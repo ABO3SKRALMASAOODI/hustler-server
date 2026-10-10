@@ -52,6 +52,7 @@ def test_spoken_numbers_read_digits_and_words():
     assert _said("sixty-two thousand creators") == [([62000.0], "sixty-two thousand")]
     assert _said("a million users") == [([1e6], "a million")]
     assert _said("four point nine stars") == [([4.9], "four point nine")]
+    assert _said("one point two billion dollars") == [([1.2e9], "one point two billion")]
     assert _said("in nineteen eighty-three we") == [([1983.0], "nineteen eighty-three")]
     assert _said("it's $1.2 billion") == [([1.2, 1.2e9], "$1.2 billion")]
     assert _said("made 32% fewer errors") == [([32.0], "32%")]
@@ -204,6 +205,59 @@ def test_counter_cues_follow_the_landing():
     rev = cues({"value": "140", "style": "reveal"})
     assert [t for t, _k in rev] == [10.0]                     # one hit on the cut, no tick run
     assert [t for t, _k in cues({"value": "140", "style": "reveal", "land": 0.3})] == [10.3]
+    # a landing set past the exit is capped exactly as the template caps it
+    for style in ("count", "reveal"):
+        params = {"value": "140", "style": style, "land": 1.95}
+        hit = [t for t, k in cues(params) if k.startswith("impact")]
+        assert hit == [pytest.approx(10.0 + number_reveal.counter_landing(params, 2.0), abs=0.001)], style
+
+
+def test_only_figures_land_a_slam():
+    fig = number_reveal._slam_figure
+    assert fig("*$1.2B* / valuation") == "$1.2B" and fig("62,000+ creators") == "62,000+"
+    assert fig("the *1980s*") == "1980s" and fig("*10x* faster") == "10x"
+    # a name that carries digits is not a figure: the slam keeps its timing
+    for name in ("*GPT-4*", "Web3 / is here", "COVID-19", "5G", "F1 / racing"):
+        assert fig(name) is None, name
+
+
+def test_a_moved_slam_names_the_neighbour_it_now_overlaps(probe):
+    ctx = _Ctx("look at this, 32% fewer errors and 24% faster", t0=8.0)
+    first, second = _onset(ctx, "32%"), _onset(ctx, "24%")
+    motion_tools.add_motion_graphic(ctx, "word_slam", first - 0.02, second, id="st1",
+                                    params={"text": "*32%* / fewer errors"})
+    # placed back to back with st1, 0.3 s late for its word
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", second + 0.3, second + 1.5, id="st2",
+                                          params={"text": "*24%* / faster"})
+    assert "NUMBER LANDED" in out and "overlaps st1" in out, out
+    assert ctx.item("st1")["end"] == second                 # the neighbour is the editor's call
+
+
+def test_a_named_number_slam_keeps_the_editors_timing(probe):
+    ctx = _Ctx("and then GPT four changed everything", t0=8.0)
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 8.3, 9.6, id="g",
+                                          params={"text": "*GPT-4*", "entrance": "pop"})
+    assert "NUMBER" not in out and ctx.item("g")["start"] == 8.3
+
+
+def test_a_reveal_in_the_programs_last_instant_is_not_squeezed(probe):
+    ctx = _Ctx("and all we got was 140", t0=58.5)     # '140' at 59.75 of a 60 s program
+    out = motion_tools.add_motion_graphic(ctx, "counter", 58.5, 60.0, id="num",
+                                          params={"value": "140", "style": "reveal"})
+    it = ctx.item("num")
+    assert "too close to the end" in out, out
+    assert it["start"] == 58.5 and it["end"] == 60.0
+
+
+def test_a_landing_that_stretches_the_item_says_so(probe):
+    ctx = _Ctx()
+    onset = _onset(ctx, "140")
+    # ends 0.2 s after the word: the count needs room to land and hold
+    out = motion_tools.add_motion_graphic(ctx, "counter", onset - 0.8, onset + 0.2, id="num",
+                                          params={"value": "140"})
+    it = ctx.item("num")
+    assert it["end"] == pytest.approx(onset - number_reveal.LEAD_S + number_reveal.MIN_HOLD_S, abs=0.002)
+    assert "now ends at" in out, out
 
 
 # ── rendered compositions ───────────────────────────────────────────────
@@ -259,24 +313,64 @@ async def _run(cases, size=(1080, 1920)):
 
 NUM = "document.querySelector('.num:not(.glow)').textContent"
 SHOWN = "(() => { const s = document.querySelector('#stage'); return [getComputedStyle(s).opacity, " + NUM + "]; })()"
+# an odometer's reading: per drum the digit sitting at rest in its window
+# ('~' while the drum is between digits)
+ODO = """(() => Array.from(document.querySelectorAll('.num:not(.glow) .col')).map(c => {
+  const d = Array.from(c.querySelectorAll('.dg')).find(e => e.style.opacity === '1'
+    && /translateY\\(-?0(\\.0+)?px\\)/.test(e.style.transform));
+  return d ? d.textContent : '~'; }).join(''))()"""
 
 
 @needs_browser
 def test_a_count_never_reads_its_figure_before_the_landing_and_a_reveal_cuts_on():
     land = 0.5
     frames = [i / 30 for i in range(0, 25)]
-    count, odo, reveal = asyncio.run(_run([
+    count, big, one_b, one_m, odo, reveal = asyncio.run(_run([
         ("counter", {"value": "140", "land": land, "glow": 0}, 1.6, [(t, NUM) for t in frames]),
         ("counter", {"value": "62,000+", "land": land, "glow": 0}, 1.6, [(t, NUM) for t in frames]),
+        # one-step counts: rounding must not show the landed figure mid-roll
+        ("counter", {"value": "$1B", "land": land, "glow": 0}, 1.6, [(t, NUM) for t in frames]),
+        ("counter", {"value": "1M", "land": land, "glow": 0}, 1.6, [(t, NUM) for t in frames]),
+        ("counter", {"value": "40", "from": 1, "style": "odometer", "land": land, "glow": 0}, 1.6,
+         [(t, ODO) for t in frames]),
         ("counter", {"value": "140", "style": "reveal", "land": land}, 1.6, [(t, SHOWN) for t in frames]),
     ]))
     for t, text in zip(frames, count):
         assert (text == "140") == (t >= land - 1e-6), (t, text)
-    for t, text in zip(frames, odo):
+    for t, text in zip(frames, big):
         assert (text.startswith("62,000")) == (t >= land - 1e-6), (t, text)
+    for want, got in (("$1B", one_b), ("1M", one_m)):
+        for t, text in zip(frames, got):
+            assert (text == want) == (t >= land - 1e-6), (want, t, text)
+    for t, text in zip(frames, odo):
+        assert (text == "40") == (t >= land - 1e-6), (t, text)
     for t, (opacity, text) in zip(frames, reveal):
         assert text == "140"
         assert (float(opacity) > 0.99) == (t >= land - 1e-6), (t, opacity)
+
+
+# whether the frame is declared active, and everything a counter animates
+STATE = """(() => {
+  const q = s => document.querySelector(s), st = el => el ? [el.style.transform, el.style.opacity] : null;
+  return [window.__mgSeek(MG.t), JSON.stringify([st(q('.numwrap')), st(q('.glow')), st(q('.label')),
+          st(q('.rule')), st(q('#stage')), q('.num:not(.glow)').textContent])];
+})()"""
+
+
+@needs_browser
+def test_a_counter_never_changes_on_a_frame_it_declares_static():
+    # the renderer reuses the previous picture for a frame outside MG.active:
+    # an early landing must not freeze the bloom, label or rule mid-move
+    frames = [i / 30 for i in range(0, 48)]
+    runs = asyncio.run(_run([
+        ("counter", {"value": "140", "land": 0.3, "label": "characters"}, 1.6, [(t, STATE) for t in frames]),
+        ("counter", {"value": "140", "style": "reveal", "land": 0.3, "label": "characters"}, 1.6,
+         [(t, STATE) for t in frames]),
+    ]))
+    for got in runs:
+        for i in range(1, len(got)):
+            if got[i][1] != got[i - 1][1]:
+                assert got[i][0], (frames[i], got[i - 1][1], got[i][1])
 
 
 # the smallest vertical gap between glyph ink of consecutive stacked elements
@@ -318,6 +412,51 @@ def test_stacked_rows_never_collide():
         assert gaps and all(g is not None and g > 0 for g in gaps), gaps
     # 'overlap' keeps the designed negative leading: the script swash crosses
     assert any(g is not None and g < 0 for g in overlap[0]), overlap
+
+
+# an independent oracle for MG.stackGap: the same ink model measured afresh
+# (a new canvas, no cache) on the final, font-loaded layout
+FRESH_GAPS = """sel => {
+  const cx = document.createElement('canvas').getContext('2d'), range = document.createRange();
+  const boxes = root => { const out = [];
+    const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walk.nextNode(); node; node = walk.nextNode()) {
+      const cs = getComputedStyle(node.parentElement);
+      cx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`;
+      for (let i = 0; i < node.data.length; i++) {
+        if (/\\s/.test(node.data[i])) continue;
+        range.setStart(node, i); range.setEnd(node, i + 1);
+        const rc = range.getClientRects()[0]; if (!rc) continue;
+        const m = cx.measureText(node.data[i]), base = rc.top + m.fontBoundingBoxAscent;
+        out.push([rc.left - m.actualBoundingBoxLeft, base - m.actualBoundingBoxAscent,
+                  rc.left + m.actualBoundingBoxRight, base + m.actualBoundingBoxDescent]); } }
+    return out; };
+  const els = Array.from(document.querySelectorAll(sel)), out = [];
+  for (let i = 1; i < els.length; i++) {
+    let need = -Infinity;
+    for (const g of boxes(els[i - 1])) for (const h of boxes(els[i]))
+      if (h[0] < g[2] && h[2] > g[0]) need = Math.max(need, g[3] - h[1]);
+    out.push([need === -Infinity ? null : -need, -MG.stackGap(els[i - 1], els[i])]);
+  }
+  return out;
+}"""
+
+
+@needs_browser
+def test_leading_is_measured_on_the_loaded_fonts():
+    # a height-capped hero and a clamped kicker keep their sizes across the
+    # pre-font and post-font layouts: the second must not reuse ink measured
+    # on the fallback faces of the first
+    res = asyncio.run(_run([
+        ("word_slam", {"text": "ONE / jump", "role": "script", "kicker": "a kicker, yes"}, 1.5,
+         [(1.0, f"({FRESH_GAPS})('.kick, .line')")]),
+        ("word_slam", {"text": "gap / yo", "role": "serif", "kicker": "just jog"}, 1.5,
+         [(1.0, f"({FRESH_GAPS})('.kick, .line')")]),
+    ]))
+    for (pairs,) in res:
+        for fresh, mg in pairs:
+            assert fresh is not None and fresh > 0, pairs
+            assert mg == pytest.approx(fresh, abs=0.01), pairs
 
 
 @needs_browser

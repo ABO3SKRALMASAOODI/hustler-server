@@ -19,8 +19,8 @@
  },
  "example": {"value": "62,000+", "label": "creators joined in *one week*"},
  "sfx": [{"at": 0.05, "kind": "tick", "when": {"style": ["count", "odometer"]}},
-         {"at": 1.0, "kind": "kick", "gain_db": -11, "when": {"style": ["count", "odometer"]}, "land": {"frac": 0.55, "min": 0.5, "max": 1.0, "param": "land"}},
-         {"at": 0.0, "kind": "kick", "gain_db": -11, "when": {"style": ["reveal"]}, "land": {"param": "land"}}]} -->
+         {"at": 1.0, "kind": "kick", "gain_db": -11, "when": {"style": ["count", "odometer"]}, "land": {"frac": 0.55, "min": 0.5, "max": 1.0, "param": "land", "tail": {"frac": 0.1, "max": 0.22, "add": 0.1}}},
+         {"at": 0.0, "kind": "kick", "gain_db": -11, "when": {"style": ["reveal"]}, "land": {"param": "land", "tail": {"frac": 0.1, "max": 0.22, "add": 0.1}}}]} -->
 <style>
   .scrim{position:absolute;left:0;top:0;width:64px;height:64px;pointer-events:none;will-change:transform,opacity;transform-origin:0 0;
          background:radial-gradient(closest-side,rgba(0,0,0,.68),rgba(0,0,0,.55) 40%,rgba(0,0,0,.3) 70%,rgba(0,0,0,0))}
@@ -133,10 +133,13 @@
   const odoEase = x => 0.85 * MG.ease.outQuart(x) + 0.15 * x;
   const valueAt = t => from + (to - from) * (odo ? odoEase : expo)(MG.range(t, C0, CT - C0));
   // a count never shows its landed reading early: digits are truncated toward
-  // the start value, so the final figure appears exactly at CT
+  // the start value, so the final figure appears exactly at CT (a one-step
+  // count - '$1B', '1M', '#1' from 0 - holds its start reading until then;
+  // rounding would show the landed figure halfway through the roll)
   const STEP = Math.pow(10, -(V ? V.decimals : 0));
   const shown = v => {
-    if (Math.abs(to - from) < STEP * 1.5) return v;
+    if (to === from) return v;
+    if (Math.abs(to - from) < STEP - 1e-9) return from;
     const n = (v - from) / STEP, k = to >= from ? Math.floor(n + 1e-9) : Math.ceil(n - 1e-9);
     const q = from + k * STEP;
     return to >= from ? Math.min(q, to - STEP) : Math.max(q, to + STEP);
@@ -339,7 +342,10 @@
   }
   MG.ready = fontsReady.then(() => { L = L || layout(); });
 
-  MG.active(reveal ? [[Math.max(0, CT - 0.04), CT + 0.4], [D - XD - 0.02, D]] : [[0, CT + 0.36], [D - XD - 0.02, D]]);
+  // a frame outside these windows reuses the last one: they cover the bloom's
+  // flash (CT .. CT + 0.38) and, for a count, the label rise and rule wipe
+  // (to ~1.0 s) even when an early landing ('land' on the lead-in) ends the count first
+  MG.active(reveal ? [[Math.max(0, CT - 0.04), CT + 0.4], [D - XD - 0.02, D]] : [[0, Math.max(CT + 0.4, 1.0)], [D - XD - 0.02, D]]);
   let lastStr = null;
   // drum positions for a value: the last column turns continuously, every
   // higher column rolls its carry exactly while the column below turns 9 -> 0,

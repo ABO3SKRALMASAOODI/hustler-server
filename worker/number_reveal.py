@@ -18,8 +18,12 @@ around the item (digits, or words: "forty", "one hundred and forty",
   starts on the landing itself, so nothing of it is up during the setup.
   A long roll over the setup and a count on an item marked as the payoff are
   pointed out (style='reveal' is the fix the tool does not impose).
-- word_slam whose hero shows a number: the item moves so its entrance lands
-  on the onset (the slam's impact 0.2 s in, a ghost's snap 2 frames in).
+- word_slam whose hero shows a figure ('32%', '$1.2B'; not a name such as
+  'GPT-4'): the item moves so its entrance lands on the onset (the slam's
+  impact 0.2 s in, a ghost's snap 2 frames in).
+
+A moved window that now overlaps another graphic is pointed out; the
+neighbour is the editor's to trim.
 
 Nothing changes when there is no transcript, no spoken match, or the graphic
 already lands within the window: a stored EDL keeps its exact timing.
@@ -34,6 +38,8 @@ MIN_ROLL_S = 0.25        # a count shorter than this reads as a flicker
 ROLL_S = 0.45            # the roll a moved count gets (0.3-0.6 s reads well)
 LONG_ROLL_S = 0.8        # longer rolls count through the setup: say so
 MIN_HOLD_S = 0.5         # the landed number should stay this long
+MIN_ITEM_S = 0.3         # a moved item never gets shorter than this
+MAX_LAND_S = 30.0        # the counter's 'land' param range (its MG-SPEC max)
 SEARCH_BEFORE_S = 1.2    # how far before the item a spoken number may be
 SEARCH_AFTER_S = 0.3
 
@@ -133,6 +139,11 @@ def _word_value(toks, i):
                 digits += str(_UNITS[parts[k][0]])
                 k += 1
             cur += float("0." + digits)
+            if k < len(parts) and parts[k][0] in _SCALES and parts[k][0] != "hundred":
+                # "one point two billion"
+                total += cur * _SCALES[parts[k][0]]
+                cur = 0.0
+                k += 1
             used = k
             break
         elif p in ("percent", "times") and seen:
@@ -219,10 +230,19 @@ def counter_landing(params, span):
     return min(1.0, max(0.5, span * 0.55))
 
 
+# a token that IS a figure ('32%', '$1.2B', '62,000+', '10x', '1983'), not a
+# name that carries digits ('Web3', 'GPT-4', 'COVID-19', 'F1', '5G'): a slam
+# of a name lands on the name, which is the editor's own timing
+_FIGURE = re.compile(r"^[+\-−~≈#]?[$€£¥₹]?\d[\d,.\u00a0\u202f]*(?:%|x|×|k|m|mm|mn|bn|b|t|s|\+)?\+?$", re.I)
+
+
 def _slam_figure(text):
-    """The figure a word_slam hero shows ('*32%* / fewer errors' -> '32%')."""
-    for tok in re.split(r"[\s/]+", str(text or "").replace("*", " ")):
-        if re.search(r"\d", tok):
+    """The figure a word_slam hero shows ('*32%* / fewer errors' -> '32%'),
+    or None when no token is a figure."""
+    # (a thin or no-break space inside a figure is a digit-group separator)
+    for tok in re.split(r"[ \t\r\n/]+", str(text or "").replace("*", " ")):
+        tok = _EDGE.sub("", tok.strip())
+        if re.search(r"\d", tok) and _FIGURE.match(tok):
             return tok
     return None
 
@@ -263,8 +283,32 @@ def land(edl, index, item, prog):
         print(f"[motion] number landing skipped: {str(err)[:160]}", flush=True)
         return False, ""
     if tpl == "counter":
-        return _land_counter(item, params, spoken, figure, prog)
-    return _land_slam(item, params, spoken, figure, prog)
+        changed, note = _land_counter(item, params, spoken, figure, prog)
+    else:
+        changed, note = _land_slam(item, params, spoken, figure, prog)
+    if changed:
+        note = "\n".join(n for n in (note, _new_overlaps(edl, item, s, e)) if n)
+    return changed, note
+
+
+def _new_overlaps(edl, item, s0, e0):
+    """A moved number may now run into a neighbouring graphic (back-to-back
+    stat slams): name the ones it newly overlaps; the editor decides."""
+    s, e = float(item["start"]), float(item["end"])
+    hits = []
+    for m in edl.get("motion") or []:
+        if m.get("id") == item.get("id"):
+            continue
+        try:
+            a, b = float(m["start"]), float(m["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if a < e - 1e-6 and b > s + 1e-6 and not (a < e0 - 1e-6 and b > s0 + 1e-6):
+            hits.append(f"{m.get('id')} ({m.get('template')} {a:g}-{b:g}s)")
+    if not hits:
+        return ""
+    return (f"NOTE (number): the moved window {_f(s)}-{_f(e)} now overlaps {', '.join(hits[:3])}; "
+            "trim the neighbour so one graphic hands over to the next.")
 
 
 def _nearest(spoken, at):
@@ -277,7 +321,7 @@ def _on_time(landing, onset):
 
 def _land_counter(item, params, spoken, figure, prog):
     s, e = float(item["start"]), float(item["end"])
-    s0 = s
+    s0, e0 = s, e
     reveal = params.get("style") == "reveal"
     landing = s + counter_landing(params, e - s)
     hit = _nearest(spoken, landing)
@@ -296,6 +340,10 @@ def _land_counter(item, params, spoken, figure, prog):
             # the hard cut IS the item start: nothing of it shows during the setup
             ns = max(0.0, target)
             ne = e if e >= ns + MIN_HOLD_S else min(prog, ns + max(MIN_HOLD_S, e - s))
+            if ne - ns < MIN_ITEM_S:
+                # the word is in the program's last instant: no room to cut on
+                return False, (f"NOTE (number): \"{said}\" is said at {_f(onset)}, too close to "
+                               f"the end of the program for '{figure}' to cut on with it.")
             item["start"], item["end"] = round(ns, 3), round(ne, 3)
             params["land"] = round(max(0.0, target - ns), 3)
         else:
@@ -305,7 +353,7 @@ def _land_counter(item, params, spoken, figure, prog):
                 ns = max(0.0, target - ROLL_S)
                 item["start"] = round(ns, 3)
                 roll = target - ns
-            params["land"] = round(max(0.0, roll), 3)
+            params["land"] = round(min(MAX_LAND_S, max(0.0, roll)), 3)
             # the template ends a count no later than its exit: keep room to land and hold
             if e < target + MIN_HOLD_S:
                 item["end"] = round(min(prog, target + MIN_HOLD_S), 3)
@@ -313,6 +361,8 @@ def _land_counter(item, params, spoken, figure, prog):
         changed = True
         s, e = float(item["start"]), float(item["end"])
         moved = f"; it now starts at {_f(s)} (was {_f(s0)})" if abs(s - s0) > 1e-6 else ""
+        if abs(e - e0) > 1e-6:
+            moved += f"; it now ends at {_f(e)} (was {_f(e0)}) so the landed number holds"
         what = "cuts on" if reveal else "completes"
         notes.append(f"NUMBER LANDED: '{figure}' now {what} at {_f(target)}, 20 ms before "
                      f"\"{said}\" is said at {_f(onset)} (it would have read in full at "

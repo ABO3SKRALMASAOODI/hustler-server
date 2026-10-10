@@ -401,24 +401,28 @@
   // laid-out DOM, its ink extents from the font (canvas text metrics in the
   // element's own computed font) — so a template can stack rows as tight as
   // the glyphs allow and no tighter. Measure before any transform is applied.
+  // The metrics are cached for ONE measurement only: a template's first
+  // layout runs before its web fonts have loaded (canvas then measures the
+  // fallback face under the same font string), and a document-wide cache
+  // would hand those fallback ascents/descents to the real layout after
+  // MG.ready whenever a row kept its size (height-capped hero, clamped kicker).
   const inkCtx = document.createElement('canvas').getContext('2d');
-  const inkCache = new Map();
-  const inkOf = (font, ch) => {
+  const inkOf = (cache, font, ch) => {
     const key = font + '\u0000' + ch;
-    let m = inkCache.get(key);
+    let m = cache.get(key);
     if (!m) {
       inkCtx.font = font;
       const r = inkCtx.measureText(ch);
       m = { l: r.actualBoundingBoxLeft || 0, r: r.actualBoundingBoxRight || 0,
             a: r.actualBoundingBoxAscent || 0, d: r.actualBoundingBoxDescent || 0,
             fa: r.fontBoundingBoxAscent };
-      inkCache.set(key, m);
+      cache.set(key, m);
     }
     return m;
   };
   /** Ink box [x0, y0, x1, y1] (page px) of every visible glyph in els. */
   MG.glyphBoxes = els => {
-    const out = [], range = document.createRange();
+    const out = [], range = document.createRange(), cache = new Map();
     (Array.isArray(els) ? els : [els]).forEach(root => {
       if (!root) return;
       const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -433,7 +437,7 @@
             range.setStart(node, i); range.setEnd(node, i + n);
             const rc = range.getClientRects()[0];
             if (rc) {
-              const m = inkOf(font, ch);
+              const m = inkOf(cache, font, ch);
               // the content box's top is the font ascent above the baseline
               const base = rc.top + (m.fa > 0 ? m.fa : rc.height * 0.8);
               out.push([rc.left - m.l, base - m.a, rc.left + m.r, base + m.d]);

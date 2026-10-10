@@ -96,7 +96,7 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   the word) so the roll is short, never across the setup; a punchline number,
   or one that is not a growing quantity ('140 characters'), uses
   `style='reveal'` — no count, the whole number hard-cuts on at the word; a
-  number word_slam is moved so it lands on the word too. A rapid run of spoken stats as one `word_slam` each with
+  word_slam whose hero is a figure ('32%', not a name like 'GPT-4') is moved so it lands on the word too. A rapid run of spoken stats as one `word_slam` each with
   `fit='justify'` and the figure over its label (`'*32%* / fewer errors'`,
   pop entrance on the figure's onset); `stat_card` for a metric plus its meaning; `bar_compare` for
   2–4 spoken quantities; `line_chart` for a spoken trend; `progress_ring`

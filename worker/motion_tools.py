@@ -234,7 +234,9 @@ def _land_at(land, span, default, params=None):
     (``land``: clamp(span * frac + add, min, max)), e.g. counter's count
     landing min(1.0, max(0.5, 0.55 * duration)). ``param`` names a float
     param that, when positive, IS the landing (item seconds) — counter's
-    ``land``, set on the spoken number's onset."""
+    ``land``, set on the spoken number's onset — capped like the template
+    caps it: ``tail`` {frac, max, add} keeps it span - (min(span * frac,
+    max) + add) clear of the end (counter: its exit plus 0.1 s)."""
     try:
         v = span * float(land.get("frac", 0.0)) + float(land.get("add", 0.0))
         if land.get("min") is not None:
@@ -243,7 +245,10 @@ def _land_at(land, span, default, params=None):
             v = min(v, float(land["max"]))
         p = _js_float((params or {}).get(land["param"])) if land.get("param") else None
         if p is not None and p > 0:
-            v = min(p, max(0.0, span))
+            tail = land.get("tail") if isinstance(land.get("tail"), dict) else {}
+            cut = min(span * float(tail.get("frac", 0.0)), float(tail.get("max", span))) \
+                + float(tail.get("add", 0.0))
+            v = min(p, max(0.0, span - cut))
     except (TypeError, ValueError, AttributeError):
         return default
     return v
@@ -1479,8 +1484,9 @@ TOOL_SPECS = {
         "allow_face_overlap=true keeps a deliberate design over the face. NUMBERS land on "
         "their word: a counter completes 20 ms before its spoken number's onset in the "
         "transcript (the write sets its `land`; a 'reveal' starts there; a count with no room "
-        "to roll starts on the lead-in) and a word_slam showing a number moves onto it — the "
-        "reply says NUMBER LANDED, and NOTEs a count that rolls through the setup.",
+        "to roll starts on the lead-in) and a word_slam whose hero is a figure ('32%', '$1.2B'; "
+        "not a name like 'GPT-4') moves onto it — the reply says NUMBER LANDED, and NOTEs a "
+        "count that rolls through the setup or a moved window that now overlaps a neighbour.",
         {"template": _TEMPLATE_PARAM, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"},
          "layer": {"type": "string", "enum": list(LAYERS)},
