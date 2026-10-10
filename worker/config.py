@@ -1816,6 +1816,21 @@ SCREENING_FRAME_PARALLELISM = int(os.getenv(
 # / VMAF 92.7 at no extra encode time (veryfast is not rate-bound here).
 FINAL_PRESET = os.getenv("FINAL_PRESET", "veryfast")
 FINAL_CRF = int(os.getenv("FINAL_CRF", "18"))
+# ...under a VBV ceiling (renderer.final_rate_cap_kbps; render polish, Oct
+# 2026). CRF alone let animated grain over a 1.9x-upscaled 480p archival plate
+# ship the Jobs short at 21.6 Mb/s (116 MB for 43 s) when a clean talking head
+# takes 2-5 Mb/s; every platform re-encodes the upload to a few Mb/s. This is
+# the ceiling for 1080x1920 at 30 fps (scaled with the pixel rate), so only
+# such pathological pictures are touched: the watermarked Jobs final went
+# from 115 MB to 58 MB with no visible change (only the canvas grain is a
+# touch smoother at 1:1); Thiel (4.4 Mb/s) and Elon (2.5 Mb/s) never reach
+# it. Bufsize is FINAL_BUFSIZE_S seconds of the ceiling. 0 = uncapped.
+FINAL_MAXRATE_KBPS = int(os.getenv("FINAL_MAXRATE_KBPS", "12000"))
+FINAL_BUFSIZE_S = float(os.getenv("FINAL_BUFSIZE_S", "2.0"))
+# Programme edges (renderer.edge_fades): a few-ms fade from zero at the TRUE
+# programme start and at an end with no card, so a first kept span that
+# starts mid-sound does not open on a click (Thiel's first sample was -0.64).
+PROGRAM_EDGE_FADE_S = float(os.getenv("PROGRAM_EDGE_FADE_S", "0.005"))
 
 # Keep spans further apart than this (source seconds) are read through their
 # own bounded input instead of decoding the gap (renderer._keep_clusters).
@@ -2025,7 +2040,13 @@ BLOCK_CLOCK_VERSION = 1
 # Revolution", "140 characters"), so every design-v2 track's cards may have
 # regrouped, with or without a cut. (A word a cut kept the sound of busts
 # through the caption fingerprint, like the rejoin.)
-CAPTION_TIMING_VERSION = 2
+# v3 (round 6): a one-word connector page joins its line, a word snapped
+# onto a layout change appears at most two frames late (never more for a
+# graphic's exit either), and the motion looks keep out of a 9:16 reel's
+# 9% side crop, set a lone article inline with its serif word, and guard
+# legibility per word in order: reposition, a tight halo and lifted
+# accents, a soft dark scrim, only then the pocket.
+CAPTION_TIMING_VERSION = 3
 
 # Manual music remains editable past the last scene, but rendered media always
 # stops at the picture/program boundary.  v1 extended overhanging music across
@@ -2062,7 +2083,14 @@ MASTER_VERSION = 1
 # layout is the composed card (its backdrop and panels), not the uncropped
 # frame (plate.py) — light words over a card's dark band no longer switch to
 # dark ink because the footage there would have been bright.
-LEGIBILITY_VERSION = 2
+# v3 (round 4 motion track, Oct 2026): one type system — phrase_build sets
+# only its rows (no bridge lines) in at most 3 sizes, a series of parallel
+# word_slams shares one size per line, an accent the plate would sink is
+# lifted (and a thin serif accent set heavier) by MG.accentInk, the
+# typewriter is a band-wide hero (>= 5% of the frame height on a band-wide
+# plate), marker_text reveals a spoken line on its onsets, and word_slam
+# has the payoff and hero tiers.
+LEGIBILITY_VERSION = 3
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
 # mute_captions unset hides only the spoken words it shows, the rest stay
@@ -2079,7 +2107,19 @@ LEGIBILITY_VERSION = 2
 # reading order, and a word a cut kept the sound of is captioned. Lockups
 # (phrase_build) without transcript captions are stamped too: their reveal
 # timing changed.
-CAPTION_CARRY_VERSION = 2
+# v3 (round 6, every heard word reaches the screen once): no graphic mutes a
+# whole window or leaves a word to the sound — the words it does not show
+# (a lockup's bridge words included: no more micro bridge rows) stay
+# captioned beside it; and the placement solver (worker/caption_place.py)
+# keeps captions off card and panel edges and seams, a stack's content
+# panel, faces with their chin, props and the watermark, re-solving at every
+# layout change. Transcript-caption EDLs with picture cards are stamped too.
+# A word-timed reveal (a lockup's rows, marker_text's line) within 0.15 s
+# after its window's start shows at the start (round 6 motion track). A
+# word said less than a page's minimum (0.12 s) before a placement change
+# appears on the change in the new place instead of being dropped as a
+# too-short page (final review; still unreleased v3).
+CAPTION_CARRY_VERSION = 3
 
 # Crops and picture cards that follow the speaker's face inside a shot
 # (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as
@@ -2101,6 +2141,17 @@ FOLLOW_VERSION = 1
 # changes (renderer.handoff_affected). Everything else keeps its cache.
 HANDOFF_VERSION = 1
 
+# Picture-card layouts (worker/picture_cards.py) and the headline band.
+# Stamped as `card_v` on every render and compared ONLY for EDLs that carry a
+# picture card or a persistent headline: older renders opened and closed a
+# card by fading its footage in over its own backdrop — a frame of bare dark
+# canvas mid-sentence (judges, Oct 2026) — where today's dissolve the whole
+# card with the full-frame shot (or cut in populated on a cut), and their
+# headline left its band empty for up to a second between graphics where
+# today's swaps on the frame. Everything else keeps its cache. Bump when what
+# a card or the band looks like changes.
+CARD_LAYOUT_VERSION = 1
+
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so
 # pieces from a different look show a sharpness/tone seam at every splice.
@@ -2111,6 +2162,17 @@ HANDOFF_VERSION = 1
 # like. v1: crop-first lanczos fit + unsharp, block grade, pinned end-card
 # matrix (render-perf round).
 RENDER_LOOK_VERSION = 1
+
+# Export finishing (render polish, Oct 2026): the VBV ceiling on finals
+# (FINAL_MAXRATE_KBPS), the de-click edge fades (PROGRAM_EDGE_FADE_S) and a
+# block's last slot filled from the same shot instead of a held frame
+# (renderer.same_shot_tail). Stamped as `finish_v` on every render and
+# compared ONLY for FINALS whose stored bytes run over today's ceiling
+# (renderer.finish_current): those exports are the 100+ MB files the ceiling
+# exists for. Every other cached render keeps its cache — the click and the
+# held frame are small, and a re-render of every export on a ~1 vCPU box is
+# not worth them. Bump when an export-only treatment changes again.
+FINISH_VERSION = 1
 
 # ── Free-tier watermark (round 41) ────────────────────────────────────────
 # The site's robot in the top-left of the EXPORT, with "edited by valmera

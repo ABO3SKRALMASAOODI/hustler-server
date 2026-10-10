@@ -49,6 +49,13 @@ sits.
   chat or post card depicts what the speaker describes, with generic names,
   and never invents a real brand's message, endorsement, follower count or
   revenue figure.
+- **Every graphic earns its place.** It adds what the captions cannot — a
+  number, a contrast, an identification, evidence, an image — at most about
+  one hero graphic per 6–8 s, under ~50% of the runtime, in at most 3 type
+  roles and one accent. Never re-typeset the words being heard as a lockup
+  or typewriter, and never set a spoken list as rows of text (show the
+  items, or one big word per item). The hook never shows a word a later
+  graphic slams (short-form-direction, EARN ITS PLACE).
 - **Restraint is a deliberate passage, not the default.** Holding a
   vulnerable admission on the face with only captions is a choice you make
   for that moment — and the surrounding passages still carry motion.
@@ -87,12 +94,28 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   `word_slam` for one hero word on its spoken onset (the most common hero
   moment); `phrase_build` for a short lockup assembled word by word on
   onsets (rows quote the transcript; the engine lands each spoken word on
-  its onset and sets the phrase's words the rows leave out as small lines
-  between them); `glow_title` for a luminous keyword on dark or night footage.
-- Reveal grammar: `typewriter` for a typed prompt, definition or terminal
-  line (25–40 chars/s with a cursor; the first key and its plate land on the
-  item's first frame, so start it on the word; `typing` sound under it when it is
-  sounded); `text_scramble` for
+  its onset; at most 4 rows in at most 3 sizes — a 4th size is merged and
+  the reply says SIZES; the words the rows leave out stay with the
+  captions); `glow_title` for a luminous keyword on dark or night footage.
+- Type tiers (`word_slam` `tier`, optional — only where the moment earns
+  it): `payoff` is the short's closing lockup, the number and its noun
+  locked up together in the accent (`'*140* / characters'`, justified) —
+  make it the largest lockup of the short (the reply NOTEs a taller one);
+  `hero` is ONE giant word per short (a line up to 30% of the frame height
+  on a short word) set BEHIND the speaker: the write measures a person
+  matte and, when it cannot (a cut in the window, no person model, a still
+  speaker the photometric mask loses, a crop that follows the speaker),
+  draws it as a display slam above the picture, clear of the face, and says
+  HERO FALLBACK; a later edit that stops it going behind renders that same
+  face-safe slam, never the giant word over the face. It is placed at head
+  height so the head crosses the middle of the letters, and narrowed under a
+  camera zoom (it is drawn before the zoom) so no letter leaves the frame.
+- Reveal grammar: `typewriter` only as a band-wide hero — type at least 5%
+  of the frame height on a plate spanning the band, a few short words that
+  ARE the beat (never a small label: a small mono line on a pill reads like
+  a code tooltip; 25–40 chars/s with a cursor; the first key and its plate
+  land on the item's first frame, so start it on the word; `typing` sound
+  under it when it is sounded); `text_scramble` for
   a decode reveal (secrets, tech, "the answer is…"); `marker_text` for a
   highlighter sweep behind the key phrase.
 - Layout: `headline` is the PERSISTENT claim headline of a card or
@@ -100,11 +123,19 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   an optional kicker (who + when). Write one per program (start 0, end
   omitted = the program end; or one per chapter, never overlapping) with y
   omitted: the write centres it in the free band above the card or the
-  letterboxed picture and sizes it to that band. It holds the band and
-  YIELDS on its own at render time — fading out just before any graphic that
-  occupies its band lands and back after it leaves (gaps under 1.2 s stay
-  clear, a phrase build yields from its first revealed row) — so hero
-  lockups replace it and hand the band back without any timing on your side.
+  letterboxed picture and sizes it to that band (the band starts below the
+  feed header AND the free-tier watermark's zone). A headline that opens
+  the program is the hook on frame 0, the thumbnail: the write sets it
+  complete there (entrance 'none') unless you pass an entrance. It holds the band and
+  YIELDS on its own at render time — gone on the frame any graphic that
+  occupies its band lands, back from the frame it leaves (it holds every gap
+  of 0.15 s or more: the band is never left empty; a phrase build yields
+  from its first revealed row; a graphic within 0.6 s of the headline's own
+  start or end takes the band from/to that edge) — so hero lockups replace
+  it and hand the band back without any timing on your side. Start each
+  band graphic on its first visible word and keep every row inside the
+  band: the PICTURE CHECK names an empty band over 0.15 s (a row drawn up
+  in the watermark's zone leaves the band itself empty).
   It is silent, never mutes or replaces captions, is not counted as a
   designed moment, and the write refuses a second overlapping headline, more
   than one accent span, a window under 4 s and a full-bleed frame without an
@@ -113,8 +144,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   set_typography_scene or set_editorial_graphic does not move it, so build
   every lockup that shares the band as a motion template. A graphic set in
   that band (with or without a headline) is NOTEd (band) when it spills out
-  of it — onto the top of the card (a phrase_build grows by its small bridge
-  lines) or up into the feed header — narrow it or move its y. Without a
+  of it — onto the top of the card or up into the feed header / the
+  watermark's zone (top-left, where a free-tier final burns the mark) —
+  narrow it or move its y. Without a
   browser at write time the box is the template's estimate, which runs a
   little tall: only a clear spill is named there, and a preview measures it.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step
@@ -132,14 +164,17 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   `style='reveal'` — no count, the whole number hard-cuts on at the word; a
   word_slam whose hero is a figure ('32%', not a name like 'GPT-4') is moved so it lands on the word too. A rapid run of spoken stats as one `word_slam` each with
   `fit='justify'` and the figure over its label (`'*32%* / fewer errors'`,
-  pop entrance on the figure's onset); `stat_card` for a metric plus its meaning; `bar_compare` for
+  pop entrance on the figure's onset) — back-to-back slams of one style are
+  a SERIES: they share one size per line, one baseline and one column (the
+  reply says SERIES; give the run one y/x/width); `stat_card` for a metric plus its meaning; `bar_compare` for
   2–4 spoken quantities; `line_chart` for a spoken trend; `progress_ring`
   for a spoken percentage or completion. Numbers come from the transcript
   or a verified source only.
 - Pointing: `arrow_callout` and `circle_highlight` aim at a VISIBLE target
   read off the grid; `focus_spotlight` darkens everything except the
   subject or region for a reveal; `lower_third` names a verified person,
-  place or role.
+  place or role — not a famous speaker the hook kicker or headline band
+  already names.
 - Social and UI (Apple/SaaS-style mockups with an animated cursor; a click
   sound only on a visible press, when sounded): `notification` when the
   speaker describes a message or alert;
@@ -161,6 +196,18 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   These go ON a real junction; one library sound may peak on it when the
   turn earns it (read transitions).
 
+ONE TYPE SYSTEM PER SHORT (the Look): one accent colour — the captions'
+highlight colour when the Look set one — on every graphic, and at most three
+type roles (grotesk, condensed, serif, script, mono, hand) across the short.
+A graphic added without `accent` (or `color`) takes the short's; a font role
+the editor did not choose that would be a fourth role is swapped for one the
+short uses. The reply NOTEs (look) a second accent, a fourth role, a
+broadcast `clean_bar` lower third or a highlighter `marker_text` in an
+editorial Look, each with its fix — advisory, never a rejection. Accent words
+the picture under them would sink (a thin red italic over a charcoal shirt)
+are lifted toward white at render time, keeping the hue; on a plate where
+they read nothing changes.
+
 CUING TO THE WORD:
 - Find the onset as above, then set `start` so the template's LANDING
   frame falls 0–3 frames (0–0.1 s) before it. A template's description in
@@ -171,6 +218,13 @@ CUING TO THE WORD:
 - `end` is when the moment releases: usually at the next phrase or the next
   leader, rarely more than 2.5 s for a hero word. Omit it to use the
   template's natural duration.
+- The write tidies the window: a word-timed graphic (`phrase_build`,
+  `marker_text` on a spoken line) starts on its first visible word (WINDOW),
+  and an entrance or exit within 0.15 s of a cut moves onto the cut so the
+  change reads as one event (CUT-SNAP) — never more than 0.15 s off its
+  word; a number's entrance stays on its spoken number. `marker_text` over a
+  spoken line reveals each word on its onset and draws a run's mark once it
+  has been said.
 - Pass `purpose` naming the word or event ("slam on 'garbage' at 14.2 s")
   and a stable `id` so later passes can `set_motion_graphic` it.
 - Rhythm across the reel: aim for a visual change every 0.3–0.6 s (word
@@ -185,27 +239,24 @@ LAYERING AND CAPTIONS:
   thirds, textures, background shapes); `behind_subject` composites the
   graphic behind the person's matte — the giant-word-behind-the-head look —
   and needs a person in frame and no cut inside the window.
-- ONE READING PATH: captions and a graphic never say the same words twice,
-  and never show two different texts of one sentence at once.
-  Leave `mute_captions` unset (the default): the captions drop the spoken words
-  the graphic shows, and the graphic owns the phrase it shows from its first
-  shown word until it leaves — the captions yield there. A `phrase_build`
-  sets that phrase's other words in small type between its rows on their
-  onsets; any other graphic leaves them to the sound, so end a word slam or
-  counter where its words end (the reply NOTEs the words and the time — before
-  the next word's midpoint; when that would leave it up under 0.8 s it offers
-  carrying the words instead, and a slam that lands straight into its sentence
-  may keep its hold: the words are still heard).
-  Words said before its first shown word, and other sentences, stay
-  captioned — moved to a band clear of the graphic's drawn box (and the
-  face) while it is up. Design for it: keep hero graphics OFF the caption
-  band (top band, beside or above the head, behind the subject). A word slam
-  or phrase build parked on the caption band with the face above leaves no
-  clear band: other sentences' words are muted and the reply NOTEs them —
-  move it. Set `mute_captions` explicitly only to override: true hides every
-  caption for the whole window (a graphic that replaces the entire spoken
-  line); false keeps all captions running beside it (a number or *starred*
-  word it shows is still not repeated).
+- EVERY HEARD WORD REACHES THE SCREEN ONCE: captions and a graphic never
+  say the same words twice, and no heard word is left to the sound.
+  Leave `mute_captions` unset (the default): the captions drop the spoken
+  words the graphic shows and keep every other word — the rest of the phrase
+  it shows included — beside it, in a band clear of its drawn box, the face
+  and any card layout. A `phrase_build` no longer sets the phrase's other
+  words in small type between its rows (the judged 6-line piles): keep its
+  rows to the words that matter (at most 4 rows in at most 3 sizes; 2 tiers
+  for a payoff) and the captions carry
+  the rest; the reply names them and, where it does not make a flash under
+  0.8 s, the end that keeps the graphic to its own words. Design for it: keep
+  hero graphics OFF the caption band (top band, beside or above the head,
+  behind the subject). A word slam or phrase build parked on the caption
+  band with the face above leaves no clear band: the words it does not show
+  are muted and the reply NOTEs them — carry them on it (a kicker) or move
+  it. `mute_captions=true` no longer hides a whole window (it acts as unset);
+  false keeps all captions running beside it (a number or *starred* word it
+  shows is still not repeated).
 - Lockup rows reveal in reading order: a spoken row's words land on their
   spoken onsets (readable on the word, never before it; a `rise` word
   starts its short fade 2 frames ahead), a row nobody says on its `at` with its
@@ -242,11 +293,12 @@ LEGIBILITY:
   under the chin, beside the face, the header above a card — instead of
   stacking every graphic in the chest band.
 - While a graphic is on screen, the captions for the words it does not show
-  step into the nearest band clear of it AND the face — the zones the
-  keep-out measured — (`Captions for the words it does not show move to
-  y≈…` in the result). When no band is left (`NOTE (captions)`), move it off
-  the caption band or make it smaller; never reach for mute_captions=true
-  to hide the clash.
+  (every heard word reaches the screen once — a lockup's left-out words
+  included; no micro bridge rows) step into the best band clear of it, the
+  face and any card layout (`Captions for the words it does not show move
+  to y≈…` in the result). When no band is left (`NOTE (captions)`), carry
+  those words on it (a kicker) or move it off the caption band; mute_captions
+  =true no longer hides the clash.
 - Contrast from a soft shadow (0 2–6 px 12–30 px at 35–60% black), a
   frosted or dark plate, or the grade — not thick outlines or yellow boxes
   by default. Check bright and dark plates in the render.
@@ -369,6 +421,9 @@ the engine scales it to the output. Runtime summary:
 
 - A graphic that lands a beat late, or on a filler word instead of the
   meaning word.
+- A graphic that only restates the caption (a typewriter of the words just
+  heard, a stack of the spoken list), the hook's hero word slammed again,
+  a payoff number without its noun.
 - Two leaders at once: a hook title, a word slam and a caption page all
   animating in the same half-second.
 - Hard-coded params from memory instead of the listing, producing rejected

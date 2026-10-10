@@ -93,6 +93,7 @@ import typography_scenes
 import motion_tools
 import motion_planner
 import cut_steps
+import jump_cut_report
 import music_library
 import sound_library
 import sfx_mix
@@ -617,6 +618,16 @@ class ToolContext:
                 f"Before: {before}. After: {after}.")
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
+        # Jump cuts this write put in the hook, or framing steps too small to
+        # read as a cut (index evidence only; never blocks, never adds a zoom).
+        if self.has_main_video:
+            try:
+                note = jump_cut_report.write_note(prev["json"], normalized,
+                                                  self.index)
+            except Exception:  # noqa: BLE001 — a note never fails a write
+                note = ""
+            if note:
+                line += "\n" + note
 
         # Cycle detection. A turn that removes what it just added and adds it
         # back has made no progress, and left alone it will keep going: one
@@ -8475,9 +8486,11 @@ FRAMING_CHECK_STEP_S = 0.25
 # check only over this much kept footage (a short); auto_reframe has already
 # measured it.
 FRAMING_CHECK_MEASURE_S = 120.0
-# Canvas boxes of the suggested speaker + screen stack (9:16).
-STACK_SPEAKER_BOX = [0.04, 0.07, 0.96, 0.47]
-STACK_SCREEN_BOX = [0.04, 0.50, 0.96, 0.93]
+# Canvas boxes of the suggested speaker + screen stack (9:16): the speaker
+# below the free-tier mark's zone (keepout.watermark_zone), a gutter of
+# STACK_CAPTION_GAP between the panels (captions: a free band, never it).
+STACK_SPEAKER_BOX = [0.04, 0.13, 0.96, 0.475]
+STACK_SCREEN_BOX = [0.04, 0.54, 0.96, 0.93]
 
 
 def _inset_boxes(ctx, windows):
@@ -16044,6 +16057,273 @@ def _rect_arg(value, what, source=False):
     return rect, None
 
 
+# A stack panel's speaker is measured over its window reached this far into
+# its own shot either side: a turn the frontal detector loses inside a short
+# window (the judged Elon panel: 0.9 s in profile, nothing found) is carried
+# in by the face track from where the shot still showed the face.
+PANEL_SHOT_REACH_S = 2.5
+# A burned-in box a speaker panel keeps out: on screen at least this long in
+# the window.
+PANEL_INSET_MIN_S = .25
+# Panels stacked one over the other keep a gutter at least this tall between
+# them (frame fractions; judges, Oct 2026: captions sat on a 0.03 seam,
+# crossing both panels' edges). One design with the caption placement
+# solver (worker/caption_place.py): the gutter is no caption band — a seam
+# is a hard no-go for captions (EDGE_PAD off every panel edge) — so a page
+# is never squeezed onto it; the solver places captions in the largest free
+# band (above the speaker panel when the layout leaves one, else in the
+# speaker panel clear of the face, the screen panel only as a last resort).
+STACK_CAPTION_GAP = .065
+
+
+def _panel_samples(ctx, edl, spans):
+    """([(t, face box, look)], failure) — the speaker's face track over
+    SOURCE ``spans``, measured over each shot's piece reached
+    PANEL_SHOT_REACH_S into the shot either side (_follow_samples: the
+    index's when dense, else measured with the profile detector and carry).
+    The samples inside the window when it has any, else the shot's."""
+    pieces = _card_pieces(ctx, edl, spans)
+    if not pieces or len(pieces) > PICTURE_CARD_MAX_TRACK:
+        return [], None
+    windows = [(max(lo, a - PANEL_SHOT_REACH_S), min(hi, b + PANEL_SHOT_REACH_S))
+               for a, b, _fr, lo, hi in pieces]
+    samples, how, _counts, failure = _follow_samples(
+        ctx, windows, [x for _a, _b, _fr, lo, hi in pieces for x in (lo, hi)])
+    if not samples:
+        return [], failure
+    inside = [x for x in samples
+              if any(a - .3 <= x[0] <= b + .3 for a, b in spans)]
+    return inside or list(samples), (failure if how not in ("index", "measured")
+                                     else None)
+
+
+def _panel_insets(ctx, spans):
+    """Rects (source fractions) of the burned-in boxes on screen inside
+    SOURCE ``spans`` (insets.py) — what a speaker panel keeps out."""
+    out = []
+    for box in _inset_boxes(ctx, spans):
+        on = sum(insets.present(box, a, b) for a, b in _merge_windows(spans))
+        if on >= PANEL_INSET_MIN_S:
+            out.append([float(v) for v in box["rect"]])
+    return out
+
+
+def _panel_follow(ctx, edl, spans, samples, rect):
+    """Follow spans (one per shot piece, follow.plan) moving ``rect``
+    (source fractions) with a speaker who moves inside a shot, or None
+    when no piece needs to move."""
+    ww, wh = rect[2] - rect[0], rect[3] - rect[1]
+    out, moving = [], 0
+    for a, b, frags, lo, hi in _card_pieces(ctx, edl, spans):
+        own = [x for x in samples if a - .05 <= x[0] <= b + .05]
+        keys, info = follow.plan(own, a, b, ww, wh, kept=frags) if own else ([], {})
+        if keys:
+            moving += 1
+        else:
+            c = info.get("static") or ((rect[0] + rect[2]) / 2.0,
+                                       (rect[1] + rect[3]) / 2.0)
+            keys = [[round((a + b) / 2.0, 3), round(c[0], 4), round(c[1], 4)]]
+        out.append({"t0": round(lo, 3), "t1": round(hi, 3), "k": keys})
+    return out if moving else None
+
+
+def _panel_speaker(ctx, edl, spans, box, canvas, video, prefer=None,
+                   insets_out=True):
+    """(rect, info, follow spans, failure) — a face-safe source rect for a
+    panel showing the speaker (picture_cards.panel_framing) from the face
+    track (_panel_samples), keeping burned-in boxes out where it can, and
+    a follow path where one still rect would have to grow past SHARE_GROW
+    of the speaker's own framing to hold them as they move. ``prefer``: the
+    editor's rect, kept as far as the face allows. rect None: no face was
+    measured (info None) or no rect of this box's aspect holds the head."""
+    try:
+        sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
+    except (TypeError, ValueError):
+        return None, None, None, None
+    if not (sw and sh):
+        return None, None, None, None
+    W, H = canvas
+    samples, failure = _panel_samples(ctx, edl, spans)
+    if not samples:
+        return None, None, None, failure
+    faces = [list(b) for _t, b, _l in samples]
+    looks = [lk for _t, _b, lk in samples]
+    avoid = _panel_insets(ctx, spans) if insets_out else []
+    # how much of the window the track saw (each sample stands for ~0.5 s)
+    total = sum(b - a for a, b in spans) or 1.0
+    seen = min(1.0, len({round(t * 2) for t, _b, _l in samples
+                         if any(a - .3 <= t <= b + .3 for a, b in spans)})
+               * .5 / total)
+    pad = picture_cards.PANEL_UNSEEN_PAD if seen < picture_cards.PANEL_SEEN_MIN else 0.0
+    rect, info = picture_cards.panel_framing(sw, sh, W, H, box, faces, looks,
+                                             avoid, prefer=prefer, pad=pad)
+    follows = None
+    if rect is not None and prefer is None:
+        med = picture_cards.median_face(picture_cards.steady_faces(faces))
+        tight, tinfo = picture_cards.panel_framing(sw, sh, W, H, box, [med],
+                                                   looks, avoid, pad=pad)
+        if tight is not None and rect[3] - rect[1] > \
+                picture_cards.SHARE_GROW * (tight[3] - tight[1]) + 1e-6:
+            follows = _panel_follow(ctx, edl, spans, samples, tight)
+            if follows:
+                rect, info = tight, dict(tinfo, follow=True)
+    info = dict(info or {}, avoid=avoid, seen=seen)
+    return rect, info, follows, failure
+
+
+def _speaker_note(info, k, moved_from=None, concealed=True):
+    """The tool-result words for a solved speaker panel. ``concealed``:
+    the corner a burned-in box forces in is softened in the render (a
+    following panel's is not: its rect moves)."""
+    bits = []
+    lead = (info or {}).get("lead")
+    bits.append("face held whole with chin and hair margins"
+                + (f", lead room to the {'left' if lead < 0 else 'right'} where "
+                   "they look" if lead else ""))
+    if (info or {}).get("follow"):
+        bits.append("the panel FOLLOWS the speaker inside the shot")
+    seen = (info or {}).get("seen")
+    if seen is not None and seen < picture_cards.PANEL_SEEN_MIN:
+        bits.append(f"the face was measured over only {seen * 100:.0f}% of the "
+                    "window (a turn the detectors lose), so the framing leaves "
+                    "extra room around it — look at the unmeasured stretch")
+    cover = float((info or {}).get("inset") or 0.0)
+    if cover >= 1.0:
+        share = cover - 1.0
+        bits.append(
+            f"NOTE: the burned-in screen box touches the speaker's face in the "
+            f"source — no framing that holds the face can leave it out, so "
+            f"{max(1, round(share * 100))}% of the panel (a corner) still "
+            + ("shows it, softened (blurred, darkened, feathered in: it reads "
+               "as shadow, not a second screen)" if concealed else
+               "shows it — NOT softened: the panel follows the speaker, so the "
+               "corner moves; look at it")
+            + "; the face wins (owner rule). If that corner still distracts, "
+            "show the speaker full-bleed and the screen as its own cut-in card")
+    elif (info or {}).get("avoid"):
+        bits.append("the burned-in screen box kept out of the panel")
+    if moved_from is not None:
+        to = f"[{', '.join(f'{v:.3f}' for v in moved_from)}]"
+        if (info or {}).get("cut"):
+            bits.append(f"the given rect cut the speaker's face — moved/grown "
+                        f"to {to} to hold it")
+        else:
+            bits.append(f"the given rect held the face; adjusted to {to} "
+                        "(the head's margins from the panel edge, or the "
+                        "burned-in box kept out)")
+    return "; ".join(bits)
+
+
+def _open_caption_gaps(boxes, gap=STACK_CAPTION_GAP):
+    """(boxes, note) — panels stacked one over the other (sharing columns)
+    pulled apart until the gutter between them is at least ``gap`` of the
+    frame height (each gives up half from its facing edge): the panels never
+    read as one block, and no caption is ever set on the seam (the caption
+    solver keeps pages off every panel edge and places them in a free band
+    — picture_cards.free_bands names the same bands)."""
+    boxes = [list(b) for b in boxes]
+    moved = []
+    order = sorted(range(len(boxes)), key=lambda k: boxes[k][1])
+    for i, j in zip(order, order[1:]):
+        a, b = boxes[i], boxes[j]
+        if min(a[2], b[2]) - max(a[0], b[0]) <= .02:
+            continue                          # side by side, not stacked
+        have = b[1] - a[3]
+        if have >= gap - 1e-4 or have < -1e-4:
+            continue
+        d = (gap - have) / 2.0
+        if a[3] - d - a[1] < .1 or b[3] - (b[1] + d) < .1:
+            continue                          # too small to give it up
+        a[3] = round(a[3] - d, 4)
+        b[1] = round(b[1] + d, 4)
+        moved.append((i, j, have))
+    if not moved:
+        return boxes, ""
+    return boxes, ("the stacked panels get a gutter: the gap opened to "
+                   f"{gap:g} of the frame height (it was "
+                   f"{min(h for _i, _j, h in moved):.3f}); captions never sit "
+                   "on the seam — the engine places them in a free band "
+                   "(above the speaker panel when the layout leaves one, "
+                   "else in the speaker panel clear of the face)")
+
+
+def _speaker_panel(ctx, edl, spans, box, source, fit, canvas, video, k):
+    """A stack panel that shows the speaker, solved face-first: (box, rect,
+    follow spans or None, note, conceal boxes or None), a REJECTED string when no framing of any
+    width of this box can hold the face, or None when this is not a
+    speaker panel (or no face was measured) — the caller resolves it as
+    before. A speaker panel is source 'auto' (crop; a low-resolution
+    source's 'auto' panel without fit='crop' is shown whole instead) or a
+    crop rect holding most of the measured face (the editor's framing,
+    moved and grown only as far as the face needs)."""
+    lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
+    prefer = None
+    if isinstance(source, str):
+        if source != "auto" or fit == "pad" or (lowres and fit != "crop"):
+            return None
+    else:
+        if fit != "crop":
+            return None
+        prefer, err = _rect_arg(source, "source", source=True)
+        if err:
+            return None
+    try:
+        sw, sh = float(video.get("width") or 0), float(video.get("height") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not (sw and sh):
+        return None
+    W, H = canvas
+    if prefer is not None:
+        samples, _f = _panel_samples(ctx, edl, spans)
+        keep = picture_cards.panel_keep([b for _t, b, _l in samples])
+        if keep is None:
+            return None
+        inside = picture_cards._overlap(prefer, keep) / max(
+            1e-9, (keep[2] - keep[0]) * (keep[3] - keep[1]))
+        if inside < .25:
+            return None                  # a rect of something else (a screen)
+    tried = list(box)
+    for shrink in (1.0, .9, .8, .7, .6, .5):
+        cx, w = (box[0] + box[2]) / 2.0, (box[2] - box[0]) * shrink
+        tried = [round(cx - w / 2.0, 4), box[1], round(cx + w / 2.0, 4), box[3]]
+        rect, info, follows, failure = _panel_speaker(
+            ctx, edl, spans, tried, canvas, video, prefer=prefer)
+        if info is None and rect is None:
+            return None                  # nothing measured: resolve as before
+        if rect is not None:
+            break
+    else:
+        return (f"REJECTED: panel {k + 1} cannot hold the speaker's face at any "
+                "framing of its box (the head is taller than the source allows "
+                "at that shape). Give it a taller box, or show the speaker "
+                "full-bleed (no card) and the screen as its own cut-in "
+                "(set_picture_card source='inset' for the beat that needs it).")
+    cap = min(picture_cards.FACE_UPSCALE_CAP,
+              max(picture_cards.SOURCE_UPSCALE_CAP, float(info.get("k") or 0.0)))
+    fbox, frect, kk = picture_cards.fit_panel(sw, sh, W, H, tried, rect, "crop",
+                                              cap=cap + 1e-6)
+    if follows:
+        # the follow path moves the rect's centre: keep it on the fitted rect
+        frect = picture_cards.recentre(frect, (
+            (rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0))
+    # what of a burned-in box the face forced in is softened in the render
+    # (a still panel only: a following panel's rect moves over it)
+    conceal = None
+    if float(info.get("inset") or 0.0) >= 1.0 and not follows:
+        conceal = [list(b) for b in info.get("avoid") or []
+                   if picture_cards._overlap(frect, b) > 0] or None
+    note = (f"{int(sw)}x{int(sh)} speaker rect "
+            f"[{', '.join(f'{v:.3f}' for v in frect)}] -> box "
+            f"[{', '.join(f'{v:.3f}' for v in fbox)}], enlarged {kk:.2f}x; "
+            + _speaker_note(info, k, moved_from=frect if info.get("moved") else None,
+                            concealed=not follows))
+    if tried != list(box):
+        note += (f"; the box narrowed to x {tried[0]:.3f}-{tried[2]:.3f} so the "
+                 "speaker's head fits its shape")
+    return fbox, [round(v, 4) for v in frect], follows, note, conceal
+
+
 def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
                    track_face=True):
     """(box, source rect, fit, report, source_track, follow spans) for one
@@ -16107,12 +16387,20 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
     if not (sw and sh):
         return box, rect, fit, "source size unknown — the render fits it", None, None
     box0 = list(box)
-    box, rect, k = picture_cards.fit_panel(sw, sh, W, H, box, rect, fit)
+    # A face framing may enlarge a small face past the cap (face_cap): keep
+    # the enlargement the framing chose, never more than FACE_UPSCALE_CAP.
+    cap = picture_cards.SOURCE_UPSCALE_CAP
+    if face is not None and fit == "crop":
+        rw_px = max(1e-6, (rect[2] - rect[0]) * sw)
+        cap = min(picture_cards.FACE_UPSCALE_CAP,
+                  max(cap, (box[2] - box[0]) * W / rw_px)) + 1e-6
+    box, rect, k = picture_cards.fit_panel(sw, sh, W, H, box, rect, fit, cap=cap)
     if track:
         # every shot's framing goes onto the SAME box at the same scale
         fitted = []
         for row in track:
-            b2, r2, _k2 = picture_cards.fit_panel(sw, sh, W, H, box0, row["source"], fit)
+            b2, r2, _k2 = picture_cards.fit_panel(sw, sh, W, H, box0, row["source"],
+                                                  fit, cap=cap)
             if any(abs(u - v) > 1e-3 for u, v in zip(b2, box)):
                 fitted = None
                 break
@@ -16121,7 +16409,11 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
     bits = [f"{int(sw)}x{int(sh)} source rect "
             f"[{', '.join(f'{v:.3f}' for v in rect)}] -> box "
             f"[{', '.join(f'{v:.3f}' for v in box)}], enlarged {k:.2f}x "
-            f"(cap {picture_cards.SOURCE_UPSCALE_CAP:g}x)"]
+            f"(cap {picture_cards.SOURCE_UPSCALE_CAP:g}x"
+            + (f"; up to {picture_cards.FACE_UPSCALE_CAP:g}x keeps a small face "
+               "readable — lanczos, light sharpening"
+               + (", the card's grain over it" if lowres else "")
+               if k > picture_cards.SOURCE_UPSCALE_CAP + 1e-3 else "") + ")"]
     if face is not None and headroom is not None:
         bits.append(f"{headroom * 100:.0f}% headroom above the head"
                     + ("" if headroom >= picture_cards.HEADROOM_MIN - 1e-3
@@ -16154,8 +16446,9 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
         bits.append("low-resolution source shown whole (contain), edge "
                     "blanking trimmed")
     elif lowres and isinstance(source, str):
-        bits.append(f"low-resolution source framed on the speaker at most "
-                    f"{picture_cards.SOURCE_UPSCALE_CAP:g}x")
+        bits.append("low-resolution source framed on the speaker as a medium "
+                    f"close-up (face about {picture_cards.FACE_MIN_FRAME:g} of the "
+                    f"frame height or more, at most {picture_cards.FACE_UPSCALE_CAP:g}x)")
     return box, rect, fit, "; ".join(bits), track, follows
 
 
@@ -16284,7 +16577,7 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
                 PICTURE_CARD_MAX_PANELS:
             return (f"REJECTED: panels is a list of 2-{PICTURE_CARD_MAX_PANELS}"
                     " {box, source[, fit]} — one region alone is `source`.")
-        rows_panels = []
+        parsed = []
         for k, panel in enumerate(panels):
             if not isinstance(panel, dict) or panel.get("box") is None:
                 return (f"REJECTED: panel {k + 1} needs a box ([left, top, "
@@ -16303,6 +16596,28 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             pfit = panel.get("fit")
             if pfit is not None and pfit not in ("crop", "pad"):
                 return f"REJECTED: panel {k + 1} fit must be 'crop' or 'pad'."
+            parsed.append((pbox, psrc, pfit))
+        # stacked panels get a gutter (captions are placed in a free band)
+        gapped, gap_note = _open_caption_gaps([b for b, _s, _f in parsed])
+        if gap_note:
+            report.append(gap_note)
+        rows_panels = []
+        for k, ((_b, psrc, pfit), pbox) in enumerate(zip(parsed, gapped)):
+            # a speaker panel is framed face-first from the face track
+            spk = _speaker_panel(ctx, edl, spans, pbox, psrc, pfit, canvas,
+                                 video, k) if spans else None
+            if isinstance(spk, str):
+                return spk
+            if spk:
+                sbox, srect, sfollow, note, sconceal = spk
+                row = {"box": sbox, "source": srect}
+                if sfollow:
+                    row["follow"] = sfollow
+                if sconceal:
+                    row["conceal"] = sconceal
+                rows_panels.append(row)
+                report.append(f"panel {k + 1}: {note}")
+                continue
             pbox, prect, _pfit, note, _track, _follows = _resolve_panel(
                 ctx, edl, spans, pbox, psrc, pfit, canvas)
             if pbox is None:
@@ -19956,6 +20271,7 @@ def audit_captions(ctx, offset=0, limit=80):
     warnings = []
     uncovered = []
     sound_off = []
+    unshown = []
     first_late = None
     declared_max_words = None
     single_line_contract = False
@@ -19988,13 +20304,18 @@ def audit_captions(ctx, offset=0, limit=80):
             warnings.append(f"{len(uncovered)} spoken word(s) lack caption coverage")
         try:
             sound_off = caption_carry.sound_off_gaps(edl, ctx.index, tl)
+            unshown = caption_carry.heard_unshown(edl, ctx.index, tl)
         except Exception:  # noqa: BLE001 — the audit reports what it can
-            sound_off = []
+            sound_off, unshown = [], []
         if sound_off:
             warnings.append(
                 f"{len(sound_off)} spoken span(s) over "
                 f"{caption_carry.SOUND_OFF_GAP_S:g}s have no caption and no graphic "
                 "showing them (sound_off_gaps)")
+        if len(unshown) > len(sound_off):
+            warnings.append(
+                f"{len(unshown)} heard span(s) never reach the screen, however short "
+                "(heard_unshown: every heard word should, once)")
     density_violations = [
         {"start": state["start"], "end": state["end"],
          "word_count": state["word_count"],
@@ -20090,6 +20411,7 @@ def audit_captions(ctx, offset=0, limit=80):
         "uncovered_words": uncovered[:20],
         "uncovered_word_count": len(uncovered),
         "sound_off_gaps": sound_off[:10],
+        "heard_unshown": unshown[:20],
         "overlaps": overlaps[:20],
         "warnings": warnings,
         "short_phrase_states": fragment_states,
@@ -20908,7 +21230,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
                     src_w=(ctx.index.get("video") or {}).get("width"),
                     src_h=(ctx.index.get("video") or {}).get("height"),
                     user_asked=ctx.user_message or "",
-                    measure=motion_tools.jump_cut_measure(ctx))
+                    measure=motion_tools.jump_cut_measure(ctx),
+                    pop=jump_cut_report.pop_measure(ctx, edl))
                 ctx.last_taste_advisory = list(findings)
                 note += taste.audit_line(findings)
             except Exception:
@@ -23588,8 +23911,10 @@ def audit_audio_mix(ctx):
         warnings.append(
             "EDL has voiceover but no music; if this file is actually a song, "
             "remove_voiceover and add_music instead—the roles mix differently")
-    if not any(state.get(k) for k in ("music", "voiceover", "sfx")):
-        warnings.append("no designed audio layers are authored")
+    # No music, voiceover or sounds is a complete mix, not a defect: sounds
+    # are optional and music is the owner's to supply — a warning here read
+    # as "add some" (the owner's whoosh-war complaint).
+    dialogue_only = not any(state.get(k) for k in ("music", "voiceover", "sfx"))
     warnings += _sfx_mix_audit(ctx, edl, state.get("sfx") or [])
     for item in state.get("music") or []:
         rights = item.get("provenance") or {}
@@ -23622,6 +23947,7 @@ def audit_audio_mix(ctx):
         "mix": state,
         "duplicate_cross_role_assets": doubled,
         "warnings": warnings,
+        "dialogue_only": dialogue_only,
         "latest_preview_matches_version": bool(preview_asset),
         "latest_preview_audio_qc": (preview_meta.get("audio_qc")
                                     if preview_asset else None),
@@ -27682,11 +28008,16 @@ TOOLS = {
         "Captions, designed type and branding stay independent and sharp. Stable id replaces the card. "
         "box=[left,top,right,bottom] on the output canvas; radius 0-.25 of card short side; "
         "border 0-.015 of canvas short side. entrance/exit none, fade, lift (restrained settle), "
-        "or reveal (picture opens/closes inside its rounded window). duration_s .12-1.2. "
+        "or reveal (picture opens/closes inside its rounded window): an animated end DISSOLVES "
+        "the whole card with the full-frame shot under it — never a frame of bare canvas; a "
+        "source card that opens or closes on a cut cuts in with its panels populated "
+        "('none' says so outright). duration_s .12-1.2. "
         "Windows must not overlap. Inspect entry, settle, exit and the speaker framing. Rounded "
         "cards are one purposeful format, not a quota. "
         "FOOTAGE — source: the card takes its picture straight from the full SOURCE frame "
-        "(enlarged once, at most 2x), never from the already-cropped 9:16 program. "
+        "(enlarged once, at most 2x — up to 3x only so a small archival face reads at ~15% of "
+        "the frame, with lanczos, light sharpening and the card's grain over it), never from "
+        "the already-cropped 9:16 program. "
         "Default 'auto' frames the speaker as a medium close-up (>=8% headroom above the "
         "head) from a face track measured on the window's kept footage (4 fps) and FOLLOWS "
         "a speaker who moves inside a shot: the card holds STILL while they sway and glides "
@@ -27698,7 +28029,7 @@ TOOLS = {
         "source below 720p 'auto' shows the WHOLE frame "
         "(contain: the box shrinks to the footage's aspect, edge blanking trimmed) — archival "
         "4:3 talks belong in a full-width 4:3 card, not a 3.7x crop; fit='crop' there frames "
-        "the speaker at most 2x and follows them. 'full' = the whole source "
+        "the speaker as a medium close-up and follows them. 'full' = the whole source "
         "frame; [left,top,right,bottom] = that rect of the SOURCE frame (look_at gives the "
         "fractions); 'inset' = the burned-in screen / picture-in-picture box measured in the "
         "window's footage (four straight edges, the same place across frames), shown WHOLE "
@@ -27716,12 +28047,19 @@ TOOLS = {
         "Spliced inserts inside a source card play full-frame and the card returns after them. "
         "SPEAKER + EVIDENCE — panels: 2-3 {box, source[, fit]} shown at once over the window, "
         "each box its own rounded window on one canvas, each source its own region of the SAME "
-        "source frame: e.g. [{box:[.04,.06,.96,.46], source:'auto'} (the speaker), "
-        "{box:[.04,.5,.96,.92], source:'inset'} (the screen/study/inset they show — or "
+        "source frame: e.g. [{box:[.04,.13,.96,.475], source:'auto'} (the speaker), "
+        "{box:[.04,.54,.96,.93], source:'inset'} (the screen/study/inset they show — or "
         "its rect)]. Use it when the source shows a speaker beside a picture-in-picture screen, "
         "document or browser that a 9:16 crop would either drop or slice; never crop to the "
-        "evidence and lose the speaker for seconds. Panel boxes must not overlap; zooms do not "
-        "play inside a stack. "
+        "evidence and lose the speaker for seconds. A SPEAKER panel ('auto', or a crop rect "
+        "holding most of the measured face) is solved from the face track (measured into its "
+        "shot, so a profile turn is carried): the whole head with chin and hair margins, lead "
+        "room where they look, burned-in screen boxes kept out wherever a framing can (where "
+        "the box touches the face the face wins and the result names the corner that shows), "
+        "following a speaker who moves; a given rect that cuts the face is moved and grown only "
+        "as far as it must. Stacked panels keep a caption band of >= .065 of the frame height "
+        "between them (a narrower gap is opened, and said). Panel boxes must not overlap; zooms "
+        "do not play inside a stack. "
         "CANVAS — omitted, it is a dark canvas sampled from the footage (its hue, near-black "
         "at the edges, vignette; film grain on sources below 720p). Name one to override: "
         "background_style 'radial_gradient' glows from `background` behind the card out to "
@@ -27732,8 +28070,9 @@ TOOLS = {
         "(~.4). grain 0-1 adds animated film grain: .25 is the references' texture. Grain is a "
         "FINAL-export finish with a cliff — the encoder smooths it out of previews and out of "
         "any value below ~.2 entirely, and where it survives it costs ~3-4x the file size and "
-        "~+0.5s of export per 8s of card at 1080x1920. Both only on the backdrop, never on the "
-        "footage. background_color2 alone implies vertical_gradient; a knob the chosen style "
+        "~+0.5s of export per 8s of card at 1080x1920. Both only on the backdrop (grain also "
+        "over footage enlarged past 2x). background_color2 alone implies vertical_gradient; a "
+        "knob the chosen style "
         "cannot draw (color2 on blur/solid, background_dim off blur) is rejected.",
         {"id":{"type":"string"},"start":{"type":"number"},"end":{"type":"number"},
          "box":{"type":"array","items":{"type":"number"},"minItems":4,"maxItems":4},
@@ -28929,7 +29268,9 @@ TOOLS = {
                        "spoken-word coverage (words a graphic shows count as "
                        "covered), sound_off_gaps (speech over 0.6 s with no "
                        "caption and no graphic showing it, with cause and "
-                       "fix), true distinct-state overlaps, "
+                       "fix), heard_unshown (every such span however short: "
+                       "every heard word should reach the screen once), "
+                       "true distinct-state overlaps, "
                        "max_words_seen, max_lines_seen, declared-density and "
                        "single-line wrap violations, exact event pages and "
                        "up to 16 high-information "
@@ -28946,6 +29287,8 @@ TOOLS = {
         "and typography path; draft is the inexpensive 480px preview. The Studio attaches "
         "the complete preview. wait_for_job observes pending work; call render_preview again "
         "to review its existing result. MCP clients can retrieve it with watch_video or download_url. "
+        "On a short its VERIFICATION ADVISORIES carry an EARN ITS PLACE note (hook, graphic "
+        "budget, payoff hold), advisory: act on what hurts this short, never with a zoom or a sound. "
         "A complete render carries a PICTURE CHECK measured on its own frames: a face within ~6% "
         "of the frame's (or its card's) edge, a single-frame jump or pop that is not on a cut, a "
         "missing end card or watermark. Repair each one or keep it deliberately and say why.",
@@ -29563,18 +29906,20 @@ _COMPACT_CONTRACTS = {
         "sits 0-3 frames before the spoken onset (get_kept_transcript + "
         "get_words; start earlier by the landing offset the template "
         "description states). layer above_captions (default), below_captions "
-        "or behind_subject. Captions: leave mute_captions unset — one reading "
-        "path: captions drop the words it shows and yield to its phrase from "
-        "its first shown word until it leaves (phrase_build sets the phrase's "
-        "other words small: quote the transcript in its rows; end other "
-        "graphics where their words end, per the NOTE); other words stay "
-        "captioned, clear of it; true hides all captions in its window, false "
-        "keeps them all. A number lands on its spoken word. Silent by "
+        "or behind_subject. Captions: leave mute_captions unset — every "
+        "heard word reaches the screen once: captions drop the words it shows "
+        "and carry the rest beside it, in a free band (quote the transcript in "
+        "rows; end graphics where their words end, per the NOTE). A number "
+        "lands on its spoken word. Silent by "
         "default; sfx=true, only for a moment that earns sound, maps its "
         "sound roles onto the approved library (cues listed in the result). "
         "Pass purpose and a stable id. A graphic over the speaker's face or "
         "outside the 9:16 safe area is moved to clear space (KEEP-OUT in the "
-        "result). "
+        "result). A word-timed window starts on its first shown word; an edge "
+        "within 0.15 s of a cut snaps to it. accent/color default to the "
+        "short's Look (NOTE (look): 2nd accent, 4th type role). word_slam "
+        "tier: payoff (number+noun in the accent) or hero (one per short, "
+        "behind the speaker; face-safe fallback). "
         "Never invent numbers, brand messages, handles or CTA offers."),
     "set_motion_graphic": (
         "Patch a motion graphic by id: window, params (merged), template, layer, "
@@ -29639,8 +29984,9 @@ _COMPACT_CONTRACTS = {
         "only punches on words the story turns on (a punch on every stressed "
         "word looks childish). Skip for calm/minimal briefs."),
     "conceal_jump_cuts": (
-        "Optional, never a default: hard 6-10% framing steps on only the "
-        "jump cuts that visibly pop. at=[s] picks cuts; mode='off' undoes."),
+        "mode='report' lists every jump cut (evidence, cover, options), "
+        "writes nothing. Optional, never a default: hard 10-15% steps on "
+        "cuts that visibly pop; at=[s] picks; mode='off' undoes."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
         "cuts — report the junction count it returns. Styles dip_black, "
@@ -29656,8 +30002,11 @@ _COMPACT_CONTRACTS = {
         "speaker who moves inside a shot — still while they sway, a smooth "
         "glide when a still card would cut the head, never across a cut; a "
         "sub-720p source is shown whole unless fit='crop'), enlarged at most "
-        "2x; panels=[{box, source}, ...] stacks the speaker ('auto') and the "
-        "screen they show ('inset': a burned-in screen box, whole). The default "
+        "2x (3x for a small archival face); panels=[{box, source}, ...] stacks "
+        "the speaker ('auto': solved from the face — chin, hair, lead room, the "
+        "screen box kept out; captions never on the gutter between panels) "
+        "and the screen they show ('inset': a burned-in screen box, whole). Animated "
+        "entrances/exits dissolve with the full-frame shot. The default "
         "canvas is dark and sampled from the footage; never a flat void, and "
         "no blurred self-copy on low-resolution footage."),
 }

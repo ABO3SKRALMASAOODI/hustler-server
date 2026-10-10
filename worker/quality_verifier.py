@@ -44,6 +44,7 @@ ADVISORY_FINDINGS = {
     "scene_unaware_reframe", "duplicate_broll_window",
     "music_missing_treatment_purpose", "sfx_missing_trigger",
     "mechanical_sfx_pattern", "taste_advisory", "sound_off_gap",
+    "earn_its_place",
 }
 ADVISORY_LABEL = "advisory: keep if intentional"
 
@@ -687,6 +688,28 @@ def _sound_off_findings(edl, index):
          "band"))]
 
 
+def _earn_its_place_findings(edl, index, request_text=None):
+    """edit_review's advisory "earn its place" notes on a short (hook,
+    graphic budget, payoff, identification, trim, restraint), folded into
+    ONE advisory finding: the leading notes in the message, every note with
+    its full fix in the evidence. Never blocking, never raising."""
+    try:
+        import edit_review
+        notes = edit_review.review(edl, index, request_text=request_text)
+    except Exception as exc:  # noqa: BLE001 — an advisory never breaks review
+        print(f"[verify] earn-its-place review skipped: {type(exc).__name__}",
+              flush=True)
+        return []
+    if not notes:
+        return []
+    return [_finding(
+        "earn_its_place", "craft", edit_review.summary(notes),
+        {"review_version": edit_review.REVIEW_VERSION,
+         "notes": [{key: note[key] for key in ("code", "at", "message", "fix")}
+                   for note in notes[:16]]},
+        "act on the notes that hurt this short; " + ADVISORY_LABEL)]
+
+
 def deterministic_findings(edl, index=None, request_text=None):
     return (_text_corruption_findings(edl)
             + _caption_findings(edl)
@@ -697,7 +720,8 @@ def deterministic_findings(edl, index=None, request_text=None):
             + _media_findings(edl)
             + _cleanup_findings(edl)
             + _audio_findings(edl)
-            + _request_findings(edl, request_text))
+            + _request_findings(edl, request_text)
+            + _earn_its_place_findings(edl, index or {}, request_text))
 
 
 def build_verification_record(project_id, version, manifest, edl, index,

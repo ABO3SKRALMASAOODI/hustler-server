@@ -60,8 +60,11 @@ HOW TO LOOK AT MOTION — two different renders:
 
 SCREEN IN THIS ORDER — each item is a yes/no question:
 1. THE OPEN (rendered 0.0, 0.2, 0.6, 1.5): first visual event by 0.6 s?
-   Hook text readable by 1.5 s? Speaker on screen and talking by ~0.3 s? No
-   black, no fade-in, no dead air?
+   Hook text readable by 1.5 s, written from the clip's strongest line or
+   statistic (not a generic question) and not showing a word a later
+   graphic slams? Speaker on screen, facing camera and talking by ~0.3 s,
+   on a clean first word (no fragment, no disfluency) with no jump cut in
+   the first 1.5 s? No black, no fade-in, no dead air?
 2. RHYTHM: scanning the program, does the type keep moving with the
    speech, and does the structure (a graphic, B-roll, a layout shift) move
    where the story turns? Is any zoom or sound there only to fill time
@@ -69,6 +72,10 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
 3. HERO MOMENTS (dense frames each): does one leader land on its word
    (0–3 frames early), with any camera move or sound on the same frame, clear
    of the face and the UI band, readable at phone size, and exit cleanly?
+   Does each graphic EARN ITS PLACE — adding a number, a contrast, an
+   identification, evidence or an image the captions cannot — with about
+   one hero graphic per 6–8 s at most, under ~50% of the runtime, at most 3
+   type roles and one accent? Remove any that only restate the caption.
 4. CAPTIONS: words appear on onsets; accents on the right 1–2 words; legible
    against every background; no overlap with faces, graphics or the platform
    band; no caption stacked over burned-in text.
@@ -96,8 +103,10 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    its labeled windows.
 8. LOOK AND LAYOUT: one grade and texture throughout; no flat black void; no
    scene obviously rawer than the rest.
-9. THE END: payoff held 1.0–1.5 s, a requested CTA after it (not over it),
-   last beat lands clean for the loop.
+9. THE END: the payoff is the largest accented lockup (a number with its
+   noun), held 0.6–1.5 s after the last word before the end card, a
+   reaction button 1.0–1.5 s or none, a requested CTA after it (not over
+   it), last beat lands clean for the loop.
 10. THE BRIEF: reread the user's message once. Every named item delivered or
     honestly reported? Anything they forbade present anyway?
 11. HONESTY: every number, name, quote and UI claim on screen is supported by
@@ -105,6 +114,13 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
     handle, keyword and offer the user or brief supplied (no invented
     verified badge or promised resource); every device has a purpose you
     can name.
+
+THE EARN ITS PLACE ADVISORY (in VERIFICATION ADVISORIES) lists, by time,
+a generic or spent hook, a fragment or jump-cut opening, graphics past the
+budget or restating the captions, a spoken list set as text, extra type
+roles or accents, a lower third beside the hook, a product set as "Name:",
+a short payoff hold, colliding sentences, and a barely visible or stacked
+zoom (offered for removal only). Act on the notes that hurt this short.
 
 TASTE AND DENSITY FINDINGS ARE ADVISORY: fix real defects (collisions,
 illegible type, mistimed cues, clipped faces, fades on reels, silence,

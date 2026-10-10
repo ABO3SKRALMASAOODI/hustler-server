@@ -23,14 +23,15 @@ def test_a_number_lands_before_its_reading_is_timed(monkeypatch):
                                           params={"text": "*140*"}, id="slam")
     item = ctx.latest_edl()["json"]["motion"][0]
     assert (item["start"], item["end"]) == (2.78, 3.88), item
-    assert out.index("NUMBER LANDED") < out.index("NOTE (captions)"), out
-    # "characters" is said while the moved slam is up: the reading names it
-    # and the exit the slam really has
-    assert "until it leaves at 3.88s" in out and '"characters' in out, out
-    # the end it names gives "characters" back (before its midpoint, 3.6 s)
-    assert "End it at 3.58s" in out, out
+    assert out.index("NUMBER LANDED") < out.index("Captions carry the words"), out
+    # "characters" is said while the moved slam is up: the captions carry it
+    # beside the slam, and the note names it
+    assert '"characters' in out and "NOTE (captions)" not in out, out
+    # the end it names keeps the slam to its own word (before the midpoint
+    # of "characters", 3.6 s) — the exit the slam really has, after landing
+    assert "end it at 3.58s" in out, out
     again = motion_tools.set_motion_graphic(ctx, "slam", end=3.58)
-    assert "NOTE (captions)" not in again and "NUMBER LANDED" not in again, again
+    assert "Captions carry" not in again and "NUMBER LANDED" not in again, again
 
 
 # ── a lockup's reveal times: one definition for the page and the engine ──
@@ -40,6 +41,8 @@ def test_a_number_lands_before_its_reading_is_timed(monkeypatch):
 # both read caption_carry.lockup_reveals — the page's own timing.
 
 import asyncio  # noqa: E402
+
+import pytest  # noqa: E402
 
 import caption_carry  # noqa: E402
 import motion_layer  # noqa: E402
@@ -61,8 +64,9 @@ def _pb(rows, reading=None, start=0.0, end=5.3, **params):
 
 
 def test_reveals_follow_the_reading_not_the_fallback_at_times():
-    # rows: bridge(-1), row 0, bridge(0), row 1, row 2 in reading order
-    assert caption_carry.lockup_reveals(_pb(PAPER_ROWS, SPOKEN)) == [0.4, 0.7, 1.6, 3.28, 3.9]
+    # rows in reading order; a stored reading's bridge lines are not drawn
+    # (round 4: a lockup sets only its rows), so they reveal nothing
+    assert caption_carry.lockup_reveals(_pb(PAPER_ROWS, SPOKEN)) == [0.7, 3.28, 3.9]
     # no reading: the rows' own 'at' times
     assert caption_carry.lockup_reveals(_pb(PAPER_ROWS)) == [0.7, 3.28, 3.9]
     # a 'rise' word starts 0.06 s early; reading order is never broken
@@ -75,17 +79,18 @@ def test_reveals_follow_the_reading_not_the_fallback_at_times():
 
 def test_the_headline_yields_from_the_lockups_first_spoken_word():
     lock = _pb(PAPER_ROWS, SPOKEN, start=10.0, end=15.3)
-    assert motion_layer._ink_lead(lock) == 0.4          # the leading bridge line
+    assert motion_layer._ink_lead(lock) == 0.7          # the first spoken row
     unread = _pb(PAPER_ROWS, start=10.0, end=15.3)
     assert motion_layer._ink_lead(unread) == 0.7        # the first row's 'at'
-    # a stitched piece 1 s into the composition waits that much less
+    # a stitched piece 0.5 s into the composition waits that much less
+    assert motion_layer._ink_lead(dict(lock, phase_s=0.5)) == pytest.approx(0.2)
     assert motion_layer._ink_lead(dict(lock, phase_s=1.0)) == 0.0
 
 
 def test_a_sound_partner_is_a_spoken_row_landing():
     lock = _pb(PAPER_ROWS, SPOKEN, start=10.0, end=15.3)
     lands = sfx_placement._motion_landings(lock)
-    assert 13.28 in lands and 13.9 in lands and 10.4 in lands
+    assert 13.28 in lands and 13.9 in lands and 10.7 in lands and 10.4 not in lands
     # the fallback 'at' of a spoken row is no landing any more
     lock2 = _pb([dict(PAPER_ROWS[0], at="0.2")] + PAPER_ROWS[1:], SPOKEN, start=10.0, end=15.3)
     assert 10.2 not in sfx_placement._motion_landings(lock2)
@@ -131,7 +136,7 @@ def test_lockup_reveals_match_the_page():
 def test_the_end_it_at_advice_never_makes_a_flash(monkeypatch):
     # "ENOUGH" lands and "to take our civilization" follows at once: ending
     # the slam before "to" would leave it up for 0.43 s, a flash — the note
-    # offers carrying the words instead
+    # names the words the captions carry and offers no such end
     import motion_tools as mt
     from test_one_reading_path import _edl, _index
     from timeline import Timeline
@@ -146,8 +151,8 @@ def test_the_end_it_at_advice_never_makes_a_flash(monkeypatch):
     ix = _index(words)
     tl = Timeline(edl["keep"])
     notes = mt._word_level_notes(edl, ix, tl, edl["motion"][0], canvas=(1080, 1920))
-    said = [n for n in notes if "never reads" in n]
-    assert said and "End it at" not in said[0] and "Carry them on it" in said[0], notes
+    said = [n for n in notes if "Captions carry the words" in n]
+    assert said and "end it at" not in said[0] and "to take our civilization to" in said[0], notes
 
 
 # ── the band above a card: lockups grown by bridge lines stay in it ──────
@@ -172,8 +177,8 @@ def test_a_lockup_spilling_out_of_the_band_is_named(monkeypatch):
                                           params={"rows": rows, "y": 0.15}, id="paper")
     assert "NOTE (band)" in out and "onto the top of the picture card" in out \
         and "rises into the feed header" in out, out
-    # inside the band: nothing to say
-    monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.09, 0.88, 0.28)))
+    # inside the band (below the free-tier mark's zone): nothing to say
+    monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.135, 0.88, 0.285)))
     out = motion_tools.set_motion_graphic(ctx, "paper", params={"width": 0.66, "y": 0.19})
     assert "NOTE (band)" not in out, out
     # a graphic set ON the card is not a band graphic
@@ -304,9 +309,11 @@ def test_the_probe_composes_the_card_live_at_that_moment():
 def test_a_browserless_estimate_is_named_only_past_its_own_error(monkeypatch):
     # production agent, MCP and shorts lanes have no browser at write time:
     # a lockup's box there is the template's estimate, which runs ~0.03-0.05
-    # taller than the real block. The Jobs hook (a real 0.087-0.273 in this
-    # band) estimates 0.054-0.306 — it must not be told to shrink; a block
-    # set grossly into the header still is, and the note says it estimated
+    # taller than the real block. The band now starts below the free-tier
+    # mark's zone (judged: the Jobs kicker at y 0.09-0.115 sat on the mark):
+    # the hook as judged (y .18, estimated 0.054-0.306) is named; set lower
+    # (y .21) its estimate is inside the band's own error — it must not be
+    # told to shrink — and a block set grossly into the header still is
     from test_headline_band import _Ctx as BandCtx, _card_edl
     rows = [{"text": "Steve Jobs, 1983", "role": "sans", "size": "0.45", "at": "0"},
             {"text": "computer fonts were", "role": "serif", "size": "0.8", "at": ""},
@@ -318,6 +325,8 @@ def test_a_browserless_estimate_is_named_only_past_its_own_error(monkeypatch):
                                           id="hook")
     item = ctx.latest_edl()["json"]["motion"][0]
     assert item["footprint"].get("estimated"), item.get("footprint")
+    assert "free-tier mark's zone" in out, out
+    out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.21})
     assert "NOTE (band)" not in out, out
     out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.12})
     assert "NOTE (band): by its estimated box" in out and "feed header" in out, out

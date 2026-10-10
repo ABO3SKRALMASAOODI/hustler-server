@@ -192,8 +192,7 @@ def _event_frames(edl, duration):
         import follow
         spans = list(follow.frame_spans(edl))
         for card in (edl.get("effects") or {}).get("picture_cards") or []:
-            if isinstance(card, dict):
-                spans += [sp for sp in card.get("follow") or [] if isinstance(sp, dict)]
+            spans += follow.card_spans(card)
         tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                       edl.get("speed") or [])
         n = 0

@@ -829,6 +829,105 @@ def block_tail(fps, seg_dur=None, frames=None):
     return f"{lead}fps={fps:.3f},{bound}setsar=1,format=yuv420p"
 
 
+def same_shot_tail(e, index, src_fps, out_fps, src_end, edges=()):
+    """How far past a kept span's end (SOURCE second ``e``) its PICTURE may
+    be read, in seconds, or 0.0 (render polish, Oct 2026).
+
+    On the block clock a block is an exact number of frames; when the
+    source's frame grid gives its span one frame fewer than that, block_tail
+    clones the last frame — a held frame right before the cut (the judged
+    one-frame hitch before Thiel's 7.22 and 24.10 jump cuts). Reading one
+    more frame of the SAME shot instead fills that slot with the next real
+    frame, as a frame-accurate cut does; a block that already holds enough
+    frames is cut to its count and never shows it. Never across a camera
+    cut: a frame of the next shot would be a flash. So only with a shot
+    list (the index's ``shots``; without one a measured cut cannot be told
+    from an edit) and no shot boundary, focus or follow edge (``edges``)
+    within 1.5 frames of the stretch read."""
+    shots = (index or {}).get("shots") or []
+    if not shots:
+        return 0.0
+    try:
+        sf = float(src_fps or out_fps or 30.0)
+        of = float(out_fps or src_fps or 30.0)
+        e = float(e)
+    except (TypeError, ValueError):
+        return 0.0
+    if sf <= 0 or of <= 0:
+        return 0.0
+    reach = max(1.0 / of, 1.0 / sf)
+    if src_end is not None and e + reach > float(src_end) - 1e-3:
+        return 0.0
+    slack = HANDOFF_JOIN_FRAMES / sf
+    lo, hi = e - slack, e + reach + slack
+    for shot in shots:
+        try:
+            c = float(shot["start"])
+        except (KeyError, TypeError, ValueError):
+            return 0.0              # an unreadable shot list is no evidence
+        if c > 0.0 and lo < c <= hi:
+            return 0.0
+    if any(lo < float(x) <= hi for x in edges or ()):
+        return 0.0
+    return round(reach, 6)
+
+
+def edge_fades(total_s, head=True, tail=True, fade_in=0.0, fade_out=0.0,
+               carry_music=False):
+    """The de-click fades at the TRUE programme edges (render polish, Oct
+    2026): (fade-in s, fade-out s), 0.0 where none applies.
+
+    A programme whose first kept span starts mid-sound opens on a step from
+    silence to wherever the waveform is — Thiel's first sample was -0.64, an
+    audible click on frame 0. PROGRAM_EDGE_FADE_S (a few ms, far below any
+    audible fade) takes the start, and the end of a programme that stops
+    without an end card, from zero. Never on a stitched piece or proof
+    window that does not hold the edge (``head``/``tail`` False), never on
+    an internal join (those have their own crossfades), and not where the
+    EDL already fades that edge or a carried score plays through the card
+    (its own fade at the card's far edge ends the mix)."""
+    d = float(config.PROGRAM_EDGE_FADE_S)
+    if d <= 0.0 or total_s <= 4 * d:
+        return 0.0, 0.0
+    fi = d if head and not fade_in else 0.0
+    fo = d if tail and not fade_out and not carry_music else 0.0
+    return fi, fo
+
+
+def final_rate_cap_kbps(W, H, fps):
+    """The VBV ceiling (kb/s) for a final export at W x H and ``fps``
+    (render polish, Oct 2026), or None when uncapped.
+
+    CRF alone sets the quality, so the size follows the picture: animated
+    grain over a 1.9x-upscaled 480p archival plate encoded the Jobs short at
+    21.6 Mb/s (116 MB for 43 s) where a clean talking head takes 2-5 Mb/s.
+    Every platform re-encodes the upload to a few Mb/s anyway; the ceiling
+    only bites on such pathological pictures. config.FINAL_MAXRATE_KBPS is
+    the ceiling for 1080x1920 at 30 fps, scaled with the pixel rate (within
+    0.25-5x), so a 4K or 60 fps export is not starved."""
+    base = float(config.FINAL_MAXRATE_KBPS or 0)
+    if base <= 0:
+        return None
+    try:
+        rate = float(W) * float(H) * max(1.0, float(fps or 30.0))
+    except (TypeError, ValueError):
+        return int(base)
+    k = min(5.0, max(0.25, rate / (1080.0 * 1920.0 * 30.0)))
+    return int(round(base * k))
+
+
+def final_video_encode(W, H, fps):
+    """x264 settings of a final export: CRF quality under the VBV ceiling
+    (final_rate_cap_kbps), bufsize FINAL_BUFSIZE_S seconds of it."""
+    enc = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
+           "-crf", str(config.FINAL_CRF), "-g", "120"]
+    cap = final_rate_cap_kbps(W, H, fps)
+    if cap:
+        buf = int(round(cap * max(0.5, float(config.FINAL_BUFSIZE_S))))
+        enc += ["-maxrate", f"{cap}k", "-bufsize", f"{buf}k"]
+    return enc
+
+
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
                      focus=None, seg_dur=None, picture=None, grade=None,
                      src_size=None, frames=None):
@@ -2044,8 +2143,8 @@ def captions_current(meta, edl):
         return False
     if caps.get("design_version") != caplib.CAPTION_DESIGN_VERSION:
         return True
-    if cap_v < 2:
-        return False      # v2: name/noun-phrase-aware cards on every v2 track
+    if cap_v < 3:
+        return False      # v2: name/noun-phrase-aware cards; v3: orphan pages joined
     return not caplib.program_cuts(Timeline(edl.get("keep") or [],
                                             edl.get("inserts") or [],
                                             edl.get("speed")))
@@ -2073,8 +2172,11 @@ def carry_current(meta, edl):
     Only transcript-caption EDLs with motion graphics, and EDLs with a
     phrase_build lockup (its words now land on their spoken onsets), can be
     stale: before config.CAPTION_CARRY_VERSION every caption under a muting
-    graphic was hidden for its whole window (v1), and captions ran under a
-    graphic in a different text from the phrase it showed (v2). Same
+    graphic was hidden for its whole window (v1), captions ran under a
+    graphic in a different text from the phrase it showed (v2), and words a
+    graphic did not show were muted or set as micro bridge rows, and a
+    card layout's captions sat on its seams (v3: transcript captions over
+    picture cards are stamped too). Same
     grandfathering discipline as legibility_current: everything else keeps
     its cache, and a missing stamp on such an EDL means the render predates
     the plan.
@@ -2083,8 +2185,10 @@ def carry_current(meta, edl):
     caps = edl.get("captions")
     lockup = any(isinstance(m, dict) and m.get("template") == "phrase_build"
                  for m in edl.get("motion") or [])
+    cards = bool(((edl.get("effects") or {}) if isinstance(edl.get("effects"), dict)
+                  else {}).get("picture_cards"))
     if not ((isinstance(caps, dict) and caps.get("mode") == "from_transcript"
-             and edl.get("motion")) or lockup):
+             and (edl.get("motion") or cards)) or lockup):
         return True
     return ((meta or {}).get("carry_v") or 0) == config.CAPTION_CARRY_VERSION
 
@@ -2101,9 +2205,25 @@ def follow_current(meta, edl):
     frame = edl.get("frame") if isinstance(edl.get("frame"), dict) else {}
     cards = ((edl.get("effects") or {}).get("picture_cards")) or []
     if not ((frame or {}).get("follow")
-            or any(isinstance(c, dict) and c.get("follow") for c in cards)):
+            or any(isinstance(c, dict) and (
+                c.get("follow") or any(isinstance(p, dict) and p.get("follow")
+                                       for p in c.get("panels") or []))
+                for c in cards)):
         return True
     return ((meta or {}).get("follow_v") or 0) == config.FOLLOW_VERSION
+
+
+def cards_current(meta, edl):
+    """Was this render's layout drawn by today's cards and headline band
+    (config.CARD_LAYOUT_VERSION)? Only EDLs that carry a picture card or a
+    persistent headline can be stale; everything else keeps its cache."""
+    import motion_templates
+    cards = (((edl or {}).get("effects") or {}).get("picture_cards")) or []
+    band = any(isinstance(m, dict) and motion_templates.persistent(m)
+               for m in (edl or {}).get("motion") or [])
+    if not band and not any(isinstance(c, dict) for c in cards):
+        return True
+    return ((meta or {}).get("card_v") or 0) == config.CARD_LAYOUT_VERSION
 
 
 def look_current(meta):
@@ -2114,6 +2234,33 @@ def look_current(meta):
     different look. Serving or reusing a whole old render is unaffected.
     """
     return ((meta or {}).get("look_v") or 0) == config.RENDER_LOOK_VERSION
+
+
+def finish_current(asset, variant):
+    """Does this cached render carry today's export finishing (config.
+    FINISH_VERSION: the rate ceiling, the de-click edges, same-shot block
+    tails)?
+
+    Only FINALS are ever busted, and only those whose stored size runs over
+    today's ceiling (final_rate_cap_kbps at the asset's own size and rate,
+    with 10% slack for the sound track and the container): the 100+ MB
+    exports the ceiling exists for. Every other render keeps its cache — an
+    absent stamp on a small final is grandfathered, like outro_current's
+    previews."""
+    if variant != "final":
+        return True
+    asset = asset or {}
+    if ((asset.get("meta") or {}).get("finish_v") or 0) >= \
+            config.FINISH_VERSION:
+        return True
+    try:
+        cap = final_rate_cap_kbps(int(asset["width"]), int(asset["height"]),
+                                  float(asset.get("fps") or 30.0))
+        kbps = float(asset["bytes"]) * 8.0 / 1000.0 / float(
+            asset["duration_s"])
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return True
+    return cap is None or kbps <= cap * 1.1
 
 
 def watermark_font_path():
@@ -2610,7 +2757,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       patch_inputs=None, cap_burn_offset=None,
                       picture_card_inputs=None, main_video_inputs=None,
                       loudness="auto", dialogue_gain=None,
-                      dialogue_probe=False, focus_origin=None):
+                      dialogue_probe=False, focus_origin=None,
+                      program_edges=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -2639,6 +2787,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     dialogue_probe: build the graph the leveler MEASURES — identical except
     that the source volume automation is left out, so a deliberate "quieter
     here" is not counted as quiet speech to undo.
+    program_edges: (head, tail) — does this graph hold the programme's TRUE
+    start / end? Those edges get the de-click fades (edge_fades). None (a
+    bare graph, a stitched piece) adds none.
     """
     # The program clock is the picture clock. Music can remain parked beyond
     # this boundary in the EDL, but its temporary render window is clamped.
@@ -2723,6 +2874,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     fx_cards = [c for c in ((edl.get("effects") or {}).get("picture_cards")
                             or []) if picture_cards.source_fed(c)]
     card_windows = {}
+    # Where the footage itself cuts to another shot (focus edges and their
+    # handoffs, follow spans): a card edge there is a cut, never a dissolve.
+    cam_edges = set(handoff_of) | {float(x) for x in follow_edges}
+    for span in focus_track:
+        for key in ("t0", "t1"):
+            try:
+                cam_edges.add(float(span[key]))
+            except (KeyError, TypeError, ValueError):
+                continue
     if keep and fx_cards:
         card_edges = set()
         reach = 1.5 / float(src_fps or fps or 30.0)
@@ -2740,6 +2900,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         card_edges.add(round(float(src_t), 6))
                 window.append(t)
             card_windows[card["id"]] = tuple(window)
+            # The dissolve's inner edge (the entrance's end, the exit's
+            # start) splits the block too: the blocks composed as the shot
+            # with the panels dissolving in are exactly the animation's.
+            ent_w, ext_w = picture_cards.animation_windows(card)
+            for t in ((ent_w or (None, None))[1], (ext_w or (None, None))[0]):
+                if t is not None and window[0] + .02 < t < window[1] - .02:
+                    src_t = tl.out_to_src(t)
+                    if src_t is not None:
+                        card_edges.add(round(float(src_t), 6))
         split_keep = []
         for s, e in keep:
             edges = [s] + sorted(x for x in card_edges
@@ -2899,6 +3068,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # run's span lets its card branch wait for exactly that stretch of the
     # program (picture_cards._append_source_fed MEMORY).
     card_layout, card_runs = {}, {}
+    card_blocks, card_anim, card_dissolve = {}, {}, {}
     if fx_cards and n > 0:
         _at = [tl.ins[j][0] for j in range(len(insert_inputs))]
         _pre = _prog = 0.0
@@ -2934,9 +3104,51 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         if card.get("source") and not card.get("panels")
                         else None,
                         picture_cards.step_scale_at(card, mid_src)
-                        is not None)
+                        is not None,
+                        [follow.span_at(p.get("follow"), mid_src)
+                         for p in card.get("panels") or []] or None,
+                        card.get("grain"),
+                        [p.get("conceal") for p in card.get("panels") or []]
+                        or None)
+                    card_blocks.setdefault(card["id"], []).append(i)
                 else:
                     run = None
+        # Which end of each card DISSOLVES (picture_cards module docstring):
+        # an animated end whose neighbouring block is the same footage
+        # running on — the same kept span, no camera cut, no other card's
+        # layout. Every other animated end cuts in with its panels
+        # already populated. The blocks under a dissolve are composed as the
+        # shot with the panels dissolving in (layout_filter ``under``).
+        seg_t0 = {i: t0 for kind, i, t0 in order if kind == "seg"}
+        pos = {i: k for k, (kind, i, _t) in enumerate(order) if kind == "seg"}
+        cam_reach = 1.5 / float(src_fps or fps or 30.0)
+
+        def _runs_on(i, j):
+            """Block j plays the footage of block i on, uncut."""
+            if not (0 <= j < n) or j in card_layout or \
+                    abs(pos.get(i, -9) - pos.get(j, -9)) != 1:
+                return False
+            a, b = (i, j) if i < j else (j, i)
+            seam = float(keep[b][0])
+            return (abs(float(keep[a][1]) - seam) < 1e-3
+                    and not any(abs(seam - x) <= cam_reach for x in cam_edges))
+        for card in fx_cards:
+            blocks = card_blocks.get(card["id"])
+            if not blocks:
+                continue
+            ent_w, ext_w = picture_cards.animation_windows(card)
+            if ent_w and not _runs_on(blocks[0], blocks[0] - 1):
+                ent_w = None
+            if ext_w and not _runs_on(blocks[-1], blocks[-1] + 1):
+                ext_w = None
+            card_anim[card["id"]] = (ent_w, ext_w)
+            for i in blocks:
+                t0, L = seg_t0[i], seg_out_len[i]
+                rows = [(kind, w[0] - t0, w[1] - w[0])
+                        for kind, w in (("in", ent_w), ("out", ext_w))
+                        if w and t0 < w[1] - 1e-3 and t0 + L > w[0] + 1e-3]
+                if rows:
+                    card_dissolve[i] = rows
     sw = sh = None
     seg_prog = []
     if regions:
@@ -3094,6 +3306,27 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                      + f"amix=inputs={len(mix)}:duration=first:"
                      f"dropout_transition=0:normalize=0{norm}[a_seg{i}]")
 
+    # A block on the block clock whose span holds one frame fewer than its
+    # count would show its last frame twice before the cut (block_tail's
+    # clone): it reads the next frame of the same shot instead
+    # (same_shot_tail). Only where nothing of the source follows the block
+    # in the programme (a cut, an insert, the end) — across a
+    # source-contiguous split the next block owns that frame — and never
+    # under repaint patches, censor regions or a held picture pad, whose
+    # windows stop at the span's end.
+    tail_edges = ()
+    if blk_frames and not (regions or patch_inputs or src_pad > 0):
+        tail_edges = tuple(follow_edges) + tuple(
+            float(sp[k]) for sp in focus_track for k in ("t0", "t1")
+            if isinstance(sp, dict) and isinstance(sp.get(k), (int, float)))
+
+    def _video_end(i, e):
+        if ("seg", i) not in blk_frames or regions or patch_inputs \
+                or src_pad > 0 or not (i == n - 1 or cut_after[i]):
+            return e
+        return e + same_shot_tail(e, index, src_fps or fps, fps, src_dur,
+                                  tail_edges)
+
     def _seg_video(i, in_label, s, e):
         vlab = f"segv{i}" if do_norm else f"v_seg{i}"
         if regions:
@@ -3102,7 +3335,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             _region_parts(parts, f"segraw{i}", vlab, regions, sw, sh,
                           seg_prog[i], e - s, f"s{i}")
         else:
-            parts.append(f"[{in_label}]trim=start={s:.3f}:end={e:.3f},"
+            ev = _video_end(i, e)
+            parts.append(f"[{in_label}]trim=start={s:.3f}:end={ev:.3f},"
                          f"setpts=PTS-STARTPTS[{vlab}]")
 
     def _seg_pieces_video_audio(i, v_in, a_in, s, e):
@@ -3326,41 +3560,59 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             return (tmap, None if tmap is None else (0.0, e_ - s_),
                     [t - s_ for t in ts_], xs_, ys_)
 
+        def _full_frame(i, in_label, out_label, uid):
+            """Block i composed as the program shows it full-frame."""
+            seg_focus, seg_mode = _frame_for(*keep[i])
+            fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
+                     if _fspans and seg_mode == "crop" else None)
+            if fspan and main_src_size and follow.moves(fspan):
+                _follow_video(parts, in_label, out_label, W, H, fps,
+                              uid, _follow_of(i, fspan), seg_out_len[i],
+                              blk_frames.get(("seg", i)), main_src_size,
+                              (edl.get("frame") or {}).get("picture"),
+                              block_grade, follow_interp)
+                return
+            if fspan:
+                # one held position: the static crop, aimed there
+                seg_focus = follow.centre_at(fspan, _block_mid(*keep[i]))
+            _normalize_video(parts, in_label, out_label, W, H, fps,
+                             seg_mode, uid, focus=seg_focus,
+                             seg_dur=seg_out_len[i],
+                             frames=blk_frames.get(("seg", i)),
+                             picture=(edl.get("frame") or {}).get("picture"),
+                             grade=block_grade, src_size=main_src_size)
+
         for i in range(n):
             # frame_focus reaches ONLY the main footage: the focus point was
             # measured on the source video, so inserts (below) keep the
             # center crop.
             if i in card_layout:
                 cspan = card_layout[i][2] if len(card_layout[i]) > 2 else None
+                pspans = card_layout[i][4] if len(card_layout[i]) > 4 else None
+                under, seg_in = None, f"segv{i}"
+                if i in card_dissolve:
+                    # the shot itself, for the panels to dissolve over
+                    parts.append(f"[segv{i}]split[segv{i}u][segv{i}l]")
+                    _full_frame(i, f"segv{i}u", f"v_seg{i}u", f"s{i}u")
+                    under, seg_in = f"v_seg{i}u", f"segv{i}l"
                 picture_cards.layout_filter(
-                    parts, f"segv{i}", f"v_seg{i}", W, H, fps,
+                    parts, seg_in, f"v_seg{i}", W, H, fps,
                     card_layout[i][0], f"s{i}", src_size=main_src_size,
                     seg_dur=seg_out_len[i], grade=block_grade,
                     tag=card_layout[i][1], frames=blk_frames.get(("seg", i)),
                     follow_block=(_follow_of(i, cspan) + (follow_interp,)
                                   if cspan and follow.moves(cspan) else None),
                     bounded=bool(len(card_layout[i]) > 3
-                                 and card_layout[i][3]))
+                                 and card_layout[i][3]),
+                    under=under, dissolve=card_dissolve.get(i),
+                    panel_follow=[_follow_of(i, sp) + (follow_interp,)
+                                  if sp and follow.moves(sp) else None
+                                  for sp in pspans] if pspans else None,
+                    grain=card_layout[i][5] if len(card_layout[i]) > 5 else None,
+                    panel_conceal=(card_layout[i][6] if len(card_layout[i]) > 6
+                                   else None))
                 continue
-            seg_focus, seg_mode = _frame_for(*keep[i])
-            fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
-                     if _fspans and seg_mode == "crop" else None)
-            if fspan and main_src_size and follow.moves(fspan):
-                _follow_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
-                              f"s{i}", _follow_of(i, fspan), seg_out_len[i],
-                              blk_frames.get(("seg", i)), main_src_size,
-                              (edl.get("frame") or {}).get("picture"),
-                              block_grade, follow_interp)
-                continue
-            if fspan:
-                # one held position: the static crop, aimed there
-                seg_focus = follow.centre_at(fspan, _block_mid(*keep[i]))
-            _normalize_video(parts, f"segv{i}", f"v_seg{i}", W, H, fps,
-                             seg_mode, f"s{i}", focus=seg_focus,
-                             seg_dur=seg_out_len[i],
-                             frames=blk_frames.get(("seg", i)),
-                             picture=(edl.get("frame") or {}).get("picture"),
-                             grade=block_grade, src_size=main_src_size)
+            _full_frame(i, f"segv{i}", f"v_seg{i}", f"s{i}")
 
     # insert blocks: trim to their window (source_start_s picks where in
     # the clip the window starts), normalize like everything else
@@ -4267,7 +4519,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     vlabel = picture_cards.append_graph(
         parts, vlabel, picture_card_inputs, W, H, fps,
         (edl.get("frame") or {}).get("picture"),
-        runs=card_runs)
+        runs=card_runs, anim=card_anim)
     # Browser-rendered motion design under the dialogue captions...
     vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
                                        "below_captions", fps)
@@ -4602,7 +4854,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     outro_on = outro_here          # one predicate, so the video and audio
     loud = master == "social"
     a_prog = "aprog"
-    a_final = "apre" if (fade_in or fade_out or outro_on) else a_prog
+    # De-click edges (edge_fades): the programme's own sound, measured on
+    # its own clock — on the block clock that is the blocks' exact length.
+    edge_in, edge_out = edge_fades(
+        total_dur, *(program_edges or (False, False)), fade_in=fade_in,
+        fade_out=fade_out or outro_on, carry_music=carry_music)
+    prog_audio_s = (sum(blk_len.values()) if blk_len else total_dur)
+    a_final = "apre" if (fade_in or fade_out or outro_on
+                         or edge_in or edge_out) else a_prog
     if mix_labels:
         parts.append(f"[{alabel}]" + "".join(mix_labels) +
                      f"amix=inputs={1 + len(mix_labels)}:duration=first:"
@@ -4622,6 +4881,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         chain = []
         if fade_in:
             chain.append(f"afade=t=in:st=0:d={fade_in:.2f}")
+        if edge_in:
+            chain.append(f"afade=t=in:st=0:d={edge_in:.3f}")
+        if edge_out:
+            chain.append(f"afade=t=out:st={prog_audio_s - edge_out:.6f}"
+                         f":d={edge_out:.3f}")
         if carry_music:
             # The carried path has exactly one ending fade, on the completed
             # mix at the far edge of the card. It replaces both the item's
@@ -4645,6 +4909,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                              f":d={d:.2f}")
         parts.append(f"[apre]{','.join(chain) or 'anull'}[{a_prog}]")
 
+    # The mastered sound restamped on its samples wherever the card concat
+    # below does not do it (a card-less programme — every preview — and a
+    # carried score; render polish review, Oct 2026). loudnorm stamps its
+    # frames on its own grid: on the Thiel preview it left a 39 ms hole in
+    # the timestamps at 30 s with no sample missing, so the export's -t cut
+    # the programme's last 39 ms of sound (and the de-click fade-out there)
+    # and the file carried a 39 ms A/V jump for players that honour stamps.
+    # The stream is contiguous from 0 (asetpts=PTS-STARTPTS blocks, amix),
+    # so N/SR is its true clock.
+    restamp = ",asetpts=N/SR/TB" if (not outro_on or carry_music) else ""
     if loud:
         # Master loudness: -14 LUFS with codec-safe true-peak headroom.
         # loudnorm's single pass can miss short nonlinear mixes and AAC can
@@ -4659,12 +4933,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{a_prog}]loudnorm=I=-14:TP=-2.0:LRA=11,"
                      "alimiter=limit=0.75:attack=5:release=50:level=0:"
                      "latency=1,"
-                     f"{AUDIO_NORM}[{nxt}]")
+                     f"{AUDIO_NORM}{restamp}[{nxt}]")
         a_prog = nxt
     else:
         nxt = "amst" if outro_on else "aout"
         parts.append(f"[{a_prog}]alimiter=limit=0.75:attack=5:release=50:"
-                     f"level=0:latency=1,{AUDIO_NORM}[{nxt}]")
+                     f"level=0:latency=1,{AUDIO_NORM}{restamp}[{nxt}]")
         a_prog = nxt
 
     if outro_on:
@@ -4723,14 +4997,16 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                        cap_ass_override=None, cap_burn_offset=None,
                        render_fragment=False, _base_stage=False,
                        _batch_window=None, _source_stage=False,
-                       discard_audio=False):
+                       discard_audio=False, program_edges=None):
     """Render a canvas program (round 34): a timeline with NO main video, where
     the ordered inserts (clips/images) are concatenated on the canvas, plus
     music / sfx / voiceover / manual captions / effects. Mirrors render_edl but
     assembles the ffmpeg inputs with NO input [0] main video — every input
     (silence, music, sfx, inserts, voiceover, end card) starts at index 0 — and
     takes the output geometry from the canvas rather than probing a source.
-    discard_audio: see render_edl."""
+    discard_audio, program_edges: see render_edl."""
+    if program_edges is None:
+        program_edges = (not render_fragment, not render_fragment)
     edl = validate_edl(edl_dict, render_fragment=render_fragment).model_dump()
     canvas = edl["canvas"]
     W, H = int(canvas["width"]), int(canvas["height"])
@@ -4887,7 +5163,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx),
             plate=_plate_probe(edl, tl, None, None, W, H,
                                (edl.get("frame") or {}).get("mode"), None,
-                               insert_locals))
+                               insert_locals),
+            behind_why=lambda m: "a canvas program has no subject footage")
         motion_inputs = motion_layer.demote_behind(
             motion_inputs, "a canvas program has no subject footage")
     # Base stages are lossless building blocks: the final composition alone
@@ -4911,7 +5188,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                  cap_burn_offset=cap_burn_offset,
                                  picture_card_inputs=picture_card_inputs,
                                  motion_inputs=motion_inputs,
-                                 loudness=master, **extra)
+                                 loudness=master,
+                                 program_edges=program_edges, **extra)
 
     dialogue_gain = None
     if master == "social" and not discard_audio:
@@ -4949,8 +5227,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                   "-crf", "27", "-g", "48", "-keyint_min", "24",
                   "-c:a", "aac", "-b:a", "128k"]
     else:
-        encode = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
-                  "-crf", str(config.FINAL_CRF), "-g", "120",
+        encode = [*final_video_encode(W, H, fps),
                   "-c:a", "aac", "-b:a", "192k"]
 
     expected_out_s = (program_render_s(tl, fps)
@@ -5370,7 +5647,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                patch_locals=None, cap_ass_override=None,
                suppress_outro=False, cap_burn_offset=None,
                audio_only=False, asset_locals=None, render_fragment=False,
-               discard_audio=False):
+               discard_audio=False, program_edges=None):
     """Render an EDL against a source file. Returns output duration (s).
 
     patch_locals (round 92): {patch id: local file} for the EDL's `patches` —
@@ -5393,7 +5670,14 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     track or a separately rebuilt one. The dialogue leveler's measurement
     pass is skipped: it would be one more ffmpeg run per window, every input
     reopened, for a track nobody hears.
+
+    program_edges: (head, tail) — does this file hold the programme's TRUE
+    start / end (the de-click edge fades, edge_fades)? Default: both for a
+    whole programme, neither for a render_fragment (a stitched piece or a
+    proof window decides for itself).
     """
+    if program_edges is None:
+        program_edges = (not render_fragment, not render_fragment)
     edl_dict = render_plan.canonical_program(edl_dict)
     if is_canvas_program(edl_dict):
         # No main video: the program is built on the canvas from inserts alone.
@@ -5406,7 +5690,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   cap_ass_override=cap_ass_override,
                                   cap_burn_offset=cap_burn_offset,
                                   render_fragment=render_fragment,
-                                  discard_audio=discard_audio)
+                                  discard_audio=discard_audio,
+                                  program_edges=program_edges)
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
@@ -5793,6 +6078,23 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     picture_card_inputs, next_idx = picture_cards.prepare_inputs(
         edl, workdir, W, H, fps, extra_inputs, next_idx)
     motion_inputs = []
+    hero_masks = {}
+
+    def _hero_behind_why(m):
+        # A hero word's clip is drawn at head height for its behind-subject
+        # composite, so a mask that cannot be fetched must be known BEFORE
+        # the clip renders: then the hero becomes its face-safe display slam
+        # (motion_layer.hero_front). Found after, it could only be dropped —
+        # and the words it carries with it.
+        why = motion_layer.behind_why(edl, tl, m, geom_now)
+        key = (m.get("behind") or {}).get("asset_key")
+        if why or not key:
+            return why
+        try:
+            hero_masks[key] = _fetch(key, "matte", next_idx)
+        except Exception as e:  # noqa: BLE001 — the swap is the fallback
+            return f"mask unavailable ({str(e)[:120]})"
+        return None
     if not audio_only:
         motion_inputs, next_idx = motion_layer.prepare_inputs(
             edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
@@ -5801,7 +6103,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             plate=_plate_probe(edl, tl, src_path,
                                (info["width"], info["height"]), W, H,
                                frame_mode, frame_focus, insert_locals,
-                               bool(caption_motion_items)))
+                               bool(caption_motion_items)),
+            behind_why=_hero_behind_why)
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):
@@ -5819,42 +6122,25 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # layer instead of failing the render. A cut that now falls inside
         # the window degrades too: the mask is one continuous clip, so past
         # the cut it would cut the subject out of the wrong second of video.
+        # (motion_layer.behind_why holds the rules; a hero word that breaks
+        # one was already drawn as its face-safe display slam above)
         for k, (m_idx, m_item, m_clip) in enumerate(motion_inputs):
             if m_item.get("layer") != "behind_subject":
                 continue
             b = m_item.get("behind") or {}
-            pieces = (tl.span_to_out(float(b["src_start"]),
-                                     float(b["src_end"])) if b else [])
-            why, local = None, None
-            ramp = (tl.ramp_over(float(b["src_start"]), float(b["src_end"]))
-                    if b else None)
-            if not b:
-                why = "it carries no subject mask"
-            elif not pieces:
-                why = "its footage is no longer in the edit"
-            elif len(pieces) > 1:
-                why = "a cut now falls inside its window"
-            elif ramp:
-                # The mask is one 1x clip of source frames; a ramp shortens
-                # (or stretches) that footage's program window, so the
-                # trimmed mask would slide off the subject.
-                why = f"speed ramp {ramp[0]} now covers its footage"
-            elif b.get("geom") and b["geom"] != geom_now:
-                why = "the framing changed since its mask was measured"
-            elif picture_cards.overlaps_source_card(edl, pieces):
-                why = "a source-fed picture card re-frames its footage"
-            elif follow.moves_during(edl, [(float(b["src_start"]),
-                                            float(b["src_end"]))]):
-                why = "the crop follows the speaker across its footage"
-            else:
+            why, local = motion_layer.behind_why(edl, tl, m_item, geom_now), None
+            if not why:
                 try:
-                    local = _fetch(b["asset_key"], "matte", next_idx)
+                    local = (hero_masks.get(b.get("asset_key"))
+                             or _fetch(b["asset_key"], "matte", next_idx))
                 except Exception as e:
                     why = f"mask unavailable ({str(e)[:120]})"
             if why:
+                # (None: a hero clip that cannot be drawn safely above)
                 motion_inputs[k] = (m_idx, motion_layer.demote(m_item, why),
                                     m_clip)
                 continue
+            pieces = tl.span_to_out(float(b["src_start"]), float(b["src_end"]))
             # Where in the mask this program's window starts: 0 for a whole
             # window; a proof fragment that begins mid-window skips ahead.
             a_src = tl.out_to_src(pieces[0][0] + 1e-3)
@@ -5867,6 +6153,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                   (round(pieces[0][0], 3),
                                    round(pieces[0][1], 3))))
             next_idx += 1
+        motion_inputs = [mi for mi in motion_inputs if mi[1] is not None]
     def _graph(**extra):
         return build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                                  music_inputs, index, preview,
@@ -5893,6 +6180,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  motion_inputs=motion_inputs,
                                  main_video_inputs=main_video_inputs,
                                  focus_origin=focus_origin,
+                                 program_edges=program_edges,
                                  **extra)
 
     # Mastered mixes level the dialogue first, from one measurement pass of
@@ -5934,9 +6222,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                   "-c:a", "aac", "-b:a", "128k"]
     else:
         # veryfast keeps export wall time low (the graph, not x264, is the
-        # cost); config.FINAL_CRF sets the delivered quality (see config).
-        encode = ["-c:v", "libx264", "-preset", config.FINAL_PRESET,
-                  "-crf", str(config.FINAL_CRF), "-g", "120",
+        # cost); config.FINAL_CRF sets the delivered quality (see config),
+        # under the export's rate ceiling (final_video_encode).
+        encode = [*final_video_encode(W, H, fps),
                   "-c:a", "aac", "-b:a", "192k"]
 
     expected_out_s = (program_render_s(tl, fps)
@@ -7004,7 +7292,8 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
             progress_cb=progress_cb, want_wm=False,
             patch_locals=patch_locals, cap_ass_override=(cap_path or ""),
             cap_burn_offset=(a if cap_path else None), suppress_outro=True,
-            render_fragment=True)
+            render_fragment=True,
+            program_edges=(a <= 0.001, b >= duration - 0.001))
         expected = b - a
         if abs(pdur - expected) > max(0.2, expected * 0.03):
             raise RenderVerificationError(
@@ -7262,6 +7551,7 @@ def _run_render_job(worker_db, job):
                 and legibility_current(cached.get("meta"), edl_row["json"]) \
                 and carry_current(cached.get("meta"), edl_row["json"]) \
                 and follow_current(cached.get("meta"), edl_row["json"]) \
+                and cards_current(cached.get("meta"), edl_row["json"]) \
                 and (not handoff_may_matter(edl_row["json"])
                      or handoff_current(
                          cached.get("meta"), edl_row["json"],
@@ -7270,6 +7560,7 @@ def _run_render_job(worker_db, job):
                          .get("json") or {})) \
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings) \
+                and finish_current(cached, variant) \
                 and _audio_model_review_cache_compatible(
                     audio_model_review, edl_row["json"], cached.get("meta")):
             cached_meta = cached.get("meta") or {}
@@ -7572,9 +7863,11 @@ def _run_render_job(worker_db, job):
                             and legibility_current(pm, prev_row["json"]) \
                             and carry_current(pm, prev_row["json"]) \
                             and follow_current(pm, prev_row["json"]) \
+                            and cards_current(pm, prev_row["json"]) \
                             and handoff_current(pm, prev_row["json"], index) \
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
+                            and finish_current(prev_asset, variant) \
                             and (fp_now is None
                                  or pm.get("caption_fp") == fp_now):
                         out_dur = _reuse_picture_with_new_audio(
@@ -7935,6 +8228,10 @@ def _run_render_job(worker_db, job):
                   "follow_v": (reused_visual_meta.get("follow_v") or 0
                                if reused_visual_meta
                                else config.FOLLOW_VERSION),
+                  # ...and the card layouts it was drawn with.
+                  "card_v": (reused_visual_meta.get("card_v") or 0
+                             if reused_visual_meta
+                             else config.CARD_LAYOUT_VERSION),
                   # A reused picture keeps the block clock it was cut on.
                   "clock_v": (reused_visual_meta.get("clock_v") or 0
                               if reused_visual_meta
@@ -7957,6 +8254,10 @@ def _run_render_job(worker_db, job):
                   "look_v": (reused_visual_meta.get("look_v") or 0
                              if reused_visual_meta
                              else config.RENDER_LOOK_VERSION),
+                  # ...and the export finishing it was encoded with.
+                  "finish_v": (reused_visual_meta.get("finish_v") or 0
+                               if reused_visual_meta
+                               else config.FINISH_VERSION),
                   "audio_peak_v": 1,
                   "master_v": config.MASTER_VERSION,
                   "wm_v": (0 if proof_only else

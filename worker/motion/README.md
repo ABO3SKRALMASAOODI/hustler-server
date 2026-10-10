@@ -30,22 +30,48 @@ Every non-required param needs a `default`. Keep params few and meaningful;
 good defaults matter more than knobs.
 
 `mutes_captions` says the template exists to SAY the spoken words (a slam, a
-phrase build, a marker line, a quote). Captions follow one reading path either
-way (worker/caption_carry.py): an item with `mute_captions` unset drops the
-spoken words its visible text params show and owns the phrase they belong to
-from its first shown word to its exit (the captions yield there); the setup
-before it and other sentences stay captioned in a band clear of the box it
-draws. The flag decides the fallback when no band is clear — a speech template
-mutes those words, any other keeps them in place — so every text a template
+phrase build, a marker line, a quote). Every heard word reaches the screen
+once either way (worker/caption_carry.py): an item drops from the captions the
+spoken words its visible text params show, and every other heard word stays
+captioned in a band clear of the box it draws, the face and any card layout
+(worker/caption_place.py). The flag decides the fallback when no band is
+clear — a speech template mutes those words and names them (the write NOTE,
+`heard_unshown`), any other keeps them in place — so every text a template
 prints must come from its params (that is what the captions are matched
 against).
 
-`reads_phrase` says the template sets the owned phrase's other words itself
-(phrase_build): the engine hands the page `params._reading`
-(MotionItem.reading — per row, per printed word, its spoken onset in item
-seconds or null, and `bridges` [{after: row, words: [{t, s}]}]) and the page
-lays the bridge lines out from the start and reveals every word on its time,
-in reading order.
+`reads_phrase` marks a LOCKUP (phrase_build): the engine hands the page
+`params._reading` (MotionItem.reading — per row, per printed word, its spoken
+onset in item seconds or null) and the page reveals every word on its time,
+in reading order. A lockup sets only its rows, in at most 3 sizes: its
+`bridges` are always [] now — the phrase's words the rows leave out are
+captioned beside the lockup (every heard word reaches the screen once),
+never set as micro bridge rows inside it (round 4 judging: they grew lockups
+into 6-line piles in 5 sizes; an old stored reading with bridges still
+validates, its bridges are not drawn, and the render recomputes it). `reads_onsets` marks a template
+that reveals ONE text on its spoken onsets (marker_text): its reading is one
+row of the printed words in reading order, and a line more than half
+unsaid keeps the template's authored build. For both, a word within 0.15 s
+after the item's start shows at the start (the write puts the window on its
+first visible word, or on a cut just before it — motion_tools: one event).
+
+A run of parallel `word_slam`s (same role, fit, case, tier and line count,
+each starting within 0.75 s of the previous one's end) is a SERIES
+(`motion_look.attach_series`, MotionItem.series): the page gets
+`params._series` = {texts, i, ids} and sizes every line by the smallest fit
+of that line across the members, so labels share one size and baseline.
+
+word_slam's `hero` tier is a word up to 30% of the frame height composited
+BEHIND the subject (layer behind_subject, which draws before the zoom
+stage): its band is 94% of the width at `width` 0.85 and scales with it, so
+the write narrows a hero a camera zoom would push past the frame's sides
+(motion_tools._hero_fit). Its mask carries `fallback` — the face-safe
+display-slam placement the write measured — and wherever the render cannot
+composite it behind the subject (`motion_layer.behind_why`: a cut, a ramp,
+a new framing, a source-fed card, a crop that follows the speaker) it draws
+that display slam instead (`motion_layer.hero_front`, decided before the
+clip renders); a hero with no placement, or whose mask fails to download,
+is not drawn — never the giant word over the face.
 
 `persistent: true` marks a LAYOUT template that holds a band for the whole
 program (the `headline` of a card or letterbox layout). The renderer hands
@@ -150,12 +176,33 @@ Templates read it under their OWN laid-out boxes:
   is darkening the template already lays there. 0 = nothing to do.
 - `MG.darkInkOK(rect, {ratio})` — the plate is bright all the way across, so
   `MG.DARK_INK` reads on it (slams, marker lines).
+- `MG.accentInk(rect, accent, {lc, have, t0, t1, max})` → `{color, lifted,
+  short}`: the accent as it reads on the plate — unchanged with no plate, a
+  dark one (mean luma <= `MG.DARK_PLATE`, 0.12), one as bright as the
+  accent or brighter, or one whose bright part is lit (85th percentile >=
+  `MG.LIT_PLATE`, 0.7: a paler accent would only wash out there — the
+  template's pocket / dark-ink pass handles it) or where it reaches APCA
+  `lc` (35 heavy display, 45 thin serif/script strokes) against the plate's
+  mean; otherwise lifted toward white (hue kept) by the least step that
+  does, `short` when even `max` (0.6) falls short (set it heavier, or back
+  it with `MG.need` using the lifted colour). `MG.apca(Lt, Lb)` is the |Lc|
+  it uses; `MG.lift(hex, k)` the tint.
 - `MG.backing(parent, rect, alpha, {pad, feather, radius})` — a feathered
   dark pocket behind type (starts hidden; the template drives its opacity;
   `.box` is its painted extent for `MG.growBox`).
 
 The contract: with no plate, or a dark one, a template renders exactly as it
 did before plates existed — compute `need` and change nothing when it is 0.
+
+### One type system
+
+A short holds one Look (worker/motion_look.py): one accent (the captions'
+highlight colour, else the accent its graphics wear) and at most three type
+roles (grotesk, condensed, serif, script, mono, hand). add_motion_graphic
+fills an accent/ink the editor did not pass from that Look, and its reply
+NOTEs a second accent, a fourth role, a broadcast `clean_bar` lower third or
+a highlighter marker in an editorial Look. Templates take their colours from
+`accent`/`color` params — never hard-code a second accent.
 
 Secondary text (kickers, sub-labels, labels, attributions, chips) keeps a cap
 height of at least `MG.MIN_CAP` (2.2%) of the frame height: `MG.minType(el)`

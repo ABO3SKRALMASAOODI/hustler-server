@@ -72,32 +72,28 @@ SIZE LADDER AND ACCENT:
   Legibility comes from size, clear-space placement, soft shadow and the
   grade.
 
-CAPTIONS AND GRAPHICS SHARE ONE STAGE — ONE READING PATH. Two texts on
-screen at once that say different things (a list reading "supersonic jets"
-over a caption reading "aviation and the Green Revolution agriculture") is a
-defect, and so is the eye ping-ponging between a lockup up top and the
-caption at the bottom. On `add_motion_graphic` leave `mute_captions` unset:
-the captions drop exactly the spoken words the graphic shows (its number,
-slammed word, quoted kicker, list rows — matched through case, punctuation,
-plurals, "forty"/"40" and *stars*), and the graphic OWNS the phrase it shows
-from its first shown word until it leaves — the captions yield there. A
-`phrase_build` lockup sets that phrase's other words itself, in small type
-between its rows, each on its spoken onset (the reply says which); any other
-graphic leaves them to the sound, and the reply NOTEs the words a sound-off
-viewer would miss with the time to end it so they are captioned. The words
-said before its first shown word (the setup) and every other sentence keep
-their captions, and the setup line clears as the graphic's first word
-lands. So: quote the transcript word for word in rows, kickers and labels
-(the reply NOTEs a paraphrase and an unsaid row word), and end hero graphics
-where their words end. While a graphic is up, captions of other sentences
-move to a band clear of the box it draws and of the face; where none is
-clear, a graphic that says the line (word slam, phrase build, marker, quote)
-mutes them and the write reply NOTEs the words lost — move the graphic off
-the caption band (top band, beside the head) rather than accept the gap.
-`mute_captions=true` hides every caption for the graphic's whole window
-(only when it replaces the whole spoken line); `false` keeps all captions
-running beside it (a number or *starred* word it shows is still not
-repeated). Never duplicate it with `set_caption_mutes`.
+CAPTIONS AND GRAPHICS SHARE ONE STAGE — EVERY HEARD WORD REACHES THE SCREEN
+ONCE. On `add_motion_graphic` leave `mute_captions` unset: the captions drop
+exactly the spoken words the graphic shows (its number, slammed word, quoted
+kicker, list rows — matched through case, punctuation, plurals,
+"forty"/"40" and *stars*) and the one or two connectors between them; every
+other heard word — the rest of the phrase the graphic shows included — stays
+CAPTIONED beside it, in a band clear of it. A `phrase_build` lockup no longer
+sets those words as micro bridge rows inside itself (the judged 6-line
+piles): its rows carry the words you designed, the captions carry the
+rest, and the reply names them ("Captions carry the words of this phrase
+its rows leave out…") with the end that keeps the graphic to its own words.
+So: quote the transcript word for word in rows, kickers and labels (the
+reply NOTEs a paraphrase and an unsaid row word), keep lockups to the words
+that matter, and end hero graphics where their words end. Where no band is
+clear of a graphic, the face and the layout, a graphic that says the line
+(word slam, phrase build, marker, quote) mutes the words it does not show
+and the write reply NOTEs them — carry them on it (a kicker) or move it off
+the caption band rather than accept the gap. `mute_captions=true` no longer
+hides a whole window (it behaves as unset; its reply NOTEs the words that
+stay captioned beside it); `false` keeps all captions running beside it (a
+number or *starred* word it shows is still not repeated). Never duplicate a
+graphic with `set_caption_mutes`.
 
 HEARD WORDS: captions show every word the viewer hears. A pause cut can take
 a word's transcript midpoint while its sound survives (whisper lends the
@@ -106,20 +102,37 @@ is. A word whose middle a cut really clipped is not. Cards never split a
 name or a noun phrase ("the Green Revolution", "Steve Jobs", "140
 characters") when another break reads.
 
-SOUND-OFF COVERAGE: no spoken span longer than ~0.6 s may go without
-on-screen text (a caption, a graphic showing those words, or a lockup's
-small bridge line). Review lists every such gap as a "Sound-off gap"
-advisory with its cause (e.g. words a hero graphic holds over while the
-captions yield to it), and `audit_captions` returns them as
-`sound_off_gaps`.
+SOUND-OFF COVERAGE: every heard word reaches the screen once (a caption, or
+a graphic showing it). Review lists spans over ~0.6 s with neither as a
+"Sound-off gap" advisory with its cause (a graphic that left no clear band,
+a manual caption mute, a text that mutes captions), and `audit_captions`
+returns them as `sound_off_gaps` and every shorter one as `heard_unshown`.
 
 PLACEMENT LAW: multi-word captions sit in measured clear space — usually
 the lower-middle band above the platform UI, or beside the face in a
-designed layout — never across eyes or mouth, never inside the bottom ~13–15%
-of a 9:16 frame, never covering what the speaker points at. Placement is
-shot-measured and stabilized; `position` or `anchor_y` locks one band for the
-whole video, so omit them to let collision-aware placement adapt by shot.
-Only single-word looks (or the `lyric` preset) hold dead centre.
+designed layout — never across eyes, mouth or chin, never inside the bottom
+~13–15% of a 9:16 frame or its ~9% side crop, never covering what the
+speaker points at. Placement is shot-measured and stabilized; `position` or
+`anchor_y` locks one band for the whole video, so omit them to let
+collision-aware placement adapt by shot. Only single-word looks (or the
+`lyric` preset) hold dead centre.
+THE PLACEMENT SOLVER re-solves on the exact frames of every graphic, card
+and layout change (worker/caption_place.py): card and panel EDGES and the
+SEAMS between stacked panels, a stack's content panel (the screen, page or
+document it shows — no text set on text, unless no other band is free: a
+heard word is never lost for it), the face with its chin (on a card, only
+inside the window it shows through — the canvas around a card holds no
+face), props the index
+knows, every live graphic's box and the free-tier watermark's corner are
+hard no-go; a band shorter than ~1.4 caption lines is no band; the
+largest free band wins (a placement span you wrote, e.g. 'between the
+panels', is overridden where it lands on a seam). In a speaker + screen
+stack the captions usually take the band above the speaker panel. A page
+never carries its place across a layout change onto the new layout: it ends
+there, and a word said within two frames before the change appears with
+the new layout (never later) — so does a word said less than a page's
+minimum (0.12 s) before it, rather than flash or be lost. Pages of one
+connector word ("and", "that", "on") join their line.
 
 LEGACY PRESET FAMILIES (`style.preset`) remain available and are the right
 choice for subtitles and specific grammars:
@@ -175,9 +188,14 @@ READABILITY:
 - Contrast is non-negotiable: check rendered frames at 2–3 caption moments
   on distinct backgrounds; fix with the look's plate or glow, a clearer band,
   or a grade adjustment. Motion looks (clean, editorial, lockup, serif,
-  glow, stack) measure the picture under every cue and lay a soft dark
-  pocket under the words where the plate is too bright for them (4.5:1);
-  on dark plates nothing changes.
+  glow, stack) measure the picture under every cue and guard each word in
+  this order: slide inside the cue's clear band to a darker spot; a tight
+  dark halo for a plate a little too bright, and accent/emphasis words
+  lifted toward white until they read 3:1 on what lies under them; a soft
+  dark local scrim (a blurred shadow, never a card); only then the pocket
+  (a box). Scrims and glows only ever darken a bright plate, never lift it;
+  on dark plates nothing changes. A lone article stays inline with its serif
+  emphasis word ("a *weird*"), never stacked above it.
 - `audit_captions()` compiles the exact caption artifact and reports
   lateness, uncovered words and overlaps. `render_preview(complete=false)`
   returns caption QA pages of real rendered caption states — judge those

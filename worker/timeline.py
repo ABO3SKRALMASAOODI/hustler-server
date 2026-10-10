@@ -1958,6 +1958,12 @@ def _reveal_follow(edl, keep, old_keep=None):
         if isinstance(card, dict) and card.get("follow"):
             card["follow"], n = revealed_follow(card["follow"], keep, old_keep)
             total += n
+        # a stack panel that follows its speaker (CardPanel.follow)
+        for panel in (card.get("panels") or []) if isinstance(card, dict) else []:
+            if isinstance(panel, dict) and panel.get("follow"):
+                panel["follow"], n = revealed_follow(panel["follow"], keep,
+                                                     old_keep)
+                total += n
     if not total:
         return []
     return [f"note: {total} face-following re-aim{'s' if total != 1 else ''} "

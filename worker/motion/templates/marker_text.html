@@ -1,6 +1,6 @@
 <!--MG-SPEC {"title": "Marker text", "category": "callout",
- "description": "A key line set like a premium caption where *starred* words get a highlighter swipe, a hand-drawn underline or a hand-drawn box (' / ' forces a line break). Use on the one sentence that carries the point (it replaces the captions while on screen); star only 1-2 words.",
- "duration": 3.0, "layer": "above_captions", "mutes_captions": true,
+ "description": "A key line set like a premium caption where *starred* words get a highlighter swipe, a hand-drawn underline or a hand-drawn box (' / ' forces a line break). Use on the one sentence that carries the point (it replaces the captions while on screen); star only 1-2 words. When the line is spoken, each word appears ON its spoken onset (the engine times them from the transcript) and a word's mark draws once its run has been said; an unspoken line builds in its first 0.3 s.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": true, "reads_onsets": true,
  "params": {
   "text": {"type": "text", "required": true, "max": 90, "hint": "the line, 3-12 words; wrap the 1-2 key words in *stars* (a *multi word* run works); ' / ' forces a line break"},
   "style": {"type": "enum", "values": ["marker", "underline", "box"], "default": "marker", "hint": "marker = highlighter swipe behind the word, underline = hand-drawn swoosh under it, box = hand-drawn box around it"},
@@ -283,7 +283,13 @@
         MG.growBox(bk.box);
       }
     }
-    return { fs, shapes, bk };
+    // a spoken line's pocket hugs the words said so far: each word's box,
+    // its x from its line (layout offsets, free of the rise transform)
+    const wordRects = words.map(w => {
+      const lr = w.lineEl.getBoundingClientRect(), x0 = lr.left + w.el.offsetLeft;
+      return [x0, lr.top, x0 + w.el.offsetWidth, lr.bottom];
+    });
+    return { fs, shapes, bk, wordRects, pad: [0.2 * fs, 0.06 * fs] };
   }
 
   const fontsReady = Promise.all(["800 106px 'Inter Display'", "italic 400 126px 'Instrument Serif'", "400 134px 'Anton'"]
@@ -293,23 +299,69 @@
   const n = words.length, each = Math.min(0.055, 0.3 / Math.max(1, n));
   const markAt = 0.36, markEach = 0.2;
   const markDur = style === 'marker' ? 0.3 : style === 'underline' ? 0.36 : 0.46;
-  const enterEnd = Math.max(each * n + 0.2, markAt + markEach * Math.max(0, groups.length - 1) + markDur) + 0.02;
   const exitDur = Math.min(0.26, D * 0.15), exitAt = D - exitDur - 1 / MG.fps;   // exits finish on the last frame
-  MG.active([[0, Math.min(D, enterEnd)], [Math.max(0, exitAt - 0.02), D]]);
+  // ── when each word shows ──
+  // A spoken line (the engine's reading, MotionItem.reading: one row of the
+  // printed words' spoken onsets, null for a word nobody says) reveals each
+  // word ON its onset — a short rise starting 2 frames ahead — a word nobody
+  // says with the word before it, and draws a run's mark once its last word
+  // is up (round 4: Elon's closing line stood complete ~2 s before he said
+  // it). A line mostly not said keeps the authored 0.3 s build.
+  const RD = (P._reading && Array.isArray(P._reading.rows)) ? P._reading.rows.flat() : [];
+  const said = RD.slice(0, n).map(v => (v == null || !isFinite(parseFloat(v))) ? null : Math.max(0, parseFloat(v) - 0.06));
+  const onsets = said.filter(v => v != null).length * 2 >= n && n > 0;
+  if (onsets) {
+    let cur = said.find(v => v != null);
+    words.forEach((w, i) => { const v = said[i]; cur = v != null ? Math.max(cur, v) : cur; w.t0 = cur; });
+  } else words.forEach((w, i) => { w.t0 = i * each; });
+  groups.forEach((g, gi) => {
+    g.at = onsets ? Math.max(...g.words.map(w => w.t0)) + 0.17 : markAt + gi * markEach;
+  });
+  const wins = [[Math.max(0, exitAt - 0.02), D]];
+  if (onsets) {
+    words.forEach(w => wins.push([Math.max(0, w.t0 - 0.02), w.t0 + 0.2]));
+    groups.forEach(g => wins.push([Math.max(0, g.at - 0.02), g.at + markDur + 0.02]));
+  } else {
+    const enterEnd = Math.max(each * n + 0.2, markAt + markEach * Math.max(0, groups.length - 1) + markDur) + 0.02;
+    wins.push([0, Math.min(D, enterEnd)]);
+  }
+  MG.active(wins);
   MG.frame(t => {
     if (!G) G = layout();
     // exit: the column (words + marker swipes) and the drawn marks rise and fade as one;
     // blur goes on the small pieces, not the whole column (much cheaper to render)
     const q = exitDur > 0 ? MG.ease.inCubic(MG.range(t, exitAt, exitDur)) : 0;
     MG.set(wrap, { y: -q * 18, opacity: 1 - q });
-    if (G.bk) G.bk.style.opacity = (MG.ease.outCubic(MG.range(t, 0, 0.16)) * (1 - q)).toFixed(4);
+    const b0 = words.length ? words[0].t0 : 0;
+    if (G.bk) {
+      G.bk.style.opacity = (MG.ease.outCubic(MG.range(t, b0, 0.16)) * (1 - q)).toFixed(4);
+      if (onsets) {
+        // the pocket grows with the words said so far (never an empty slab
+        // beside the first word): a rising word's box eases in from its
+        // left edge, and a word that opens a new line eases the pocket down
+        let u = null;
+        words.forEach((w, i) => {
+          if (t < w.t0 - 1e-6) return;
+          const r = G.wordRects[i];
+          if (!u) { u = r.slice(); return; }
+          const k = MG.ease.outCubic(MG.range(t, w.t0, 0.17));
+          const left = r[0] < u[0] ? u[0] - (u[0] - r[0]) * k : u[0];
+          const down = r[3] > u[3] ? u[3] + (r[3] - u[3]) * k : u[3];
+          u = [left, Math.min(u[1], r[1]), Math.max(u[2], r[0] + (r[2] - r[0]) * k), down];
+        });
+        if (u) {
+          Object.assign(G.bk.style, { left: (u[0] - G.pad[0]).toFixed(1) + 'px', top: (u[1] - G.pad[1]).toFixed(1) + 'px',
+            width: (u[2] - u[0] + 2 * G.pad[0]).toFixed(1) + 'px', height: (u[3] - u[1] + 2 * G.pad[1]).toFixed(1) + 'px' });
+        }
+      }
+    }
     MG.set(ink, { y: -q * 18, opacity: 1 - q, blur: q * 10 });
-    words.forEach((w, i) => {
-      const t0 = i * each, e = MG.ease.outCubic(MG.range(t, t0, 0.17));
+    words.forEach(w => {
+      const t0 = w.t0, e = MG.ease.outCubic(MG.range(t, t0, 0.17));
       MG.set(w.el, { y: (1 - e) * 11, opacity: MG.range(t, t0, 0.08), blur: (1 - e) * 9 + q * 10 });
     });
     G.shapes.forEach((s, gi) => {
-      const p0 = MG.range(t, markAt + gi * markEach, markDur);
+      const p0 = MG.range(t, s.g.at, markDur);
       if (style === 'marker') {
         const p = MG.ease.outQuart(p0), rev = s.mw * p;
         s.mk.style.clipPath = p >= 1 ? '' : `inset(-4px ${(s.mw - rev).toFixed(1)}px -4px -4px round ${(0.18 * G.fs).toFixed(1)}px)`;

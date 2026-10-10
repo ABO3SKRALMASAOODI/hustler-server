@@ -27,6 +27,9 @@
      even darkening under the revealed words with a feathered rounded edge,
      strong enough for 4.5:1 (alpha + geometry set per cue / per frame) */
   .scrim.pocket{background:var(--pk)}
+  /* guard 3: soft dark scrim (blurred edge); guard 2: tight dark halo */
+  .scrim.soft{background:var(--sk)}
+  .blk.halo,.blk.halo *{text-shadow:0 0 .045em rgba(0,0,0,.9),0 .02em .14em rgba(0,0,0,.78),0 0 .5em rgba(0,0,0,.34)!important}
   /* bright plates (cue luma hint): a firmer shadow core behind near-white type */
   .cue.lit.L-clean .blk,.cue.lit.L-editorial .blk,.cue.lit.L-serif .blk,.cue.lit.L-lockup .sm{
     text-shadow:0 1px 3px rgba(0,0,0,.56),0 3px 16px rgba(0,0,0,.56),0 0 44px rgba(0,0,0,.32)}
@@ -101,8 +104,8 @@
   // Type scales with the frame: 9:16 is the design space; square and
   // landscape frames are shorter, so the same px would read huge.
   const K = Math.min(1, Math.sqrt(H / 1920));
-  // Platform-safe text area (design px).
-  const SAFE = ar >= 1.6 ? { x0: 70, x1: W - 70, y0: 0.08 * H, y1: 0.80 * H }
+  // Platform-safe text area (design px); 9:16 keeps out of the 9% side crop.
+  const SAFE = ar >= 1.6 ? { x0: Math.round(0.09 * W), x1: W - Math.round(0.09 * W), y0: 0.08 * H, y1: 0.80 * H }
     : ar > 1.15 ? { x0: 64, x1: W - 64, y0: 0.06 * H, y1: 0.90 * H }
     : ar >= 0.95 ? { x0: 80, x1: W - 80, y0: 0.06 * H, y1: 0.92 * H }
     : { x0: 0.13 * W, x1: 0.87 * W, y0: 0.07 * H, y1: 0.92 * H };
@@ -128,6 +131,15 @@
   // and corner radius in units of the cue font size. Box/pop/mono carry
   // their own plate or outline and never need one.
   const POCKET_PAD = [0.3, 0.12], POCKET_FEATHER = 0.3, POCKET_R = 0.32;
+  // Legibility guard, in order: 1 slide inside the zone to the darkest
+  // spot; 2 tight halo + accents lifted to 3:1; 3 soft scrim; 4 pocket.
+  const NEED_OK = 0.12, HALO_MAX = 0.3, SOFT_MAX = 0.62, SLIDE = 0.03, MOVE_W = 0.6;
+  const SOFT_PAD = [0.7, 0.5], SOFT_BLUR = 0.42, SOFT_R = 0.6, ACCENT_RATIO = 3;
+  const lin = v => v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  const hexMix = (a, b, k) => '#' + [1, 3, 5].map(i => {
+    const x = parseInt(a.slice(i, i + 2), 16), y = parseInt(b.slice(i, i + 2), 16);
+    return Math.round(x + (y - x) * k).toString(16).padStart(2, '0');
+  }).join('').toUpperCase();
   const POCKET_LOOKS = ['clean', 'editorial', 'lockup', 'serif', 'glow', 'stack'];
   const isHex = v => typeof v === 'string' && /^#[0-9A-Fa-f]{6}$/.test(v);
   const baseColor = isHex(P.color) ? P.color.toUpperCase() : '#FFFFFF';
@@ -170,12 +182,9 @@
     return best;   // -1: a connector-only phrase has no hero
   }
 
-  // Entrance per look/role: kind + duration + how early it may start.
-  // Per-word reveals are crisp, as in the references: a word is legible on
-  // its first frame and settled within two (rise = a 2-frame snap out of a
-  // short blur; slam settles its scale longer but is solid in one frame).
-  // Looks whose identity is the transition keep it: the ghost-snap, the
-  // glow's light-up, the box glide, the typewriter.
+  // Entrance per look/role: kind + duration + how early it may start. A word
+  // is legible on its first frame and settled within two (rise: a 2-frame
+  // snap out of a blur; slam: solid at once, settling its scale).
   const ENTER = {
     pop: { d: 0, early: 0 }, ghost: { d: 2 * F, early: 2 * F }, rise: { d: 2 * F, early: 0 },
     scale: { d: 0.09, early: 0 }, slam: { d: 0.14, early: 0 }, light: { d: 0.17, early: 0 },
@@ -214,8 +223,8 @@
     const up = upperAll;
     c.w.forEach((w, k) => {
       const o = newWord(blk, caseOf(w.t, up), w, k, 'base');
-      if (look === 'clean' && w.x && accent !== color) o.el.style.color = accent;
-      if (look === 'serif' && w.x) { o.el.classList.add('em'); o.el.style.color = accent; o.role = 'em'; }
+      if (look === 'clean' && w.x && accent !== color) { o.el.style.color = accent; o.acc = accent; }
+      if (look === 'serif' && w.x) { o.el.classList.add('em'); o.el.style.color = accent; o.role = 'em'; o.acc = accent; }
       c.words.push(o);
       if (k < c.w.length - 1) space(blk);
     });
@@ -227,13 +236,17 @@
     let hero = pickHero(c.w, false);
     // a lone exclamation/question word is a beat of its own ("Why?")
     if (hero < 0 && n === 1 && /[?!]["'”’)]*$/.test(c.w[0].t) && key(c.w[0].t).length >= 2) hero = 0;
-    const mode = hero < 0 ? 'flow' : n === 1 ? 'solo' : hero === n - 1 ? 'below' : hero === 0 ? 'above' : 'inline';
+    // a lone article/connector reads inline ('a weird'), never stacked
+    const others = c.w.filter((w, k) => k !== hero);
+    const bare = others.length <= 2 && others.every(w => STOP.has(key(w.t)) && key(w.t).length <= 4);
+    const mode = hero < 0 ? 'flow' : n === 1 ? 'solo' : bare ? 'inline'
+      : hero === n - 1 ? 'below' : hero === 0 ? 'above' : 'inline';
     c.mode = mode;
     const heroColor = accentSet ? accent : color;
     if (mode === 'flow' || mode === 'inline') {
       c.w.forEach((w, k) => {
         const o = newWord(blk, caseOf(w.t, upperAll), w, k, k === hero ? 'hero' : 'base');
-        if (k === hero) { o.el.classList.add('srf', 'inl'); o.el.style.color = heroColor; }
+        if (k === hero) { o.el.classList.add('srf', 'inl'); o.el.style.color = heroColor; if (accentSet) o.acc = heroColor; }
         c.words.push(o);
         if (k < n - 1) space(blk);
       });
@@ -246,6 +259,7 @@
     const heroWord = newWord(hr, c.heroText, c.w[hero], hero, 'hero');
     heroWord.el.classList.add('srf');
     heroWord.el.style.color = heroColor;
+    if (accentSet) heroWord.acc = heroColor;
     const rest = [];
     c.w.forEach((w, k) => {
       if (k === hero) return;
@@ -282,7 +296,7 @@
     c.w.forEach((w, k) => {
       if (k === hero) {
         const o = newWord(hr, caseOf(tidyHero(w.t), heroUp), w, k, 'hero');
-        if (w.x && (accentSet || look === 'stack')) o.el.style.color = accent;
+        if (w.x && (accentSet || look === 'stack')) { o.el.style.color = accent; o.acc = accent; }
         c.words.push(o);
         return;
       }
@@ -471,6 +485,24 @@
       if (h <= zoneH) top = MG.clamp(top, zone[0], zone[1] - h);
       else top = c.b === 't' ? zone[1] - h : c.b === 'm' ? (zone[0] + zone[1] - h) / 2 : zone[0];
       el.style.top = Math.round(top) + 'px';
+      if (POCKET_LOOKS.includes(look) && MG.plate) {
+        const r0 = blk.getBoundingClientRect();
+        const needAt = dy => MG.need([r0.left, r0.top + dy, r0.right, r0.bottom + dy],
+                                     { ink: color, ratio: 4.5, t0: c.s, t1: c.e });
+        const n0 = needAt(0);
+        if (n0 > NEED_OK && r0.height <= zoneH) {
+          let lo = zone[0] - r0.top, hi = zone[1] - r0.bottom;
+          if (!(Array.isArray(c.z) && c.z.length === 2)) { lo = Math.max(lo, -SLIDE * H); hi = Math.min(hi, SLIDE * H); }
+          lo = Math.max(lo, SAFE.y0 - r0.top); hi = Math.min(hi, SAFE.y1 - r0.bottom);
+          let best = [n0, 0];
+          for (let dy = lo; dy <= hi + 1e-6; dy += Math.max(4, 0.01 * H)) {
+            const n = needAt(dy) + MOVE_W * Math.abs(dy) / H;
+            if (n < best[0] - 1e-6) best = [n, dy];
+          }
+          const nb = best[1] ? needAt(best[1]) : n0;
+          if (best[1] && (nb <= NEED_OK || nb <= n0 - 0.15)) el.style.top = Math.round(top + best[1]) + 'px';
+        }
+      }
       r = blk.getBoundingClientRect();
       // word geometry relative to the block's border box (scrim, box
       // highlight, mono caret) and on the frame (punch/slam headroom)
@@ -502,9 +534,34 @@
         c.caret.style.height = (f0.height * 0.78).toFixed(1) + 'px';
       }
       c.rect = [r.left, r.top, r.right, r.bottom];
-      // the measured plate under this cue's own block: light ink over a
-      // bright plate gets a pocket dark enough for 4.5:1 (0 = unchanged)
-      c.need = POCKET_LOOKS.includes(look) ? MG.need(c.rect, { ink: color, ratio: 4.5, t0: c.s, t1: c.e }) : 0;
+      // guard 2-4 from the measured plate under the block (need: the black
+      // light ink asks for to reach 4.5:1; 0 = unchanged)
+      const need = POCKET_LOOKS.includes(look) ? MG.need(c.rect, { ink: color, ratio: 4.5, t0: c.s, t1: c.e }) : 0;
+      c.need = need > SOFT_MAX ? need : 0;
+      c.softA = need > HALO_MAX && !c.need ? Math.min(0.85, need + 0.1) : 0;
+      c.dim = need > NEED_OK;
+      if (need > NEED_OK && need <= HALO_MAX) blk.classList.add('halo');
+      const under = c.need || 0.85 * c.softA || 0;
+      c.words.forEach(o => {
+        if (!o.acc || !isHex(o.acc)) return;
+        const wr = [r.left + o.box[0], r.top + o.box[1], r.left + o.box[0] + o.box[2], r.top + o.box[1] + o.box[3]];
+        const pl = MG.plateAt(wr, c.s, c.e);
+        if (!pl) return;
+        const Lp = lin(pl.hi * (1 - under));
+        const ok = col => MG.luminance(col) > Lp && MG.contrast(MG.luminance(col), Lp) >= ACCENT_RATIO;
+        if (ok(o.acc)) return;
+        for (const k of [0.15, 0.3, 0.45, 0.6, 0.75, 0.9]) {
+          const col = hexMix(o.acc, '#FFFFFF', k);
+          if (ok(col)) { o.el.style.color = col; o.acc = col; break; }
+        }
+      });
+      if (c.softA > 0) {
+        if (!c.scrim) c.scrim = blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
+        c.scrim.classList.add('soft');
+        Object.assign(c.scrim.style, { borderRadius: (SOFT_R * c.fs).toFixed(1) + 'px',
+          filter: `blur(${(SOFT_BLUR * c.fs).toFixed(1)}px)` });
+        c.scrim.style.setProperty('--sk', `rgba(0,0,0,${c.softA.toFixed(3)})`);
+      }
       if (c.need > 0) {
         if (!c.scrim) c.scrim = blk.insertBefore(MG.el('span', 'scrim'), blk.firstChild);
         const a = c.need.toFixed(3), f = POCKET_FEATHER * c.fs;
@@ -519,13 +576,9 @@
     cues.sort((a, b) => a.s - b.s);
     // timing: reveal time + entrance per word, then the motion windows
     const Wn = [];
-    // A window covers the first frame at/after every change and nothing
-    // more: frames outside all windows re-use the previous capture. Every
-    // window spans MORE than one frame period, so it always contains a frame
-    // whatever the sub-frame phase of the event (ms-rounded word timings, a
-    // lead that is not exactly one frame): a narrower window can fall between
-    // two frames and silently drop the change (a word never shown, a hero
-    // stuck at its ghost opacity).
+    // A window covers the first frame at/after every change; frames outside
+    // all windows re-use the last capture. Each spans MORE than one frame
+    // period, so a sub-frame event can never fall between two frames.
     const G = F + 2e-4;
     const win = (a, b) => Wn.push([a - 1e-4, b]);
     cues.forEach((c, i) => {
@@ -591,6 +644,8 @@
       if (CFG.premium) pad = Math.max(pad, SCRIM_PAD[0] * Math.max(...cues.map(c => c.fs)) + 4);
       const pk = cues.filter(c => c.need > 0);
       if (pk.length) pad = Math.max(pad, (POCKET_PAD[0] + 1.4 * POCKET_FEATHER) * Math.max(...pk.map(c => c.fs)) + 4);
+      const sk = cues.filter(c => c.softA > 0);
+      if (sk.length) pad = Math.max(pad, (SOFT_PAD[0] + 3 * SOFT_BLUR) * Math.max(...sk.map(c => c.fs)) + 4);
       MG.box = [Math.min(...cues.map(c => c.rect[0])) - pad, Math.min(...cues.map(c => c.rect[1])) - pad,
                 Math.max(...cues.map(c => c.rect[2])) + pad, Math.max(...cues.map(c => c.rect[3])) + pad];
     }
@@ -687,9 +742,10 @@
           b = nb.map((v, i) => MG.lerp(pb[i], v, q));
         }
         const first = rev.reduce((a, o) => (o.R < a.R ? o : a), rev[0]);
-        const pad = c.need > 0 ? POCKET_PAD : SCRIM_PAD;
+        const pad = c.need > 0 ? POCKET_PAD : c.softA > 0 ? SOFT_PAD : SCRIM_PAD;
         const px = pad[0] * c.fs, py = pad[1] * c.fs;
-        const op = c.need > 0 ? (look === 'glow' ? 1 : first.op) : SCRIM_OP[c.lit ? 1 : 0] * first.op;
+        const op = c.need > 0 || c.softA > 0 ? (look === 'glow' ? 1 : first.op)
+          : SCRIM_OP[c.lit ? 1 : 0] * first.op;
         Object.assign(c.scrim.style, {
           left: (b[0] - px).toFixed(1) + 'px', top: (b[1] - py).toFixed(1) + 'px',
           width: (b[2] - b[0] + 2 * px).toFixed(1) + 'px', height: (b[3] - b[1] + 2 * py).toFixed(1) + 'px',
@@ -710,6 +766,7 @@
           if (nx && t >= nx.R) g *= 0.32 + 0.68 * (1 - MG.range(t, nx.R, 0.16));
         }
         o.el.style.opacity = (0.36 + 0.64 * (lit ? ramp : 0)).toFixed(3);
+        if (c.dim) g = 0;
         o.el.style.textShadow = g > 0.01
           ? `0 0 ${(0.16 * g).toFixed(3)}em ${accent}, 0 0 ${(0.48 * g).toFixed(3)}em ${accent}, 0 .04em .2em rgba(0,0,0,.35)`
           : '0 .04em .2em rgba(0,0,0,.45)';

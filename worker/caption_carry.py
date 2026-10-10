@@ -1,49 +1,44 @@
-"""Caption arbitration: one reading path between graphics and captions.
+"""Caption arbitration and placement: graphics and captions share one stage.
 
-Round 3 (Oct 2026): word-level muting alone still left TWO texts on screen —
-a list reading "ROCKETS / supersonic jets" over captions reading "aviation
-and the Green Revolution agriculture", a lockup building "no college
-student" up top while "three or four years from now" ran at the bottom. So
-a graphic that shows a phrase's words now OWNS that phrase from its first
-shown word until it leaves (``owned``; the section "one reading path"
-below): the captions yield there, a lockup (spec ``reads_phrase``:
-phrase_build) sets the phrase's words its rows leave out in small type on
-their onsets (``MotionItem.reading``), and the words said before its first
-shown word (the setup) and every other phrase keep their captions.
-
-Round 2 (word-level muting):
-
-Showcase judging (Oct 2026): a graphic muted the captions for its WHOLE
-window, so spoken words it did not show vanished for sound-off viewers ("the
-1960s technology meant" under a paraphrased hook, "green revolution
-agriculture" under a list of other items, "we're solving the problems of"
-before a phrase build's first row), while a counter that did not mute showed
-"140" in the graphic and again in the caption.
+Round 6 (Oct 2026, after round-4 judging): EVERY HEARD WORD REACHES THE
+SCREEN ONCE. Lockups had grown into 6-line piles of micro "bridge" rows,
+words were heard but never shown ("to take our civilization to" under a
+slam, "and scored" between two stat slams, the speech under a versus split
+muted for its whole window), and captions sat on the seam between two
+stacked panels and carried their place over a layout change onto a chin.
 
 The contract (MotionItem.mute_captions):
 
-- unset (the default): ONE READING PATH. The words spoken in the graphic's
-  window that it actually shows — its visible text params matched against
-  the transcript, tolerant of case, punctuation, plurals, numerals vs
-  number words and *starred* accents — are dropped from the captions (one
-  connector word or two between shown words go with them, and so does a
-  quoted phrase that starts up to CARRY_LEAD_S before the graphic). The
-  rest of each phrase it shows, said between its first shown word and its
-  exit, yields too: a lockup sets it in small type, any other graphic
-  leaves it to the sound (the write NOTE and the sound-off audit name it).
-  Every other spoken word keeps its caption. While the graphic is up those
-  captions sit in the band nearest their usual place that is clear of the
-  box it draws (``MotionItem.footprint``) and of the speaker's face (the
-  zones the write-time face keep-out measured, else the index), preferring
-  a band that clears the hair too. When no band is clear, a template that
-  replaces speech (spec ``mutes_captions``) mutes them — the write reply's
-  NOTE names the words — and any other template keeps the caption where it
-  was.
-- true: the graphic replaces the captions for its whole window (an explicit
-  choice; the behaviour every graphic used to have).
+- unset (the default) and true: a graphic takes the words it SHOWS — its
+  visible text params matched against the transcript, tolerant of case,
+  punctuation, plurals, numerals vs number words and *starred* accents,
+  read in display order (a kicker before its line) — and the one or two
+  connectors between them (and a quoted phrase that starts up to
+  CARRY_LEAD_S before it). Every other heard word stays captioned — the
+  rest of the phrase it shows included (``owned``: reported as
+  ``captioned``; a lockup no longer sets them itself, its ``reading`` has
+  no bridges). No graphic mutes a whole window any more: true behaves as
+  unset, except that with no free band its unshown words are muted.
 - false: the captions keep running beside it; only a number or a hero word
-  it shows (a *starred* word, a counter's value) is not repeated in the
-  caption at the same moment. Placement as unset; never muted.
+  it shows (a *starred* word, a counter's value) is not repeated.
+
+Placement (``plan``, with worker/caption_place.py): a caption keeps its
+usual place unless that place, on the frames it is up, touches a graphic's
+stored box (MotionItem.footprint), a card or panel edge or seam, a stack's
+content panel, a face with its chin (the write-time zones and the index's
+evidence together), a prop the index knows or the watermark's corner; then
+it takes the best free band (the largest, at least ~1.4 lines tall) — and,
+with none on the canvas, the inside of a stack's content panel rather than
+lose a heard word. Where no band is free of a graphic that replaces speech
+(spec ``mutes_captions``) or was asked to (true), its words are muted and
+named (the write NOTE, ``heard_unshown``, the sound-off audit); under any
+other graphic they stay where they were. Placement is re-solved at every
+layout change — a graphic's or card's edges, a cut inside a card — and a
+page never holds its place across one (``Plan.hold_limit``); a word said
+within two frames before the change appears ON it (and one said less than a
+page's minimum before it, MIN_PAGE_S, rather than flash or be lost); one or
+two words a change would strand take their line's place when it is clear
+for them.
 
 Everything here is a pure function of the EDL, the index and the timeline,
 and it is the ONE caption placement pass: the libass captions, the motion
@@ -72,6 +67,9 @@ CARRY_LEAD_S = 0.5
 # Connector words between shown words go with them (one or two of "and",
 # "the", "of" left alone as a flashing card are noise, not speech).
 ABSORB_MAX = 2
+# A printed word this long may stand for a longer spoken word it starts
+# ("tech" for "technology") — inside a run of the graphic's words only.
+ABBREV_MIN = 4
 # Caption geometry (frame fractions): a two-line block around its anchor,
 # the smallest band the motion caption template lays a block into, the
 # column a centred caption occupies, and the clearances kept from graphics
@@ -94,8 +92,10 @@ HAIR_UP = 0.3
 # when nothing nearer was measured.
 FACE_FAR_S = 6.0
 # A caption that would start this little before an occupying graphic leaves
-# waits for it instead of touching it (the 'computers' under the hook title).
-START_WAIT_S = 0.3
+# waits for it instead of touching it (the 'computers' under the hook title)
+# — never more than two frames: a word is never revealed later than that
+# to line a page flip up with anything (judged: 'has' 0.2 s late).
+START_WAIT_S = 0.075
 # Sound-off coverage: spoken spans longer than this with nothing on screen
 # saying them are reported.
 SOUND_OFF_GAP_S = 0.6
@@ -285,6 +285,9 @@ def graphic_lines(item):
     if item.get("template") == "html" and item.get("html"):
         body = re.sub(r"(?is)<(script|style)\b.*?</\1>", " ", item["html"])
         out.append(("html", re.sub(r"<[^>]+>", " ", body)))
+    # in reading order: a kicker is read (and said) before the line it sits
+    # over ("and scored / 26% better overall" matched against the speech)
+    out.sort(key=lambda kv: 0 if kv[0] == "kicker" else 1)
     return [(k, v) for k, v in out if tokens(v)]
 
 
@@ -325,12 +328,25 @@ def carried_indices(word_toks, seq, lead_n=0, solo=frozenset()):
     content = {t for t in seq if is_content(t)}
     flat = [(t, i) for i, ts in enumerate(word_toks) for t in ts]
     in_run, lead_runs = set(), []
+    # inside a run, a printed word may be the spoken word cut short
+    # ("information tech" over "information technology"): a run is never
+    # built of a clipped word alone, and only runs read it that way
+    clipped = sorted((t for t in content if len(t) >= ABBREV_MIN and t.isalpha()),
+                     key=len, reverse=True)
+
+    def run_token(t):
+        if t in content:
+            return t
+        return next((c for c in clipped if len(t) >= len(c) + 2 and t.startswith(c)), t)
     if seq and flat:
-        sm = difflib.SequenceMatcher(None, seq, [t for t, _i in flat], autojunk=False)
+        sm = difflib.SequenceMatcher(None, seq, [run_token(t) for t, _i in flat],
+                                     autojunk=False)
         for blk in sm.get_matching_blocks():
             # a run of connectors alone ("of the" in "THE END OF THE WORLD"
             # over "one of the best years") is not the graphic's words
-            if blk.size >= 2 and any(is_content(seq[blk.a + k]) for k in range(blk.size)):
+            if blk.size >= 2 and any(is_content(seq[blk.a + k]) and
+                                     flat[blk.b + k][0] == seq[blk.a + k]
+                                     for k in range(blk.size)):
                 idx = {flat[blk.b + k][1] for k in range(blk.size)}
                 if max(idx) >= lead_n:
                     in_run |= idx
@@ -552,26 +568,42 @@ def faces_over(edl, index, tl, a, b, W, H, live=()):
        measured on is still the picture (``footprint.geo``, face_geometry):
        a zoom, re-cut, reframe or card added after the graphic (the usual
        order: graphics, then camera) moves the face without re-measuring
-       them, and stale zones would park a caption on the face;
+       them, and stale zones would park a caption on the face — together
+       with
     2. the keep-out's face track over [a, b] from the index's spatial
-       samples (the same mapping, on the EDL as it is now);
-    3. the nearest measured face within FACE_FAR_S of the span;
+       samples (the same mapping, on the EDL as it is now): either alone
+       can miss a profile;
+    3. with no track, the nearest measured face within FACE_FAR_S;
     4. the talking-head prior (Haar misses profiles: "no face found" is no
        evidence of no face)."""
     import keepout
     ar = frame_ar(W, H)
     geo = face_geometry(edl)
-    zones = [z for m in live for z in footprint_faces(m, ar, geo)]
-    if zones:
-        return zones
+    stored = [tuple(z) for m in live for z in footprint_faces(m, ar, geo)]
     try:
-        zones = keepout.zones_of(keepout.face_track(edl, index, W, H, a, b))
+        zones = [tuple(z) for z in keepout.zones_of(keepout.face_track(edl, index, W, H, a, b))]
     except Exception:  # noqa: BLE001 — unmappable index: the fallbacks answer
         zones = []
-    if zones:
-        return [tuple(z) for z in zones]
-    far = _faces_far(edl, index, tl, a, b, W, H)
-    return far or [FACE_PRIOR]
+    if not zones:
+        zones = _faces_far(edl, index, tl, a, b, W, H)
+    # the write-time frames win for a face they measured (exact frames: a
+    # push-in moved it), but a face the index has and they do not count too
+    # — Haar misses profiles, and the write-time zones alone parked 'and
+    # scored' on Rogan's turned cheek
+    out = stored + [z for z in zones if not any(_same_face(z, s) for s in stored)]
+    return out or [FACE_PRIOR]
+
+
+def _same_face(a, b):
+    """Do two face zones speak for the same face (side by side in x, of a
+    like size — one measured where the other was before a move)?"""
+    w = min(a[2], b[2]) - max(a[0], b[0])
+    wa, wb = a[2] - a[0], b[2] - b[0]
+    if w <= 0 or w < 0.5 * min(wa, wb):
+        return False
+    area_a = max(1e-9, wa * (a[3] - a[1]))
+    area_b = max(1e-9, wb * (b[3] - b[1]))
+    return 0.4 <= area_a / area_b <= 2.5
 
 
 def _faces_far(edl, index, tl, a, b, W, H):
@@ -732,34 +764,75 @@ def _said(words):
 class Plan:
     """The caption decision for one EDL's words (see module docstring).
 
-    ``hidden[i] = (item id, "carried"|"joined"|"yield"|"room"|"unmeasured")``
-    ("joined": a word the lockup sets in small type because it reads the
-    phrase; "yield": a word of a phrase the graphic shows, said while it is
-    up, that only the sound carries — one reading path; "room": no band
-    clear of its box and the face; "unmeasured": no box measured at this
-    frame shape, so it is assumed to sit on the captions); ``placed[i]`` =
-    the band dict for a word moved clear of a graphic; ``clamp_spans`` are
-    program windows no normally placed caption may hold into (a graphic
-    occupies the caption band there); ``yield_spans`` are the stretches a
-    graphic owns its phrase (a caption from before never holds into one);
-    ``wait_spans`` add the whole-window mutes of motion graphics, which a
-    normally placed caption must not start inside of near their end;
-    ``report`` is per item for notes and audits."""
+    ``hidden[i] = (item id, "carried"|"room"|"unmeasured")`` ("carried":
+    the graphic shows the word, or it is a connector joint between words it
+    shows; "room": no band clear of its box, the face and the layout, and
+    the graphic replaces speech or was asked to (mute_captions=true);
+    "unmeasured": no box measured at this frame shape, so it is assumed to
+    sit on the captions); ``placed[i]`` = the band dict for a word moved
+    clear of a graphic or of a card layout's edges; ``shown_at[i]`` = the
+    program second a word snapped forward onto a layout change appears
+    (never more than caption_place.SNAP_FRAMES late — or MIN_PAGE_S, for a
+    word that would otherwise show for less than a page before the change
+    and be dropped: _onto_next_layout); ``clamp_spans`` are
+    program windows a caption from before may not hold into (a graphic
+    occupies the caption band there, or the placement changes);
+    ``yield_spans`` and ``wait_spans`` are kept for older callers and are
+    empty (no graphic owns a phrase or mutes a whole window any more: every
+    heard word reaches the screen once); ``report`` is per item for notes
+    and audits."""
 
     def __init__(self, words):
         self.words = words
         self.hidden = {}
         self.placed = {}
+        self.shown_at = {}
         self.clamp_spans = []
         self.wait_spans = []
         self.yield_spans = []
+        self.segments = []
+        self._seg_places = None
         self.report = {}
+
+    def hold_limit(self, start, place=None):
+        """The program second a page shown from ``start`` at ``place`` (its
+        band dict, None = its usual place) must clear by: the start of the
+        first later segment where the captions sit elsewhere (another band,
+        their usual place after a band, or muted) — a page never carries its
+        place across a layout change onto the new layout. A segment where a
+        word is still shown at ``place`` (one or two words a change would
+        strand keep their line's place: _smooth_flips) is not such a change:
+        a page reaching into it is not cut off before its own last words.
+        inf when none."""
+        for k, (a, _b, st) in enumerate(self.segments):
+            if a > start + 1e-3 and st != place and place not in self._places_in(k):
+                return a
+        return float("inf")
+
+    def _places_in(self, k):
+        """The places (band dicts, None = usual) of the caption words shown
+        from inside segment ``k``."""
+        if self._seg_places is None:
+            import bisect
+            starts = [a for a, _b, _st in self.segments]
+            self._seg_places = [[] for _ in self.segments]
+            for i, w in enumerate(self.words):
+                if i in self.hidden:
+                    continue
+                t = max(float(w["t0"]), self.shown_at.get(i, float(w["t0"])))
+                j = bisect.bisect_right(starts, t + 1e-6) - 1
+                if 0 <= j < len(self._seg_places):
+                    pl = self.placed.get(i)
+                    if pl not in self._seg_places[j]:
+                        self._seg_places[j].append(pl)
+        return self._seg_places[k] if k < len(self._seg_places) else []
 
     def caption_words(self):
         """The words the captions show: hidden ones dropped, the first word
         after a hidden run or a placement change breaking the card, moved
-        words carrying their band as ``place``."""
-        if not self.hidden and not self.placed:
+        words carrying their band as ``place``, a word snapped onto a layout
+        change starting there (``t0_said`` keeps its spoken onset)."""
+        if not self.hidden and not self.placed and not self.shown_at:
             return self.words
         out, prev_hidden, prev_place = [], False, None
         for i, w in enumerate(self.words):
@@ -772,27 +845,306 @@ class Plan:
                 word["brk"] = True
             if place:
                 word["place"] = dict(place)
+            if i in self.shown_at and self.shown_at[i] > float(w["t0"]):
+                word["t0_said"] = float(w["t0"])
+                word["t0"] = round(self.shown_at[i], 4)
+                # a word that ended before the change it waits for still
+                # gets a moment on screen (never a start before the change)
+                if float(w["t1"]) < word["t0"] + 0.01:
+                    word["t1"] = round(word["t0"] + 0.01, 4)
             out.append(word)
             prev_hidden, prev_place = False, place
         return out
 
 
+def said_key(w):
+    """A caption word's identity across the plan: its spoken onset (before
+    any snap onto a layout change) and its text."""
+    return (round(float(w.get("t0_said", w["t0"])), 3), str(w.get("w")))
+
+
+def _segment_bounds(edl, tl, items, cards):
+    """Program seconds where what a caption must keep clear of can change:
+    every graphic's and card's edges, the program cuts inside a card (each
+    shot frames the speaker anew) and the placement track's span edges."""
+    import captions as caplib
+    end = float(tl.out_duration)
+    bounds = {0.0, end}
+    for m in items:
+        bounds.update((m["start"], m["end"]))
+    for s, e in cards:
+        bounds.update((s, e))
+        bounds.update(c for c in caplib.program_cuts(tl) if s < c < e)
+    for span in ((edl.get("captions") or {}).get("placement_track") or []):
+        for key in ("t0", "t1"):
+            try:
+                o = tl.src_to_out(float(span[key]))
+            except Exception:  # noqa: BLE001
+                o = None
+            if o is not None and any(s < o < e for s, e in cards):
+                bounds.add(float(o))
+    return sorted(b for b in bounds if 0.0 <= b <= end)
+
+
+# How long after a card leaves the captions' usual place is checked against
+# the full shot's face (see plan).
+AFTER_CARD_S = 0.25
+
+
+def _inside(a, b):
+    """The end of a segment's face query: a hair before its last instant,
+    which belongs to the next layout (a card's end frame is the full shot)."""
+    return b - 0.02 if b - a > 0.06 else b
+
+
+def _off_content(faces, screens):
+    """Face zones less those centred inside a stack's content panel
+    (caption_place.content_zones: the panel was told apart BY having no face
+    in its source rect). A face there is a far take's face mapped through
+    the panel (_faces_far: any take within FACE_FAR_S), not one the viewer
+    sees — it would block the panel's clear space for nothing."""
+    if not screens:
+        return faces
+    out = [f for f in faces if not any(
+        z[0] <= (f[0] + f[2]) / 2.0 <= z[2] and z[1] <= (f[1] + f[3]) / 2.0 <= z[3]
+        for z in screens)]
+    return out or [FACE_PRIOR]
+
+
+def _in_windows(zones, rects):
+    """Zones on a card layout clipped to the card windows they show through
+    (picture_cards.card_boxes): a card shows only its source rect, so a face
+    zone mapped past a window's edge — padded by keepout.face_zone, a chin
+    pad, or a false detection outside what the card frames — is not on
+    screen there and never blocks the canvas around the card (Jobs: a zone
+    mapped to y 0.47-0.99, off the bottom of his card, took the band below
+    it, so every caption climbed into the card over his hair). A zone that
+    meets no window is dropped. With no window (a full-frame stretch) the
+    zones are returned as they are."""
+    if not rects:
+        return list(zones)
+    out = []
+    for z in zones:
+        for x0, y0, x1, y1 in rects:
+            c = (max(z[0], x0), max(z[1], y0), min(z[2], x1), min(z[3], y1))
+            if c[2] - c[0] > 1e-3 and c[3] - c[1] > 1e-3:
+                out.append(c)
+    return out
+
+
+def _card_faces(edl, index, tl, a, b, W, H, live, screens, rects):
+    """The face zones a caption keeps clear of over a card segment: the
+    faces over [a, b] less any on a stack's content panel, clipped to the
+    card windows (_in_windows), else the talking-head prior in each window."""
+    faces = _off_content(faces_over(edl, index, tl, a, _inside(a, b), W, H, live), screens)
+    if rects:
+        faces = [f for f in faces if f != FACE_PRIOR]
+        faces = _in_windows(faces, rects) or _prior_in_cards(rects)
+    return faces
+
+
+def _chins(faces, rects):
+    """caption_place.chin of each face, kept inside the windows it shows in."""
+    import caption_place
+    return _in_windows([caption_place.chin(f) for f in faces], rects)
+
+
+def _prior_in_cards(rects):
+    """The talking-head prior (FACE_PRIOR) inside each card window: under a
+    card the face is in a panel, never on the canvas around it."""
+    if not rects:
+        return [FACE_PRIOR]
+    out = []
+    fx0, fy0, fx1, fy1 = FACE_PRIOR
+    for x0, y0, x1, y1 in rects:
+        w, h = x1 - x0, y1 - y0
+        out.append((x0 + fx0 * w, y0 + fy0 * h, x0 + fx1 * w, y0 + fy1 * h))
+    return out
+
+
+# At a placement change inside a spoken line, the page splits around it;
+# when that strands this many words or fewer on one side ("I'd" before a
+# lower third arrives), they take the other side's place — when it is clear
+# for them where they are said — instead of flashing as an orphan page.
+SMOOTH_MAX_WORDS = 2
+# The shortest caption page the caption track draws (motion_captions.cues
+# drops a shorter one as a flash). A word said less than this before a
+# placement change it cannot hold across would get a shorter page in the
+# old place — or none, a heard word lost (final review, round 7: Elon's
+# 'than', 0.10 s before the last stat slam left) — so it appears ON the
+# change in the new layout's place instead (_onto_next_layout).
+MIN_PAGE_S = 0.12
+
+
+def _next_layout(bounds, state, k):
+    """The first segment after ``k`` that has a length (zero-length
+    segments sit where two edges meet), or None."""
+    for j in range(k + 1, len(state)):
+        if bounds[j + 1] - bounds[j] >= 1e-3:
+            return j
+    return None
+
+
+def _onto_next_layout(p, words, bounds, seg_of, state, cuts=()):
+    """Move each visible word that would START a page less than MIN_PAGE_S
+    before a placement change (the next segment places the captions
+    elsewhere, and does not mute them) into the segment after it: it takes
+    that segment's place and appears on the change (plan's shown_at). A word
+    starts a page after a hidden word (a graphic's), a word in another place
+    or a break the captions take anyway (_line_break); one inside a running
+    line is shown on its page, which began earlier. Returns {word index: the
+    place it had}; _smooth_flips may still hand it back to its line's place
+    where that place is clear after the change."""
+    moved = {}
+    prev = None
+    for i, w in enumerate(words):
+        if i in p.hidden:
+            continue
+        j, prev = prev, i
+        if j is not None and j == i - 1 and p.placed.get(j) == p.placed.get(i) \
+                and not _line_break(words[j], w, cuts):
+            continue
+        t0 = float(w["t0"])
+        k = seg_of[i]
+        while True:
+            nk = _next_layout(bounds, state, k)
+            if nk is None or not t0 < bounds[nk] < t0 + MIN_PAGE_S - 1e-6:
+                break
+            nxt = state[nk]
+            here = p.placed.get(i)
+            if nxt == "mute" or nxt == here:
+                break
+            moved.setdefault(i, here)
+            seg_of[i] = k = nk
+            if nxt is None:
+                p.placed.pop(i, None)
+            else:
+                p.placed[i] = nxt
+    return moved
+
+
+def _line_break(prev, nxt, cuts):
+    """A break the captions take anyway between two consecutive words: a
+    breath (0.62 s), a sentence end, an insert or a program cut."""
+    try:
+        gap = float(nxt["t0"]) - float(prev["t1"])
+    except (KeyError, TypeError, ValueError):
+        return True
+    end = str(prev.get("w") or "").rstrip("\"'”’ )")
+    if gap >= 0.62 or end[-1:] in ".!?…" or nxt.get("brk"):
+        return True
+    return any(float(prev["t1"]) - 1e-3 <= c <= float(nxt["t0"]) + 1e-3 for c in cuts)
+
+
+def _smooth_flips(p, edl, index, tl, W, H, col, bounds, seg_of, state, info):
+    """Move the one or two words a placement change strands (see
+    SMOOTH_MAX_WORDS) to the place of the rest of their line, when that
+    place is clear at the moments they are said."""
+    import caption_place
+    import captions as caplib
+    words = p.words
+    cuts = caplib.program_cuts(tl)
+    vis = [i for i in range(len(words)) if i not in p.hidden]
+    faces_cache = {}
+
+    def zones(k):
+        if info[k] is not None:
+            return info[k]["zones"]
+        if k not in faces_cache:
+            # a stretch the plan did not solve (no graphic, no card): the
+            # faces there, less any the usual place already sits on (a
+            # moved word is held to no stricter a standard than the rest)
+            a, b = bounds[k], bounds[k + 1]
+            i = next((i for i in vis if seg_of[i] == k), None)
+            src = float(words[i].get("src_t0", words[i]["t0"])) if i is not None \
+                else _src_near(tl, (a + b) / 2.0)
+            ny, _band = normal_place(edl, src)
+            chins = [caption_place.chin(f) for f in
+                     faces_over(edl, index, tl, a, _inside(a, b), W, H)]
+            faces_cache[k] = [z for z in chins if not caption_place.hits(
+                ny - CAP_HALF_H, ny + CAP_HALF_H, [z], col)]
+        return faces_cache[k]
+
+    def fits(place, idx):
+        for i in idx:
+            k = seg_of[i]
+            if k >= len(state):
+                return False
+            if place is None:
+                if state[k] is not None:
+                    return False       # its usual place is taken there
+                continue
+            if state[k] == "mute":
+                return False
+            lo, hi = place["y"] - CAP_HALF_H, place["y"] + CAP_HALF_H
+            if caption_place.hits(lo, hi, zones(k), col):
+                return False
+        return True
+    j = 1
+    while j < len(vis):
+        i0, i1 = vis[j - 1], vis[j]
+        pl0, pl1 = p.placed.get(i0), p.placed.get(i1)
+        if pl0 == pl1 or i1 != i0 + 1 or _line_break(words[i0], words[i1], cuts):
+            j += 1
+            continue
+        tail = [i0]
+        while len(tail) <= SMOOTH_MAX_WORDS:
+            q = tail[0] - 1
+            if q < 0 or q in p.hidden or p.placed.get(q) != pl0 or \
+                    _line_break(words[q], words[tail[0]], cuts):
+                break
+            tail.insert(0, q)
+        head = [i1]
+        while len(head) <= SMOOTH_MAX_WORDS:
+            q = head[-1] + 1
+            if q >= len(words) or q in p.hidden or p.placed.get(q) != pl1 or \
+                    _line_break(words[head[-1]], words[q], cuts):
+                break
+            head.append(q)
+        if len(tail) <= SMOOTH_MAX_WORDS and len(head) > len(tail) and fits(pl1, tail):
+            for i in tail:
+                if pl1 is None:
+                    p.placed.pop(i, None)
+                else:
+                    p.placed[i] = pl1
+        elif len(head) <= SMOOTH_MAX_WORDS and len(tail) > len(head) and fits(pl0, head):
+            for i in head:
+                if pl0 is None:
+                    p.placed.pop(i, None)
+                else:
+                    p.placed[i] = pl0
+        j += 1
+
+
 def plan(edl, index, tl, words, canvas=None):
     """Plan word-level caption muting and placement for ``words`` (program
-    caption words after the whole-window mutes; see captions.caption_words).
+    caption words after the explicit caption mutes; see
+    captions.caption_words).
 
     This is the ONE caption placement pass: the libass captions, the motion
     caption track, the write-time notes, audit_captions and the sound-off
     review all read it. ``canvas`` is the output (W, H) when the caller
-    knows it (the renderer); otherwise it is derived from the EDL."""
+    knows it (the renderer); otherwise it is derived from the EDL.
+
+    Every heard word reaches the screen once: a graphic takes the words it
+    shows (and the one or two connectors between them); every other word is
+    captioned — moved to a free band (worker/caption_place.py) wherever its
+    usual place is taken by a graphic, a card or panel edge, a face in a
+    panel, a prop or the watermark. Only where no band is free of a graphic
+    that replaces speech (or was asked to, mute_captions=true) are its words
+    muted, and the sound-off audit names them. Placement is re-solved at
+    every layout change (a graphic or card starting or ending, a cut inside
+    a card): a page never carries its place across one where it would land
+    on the new layout, and a word whose onset is within two frames of the
+    change appears with the new layout."""
+    import caption_place
     p = Plan(words)
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return p
-    items_all = program_items(edl, tl)
-    p.wait_spans = [[m["start"], m["end"]] for m in items_all if mode(m) == MODE_ALL]
-    items = [m for m in items_all if mode(m) != MODE_ALL]
-    if not items or not words:
+    items = program_items(edl, tl)
+    cards = caption_place.card_windows(edl)
+    if not words or not (items or cards):
         return p
     word_toks = _token_rows([w.get("w") for w in words])
     mids = [_mid(w) for w in words]
@@ -810,65 +1162,131 @@ def plan(edl, index, tl, words, canvas=None):
             "box": footprint_box(m, ar), "estimated": estimated(m),
             "carried": [words[i] for i in sorted(carried)],
             "placed": None, "muted": [], "kept": [],
-            "owns_from": None, "joined": [], "yielded": [], "beside": []}
-        # (the standing headline owns no phrase: captions never yield to it)
+            "owns_from": None, "joined": [], "yielded": [], "beside": [],
+            "captioned": []}
+        # (the standing headline shows no spoken words: captions run beside it)
         own = owned(m, words, word_toks, mids, pids, carried) \
-            if mode(m) == MODE_WORDS and not persistent(m) else None
+            if mode(m) != MODE_HERO and not persistent(m) else None
         if own is None:
             continue
-        # One reading path: the phrase this graphic shows is read on it
-        # alone from its first shown word to its exit.
         rep["owns_from"] = own["from"]
-        p.yield_spans.append([own["from"], e])
         for i in own["absorbed"]:
             p.hidden.setdefault(i, (m["id"], "carried"))
-        for run in own["joined"]:
-            for i in run:
-                p.hidden.setdefault(i, (m["id"], "joined"))
-            rep["joined"].append([words[i] for i in run])
-        for i in own["yielded"]:
-            p.hidden.setdefault(i, (m["id"], "yield"))
-            rep["yielded"].append(words[i])
-        rep["beside"] = [[words[i] for i in run] for run in own["beside"]]
-    p.yield_spans = _merge(p.yield_spans)
-    # Segments: maximal program spans with one set of live graphics.
-    cuts = sorted({x for m in items for x in (m["start"], m["end"])})
-    for a, b in zip(cuts, cuts[1:]):
-        live = [m for m in items if m["start"] <= a + 1e-6 and m["end"] >= b - 1e-6]
-        if not live or b - a < 1e-3:
+        # the phrase's words it does not show stay captioned (every heard
+        # word reaches the screen once; a lockup no longer sets them itself)
+        rep["captioned"] = [[words[i] for i in run] for run in own["rest"]]
+    # Layout segments: spans with one set of live graphics and cards.
+    bounds = _segment_bounds(edl, tl, items, cards)
+    snap = caption_place.snap_s(((index or {}).get("video") or {}).get("fps") or 30.0)
+    import bisect
+    seg_of = [max(0, bisect.bisect_right(bounds, float(w["t0"]) + snap) - 1) for w in words]
+    col = caption_place.column(W, H, COLUMN)
+    min_h = caption_place.min_band(edl, W, H, MIN_BAND_H)
+    nseg = max(0, len(bounds) - 1)
+    state = [None] * nseg          # per segment: None (usual place), a band, "mute"
+    info = [None] * nseg           # per solved segment: its usual y and hard zones
+    prev_pick = None               # the band the last placed page used
+    for k, (a, b) in enumerate(zip(bounds, bounds[1:])):
+        if b - a < 1e-3:
             continue
-        seg = [i for i, t in enumerate(mids) if a <= t < b or (b == cuts[-1] and t == b)]
+        live = [m for m in items if m["start"] <= a + 1e-6 and m["end"] >= b - 1e-6]
+        lcards = caption_place.live_cards(edl, a + 1e-4, b - 1e-4)
+        seg = [i for i, sk in enumerate(seg_of) if sk == k]
         visible = [i for i in seg if i not in p.hidden]
-        src_at = (float(words[visible[0]].get("src_t0", mids[visible[0]])) if visible
-                  else _src_near(tl, (a + b) / 2.0))
-        normal_y, _band = normal_place(edl, src_at)
+        # the stretch right after a card leaves is re-solved too: a page or
+        # a placement span written for the card must not land on the full
+        # shot's face (Elon: 'believe that for sure' on Rogan's chin)
+        after = not lcards and any(ce - 1e-3 <= a < ce + AFTER_CARD_S for _cs, ce in cards)
+        if not (live or lcards or after):
+            prev_pick = None
+            continue
+        # the usual place most of its words have (a placement span may end
+        # a hair inside the stretch); with none said here, the place a page
+        # from before would hold into
+        normals = [normal_place(edl, float(words[i].get("src_t0", mids[i]))) for i in visible] \
+            or [normal_place(edl, _src_near(tl, (a + b) / 2.0))]
+        normal_y, _band = max(normals, key=normals.count)
         known = [bx for bx in (footprint_box(m, ar) for m in live) if bx]
-        # An unmeasured box is old behaviour: a speech-replacing word-level
-        # graphic is assumed to sit on the captions (no band can be proven
-        # clear of it), anything else is assumed to sit elsewhere.
-        assume = [m for m in live if not footprint_box(m, ar) and mode(m) == MODE_WORDS
-                  and replaces_speech(m)]
-        if not (collides(known, normal_y) or assume):
+        gzones = [(bx[0], bx[1] - GRAPHIC_PAD, bx[2], bx[3] + GRAPHIC_PAD) for bx in known]
+        # An unmeasured box is old behaviour: a word-level graphic that
+        # replaces speech (or was asked to) is assumed to sit on the
+        # captions (no band can be proven clear of it).
+        speech = [m for m in live if not persistent(m) and
+                  (mode(m) == MODE_ALL or (mode(m) == MODE_WORDS and replaces_speech(m)))]
+        assume = [m for m in speech if not footprint_box(m, ar)]
+        rects = caption_place.card_rects(lcards)
+        edges = caption_place.edge_zones(rects, col)
+        wm = caption_place.watermark_box(W, H)
+        props = caption_place.prop_zones(edl, index, tl, W, H, a, b)
+        soft = caption_place.text_boxes(edl, index, tl, W, H, a, b)
+        screens = caption_place.content_zones(lcards, index, tl, a, b)
+        hard = gzones + edges + ([wm] if wm else []) + props + screens
+        faces = None
+        lo, hi = max(safe[0], normal_y - CAP_HALF_H), min(safe[1], normal_y + CAP_HALF_H)
+        blocked = bool(assume) or collides(known, normal_y) or \
+            caption_place.hits(lo, hi, props, col)
+        if (lcards or after) and not blocked:
+            # a card layout: its edges and seams, the faces in its panels
+            # and the watermark are no place for the usual anchor either
+            faces = _card_faces(edl, index, tl, a, b, W, H, live, screens, rects)
+            blocked = caption_place.hits(lo, hi, edges + screens + ([wm] if wm else []) +
+                                         _chins(faces, rects), col)
+        if faces is not None:
+            info[k] = {"y": normal_y, "zones": hard + _chins(faces, rects)}
+        if not blocked:
+            prev_pick = None
             continue
         place = None
         if not assume:
-            # clear of the graphics AND the face: the zones the keep-out
-            # measured for these graphics, else the face over this stretch
-            place = clear_band(known, faces_over(edl, index, tl, a, b, W, H, live),
-                               safe, normal_y)
-        mute = place is None and any(mode(m) == MODE_WORDS and replaces_speech(m)
-                                     for m in live)
-        if place is None and not mute and visible:
-            # nowhere clear and not a graphic that replaces speech: the
-            # captions stay where they always were
+            if faces is None:
+                faces = _card_faces(edl, index, tl, a, b, W, H, live, screens, rects)
+            chins = _chins(faces, rects)
+            info[k] = {"y": normal_y, "zones": hard + chins}
+            one_line = max(MIN_BAND_H * 0.75, caption_place.line_height(edl, W, H) * 1.15)
+            pick = None
+            # a band that clears the hair too wins when one fits; then the
+            # face and chin alone; then (a frame-filling head, a crowded
+            # stack) any band one line still fits
+            for fz, need in (([_head(f) for f in chins], min_h), (chins, min_h),
+                             (chins, one_line)):
+                pick = caption_place.choose(caption_place.free_bands(hard + fz, safe, col),
+                                            normal_y, CAP_HALF_H, need, soft, rects, col,
+                                            prev=prev_pick)
+                if pick:
+                    break
+            if not pick and screens:
+                # the last resort before muting heard words (or leaving them
+                # on a seam): a stack's content panel, inside its edges and
+                # priced like source text under the caption — every heard
+                # word reaches the screen once (Elon: 'and scored' between
+                # two stat slams, the speaker's face filling his panel)
+                loose = gzones + edges + ([wm] if wm else []) + props + chins
+                pick = caption_place.choose(caption_place.free_bands(loose, safe, col),
+                                            normal_y, CAP_HALF_H, one_line,
+                                            list(soft) + list(screens), rects, col,
+                                            prev=prev_pick)
+                if pick:
+                    info[k] = {"y": normal_y, "zones": loose}
+            if pick:
+                y, ba, bb, _score = pick
+                z0, z1 = max(ba, y - ZONE_HALF_H), min(bb, y + ZONE_HALF_H)
+                letter = band_letter(y)
+                place = {"y": round(y, 4), "b": letter, "z": [round(z0, 4), round(z1, 4)],
+                         "position": _POSITION[letter]}
+                prev_pick = (y, ba, bb)
+        mute = place is None and bool(speech)
+        if place is None and not mute:
+            # nowhere clear and nothing that replaces speech: the captions
+            # stay where they always were (named in the notes)
             for i in visible:
                 for m in live:
                     p.report[m["id"]]["kept"].append(words[i])
+            prev_pick = None
             continue
-        p.clamp_spans.append([a, b])
+        state[k] = place if place else "mute"
         for i in visible:
             if mute:
-                owner = next(m for m in live if mode(m) == MODE_WORDS and replaces_speech(m))
+                owner = next((m for m in speech if m in assume), speech[0])
                 p.hidden[i] = (owner["id"], "unmeasured" if owner in assume else "room")
                 p.report[owner["id"]]["muted"].append(words[i])
             else:
@@ -877,6 +1295,28 @@ def plan(edl, index, tl, words, canvas=None):
             for m in live:
                 p.report[m["id"]]["placed"] = p.report[m["id"]]["placed"] or \
                     dict(place, normal_y=round(normal_y, 4))
+    import captions as caplib
+    moved = _onto_next_layout(p, words, bounds, seg_of, state, caplib.program_cuts(tl))
+    _smooth_flips(p, edl, index, tl, W, H, col, bounds, seg_of, state, info)
+    p.segments = [(bounds[k], bounds[k + 1], state[k]) for k in range(nseg)]
+    for a, b, st in p.segments:
+        if st is not None:
+            p.clamp_spans.append([a, b])
+    # a word said within two frames before a layout change it is placed
+    # for appears ON the change (the page never flips early) — and so does
+    # one moved there because its page before the change would be too short
+    # to draw (_onto_next_layout), unless it went back to its line's place
+    prev = None
+    for i, w in enumerate(words):
+        if i in p.hidden:
+            continue
+        place = p.placed.get(i)
+        k = seg_of[i]
+        rescued = i in moved and place != moved[i]
+        if (rescued or (prev is not None and place != prev[1])) and k < nseg and \
+                float(w["t0"]) < bounds[k] and k > 0:
+            p.shown_at[i] = bounds[k]
+        prev = (i, place)
     p.clamp_spans = _merge(p.clamp_spans)
     return p
 
@@ -936,44 +1376,54 @@ def _absorbed(inside, carried, word_toks, words):
     return out
 
 
-# ── one reading path ─────────────────────────────────────────────────────
-# Judging (Oct 2026, round 3): a list read "ROCKETS / supersonic jets" while
-# the caption under it read "aviation and the Green Revolution agriculture";
-# a lockup built "no college student" up top while the caption carried
-# "three or four years from now" at the bottom, and the eye ping-ponged.
-# Two texts at once, two different readings. The rule: a graphic that shows
-# a phrase's words OWNS that phrase from its first shown word to its exit —
-# the captions yield there. A lockup (spec ``reads_phrase``: phrase_build)
-# sets the phrase's other words in small type in reading order, each on its
-# spoken onset (``MotionItem.reading``), so a sound-off viewer still reads
-# every word; any other graphic leaves them to the sound, and its write
-# NOTE and the sound-off audit name them. Words said before its first shown
-# word (the setup) and other phrases keep their captions.
+# ── what a graphic takes beyond its own words ─────────────────────────────
+# Round 3 made a graphic that shows a phrase OWN it: the captions yielded
+# from its first shown word to its exit, a lockup set the phrase's other
+# words as micro "bridge" rows inside itself, any other graphic left them to
+# the sound. Round 4 judging: the lockups became 6-line piles with 1.3%-of-
+# frame type, and words were heard but never shown ("to take our
+# civilization to" under ENOUGH, "and scored" between two stat slams).
+# The contract now (the captions side of it, pinned in
+# tests/test_caption_coverage.py): EVERY HEARD WORD REACHES THE SCREEN ONCE.
+# A graphic takes the words it shows and the one or two connectors between
+# them; every other word — the rest of its phrase included — is captioned,
+# in a band clear of it (plan). A lockup's ``reading`` times its rows to the
+# speech and carries no bridges.
 
 # A source jump this long (or a program pause) ends a phrase even without
 # punctuation; sentence and clause marks always do.
 PHRASE_GAP_S = 1.5
 PHRASE_PAUSE_S = 1.0
 _PHRASE_END = ".!?…;:"
-# A lockup sets a run of the phrase's other words in small type up to this
-# size; a longer run stays captioned beside it (and its NOTE says so).
-BRIDGE_MAX_WORDS = 14
-BRIDGE_MAX_CHARS = 90
-# A list's "and"/"or" between a shown row and the small run beside it is
-# the graphic's own joint, not words to set. ("but" and "so" carry meaning —
-# "great companies, but not enough" — and are always set.)
-_EDGE_CONJ = frozenset(("and", "or"))
-# A bridge line wraps inside the lockup's column, never inside a name, a
-# number and its noun, or after an article ("the / Green Revolution"); a
-# glued group stays this short so it always fits the column.
-BRIDGE_GLUE_MAX_CHARS = 24
-_BRIDGE_ARTICLES = frozenset(("a", "an", "the"))
 READING_VERSION = 1
+# Judged Oct 2026 (round 4): the lockups grew piles of micro bridge type
+# (Thiel's list to 6 lines in 5 sizes, 'the Green Revolution / agriculture'
+# at ~1.3% of the frame height; Jobs' payoff likewise). A lockup no longer
+# sets the phrase's other words: they stay captioned beside it (owned():
+# "rest"; readings() writes no bridges), and the lockup is only its designed
+# rows. An OLD stored reading with bridges still parses; while this switch
+# is off its bridge lines are never drawn or timed (lockup_reveals) — the
+# render recomputes the reading anyway (attach_readings).
+LOCKUP_SETS_BRIDGES = False
+# A word-timed reveal within this much after its item's start shows AT the
+# start: the write puts a lockup's window on its first visible word, or on a
+# cut up to this far before it (motion_tools: one event, not a cut and then
+# a word two frames later) — never further off its word than this.
+READING_SNAP_S = 0.15
 
 
 def reads_phrase(item):
-    """Does the template set a phrase's unshown words itself (lockups)?"""
+    """Is the template a lockup that reads a phrase row by row (its rows
+    are timed to the speech: ``reading``)?"""
     return bool(_spec(item).get("reads_phrase"))
+
+
+def reads_onsets(item):
+    """Does the template reveal its printed words on their spoken onsets
+    (spec ``reads_onsets``: marker_text's lines; every ``reads_phrase``
+    lockup too)? Such an item gets a ``reading`` (MotionItem.reading)."""
+    sp = _spec(item)
+    return bool(sp.get("reads_phrase") or sp.get("reads_onsets"))
 
 
 def phrase_ids(words):
@@ -1034,12 +1484,15 @@ def _runs(idx):
 
 
 def owned(m, words, word_toks, mids, pids, carried):
-    """What graphic ``m`` owns (one reading path), or None when it shows no
-    content word of what is said. {"from": program second the captions
-    yield from (its first shown word, or its start), "joined": runs of word
-    indices a lockup sets in small type, "yielded": indices left to the
-    sound (a graphic that is no lockup), "beside": runs too long for a
-    lockup (they stay captioned), "absorbed": list joints dropped}."""
+    """What graphic ``m`` takes from the captions beyond the words it
+    shows, or None when it shows no content word of what is said.
+    {"from": program second its phrase is first shown (its first shown
+    word, or its start), "absorbed": [] (connector joints between shown
+    words go with them in carried_by), "rest": runs of the
+    phrase's other words said while it is up — they stay captioned beside
+    it (every heard word reaches the screen once: no graphic leaves a word
+    to the sound, and a lockup no longer sets them in small type itself),
+    "joined"/"yielded"/"beside": [] (older callers)}."""
     if not any(is_content(t) for i in carried for t in word_toks[i]):
         return None
     s, e = float(m["start"]), float(m["end"])
@@ -1048,43 +1501,44 @@ def owned(m, words, word_toks, mids, pids, carried):
     phrases = {pids[i] for i in carried}
     span = [i for i in range(len(words)) if pids[i] in phrases and i not in carried
             and float(words[i]["t0"]) >= start - 1e-3 and mids[i] < e]
-    out = {"from": round(start, 3), "joined": [], "yielded": [], "beside": [],
-           "absorbed": []}
-    if not reads_phrase(m):
-        out["yielded"] = span
-        return out
-    for run in _runs(span):
-        while run and run[0] - 1 in carried and \
-                str(words[run[0]].get("w") or "").strip(" ,").lower() in _EDGE_CONJ:
-            out["absorbed"].append(run.pop(0))
-        while run and run[-1] + 1 in carried and \
-                str(words[run[-1]].get("w") or "").strip(" ,").lower() in _EDGE_CONJ:
-            out["absorbed"].append(run.pop())
-        if not run:
-            continue
-        if len(run) > BRIDGE_MAX_WORDS or len(_said([words[i] for i in run])) > BRIDGE_MAX_CHARS:
-            out["beside"].append(run)
-        else:
-            out["joined"].append(run)
+    out = {"from": round(start, 3), "absorbed": [], "rest": [],
+           "joined": [], "yielded": [], "beside": []}
+    # every word of it the graphic does not show stays captioned, list
+    # joints included ("and the Green Revolution agriculture" reads on as
+    # the caption beside a list that shows the other items)
+    out["rest"] = _runs(span)
     return out
+
+
+_LINE_BREAK_RE = re.compile(r"\s+/\s*|\s*/\s+")
+ONSET_TEXT_MAX_LINES = 3
 
 
 def display_rows(item):
     """The words each row of a lockup prints, split like the page splits
-    them (MG.starWords: whitespace, *accent* stars dropped)."""
+    them (MG.starWords: whitespace, *accent* stars dropped). A template that
+    reveals one text on its onsets (``reads_onsets``: marker_text) is ONE
+    row of its words in reading order, its ' / ' breaks dropped like the
+    page drops them (at most ONSET_TEXT_MAX_LINES lines)."""
+    params = item.get("params") or {}
+    if not params.get("rows") and _spec(item).get("reads_onsets"):
+        text = _LINE_BREAK_RE.sub("\n", str(params.get("text") or "")).strip()
+        lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+        words = [t.replace("*", "") for ln in lines[:ONSET_TEXT_MAX_LINES]
+                 for t in ln.split() if t.replace("*", "")]
+        return [words] if words else []
     out = []
-    for row in (item.get("params") or {}).get("rows") or []:
+    for row in params.get("rows") or []:
         text = row.get("text") if isinstance(row, dict) else None
         out.append([t.replace("*", "") for t in str(text or "").split()
                     if t.replace("*", "")])
     return out
 
 
-def _reading_of(m, words, word_toks, mids, carried, joined):
+def _reading_of(m, words, word_toks, mids, carried):
     """The ``reading`` of lockup ``m``: per row, per printed word, the
     composition second its carried spoken word starts (None: not said,
-    e.g. a headline row), and the joined runs as small bridge lines placed
-    after the row of the shown word before them (-1: before the first)."""
+    e.g. a headline row). ``bridges`` is always [] (see readings)."""
     rows = display_rows(m)
     s = float(m["start"])
     flat_d = [(r, j) for r, ws in enumerate(rows) for j in range(len(ws))]
@@ -1093,7 +1547,6 @@ def _reading_of(m, words, word_toks, mids, carried, joined):
     near = sorted(i for i in carried)
     flat_w = [(t, i) for i in near for t in word_toks[i]]
     at = [[None] * len(ws) for ws in rows]
-    row_of = {}
     if seq and flat_w:
         sm = difflib.SequenceMatcher(None, [t for t, _k in seq], [t for t, _i in flat_w],
                                      autojunk=False)
@@ -1102,57 +1555,28 @@ def _reading_of(m, words, word_toks, mids, carried, joined):
                 r, j = flat_d[seq[blk.a + k][1]]
                 i = flat_w[blk.b + k][1]
                 t = round(max(0.0, float(words[i]["t0"]) - s), 3)
+                if t <= READING_SNAP_S:
+                    t = 0.0             # on the window's first frame (a cut)
                 if at[r][j] is None or t < at[r][j]:
                     at[r][j] = t
-                row_of.setdefault(i, r)
-    import captions as caplib
-    bridges = []
-    for run in joined:
-        t_first = float(words[run[0]]["t0"])
-        after = -1
-        for i in sorted((i for i in row_of if float(words[i]["t0"]) <= t_first),
-                        key=lambda i: float(words[i]["t0"])):
-            after = row_of[i]
-        ws, group = [], 0          # group: characters glued so far
-        for k, i in enumerate(run):
-            text = str(words[i].get("w") or "").strip().strip("\"“”")
-            if i == run[-1]:
-                text = text.rstrip(".,;:…")
-            if text:
-                w = {"t": text, "s": round(max(0.0, float(words[i]["t0"]) - s), 3)}
-                # a name, a number and its noun, a determiner or an article
-                # and its noun never break across the bridge line's wrap
-                # ("the Green / Revolution" was the caption defect all over
-                # again), as long as the glued group still fits the column
-                if k + 1 < len(run):
-                    nxt = str(words[run[k + 1]].get("w") or "").strip().strip("\"“”")
-                    want = caplib._glue(words[i], words[run[k + 1]],
-                                        words[run[k - 1]] if k else None) \
-                        >= caplib.GLUE_NUMBER or \
-                        text.lower().strip("'’") in _BRIDGE_ARTICLES
-                    span = (group or len(text)) + 1 + len(nxt)
-                    if want and nxt and span <= BRIDGE_GLUE_MAX_CHARS:
-                        w["g"] = 1
-                        group = span
-                    else:
-                        group = 0
-                ws.append(w)
-        if ws:
-            bridges.append({"after": after, "words": ws})
-    if not any(v is not None for row in at for v in row) and not bridges:
+    if not any(v is not None for row in at for v in row):
         return None
-    return {"v": READING_VERSION, "rows": at, "bridges": bridges}
+    return {"v": READING_VERSION, "rows": at, "bridges": []}
 
 
 def readings(edl, index, tl):
-    """{item id: reading} for the whole lockups (``reads_phrase``) of a
-    program: their printed words timed to the spoken onsets and, under
-    transcript captions with mute_captions unset, the phrase's other words
-    joined as bridge lines (see owned). A windowed item (a stitched piece,
+    """{item id: reading} for the word-timed items (``reads_onsets``:
+    phrase_build lockups, marker_text) of a program: their printed words
+    timed to the spoken onsets (a reveal within READING_SNAP_S of the
+    item's start shows at the start). ``bridges`` is always empty now — the
+    words of the phrase a lockup's rows leave out stay CAPTIONED beside it
+    (plan / owned: every heard word reaches the screen once), instead of
+    being set as micro bridge rows inside it (the judged 6-line piles with
+    1.3%-of-frame type). A windowed item (a stitched piece,
     ``full_duration_s``) keeps the reading its full program gave it."""
     import captions as caplib
     items = [m for m in program_items(edl, tl)
-             if reads_phrase(m) and not m.get("full_duration_s")]
+             if reads_onsets(m) and not m.get("full_duration_s")]
     if not items or not (index or {}).get("words"):
         return {}
     words = caplib.transcript_words(edl, index, tl)
@@ -1160,29 +1584,10 @@ def readings(edl, index, tl):
         return {}
     word_toks = _token_rows([w.get("w") for w in words])
     mids = [_mid(w) for w in words]
-    caps = edl.get("captions")
-    cap_words = None
-    if isinstance(caps, dict) and caps.get("mode") == "from_transcript":
-        cap_words = caplib.transcript_words(edl, index, tl,
-                                            caplib.effective_caption_mutes(edl))
-        cap_toks = _token_rows([w.get("w") for w in cap_words])
-        cap_mids = [_mid(w) for w in cap_words]
-        cap_pids = phrase_ids(cap_words)
-        pos = {(round(float(w["t0"]), 3), str(w.get("w"))): i for i, w in enumerate(words)}
     out = {}
     for m in items:
         carried = carried_by(m, words, word_toks, mids, hero_only=False)
-        joined = []
-        if cap_words and mode(m) == MODE_WORDS:
-            c_carried = carried_by(m, cap_words, cap_toks, cap_mids)
-            own = owned(m, cap_words, cap_toks, cap_mids, cap_pids, c_carried)
-            for run in (own or {}).get("joined") or []:
-                mapped = [pos.get((round(float(cap_words[i]["t0"]), 3),
-                                   str(cap_words[i].get("w")))) for i in run]
-                mapped = [i for i in mapped if i is not None]
-                if mapped:
-                    joined.append(mapped)
-        rd = _reading_of(m, words, word_toks, mids, carried, joined)
+        rd = _reading_of(m, words, word_toks, mids, carried)
         if rd:
             out[m["id"]] = rd
     return out
@@ -1244,7 +1649,10 @@ def lockup_reveals(item, fps=30.0):
     params = item.get("params") or {}
     rd = item.get("reading") if isinstance(item.get("reading"), dict) else {}
     rd_rows = rd.get("rows") if isinstance(rd.get("rows"), list) else []
-    bridges = rd.get("bridges") if isinstance(rd.get("bridges"), list) else []
+    # the page sets only its rows (round 4): a stored reading's bridge lines
+    # are not drawn, so they reveal nothing
+    bridges = (rd.get("bridges") if isinstance(rd.get("bridges"), list) else []) \
+        if LOCKUP_SETS_BRIDGES else []
     lead = LOCKUP_RISE_LEAD_S if params.get("entrance") == "rise" else 0.0
 
     def onset(v):
@@ -1312,6 +1720,44 @@ def lockup_reveals(item, fps=30.0):
     return out
 
 
+# A word of an onset-timed line starts its short rise this early.
+ONSET_RISE_LEAD_S = 0.06
+
+
+def onset_reveals(item):
+    """Composition seconds at which a ``reads_onsets`` template that is not
+    a lockup (marker_text) reveals each printed word, mirroring the page:
+    a word ONSET_RISE_LEAD_S before its spoken onset, a word nobody says
+    with the word before it (leading ones with the first said word), never
+    before a word before it. [] when fewer than half its printed words are
+    said (the page keeps its own authored 0.3 s build) or it is a lockup
+    (lockup_reveals)."""
+    if not isinstance(item, dict) or reads_phrase(item) or not reads_onsets(item):
+        return []
+    rd = item.get("reading") if isinstance(item.get("reading"), dict) else {}
+    rows = rd.get("rows") if isinstance(rd.get("rows"), list) else []
+    n = sum(len(r) for r in display_rows(item))
+    flat = [v for row in rows if isinstance(row, list) for v in row][:n]
+    known = [None if v is None else _js_float(v, None) for v in flat]
+    known = [None if v is None else max(0.0, v - ONSET_RISE_LEAD_S) for v in known]
+    if not n or 2 * sum(1 for v in known if v is not None) < n:
+        return []
+    known += [None] * (n - len(known))
+    cur = next(v for v in known if v is not None)
+    out = []
+    for v in known:
+        cur = max(cur, v) if v is not None else cur
+        out.append(round(cur, 4))
+    return out
+
+
+def first_reveal(item):
+    """When a word-timed item first draws a word (composition seconds), or
+    None when its reveals are not word-timed."""
+    r = lockup_reveals(item) or onset_reveals(item)
+    return r[0] if r else None
+
+
 def attach_readings(edl, index, tl):
     """Write each whole lockup's ``reading`` (readings) onto its motion item
     in place — and drop a stale one — before anything measures or renders
@@ -1323,7 +1769,7 @@ def attach_readings(edl, index, tl):
         print(f"[motion] lockup reading skipped: {str(e)[:160]}", flush=True)
         return edl
     for m in edl.get("motion") or []:
-        if not isinstance(m, dict) or m.get("full_duration_s") or not reads_phrase(m):
+        if not isinstance(m, dict) or m.get("full_duration_s") or not reads_onsets(m):
             continue
         if m.get("id") in got:
             m["reading"] = got[m["id"]]
@@ -1367,13 +1813,13 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
     mutes = caplib.effective_caption_mutes(edl)
     after_mutes = caplib.transcript_words(edl, index, tl, mutes)
     p = plan(edl, index, tl, after_mutes)
-    key = lambda w: (round(float(w["t0"]), 3), str(w.get("w")))  # noqa: E731
+    key = said_key
     shown = {key(w) for w in p.caption_words()}
-    # carried: on the graphic; joined: set in small type on the lockup
+    # carried: on the graphic (a word it shows, or a joint between two)
     carried = {key(after_mutes[i]) for i, (_o, why) in p.hidden.items()
-               if why in ("carried", "joined")}
+               if why == "carried"}
     room = {key(after_mutes[i]): (owner, why) for i, (owner, why) in p.hidden.items()
-            if why in ("room", "unmeasured", "yield")}
+            if why in ("room", "unmeasured")}
     screen = _on_screen(edl, tl)
     toks = _token_rows([w.get("w") for w in spoken])
     state = []                         # covered / neutral / uncovered per word
@@ -1399,13 +1845,21 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
                 gaps.append(_gap(edl, spoken, hard[0], hard[-1], dur, room, key))
     for i, st in enumerate(state):
         if run and (st == "covered" or
-                    float(spoken[i]["t0"]) - float(spoken[run[-1]]["t1"]) > min_gap):
+                    float(spoken[i]["t0"]) - float(spoken[run[-1]]["t1"]) >
+                    max(min_gap, SOUND_OFF_GAP_S)):
             flush()
             run = []
         if st != "covered":
             run.append(i)
     flush()
     return gaps
+
+
+def heard_unshown(edl, index, tl):
+    """Every heard content word no caption and no graphic or text shows,
+    however short the run (the owner's rule: every heard word reaches the
+    screen once) — sound_off_gaps with no minimum length."""
+    return sound_off_gaps(edl, index, tl, min_gap=0.0)
 
 
 def _gap(edl, spoken, i0, i1, dur, room, key):
@@ -1415,52 +1869,38 @@ def _gap(edl, spoken, i0, i1, dur, room, key):
     for i in range(i0, i1 + 1):
         if key(spoken[i]) in room:
             owner, why = room[key(spoken[i])]
-            if why == "yield":
-                cause = (f"captions yield to motion graphic '{owner}' while it shows that "
-                         "phrase (one reading path), and it does not print those words")
-                fix = (f"end '{owner}' where its own words end so those words are "
-                       "captioned, carry them on it, or make it a phrase_build (a lockup "
-                       "sets them in small type)")
-            elif why == "unmeasured":
+            if why == "unmeasured":
                 cause = (f"motion graphic '{owner}' has no box measured at this frame "
                          "shape, so it is assumed to sit on the caption band (a render "
                          "measures it)")
                 fix = (f"re-save '{owner}' (set_motion_graphic) so its box is measured, "
                        "keep it off the caption band, or carry those words on it")
             else:
-                cause = (f"motion graphic '{owner}' leaves no caption band clear of it "
-                         "and the face")
+                cause = (f"motion graphic '{owner}' leaves no caption band clear of it, "
+                         "the face and the layout")
                 fix = (f"move '{owner}' off the caption band (its y param) or carry "
                        "those words on it")
             break
     else:
-        for m in program_items(edl):
-            if mode(m) == MODE_ALL and m["start"] <= mid <= m["end"]:
-                owner = m["id"]
-                cause = f"motion graphic '{owner}' mutes the captions (mute_captions=true)"
-                fix = (f"leave '{owner}' mute_captions unset so only the words it "
-                       "shows are hidden")
+        for t in edl.get("texts") or []:
+            try:
+                inside = float(t["start"]) <= mid <= float(t["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if inside and t.get("mute_captions"):
+                owner = t.get("id")
+                cause = f"text '{owner}' mutes the captions"
+                fix = (f"set '{owner}' mute_captions=false, or put those words "
+                       "on it")
                 break
         else:
-            for t in edl.get("texts") or []:
-                try:
-                    inside = float(t["start"]) <= mid <= float(t["end"])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if inside and t.get("mute_captions"):
-                    owner = t.get("id")
-                    cause = f"text '{owner}' mutes the captions"
-                    fix = (f"set '{owner}' mute_captions=false, or put those words "
-                           "on it")
+            for m0, m1 in edl.get("caption_mutes") or []:
+                if float(m0) <= mid <= float(m1):
+                    cause = f"set_caption_mutes window {float(m0):g}-{float(m1):g}s"
+                    fix = "narrow or remove that caption mute"
                     break
             else:
-                for m0, m1 in edl.get("caption_mutes") or []:
-                    if float(m0) <= mid <= float(m1):
-                        cause = f"set_caption_mutes window {float(m0):g}-{float(m1):g}s"
-                        fix = "narrow or remove that caption mute"
-                        break
-                else:
-                    cause = "no caption covers them"
+                cause = "no caption covers them"
     said = _said(spoken[i0:i1 + 1])
     if len(said) > 90:
         said = said[:87].rstrip() + "…"

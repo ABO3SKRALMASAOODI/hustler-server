@@ -8,12 +8,10 @@ What is pinned here:
      voice is its end. A word whose middle really was clipped stays out.
   2. The caption chunker keeps names and noun phrases on one card ("the
      Green / Revolution agriculture" was garbage).
-  3. A graphic that shows a phrase owns it from its first shown word to its
-     exit: the captions yield there (no two texts at once), the words said
-     before it stay captioned and clear as it lands, a lockup (phrase_build)
-     sets the phrase's other words in small type on their onsets, any other
-     graphic leaves them to the sound and its write NOTE and the sound-off
-     audit say so.
+  3. A graphic takes the words it shows; the rest of its phrase stays
+     CAPTIONED beside it (round 6: every heard word reaches the screen once
+     — a lockup no longer sets them as micro bridge rows, no graphic leaves
+     them to the sound), and its write NOTE names them.
   4. phrase_build reveals in reading order: spoken rows on their spoken
      onsets, unspoken rows on their 'at' with the stagger squeezed so a row
      is complete before the next one starts ("GARBAGE" never before "were").
@@ -248,40 +246,32 @@ def _paper(start=0.0, end=5.3, **kw):
     return m
 
 
-def test_a_lockup_owns_its_phrase_and_sets_the_words_its_rows_leave_out():
+def test_a_lockup_shows_its_rows_and_the_captions_carry_what_it_leaves_out():
     edl = _edl([[0.0, 7.0]], [_paper()], words=PAPER)
     ix = _index(PAPER)
     tl = Timeline(edl["keep"])
     p = captions.caption_plan(edl, ix, tl)
     shown = [w["w"] for w in p.caption_words()]
-    # the setup before its first shown word, and the next sentence, stay captioned
-    assert shown == ["there", "is", "going", "to", "be", "And", "so", "on."]
+    # every word the rows do not print is captioned, in reading order
+    assert shown == ["there", "is", "going", "to", "be", "three", "or", "four", "years",
+                     "from", "now", "that's", "ever", "going", "to", "think", "of",
+                     "of", "these", "things.", "And", "so", "on."]
     rep = p.report["paper"]
     assert rep["owns_from"] == pytest.approx(0.7)
-    assert [caption_carry._said(r) for r in rep["joined"]] == [
+    assert [caption_carry._said(r) for r in rep["captioned"]] == [
         "three or four years from now that's ever going to think of", "of these things"]
-    assert p.yield_spans == [[0.7, 5.3]]
-    # the setup line clears as the lockup's first word lands (no two texts)
-    cues = motion_captions.cues(edl, ix, tl)
-    setup = [c for c in cues if c["s"] < 0.7]
-    assert setup and all(c["e"] <= 0.7 + 1e-6 for c in setup)
-    assert not any(0.7 <= c["s"] < 5.3 for c in cues)
-    # the reading: rows on their onsets, bridges after the row before them
+    assert rep["joined"] == [] and p.yield_spans == []
+    # the reading: rows on their onsets, no bridge rows
     rd = caption_carry.readings(edl, ix, tl)["paper"]
     assert rd["rows"] == [[0.7, 0.92, 1.28], [3.28, 3.5, 3.66], [3.9, 4.2]]
-    assert [(b["after"], " ".join(w["t"] for w in b["words"]), b["words"][0]["s"])
-            for b in rd["bridges"]] == [
-        (0, "three or four years from now that's ever going to think of", 1.6),
-        (2, "of these things", 4.36)]
-    # the sound-off audit counts the set words as on screen
-    assert not caption_carry.sound_off_gaps(edl, ix, tl)
-    # the write NOTE says where captions yield and what the lockup sets
+    assert rd["bridges"] == []
+    assert not caption_carry.heard_unshown(edl, ix, tl)
+    # the write NOTE names the words the captions carry beside it
     notes = motion_tools._word_level_notes(edl, ix, tl, edl["motion"][0], canvas=(1080, 1920))
-    assert any("One reading path" in n and "0.70s" in n and "of these things" in n
-               for n in notes), notes
+    assert any("Captions carry the words" in n and "of these things" in n for n in notes), notes
 
 
-def test_a_graphic_that_is_no_lockup_leaves_the_rest_of_its_phrase_to_the_sound():
+def test_a_graphic_that_is_no_lockup_leaves_the_rest_of_its_phrase_to_the_captions():
     words = [("but", 0.0, 0.2), ("it's", 0.2, 0.35), ("not", 0.62, 0.75),
              ("quite", 0.75, 0.9), ("been", 0.9, 1.05), ("enough", 1.3, 1.8),
              ("to", 1.9, 2.0), ("take", 2.0, 2.3), ("our", 2.3, 2.45),
@@ -294,17 +284,15 @@ def test_a_graphic_that_is_no_lockup_leaves_the_rest_of_its_phrase_to_the_sound(
     ix = _index(words)
     tl = Timeline(edl["keep"])
     shown = [w["w"] for w in captions.caption_words(edl, ix, tl)]
-    assert shown == ["but", "it's", "the", "next", "level."]
-    gaps = caption_carry.sound_off_gaps(edl, ix, tl)
-    assert gaps and gaps[0]["owner"] == "enough" and "one reading path" in gaps[0]["cause"]
+    # judged: "to take our civilization to" was heard and never shown
+    assert shown == ["but", "it's", "to", "take", "our", "civilization", "to", "the",
+                     "next", "level."]
+    assert not caption_carry.heard_unshown(edl, ix, tl)
     notes = motion_tools._word_level_notes(edl, ix, tl, edl["motion"][0], canvas=(1080, 1920))
-    # the end it names gives those words back: before the next word's midpoint
-    # ("to" 1.9-2.0), not "enough"'s end + 0.3 s, which still swallowed "to"
-    assert any("never reads \"to take our civilization to\"" in n and "End it at 1.93s" in n
+    # the end it names keeps it to its own words: before the next word's
+    # midpoint ("to" 1.9-2.0)
+    assert any("\"to take our civilization to\"" in n and "end it at 1.93s" in n
                for n in notes), notes
-    ended = _edl([[0.0, 6.0]], [dict(slam, end=1.93)], words=words)
-    assert [w["w"] for w in captions.caption_words(ended, ix, tl)] == \
-        ["but", "it's", "to", "take", "our", "civilization", "to", "the", "next", "level."]
     # an explicit false keeps the captions running beside it (unchanged)
     edl = _edl([[0.0, 6.0]], [dict(slam, mute_captions=False)], words=words)
     assert "civilization" in [w["w"] for w in captions.caption_words(edl, ix, tl)]
@@ -363,62 +351,66 @@ def test_a_paraphrased_row_is_named_in_the_write_note():
                                           params={"rows": rows}, id="list")
     assert "row 2 \"supersonic jets\" prints 'jets'" in out, out
     stored = edl["motion"][0]
-    # the stored item carries its reading (rows on onsets, the bridge "aviation")
-    assert stored["reading"]["rows"][0] == [0.2]
-    assert [w["t"] for b in stored["reading"]["bridges"] for w in b["words"]] == ["aviation"]
+    # the stored item carries its reading (rows on onsets; no bridge lines:
+    # "aviation" stays with the captions). Its window starts on its first
+    # visible word ("rockets" at 0.2 s), so the rows are timed from there.
+    assert stored["start"] == pytest.approx(0.2)
+    assert stored["reading"]["rows"][0] == [0.0]
+    assert stored["reading"]["bridges"] == []
+    assert "WINDOW: starts on its first visible word at 0.2s" in out, out
     del m
 
 
-def test_a_bridge_line_never_wraps_inside_a_name():
+def test_the_captions_beside_a_lockup_never_split_a_name():
     words = [("rockets", 0.2, 0.6), ("and", 0.6, 0.7), ("the", 0.8, 0.9),
              ("Green", 0.9, 1.1), ("Revolution", 1.1, 1.5), ("agriculture", 1.5, 2.0),
              ("and", 2.0, 2.1), ("new", 2.1, 2.3), ("medicines.", 2.3, 2.9)]
     rows = [{"text": "ROCKETS"}, {"text": "NEW *MEDICINES*"}]
     m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 3.2,
-         "params": {"rows": rows}}
+         "params": {"rows": rows},
+         "footprint": {"box": [0.1, 0.3, 0.9, 0.5], "ar": round(1080 / 1920, 4), "faces": []}}
     edl = _edl([[0.0, 4.0]], [m], words=words)
-    rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
-    (bridge,) = rd["bridges"]
-    # ...nor after its article ("the / Green Revolution")
-    assert [(w["t"], w.get("g")) for w in bridge["words"]] == [
-        ("the", 1), ("Green", 1), ("Revolution", None), ("agriculture", None)]
-    assert validate_edl(dict(edl, motion=[dict(m, reading=rd)]), 9.0).model_dump()[
-        "motion"][0]["reading"]["bridges"][0]["words"][1]["g"] == 1
+    ix = _index(words)
+    tl = Timeline(edl["keep"])
+    assert caption_carry.readings(edl, ix, tl)["list"]["bridges"] == []
+    cues = motion_captions.cues(edl, ix, tl)
+    pages = [" ".join(w["t"] for w in c["w"]) for c in cues]
+    assert any("Green Revolution" in pg for pg in pages), pages
+    assert not caption_carry.heard_unshown(edl, ix, tl)
 
 
-def test_a_glued_bridge_group_always_fits_the_column():
-    # a run of capitalised words is glued only while the group stays short
-    # enough to fit the lockup's column (a nowrap group never overflows it)
-    names = "the United States Department Of Health And Human Services".split()
-    words = [("rockets", 0.2, 0.6)] + [(n, 0.7 + 0.2 * k, 0.88 + 0.2 * k)
-                                       for k, n in enumerate(names)] + \
-        [("and", 2.6, 2.7), ("new", 2.7, 2.9), ("medicines.", 2.9, 3.3)]
-    rows = [{"text": "ROCKETS"}, {"text": "NEW *MEDICINES*"}]
-    m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 3.6,
-         "params": {"rows": rows}}
-    edl = _edl([[0.0, 4.0]], [m], words=words)
-    rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["list"]
-    (bridge,) = rd["bridges"]
-    groups, cur = [], []
-    for w in bridge["words"]:
-        cur.append(w["t"])
-        if not w.get("g"):
-            groups.append(" ".join(cur))
-            cur = []
-    assert " ".join(groups) == " ".join(names)
-    assert len(groups) > 1 and all(len(g) <= caption_carry.BRIDGE_GLUE_MAX_CHARS
-                                   for g in groups), groups
-
-
-def test_but_and_so_are_set_on_the_lockup_not_dropped_as_list_joints():
+def test_but_and_so_are_captioned_beside_the_lockup():
     words = [("great", 0.2, 0.5), ("companies", 0.5, 1.0), ("but", 1.1, 1.3),
              ("not", 1.3, 1.5), ("quite", 1.5, 1.8), ("enough.", 1.8, 2.3)]
     rows = [{"text": "great companies"}, {"text": "*ENOUGH*"}]
     m = {"id": "pb", "template": "phrase_build", "start": 0.0, "end": 2.6,
-         "params": {"rows": rows}}
+         "params": {"rows": rows},
+         "footprint": {"box": [0.1, 0.3, 0.9, 0.5], "ar": round(1080 / 1920, 4), "faces": []}}
     edl = _edl([[0.0, 3.0]], [m], words=words)
-    rd = caption_carry.readings(edl, _index(words), Timeline(edl["keep"]))["pb"]
-    assert [" ".join(w["t"] for w in b["words"]) for b in rd["bridges"]] == ["but not quite"]
+    ix = _index(words)
+    tl = Timeline(edl["keep"])
+    assert [w["w"] for w in captions.caption_words(edl, ix, tl)] == ["but", "not", "quite"]
+
+
+def test_a_lockup_sets_no_bridge_lines_its_skipped_words_are_captioned():
+    # the Thiel list: 'the Green Revolution agriculture' between two rows
+    # used to become a 1.3%-of-frame bridge line; it is captioned now
+    words = [("rockets", 0.2, 0.6), ("and", 0.6, 0.7), ("the", 0.8, 0.9),
+             ("Green", 0.9, 1.1), ("Revolution", 1.1, 1.5), ("agriculture", 1.5, 2.0),
+             ("and", 2.0, 2.1), ("new", 2.1, 2.3), ("medicines.", 2.3, 2.9)]
+    rows = [{"text": "ROCKETS"}, {"text": "NEW *MEDICINES*"}]
+    m = {"id": "list", "template": "phrase_build", "start": 0.0, "end": 3.2,
+         "params": {"rows": rows},
+         "footprint": {"box": [0.1, 0.5, 0.9, 0.62], "ar": round(1080 / 1920, 4), "faces": []}}
+    edl = _edl([[0.0, 4.0]], [m], words=words)
+    ix = _index(words)
+    tl = Timeline(edl["keep"])
+    rd = caption_carry.readings(edl, ix, tl)["list"]
+    assert rd["bridges"] == []
+    shown = [w["w"] for w in captions.caption_words(edl, ix, tl)]
+    assert ["the", "Green", "Revolution", "agriculture"] == \
+        [w for w in shown if w in ("the", "Green", "Revolution", "agriculture")]
+    assert not caption_carry.sound_off_gaps(edl, ix, tl)
 
 
 def test_mute_true_and_false_keep_their_contracts_and_still_time_the_rows():
@@ -438,10 +430,8 @@ def test_the_reading_is_stored_cleaned_and_handed_to_the_page():
     tl = Timeline(edl["keep"])
     motion_layer.fill_footprints(edl, 1080, 1920, 30.0, index=ix, tl=tl)
     item = edl["motion"][0]
-    assert item["reading"]["bridges"]
-    # a measured box drawn without its bridge lines is measured again
-    assert item.get("footprint") is None or item["footprint"].get("estimated") or \
-        motion_engine.available()
+    assert item["reading"]["rows"][0] == [0.7, 0.92, 1.28]
+    assert item["reading"]["bridges"] == []
     again = validate_edl(edl, 20.0).model_dump()["motion"][0]["reading"]
     assert again == item["reading"]
     junk = validate_edl(dict(edl, motion=[dict(item, reading={"rows": "x"})]), 20.0)
@@ -537,26 +527,38 @@ def test_unspoken_rows_reveal_in_reading_order_within_their_at_times():
 
 
 @needs_browser
-def test_spoken_rows_land_on_their_onsets_and_bridges_sit_between_rows():
+def test_spoken_rows_land_on_their_onsets_and_old_bridges_are_not_drawn():
+    # a reading stored before round 4 still names bridge lines: the page sets
+    # only the rows (the captions carry the rest)
     reading = {"v": 1, "rows": [[0.7, 0.92, 1.28], [3.28, 3.5, 3.66], [3.9, 4.2]],
                "bridges": [{"after": 0, "words": [{"t": t, "s": 1.6 + 0.1 * i} for i, t in
-                                                  enumerate("three or four years from now".split())]},
-                           {"after": 2, "words": [{"t": "of", "s": 4.36}, {"t": "these", "s": 4.46},
-                                                  {"t": "things", "s": 4.58}]}]}
+                                                  enumerate("three or four years from now".split())]}]}
     job = _job(PAPER_ROWS, reading, end=5.3, y=0.3)
     st = asyncio.run(_states(job, [0.65, 0.95, 1.65, 3.3, 4.5, 5.2]))
-    kinds = [r["bridge"] for r in st[-1]]
-    assert kinds == [False, True, False, False, True]       # reading order in the block
+    assert [r["bridge"] for r in st[-1]] == [False, False, False]
     assert st[0][0]["words"] == [0, 0, 0]                    # 'at' 0.7: nothing before the onset
     assert st[1][0]["words"] == [1, 1, 0]                    # "no college" at 0.7 / 0.92
-    assert st[2][1]["words"][:1] == [1] and st[2][2]["words"] == [0, 0, 0]
-    assert st[3][2]["words"] == [1, 0, 0]
-    assert st[4][4]["words"] == [1, 1, 0] and st[5][4]["words"] == [1, 1, 1]
+    assert st[2][1]["words"] == [0, 0, 0]
+    assert st[3][1]["words"] == [1, 0, 0] and st[3][2]["words"] == [0, 0]
+    assert st[5][2]["words"] == [1, 1]
     # pre-laid-out: nothing moves while words land
     assert [r["top"] for r in st[0]] == [r["top"] for r in st[-1]]
-    # bridges are small type, smaller than every row
-    rows_fs = [r["fs"] for r in st[-1] if not r["bridge"]]
-    assert all(r["fs"] < min(rows_fs) for r in st[-1] if r["bridge"])
+
+
+@needs_browser
+def test_a_lockup_merges_more_than_three_sizes_into_three():
+    rows = [{"text": "ROCKETS", "role": "condensed", "size": "1.2", "at": "0"},
+            {"text": "supersonic aviation", "role": "serif", "size": "0.8", "at": "0.1"},
+            {"text": "underwater cities", "role": "sans", "size": "0.75", "at": "0.2"},
+            {"text": "NEW *MEDICINES*", "role": "condensed", "size": "1.0", "at": "0.3"}]
+    st = asyncio.run(_states(_job(rows, end=2.0), [1.5]))[0]
+    # rows 2 and 3 (0.8 serif, 0.75 sans) share one level: their optical
+    # sizes keep the role ratio (serif 1.1, sans 1.0), nothing else changes
+    fs = [r["fs"] for r in st]
+    assert fs[1] / fs[2] == pytest.approx(1.1, rel=0.01)
+    assert fs[0] / fs[3] == pytest.approx(1.2, rel=0.01)
+    assert motion_tools.size_levels([1.2, 0.8, 0.75, 1.0]) == \
+        {1.2: 1.2, 0.8: 0.77, 0.75: 0.77, 1.0: 1.0}
 
 
 @needs_browser

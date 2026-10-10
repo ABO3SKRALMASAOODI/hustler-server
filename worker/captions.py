@@ -1879,7 +1879,81 @@ def _premium_chunks_v2(out_words, max_w, chunk_chars, p):
     chunks = []
     for region in regions:
         chunks.extend(_chunk_region_v2(region, max_w, chunk_chars, p))
-    return chunks
+    return _merge_orphans(chunks, max_w)
+
+
+# A one-word page of a connector ('and', 'that', 'on') is no caption: it
+# flashes alone between a breath or a cut and the line it belongs to. It
+# joins the page after it (or before it) when they share a shot and a
+# place, and the joined page stays within the word cap.
+ORPHAN_WORDS = _GLUE_FUNCTION | frozenset(_WEAK_BOUNDARY_WORDS)
+ORPHAN_JOIN_GAP_S = 1.2
+
+
+def _ends_sentence(word):
+    return str((word or {}).get("w") or "").rstrip("\"'”’) ")[-1:] in _STRONG_END
+
+
+def _orphan(chunk):
+    """A one-word connector page — not a one-word question or exclamation
+    ('Why?', 'No!'), which is a beat of its own."""
+    if len(chunk) != 1 or _chunk_word_key(chunk[0]) not in ORPHAN_WORDS:
+        return False
+    return str(chunk[0].get("w") or "").rstrip("\"'”’) ")[-1:] not in "?!"
+
+
+def _joinable(a, b, max_w):
+    """May page ``a`` and the page ``b`` right after it become one?"""
+    if not a or not b or len(a) + len(b) > max_w:
+        return False
+    last, first = a[-1], b[0]
+    if last.get("place") != first.get("place") or _cut_between(last, first):
+        return False
+    if first.get("brk"):
+        return False        # an insert, a placement change, words a graphic took
+    try:
+        gap = float(first["t0"]) - float(last["t1"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return gap < ORPHAN_JOIN_GAP_S
+
+
+def _merge_orphans(chunks, max_w):
+    """Join every orphan connector page to a neighbour (see ORPHAN_WORDS):
+    forward when it opens the next thought ('and | the next level'),
+    backward when it trails the last ('it's | not'), whichever is allowed
+    and closer in time."""
+    out = [list(c) for c in chunks if c]
+    i = 0
+    while i < len(out):
+        if not _orphan(out[i]) or len(out) < 2:
+            i += 1
+            continue
+        nxt = out[i + 1] if i + 1 < len(out) else None
+        prv = out[i - 1] if i else None
+        # never across a sentence end: a word that ends its sentence ('on.')
+        # trails the last page only, one that opens a sentence leads the next
+        fwd = nxt is not None and not _ends_sentence(out[i][0]) and \
+            _joinable(out[i], nxt, max_w)
+        back = prv is not None and not _ends_sentence(prv[-1]) and \
+            _joinable(prv, out[i], max_w)
+        if fwd and back:
+            gf = float(nxt[0]["t0"]) - float(out[i][0]["t1"])
+            gb = float(out[i][0]["t0"]) - float(prv[-1]["t1"])
+            fwd = gf <= gb
+            back = not fwd
+        if fwd:
+            word = dict(out[i][0])
+            joined = [word] + [dict(w) for w in nxt]
+            joined[1].pop("brk", None)
+            out[i:i + 2] = [joined]
+        elif back:
+            word = dict(out[i][0])
+            word.pop("brk", None)
+            out[i - 1:i + 1] = [prv + [word]]
+            i -= 1
+        i += 1
+    return out
 
 
 def _premium_layout(disp, wpl, line_chars):
@@ -2739,15 +2813,11 @@ def effective_caption_mutes(edl):
             continue
         if e > s:
             spans.append([s, e])
-    if edl.get("motion"):
-        # A motion graphic owns a whole-window mute only when it says so
-        # (mute_captions=true). Unset is word-level: it hides just the words
-        # it shows (caption_plan / worker/caption_carry.py).
-        try:
-            import motion_layer
-            spans.extend(motion_layer.caption_mute_spans(edl))
-        except Exception:
-            pass
+    # A motion graphic never mutes a whole window (round 6, every heard word
+    # reaches the screen once): whatever its mute_captions, it hides just
+    # the words it shows, and the rest stay captioned clear of it — or, with
+    # no band clear of it and the face, are muted word by word and named
+    # (caption_plan / worker/caption_carry.py).
     merged = []
     for s, e in sorted(spans):
         if merged and s <= merged[-1][1] + 0.001:
@@ -2916,6 +2986,9 @@ def _positioned_events(out_words, captions, global_style, play_res):
                 ev["item_style"] = {"position": pos}
                 if anchor_y is not None:
                     ev["item_style"]["anchor_y"] = anchor_y
+        if words and words[0].get("place"):
+            for ev in made:
+                ev["_place"] = words[0]["place"]   # compiled_events' hold limit
         events.extend(made)
     events.sort(key=lambda x: (float(x.get("start", 0)),
                                int(x.get("layer", 0))))
@@ -3022,7 +3095,13 @@ def compiled_events(edl, index, tl, play_res=BASE_PLAY_RES):
         # ...nor into a stretch a graphic holds on the caption band, nor one
         # where a graphic owns its phrase (one reading path).
         events = _clamp_event_ends_to_mutes(
-            events, list(mutes) + carry.clamp_spans + carry.yield_spans)
+            events, list(mutes) + carry.yield_spans)
+        # A line never carries its place across a layout change onto the
+        # new layout (the plan re-solves placement there).
+        for ev in events:
+            lim = carry.hold_limit(float(ev["start"]), ev.pop("_place", None))
+            if float(ev["start"]) + 0.02 < lim < float(ev["end"]):
+                ev["end"] = lim
     else:
         events = apply_mutes(events, mutes)
     # Display holds must never outlive the program (or spill into the outro).

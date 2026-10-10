@@ -87,10 +87,19 @@ source range).
 ## Headlines
 
 `Name: claim`, using the verified speaker and a faithful paraphrase of the
-claim, at most about 60 characters. It poses the tension and never gives
-away the payoff ("Elon Musk: What is money actually worth?", not the answer).
-No dates, venues or metadata sub-lines. No first-person testimony the speaker
+clip's strongest line or statistic, at most about 60 characters. It is
+payoff-led: a specific claim the ending completes ("Peter Thiel: They
+promised us flying cars…" for a clip that ends on "…all we got was 140
+characters"), never a generic question ("Where did progress go?"), never
+the punchline itself, and never the hero word a later graphic slams (a
+headline that says "garbage" spends the moment the speaker says it). No
+dates, venues or metadata sub-lines. No first-person testimony the speaker
 did not give.
+
+While reading, note for each candidate what the editor can SHOW rather than
+re-type: a number, a contrast, a named product or place (with what it is:
+"Apple Lisa, 1983"), a spoken list whose items have real images. The brief's
+beats name those, so every graphic earns its place.
 
 ## The brief (one JSON per short)
 
@@ -110,7 +119,7 @@ The example shows the format only; never reuse its copy, cues or claims.
   "tier": "hero",
   "music": "inherit",
   "speaker": "Steve Jobs",
-  "headline": "Steve Jobs: Computer fonts have been garbage",
+  "headline": "Steve Jobs: Every computer has used weird type",
   "structure_reason": "he names concrete typefaces the viewer can see",
   "closest_alternative": "headline-pro: his delivery is strong but the fonts are the point",
   "story": {
@@ -121,8 +130,8 @@ The example shows the format only; never reuse its copy, cues or claims.
   },
   "beats": [
     {"role": "hook", "cue": "garbage", "source_s": 1312.4, "move": "word_slam serif, silent"},
-    {"role": "turn", "cue": "same width", "source_s": 1321.8, "move": "W-R-I-T-I-N-G mono cells, silent"},
-    {"role": "payoff", "cue": "real typefaces", "source_s": 1340.2, "move": "typeface cycle 0.3 s each, riser_2 into impact_1 on settle"}
+    {"role": "turn", "cue": "same width", "source_s": 1321.8, "move": "W-R-I-T-I-N-G mono cells, silent (shows what the words can't)"},
+    {"role": "payoff", "cue": "real typefaces", "source_s": 1340.2, "move": "typeface cycle 0.3 s each, held 0.8 s after the last word; silent unless the landing earns one sound"}
   ],
   "brief": "About 150 words of art direction ..."
 }

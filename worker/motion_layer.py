@@ -149,15 +149,23 @@ def measure_plates(items, probe):
 
 # ── the persistent headline band: yielding to other graphics ────────────
 # A persistent template (motion_templates.persistent: the headline of a card
-# or letterbox layout) holds its band for the program. While another graphic
-# occupies that band it fades out (YIELD_OUT_S, ending as the other lands) and
-# comes back YIELD_IN_S after it leaves; two band graphics less than
-# YIELD_MERGE_S apart keep it away (a flash back for half a second is a
-# flicker, not a restore). Decided at render time from the stored footprints,
-# so adding, moving or removing a lockup never leaves a stale headline.
-YIELD_OUT_S = 0.12
-YIELD_IN_S = 0.3
-YIELD_MERGE_S = 1.2
+# or letterbox layout) holds its band for the program. It HOLDS whenever no
+# other graphic occupies that band and swaps on the same frame: it is gone
+# on the frame the other's first ink lands (YIELD_OUT_S 0) and back from the
+# frame it leaves (a YIELD_IN_S return, never a hole). Judged Oct 2026: with
+# a fade out before each landing, a slow return and gaps under 1.2 s kept
+# clear, the Jobs band stood EMPTY at 4.2-4.4, 14.09-15.0, 17.79-18.58 and
+# 32.34-33.04 s and the headline blinked — "a dropped layer". Only a gap
+# shorter than YIELD_MERGE_S (render_qc flags an empty band longer than
+# that) stays yielded, and a graphic landing within YIELD_EDGE_S of the
+# composition's start or end takes the band from (to) that edge: a headline
+# shown for a moment before the hook lands is a flash. Decided at render
+# time from the stored footprints, so adding, moving or removing a lockup
+# never leaves a stale headline.
+YIELD_OUT_S = 0.0
+YIELD_IN_S = 0.1
+YIELD_MERGE_S = 0.15
+YIELD_EDGE_S = 0.6
 # Boxes this close (frame fractions) already read as one crowded band.
 YIELD_PAD = 0.006
 
@@ -200,19 +208,21 @@ def _nominal(item, W, H):
 
 def _ink_lead(item):
     """Seconds into an item (from its start on the program clock) before it
-    draws anything: a phrase build whose first row is revealed on a later
-    spoken word leaves its band empty until then (the Jobs 'liberal arts'
-    lockup: 1.17 s), and the headline keeps the band meanwhile. The reveal
-    is the page's own (caption_carry.lockup_reveals: spoken rows and bridge
-    lines on their onsets from the item's reading, others on their 'at', in
-    reading order) on the composition clock, so a windowed piece already
-    ``phase_s`` into the composition has that much less to wait."""
+    draws anything: a word-timed item whose first word is revealed on a
+    later spoken onset leaves its band empty until then (the Jobs 'liberal
+    arts' lockup: 1.17 s), and the headline keeps the band meanwhile. The
+    reveal is the page's own (caption_carry.first_reveal: a lockup's rows on
+    their onsets or 'at' in reading order, marker_text's words on their
+    onsets) on the composition clock, so a windowed piece already
+    ``phase_s`` into the composition has that much less to wait. A graphic
+    written since the motion track's WINDOW rule starts on its first word,
+    so this is ~0 for it; it keeps older EDLs from leaving a hole."""
     import caption_carry
-    reveals = caption_carry.lockup_reveals(item)
-    if not reveals:
+    first = caption_carry.first_reveal(item)
+    if first is None:
         return 0.0
     phase = float(item.get("phase_s") or 0.0)
-    return max(0.0, reveals[0] - phase)
+    return max(0.0, first - phase)
 
 
 def _shares_band(a, b, pad=YIELD_PAD):
@@ -260,12 +270,12 @@ def yield_windows(item, items, W, H):
             merged[-1][1] = max(merged[-1][1], b)
         else:
             merged.append([a, b])
-    # a gap at either end of the composition shorter than the merge is no
+    # a gap at either end of the composition shorter than YIELD_EDGE_S is no
     # restore (a stitched piece's own edges are not the composition's)
     full = float(item.get("full_duration_s") or (e - s))
-    if merged and phase <= 1e-6 and merged[0][0] - s < YIELD_MERGE_S:
+    if merged and phase <= 1e-6 and merged[0][0] - s < YIELD_EDGE_S:
         merged[0][0] = s
-    if merged and phase + (e - s) >= full - 1e-3 and e - merged[-1][1] < YIELD_MERGE_S:
+    if merged and phase + (e - s) >= full - 1e-3 and e - merged[-1][1] < YIELD_EDGE_S:
         merged[-1][1] = e
     return [[round(a - s + phase, 3), round(b - s + phase, 3)] for a, b in merged]
 
@@ -313,15 +323,34 @@ def headline_visible(item, items, W, H):
 
 
 def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
-                   fetch_asset=None, extra_items=None, plate=None):
+                   fetch_asset=None, extra_items=None, plate=None, behind_why=None):
     """Render motion clips and append ffmpeg inputs. Returns (inputs, next_idx)
     with inputs = [(input_index, item, RenderedClip)]. ``extra_items`` are
     renderer-synthesized items (the motion caption track); ``plate`` is the
-    renderer's plate probe (worker/plate.Probe) or None."""
+    renderer's plate probe (worker/plate.Probe) or None. ``behind_why(item)``
+    says why a behind_subject item cannot composite behind the subject here
+    (None when it can): a hero word that cannot is drawn as its face-safe
+    display slam instead (hero_front), decided before anything renders."""
     LAST_WARNINGS.clear()
     items = list(extra_items or []) + program_items(edl, out_duration)
+    if behind_why is not None:
+        swapped = []
+        for item in items:
+            if is_hero(item):
+                try:
+                    why = behind_why(item)
+                except Exception as e:  # noqa: BLE001 — never the render
+                    why = f"its mask could not be checked ({str(e)[:120]})"
+                if why:
+                    item = hero_front(item, why)
+                    if item is None:
+                        continue
+            swapped.append(item)
+        items = swapped
     if not items:
         return [], next_idx
+    import motion_look
+    motion_look.attach_series(items)
     plates = measure_plates(items, plate)
     asset_locals = {}
     jobs, kept = [], []
@@ -395,7 +424,17 @@ def demote(item, why):
     """A behind_subject item drawn as an ordinary above-captions graphic.
 
     The words-behind contract, applied to graphics: losing the depth is a
-    disappointment, losing the graphic (or the render) is a broken product."""
+    disappointment, losing the graphic (or the render) is a broken product.
+    A hero word (is_hero) is the exception: its clip was drawn as the giant
+    word at head height, so above the picture it would cover the face —
+    it is not drawn (None). The renderer swaps a hero it can tell will not
+    composite for its face-safe display slam BEFORE drawing it
+    (prepare_inputs' behind_why, hero_front — the renderer's check fetches
+    the mask itself), so this is a last guard."""
+    if is_hero(item):
+        warn(f"hero word '{item.get('id')}' not drawn: it cannot sit behind the "
+             f"subject ({why}), and drawn above the picture it would cover the face")
+        return None
     msg = (f"motion '{item.get('id')}' rendered above the picture instead of "
            f"behind the subject: {why}")
     print(f"[render] {msg}", flush=True)
@@ -405,17 +444,87 @@ def demote(item, why):
 
 def demote_behind(inputs, why):
     """``inputs`` with every behind_subject item demoted (a render path
-    that has no behind-subject stage, e.g. a canvas program)."""
-    return [(idx, demote(item, why), clip)
-            if item.get("layer") == "behind_subject" else (idx, item, clip)
-            for idx, item, clip in inputs or []]
+    that has no behind-subject stage, e.g. a canvas program); a hero clip
+    that cannot be demoted safely is left out (demote)."""
+    out = []
+    for idx, item, clip in inputs or []:
+        if item.get("layer") == "behind_subject":
+            item = demote(item, why)
+            if item is None:
+                continue
+        out.append((idx, item, clip))
+    return out
+
+
+# ── the hero tier off its subject (word_slam tier='hero') ─────────────────
+# A hero word is set up to 30% of the frame height at head height so the
+# speaker's head crosses it. Drawn above the picture it would sit across
+# the face — the owner's top complaint — so wherever the render cannot
+# composite it behind the subject it becomes the face-safe display slam its
+# write measured (SubjectMatte.fallback), or is not drawn at all.
+
+def is_hero(item):
+    """A behind_subject word_slam in the hero tier."""
+    return (isinstance(item, dict) and item.get("layer") == "behind_subject"
+            and str((item.get("params") or {}).get("tier") or "") == "hero")
+
+
+def hero_front(item, why):
+    """``item`` (a hero, is_hero) as the display slam above the picture at
+    the face-safe placement its write stored, or None (not drawn) when it
+    has none."""
+    fb = (item.get("behind") or {}).get("fallback")
+    if isinstance(fb, dict) and fb:
+        place = {k: fb[k] for k in ("x", "y", "width") if k in fb}
+        warn(f"hero word '{item.get('id')}' drawn as a display slam above the picture, "
+             f"clear of the face, instead of behind the subject: {why}")
+        return dict(item, layer="above_captions", behind=None,
+                    params=dict(item.get("params") or {}, tier="display", **place))
+    warn(f"hero word '{item.get('id')}' not drawn: it cannot sit behind the subject "
+         f"({why}) and has no face-safe placement stored (set_motion_graphic re-measures it)")
+    return None
+
+
+def behind_why(edl, tl, item, geom_now=None):
+    """Why the behind_subject ``item`` cannot composite behind the subject
+    in this program (None when it can, the mask download aside) — the
+    renderer's rules: the mask is one continuous 1x clip of its source span
+    in the framing it was measured in."""
+    import follow
+    import picture_cards
+    from schemas import subject_matte_geom
+    b = item.get("behind") or {}
+    if not b:
+        return "it carries no subject mask"
+    a_src, b_src = float(b["src_start"]), float(b["src_end"])
+    pieces = tl.span_to_out(a_src, b_src)
+    if not pieces:
+        return "its footage is no longer in the edit"
+    if len(pieces) > 1:
+        return "a cut now falls inside its window"
+    ramp = tl.ramp_over(a_src, b_src)
+    if ramp:
+        # The mask is one 1x clip of source frames; a ramp shortens (or
+        # stretches) that footage's program window, so the trimmed mask
+        # would slide off the subject.
+        return f"speed ramp {ramp[0]} now covers its footage"
+    if geom_now is None:
+        geom_now = subject_matte_geom(edl.get("frame"))
+    if b.get("geom") and b["geom"] != geom_now:
+        return "the framing changed since its mask was measured"
+    if picture_cards.overlaps_source_card(edl, pieces):
+        return "a source-fed picture card re-frames its footage"
+    if follow.moves_during(edl, [(a_src, b_src)]):
+        return "the crop follows the speaker across its footage"
+    return None
 
 
 def caption_mute_spans(edl):
-    """Program windows where a motion item owns the WHOLE caption area: only
-    an explicit mute_captions=true. Unset is word-level — the graphic hides
-    just the spoken words it shows (worker/caption_carry.py) — and false
-    keeps the captions running beside it."""
+    """Program windows of the motion items with an explicit
+    mute_captions=true. No caption path mutes them as a whole any more
+    (round 6, every heard word reaches the screen once): the caption plan
+    (worker/caption_carry.py) hides just the words a graphic shows and mutes
+    others only where no band is clear of it, naming them."""
     return [[float(item["start"]), float(item["end"])]
             for item in edl.get("motion") or []
             if item.get("mute_captions") is True]
@@ -454,18 +563,32 @@ def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
     """Measure the footprint box of every motion item that matters to the
     caption plan and has none, has one measured at another frame shape, or
     has only an estimate (in place; returns ``edl``). Only transcript
-    captions use it, and an explicit mute_captions=true hides every caption
-    under the item anyway. Face zones the keep-out stored at this frame
-    shape are kept. A probe that cannot run leaves an estimate in place and
-    an item without a box (a stale one is dropped): the plan then keeps the
-    old behaviour for it.
+    captions use it — mute_captions=true items included: they no longer hide
+    a whole window, so the captions they do not show are placed against
+    their real box too. Face zones the keep-out stored at this frame shape
+    are kept. A probe that cannot run leaves an estimate in place and an
+    item without a box (a stale one is dropped): the plan then keeps the old
+    behaviour for it (a graphic that says the line is assumed to sit on the
+    captions).
 
-    With the program's ``index`` and Timeline ``tl``, every whole lockup is
-    first timed to the speech it shows (caption_carry.attach_readings: word
-    onsets and the bridge lines of one reading path), so it is measured and
-    rendered as it will read; a stored box measured without its bridge lines
-    is measured again."""
+    With the program's ``index`` and Timeline ``tl``, every whole word-timed
+    item (a lockup, marker_text) is first timed to the speech it shows
+    (caption_carry.attach_readings: its words land on their spoken onsets;
+    an old stored reading's bridge lines are dropped), so it is measured and
+    rendered as it will read; a stored box measured under another reading
+    is measured again. A run of parallel slams gets its series first
+    (motion_look.attach_series)."""
     import caption_carry
+    import motion_look
+    # a parallel run's members share one size (word_slam series); a member
+    # whose series changed since its box was stored (a sibling removed or
+    # moved by another tool) is measured again
+    series_was = {id(m): m.get("series") for m in edl.get("motion") or [] if isinstance(m, dict)}
+    motion_look.attach_series(edl.get("motion") or [])
+    for m in edl.get("motion") or []:
+        if isinstance(m, dict) and m.get("series") != series_was.get(id(m)) \
+                and isinstance(m.get("footprint"), dict) and not m["footprint"].get("estimated"):
+            m["footprint"] = dict(m["footprint"], estimated=True)
     if index is not None and tl is not None:
         before = {m.get("id"): m.get("reading") for m in edl.get("motion") or []
                   if isinstance(m, dict)}
@@ -483,7 +606,7 @@ def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
     todo = [m for m in edl.get("motion") or []
             if isinstance(m, dict) and not m.get("_synthetic")
             and not (caption_carry.footprint_box(m, ar) and not caption_carry.estimated(m))
-            and m.get("mute_captions") is not True and not m.get("phase_s")
+            and not m.get("phase_s")
             and float(m.get("end", 0)) - float(m.get("start", 0)) >= 0.05]
     if not todo:
         return edl

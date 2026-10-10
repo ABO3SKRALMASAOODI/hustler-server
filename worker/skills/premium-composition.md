@@ -50,7 +50,10 @@ wording. Preserve the user's requested mood, aspect, music and identity.
 
 LAYOUTS FOR 9:16:
 - **Face-aware full-bleed** (the default for modern 16:9 podcasts and
-  talking heads): `auto_reframe` or `set_frame` crop with a shot-aware focus
+  talking heads when the plate is clean; a busy or washed-out plate — a
+  bright projector screen, a cluttered set — reads better as a card on a
+  textured canvas or a letterbox with a headline band, with a committed
+  grade, a taste call per short): `auto_reframe` or `set_frame` crop with a shot-aware focus
   track so each speaker's face sits in the upper-middle with the face around
   28–40% of the frame height; type lives in the clear space above, beside or
   below the face. `auto_reframe` also follows a speaker who leans or steps
@@ -60,14 +63,16 @@ LAYOUTS FOR 9:16:
 - **Card on a designed background** (archival 4:3, wide shots that a crop
   would destroy, two-shot frames): `set_picture_card` takes the card's
   footage straight from the full SOURCE frame — never a re-crop of the 9:16
-  crop — enlarged once and at most 2x. `source='auto'` frames the speaker
+  crop — enlarged once and at most 2x (up to 3x only to make a small
+  archival face readable). `source='auto'` frames the speaker
   from a measured face track with headroom above the head and follows a
   speaker who moves inside a shot (still while they sway, a smooth glide
   only when a still card would cut the head, never across a cut — each
   shot gets its own framing); a source below
   720p is shown whole (a 4:3 talk becomes a full-width 4:3 card, ~1.6x,
   instead of a 3.7x crop that cuts the head). Give it rounded corners, a
-  hairline border, a soft shadow and a lift or reveal entrance. Leave the
+  hairline border, a soft shadow and an entrance that dissolves the card in
+  from the full-frame shot (fade/lift; on a cut, 'none'). Leave the
   canvas to the default — a dark tone sampled from the footage glowing to
   near-black, vignette, and film grain on low-resolution footage — or pick
   a gradient; a blurred copy of the picture (`blur`) only behind sharp HD
@@ -83,9 +88,11 @@ LAYOUTS FOR 9:16:
   region of the SAME source frame in another, both over the window the
   evidence is discussed. Crop the evidence to what is being read (the
   highlighted sentence and its source line), so it is legible, and keep the
-  speaker's face in frame the whole time; never a crop that drops the speaker
-  for seconds or slices the inset. Leave a band for the stat or captions;
-  zooms do not play inside a stack.
+  speaker's face in frame the whole time (the speaker panel is solved from
+  the face: chin, hair and lead room inside it); never a crop that drops the
+  speaker for seconds or slices the inset. The panels keep a caption band
+  between them; leave the band above for the stat; zooms do not play inside
+  a stack.
 - **Two speakers**: shot-aware reframing that cuts to the active speaker, or
   a stacked card when both reactions matter.
 - Never leave a fixed band of the canvas empty for the whole reel.
@@ -122,9 +129,12 @@ LEGIBILITY:
 NATIVE TOOLS THAT REMAIN USEFUL:
 - **Speaker-first headline**: `set_editorial_graphic(kind="headline",
   speaker="…", text="…")` for a verified speaker and a faithful claim. It
-  holds still and keeps dialogue captions. On a reel it should pose the
-  question, never the payoff, and sit inside the designed layout rather than
-  above a small card on black. It does not yield to other graphics: where
+  holds still and keeps dialogue captions. On a reel it is a specific
+  third-person claim from the clip's strongest line that the payoff
+  completes — never a generic question, never the punchline or a word a
+  later graphic slams — and sits inside the designed layout rather than
+  above a small card on black. It also carries the speaker's name, so a
+  broadcast lower third is unnecessary. It does not yield to other graphics: where
   hero lockups share the band above a card or letterbox, use the persistent
   `headline` motion template instead, which steps aside for them.
 - **A phrase built in place**: `set_typography_scene` measures the complete
@@ -140,11 +150,11 @@ NATIVE TOOLS THAT REMAIN USEFUL:
 - **Words behind the subject**: `add_text_behind` (person matte) or a motion
   graphic with `layer='behind_subject'`; the type must be LARGE so the
   person crosses the middle of tall glyphs.
-- One reading path by default: a motion graphic hides the spoken words it
-  shows and owns the phrase it shows while it is up (a phrase_build sets the
-  rest of that phrase in small type; end other graphics where their words
-  end); the setup and other sentences stay captioned clear of it. Keep hero
-  graphics off the caption band so nothing has to be muted.
+- Every heard word reaches the screen once: a motion graphic hides the
+  spoken words it shows, and the captions carry every other word beside it,
+  clear of it (a phrase_build's left-out words included — no micro bridge
+  rows; end graphics where their words end). Keep hero graphics off the
+  caption band so nothing has to be muted.
 
 MOVEMENT WITH A LANDING: text, cards and vectors enter with short graphic
 motion (pop, rise-blur, mask, spring for objects), settle and hold. Use one
@@ -160,7 +170,8 @@ timing.
 ## Common failure modes
 
 Small card on a black void; static headline bars that never change; tiny
-captions shrunk to avoid collisions; generic PROGRESS/FUTURE headings; the
+captions shrunk to avoid collisions; generic PROGRESS/FUTURE headings; a
+lockup that re-typesets the transcript instead of adding information; the
 same panel on every noun; rounded cards so small the face disappears; two or
 three unrelated type systems; words re-centering as a phrase builds; an
 entrance replayed at every cue; type across the face or in the UI band;
