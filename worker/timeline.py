@@ -1895,10 +1895,125 @@ def remap_program_items(edl, old_tl, new_tl):
                     "on the same moment.")
             kept_mu.append([ns, ne])
         edl["caption_mutes"] = kept_mu
+    if edl.get("fx"):
+        region_notes += _remap_fx(edl, old_tl, new_tl)
     region_notes += _reveal_follow(edl, getattr(new_tl, "segs", None)
                                    or edl.get("keep") or [],
                                    getattr(old_tl, "segs", None))
     return region_notes
+
+
+# EDL.fx re-anchoring (Wave 0 seams, INTERFACES.md §4.1). A picture-stage
+# device is CONTENT-anchored like a zoom or a stylize ("flash him white on
+# that word" follows the word); a junction device decorates a CUT and follows
+# that cut through the content either side of it; a music_bus device follows
+# its music item. Devices of at most this long keep their exact length when
+# their footage moves — a 1-frame negate stays one frame.
+_FX_SHORT_S = 0.25
+
+
+def _fx_cut_after_remap(at, old_tl, new_tl):
+    """New program second of the cut at old program second ``at``, found
+    through the content either side of it (the incoming shot first), or None
+    when no cut of that content survives."""
+    eps = 0.005
+    new_cuts = cut_points(new_tl)
+    cands = []
+    src_in = old_tl.out_to_src(at + eps)
+    if src_in is not None:
+        t = new_tl.src_to_out(src_in)
+        if t is not None:
+            cands.append(t - eps)
+    src_out = old_tl.out_to_src(at - eps)
+    if src_out is not None:
+        t = new_tl.src_to_out(src_out)
+        if t is not None:
+            cands.append(t + eps)
+    if src_in is None and src_out is None:
+        cands.append(at)            # insert to insert: the edit position
+    for c in cands:
+        near = [x for x in new_cuts if abs(x - c) <= 0.02]
+        if near:
+            return min(near, key=lambda x: abs(x - c))
+    return None
+
+
+def _remap_fx(edl, old_tl, new_tl):
+    """Move EDL.fx items with their anchors after a time-base change;
+    mutates ``edl["fx"]``, returns disclosure notes."""
+    notes, kept = [], []
+    prog = round(new_tl.out_duration, 2)
+    music_ids = {m.get("id") for m in edl.get("music") or []
+                 if isinstance(m, dict)}
+    old_cuts = cut_points(old_tl)
+    for it in edl.get("fx") or []:
+        if not isinstance(it, dict):
+            kept.append(it)
+            continue
+        it = dict(it)
+        fid, stage = it.get("id"), it.get("stage")
+        what = f"{it.get('type')} {fid}"
+        if stage == "music_bus":
+            if it.get("music_id") in music_ids:
+                kept.append(it)
+            else:
+                notes.append(f"note: {what} was removed — its music item is "
+                             "no longer in the edit.")
+            continue
+        if stage == "junction":
+            at = float(it.get("at") or 0.0)
+            if any(abs(at - c) <= 0.02 for c in old_cuts):
+                new_at = _fx_cut_after_remap(at, old_tl, new_tl)
+            else:
+                # not on a cut: a moment of the footage, like an sfx
+                src = old_tl.out_to_src(at)
+                new_at = new_tl.src_to_out(src) if src is not None else at
+            if new_at is None or new_at > prog + 0.01:
+                notes.append(f"note: {what} was removed — the cut it "
+                             "decorated is no longer in the edit.")
+                continue
+            if abs(new_at - at) > 0.005:
+                notes.append(f"note: {what} moved to {round(new_at, 2)}s so "
+                             "it stays on the same cut.")
+            it["at"] = round(new_at, 2)
+            kept.append(it)
+            continue
+        if it.get("start") is None or it.get("end") is None:
+            kept.append(it)
+            continue
+        s0, e0 = float(it["start"]), float(it["end"])
+        moved = remap_program_span(old_tl, new_tl, s0, e0)
+        if moved is None:
+            if old_tl.out_to_src(s0) is None or old_tl.out_to_src(e0) is None:
+                # anchored inside a spliced insert: keep its program window,
+                # clamped so validation cannot reject the write
+                if s0 > max(0.0, prog - 0.01):
+                    notes.append(f"note: {what} was removed — its window "
+                                 "falls outside the shortened edit.")
+                    continue
+                if e0 > prog:
+                    it["end"] = prog
+                    notes.append(f"note: {what} now ends at {prog}s to fit "
+                                 "the shortened edit.")
+                kept.append(it)
+                continue
+            notes.append(f"note: {what} was removed — the footage it was on "
+                         "is no longer in the edit.")
+            continue
+        ns, ne = moved
+        if e0 - s0 <= _FX_SHORT_S:
+            ne = round(min(prog, ns + (e0 - s0)), 2)
+        if ne - ns < 0.01:
+            notes.append(f"note: {what} was removed — almost none of the "
+                         "footage it was on survives the cut.")
+            continue
+        if (ns, ne) != (round(s0, 2), round(e0, 2)):
+            notes.append(f"note: {what} moved to {ns}-{ne}s so it stays on "
+                         "the same footage.")
+        it["start"], it["end"] = ns, ne
+        kept.append(it)
+    edl["fx"] = kept
+    return notes
 
 
 # follow.MOVE_MIN_S: the shortest glide a face-following crop plays on screen
