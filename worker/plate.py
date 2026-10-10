@@ -338,16 +338,31 @@ def canvas_grid(img, src_size, W, H, *, mode=None, focus=None, crop=None,
 def _card_canvas(img, card, CW, CH):
     """A source-fed picture card composed on a CW x CH luma canvas: its
     backdrop (picture_cards._fill — the gradient or flat colour and the
-    vignette — or, for a 'blur' backdrop, the frame itself blurred and
-    dimmed) with each panel's source rect fitted into its box."""
+    vignette — or, for a 'blur' backdrop, what picture_cards._blur_chain
+    draws: the first panel's footage cover-scaled to the canvas, blurred and
+    its luma dimmed toward 16 by background_dim) with each panel's source
+    rect fitted into its box."""
     from PIL import Image, ImageFilter
     import picture_cards
     w, h = img.size
+
+    def rect_px(rect):
+        x0, y0 = int(float(rect[0]) * w), int(float(rect[1]) * h)
+        return (x0, y0, max(x0 + 1, int(round(float(rect[2]) * w))),
+                max(y0 + 1, int(round(float(rect[3]) * h))))
     style = card.get("background_style")
     if style == "blur":
-        dim = float(card.get("background_dim") or 0.35)
-        canvas = img.resize((CW, CH), Image.BOX).filter(ImageFilter.GaussianBlur(6)) \
-            .point(lambda v: int(v * (1.0 - dim)))
+        dim = card.get("background_dim")
+        k = 1.0 - float(picture_cards.BLUR_DIM_DEFAULT if dim is None else dim)
+        first = next((r for _b, r in card.get("panels_at") or [] if r), None)
+        part = img.crop(rect_px(first)) if first else img
+        pw, ph = part.size
+        s = max(CW / float(pw), CH / float(ph))
+        rw, rh = max(CW, int(round(pw * s))), max(CH, int(round(ph * s)))
+        x0, y0 = (rw - CW) // 2, (rh - CH) // 2
+        canvas = part.resize((rw, rh), Image.BOX).crop((x0, y0, x0 + CW, y0 + CH)) \
+            .filter(ImageFilter.GaussianBlur(max(1.0, min(CW, CH) / 32.0))) \
+            .point(lambda v: max(0, min(255, int(round(16 + (v - 16) * k)))))
     else:
         try:
             rgb = picture_cards._fill(CW, CH, card)
@@ -361,10 +376,7 @@ def _card_canvas(img, card, CW, CH):
         bx0, by0 = int(round(float(box[0]) * CW)), int(round(float(box[1]) * CH))
         bw = max(1, int(round((float(box[2]) - float(box[0])) * CW)))
         bh = max(1, int(round((float(box[3]) - float(box[1])) * CH)))
-        part = img.crop((int(float(rect[0]) * w), int(float(rect[1]) * h),
-                         max(int(float(rect[0]) * w) + 1, int(round(float(rect[2]) * w))),
-                         max(int(float(rect[1]) * h) + 1, int(round(float(rect[3]) * h)))))
-        canvas.paste(part.resize((bw, bh), Image.BOX), (bx0, by0))
+        canvas.paste(img.crop(rect_px(rect)).resize((bw, bh), Image.BOX), (bx0, by0))
     return canvas
 
 

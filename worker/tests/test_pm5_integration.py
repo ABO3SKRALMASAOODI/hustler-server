@@ -313,3 +313,27 @@ def test_a_browserless_estimate_is_named_only_past_its_own_error(monkeypatch):
     assert "NOTE (band)" not in out, out
     out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.12})
     assert "NOTE (band): by its estimated box" in out and "feed header" in out, out
+
+
+def test_a_blur_backdrop_is_the_first_panels_footage_as_the_card_draws_it():
+    # picture_cards._blur_chain fills the canvas with the FIRST panel's
+    # footage, cover-scaled, blurred and its luma dimmed toward 16 by
+    # background_dim (default BLUR_DIM_DEFAULT) — not the whole frame
+    # stretched (a bright wall beside a dark-shirted speaker read as a
+    # bright band above the card)
+    import picture_cards
+    import plate
+    from PIL import Image
+    img = Image.new("L", (320, 180), 255)                       # a bright frame
+    img.paste(0, (0, 0, 160, 180))                              # the speaker's dark half
+    rows = plate.grid_rows(1080, 1920)
+    card = {"box": [0.04, 0.3, 0.96, 0.6], "background_style": "blur",
+            "panels_at": [[[0.04, 0.3, 0.96, 0.6], [0.0, 0.0, 0.5, 1.0]]]}
+    g = plate.canvas_grid(img, (1920, 1080), 1080, 1920, mode="crop", card=card)
+    band = g[2 * plate.COLS:(int(0.25 * rows)) * plate.COLS]
+    assert max(band) < 40, band                                 # dark, as drawn
+    lit = dict(card, background_dim=0.0,
+               panels_at=[[[0.04, 0.3, 0.96, 0.6], [0.5, 0.0, 1.0, 1.0]]])
+    g = plate.canvas_grid(img, (1920, 1080), 1080, 1920, mode="crop", card=lit)
+    assert min(g[2 * plate.COLS:(int(0.25 * rows)) * plate.COLS]) > 230   # 0 dims nothing
+    assert picture_cards.BLUR_DIM_DEFAULT > 0
