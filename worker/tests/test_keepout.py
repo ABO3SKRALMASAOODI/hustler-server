@@ -942,3 +942,18 @@ def test_a_camera_move_rechecks_the_graphics_under_it(monkeypatch):
                         [(a + 0.1 * k, [(0.3, 0.05, 0.7, 0.3)]) for k in range(10)])
     calls.clear()
     assert motion_tools.keep_out_under_camera(Ctx(), edl, 1.5, 5.0) == [] and calls == []
+
+
+def test_a_small_graphic_inside_a_frame_filling_face_is_on_it():
+    """A graphic lying mostly inside a face zone is on the face even when it
+    covers under FACE_HIT of a frame-filling zone (round 7 integration: a
+    counter shrunk to size 0.4 was offered a spot on the cheek)."""
+    face = (0.0, 0.1, 1.0, 0.75)
+    zones = [keepout.face_zone(face)]
+    small = (0.25, 0.362, 0.82, 0.498)
+    assert keepout.inter(small, zones[0]) < keepout.FACE_HIT * keepout.area(zones[0])
+    assert keepout.on_face(small, zones)
+    assert keepout.assess(small, [(1.0, [face]), (2.0, [face]), (3.0, [face])])["hit"]
+    # a graphic below the chin of an ordinary face stays clear
+    ordinary = (0.35, 0.15, 0.65, 0.42)
+    assert not keepout.on_face((0.2, 0.55, 0.8, 0.68), [keepout.face_zone(ordinary)])

@@ -82,6 +82,11 @@ MOUTH = (0.22, 0.58, 0.22, 0.08)          # insets: left, top, right, bottom
 # the face across its width) or of the mouth band before it counts as on the
 # face: type tucked under the chin is the chest band, not a collision.
 FACE_HIT = 0.10             # share of the face zone a graphic may not cover
+# ...nor may a graphic lie mostly INSIDE a face zone: on a face that fills the
+# frame (a tight close-up) a small graphic covers under FACE_HIT of the huge
+# zone while sitting on the cheek (round 7 integration: once a counter could
+# shrink to size 0.4, the solver offered spots inside a frame-filling face)
+BOX_ON_FACE = 0.5           # share of the graphic's own box
 MOUTH_HIT = 0.10            # share of the mouth band
 HIT_SHARE = 0.15            # share of the faced moments that must collide
 CLEARANCE = 0.025           # a moved graphic keeps this gap from the zone
@@ -736,7 +741,8 @@ def zones_of(track, kind=None):
 def on_face(box, zones, mouths=()):
     """The solver's fast version of assess() over merged zones: does a box
     cover a real share of a face zone or a mouth band?"""
-    return any(inter(box, z) >= FACE_HIT * area(z) for z in zones) or \
+    return any(inter(box, z) >= min(FACE_HIT * area(z), BOX_ON_FACE * area(box))
+               for z in zones) or \
         any(inter(box, m) >= MOUTH_HIT * area(m) for m in mouths)
 
 
@@ -744,7 +750,8 @@ def assess(box, track):
     """How a graphic box meets the faces: {'hit': bool, 'mouth': bool,
     'when': (t0, t1) of the colliding seconds, 'face': union of the zones
     it hits} — hit when it covers FACE_HIT of a face zone or MOUTH_HIT of
-    the mouth band in HIT_SHARE of the seconds that show a face."""
+    the mouth band (or lies BOX_ON_FACE inside a face zone) in HIT_SHARE of
+    the seconds that show a face."""
     faced = hits = 0
     mouth = False
     when, zs = [], []
@@ -757,7 +764,8 @@ def assess(box, track):
             fz, mz = face_zone(f), mouth_zone(f)
             a = inter(box, fz) / max(1e-9, area(fz))
             m = inter(box, mz) / max(1e-9, area(mz))
-            if a >= FACE_HIT or m >= MOUTH_HIT:
+            if a >= FACE_HIT or m >= MOUTH_HIT or \
+                    inter(box, fz) >= BOX_ON_FACE * max(1e-9, area(box)):
                 hit = True
                 mouth = mouth or m >= MOUTH_HIT
                 zs.append(fz)
