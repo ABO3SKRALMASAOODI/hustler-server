@@ -2238,7 +2238,8 @@ _EXPLICIT_MICRO_EDIT = re.compile(
 # and the final handoff has neither a preview attachment nor its review.
 _PREVIEW_CHECKPOINT_FIELDS = (
     "last_preview", "last_visual_critic", "last_story_review",
-    "last_audio_review", "last_audio_qc_findings", "last_taste",
+    "last_audio_review", "last_audio_qc_findings",
+    "last_picture_qc_findings", "last_taste",
     "last_taste_version", "last_taste_advisory",
 )
 
@@ -2826,6 +2827,8 @@ def _quality_handoff(ctx):
         findings.append(line)
     for line in (getattr(ctx, "last_audio_qc_findings", None) or [])[:2]:
         findings.append("audio QC: " + str(line))
+    for line in (getattr(ctx, "last_picture_qc_findings", None) or [])[:2]:
+        findings.append("picture QC: " + str(line))
     audio_review = getattr(ctx, "last_audio_review", None) or {}
     if audio_review.get("edl_version") == latest \
             and agent_tools.audio_review_blocks(audio_review):
@@ -4005,6 +4008,8 @@ def _outcome_meta(ctx, outcome):
                 getattr(ctx, "last_taste", None) or []),
             "audio_qc_findings": len(
                 getattr(ctx, "last_audio_qc_findings", None) or []),
+            "picture_qc_findings": len(
+                getattr(ctx, "last_picture_qc_findings", None) or []),
             "audio_review_verdict": (
                 (getattr(ctx, "last_audio_review", None) or {}).get(
                     "verdict")),

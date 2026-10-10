@@ -19,9 +19,10 @@ A missing zoom or sound is never a defect; an unearned one is.
 
 ## Evidence to inspect
 
-Inspect deterministic checks, the AUDIO CHECK, dense rendered frames around
-the hook and every hero moment, caption pages, every junction the edit
-touched, the payoff and the ending, plus any bounded listening evidence.
+Inspect deterministic checks, the AUDIO CHECK, the PICTURE CHECK, dense
+rendered frames around the hook and every hero moment, caption pages, every
+junction the edit touched, the payoff and the ending, plus any bounded
+listening evidence.
 
 ## Strong treatment patterns
 
@@ -30,7 +31,11 @@ HOW TO LOOK AT MOTION — two different renders:
   seconds changed since the last complete preview and returns RENDER CHECK
   and caption QA tiles of them. Judge placement, legibility and collisions
   from that result; the complete preview adds the AUDIO CHECK of the whole
-  mix.
+  mix and the PICTURE CHECK of its frames: a face within ~6% of the frame's
+  (or its card's) edge, a one-frame pop or a jump that is not on a cut, a
+  missing end card or watermark (finals). It measures the file that ships
+  and never changes the edit: repair each finding (look_at the frames it
+  names first) or keep it deliberately and say why.
 - `look_at(rendered=true, ...)` reads only a COMPLETE preview of the current
   EDL version; a changed-section proof does not count, and calling it
   without one is rejected. For dense motion frames, build the hook and hero
@@ -63,7 +68,8 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    strengths, never a move on every cut or sentence, no more than one camera
    event per ~1.5 s except a designed hit. A bare jump cut is fine; act on
    one only where it is genuinely jarring (B-roll or a framing change).
-6. JUNCTIONS: cuts on word edges, no flash or double frames; transitions only
+6. JUNCTIONS: cuts on word edges, no flash or double frames, no one-frame
+   framing pop before or after a cut (PICTURE CHECK); transitions only
    on real turns, any sound peaking on the cut; no effect or sound on a jump
    cut.
 7. SOUND (sound effects are optional — zero is fine): AUDIO CHECK loudness
@@ -111,14 +117,16 @@ one sentence.
   look that contains no graphics.
 - Judging motion from one settled frame; missing a late landing or a
   drifting hold.
-- Ignoring the AUDIO CHECK; claiming to have heard unreviewed seconds.
+- Ignoring the AUDIO CHECK or the PICTURE CHECK; claiming to have heard
+  unreviewed seconds.
 - Defending an orphan device as polish, or stripping intentional design to
   silence an advisory.
 
 ## Verification procedure
 
 Require deterministic checks, dense rendered frames on the hook and every
-hero moment, caption QA pages, the AUDIO CHECK, current-version visual and
+hero moment, caption QA pages, the AUDIO CHECK and the PICTURE CHECK,
+current-version visual and
 audio review, repairs or justifications for every finding, and one complete
 Studio preview.
 

@@ -100,6 +100,32 @@ REACT = 0.15                 # a move centres this share of itself after the cro
 HOLD_MIN_S = 0.6             # a shorter hold between moves the same way is passed through
 MIN_STEP = 0.08              # re-aims smaller than this are not worth a move
 MAX_KEYS = 120               # per span (schemas.FOLLOW_MAX_KEYS)
+# A tight close-up (the face wider than the window's room) whose speaker
+# TURNS: the leading edge of the face (the nose side) is held at least this
+# share of the window inside its edge, and the trailing side (ear, back of
+# the head) gives way first. Smoothed look at or past TURNED counts. The
+# plan reads SMOOTHED boxes that lag a fast turn, so it holds more than the
+# 6% at which the QC gate (render_qc.EDGE_CLIP) calls a face clipped.
+TIGHT_LEAD_MARGIN = 0.10
+TURNED = 0.5
+TIGHT_FACE_SHARE = 0.6
+# Haar loses a speaker who turns to full profile (the Elon close-up: no
+# detection for 1.6 s while he leaned toward Rogan). A face lost between
+# samples is CARRIED by the optical flow of the features inside its box,
+# forward from its last detection and back from its next, for at most this
+# long; carried boxes keep the look they were last seen with.
+CARRY_MAX_S = 2.0
+CARRY_MIN_POINTS = 6
+# ...and never across a picture cut between two samples: a measured
+# window spans every camera cut of the kept footage, and optical flow can
+# "track" a face's features into the next shot wherever similar texture
+# sits there — a ghost box a follow plan (or the picture check) would take
+# for that shot's speaker. Two samples whose pixels change by more than
+# CARRY_CUT_STEP on CARRY_CUT_SHARE of the frame are a cut: the Elon
+# source's camera cuts measure 0.70-0.83, its turning close-ups at 4 fps
+# stay under 0.16.
+CARRY_CUT_STEP = 30
+CARRY_CUT_SHARE = 0.35
 # The detector box runs brow to chin; the head the window must keep is the
 # hair above it (more than picture_cards' 0.40: a big-haired speaker looking
 # down showed his hair at a held card's top edge), the ears either side and
@@ -344,6 +370,95 @@ def _decode_gray(path, a, b, fps, width, height, timeout):
     return [buf[i * size:(i + 1) * size].reshape(height, width) for i in range(n)]
 
 
+def _flow_shift(cv2, np, a, b, box):
+    """(dx, dy) in fractions: the median optical flow, gray frame a -> b,
+    of the trackable features inside ``box`` (fractions), checked forward
+    and back. None when too few features agree."""
+    h, w = a.shape[:2]
+    x0, y0 = max(0, int(box[0] * w)), max(0, int(box[1] * h))
+    x1, y1 = min(w, int(math.ceil(box[2] * w))), min(h, int(math.ceil(box[3] * h)))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    mask = np.zeros_like(a)
+    mask[y0:y1, x0:x1] = 255
+    try:
+        pts = cv2.goodFeaturesToTrack(a, 60, 0.01, 4, mask=mask)
+        if pts is None or len(pts) < CARRY_MIN_POINTS:
+            return None
+        nxt, st, _e = cv2.calcOpticalFlowPyrLK(a, b, pts, None, winSize=(21, 21),
+                                               maxLevel=3)
+        back, st2, _e2 = cv2.calcOpticalFlowPyrLK(b, a, nxt, None, winSize=(21, 21),
+                                                  maxLevel=3)
+    except Exception:
+        return None
+    err = np.linalg.norm((back - pts).reshape(-1, 2), axis=1)
+    ok = (st.ravel() == 1) & (st2.ravel() == 1) & (err < 1.0)
+    if int(ok.sum()) < CARRY_MIN_POINTS:
+        return None
+    d = (nxt - pts).reshape(-1, 2)[ok]
+    return float(np.median(d[:, 0])) / w, float(np.median(d[:, 1])) / h
+
+
+def cut_between(a, b):
+    """True when grey frames ``a`` and ``b`` (same size) are two different
+    shots: most of the picture steps hard between them (CARRY_CUT_*)."""
+    import numpy as np
+    if a is None or b is None or getattr(a, "shape", None) != getattr(b, "shape", None):
+        return True
+    d = np.abs(a.astype(np.int16) - b.astype(np.int16))
+    return float((d > CARRY_CUT_STEP).mean()) >= CARRY_CUT_SHARE
+
+
+def carry(times, grays, dets, cv2=None):
+    """``dets`` (one list of (box, look) per frame of one decoded run) with
+    every face the detector lost CARRIED by optical flow: forward from its
+    last detection and back from its next, each at most CARRY_MAX_S from a
+    real detection, into frames where nothing found overlaps it (a false
+    positive elsewhere in the frame does not stop it), and never across a
+    picture cut between two samples (cut_between). Detections are left as
+    found; a carried box keeps the look it was last seen with."""
+    import numpy as np
+    cv2 = cv2 or __import__("subject")._cv2()
+    n = len(dets)
+    if cv2 is None or n < 2 or len(grays) != n:
+        return dets
+    out = [list(d) for d in dets]
+    cut = [False] + [cut_between(grays[i - 1], grays[i]) for i in range(1, n)]
+
+    def moved(box, a, b):
+        d = _flow_shift(cv2, np, grays[a], grays[b], box)
+        if d is None:
+            return None
+        return [round(box[0] + d[0], 4), round(box[1] + d[1], 4),
+                round(box[2] + d[0], 4), round(box[3] + d[1], 4)]
+
+    def sweep(order):
+        live = []                         # (box, look, time of detection)
+        prev = None
+        for i in order:
+            if prev is not None and cut[max(i, prev)]:
+                live = []                 # a new shot: nothing carries over
+            if prev is not None:
+                kept = []
+                for box, look, t_real in live:
+                    if abs(times[i] - t_real) > CARRY_MAX_S + 1e-6:
+                        continue
+                    if any(_iou(box, b) > .3 for b, _l in out[i]):
+                        continue          # found (or carried) here already
+                    box2 = moved(box, prev, i)
+                    if box2 is None or any(_iou(box2, b) > .3 for b, _l in out[i]):
+                        continue
+                    out[i].append((box2, look))
+                    kept.append((box2, look, t_real))
+                live = [(b, lk, times[i]) for b, lk in dets[i]] + kept
+            else:
+                live = [(b, lk, times[i]) for b, lk in dets[i]]
+            prev = i
+    sweep(range(n))
+    sweep(range(n - 1, -1, -1))
+    return out
+
+
 def too_long(windows):
     """True when ``windows`` hold more footage than one call measures."""
     return sum(max(0.0, float(b) - float(a)) for a, b in windows or []) \
@@ -384,11 +499,15 @@ def measure(path, windows, aspect, fps=SAMPLE_FPS, width=DETECT_WIDTH,
             return []
         except Exception:
             grays = []
+        times, found = [], []
         for i, g in enumerate(grays):
             t = a + i / fps
             if t > b + 1e-6:
                 break
-            frames.append((round(t, 3), detect(g, cv2, cascades)))
+            times.append(round(t, 3))
+            found.append(detect(g, cv2, cascades))
+        found = carry(times, grays[:len(found)], found, cv2)
+        frames.extend(zip(times, found))
     return frames
 
 
@@ -524,27 +643,47 @@ def head_box(face):
             face[2] + HEAD_SIDE * w, face[3] + HEAD_BELOW * h]
 
 
-def keep_box(face, ww, wh):
+def keep_box(face, ww, wh, look=0.0):
     """What the window must hold of the speaker, per axis: the whole head
     (head_box) when it fits with SAFE_MARGIN either side AND leaves the
     window a dead zone's worth of play, else the face box on the same
-    terms, else only the face's centre line. A tight close-up whose head is
-    wider than a 9:16 window can never be held whole: demanding it turned
-    every detector wobble into a re-aim (a hunting camera, 16 holds in 9 s
-    of Elon), so the window then just keeps the face — or its centre — and
-    the dead zone keeps it still."""
+    terms. A tight close-up whose face is wider than that room can never
+    be held whole: demanding it turned every detector wobble into a
+    re-aim (a hunting camera, 16 holds in 9 s of Elon), so the window then
+    keeps the face's features — its middle TIGHT_FACE_SHARE, no more than
+    leaves the dead zone its play — and only the centre line when no part
+    of it fits. A face turned across (``look``, the smoothed profile
+    direction, at or past TURNED) keeps its leading edge (the nose side)
+    TIGHT_LEAD_MARGIN inside the window and lets the trailing side (the
+    ear, the back of the head) give way first: the judged Elon turn left
+    his nose 3% from the edge under a crop that kept only the centre
+    line. The held-still camera re-aims only when the face nears the edge."""
     head = head_box(face)
 
-    def axis(h0, h1, f0, f1, size, dz):
+    def axis(h0, h1, f0, f1, size, dz, lk):
         room = (1.0 - dz) * size - 2.0 * SAFE_MARGIN * size
         if h1 - h0 <= room:
             return h0, h1
-        if f1 - f0 <= room:
-            return f0, f1
         c = (f0 + f1) / 2.0
-        return c, c
-    x0, x1 = axis(head[0], head[2], face[0], face[2], ww, DEAD_ZONE[0])
-    y0, y1 = axis(head[1], head[3], face[1], face[3], wh, DEAD_ZONE[1])
+        if room <= 0:
+            return c, c
+        fits = f1 - f0 <= room
+        # on a tight face the features (eyes, nose, mouth: its middle
+        # TIGHT_FACE_SHARE) must stay in; a cheek or an ear may go before
+        # the camera chases
+        span = room if fits else min(room, TIGHT_FACE_SHARE * (f1 - f0))
+        if abs(lk) >= TURNED:
+            extra = max(0.0, TIGHT_LEAD_MARGIN - SAFE_MARGIN) * size
+            if lk < 0:                       # looks screen-left
+                a = f0 - extra
+                return a, max(a, min(f1, a + span))
+            b = f1 + extra                   # looks screen-right
+            return min(b, max(f0, b - span)), b
+        if fits:
+            return f0, f1
+        return c - span / 2.0, c + span / 2.0
+    x0, x1 = axis(head[0], head[2], face[0], face[2], ww, DEAD_ZONE[0], look)
+    y0, y1 = axis(head[1], head[3], face[1], face[3], wh, DEAD_ZONE[1], 0.0)
     return [x0, y0, x1, y1]
 
 
@@ -573,10 +712,20 @@ def _median(vals):
 
 
 def _smooth_looks(samples, reach_s=1.0):
-    out = []
-    for t, _box, _look in samples:
-        near = [lk for tt, _b, lk in samples if abs(tt - t) <= reach_s]
-        out.append(sum(near) / len(near) if near else 0.0)
+    """Per sample (in the given order): the mean look of every sample
+    within ``reach_s`` — prefix sums over the time-sorted samples, so the
+    planner's many path checks stay linear in a long shot."""
+    import bisect
+    order = sorted(range(len(samples)), key=lambda i: samples[i][0])
+    ts = [float(samples[i][0]) for i in order]
+    acc = [0.0]
+    for i in order:
+        acc.append(acc[-1] + float(samples[i][2]))
+    out = [0.0] * len(samples)
+    for rank, i in enumerate(order):
+        lo = bisect.bisect_left(ts, ts[rank] - reach_s - 1e-12)
+        hi = bisect.bisect_right(ts, ts[rank] + reach_s + 1e-12)
+        out[i] = (acc[hi] - acc[lo]) / (hi - lo) if hi > lo else 0.0
     return out
 
 
@@ -609,7 +758,7 @@ def _desired(samples, ww, wh, headroom, lead):
         head = head_box(f)
         dx = (f[0] + f[2]) / 2.0 + lead * ww * max(-1.0, min(1.0, lk))
         dy = head[1] - headroom * wh + wh / 2.0
-        kb = keep_box(f, ww, wh)
+        kb = keep_box(f, ww, wh, lk)
         hx = (kb[2] + mx - ww / 2.0, kb[0] - mx + ww / 2.0)
         hy = (kb[3] + my - wh / 2.0, kb[1] - my + wh / 2.0)
         if _empty(hx):                       # a head wider than the window
@@ -634,10 +783,11 @@ def nudge(aim, samples, ww, wh, kept=None):
     bx, by = _bounds(ww), _bounds(wh)
     mx, my = SAFE_MARGIN * ww, SAFE_MARGIN * wh
     ix, iy = bx, by
-    for t, f, _look in samples or []:
+    samples = sorted(samples or [], key=lambda s: s[0])
+    for (t, f, _look), lk in zip(samples, _smooth_looks(samples)):
         if kept and not any(float(a) - .05 <= t <= float(b) + .05 for a, b in kept):
             continue
-        kb = keep_box(f, ww, wh)
+        kb = keep_box(f, ww, wh, lk)
         for axis, raw, bounds in ((0, (kb[2] + mx - ww / 2.0, kb[0] - mx + ww / 2.0), bx),
                                   (1, (kb[3] + my - wh / 2.0, kb[1] - my + wh / 2.0), by)):
             band = _isect(raw, bounds)
@@ -768,8 +918,10 @@ def _violation(keys, samples, ww, wh, lo=None, hi=None, step=1 / 15.0,
     import numpy as np
     if not samples or not keys:
         return 0.0, None
+    samples = sorted(samples, key=lambda s: s[0])
     st = np.array([s[0] for s in samples], float)
-    heads = np.array([keep_box(s[1], ww, wh) for s in samples], float)
+    heads = np.array([keep_box(s[1], ww, wh, lk) for s, lk in
+                      zip(samples, _smooth_looks(samples))], float)
     a = st[0] if lo is None else max(st[0], lo)
     b = st[-1] if hi is None else min(st[-1], hi)
     if b < a:

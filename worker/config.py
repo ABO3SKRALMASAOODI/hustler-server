@@ -2064,6 +2064,17 @@ CAPTION_CARRY_VERSION = 2
 # Bump when how a follow path is drawn changes.
 FOLLOW_VERSION = 1
 
+# Crop switches on keep joins (renderer.composition_join, Oct 2026). A
+# focus_track edge with no indexed camera cut near it that sits on (within
+# 1.5 source frames of) a keep edge switches the crop ON that keep edge;
+# before, it was read as a measured cut and split half a frame before the
+# rounded frame, so the last frame before the join showed the next span's
+# crop and a zoom held to the join released a frame early (the judged Elon
+# pop at 21.888 s). Stamped as `handoff_v` and compared — for the served
+# cache and the splice/reuse path — ONLY for EDLs whose render the rule
+# changes (renderer.handoff_affected). Everything else keeps its cache.
+HANDOFF_VERSION = 1
+
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so
 # pieces from a different look show a sharpness/tone seam at every splice.

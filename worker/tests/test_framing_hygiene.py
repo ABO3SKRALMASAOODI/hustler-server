@@ -236,7 +236,9 @@ def test_build_filtergraph_uses_the_origin_for_focus_blocks():
 def test_a_keep_junction_on_the_cut_gives_the_new_frame_the_new_aim():
     """set_transitions exposes a baked camera cut as touching keep spans at
     the indexed cut; the half-frame before that junction holds the new
-    shot's first frame and must take the new span's aim."""
+    shot's first frame and must take the new span's aim. (Without an
+    indexed cut there the join itself is the cut: see
+    test_reframe_qc.test_a_focus_edge_on_an_unindexed_join_switches_on_it.)"""
     import renderer
     from timeline import Timeline
     edl = default_edl(6.0)
@@ -245,8 +247,10 @@ def test_a_keep_junction_on_the_cut_gives_the_new_frame_the_new_aim():
         {"t0": 0.0, "t1": 3.0, "x": 0.3, "y": 0.5},
         {"t0": 3.0, "t1": 6.0, "x": 0.7, "y": 0.5}]}
     edl = validate_edl(edl, 6.0).model_dump()
+    index = {"words": [], "shots": [{"id": 1, "start": 0.0, "end": 3.0},
+                                    {"id": 2, "start": 3.0, "end": 6.0}]}
     graph = renderer.build_filtergraph(
-        edl, 6.0, True, Timeline(edl["keep"]), None, [], {"words": []},
+        edl, 6.0, True, Timeline(edl["keep"]), None, [], index,
         preview=True, W=270, H=480, fps=30.0, frame_mode="crop",
         src_w=1920, src_h=1080, src_fps=30.0, focus_origin=0.0)
     blocks = {p.split("]")[0]: p for p in graph.split(";")
