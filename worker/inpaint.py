@@ -1191,33 +1191,6 @@ def _clamped(regions, stats):
     return out
 
 
-def erase_measure(src, out, regions, out_offset=0.0, samples=3):
-    """(before, after, metric) per region of one repaint — the honesty
-    check, at `samples` moments across each region's own window: 'ink'
-    (stroke energy, text fills) or 'pattern' (pattern_kept: 100 before, the
-    share of the box's picture that survives after; box fills). Either way
-    gone = after <= max(1.5, before * 0.35)."""
-    before, after, metric = [], [], []
-    dur = float(media.probe(src)["duration"])
-    for r in regions:
-        rs = float(r.get("start") if r.get("start") is not None else out_offset)
-        re_ = float(r.get("end") if r.get("end") is not None else dur)
-        re_ = max(rs + 0.05, re_)
-        times = [rs + (re_ - rs) * (k + 0.5) / samples for k in range(samples)]
-        box = (r["x"], r["y"], r["w"], r["h"])
-        if str(r.get("fill") or "text") == "box":
-            before.append(100.0)
-            after.append(pattern_kept(src, out, box, times, out_offset))
-            metric.append("pattern")
-        else:
-            b = [text_energy(src, box, at=t) for t in times]
-            a = [text_energy(out, box, at=max(0.0, t - out_offset)) for t in times]
-            before.append(round(sum(b) / len(b), 2))
-            after.append(round(sum(a) / len(a), 2))
-            metric.append("ink")
-    return before, after, metric
-
-
 def run_clean_job(worker_db, job):
     """Executor-side runner for the erase/repaint pass (round 67 — the
     capture/frames/track/matte shape: synchronous, no row, remote failure

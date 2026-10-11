@@ -150,7 +150,8 @@ def catalog(category=None):
 # A row field the template reads with JavaScript parseFloat: anything else
 # ('xl', 'large') silently became the default size, so a lockup's 's'/'l'
 # ladder rendered every row the same size (Oct 2026 run). A number may carry
-# its unit ('0.5s', '1.6x'); parseFloat reads the number either way.
+# its unit ('0.5s', '1.6x'): the write stores the bare number, which the
+# Python readers (motion_tools._cap_size_levels) parse the same way.
 _ROW_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*[sx]?$", re.I)
 _ROW_FLAG = {"", "0", "1", "true", "false", "yes", "no", "y", "n", "on", "off"}
 
@@ -168,9 +169,11 @@ def _check_row(where, row, clean, fields, types):
         val = clean.get(f, "")
         if not val:
             continue
-        if kind == "number" and not _ROW_NUMBER.match(val):
-            raise ValueError(f"{where}.{f} must be a number (e.g. 0.6, 1, 1.6), "
-                             f"not '{val}'")
+        if kind == "number":
+            if not _ROW_NUMBER.match(val):
+                raise ValueError(f"{where}.{f} must be a number (e.g. 0.6, 1, 1.6), "
+                                 f"not '{val}'")
+            clean[f] = val.rstrip("sSxX").strip()
         if kind == "flag" and val.lower() not in _ROW_FLAG:
             raise ValueError(f"{where}.{f} must be 1 or 0 (true/false), not '{val}'")
         if isinstance(kind, list) and val.lower() not in kind:

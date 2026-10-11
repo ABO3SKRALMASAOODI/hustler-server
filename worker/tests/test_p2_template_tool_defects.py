@@ -82,7 +82,10 @@ def test_phrase_build_refuses_a_row_size_it_cannot_read():
     ok = motion_templates.check_params("phrase_build", {"rows": [
         {"text": "a", "size": 0.62, "at": "0.25"}, {"text": "b", "size": "1.6x"},
         {"text": "c", "role": "Serif", "accent": "1", "at": "0.9s"}]})
-    assert [r["size"] for r in ok["rows"]] == ["0.62", "1.6x", ""]
+    # a number with its unit is stored bare: the Python readers (the size
+    # ladder merge) read it as the template's parseFloat does
+    assert [r["size"] for r in ok["rows"]] == ["0.62", "1.6", ""]
+    assert [r["at"] for r in ok["rows"]] == ["0.25", "", "0.9"]
     # a stored EDL keeps rendering as before (the lenient path never raises)
     old = motion_templates.normalize_params("phrase_build", {"rows": _rows("s", "xl")})
     assert [r["size"] for r in old["rows"]] == ["s", "xl"]
@@ -103,6 +106,14 @@ def test_an_edit_batch_checks_the_motion_it_adds_but_not_what_it_leaves():
         {"action": "upsert", "layer": "motion", "id": "lock",
          "value": {"id": "lock", "end": 2.5}}], 20, {})
     assert moved["motion"][0]["end"] == 2.5
+    # the write's allow_face_overlap passed inside params is honoured here
+    # too (the strict check would otherwise refuse it as a template param)
+    card = {"id": "card", "template": "image_card", "start": 4.0, "end": 6.0,
+            "params": {"caption": "Grid", "y": 0.47, "allow_face_overlap": "true"}}
+    got = edit_batch.apply_batch(default_edl(20), [
+        {"action": "upsert", "layer": "motion", "id": "card", "value": card}], 20, {})
+    placed = got["motion"][0]
+    assert placed["allow_face_overlap"] is True and "allow_face_overlap" not in placed["params"]
 
 
 def test_the_template_list_shows_a_rows_shape_and_type_finds_its_lockups():
@@ -131,16 +142,38 @@ def test_timeline_glow_and_image_card_take_size_and_x_and_the_estimate_follows()
     for name, key in (("timeline_steps", "size"), ("glow_title", "size"), ("image_card", "x")):
         p = motion_templates.spec(name)["params"][key]
         assert p["type"] == "float" and p["default"] in (1.0, 0.5), name
+    tl = motion_templates.spec("timeline_steps")
     base = {"rows": [{"label": "1983"}, {"label": "2007"}]}
-    full = keepout.nominal_ink("timeline_steps", motion_templates.spec("timeline_steps"),
-                               dict(base, y=0.5))
-    small = keepout.nominal_ink("timeline_steps", motion_templates.spec("timeline_steps"),
-                                dict(base, y=0.5, size=0.6))
+    full = keepout.nominal_ink("timeline_steps", tl, dict(base, y=0.5))
+    small = keepout.nominal_ink("timeline_steps", tl, dict(base, y=0.5, size=0.6))
     assert (small[2] - small[0]) == pytest.approx(0.6 * (full[2] - full[0]), rel=1e-6)
+    # ...but a narrower layout is never a shorter box (its notes wrap), and
+    # 4+ stops with notes stack in a column (measured 0.40 of the frame at
+    # 0.75): the browserless keep-out must not see a small band there
+    assert small[3] - small[1] >= full[3] - full[1]
+    four = dict(rows=[{"label": str(1980 + i), "sub": "a note"} for i in range(4)], y=0.5)
+    col = keepout.nominal_ink("timeline_steps", tl, dict(four, size=0.75), frame=(1080, 1920))
+    assert col[3] - col[1] >= 0.4 and 0.08 - 1e-9 <= col[1] and col[3] <= 0.80 + 1e-9
+    # ...and the keep-out solver never "shrinks" it off a face
+    cands = keepout.candidates("timeline_steps", tl, dict(four, size=1.0), full, [],
+                               [(0.3, 0.3, 0.7, 0.6)], 1080, 1920)
+    assert cands and all("size" not in patch for _c, patch, _b in cands)
+    # glow_title: a type scale below 1 (the template now scales a width-bound
+    # title too); above 1 its box stays the width it already fills
+    glow = motion_templates.spec("glow_title")
+    g1, g6, g13 = (keepout.nominal_ink("glow_title", glow, {"text": "x", "y": 0.4, "size": z})
+                   for z in (1.0, 0.6, 1.3))
+    assert g13 == g1 and (g6[2] - g6[0]) == pytest.approx(0.6 * (g1[2] - g1[0]))
     spec = motion_templates.spec("image_card")
     mid = keepout.nominal_ink("image_card", spec, {"y": 0.4, "size": 0.5})
-    left = keepout.nominal_ink("image_card", spec, {"y": 0.4, "size": 0.5, "x": 0.3})
-    assert left[0] == pytest.approx(mid[0] - 0.2) and left[2] == pytest.approx(mid[2] - 0.2)
+    left = keepout.nominal_ink("image_card", spec, {"y": 0.4, "size": 0.5, "x": 0.35})
+    assert left[0] == pytest.approx(mid[0] - 0.15) and left[2] == pytest.approx(mid[2] - 0.15)
+    # the card stops 60 design px inside the frame (image_card.html), so the
+    # estimate of a card pushed to the edge stops there too: a face to its
+    # right is still under it (a narrow card set beside the face, s05/s06)
+    edge = keepout.nominal_ink("image_card", spec, {"y": 0.4, "size": 0.5, "x": 0.2})
+    assert edge[0] == pytest.approx(60 / 1080 - 0.006) and \
+        edge[2] - edge[0] == pytest.approx(mid[2] - mid[0])
 
 
 def test_allow_face_overlap_inside_params_is_the_writes_argument():
@@ -274,13 +307,16 @@ CARD = "parseFloat(document.querySelector('.card').style.left)"
 
 @needs_browser
 def test_headline_breaks_at_the_slash_and_the_counter_label_takes_its_ink():
-    head, label, glow_big, glow_small, tl_full, tl_small = asyncio.run(_run([
+    head, label, glow_big, glow_small, wide_big, wide_small, tl_full, tl_small = asyncio.run(_run([
         ("headline", {"text": "Elon Musk: If it's not your goal, / you won't achieve it",
                       "y": 0.15}, 4.0, 1.0, HEADLINE),
         ("counter", {"value": "10x", "label": "every six months", "color": "#0F1B33",
                      "accent": "#6D93D6", "glow": 0}, 3.0, 2.5, LABEL),
         ("glow_title", {"text": "2001", "subline": "1968", "flicker": False}, 2.6, 1.5, GLOW),
         ("glow_title", {"text": "2001", "subline": "1968", "flicker": False, "size": 0.6},
+         2.6, 1.5, GLOW),
+        ("glow_title", {"text": "The economy of abundance", "flicker": False}, 2.6, 1.5, GLOW),
+        ("glow_title", {"text": "The economy of abundance", "flicker": False, "size": 0.6},
          2.6, 1.5, GLOW),
         ("timeline_steps", {"rows": [{"label": "2025"}, {"label": "2027"}]}, 3.5, 2.0, STAGE),
         ("timeline_steps", {"rows": [{"label": "2025"}, {"label": "2027"}], "size": 0.6},
@@ -290,6 +326,9 @@ def test_headline_breaks_at_the_slash_and_the_counter_label_takes_its_ink():
     assert head["second"] > head["first"]           # 'you' starts the second line
     assert label.replace(" ", "") in ("rgba(15,27,51,0.92)", "rgba(15,27,51,.92)")
     assert glow_small < glow_big
+    # a width-bound title follows its size too (the keep-out estimate scales
+    # the box by it): 0.6 of the type, give or take the 40 px floor
+    assert wide_small <= 0.65 * wide_big
     assert tl_small < tl_full
 
 
@@ -305,7 +344,7 @@ def test_an_image_card_moves_sideways_with_x():
     assert left < centre
 
 
-# ── 5. EARN ITS PLACE and the Look's own lockups ─────────────────────────
+# ── 5. EARN ITS PLACE: re-typesets stay flagged; an html image is imagery ─
 
 SPEECH = ("the goal of SpaceX is making life multiplanetary and at least you have a chance "
           "of achieving it so a self sustaining city on Mars is at least possible " + "and then " * 40)
@@ -336,19 +375,27 @@ def _codes(edl, words):
     return {n["code"]: n for n in edit_review.review(edl, idx, force=True)}
 
 
-def test_a_hero_lockup_is_not_a_retypeset_but_a_sentence_stack_still_is():
+def test_a_short_starred_lockup_of_heard_words_is_still_a_retypeset():
+    # The s09 editor called its band lockups the Look's own; its reviewer
+    # answered "EARN ITS PLACE is right" and the s07/s08 reviews killed on
+    # the same re-typeset, so the flag stands for a starred two-row lockup
+    # and for a payoff lockup beside its image.
     words = _w(SPEECH)
     t = next(w["t0"] for w in words if w["w"] == "multiplanetary")
     lockup = _mg("goal", "phrase_build", t - 0.6, t + 1.5, rows=[
         {"text": "making life"}, {"text": "*multiplanetary*"}])
-    assert "restates_captions" not in _codes(_edl([lockup]), words)
-    stack = _mg("goal", "phrase_build", t - 0.6, t + 1.5, rows=[
-        {"text": "the goal of *SpaceX*"}, {"text": "is making life"},
-        {"text": "multiplanetary and"}])
-    assert "restates_captions" in _codes(_edl([stack]), words)
+    hit = _codes(_edl([lockup]), words).get("restates_captions")
+    assert hit and "'goal'" in hit["message"]
+    m = next(w["t0"] for w in words if w["w"] == "Mars")
+    payoff = _mg("payoff", "phrase_build", m - 1.0, 30.0, rows=[
+        {"text": "a self sustaining"}, {"text": "city on Mars"}, {"text": "is at least possible"}])
+    image = dict(_mg("mars", "html", m - 0.5, 30.0, asset_mars="fetched/1/mars.jpg"),
+                 html="<img src='assets/asset_mars'>")
+    hit = _codes(_edl([lockup, payoff, image]), words).get("restates_captions")
+    assert hit and "'goal'" in hit["message"] and "'payoff'" in hit["message"]
 
 
-def test_an_html_image_is_imagery_and_the_payoffs_image_shares_its_moment():
+def test_an_html_graphic_placing_a_project_image_is_imagery():
     words = _w(SPEECH)
     t = next(w["t0"] for w in words if w["w"] == "Mars")
     payoff = _mg("payoff", "phrase_build", t - 1.0, 30.0, rows=[
@@ -357,10 +404,11 @@ def test_an_html_image_is_imagery_and_the_payoffs_image_shares_its_moment():
                  html="<img src='assets/asset_mars'>")
     m = edit_review.moments(_edl([payoff, image]))
     assert edit_review._html_image(next(x for x in m if x["id"] == "mars"))
-    codes = _codes(_edl([payoff, image]), words)
-    assert "restates_captions" not in codes          # the payoff, beside its image
-    shows = codes.get("showable_moment")
+    # s09: the NASA Mars photo was there, yet 'Mars' read as set only as type
+    shows = _codes(_edl([payoff, image]), words).get("showable_moment")
     assert not shows or "'Mars'" not in shows["message"]
+    shows = _codes(_edl([payoff]), words).get("showable_moment")
+    assert shows and "'Mars'" in shows["message"]
 
 
 # ── 6. the erase: repaint v2 and its honesty check ───────────────────────
@@ -512,6 +560,18 @@ def test_an_edge_keeping_a_sliver_of_a_word_cuts_that_word():
     assert got["why"] == "word" and 974.90 <= got["t"] <= 974.91
 
 
+def test_a_sliver_edge_its_span_cannot_carry_past_the_word_keeps_it_whole():
+    # [974.85, 974.92]: the span's own limits stop the start inside 'What'
+    # (it used to recurse until RecursionError, and the write then lost the
+    # audio-safe placement of every edge)
+    for level in (None, lambda t: -15.0):
+        new, moves, _n = cut_audio.refine_keep([[960.0, 970.0], [974.85, 974.92]],
+                                               STUTTER, 2000.0, None, level)
+        start = next(m for m in moves if m["side"] == "start" and m["old"] == 974.85)
+        assert not start.get("dropped")
+        assert new[-1][0] <= 974.85
+
+
 def test_an_edge_written_at_a_5ms_word_boundary_never_reaches_across_the_word():
     # 'pulling' ends 1574.155 and 'a' starts there; a start written at
     # 1574.15 reached 0.24 s back through 'pulling' for a quiet point
@@ -575,8 +635,10 @@ def test_review_audio_hears_six_windows_in_batches_anchored_where_asked(monkeypa
     monkeypatch.setattr(llm, "audio_review_available", lambda: True)
     monkeypatch.setattr(agent_tools.media, "extract_audio_clip",
                         lambda src, a, b, dst: cut.append((round(a, 2), round(b, 2))))
+    froms = []
     monkeypatch.setattr(llm, "ask_audio", lambda prompt, paths, labels, **kw: (
-        asked.append((prompt, list(labels), kw.get("max_tokens"))) or "clean joins"))
+        froms.append(kw.get("number_from", 1)),
+        asked.append((prompt, list(labels), kw.get("max_tokens"))))[-1] or "clean joins")
     ctx = SimpleNamespace(has_main_video=True, duration=60.0, project_id=7, workdir=str(tmp_path),
                           proxy_path=lambda: "/cache/proxy.mp4",
                           db=SimpleNamespace(run=lambda *a, **k: None), edit_plan={})
@@ -585,6 +647,8 @@ def test_review_audio_hears_six_windows_in_batches_anchored_where_asked(monkeypa
     assert cut == [(5.0, 7.0), (10.0, 12.0), (15.0, 17.0), (20.0, 22.0), (25.0, 27.0), (30.0, 32.0)]
     assert [len(labels) for _p, labels, _m in asked] == [3, 3]
     assert "CLIPS 4-6 of 6" in asked[1][0]
+    # ...and the listener sees them as CLIP 4-6 too, not a second CLIP 1-3
+    assert froms == [1, 4]
     assert "CLIP 6: main-video SOURCE sound (from the proxy) 30.0-32.0s" in out
     assert "NOT HEARD" in out and "35s" in out
     cut.clear()
@@ -596,12 +660,42 @@ def test_review_audio_hears_six_windows_in_batches_anchored_where_asked(monkeypa
     assert agent_tools.review_audio(ctx, times=[10], anchor="middle").startswith("REJECTED")
 
 
+def test_the_listener_numbers_a_later_calls_clips_on(monkeypatch, tmp_path):
+    import config
+    clips = []
+    for i in range(2):
+        c = tmp_path / f"c{i}.mp3"
+        c.write_bytes(b"bounded-audio")
+        clips.append(str(c))
+    sent = {}
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+        @staticmethod
+        def json():
+            return {"choices": [{"message": {"content": "CLIP 4: clean. CLIP 5: clean."}}],
+                    "usage": {"prompt_tokens": 9, "completion_tokens": 4}}
+
+    monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "test-key")
+    monkeypatch.setattr(llm, "_audio_review_dead", False)
+    monkeypatch.setattr(llm.requests, "post",
+                        lambda url, **kw: (sent.update(kw) or Response()))
+    monkeypatch.setattr(llm, "record", lambda *a, **k: None)
+    llm.ask_audio("Judge the joins.", clips, ["a 1.0-3.0s", "b 5.0-7.0s"], number_from=4)
+    texts = [p.get("text") for p in sent["json"]["messages"][0]["content"] if p.get("type") == "text"]
+    assert "CLIP 4: a 1.0-3.0s" in texts and "CLIP 5: b 5.0-7.0s" in texts
+
+
 # ── 10. audit_captions sees the graphics ─────────────────────────────────
 
 def test_the_caption_audit_names_graphic_text_and_captions_under_a_graphic():
     edl = _edl([
         _mg("card", "image_card", 3.0, 6.5, caption="AI chips", chip="2023"),
-        _mg("head", "headline", 0.0, 30.0, text="After chips, AI ran into a *voltage problem*")])
+        _mg("head", "headline", 0.0, 30.0, text="After chips, AI ran into a *voltage problem*"),
+        dict(_mg("pun", "html", 8.0, 9.0, asset_photo="fetched/7/stock/ab12.jpg"),
+             html="<img src='assets/asset_photo'><b>the power-grid kind</b>")])
     edl["texts"] = [{"id": "t1", "text": "PEOPLE KEEP GUESSING", "start": 0.0, "end": 2.0}]
     words = [{"w": "were", "t0": 4.0, "t1": 4.2, "src_t0": 4.0},
              {"w": "growth.", "t0": 4.3, "t1": 4.6, "src_t0": 4.3}]
@@ -615,6 +709,7 @@ def test_the_caption_audit_names_graphic_text_and_captions_under_a_graphic():
     assert by_id["card"]["text"] == "AI chips / 2023" or "AI chips" in by_id["card"]["text"]
     assert by_id["card"]["shows_caption_words"] == "AI chips"
     assert by_id["t1"]["text"] == "PEOPLE KEEP GUESSING"
+    assert by_id["pun"]["text"] == "the power-grid kind"      # its photo's key is no text
     # the card's box meets the caption band; the headline band above does not
     assert [u["id"] for u in under] == ["card"] and under[0]["words"] == "were growth."
 

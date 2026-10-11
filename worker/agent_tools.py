@@ -21118,7 +21118,8 @@ def _caption_graphics_report(edl, plan):
             continue
         rep = plan.report.get(m.get("id")) or {}
         text = " / ".join(" ".join(str(v).split())
-                          for _k, v in caption_carry.graphic_lines(m))
+                          for k, v in caption_carry.graphic_lines(m)
+                          if not str(k).startswith("asset"))     # a file, not text
         row = {"id": m.get("id"), "template": m.get("template"),
                "start": m.get("start"), "end": m.get("end"), "text": text[:200]}
         if rep.get("carried"):
@@ -25236,9 +25237,10 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         numbered = prompt + (f" The clips below are CLIPS {k + 1}-{k + len(part)} of "
                              f"{len(clips)}; answer for each by that number."
                              if len(clips) > REVIEW_AUDIO_BATCH else "")
+        more = {"number_from": k + 1} if len(clips) > REVIEW_AUDIO_BATCH else {}
         got = llm.ask_audio(numbered, part, labels[k:k + REVIEW_AUDIO_BATCH],
                             max_tokens=240 + 60 * len(part),
-                            purpose="audio_asset_review")
+                            purpose="audio_asset_review", **more)
         if got:
             answers.append(got if len(clips) <= REVIEW_AUDIO_BATCH else
                            f"[CLIPS {k + 1}-{k + len(part)}] {got}")

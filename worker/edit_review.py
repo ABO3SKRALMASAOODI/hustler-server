@@ -106,13 +106,10 @@ MAX_ACCENTS = 1
 RESTATE_MIN_CONTENT = 3      # content words a graphic needs to "restate"
 RESTATE_SHARE = 0.85         # share of them heard around its window
 RESTATE_PAD_S = 2.0
-# An emphasis lockup — a starred hero word or two in a short line (Headline
-# Pro's serif hero word, the in-band lockups a headline yields to, a payoff
-# phrase) — is the Looks' signature device, not a re-typeset sentence: the
-# words it shows leave the captions (caption_carry) and the budget still
-# counts it. A longer stack of heard words still restates (Oct 2026: every
-# Headline Pro lockup of s09 was flagged).
-HERO_LOCKUP_MAX_CONTENT = 4
+# Oct 2026 (Diamandis run): a short starred lockup of heard words still
+# restates them. The s09 editor called its three Headline Pro band lockups
+# 'the Look's own'; the reviewer answered "EARN ITS PLACE is right", and the
+# s07/s08 reviews killed on the same re-typeset (test_p2_template_tool_defects).
 
 # ── beat coverage (the budget's complement) ──────────────────────────────
 DEAD_GAP_S = 8.0             # a body stretch this long with no designed beat
@@ -798,25 +795,12 @@ def _is_list(m, prog):
     return separated >= max(2, len(rows) - 2)
 
 
-def _hero_lockup(m):
-    """An emphasis lockup (HERO_LOCKUP_MAX_CONTENT): a *starred* hero in
-    main lines of at most that many content words."""
-    main = [text for key, text in m["lines"] if key not in SIDE_KEYS]
-    if not any(_STAR_RE.search(str(text)) for text in main):
-        return False
-    return len(set(_content(_tokens(" ".join(map(str, main)))))) \
-        <= HERO_LOCKUP_MAX_CONTENT
-
-
 def _restate_notes(ms, prog, hook_ids, payoff):
     if not prog.kept:
         return [], set()
     restated, lists = [], []
     for m in ms:
-        if m["id"] in hook_ids or (payoff is not None and (
-                m is payoff or m["start"] < payoff["end"] - 1e-6
-                and m["end"] > payoff["start"] + 1e-6)):
-            # the payoff lockup, and whatever shares its moment (its image)
+        if m["id"] in hook_ids or (payoff is not None and m is payoff):
             continue
         tpl = m["template"]
         if tpl in INFO_TEMPLATES or tpl.startswith("text:lower_third"):
@@ -826,8 +810,6 @@ def _restate_notes(ms, prog, hook_ids, payoff):
         if len(content) < RESTATE_MIN_CONTENT:
             continue
         if any(any(c.isdigit() for c in t) for t in content):
-            continue
-        if _hero_lockup(m) and not _is_list(m, prog):
             continue
         heard = set()
         for w in prog.words_between(m["start"] - RESTATE_PAD_S,

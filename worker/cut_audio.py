@@ -194,7 +194,8 @@ def _floor(level, b):
     return min(vals) if vals else None
 
 
-def place_edge(side, b, words, level=None, lo_limit=None, hi_limit=None):
+def place_edge(side, b, words, level=None, lo_limit=None, hi_limit=None,
+               _may_drop=True):
     """Where one cut edge should sit: a dict {t, why, word, db_was, db,
     loud} (t == b when it stays). ``side`` is 'start' (sound kept AFTER b)
     or 'end' (sound kept BEFORE b). ``level(t)`` is the source's level
@@ -208,7 +209,7 @@ def place_edge(side, b, words, level=None, lo_limit=None, hi_limit=None):
     lo_limit = 0.0 if lo_limit is None else float(lo_limit)
     hi_limit = math.inf if hi_limit is None else float(hi_limit)
     hit = ws.inside(b)
-    if hit and _kept_share(side, b, hit) < KEEP_WORD_FRAC:
+    if _may_drop and hit and _kept_share(side, b, hit) < KEEP_WORD_FRAC:
         return _past_word(side, b, hit, ws, level, lo_limit, hi_limit)
     db_b = level(b) if level else None
     out = {"t": b, "why": None, "word": hit[2] if hit else None,
@@ -325,8 +326,14 @@ def _past_word(side, b, hit, ws, level, lo_limit, hi_limit):
     edge = (math.floor(t1 / GRID_S + 1e-6) if side == "start"
             else math.ceil(t0 / GRID_S - 1e-6)) * GRID_S
     edge = round(min(max(edge, lo_limit), hi_limit), 2)
+    if ws.inside(edge) == hit:
+        # the span's own limits keep the edge inside the word (a span that
+        # ends just past it): it cannot be cut here, so it is kept whole as
+        # before (this used to recurse until RecursionError, which dropped
+        # the whole write's audio-safe placement)
+        return place_edge(side, b, ws, level, lo_limit, hi_limit, _may_drop=False)
     db_b = level(b) if level else None
-    got = place_edge(side, edge, ws, level, lo_limit, hi_limit)
+    got = place_edge(side, edge, ws, level, lo_limit, hi_limit, _may_drop=False)
     t = got["t"]
     if level is None:
         # no sound to read: clear the word's release (Whisper ends it early)

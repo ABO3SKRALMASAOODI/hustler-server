@@ -68,6 +68,22 @@ def _check_new_motion_params(before, edl):
         if prev is not None and all(prev.get(k) == item.get(k)
                                     for k in ("template", "params", "html")):
             continue
+        params = item.get("params")
+        if isinstance(params, dict) and "allow_face_overlap" in params:
+            # the write's flag passed inside params, as add/set_motion_graphic
+            # take it (motion_tools._hoist_face_flag): honoured, not refused
+            try:
+                accepts = motion_templates.spec(str(item.get("template") or ""))["params"]
+            except (ValueError, KeyError):
+                accepts = {}
+            if "allow_face_overlap" not in accepts:
+                params = dict(params)
+                flag = params.pop("allow_face_overlap")
+                item["params"] = params
+                if item.get("allow_face_overlap") is None:
+                    item["allow_face_overlap"] = (
+                        flag.strip().lower() in ("1", "true", "yes", "on")
+                        if isinstance(flag, str) else bool(flag))
         try:
             motion_templates.check_params(str(item.get("template") or ""),
                                           item.get("params") or {}, html=item.get("html"))

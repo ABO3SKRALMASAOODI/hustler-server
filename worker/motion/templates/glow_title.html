@@ -74,8 +74,10 @@
   const layout = () => {
     [halo, core].forEach(el => { el.style.fontSize = '100px'; });
     const wmax = Math.max(...Array.from(core.children, c => c.scrollWidth), 1) / 100;
+    // size is a type scale: below 1 a width-bound title shrinks too (the
+    // keep-out estimate scales its box by it); above 1 it never passes the width
     const S = Number(P.size) || 1;
-    fs = Math.max(40, Math.min((W * 0.84) / wmax, (lines.length > 1 ? 0.075 : 0.1) * H * S, 210 * S));
+    fs = Math.max(40, Math.min((W * 0.84 * Math.min(1, S)) / wmax, (lines.length > 1 ? 0.075 : 0.1) * H * S, 210 * S));
     [halo, core].forEach(el => { el.style.fontSize = fs + 'px'; });
     const I = P.intensity;
     // bloom: tight glyph glow + mid halo + very wide low-alpha halo (~12% FH)
