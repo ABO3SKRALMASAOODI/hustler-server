@@ -51,8 +51,11 @@ CLASS_SQL = f"""CASE WHEN d.robot THEN 'robot'
             ELSE 'no_signal' END"""
 
 
-def browsers_cte(cur, by_day=False, extra_where="", extra_cols=""):
-    """SQL for CTEs `v` (rows) and `d` (one row per browser[, day])."""
+def browsers_cte(cur, by_day=False, extra_where="", extra_cols="", extra_v=""):
+    """SQL for CTEs `v` (rows) and `d` (one row per browser[, day]).
+
+    extra_v adds columns to `v` (e.g. "pv.country,"), extra_cols adds
+    aggregates over them to `d`."""
     interacted, signed_in = _flags(cur)
     day = (ranges.local_date_sql("pv.visited_at", tz_aware=False) + " AS day,"
            if by_day else "")
@@ -60,7 +63,7 @@ def browsers_cte(cur, by_day=False, extra_where="", extra_cols=""):
     return f"""
       v AS (
         SELECT pv.device_id, pv.analytics_id, pv.page, pv.visited_at,
-               pv.referrer, pv.attribution, {day}
+               pv.referrer, pv.attribution, {day} {extra_v}
                COALESCE(pv.user_agent, '') AS user_agent,
                COALESCE(pv.time_on_page, 0) AS active_s,
                COALESCE(pv.scroll_depth, 0) AS scroll,

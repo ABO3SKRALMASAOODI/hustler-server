@@ -18,9 +18,9 @@ from werkzeug.exceptions import HTTPException
 from acquisition import CHANNELS, NOT_RECORDED_REASONS
 from admin_metrics import (attention as attention_mod, cache,
                            channels_report, costs as costs_mod, customers,
-                           db, defs, funnel as funnel_mod, health, live as
-                           live_mod, money, outreach, projects, ranges,
-                           registry, visitors)
+                           db, defs, funnel as funnel_mod, health, insights,
+                           live as live_mod, money, outreach, projects,
+                           ranges, registry, visitors)
 from admin_metrics.ranges import RangeError
 from routes.admin import admin_required
 
@@ -30,7 +30,14 @@ log = logging.getLogger(__name__)
 TTL = {"meta": 3600, "summary": 60, "trend": 300, "acquisition": 300,
        "outreach": 300, "pages": 300, "funnel": 300, "cohorts": 300,
        "revenue": 300, "health": 60, "waits": 300, "attention": 60,
-       "billing_problems": 60}
+       "billing_problems": 60, "engagement": 300, "audience": 300,
+       "exports": 120, "revenue_costs": 300, "activity": 60,
+       "customers": 60, "projects": 60}
+
+# Stale-while-revalidate (R3): an answer up to this old is served at once
+# while a fresh one is computed in the background, so a page never waits on
+# a report it has already seen. The page shows how old it is (generated_at).
+STALE_S = 30 * 60
 
 
 # ── Errors (R5) ──────────────────────────────────────────────────────────
@@ -181,10 +188,15 @@ def _respond(data, period=None, include_owner=False, errors=None,
                     "data": data})
 
 
-def _cached(name, params, compute):
-    """Run compute() through the in-process cache unless it reported errors."""
+def _cached(name, params, compute, swr=True):
+    """Run compute() through the in-process cache unless it reported errors.
+
+    swr: serve an expired answer at once and refresh it in the background.
+    compute() must then not read the request (it may run after it ended)."""
     value, computed_at, age = cache.get_or_compute(
-        name, params, TTL.get(name, 0), compute, fresh=_fresh())
+        name, params, TTL.get(name, 0), compute, fresh=_fresh(),
+        stale_s=STALE_S if swr else 0,
+        keep=lambda v: not v.get("errors"))
     if value.get("errors"):
         cache.clear_key(name, params)
     return value, computed_at, age
@@ -195,21 +207,37 @@ class Sections:
 
     def __init__(self):
         self.errors = []
+        self.results = {}
+
+    def fail(self, name, e):
+        if isinstance(e, psycopg2.errors.QueryCanceled):
+            msg = "This part took too long and was skipped."
+        elif isinstance(e, psycopg2.Error):
+            msg = "The database couldn't answer this part."
+        else:
+            msg = "This part couldn't be computed."
+        log.warning("admin v2 section %s failed: %s", name, type(e).__name__)
+        self.errors.append({"section": name, "message": msg})
 
     def run(self, name, fn, default=None):
         try:
             return fn()
         except Exception as e:
-            if isinstance(e, psycopg2.errors.QueryCanceled):
-                msg = "This part took too long and was skipped."
-            elif isinstance(e, psycopg2.Error):
-                msg = "The database couldn't answer this part."
-            else:
-                msg = "This part couldn't be computed."
-            log.warning("admin v2 section %s failed: %s", name,
-                        type(e).__name__)
-            self.errors.append({"section": name, "message": msg})
+            self.fail(name, e)
             return default
+
+    def parallel(self, tasks):
+        """Run [(name, fn(cur))] at once on their own connections (R10)."""
+        self.results = db.parallel(tasks)
+        return self.results
+
+    def get(self, name, default=None):
+        """A parallel task's value, or `default` (recorded as an error)."""
+        ok, value = self.results.get(name, (False, RuntimeError("not run")))
+        if ok:
+            return value
+        self.fail(name, value)
+        return default
 
 
 def _href(base, period, extra=""):
@@ -241,36 +269,8 @@ def signups_by_day(cur, period):
     return {r["day"]: int(r["n"]) for r in cur.fetchall()}
 
 
-ACTIVE_UNION = """
-    SELECT p.user_id, {day_a} AS day FROM assets a
-      JOIN projects p ON p.id = a.project_id
-     WHERE a.kind = 'original' AND a.created_at >= %(start_tz)s
-       AND a.created_at < %(end_tz)s
-    UNION ALL
-    SELECT p.user_id, {day_m} FROM chat_messages cm
-      JOIN projects p ON p.chat_session_id = cm.session_id
-     WHERE cm.role = 'user' AND cm.created_at >= %(start)s
-       AND cm.created_at < %(end)s
-    UNION ALL
-    SELECT vj.user_id, {day_j} FROM video_jobs vj
-     WHERE vj.type = 'mcp_tool' AND vj.payload->>'mutation' = 'true'
-       AND vj.created_at >= %(start_tz)s AND vj.created_at < %(end_tz)s
-    UNION ALL
-    SELECT vj.user_id, {day_e} FROM video_jobs vj
-     WHERE vj.type = 'final' AND vj.state = 'done'
-       AND vj.updated_at >= %(start_tz)s AND vj.updated_at < %(end_tz)s"""
-
-
-def _active_sql(by_day):
-    if by_day:
-        parts = dict(day_a=ranges.local_date_sql("a.created_at", True),
-                     day_m=ranges.local_date_sql("cm.created_at", False),
-                     day_j=ranges.local_date_sql("vj.created_at", True),
-                     day_e=ranges.local_date_sql("vj.updated_at", True))
-    else:
-        parts = dict(day_a="NULL::date", day_m="NULL::date",
-                     day_j="NULL::date", day_e="NULL::date")
-    return ACTIVE_UNION.format(**parts)
+ACTIVE_UNION = insights.ACTIVE_UNION
+_active_sql = insights.active_sql
 
 
 def active_customers(cur, period):
@@ -395,39 +395,119 @@ def meta():
 
 
 # ── 2. summary (Today) ───────────────────────────────────────────────────
+SUMMARY_ORDER = ("people", "signups", "signup_rate", "first_upload",
+                 "first_edit", "first_export", "new_paying", "paying_now",
+                 "mrr", "cash", "exports", "active_customers")
+
+
+def _spark_of(days, series, default=0):
+    return [{"date": d.isoformat(), "value": series.get(d, default)}
+            for d in days]
+
+
 @admin_v2_bp.route("/summary", methods=["GET"])
 @admin_required
 def summary():
     period = _period("today")
 
     def compute():
-        cur = db.cursor()
         s = Sections()
         comp = period.compare()
         spark_period = ranges.trailing_days(14, period.to_day)
         days = spark_period.day_list()
+        _tracking_meta()            # warm before the sections fan out
+        partial = _visitor_status(period)[0] == "partial"
+
+        def t_people(cur):
+            return people_metric(cur, period, with_spark=False)
+
+        def t_people_spark(cur):
+            return visitors.classify_by_day(cur, spark_period)
+
+        def t_signups(cur):
+            return {"now": signups_count(cur, period),
+                    "prev": signups_count(cur, comp),
+                    "spark": signups_by_day(cur, spark_period),
+                    "tracked": signups_count(cur, _tracked_part(period))
+                    if partial else None}
+
+        def t_activation(cur):
+            def href(kind):
+                return _href("/admin/customers", period,
+                             f"&date_field=first_{kind}")
+            return insights.activation_metrics(cur, period, href)
+
+        def t_paying(cur):
+            return {"new": money.new_paying(cur, period),
+                    "new_prev": money.new_paying(cur, comp),
+                    "new_spark": money.new_paying_by_day(cur, spark_period),
+                    "mrr": money.mrr_and_paying(cur),
+                    "mrr_prev": money.mrr_at(cur, comp.to_day)
+                    if comp else None,
+                    "mrr_hist": money.mrr_history(cur, spark_period)}
+
+        def t_cash(cur):
+            return {"now": money.cash(cur, period),
+                    "prev": money.cash(cur, comp),
+                    "spark": money.cash_by_day(cur, spark_period)}
+
+        def t_active(cur):
+            return {"now": active_customers(cur, period),
+                    "prev": active_customers(cur, comp),
+                    "spark": active_by_day(cur, spark_period)}
+
+        def t_exports(cur):
+            n, people_n = exports_count(cur, period)
+            pn, _ = exports_count(cur, comp)
+            return {"now": n, "people": people_n, "prev": pn,
+                    "spark": exports_by_day(cur, spark_period)}
+
+        def t_health_jobs(cur):
+            return (health.failures(cur, period, recent_limit=0),
+                    health.uploads(cur, period, recent_limit=0))
+
+        def t_health_edits(cur):
+            return (health.messages_without_edit(cur, period, recent_limit=0),
+                    health.engine(cur))
+
+        def t_health_pay(cur):
+            return (money.status_counts(cur)["payment_failing"],
+                    money.failed_payments(cur, period)["payments"])
+
+        def t_channels(cur):
+            return channels_report.summary_channels(cur, period)
+
+        s.parallel([("people", t_people), ("people_spark", t_people_spark),
+                    ("activation", t_activation), ("paying", t_paying),
+                    ("signups", t_signups), ("active_customers", t_active),
+                    ("exports", t_exports), ("cash", t_cash),
+                    ("health_jobs", t_health_jobs),
+                    ("health_edits", t_health_edits),
+                    ("health_pay", t_health_pay), ("channels", t_channels)])
         kpis = {}
 
-        people = s.run("people", lambda: people_metric(cur, period),
-                       (registry.error_metric("people"), None, None))
-        kpis["people"] = people[0]
-        people_now, people_prev = people[1], people[2]
+        people = s.get("people", None)
+        if people is None:
+            kpis["people"] = registry.error_metric("people")
+        else:
+            kpis["people"] = people[0]
+            by_day = s.get("people_spark", None)
+            if by_day is not None and period.to_day:
+                kpis["people"]["spark"] = [
+                    {"date": d.isoformat(),
+                     "value": (by_day.get(d) or {}).get("person")
+                     if by_day.get(d) is not None else None} for d in days]
 
-        def signups_kpi():
-            v = signups_count(cur, period)
-            p = signups_count(cur, comp)
-            sp = signups_by_day(cur, spark_period)
-            return registry.metric(
-                "signups", v, p, spark=[{"date": d.isoformat(),
-                                         "value": sp.get(d, 0)} for d in days],
-                href=_href("/admin/customers", period, "&date_field=joined"))
-        kpis["signups"] = s.run("signups", signups_kpi,
-                                registry.error_metric("signups"))
+        sg = s.get("signups", None)
+        kpis["signups"] = registry.metric(
+            "signups", sg["now"], sg["prev"],
+            spark=_spark_of(days, sg["spark"]),
+            href=_href("/admin/customers", period, "&date_field=joined")) \
+            if sg else registry.error_metric("signups")
 
         def rate_kpi():
-            sg = kpis["signups"]
             pp = kpis["people"]
-            if sg["status"] == "error" or pp["status"] == "error":
+            if sg is None or pp["status"] == "error":
                 return registry.error_metric("signup_rate")
             status, note = _visitor_status(period)
             # People are only counted since visits were tracked, so the
@@ -436,16 +516,15 @@ def summary():
             # tracked part only (never 357%).
             value, prev = None, None
             if status == "partial":
-                tracked = _tracked_part(period)
-                value = defs.pct(signups_count(cur, tracked), pp["value"]) \
+                value = defs.pct(sg["tracked"], pp["value"]) \
                     if pp["value"] else None
                 note = ("Signups since 3 Oct ÷ people since 3 Oct: visitors "
                         "are counted from 3 Oct 2026, so earlier signups are "
                         "left out of this rate.")
             elif status == "ok":
-                value = defs.pct(sg["value"], pp["value"]) \
+                value = defs.pct(sg["now"], pp["value"]) \
                     if pp["value"] else None
-                prev = defs.pct(sg["previous"], pp["previous"]) \
+                prev = defs.pct(sg["prev"], pp["previous"]) \
                     if pp.get("previous") else None
             if value is None and status == "ok":
                 status, note = "unavailable", "No people visited yet."
@@ -455,89 +534,79 @@ def summary():
         kpis["signup_rate"] = s.run("signup_rate", rate_kpi,
                                     registry.error_metric("signup_rate"))
 
-        def new_paying_kpi():
-            sp = money.new_paying_by_day(cur, spark_period)
-            return registry.metric(
-                "new_paying", money.new_paying(cur, period),
-                money.new_paying(cur, comp),
-                spark=[{"date": d.isoformat(), "value": sp.get(d, 0)}
-                       for d in days],
+        act = s.get("activation", None)
+        for key in ("first_upload", "first_edit", "first_export"):
+            kpis[key] = act[key] if act else registry.error_metric(key)
+
+        pay = s.get("paying", None)
+        if pay:
+            kpis["new_paying"] = registry.metric(
+                "new_paying", pay["new"], pay["new_prev"],
+                spark=_spark_of(days, pay["new_spark"]),
                 href=_href("/admin/customers", period,
                            "&date_field=first_paid"))
-        kpis["new_paying"] = s.run("new_paying", new_paying_kpi,
-                                   registry.error_metric("new_paying"))
-
-        def cash_kpi():
-            c = money.cash(cur, period)
-            pc = money.cash(cur, comp)
-            sp = money.cash_by_day(cur, spark_period)
-            return registry.metric(
-                "cash", c["usd"], pc["usd"],
-                note=(f"{c['non_usd']} payments in other currencies are not "
-                      "in this total." if c["non_usd"] else None),
-                breakdown=[registry.item("payments", c["payments"]),
-                           registry.item("non_usd_payments", c["non_usd"])],
-                spark=[{"date": d.isoformat(),
-                        "value": (sp.get(d) or (0.0, 0))[0]} for d in days],
-                href=_href("/admin/revenue", period) + "#payments")
-        kpis["cash"] = s.run("cash", cash_kpi, registry.error_metric("cash"))
-
-        def mrr_kpi():
-            mrr, paying, _ = money.mrr_and_paying(cur)
-            prev = money.mrr_at(cur, comp.to_day) if comp else None
-            hist = money.mrr_history(cur, spark_period)
+            mrr, paying_n, _ = pay["mrr"]
             spark = []
+            hist = pay["mrr_hist"]
             if hist["available"]:
                 by = {r["date"]: r["mrr_usd"] for r in hist["rows"]}
                 spark = [{"date": d.isoformat(), "value": by.get(d.isoformat())}
                          for d in days]
-            return registry.metric(
-                "mrr", mrr, prev,
-                note=(None if prev is not None else
+            kpis["mrr"] = registry.metric(
+                "mrr", mrr, pay["mrr_prev"],
+                note=(None if pay["mrr_prev"] is not None else
                       "No comparison yet: MRR history starts when daily "
                       "billing snapshots begin."),
-                breakdown=[registry.item("paying_now", paying)], spark=spark,
-                href="/admin/revenue")
-        kpis["mrr"] = s.run("mrr", mrr_kpi, registry.error_metric("mrr"))
+                breakdown=[registry.item("paying_now", paying_n)],
+                spark=spark, href="/admin/revenue")
+            kpis["paying_now"] = registry.metric(
+                "paying_now", paying_n, comparable=False,
+                href="/admin/customers?range=all&filter=paying")
+        else:
+            for key in ("new_paying", "mrr", "paying_now"):
+                kpis[key] = registry.error_metric(key)
 
-        def active_kpi():
-            sp = active_by_day(cur, spark_period)
-            return registry.metric(
-                "active_customers", active_customers(cur, period),
-                active_customers(cur, comp),
-                spark=[{"date": d.isoformat(), "value": sp.get(d, 0)}
-                       for d in days],
-                href=_href("/admin/customers", period, "&date_field=active"))
-        kpis["active_customers"] = s.run(
-            "active_customers", active_kpi,
-            registry.error_metric("active_customers"))
+        c = s.get("cash", None)
+        kpis["cash"] = registry.metric(
+            "cash", c["now"]["usd"], c["prev"]["usd"],
+            note=(f"{c['now']['non_usd']} payments in other currencies are "
+                  "not in this total." if c["now"]["non_usd"] else None),
+            breakdown=[registry.item("payments", c["now"]["payments"]),
+                       registry.item("non_usd_payments", c["now"]["non_usd"])],
+            spark=[{"date": d.isoformat(),
+                    "value": (c["spark"].get(d) or (0.0, 0))[0]}
+                   for d in days],
+            href=_href("/admin/revenue", period) + "#payments") \
+            if c else registry.error_metric("cash")
 
-        def exports_kpi():
-            n, people_n = exports_count(cur, period)
-            pn, _ = exports_count(cur, comp)
-            sp = exports_by_day(cur, spark_period)
-            return registry.metric(
-                "exports", n, pn,
-                breakdown=[registry.item("exporters", people_n)],
-                spark=[{"date": d.isoformat(), "value": sp.get(d, 0)}
-                       for d in days],
-                href=_href("/admin/projects", period, "&date_field=exported"))
-        kpis["exports"] = s.run("exports", exports_kpi,
-                                registry.error_metric("exports"))
+        a = s.get("active_customers", None)
+        kpis["active_customers"] = registry.metric(
+            "active_customers", a["now"], a["prev"],
+            spark=_spark_of(days, a["spark"]),
+            href=_href("/admin/customers", period, "&date_field=active")) \
+            if a else registry.error_metric("active_customers")
 
-        def health_items():
-            failing = money.status_counts(cur)["payment_failing"]
-            failed = money.failed_payments(cur, period)["payments"]
-            return health.health_items(cur, period, failing, failed)
-        items = s.run("health", health_items, [])
+        e = s.get("exports", None)
+        kpis["exports"] = registry.metric(
+            "exports", e["now"], e["prev"],
+            breakdown=[registry.item("exporters", e["people"])],
+            spark=_spark_of(days, e["spark"]),
+            href=_href("/admin/exports", period)) \
+            if e else registry.error_metric("exports")
 
-        channels = s.run("channels",
-                         lambda: channels_report.summary_channels(cur, period),
-                         None)
-        order = ("people", "signups", "signup_rate", "new_paying", "cash",
-                 "mrr", "active_customers", "exports")
-        return {"data": {"kpis": [kpis[k] for k in order], "health": items,
-                         "channels": channels},
+        hj = s.get("health_jobs", None)
+        he = s.get("health_edits", None)
+        hp = s.get("health_pay", None)
+        items = health.health_items_from(period, hj[0], hj[1], hp[0], hp[1],
+                                         he[0], he[1]) \
+            if (hj and he and hp) else []
+        if items == [] and not any(e["section"] == "health"
+                                   for e in s.errors):
+            s.errors.append({"section": "health", "message":
+                             "This part couldn't be computed."})
+        channels = s.get("channels", None)
+        return {"data": {"kpis": [kpis[k] for k in SUMMARY_ORDER],
+                         "health": items, "channels": channels},
                 "errors": s.errors}
 
     value, computed_at, age = _cached("summary", dict(_args()), compute)
@@ -546,7 +615,8 @@ def summary():
 
 
 # ── 3. trend ─────────────────────────────────────────────────────────────
-TREND_METRICS = ("people", "signups", "new_paying", "cash", "link_previews")
+TREND_METRICS = ("people", "signups", "new_paying", "cash", "link_previews",
+                 "exports", "active")
 
 
 def _weekly(rows, keys):
@@ -587,22 +657,35 @@ def trend():
                        + ", ".join(TREND_METRICS) + ".")
 
     def compute():
-        cur = db.cursor()
         s = Sections()
         # Six extra days so the first point has a full 7-day average.
         wide = ranges.make_period("custom", period.from_day - timedelta(days=6),
                                   period.to_day)
         days = wide.day_list()
         # A series the page didn't ask for is null ("not computed"), never 0.
-        people = s.run("people", lambda: visitors.classify_by_day(cur, wide),
-                       {}) if ("people" in wanted or "link_previews" in wanted) \
-            else {}
-        signups = s.run("signups", lambda: signups_by_day(cur, wide), None) \
-            if "signups" in wanted else None
-        paying = s.run("new_paying", lambda: money.new_paying_by_day(cur, wide),
-                       None) if "new_paying" in wanted else None
-        cash = s.run("cash", lambda: money.cash_by_day(cur, wide), None) \
-            if "cash" in wanted else None
+        tasks = []
+        if "people" in wanted or "link_previews" in wanted:
+            tasks.append(("people",
+                          lambda cur: visitors.classify_by_day(cur, wide)))
+        if "signups" in wanted:
+            tasks.append(("signups", lambda cur: signups_by_day(cur, wide)))
+        if "new_paying" in wanted:
+            tasks.append(("new_paying",
+                          lambda cur: money.new_paying_by_day(cur, wide)))
+        if "cash" in wanted:
+            tasks.append(("cash", lambda cur: money.cash_by_day(cur, wide)))
+        if "exports" in wanted:
+            tasks.append(("exports", lambda cur: exports_by_day(cur, wide)))
+        if "active" in wanted:
+            tasks.append(("active", lambda cur: active_by_day(cur, wide)))
+        s.parallel(tasks)
+        asked = {name for name, _ in tasks}
+        people = s.get("people", {}) if "people" in asked else {}
+        signups = s.get("signups") if "signups" in asked else None
+        paying = s.get("new_paying") if "new_paying" in asked else None
+        cash = s.get("cash") if "cash" in asked else None
+        exports = s.get("exports") if "exports" in asked else None
+        active = s.get("active") if "active" in asked else None
         rows = []
         for d in days:
             pd = people.get(d) if people is not None else None
@@ -614,6 +697,8 @@ def trend():
                 "new_paying": None if paying is None else paying.get(d, 0),
                 "cash_usd": None if cash is None else
                 (cash.get(d) or (0.0, 0))[0],
+                "exports": None if exports is None else exports.get(d, 0),
+                "active": None if active is None else active.get(d, 0),
             })
         avg = {"people_7d": _avg7([r["people"] for r in rows]),
                "signups_7d": _avg7([r["signups"] for r in rows]),
@@ -623,7 +708,7 @@ def trend():
         if period.days and period.days > 120:
             grain = "week"
             rows = _weekly(rows, ("people", "link_previews", "signups",
-                                  "new_paying", "cash_usd"))
+                                  "new_paying", "cash_usd", "exports"))
             avg = {k: [None] * len(rows) for k in avg}
         return {"data": {"grain": grain, "rows": rows, "averages": avg},
                 "errors": s.errors}
@@ -751,15 +836,25 @@ def funnel_cohorts():
 def customers_list():
     period = _period("all", allow_all=True)
     page, per_page = _paging()
-    data = customers.list_customers(db.cursor(), period, _args(), page,
-                                    per_page)
-    return _respond(data, period)
+    args = dict(_args())
+
+    def compute():
+        return {"data": customers.list_customers(db.cursor(), period, args,
+                                                 page, per_page),
+                "errors": []}
+
+    # Short-lived and served stale while it refreshes: the list has no
+    # expiring links, so a returning visit paints at once.
+    value, computed_at, age = _cached("customers", args, compute)
+    return _respond(value["data"], period, computed_at=computed_at,
+                    cache_age=age)
 
 
 @admin_v2_bp.route("/customers/<int:user_id>", methods=["GET"])
 @admin_required
 def customer_detail(user_id):
-    data = customers.customer_detail(db.cursor(), user_id)
+    from routes.admin_video import _presign
+    data = customers.customer_detail(db.cursor(), user_id, _presign)
     if data is None:
         raise ApiError(404, "not_found", "No account with this id.")
     return _respond(data)
@@ -772,8 +867,18 @@ def projects_list():
     period = _period("all", allow_all=True)
     include_owner = _include_owner()
     page, per_page = _paging()
-    data = projects.list_projects(db.cursor(), period, _args(), page, per_page)
-    return _respond(data, period, include_owner=include_owner)
+    from routes.admin_video import _presign
+    args = dict(_args())
+
+    def compute():
+        return {"data": projects.list_projects(db.cursor(), period, args, page,
+                                               per_page, _presign),
+                "errors": []}
+
+    # Thumbnails are 15-minute links: cached briefly, never served stale.
+    value, computed_at, age = _cached("projects", args, compute, swr=False)
+    return _respond(value["data"], period, include_owner=include_owner,
+                    computed_at=computed_at, cache_age=age)
 
 
 def _project_or_404(cur, project_id):
@@ -892,45 +997,15 @@ def revenue():
     period = _period("30d")
 
     def compute():
-        cur = db.cursor()
         s = Sections()
         comp = period.compare()
-        tiles = {}
-        statuses = s.run("statuses", lambda: money.status_counts(cur), None)
-        mrr_info = s.run("mrr", lambda: money.mrr_and_paying(cur), None)
-        if mrr_info:
-            mrr, paying, groups = mrr_info
+
+        def t_mrr(cur):
+            mrr, paying, groups = money.mrr_and_paying(cur)
             prev = money.mrr_at(cur, comp.to_day) if comp else None
-            tiles["mrr"] = registry.metric(
-                "mrr", mrr, prev, href="/admin/revenue",
-                note=None if prev is not None else
-                "No comparison yet: MRR history starts when daily billing "
-                "snapshots begin.")
-            tiles["paying_now"] = registry.metric(
-                "paying_now", paying, comparable=False,
-                href="/admin/customers?range=all&filter=paying")
-        else:
-            mrr, paying, groups = None, None, None
-            tiles["mrr"] = registry.error_metric("mrr")
-            tiles["paying_now"] = registry.error_metric("paying_now")
+            return mrr, paying, groups, prev
 
-        def cash_tile():
-            c, pc = money.cash(cur, period), money.cash(cur, comp)
-            return registry.metric(
-                "cash", c["usd"], pc["usd"],
-                breakdown=[registry.item("payments", c["payments"]),
-                           registry.item("non_usd_payments", c["non_usd"])],
-                href=_href("/admin/revenue", period) + "#payments")
-        tiles["cash"] = s.run("cash", cash_tile, registry.error_metric("cash"))
-        tiles["new_paying"] = s.run(
-            "new_paying", lambda: registry.metric(
-                "new_paying", money.new_paying(cur, period),
-                money.new_paying(cur, comp),
-                href=_href("/admin/customers", period,
-                           "&date_field=first_paid")),
-            registry.error_metric("new_paying"))
-
-        def stopped_tile():
+        def t_stopped(cur):
             v = money.stopped_paying(cur, period)
             if v is None:
                 since = money.snapshots_since(cur)
@@ -942,26 +1017,17 @@ def revenue():
                              "number appears the day after.")))
             return registry.metric("stopped_paying", v,
                                    money.stopped_paying(cur, comp))
-        tiles["stopped_paying"] = s.run("stopped_paying", stopped_tile,
-                                        registry.error_metric("stopped_paying"))
-        tiles["payment_failing"] = (
-            registry.metric("payment_failing", statuses["payment_failing"],
-                            comparable=False,
-                            href="/admin/customers?range=all"
-                                 "&filter=payment_failing")
-            if statuses else registry.error_metric("payment_failing"))
 
-        def cash_series():
+        def t_cash_series(cur):
             if period.days and period.days <= 31:
-                by = money.cash_by_day(cur, period)
-                rows = [{"date": d.isoformat(),
-                         "usd": (by.get(d) or (0.0, 0))[0],
-                         "payments": (by.get(d) or (0.0, 0))[1]}
-                        for d in period.day_list()]
                 wide = ranges.make_period(
                     "custom", period.from_day - timedelta(days=6),
                     period.to_day)
                 wb = money.cash_by_day(cur, wide)
+                rows = [{"date": d.isoformat(),
+                         "usd": (wb.get(d) or (0.0, 0))[0],
+                         "payments": (wb.get(d) or (0.0, 0))[1]}
+                        for d in period.day_list()]
                 vals = [(wb.get(d) or (0.0, 0))[0] for d in wide.day_list()]
                 return {"grain": "day", "rows": rows,
                         "average": _avg7(vals)[6:]}
@@ -980,13 +1046,68 @@ def revenue():
                    if i >= 3 else None for i in range(len(vals))]
             return {"grain": "week", "rows": rows, "average": avg}
 
-        def ledger():
+        def t_by_plan(cur):
+            mrr_, _paying, groups_ = money.mrr_and_paying(cur)
+            return money.by_plan(cur, groups_, mrr_)
+
+        def t_ledger(cur):
             out = money.ledger(cur)
             out["failed_in_range"] = money.failed_payments(cur, period)
             return out
 
-        def costs():
-            return costs_mod.revenue_costs(costs_report(_fresh()))
+        s.parallel([
+            ("statuses", money.status_counts),
+            ("mrr", t_mrr),
+            ("cash", lambda cur: (money.cash(cur, period),
+                                  money.cash(cur, comp))),
+            ("new_paying", lambda cur: (money.new_paying(cur, period),
+                                        money.new_paying(cur, comp))),
+            ("stopped_paying", t_stopped),
+            ("cash_series", t_cash_series),
+            ("mrr_history", lambda cur: money.mrr_history(cur, period)),
+            ("by_plan", t_by_plan),
+            ("ledger", t_ledger),
+        ])
+        tiles = {}
+        statuses = s.get("statuses", None)
+        mrr_info = s.get("mrr", None)
+        if mrr_info:
+            mrr, paying, _groups, prev = mrr_info
+            tiles["mrr"] = registry.metric(
+                "mrr", mrr, prev, href="/admin/revenue",
+                note=None if prev is not None else
+                "No comparison yet: MRR history starts when daily billing "
+                "snapshots begin.")
+            tiles["paying_now"] = registry.metric(
+                "paying_now", paying, comparable=False,
+                href="/admin/customers?range=all&filter=paying")
+        else:
+            mrr, paying = None, None
+            tiles["mrr"] = registry.error_metric("mrr")
+            tiles["paying_now"] = registry.error_metric("paying_now")
+        cash = s.get("cash", None)
+        tiles["cash"] = registry.metric(
+            "cash", cash[0]["usd"], cash[1]["usd"],
+            breakdown=[registry.item("payments", cash[0]["payments"]),
+                       registry.item("non_usd_payments", cash[0]["non_usd"])],
+            href=_href("/admin/revenue", period) + "#payments") \
+            if cash else registry.error_metric("cash")
+        np_ = s.get("new_paying", None)
+        tiles["new_paying"] = registry.metric(
+            "new_paying", np_[0], np_[1],
+            href=_href("/admin/customers", period, "&date_field=first_paid")) \
+            if np_ else registry.error_metric("new_paying")
+        tiles["stopped_paying"] = s.get(
+            "stopped_paying", registry.error_metric("stopped_paying"))
+        customers_n = sum(statuses.get(k, 0) for k in (
+            "paying", "payment_failing", "canceled", "free")) \
+            if statuses else 0
+        tiles["payment_failing"] = (
+            registry.metric("payment_failing", statuses["payment_failing"],
+                            comparable=False,
+                            href="/admin/customers?range=all"
+                                 "&filter=payment_failing")
+            if statuses else registry.error_metric("payment_failing"))
 
         data = {
             "tiles": [tiles[k] for k in ("mrr", "paying_now", "cash",
@@ -996,6 +1117,10 @@ def revenue():
                 "avg_plan_value", round(mrr / paying, 2) if paying else None,
                 comparable=False) if mrr_info else
                 registry.error_metric("avg_plan_value")),
+            "arpu": (registry.metric(
+                "arpu", round(mrr / customers_n, 2) if customers_n else None,
+                comparable=False) if (mrr_info and statuses) else
+                registry.error_metric("arpu")),
             "ever_paid": (registry.metric(
                 "ever_paid", statuses["ever_paid"], comparable=False,
                 href="/admin/customers?range=all&filter=ever_paid")
@@ -1004,21 +1129,32 @@ def revenue():
                 "canceled_ever", statuses["canceled"], comparable=False,
                 href="/admin/customers?range=all&filter=canceled")
                 if statuses else registry.error_metric("canceled_ever")),
-            "cash_series": s.run("cash_series", cash_series, None),
-            "mrr_history": s.run("mrr_history",
-                                 lambda: money.mrr_history(cur, period),
-                                 None),
-            "by_plan": s.run("by_plan", lambda: money.by_plan(
-                cur, groups, mrr) if groups is not None else
-                money.by_plan(cur), None),
-            "ledger": s.run("ledger", ledger, None),
-            "costs": s.run("costs", costs, None),
+            "cash_series": s.get("cash_series", None),
+            "mrr_history": s.get("mrr_history", None),
+            "by_plan": s.get("by_plan", None),
+            "ledger": s.get("ledger", None),
+            # Costs load on their own (/revenue/costs): the shared report can
+            # take seconds when its 10-minute copy has expired.
+            "costs": None,
         }
         return {"data": data, "errors": s.errors}
 
     value, computed_at, age = _cached("revenue", dict(_args()), compute)
     return _respond(value["data"], period, errors=value["errors"],
                     computed_at=computed_at, cache_age=age)
+
+
+@admin_v2_bp.route("/revenue/costs", methods=["GET"])
+@admin_required
+def revenue_costs():
+    fresh = _fresh()
+
+    def compute():
+        return {"data": costs_mod.revenue_costs(costs_report(fresh)),
+                "errors": []}
+
+    value, computed_at, age = _cached("revenue_costs", {}, compute)
+    return _respond(value["data"], computed_at=computed_at, cache_age=age)
 
 
 @admin_v2_bp.route("/revenue/payments", methods=["GET"])
@@ -1106,6 +1242,82 @@ def revenue_billing_problems():
     return _respond(value["data"], computed_at=computed_at, cache_age=age)
 
 
+# ── 28–30. engagement, audience, exports ─────────────────────────────────
+@admin_v2_bp.route("/engagement", methods=["GET"])
+@admin_required
+def engagement():
+    period = _period("30d")
+
+    def compute():
+        s = Sections()
+        s.parallel([
+            ("engagement", lambda cur: insights.engagement(cur, period)),
+            ("top_customers", lambda cur: insights.top_customers(cur, period)),
+            ("activity", lambda cur: insights.activity_feed(cur)),
+        ])
+        data = {"engagement": s.get("engagement", None),
+                "top_customers": s.get("top_customers", None),
+                "activity": s.get("activity", None)}
+        return {"data": data, "errors": s.errors}
+
+    value, computed_at, age = _cached("engagement", dict(_args()), compute)
+    return _respond(value["data"], period, errors=value["errors"],
+                    computed_at=computed_at, cache_age=age)
+
+
+@admin_v2_bp.route("/activity", methods=["GET"])
+@admin_required
+def activity():
+    limit = _int_arg("limit", 40, 1, 100)
+
+    def compute():
+        s = Sections()
+        rows = s.run("activity", lambda: insights.activity_feed(db.cursor(),
+                                                                limit), None)
+        return {"data": {"rows": rows}, "errors": s.errors}
+
+    value, computed_at, age = _cached("activity", {"limit": limit}, compute)
+    return _respond(value["data"], errors=value["errors"],
+                    computed_at=computed_at, cache_age=age)
+
+
+@admin_v2_bp.route("/audience", methods=["GET"])
+@admin_required
+def audience():
+    period = _period("30d")
+
+    def compute():
+        s = Sections()
+        data = s.run("audience", lambda: insights.audience(db.cursor(),
+                                                           period), None)
+        status, note = _visitor_status(period)
+        return {"data": {"audience": data, "status": status, "note": note},
+                "errors": s.errors}
+
+    value, computed_at, age = _cached("audience", dict(_args()), compute)
+    return _respond(value["data"], period, errors=value["errors"],
+                    computed_at=computed_at, cache_age=age)
+
+
+@admin_v2_bp.route("/exports", methods=["GET"])
+@admin_required
+def exports_page():
+    period = _period("30d")
+    from routes.admin_video import _presign
+
+    def compute():
+        s = Sections()
+        data = s.run("exports", lambda: insights.exports_report(
+            db.cursor(), period, _presign), None)
+        return {"data": data, "errors": s.errors}
+
+    # Presigned links last 15 minutes, so this answer is never served stale.
+    value, computed_at, age = _cached("exports", dict(_args()), compute,
+                                      swr=False)
+    return _respond(value["data"], period, errors=value["errors"],
+                    computed_at=computed_at, cache_age=age)
+
+
 # ── 25–27. health and live ───────────────────────────────────────────────
 @admin_v2_bp.route("/health", methods=["GET"])
 @admin_required
@@ -1114,29 +1326,30 @@ def health_page():
     include_owner = _include_owner()
 
     def compute():
-        cur = db.cursor()
         s = Sections()
-        data = {
-            "engine": s.run("engine", lambda: health.engine(
-                cur, include_owner), None),
-            "failures": s.run("failures", lambda: health.failures(
-                cur, period, include_owner), None),
-            "messages_without_edit": s.run(
-                "messages_without_edit", lambda: {
-                    k: v for k, v in health.messages_without_edit(
-                        cur, period, include_owner).items()
-                    if k in ("paying", "free", "recent")}, None),
-            "uploads": s.run("uploads", lambda: health.uploads(
-                cur, period, include_owner), None),
-            "export_steps": s.run("export_steps", lambda: health.export_steps(
-                cur, period, include_owner), None),
-            "waits": s.run("waits", lambda: _wait_summary(
-                health.waits(cur, period, include_owner)), None),
-            "projects_exported_share": s.run(
-                "projects_exported_share",
-                lambda: health.projects_exported_share(cur, include_owner),
-                registry.error_metric("projects_exported_share")),
-        }
+        s.parallel([
+            ("engine", lambda cur: health.engine(cur, include_owner)),
+            ("failures", lambda cur: health.failures(cur, period,
+                                                     include_owner)),
+            ("messages_without_edit", lambda cur: {
+                k: v for k, v in health.messages_without_edit(
+                    cur, period, include_owner).items()
+                if k in ("paying", "free", "recent")}),
+            ("uploads", lambda cur: health.uploads(cur, period,
+                                                   include_owner)),
+            ("export_steps", lambda cur: health.export_steps(
+                cur, period, include_owner)),
+            ("waits", lambda cur: _wait_summary(
+                health.waits(cur, period, include_owner))),
+            ("projects_exported_share",
+             lambda cur: health.projects_exported_share(cur, include_owner)),
+        ])
+        data = {k: s.get(k, None) for k in (
+            "engine", "failures", "messages_without_edit", "uploads",
+            "export_steps", "waits")}
+        data["projects_exported_share"] = s.get(
+            "projects_exported_share",
+            registry.error_metric("projects_exported_share"))
         return {"data": data, "errors": s.errors}
 
     value, computed_at, age = _cached("health", dict(_args()), compute)

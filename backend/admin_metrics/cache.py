@@ -35,10 +35,21 @@ def make_key(name, params):
     return json.dumps([name, ranges.local_today().isoformat(), items])
 
 
-def get_or_compute(name, params, ttl_s, compute, fresh=False):
-    """Return (value, computed_at, cache_age_s)."""
+_refreshing = set()     # keys being recomputed in the background
+
+
+def get_or_compute(name, params, ttl_s, compute, fresh=False, stale_s=0,
+                   keep=None):
+    """Return (value, computed_at, cache_age_s).
+
+    stale_s > 0 serves an expired answer at once (stale-while-revalidate)
+    when it is younger than ttl_s + stale_s, and recomputes it on a
+    background thread, one per key. `keep(value)` decides whether a
+    background answer may replace the cached one (e.g. not when a section
+    failed); a page never waits on that refresh."""
     key = make_key(name, params)
     now = time.monotonic()
+    stale_hit = None
     with _lock:
         hit = _entries.get(key)
         if fresh:
@@ -51,21 +62,65 @@ def get_or_compute(name, params, ttl_s, compute, fresh=False):
             computed_at = hit[1]
             age = (datetime.now(timezone.utc) - computed_at).total_seconds()
             return hit[2], computed_at, max(0, int(age))
+        if hit and not fresh and stale_s > 0 and hit[0] + stale_s > now:
+            stale_hit = hit
+            start_bg = key not in _refreshing
+            if start_bg:
+                _refreshing.add(key)
+    if stale_hit is not None:
+        if start_bg:
+            _refresh_in_background(key, ttl_s, compute, keep)
+        computed_at = stale_hit[1]
+        age = (datetime.now(timezone.utc) - computed_at).total_seconds()
+        return stale_hit[2], computed_at, max(0, int(age))
     value = compute()
     computed_at = datetime.now(timezone.utc)
     if ttl_s > 0:
-        with _lock:
-            if len(_entries) >= MAX_ENTRIES:
-                oldest = min(_entries, key=lambda k: _entries[k][0])
-                _entries.pop(oldest, None)
-            _entries[key] = (now + ttl_s, computed_at, value)
+        _store_local(key, ttl_s, computed_at, value)
     return value, computed_at, 0
+
+
+def _store_local(key, ttl_s, computed_at, value):
+    with _lock:
+        if len(_entries) >= MAX_ENTRIES and key not in _entries:
+            oldest = min(_entries, key=lambda k: _entries[k][0])
+            _entries.pop(oldest, None)
+        _entries[key] = (time.monotonic() + ttl_s, computed_at, value)
+
+
+def _refresh_in_background(key, ttl_s, compute, keep):
+    try:
+        app = current_app._get_current_object()
+    except RuntimeError:
+        app = None
+
+    def run():
+        try:
+            if app is not None:
+                with app.app_context():
+                    try:
+                        value = compute()
+                    finally:
+                        from admin_metrics import db
+                        db.close()
+            else:
+                value = compute()
+            if keep is None or keep(value):
+                _store_local(key, ttl_s, datetime.now(timezone.utc), value)
+        except Exception:
+            pass                         # the stale copy stays; next ask retries
+        finally:
+            with _lock:
+                _refreshing.discard(key)
+
+    threading.Thread(target=run, daemon=True, name="admin-cache-refresh").start()
 
 
 def clear():
     with _lock:
         _entries.clear()
         _fresh_at.clear()
+        _refreshing.clear()
 
 
 def clear_key(name, params):

@@ -125,8 +125,23 @@ def connect():
     return psycopg2.connect(current_app.config['DATABASE_URL'], connect_timeout=3,
                            options='-c statement_timeout=3000 -c lock_timeout=1000', cursor_factory=RealDictCursor)
 
-def save_visit(data, user_agent):
+_COUNTRY = re.compile(r'^[A-Z]{2}$')
+
+
+def edge_country(headers):
+    """The visitor's country code as Vercel's edge saw it, or None.
+
+    Beacons reach Render through the Vercel rewrite, which adds
+    X-Vercel-IP-Country. No IP is stored and no geo service is called; any
+    other country header (e.g. Cloudflare's in front of Render) would describe
+    Vercel's server, not the visitor, so it is never read."""
+    value = (headers.get('X-Vercel-IP-Country') or '').strip().upper()
+    return value if _COUNTRY.match(value) and value not in ('XX', 'T1') else None
+
+
+def save_visit(data, user_agent, country=None):
     p = clean_payload(data)
+    country = country if country and _COUNTRY.match(country) else 'Unknown'
     if BOT.search(user_agent):
         return False
     ua = user_agent.lower()
@@ -151,13 +166,13 @@ def save_visit(data, user_agent):
             cur.execute(f'''INSERT INTO page_visits
                 (analytics_id,page,device_id,session_id,ip,user_agent,country,referrer,
                  referrer_source,device_type,browser,time_on_page,last_seen_at,scroll_depth,exit_reason,attribution{extra_cols})
-                VALUES (%s,%s,%s,%s,NULL,%s,'Unknown',%s,%s,%s,%s,%s,now() AT TIME ZONE 'UTC',%s,%s,%s{extra_vals})
+                VALUES (%s,%s,%s,%s,NULL,%s,%s,%s,%s,%s,%s,%s,now() AT TIME ZONE 'UTC',%s,%s,%s{extra_vals})
                 ON CONFLICT (analytics_id) DO UPDATE SET
                   time_on_page=GREATEST(page_visits.time_on_page,EXCLUDED.time_on_page),
                   scroll_depth=GREATEST(page_visits.scroll_depth,EXCLUDED.scroll_depth),
                   last_seen_at=EXCLUDED.last_seen_at,exit_reason=EXCLUDED.exit_reason{extra_set}
                 WHERE page_visits.device_id=EXCLUDED.device_id AND page_visits.session_id=EXCLUDED.session_id
-                RETURNING analytics_id''', (p['visit_id'],p['page'],p['device_id'],p['session_id'],user_agent[:300],p['referrer'],p['source'],device,browser,p['active'],p['scroll'],p['reason'],Json(p['attribution']),*extra_params))
+                RETURNING analytics_id''', (p['visit_id'],p['page'],p['device_id'],p['session_id'],user_agent[:300],country,p['referrer'],p['source'],device,browser,p['active'],p['scroll'],p['reason'],Json(p['attribution']),*extra_params))
             if not cur.fetchone():
                 return False
             cur.execute('SELECT count(*) AS n FROM website_events WHERE visit_id=%s', (p['visit_id'],))
