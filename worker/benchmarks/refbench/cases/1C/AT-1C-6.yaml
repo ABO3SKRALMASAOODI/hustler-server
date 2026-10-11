@@ -1,0 +1,38 @@
+# AT-1C-6: magenta solarise inside the finger frame (25@≈0.33-12.7). The
+# roadmap names V12 gestures; the house stand-in HC-C c-frame2 (a finger
+# frame around the face) is the closer match and is used (interim). The quad
+# is keyframed by hand here; 3A tracks it.
+id: AT-1C-6
+track: 1C
+title: magenta solarise inside a keyframed finger-frame quad
+local_only: true
+interim: true
+reference:
+  - {ref: "25", t: [0.33, 12.7], approx: true, board_t: 3.0}
+footage:
+  - {vfl: V12, window: gestures}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: "catalog:HC-C/c-frame2-finger-frame-face-9x16"
+  keep_file: [[0.0, 4.0]]
+  ops:
+    - {action: upsert, layer: fx, id: sol,
+       value: {id: sol, type: region, stage: world, start: 0.0, end: 3.0,
+               effect: solarise, colour: "#ff00ff", device: region_tone,
+               region: {shape: polygon, feather_px: 2, keys: [
+                 {t: 0.0, ease: in_out, points: [[0.47, 0.38], [0.80, 0.37], [0.80, 0.58], [0.50, 0.60]]},
+                 {t: 1.0, ease: in_out, points: [[0.47, 0.39], [0.82, 0.38], [0.82, 0.60], [0.50, 0.62]]},
+                 {t: 2.0, ease: in_out, points: [[0.30, 0.38], [0.86, 0.36], [0.86, 0.62], [0.45, 0.66]]},
+                 {t: 2.5, ease: in_out, points: [[0.33, 0.40], [0.88, 0.36], [0.88, 0.64], [0.40, 0.68]]},
+                 {t: 3.0, points: [[0.20, 0.33], [0.90, 0.30], [0.90, 0.72], [0.25, 0.74]]}]}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: region_locality, op: "<=", value: 0}
+  - {name: duration_exact, op: "<=", value: 0}
+beyond: "any effect inside any moving shape from one write (and inside tracked hands once 3A lands); the reference was rotoscoped"
+board: {stills: [0.0, 2.0, 2.9], clip: [0.0, 3.5]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

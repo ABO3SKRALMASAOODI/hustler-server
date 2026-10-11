@@ -332,14 +332,23 @@ def headline_visible(item, items, W, H):
 
 
 def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
-                   fetch_asset=None, extra_items=None, plate=None, behind_why=None):
+                   fetch_asset=None, extra_items=None, plate=None, behind_why=None,
+                   source_path=None):
     """Render motion clips and append ffmpeg inputs. Returns (inputs, next_idx)
     with inputs = [(input_index, item, RenderedClip)]. ``extra_items`` are
     renderer-synthesized items (the motion caption track); ``plate`` is the
     renderer's plate probe (worker/plate.Probe) or None. ``behind_why(item)``
     says why a behind_subject item cannot composite behind the subject here
     (None when it can): a hero word that cannot is drawn as its face-safe
-    display slam instead (hero_front), decided before anything renders."""
+    display slam instead (hero_front), decided before anything renders.
+
+    Wave 1 (track 1C, INTERFACES_W1.md §3.3): an item that carries a
+    ``composite`` gets what it needs opened here too (its fill, its clip
+    region, the ghost pass's stroke-only clip), and every clip an fx item
+    names as a ``glyph`` region gets its own inputs for the glyph mask
+    (compositor.prepare_composites). ``source_path`` (optional) is the main
+    video, for a ``source`` fill. Without composites or glyph references
+    nothing here changes: the inputs are exactly today's."""
     LAST_WARNINGS.clear()
     items = list(extra_items or []) + program_items(edl, out_duration)
     if behind_why is not None:
@@ -363,6 +372,7 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
     plates = measure_plates(items, plate)
     asset_locals = {}
     jobs, kept = [], []
+    piece_plates = {}
     for k, item in enumerate(items):
         try:
             for _k, key in motion_templates.asset_params(item["template"], item.get("params") or {}).items():
@@ -375,6 +385,8 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
                 yields=ydoc) for part in pieces]
             jobs.extend(built)
             kept.extend(pieces)
+            for part in pieces:
+                piece_plates[id(part)] = plates.get(k)
         except Exception as e:  # noqa: BLE001 — degrade one item, keep the render
             warn(f"motion '{item.get('id')}' skipped: {str(e)[:200]}")
     if not jobs:
@@ -400,14 +412,28 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
         args += ["-i", clip.path]
         inputs.append((next_idx, item, clip))
         next_idx += 1
+    import compositor
+    if compositor.needed(edl, [it for _i, it, _c in inputs]):
+        inputs, next_idx = compositor.prepare_composites(
+            edl, inputs, workdir=workdir, W=W, H=H, fps=fps, args=args,
+            next_idx=next_idx, fetch_asset=fetch_asset, plates=piece_plates,
+            source_path=source_path)
     return inputs, next_idx
 
 
 def overlay_clip(parts, vlabel, idx, item, clip, fps, tag, plan=None):
     """Overlay one rendered clip on [vlabel] inside its program window;
-    returns the new label. ``plan`` (the render's fxgraph plan, or None) is
-    the Wave 1 seam track 1C reads for ``MotionItem.composite``
-    (INTERFACES_W1.md §3.3); unused until then."""
+    returns the new label.
+
+    An item that carries a ``composite`` (track 1C, INTERFACES_W1.md §3.3:
+    blend, opacity, fill, field, clip region) is laid by
+    ``compositor.emit`` on exactly the frames below; ``plan`` (the render's
+    fxgraph plan, or None) lends it the render's masks (a face or card clip
+    region). An item without one takes the filters below, byte for byte."""
+    if isinstance(item.get("composite"), dict):
+        import compositor
+        return compositor.emit(parts, vlabel, idx, item, clip, fps, tag,
+                               plan=plan)
     s, e = float(item["start"]), float(item["end"])
     # Hold the clip's last frame for a couple of frames: framesync can
     # quantize a fractional program clock a frame past the clip's EOF.
@@ -421,13 +447,17 @@ def overlay_clip(parts, vlabel, idx, item, clip, fps, tag, plan=None):
 
 def append_graph(parts, vlabel, inputs, layer, fps, plan=None):
     """Composite this layer's clips over [vlabel]; returns the new label.
-    ``plan``: see overlay_clip (Wave 1 seam; unused until 1C)."""
+    ``plan``: the render's fxgraph plan, handed to overlay_clip for
+    composite items (track 1C)."""
     j = 0
     for idx, item, clip in inputs or []:
         if (item.get("layer") or "above_captions") != layer:
             continue
+        # the plan only when the renderer passes one: the call keeps its
+        # legacy shape for wrappers of overlay_clip (refbench's ink capture)
+        kw = {"plan": plan} if plan is not None else {}
         vlabel = overlay_clip(parts, vlabel, idx, item, clip, fps,
-                              f"mg{layer[0]}{j}")
+                              f"mg{layer[0]}{j}", **kw)
         j += 1
     return vlabel
 
@@ -445,7 +475,32 @@ def composite_behind(parts, vlabel, mask_label, j, *, fps, motion=None,
     matte; a ``composite.stage == "screen"`` item is composited after the
     camera with the screen-space matte); track 1C owns this body for items
     whose ``composite`` is set (blend, ghost pass, fill). For an item with
-    ``composite`` None it must stay byte-identical to these strings."""
+    ``composite`` None it must stay byte-identical to these strings.
+
+    A composite graphic is drawn by overlay_clip's composite path; its
+    ghost pass (compositor.emit_ghost: the stroke-only clip kept where the
+    subject covers the letters) is laid over the result through a split of
+    the same mask."""
+    if motion and isinstance(motion[1].get("composite"), dict):
+        import compositor
+        m_idx, m_item, m_clip = motion
+        side = getattr(m_clip, "composite", None)
+        ghost = bool(side is not None and side.stroke and side.ghost)
+        parts.append(f"[{vlabel}]split[bhb{j}][bhf{j}]")
+        kw = {"plan": plan} if plan is not None else {}
+        bht = overlay_clip(parts, f"bhb{j}", m_idx, m_item, m_clip, fps,
+                           f"mgs{j}", **kw)
+        mlab = mask_label
+        if ghost:
+            parts.append(f"[{mask_label}]split[bhm{j}s][bhm{j}g]")
+            mlab = f"bhm{j}s"
+        parts.append(f"[bhf{j}][{mlab}]alphamerge[bhfa{j}]")
+        parts.append(f"[{bht}][bhfa{j}]overlay=0:0:format=auto"
+                     f":eof_action=pass[vbh{j}]")
+        if ghost:
+            return compositor.emit_ghost(parts, f"vbh{j}", f"bhm{j}g",
+                                         m_item, m_clip, fps, j)
+        return f"vbh{j}"
     parts.append(f"[{vlabel}]split[bhb{j}][bhf{j}]")
     if motion:
         m_idx, m_item, m_clip = motion
