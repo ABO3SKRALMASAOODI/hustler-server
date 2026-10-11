@@ -41,7 +41,9 @@ where nothing calls for them they make an edit look childish.
   moment with the reason, an exemplar reference moment, a render cost and
   the exact apply_edit_batch operation. It never proposes a zoom or a sound
   unless the user asked, and it already applies the budgets and the rules
-  above. Zero candidates is a valid answer.
+  above. It also starts measuring the person matte its matte candidates
+  need (a batch launches nothing itself). Zero candidates is a valid
+  answer.
 - `look_at(times=[...], overlay='matte')` shows the person matte where a
   matte device would draw (it starts measuring a missing chunk and says
   "measuring"); `overlay='free_space'` shades faces, UI bands and the

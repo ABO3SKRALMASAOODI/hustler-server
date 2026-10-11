@@ -2529,8 +2529,10 @@ def project_state_line(ctx, edl=None):
                                        "nothing measured yet")
             + f". Person matte on the current cut: {status}"
             + (" (matte devices render as their substitutes until it is "
-               "ready; a device write starts it)" if status != "ready"
-               else "")
+               "ready; suggest_devices or look_at(overlay='matte') starts "
+               "it)" if status not in ("ready", "pending")
+               else " (matte devices render as their substitutes until it "
+               "is ready)" if status == "pending" else "")
             + f". Device intensity: {state.get('intensity', 'designed')}.")
     return line
 
