@@ -200,10 +200,18 @@ def _core_catalog():
     return agent_tools.openai_tools("any-model", compact=True, names=core)
 
 
+# The Wave 1 track skills (INTERFACES_W1.md §6.3). Each one a track ships
+# joins read_skill's name enum automatically (agent_prompt.skill_names):
+# automatic growth like the fx layer and the department names, set aside
+# here (+12..+15 bytes each; the ceiling test below still counts them).
+W1_TRACK_SKILLS = {"subject-fx", "compositing", "punctuation", "finishing"}
+
+
 def _strip_w1_growth(catalog):
     """The catalog with Wave 1's automatic growth set aside: the ``fx``
-    layer in apply_edit_batch's enum and live department names in the
-    load_tools / expand_toolset domain enums."""
+    layer in apply_edit_batch's enum, live department names in the
+    load_tools / expand_toolset domain enums, and the Wave 1 track skills
+    in read_skill's name enum."""
     cat = copy.deepcopy(catalog)
     live = set(tools_ext.EXT_DEPARTMENTS)
 
@@ -223,6 +231,8 @@ def _strip_w1_growth(catalog):
             walk(tool, {"fx"})
         elif name in ("load_tools", "expand_toolset"):
             walk(tool, live)
+        elif name == "read_skill":
+            walk(tool, W1_TRACK_SKILLS)
     return cat
 
 
