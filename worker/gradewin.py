@@ -323,7 +323,12 @@ def _asset_local(plan, key):
         local = os.path.join(plan.workdir, "fxlut_" + hashlib.sha256(
             key.encode()).hexdigest()[:16] + ".cube")
         if not os.path.exists(local):
-            storage.download_to(key, local)
+            size = storage.object_bytes(key)
+            if size is not None and size > lutlib.CUBE_MAX_BYTES:
+                return None              # too big to be a LUT: not fetched
+            tmp = local + ".part"
+            storage.download_to(key, tmp)
+            os.replace(tmp, local)       # never a half file on a retry
         return local
     except Exception:  # noqa: BLE001
         return None
@@ -419,10 +424,8 @@ class _Grade:
         return [fxprims.frame_at(float(item["start"]), plan.fps)]
 
     def stage(self, ctx, items):
-        label = ctx.label
-        for it in items:
-            label = self._emit(ctx, label, it)
-        return label
+        import finish
+        return finish.emit_each(ctx, items, self._emit)
 
     def _emit(self, ctx, label, it):
         import finish

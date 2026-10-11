@@ -193,6 +193,28 @@ def window_composite(ctx, label, spans, build, *, mask=None, opacity=1.0,
     return f"{u}o"
 
 
+def emit_each(ctx, items, emit):
+    """Compile ``items`` one by one onto ``ctx.label`` with ``emit(ctx,
+    label, item) -> label``. An item that fails to compile is rolled back
+    alone and reported ``omit``: the stage's other devices still draw
+    (fxgraph's own rollback would drop the whole group)."""
+    label = ctx.label
+    for it in items:
+        mark = len(ctx.parts)
+        tails = list(getattr(ctx, "_mask_tails", []))
+        bound = ctx.label
+        try:
+            label = emit(ctx, label, it)
+        except Exception as e:  # noqa: BLE001 — degrade, never fail
+            del ctx.parts[mark:]
+            ctx.label = bound
+            if hasattr(ctx, "_mask_tails"):
+                ctx._mask_tails = tails
+            ctx.note(it, "omit", f"compile failed ({type(e).__name__}: "
+                     f"{str(e)[:120]})")
+    return label
+
+
 def region_pad(ctx, item):
     """A fresh gray program mask for ``item['region']``, or None.
 
@@ -437,7 +459,10 @@ def _crt(g, src, it):
         table_expr(t) for t in _gain_curve(2.0, lift=(4, 6, 5),
                                            cast=(1.0, 0.98, 0.96)))))
     x = _bloom(g, x, 10.0 * g.s, 0.32)
-    x = g.add(x, "lagfun=decay=0.55")
+    # phosphor persistence on LUMA only: lagfun keeps max(now, before *
+    # decay) per sample, which on Cb/Cr would let only the higher chroma
+    # persist (a blue or red trail, never a green one): a hue smear
+    x = g.add(x, "lagfun=decay=0.55:planes=1")
     x = _darken(g, x, "crt_bezel")
     return _barrel(g, x, 0.055, 0.022)
 
@@ -956,10 +981,7 @@ class _Finish:
         return 150.0 + (f1 - f0) * (fix + mpx * per)
 
     def stage(self, ctx, items):
-        label = ctx.label
-        for it in items:
-            label = self._emit(ctx, label, it)
-        return label
+        return emit_each(ctx, items, self._emit)
 
     def _emit(self, ctx, label, it):
         st = _state(ctx.plan).get(it.get("id"), {})
@@ -968,12 +990,14 @@ class _Finish:
         u = ctx.uid("fi")
         names = maps_for(it)
         maps = {}
-        for name in names:
+        for j, name in enumerate(names):
             src = ctx.input_label(_map_input_key(it, name))
             if src is None:
                 raise ValueError(f"map {name} was never bound")
+            # one tag per map: crt_mask and crt_bezel shared "crt" and so
+            # their output labels (parsed in order, it only worked by luck)
             maps[name] = _map_getter(ctx.parts, src, n, ctx.fps,
-                                     f"{u}{name[:3]}")
+                                     f"{u}mp{j}")
         matte = None
         if it.get("matte_weighted") and it.get("kind") in MATTE_KINDS \
                 and st.get("matte"):

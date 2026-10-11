@@ -78,29 +78,67 @@ def _fps(ctx):
         return 30.0
 
 
+def _render_rates(fps):
+    """The frame rates this edit renders at: the final's (the source rate,
+    at most 60) first, then the preview's (capped by PREVIEW_MAX_FPS)."""
+    final = max(1.0, min(float(fps or 30.0), 60.0))
+    try:
+        import config
+        cap = float(getattr(config, "PREVIEW_MAX_FPS", 30.0) or 0.0)
+    except Exception:  # noqa: BLE001
+        cap = 30.0
+    preview = min(final, cap) if cap else final
+    return (final,) if abs(preview - final) < 1e-6 else (final, preview)
+
+
+def _cut_time(cut, rates):
+    """The centisecond an fx edge is stored at so it lands ON the cut's
+    first frame (renderer.first_frame_at, ceil) where an fx window's frame
+    is round(t * fps): on the final's rate, and on the preview's too
+    whenever one centisecond serves both. (Rounding the frame time UP to
+    the centisecond, as before, overshot by up to 0.6 frame at 59.94 fps:
+    a fifth of cuts started a frame late, and 30 fps previews of 50 / 59.94
+    sources missed by a frame on a third.)"""
+    import math
+    import fxprims
+    import renderer
+    want = [(f, renderer.first_frame_at(cut, f)) for f in rates]
+    k0 = want[0][1] / fxprims.fps3(want[0][0])
+    best = None
+    for c in range(int(math.floor(cut * 100)) - 4,
+                   int(math.ceil(cut * 100)) + 8):
+        t = c / 100.0
+        hits = [fxprims.frame_at(t, f) == k for f, k in want]
+        score = (hits[0], sum(hits), -abs(t - k0))
+        if best is None or score > best[0]:
+            best = (score, t)
+    return best[1]
+
+
 def _snap_to_cuts(edl, s, e, fps):
     """Edges within 1.5 frames of a cut land ON the cut's first frame.
 
     The render starts each block on first_frame_at(T) (ceil), while an fx
     window's frames are round(t * fps): a section written at the cut's
     exact program second (7.99 at 29.97 -> frame 239.46) would start a
-    frame BEFORE the shot changes. Snapped to the cut frame's own time
-    (frame / fps, to the centisecond above), it starts on it."""
+    frame BEFORE the shot changes. Snapped (``_cut_time``), it starts on
+    it, on the final and the preview alike."""
     try:
-        import math
-        import renderer
         from timeline import Timeline
         tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                       edl.get("speed") or [])
         cuts = [float(o) for o in tl.offsets[1:]]
     except Exception:  # noqa: BLE001 — snapping is a refinement
         return s, e
+    rates = _render_rates(fps)
 
     def snap(t):
         for c in cuts:
-            if abs(t - c) * fps <= 1.5:
-                k = renderer.first_frame_at(c, fps)
-                return math.ceil(k / round(fps, 3) * 100 - 1e-6) / 100.0
+            if abs(t - c) * rates[0] <= 1.5:
+                try:
+                    return _cut_time(c, rates)
+                except Exception:  # noqa: BLE001
+                    return t
         return t
     return round(snap(s), 2), round(snap(e), 2)
 
@@ -279,6 +317,13 @@ def _store_lut(ctx, text, origin, meta=None):
     with open(path, "w") as f:
         f.write(text)
     storage.upload_file(path, key, "text/plain")
+    try:
+        import edit_batch
+        if key in (ctx.db.run(edit_batch.project_media_keys,
+                              ctx.project_id) or ()):
+            return key            # the same cube again: one asset row
+    except Exception:  # noqa: BLE001
+        pass
     ctx.db.run(dbx.insert_asset, ctx.project_id, "sheet", key,
                bytes_=os.path.getsize(path), sha256=sha,
                meta=dict({"filename": os.path.basename(key), "lut": True,
@@ -299,6 +344,11 @@ def _read_lut_source(ctx, asset_key=None, url=None):
         keys = ctx.db.run(edit_batch.project_media_keys, ctx.project_id)
         if asset_key not in keys:
             raise ValueError("that asset is not in this project")
+        size = storage.object_bytes(asset_key)
+        if size is not None and size > LUT_MAX_BYTES:
+            # a video named by mistake: refused before a byte is fetched
+            raise ValueError("that asset is larger than 16 MB, so it is not "
+                             "a .cube LUT")
         storage.download_to(asset_key, local)
         src = asset_key
     elif url:
@@ -328,6 +378,7 @@ def import_lut(ctx, asset_key=None, url=None, start=None, end=None,
     edl, _v = _edl(ctx)
     try:
         s, e = _window(edl, start, end)
+        s, e = _snap_to_cuts(edl, s, e, _fps(ctx))
         lut, src = _read_lut_source(ctx, asset_key, url)
     except ValueError as x:
         return _rejected(str(x))
@@ -378,6 +429,9 @@ def match_grade(ctx, hero_t, start=None, end=None, strength=1.0,
         return _rejected("shot match needs the main video")
     try:
         s, e = _window(edl, start, end)
+        # a matched section is a shot: its edges land ON the cut frames,
+        # never a frame of the neighbouring shot in the matched colour
+        s, e = _snap_to_cuts(edl, s, e, _fps(ctx))
         h = _num(hero_t, "hero_t")
     except ValueError as x:
         return _rejected(str(x))
@@ -390,7 +444,8 @@ def match_grade(ctx, hero_t, start=None, end=None, strength=1.0,
     span = e - s
     tgt = _frames(ctx, edl, [s + span * (k + 0.5) / MATCH_FRAMES
                              for k in range(MATCH_FRAMES)])
-    hero = _frames(ctx, edl, [min(prog - 0.01, max(0.0, h + d))
+    lo, hi = _shot_of(edl, h, prog)
+    hero = _frames(ctx, edl, [min(hi - 0.01, max(lo, h + d))
                               for d in (-0.2, 0.0, 0.2)][:HERO_FRAMES])
     if not tgt or not hero:
         return _rejected("could not read frames to match")
@@ -415,6 +470,22 @@ def match_grade(ctx, hero_t, start=None, end=None, strength=1.0,
     return _commit(ctx, [_upsert(item)], f"matched {s:g}-{e:g}s to the "
                    f"frame at {h:g}s ({method}; mean colour gap dE "
                    f"{before:.1f} -> {after:.1f})")
+
+
+def _shot_of(edl, t, prog):
+    """[a, b) program seconds of the shot holding ``t`` (cut to cut): the
+    hero's samples never reach into the next camera."""
+    try:
+        from timeline import Timeline
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        edges = sorted({0.0, float(prog)} |
+                       {float(o) for o in tl.offsets[1:]})
+    except Exception:  # noqa: BLE001
+        return 0.0, float(prog)
+    a = max([x for x in edges if x <= t] or [0.0])
+    b = min([x for x in edges if x > t] or [float(prog)])
+    return a, b
 
 
 def _mean_lab_gap(a, b):

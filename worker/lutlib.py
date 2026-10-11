@@ -155,6 +155,12 @@ def parse_cube(text, max_size=CUBE_MAX):
         if np.any(out < -0.5) or np.any(out > 1.5 * max(1.0, hi.max())):
             raise LutError("LUT values are far outside 0..1")
         table = out.reshape(size3, size3, size3, 3)
+        if np.any(lo != 0.0) or np.any(hi != 1.0):
+            # the lattice spans [DOMAIN_MIN, DOMAIN_MAX]: re-sample it on
+            # the 0..1 lattice the render indexes (inputs outside the
+            # domain clamp to its edge, as the .cube spec says)
+            grid = identity(size3).table.astype(np.float64)
+            table = apply(table, (grid - lo) / (hi - lo))
         return Lut(np.clip(table, 0, 1), title=title, source_kind="3d")
     if data.shape[0] != size1:
         raise LutError(f"LUT_1D_SIZE {size1} needs {size1} rows, found "
@@ -162,10 +168,12 @@ def parse_cube(text, max_size=CUBE_MAX):
     curves = np.clip(data, 0, 1)
     n = MATCH_SIZE
     x = np.linspace(0, 1, n)
-    src = np.linspace(0, 1, size1)
-    cr = np.interp(x, src, curves[:, 0])
-    cg = np.interp(x, src, curves[:, 1])
-    cb = np.interp(x, src, curves[:, 2])
+    # each channel's curve samples [DOMAIN_MIN, DOMAIN_MAX] of its input
+    src = [lo[c] + np.linspace(0, 1, size1) * (hi[c] - lo[c])
+           for c in range(3)]
+    cr = np.interp(x, src[0], curves[:, 0])
+    cg = np.interp(x, src[1], curves[:, 1])
+    cb = np.interp(x, src[2], curves[:, 2])
     b, g, r = np.meshgrid(cb, cg, cr, indexing="ij")
     return Lut(np.stack([r, g, b], axis=-1), title=title, source_kind="1d")
 

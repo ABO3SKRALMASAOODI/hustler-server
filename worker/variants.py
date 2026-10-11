@@ -89,11 +89,11 @@ def variant_graph(kinds, W, H, workdir, seed=0):
             parts.append(f"[{srcs[i]}]negate,format=rgb24[{out}]")
         else:
             maps = {}
-            for nm in finish.maps_for(item):
+            for j, nm in enumerate(finish.maps_for(item)):
                 paths.append(finish.map_path(workdir, nm, W, H,
                                              finish._scale(item)))
                 maps[nm] = finish._map_getter(parts, f"{len(paths)}:v", 1,
-                                              25.0, f"m{i}{nm[:3]}")
+                                              25.0, f"m{i}_{j}")
             g = finish.Graph(parts, f"v{i}", W, H, 25.0, 1, maps=maps,
                              seed=seed)
             last = finish.BUILDERS[finish_kind(kind)](g, srcs[i], item)
@@ -197,10 +197,22 @@ def make_variant_set(tool_ctx, source_t, kinds=None):
     keys = []
     batch = hashlib.sha256(json.dumps([tool_ctx.project_id, t, kinds])
                            .encode()).hexdigest()[:10]
+    try:
+        import edit_batch
+        have = set(tool_ctx.db.run(edit_batch.project_media_keys,
+                                   tool_ctx.project_id) or ())
+    except Exception:  # noqa: BLE001 — at worst a duplicate row
+        have = set()
     for kind in kinds:
         p = paths[kind]
         key = f"generated/{tool_ctx.project_id}/variant-{batch}-{kind}.png"
         storage.upload_file(p, key, "image/png")
+        if key in have:
+            # the same frame and kinds again: the same seeded stills under
+            # the same key, already a project image (no duplicate in the
+            # media tray)
+            keys.append(key)
+            continue
         tool_ctx.db.run(
             dbx.insert_asset, tool_ctx.project_id, "image_ref", key,
             bytes_=os.path.getsize(p), width=stats["W"], height=stats["H"],

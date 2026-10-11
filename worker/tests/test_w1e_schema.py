@@ -147,10 +147,12 @@ def test_flash_times():
     # a 3-frame thermal flip over the frame is a flash; a 2 s one is not
     assert ft(_fi(kind="thermal", start=2.0, end=2.12)) == [2.0]
     assert ft(_fi(kind="thermal", start=2.0, end=4.0)) == []
-    # a small region never flashes the frame; a ramped one is no flash
+    # a small region never flashes the frame; easing a short flip in does
+    # not stop it being a flash (it still flips and back within 0.5 s)
     assert ft(_fi(kind="xray", start=2.0, end=2.08,
                   region={"shape": "rect", "box": [0, 0, 0.3, 0.3]})) == []
-    assert ft(_fi(kind="xray", start=2.0, end=2.08, ramp_in_f=2)) == []
+    assert ft(_fi(kind="xray", start=2.0, end=2.08, ramp_in_f=2)) == [2.0]
+    assert ft(_gw(ev=2.0, start=1.0, end=1.2, ramp_in_f=3)) == [1.0]
     assert ft(_fi(kind="film", start=2.0, end=2.08)) == []
     assert ft(_fi(kind="solarise", start=2.0, end=2.08, strength=0.3)) == []
     # grade: an abrupt exposure pop flashes; mono does not

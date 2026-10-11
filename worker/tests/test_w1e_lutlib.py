@@ -73,6 +73,25 @@ def test_a_65_cube_is_accepted_and_1d_curves_expand():
     assert np.allclose(out, [0.25, 0.5, 0.75], atol=1e-3)
 
 
+def test_a_cube_domain_is_its_input_range():
+    """DOMAIN_MIN / DOMAIN_MAX name what the lattice's INPUTS span: a cube
+    over 0..2 that halves its input applies x -> x/2 on 0..1 (read as a
+    0..1 lattice it would be an identity); a 1D set over 0..0.5 reaches its
+    last value at input 0.5 and holds it."""
+    n = 5
+    pts = np.linspace(0, 2, n)
+    rows = "\n".join(f"{r / 2} {g / 2} {b / 2}" for b in pts for g in pts
+                     for r in pts)
+    lut = lutlib.parse_cube(f"DOMAIN_MIN 0 0 0\nDOMAIN_MAX 2 2 2\n"
+                            f"LUT_3D_SIZE {n}\n{rows}\n")
+    assert np.allclose(lutlib.apply(lut, [[0.8, 0.4, 1.0]]),
+                       [[0.4, 0.2, 0.5]], atol=1e-6)
+    one = lutlib.parse_cube("DOMAIN_MAX 0.5 0.5 0.5\nLUT_1D_SIZE 2\n"
+                            "0 0 0\n1 1 1\n")
+    assert np.allclose(lutlib.apply(one, [[0.25, 0.5, 0.9]]),
+                       [[0.5, 1.0, 1.0]], atol=2e-2)
+
+
 def test_mix_compose_resample():
     neg = lutlib.Lut(1.0 - lutlib.identity(9).table)
     half = lutlib.mix(neg, 0.5)

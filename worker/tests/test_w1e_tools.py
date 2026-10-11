@@ -102,8 +102,13 @@ def uploads(monkeypatch, tmp_path):
 
     def download_to(key, local):
         shutil.copy(store[key], local)
+
+    def object_bytes(key):
+        p = store.get(key)
+        return os.path.getsize(p) if p and os.path.exists(p) else None
     monkeypatch.setattr(storage, "upload_file", upload_file)
     monkeypatch.setattr(storage, "download_to", download_to)
+    monkeypatch.setattr(storage, "object_bytes", object_bytes)
     monkeypatch.setattr(storage, "presign_get",
                         lambda key, expires=0: store.get(key, "/nonexistent"))
     return store
@@ -279,6 +284,31 @@ def test_import_lut_refusals(tmp_path, uploads):
     assert not ctx.writes
 
 
+def test_import_lut_never_fetches_a_video_named_by_mistake(tmp_path, uploads,
+                                                          monkeypatch):
+    """A project video passed as the LUT is refused on its size, before a
+    byte is downloaded; a batch cannot name a non-.cube asset as a LUT, so
+    a render never fetches one either."""
+    big = tmp_path / "talk.mp4"
+    with open(big, "wb") as f:
+        f.truncate(ft.LUT_MAX_BYTES + 1)
+    uploads["media/7/talk.mp4"] = str(big)
+    fetched = []
+    monkeypatch.setattr(storage, "download_to",
+                        lambda key, local: fetched.append(key))
+    ctx = Ctx(tmp_path, keys=["media/7/talk.mp4"])
+    out = ft.import_lut(ctx, asset_key="media/7/talk.mp4")
+    assert "larger than 16 MB" in out and not fetched and not ctx.writes
+    import edit_batch as eb
+    with pytest.raises(ValueError, match=".cube asset"):
+        eb.apply_batch(_base(), [{"action": "upsert", "layer": "fx",
+                                  "id": "g", "value": {
+            "id": "g", "type": "grade_window", "stage": "world",
+            "start": 1.0, "end": 2.0,
+            "lut": {"asset_key": "media/7/talk.mp4"}}}], DUR,
+            {"media/7/talk.mp4"})
+
+
 def test_match_grade_bakes_a_cube_that_closes_the_gap(tmp_path, uploads,
                                                       monkeypatch):
     rng = np.random.default_rng(5)
@@ -341,6 +371,10 @@ def test_make_variant_set_uploads_registered_stills(tmp_path, uploads):
     assert kinds == ["photo", "negative", "line", "blueprint", "thermal"]
     assert all(a["kind"] == "image_ref" for a in ctx.db.assets)
     assert not ctx.writes                           # places nothing
+    # the same frame and kinds again: the same keys, no duplicate images
+    again = ft.make_variant_set(ctx, t=2.0)
+    assert again.splitlines()[1:6] == out.splitlines()[1:6]
+    assert len(ctx.db.assets) == 5
     assert ft.make_variant_set(ctx, t=2, kinds=["hologram"]).startswith(
         "REJECTED")
     assert "at most" in ft.make_variant_set(ctx, t=2, kinds=list(
@@ -366,3 +400,32 @@ def test_section_edges_snap_onto_the_cut_frame(tmp_path):
     ft.add_finish(ctx, "film", 2.0, 3.0)                 # not near a cut
     f = ctx.writes[-1][0]["fx"][-1]
     assert (f["start"], f["end"]) == (2.0, 3.0)
+
+
+def test_cut_snapping_holds_on_the_final_rate_and_the_preview_rate():
+    """A 59.94 fps source renders finals at 59.94 and previews at 30. The
+    snapped edge must land on the cut frame of the final always, and of the
+    preview whenever one centisecond can serve both (rounding the frame
+    time UP to the centisecond overshot by up to 0.6 frame at 59.94)."""
+    import random
+    import fxprims
+    import renderer
+    rnd = random.Random(5)
+    for fps in (23.976, 25.0, 29.97, 50.0, 59.94, 60.0):
+        rates = ft._render_rates(fps)
+        for _ in range(300):
+            cut = round(rnd.uniform(0.5, 60.0), 2)
+            t = ft._cut_time(cut, rates)
+            assert fxprims.frame_at(t, rates[0]) == \
+                renderer.first_frame_at(cut, rates[0]), (fps, cut, t)
+            if len(rates) == 2:
+                both = [c / 100 for c in range(int(cut * 100) - 4,
+                                               int(cut * 100) + 8)
+                        if all(fxprims.frame_at(c / 100, f)
+                               == renderer.first_frame_at(cut, f)
+                               for f in rates)]
+                if both:
+                    assert fxprims.frame_at(t, rates[1]) == \
+                        renderer.first_frame_at(cut, rates[1]), (fps, cut)
+    # the case that was a frame late: 7.99 s at 59.94 starts on frame 479
+    assert fxprims.frame_at(ft._cut_time(7.99, (59.94, 30.0)), 59.94) == 479

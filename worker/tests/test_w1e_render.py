@@ -180,6 +180,11 @@ def r25(work):
             lut={"asset_key": LUT_KEY, "strength": 0.5},
             protect=["skin"])])),
     ]
+    # one device that cannot compile (a face region with no face mask on
+    # this render) next to one that can, in the same stage and compiler
+    cases.append(_case(work, "sibling", dict(b, fx=[
+        _gw("ok1", 1.0, 2.0, saturation=0.0),
+        _gw("face1", 2.0, 3.0, ev=1.0, region={"shape": "face"})])))
     for k in KINDS:
         cases.append(_case(work, f"k_{k}", dict(b, fx=[_fi(
             f"f_{k}", k, 1.0, 2.0)]), dump_frames=[30]))
@@ -283,6 +288,20 @@ def test_over_type_and_screen_stages(r25):
     li = _ok(r25, "lut_iso")                 # LUT + key + protect, planar
     assert _diff(base, li) == list(range(50, 75))
     assert [r["rung"] for r in li["report"]] == ["full"]
+
+
+def test_a_device_that_cannot_compile_never_takes_its_siblings(r25):
+    """The face-region grade has no face mask here (until 1A's provider
+    lands) and is rolled back ALONE: the mono grade in the same stage still
+    draws its exact window. With a face mask it draws too."""
+    base, r = _ok(r25, "base"), _ok(r25, "sibling")
+    rows = {x["id"]: x for x in r["report"]}
+    assert rows["ok1"]["rung"] == "full", rows
+    d = _diff(base, r)
+    assert d[:25] == list(range(25, 50))
+    if rows["face1"]["rung"] == "omit":
+        assert d == list(range(25, 50)), d
+        assert "compile failed" in rows["face1"]["reason"]
 
 
 def test_seeded_finishes_are_deterministic(r25):

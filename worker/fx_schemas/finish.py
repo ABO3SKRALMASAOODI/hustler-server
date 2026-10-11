@@ -102,6 +102,15 @@ class GradeLut(BaseModel):
     match_t: Optional[float] = Field(default=None, ge=0.0,
                                      allow_inf_nan=False)
 
+    @model_validator(mode="after")
+    def _a_cube(self):
+        # import_lut / match_grade store canonical ``.cube`` assets; any
+        # other project media (a video) is never fetched as a LUT
+        if not self.asset_key.strip().lower().endswith(".cube"):
+            raise ValueError("lut.asset_key names a .cube asset (import_lut "
+                             "or match_grade stores one)")
+        return self
+
 
 class HueKey(BaseModel):
     """Colour kept by hue (hsvhold/colorhold); everything else goes mono.
@@ -192,14 +201,16 @@ class GradeWindowFx(FxItemBase):
                                  "do not fit in the window")
 
     def flash_times(self):
-        """A short, abrupt, full-frame exposure jump is a flash; a colour
-        change (mono, a hue key, a LUT) is not."""
+        """A short full-frame exposure jump is a flash; a colour change
+        (mono, a hue key, a LUT) is not. Ramps do not exempt it: a window
+        under half a second goes up AND back down inside it, which is the
+        opposing pair of transitions a flash is, eased or not."""
         if self.start is None or self.end is None:
             return []
         area = _region_area(self.region)
         short = (self.end - self.start) < FLASH_WINDOW_S
         if area is not None and area >= FLASH_AREA and short and \
-                not self.ramp_in_f and abs(self.ev or 0.0) >= 1.0:
+                abs(self.ev or 0.0) >= 1.0:
             return [self.start]
         return []
 
@@ -267,13 +278,13 @@ class FinishFx(FxItemBase):
 
     def flash_times(self):
         """A luminance-flipping finish (thermal, X-ray, solarise ...) held
-        for under half a second over most of the frame is a flash."""
+        for under half a second over most of the frame is a flash, ramped
+        or not (it flips and flips back inside half a second)."""
         if self.start is None or self.end is None:
             return []
         area = _region_area(self.region)
         if self.kind in LUMA_FLIP_KINDS and area is not None and \
                 area >= FLASH_AREA and self.strength >= 0.5 and \
-                not self.ramp_in_f and \
                 (self.end - self.start) < FLASH_WINDOW_S:
             return [self.start]
         return []
