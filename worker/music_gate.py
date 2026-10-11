@@ -635,6 +635,30 @@ def gate_web_sounds(prev_edl, new_edl, asset_of):
     return None
 
 
+def grant_sfx(ctx, storage_key):
+    """add_sfx verified this key in this call (_resolve_sfx refuses a
+    web-found sound while web sounds are off): the write gate skips it."""
+    root = _root(ctx)
+    try:
+        grants = getattr(root, "_sfx_grants", None) or set()
+        grants.add(str(storage_key))
+        root._sfx_grants = grants
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _sfx_cleared(ctx, key):
+    """No lookup needed: add_sfx verified it, or it is an approved library
+    recording (never web-found)."""
+    if key in (getattr(_root(ctx), "_sfx_grants", None) or ()):
+        return True
+    try:
+        import sound_library
+        return sound_library.id_for_key(key) is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def check_sfx_write(ctx, prev_edl, new_edl):
     """Owner rule 2 inside every agent EDL write (ToolContext.write_edl)."""
     try:
@@ -643,10 +667,12 @@ def check_sfx_write(ctx, prev_edl, new_edl):
             return None
     except Exception:  # noqa: BLE001 — the flag unreadable reads as off
         pass
-    if not new_sfx_keys(prev_edl, new_edl):
+    keys = [k for k in new_sfx_keys(prev_edl, new_edl)
+            if not _sfx_cleared(ctx, k)]
+    if not keys:
         return None
     return gate_web_sounds(
-        prev_edl, new_edl,
+        prev_edl, {"sfx": [{"storage_key": k} for k in keys]},
         lambda key: ctx.db.run(_dbx().asset_by_key, ctx.project_id, key))
 
 

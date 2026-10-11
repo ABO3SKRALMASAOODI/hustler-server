@@ -1,7 +1,8 @@
 """Track 0B seams in the motion engine (motion_engine.py, motion/lib/).
 
-* motion/lib/*.js joins the runtime in name order; with no library file the
-  runtime (and so every document and clip cache key) is exactly runtime.js.
+* motion/lib/*.js joins the runtime in name order, in the documents that use
+  it (MG.<name> or the _<name> param); every other document, and the
+  runtime with no library file, is exactly runtime.js.
 * params._beats: the item's rhythm on its composition clock, normalized and
   bounded; MG.beats reads it in the page (Chromium test).
 * clip_store: a local cache miss asks the shared store; a fresh clip is
@@ -68,11 +69,28 @@ def test_no_library_file_means_the_runtime_is_runtime_js_exactly(
     assert "note" not in out and "not a library" not in out
 
 
-def test_the_shipped_library_joins_every_document(fresh_runtime):
+def test_the_shipped_library_joins_the_documents_that_use_it(fresh_runtime):
     libs = [os.path.basename(p) for p in motion_engine._lib_files()]
     assert "beats.js" in libs
-    doc = motion_engine.build_document("<div></div>")
-    assert "MG.beats = {" in doc
+    runtime = motion_engine.strip_line_comments(open(os.path.join(
+        motion_engine.MOTION_DIR, "runtime.js"), encoding="utf-8").read())
+    # a page that never asks for beats carries runtime.js alone, byte for
+    # byte as before Wave 0 (caption pages hold it under the 200 KB cap)
+    plain = motion_engine.build_document("<div></div>")
+    assert "MG.beats = {" not in plain
+    assert f"<script>{runtime}</script>" in plain
+    # it joins a page that names MG.beats, or that carries _beats
+    used = motion_engine.build_document(
+        "<script>MG.frame(t => MG.beats.pulse(t));</script>")
+    assert "MG.beats = {" in used
+    with_beats = motion_engine.build_document("<div></div>",
+                                              beats={"t": [0.5]})
+    assert "MG.beats = {" in with_beats
+    assert motion_engine.libs_used("<b>MG.beats</b>") == ["beats"]
+    assert motion_engine.libs_used("<b></b>", {"_beats": {}}) == ["beats"]
+    assert motion_engine.libs_used("<b></b>", {"beats": 1}) == []
+    # every library still enters every clip key
+    assert "MG.beats = {" in motion_engine._runtime_js()
     # beats.js is comment-stripped like the runtime and stays small
     lib = open(os.path.join(motion_engine.LIB_DIR, "beats.js")).read()
     assert len(motion_engine.strip_line_comments(lib)) < 1500

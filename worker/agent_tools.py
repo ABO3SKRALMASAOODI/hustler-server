@@ -7066,6 +7066,9 @@ def add_sfx(ctx, storage_key, at, gain_db=None, purpose=None, offset_s=None,
     if err:
         return err
     storage_key = sound["storage_key"]      # a video resolves to its audio
+    # _resolve_sfx already refused a web-found sound while web sounds are
+    # off (owner rule 2): the write gate need not look this key up again.
+    music_gate.grant_sfx(ctx, storage_key)
     lib_id = sound.get("sound_id") or sound_library.id_for_key(storage_key)
     try:
         at = float(at)

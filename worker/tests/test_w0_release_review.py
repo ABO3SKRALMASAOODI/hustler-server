@@ -40,6 +40,9 @@ class _SlowStore:
         self.delay, self.have = delay, set(have)
         self.asked, self.lock = [], threading.Lock()
         self.inflight = self.peak = 0
+        # Event.wait, not time.sleep: a test elsewhere in the suite that
+        # stubs time.sleep must not make this store answer instantly.
+        self.never = threading.Event()
 
     def get(self, key, dest):
         with self.lock:
@@ -47,7 +50,7 @@ class _SlowStore:
             self.inflight += 1
             self.peak = max(self.peak, self.inflight)
         try:
-            time.sleep(self.delay)
+            self.never.wait(self.delay)
             if key not in self.have:
                 return None
             os.makedirs(dest, exist_ok=True)
@@ -106,7 +109,7 @@ def test_a_slow_store_never_holds_a_render_past_the_budget(cache,
     assert time.monotonic() - t < 1.5
     assert asked == frozenset(keys)
     # only the first wave started; nothing new starts after the budget
-    time.sleep(0.2)
+    threading.Event().wait(0.2)
     assert len(slow.asked) <= motion_engine.SHARED_GET_THREADS
 
 
@@ -151,7 +154,7 @@ def test_uploads_run_at_most_two_at_a_time(cache, monkeypatch, tmp_path):
         with lock:
             state["now"] += 1
             state["peak"] = max(state["peak"], state["now"])
-        time.sleep(0.05)
+        threading.Event().wait(0.05)
         with lock:
             state["now"] -= 1
             state["done"] += 1

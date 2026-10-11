@@ -41,10 +41,11 @@ from dataclasses import dataclass, field
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOTION_DIR = os.path.join(HERE, "motion")
 TEMPLATES_DIR = os.path.join(MOTION_DIR, "templates")
-# Shared page libraries (Wave 0 seam, track 0B): every motion/lib/*.js is
-# appended to the runtime in name order — so to every document and every
-# clip cache key. Device tracks add a file here (1C: paint.js); nobody edits
-# runtime.js for a library.
+# Shared page libraries (Wave 0 seam, track 0B): a motion/lib/<name>.js is
+# appended to the runtime (name order) of every document that uses it
+# (libs_used: the page names MG.<name> or carries the _<name> param), and
+# every library enters every clip cache key. Device tracks add a file here
+# (1C: paint.js); nobody edits runtime.js for a library.
 LIB_DIR = os.path.join(MOTION_DIR, "lib")
 FONTS_DIR = os.path.join(HERE, "fonts")
 
@@ -342,11 +343,23 @@ def _lib_files():
     return [os.path.join(LIB_DIR, n) for n in names]
 
 
-def _runtime_js():
-    """runtime.js, then every motion/lib/*.js in name order, comments
-    stripped. With no library files this is runtime.js exactly as before."""
+def _lib_name(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _runtime_js(libs=None):
+    """runtime.js, then motion/lib/*.js in name order, comments stripped.
+
+    ``libs``: the library names (file stems) a document uses; None means
+    every library (what a clip key hashes, so a change to any library
+    re-keys every clip). With no library this is runtime.js exactly as
+    before Wave 0."""
     path = os.path.join(MOTION_DIR, "runtime.js")
-    files = [path] + _lib_files()
+    lib_files = _lib_files()
+    if libs is not None:
+        want = set(libs)
+        lib_files = [p for p in lib_files if _lib_name(p) in want]
+    files = [path] + lib_files
     key = tuple((p, st.st_mtime_ns, st.st_size)
                 for p, st in ((p, os.stat(p)) for p in files))
     if key not in _RUNTIME_CACHE:
@@ -354,9 +367,23 @@ def _runtime_js():
         for p in files:
             with open(p, "r", encoding="utf-8") as f:
                 chunks.append(strip_line_comments(f.read()))
-        _RUNTIME_CACHE.clear()
+        if len(_RUNTIME_CACHE) >= 16:
+            _RUNTIME_CACHE.clear()
         _RUNTIME_CACHE[key] = "\n".join(chunks)
     return _RUNTIME_CACHE[key]
+
+
+def libs_used(body, params=None):
+    """The motion/lib libraries a document uses: ``<name>.js`` joins it when
+    the page names ``MG.<name>`` or its params carry ``_<name>`` (beats.js:
+    ``MG.beats`` / ``_beats``). Every other document carries runtime.js
+    alone, byte for byte as before Wave 0: each caption segment holds the
+    runtime under the 200 KB document cap (Wave 0 final review: joining
+    every library to every page pushed caption pages past their headroom)."""
+    text = str(body or "")
+    keys = set((params or {}).keys()) if isinstance(params, dict) else set()
+    return [n for n in (_lib_name(p) for p in _lib_files())
+            if f"MG.{n}" in text or f"_{n}" in keys]
 
 
 BASE_CSS = """
@@ -478,7 +505,7 @@ def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<style>{_font_css()}\n:root{{--W:{int(design_w)}px;--H:{int(design_h)}px}}{BASE_CSS}</style>"
-        f"<script>{_runtime_js()}</script>"
+        f"<script>{_runtime_js(libs_used(body, params))}</script>"
         f"<script>Object.assign(window.MG,{_json_for_script(init)});</script>"
         "</head><body>"
         f"{body}"
