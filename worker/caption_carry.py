@@ -38,7 +38,11 @@ page never holds its place across one (``Plan.hold_limit``); a word said
 within two frames before the change appears ON it (and one said less than a
 page's minimum before it, MIN_PAGE_S, rather than flash or be lost); one or
 two words a change would strand take their line's place when it is clear
-for them.
+for them. A caption anchored inside a picture card keeps that anchor in the
+card's own column, its block measured as the caption track lays it out and
+moved at most NUDGE_LINES lines (Diamandis run, Oct 2026: see plan and
+worker/caption_place.py); where it finds no clear place it is named
+(Plan.unplaced), never silently moved onto the face or muted.
 
 Everything here is a pure function of the EDL, the index and the timeline,
 and it is the ONE caption placement pass: the libass captions, the motion
@@ -76,6 +80,9 @@ ABBREV_MIN = 4
 # and faces.
 CAP_HALF_H = 0.055
 MIN_BAND_H = 0.085
+# A zone shorter than this the motion caption template ignores (it lays the
+# block in the whole safe area) unless the place marks it exact (``h``).
+TIGHT_ZONE_H = 0.08
 ZONE_HALF_H = 0.11
 COLUMN = (0.15, 0.85)
 GRAPHIC_PAD = 0.015
@@ -91,6 +98,9 @@ HAIR_UP = 0.3
 # A face measured this far from a moment still speaks for it (any take)
 # when nothing nearer was measured.
 FACE_FAR_S = 6.0
+# ...and, with none that near, one measured in the same source shot within
+# this many seconds (_faces_in_shot: one shot is one framing).
+FACE_SHOT_S = 60.0
 # A caption that would start this little before an occupying graphic leaves
 # waits for it instead of touching it (the 'computers' under the hook title)
 # — never more than two frames: a word is never revealed later than that
@@ -574,7 +584,8 @@ def faces_over(edl, index, tl, a, b, W, H, live=()):
     2. the keep-out's face track over [a, b] from the index's spatial
        samples (the same mapping, on the EDL as it is now): either alone
        can miss a profile;
-    3. with no track, the nearest measured face within FACE_FAR_S;
+    3. with no track, the nearest measured face within FACE_FAR_S, else
+       the nearest one measured in the same source shot (_faces_in_shot);
     4. the talking-head prior (Haar misses profiles: "no face found" is no
        evidence of no face)."""
     import keepout
@@ -587,6 +598,8 @@ def faces_over(edl, index, tl, a, b, W, H, live=()):
         zones = []
     if not zones:
         zones = _faces_far(edl, index, tl, a, b, W, H)
+    if not zones and not stored:
+        zones = _faces_in_shot(edl, index, tl, a, b, W, H)
     # the write-time frames win for a face they measured (exact frames: a
     # push-in moved it), but a face the index has and they do not count too
     # — Haar misses profiles, and the write-time zones alone parked 'and
@@ -637,6 +650,55 @@ def _faces_far(edl, index, tl, a, b, W, H):
             except Exception:  # noqa: BLE001 — unmappable sample
                 ms = []
             out += [tuple(keepout.face_zone(m)) for m in ms]
+    return out
+
+
+def _faces_in_shot(edl, index, tl, a, b, W, H):
+    """Zones of the faces of the spatial sample nearest the source under
+    program [a, b] that lies in the same source shot (index ``shots``),
+    within FACE_SHOT_S, and saw a face, mapped at the span's middle — []
+    with no shots or none.
+
+    Diamandis run (Oct 2026): a 30-minute source is sampled every ~22 s, so
+    most of a phone-call short was beyond FACE_FAR_S of its one measured
+    face; the talking-head prior then put Elon's chin at y 0.48 of a
+    close-up card whose chin is at 0.69, and the captions moved onto his
+    mouth. One shot is one framing: its measured face speaks for it."""
+    import keepout
+    video = (index or {}).get("video") or {}
+    shots = (index or {}).get("shots") or []
+    if not shots or not video.get("width") or not video.get("height") or edl.get("canvas"):
+        return []
+    mid = (a + b) / 2.0
+    src_mid = _src_near(tl, mid)
+    here = keepout._shot_at(shots, src_mid)
+    if here is None:
+        return []
+    near = None
+    for s in (((index or {}).get("spatial") or {}).get("samples") or []):
+        try:
+            t = float(s["t"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not s.get("faces") or abs(t - src_mid) > FACE_SHOT_S or \
+                keepout._shot_at(shots, t) != here:
+            continue
+        if near is None or abs(t - src_mid) < abs(near[0] - src_mid):
+            near = (t, s)
+    if near is None:
+        return []
+    try:
+        geo = keepout.Geometry(edl, video, W, H, float(tl.out_duration),
+                               zooms=keepout.camera_zooms(edl, index, tl))
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for f in near[1].get("faces") or []:
+        try:
+            ms = geo.to_outputs(mid, src_mid, [float(v) for v in f[:4]])
+        except Exception:  # noqa: BLE001 — unmappable sample
+            ms = []
+        out += [tuple(keepout.face_zone(m)) for m in ms]
     return out
 
 
@@ -707,6 +769,15 @@ def clear_band(boxes, faces, safe, normal_y):
     letter = band_letter(y)
     return {"y": round(y, 4), "b": letter, "z": [round(z0, 4), round(z1, 4)],
             "position": _POSITION[letter]}
+
+
+def explicit_anchor(edl):
+    """Is the captions' place set by hand for the whole video — a style
+    anchor_y with no shot-aware placement track (set_caption_style locks
+    it)? The plan honours it: only measured evidence moves it."""
+    caps = edl.get("captions") if isinstance(edl.get("captions"), dict) else {}
+    style = caps.get("style") if isinstance(caps.get("style"), dict) else {}
+    return style.get("anchor_y") is not None and not caps.get("placement_track")
 
 
 def normal_place(edl, src_mid):
@@ -781,7 +852,20 @@ class Plan:
     ``yield_spans`` and ``wait_spans`` are kept for older callers and are
     empty (no graphic owns a phrase or mutes a whole window any more: every
     heard word reaches the screen once); ``report`` is per item for notes
-    and audits."""
+    and audits; ``unplaced`` lists the stretches whose captions found no
+    clear place — {start, end, words, y: their anchor, why, on} — never
+    silent (audit_captions, the render report): why 'room' (nowhere clear
+    of the graphics ``on`` them, the card's edges or the face, and nothing
+    that replaces speech covers them: they stay in their usual place) or
+    'face' (an anchor the editor set inside a card, kept on it although the
+    measured face, chin included, reaches ``face_to``: no room past the face
+    in the card nor on the canvas around it).
+
+    A place may also carry ``x`` (the column [x0, x1] its lines keep to:
+    a card's inner column), ``h`` = 1 (``z`` is exactly the zone the block
+    is laid in, however tight: the caption's own anchor inside a card, its
+    block moved only as far as it must, or a band one line tall) and ``l`` =
+    1 (the zone holds one line: pages of one line)."""
 
     def __init__(self, words):
         self.words = words
@@ -792,6 +876,7 @@ class Plan:
         self.wait_spans = []
         self.yield_spans = []
         self.segments = []
+        self.unplaced = []
         self._seg_places = None
         self._seg_of = None
         self.report = {}
@@ -955,6 +1040,30 @@ def _card_faces(edl, index, tl, a, b, W, H, live, screens, rects):
     return faces
 
 
+def _past_face(bands, chins, col, block, y, one, tall, motion, lift):
+    """The spot (caption_place.anchor_spot) for a caption anchored at ``y``
+    whose block ``block`` a measured face reaches, past that face on the
+    anchor's own side inside the card (``bands``: the card's free bands, the
+    faces already taken out) — under the chin for an anchor below the
+    face's middle, above the brow for one set above it — however far that
+    is; never across the face (onto the mouth or over the hair). None when
+    that side holds no caption."""
+    import caption_place
+    near = [c for c in chins if caption_place._in_col(c, col)]
+    hit = [c for c in near if c[1] < block[1] and c[3] > block[0]] or near
+    if not hit:
+        return None
+    if y >= min((c[1] + c[3]) / 2.0 for c in hit):
+        foot = max(c[3] for c in hit)
+        side = [(max(lo, foot), hi) for lo, hi in bands if hi > foot]
+    else:
+        # (rising away from the face, the whole block may: no lift limit)
+        brow = min(c[1] for c in hit)
+        side = [(lo, min(hi, brow)) for lo, hi in bands if lo < brow]
+        lift = None
+    return caption_place.anchor_spot(side, y, one, tall, motion, nudge=1.0, lift=lift)
+
+
 def _chins(faces, rects):
     """caption_place.chin of each face, kept inside the windows it shows in."""
     import caption_place
@@ -1088,8 +1197,12 @@ def _smooth_flips(p, edl, index, tl, W, H, col, bounds, seg_of, state, info):
                 continue
             if state[k] == "mute":
                 return False
-            lo, hi = place["y"] - CAP_HALF_H, place["y"] + CAP_HALF_H
-            if caption_place.hits(lo, hi, zones(k), col):
+            # a caption on its own anchor in a card is its zone, in the
+            # card's column (caption_place.anchor_spot)
+            lo, hi = (place["z"] if place.get("h") else
+                      (place["y"] - CAP_HALF_H, place["y"] + CAP_HALF_H))
+            c = place.get("x") or (info[k] or {}).get("col") or col
+            if caption_place.hits(lo, hi, zones(k), c):
                 return False
         return True
     j = 1
@@ -1204,9 +1317,13 @@ def plan(edl, index, tl, words, canvas=None):
               for w in words]
     col = caption_place.column(W, H, COLUMN)
     min_h = caption_place.min_band(edl, W, H, MIN_BAND_H)
+    one, tall, on_motion = caption_place.block_metrics(edl, W, H)
+    locked = explicit_anchor(edl)
+    hero = caption_place.look_of(edl) in caption_place.HERO_LOOKS
     nseg = max(0, len(bounds) - 1)
     state = [None] * nseg          # per segment: None (usual place), a band, "mute"
     info = [None] * nseg           # per solved segment: its usual y and hard zones
+    usual = {}                     # segment -> the card's own place no graphic covers
     prev_pick = None               # the band the last placed page used
     for k, (a, b) in enumerate(zip(bounds, bounds[1:])):
         if b - a < 1e-3:
@@ -1244,13 +1361,136 @@ def plan(edl, index, tl, words, canvas=None):
         screens = caption_place.content_zones(lcards, index, tl, a, b)
         hard = gzones + edges + ([wm] if wm else []) + props + screens
         faces = None
+        # A caption whose own anchor lies inside a card belongs to that card
+        # (caption_place.home_rect, and the note above it): it keeps to the
+        # card's inner column and stays on its anchor, its block measured
+        # as the caption track lays it out and moved at most NUDGE_LINES
+        # lines to clear the card's edges, a face with its chin, a graphic,
+        # a prop or the watermark. An explicitly set anchor (captions.style
+        # .anchor_y, which set_caption_style locks) is the editor's decision:
+        # the talking-head prior (no face measured anywhere in the shot)
+        # never moves it, and a measured face alone never sends it to a band
+        # elsewhere in the card (over the hair, onto the mouth: s08): it rises
+        # at most LOCKED_LIFT_LINES (pages of one line rather than climb
+        # toward the chin); a measured face reaching it sends it past the
+        # face on its own side (_past_face), else to a clear band on the
+        # canvas around the card; with neither it stays on its anchor and
+        # the plan names the stretch (``unplaced``, why 'face').
+        # (libass captions take it only from an anchor the editor set: the
+        # style's own place there is the preset's, drawn by its own
+        # alignment, and stays as it always was until something covers it)
+        home = caption_place.home_rect(rects, normal_y, col) \
+            if rects and not assume and not hero and (on_motion or locked) else None
+        block, bcol = (normal_y - CAP_HALF_H, normal_y + CAP_HALF_H), col
+        if home is not None:
+            hcol = caption_place.card_column(home, W, H)
+            # the motion template lays a block inside the platform-safe area
+            # (its SAFE); libass draws where it is told, and its block in its
+            # usual place never was held to it — a card is no reason to lift
+            # an anchor near the frame's foot toward the face (review: the
+            # 'composed' cards' anchor 0.8 rose 0.05 onto the chin)
+            hsafe = (max(safe[0], home[1] + caption_place.EDGE_PAD),
+                     min(safe[1], home[3] - caption_place.EDGE_PAD)) if on_motion else \
+                (home[1] + caption_place.EDGE_PAD, home[3] - caption_place.EDGE_PAD)
+            block, bcol = caption_place.natural_block(normal_y, one, tall, on_motion), hcol
+            faces = _card_faces(edl, index, tl, a, b, W, H, live, screens, rects)
+            base = gzones + caption_place.edge_zones(rects, hcol) + ([wm] if wm else []) + \
+                props + screens
+            prior = faces == _prior_in_cards(rects)
+            chins = [] if locked and prior else _chins(faces, rects)
+            if locked and prior:
+                # unmeasured, under an anchor the editor set below it: the
+                # face runs down to the captions' row, so a graphic that
+                # covers them never sends them into the band between the
+                # prior's chin and that row — the mouth (s08: y 0.56)
+                faces = [(f[0], f[1], f[2], max(f[3], block[0] - FACE_PAD)) for f in faces]
+            spot, zones_k, why, canvas, far = None, base + chins, None, None, False
+            lift = caption_place.LOCKED_LIFT_LINES * one if locked else None
+            if hsafe[1] - hsafe[0] > one:
+                spot = caption_place.anchor_spot(caption_place.free_bands(zones_k, hsafe, hcol),
+                                                 normal_y, one, tall, on_motion, lift=lift)
+                if spot is None and locked and chins:
+                    # The measured face, chin included, reaches the anchor.
+                    # Captions never sit on a face while a clear place is
+                    # left that is neither over the head nor the mouth: past
+                    # the face on the anchor's own side inside the card (under
+                    # the chin), else a band on the canvas around the card
+                    # (review: the production 'composed' cards — the old plan
+                    # moved those words off the face; keeping them on it
+                    # doubled the words on a measured face).
+                    spot = _past_face(caption_place.free_bands(zones_k, hsafe, hcol), chins,
+                                      hcol, block, normal_y, one, tall, on_motion, lift)
+                    far = spot is not None
+                    if spot is None:
+                        cz = hard + chins + [(r[0], r[1] - caption_place.EDGE_PAD, r[2],
+                                              r[3] + caption_place.EDGE_PAD) for r in rects]
+                        canvas = caption_place.choose(
+                            caption_place.free_bands(cz, safe, col), normal_y, CAP_HALF_H,
+                            min_h, soft, rects, col, prev=prev_pick if visible else None)
+                    if spot is None and canvas is None:
+                        spot = caption_place.anchor_spot(caption_place.free_bands(base, hsafe, hcol),
+                                                         normal_y, one, tall, on_motion, lift=0.0)
+                        if spot is not None:
+                            zones_k, why = base, "face"
+            if canvas is not None:
+                y, ba, bb, _score = canvas
+                z0, z1 = max(ba, y - ZONE_HALF_H), min(bb, y + ZONE_HALF_H)
+                letter = band_letter(y)
+                place = {"y": round(y, 4), "b": letter, "z": [round(z0, 4), round(z1, 4)],
+                         "position": _POSITION[letter]}
+                if on_motion and z1 - z0 < min(tall, TIGHT_ZONE_H) - 1e-4 and tall > one * 1.5:
+                    place.update(h=1, l=1)
+                info[k] = {"y": normal_y, "zones": cz}
+                state[k] = place
+                for i in visible:
+                    p.placed[i] = place
+                prev_pick = (y, ba, bb)
+                continue
+            if spot is not None:
+                z0, z1 = spot
+                y = normal_y if on_motion else (z0 + z1) / 2.0
+                if on_motion and far:
+                    # moved past the face: the first line's row in its zone
+                    y = min(max(normal_y, z0 + one / 2.0), z1 - one / 2.0)
+                letter = _band if on_motion and _band in _POSITION else band_letter(y)
+                place = {"y": round(y, 4), "b": letter, "z": [z0, z1],
+                         "position": _POSITION[letter], "x": list(hcol), "h": 1}
+                if on_motion and z1 - z0 < tall - 1e-4 and tall > one * 1.5:
+                    place["l"] = 1        # the spot holds one line: pages of one line
+                info[k] = {"y": normal_y, "zones": zones_k, "col": hcol}
+                state[k] = place
+                for i in visible:
+                    p.placed[i] = place
+                # the card's own place for its captions: no graphic covers
+                # their block, so a page may hold into it like the usual
+                # place (Plan.clamp_spans: the opening caption's lead-in)
+                if not any(footprint_box(m, ar) and caption_place.hits(
+                        block[0] - GRAPHIC_PAD, block[1] + GRAPHIC_PAD,
+                        [footprint_box(m, ar)], hcol) for m in live):
+                    usual[k] = place
+                if why and visible:
+                    over = [c for c in chins if caption_place.hits(z0, z1, [c], hcol)]
+                    p.unplaced.append({
+                        "start": round(a, 3), "end": round(b, 3), "why": why, "on": [],
+                        "words": [words[i] for i in visible], "y": round(normal_y, 4),
+                        "face_to": round(max((c[3] for c in over), default=z0), 4)})
+                prev_pick = None
+                continue
         lo, hi = max(safe[0], normal_y - CAP_HALF_H), min(safe[1], normal_y + CAP_HALF_H)
-        blocked = bool(assume) or collides(known, normal_y) or \
+        # the graphics that truly cover the caption's usual block (in a card:
+        # the block the caption track lays out, in the card's column): only
+        # they may mute it, and only they are named for words left on them
+        covering = [m for m in live if m in assume or (footprint_box(m, ar) and (
+            caption_place.hits(block[0] - GRAPHIC_PAD, block[1] + GRAPHIC_PAD,
+                               [footprint_box(m, ar)], bcol) if home is not None
+            else collides([footprint_box(m, ar)], normal_y)))]
+        blocked = home is not None or bool(assume) or bool(covering) or \
             caption_place.hits(lo, hi, props, col)
         if (lcards or after) and not blocked:
             # a card layout: its edges and seams, the faces in its panels
             # and the watermark are no place for the usual anchor either
-            faces = _card_faces(edl, index, tl, a, b, W, H, live, screens, rects)
+            if faces is None:
+                faces = _card_faces(edl, index, tl, a, b, W, H, live, screens, rects)
             blocked = caption_place.hits(lo, hi, edges + screens + ([wm] if wm else []) +
                                          _chins(faces, rects), col)
         if faces is not None:
@@ -1265,17 +1505,31 @@ def plan(edl, index, tl, words, canvas=None):
             chins = _chins(faces, rects)
             info[k] = {"y": normal_y, "zones": hard + chins}
             one_line = max(MIN_BAND_H * 0.75, caption_place.line_height(edl, W, H) * 1.15)
-            pick = None
-            # a band that clears the hair too wins when one fits; then the
-            # face and chin alone; then (a frame-filling head, a crowded
-            # stack) any band one line still fits
-            for fz, need in (([_head(f) for f in chins], min_h), (chins, min_h),
-                             (chins, one_line)):
-                pick = caption_place.choose(caption_place.free_bands(hard + fz, safe, col),
-                                            normal_y, CAP_HALF_H, need, soft, rects, col,
-                                            prev=prev_pick)
-                if pick:
-                    break
+            # the band a page from before used holds only while it showed
+            # words (a band solved under a caption mute is no page's place)
+            sticky = prev_pick if visible else None
+
+            def passes(zones, rng, c):
+                # a band that clears the hair too wins when one fits; then
+                # the face and chin alone; then (a frame-filling head, a
+                # crowded stack) any band one line still fits
+                for fz, need in (([_head(f) for f in chins], min_h), (chins, min_h),
+                                 (chins, one_line)):
+                    got = caption_place.choose(caption_place.free_bands(zones + fz, rng, c),
+                                               normal_y, CAP_HALF_H, need, soft, rects, c,
+                                               prev=sticky)
+                    if got:
+                        return got
+                return None
+            pick = passes(hard, safe, col)
+            pcol = col
+            if not pick and home is not None and not locked and hsafe[1] - hsafe[0] > one:
+                # a card narrower than the column: a band inside it, in its
+                # own column, before muting or leaving words on an edge (an
+                # anchor the editor set stays on it instead: see above)
+                pick = passes(gzones + caption_place.edge_zones(rects, hcol) +
+                              ([wm] if wm else []) + props + screens, hsafe, hcol)
+                pcol = hcol if pick else col
             if not pick and screens:
                 # the last resort before muting heard words (or leaving them
                 # on a seam): a stack's content panel, inside its edges and
@@ -1286,7 +1540,7 @@ def plan(edl, index, tl, words, canvas=None):
                 pick = caption_place.choose(caption_place.free_bands(loose, safe, col),
                                             normal_y, CAP_HALF_H, one_line,
                                             list(soft) + list(screens), rects, col,
-                                            prev=prev_pick)
+                                            prev=sticky)
                 if pick:
                     info[k] = {"y": normal_y, "zones": loose}
             if pick:
@@ -1295,20 +1549,42 @@ def plan(edl, index, tl, words, canvas=None):
                 letter = band_letter(y)
                 place = {"y": round(y, 4), "b": letter, "z": [round(z0, 4), round(z1, 4)],
                          "position": _POSITION[letter]}
+                if on_motion and not hero and z1 - z0 < min(tall, TIGHT_ZONE_H) - 1e-4 \
+                        and tall > one * 1.5:
+                    # a band that holds one line (the last pass): pages of one
+                    # line in exactly that band — the template lays a zone
+                    # this tight in the whole frame otherwise
+                    place.update(h=1, l=1)
+                # set inside a card: its lines keep to the card's column (a
+                # hero ladder is a poster across it by design)
+                inside = caption_place.home_rect(rects, y, pcol) if not hero else None
+                if inside is not None and inside[1] <= z0 + 1e-6 and z1 <= inside[3] + 1e-6:
+                    place["x"] = list(caption_place.card_column(inside, W, H))
                 prev_pick = (y, ba, bb)
-        mute = place is None and bool(speech)
+        # muted only where a graphic that replaces speech truly covers the
+        # caption's usual block (or is unmeasured): a card edge or a face is
+        # never a reason to lose a heard word
+        mute = place is None and any(m in speech for m in covering)
         if place is None and not mute:
-            # nowhere clear and nothing that replaces speech: the captions
-            # stay where they always were (named in the notes)
+            # nowhere clear and nothing that replaces speech covers them:
+            # the captions stay where they always were — named on the
+            # graphics that do cover them (the notes), and in the plan
             for i in visible:
-                for m in live:
+                for m in covering:
                     p.report[m["id"]]["kept"].append(words[i])
+            # (a hero ladder is a poster across the card by design: only a
+            # graphic over it is worth naming)
+            if visible and (covering or not hero):
+                p.unplaced.append({"start": round(a, 3), "end": round(b, 3), "why": "room",
+                                   "words": [words[i] for i in visible], "y": round(normal_y, 4),
+                                   "on": [m["id"] for m in covering]})
             prev_pick = None
             continue
         state[k] = place if place else "mute"
         for i in visible:
             if mute:
-                owner = next((m for m in speech if m in assume), speech[0])
+                owner = next((m for m in speech if m in assume),
+                             next(m for m in covering if m in speech))
                 p.hidden[i] = (owner["id"], "unmeasured" if owner in assume else "room")
                 p.report[owner["id"]]["muted"].append(words[i])
             else:
@@ -1322,8 +1598,10 @@ def plan(edl, index, tl, words, canvas=None):
     _smooth_flips(p, edl, index, tl, W, H, col, bounds, seg_of, state, info)
     p.segments = [(bounds[k], bounds[k + 1], state[k]) for k in range(nseg)]
     p._seg_of = list(seg_of)
-    for a, b, st in p.segments:
-        if st is not None:
+    for k, (a, b, st) in enumerate(p.segments):
+        # a card's own place for its captions is their usual place there:
+        # nothing occupies it, so it is no window a page may not hold into
+        if st is not None and usual.get(k) is not st:
             p.clamp_spans.append([a, b])
     # a word said within two frames before a layout change it is placed
     # for appears ON the change (the page never flips early) — and so does
@@ -1346,6 +1624,43 @@ def plan(edl, index, tl, words, canvas=None):
             p.shown_at[i] = max(p.shown_at.get(i, 0.0), b)
     p.clamp_spans = _merge(p.clamp_spans)
     return p
+
+
+def unplaced_lines(p, most=3):
+    """Plain lines naming the stretches whose captions found no clear place
+    (Plan.unplaced) — for audit_captions and the render report. Never
+    blocking: the captions are on screen; the layout leaves them no room."""
+    out = []
+    groups = (("face", [u for u in p.unplaced if u.get("why") == "face"]),
+              ("room", [u for u in p.unplaced if u.get("why") != "face"]))
+    for why, rows in groups:
+        if not rows:
+            continue
+        spans = ", ".join(f"{u['start']:.1f}-{u['end']:.1f}s" for u in rows[:most]) + \
+            (f" (+{len(rows) - most} more)" if len(rows) > most else "")
+        said = _said(rows[0]["words"])
+        said = said if len(said) <= 60 else said[:57].rstrip() + "…"
+        if why == "face":
+            reach = max(float(u.get("face_to") or 0.0) for u in rows)
+            out.append(
+                f"CAPTIONS ON THE MEASURED FACE {spans} (\"{said}\"): anchor_y "
+                f"{float(rows[0]['y']):.2f} is inside the card, and the measured face, "
+                f"chin included, reaches y {reach:.2f} there — no room is left under "
+                "the chin and no clear band on the canvas around the card, so the "
+                "captions keep the anchor you set instead of jumping over the head. "
+                "If they cover the chin on those frames, give the face "
+                "less of the card (a looser source rect, a smaller zoom), free a band "
+                "beside the card, or set anchor_y below the card")
+        else:
+            on = sorted({i for u in rows for i in u.get("on") or []})
+            out.append(
+                f"CAPTIONS WITH NO CLEAR PLACE {spans} (\"{said}\"): nothing clear of "
+                "the card's edges, the face and the graphics is left, so they stay "
+                f"where they are (y {float(rows[0]['y']):.2f})"
+                + (" under " + ", ".join(f"'{i}'" for i in on[:3])
+                   + " — move or shrink it so they read clear" if on else
+                   " — leave them room: a smaller card or face, or another anchor_y"))
+    return out
 
 
 def _src_near(tl, out_t):
