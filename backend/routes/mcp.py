@@ -1999,6 +1999,8 @@ def _t_shorts_status(tok, args):
             bits.append("story: " + " -> ".join(
                 str(story.get(stage) or "?")[:90]
                 for stage in ("setup", "development", "payoff")))
+        if clip.get("source_layout"):
+            bits.append("frame: " + str(clip["source_layout"])[:200])
         if clip.get("visual_direction"):
             bits.append("design: " + str(clip["visual_direction"])[:180])
         if clip.get("broll"):
@@ -2015,8 +2017,12 @@ def _t_shorts_status(tok, args):
             "user when the edit is ready to export. Valmera's in-house agent "
             "is not callable over MCP; this MCP model must make every child "
             "edit itself.")
+    # What the source frame is made of (worker/source_layout.py), measured
+    # once by the planner: read before briefing — every child inherits it.
+    layout = str(shorts.get("source_layout") or "")[:2400]
     return parent_note + head + f" {len(clips)} clip(s):\n" + \
-        "\n".join(lines) + "\n\n" + tail
+        "\n".join(lines) + ("\n\n" + layout if layout else "") + \
+        "\n\n" + tail
 
 
 def _t_wait_for_job(tok, args):

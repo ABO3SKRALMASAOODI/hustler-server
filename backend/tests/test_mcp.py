@@ -646,6 +646,24 @@ def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
     assert "Call export_final for the reviewed version" in body
 
 
+def test_shorts_status_carries_the_measured_source_layout(client):
+    shorts = DB["project_rows"][3]["meta"]["shorts"]
+    shorts["source_layout"] = (
+        "SOURCE LAYOUT (measured once on the source pixels; every short cut "
+        "from it reads the same): 71% a portrait CALL window")
+    shorts["clips"][0]["source_layout"] = (
+        "100% call window [0.38, 0.04, 0.62, 0.96]; largest card "
+        "[0.09, 0.13, 0.91, 0.80] at 2.0x (area 0.54); erase the self-view")
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "shorts_status",
+                        "arguments": {"project_id": 3}}))
+    assert "SOURCE LAYOUT (measured once" in body
+    assert "frame: 100% call window" in body
+    # the board's own lines and the editing route still close the reply
+    assert body.index("card 1, project [9]") < body.index("SOURCE LAYOUT")
+    assert body.rstrip().endswith("must make every child edit itself.")
+
+
 def test_open_short_puts_the_child_edl_under_direct_mcp_control(client):
     DB["static_project"] = None  # explicit board, never the stale pointer
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
