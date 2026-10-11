@@ -44,7 +44,8 @@ motion items, and `MATTE_RVM_MODEL` for person mattes.
     - with `-copyts`, the fixture is restamped by `file_t0` minus its floor to 0.01 s;
     - without it, a boundary is nudged by 0.01 s, and the nudge is listed.
   - `vfl.unshifted` refuses a move that left a source-clock field behind. Picture-card follow keys were the one that broke the Jobs baseline.
-  - Measured result: the Thiel, Jobs and Elon v5 EDLs re-rendered on their fixtures match the v5 files at 50.4, 50.2 and 51.4 dB mean PSNR.
+  - Measured result: the Thiel, Jobs and Elon v5 EDLs re-rendered on their fixtures match the v5 files at 50.4, 50.2 and 51.4 dB mean PSNR. Thiel and Jobs have no frame below 40 dB. Elon has 4 (frames 232-233, 528, 658): three picture-card events (a cut inside the card, the switch to full frame, a follow step) land one frame late on the fixture. No baseline number reads those frames, but a later wave that times an event there must use the v5 file, not the re-render.
+  - Cause not yet traced: the keeps themselves land on their source frames (the cuts at program frames 16, 250 and 569 match); the three late events are picture-card timing on the V04 fixture (`copyts` mode, q 110.80 against `file_t0` 110.8056).
 
 ## Standing checks
 
