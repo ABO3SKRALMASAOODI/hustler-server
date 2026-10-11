@@ -191,3 +191,50 @@ def test_the_sound_of_a_stock_clip_is_not_the_users_music(api):
     result, status = video.apply_edit_batch_core(
         1, 2, _batch(_item(STOCK_AUDIO)), origin="mcp")
     assert status == 400 and "agent found" in result["error"]
+
+
+# ── owner rule 2 on the same path (Wave 0 final review) ─────────────────
+# With web sounds off, an MCP batch may not place a sound an earlier
+# search_sfx fetched into the project (the worker's add_sfx and its own
+# writes refuse it too); a sound already in the edit keeps playing.
+
+def _sfx_batch(*items, base=1, op="s1"):
+    return dict(base_version=base, operation_id=f"web-sound-{op}-0123456789",
+                operations=[dict(action="upsert", layer="sfx", id=i["id"],
+                                 value=i) for i in items])
+
+
+def _sfx(key, sid="s1", at=2.0):
+    return dict(id=sid, storage_key=key, at=at)
+
+
+def test_an_mcp_batch_cannot_place_a_web_sound_while_web_sfx_is_off(
+        api, monkeypatch):
+    monkeypatch.delenv("WEB_SFX_ENABLED", raising=False)
+    result, status = video.apply_edit_batch_core(
+        1, 2, _sfx_batch(_sfx(SFX)), origin="mcp")
+    assert status == 400 and "found online" in result["error"], result
+    assert list(api.edls) == [1]
+    # the user's own file still places
+    result, status = video.apply_edit_batch_core(
+        1, 2, _sfx_batch(_sfx(UPLOAD), op="s2"), origin="mcp")
+    assert status == 200, result
+
+
+def test_a_web_sound_already_in_the_edit_still_moves(api, monkeypatch):
+    monkeypatch.delenv("WEB_SFX_ENABLED", raising=False)
+    edl = copy.deepcopy(api.edls[1])
+    edl["sfx"] = [_sfx(SFX)]
+    api.edls[1] = video.wschemas.validate_edl(edl, 20).model_dump()
+    result, status = video.apply_edit_batch_core(
+        1, 2, _sfx_batch(dict(id="s1", at=4.0)), origin="mcp")
+    assert status == 200, result
+    assert api.edls[2]["sfx"][0]["at"] == 4.0
+
+
+def test_with_web_sounds_on_the_batch_gate_stands_aside(api, monkeypatch):
+    monkeypatch.setenv("WEB_SFX_ENABLED", "1")
+    monkeypatch.setenv("SFX_SEARCH_ENABLED", "1")
+    result, status = video.apply_edit_batch_core(
+        1, 2, _sfx_batch(_sfx(SFX)), origin="mcp")
+    assert status == 200, result

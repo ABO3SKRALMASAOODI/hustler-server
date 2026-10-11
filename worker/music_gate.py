@@ -588,6 +588,68 @@ def check_write(ctx, prev_edl, new_edl):
                       lambda key: provenance_for(ctx, key))
 
 
+# ── owner rule 2 on the write path (web sounds) ─────────────────────────
+# Sound effects come only from the owner-approved library. With the web-SFX
+# chain off, add_sfx refuses a sound an earlier search_sfx fetched into the
+# project; an edit batch (the agent's apply_edit_batch, or the backend's MCP
+# batch) could still place that asset by key. These pure helpers let both
+# write paths refuse it the same way. Sounds already in the edit keep
+# playing and may be moved or rewritten with their layer.
+
+WEB_SOUND_REFUSAL = (
+    "REJECTED: that sound was found online by search_sfx, and web sounds are "
+    "off — sound effects come only from the owner-approved library "
+    "(list_sound_library) or a file the user supplied.")
+
+
+def web_found_sound(asset):
+    """A sound search_sfx / add_web_sfx fetched from the web (the fetch
+    records it in the asset caption), not one the user uploaded."""
+    meta = (asset or {}).get("meta") or {}
+    return "search_sfx" in str(meta.get("caption") or "")
+
+
+def new_sfx_keys(prev_edl, new_edl):
+    """Storage keys on sound-effect items of ``new_edl`` that no sound-effect
+    item of ``prev_edl`` plays (sorted)."""
+    before = {s.get("storage_key") for s in (prev_edl or {}).get("sfx") or []
+              if isinstance(s, dict)}
+    return sorted({s.get("storage_key") for s in (new_edl or {}).get("sfx")
+                   or [] if isinstance(s, dict) and s.get("storage_key")
+                   and s.get("storage_key") not in before})
+
+
+def gate_web_sounds(prev_edl, new_edl, asset_of):
+    """Error string when the write adds a web-found sound new to the edit,
+    else None. ``asset_of(key)`` returns the project asset row (or None).
+    The caller runs this only while web sounds are off. A lookup that raises
+    refuses (fail closed) instead of failing the write with a traceback."""
+    for key in new_sfx_keys(prev_edl, new_edl):
+        try:
+            asset = asset_of(key)
+        except Exception:  # noqa: BLE001
+            return ("REJECTED: where this sound came from could not be "
+                    "verified, so nothing was placed; try again.")
+        if web_found_sound(asset):
+            return WEB_SOUND_REFUSAL
+    return None
+
+
+def check_sfx_write(ctx, prev_edl, new_edl):
+    """Owner rule 2 inside every agent EDL write (ToolContext.write_edl)."""
+    try:
+        import sfx_search
+        if sfx_search.available():
+            return None
+    except Exception:  # noqa: BLE001 — the flag unreadable reads as off
+        pass
+    if not new_sfx_keys(prev_edl, new_edl):
+        return None
+    return gate_web_sounds(
+        prev_edl, new_edl,
+        lambda key: ctx.db.run(_dbx().asset_by_key, ctx.project_id, key))
+
+
 def validate_new_items(prev_edl, new_edl):
     """Pure check (no project context): every music item whose track is new
     to the edit must carry an allowed provenance. Raises MusicGateError —

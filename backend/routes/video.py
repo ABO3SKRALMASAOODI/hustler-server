@@ -4708,6 +4708,24 @@ def _mcp_music_gate(cur, project_id, before, after):
     return wmusic.gate_items(before, after, decide)
 
 
+def _mcp_web_sound_gate(cur, project_id, before, after):
+    """Owner rule 2 on the MCP batch path: while web sounds are off, a batch
+    may not place a sound an earlier search_sfx fetched into the project
+    (worker/music_gate.gate_web_sounds, the same rule the worker's writes
+    run). Sounds already in the edit keep playing. Error string or None."""
+    if _sfx_search_enabled():
+        return None
+    keys = wmusic.new_sfx_keys(before, after)
+    if not keys:
+        return None
+    cur.execute("SELECT storage_key, kind, meta FROM assets "
+                "WHERE project_id=%s AND storage_key = ANY(%s)",
+                (project_id, keys))
+    rows = {row["storage_key"]: row for row in cur.fetchall() or ()}
+    err = wmusic.gate_web_sounds(before, after, rows.get)
+    return err.replace("REJECTED: ", "", 1) if err else None
+
+
 def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
     """Authenticated caller, one transaction, one revision, no compute job."""
     try:
@@ -4755,7 +4773,9 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
             return {"error": str(exc)[:500]}, 400
         if origin == "mcp":
             refusal = _mcp_music_gate(cur, project_id, latest["json"],
-                                      normalized)
+                                      normalized) \
+                or _mcp_web_sound_gate(cur, project_id, latest["json"],
+                                       normalized)
             if refusal:
                 return {"error": refusal[:500]}, 400
         work = wplayback.changed_work(latest["json"], normalized)

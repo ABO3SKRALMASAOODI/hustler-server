@@ -630,6 +630,14 @@ class ToolContext:
         music_refusal = music_gate.check_write(self, prev["json"], normalized)
         if music_refusal:
             return f"REJECTED (EDL v{prev['version']} unchanged): {music_refusal}"
+        # Owner rule 2: with web sounds off, no write (add_sfx or an edit
+        # batch) places a sound search_sfx fetched earlier; sounds already in
+        # the edit keep playing.
+        sfx_refusal = music_gate.check_sfx_write(self, prev["json"],
+                                                 normalized)
+        if sfx_refusal:
+            return (f"REJECTED (EDL v{prev['version']} unchanged): "
+                    + sfx_refusal.replace("REJECTED: ", "", 1))
         advisories = quality_gate.advisory_findings(
             prev["json"], normalized, self.user_message)
         if edl_signature(normalized) == edl_signature(prev["json"]):
@@ -7012,8 +7020,7 @@ def _resolve_sfx(ctx, storage_key):
 def _web_found_sound(asset):
     """A sound search_sfx / audition_sfx_candidates fetched from the web
     (_download_sfx_hit records it so), not one the user uploaded."""
-    meta = (asset or {}).get("meta") or {}
-    return "search_sfx" in str(meta.get("caption") or "")
+    return music_gate.web_found_sound(asset)
 
 
 # A non-library sound's level when the editor sets none: the schema's and the

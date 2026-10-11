@@ -27,6 +27,7 @@ the page runs in a disposable context.
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import json
 import os
@@ -520,6 +521,7 @@ class RenderJob:
     def key(self):
         h = hashlib.sha256()
         h.update(ENGINE_VERSION.encode())
+        h.update(_env_digest().encode())
         h.update(_runtime_js().encode())
         h.update(self.html.encode("utf-8"))
         h.update(json.dumps([self.out_w, self.out_h, round(self.fps, 4),
@@ -557,6 +559,48 @@ def _asset_digest(path):
             _ASSET_DIGESTS.clear()
         _ASSET_DIGESTS[memo] = hit
     return hit
+
+
+# What draws a page besides its document (Wave 0 final review). The shared
+# clip store outlives deploys — before it, every deploy started with empty
+# container caches — so a clip key must also name what a deploy can change
+# under an unchanged document: the bundled fonts (served by FILE NAME, so a
+# replaced font file keeps every document byte), this module's capture code
+# and the Chromium build. Hashed once per process (~11 MB of fonts, ~20 ms).
+_ENV_DIGEST = None
+
+
+def _env_digest():
+    global _ENV_DIGEST
+    if _ENV_DIGEST is not None:
+        return _ENV_DIGEST
+    h = hashlib.sha256()
+    for d in (FONTS_DIR, MOTION_FONTS_DIR):
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            names = []
+        for n in names:
+            p = os.path.join(d, n)
+            if n.startswith(".") or not os.path.isfile(p):
+                continue
+            try:
+                h.update(f"{os.path.basename(d)}/{n}:{_asset_digest(p)}"
+                         .encode())
+            except OSError:
+                h.update(f"{n}:missing".encode())
+    try:
+        with open(os.path.abspath(__file__), "rb") as f:
+            h.update(f.read())
+    except OSError:
+        h.update(b"engine:unreadable")
+    try:
+        from importlib import metadata
+        h.update(("playwright=" + metadata.version("playwright")).encode())
+    except Exception:  # noqa: BLE001 — a lane without playwright never renders
+        h.update(b"playwright=none")
+    _ENV_DIGEST = h.hexdigest()[:16]
+    return _ENV_DIGEST
 
 
 @dataclass
@@ -642,7 +686,8 @@ def _cache_get(key):
     """(local .mov, meta) from the container-local LRU, else from the shared
     content-addressed store (clip_store, R2) — a cold container renders a
     warm project's graphics without starting Chromium (AT-0A-2) — else None.
-    Never raises."""
+    A key this render already asked the shared store for (_prefetch_shared)
+    is not asked again. Never raises."""
     path = os.path.join(CACHE_DIR, key + ".mov")
     meta = os.path.join(CACHE_DIR, key + ".json")
     if os.path.exists(path) and os.path.exists(meta):
@@ -653,7 +698,16 @@ def _cache_get(key):
             return path, m
         except Exception:
             return None
+    if key in _SHARED_ASKED.get():
+        return None
     return _shared_get(key)
+
+
+def _write_json_atomic(path, value):
+    tmp = path + f".{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(value, f)
+    os.replace(tmp, path)
 
 
 def _shared_get(key):
@@ -671,11 +725,75 @@ def _shared_get(key):
             tmp = dst + f".{os.getpid()}.{threading.get_ident()}.tmp"
             shutil.copyfile(mov, tmp)
             os.replace(tmp, dst)
-        with open(os.path.join(CACHE_DIR, key + ".json"), "w") as f:
-            json.dump(m, f)
+        _write_json_atomic(os.path.join(CACHE_DIR, key + ".json"), m)
         return dst, m
     except Exception:
         return None
+
+
+# Shared-store reads on a render's path (Wave 0 final review). A preview with
+# 40 new caption segments misses the store 40 times; asked one by one, each
+# miss is a network round trip on the render's critical path, and a slow R2
+# (2 s connect + 10 s read per call) could stall a preview for minutes. So a
+# render asks for every key its local LRU lacks AT ONCE, on a few threads,
+# within one wall-clock budget; whatever has not answered by then renders in
+# Chromium as it always did.
+SHARED_GET_THREADS = 8
+SHARED_GET_BUDGET_S = float(os.getenv("MOTION_SHARED_GET_BUDGET_S", "6") or 6)
+_SHARED_ASKED = contextvars.ContextVar("motion_shared_asked",
+                                       default=frozenset())
+
+
+def _local_present(key):
+    return (os.path.exists(os.path.join(CACHE_DIR, key + ".mov"))
+            and os.path.exists(os.path.join(CACHE_DIR, key + ".json")))
+
+
+def _prefetch_shared(keys, budget_s=None):
+    """Copy every listed clip the local LRU lacks from the shared store into
+    it, in parallel, waiting at most ``budget_s``. Returns the keys it asked
+    for (hits are now local; misses and late answers render in Chromium).
+    Never raises."""
+    try:
+        want = [k for k in dict.fromkeys(keys or ()) if not _local_present(k)]
+        if not want or not clip_store.available():
+            return frozenset()
+    except Exception:  # noqa: BLE001
+        return frozenset()
+    budget = SHARED_GET_BUDGET_S if budget_s is None else float(budget_s)
+    lock = threading.Lock()
+    queue = list(want)
+    left = [len(want)]
+    done = threading.Event()
+
+    def worker():
+        while True:
+            with lock:
+                if not queue:
+                    return
+                key = queue.pop(0)
+            try:
+                _shared_get(key)
+            finally:
+                with lock:
+                    left[0] -= 1
+                    if left[0] <= 0:
+                        done.set()
+    try:
+        for _ in range(min(SHARED_GET_THREADS, len(want))):
+            threading.Thread(target=worker, daemon=True,
+                             name="clip-store-get").start()
+        done.wait(max(0.0, budget))
+    except Exception:  # noqa: BLE001
+        pass
+    with lock:
+        queue.clear()      # a late worker starts no new lookup
+    return frozenset(want)
+
+
+# At most this many clip uploads run at once per process: they share the
+# container's CPU and network with the render that made them.
+_SHARED_PUT_SLOTS = threading.BoundedSemaphore(2)
 
 
 def _shared_put(key, path, meta):
@@ -684,7 +802,8 @@ def _shared_put(key, path, meta):
     The file is the LRU's own copy, which outlives the render's workdir."""
     def run():
         try:
-            clip_store.put(key, path, dict(meta))
+            with _SHARED_PUT_SLOTS:
+                clip_store.put(key, path, dict(meta))
         except Exception:
             pass
     try:
@@ -701,8 +820,7 @@ def _cache_put(key, src, meta):
         tmp = dst + f".{os.getpid()}.{threading.get_ident()}.tmp"
         shutil.copyfile(src, tmp)
         os.replace(tmp, dst)
-        with open(os.path.join(CACHE_DIR, key + ".json"), "w") as f:
-            json.dump(meta, f)
+        _write_json_atomic(os.path.join(CACHE_DIR, key + ".json"), meta)
         _cache_prune()
     except Exception:
         return
@@ -879,13 +997,21 @@ async def _render_all(jobs, out_dir, pages, budget_s):
     deadline = time.monotonic() + budget_s
     results = [None] * len(jobs)
     todo = []
-    for i, job in enumerate(jobs):
+    keys = []
+    for job in jobs:
         if job.duration <= 0 or job.duration > MAX_DURATION_S:
             raise MotionRenderError(f"{job.label}: duration must be 0-{MAX_DURATION_S:.0f}s")
         if len(job.html.encode("utf-8")) > MAX_HTML_BYTES:
             raise MotionRenderError(f"{job.label}: HTML exceeds {MAX_HTML_BYTES // 1000} KB")
-        key = job.key()
-        hit = _cache_get(key)
+        keys.append(job.key())
+    # one bounded, parallel read of the shared store for every local miss
+    asked = _prefetch_shared(keys)
+    token = _SHARED_ASKED.set(_SHARED_ASKED.get() | asked)
+    try:
+        lookups = [_cache_get(key) for key in keys]
+    finally:
+        _SHARED_ASKED.reset(token)
+    for i, (job, key, hit) in enumerate(zip(jobs, keys, lookups)):
         if hit:
             path, m = hit
             local = os.path.join(out_dir, f"mg_{key}.mov")

@@ -75,6 +75,14 @@ def _store():
     return _STORE
 
 
+def available():
+    """Is the shared tier configured in this process? (No network.)"""
+    try:
+        return _store() is not None
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _log(msg):
     print(f"[clip-store] {msg}", flush=True)
 
