@@ -1,0 +1,24 @@
+# Refbench DEV-ONLY extras (Wave 0 track 0D). Not part of worker/requirements.txt:
+# no production image installs these, and nothing on the render or agent path
+# imports them (refsig degrades to {"available": false} without OCR).
+#
+#   python -m pip install -r worker/requirements.txt
+#   python -m pip install --no-deps -r worker/benchmarks/refbench/requirements.txt
+#
+# --no-deps: rapidocr-onnxruntime declares opencv-python (GUI build) and tqdm;
+# the worker already pins opencv-python-headless (same cv2 module) and the
+# rest of its stack. Install the three small runtime deps explicitly below.
+
+# RapidOCR (github.com/RapidAI/RapidOCR, Apache-2.0). The wheel bundles the
+# PaddleOCR PP-OCRv4 detector/recogniser and the mobile v2.0 direction
+# classifier (Apache-2.0); refsig.OCR_MODELS pins each ONNX file by sha256
+# and refuses a package whose models differ. Wheel (py3-none-any) sha256:
+# 971d7d5f223a7a808662229df1ef69893809d8457d834e6373d3854bc1782cbf
+# (not a pip --hash line: pip would then demand hashes for every
+# platform wheel below).
+rapidocr-onnxruntime==1.4.4
+pyclipper==1.3.0.post6
+shapely==2.0.6
+six==1.16.0
+# Case specs are YAML (spec.py); PyYAML is otherwise only transitive.
+PyYAML==6.0.3

@@ -1,0 +1,24 @@
+# Wave 0 baseline board: today's best output on the window every later wave re-renders.
+id: BASE-3
+track: W0
+title: "Elon and Rogan: Gamers make better surgeons (v5)"
+local_only: true
+interim: false
+reference:
+  - {ref: "09", t: [1.27, 21.6], approx: false}
+footage:
+  - {vfl: V04, t: [115.5, 160.1]}
+music: null
+aspect: "9:16"
+mode: engine
+edl: {base: "baseline:elon_final8.json", window_ref: V04/rogan_gamers, index: idx_elon_v4.json, name: elon}
+chat: null
+render: {variant: final, use: "~/Documents/Valmera/Showcase Shorts 2026-10-10/v5 03 Elon and Rogan - Gamers make better surgeons.mp4"}
+allow: []
+metrics:
+  - {name: legibility, op: ">=", value: 60}
+  - {name: land_err_f, op: "<=", value: 1}
+  - {name: flash_risk, op: "<=", value: 3}
+beyond: "baseline: today's output, measured on the identical source window every later wave re-renders, so progress is a number and not a memory"
+board: {stills: [1.0, 9.0, 20.0], clip: [8.0, 12.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: owner}
