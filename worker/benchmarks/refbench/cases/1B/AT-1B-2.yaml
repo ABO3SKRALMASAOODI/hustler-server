@@ -1,0 +1,83 @@
+# AT-1B-2 (track 1B). Devices are apply_edit_batch operations (the stale-client path).
+# Until track 1A's program matte is live, refbench renders these on their substitute rungs;
+# tests/test_w1b_acceptance.py runs them with the 1A stand-in and measures every bar.
+id: AT-1B-2
+track: 1B
+title: poster silhouette on the Look's accent field (V01)
+local_only: true
+interim: false
+reference:
+- ref: '23'
+  t:
+  - 1.3
+  - 4.7
+  approx: true
+  board_t: 2.5
+- ref: '38'
+  t:
+  - 0.3
+  - 1.0
+  approx: true
+  board_t: 0.3
+- ref: '16'
+  t:
+  - 4.71
+  - 7.08
+  approx: false
+  board_t: 5.5
+footage:
+- vfl: V01
+  window: thiel_ai_bigger
+music: null
+aspect: '9:16'
+mode: engine
+edl:
+  base: vfl_default
+  keep:
+  - - 149.96
+    - 155.96
+  focus:
+  - 0.42
+  - 0.5
+  ops:
+  - action: upsert
+    layer: fx
+    id: sx1
+    value:
+      id: sx1
+      type: subject
+      stage: world
+      start: 1.0
+      end: 3.0
+      kind: poster
+      field: accent
+      keep_footage: false
+      colour: black
+      device: subject_poster
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: edge_chatter
+  op: <=
+  value: 0.002
+- name: region_locality
+  item: sx1
+  op: <=
+  value: 0
+beyond: the field is the Look's accent resolved at render (change the Look, the poster follows), on a
+  9:16 re-frame of a 16:9 interview, with field flatness, accent match, edge chatter and a 3 px halo band
+  measured
+board:
+  stills:
+  - 2.0
+  clip:
+  - 0.5
+  - 3.5
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

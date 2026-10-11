@@ -258,6 +258,14 @@ def test_each_item_is_one_closed_composite(tmp_path, monkeypatch, item):
     assert used.count("v0") == 1
 
 
+def test_every_restamp_rounds(tmp_path, monkeypatch):
+    """setpts truncates: N / 30.000 / TB is 244.99999 for N = 245."""
+    parts, _ = _emit(tmp_path, monkeypatch, ITEMS)
+    text = ";".join(parts)
+    assert "setpts=round(N/" in text
+    assert not re.search(r"setpts=N/", text)
+
+
 def test_frames_are_gated_on_the_program_frame_index(tmp_path, monkeypatch):
     parts, _ = _emit(tmp_path, monkeypatch,
                      [_sx(start=1.0, end=1.08)])

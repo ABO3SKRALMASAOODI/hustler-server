@@ -30,7 +30,8 @@ CUT_DIFF = 28.0          # mean |delta| (0..255) of a 64x36 gray: a cut
 def probe(path):
     out = subprocess.run(["ffprobe", "-v", "error", "-select_streams",
                           "v:0", "-show_entries",
-                          "stream=width,height,r_frame_rate,nb_frames",
+                          "stream=width,height,r_frame_rate,nb_frames,"
+                          "start_time",
                           "-show_entries", "format=duration", "-of", "json",
                           path], capture_output=True, text=True,
                          check=True).stdout
@@ -39,6 +40,7 @@ def probe(path):
     num, den = (int(x) for x in s["r_frame_rate"].split("/"))
     return {"width": int(s["width"]), "height": int(s["height"]),
             "fps": num / den, "rate": s["r_frame_rate"],
+            "start": float(s.get("start_time") or 0.0),
             "duration": float(d["format"]["duration"])}
 
 

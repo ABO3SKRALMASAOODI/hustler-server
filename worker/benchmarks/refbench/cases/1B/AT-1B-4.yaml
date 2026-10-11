@@ -1,0 +1,76 @@
+# AT-1B-4 (track 1B). Devices are apply_edit_batch operations (the stale-client path).
+# Until track 1A's program matte is live, refbench renders these on their substitute rungs;
+# tests/test_w1b_acceptance.py runs them with the 1A stand-in and measures every bar.
+id: AT-1B-4
+track: 1B
+title: red ghost clones 4 and 8 frames back (V12 crowd; HC-H/h1 for geometry)
+local_only: true
+interim: true
+reference:
+- ref: '40'
+  t:
+  - 18.3
+  - 19.3
+  approx: true
+  board_t: 18.5
+- ref: '22'
+  t:
+  - 6.0
+  - 7.3
+  approx: true
+footage:
+- vfl: V12
+  window: walkon
+music: null
+aspect: '9:16'
+mode: engine
+edl:
+  base: vfl_default
+  keep:
+  - - 0.3
+    - 6.3
+  focus:
+  - 0.5
+  - 0.5
+  ops:
+  - action: upsert
+    layer: fx
+    id: sx1
+    value:
+      id: sx1
+      type: subject
+      stage: world
+      start: 1.0
+      end: 3.0
+      kind: echo
+      device: subject_echo
+      echo:
+        mode: clone
+        offsets_f:
+        - 4
+        - 8
+        opacity: 0.75
+        tint: '#ff2a2a'
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: region_locality
+  item: sx1
+  op: <=
+  value: 2
+beyond: every copy is the subject's own earlier frame at its own earlier place (time offset and 0 px shift
+  found by search), opacity measured, on every moving person the matte holds
+board:
+  stills:
+  - 2.0
+  clip:
+  - 1.0
+  - 3.0
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

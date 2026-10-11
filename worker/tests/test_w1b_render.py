@@ -307,6 +307,43 @@ def test_a_one_frame_fill_lands_on_its_frame_at_every_rate(rates, fps):
     assert f["report"][0]["rung"] == "full"
 
 
+@pytest.fixture(scope="module")
+def frame245(work):
+    """At 30 fps, N / 30.000 / TB truncates to 244 for N = 245: a window
+    starting there must still land on 245 and keep every frame."""
+    src, mask = w1b_support.make_subject_source(
+        os.path.join(work["dir"], "src30.mp4"),
+        os.path.join(work["dir"], "mask30.mkv"), rate="30", dur=10.0)
+    it = _sx("f", start=round(245 / 30, 2), end=round(248 / 30, 2),
+             decay_f=2)
+    cases = [{"name": n, "src": src, "src_fps": 30.0,
+              "idx": _idx(30.0, 10.0), "edl": _edl(fx, keep=((0.0, 10.0),)),
+              "matte": mask, "dump_frames": [245, 246, 247]}
+             for n, fx in (("b", []), ("f", [it]))]
+    return {"res": w1b_probe.run(cases, os.path.join(work["dir"], "f245")),
+            "mask": mask}
+
+
+def test_a_window_on_an_unlucky_frame_keeps_every_frame(frame245, work):
+    b, f = frame245["res"]["b"], frame245["res"]["f"]
+    assert b["error"] is None and f["error"] is None
+    diff = [i for i, (x, y) in enumerate(zip(b["frames"], f["frames"]))
+            if x != y]
+    assert diff == [245, 246, 247], diff
+    # and each frame shows ITS step: the peak, then the two decay frames
+    w = dict(work, mask=frame245["mask"])
+    masks = program_masks(w, [245, 246, 247], keep=((0.0, 10.0),), fps=30.0)
+    lift = []
+    for k in (245, 246, 247):
+        y0 = _yuv(b, k)[0]
+        y1 = _yuv(f, k)[0]
+        core = _shrink(masks[k] >= 250, 2)
+        lift.append(float(((y1 - y0)[core] / np.maximum(1, 235 - y0[core]))
+                          .mean()))
+    assert lift[0] > 0.98 and 0.35 < lift[1] < 0.65 and \
+        0.12 < lift[2] < 0.35, lift
+
+
 # ── poster, glow, echo, backgrounds ──────────────────────────────────────
 
 def test_the_poster_field_is_flat_and_the_colour_asked_for(r25, work):

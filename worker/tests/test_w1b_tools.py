@@ -161,6 +161,23 @@ def test_one_call_puts_a_hit_on_every_cut_of_a_montage():
     assert all(i["end"] == round(i["start"] + 2 / 30, 2) for i in items)
 
 
+def test_per_shot_puts_the_strongest_moment_on_every_shot():
+    edl = schemas.default_edl(DUR)
+    edl["keep"] = [[0.9, 2.4], [2.6, 4.0], [4.2, 5.6], [5.8, 7.2],
+                   [7.4, 8.8], [9.0, 9.9]]
+    ctx = Ctx(edl)
+    out = st.add_subject_effect(ctx, kind="fill", on="word", count=1,
+                                per="shot")
+    assert out.startswith("EDL"), out
+    items = sorted(_fx(ctx), key=lambda i: i["start"])
+    assert len(items) == 6
+    edges = [0.0, 1.5, 2.9, 4.3, 5.7, 7.1, 8.0]
+    for it, a, b in zip(items, edges, edges[1:]):
+        assert a <= it["start"] < b, (it["start"], a, b)
+    assert st.add_subject_effect(ctx, kind="fill", on="word",
+                                 per="scene").startswith("REJECTED")
+
+
 def test_music_moments_need_a_track_the_user_added():
     out = st.add_subject_effect(Ctx(), kind="fill", on="beat")
     assert out.startswith("REJECTED") and "no music" in out

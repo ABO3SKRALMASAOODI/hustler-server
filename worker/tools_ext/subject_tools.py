@@ -355,7 +355,8 @@ def _flash_thin(ctx, items, fps, edl=None):
 # ------------------------------------------------------------------ verbs
 def add_subject_effect(ctx, kind, start=None, end=None, on=None, count=None,
                        frames=None, colour=None, scope=None, intensity=None,
-                       region=None, hue=None, echo=None, style=None):
+                       region=None, hue=None, echo=None, style=None,
+                       per=None):
     """WRITE: one subject effect over [start, end), or one per moment."""
     from tools_ext import _write
     gate = _gate(ctx, "subject")
@@ -393,10 +394,30 @@ def add_subject_effect(ctx, kind, start=None, end=None, on=None, count=None,
                 rhythm = mitem.get("id")
         except ValueError as e:
             return f"REJECTED: {e}"
-        n = int(count) if count else DEFAULT_COUNT
-        n = max(1, min(MAX_ITEMS, n))
-        picks = _pick(moments, lo, hi, n,
-                      MIN_GAP_S.get(kind, DEFAULT_MIN_GAP_S))
+        gap = MIN_GAP_S.get(kind, DEFAULT_MIN_GAP_S)
+        if per == "shot":
+            # the strongest ``count`` moments of EVERY shot (one sentence,
+            # every shot of a montage)
+            n = max(1, min(MAX_ITEMS, int(count) if count else 1))
+            edges = [lo] + [t for t, _r, _s in _cut_moments(ctx, edl, tl)
+                            if lo < t < hi] + [hi]
+            picks, words_for = [], None
+            for a, b in zip(edges, edges[1:]):
+                got = _pick(moments, a, b, n, gap)
+                if not got and on == "stress":
+                    # a shot with no stress peak: its strongest word
+                    if words_for is None:
+                        words_for = _speech_moments(ctx, tl, "word")
+                    got = _pick(words_for, a, b, n, gap)
+                picks += got
+            picks = sorted(picks)[:MAX_ITEMS]
+            n = n * (len(edges) - 1)
+        elif per is not None:
+            return "REJECTED: per is 'shot' (or omitted)."
+        else:
+            n = int(count) if count else DEFAULT_COUNT
+            n = max(1, min(MAX_ITEMS, n))
+            picks = _pick(moments, lo, hi, n, gap)
         if not picks:
             return (f"REJECTED: no {on} moment between {lo:g}s and {hi:g}s "
                     "of the program. Widen start/end or pick other "
@@ -418,8 +439,8 @@ def add_subject_effect(ctx, kind, start=None, end=None, on=None, count=None,
                               _strength=strength))
         if len(picks) < n:
             notes.append(f"{len(picks)} of {n} moments found (at least "
-                         f"{MIN_GAP_S.get(kind, DEFAULT_MIN_GAP_S):g}s "
-                         "apart).")
+                         f"{gap:g}s apart"
+                         + (", per shot" if per == "shot" else "") + ").")
     else:
         if start is None:
             return ("REJECTED: give start (and end or frames), or on=<moment>"
@@ -625,13 +646,15 @@ TOOL_SPECS = {
         "hue key), echo (clones from k frames back). Time it with "
         "start+end, start+frames, or on=stress|word|phrase_end|cut (speech "
         "clock) or beat|downbeat|onset (a track the user added) with "
-        "count. Earns its place on payoffs, structural beats and section "
+        "count (per='shot': count on every shot). Earns its place on payoffs, structural beats and section "
         "changes, never decoration. No sound, no zoom. Without a measured "
         "matte previews show a stand-in.",
         {"kind": {"type": "string", "enum": list(SUBJECT_CARDS)},
          "start": {"type": "number"}, "end": {"type": "number"},
          "on": {"type": "string", "enum": list(MOMENTS)},
-         "count": {"type": "integer"}, "frames": {"type": "integer"},
+         "count": {"type": "integer"}, "per": {"type": "string",
+                                               "enum": ["shot"]},
+         "frames": {"type": "integer"},
          "colour": {"type": "string",
                     "description": "white|black|accent|#rrggbb"},
          "scope": {"type": "string", "enum": ["subject", "background"]},

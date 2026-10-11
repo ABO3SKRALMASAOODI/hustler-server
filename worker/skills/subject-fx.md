@@ -155,7 +155,7 @@ Glow, outline, negate, exposure, isolate, echo (one item each; `scope` is
 
     {"action": "upsert", "layer": "fx", "id": "sx3", "value": {"id": "sx3",
      "type": "subject", "stage": "world", "start": 7.0, "end": 9.0,
-     "kind": "glow", "colour": "#ffd23f", "radius": 0.05, "intensity": 0.9,
+     "kind": "glow", "colour": "#ffd23f", "radius": 0.04, "intensity": 0.9,
      "device": "subject_glow"}}
     {"action": "upsert", "layer": "fx", "id": "sx4", "value": {"id": "sx4",
      "type": "subject", "stage": "world", "start": 2.0, "end": 3.0,

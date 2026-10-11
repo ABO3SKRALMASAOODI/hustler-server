@@ -43,10 +43,18 @@ def _geometry(plan):
     return segs, fit
 
 
-def _program_pad(ctx, plan, key, src_fps):
+def _first_frame(t, fps, start):
+    """The source frame a keep boundary at ``t`` starts on: the first frame
+    whose PTS (start + k / fps) is >= t, as the renderer's trim picks it."""
+    import math
+    return max(0, int(math.ceil((float(t) - float(start)) * fps - 1e-6)))
+
+
+def _program_pad(ctx, plan, key, src_fps, src_start=0.0):
     """A fresh program-space gray pad from the SOURCE-space video bound as
-    input ``key``: every keep span trimmed on the source clock, joined,
-    brought to the render rate and fitted like the picture."""
+    input ``key`` (frame k = source PTS src_start + k / src_fps): every
+    keep span trimmed on the source clock, joined, brought to the render
+    rate and fitted like the picture."""
     lab = plan.input_label(key)
     if lab is None:
         return None
@@ -55,8 +63,8 @@ def _program_pad(ctx, plan, key, src_fps):
     parts = ctx.parts
     pieces = []
     for i, (a, b) in enumerate(segs or [(0.0, plan.program_s)]):
-        fa = int(round(float(a) * src_fps))
-        fb = int(round(float(b) * src_fps))
+        fa = _first_frame(a, src_fps, src_start)
+        fb = _first_frame(b, src_fps, src_start)
         p = f"{u}k{i}"
         parts.append(f"[{lab}]trim=start_frame={fa}:end_frame={fb},"
                      f"setpts=PTS-STARTPTS[{p}]")
@@ -71,14 +79,14 @@ def _program_pad(ctx, plan, key, src_fps):
     F = fxprims.fps3(plan.fps)
     parts.append(f"[{joined}]fps={F:.3f},format=yuv420p,{fit},"
                  f"scale={int(plan.W)}:{int(plan.H)},format=gray,"
-                 f"setpts=N/{F:.3f}/TB,"
+                 f"setpts=round(N/{F:.3f}/TB),"
                  f"tpad=stop={int(plan.n_frames) + 2}:stop_mode=clone,"
                  f"trim=end_frame={int(plan.n_frames)}[{out}]")
     return out
 
 
 def install_matte(monkeypatch, mask_path, src_fps, *, windows=None,
-                  status="ready", ready_sidecars=True):
+                  status="ready", ready_sidecars=True, src_start=0.0):
     """Patch fxgraph so the program matte comes from ``mask_path``."""
     key = "stub1a:person"
 
@@ -97,7 +105,7 @@ def install_matte(monkeypatch, mask_path, src_fps, *, windows=None,
     def person(plan, name, space, ctx):
         if ctx is None:
             return None
-        return _program_pad(ctx, plan, key, src_fps)
+        return _program_pad(ctx, plan, key, src_fps, src_start)
 
     real_status = fxgraph._sidecar_status
 

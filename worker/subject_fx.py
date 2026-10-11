@@ -73,7 +73,7 @@ FIRM_SOFT = (0.12, 0.88)
 # subject's soft edge: the footage's own background never fringes the field.
 POSTER_CHOKE_PX = 1.5
 # Defaults (share of frame height, unless px at a 1080-high frame).
-GLOW_RADIUS = 0.05
+GLOW_RADIUS = 0.04
 OUTLINE_WIDTH_PX = 4.0
 BLUR_RADIUS = 0.025
 RADIAL_RADIUS = 0.08
@@ -81,7 +81,7 @@ RADIAL_RADIUS = 0.08
 # (sigma as a share of the glow radius, weight); the heaviest tail reaches
 # ~0.3 % of full strength at the radius (none beyond it). Inside, a light
 # wrap (WRAP x 1 - the tightest tail) on a faint CORE wash.
-GLOW_TAIL = ((0.10, 0.30), (0.25, 0.35), (0.42, 0.35))
+GLOW_TAIL = ((0.10, 0.30), (0.25, 0.35), (0.38, 0.35))
 GLOW_WRAP = 0.9
 GLOW_CORE = 0.18
 # Glow and blurs are soft by nature: they are computed at a working height
@@ -90,6 +90,9 @@ GLOW_CORE = 0.18
 # same defocus, and a final pays for 480 lines, not 1920.
 SOFT_LINES = 480
 RADIAL_COPIES = 8
+# A coloured light composites its screened picture through min(1, GAIN x
+# light): the RGB round trip only shows where the light itself does.
+LIGHT_ALPHA_GAIN = 8
 # Echo tint (duotone): tint x clip(LIFT + GAIN x luma).
 DUO_LIFT = 70
 DUO_GAIN = 1.05
@@ -126,6 +129,24 @@ _STATE = "_w1b_state"
 # untagged SD source), so an accent field is the accent on every source.
 TO_RGB = "scale=flags=accurate_rnd+full_chroma_int,format=gbrp"
 TO_YUV = "scale=flags=accurate_rnd+full_chroma_int,format=yuv420p"
+# Frame n at n / fps on a 1 / fps timebase: setpts TRUNCATES its result, and
+# N / 30.000 / TB evaluates to 244.99999 for N = 245 (38 of the first 2000
+# frames at 30 fps), which stacked two frames on one timestamp and made the
+# overlay drop a window frame (measured: a fill's decay frame vanished).
+# Every restamp here rounds. (fxprims.repad has the same expression; see
+# the 1B report.)
+
+
+def restamp_expr(fps):
+    return f"setpts=round(N/{fxprims.fps3(fps):.3f}/TB)"
+
+
+def repad(f0, fps, alpha=False):
+    """fxprims.repad with a rounded restamp (see restamp_expr)."""
+    color = "black@0" if alpha else "black"
+    lead = f"start={int(f0)}:" if f0 > 0 else ""
+    return (f",tpad={lead}stop=1:start_mode=add:stop_mode=add:color={color},"
+            f"{restamp_expr(fps)}")
 
 
 # ------------------------------------------------------------------ colours
@@ -177,8 +198,10 @@ def resolve_colour(value, edl, default="white"):
 
 
 def rgb_to_yuv(rgb, height=1080):
-    """Limited-range 8-bit Y'CbCr of an sRGB triple: BT.709 for HD
-    programs (every 9:16 or 16:9 HD render), BT.601 below 600 lines."""
+    """Limited-range 8-bit Y'CbCr of an sRGB triple, BT.709 (``height`` >=
+    600) or BT.601: the values libavfilter's colour-space negotiation gives
+    a colour layer on a BT.709-tagged program or an untagged one (the
+    compiler itself lets ffmpeg convert; tests compare against this)."""
     r, g, b = (float(c) / 255.0 for c in rgb)
     if height >= 600:
         kr, kb = 0.2126, 0.0722
@@ -624,7 +647,7 @@ class _Emit:
 
     @property
     def restamp(self):
-        return f"setpts=N/{self.F:.3f}/TB"
+        return restamp_expr(self.F)
 
     def scale_px(self, px):
         return float(px) * self.H / 1080.0
@@ -753,10 +776,10 @@ class _Emit:
             self.p.append(f"[{layer}]{'format=yuva420p' if plain else 'null'}"
                           f"[{lf}]")
             self.p.append(f"[{lf}][{alpha}]alphamerge"
-                          f"{fxprims.repad(self.f0, self.F, alpha=True)}[{w}]")
+                          f"{repad(self.f0, self.F, alpha=True)}[{w}]")
         else:
             self.p.append(f"[{layer}]{'format=yuv420p' if plain else 'null'}"
-                          f"{fxprims.repad(self.f0, self.F)}[{w}]")
+                          f"{repad(self.f0, self.F)}[{w}]")
         expr = fxprims.enable_expr([(self.f0, self.f1)])
         self.p.append(f"[{base}][{w}]{ov}:enable='{expr}'[{out}]")
         return out
@@ -858,8 +881,17 @@ class _Emit:
         return out
 
     def screen_light(self, label, light_alpha, tint):
-        """screen(P, tint x light) inside the window. The screened picture
-        replaces P only where the light is non-zero (exact elsewhere)."""
+        """screen(P, tint x light) inside the window.
+
+        A white light is exactly a lerp to white (screen(P, L) = P + L x
+        (1 - P)), which is linear in Y'CbCr too: it is laid as white through
+        the light as alpha, with no colour round trip at all. A coloured
+        light is screened in RGB and laid back through a soft alpha
+        (min(1, 8 L)), so where the light is faint the RGB round trip's
+        chroma-edge rounding cannot show; where there is no light the
+        program is untouched."""
+        if str(tint).lower() == "#ffffff":
+            return self.lay(label, self.colour_layer("#ffffff"), light_alpha)
         main, pw = self.window_pic(label)
         la, lb = self.lab("la"), self.lab("lb")
         self.p.append(f"[{light_alpha}]split[{la}][{lb}]")
@@ -874,7 +906,8 @@ class _Emit:
         self.p.append(f"[{pw}]{TO_RGB}[{pg}]")
         self.p.append(f"[{pg}][{tl}]blend=all_mode=screen,{TO_YUV}[{sc}]")
         sup = self.lab("su")
-        self.p.append(f"[{lb}]lut=c0='if(gt(val,0),255,0)'[{sup}]")
+        self.p.append(f"[{lb}]lut=c0='min(255,val*{LIGHT_ALPHA_GAIN})'"
+                      f"[{sup}]")
         return self.lay(main, sc, sup)
 
     def k_glow(self, label):
@@ -1104,11 +1137,15 @@ class _Emit:
             sa = self.mask_window(masks[0], firm=FIRM_CRISP, region=False)
         bg = self.background_layer(kind, pw, masks[1] if len(masks) > 1
                                    else None, pics)
-        sl, res = self.lab("sl"), self.lab("br")
-        self.p.append(f"[{sp}]format=yuva420p[{sl}x]")
-        self.p.append(f"[{sl}x][{sa}]alphamerge[{sl}]")
-        self.p.append(f"[{bg}][{sl}]overlay=format=auto,format=yuv420p"
-                      f"[{res}]")
+        # The subject picture is the overlay's MAIN input and the new world
+        # goes on top through the inverse matte: the result keeps the
+        # program's colour tags, and footage plates (whatever their own
+        # matrix) are converted into them, never the program into theirs.
+        bl, inv, res = self.lab("bl"), self.lab("bi"), self.lab("br")
+        self.p.append(f"[{sa}]negate[{inv}]")
+        self.p.append(f"[{bg}]format=yuva420p[{bl}x]")
+        self.p.append(f"[{bl}x][{inv}]alphamerge[{bl}]")
+        self.p.append(f"[{sp}][{bl}]overlay=eof_action=pass[{res}]")
         return self.lay(main, res, self.region_alpha())
 
     def background_layer(self, kind, pw, mask2, pics):
@@ -1346,7 +1383,8 @@ class _Emit:
         self.p.append(f"[{tg}][{tl}g]blend=all_mode=multiply[{tl}]")
         self.p.append(f"[{b}]{TO_RGB}[{pg}]")
         self.p.append(f"[{pg}][{tl}]blend=all_mode=screen,{TO_YUV}[{sc}]")
-        self.p.append(f"[{lk}b]lut=c0='if(gt(val,0),255,0)'[{sup}]")
+        self.p.append(f"[{lk}b]lut=c0='min(255,val*{LIGHT_ALPHA_GAIN})'"
+                      f"[{sup}]")
         if self.st.get("region"):
             sup = self.intersect_region(sup)
         return self.lay(main, sc, sup)

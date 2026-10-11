@@ -65,7 +65,8 @@ def run_case(case, workroot):
         w1b_stub1a.install_matte(
             patch, case["matte"], float(case.get("src_fps") or 25.0),
             windows=case.get("matte_windows"),
-            status=case.get("matte_status", "ready"))
+            status=case.get("matte_status", "ready"),
+            src_start=float(case.get("src_start") or 0.0))
     if case.get("hue"):
         w1b_stub1a.install_hue(patch)
     locals_ = case.get("asset_locals") or {}

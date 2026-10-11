@@ -59,7 +59,7 @@ cost:
     interactive: 6.0
     batch: 16.0
     local: 3.0
-  fixed_ms: 60
+  fixed_ms: 30
 exemplars:
 - 22@≈8.43
 - 22@≈12.33
