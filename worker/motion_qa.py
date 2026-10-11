@@ -399,6 +399,60 @@ class LocalRenderer:
             "devices": None}
 
 
+def _frame_times(path):
+    """The video frames' presentation times (seconds, sorted) of a file,
+    from its packets (no decode), or None."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "packet=pts_time", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60, check=True).stdout
+    except Exception:  # noqa: BLE001
+        return None
+    times = []
+    for line in out.split():
+        v = line.split(",")[0]
+        try:
+            times.append(float(v))
+        except ValueError:
+            continue
+    return sorted(times) or None
+
+
+def reel_segments(path, proof_segments, fps):
+    """Reel segments of a CONCATENATED proof reel: where each window's
+    frames start in it and how many it holds. A window piece can render a
+    frame short of its duration (the concat keeps every window on its
+    nominal start, leaving a gap), so counting frames from the durations
+    drifts a frame per window; the packets' own times place each window
+    exactly. Falls back to the durations when the times are unreadable."""
+    rows = sorted(proof_segments or [], key=lambda r: float(r["reel_start"]))
+    f3 = float(fps or 30.0)
+    times = _frame_times(path)
+    starts = None
+    if times:
+        base = times[0]
+        starts = []
+        for r in rows:
+            want = float(r["reel_start"]) - 0.5 / f3
+            starts.append(next((i for i, t in enumerate(times)
+                                if t - base >= want), len(times)))
+    segs = []
+    for k, r in enumerate(rows):
+        a, b = float(r["start"]), float(r["end"])
+        if starts is not None:
+            f0 = starts[k]
+            n = (starts[k + 1] if k + 1 < len(starts) else len(times)) - f0
+        else:
+            f0 = int(round(float(r["reel_start"]) * f3))
+            n = int(round((b - a) * f3))
+        segs.append({"a": a, "b": b, "path": path,
+                     "first_f": frame_of(a, f3), "reel_f0": int(f0),
+                     "frames": max(0, int(n))})
+    return segs
+
+
 class JobRenderer:
     """Production: ``preview_check`` jobs (the existing changed-section
     proof kind) on the agent's ToolContext. ``enqueue("with", ...)`` renders
@@ -567,13 +621,8 @@ class JobRenderer:
             # a concatenated proof reel's stream rate approximates the render
             # rate; the render rate is the program's, capped for previews
             fps = self.expected_fps
-        segs = []
-        for s in result.get("proof_segments") or []:
-            segs.append({"a": float(s["start"]), "b": float(s["end"]),
-                         "path": local, "first_f": frame_of(s["start"], fps),
-                         "reel_f0": int(round(float(s["reel_start"]) * fps)),
-                         "frames": int(round((float(s["end"])
-                                              - float(s["start"])) * fps))})
+        segs = reel_segments(local, result.get("proof_segments") or [],
+                             fps)
         return Reel(segs, fps, (info["width"], info["height"])), {
             "path": local, "fps": fps, "width": info["width"],
             "height": info["height"],
@@ -648,7 +697,7 @@ def _family(dev, cards):
 
 def measure_device(dev, with_reel, without_reel, *, fps, land_f, planned_f,
                    cards=None, workdir=None, ledger=None, full_frame=None,
-                   front_reel=None, ref_same_clock=True):
+                   front_reel=None, ref_same_clock=True, subsampled=False):
     """One device's proof: strip and onion images and its metrics."""
     import numpy as np
     import qa_metrics
@@ -708,6 +757,15 @@ def measure_device(dev, with_reel, without_reel, *, fps, land_f, planned_f,
         metrics["land_err_f"] = _metric(
             "land_err_f", lm["value"], None,
             {"event_f": event_f, "planned_f": planned_f, "basis": basis})
+    elif subsampled:
+        # the proof ran below the program's rate (the preview cap): a
+        # device shorter than a proof frame can fall between two of them
+        metrics["land_err_f"] = _metric(
+            "land_err_f", None, None,
+            {"planned_f": planned_f, "basis": basis,
+             "why": "not visible at the proof's frame rate (below the "
+                    "program's); check it on a full-rate render"},
+            passed=None)
     else:
         metrics["land_err_f"] = _metric(
             "land_err_f", None, None,
@@ -1083,7 +1141,6 @@ def analyse(out, edl, devs, lands, fps, with_reel, winfo, wo_reel, *,
             if isinstance(r, dict)}
     static = {r.get("id"): r for r in fxgraph.job_report(edl, [])}
     reel_fps = float(winfo.get("fps") or fps)
-    all_pass = out.get("pass") is not False
     for d in devs:
         lf, pf = lands[d["id"]]
         if abs(reel_fps - fps) > 0.01:
@@ -1093,7 +1150,8 @@ def analyse(out, edl, devs, lands, fps, with_reel, winfo, wo_reel, *,
         m = measure_device(d, with_reel, wo_reel, fps=reel_fps, land_f=lf,
                            planned_f=pf, cards=cards, workdir=workdir,
                            ledger=out.get("ledger"), front_reel=front_reel,
-                           ref_same_clock=ref_same_clock)
+                           ref_same_clock=ref_same_clock,
+                           subsampled=reel_fps < fps - 0.5)
         rec = {"id": d["id"], "type": d["type"],
                "device": d.get("device"),
                "family": _family(d, cards),
@@ -1104,13 +1162,28 @@ def analyse(out, edl, devs, lands, fps, with_reel, winfo, wo_reel, *,
                "event_f": m.get("event_f"), "basis": m["basis"],
                "strip": m.get("strip"), "onion": m.get("onion"),
                "metrics": m["metrics"]}
-        if any(v.get("pass") is False for v in m["metrics"].values()):
-            all_pass = False
-        if rec["rung"] not in (None, "full"):
-            all_pass = False
         out["devices"].append(rec)
-    out["pass"] = all_pass
+    out["pass"] = verdict(out["devices"])
     return out
+
+
+def verdict(records):
+    """A proof's pass: False when any device failed a metric or rendered
+    below full; None when none failed but a landing could not be read (no
+    reference and no visible change, or a device shorter than a proof
+    frame); True otherwise."""
+    if not records:
+        return None
+    unread = False
+    for rec in records:
+        metrics = rec.get("metrics") or {}
+        if any(v.get("pass") is False for v in metrics.values()):
+            return False
+        if rec.get("rung") not in (None, "full"):
+            return False
+        if (metrics.get("land_err_f") or {}).get("pass") is None:
+            unread = True
+    return None if unread else True
 
 
 def _render(renderer, edl, ranges, tag):
@@ -1204,7 +1277,7 @@ def summary_lines(result, limit=8):
              f"({result['render'].get('variant')}) — "
              + ("PASS" if result.get("pass") else
                 "NEEDS ATTENTION" if result.get("pass") is False
-                else "not measured")]
+                else "NOT FULLY MEASURED (see the notes)")]
     for d in result["devices"][:limit]:
         bits = []
         for name, m in d["metrics"].items():

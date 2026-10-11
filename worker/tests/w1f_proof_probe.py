@@ -13,6 +13,7 @@ Prints one JSON report on its last line.
 """
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -143,29 +144,38 @@ def temporal(workdir):
             "land": d["metrics"]["land_err_f"]["value"]}
 
 
-def jobs(workdir):
+def jobs(workdir, rate="25", seconds=4.0, keep=((0.0, 3.8),),
+         at=(1.0, 2.6), name="proof_jobs", max_fps=None):
     """The production path: proof_jobs on a ToolContext whose queue runs
     each preview_check payload through renderer._render_changed_sections
     (what the executor does) and hands back the concatenated reel and its
     proof_segments; the reference is the previous version, which lacks the
-    devices on the same timeline."""
+    devices on the same timeline. ``at``: program seconds of one-frame
+    negates (each frame-exact); ``max_fps``: the preview rate cap."""
+    import config
     import renderer
     import storage
-    src = source(workdir, "25", "25")
+    src = source(workdir, name + rate.replace(".", ""), rate, seconds)
     info = media.probe(src)
+    fps = float(info["fps"])
+    f3 = round(fps, 3)
     index = {"video": {"duration": info["duration"], "width": 320,
-                       "height": 180, "fps": 25.0, "has_audio": True},
+                       "height": 180, "fps": fps, "has_audio": True},
              "words": []}
-    base = schemas.validate_edl({"keep": [[0.0, 3.8]],
+    base = schemas.validate_edl({"keep": [list(k) for k in keep],
                                  "frame": {"ratio": "16:9", "mode": "crop"}},
                                 info["duration"]).model_dump()
-    cur = schemas.validate_edl(dict(base, fx=[
-        {"id": "n1", "type": "fx_probe", "stage": "pre_captions",
-         "op": "negate", "start": 1.0, "end": 1.04},
-        {"id": "n2", "type": "fx_probe", "stage": "world", "op": "negate",
-         "start": 2.6, "end": 2.64}]), info["duration"]).model_dump()
+    fx = []
+    for k, t in enumerate(at):
+        f = int(math.floor(t * f3 + 0.5))
+        fx.append({"id": f"n{k + 1}", "type": "fx_probe",
+                   "stage": "pre_captions" if k % 2 == 0 else "world",
+                   "op": "negate", "start": round(f / f3, 2),
+                   "end": round((f + 1) / f3, 2)})
+    cur = schemas.validate_edl(dict(base, fx=fx),
+                               info["duration"]).model_dump()
     versions = {4: base, 5: cur}
-    wd = os.path.join(workdir, "proof_jobs")
+    wd = os.path.join(workdir, name)
     os.makedirs(wd, exist_ok=True)
     queue = {}
 
@@ -183,21 +193,21 @@ def jobs(workdir):
 
     class DB:
         def run(self, fn, *a):
-            name = fn.__name__
-            if name == "edl_history":
+            name_ = fn.__name__
+            if name_ == "edl_history":
                 return [{"version": 5}, {"version": 4}]
-            if name == "get_edl_version":
+            if name_ == "get_edl_version":
                 return {"version": a[1], "json": versions[a[1]]}
-            if name == "get_or_enqueue_preview_check_job":
+            if name_ == "get_or_enqueue_preview_check_job":
                 jid = len(queue) + 1
                 queue[jid] = run_job(jid, a[2])
                 return jid, True
-            if name == "get_job":
+            if name_ == "get_job":
                 return {"state": "done", "result": queue[a[0]][0]}
-            if name == "get_asset":
+            if name_ == "get_asset":
                 jid = a[0] - 1000
                 return {"storage_key": queue[jid][1]}
-            raise AssertionError(name)
+            raise AssertionError(name_)
 
     class Ctx:
         db = DB()
@@ -210,18 +220,26 @@ def jobs(workdir):
         def latest_edl(self):
             return {"version": 5, "json": cur}
     real = storage.download_to
+    saved_fps = config.PREVIEW_MAX_FPS
     storage.download_to = lambda key, dest: __import__("shutil").copy(
         key, dest)
+    if max_fps is not None:
+        config.PREVIEW_MAX_FPS = float(max_fps)
     try:
         res = motion_qa.proof_jobs(Ctx(), cur, index=index, cards={},
                                    previous_edl=base, budget_s=60)
     finally:
         storage.download_to = real
+        config.PREVIEW_MAX_FPS = saved_fps
     return {"pass": res["pass"], "notes": res["notes"],
             "jobs": res["render"].get("jobs"),
+            "window": res["render"].get("window"),
+            "reel_fps": res["render"].get("fps"),
             "devices": {d["id"]: {"landing_f": d["landing_f"],
+                                  "planned_f": d["planned_f"],
                                   "event_f": d["event_f"],
-                                  "basis": d["basis"]}
+                                  "basis": d["basis"],
+                                  "land": d["metrics"]["land_err_f"]}
                         for d in res["devices"]}}
 
 
@@ -308,12 +326,24 @@ def main():
             import traceback
             report[name] = {"error": f"{type(e).__name__}: {e}",
                             "trace": traceback.format_exc()[-2500:]}
-    try:
-        report["jobs"] = jobs(workdir)
-    except Exception as e:  # noqa: BLE001
-        import traceback
-        report["jobs"] = {"error": str(e),
-                          "trace": traceback.format_exc()[-2500:]}
+    for key, kw in (
+            ("jobs", {}),
+            # three windows at 29.97 (each piece a frame short of its
+            # duration in the concatenated reel)
+            ("jobs_ntsc", {"rate": "29.97", "seconds": 6.0,
+                           "keep": ((0.0, 2.5), (3.0, 5.8)),
+                           "at": (1.03, 3.7, 4.6), "name": "proof_ntsc"}),
+            # a 59.94 program proved at the 30 fps preview cap
+            ("jobs_60p", {"rate": "59.94", "seconds": 6.0,
+                          "keep": ((0.0, 2.5), (3.0, 5.8)),
+                          "at": (0.27, 3.7, 4.6), "name": "proof_60p",
+                          "max_fps": 30.0})):
+        try:
+            report[key] = jobs(workdir, **kw)
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            report[key] = {"error": str(e),
+                           "trace": traceback.format_exc()[-2500:]}
     for key, framed in (("long_junction", True),
                         ("long_junction_frameless", False)):
         try:

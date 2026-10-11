@@ -114,6 +114,35 @@ def test_production_path_proves_on_preview_check_jobs(report):
         assert d["event_f"] == d["landing_f"] == want, (did, d)
 
 
+def test_production_reel_windows_never_drift(report):
+    """Three windows in one concatenated preview_check reel at 29.97: each
+    window is placed by the reel's own frame times, so the second and third
+    land exactly (counting frames from the durations drifted a frame per
+    window and failed correct devices)."""
+    j = report["jobs_ntsc"]
+    assert "error" not in j, j
+    assert len(j["window"]) == 3, j["window"]
+    for did, d in j["devices"].items():
+        assert d["event_f"] == d["planned_f"] == d["landing_f"], (did, d)
+    assert j["pass"] is True, j
+
+
+def test_a_60p_program_proved_at_the_preview_cap_is_not_failed(report):
+    """A 59.94 program proved at the 30 fps preview cap: a one-frame device
+    can fall between proof frames. It reads 'not measured' (pass None), and
+    the proof says why, instead of failing a correct device."""
+    j = report["jobs_60p"]
+    assert "error" not in j, j
+    assert j["reel_fps"] == pytest.approx(30.0, abs=0.05)
+    assert any("preview cap" in n for n in j["notes"]), j["notes"]
+    assert j["pass"] is not False, j
+    for did, d in j["devices"].items():
+        land = d["land"]
+        assert land["pass"] is not False, (did, d)
+        if land["pass"] is None:
+            assert "frame rate" in land["detail"]["why"]
+
+
 def test_proof_windows_and_landing_helpers():
     w = motion_qa.proof_windows([30, 33, 200], 30.0, 10.0)
     assert w[0][0] == pytest.approx(25 / 30.0, abs=0.01)
