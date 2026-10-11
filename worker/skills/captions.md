@@ -138,9 +138,12 @@ captions sit on it in the card's own column (never past its sides), moved
 at most ~1.5 lines to clear the card's foot, the chin or a graphic — pages
 of one line where the foot under the chin holds one. A graphic over them
 moves them to a free band (mutes only where it replaces speech and none is
-left). A face filling the card is never solved by jumping over the head:
-they keep the anchor and `audit_captions` / the render name it (CAPTIONS ON
-THE MEASURED FACE) — give the face less of the card.
+left). A measured face over the anchor sends them under the chin, else to a
+clear band on the canvas around the card — never across the face or over
+the head inside it; with neither left they keep the anchor and
+`audit_captions` / the render name it (CAPTIONS ON THE MEASURED FACE) —
+give the face less of the card. (libass presets: the same for an anchor
+you set; their lines keep the frame's column.)
 
 LEGACY PRESET FAMILIES (`style.preset`) remain available and are the right
 choice for subtitles and specific grammars:

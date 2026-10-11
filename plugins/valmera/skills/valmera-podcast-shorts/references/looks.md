@@ -71,8 +71,9 @@ The coordinator assigns one Look and one structure per short. The editor reads
 - An `anchor_y` inside a single card (under the chin, ~0.73-0.76 on the
   4:5 card) is kept: the captions stay on it in the card's own column,
   moved at most ~1.5 lines off the chin or the card's foot, in pages of one
-  line where the foot holds one. Leave room under the chin when you size
-  the card.
+  line where the foot holds one. A measured face over the anchor sends them
+  under the chin or to a free band on the canvas around the card, never
+  over the head inside it. Leave room under the chin when you size the card.
 - A stack's speaker panel is framed from the face (the face box 8% inside
   each panel edge; a screen box touching the face shows as a corner,
   softened only away from the face). When the reply says `BETTER LAYOUT

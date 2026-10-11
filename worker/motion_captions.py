@@ -144,12 +144,15 @@ def _runs_by_room(words, chars, canvas, edl, index):
         return [(words, chars)]
     W, H = caption_carry.frame_wh(edl, index, canvas)
     tc = caption_place.template_column(W, H)
-    out = []
+    out, fits = [], {}
     for w in words:
         pl = w.get("place") or {}
         budget = chars
         if pl.get("l"):
-            budget = min(chars, caption_place.line_chars(edl, W, H, pl.get("x") or tc))
+            col = tuple(pl.get("x") or tc)
+            if col not in fits:            # (a measured face: once per column)
+                fits[col] = caption_place.line_chars(edl, W, H, col)
+            budget = min(chars, fits[col])
         if out and out[-1][1] == budget and \
                 ((out[-1][0][-1].get("place") or {}).get("l") == pl.get("l")):
             out[-1][0].append(w)

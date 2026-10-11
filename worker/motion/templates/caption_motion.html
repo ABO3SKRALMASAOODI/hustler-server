@@ -217,10 +217,11 @@
       z0 = y + bz[0]; z1 = y + bz[1];
     }
     const top = Math.max(SAFE.y0, z0 * H), bot = Math.min(SAFE.y1, z1 * H);
-    // a caption the plan set on its own anchor inside a picture card (h)
-    // keeps its zone however tight (a card's foot under the chin holds one
+    // a caption the plan set on its own anchor inside a picture card (the
+    // cue's h, kept as hz: c.h is the laid-out block's height) keeps its
+    // zone however tight (a card's foot under the chin holds one
     // line): the block fits inside it, never in the whole frame
-    if (c.h && Array.isArray(c.z) && c.z.length === 2 && bot - top >= 0.02 * H) return [top, bot];
+    if (c.hz && Array.isArray(c.z) && c.z.length === 2 && bot - top >= 0.02 * H) return [top, bot];
     return bot - top >= 0.08 * H ? [top, bot] : [SAFE.y0, SAFE.y1];
   }
 
@@ -694,7 +695,7 @@
     laidOut = true;
     (P.cues || []).forEach((src, ci) => {
       if (!src || !Array.isArray(src.w) || !src.w.length) return;
-      const c = { s: +src.s || 0, e: +src.e || 0, k: !!src.k, y: src.y, b: src.b, z: src.z, h: !!src.h, n: !!src.n,
+      const c = { s: +src.s || 0, e: +src.e || 0, k: !!src.k, y: src.y, b: src.b, z: src.z, hz: !!src.h, n: !!src.n,
                   w: src.w.map(w => ({ t: String(w.t || ''), s: +w.s || 0, e: +w.e || 0, x: !!w.x })),
                   words: [], flowWords: [] };
       const col = colOf(src);

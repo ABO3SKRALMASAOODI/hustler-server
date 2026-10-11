@@ -240,6 +240,125 @@ def test_a_face_filling_the_card_keeps_the_anchor_and_says_so():
     assert not [u for u in _plan(free, _index(faces=())).unplaced if u["why"] == "face"]
 
 
+# Review (Oct 2026), on the production 'composed' cards (94 EDLs with an
+# anchor_y inside a card, read-only): kept on the measured face, twice as many
+# words sat on a face as before. A measured face reaching the anchor sends
+# the captions past it on the anchor's own side inside the card, else to
+# the canvas around the card — never across the face (mouth) or over the
+# head inside the card; only with neither left do they stay, named.
+WIDE_CARD = [0.04, 0.3, 0.96, 0.72]          # a landscape picture in a 9:16 frame
+SHOT = [{"id": 1, "start": 0.0, "end": 60.0}]
+HEADLINE = {"id": "headline", "template": "headline", "start": 0.0, "end": DUR,
+            "params": {"text": "A HEADLINE"},
+            "footprint": caption_carry.make_footprint([0.06, 0.10, 0.94, 0.29], W, H)}
+
+
+def _composed(edl, anchor):
+    edl["captions"]["style"] = {"preset": "composed", "anchor_y": anchor}
+    return edl
+
+
+@pytest.mark.parametrize("look", ["clean", None])
+def test_a_face_filling_the_card_sends_the_captions_to_the_canvas_not_onto_it(look):
+    edl = _edl(WIDE_CARD, anchor=0.655, look=look, motion=())
+    if look is None:
+        _composed(edl, 0.655)
+    ix = _index(faces=[[0.40, 0.30, 0.60, 0.80]], shots=SHOT)
+    p = _plan(edl, ix)
+    places = {str(pl) for pl in p.placed.values()}
+    assert len(places) == 1 and not p.unplaced
+    pl = next(iter(p.placed.values()))
+    # on the canvas above the card, clear of its edge: never inside it
+    assert pl["z"][1] <= WIDE_CARD[1] - caption_place.EDGE_PAD + 1e-4 and "x" not in pl, pl
+    assert len(p.placed) == len(p.words)                 # every heard word shown
+    # with the canvas taken (a standing headline) they keep the anchor, named
+    edl = _edl(WIDE_CARD, anchor=0.655, look=look, motion=(HEADLINE,))
+    if look is None:
+        _composed(edl, 0.655)
+    p = _plan(edl, ix)
+    assert p.unplaced and {u["why"] for u in p.unplaced} == {"face"}
+    assert all(WIDE_CARD[1] < pl["z"][0] and pl["z"][1] <= WIDE_CARD[3] for pl in p.placed.values())
+
+
+@pytest.mark.parametrize("look", ["clean", None])
+def test_a_measured_face_over_the_anchor_moves_it_under_the_chin_never_across(look):
+    """An anchor set on the face (0.5 of a tall card): the captions go under
+    the measured chin, however far — never above the brow (the hair) or
+    left on the face."""
+    card = [0.0, 0.1, 1.0, 0.9]
+    edl = _edl(card, anchor=0.5, look=look, motion=())
+    if look is None:
+        _composed(edl, 0.5)
+    ix = _index(faces=[[0.42, 0.15, 0.58, 0.55]], shots=SHOT)
+    tl = Timeline(edl["keep"])
+    chin = max(caption_place.chin(z)[3]
+               for z in caption_carry.faces_over(edl, ix, tl, 0.3, 1.2, W, H))
+    p = _plan(edl, ix)
+    assert not p.unplaced and p.placed
+    for pl in p.placed.values():
+        assert pl["z"][0] >= chin - 1e-4 and pl["z"][1] <= card[3], (pl, chin)
+        assert pl["z"][0] - 1e-4 <= pl["y"] <= pl["z"][1] + 1e-4
+    # an anchor set above the face's middle rises above its brow, whole
+    edl = _edl(card, anchor=0.45, look=look, motion=())
+    if look is None:
+        _composed(edl, 0.45)
+    ix = _index(faces=[[0.44, 0.45, 0.56, 0.8]], shots=SHOT)
+    brow = min(z[1] for z in caption_carry.faces_over(edl, ix, tl, 0.3, 1.2, W, H))
+    p = _plan(edl, ix)
+    one, tall, _m = caption_place.block_metrics(edl, W, H)
+    assert not p.unplaced and p.placed
+    for pl in p.placed.values():
+        assert pl["z"][1] <= brow + 1e-4 and pl["z"][1] - pl["z"][0] >= tall - 1e-3, (pl, brow)
+        assert not pl.get("l")
+
+
+def test_libass_captions_on_their_card_anchor_keep_the_opening_lead_in_and_their_row():
+    """The libass 'composed' cards: their first caption still starts on the
+    opening frame (FIRST_CAPTION_LEAD_IN_S — the card's own place is no
+    window a page may not hold into), and an anchor near the frame's foot is
+    not lifted to the motion template's safe area toward the face."""
+    ix = _index(faces=())
+    for card, anchor in ((WIDE_CARD, 0.655), ([0.0, 0.25, 1.0, 0.875], 0.8)):
+        edl = _composed(_edl(card, anchor=anchor, look=None, motion=()), anchor)
+        tl = Timeline(edl["keep"])
+        p = _plan(edl, ix)
+        assert not p.clamp_spans
+        events, _style = captions.compiled_events(edl, ix, tl, play_res=(W, H))
+        assert events and events[0]["start"] == 0.0
+        one, tall, _m = caption_place.block_metrics(edl, W, H)
+        for pl in p.placed.values():
+            # its row: the anchor, raised only as far as the card's foot needs
+            assert pl["y"] == pytest.approx(min(anchor, card[3] - caption_place.EDGE_PAD
+                                                - tall / 2), abs=1e-3), pl
+    # a graphic over the card's foot still keeps a page from holding into it
+    low = dict(SWAP, id="low", start=0.0, footprint=caption_carry.make_footprint(
+        [0.1, 0.55, 0.9, 0.71], W, H))
+    edl = _composed(_edl(WIDE_CARD, anchor=0.655, look=None, motion=(low,)), 0.655)
+    assert _plan(edl, ix).clamp_spans
+
+
+def test_a_page_of_one_line_holds_what_one_line_of_its_face_holds(monkeypatch):
+    """s08 (Inter Display Black, capitals, a 0.74 column): the flat 0.7 em
+    price cut 'TESLA'S DEVELOPING' into two one-word pages, the second up
+    for 0.21 s. The look's face is measured (worker/band_type.py)."""
+    edl = _edl(S08_CARD)
+    edl["captions"]["style"].update(font="Inter Display Black", uppercase=True)
+    col = (0.13, 0.87)
+    measured = caption_place.line_chars(edl, W, H, col)
+    # (Chromium lays 'TESLA'S DEVELOPING' 0.674 of the frame wide: 18 fit)
+    assert measured >= len("TESLA'S DEVELOPING") - 1
+    # sentence case holds more than capitals
+    plain = _edl(S08_CARD)
+    assert caption_place.line_chars(plain, W, H, col) > measured
+    # no measurable face (a lane without the font or Pillow): the flat price
+    import band_type
+    monkeypatch.setattr(band_type, "font_path", lambda *a, **k: None)
+    flat = caption_place.line_chars(edl, W, H, col)
+    one = caption_place.line_height(edl, W, H)
+    fs = one / caption_place.LOOK_LINE["clean"][1]
+    assert flat == int(0.74 * W / (caption_place.CAPS_EM * fs * H)) < measured
+
+
 # ── 4. muted only where a graphic truly covers them ──────────────────────
 
 def test_a_slam_in_the_headline_band_mutes_nothing_and_claims_no_collision():
@@ -323,7 +442,8 @@ needs_browser = pytest.mark.skipif(not (shutil.which("ffmpeg") and _chromium_ok(
                                    reason="headless Chromium + ffmpeg required")
 
 _INK = """() => Array.from(document.querySelectorAll('.cue.on .mg-w')).map(e => {
-    const r = e.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; })"""
+    const r = e.getBoundingClientRect();
+    return [r.left, r.top, r.right, r.bottom, parseFloat(getComputedStyle(e).fontSize)]; })"""
 
 
 async def _dom(job, times, script):
@@ -386,5 +506,9 @@ def test_the_browser_lays_every_cue_inside_the_plans_zone_and_column(case, tmp_p
             assert c.get("h") == 1, c
             if c.get("n"):
                 assert y1 - y0 <= 1.25 * one, (case, c, (y0, y1))   # one line
+                # ...at the look's size: a page of one line is cut to what
+                # one line holds, never shrunk to fit (its sans words)
+                base = caption_place.LOOK_LINE[motion_captions.look_of(edl)][0]
+                assert min(b[4] for b in boxes) >= 0.9 * base, (case, c, boxes)
             checked += 1
     assert checked >= 6

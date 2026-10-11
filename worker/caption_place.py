@@ -170,8 +170,50 @@ LOCKED_LIFT_LINES = 0.5
 HERO_LOOKS = ("lockup", "stack")
 # Average advance of a caption glyph (em) — sentence case, and capitals
 # (an uppercase style, or a look that sets them) — for the characters one
-# line of a card's column holds (line_chars).
+# line of a card's column holds (line_chars), when the look's face cannot
+# be measured (no bundled file, no Pillow).
 CHAR_EM, CAPS_EM = 0.6, 0.7
+# The face each motion look sets a caption line in (caption_motion.html
+# .L-<look> .blk): CSS family, weight, letter-spacing (em), and the em a
+# line spends besides its glyphs (mono's plate padding). A style's own font
+# replaces the family and weight, as the template does (not on mono).
+LOOK_FACE = {"clean": ("Inter", 600, -0.014, 0.0), "editorial": ("Inter Display", 700, -0.022, 0.0),
+             "pop": ("Inter Display", 900, -0.022, 0.0), "box": ("Inter Display", 800, -0.018, 0.0),
+             "serif": ("Inter Display", 700, -0.02, 0.0), "glow": ("Inter Display", 800, -0.02, 0.0),
+             "mono": ("JetBrains Mono", 700, -0.01, 1.04)}
+# A caption line of ordinary speech: its measured average advance prices a
+# character (upper-cased for capitals), with EM_SLACK of headroom for a
+# page of wider words. Judged on the Diamandis run laid out in Chromium:
+# the flat 0.6/0.7 em cut one line of 'TESLA'S DEVELOPING' into two
+# one-word pages (42 one-word pages over 9 shorts, against 4 before); a
+# measured price keeps a line whole where it fits.
+LINE_SAMPLE = ("and then you add the humanoid robots in there it is actually very "
+               "difficult to predict what will happen next, which is why")
+EM_SLACK = 1.12
+
+
+def _measured_em(edl, look, upper):
+    """(em per character, em of padding) of a caption line in the look's
+    face — the style's own font when it sets one — measured on the bundled
+    font file (worker/band_type.py), or None."""
+    face = LOOK_FACE.get(look)
+    if not face:
+        return None
+    family, weight, track, pad = face
+    try:
+        import band_type
+        import motion_captions
+        sp = motion_captions.style_params(edl)
+        if sp.get("font") and look != "mono":
+            family, weight = sp["font"], int(sp.get("font_weight") or weight)
+        path = band_type.font_path(family, weight)
+        if not path:
+            return None
+        text = LINE_SAMPLE.upper() if upper else LINE_SAMPLE
+        em = band_type.text_width(path, text, 1.0, track) / len(text)
+    except Exception:  # noqa: BLE001 — no font measure on this lane: the flat price
+        return None
+    return (em * EM_SLACK, pad) if em > 0.2 else None
 
 
 def template_column(W, H):
@@ -261,8 +303,9 @@ def line_chars(edl, W, H, col):
     caps = (edl or {}).get("captions") or {}
     style = caps.get("style") if isinstance(caps.get("style"), dict) else {}
     fs = one / (LOOK_LINE.get(look, LOOK_LINE["editorial"])[1] if look else 1.2)
-    em = CAPS_EM if (style.get("uppercase") or look in ("pop", "lockup")) else CHAR_EM
-    width = (float(col[1]) - float(col[0])) * float(W)
+    upper = bool(style.get("uppercase")) or look in ("pop", "lockup")
+    em, pad = _measured_em(edl, look, upper) or (CAPS_EM if upper else CHAR_EM, 0.0)
+    width = (float(col[1]) - float(col[0])) * float(W) - pad * fs * float(H)
     return max(6, int(width / max(1e-6, em * fs * float(H))))
 
 

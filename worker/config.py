@@ -2155,9 +2155,12 @@ LEGIBILITY_VERSION = 5
 # card's edges, a face with its chin, a graphic or the watermark — pages of
 # one line where the card's foot under the chin holds one. An explicit
 # anchor_y is never moved for an unmeasured (prior) face nor sent over the
-# head by a measured one (it stays, and the plan names it); a shot's
-# measured face speaks for the shot; words are muted only where a graphic
-# that replaces speech covers their block; lines keep to the card's column.
+# head by a measured one: past the face on its own side, else to a clear
+# band on the canvas around the card, else it stays and the plan names it;
+# libass presets take this only for an anchor_y set; a card's own place
+# keeps the opening caption's lead-in; a shot's measured face speaks for
+# the shot; words are muted only where a graphic that replaces speech
+# covers their block; lines keep to the card's column.
 CAPTION_CARRY_VERSION = 5
 
 # Crops and picture cards that follow the speaker's face inside a shot
