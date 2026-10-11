@@ -301,6 +301,33 @@ def test_mask_switches_on_the_exact_cut_frame(tmp_path, monkeypatch, store,
     assert min(ious) >= 0.98, min(ious)
 
 
+def test_later_blocks_keep_their_frames_after_clone_tails(
+        tmp_path, monkeypatch, store, synth_cut):
+    """Review (AT-1A-1, h3 a frame early): kept spans that end between two
+    frames get the picture's clone tail (tpad stop_mode=clone, then fps).
+    The matte's source clock joins its chunks with ``interleave``, which
+    leaves no frame rate, so those clones were stamped on the last frame's
+    time and dropped: the block came out a frame short and every later
+    block's matte ran a frame ahead of its picture. Two chunks (the cut at
+    4.0 s), three spans whose lengths are not whole frames, the words on
+    the last span: its matte must still be its picture's rectangle."""
+    import matte_track
+    # the middle span's last frame sits a frame short of its block (its
+    # clone tail: the cut at 4.0 s keeps the same-shot tail from reaching
+    # past it); the words cover it and the span after it
+    edl = {"keep": [[0.4, 2.4], [2.81, 3.99], [4.21, 7.61]],
+           "frame": {"ratio": "9:16", "mode": "crop", "focus_x": 0.5}}
+    ious = _case(tmp_path, monkeypatch, store, synth_cut, edl, (2.12, 5.52),
+                 "clones", shots=(4.0,))
+    assert len(ious) > 80
+    assert min(ious) >= 0.98, min(ious)
+    from fractions import Fraction
+    assert matte_track.exact_rate(29.97) == Fraction(30000, 1001)
+    assert matte_track.exact_rate(23.976) == Fraction(24000, 1001)
+    assert matte_track.exact_rate(25.0) == 25
+    assert matte_track.exact_rate(30) == 30
+
+
 def test_source_fed_picture_card(tmp_path, monkeypatch, store, synth):
     """AT-1A-5's contract on synthetic footage: inside a source-fed picture
     card the matte maps through the card's source rect onto its box (Wave

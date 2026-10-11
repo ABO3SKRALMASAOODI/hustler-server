@@ -92,8 +92,8 @@ LABELS = ("person", "face")
 # ffmpeg_filter_missing fault). The picture's own geometry filters (crop,
 # scale, pad, perspective, zoompan, overlay, dblur) are the picture's.
 FILTERS = ("interleave", "lut", "alphamerge", "gblur", "overlay", "trim",
-           "setpts", "tpad", "concat", "color", "split", "format", "scale",
-           "nullsink", "null", "fps")
+           "setpts", "settb", "tpad", "concat", "color", "split", "format",
+           "scale", "nullsink", "null", "fps")
 SPACES = ("world", "screen")
 
 # Chunk QA bars (the manifest's ``qa``: analysis_jobs._MatteQA, a 12 px band
@@ -166,6 +166,22 @@ def program_to_source(tl, t0, t1):
                             round(ps + (b - acc) * f, 4)))
             acc += plen
     return out
+
+
+def exact_rate(fps):
+    """The frame rate a probe's rounded ``fps`` stands for, as a Fraction:
+    the NTSC rates (29.97, 23.976, 59.94 ...) are N*1000/1001 — the source
+    frames' real spacing; 29.97 drifts off it by a frame-third an hour,
+    which would move a keep span's first frame on a long interview. Any
+    other rate as given (25, 30, 12.5 ...)."""
+    from fractions import Fraction
+    f = float(fps or 30.0)
+    if f <= 0:
+        f = 30.0
+    n = round(f * 1.001)
+    if abs(f - round(f)) > 1e-3 and n > 0 and abs(f * 1.001 - n) < 2e-3:
+        return Fraction(n * 1000, 1001)
+    return Fraction(f).limit_denominator(1000)
 
 
 def merge(spans, gap=1e-3):
@@ -728,8 +744,22 @@ class ProgramMatte:
         the picture's frame grid (frame j of a chunk from t0 at rate fm was
         measured on the source frame nearest t0 + j / fm, so it carries that
         frame's time), black frames on every grid slot no chunk fills over
-        the span the blocks trim, interleaved by time, firmed."""
-        origin, sf = float(grid[0] or 0.0), float(grid[1] or 30.0)
+        the span the blocks trim, interleaved by time, firmed.
+
+        Every piece is stamped on its grid SLOT (slot / rate, microsecond
+        time base) and the joined stream goes through ``fps`` at the
+        picture's exact rate before the grid's origin is added back:
+        ``interleave`` leaves its output without a frame rate, and the
+        block chain's ``tpad=stop_mode=clone`` (the picture's own tail
+        frames) then stamps its clones on the last frame's time, where the
+        block's ``fps`` drops them — a block one or two frames short, and
+        every later block's matte that many frames AHEAD of its picture
+        (the AT-1A-1 review: the subject's cut-out a frame early on the
+        last kept span). ``fps`` on slot-exact stamps moves no frame; it
+        restores the rate the clones are timed by."""
+        origin = float(grid[0] or 0.0)
+        rate = exact_rate(grid[1] or 30.0)
+        sf = float(rate)
         dt = float(self.clock_offset or 0.0)
         if label == "person":
             files = [(f["t0"], int((f.get("meta") or {}).get("frames") or 0),
@@ -762,13 +792,12 @@ class ProgramMatte:
             last = slot(t0 + (frames - 1) / fm)
             if last < lo_k or first > hi_k:
                 continue
-            # rounded to the link's time base, never truncated (a
-            # truncated N/fps/TB stamps some frames a tick early, and a
-            # 1/fps time base makes that tick a whole frame)
-            ts = (f"floor(({origin:.6f}+floor(({t0:.6f}+N/{fm:.6f}"
-                  f"-{origin:.6f})*{sf:.6f}+0.5)/{sf:.6f})/TB+0.5)")
+            # the SLOT's time from the grid's origin (microseconds, rounded,
+            # never truncated); the origin is added after the join
+            ts = (f"floor(floor(({t0:.6f}+N/{fm:.6f}-{origin:.6f})"
+                  f"*{sf:.9f}+0.5)/{sf:.9f}/TB+0.5)")
             parts.append(f"[{lab}]format=gray,setsar=1,trim=end_frame="
-                         f"{frames},setpts='{ts}'[{u}c{k}]")
+                         f"{frames},settb=AVTB,setpts='{ts}'[{u}c{k}]")
             pieces.append((first, last, f"{u}c{k}"))
         # black on every grid slot of [lo, hi] no chunk fills
         gaps, at = [], lo_k
@@ -780,21 +809,24 @@ class ProgramMatte:
             gaps.append((at, hi_k))
         for k, (g0, g1) in enumerate(gaps):
             n = g1 - g0 + 1
-            parts.append(f"color=c=black:s={w}x{h}:r={sf:.6f}:"
+            parts.append(f"color=c=black:s={w}x{h}:r={rate}:"
                          f"d={(n + 2) / sf:.6f},format=gray,setsar=1,"
-                         f"trim=end_frame={n},"
-                         f"setpts='floor(({origin:.6f}+({g0}+N)/{sf:.6f})"
-                         f"/TB+0.5)'"
+                         f"trim=end_frame={n},settb=AVTB,"
+                         f"setpts='floor(({g0}+N)/{sf:.9f}/TB+0.5)'"
                          f"[{u}g{k}]")
             pieces.append((g0, g1, f"{u}g{k}"))
         labels = [p[2] for p in sorted(pieces)]
         firm = f",lut=c0='{curve}'" if curve else ""
+        # one frame per grid slot at the picture's rate (see the docstring),
+        # then the grid's origin: each frame back on its source frame's time
+        regrid = (f"fps=fps={rate},settb=AVTB,"
+                  f"setpts='floor(PTS+{origin:.6f}/TB+0.5)'")
         if len(labels) == 1:
-            parts.append(f"[{labels[0]}]null{firm}[{u}src]")
+            parts.append(f"[{labels[0]}]{regrid}{firm}[{u}src]")
         else:
             parts.append("".join(f"[{x}]" for x in labels)
-                         + f"interleave=nb_inputs={len(labels)}{firm}"
-                         f"[{u}src]")
+                         + f"interleave=nb_inputs={len(labels)},{regrid}"
+                         f"{firm}[{u}src]")
         return Tap(f"{u}src")
 
     def set_world(self, label, out_label):
