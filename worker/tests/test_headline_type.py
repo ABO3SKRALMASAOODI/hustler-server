@@ -76,6 +76,10 @@ RUN = [
           y=0.1836, height=0.1108), 65.80),
     (dict(text="*Elon Musk:* If you cannot beat AI, join it", size=1.12, y=0.1776,
           height=0.0988), 91.30),
+    # ' / ' forces a line break (P2 track): each forced line counts against
+    # the band (the estimate read the slash as a word: 84 and 100.8 px)
+    (dict(text="AI / will / *win*", y=0.18, height=0.1), 60.09),
+    (dict(text="Musk says / AI is / *coming*", size=1.2, y=0.18, height=0.11), 67.84),
 ]
 
 

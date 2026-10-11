@@ -83,6 +83,8 @@ WRAP_SAFETY = 0.004
 HEIGHT_SAFETY_PX = 1.0
 
 _STAR_TOKEN_END = re.compile(r"\*([.,!?:;\"')’”]*)$")
+# headline.html: ' / ' forces a line break ('24/7' stays one word)
+_FORCED_BREAK = re.compile(r"\s+/\s*|\s*/\s+")
 
 
 # ── fonts ─────────────────────────────────────────────────────────────────
@@ -192,6 +194,13 @@ def star_words(text):
     return out
 
 
+def claim_lines(text):
+    """The claim's forced lines: headline.html splits its text on ' / '
+    (a slash with a space on either side; '24/7' stays one word) and sets
+    each part on its own line, its words starred on their own."""
+    return [part.strip() for part in _FORCED_BREAK.split(str(text or "")) if part.strip()]
+
+
 def _num(params, key, default):
     try:
         v = params.get(key)
@@ -232,12 +241,13 @@ def _kicker_fit(text, col_w, size, Hd):
     return fs, len(lines), (col_w if len(lines) > 1 else max(lines))
 
 
-def _greedy(widths, space, col_w):
+def _greedy(widths, space, col_w, breaks=()):
     """Greedy line widths (Chromium's first pass; text-wrap: balance keeps
-    the line count)."""
+    the line count); ``breaks``: indices of words a forced break (<br>)
+    starts a line at."""
     lines = []
-    for w in widths:
-        if lines and lines[-1] + space + w <= col_w + 0.01:
+    for k, w in enumerate(widths):
+        if lines and k not in breaks and lines[-1] + space + w <= col_w + 0.01:
             lines[-1] += space + w
         else:
             lines.append(w)
@@ -250,15 +260,15 @@ def _balanced_width(claim, fs, col_w):
     line box until another line would be needed)."""
     widths = [em * fs for em, _s in claim.words]
     space = claim.space_em * fs
-    n = len(_greedy(widths, space, col_w))
+    n = len(_greedy(widths, space, col_w, claim.breaks))
     lo_, hi_ = max(widths or [0.0]), col_w
     for _ in range(24):
         mid = (lo_ + hi_) / 2.0
-        if len(_greedy(widths, space, mid)) <= n:
+        if len(_greedy(widths, space, mid, claim.breaks)) <= n:
             hi_ = mid
         else:
             lo_ = mid
-    return max(_greedy(widths, space, hi_))
+    return max(_greedy(widths, space, hi_, claim.breaks))
 
 
 def _box_above_below(path, px, lh):
@@ -280,30 +290,37 @@ class _Claim:
                      and str(params.get("style") or "sans") != "serif")
         self.acc_path = font_path(ACC_SERIF["family"], ACC_SERIF["weight"], True) if serif_acc else None
         self.words = []                       # (em width, is serif accent)
-        for t, acc in star_words(params.get("text")):
-            t = t.upper() if st["upper"] else t
-            if acc and self.acc_path:
-                k = ACC_SERIF["scale"]
-                em = (_advance(self.acc_path, t) + ACC_SERIF["track"] * len(t)) * k
-                self.words.append((em, True))
-            else:
-                self.words.append((_advance(self.path, t) + st["track"] * len(t), False))
+        self.breaks = set()                   # words a forced ' / ' line starts at
+        forced = claim_lines(params.get("text"))
+        for li, line in enumerate(forced):
+            if li and self.words:
+                self.breaks.add(len(self.words))
+            for t, acc in star_words(line):
+                t = t.upper() if st["upper"] else t
+                if acc and self.acc_path:
+                    k = ACC_SERIF["scale"]
+                    em = (_advance(self.acc_path, t) + ACC_SERIF["track"] * len(t)) * k
+                    self.words.append((em, True))
+                else:
+                    self.words.append((_advance(self.path, t) + st["track"] * len(t), False))
         self.space_em = _advance(self.path, " ") + st["track"]
         self.chars = len(str(params.get("text") or "").replace("*", ""))
-        self.max_lines = 2 if self.chars <= LONG_CLAIM else 3
+        # the template's line limit, never under its forced lines
+        self.max_lines = max(len(forced), 2 if self.chars <= LONG_CLAIM else 3)
         self.cap = metrics(self.path)[0]
 
     def layout(self, fs, col_w):
         """(height px, lines by height, widest word px, line count)."""
         lh = self.st["lh"]
-        lines = _greedy([em * fs for em, _s in self.words], self.space_em * fs, col_w)
+        lines = _greedy([em * fs for em, _s in self.words], self.space_em * fs, col_w,
+                        self.breaks)
         # which words sit on which line, for the taller accent lines
         rows, cur, w_cur = [[]], 0.0, None
-        for em, serif in self.words:
+        for k, (em, serif) in enumerate(self.words):
             w = em * fs
             if w_cur is None:
                 w_cur = w
-            elif w_cur + self.space_em * fs + w <= col_w + 0.01:
+            elif k not in self.breaks and w_cur + self.space_em * fs + w <= col_w + 0.01:
                 w_cur += self.space_em * fs + w
             else:
                 rows.append([])
