@@ -3084,6 +3084,18 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         pm.begin_graph()
     pm_cur = {}                     # label -> the matte's current label
 
+    def _mask_kernels(parts_, mark):
+        """A program-matte block's chain (parts_[mark:]) resampled as a
+        MASK: the picture's enlarging kernel (lanczos) and its luma
+        sharpen give a matte ringing and cost the most per frame; the
+        geometry — every crop, size and offset — is untouched."""
+        sharp = f",unsharp=3:3:{UPSCALE_SHARPEN:.2f}:3:3:0"
+        for k_ in range(mark, len(parts_)):
+            p_ = parts_[k_].replace(sharp, "")
+            if UPSCALE_SCALER and UPSCALE_SCALER != "bilinear":
+                p_ = p_.replace(f":flags={UPSCALE_SCALER}", ":flags=bilinear")
+            parts_[k_] = p_
+
     def _pm_chain(chain, tag):
         """The picture's post-concat geometry, on the matte too."""
         for lab in list(pm_cur):
@@ -4082,6 +4094,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                     parts.append(f"[{tap}]trim=start={s:.3f}:end={ev:.3f},"
                                  f"setpts=PTS-STARTPTS{up}[{raw}]")
                 out = f"pm{x}b{i}"
+                mark = len(parts)
                 if i in card_layout:
                     under = None
                     if i in card_dissolve:
@@ -4093,6 +4106,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                                 mask=True)
                 else:
                     _full_frame(i, raw, f"{out}y", f"m{x}{i}", mask=True)
+                _mask_kernels(parts, mark)
                 parts.append(f"[{out}y]format=gray[{out}]")
                 pm_blk[(lab, "seg", i)] = out
             f3 = round(float(fps), 3)
@@ -4312,10 +4326,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         if fspan:
             edge = float(keep[i][1]) if side == "a" else float(keep[i][0])
             seg_focus = follow.centre_at(fspan, edge)
+        mark = len(parts)
         _normalize_video(parts, f"{uu}r", f"{uu}h", W, H, fps, seg_mode,
                          f"{uu}n", focus=seg_focus, seg_dur=h / f3, frames=h,
                          picture=(edl.get("frame") or {}).get("picture"),
                          grade=None, src_size=main_src_size)
+        _mask_kernels(parts, mark)
         pair = (f"[{uu}o][{uu}h]" if side == "a" else f"[{uu}h][{uu}o]")
         parts.append(f"{pair}concat=n=2:v=1:a=0,{tail},format=gray[{uu}m]")
         return f"{uu}m"
