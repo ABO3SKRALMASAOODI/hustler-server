@@ -2177,7 +2177,12 @@ MASTER_VERSION = 1
 # Also v4 (round 7 final review, same release): a slam entrance's oversized
 # first frames stay inside the picture (the start scale shrinks below 1.5x
 # for a wide line).
-LEGIBILITY_VERSION = 4
+# v5 (P2 template track, Oct 2026): a counter's label takes the number's ink
+# (`color`; dark ink on a light card read white), the persistent headline
+# breaks its claim at ' / ' instead of printing the slash, and
+# timeline_steps/glow_title/image_card read their new size/x knobs (defaults
+# render as before).
+LEGIBILITY_VERSION = 5
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
 # mute_captions unset hides only the spoken words it shows, the rest stay
@@ -2213,7 +2218,20 @@ LEGIBILITY_VERSION = 4
 # (its words appear as it exits), and a page before a muting graphic clears
 # as it lands even when the next page's first word is said a frame before
 # its exit (that word belongs to the layout after it).
-CAPTION_CARRY_VERSION = 4
+# v5 (Diamandis run, Oct 2026 — captions inside picture cards): a caption
+# whose anchor lies inside a card stays on that anchor in the card's inner
+# column, its block measured as the caption track lays it out (first line
+# on the anchor, growing down) and moved at most 1.5 lines to clear the
+# card's edges, a face with its chin, a graphic or the watermark — pages of
+# one line where the card's foot under the chin holds one. An explicit
+# anchor_y is never moved for an unmeasured (prior) face nor sent over the
+# head by a measured one: past the face on its own side, else to a clear
+# band on the canvas around the card, else it stays and the plan names it;
+# libass presets take this only for an anchor_y set; a card's own place
+# keeps the opening caption's lead-in; a shot's measured face speaks for
+# the shot; words are muted only where a graphic that replaces speech
+# covers their block; lines keep to the card's column.
+CAPTION_CARRY_VERSION = 5
 
 # Crops and picture cards that follow the speaker's face inside a shot
 # (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as

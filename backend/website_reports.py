@@ -18,30 +18,38 @@ def visits_report(cur, scope, signup_start="2026-07-06"):
     FROM bounds,generate_series(start,CURRENT_DATE,interval '1 day') d
     LEFT JOIN visits v ON v.day=d::date LEFT JOIN signups s ON s.day=d::date ORDER BY d''', (signup_start, signup_start))
     rows = [dict(r) for r in cur.fetchall()]
-    cur.execute('''SELECT count(*) views,count(DISTINCT COALESCE(NULLIF(device_id,''),ip)) unique_visitors,
-                   min(visited_at)::date first_tracked FROM analytics_page_visits''')
-    totals = dict(cur.fetchone())
+    # One pass for every supported period (the old shape ran the bot-filtered
+    # view three times). Unique browsers are deduplicated per period, never
+    # summed from daily distinct counts.
+    cur.execute("""SELECT min(visited_at)::date first_tracked, CURRENT_DATE today,
+      count(*) views_all, count(DISTINCT vid) uv_all,
+      count(*) FILTER (WHERE visited_at >= CURRENT_DATE-89) views_90,
+      count(DISTINCT vid) FILTER (WHERE visited_at >= CURRENT_DATE-89) uv_90,
+      count(*) FILTER (WHERE visited_at >= CURRENT_DATE-29) views_30,
+      count(DISTINCT vid) FILTER (WHERE visited_at >= CURRENT_DATE-29) uv_30,
+      count(*) FILTER (WHERE visited_at >= CURRENT_DATE-6) views_7,
+      count(DISTINCT vid) FILTER (WHERE visited_at >= CURRENT_DATE-6) uv_7
+      FROM (SELECT visited_at, COALESCE(NULLIF(device_id,''),ip) vid
+              FROM analytics_page_visits) v""")
+    agg = dict(cur.fetchone() or {})
+    first = agg.get('first_tracked')
+    totals = {'views': agg.get('views_all') or 0,
+              'unique_visitors': agg.get('uv_all') or 0,
+              'first_tracked': first}
     totals['signups'] = sum(r['signups'] or 0 for r in rows)
     # Full traffic history predates the account-metrics epoch. Do not divide
     # a July signup cohort by March visitor totals. Daily ratios are aligned.
     totals['conversion_rate'] = None
-    # Unique browsers must be deduplicated for the selected period, never
-    # summed from daily distinct counts. Return every supported range once.
-    cur.execute("""WITH ranges AS (
-      SELECT 'all' key, min(visited_at)::date start FROM analytics_page_visits
-      UNION ALL SELECT '90',CURRENT_DATE-89
-      UNION ALL SELECT '30',CURRENT_DATE-29
-      UNION ALL SELECT '7',CURRENT_DATE-6
-    ) SELECT r.key,r.start,count(v.visited_at) views,
-      count(DISTINCT COALESCE(NULLIF(v.device_id,''),v.ip)) unique_visitors
-      FROM ranges r LEFT JOIN analytics_page_visits v ON v.visited_at>=r.start
-      GROUP BY r.key,r.start""")
+    from datetime import date, timedelta
+    today = agg.get('today') or date.today()
+    starts = {'all': first, '90': today - timedelta(days=89),
+              '30': today - timedelta(days=29), '7': today - timedelta(days=6)}
     periods = {}
-    for result in cur.fetchall():
-        period = dict(result)
-        key = period.pop('key')
-        start = str(period['start'] or signup_start)
+    for key, suffix in (('all', 'all'), ('90', '90'), ('30', '30'), ('7', '7')):
+        start = str(starts[key] or signup_start)
         aligned_start = max(start, signup_start)
+        period = {'start': starts[key], 'views': agg.get(f'views_{suffix}') or 0,
+                  'unique_visitors': agg.get(f'uv_{suffix}') or 0}
         period['signups'] = sum(r['signups'] or 0 for r in rows if r['day'] >= aligned_start)
         period['signup_start'] = aligned_start
         period['conversion_rate'] = (round(100 * period['signups'] / period['unique_visitors'], 1)

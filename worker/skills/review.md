@@ -59,8 +59,9 @@ HOW TO LOOK AT MOTION — two different renders:
   +0.27, +0.5, and the release. Batch several moments into a few calls.
 - Every repair makes a new version: render it complete again before the
   next rendered look. The geometry-only view (no `rendered=true`) needs no
-  render and shows framing and zoom aim, but no captions, graphics or
-  grade. `native_resolution=true` on one time gives full-detail pixels.
+  render and shows framing, zoom aim, picture cards and erase patches, but
+  no captions, graphics or grade. `native_resolution=true` gives one
+  full-detail image per time.
 
 SCREEN IN THIS ORDER — each item is a yes/no question:
 1. THE OPEN (rendered 0.0, 0.2, 0.6, 1.5): first visual event by 0.6 s?

@@ -376,7 +376,9 @@ def test_job_type_is_registered_everywhere():
 
 
 def test_seed_child_only_keeps_the_selected_story(monkeypatch, tmp_path):
-    """The scout must never sneak the old caption/crop/zoom recipe back in."""
+    """The scout must never sneak the old caption/crop/zoom recipe back in:
+    the story cut plus the 9:16 frame every child needs (a child cut with
+    no frame rendered 16:9 in the Diamandis run), nothing else."""
     import agent_tools
     import db as dbx
 
@@ -390,12 +392,17 @@ def test_seed_child_only_keeps_the_selected_story(monkeypatch, tmp_path):
 
     class FakeContext:
         duration = 180.0
+        index = {}
 
         def __init__(self):
             self.row = {"version": 1, "json": {"keep": [[0.0, 180.0]]}}
 
         def latest_edl(self):
             return self.row
+
+        def write_edl(self, edl, desc):
+            self.row = {"version": self.row["version"] + 1, "json": edl}
+            return f"EDL v{self.row['version']}: {desc}"
 
     fake_ctx = FakeContext()
     monkeypatch.setattr(agent_tools, "ToolContext",
@@ -412,10 +419,15 @@ def test_seed_child_only_keeps_the_selected_story(monkeypatch, tmp_path):
         FakeDb(), {"id": 9}, 71, {}, {"start": 32, "end": 88},
         str(tmp_path))
 
-    assert version == 2 and note == "kept story"
+    assert version == 3 and note.startswith("kept story; 9:16 frame")
     assert calls == [("keep_segments", {
         "segments": [[32, 88]], "snap_to_words": True,
     })]
+    edl = fake_ctx.row["json"]
+    assert set(edl) == {"keep", "frame"}
+    # no measured layout: the whole frame fitted, never a guessed crop
+    assert edl["frame"]["ratio"] == "9:16" and \
+        edl["frame"]["mode"] == "pad_blur"
 
 
 def test_seed_retry_recovers_matching_word_snapped_edl(monkeypatch, tmp_path):
@@ -440,7 +452,9 @@ def test_seed_retry_recovers_matching_word_snapped_edl(monkeypatch, tmp_path):
 
         @staticmethod
         def latest_edl():
-            return {"version": 4, "json": {"keep": expected_keep}}
+            return {"version": 4, "json": {
+                "keep": expected_keep,
+                "frame": {"ratio": "9:16", "mode": "pad_blur"}}}
 
     monkeypatch.setattr(agent_tools, "ToolContext",
                         lambda *_args, **_kwargs: FakeContext())

@@ -89,9 +89,17 @@ BASE_FILTER = (
     "AND u.unsubscribed_at IS NULL "
     f"AND (({customer_scope('u')}) OR lower(u.email)='thevalmera@gmail.com')"
 )
+# Audience SIZES shown on the admin Email page: the same people minus the
+# owner's own account (which still receives the emails as a monitor).
+AUDIENCE_COUNT_FILTER = (
+    "u.is_verified=1 AND u.email IS NOT NULL AND u.email <> '' "
+    "AND u.unsubscribed_at IS NULL "
+    f"AND ({customer_scope('u')})"
+)
 NOT_TODAY = (
     "NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id "
-    "AND s.status='sent' AND s.sent_at::date = CURRENT_DATE)"
+    "AND s.status='sent' AND s.sent_at >= CURRENT_DATE "
+    "AND s.sent_at < CURRENT_DATE + 1)"
 )
 CONTACT_CADENCE = (
     "NOT EXISTS (SELECT 1 FROM newsletter_sends s WHERE s.user_id=u.id "
@@ -147,9 +155,26 @@ def ensure_newsletter_schema(conn):
     if _nl_schema_ready:
         return
     cur = conn.cursor()
+    # Catalog reads take no table locks. In production every object exists,
+    # so no request (and no GET) ever issues DDL; only a fresh database does.
+    cur.execute("""SELECT
+        to_regclass('public.newsletter_sends') IS NOT NULL
+          AND to_regclass('public.newsletter_templates') IS NOT NULL
+          AND to_regclass('public.newsletter_settings') IS NOT NULL
+          AND EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'users'
+                         AND column_name = 'unsubscribed_at') AS ready""")
+    row = cur.fetchone()
+    present = bool(row and (row["ready"] if isinstance(row, dict) else row[0]))
+    if present:
+        cur.execute("SELECT 1 FROM newsletter_settings WHERE id = 1")
+        if cur.fetchone() is not None:
+            cur.close()
+            _nl_schema_ready = True
+            return
     # Never let DDL sit in the lock queue. Session-local; the app's normal
     # queries are unaffected.
-    cur.execute("SET LOCAL lock_timeout = '3s'")
+    cur.execute("SET LOCAL lock_timeout = '2s'")
     cur.execute("""SELECT 1 FROM information_schema.columns
                     WHERE table_name = 'users'
                       AND column_name = 'unsubscribed_at'""")
@@ -696,11 +721,14 @@ def segments():
         from video_services.newsletter_metrics import read_counts
         with conn.cursor() as cur:
             cur.execute("SET LOCAL statement_timeout = '12s'")
-            counts = read_counts(cur, BASE_FILTER, EXPORT_STATES)
+            counts = read_counts(cur, AUDIENCE_COUNT_FILTER, EXPORT_STATES)
         # The explicit “Preview who's due” action runs the full send planner.
         # Loading a dashboard must not acquire its lock or query Brevo again.
         return jsonify({"counts": counts, "eligible_now": {},
-                        "eligibility_on_demand": True}), 200
+                        "eligibility_on_demand": True,
+                        "audience_note": "Email audience: customers since the "
+                                         "relaunch who can receive email. "
+                                         "Your own account is not counted."}), 200
     finally:
         conn.close()
 
@@ -997,7 +1025,11 @@ def get_campaigns():
         'opens': stats.get('uniqueOpens', 0),
         'clicks': stats.get('uniqueClicks', 0),
         'blocked': stats.get('blocked', 0),
-    }}), 200
+    },
+        'label': 'All emails from Valmera (provider-wide)',
+        'note': 'Brevo totals for every email Valmera sends, including login '
+                'codes and receipts, not only newsletters. Apple Mail opens '
+                'every message automatically, so opens are inflated.'}), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -600,8 +600,10 @@ def test_shorts_story_seed_accepts_the_shot_snapped_keep(monkeypatch,
     version, note = shorts._seed_story_child(
         FakeDb(), {"id": 9}, 71, ctx.index, {"start": 140.0, "end": 152.7},
         str(tmp_path))
-    assert version == 2 and note.startswith("EDL v1")
+    # the cut, then the 9:16 frame every child starts with
+    assert version == 3 and note.startswith("EDL v1")
     assert ctx.latest_edl()["json"]["keep"] == [[140.0, 152.63]]
+    assert ctx.latest_edl()["json"]["frame"]["ratio"] == "9:16"
 
 
 def test_set_frame_keeps_an_authored_aim_but_names_the_sliver(monkeypatch,

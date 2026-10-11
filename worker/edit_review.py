@@ -106,6 +106,10 @@ MAX_ACCENTS = 1
 RESTATE_MIN_CONTENT = 3      # content words a graphic needs to "restate"
 RESTATE_SHARE = 0.85         # share of them heard around its window
 RESTATE_PAD_S = 2.0
+# Oct 2026 (Diamandis run): a short starred lockup of heard words still
+# restates them. The s09 editor called its three Headline Pro band lockups
+# 'the Look's own'; the reviewer answered "EARN ITS PLACE is right", and the
+# s07/s08 reviews killed on the same re-typeset (test_p2_template_tool_defects).
 
 # ── beat coverage (the budget's complement) ──────────────────────────────
 DEAD_GAP_S = 8.0             # a body stretch this long with no designed beat
@@ -919,12 +923,27 @@ def _insert_spans(prog):
     return out
 
 
+_IMAGE_EXT = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif", ".mp4", ".mov", ".webm")
+
+
+def _html_image(m):
+    """An authored html graphic that places a project image or clip (an
+    asset_* param): s09's NASA photo of Mars beside the payoff was 'the name
+    Mars set as the heard words' (Oct 2026)."""
+    if m.get("template") != "html":
+        return False
+    params = (m.get("item") or {}).get("params") or {}
+    return any(str(k).startswith("asset_") and str(v).lower().endswith(_IMAGE_EXT)
+               for k, v in params.items())
+
+
 def _imagery(edl, ms, prog):
     """The program's real-imagery spans: cover or picture-in-picture
-    overlays, spliced inserts and the image card templates."""
+    overlays, spliced inserts, the image card templates and authored html
+    graphics placing a project image."""
     out = _overlay_spans(edl) + _insert_spans(prog)
     out += [{"start": m["start"], "end": m["end"], "kind": "image", "id": m["id"]}
-            for m in ms if m["template"] in IMAGE_TEMPLATES]
+            for m in ms if m["template"] in IMAGE_TEMPLATES or _html_image(m)]
     return out
 
 

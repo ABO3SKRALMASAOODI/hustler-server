@@ -140,7 +140,15 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   omitted = the program end; or one per chapter, never overlapping) with y
   omitted: the write centres it in the free band above the card or the
   letterboxed picture and sizes it to that band (the band starts below the
-  feed header AND the free-tier watermark's zone). A headline that opens
+  feed header AND the free-tier watermark's zone). The write measures the
+  claim from the font files against the captions (HEADLINE TYPE): it
+  refuses a claim smaller than the captions and names what fixes it — the
+  card top (with the largest card that band leaves against the 0.54
+  picture floor), the claim length or the kicker — and says what lifts one
+  under 1.2x. For params you did not pass it first sets a short kicker
+  (about 12 characters) on its own line beside the corner mark (kicker_y:
+  the mark covers the top-left only, so the band is the claim's) and a
+  larger size. A headline that opens
   the program is the hook on frame 0, the thumbnail: the write sets it
   complete there (entrance 'none') unless you pass an entrance. It holds the band and
   YIELDS on its own at render time — gone on the frame any graphic that

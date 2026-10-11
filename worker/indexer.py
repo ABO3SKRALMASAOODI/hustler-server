@@ -33,6 +33,7 @@ import llm
 import media
 import motion_judge
 import scenes
+import source_layout
 import spatial
 import storage
 import tiles as tilestrip
@@ -468,6 +469,18 @@ def run_index_job(worker_db, job):
                     warnings.append(
                         f"shot-boundary spatial supplement failed "
                         f"({str(e)[:120]}) — coarse face/text track kept")
+                try:
+                    # What the frame is made of (a call window, its chrome,
+                    # the self-view), once per source: every short cut from
+                    # it inherits this through the shared index row.
+                    state["source_layout"] = source_layout.analyze(
+                        proxy_local, info["duration"], state["shots"],
+                        src_w=info["width"], src_h=info["height"],
+                        spatial=state.get("spatial"))
+                except Exception as e:
+                    warnings.append(
+                        f"source layout measurement failed ({str(e)[:120]})"
+                        " — tools measure it on first use")
                 _lane_progress("picture", 0.96)
                 try:
                     f_up.result()
@@ -557,6 +570,7 @@ def run_index_job(worker_db, job):
         language, silences = state["language"], state["silences"]
         perception_sidecar = state.get("perception")
         spatial_sidecar = state.get("spatial")
+        layout_sidecar = state.get("source_layout")
         motion_sidecar = state.get("motion")
         try:
             visual_storyboard = visual_index.build(
@@ -613,6 +627,7 @@ def run_index_job(worker_db, job):
             perception=perception_sidecar,
             motion=motion_sidecar,
             spatial=spatial_sidecar,
+            source_layout=layout_sidecar,
             visual_storyboard=visual_storyboard,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)

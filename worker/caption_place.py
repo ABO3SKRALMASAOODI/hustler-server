@@ -134,6 +134,230 @@ def column(W, H, base=(0.15, 0.85)):
     return tuple(base)
 
 
+# ── captions inside a card (Diamandis run, Oct 2026) ─────────────────────
+# Judged on the run's 9 shorts: 'clean' captions with anchor_y 0.735 inside
+# a 4:5 card landed on Elon's mouth (y ~0.56) or over his hair: the plan
+# priced a caption as a block CAP_HALF_H either side of its anchor, which
+# brushed the card's bottom edge, and then took the largest free band above
+# a talking-head PRIOR face (nothing measured near the moment) — his real
+# mouth. Words were muted under graphics that did not cover the captions,
+# and lines ran past the card's sides (the template's column is the
+# frame's).
+#
+# A caption whose anchor lies inside a card window belongs to that card
+# (home_rect). It keeps to the card's inner column (card_column: the card
+# less CARD_SIDE_PAD each side) and stays on its anchor, its block measured
+# the way the motion caption template lays it out (block_metrics: the first
+# line's row on the anchor, the block growing DOWN from it, raised only as
+# far as the zone needs) and moved at most NUDGE_LINES lines to clear the
+# card's edges, a face with its chin, a graphic or the watermark
+# (anchor_spot). A spot under the chin that holds one line but not the
+# look's tallest page gets pages of one line (``l``) instead of a shrunken
+# two-line block. Lockup/stack hero ladders (HERO_LOOKS) are poster
+# lockups laid across the card by design (render_qc does not hold them to
+# its edges): they keep the template's own column and the old placement.
+CARD_SIDE_PAD = 0.035
+NUDGE_LINES = 1.5
+# A card window narrower than this (frame width) is no caption column.
+MIN_HOME_W = 0.3
+# A spot holds at least one caption line plus this slack.
+ONE_LINE_SLACK = 1.1
+# An anchor the editor set (caption_carry.explicit_anchor) is the row its
+# first line reads on: the block is raised at most this many lines to fit
+# its second line above the card's foot; past that its pages hold one line,
+# so the reading row stays put from page to page.
+LOCKED_LIFT_LINES = 0.5
+HERO_LOOKS = ("lockup", "stack")
+# Average advance of a caption glyph (em) — sentence case, and capitals
+# (an uppercase style, or a look that sets them) — for the characters one
+# line of a card's column holds (line_chars), when the look's face cannot
+# be measured (no bundled file, no Pillow).
+CHAR_EM, CAPS_EM = 0.6, 0.7
+# The face each motion look sets a caption line in (caption_motion.html
+# .L-<look> .blk): CSS family, weight, letter-spacing (em), and the em a
+# line spends besides its glyphs (mono's plate padding). A style's own font
+# replaces the family and weight, as the template does (not on mono).
+LOOK_FACE = {"clean": ("Inter", 600, -0.014, 0.0), "editorial": ("Inter Display", 700, -0.022, 0.0),
+             "pop": ("Inter Display", 900, -0.022, 0.0), "box": ("Inter Display", 800, -0.018, 0.0),
+             "serif": ("Inter Display", 700, -0.02, 0.0), "glow": ("Inter Display", 800, -0.02, 0.0),
+             "mono": ("JetBrains Mono", 700, -0.01, 1.04)}
+# A caption line of ordinary speech: its measured average advance prices a
+# character (upper-cased for capitals), with EM_SLACK of headroom for a
+# page of wider words. Judged on the Diamandis run laid out in Chromium:
+# the flat 0.6/0.7 em cut one line of 'TESLA'S DEVELOPING' into two
+# one-word pages (42 one-word pages over 9 shorts, against 4 before); a
+# measured price keeps a line whole where it fits.
+LINE_SAMPLE = ("and then you add the humanoid robots in there it is actually very "
+               "difficult to predict what will happen next, which is why")
+EM_SLACK = 1.12
+
+
+def _measured_em(edl, look, upper):
+    """(em per character, em of padding) of a caption line in the look's
+    face — the style's own font when it sets one — measured on the bundled
+    font file (worker/band_type.py), or None."""
+    face = LOOK_FACE.get(look)
+    if not face:
+        return None
+    family, weight, track, pad = face
+    try:
+        import band_type
+        import motion_captions
+        sp = motion_captions.style_params(edl)
+        if sp.get("font") and look != "mono":
+            family, weight = sp["font"], int(sp.get("font_weight") or weight)
+        path = band_type.font_path(family, weight)
+        if not path:
+            return None
+        text = LINE_SAMPLE.upper() if upper else LINE_SAMPLE
+        em = band_type.text_width(path, text, 1.0, track) / len(text)
+    except Exception:  # noqa: BLE001 — no font measure on this lane: the flat price
+        return None
+    return (em * EM_SLACK, pad) if em > 0.2 else None
+
+
+def template_column(W, H):
+    """(x0, x1) the motion caption template lays a block in
+    (worker/motion/templates/caption_motion.html SAFE), frame fractions."""
+    W, H = float(W), float(H)
+    ar = H / max(W, 1.0)
+    dw = 1080.0                                   # motion_engine.DESIGN_W
+    if ar >= 1.6:
+        return (round(0.09 * dw) / dw, 1.0 - round(0.09 * dw) / dw)
+    if ar > 1.15:
+        return (64.0 / dw, 1.0 - 64.0 / dw)
+    if ar >= 0.95:
+        return (80.0 / dw, 1.0 - 80.0 / dw)
+    return (0.13, 0.87)
+
+
+def home_rect(rects, y, col):
+    """The card window (x0, y0, x1, y1) a caption anchored at ``y`` sits
+    inside — the innermost one holding the anchor and, well inside its
+    sides, the caption column's centre — or None (the caption is on the
+    canvas, on a seam, or the window is too narrow to hold a column)."""
+    cx = (float(col[0]) + float(col[1])) / 2.0
+    best = None
+    for r in rects or ():
+        x0, y0, x1, y1 = (float(v) for v in r[:4])
+        if not (y0 + EDGE_PAD < y < y1 - EDGE_PAD and x0 + 0.05 < cx < x1 - 0.05):
+            continue
+        if x1 - x0 < MIN_HOME_W:
+            continue
+        if best is None or (x1 - x0) * (y1 - y0) < (best[2] - best[0]) * (best[3] - best[1]):
+            best = (x0, y0, x1, y1)
+    return best
+
+
+def card_column(rect, W, H):
+    """(x0, x1) of the column a caption set inside card window ``rect``
+    lays its lines in: the card's width less CARD_SIDE_PAD each side, never
+    wider than the template's own column."""
+    tc = template_column(W, H)
+    return (round(max(tc[0], rect[0] + CARD_SIDE_PAD), 4),
+            round(min(tc[1], rect[2] - CARD_SIDE_PAD), 4))
+
+
+def look_of(edl):
+    try:
+        import motion_captions
+        return motion_captions.look_of(edl)
+    except Exception:  # noqa: BLE001 — an unreadable style: no motion look
+        return None
+
+
+def block_metrics(edl, W, H):
+    """(one, tall, motion): the height of a one-line caption block and of
+    the tallest block the caption style sets (frame fractions), and whether
+    the motion caption template lays them out — as caption_motion.html's
+    nominal() measures them: a motion block keeps its first line's row on
+    the anchor and grows DOWN (raised only as far as the zone needs); a
+    libass block is centred on its anchor."""
+    one = line_height(edl, W, H)
+    look = look_of(edl)
+    if not look:
+        caps = (edl or {}).get("captions") or {}
+        style = caps.get("style") if isinstance(caps.get("style"), dict) else {}
+        lines = 1 if style.get("single_line") else 2
+        return one, lines * one, False
+    fs = one / LOOK_LINE.get(look, LOOK_LINE["editorial"])[1]     # the font size
+    if look == "pop":
+        tall = one
+    elif look == "editorial":
+        tall = max(2 * one, fs * (1.08 + 1.8 * 0.86))     # a sans row over its serif hero
+    elif look in HERO_LOOKS:
+        hero = (4.9, 0.84) if look == "lockup" else (5.6, 0.9)
+        k = 0.78 if float(H) / max(float(W), 1.0) < 0.95 else 1.0
+        tall = fs * (2 * 1.05 + hero[0] * k * hero[1])     # connectors around a hero ladder
+    else:
+        tall = 2 * one
+    return one, tall + 0.08 * fs, True
+
+
+def line_chars(edl, W, H, col):
+    """The characters one caption line holds in column ``col`` (x0, x1) at
+    the style's size: the budget of a page of one line (caption_carry
+    plan's ``l``)."""
+    one, _tall, motion = block_metrics(edl, W, H)
+    look = look_of(edl) if motion else None
+    caps = (edl or {}).get("captions") or {}
+    style = caps.get("style") if isinstance(caps.get("style"), dict) else {}
+    fs = one / (LOOK_LINE.get(look, LOOK_LINE["editorial"])[1] if look else 1.2)
+    upper = bool(style.get("uppercase")) or look in ("pop", "lockup")
+    em, pad = _measured_em(edl, look, upper) or (CAPS_EM if upper else CHAR_EM, 0.0)
+    width = (float(col[1]) - float(col[0])) * float(W) - pad * fs * float(H)
+    return max(6, int(width / max(1e-6, em * fs * float(H))))
+
+
+def natural_block(y, one, tall, motion=True):
+    """(top, bottom) of the tallest page a caption anchored at ``y`` sets
+    where nothing moves it (block_metrics)."""
+    top = y - one / 2.0 if motion else y - tall / 2.0
+    return top, top + tall
+
+
+def anchor_spot(bands, y, one, tall, motion=True, nudge=None, lift=None):
+    """Where a caption anchored at ``y`` sits within the free ``bands``:
+    (top, bottom) of the zone its block is laid into, or None.
+
+    A motion block keeps its first line's row on the anchor and grows down
+    to the zone's foot: it is lowered below an obstacle above it, and
+    raised as far as its tallest page needs to fit above the band's foot —
+    when that is at most ``lift`` (default: ``nudge``); past that the zone
+    holds pages of one line, their row on the anchor (raised only as far as
+    one line needs) rather than a row that climbs toward a face. A libass block
+    cannot shrink: its whole block is centred as near its anchor as the
+    band allows. Either moves at most ``nudge`` (NUDGE_LINES lines) off
+    where the template would set it; the band nearest the anchor wins. The
+    zone starts at the block's top, so the template never slides it up out
+    of what was proven clear."""
+    nudge = NUDGE_LINES * one if nudge is None else nudge
+    lift = nudge if lift is None else max(0.0, lift)
+    need = ONE_LINE_SLACK * one if motion else tall
+    nat = natural_block(y, one, tall, motion)[0]
+    best = None
+    for a, b in bands:
+        if b - a < need - 1e-9:
+            continue
+        lo, hi = max(a, nat - nudge), min(nat + nudge, b - need)
+        if lo > hi + 1e-9:
+            continue
+        if motion:
+            # the tallest page fits when the block may rise that far; else
+            # pages of one line, their row on the anchor (risen only as far
+            # as one line needs)
+            want = min(nat, b - tall) if b - tall >= nat - lift - 1e-9 else min(nat, b - need)
+            top = min(max(want, lo), hi)
+            z1 = min(b, top + tall)
+        else:
+            top = min(max(nat, lo), hi)
+            z1 = top + tall
+        move = abs(top - nat)
+        if best is None or move < best[0]:
+            best = (move, top, z1)
+    return (round(best[1], 4), round(best[2], 4)) if best else None
+
+
 # ── layout: cards and panels ─────────────────────────────────────────────
 
 def _cards(edl):

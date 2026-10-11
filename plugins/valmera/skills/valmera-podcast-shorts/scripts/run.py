@@ -11,6 +11,12 @@ for jobs and EDL versions, and the review verdict is the coordinator's call.
 Flow per short:
   add-short -> assign (brief, editor) -> candidate -> review ship|fix|kill
   -> export ; exception closes a short that cannot ship.
+register does add-short + assign --brief for a whole assignments folder in
+one call. An editor records its candidate whether or not it holds a slot
+(a short still "queued" or back in "fix" is taken over by the candidate).
+First-candidate gate: until the run has one review, no more than
+max_editors shorts are handed out, so a systemic defect (layout, source,
+template, a Valmera tool) is caught on the first candidate, not the ninth.
 finalize writes exports/manifest.json, exports/publishing-manifest.json and
 exports/PUBLISHING.md with the same file names and keys as v7 runs.
 
@@ -42,6 +48,12 @@ DEFAULT_EDITORS = 3
 HERO_CAP = 12
 BRIEF_MAX_WORDS = 250
 NOTE_MAX_LINES = 10
+# Beat coverage is planned in the brief: the body needs a beat that adds
+# information every ~6-8 s of PROGRAM, which is about 10-12 s of SOURCE
+# before tightening (programs keep 45-80% of their window). Oct 2026 run:
+# 8 of 9 briefs left 13-27 s source gaps and the reviews killed 5 shorts
+# for beatless stretches the brief had already planned.
+BEAT_GAP_MAX_S = 12.0
 LOOKS = (
     "headline-pro", "editorial-serif", "kinetic-poster", "cinematic-doc",
     "mono-noir", "clean-data", "creator-glow",
@@ -217,6 +229,47 @@ def editors_busy(state: dict) -> dict:
             if item["status"] == "editing" and item.get("editor")}
 
 
+def gate_open(state: dict) -> bool:
+    """The first-candidate gate is open once any short has a review (or the
+    run was told to skip it with assign --no-gate)."""
+    return bool(state.get("gate_skipped")) or any(
+        item["reviews"] for item in state["shorts"].values())
+
+
+def handed_out(state: dict) -> list[str]:
+    """Shorts an editor has started (editing or beyond, or with a candidate)."""
+    return [item["short_id"] for item in state["shorts"].values()
+            if item["status"] != "queued" or item["candidates"]]
+
+
+def beat_gap(payload: dict, window: list | None) -> tuple[float, list] | None:
+    """(largest gap in source seconds, [from, to]) between the window start
+    and the brief's timed beats, the payoff's tail excluded; None when the
+    brief has no window or no timed beats to measure."""
+    window = payload.get("source_window_s") or window
+    if not (isinstance(window, (list, tuple)) and len(window) == 2):
+        return None
+    try:
+        start, end = float(window[0]), float(window[1])
+    except (TypeError, ValueError):
+        return None
+    times = []
+    for beat in payload.get("beats") or []:
+        if not isinstance(beat, dict):
+            continue
+        try:
+            at = float(beat.get("source_s"))
+        except (TypeError, ValueError):
+            continue
+        if start - 1.0 <= at <= end + 1.0:
+            times.append(max(start, at))
+    if not times:
+        return None
+    points = [start] + sorted(times)
+    gaps = [(b - a, [a, b]) for a, b in zip(points, points[1:])]
+    return max(gaps, key=lambda g: g[0])
+
+
 # ── commands ───────────────────────────────────────────────────────────────
 
 def cmd_init(args: argparse.Namespace) -> dict:
@@ -320,7 +373,7 @@ def cmd_add_short(args: argparse.Namespace) -> dict:
         return item
 
 
-def load_brief(path_text: str, short_id: str) -> dict:
+def load_brief(path_text: str, short_id: str, window: list | None = None) -> dict:
     payload = read_json(path_text, "brief")
     if not isinstance(payload, dict):
         raise StateError("brief must be a JSON object")
@@ -353,10 +406,22 @@ def load_brief(path_text: str, short_id: str) -> dict:
     beats = payload.get("beats", [])
     if not isinstance(beats, list):
         raise StateError("brief beats must be a list")
+    gap = beat_gap(payload, window)
+    gap_reason = payload.get("beat_gap_reason")
+    if gap and gap[0] > BEAT_GAP_MAX_S and not (
+            isinstance(gap_reason, str) and gap_reason.strip()):
+        a, b = gap[1]
+        raise StateError(
+            f"brief beats leave source {a:.1f}-{b:.1f} s ({gap[0]:.1f} s) with no "
+            f"beat; plan one at least every {BEAT_GAP_MAX_S:g} s of source (about "
+            "6-8 s of program): a thesis line, number, name, list or contrast in "
+            "that span, with its cue and source_s. If the span is cut in the edit, "
+            "say so in beat_gap_reason")
     resolved = Path(path_text).expanduser().resolve()
     record = {
         "file": str(resolved), "sha256": sha256(resolved), "words": words,
         "story": clean_story, "music": music, "beats": len(beats),
+        "max_beat_gap_s": round(gap[0], 1) if gap else None,
     }
     for key in ("headline", "speaker", "structure_reason", "closest_alternative"):
         value = payload.get(key)
@@ -370,7 +435,7 @@ def cmd_assign(args: argparse.Namespace) -> dict:
         item = short(state, args.short_id)
         require(item, ("queued", "editing", "fix"), "assign")
         if args.brief:
-            loaded = load_brief(args.brief, args.short_id)
+            loaded = load_brief(args.brief, args.short_id, item.get("source_range_s"))
             if item["status"] in ("editing", "fix") and item.get("structure") and \
                     loaded["structure"] != item["structure"] and item["candidates"]:
                 raise StateError("structure cannot change after a candidate exists")
@@ -390,7 +455,20 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             if item["status"] != "editing" and len(others) >= state["max_editors"]:
                 raise StateError(
                     f"{len(others)} editors are busy (max {state['max_editors']}); "
-                    "wait for a candidate or raise --max-editors with init")
+                    "wait for a candidate or raise --max-editors with init (an "
+                    "editor already working records its candidate without a slot)")
+            if args.no_gate and not state.get("gate_skipped"):
+                state["gate_skipped"] = True
+                event(state, "gate_skipped", short_id=args.short_id)
+            started = [s for s in handed_out(state) if s != args.short_id]
+            if item["status"] == "queued" and not gate_open(state) and \
+                    len(started) >= state["max_editors"]:
+                raise StateError(
+                    "first-candidate gate: review the run's first candidate "
+                    f"(run.py review) before handing out short #{len(started) + 1}. "
+                    "If its verdict names a shared cause (layout, source, template, "
+                    "a Valmera tool), fix the framing recipe and open briefs first. "
+                    "--no-gate only for a source whose recipe is already proven")
             item["editor"] = editor
             item["status"] = "editing"
             event(state, "assigned", short_id=args.short_id, editor=editor,
@@ -399,6 +477,46 @@ def cmd_assign(args: argparse.Namespace) -> dict:
             raise StateError("pass --brief, --editor or both")
         item["updated_at"] = now()
         return item
+
+
+def cmd_register(args: argparse.Namespace) -> dict:
+    """add-short + assign --brief for every assignments/<id>.json at once.
+    Each file carries short_id and child_project_id (plus rank, score,
+    speaker, tier, source_window_s, child_title or headline). All briefs are
+    checked before anything is written, so one bad brief writes nothing."""
+    folder = Path(args.assignments).expanduser().resolve()
+    files = sorted(p for p in folder.glob("*.json") if p.is_file())
+    if not files:
+        raise StateError(f"no assignment JSON files in {folder}")
+    plans = []
+    for path in files:
+        payload = read_json(str(path), f"assignment {path.name}")
+        if not isinstance(payload, dict) or not payload.get("short_id"):
+            raise StateError(f"{path.name}: needs short_id")
+        if not isinstance(payload.get("child_project_id"), int):
+            raise StateError(f"{path.name}: needs an integer child_project_id")
+        window = payload.get("source_window_s")
+        load_brief(str(path), payload["short_id"], window)  # validate first
+        title = payload.get("child_title") or payload.get("headline")
+        plans.append((path, payload, title, window))
+    rows = []
+    for path, payload, title, window in plans:
+        start, end = (window if isinstance(window, (list, tuple)) and len(window) == 2
+                      else (None, None))
+        cmd_add_short(argparse.Namespace(
+            run_dir=args.run_dir, short_id=payload["short_id"],
+            project_id=payload["child_project_id"], title=title,
+            tier=payload.get("tier") or "hero", rank=payload.get("rank"),
+            score=payload.get("score"), speaker=payload.get("speaker"),
+            source_start=start, source_end=end))
+        item = cmd_assign(argparse.Namespace(
+            run_dir=args.run_dir, short_id=payload["short_id"], brief=str(path),
+            editor=None, no_gate=False))
+        rows.append({"short_id": item["short_id"], "look": item["look"],
+                     "structure": item["structure"],
+                     "music_effective": item["music_effective"],
+                     "max_beat_gap_s": item["brief"].get("max_beat_gap_s")})
+    return {"registered": len(rows), "shorts": rows}
 
 
 def cmd_candidate(args: argparse.Namespace) -> dict:
@@ -418,9 +536,24 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
         raise StateError("handback must be a JSON object")
     with locked(run_dir(args.run_dir)) as state:
         item = short(state, args.short_id)
-        require(item, ("editing",), "record a candidate for")
-        if args.editor and item.get("editor") != args.editor:
-            raise StateError(f"{args.short_id} belongs to editor {item.get('editor')!r}")
+        require(item, ("editing", "queued", "fix"), "record a candidate for")
+        if item["status"] == "editing":
+            if args.editor and item.get("editor") != args.editor:
+                raise StateError(
+                    f"{args.short_id} belongs to editor {item.get('editor')!r}")
+        else:
+            # An editor that worked without a recorded slot (or the fix pass)
+            # records its finished candidate directly: no slot wait, no
+            # reviewer bookkeeping on its behalf.
+            if not item.get("brief"):
+                raise StateError("record the brief (run.py assign --brief) before "
+                                 "a candidate")
+            if item["status"] == "fix" and not item["candidates"]:
+                raise StateError(f"{args.short_id} is in fix with no candidate")
+            item["editor"] = args.editor or item.get("editor")
+            event(state, "assigned", short_id=args.short_id,
+                  editor=item["editor"] or "unrecorded", look=item["look"],
+                  structure=item["structure"], implicit=True)
         record = {"preview": args.preview, "edl_version": args.edl_version,
                   "note": "\n".join(lines), "renders": args.renders,
                   "editor": item.get("editor"), "recorded_at": now()}
@@ -586,12 +719,18 @@ def summary(state: dict) -> dict:
              and state["shorts"][r["short_id"]].get("brief")]
     nxt = []
     idle = max(0, state["max_editors"] - len(busy))
+    review = [r["short_id"] for r in rows if r["status"] == "candidate"]
+    gated = not gate_open(state) and len(handed_out(state)) >= state["max_editors"]
+    if review:
+        # reviews go before new edits: a verdict can change every open brief
+        nxt.append("review candidates first: " + ", ".join(review)
+                   + (" (first-candidate gate: no new shorts until one is reviewed)"
+                      if gated else ""))
+    if gated:
+        ready = [r for r in ready if state["shorts"][r]["status"] == "fix"]
     if idle and ready:
         nxt.append(f"hand {min(idle, len(ready))} short(s) to idle editors: "
                    + ", ".join(ready[:idle]))
-    review = [r["short_id"] for r in rows if r["status"] == "candidate"]
-    if review:
-        nxt.append("review candidates: " + ", ".join(review))
     export = [r["short_id"] for r in rows if r["status"] == "approved"]
     if export:
         nxt.append("export approved: " + ", ".join(export))
@@ -711,8 +850,11 @@ def publishing_markdown(manifest: dict) -> str:
            f"Run `{manifest['run_id']}`. Source: {src.get('url')}"
            + (f" ({src['channel']}" + (f", {src['upload_date']}" if src.get("upload_date")
                                          else "") + ")" if src.get("channel") else "")
-           + ". Nothing was published or scheduled. Every file below is a verified "
-           "final; previews are listed separately and are not finals.", ""]
+           + ". Nothing was published or scheduled. "
+           + ("Every file below is a verified final; previews are not finals."
+              if manifest["items"] else
+              "No final was exported in this run; every selected short is listed "
+              "under Not exported with its reason and next action."), ""]
     for it in manifest["items"]:
         dims = "x".join(map(str, it["dimensions"])) if it["dimensions"] else "?"
         out += [f"## {it['short_id']} - {it['title']}",
@@ -860,14 +1002,22 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--source-start", type=float)
     p.add_argument("--source-end", type=float)
 
+    p = command("register", cmd_register, "add-short + assign --brief for every "
+                "assignment JSON in a folder (one call for the whole slate).")
+    p.add_argument("--assignments", required=True,
+                   help="folder of <short_id>.json briefs, each with child_project_id")
+
     p = command("assign", cmd_assign, "Record the brief JSON and/or hand the short "
                 "to an editor.")
     p.add_argument("--short-id", required=True)
     p.add_argument("--brief", help="assignment JSON (see references/selection.md)")
     p.add_argument("--editor", help="editor name; one short per editor at a time")
+    p.add_argument("--no-gate", action="store_true",
+                   help="skip the first-candidate gate for this run (only when the "
+                   "source's framing recipe is already proven by a shipped short)")
 
     p = command("candidate", cmd_candidate, "Record an editor's candidate and free "
-                "the editor.")
+                "the editor (works from queued or fix too: no slot needed).")
     p.add_argument("--short-id", required=True)
     p.add_argument("--preview", required=True, help="preview path or URL")
     p.add_argument("--edl-version", required=True, type=int)

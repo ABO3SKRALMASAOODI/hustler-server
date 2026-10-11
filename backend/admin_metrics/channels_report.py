@@ -1,0 +1,477 @@
+"""Where signups and people came from (Q-CHANNEL-SIGNUPS, Q-CHANNEL-PEOPLE).
+
+Signups are classified in Python with acquisition.channel(), the same
+classifier the CRM endpoint uses, so the admin and the CRM can never disagree
+about a label. A signup without a usable source always carries a reason
+(plan §4.4); "unknown" no longer exists.
+"""
+import dataclasses
+from statistics import median
+
+import acquisition
+from acquisition import CHANNELS, REASON_LABELS, channel, not_recorded
+from admin_metrics import db, defs, ranges, visitors
+
+SURVEY_LABELS = {
+    "tiktok": "TikTok", "instagram": "Instagram", "youtube": "YouTube",
+    "x": "X (Twitter)", "google": "Google", "reddit": "Reddit",
+    "friend": "A friend", "ai_chatbot": "ChatGPT / AI", "other": "Other",
+    "valmera_message": "A message from Valmera", "no_answer": "No answer",
+}
+
+
+def survey_label(key):
+    if not key:
+        return SURVEY_LABELS["no_answer"]
+    return SURVEY_LABELS.get(key, key.replace("_", " ").capitalize())
+
+
+def _tracking_sql(cur):
+    return ("ws.tracking" if db.has_column(cur, "website_signups", "tracking")
+            else "NULL::text")
+
+
+# The signup browser's first recorded page (the connector rule in
+# acquisition.channel needs it). One definition for Growth and Customers.
+FIRST_PAGE_LATERAL = """LEFT JOIN LATERAL (
+              SELECT pv.page FROM page_visits pv
+               WHERE ws.device_id IS NOT NULL AND pv.device_id = ws.device_id
+                 AND pv.analytics_id IS NOT NULL
+               ORDER BY pv.visited_at LIMIT 1) fp ON TRUE"""
+
+
+def signup_rows(cur, period, extra_where="", extra_params=None):
+    """Customer signups in the period with their stored touch and outcomes."""
+    params = period.params()
+    params.update(extra_params or {})
+    where = "" if period.is_all else \
+        "AND u.created_at >= %(start)s AND u.created_at < %(end)s"
+    cur.execute(f"""
+        SELECT u.id, u.created_at, (ws.user_id IS NOT NULL) AS has_row,
+               ws.attribution, {_tracking_sql(cur)} AS tracking,
+               ws.device_id,
+               CASE WHEN o.skipped THEN NULL ELSE o.channel END AS told,
+               COALESCE(pay.paid, FALSE) AS paid,
+               COALESCE(pay.cents, 0) AS cents,
+               fp.page AS first_page
+          FROM users u
+          LEFT JOIN website_signups ws ON ws.user_id = u.id
+          LEFT JOIN onboarding_responses o ON o.user_id = u.id
+          LEFT JOIN LATERAL (
+              SELECT bool_or({defs.success('p')}) AS paid,
+                     COALESCE(sum(p.amount_cents) FILTER (
+                         WHERE {defs.success('p')} AND p.currency = 'USD'), 0)
+                         AS cents
+                FROM payments p WHERE p.user_id = u.id) pay ON TRUE
+          {FIRST_PAGE_LATERAL}
+         WHERE {defs.customer('u')} {where} {extra_where}""", params)
+    return [dict(r) for r in cur.fetchall()]
+
+
+def reasons_since(cur):
+    """When the backend began saving a reason for every signup (031 + code)."""
+    if not db.has_column(cur, "website_signups", "tracking"):
+        return None
+
+    def compute():
+        cur.execute("""SELECT min(completed_at) AS t FROM website_signups
+                        WHERE tracking IN ('tracked','privacy_signal',
+                                           'no_identity')""")
+        row = cur.fetchone()
+        return row["t"] if row else None
+    return db.cached_value("reasons_since", 600, compute)
+
+
+def touch_for(row, model="first"):
+    """The Touch (plan §6.4) for one signup row, with a reason when missing."""
+    created = row["created_at"]
+    before = created is not None and \
+        created < ranges.naive(defs.SOURCES_SINCE)
+    tracking = row.get("tracking")
+    attribution = row.get("attribution") or {}
+    touch = attribution.get(model) if isinstance(attribution, dict) else None
+    if row.get("has_row"):
+        if tracking == "privacy_signal":
+            return not_recorded("privacy_browser")
+        if tracking == "no_identity":
+            return not_recorded("nothing_sent")
+        if touch:
+            out = channel(touch, row.get("first_page"))
+            if out["channel"] == "not_recorded":
+                # A touch from valmera.io itself or from a sign-in/checkout
+                # page: the real landing was not saved. Never reason-less.
+                return not_recorded("landing_lost")
+            out.update(code=touch.get("code") or None,
+                       at=_touch_at(touch),
+                       estimated=tracking == "estimated_from_referrer",
+                       reason=None, reason_label=None)
+            return out
+        return not_recorded("before_tracking" if before else "landing_lost")
+    return not_recorded("before_tracking" if before else "no_row_unknown")
+
+
+def _touch_at(touch):
+    at = touch.get("at")
+    if not isinstance(at, (int, float)):
+        return None
+    from datetime import datetime, timezone
+    try:
+        return defs.iso(datetime.fromtimestamp(at / 1000.0, tz=timezone.utc))
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def complete_touch(t):
+    """Fill every Touch key so the frontend can rely on the shape."""
+    base = {"channel": "not_recorded", "channel_label": "Not recorded",
+            "detail": None, "detail_label": None, "campaign": None,
+            "campaign_label": None, "code": None, "at": None,
+            "estimated": False, "reason": None, "reason_label": None}
+    base.update({k: v for k, v in t.items() if k in base})
+    return base
+
+
+def _people_touch(row, model):
+    # First model: the source the browser first came from (its first row in
+    # the period carries the browser's first touch). Latest model: the latest
+    # touch as of its last row in the period, so a person who came back from
+    # a new source is counted there, the same way signups switch models.
+    attribution = row.get("first_attribution")
+    if model == "last" and isinstance(row.get("last_attribution"), dict):
+        attribution = row["last_attribution"]
+    if attribution is None:
+        # Visits before 7 Oct 12:34 carried no labels: fall back to the
+        # referrer host the tracker stored (empty means no referrer).
+        ref = (row.get("first_referrer") or "").strip().lower()
+        if ref in ("valmera.io", "www.valmera.io"):
+            return None
+        return {"source": ref or "direct"}
+    return attribution.get(model) if isinstance(attribution, dict) else None
+
+
+def people_by_channel(cur, period, model="first"):
+    """{channel: {"people": n, "details": {detail: n}}} for person browsers."""
+    out = {}
+    for row in visitors.people_rows(cur, period):
+        touch = _people_touch(row, model)
+        c = channel(touch, row.get("first_page")) if touch else None
+        if c is None or c["channel"] == "not_recorded":
+            c = not_recorded("landing_lost")
+        bucket = out.setdefault(c["channel"], {"people": 0, "details": {}})
+        bucket["people"] += 1
+        key = c.get("detail") or c.get("reason") or "unknown"
+        bucket["details"][key] = bucket["details"].get(key, 0) + 1
+    return out
+
+
+def coverage(signups):
+    """How many signups have a recorded source, and why the rest do not."""
+    reasons = {}
+    tracked = estimated = 0
+    for s in signups:
+        t = s["touch"]
+        if t["channel"] == "not_recorded":
+            r = t.get("reason") or "no_row_unknown"
+            reasons[r] = reasons.get(r, 0) + 1
+        elif t.get("estimated"):
+            estimated += 1
+        else:
+            tracked += 1
+    return {"signups": len(signups), "tracked": tracked, "estimated": estimated,
+            "not_recorded": [
+                {"reason": key, "label": label, "signups": reasons[key]}
+                for key, label in acquisition.NOT_RECORDED_REASONS
+                if reasons.get(key)]}
+
+
+def classify_signups(cur, period, model="first"):
+    rows = signup_rows(cur, period)
+    for r in rows:
+        r["touch"] = touch_for(r, model)
+    return rows
+
+
+def acquisition_report(cur, period, model="first"):
+    """GET /admin/v2/acquisition data."""
+    signups = classify_signups(cur, period, model)
+    tracked_people = period.end is None or period.end > defs.VISITS_SINCE
+    people = people_by_channel(cur, period, model) if tracked_people else {}
+    classes = visitors.classify(cur, period) if tracked_people else None
+    previews = (classes or {}).get("link_preview", 0)
+    rate_people, rate_signups, rate_since = _rate_window(
+        cur, period, model, signups, people)
+
+    rows = []
+    for key, label in CHANNELS:
+        in_channel = [s for s in signups if s["touch"]["channel"] == key]
+        p = people.get(key, {}).get("people", 0) if tracked_people else None
+        details = {}
+        for s in in_channel:
+            t = s["touch"]
+            dkey = t.get("detail") or t.get("reason") or "unknown"
+            dlabel = t.get("detail_label") or t.get("reason_label") or dkey
+            d = details.setdefault(dkey, {"key": dkey, "label": dlabel,
+                                          "people": 0, "signups": 0,
+                                          "paying": 0, "collected_usd": 0.0,
+                                          "estimated": 0})
+            d["signups"] += 1
+            d["paying"] += 1 if s["paid"] else 0
+            d["collected_usd"] = round(d["collected_usd"]
+                                       + defs.usd(s["cents"]), 2)
+            d["estimated"] += 1 if t.get("estimated") else 0
+        for dkey, n in people.get(key, {}).get("details", {}).items():
+            d = details.setdefault(dkey, {"key": dkey, "label": _detail_label(
+                key, dkey), "people": 0, "signups": 0, "paying": 0,
+                "collected_usd": 0.0, "estimated": 0})
+            d["people"] = n
+        if not tracked_people:
+            for d in details.values():
+                d["people"] = None
+        # Each detail's rate (Google, ChatGPT, a campaign) covers the same
+        # days as its channel's rate, so the two can be compared.
+        for dkey, d in details.items():
+            d["signup_rate"] = _detail_rate(key, dkey, rate_signups,
+                                            rate_people)
+        signups_n = len(in_channel)
+        rows.append({
+            "channel": key, "label": label,
+            "people": p,
+            "link_previews": previews if key == "outreach" else 0,
+            "signups": signups_n,
+            # A rate needs people and signups measured the same way; "not
+            # recorded" signups have no matching people, so it has none.
+            # Both sides of the rate cover the same time: since sources
+            # were recorded (7 Oct) when the period starts earlier.
+            "signup_rate": _channel_rate(key, rate_signups, rate_people),
+            "paying": sum(1 for s in in_channel if s["paid"]),
+            "collected_usd": round(sum(defs.usd(s["cents"])
+                                       for s in in_channel), 2),
+            "details": sorted(details.values(),
+                              key=lambda d: (-d["signups"],
+                                             -(d["people"] or 0)))[:25],
+        })
+
+    told = told_vs_measured(signups)
+    before = None
+    if period.is_all or period.start < defs.SOURCES_SINCE:
+        before = before_tracking(signups)
+    return {"model": model, "coverage": coverage(signups), "channels": rows,
+            "rate_since": rate_since,
+            "told_vs_measured": told, "before_tracking": before}
+
+
+def _rate_window(cur, period, model, signups, people):
+    """(people by channel, signups, since) to compute signup rates from.
+
+    Visitors are classified from 3 Oct but signup sources only from 7 Oct
+    12:34 UTC. Over a period that starts earlier, a rate of all its signups
+    over all its people would mix two windows, so rates use the part since
+    sources were recorded (`since`, ISO), or are unavailable (None) when the
+    period ends before that.
+    """
+    if period.end is not None and period.end <= defs.SOURCES_SINCE:
+        return None, [], None
+    if not period.is_all and period.start >= defs.SOURCES_SINCE:
+        return people, signups, None
+    window = dataclasses.replace(period, start=defs.SOURCES_SINCE)
+    since = ranges.naive(defs.SOURCES_SINCE)
+    return (people_by_channel(cur, window, model),
+            [s for s in signups if s["created_at"] >= since],
+            defs.iso(defs.SOURCES_SINCE))
+
+
+def _channel_rate(key, signups, people):
+    """A rate needs people and signups measured the same way; "not recorded"
+    signups have no matching people, so it has none."""
+    if people is None or key == "not_recorded":
+        return None
+    p = people.get(key, {}).get("people", 0)
+    if not p:
+        return None
+    n = sum(1 for s in signups if s["touch"]["channel"] == key)
+    return defs.pct(n, p)
+
+
+def _detail_key(touch):
+    return touch.get("detail") or touch.get("reason") or "unknown"
+
+
+def _detail_rate(key, detail, signups, people):
+    """A detail's signup rate over the same window as _channel_rate: people
+    counted from 3 Oct over signups with a source from 7 Oct would understate
+    it (Google 12.7% under Search 25.5% on 11 Oct)."""
+    if people is None or key == "not_recorded":
+        return None
+    p = people.get(key, {}).get("details", {}).get(detail, 0)
+    if not p:
+        return None
+    n = sum(1 for s in signups if s["touch"]["channel"] == key
+            and _detail_key(s["touch"]) == detail)
+    return defs.pct(n, p)
+
+
+def _detail_label(channel_key, detail_key):
+    probe = {"search": acquisition.SEARCH_LABELS,
+             "ai_assistant": acquisition.AI_LABELS,
+             "social": acquisition.SOCIAL_LABELS,
+             "email": acquisition.EMAIL_LABELS}.get(channel_key, {})
+    if channel_key == "no_referrer":
+        return "No referrer"
+    if channel_key == "outreach":
+        return acquisition.campaign_label(detail_key)
+    if channel_key == "not_recorded":
+        return REASON_LABELS.get(detail_key, detail_key)
+    return probe.get(detail_key, detail_key)
+
+
+def told_vs_measured(signups):
+    measured = [s for s in signups if s["touch"]["channel"] != "not_recorded"
+                and s.get("told")]
+    columns = [k for k, _ in CHANNELS
+               if any(s["touch"]["channel"] == k for s in measured)]
+    rows = {}
+    for s in measured:
+        r = rows.setdefault(s["told"], {"told": s["told"],
+                                        "told_label": survey_label(s["told"]),
+                                        "counts": {c: 0 for c in columns},
+                                        "total": 0})
+        r["counts"][s["touch"]["channel"]] += 1
+        r["total"] += 1
+    return {"columns": columns,
+            "rows": sorted(rows.values(), key=lambda r: -r["total"])}
+
+
+def before_tracking(signups):
+    group = [s for s in signups
+             if s["touch"].get("reason") == "before_tracking"]
+    told = {}
+    no_answer = 0
+    for s in group:
+        if not s.get("told"):
+            no_answer += 1
+            continue
+        told[s["told"]] = told.get(s["told"], 0) + 1
+    return {"signups": len(group), "no_answer": no_answer,
+            "told": [{"told": k, "told_label": survey_label(k), "signups": n}
+                     for k, n in sorted(told.items(), key=lambda kv: -kv[1])]}
+
+
+def summary_channels(cur, period):
+    """Today's "Where signups came from" block (model = first)."""
+    signups = classify_signups(cur, period, "first")
+    tracked_people = period.end is None or period.end > defs.VISITS_SINCE
+    people = people_by_channel(cur, period, "first") if tracked_people else {}
+    rows = []
+    for key, label in CHANNELS:
+        if key == "not_recorded":
+            continue
+        n = sum(1 for s in signups if s["touch"]["channel"] == key)
+        p = people.get(key, {}).get("people", 0) if tracked_people else None
+        if n or p:
+            rows.append({"channel": key, "label": label, "signups": n,
+                         "people": p})
+    cov = coverage(signups)
+    return {"model": "first", "rows": rows,
+            "not_recorded": {
+                "signups": sum(r["signups"] for r in cov["not_recorded"]),
+                "reasons": cov["not_recorded"]}}
+
+
+# Pages inside the product (sign-in, sign-in returns, checkout, account,
+# studio) are where a returning customer arrives, not a landing page: the
+# landing page is a person's first page in the period that is not one of these.
+APP_PAGES = (r"^/(login|register|verify|verify-email|enter-password|"
+             r"google-callback|github-callback|reset-password|change-password|"
+             r"purchase-success|paddle-checkout|checkout|account|studio|cancel"
+             r")(/|$)")
+
+
+def landing_pages(cur, period, limit=30):
+    """Q-PAGES: first page of each person, median active time, later signups.
+
+    Returns {"rows": [...], "app_only_people": n}: people whose pages in the
+    period were all sign-in or app pages are counted apart, not listed.
+    """
+    if period.end is not None and period.end <= defs.VISITS_SINCE:
+        return {"rows": [], "app_only_people": None}
+    extra = """,
+               (array_agg(v.page ORDER BY v.visited_at)
+                    FILTER (WHERE v.page !~ %(app_pages)s))[1] AS first_page,
+               min(v.visited_at) FILTER (WHERE v.page !~ %(app_pages)s)
+                   AS first_at"""
+    cur.execute(f"""WITH {visitors.browsers_cte(cur, extra_cols=extra)},
+        ppl AS (SELECT d.device_id, d.first_page, d.first_at FROM d
+                 WHERE {visitors.CLASS_SQL} = 'person'),
+        lp AS (SELECT p.device_id, p.first_page, p.first_at,
+                      sum(v.active_s) AS active_s
+                 FROM ppl p LEFT JOIN v ON v.device_id = p.device_id
+                                       AND v.page = p.first_page
+                GROUP BY 1, 2, 3)
+        SELECT lp.first_page AS page, count(*) AS people,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY lp.active_s)
+                   AS active_median_s,
+               count(*) FILTER (WHERE lp.first_page IS NOT NULL AND EXISTS (
+                   SELECT 1 FROM website_signups ws
+                     JOIN users u ON u.id = ws.user_id
+                    WHERE ws.device_id = lp.device_id
+                      AND u.created_at >= lp.first_at
+                      AND {defs.customer('u')})) AS signups
+          FROM lp GROUP BY 1
+         ORDER BY (lp.first_page IS NULL) DESC, 2 DESC, 1
+         LIMIT %(limit)s""",
+                visitors.params(cur, period, limit=int(limit) + 1,
+                                app_pages=APP_PAGES))
+    out, app_only = [], 0
+    for r in cur.fetchall():
+        people = int(r["people"])
+        if r["page"] is None:
+            app_only = people
+            continue
+        signups = int(r["signups"])
+        med = r["active_median_s"]
+        out.append({"page": r["page"], "people": people,
+                    "active_median_s": round(float(med)) if med is not None
+                    else None,
+                    "signups": signups,
+                    "signup_share": defs.pct(signups, people)})
+    return {"rows": out[:int(limit)], "app_only_people": app_only}
+
+
+def customer_touches(cur, user_ids):
+    """{user_id: (first Touch, last Touch, tracking)} for a page of customers."""
+    if not user_ids:
+        return {}
+    # The first page is read exactly as signup_rows reads it, so a signup
+    # that landed on /mcp/authorize is "AI assistants · Connector" here too,
+    # not "No referrer" (Customers must agree with Growth, G6).
+    cur.execute(f"""
+        SELECT u.id, u.created_at, (ws.user_id IS NOT NULL) AS has_row,
+               ws.attribution, {_tracking_sql(cur)} AS tracking,
+               fp.page AS first_page
+          FROM users u LEFT JOIN website_signups ws ON ws.user_id = u.id
+          {FIRST_PAGE_LATERAL}
+         WHERE u.id = ANY(%s)""", (list(user_ids),))
+    out = {}
+    for r in cur.fetchall():
+        r = dict(r)
+        out[r["id"]] = (complete_touch(touch_for(r, "first")),
+                        complete_touch(touch_for(r, "last")),
+                        _tracking_state(r))
+    return out
+
+
+def _tracking_state(row):
+    if not row.get("has_row"):
+        if row["created_at"] < ranges.naive(defs.SOURCES_SINCE):
+            return "before_tracking"
+        return "unknown"
+    return row.get("tracking") or ("tracked" if row.get("attribution")
+                                   else ("before_tracking"
+                                         if row["created_at"]
+                                         < ranges.naive(defs.SOURCES_SINCE)
+                                         else "tracked"))
+
+
+def median_or_none(values):
+    values = [v for v in values if v is not None]
+    return median(values) if values else None

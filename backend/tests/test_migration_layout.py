@@ -25,10 +25,29 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     numbers = {int(name.split("_", 1)[0]) for name in names}
 
-    assert numbers == set(range(31))
+    assert numbers == set(range(34))
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names
+
+
+def test_admin_rebuild_migrations_are_additive_and_lock_bounded():
+    for name in ("031_admin_visitor_quality.sql", "032_billing_daily_status.sql",
+                 "033_estimated_early_signup_sources.sql"):
+        source = (MIGRATIONS / name).read_text(encoding="utf-8")
+        assert "SET LOCAL lock_timeout" in source
+        assert "BEGIN;" in source and "COMMIT;" in source
+        assert "DROP TABLE" not in source and "DROP COLUMN" not in source
+    first = (MIGRATIONS / "031_admin_visitor_quality.sql").read_text()
+    assert "ADD COLUMN IF NOT EXISTS interacted BOOLEAN NOT NULL DEFAULT FALSE" in first
+    assert "ADD COLUMN IF NOT EXISTS tracking" in first
+    # Old rows keep tracking NULL so "reasons since" marks the new code.
+    assert "UPDATE website_signups" not in first
+    snapshots = (MIGRATIONS / "032_billing_daily_status.sql").read_text()
+    assert "PRIMARY KEY (day, user_id)" in snapshots
+    estimate = (MIGRATIONS / "033_estimated_early_signup_sources.sql").read_text()
+    assert "tracking = 'estimated_from_referrer'" in estimate
+    assert "ws.attribution IS NULL AND ws.tracking IS NULL" in estimate
 
 
 def test_web_startup_does_not_create_or_migrate_schema():

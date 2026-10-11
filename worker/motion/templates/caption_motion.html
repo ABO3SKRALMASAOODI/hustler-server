@@ -105,6 +105,18 @@
     : ar >= 0.95 ? { x0: 80, x1: W - 80, y0: 0.06 * H, y1: 0.92 * H }
     : { x0: 0.13 * W, x1: 0.87 * W, y0: 0.07 * H, y1: 0.92 * H };
   const COLW = SAFE.x1 - SAFE.x0;
+  // The column a cue's lines keep to: the template's own, or — for a cue
+  // the caption plan set inside a picture card — the card's inner column
+  // (x, frame fractions; worker/caption_place.card_column), so no line
+  // runs past the card's sides.
+  function colOf(src) {
+    if (Array.isArray(src.x) && src.x.length === 2) {
+      const x0 = Math.max(SAFE.x0, +src.x[0] * W), x1 = Math.min(SAFE.x1, +src.x[1] * W);
+      if (x1 - x0 >= 0.2 * W) return [x0, x1];
+    }
+    return [SAFE.x0, SAFE.x1];
+  }
+  const cwOf = c => c.cw || COLW;
   const CFG = {
     // fs = base font px on 9:16 at size 1; lines = max wrapped lines
     clean:     { fs: 70, lines: 2, fade: 0.12, accent: '#F3CF8B', premium: true },
@@ -205,6 +217,11 @@
       z0 = y + bz[0]; z1 = y + bz[1];
     }
     const top = Math.max(SAFE.y0, z0 * H), bot = Math.min(SAFE.y1, z1 * H);
+    // a caption the plan set on its own anchor inside a picture card (the
+    // cue's h, kept as hz: c.h is the laid-out block's height) keeps its
+    // zone however tight (a card's foot under the chin holds one
+    // line): the block fits inside it, never in the whole frame
+    if (c.hz && Array.isArray(c.z) && c.z.length === 2 && bot - top >= 0.02 * H) return [top, bot];
     return bot - top >= 0.08 * H ? [top, bot] : [SAFE.y0, SAFE.y1];
   }
 
@@ -235,7 +252,9 @@
     // a lone article/connector reads inline ('a weird'), never stacked
     const others = c.w.filter((w, k) => k !== hero);
     const bare = others.length <= 2 && others.every(w => STOP.has(key(w.t)) && key(w.t).length <= 4);
-    const mode = hero < 0 ? 'flow' : n === 1 ? 'solo' : bare ? 'inline'
+    // a cue the plan set in a spot that holds one line (n: a card's foot
+    // under the chin) keeps its serif word inline, never stacked
+    const mode = hero < 0 ? 'flow' : n === 1 ? 'solo' : bare || c.n ? 'inline'
       : hero === n - 1 ? 'below' : hero === 0 ? 'above' : 'inline';
     c.mode = mode;
     const heroColor = accentSet ? accent : color;
@@ -324,7 +343,7 @@
       c.blk.style.fontSize = fs.toFixed(2) + 'px';
       const r = c.blk.getBoundingClientRect();
       const lines = lineCount(c.flowWords.length ? c.flowWords : c.words);
-      const wide = r.width > COLW + 1 || c.blk.scrollWidth > COLW + 2;
+      const wide = r.width > cwOf(c) + 1 || c.blk.scrollWidth > cwOf(c) + 2;
       if (!wide && lines <= maxLines && r.height <= zoneH) break;
       // a word wider than the column keeps shrinking: never clip off-frame
       if (fs <= base * (wide ? 0.25 : 0.5)) break;
@@ -370,8 +389,8 @@
       const r = c.blk.getBoundingClientRect();
       const lines = c.flowWords.length ? lineCount(c.flowWords) : 1;
       const heroW = c.heroRow ? c.heroRow.scrollWidth : 0;
-      const wide = r.width > COLW + 1 || c.blk.scrollWidth > COLW + 2 || heroW > COLW + 1;
-      if (!wide && lines <= CFG.lines && r.height <= zoneH) break;
+      const wide = r.width > cwOf(c) + 1 || c.blk.scrollWidth > cwOf(c) + 2 || heroW > cwOf(c) + 1;
+      if (!wide && lines <= (c.n ? 1 : CFG.lines) && r.height <= zoneH) break;
       if (fs <= base * (wide ? 0.25 : 0.5)) break;
       fs *= 0.95;
     }
@@ -384,9 +403,9 @@
     if (!hero) {
       for (let i = 0; i < 20; i++) {
         c.mid.style.fontSize = (small * k * CFG.mid).toFixed(2) + 'px';
-        c.mid.style.maxWidth = COLW + 'px';
+        c.mid.style.maxWidth = cwOf(c) + 'px';
         const r = c.blk.getBoundingClientRect();
-        if (r.height <= zoneH && lineCount(c.words) <= 2 && c.mid.scrollWidth <= COLW + 1) break;
+        if (r.height <= zoneH && lineCount(c.words) <= 2 && c.mid.scrollWidth <= cwOf(c) + 1) break;
         if (k <= 0.55) break;
         k *= 0.93;
       }
@@ -395,15 +414,15 @@
     }
     for (let i = 0; i < 20; i++) {
       const sm = small * k;
-      [c.pre, c.post].forEach(r => { if (r) { r.style.fontSize = sm.toFixed(2) + 'px'; r.style.maxWidth = COLW + 'px'; } });
+      [c.pre, c.post].forEach(r => { if (r) { r.style.fontSize = sm.toFixed(2) + 'px'; r.style.maxWidth = cwOf(c) + 'px'; } });
       // hero: as big as the column allows, inside the ladder [heroMin, heroMax]
       hero.style.fontSize = (sm * CFG.heroMax).toFixed(2) + 'px';
       const w = hero.scrollWidth;
-      let hs = sm * CFG.heroMax * Math.min(1, (COLW - 4) / Math.max(1, w));
+      let hs = sm * CFG.heroMax * Math.min(1, (cwOf(c) - 4) / Math.max(1, w));
       hs = Math.max(sm * CFG.heroMin, hs);
       hero.style.fontSize = hs.toFixed(2) + 'px';
-      if (hero.scrollWidth > COLW + 1) {        // one very long word: shrink the whole ladder
-        hero.style.fontSize = (hs * (COLW - 4) / hero.scrollWidth).toFixed(2) + 'px';
+      if (hero.scrollWidth > cwOf(c) + 1) {        // one very long word: shrink the whole ladder
+        hero.style.fontSize = (hs * (cwOf(c) - 4) / hero.scrollWidth).toFixed(2) + 'px';
       }
       // tuck connectors onto the hero's cap height (negative leading)
       if (c.pre) c.pre.style.marginBottom = (look === 'stack' ? 0.02 : -0.02) * parseFloat(hero.style.fontSize) + 'px';
@@ -676,16 +695,18 @@
     laidOut = true;
     (P.cues || []).forEach((src, ci) => {
       if (!src || !Array.isArray(src.w) || !src.w.length) return;
-      const c = { s: +src.s || 0, e: +src.e || 0, k: !!src.k, y: src.y, b: src.b, z: src.z,
+      const c = { s: +src.s || 0, e: +src.e || 0, k: !!src.k, y: src.y, b: src.b, z: src.z, hz: !!src.h, n: !!src.n,
                   w: src.w.map(w => ({ t: String(w.t || ''), s: +w.s || 0, e: +w.e || 0, x: !!w.x })),
                   words: [], flowWords: [] };
+      const col = colOf(src);
+      c.cw = col[1] - col[0];
       if (c.e - c.s < 0.04) return;
       // l = plate luma hint (0-1) under the caption, when the pipeline knows it
       c.lit = CFG.premium && +src.l >= LIT;
       const el = MG.el('div', `cue L-${look}${c.lit ? ' lit' : ''}`, null, root);
-      el.style.left = SAFE.x0 + 'px'; el.style.width = COLW + 'px'; el.style.textAlign = align;
+      el.style.left = col[0] + 'px'; el.style.width = c.cw + 'px'; el.style.textAlign = align;
       const blk = MG.el('div', 'blk', null, el);
-      blk.style.maxWidth = COLW + 'px';
+      blk.style.maxWidth = c.cw + 'px';
       blk.style.color = color;
       if (userFont && look !== 'mono') {
         const target = look === 'lockup' || look === 'stack' ? null : blk;
@@ -711,11 +732,11 @@
         }
         fitLockup(c, base, zoneH); c.fs = base;
       }
-      else if (look === 'mono') { buildMono(c, blk); c.fs = fitFlow(c, base, CFG.lines, zoneH); }
+      else if (look === 'mono') { buildMono(c, blk); c.fs = fitFlow(c, base, c.n ? 1 : CFG.lines, zoneH); }
       else {
         buildFlow(c, blk);
         if (look === 'pop') blk.style.whiteSpace = 'nowrap';
-        c.fs = fitFlow(c, base, CFG.lines, zoneH);
+        c.fs = fitFlow(c, base, c.n ? 1 : CFG.lines, zoneH);
         if (look === 'box') {
           c.ink = blk.cloneNode(true);       // the dark copy, before the box joins
           c.hl = MG.el('span', 'hl', null, blk);

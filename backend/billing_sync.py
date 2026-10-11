@@ -522,6 +522,58 @@ def reconcile_all(conn, full=False):
             "truncated": truncated, "reports": reports}
 
 
+def snapshot_daily(conn, now=None):
+    """Record today's billing state for every billed customer (migration 032).
+
+    One row per (admin-timezone day, account), upserted on every hourly tick,
+    so the last tick of a day wins and three schedulers are harmless. This is
+    what makes "MRR over time" and "stopped paying" true history instead of a
+    rebuild from today's state. A no-op until the table exists; never raises.
+    """
+    from admin_metrics import defs, ranges
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT to_regclass('public.billing_daily_status') AS t")
+        row = _as_dict(cur.fetchone(), cur)
+        if not row.get("t"):
+            cur.close()
+            return {"skipped": "migration 032 not applied"}
+        day = ranges.local_today(now)
+        cur.execute(f"""
+            SELECT u.id, u.billing_status,
+                   COALESCE(u.billing_plan, u.plan) AS plan,
+                   COALESCE(u.billing_period, 'monthly') AS period,
+                   {defs.paying('u')} AS paying
+              FROM users u
+             WHERE (u.is_subscribed = 1 OR u.billing_status IS NOT NULL)
+               AND {defs.customer('u')}""")
+        rows = [_as_dict(r, cur) for r in cur.fetchall()]
+        for r in rows:
+            value = (int(round(billing.monthly_value(r["plan"], r["period"])
+                               * 100)) if r["paying"] else 0)
+            cur.execute("""
+                INSERT INTO billing_daily_status
+                    (day, user_id, billing_status, plan, period, paying,
+                     monthly_value_cents, captured_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (day, user_id) DO UPDATE SET
+                    billing_status = EXCLUDED.billing_status,
+                    plan = EXCLUDED.plan, period = EXCLUDED.period,
+                    paying = EXCLUDED.paying,
+                    monthly_value_cents = EXCLUDED.monthly_value_cents,
+                    captured_at = NOW()""",
+                        (day, r["id"], r["billing_status"], r["plan"],
+                         r["period"], bool(r["paying"]), value))
+        conn.commit()
+        cur.close()
+        return {"day": day.isoformat(), "rows": len(rows)}
+    except Exception as e:                                  # pragma: no cover
+        billing._safe_rollback(conn)
+        print(f"⚠️ [billing_sync] daily snapshot skipped: {type(e).__name__}",
+              flush=True)
+        return {"error": type(e).__name__}
+
+
 def _as_dict(row, cur):
     if isinstance(row, dict):
         return dict(row)
@@ -639,6 +691,7 @@ def run_billing_tick(conn=None, dry_run=False):
             result = reconcile_all(conn)
             if not dry_run:
                 result["dunning"] = run_dunning(conn)
+                result["snapshot"] = snapshot_daily(conn)
             return result
         finally:
             cur = conn.cursor()

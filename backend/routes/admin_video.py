@@ -10,6 +10,7 @@ legacy admin), presigned links are <=15 min (storage.PRESIGN_EXPIRY), and
 llm_calls payloads are capped + key-redacted by the worker before storage.
 """
 
+import json
 import os
 from contextlib import contextmanager
 
@@ -17,14 +18,21 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
 
-from routes.admin import admin_required, _scope, METRICS_EPOCH
+from routes.admin import (admin_required, _scope, METRICS_EPOCH,
+                          legacy_error_response)
 from video_services.jobs import enqueue as _enqueue
+from admin_metrics import cache as admin_cache
+from admin_metrics.projects import (PROJECT_TIMINGS as _PROJECT_TIMINGS,
+                                    TIMING_COLS as _TIMING_COLS,
+                                    timing_out as _timing_out)
 import billing
 import credits
 import model_prices
 import storage
 
 admin_video_bp = Blueprint("admin_video", __name__)
+# R5: a slow or failed query answers JSON 503/500, never Flask's HTML page.
+admin_video_bp.register_error_handler(Exception, legacy_error_response)
 
 # FALLBACK $ per 1M tokens, for a model model_prices.py does not list (default =
 # GPT-6 Luna, $0.10 in / $0.50 out). Every listed model is priced from its
@@ -55,8 +63,20 @@ def adb():
     the next refresh opened another. Mirror the video route's explicit vdb
     lifecycle so reads and admin writes both release their slot immediately.
     """
+    readonly = request.method == "GET"
+    # R5: every admin connection is time-limited. GET pages are read-only
+    # autocommit (no admin page can hold a lock or leave a session idle in a
+    # transaction); writes keep a transaction with a generous limit.
+    options = ("-c statement_timeout=20000 -c lock_timeout=2000 "
+               "-c idle_in_transaction_session_timeout=30000 "
+               "-c default_transaction_read_only=on") if readonly else \
+        ("-c statement_timeout=30000 "
+         "-c idle_in_transaction_session_timeout=60000")
     conn = psycopg2.connect(current_app.config["DATABASE_URL"],
-                            cursor_factory=RealDictCursor)
+                            cursor_factory=RealDictCursor, connect_timeout=5,
+                            options=options)
+    if readonly:
+        conn.autocommit = True
     try:
         yield conn
         conn.commit()
@@ -1060,81 +1080,8 @@ def video_overview():
 # The LATERALs pick a specific row (ORDER BY ... LIMIT 1) rather than
 # aggregating: MIN(created_at) with MIN(updated_at) can silently pair the start
 # of one job with the end of another and produce a duration that never happened.
-_PROJECT_TIMINGS = """
-    LEFT JOIN LATERAL (
-        SELECT a.id, a.duration_s, a.bytes, a.width, a.height, a.created_at
-        FROM assets a
-        WHERE a.project_id = p.id AND a.kind = 'original'
-        ORDER BY a.id ASC LIMIT 1) o ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT ce.created_at
-        FROM client_events ce
-        WHERE ce.project_id = p.id AND ce.kind = 'upload_started'
-          AND ce.created_at <= o.created_at
-        ORDER BY (ce.detail->>'bytes' ~ '^[0-9]+$'
-                  AND (ce.detail->>'bytes')::bigint = o.bytes) DESC NULLS LAST,
-                 ce.id DESC
-        LIMIT 1) ue ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT vj.created_at AS t0, vj.updated_at AS t1,
-               (vj.result->>'cached') AS cached
-        FROM video_jobs vj
-        WHERE vj.project_id = p.id AND vj.type = 'index' AND vj.state = 'done'
-        ORDER BY vj.id ASC LIMIT 1) ij ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT percentile_cont(0.5) WITHIN GROUP (
-                   ORDER BY EXTRACT(EPOCH FROM (vj.updated_at - vj.created_at))
-               ) AS med,
-               COUNT(*) AS n
-        FROM video_jobs vj
-        WHERE vj.project_id = p.id AND vj.type = 'preview'
-          AND vj.state = 'done' AND vj.updated_at > vj.created_at) pv ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT percentile_cont(0.5) WITHIN GROUP (
-                   ORDER BY EXTRACT(EPOCH FROM (vj.updated_at - vj.created_at))
-               ) AS med,
-               COUNT(*) AS n
-        FROM video_jobs vj
-        WHERE vj.project_id = p.id AND vj.type = 'agent_turn'
-          AND vj.state = 'done' AND vj.updated_at > vj.created_at) ag ON TRUE
-"""
-
-_TIMING_COLS = """
-    o.duration_s AS duration_s, o.bytes AS source_bytes,
-    o.width AS width, o.height AS height,
-    EXTRACT(EPOCH FROM (o.created_at
-                        - COALESCE(ue.created_at, p.created_at))) AS upload_s,
-    (ue.created_at IS NOT NULL) AS upload_measured,
-    EXTRACT(EPOCH FROM (ij.t1 - ij.t0)) AS index_s,
-    (ij.cached = 'true') AS index_cached,
-    pv.med AS edit_s, pv.n AS previews,
-    ag.med AS turn_s, ag.n AS turns
-"""
-
-
-def _timing_out(r):
-    """Round the seconds and drop the negatives. A clock that runs backwards
-    (an asset row written before its own upload_started event was flushed) is
-    not a measurement — reporting it as one puts a nonsense point on the chart."""
-    def secs(v):
-        if v is None:
-            return None
-        v = float(v)
-        return round(v, 1) if v >= 0 else None
-    return {
-        "duration_s": round(float(r["duration_s"]), 1) if r["duration_s"] else None,
-        "source_bytes": r["source_bytes"],
-        "width": r["width"], "height": r["height"],
-        "upload_s": secs(r["upload_s"]),
-        # False = derived from the project's creation time, because this upload
-        # predates client_events (round 57). It includes however long the user
-        # spent choosing a file, so it is an upper bound, not a measurement.
-        "upload_measured": bool(r["upload_measured"]),
-        "index_s": secs(r["index_s"]),
-        "index_cached": bool(r["index_cached"]),
-        "edit_s": secs(r["edit_s"]), "previews": r["previews"] or 0,
-        "turn_s": secs(r["turn_s"]), "turns": r["turns"] or 0,
-    }
+# _PROJECT_TIMINGS, _TIMING_COLS and _timing_out live in admin_metrics.projects
+# (one definition for the old pages and /admin/v2) and are imported above.
 
 
 SUBSCRIBER_STATE_SQL = """
@@ -1156,26 +1103,7 @@ SUBSCRIBER_STATE_SQL = """
 """
 
 
-@admin_video_bp.route("/admin/video/subscribers", methods=["GET"])
-@admin_required
-def video_subscribers():
-    """Every customer who has ever completed a positive payment."""
-    search = (request.args.get("search") or "").strip()
-    state = (request.args.get("status") or "all").strip().lower()
-    if state not in ("all", "active", "canceled", "past_due", "attention"):
-        state = "all"
-    page = max(1, request.args.get("page", type=int) or 1)
-    per_page = max(10, min(100, request.args.get("per_page", type=int) or 50))
-    offset = (page - 1) * per_page
-    state_where = "" if state == "all" else "AND s.subscriber_state = %s"
-    params = [f"%{search}%"]
-    if state != "all":
-        params.append(state)
-    params.extend([per_page, offset])
-
-    with adb() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+SUBSCRIBERS_SQL = """
             WITH payment_agg AS MATERIALIZED (
                 SELECT pay.user_id,
                        COUNT(*) AS payment_count,
@@ -1267,14 +1195,46 @@ def video_subscribers():
             SELECT s.*, COUNT(*) OVER () AS matched_subscribers
               FROM subscribers s
              WHERE s.email ILIKE %s
-               """ + state_where + """
+               """
+SUBSCRIBERS_ORDER = """
              ORDER BY CASE s.subscriber_state
                         WHEN 'past_due' THEN 0 WHEN 'attention' THEN 1
                         WHEN 'canceled' THEN 2 ELSE 3 END,
                       s.last_paid_at DESC, s.id DESC
              LIMIT %s OFFSET %s
-        """, params)
+"""
+
+
+@admin_video_bp.route("/admin/video/subscribers", methods=["GET"])
+@admin_required
+def video_subscribers():
+    """Every customer who has ever completed a positive payment."""
+    search = (request.args.get("search") or "").strip()
+    state = (request.args.get("status") or "all").strip().lower()
+    if state not in ("all", "active", "canceled", "past_due", "attention"):
+        state = "all"
+    page = max(1, request.args.get("page", type=int) or 1)
+    per_page = max(10, min(100, request.args.get("per_page", type=int) or 50))
+    offset = (page - 1) * per_page
+    state_where = "" if state == "all" else "AND s.subscriber_state = %s"
+    params = [f"%{search}%"]
+    if state != "all":
+        params.append(state)
+    params.extend([per_page, offset])
+
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute(SUBSCRIBERS_SQL + state_where + SUBSCRIBERS_ORDER, params)
         rows = cur.fetchall()
+        if not rows and page > 1:
+            # A page past the end must still report the true total, or the
+            # pager reads "0 subscribers" and hides itself (F9).
+            cur.execute(SUBSCRIBERS_SQL + state_where + SUBSCRIBERS_ORDER,
+                        params[:-2] + [1, 0])
+            probe = cur.fetchall()
+            matched = int(probe[0]["matched_subscribers"] or 0) if probe else 0
+        else:
+            matched = int(rows[0]["matched_subscribers"] or 0) if rows else 0
 
         cur.execute("""
             WITH paid_users AS (
@@ -1306,7 +1266,7 @@ def video_subscribers():
         """)
         summary = cur.fetchone() or {}
 
-    total = int(rows[0]["matched_subscribers"] or 0) if rows else 0
+    total = matched
     return jsonify({
         "page": page, "per_page": per_page, "total": total,
         "status": state,
@@ -1352,26 +1312,7 @@ def video_subscribers():
     })
 
 
-@admin_video_bp.route("/admin/video/subscriber-projects", methods=["GET"])
-@admin_required
-def video_subscriber_projects():
-    """Parent projects belonging to entitled customers who previously paid.
-
-    ``is_subscribed`` alone includes legacy trials and Paddle states that have
-    not collected money. A completed positive payment is required as well, so
-    this page is the paid product's real work rather than a list dominated by
-    free accounts stopping at subscription walls. Canceled former customers
-    remain in ``/admin/video/subscribers`` and in the historical reliability
-    snapshot, but are intentionally outside this current-work view.
-    """
-    search = (request.args.get("search") or "").strip()
-    page = max(1, request.args.get("page", type=int) or 1)
-    per_page = max(10, min(100, request.args.get("per_page", type=int) or 50))
-    offset = (page - 1) * per_page
-    like = f"%{search}%"
-    with adb() as conn:
-        cur = conn.cursor()
-        cur.execute("""
+SUBSCRIBER_PROJECTS_SQL = """
             WITH paid_users AS MATERIALIZED (
                 SELECT u.id, u.email, u.plan, u.billing_plan,
                        u.billing_status
@@ -1459,8 +1400,37 @@ def video_subscriber_projects():
               LEFT JOIN asset_agg a ON a.project_id = c.id
               LEFT JOIN child_agg ch ON ch.project_id = c.id
              ORDER BY c.id DESC
-        """, (like, like, per_page, offset))
+"""
+
+
+@admin_video_bp.route("/admin/video/subscriber-projects", methods=["GET"])
+@admin_required
+def video_subscriber_projects():
+    """Parent projects belonging to entitled customers who previously paid.
+
+    ``is_subscribed`` alone includes legacy trials and Paddle states that have
+    not collected money. A completed positive payment is required as well, so
+    this page is the paid product's real work rather than a list dominated by
+    free accounts stopping at subscription walls. Canceled former customers
+    remain in ``/admin/video/subscribers`` and in the historical reliability
+    snapshot, but are intentionally outside this current-work view.
+    """
+    search = (request.args.get("search") or "").strip()
+    page = max(1, request.args.get("page", type=int) or 1)
+    per_page = max(10, min(100, request.args.get("per_page", type=int) or 50))
+    offset = (page - 1) * per_page
+    like = f"%{search}%"
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute(SUBSCRIBER_PROJECTS_SQL, (like, like, per_page, offset))
         rows = cur.fetchall()
+        if not rows and page > 1:
+            # Past the last page: still report the true total (F9).
+            cur.execute(SUBSCRIBER_PROJECTS_SQL, (like, like, 1, 0))
+            probe = cur.fetchall()
+            matched = int(probe[0]["matched_projects"] or 0) if probe else 0
+        else:
+            matched = int(rows[0]["matched_projects"] or 0) if rows else 0
         cur.execute("""SELECT COUNT(DISTINCT u.id) AS n
                          FROM users u JOIN projects p ON p.user_id = u.id
                         WHERE COALESCE(u.is_subscribed, 0) = 1
@@ -1473,7 +1443,7 @@ def video_subscriber_projects():
                                  AND pay.amount_cents > 0)""", (like, like))
         subscriber_count = int((cur.fetchone() or {}).get("n") or 0)
 
-    total = int(rows[0]["matched_projects"] or 0) if rows else 0
+    total = matched
     return jsonify({
         "page": page, "per_page": per_page, "total": total,
         "scope": "currently_entitled_and_ever_paid",
@@ -1507,6 +1477,24 @@ def video_subscriber_projects():
 @admin_required
 def video_projects():
     search = (request.args.get("search") or "").strip()
+    # ?fields=list skips the per-project tool-outcome scan (95% of this
+    # query's 5–8 s); those counts belong on the project page (R2).
+    light = request.args.get("fields") == "list"
+    tool_lateral = "" if light else f"""
+            LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS tool_calls,
+                       COUNT(*) FILTER (
+                         WHERE {_mcp_non_success_sql('mt')}) AS tool_failed,
+                       COUNT(*) FILTER (
+                         WHERE {_mcp_refusal_sql('mt')}) AS tool_rejected
+                  FROM ({_project_family_ids_sql('p')}) family
+                  JOIN video_jobs mt ON mt.project_id = family.id
+                 WHERE mt.type = 'mcp_tool'
+            ) tool_activity ON TRUE"""
+    tool_cols = ("NULL::bigint AS tool_calls, NULL::bigint AS tool_failed, "
+                 "NULL::bigint AS tool_rejected" if light else
+                 "tool_activity.tool_calls, tool_activity.tool_failed, "
+                 "tool_activity.tool_rejected")
     with adb() as conn:
         cur = conn.cursor()
         # PARENTS ONLY. A shorts run can create many child projects, each with a
@@ -1541,9 +1529,7 @@ def video_projects():
                    (SELECT MAX(vf.updated_at) FROM video_jobs vf
                     WHERE vf.project_id = p.id AND vf.type='final'
                       AND vf.state='done') AS last_export,
-                   tool_activity.tool_calls,
-                   tool_activity.tool_failed,
-                   tool_activity.tool_rejected,
+                   {tool_cols},
                    (SELECT COUNT(*) FROM projects c
                     WHERE c.parent_project_id = p.id) AS shorts_count,
                    -- Round 101: how many times this project's owner met the
@@ -1589,16 +1575,7 @@ def video_projects():
                    """ + _TIMING_COLS + """
             FROM base_projects p JOIN users u ON u.id = p.user_id
             """ + _PROJECT_TIMINGS + f"""
-            LEFT JOIN LATERAL (
-                SELECT COUNT(*) AS tool_calls,
-                       COUNT(*) FILTER (
-                         WHERE {_mcp_non_success_sql('mt')}) AS tool_failed,
-                       COUNT(*) FILTER (
-                         WHERE {_mcp_refusal_sql('mt')}) AS tool_rejected
-                  FROM ({_project_family_ids_sql('p')}) family
-                  JOIN video_jobs mt ON mt.project_id = family.id
-                 WHERE mt.type = 'mcp_tool'
-            ) tool_activity ON TRUE
+            {tool_lateral}
             LEFT JOIN LATERAL (
                 SELECT MIN(pa.occurred_at) AS paid_at
                 FROM payments pa
@@ -1632,10 +1609,10 @@ def video_projects():
          "kind": r["kind"],
          "messages": r["messages"], "versions": r["versions"],
          "exports": r["exports"],
-         "tool_calls": int(r["tool_calls"] or 0),
-         "tool_failed": int(r["tool_failed"] or 0),
-         "tool_non_success": int(r["tool_failed"] or 0),
-         "tool_rejected": int(r["tool_rejected"] or 0),
+         "tool_calls": None if light else int(r["tool_calls"] or 0),
+         "tool_failed": None if light else int(r["tool_failed"] or 0),
+         "tool_non_success": None if light else int(r["tool_failed"] or 0),
+         "tool_rejected": None if light else int(r["tool_rejected"] or 0),
          "customer_paid": bool(r["customer_paid"]),
          "converted_project": bool(r["converted_project"]),
          "paid_at": (r["paid_at"].isoformat() if r["paid_at"] else None),
@@ -1695,7 +1672,24 @@ PREVIEWABLE = ("thumb", "sheet", "render", "proxy", "image_ref", "original",
                       methods=["GET"])
 @admin_required
 def video_project_detail(project_id):
+    """The legacy project inspector (old admin, kept for one release).
+
+    One connection for the whole page (was three), and a 4 MB safety net:
+    the same chat activity used to be copied into every agent slice of a
+    request, so one long session built a 108 MB response and grew a worker
+    by 0.4 GB. /admin/v2/projects/<id> is the bounded replacement.
+    """
     with adb() as conn:
+        return _video_project_detail(conn, project_id)
+
+
+@contextmanager
+def _same(conn):
+    yield conn
+
+
+def _video_project_detail(shared_conn, project_id):
+    with _same(shared_conn) as conn:
         cur = conn.cursor()
         cur.execute("""SELECT p.*, u.email, u.trial_status,
                               u.trial_started_at, u.trial_plan,
@@ -1864,6 +1858,9 @@ def video_project_detail(project_id):
     user_msg_ids = sorted(m["id"] for m in messages if m["role"] == "user")
 
     turns = []
+    # Many slices of one long request share a message: build its activity
+    # once and let every slice reference the same lists (no copies).
+    window_cache = {}
     for t in turn_jobs:
         payload = t.get("payload") if isinstance(t.get("payload"), dict) \
             else {}
@@ -1874,7 +1871,9 @@ def video_project_detail(project_id):
             mid = None
         um = msg_by_id.get(mid)
         activity, assistant_msgs = [], []
-        if um:
+        if um and um["id"] in window_cache:
+            activity, assistant_msgs = window_cache[um["id"]]
+        elif um:
             nxt = next((i for i in user_msg_ids if i > um["id"]), None)
             for m in messages:  # ordered by id ASC
                 if m["id"] <= um["id"]:
@@ -1885,6 +1884,7 @@ def video_project_detail(project_id):
                     activity.append(_msg_brief(m))
                 elif m["role"] == "assistant":
                     assistant_msgs.append(_msg_brief(m))
+            window_cache[um["id"]] = (activity, assistant_msgs)
         try:
             edl_version = int(res["edl_version"]) \
                 if res.get("edl_version") is not None else None
@@ -1922,7 +1922,7 @@ def video_project_detail(project_id):
     # Uploads that never became an asset, in the project they were aimed at.
     # Shown beside the chat because that is where the absence shows: a project
     # whose whole story is "user tried to add a video and nothing happened".
-    with adb() as conn2:
+    with _same(shared_conn) as conn2:
         cur2 = conn2.cursor()
         cur2.execute("""SELECT id, kind, detail, created_at, project_id
                         FROM client_events
@@ -1947,7 +1947,7 @@ def video_project_detail(project_id):
     # This is what turns "a session with no upload but a fully edited video"
     # back into a story — the child was CUT from the parent by the shorts
     # pipeline, and its chat starts at the greeting by design.
-    with adb() as conn3:
+    with _same(shared_conn) as conn3:
         cur3 = conn3.cursor()
         cur3.execute("""SELECT c.id, c.title, c.kind, c.created_at,
                                (SELECT COUNT(*) FROM chat_messages cm
@@ -2035,7 +2035,7 @@ def video_project_detail(project_id):
                                if best else None),
                 })
 
-    return jsonify({
+    return jsonify(_cap_legacy_detail({
         "project": {"id": p["id"], "title": p["title"], "email": p["email"],
                     "kind": p.get("kind"),
                     "created_at": p["created_at"].isoformat()},
@@ -2079,7 +2079,67 @@ def video_project_detail(project_id):
         # then answered fine. Name the in-flight turn so the two are never
         # confused again.
         "live_turn": live_turn,
-    })
+    }))
+
+
+LEGACY_DETAIL_CAP = 4 * 1024 * 1024
+
+
+def _json_size(value, memo):
+    key = id(value)
+    if key not in memo:
+        memo[key] = len(json.dumps(value, default=str, separators=(",", ":")))
+    return memo[key]
+
+
+def _cap_legacy_detail(out, cap=LEGACY_DETAIL_CAP):
+    """Keep the legacy inspector under `cap` bytes, cheapest losses first.
+
+    Sizes are measured per distinct list (memoised by identity) so a turn
+    whose activity is shared by 60 slices is measured once, never serialised
+    60 times; everything else in the response is measured exactly.
+    """
+    memo = {}
+    shared = ("activity", "assistant_messages")
+
+    def turns_size():
+        total = 0
+        for t in out["turns"]:
+            rest = {k: v for k, v in t.items() if k not in shared}
+            total += len(json.dumps(rest, default=str, separators=(",", ":")))
+            total += sum(_json_size(t[k], memo) for k in shared) + 40
+        return total
+
+    def other_size():
+        return len(json.dumps({k: v for k, v in out.items() if k != "turns"},
+                              default=str, separators=(",", ":")))
+
+    reasons = []
+    if turns_size() + other_size() > cap:
+        seen = set()
+        for t in out["turns"]:
+            key = id(t["activity"])
+            if key in seen:
+                t["activity"], t["assistant_messages"] = [], []
+                t["activity_shown_in_first_slice"] = True
+            seen.add(key)
+        reasons.append("repeated activity of continued requests")
+    if turns_size() + other_size() > cap:
+        out["jobs"] = [dict(j, payload=None, result=None,
+                            body_omitted=True) for j in out["jobs"]]
+        reasons.append("job payloads and results")
+    if turns_size() + other_size() > cap:
+        out["edls"] = [dict(e, json=None) if i >= 20 else e
+                       for i, e in enumerate(out["edls"])]
+        reasons.append("versions older than the latest 20")
+    if turns_size() + other_size() > cap:
+        out["messages"] = out["messages"][-500:]
+        reasons.append("messages older than the latest 500")
+    if reasons:
+        out["truncated"] = True
+        out["truncated_reason"] = ("Left out to keep this page under 4 MB: "
+                                   + "; ".join(reasons) + ".")
+    return out
 
 
 # ── Upload failures (round 57) ───────────────────────────────────────────
@@ -2348,151 +2408,19 @@ def video_project_llm_calls(project_id):
 @admin_video_bp.route("/admin/video/costs", methods=["GET"])
 @admin_required
 def video_costs():
-    storage_usd_per_gb_month = max(
-        0.0, float(os.getenv("R2_STORAGE_USD_PER_GB_MONTH", "0.015")))
-    database_storage_gb = max(
-        0.0, float(os.getenv("DATABASE_STORAGE_GB", "5")))
-    database_storage_rate = max(
-        0.0, float(os.getenv(
-            "RENDER_POSTGRES_STORAGE_USD_PER_GB_MONTH", "0.30")))
-    database_storage_usd = database_storage_gb * database_storage_rate
-    configured_fixed_usd = max(
-        0.0, float(os.getenv("PLATFORM_FIXED_COST_USD_MONTH", "0")))
-    fixed_monthly_usd = configured_fixed_usd + database_storage_usd
-    with adb() as conn:
-        cur = conn.cursor()
-        cur.execute(f"""
-            SELECT u.email, DATE(lc.created_at) AS day,
-                   COUNT(*) AS calls,
-                   COALESCE(SUM(lc.prompt_tokens), 0) AS tokens_in,
-                   COALESCE(SUM(lc.completion_tokens), 0) AS tokens_out,
-                   {_cost_expr("lc")} AS est_cost
-            FROM llm_calls lc
-            JOIN projects p ON p.id = lc.project_id
-            JOIN users u ON u.id = p.user_id
-            WHERE lc.created_at > NOW() - INTERVAL '30 days'
-            GROUP BY u.email, DATE(lc.created_at)
-            ORDER BY day DESC, est_cost DESC
-            LIMIT 500
-        """)
-        rows = cur.fetchall()
-        cur.execute(f"""
-            SELECT lc.purpose, COUNT(*) AS calls,
-                   COALESCE(SUM(lc.prompt_tokens), 0) AS tokens_in,
-                   COALESCE(SUM(lc.completion_tokens), 0) AS tokens_out,
-                   {_cost_expr("lc")} AS est_cost
-            FROM llm_calls lc
-            WHERE lc.created_at > NOW() - INTERVAL '30 days'
-            GROUP BY lc.purpose ORDER BY est_cost DESC
-        """)
-        by_purpose = cur.fetchall()
-        # Per MODEL, because that is the axis spend now splits on: free
-        # accounts and paying ones can answer on different providers, and the
-        # reasoning column is the evidence for whether a provider bills
-        # thinking tokens on top of the completion (model_prices.py).
-        cur.execute(f"""
-            SELECT COALESCE(NULLIF(lc.model, ''), 'unknown') AS model,
-                   COUNT(*) AS calls,
-                   COALESCE(SUM(lc.prompt_tokens), 0) AS tokens_in,
-                   COALESCE(SUM(COALESCE(
-                       (lc.response->>'cached_in')::float, 0)), 0) AS cached_in,
-                   COALESCE(SUM(lc.completion_tokens), 0) AS tokens_out,
-                   COALESCE(SUM(COALESCE(
-                       (lc.response->>'reasoning_out')::float, 0)), 0)
-                       AS reasoning_out,
-                   {_cost_expr("lc")} AS est_cost
-            FROM llm_calls lc
-            WHERE lc.created_at > NOW() - INTERVAL '30 days'
-            GROUP BY 1 ORDER BY est_cost DESC
-        """)
-        by_model = cur.fetchall()
-        cur.execute("""SELECT COALESCE(SUM(GREATEST(COALESCE(NULLIF(
-                                   result->'timings'->>
-                                       'gross_compute_usd_ceiling', '')::numeric,
-                                   0), 0)), 0) AS usd
-                         FROM video_jobs
-                        WHERE created_at > NOW() - INTERVAL '30 days'""")
-        executor_30d = float((cur.fetchone() or {}).get("usd") or 0)
-        cur.execute("SELECT COALESCE(SUM(bytes), 0) AS bytes FROM assets")
-        storage_bytes = int((cur.fetchone() or {}).get("bytes") or 0)
-        cur.execute("""SELECT COALESCE(SUM(amount_cents), 0) AS cents
-                         FROM payments
-                        WHERE status = 'completed' AND amount_cents > 0
-                          AND occurred_at > NOW() - INTERVAL '30 days'""")
-        cash_30d = float((cur.fetchone() or {}).get("cents") or 0) / 100.0
+    """Costs and margin, last 30 days (R3): computed at most once per 10
+    minutes and shared through app_kv by every worker and /admin/v2/revenue.
+    `?fresh=1` recomputes (at most once per 30 s). Adds `computed_at` and a
+    customers-vs-owner `split`; every older key is unchanged."""
+    from admin_metrics import costs as admin_costs
 
-    model_30d = sum(float(r["est_cost"] or 0) for r in by_model)
-    storage_gb = storage_bytes / 1_000_000_000.0
-    storage_month = storage_gb * storage_usd_per_gb_month
-    provider_30d = model_30d + executor_30d + storage_month
-    total_30d = provider_30d + fixed_monthly_usd
-    cash_margin = ((cash_30d - total_30d) / cash_30d * 100.0
-                   if cash_30d > 0 else None)
-
-    plan_scenarios = []
-    storage_reserve = 5.0 * storage_usd_per_gb_month
-    labels = {"ai": "Creator", "ai_pro": "Pro", "ai_max": "Frontier"}
-    for plan in ("ai", "ai_pro", "ai_max"):
-        allowance = int(credits.PLAN_MONTHLY_LIMITS[plan])
-        metered = allowance * model_prices.USD_PER_CREDIT
-        prices = billing.PLAN_PRICES_USD[plan]
-        for cadence, monthly_revenue in (
-                ("monthly", float(prices["monthly"])),
-                ("annual", float(prices["yearly"]) / 12.0)):
-            total_cost = metered + storage_reserve
-            margin = ((monthly_revenue - total_cost) / monthly_revenue * 100.0)
-            plan_scenarios.append({
-                "plan": plan, "label": labels[plan], "cadence": cadence,
-                "credits": allowance,
-                "monthly_revenue_usd": round(monthly_revenue, 2),
-                "max_metered_cost_usd": round(metered, 2),
-                "storage_reserve_usd": round(storage_reserve, 3),
-                "gross_margin_pct": round(margin, 1),
-            })
-    return jsonify({
-        "pricing": {"in_per_m": PRICE_IN_PER_M, "out_per_m": PRICE_OUT_PER_M,
-                    "cached_in_per_m": PRICE_CACHED_IN_PER_M,
-                    "models": model_prices.MODEL_PRICES,
-                    "note": "each row is priced from its OWN model; the "
-                            "in/out/cached numbers above are only the fallback "
-                            "for a model not in the table. Cache-hit input is "
-                            "priced separately; reasoning tokens are charged "
-                            "only where the provider bills them on top of "
-                            "completion_tokens.",
-                    "provider_cost_usd_per_credit":
-                        model_prices.USD_PER_CREDIT,
-                    "r2_storage_usd_per_gb_month": storage_usd_per_gb_month},
-        "economics_30d": {
-            "cash_revenue_usd": round(cash_30d, 2),
-            "model_usd": round(model_30d, 4),
-            "executor_ceiling_usd": round(executor_30d, 4),
-            "storage_bytes": storage_bytes,
-            "storage_gb": round(storage_gb, 3),
-            "storage_usd": round(storage_month, 4),
-            "database_storage_gb": round(database_storage_gb, 2),
-            "database_storage_usd": round(database_storage_usd, 2),
-            "fixed_platform_usd": round(fixed_monthly_usd, 2),
-            "total_cost_usd": round(total_30d, 4),
-            "cash_gross_margin_pct": (round(cash_margin, 1)
-                                      if cash_margin is not None else None),
-            "note": "Cash revenue is completed positive payments in the last "
-                    "30 days. Executor is the conservative job telemetry "
-                    "ceiling. Render Postgres storage uses 5 GB at $0.30/GB "
-                    "by default. Set PLATFORM_FIXED_COST_USD_MONTH to include "
-                    "database compute and other fixed subscriptions.",
-        },
-        "plan_scenarios": plan_scenarios,
-        "daily": [{**r, "day": r["day"].isoformat(),
-                   "est_cost": round(float(r["est_cost"] or 0), 4)}
-                  for r in rows],
-        "by_purpose": [{**r, "est_cost": round(float(r["est_cost"] or 0), 4)}
-                       for r in by_purpose],
-        "by_model": [{**r,
-                      "cached_in": int(float(r["cached_in"] or 0)),
-                      "reasoning_out": int(float(r["reasoning_out"] or 0)),
-                      "est_cost": round(float(r["est_cost"] or 0), 4)}
-                     for r in by_model],
-    })
+    def compute():
+        with adb() as conn:
+            return admin_costs.compute(conn.cursor())
+    return jsonify(admin_cache.shared_report(
+        "/admin/video/costs", {}, compute,
+        fresh=request.args.get("fresh") == "1",
+        logger=current_app.logger))
 
 
 UPLOAD_KINDS = ("original", "music", "image_ref", "video_clip")
@@ -3034,7 +2962,32 @@ def video_user_detail(user_id):
 #
 # Table is created lazily here, mirroring newsletter_settings, so no schema
 # change lands in models.py.
+_video_settings_ready = False
+
+
 def _ensure_video_settings(cur):
+    """Create the settings table once per process, never on a GET (R6).
+
+    ALTER TABLE takes an ACCESS EXCLUSIVE lock even when the column exists;
+    the renderer reads this table on every render, so a queued ALTER would
+    stall every render behind it (the Jul 26 outage pattern). The table and
+    its columns already exist in production; this only runs on the first
+    POST of a process, with a 2 s lock limit so it can never queue.
+    """
+    global _video_settings_ready
+    if _video_settings_ready:
+        return
+    cur.execute("SET LOCAL lock_timeout = '2s'")
+    cur.execute("""SELECT count(*) AS n FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'video_settings'
+                      AND column_name IN ('watermark_scene_top',
+                                          'watermark_lower')""")
+    if int((cur.fetchone() or {}).get("n") or 0) == 2:
+        cur.execute("INSERT INTO video_settings (id) VALUES (1) "
+                    "ON CONFLICT (id) DO NOTHING")
+        _video_settings_ready = True
+        return
     cur.execute("""
         CREATE TABLE IF NOT EXISTS video_settings (
             id INTEGER PRIMARY KEY,
@@ -3052,6 +3005,7 @@ def _ensure_video_settings(cur):
                 "watermark_lower BOOLEAN DEFAULT FALSE")
     cur.execute("INSERT INTO video_settings (id) VALUES (1) "
                 "ON CONFLICT (id) DO NOTHING")
+    _video_settings_ready = True
 
 
 def _watermark_position(row):
@@ -3066,14 +3020,15 @@ def _watermark_position(row):
 @admin_video_bp.route("/admin/video/settings", methods=["GET"])
 @admin_required
 def video_settings_get():
+    # A plain read: no DDL on GET (R6). A missing table or row reads as the
+    # defaults the renderer itself falls back to.
     with adb() as conn:
         cur = conn.cursor()
-        _ensure_video_settings(cur)
-        conn.commit()
-        cur.execute("SELECT watermark_enabled, watermark_force, "
-                    "watermark_scene_top, watermark_lower, updated_at "
-                    "FROM video_settings WHERE id = 1")
-        row = cur.fetchone() or {}
+        cur.execute("SELECT to_regclass('public.video_settings') AS t")
+        row = {}
+        if (cur.fetchone() or {}).get("t"):
+            cur.execute("SELECT * FROM video_settings WHERE id = 1")
+            row = cur.fetchone() or {}
     return jsonify({
         "watermark_enabled": bool(row.get("watermark_enabled", True)),
         "watermark_force": bool(row.get("watermark_force", False)),
@@ -3191,19 +3146,8 @@ def video_settings_set():
 #  Counters live in metrics_counters (migration 017; the worker increments
 #  via db.bump_metric) because the raw evidence does not keep: video_jobs
 #  rows are deleted with their project, so counting failures over jobs
-#  undercounts forever after the first cleanup. Lazily created here too,
-#  mirroring video_settings, so deploy order cannot 500 this page.
+#  undercounts forever after the first cleanup.
 # ─────────────────────────────────────────────────────────────────────────
-
-def _ensure_metrics_counters(cur):
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS metrics_counters (
-            name       TEXT PRIMARY KEY,
-            count      BIGINT NOT NULL DEFAULT 0,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-    """)
-
 
 @admin_video_bp.route("/admin/video/reliability", methods=["GET"])
 @admin_required
@@ -3354,7 +3298,8 @@ def video_reliability():
             "worker_died": _metric("worker_died", jobs_total),
             "job_failed": _metric("job_failed", jobs_total),
             "tool_refused": _metric("tool_refused", tools_total),
-            "tool_failed": _metric("tool_failed", tools_total),
+            # One number for "tool calls that didn't succeed" (refused is a
+            # subset); the duplicate `tool_failed` key was dropped.
             "tool_non_success": _metric("tool_failed", tools_total),
             # Public isError responses include synchronous validation and
             # delivery failures, and can overlap queue-backed failures above.
@@ -3391,6 +3336,14 @@ def redesign_observability():
         days = max(1, min(90, int(request.args.get("days", 30))))
     except (TypeError, ValueError):
         days = 30
+    return jsonify(admin_cache.shared_report(
+        "/admin/video/redesign-observability", {"days": days},
+        lambda: _redesign_report(days),
+        fresh=request.args.get("fresh") == "1", logger=current_app.logger))
+
+
+def _redesign_report(days):
+    """The heavy 30-day telemetry scan; cached 10 min by the route (R3)."""
     interval = f"{days} days"
     with adb() as conn:
         cur = conn.cursor()
@@ -3520,6 +3473,6 @@ def redesign_observability():
         """, (interval,))
         samples = [dict(row) for row in cur.fetchall()]
 
-    return jsonify({"days": days, "execution": execution,
-                    "logical_turns": logical_turns, "agent": agent,
-                    "recent_context_samples": samples})
+    return {"days": days, "execution": execution,
+            "logical_turns": logical_turns, "agent": agent,
+            "recent_context_samples": samples}

@@ -1,4 +1,4 @@
-<!--MG-SPEC {"title": "Number counter", "category": "data",
+<!--MG-SPEC {"title": "Number counter", "category": "data", "also": ["type"],
  "description": "One big hero number that really counts (0 -> value with a ~0.4 s expo ease-out), rolls like an odometer, or hard-cuts on whole ('reveal'), and lands with a soft bloom, plus an optional label line. Use when the speaker says a striking figure (a price, a percentage, users, years) and the number itself should be the moment. The number completes exactly on its spoken onset ('land'; add/set_motion_graphic set it from the transcript) and the count rolls only in the last 'roll' seconds before it (it enters with its roll), so it never runs across the setup. A spoken range is shown as said: value '30–40' when the speaker says '30, 40 fonts' - each figure lands on its own word ('land_first' for the first, set by the write). A punchline number that must not move before its word may use style 'reveal' (a hard cut on the word).",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
@@ -9,9 +9,9 @@
   "style": {"type": "enum", "values": ["count", "odometer", "reveal"], "default": "count", "hint": "count = tabular digits tick up and complete on the landing; odometer = masked digit drums roll and carry like a real counter; reveal = no count: the whole number (and label) hard-cuts on at the landing with a bloom - for punchlines and numbers that are not growing quantities"},
   "land": {"type": "float", "min": 0, "max": 30, "default": 0, "hint": "item seconds at which the number completes - the spoken number's onset (a range: its second figure's); 0 = automatic: 'reveal' cuts on at the item start, a count lands at min(1.0 s, 55% of the item). add/set_motion_graphic set it from the transcript (20 ms before the word)"},
   "land_first": {"type": "float", "min": 0, "max": 30, "default": 0, "hint": "a range only: item seconds at which its FIRST figure lands (that figure's spoken onset; the write sets it); the second then counts on from it to 'land'. 0 = both figures land together on 'land'"},
-  "roll": {"type": "float", "min": 0.15, "max": 1.5, "default": 0.4, "hint": "seconds a count rolls into its landing (expo ease-out); with a spoken landing the number enters with its roll, so it never counts across the setup"},
+  "roll": {"type": "float", "min": 0.15, "max": 3.0, "default": 0.4, "hint": "seconds a count rolls into its landing (expo ease-out); with a spoken landing the window opens with the roll (the write keeps it), so it never counts across more of the setup than you asked"},
   "font": {"type": "enum", "values": ["Inter Display", "Anton", "Bebas Neue", "Archivo Black", "Instrument Serif", "Playfair Display"], "default": "Inter Display"},
-  "color": {"type": "color", "default": "#F7F5F2", "hint": "number colour"},
+  "color": {"type": "color", "default": "#F7F5F2", "hint": "ink of the number and its label (dark ink for a light card)"},
   "accent": {"type": "color", "default": "#FFD400", "hint": "bloom, symbols (+ % $) and the label accent"},
   "glow": {"type": "float", "min": 0, "max": 1, "default": 0.5, "hint": "bloom strength when the number lands"},
   "backdrop": {"type": "enum", "values": ["none", "scrim"], "default": "none", "hint": "scrim = soft dark falloff behind the number; use it on bright or busy footage"},
@@ -213,6 +213,7 @@
       labwrap = MG.el('div', 'labwrap');
       label = MG.el('div', 'label', null, labwrap);
       label.innerHTML = rich(P.label.trim());
+      label.style.color = hex(P.color, 0.92);   // the label shares the number's ink
       if (P.label_pos !== 'above') rule = MG.el('div', 'rule');
     }
     (P.label_pos === 'above' && label ? [labwrap, numwrap] : [numwrap, rule, labwrap]).forEach(p => p && stage.appendChild(p));
@@ -368,7 +369,7 @@
     const toPage = q => q && [x + q[0] * k, y + q[1] * k, x + q[2] * k, y + q[3] * k];
     const numR = MG.rectOf(num), labR = label ? MG.rectOf(label) : null;
     const needs = have => [MG.need(toPage(numR), { ink: P.color, ratio: 3, have }),
-                           labR ? MG.need(toPage(labR), { ink: '#F7F5F2', ratio: 4.5, have }) : 0];
+                           labR ? MG.need(toPage(labR), { ink: P.color, ratio: 4.5, have }) : 0];
     let nd = needs(P.backdrop === 'scrim' ? 0.3 : 0);
     const autoScrim = P.backdrop !== 'scrim' && (nd[0] > 0 || nd[1] > 0);
     if (autoScrim) nd = needs(0.3);

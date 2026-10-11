@@ -61,3 +61,30 @@ def test_growth_rate_has_no_fabricated_zero_baseline():
     assert phone_status._growth_percent(8, 4) == 100.0
     assert phone_status._growth_percent(2, 4) == -50.0
     assert phone_status._growth_percent(2, 0) is None
+
+
+def test_active_now_uses_the_admin_people_definition(monkeypatch):
+    """The widget's "active now" is the admin's "on the site now": robots,
+    link previews and the owner's devices are left out (it used to count
+    every browser id or IP seen in five minutes)."""
+    from admin_metrics import live, visitors
+
+    class Cur:
+        sql = []
+
+        def execute(self, sql, params=None):
+            self.sql.append(" ".join(sql.split()))
+            self.params = params
+
+        def fetchone(self):
+            return {"n": 4}
+
+    monkeypatch.setattr(visitors, "internal_ids", lambda cur: ["owner_dev_1"])
+    cur = Cur()
+    assert live.people_now(cur) == 4
+    sql = cur.sql[-1]
+    assert "!~* %(robot)s" in sql and "ANY(%(ids)s)" in sql
+    assert "ANY(%(refs)s)" in sql and "COALESCE(pv.ip" not in sql
+    assert cur.params["ids"] == ["owner_dev_1"]
+    src = open(phone_status.__file__).read()
+    assert "live_metrics.people_now(cur)" in src

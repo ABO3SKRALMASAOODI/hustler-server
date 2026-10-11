@@ -51,7 +51,8 @@ import stitch
 import storage
 import timeline as timeline_mod
 import travel
-from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
+from schemas import (clean_fingerprint, patch_fingerprint, patch_clip_key,
+                     EDLValidationError,
                      is_canvas_program, keep_boundaries, master_loudness,
                      quad_bbox, speed_pieces, strip_unknown_fx,
                      subject_matte_geom, validate_edl)
@@ -2240,7 +2241,8 @@ def carry_current(meta, edl):
     graphic in a different text from the phrase it showed (v2), and words a
     graphic did not show were muted or set as micro bridge rows, and a
     card layout's captions sat on its seams (v3: transcript captions over
-    picture cards are stamped too). Same
+    picture cards are stamped too), and captions anchored inside a card
+    left their anchor for the mouth or ran past its sides (v5). Same
     grandfathering discipline as legibility_current: everything else keeps
     its cache, and a missing stamp on such an EDL means the render predates
     the plan.
@@ -6767,10 +6769,13 @@ def _stream_report(path):
 
 
 def picture_qc(edl_json, index, out_path, out_info, variant, want_wm,
-               wm_settings=None, src_shape=None, job_id=None, budget_s=None):
+               wm_settings=None, src_shape=None, job_id=None, budget_s=None,
+               src_path=None):
     """render_qc on a finished render, or None (a render never fails over
     its own review). The plan reads the EDL exactly as render_edl does
-    (render_plan.canonical_program), on the output's own geometry."""
+    (render_plan.canonical_program), on the output's own geometry;
+    ``src_path`` (the source the render read) is where the faces inside
+    picture cards are read."""
     try:
         import render_qc
         edl = validate_edl(strip_unknown_fx(
@@ -6789,7 +6794,8 @@ def picture_qc(edl_json, index, out_path, out_info, variant, want_wm,
             outro_s=outro_seconds(variant == "preview"), want_wm=bool(want_wm),
             wm_anchor_y=anchor, src_fps=video.get("fps"))
         res = render_qc.check(out_path, plan_,
-                              budget_s=budget_s or render_qc.BUDGET_S)
+                              budget_s=budget_s or render_qc.BUDGET_S,
+                              src_path=src_path)
         if res and res.get("findings"):
             print(f"[render {job_id}] PICTURE QC {variant}: "
                   + "; ".join(f[:120] for f in res["findings"]), flush=True)
@@ -8158,9 +8164,10 @@ def _run_render_job(worker_db, job):
         # patch clips as stored; a FINAL needs each patch's full-resolution
         # twin, materialized here (window-sized work on the already-download-
         # ed original) exactly once — the key is content-addressed by the
-        # patch fingerprint, so every later export finds it. A patch whose
-        # fingerprint no longer matches this upload is a repaint of a
-        # REPLACED video and is dropped, same rule as clean_source_key.
+        # patch fingerprint and its repaint algorithm (patch_clip_key), so
+        # every later export finds it. A patch whose fingerprint no longer
+        # matches this upload is a repaint of a REPLACED video and is
+        # dropped, same rule as clean_source_key.
         patch_locals = {}
         for pt in (edl_row["json"].get("patches") or []):
             if src_sha != "canvas" and pt.get("fp") != patch_fingerprint(
@@ -8176,8 +8183,8 @@ def _run_render_job(worker_db, job):
                         pt["asset_key"], workdir) \
                         or _fetch_into(workdir, pt["asset_key"], pt["id"])
                 else:
-                    fkey = pt.get("full_key") \
-                        or f"patches/{project_id}/{pt['fp'][:16]}_full.mp4"
+                    fkey = pt.get("full_key") or patch_clip_key(
+                        project_id, pt["fp"], pt.get("repaint"), full=True)
                     if not storage.exists(fkey):
                         import inpaint as _inp
                         flocal = os.path.join(workdir,
@@ -8186,7 +8193,7 @@ def _run_render_job(worker_db, job):
                             src_local,
                             [dict(r) for r in pt.get("regions") or []],
                             (float(pt["src_start"]), float(pt["src_end"])),
-                            flocal, crf=18)
+                            flocal, crf=18, repaint=pt.get("repaint"))
                         storage.upload_file(flocal, fkey, "video/mp4")
                         patch_locals[pt["id"]] = flocal
                     else:
@@ -8549,7 +8556,7 @@ def _run_render_job(worker_db, job):
         if not proof_only and variant in ("preview", "final"):
             picture_qc_res = picture_qc(
                 edl_row["json"], index, out_local, out_info, variant,
-                want_wm, wm_settings, src_shape, job_id)
+                want_wm, wm_settings, src_shape, job_id, src_path=src_local)
         # Deterministic measurements are always-on.  When the edit authors
         # music/SFX/voiceover, also cut a few tiny excerpts while the finished
         # render is already local.  The dispatcher can hand those to the
@@ -8718,10 +8725,13 @@ def _run_render_job(worker_db, job):
         # Deterministic mid-word audit: keep boundaries that clip a word,
         # computed straight from the index — visible in logs and to the
         # agent even if it ignored the write-time warnings. Meaningless (and
-        # unsafe: index is {} with no ['video']) for a canvas program.
+        # unsafe: index is {} with no ['video']) for a canvas program. Read
+        # against the source's sound: an edge the audio-safe keep tools left
+        # in a transcript word whose sound is quiet is no mid-word cut.
         mw = [] if is_canvas else audit.midword_audit(
             edl_row["json"]["keep"], index.get("words", []),
-            index["video"]["duration"])
+            index["video"]["duration"], source=src_local,
+            frame_s=1.0 / float((index.get("video") or {}).get("fps") or 30.0))
         if mw:
             print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
                   flush=True)

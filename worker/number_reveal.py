@@ -17,7 +17,8 @@ around the item (digits, or words: "forty", "one hundred and forty",
   ease-out: the template rolls only its last ``roll`` seconds and enters
   with them), so it never runs across the setup: a count that would roll
   for less than MIN_ROLL_S, or whose window opens more than LONG_ROLL_S
-  before its word, starts ROLL_S before the word instead (round 5 judging:
+  before its word, starts ROLL_S before the word instead (both stretched by
+  an editor's longer ``roll``: _roll) (round 5 judging:
   Jobs' '40' hard-cut on fully formed and read as a static number). A
   'reveal' (a hard cut for a number that must not move before its word)
   starts on the landing itself.
@@ -44,6 +45,8 @@ MIN_ROLL_S = 0.25        # a count shorter than this reads as a flicker
 ROLL_S = 0.45            # a moved count's window opens this long before its word
                          # (the template's 0.4 s roll, entering with it)
 LONG_ROLL_S = 0.8        # a window opening longer before its word is trimmed to ROLL_S
+ROLL_DEFAULT_S = 0.4     # the counter's own 'roll' default (its MG-SPEC)
+ROLL_MAX_S = 3.0         # ...and its range max
 RANGE_GAP_S = 1.5        # a range's second figure is said within this of its first
 MIN_HOLD_S = 0.5         # the landed number should stay this long
 MIN_ITEM_S = 0.3         # a moved item never gets shorter than this
@@ -342,9 +345,25 @@ def _on_time(landing, onset):
     return onset - MAX_LEAD_S - LATE_S <= landing <= onset + LATE_S
 
 
+def _roll(params):
+    """(roll, window lead, longest lead) for the counter's ``roll`` param:
+    the count rolls ``roll`` seconds into its word, so its window opens that
+    much (plus the entrance) before it; a window opening more than ``roll``
+    + 0.4 s early would sit empty across the setup. The default 0.4 s roll
+    gives exactly ROLL_S and LONG_ROLL_S (an editor's longer roll — a
+    300,000 V countdown over its sentence — was trimmed to 0.45 s, Oct 2026)."""
+    try:
+        r = float((params or {}).get("roll") or ROLL_DEFAULT_S)
+    except (TypeError, ValueError):
+        r = ROLL_DEFAULT_S
+    r = min(ROLL_MAX_S, max(0.15, r if r == r else ROLL_DEFAULT_S))
+    return r, ROLL_S + (r - ROLL_DEFAULT_S), LONG_ROLL_S + (r - ROLL_DEFAULT_S)
+
+
 def _land_counter(item, params, spoken, figure, prog):
     s, e = float(item["start"]), float(item["end"])
     s0, e0 = s, e
+    roll_s, open_s, long_s = _roll(params)
     reveal = params.get("style") == "reveal"
     landing = s + counter_landing(params, e - s)
     hit = _nearest(spoken, landing)
@@ -356,7 +375,7 @@ def _land_counter(item, params, spoken, figure, prog):
     changed = False
     before = landing
     on_time = _on_time(landing, onset)
-    long_roll = not reveal and (landing if on_time else target) - s > LONG_ROLL_S
+    long_roll = not reveal and (landing if on_time else target) - s > long_s
     if not on_time or long_roll:
         if reveal:
             # the hard cut IS the item start: nothing of it shows during the setup
@@ -370,11 +389,11 @@ def _land_counter(item, params, spoken, figure, prog):
             params["land"] = round(max(0.0, target - ns), 3)
         else:
             roll = target - s
-            if roll < MIN_ROLL_S or roll > LONG_ROLL_S:
-                # a count rolls ~0.4 s into its word: its window opens
-                # ROLL_S before it (too little time to count, or a window
-                # that would sit empty across the setup)
-                ns = max(0.0, target - ROLL_S)
+            if roll < MIN_ROLL_S or roll > long_s:
+                # a count rolls its 'roll' into its word: its window opens
+                # that long (+ the entrance) before it (too little time to
+                # count, or a window that would sit empty across the setup)
+                ns = max(0.0, target - open_s)
                 item["start"] = round(ns, 3)
                 roll = target - ns
             params["land"] = round(min(MAX_LAND_S, max(0.0, roll)), 3)
@@ -388,8 +407,9 @@ def _land_counter(item, params, spoken, figure, prog):
         if abs(e - e0) > 1e-6:
             moved += f"; it now ends at {_f(e)} (was {_f(e0)}) so the landed number holds"
         what = "cuts on" if reveal else "completes"
-        how = "" if reveal else (" It counts up over the last ~0.4 s into the word and shows "
-                                 "nothing before, so the setup is never given away.")
+        how = "" if reveal else (f" It counts up over the last ~{roll_s:g} s into the word "
+                                 "(its 'roll') and shows nothing before, so the setup is "
+                                 "never given away.")
         notes.append(f"NUMBER LANDED: '{figure}' now {what} at {_f(target)}, 20 ms before "
                      f"\"{said}\" is said at {_f(onset)} (it would have read in full at "
                      f"{_f(before)}){moved}. A number never completes before its word." + how)
@@ -417,14 +437,15 @@ def _land_range(item, params, spoken, figure, rng, prog):
         return False, (f"NOTE (number): '{figure}' is a range, but its two figures are not "
                        "said one after the other near it; a range is shown as said, each "
                        "figure on its own word.")
-    a, b = min(pairs, key=lambda p: abs(p[0]["t0"] - (s + ROLL_S)))
+    _r, open_s, long_s = _roll(params)
+    a, b = min(pairs, key=lambda p: abs(p[0]["t0"] - (s + open_s)))
     t1, t2 = round(a["t0"] - LEAD_S, 3), round(b["t0"] - LEAD_S, 3)
     reveal = params.get("style") == "reveal"
     ns = s
     if reveal:
         ns = max(0.0, t1)
-    elif not (MIN_ROLL_S <= t1 - s <= LONG_ROLL_S):
-        ns = max(0.0, t1 - ROLL_S)
+    elif not (MIN_ROLL_S <= t1 - s <= long_s):
+        ns = max(0.0, t1 - open_s)
     want_lf, want_l = round(max(0.0, t1 - ns), 3), round(min(MAX_LAND_S, max(0.0, t2 - ns)), 3)
     ne = e if e >= t2 + MIN_HOLD_S else min(prog, t2 + MIN_HOLD_S)
     if abs(ns - s) < 1e-6 and abs(ne - e) < 1e-6 and \

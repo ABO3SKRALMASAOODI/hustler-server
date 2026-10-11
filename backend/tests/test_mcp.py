@@ -17,6 +17,7 @@ claude.ai performs it, plus the ways it should refuse.
 
 import base64
 import contextlib
+from types import SimpleNamespace
 import hashlib
 import json
 import os
@@ -645,6 +646,24 @@ def test_shorts_status_returns_children_ready_for_follow_up_edits(client):
     assert "Call export_final for the reviewed version" in body
 
 
+def test_shorts_status_carries_the_measured_source_layout(client):
+    shorts = DB["project_rows"][3]["meta"]["shorts"]
+    shorts["source_layout"] = (
+        "SOURCE LAYOUT (measured once on the source pixels; every short cut "
+        "from it reads the same): 71% a portrait CALL window")
+    shorts["clips"][0]["source_layout"] = (
+        "100% call window [0.38, 0.04, 0.62, 0.96]; largest card "
+        "[0.09, 0.13, 0.91, 0.80] at 2.0x (area 0.54); erase the self-view")
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
+                       {"name": "shorts_status",
+                        "arguments": {"project_id": 3}}))
+    assert "SOURCE LAYOUT (measured once" in body
+    assert "frame: 100% call window" in body
+    # the board's own lines and the editing route still close the reply
+    assert body.index("card 1, project [9]") < body.index("SOURCE LAYOUT")
+    assert body.rstrip().endswith("must make every child edit itself.")
+
+
 def test_open_short_puts_the_child_edl_under_direct_mcp_control(client):
     DB["static_project"] = None  # explicit board, never the stale pointer
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
@@ -1177,6 +1196,37 @@ def test_watch_video_public_result_preserves_false_preview_receipt(
     assert public["structuredContent"]["preview"][
         "audio_model_review"] is False
     assert [block["type"] for block in public["content"]] == ["text"]
+
+
+def test_watch_video_structured_result_carries_the_link_and_the_frames(
+        client, monkeypatch):
+    """A client that shows structuredContent instead of the text blocks got
+    a bare receipt from every watch_video(render=false) on the Oct 10
+    podcast run: no link, no frames. The structured result now carries the
+    link, the reply's guidance and exactly what rode along."""
+    _served(monkeypatch)
+    DB["job_result"]["preview"] = {
+        "asset_id": 44, "edl_version": 8, "duration_s": 61.2,
+        "audio_model_review": False}
+    DB["job_result"]["images"] = [{
+        "storage_key": "media/3/look_1.jpg", "edl_version": 8,
+        "label": "The program, 12 moments across 0.00-61.20s",
+        "mime_type": "image/jpeg"}]
+    monkeypatch.setattr(mcpmod.storage, "get_object_whole",
+                        lambda key, cap: b"\xff\xd8jpeg")
+
+    public = _call_watch(client, render=False)
+
+    url = "https://cdn.example/media/3/mv_abc.mp4?sig=1"
+    structured = public["structuredContent"]
+    assert structured["url"] == url
+    assert structured["download_receipt"]["url"] == url
+    assert "Download: " + url in structured["message"]
+    assert structured["attached"] == {"frame_sheets": 1, "audio": False,
+                                      "video_inline": False}
+    assert structured["frame_urls"] == [
+        "https://cdn.example/media/3/look_1.jpg?sig=1"]
+    assert [b["type"] for b in public["content"]] == ["text", "text", "image"]
 
 
 def test_version_pinned_preview_download_returns_server_receipt(
@@ -2139,3 +2189,79 @@ def test_sync_wait_covers_a_typical_render_and_backs_off(monkeypatch):
     assert row["state"] == "done"
     assert sleeps[0] == mcpmod.POLL_S and max(sleeps) == mcpmod.POLL_MAX_S
     assert len(sleeps) < 60          # ~150 at a flat 0.2 s for 30 s
+
+
+# ── P2 (Oct 2026): upload plans as data, a queued analysis with its place ──
+
+@pytest.mark.parametrize("upload_plan", [
+    {"mode": "single", "url": "https://storage.example/put"},
+    {"mode": "multipart", "upload_id": "multi-7", "part_size": 500,
+     "part_urls": [{"part_number": i, "url": f"https://storage.example/part-{i}"}
+                   for i in (1, 2, 3)]},
+])
+def test_upload_start_returns_its_plan_as_structured_content(
+        client, monkeypatch, upload_plan):
+    monkeypatch.setattr(mcpmod.storage, "is_configured", lambda: True)
+    monkeypatch.setattr(mcpmod.storage, "validate_upload",
+                        lambda filename, size, kind: ("mp4", "video/mp4"))
+    monkeypatch.setattr(mcpmod.storage, "new_original_key",
+                        lambda project_id, ext, kind: "originals/3/talk.mp4")
+    monkeypatch.setattr(mcpmod.storage, "presign_upload",
+                        lambda key, size, content_type: upload_plan)
+    result = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_start",
+        "arguments": {"project_id": 3, "filename": "talk.mp4",
+                      "size_bytes": 1234, "kind": "original"},
+    }).get_json()["result"]
+    assert result["isError"] is False
+    plan = result["structuredContent"]
+    text = result["content"][0]["text"]
+    assert text.startswith("PROJECT 3")
+    # the text closes with the same plan (clients that read only text)
+    assert json.loads(text.rsplit("\n\n", 1)[-1]) == plan
+    assert plan["upload_finish_arguments"]["storage_key"] == "originals/3/talk.mp4"
+    if upload_plan["mode"] == "single":
+        assert plan["url"] == "https://storage.example/put"
+        return
+    # every part's URL with its bytes: no URL in the prose, no token needed
+    assert [(p["part_number"], p["offset"], p["length"]) for p in plan["parts"]] == \
+        [(1, 0, 500), (2, 500, 500), (3, 1000, 234)]
+    prose = text.rsplit("\n\n", 1)[0]
+    assert "https://storage.example/part-" not in prose
+    assert "valmera_upload.py" not in prose and "VALMERA_MCP_TOKEN" not in prose
+    assert "f.seek(x['offset'])" in prose and "parts=[" in prose
+
+
+def test_index_status_says_where_a_queued_analysis_stands(client, monkeypatch):
+    class Cur(FakeCur):
+        def execute(self, sql, params=()):
+            s = " ".join(sql.split())
+            if "type = 'index' ORDER BY id DESC LIMIT 1" in s:
+                self.rows = [{"id": 41, "state": DB["index_state"], "progress": 0,
+                              "error": None}]
+            elif "AS sub FROM users" in s:
+                self.rows = [{"sub": 0}]
+            elif "AS ahead" in s:
+                self.rows = [{"running": 2, "ahead": 3}]
+            elif "SAVEPOINT" in s:
+                self.rows = []
+            else:
+                super().execute(sql, params)
+
+    @contextlib.contextmanager
+    def vdb():
+        yield SimpleNamespace(cursor=Cur)
+
+    monkeypatch.setattr(mcpmod, "vdb", vdb)
+    monkeypatch.setattr(mcpmod, "_active_original",
+                        lambda cur, pid: {"sha256": "abc", "storage_key": "o/3.mp4"})
+    monkeypatch.setattr(mcpmod, "_index_row", lambda cur, sha: None)
+    DB["index_state"] = "queued"
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "index_status", "arguments": {"project_id": 3}}))
+    assert "queued — waiting for an analysis worker: 3 analysis job(s) ahead of it, " \
+           "2 running now (job 41)" in body
+    DB["index_state"] = "running"
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "index_status", "arguments": {"project_id": 3}}))
+    assert "running — 0% (job 41)" in body and "ahead" not in body

@@ -3,7 +3,7 @@
  "duration": 2.6, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "title": {"type": "str", "required": true, "max": 40, "hint": "1-3 words read best"},
-  "number": {"type": "str", "default": "01", "max": 6, "hint": "chapter/step number; empty to hide"},
+  "number": {"type": "str", "default": "", "max": 6, "hint": "chapter/step number ('01'), only for a real numbered sequence; empty (the default) shows none"},
   "label": {"type": "str", "default": "", "max": 48, "hint": "optional small line under the title"},
   "style": {"type": "enum", "values": ["minimal", "bold_red_italic", "boxed"], "default": "minimal"},
   "color": {"type": "color", "default": "#F8F6F2"},

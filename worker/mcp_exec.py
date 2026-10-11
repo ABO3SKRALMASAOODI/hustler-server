@@ -561,9 +561,22 @@ def run_mcp_job(worker_db, job):
                 # is not an edit and does not belong in the activity feed.
                 # The inline budget is the BACKEND's — it is the one that has
                 # to carry the base64 through a JSON-RPC reply.
-                return mcp_media.prepare(
+                answer = mcp_media.prepare(
                     ctx, args, int(args.get("_inline_max_bytes")
                                    or 12 * 1048576))
+                # The filmstrip it queued belongs to THIS reply. Undrained,
+                # it rode out attached to the caller's next tool call (Oct
+                # 10 podcast run: watch_video's sheet arrived under a later
+                # look_at). A remote encode already published its own. A
+                # refusal carries no pictures (the backend answers it with
+                # text alone), so nothing is drained into it.
+                if isinstance(answer, dict) and answer.get("video") \
+                        and ctx.pending_images:
+                    imgs, _attempts = _drain_images(ctx)
+                    if imgs:
+                        answer = dict(answer, images=list(
+                            answer.get("images") or []) + imgs)
+                return answer
 
             if tool not in agent_tools.TOOLS:
                 return {"text": f"Unknown tool '{tool}'.", "is_error": True}

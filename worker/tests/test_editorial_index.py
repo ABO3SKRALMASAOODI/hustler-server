@@ -134,7 +134,11 @@ def test_agent_tool_is_bounded_honest_and_available_in_story_catalog():
     assert "EDITORIAL EVIDENCE MAP" in out
     assert "does NOT recognize the full picture or prescribe effects" in out
     assert "scene change@3" in out
-    assert "Continue with get_editorial_map" in out
+    # peaks are ranked (the strongest `limit` in source order); a
+    # chronological focus pages on with start/end
+    assert "PEAKS RANKED" in out and "weaker peak row(s) not shown" in out
+    assert "Continue with get_editorial_map" in agent_tools.get_editorial_map(
+        ctx, focus="all", limit=2)
     assert "get_editorial_map" not in agent_tools.compact_tool_names(ctx)
     ctx._loaded_tool_domains = {"story"}
     assert "get_editorial_map" in agent_tools.compact_tool_names(ctx)

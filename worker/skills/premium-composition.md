@@ -147,7 +147,10 @@ NATIVE TOOLS THAT REMAIN USEFUL:
   above a small card on black. It also carries the speaker's name, so a
   broadcast lower third is unnecessary. It does not yield to other graphics: where
   hero lockups share the band above a card or letterbox, use the persistent
-  `headline` motion template instead, which steps aside for them.
+  `headline` motion template instead, which steps aside for them. The write
+  measures it against the captions (HEADLINE TYPE): the default font_size
+  draws about two thirds of a clean caption track's cap height, so pass the
+  font_size it names — a hook is never smaller than the captions.
 - **A phrase built in place**: `set_typography_scene` measures the complete
   phrase first, then reveals runs at real PROGRAM `at` cues without moving
   previous words. Give deliberate `lines` with `runs`; pair one sans family

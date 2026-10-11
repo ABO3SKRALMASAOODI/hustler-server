@@ -18,7 +18,7 @@ def test_registration_chart_keeps_all_video_history_and_utc_days(monkeypatch):
     body=response.get_json()
     assert status==200 and body['data'][0]['count']==66
     assert body['timezone']=='UTC' and body['scope_start']==admin.METRICS_EPOCH
-    assert queries[0]=="SET LOCAL TIME ZONE 'UTC'"
+    assert queries[0]=="SET TIME ZONE 'UTC'"
     assert "INTERVAL '30 days'" not in queries[1]
     assert f"generate_series(DATE '{admin.METRICS_EPOCH}', CURRENT_DATE" in queries[1]
     assert admin.ADMIN_EMAIL in queries[1] and 'is_verified = 1' in queries[1]

@@ -391,6 +391,48 @@ def query(editorial_map, start=0.0, end=None, focus="all"):
         "scene_change_inside", "pause_before", "pause_after"}]
 
 
+# Ranking peaks (Oct 2026: a whole-podcast focus='peaks' matched 507 of the
+# ~600 sentences and showed the first 40 in time, so it was skipped): the
+# weight of a row's independent, MEASURED emphasis evidence. It ranks what
+# the lanes measured; it does not judge the words.
+PEAK_WEIGHTS = (("vocal_stress", 2.0), ("energy_peak", 1.0),
+                ("energy_rising", 0.5), ("pause_after", 0.6),
+                ("pause_before", 0.4), ("scene_change_inside", 0.3))
+
+
+PEAK_FULL_WORDS = 5     # a shorter row ('Yeah.', 'So') counts in proportion
+
+
+def peak_score(row):
+    """(score, evidence) of one row: its measured vocal stress (0-1, x2)
+    plus a weight per emphasis tag it carries (PEAK_WEIGHTS), in proportion
+    for a fragment of fewer than PEAK_FULL_WORDS words — the pauses around a
+    lone 'Yeah.' are a fragment's, not a peak's."""
+    tags = set(row.get("tags") or [])
+    audio = row.get("audio") or {}
+    score, why = 0.0, []
+    stress = _number(audio.get("vocal_stress")) if audio.get("stressed_word") else 0.0
+    if stress > 0:
+        score += dict(PEAK_WEIGHTS)["vocal_stress"] * stress
+        why.append(f"stress {stress:.2f}")
+    for tag, weight in PEAK_WEIGHTS[1:]:
+        if tag in tags:
+            score += weight
+            why.append(tag)
+    words = len(str(row.get("text") or "").split())
+    if row.get("kind") == "speech" and words < PEAK_FULL_WORDS:
+        score *= words / float(PEAK_FULL_WORDS)
+        why.append(f"{words}-word fragment")
+    return round(score, 3), why
+
+
+def rank_peaks(rows):
+    """[(rank, score, evidence, row)] strongest first (ties: earlier first)."""
+    scored = sorted(((peak_score(r), i, r) for i, r in enumerate(rows)),
+                    key=lambda x: (-x[0][0], x[1]))
+    return [(k + 1, s[0], s[1], r) for k, (s, _i, r) in enumerate(scored)]
+
+
 def summary(editorial_map):
     measured = editorial_map.get("measured") or {}
     rows = editorial_map.get("rows") or []
