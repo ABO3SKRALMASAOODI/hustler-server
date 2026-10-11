@@ -1,0 +1,38 @@
+# AT-0D-1 (part b): the harness runs the word_slam HERO on V02 840.47-880.51.
+id: AT-0D-1b
+track: 0D
+title: word_slam hero behind the speaker on "flying cars"
+local_only: true
+interim: false
+reference:
+  - {ref: "22", t: [0.67, 2.67], approx: true, board_t: 1.6}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[873.0, 881.0]]
+  focus: [0.41, 0.31]
+  ops:
+    - {action: upsert, layer: motion, id: hero,
+       value: {id: hero, template: word_slam, start: 5.12, end: 6.7,
+               params: {text: "*FLYING CARS*", tier: hero, entrance: pop,
+                        role: condensed}}}   # pop = hard cut ON the word: start = onset
+    - {harness: behind_matte, layer: motion, id: hero}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: land_err_f, item: hero, event: ink_onset, target: {word: flying},
+     op: "<=", value: 1}
+  - {name: glyph_visible, item: hero, op: ">=", value: 0.65}
+  - {name: legibility, item: hero, role: payload, op: ">=", value: 60}
+  - {name: matte_flicker, item: hero, op: "<=", value: 0.035}
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: flash_risk, op: "<=", value: 3}
+  - {name: cost_ratio}
+beyond: "the hero word lands on the spoken word, measured to the frame, from one write that also measured the matte; the reference was keyed and timed by hand"
+board: {stills: [5.6], clip: [4.4, 8.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

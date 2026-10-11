@@ -1,0 +1,25 @@
+# Wave 0 baseline board: today's best output on the window every later wave re-renders.
+id: BASE-1
+track: W0
+title: "Thiel: They promised us flying cars (v5)"
+local_only: true
+interim: false
+reference:
+  - {ref: "05", t: [0.23, 12.23], approx: false}
+  - {ref: "13", t: [0.2, 17.7], approx: false}
+footage:
+  - {vfl: V02, t: [840.47, 880.51]}
+music: null
+aspect: "9:16"
+mode: engine
+edl: {base: "baseline:thiel_final8.json", window_ref: V02/thiel_flying_cars, index: idx_thiel_v3.json, name: thiel}
+chat: null
+render: {variant: final, use: "~/Documents/Valmera/Showcase Shorts 2026-10-10/v5 01 Thiel - They promised us flying cars.mp4"}
+allow: []
+metrics:
+  - {name: legibility, op: ">=", value: 60}
+  - {name: land_err_f, op: "<=", value: 1}
+  - {name: flash_risk, op: "<=", value: 3}
+beyond: "baseline: today's output, measured on the identical source window every later wave re-renders, so progress is a number and not a memory"
+board: {stills: [1.0, 12.6, 31.8], clip: [0.0, 4.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: owner}
