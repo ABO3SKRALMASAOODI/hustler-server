@@ -5496,6 +5496,20 @@ def get_edl_version(user_id, project_id, version):
                             "created_by": row["created_by"]}})
 
 
+def _flash_flag(edl_json):
+    """Owner decision (Wave 0, flash safety): a program past the flash-safe
+    limit reached export only through the user's opt-in (the verifier
+    blocks it otherwise), so its final job is flagged contains_flashing.
+    {} for every other export (its payload is unchanged) and whenever the
+    program cannot be read: a reading failure never blocks an export."""
+    try:
+        if wflash.assess(edl_json)["over_limit"]:
+            return {"contains_flashing": True}
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
 def _request_final(cur, user_id, project_id, version, render_group=None,
                    reuse_existing=False):
     """One export gate shared by individual and explicit batch requests."""
@@ -5663,19 +5677,9 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
     # capacity and the user's export simply disappeared behind a 429.
     # The same-project final guard above prevents duplicate encodes; queue
     # ordering and worker lanes own actual fleet capacity.
-    # Owner decision (Wave 0, flash safety): a program past the flash-safe
-    # limit reached export only through the user's opt-in (the verifier
-    # blocks it otherwise), so its final is flagged contains_flashing. The
-    # key is absent for every other export, so payloads are unchanged.
-    flash_flag = {}
-    try:
-        if wflash.assess(edl_row["json"])["over_limit"]:
-            flash_flag["contains_flashing"] = True
-    except Exception:  # noqa: BLE001 — a reading failure never blocks
-        flash_flag = {}
     job_id = _enqueue(cur, project_id, user_id, "final",
                       {"edl_version": version, **({"render_group": render_group} if render_group else {}),
-                       **flash_flag})
+                       **_flash_flag(edl_row["json"])})
     record_client_event(
         user_id, project_id, "export_job_started",
         detail={"job_id": job_id, "version": version}, origin="server")

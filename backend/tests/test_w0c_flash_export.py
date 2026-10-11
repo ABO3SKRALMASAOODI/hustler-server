@@ -38,3 +38,15 @@ def test_the_export_gate_counts_flash_transitions_at_their_junctions():
 
 def test_the_limit_is_the_owner_default_without_the_worker_config():
     assert video.wflash.default_max_per_s() == 3
+
+
+def test_only_a_program_past_the_limit_changes_the_final_payload():
+    """The final job's payload gains contains_flashing only past the limit;
+    every other export's payload is exactly what it was (Wave 0 review)."""
+    assert video._flash_flag(_flash_every_cut(5)) == \
+        {"contains_flashing": True}
+    assert video._flash_flag(_flash_every_cut(2)) == {}
+    assert video._flash_flag(video.wschemas.default_edl(20.0)) == {}
+    # an unreadable program never blocks or flags an export
+    assert video._flash_flag({"effects": "not a dict"}) == {}
+    assert video._flash_flag(None) == {}
