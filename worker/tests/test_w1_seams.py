@@ -200,10 +200,17 @@ def _core_catalog():
     return agent_tools.openai_tools("any-model", compact=True, names=core)
 
 
+# The track skills INTERFACES_W1.md §5 requires (each with its "Through
+# apply_edit_batch" section): a skill file joins read_skill's name enum
+# automatically, like a department joins load_tools'.
+W1_SKILLS = {"subject-fx", "compositing", "punctuation", "finishing"}
+
+
 def _strip_w1_growth(catalog):
     """The catalog with Wave 1's automatic growth set aside: the ``fx``
-    layer in apply_edit_batch's enum and live department names in the
-    load_tools / expand_toolset domain enums."""
+    layer in apply_edit_batch's enum, live department names in the
+    load_tools / expand_toolset domain enums, and the track skills (§5) in
+    read_skill's name enum."""
     cat = copy.deepcopy(catalog)
     live = set(tools_ext.EXT_DEPARTMENTS)
 
@@ -223,6 +230,8 @@ def _strip_w1_growth(catalog):
             walk(tool, {"fx"})
         elif name in ("load_tools", "expand_toolset"):
             walk(tool, live)
+        elif name == "read_skill":
+            walk(tool, W1_SKILLS)
     return cat
 
 
