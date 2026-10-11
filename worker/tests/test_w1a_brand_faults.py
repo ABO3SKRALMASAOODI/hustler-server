@@ -195,3 +195,48 @@ def test_the_words_really_sit_behind_the_subject(brand):
         assert core.sum() > 500
         assert drawn[core].mean() < 0.01, drawn[core].mean()
         assert drawn[~subject].sum() > 500
+
+
+def test_a_render_with_an_unused_program_matte_fails_as_before(monkeypatch):
+    """Every render of an indexed source holds a ProgramMatte; one nothing
+    asked for emits nothing, so a failure of that graph is the legacy
+    graph's own: raised at once, not re-rendered 'without fx' (review)."""
+    import fxgraph
+    import media
+    import renderer
+    calls = []
+
+    def boom(cmd, **kw):
+        calls.append(cmd)
+        raise media.MediaError("ffmpeg failed: Invalid data found")
+    monkeypatch.setattr(renderer, "_render_media_run", boom)
+    plan = fxgraph.prepare({"keep": [[0.0, 2.0]]}, tl=None, W=270, H=480,
+                           fps=25.0, preview=True, workdir=None)
+    assert plan.empty
+
+    class _Unused:
+        active, wants = False, []
+    plan.pm = _Unused()
+    with pytest.raises(media.MediaError):
+        renderer._fx_run(["ffmpeg"], [plan], lambda: ["ffmpeg", "again"],
+                         None)
+    assert len(calls) == 1
+
+    class _Used:
+        active, wants = True, [(0.0, 1.0, "tx1", "person", "world")]
+    calls.clear()
+    plan.pm = _Used()
+    with pytest.raises(media.MediaError):
+        renderer._fx_run(["ffmpeg"], [plan], lambda: ["ffmpeg", "again"],
+                         None)
+    assert calls == [["ffmpeg"], ["ffmpeg", "again"]]
+
+
+def test_the_matte_chain_filters_exist_on_this_ffmpeg():
+    """Every filter the program matte's chain emits (matte_track.FILTERS,
+    the list the render checks before building it) is in this ffmpeg — on
+    CI the production 8.1 build, so a lane that would silently draw every
+    behind item in front fails here first."""
+    import fxgraph
+    import matte_track
+    assert fxgraph.missing_filters(matte_track.FILTERS) == []

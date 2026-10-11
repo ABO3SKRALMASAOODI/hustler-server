@@ -6406,8 +6406,12 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
     except media.MediaError as e:
         plan = fx_box[0]
         # a program matte (Wave 1, 1A) is fx plumbing too: an EDL whose only
-        # device is a word behind the subject retries without it as well
-        pm_on = getattr(plan, "pm", None) is not None
+        # device is a word behind the subject retries without it as well —
+        # but only when the graph carried one (every render with an indexed
+        # source holds a ProgramMatte; one nothing asked for emits nothing,
+        # and its failure is the legacy graph's, raised as before)
+        pm = getattr(plan, "pm", None)
+        pm_on = pm is not None and bool(pm.active and pm.wants)
         if plan is None or (plan.empty and not pm_on) \
                 or (cancelled_cb and cancelled_cb()) \
                 or "timed out" in str(e) or "cancelled" in str(e):
@@ -8593,7 +8597,9 @@ def _run_render_job(worker_db, job):
     # need (never waiting on a preview): the project's proxy is what a
     # sidecar job reads, and only this job knows it.
     matte_launch = None
-    if not is_canvas and original and matte_track.live():
+    # (the proxy row is read only where this process may launch at all)
+    if not is_canvas and original and matte_track.live() \
+            and matte_track.can_launch():
         try:
             matte_launch = matte_track.launch_source(
                 original.get("sha256"),
