@@ -6,6 +6,8 @@ analytics_id) seen in a period gets exactly one class, first match wins (G8):
   1. robot         its browser name matches ROBOT_UA
   2. internal      it ever opened /admin, or is listed as the owner's device
   3. person        interacted, clicked a tracked button, scrolled, or 2+ pages
+                   (events that fire by themselves, defs.PASSIVE_EVENTS, are
+                   not a click)
   4. link_preview  every row carries an outreach code and came from Meta
   5. person        stayed active for more than 30 seconds
   6. no_signal     everything else
@@ -73,6 +75,7 @@ def browsers_cte(cur, by_day=False, extra_where="", extra_cols=""):
       ), ev AS (
         SELECT DISTINCT e.visit_id FROM website_events e
          WHERE e.created_at >= %(start)s
+           AND NOT (e.kind = ANY(%(passive_events)s))
       ), d AS (
         SELECT {group},
                bool_or(v.user_agent ~* %(robot_ua)s) AS robot,
@@ -93,7 +96,8 @@ def browsers_cte(cur, by_day=False, extra_where="", extra_cols=""):
 def params(cur, period, **extra):
     p = period.params()
     p.update(robot_ua=defs.ROBOT_UA, internal_ids=internal_ids(cur),
-             preview_refs=list(defs.PREVIEW_REFERRERS))
+             preview_refs=list(defs.PREVIEW_REFERRERS),
+             passive_events=list(defs.PASSIVE_EVENTS))
     p.update(extra)
     return p
 

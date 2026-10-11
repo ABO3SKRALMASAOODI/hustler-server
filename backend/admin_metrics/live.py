@@ -59,14 +59,16 @@ def live(cur):
                COALESCE(pv.scroll_depth, 0) AS scroll,
                {interacted} AS interacted,
                EXISTS (SELECT 1 FROM website_events e
-                        WHERE e.visit_id = pv.analytics_id) AS clicked
+                        WHERE e.visit_id = pv.analytics_id
+                          AND NOT (e.kind = ANY(%(passive)s))) AS clicked
           FROM page_visits pv
          WHERE pv.analytics_id IS NOT NULL
            AND pv.visited_at > (NOW() AT TIME ZONE 'UTC') - INTERVAL '2 days'
            AND COALESCE(pv.user_agent, '') !~* %(robot)s
            AND NOT (pv.device_id = ANY(%(ids)s))
          ORDER BY pv.visited_at DESC LIMIT 50""",
-                {"robot": defs.ROBOT_UA, "ids": ids})
+                {"robot": defs.ROBOT_UA, "ids": ids,
+                 "passive": list(defs.PASSIVE_EVENTS)})
     hits = []
     for r in cur.fetchall():
         att = r["attribution"] if isinstance(r["attribution"], dict) else None

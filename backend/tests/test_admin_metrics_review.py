@@ -203,3 +203,31 @@ def test_live_counts_an_interacted_hit_as_a_person(monkeypatch):
     assert out["recent_hits"][0]["class"] == "person"
     assert "COALESCE(pv.interacted, FALSE) AS interacted" in cur.sql[-1]
     assert "user_agent" not in out["recent_hits"][0]
+
+
+# ── People: an event that fires by itself is not a person's click ───────
+def test_self_firing_events_never_make_a_browser_a_person(monkeypatch):
+    """The landing page now reports proof sections scrolled into view and a
+    demo that autoplays; those fire with nobody touching the page, so a
+    background tab or an unlabelled robot would have counted as a person."""
+    from admin_metrics import live, visitors
+    assert {"proof_view", "demo_replay_start", "demo_replay_complete",
+            "onboarding_example_view"} <= set(defs.PASSIVE_EVENTS)
+    # Pressed, toggled or opened by a person: still a click.
+    assert not {"signup_cta", "showcase_sound", "before_after_toggle",
+                "demo_replay_step", "starter_request_pick"} & \
+        set(defs.PASSIVE_EVENTS)
+    monkeypatch.setattr(visitors, "internal_ids", lambda c: [])
+    monkeypatch.setattr(db, "has_column", lambda c, t, col: False)
+    period = ranges.make_period("custom", date(2026, 10, 9), date(2026, 10, 9),
+                                now=datetime(2026, 10, 11, tzinfo=timezone.utc))
+    cur = Cur()
+    visitors.classify(cur, period)
+    sql = next(s for s in cur.sql if "FROM website_events e" in s)
+    assert "NOT (e.kind = ANY(%(passive_events)s))" in sql
+    assert cur.params[-1]["passive_events"] == list(defs.PASSIVE_EVENTS)
+    cur = Cur([("count(DISTINCT pv.device_id)", [{"n": 0}]),
+               ("u.last_seen_at >= NOW()", [{"n": 0}])])
+    live.live(cur)
+    sql = next(s for s in cur.sql if "FROM website_events e" in s)
+    assert "NOT (e.kind = ANY(%(passive)s))" in sql

@@ -102,6 +102,12 @@ ROBOT_UA_RE = re.compile(ROBOT_UA, re.I)
 # hosts with no human signal is that preview, not a person.
 PREVIEW_REFERRERS = ("www.facebook.com", "m.facebook.com", "l.facebook.com",
                      "lm.facebook.com")
+# Website events that fire by themselves, with nobody touching the page: a
+# proof section scrolled into view on load, the landing demo that autoplays at
+# 50% visible and its automatic finish, an onboarding example shown. Only the
+# other events (a button pressed, a toggle, a step opened) are a person's.
+PASSIVE_EVENTS = ("proof_view", "demo_replay_start", "demo_replay_complete",
+                  "onboarding_example_view")
 # A browser with one page and no interaction but this many active seconds is
 # still a person: the activity clock stops 30 s after the last input, so an
 # untouched page cannot pass it.
