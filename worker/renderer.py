@@ -4931,9 +4931,13 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 out_lab = f"vfs{axis}{k}"
                 xy = (f"x='{pos}':y=0" if axis == "w"
                       else f"x=0:y='{pos}'")
+                # shortest=1: the bar plate runs 1 s past the programme, and
+                # without it the overlay held the programme's last frame for
+                # that second — the end card started late and lost its last
+                # second (owner rule 4; found by the Wave 0 brand test).
                 parts.append(
                     f"[{vlabel}][fsb{bar_i}]overlay={xy}:eval=frame:"
-                    f"format=auto[{out_lab}]")
+                    f"format=auto:shortest=1[{out_lab}]")
                 vlabel = out_lab
                 bar_i += 1
     # ---- the floating rounded window (round 51) -------------------------
@@ -4946,7 +4950,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         parts.append(f"[{vlabel}]scale={pw}:{ph},setsar=1[vsfp]")
         parts.append(f"[vsfp]pad={W}:{H}:{ox}:{oy}:color=black[vsfb]")
         parts.append(f"[{plate_idx}:v]format=rgba[vsfpl]")
-        parts.append("[vsfb][vsfpl]overlay=0:0:format=auto[vsf]")
+        # shortest=1: the looped plate input runs 5 s past the programme;
+        # without it the overlay held the programme's last frame through
+        # those 5 s and the end card was never shown (owner rule 4).
+        parts.append("[vsfb][vsfpl]overlay=0:0:format=auto:shortest=1[vsf]")
         vlabel = "vsf"
     fade_in = float(fx.get("fade_in_s") or 0.0)
     fade_out = float(fx.get("fade_out_s") or 0.0)
@@ -6011,6 +6018,27 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
                                  **run_kw)
 
 
+def _fx_source(edl, index):
+    """The sidecar source a render's devices read (fxgraph.prepare): the
+    index's source identity and shot grid, with no storage key, so a render
+    only READS sidecar status — analysis is launched by the device write
+    (ROADMAP A1). None when nothing in the EDL is a device or the index does
+    not name its source."""
+    if not any(isinstance(i, dict) and i.get("device")
+               for i in (edl or {}).get("fx") or []):
+        return None
+    try:
+        import sidecars
+        sha = sidecars.index_source_sha(index)
+        video = (index or {}).get("video") or {}
+        if not sha or not video.get("duration"):
+            return None
+        return sidecars.source_from(sha, None, video, None,
+                                    (index or {}).get("shots"))
+    except Exception:  # noqa: BLE001 — absent sidecars: the substitute rung
+        return None
+
+
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                progress_cb=None, want_wm=False, wm_settings=None,
                cancelled_cb=None,
@@ -6532,7 +6560,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # EDL.fx (Wave 0 seams): rungs decided and inputs allocated once; an
     # EDL without fx gets an empty plan and the exact legacy graph.
     fx_box = [fxgraph.prepare(edl, tl=tl, W=W, H=H, fps=fps,
-                              preview=preview, workdir=workdir)]
+                              preview=preview, workdir=workdir,
+                              source=_fx_source(edl, index))]
     next_idx = fx_box[0].bind_inputs(extra_inputs, next_idx)
 
     def _graph(**extra):
@@ -8198,6 +8227,7 @@ def _run_render_job(worker_db, job):
         out_dur = None
         stitched_from = None
         reused_visual_meta = {}
+        stitched_devices = None    # (previous devices block, previous EDL)
         requested_ranges = None
         proof_segments = []
         changed_ranges = None
@@ -8285,6 +8315,8 @@ def _run_render_job(worker_db, job):
                                 preview=(variant == "preview"))
                         if out_dur is not None:
                             stitched_from = int(prev_v)
+                            stitched_devices = (pm.get("devices"),
+                                                prev_row["json"])
             except Exception as se:
                 print(f"[render {job_id}] stitch eligibility failed "
                       f"({str(se)[:160]}) — full render", flush=True)
@@ -8330,6 +8362,7 @@ def _run_render_job(worker_db, job):
                   flush=True)
             stitched_from = None
             reused_visual_meta = {}
+            stitched_devices = None
             out_dur = render_edl(edl_row["json"], index, src_local,
                                  out_local, workdir,
                                  preview=(variant == "preview"),
@@ -8342,7 +8375,9 @@ def _run_render_job(worker_db, job):
                            variant, src_path=src_local, src_dur=src_dur)
         _mark("verify_s")
         try:
-            fx_devices = fxgraph.job_report(edl_row["json"], fx_rows)
+            fx_devices = fxgraph.job_report(
+                edl_row["json"], fx_rows,
+                *(stitched_devices or (None, None)))
         except Exception as fe:  # noqa: BLE001 — a report never fails a job
             print(f"[render {job_id}] devices report skipped "
                   f"({str(fe)[:160]})", flush=True)

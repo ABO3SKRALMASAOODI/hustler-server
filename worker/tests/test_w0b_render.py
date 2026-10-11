@@ -367,14 +367,13 @@ def test_at_0b_5_end_card_is_md5_identical(brand, name):
     assert [r["rung"] for r in b["report"]] == ["full"] * 6
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "PRE-EXISTING (not fx): an aspect shift holds the programme's last "
-    "frame for 1 s and the floating-window plate for 5 s past its end — "
-    "their overlays lack shortest=1 — so the end card starts late and is "
-    "cut (shift: 100/125 card frames) or never shown (plate: 0/125), on "
-    "finals too. Owner rule 4; reported to the round lead."))
 @pytest.mark.parametrize("name", ["shift", "plate"])
 def test_end_card_survives_aspect_shifts_and_the_floating_plate(brand, name):
+    """Owner rule 4. Found by this test before Wave 0 shipped: an aspect
+    shift held the programme's last frame for 1 s and the floating-window
+    plate for 5 s past its end (their overlays lacked shortest=1), so the
+    end card started late and was cut (shift: 100/125 card frames) or never
+    shown (plate: 0/125), on finals too. Fixed at integration."""
     card = brand["plain0"]["frames"][200:]
     frames = brand[f"{name}0"]["frames"]
     assert frames[200:] == card

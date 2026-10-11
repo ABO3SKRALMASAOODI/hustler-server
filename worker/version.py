@@ -53,6 +53,16 @@ _PROVIDER_ADAPTERS = frozenset({"modal_app.py", "setup_modal_executor.py"})
 # file outside it could ship stale. Device cards are data the resolver obeys.
 _RUNTIME_PACKAGES = ("fx_schemas", "tools_ext", "jobs_ext", "devices")
 _RUNTIME_DATA = (".py", ".yaml", ".yml", ".json")
+# Wave 0 runtime data the shared program obeys, outside any package: the
+# device cost model the resolver spends against, the model pins whose
+# versions are the sidecar version handshake (and that the image bakes), and
+# the page libraries joined into every motion document. A change to any of
+# them alone is a change in what renders, so it moves the fingerprint — and
+# the Cloudflare source layer and the deploy verification with it. Every
+# image carries these files (Dockerfile ``COPY . .``, Modal add_local_dir).
+_RUNTIME_FILES = ("cost_model.json", "models.lock")
+_RUNTIME_DIRS = (("models", (".json",)), (os.path.join("motion", "lib"),
+                                         (".js",)))
 
 _cached = None
 
@@ -76,6 +86,15 @@ def _source_files():
                          if f.endswith(_RUNTIME_DATA)
                          and not f.startswith("."))
         out.extend(sorted(found))
+    out.extend(p for p in (os.path.join(_DIR, n) for n in _RUNTIME_FILES)
+               if os.path.isfile(p))
+    for sub, exts in _RUNTIME_DIRS:
+        try:
+            names = sorted(n for n in os.listdir(os.path.join(_DIR, sub))
+                           if n.endswith(exts) and not n.startswith("."))
+        except OSError:
+            continue
+        out.extend(os.path.join(_DIR, sub, n) for n in names)
     return out
 
 

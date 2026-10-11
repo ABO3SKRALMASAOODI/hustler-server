@@ -526,13 +526,37 @@ class RenderJob:
                              round(self.duration, 4), round(self.t0, 4), self.box],
                             sort_keys=True).encode())
         for k in sorted(self.assets or {}):
-            p = self.assets[k]
             try:
-                st = os.stat(p)
-                h.update(f"{k}:{st.st_size}:{int(st.st_mtime)}".encode())
+                h.update(f"{k}:{_asset_digest(self.assets[k])}".encode())
             except OSError:
                 h.update(f"{k}:missing".encode())
         return h.hexdigest()[:40]
+
+
+# Asset files enter the clip key by CONTENT (Wave 0 integration). The key
+# addresses the shared clip store (clip_store, R2) across containers and
+# projects: a size+mtime stamp misses on every cold container (a download's
+# mtime is its download time) and lets two different same-size files written
+# in the same second share a key — one project's picture in another's clip.
+# Hashing is memoised per (path, size, mtime_ns), so a file is read once.
+_ASSET_DIGESTS = {}
+_ASSET_DIGESTS_MAX = 1024
+
+
+def _asset_digest(path):
+    st = os.stat(path)
+    memo = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    hit = _ASSET_DIGESTS.get(memo)
+    if hit is None:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        hit = f"{st.st_size}:{h.hexdigest()}"
+        if len(_ASSET_DIGESTS) >= _ASSET_DIGESTS_MAX:
+            _ASSET_DIGESTS.clear()
+        _ASSET_DIGESTS[memo] = hit
+    return hit
 
 
 @dataclass

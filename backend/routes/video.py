@@ -9,6 +9,7 @@ chat_sessions / chat_messages tables (one session per project, plus an
 'activity' role for agent tool calls).
 """
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -101,6 +102,9 @@ wflash = _pure_worker_module("flash_safety")
 # every agent write it makes (music_gate.check_write); an MCP edit batch is
 # written HERE, so it runs the same pure gate (_mcp_music_gate below).
 wmusic = _pure_worker_module("music_gate")
+# Device re-solvers after a keep change (Wave 0; INTERFACES.md §6.4): the
+# Studio keep path runs the same pure hooks the agent's keep writes run.
+whooks = _pure_worker_module("hooks")
 
 video_bp = Blueprint("video", __name__)
 
@@ -4629,7 +4633,12 @@ def _reanchor_after_op(old_j, new_edl, desc):
         new_tl = wtimeline.Timeline(new_edl.get("keep") or [],
                                     new_edl.get("inserts") or [],
                                     new_edl.get("speed") or [])
+        before = copy.deepcopy(new_edl) if new_edl.get("fx") else None
         notes = wtimeline.remap_program_items(new_edl, old_tl, new_tl)
+        if before is not None:
+            new_edl, more = whooks.on_keep_change(before, new_edl, old_tl,
+                                                  new_tl)
+            notes = list(notes or []) + list(more or [])
         if notes:
             desc += " — " + _said(notes)
     return new_edl, desc

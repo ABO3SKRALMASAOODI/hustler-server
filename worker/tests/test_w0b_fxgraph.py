@@ -324,8 +324,9 @@ def test_prepare_degrades_never_raises(fake, monkeypatch):
     assert rows["ok"]["rung"] == "full" and rows["ok"]["est_ms"] > 0
     assert rows["late"]["rung"] == "omit"
     assert "no compiler" in rows["u"]["reason"]
-    # the device contract is a stub until 0C: a device item is omitted
+    # the device resolver (0C) omits a device no card names
     assert rows["dev"]["rung"] == "omit"
+    assert rows["dev"]["reason"] == "unknown device"
     assert rows["bus"]["rung"] == "omit"
     with faultinject.inject("ffmpeg_filter_missing:null"):
         p2, _ = _plan(edl)
@@ -449,11 +450,23 @@ def test_masks_resolve_by_label_and_the_person_matte_is_a_stub(fake):
 
 def test_lanes_map_from_the_worker_role(monkeypatch):
     import config
+    import devices
+    monkeypatch.delenv("CLOUDFLARE_CONTAINER_PROFILE", raising=False)
     for role, lane in (("executor", "interactive"),
                        ("batch_executor", "batch"),
-                       ("mcp_executor", "agent"), ("worker", "local")):
+                       ("agent_executor", "agent"),
+                       ("mcp_executor", "mcp"), ("shorts_executor", "shorts"),
+                       ("worker", "local")):
         monkeypatch.setattr(config, "WORKER_ROLE", role)
         assert fxgraph.lane() == lane
+        assert lane in devices.LANES       # the resolver knows every lane
+    # Cloudflare's batch containers run the same executor role as the
+    # interactive ones; the container profile tells them apart
+    monkeypatch.setattr(config, "WORKER_ROLE", "executor")
+    monkeypatch.setenv("CLOUDFLARE_CONTAINER_PROFILE", "standard-4")
+    assert fxgraph.lane() == "batch"
+    monkeypatch.setenv("CLOUDFLARE_CONTAINER_PROFILE", "standard-3")
+    assert fxgraph.lane() == "interactive"
 
 
 def test_the_probe_type_is_absent_from_production_registries():

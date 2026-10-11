@@ -2979,8 +2979,22 @@ def _merge_touching(spans):
 
 # The shared re-anchoring pass lives in timeline.py (round 35.1) so the
 # backend UI ops apply the IDENTICAL anchor policy — one implementation,
-# every surface. Alias kept for the existing call sites below.
-_remap_program_items = timeline_mod.remap_program_items
+# every surface. Then the device re-solvers run on the re-anchored EDL
+# (hooks.on_keep_change, INTERFACES.md §6.4; the backend's Studio keep path
+# does the same). An EDL with no fx and no registered keep_change re-solver
+# is exactly the shared pass, untouched.
+def _remap_program_items(edl, old_tl, new_tl):
+    before = copy.deepcopy(edl) if (edl.get("fx")
+                                    or hooks.registered("keep_change")) \
+        else None
+    notes = timeline_mod.remap_program_items(edl, old_tl, new_tl)
+    if before is None:
+        return notes
+    solved, more = hooks.on_keep_change(before, edl, old_tl, new_tl)
+    if solved is not edl:
+        edl.clear()
+        edl.update(solved)
+    return list(notes or []) + list(more or [])
 
 
 # Shot-cut hygiene. A keep edge a few frames past a SOURCE camera cut shows
@@ -6983,9 +6997,23 @@ def _resolve_sfx(ctx, storage_key):
         return None, (
             f"REJECTED: '{storage_key}' is not an audio asset in this "
             "project. Use " + _sfx_sources_hint() + ".")
+    if _web_found_sound(asset) and not sfx_search.available():
+        # Owner rule 2 (Wave 0): with web sounds off, a sound an earlier
+        # search_sfx fetched into this project is not placed either.
+        return None, (
+            "REJECTED: that sound was found online by search_sfx, and web "
+            "sounds are off — sound effects come only from the owner-approved "
+            "library. Use " + _sfx_sources_hint() + ".")
     return {"name": _asset_name(asset),
             "duration_s": asset.get("duration_s"), "library": False,
             "storage_key": storage_key}, None
+
+
+def _web_found_sound(asset):
+    """A sound search_sfx / audition_sfx_candidates fetched from the web
+    (_download_sfx_hit records it so), not one the user uploaded."""
+    meta = (asset or {}).get("meta") or {}
+    return "search_sfx" in str(meta.get("caption") or "")
 
 
 # A non-library sound's level when the editor sets none: the schema's and the

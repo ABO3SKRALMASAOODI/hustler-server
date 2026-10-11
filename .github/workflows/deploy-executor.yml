@@ -146,8 +146,13 @@ jobs:
             --project valmera --quiet --async --format='value(id)')
           wait_for_build "$app_build"
           echo "APP_IMAGE=$app_image" >> "$GITHUB_ENV"
-          agent_dep_hash=$(sha256sum worker/Dockerfile.agent-base \
-            worker/requirements.txt | sha256sum | cut -c1-16)
+          # Dockerfile.agent-base bakes the pinned models (Wave 0 track 0A):
+          # a model pin is a dependency change, so its inputs key the base.
+          agent_dep_hash=$( { sha256sum worker/Dockerfile.agent-base \
+            worker/requirements.txt worker/models.lock worker/models/bake.py; \
+            find worker/models worker/requirements.d -maxdepth 1 -type f \
+              \( -name '*.json' -o -name '*.txt' \) -print0 \
+              | sort -z | xargs -0 sha256sum; } | sha256sum | cut -c1-16)
           agent_base="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-agent-base:deps-${agent_dep_hash}"
           agent_image="us-central1-docker.pkg.dev/valmera/cloud-run-source-deploy/valmera-agent-app:${GITHUB_SHA}"
           if ! gcloud artifacts docker images describe "$agent_base" \

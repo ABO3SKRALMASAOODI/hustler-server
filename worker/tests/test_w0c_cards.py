@@ -145,11 +145,12 @@ def _live_tool_names():
 
 
 def _metric_names():
-    try:
-        import qa_metrics
-        return set(qa_metrics.METRICS)
-    except Exception:  # noqa: BLE001 — 0D's registry not merged yet
-        return set(PINNED_METRICS)
+    # 0D's registry is merged (Wave 0 integration): a card's verify names
+    # are checked against the real qa_metrics.METRICS, which holds every
+    # pinned name
+    import qa_metrics
+    assert set(PINNED_METRICS) <= set(qa_metrics.METRICS)
+    return set(qa_metrics.METRICS)
 
 
 def test_every_live_card_is_compiled_valid_and_owner_safe():

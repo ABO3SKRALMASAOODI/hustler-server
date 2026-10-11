@@ -145,6 +145,66 @@ def with_enable(chain, expr):
     return ",".join(out)
 
 
+# How a composite lays its branch back over the program (Wave 0
+# integration, measured on the v5 Thiel showcase). ffmpeg negotiates pixel
+# formats per GROUP of links joined by format-transparent filters: overlay's
+# default (yuv420) fixes its links to yuv420p, while ``format=auto`` fixes
+# them to an ALPHA format (yuva420p, rgba, ...). The motion graphics
+# composite with format=auto, so from the first one on the program runs in
+# an alpha group; before them (world, screen, junctions) it is plain yuv420p.
+# A composite must JOIN the group it lands in, never re-format it:
+#   - a yuv420 overlay on an alpha chain converted the WHOLE program at that
+#     point (every frame, inside the window or not: region_locality broken,
+#     the end card changed);
+#   - an alpha overlay (or an alpha-forced branch) on a plain chain pulled
+#     the group downstream into an alpha format, which moved the watermark
+#     robot by a pixel (its overlay rounds to the 4:2:0 grid in yuva420p).
+OVERLAY = "overlay=eof_action=pass"
+OVERLAY_ALPHA = "overlay=eof_action=pass:format=auto"
+# Filters that keep their input's format group (negotiation passes through).
+_FORMAT_TRANSPARENT = frozenset((
+    "split", "trim", "setpts", "null", "copy", "fifo", "settb", "setsar",
+    "select", "tpad", "fade", "negate", "subtitles", "ass"))
+_PART = re.compile(r"^((?:\[[^\]]+\])*)(.*?)((?:\[[^\]]+\])*)$", re.S)
+_LABEL = re.compile(r"\[([^\]]+)\]")
+
+
+def _producer(parts, label):
+    """(input labels, filter chain) of the part that outputs ``label``."""
+    for p in reversed(parts):
+        m = _PART.match(p.strip())
+        if not m:
+            continue
+        if label in _LABEL.findall(m.group(3)):
+            return _LABEL.findall(m.group(1)), m.group(2)
+    return None, None
+
+
+def alpha_chain(parts, label, _depth=0):
+    """Does ``label`` carry the program in an ALPHA format group — fed by an
+    ``overlay=...:format=auto`` through format-transparent filters only?"""
+    if _depth > 400:
+        return False
+    ins, chain = _producer(parts, label)
+    if chain is None:
+        return False
+    for f in reversed(split_chain(chain)):
+        m = _FILTER_NAME.match(f)
+        name = m.group(1) if m else ""
+        if name == "overlay":
+            return "format=auto" in f
+        if name not in _FORMAT_TRANSPARENT:
+            return False
+    return bool(ins) and alpha_chain(parts, ins[0], _depth + 1)
+
+
+def composite_overlay(parts, main_label):
+    """The overlay a composite lays its branch over ``main_label`` with,
+    without re-formatting the program: it joins an alpha group and keeps a
+    plain one plain. Position and ``enable`` options follow it."""
+    return OVERLAY_ALPHA if alpha_chain(parts, main_label) else OVERLAY
+
+
 def repad(f0, fps, alpha=False):
     """The tail of a window branch: re-pad its frames to the program clock
     and RE-STAMP them on the program's own grid (frame n at n / fps3).
@@ -173,8 +233,11 @@ def window(parts, in_label, out_label, spans, op, *, uid, timeline=True,
     the program clock -> overlay gated by the union. The branch costs only
     the hull's frames, and the re-pad (``tpad`` start frames) keeps the two
     overlay inputs in step so nothing is buffered. ``op`` must keep the
-    frame size; its output is forced to opaque yuv420p, so the overlay is a
-    pixel-exact replacement inside the window and a pass-through outside.
+    frame size and stay opaque. The composite joins the pixel-format group
+    the program is in (``composite_overlay``): on a plain program the branch
+    is forced to opaque yuv420p, on an alpha one (after the motion graphics)
+    it keeps the group's format — either way a pixel-exact replacement
+    inside the window and an untouched pass-through outside it.
 
     Returns the label holding the result (``in_label`` when the spans are
     empty: no window, no filter)."""
@@ -188,11 +251,13 @@ def window(parts, in_label, out_label, spans, op, *, uid, timeline=True,
     if fps is None:
         raise ValueError("a generic window needs the program rate (fps)")
     f0, f1 = spans[0][0], spans[-1][1]
+    ov = composite_overlay(parts, in_label)
+    flat = ",format=yuv420p" if ov == OVERLAY else ""
     parts.append(f"[{in_label}]split[{uid}a][{uid}b]")
     parts.append(f"[{uid}b]trim=start_frame={f0}:end_frame={f1},"
-                 f"setpts=PTS-STARTPTS,{op},format=yuv420p{repad(f0, fps)}"
+                 f"setpts=PTS-STARTPTS,{op}{flat}{repad(f0, fps)}"
                  f"[{uid}w]")
-    parts.append(f"[{uid}a][{uid}w]overlay=eof_action=pass:"
+    parts.append(f"[{uid}a][{uid}w]{ov}:"
                  f"enable='{expr}'[{out_label}]")
     return out_label
 
@@ -244,13 +309,17 @@ def region_fx(parts, in_label, out_label, mask_label, op, spans, *, uid,
     trim = f"trim=start_frame={f0}:end_frame={f1},setpts=PTS-STARTPTS"
     crop = (f",crop={bbox[2]}:{bbox[3]}:{bbox[0]}:{bbox[1]}"
             if bbox else "")
+    ov = composite_overlay(parts, in_label)
+    # alphamerge needs an alpha format: yuva420p on a plain program, the
+    # group's own on an alpha one (composite_overlay)
+    alpha_fmt = ",format=yuva420p" if ov == OVERLAY else ""
     parts.append(f"[{in_label}]split[{uid}a][{uid}b]")
-    parts.append(f"[{uid}b]{trim}{crop},{op},format=yuva420p[{uid}p]")
+    parts.append(f"[{uid}b]{trim}{crop},{op}{alpha_fmt}[{uid}p]")
     parts.append(f"[{mask_label}]{trim}{crop},format=gray[{uid}m]")
     parts.append(f"[{uid}p][{uid}m]alphamerge{repad(f0, fps, alpha=True)}"
                  f"[{uid}w]")
     xy = f"x={bbox[0]}:y={bbox[1]}:" if bbox else ""
-    parts.append(f"[{uid}a][{uid}w]overlay={xy}eof_action=pass:"
+    parts.append(f"[{uid}a][{uid}w]{ov.replace('overlay=', 'overlay=' + xy)}:"
                  f"enable='{expr}'[{out_label}]")
     return out_label
 
@@ -289,21 +358,27 @@ def blend(parts, base_label, layer_label, out_label, spans, *, uid, mode,
     crop = (f",crop={bbox[2]}:{bbox[3]}:{bbox[0]}:{bbox[1]}"
             if bbox else "")
     op = max(0.0, min(1.0, float(opacity)))
+    ov = composite_overlay(parts, base_label)
+    plain = ov == OVERLAY
     parts.append(f"[{base_label}]split[{uid}a][{uid}b]")
     parts.append(f"[{uid}b]{trim}{crop},format=gbrp[{uid}bg]")
     parts.append(f"[{layer_label}]{trim}{crop},format=gbrp[{uid}l]")
+    # back to the program's group: forced on a plain program, negotiated on
+    # an alpha one (composite_overlay)
     if mask_label:
         parts.append(f"[{uid}bg][{uid}l]blend=all_mode={mode}"
-                     f":all_opacity={op:.4f},format=yuva420p[{uid}x]")
+                     f":all_opacity={op:.4f},"
+                     f"format={'yuva420p' if plain else 'gbrap'}[{uid}x]")
         parts.append(f"[{mask_label}]{trim}{crop},format=gray[{uid}m]")
         parts.append(f"[{uid}x][{uid}m]alphamerge"
                      f"{repad(f0, fps, alpha=True)}[{uid}w]")
     else:
         parts.append(f"[{uid}bg][{uid}l]blend=all_mode={mode}"
-                     f":all_opacity={op:.4f},format=yuv420p"
+                     f":all_opacity={op:.4f}"
+                     f"{',format=yuv420p' if plain else ''}"
                      f"{repad(f0, fps)}[{uid}w]")
     xy = f"x={bbox[0]}:y={bbox[1]}:" if bbox else ""
-    parts.append(f"[{uid}a][{uid}w]overlay={xy}eof_action=pass:"
+    parts.append(f"[{uid}a][{uid}w]{ov.replace('overlay=', 'overlay=' + xy)}:"
                  f"enable='{expr}'[{out_label}]")
     return out_label
 

@@ -182,15 +182,22 @@ def check_required(ffmpeg=None):
 
 # ------------------------------------------------------------------ lanes
 def lane():
-    """The lane this process renders on, in device-card terms."""
+    """The lane this process renders on, in device-card terms
+    (``devices.LANES``). Cloudflare runs the interactive (standard-3) and
+    batch (standard-4) containers in the same ``executor`` role; the
+    container profile it passes says which."""
     try:
         import config
         role = (config.WORKER_ROLE or "").strip().lower()
     except Exception:  # noqa: BLE001
         role = os.environ.get("WORKER_ROLE", "worker").strip().lower()
-    return {"executor": "interactive", "batch_executor": "batch",
-            "agent_executor": "agent", "mcp_executor": "agent",
-            "shorts_executor": "agent"}.get(role, "local")
+    if role == "executor":
+        profile = os.environ.get("CLOUDFLARE_CONTAINER_PROFILE", "")
+        return "batch" if profile.strip().lower() == "standard-4" \
+            else "interactive"
+    return {"batch_executor": "batch", "agent_executor": "agent",
+            "mcp_executor": "mcp", "shorts_executor": "shorts"}.get(
+                role, "local")
 
 
 # ------------------------------------------------------------------ report
@@ -261,20 +268,31 @@ def note_dropped(edl_dict, dropped_ids):
     return rows
 
 
-def job_report(edl_dict, collected):
+def job_report(edl_dict, collected, previous=None, previous_edl=None):
     """The ``devices`` block for a render result: every fx item of the
     rendered EDL, with the decisions the render actually took (``collected``)
-    over a static plan for items the render never compiled (a stitched
-    preview re-encodes only changed windows; the copied spans were compiled
-    by the render they came from, with the same deterministic decisions)."""
+    over what the frames it reused say for items it never compiled.
+
+    A stitched preview re-encodes only changed windows and stream-copies the
+    rest from the previous preview: an item that render compiled, unchanged
+    since (``previous_edl``), keeps the previous preview's row
+    (``previous``, its ``devices`` block) — those are the very frames
+    shipped. Anything else gets the static decision."""
     items = [i for i in (edl_dict or {}).get("fx") or [] if isinstance(i, dict)]
     if not items and not collected:
         return []
     got = {r.get("id"): r for r in merge_report(collected)}
+    prev_rows = {r.get("id"): r for r in previous or []
+                 if isinstance(r, dict)}
+    prev_items = {i.get("id"): i for i in (previous_edl or {}).get("fx") or []
+                  if isinstance(i, dict)}
     rows = []
     for it in items:
-        if it.get("id") in got:
-            rows.append(got.pop(it.get("id")))
+        iid = it.get("id")
+        if iid in got:
+            rows.append(got.pop(iid))
+        elif iid in prev_rows and prev_items.get(iid) == it:
+            rows.append({k: prev_rows[iid].get(k) for k in REPORT_KEYS})
         else:
             rung, reason = _static_rung(it)
             rows.append({k: v for k, v in _row(it, rung, reason).items()})
@@ -305,6 +323,13 @@ class FxPlan:
         self._input_idx = {}
         self.notes = []
         self.rungs = {}
+        # The resolver's full answer per device item ({rung, reason,
+        # substitute, params, est_ms}; devices.resolve_detail): a compiler
+        # draws a substitute rung from ``ctx.device(item)``.
+        self.devices = {}
+        # CPU-ms the render's devices may still add (devices.render_budget_ms,
+        # spent in program order); None: no cap (cost model unreadable).
+        self.budget_ms = None
         self._uid = 0
         self._compilers = {}
 
@@ -407,16 +432,62 @@ def _static_rung(item):
     return "full", "ok"
 
 
-def _device_rung(item, sidecar_status):
+def _device_detail(item, sidecar_status, *, frames=0, budget_ms=None):
+    """devices.resolve_detail for one item (INTERFACES.md §6.3): the rung
+    from sidecar status, this lane's features and the item's predicted cost
+    against what the render's budget has left. Never raises."""
     try:
         import devices
-        rung, reason = devices.resolve(item["device"], lane=lane(),
-                                       sidecar_status=sidecar_status or {})
+        d = devices.resolve_detail(item["device"], lane=lane(),
+                                   sidecar_status=sidecar_status or {},
+                                   budget_ms=budget_ms, frames=frames)
     except Exception as e:  # noqa: BLE001
-        return "omit", f"device resolver failed ({str(e)[:120]})"
-    if rung not in RUNGS:
-        return "omit", f"device resolver returned {rung!r}"
-    return rung, reason or rung
+        return {"rung": "omit", "reason": f"device resolver failed "
+                f"({str(e)[:120]})", "substitute": None, "params": {},
+                "est_ms": 0.0}
+    if not isinstance(d, dict) or d.get("rung") not in RUNGS:
+        return {"rung": "omit", "reason": f"device resolver returned "
+                f"{(d or {}).get('rung') if isinstance(d, dict) else d!r}",
+                "substitute": None, "params": {}, "est_ms": 0.0}
+    return d
+
+
+def _device_rung(item, sidecar_status):
+    d = _device_detail(item, sidecar_status)
+    return d["rung"], d.get("reason") or d["rung"]
+
+
+def _item_frames(item, fps):
+    try:
+        if item.get("start") is not None and item.get("end") is not None:
+            f0, f1 = fxprims.frame_span(item["start"], item["end"], fps)
+            return max(1, f1 - f0)
+        if item.get("at") is not None:
+            return 2 * fxprims.frame_at(DEFAULT_JUNCTION_S, fps)
+    except Exception:  # noqa: BLE001
+        pass
+    return 1
+
+
+def _device_budget(plan, edl):
+    """CPU-ms this render's devices may add (devices.render_budget_ms):
+    previews at most +30% over their no-device baseline, finals up to the
+    4-minute p95 for 60 s. None (no cap) when the cost model is unreadable."""
+    try:
+        import devices
+        ln = lane()
+        W, H = int(plan.W or 1080), int(plan.H or 1920)
+        frame = (edl or {}).get("frame") or {}
+        base = devices.baseline_ms(
+            plan.program_s, W, H, preview=plan.preview, lane=ln,
+            motion_items=len((edl or {}).get("motion") or []),
+            captions=bool((edl or {}).get("captions")),
+            inserts=len((edl or {}).get("inserts") or []),
+            crop=bool(frame.get("ratio") and frame.get("ratio") != "16:9"))
+        return float(devices.render_budget_ms(
+            base, preview=plan.preview, program_s=plan.program_s, lane=ln))
+    except Exception:  # noqa: BLE001 — a cost model never fails a render
+        return None
 
 
 def _sidecar_status(item, source, plan):
@@ -485,6 +556,8 @@ def prepare(edl, *, tl, W, H, fps, preview, workdir, source=None):
                   program_s=(getattr(tl, "out_duration", None) or 0.0),
                   tl=tl, source=source)
     items = [i for i in (edl or {}).get("fx") or [] if isinstance(i, dict)]
+    if any(i.get("device") for i in items):
+        plan.budget_ms = _device_budget(plan, edl)
     for item in items:
         try:
             _prepare_item(plan, item)
@@ -506,11 +579,17 @@ def _prepare_item(plan, item):
         return
     rung, reason = "full", "ok"
     if item.get("device"):
-        rung, reason = _device_rung(item, _sidecar_status(
-            item, plan.source, plan))
+        d = _device_detail(item, _sidecar_status(item, plan.source, plan),
+                           frames=_item_frames(item, plan.fps),
+                           budget_ms=plan.budget_ms)
+        rung, reason = d["rung"], d.get("reason") or d["rung"]
+        plan.devices[item.get("id")] = d
         if rung == "omit":
             plan.note(item, "omit", reason)
             return
+        if plan.budget_ms is not None:
+            plan.budget_ms = max(0.0, plan.budget_ms
+                                 - float(d.get("est_ms") or 0.0))
     stage = item.get("stage")
     if stage in PICTURE_STAGES:
         if item.get("start") is None or item.get("end") is None \
@@ -537,7 +616,11 @@ def _prepare_item(plan, item):
         plan.junction_items.append(item)
     elif stage == "music_bus":
         plan.bus.setdefault(item["music_id"], []).append(item)
-    plan.note(item, rung, reason, _est_ms(comp, plan, item))
+    est = _est_ms(comp, plan, item)
+    card_est = (plan.devices.get(item.get("id")) or {}).get("est_ms")
+    if card_est and getattr(comp, "cost_ms", None) is None:
+        est = float(card_est)          # the card's calibrated cost model
+    plan.note(item, rung, reason, est)
 
 
 # ------------------------------------------------------------------ hooks
@@ -564,6 +647,11 @@ class StageCtx:
 
     def rung(self, item):
         return self.plan.rung(item)
+
+    def device(self, item):
+        """The resolver's answer for a device item ({rung, reason,
+        substitute, params, est_ms}), or None for an item with no device."""
+        return self.plan.devices.get(item.get("id"))
 
     def note(self, item, rung, reason):
         return self.plan.note(item, rung, reason)
@@ -719,7 +807,8 @@ def junction_overlay(parts, vlabel, windows, plan):
         f0 = int(cut) - int(h)
         parts.append(f"[{label}]format=yuv420p"
                      f"{fxprims.repad(f0, plan.fps)}[{uid}p]")
-        parts.append(f"[{vlabel}][{uid}p]overlay=eof_action=pass:"
+        parts.append(f"[{vlabel}][{uid}p]"
+                     f"{fxprims.composite_overlay(parts, vlabel)}:"
                      f"enable='{fxprims.enable_expr([(f0, f0 + 2 * h)])}'"
                      f"[{uid}o]")
         vlabel = f"{uid}o"
