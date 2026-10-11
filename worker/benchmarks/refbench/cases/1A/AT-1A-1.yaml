@@ -16,26 +16,28 @@ aspect: "9:16"
 mode: engine
 edl:
   base: "baseline:v5/thiel_final8.json"   # its keep (7 spans) and follow crop only
+  # high on the lit projection screen, one dark ink (a series): the head's
+  # crown crosses the type's lower half (05's lockups)
   ops:
     - {action: upsert, layer: motion, id: h1,
        value: {id: h1, template: word_slam, start: 1.0, end: 4.2,
                layer: behind_subject,
-               params: {text: TECHNOLOGY, tier: hero, y: 0.27, entrance: slam}}}
+               params: {text: TECHNOLOGY, tier: hero, y: 0.17, entrance: slam, color: "#111114"}}}
     - {action: upsert, layer: motion, id: h2,
        value: {id: h2, template: word_slam, start: 19.5, end: 22.4,
                layer: behind_subject,
-               params: {text: BITS, tier: hero, y: 0.27, entrance: slam}}}
+               params: {text: BITS, tier: hero, y: 0.17, entrance: slam, color: "#111114"}}}
     - {action: upsert, layer: motion, id: h3,
        value: {id: h3, template: word_slam, start: 30.0, end: 32.6,
                layer: behind_subject,
-               params: {text: FLYING CARS, tier: hero, y: 0.27, entrance: slam}}}
+               params: {text: FLYING CARS, tier: hero, y: 0.17, entrance: slam, color: "#111114"}}}
 chat: null
 render: {variant: final}
 allow: []
 metrics:
   - {name: matte_iou, item: h1, op: ">=", value: 0.90}   # subject-over-type occlusion IoU
   - {name: matte_iou, item: h3, op: ">=", value: 0.90}
-  - {name: matte_flicker, item: h1, op: "<=", value: 0.035}
+  - {name: matte_flicker, item: h1, op: "<=", value: 0.035}   # source-space static protocol (runner: source_flicker)
   - {name: edge_chatter, item: h1, op: "<=", value: 0.002}
   - {name: cost_ratio}
 beyond: "written as three apply_edit_batch upserts with no mask, rendered behind the head under a crop that follows the speaker across cuts; the reference was one rotoscoped 16:9 shot"

@@ -17,20 +17,21 @@ mode: engine
 edl:
   base: vfl_default
   keep: [[150.4, 162.4]]
-  focus: [0.38, 0.4]
+  focus: [0.46, 0.4]      # the head whole, looking into the frame's left third
   ops:
     - {action: set, layer: effects,
        value: {zooms: [{id: z1, start: 1.0, end: 9.3, mode: push_in, strength: 0.26}]}}
     - {action: upsert, layer: motion, id: h1,
        value: {id: h1, template: word_slam, start: 1.0, end: 9.3,
                layer: behind_subject, composite: {stage: screen},
-               params: {text: BIGGER, tier: hero, y: 0.24, entrance: pop}}}
+               params: {text: BIGGER, tier: hero, y: 0.13, role: condensed,
+                        entrance: pop}}}
 chat: null
 render: {variant: final}
 allow: [zoom]
 metrics:
   - {name: matte_iou, item: h1, op: ">=", value: 0.90}
-  - {name: reproj_rms_px, item: h1, op: "<=", value: 1.0}  # glyph bbox drift under the push
+  - {name: reproj_rms_px, item: h1, op: "<=", value: 1.0}  # glyph drift under the push, against the same word drawn in front (screen-locked by construction)
 beyond: "impossible in Wave 0 (behind graphics rode the zoom): the subject is cut out after the camera from the same matte, so the push and the type are independent"
 board: {stills: [1.5, 5.0, 9.0], clip: [1.0, 9.3]}
 judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

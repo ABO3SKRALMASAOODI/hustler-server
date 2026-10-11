@@ -1,7 +1,8 @@
 # AT-1A-perf: the matte's costs. Runner: worker/tools/at1a_matte.py --perf
 # (sidecar wall on 3 local 4-thread slots + the production projection; the
-# preview's added seconds for a 12 s window) and every case's cost_ratio
-# (render with the program matte / the same graphics drawn in front).
+# preview's added seconds for a 12 s window; the final cost ratio on
+# AT-1A-1's short, wall and CPU, words behind the head vs the same words
+# drawn in front, alternated) and every case's cost_ratio.
 id: AT-1A-perf
 track: 1A
 title: 60 s sidecar p95, preview cost of a 12 s window, final cost ratio
