@@ -5,12 +5,16 @@ analytics_id) seen in a period gets exactly one class, first match wins (G8):
 
   1. robot         its browser name matches ROBOT_UA
   2. internal      it ever opened /admin, or is listed as the owner's device
-  3. person        interacted, clicked a tracked button, scrolled, or 2+ pages
+  3. person        clicked a tracked button, scrolled, or 2+ pages
                    (events that fire by themselves, defs.PASSIVE_EVENTS, are
                    not a click)
-  4. link_preview  every row carries an outreach code and came from Meta
-  5. person        stayed active for more than 30 seconds
-  6. no_signal     everything else
+  4. link_preview  every row carries an outreach code and it stayed active
+                   for at most defs.LINK_CHECK_SECONDS (a link check: scanners
+                   open each DM link once and fake a touch)
+  5. person        any touch, key or wheel input
+  6. link_preview  every row carries an outreach code and came from Meta
+  7. person        stayed active for more than 30 seconds
+  8. no_signal     everything else
 
 Only new-tracker rows (about a thousand a day) are read, always through the
 visited_at index, so no query re-runs the robot regex over all history.
@@ -44,8 +48,10 @@ def _flags(cur):
 
 CLASS_SQL = f"""CASE WHEN d.robot THEN 'robot'
             WHEN d.internal THEN 'internal'
-            WHEN d.interacted OR d.clicked OR d.scroll > 0 OR d.pages >= 2
-              THEN 'person'
+            WHEN d.clicked OR d.scroll > 0 OR d.pages >= 2 THEN 'person'
+            WHEN d.all_coded AND d.active_s <= {defs.LINK_CHECK_SECONDS}
+              THEN 'link_preview'
+            WHEN d.interacted THEN 'person'
             WHEN d.preview_shape THEN 'link_preview'
             WHEN d.active_s > {defs.PERSON_ACTIVE_SECONDS} THEN 'person'
             ELSE 'no_signal' END"""
@@ -88,6 +94,7 @@ def browsers_cte(cur, by_day=False, extra_where="", extra_cols="", extra_v=""):
                bool_or(v.interacted) AS interacted,
                bool_or(v.signed_in) AS signed_in,
                bool_or(ev.visit_id IS NOT NULL) AS clicked,
+               bool_and(v.coded) AS all_coded,
                bool_and(v.coded AND COALESCE(v.referrer, '')
                         = ANY(%(preview_refs)s)) AS preview_shape
                {extra_cols}

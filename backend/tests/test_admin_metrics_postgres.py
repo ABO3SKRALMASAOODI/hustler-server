@@ -97,13 +97,15 @@ def test_each_browser_gets_exactly_one_class(cur):
     cur.execute("""INSERT INTO website_events VALUES (gen_random_uuid(), %s,
                    'proof_view', %s)""", (viewer, DAY))
     visit(cur, "codedhuman001", ref="www.facebook.com", code=CODE, scroll=20)
+    # A scanner opening one DM link for a few seconds, from no Meta referrer.
+    visit(cur, "linkcheck0001", code=CODE, active=9)
     period = ranges.make_period("custom", date(2026, 10, 9), date(2026, 10, 9),
                                 now=datetime(2026, 10, 11, tzinfo=timezone.utc))
     counts = visitors.classify(cur, period)
     assert {k: counts[k] for k in visitors.CLASSES} == {
-        "person": 5, "link_preview": 2, "no_signal": 2, "robot": 2,
+        "person": 5, "link_preview": 3, "no_signal": 2, "robot": 2,
         "internal": 1}
-    assert counts["browsers"] == 12
+    assert counts["browsers"] == 13
     by_day = visitors.classify_by_day(cur, period)
     assert by_day[date(2026, 10, 9)]["person"] == 5
     people = {r["device_id"] for r in visitors.people_rows(cur, period)}

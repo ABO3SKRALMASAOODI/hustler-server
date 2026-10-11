@@ -112,6 +112,13 @@ PASSIVE_EVENTS = ("proof_view", "demo_replay_start", "demo_replay_complete",
 # still a person: the activity clock stops 30 s after the last input, so an
 # untouched page cannot pass it.
 PERSON_ACTIVE_SECONDS = 30
+# An outreach link opened on one page with no scroll, no tracked click and at
+# most this many active seconds is a link check, not a person, even when the
+# beacon saw a touch. Instagram and mail scanners open every DM link at send
+# time with a real browser and a synthetic touch: 11 Oct 2026, 550 coded
+# one-page opens in 3 h at the send cadence, median 0 s active, fixed 9 s
+# dwells, a 2019 Chrome build, and not one second page.
+LINK_CHECK_SECONDS = 10
 INTERNAL_DEVICE_IDS = tuple(
     d.strip() for d in os.getenv("ADMIN_INTERNAL_DEVICE_IDS", "").split(",")
     if re.fullmatch(r"[A-Za-z0-9_-]{8,64}", d.strip() or "x"))
