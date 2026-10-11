@@ -31003,9 +31003,9 @@ _COMPACT_CONTRACTS = {
         "See frames now, no render needed: times=[...] are SOURCE seconds; "
         "output_times=[...] show the assembled edit (inserts, framing, zoom, "
         "cards, erase patches; not captions/text/grade) to aim zooms and place "
-        "type. rendered=true reads only a COMPLETE preview of the current EDL "
-        "version (render_preview(complete=true) first; a changed-section proof "
-        "is rejected) and shows real captions, motion graphics and grade: batch "
+        "type. rendered=true needs render_preview first: only a COMPLETE "
+        "preview of the current EDL version (complete=true; a changed-section "
+        "proof is rejected) shows real captions, motion graphics and grade: batch "
         "up to 8 dense output_times around a landing. Read positions off the "
         "tenths grid. Uploads: look_at_asset."),
     "look_at_asset": (
