@@ -269,11 +269,13 @@ Tools change; the live server schema wins over any doc. A client caches
 `tools/list` when it connects, so a long-lived session can miss parameters
 the server added since (Oct 2026: `set_picture_card` `source`/`panels`/
 `follow`, `add_freeze_frame` audio_mode 'hold'); start a fresh session to
-refresh it. Real limits as of Oct 2026 (`watch_video` returning no link, the
-headline band starting below the free-tier mark, captions inside cards) are
-in editing.md **Known Valmera limits** with the working path. Read it before
-the pilot and before editing; never spend more than two calls rediscovering
-one.
+refresh it. Real limits as of Oct 2026 (captions inside cards, write-time
+size estimates for lockups) are in editing.md **Known Valmera limits** with
+the working path. Read it before the pilot and before editing; never spend
+more than two calls rediscovering one. The render result measures what
+reviewers used to estimate (its MEASURES line: picture area and upscale,
+hook, caption and payoff cap heights), and the `headline` write measures its
+claim against the captions and names the fix when it is smaller.
 
 ## Run state (`scripts/run.py`, `--help` on each command)
 

@@ -110,16 +110,11 @@ and the negative space you will design into.
 
 ## 3. Execute in a few deliberate calls
 
-Order matters, and on today's Valmera it is also what keeps the edit
-editable: `set_frame` 9:16 (if `get_edl` shows `frame` null), cuts (they
-move every later time), the card with its source rect through
-`apply_edit_batch` (effects layer, the pilot's JSON, card end = program
-end), THEN `erase_region`, stock overlays and captions, then designed
-beats, camera, transitions and sound. Once an erase patch, a stock overlay
-or a motion graphic exists, `apply_edit_batch` fails ('referenced asset is
-not available' / internal error), so a later card change means removing
-and re-adding them. If you must re-cut later, recheck every output-timed
-item and the card's end.
+Order matters: cuts first (they move every later time; the child already
+starts 9:16 from the SOURCE LAYOUT), then the pilot's card (card end =
+program end), THEN `erase_region`, stock overlays and captions, then
+designed beats, camera, transitions and sound. If you must re-cut later,
+recheck every output-timed item and the card's end.
 
 | Step | Calls | Notes |
 | --- | --- | --- |
@@ -227,25 +222,27 @@ in the pilot.
 
 ## 5. Self-check, then fix only the weakest moment
 
-1. Do not call `watch_video` to watch: on this deployment it returns a
-   receipt with no link, frames or audio (every Oct 2026 editor and
-   reviewer lost 1-2 calls to it). Use rendered frames and the audio tools.
+1. Read the render result: its PICTURE CHECK, CAPTION CHECK, MEASURES
+   line and advisories (`render_preview(report=true)` re-reads them for the
+   existing preview without rendering). `watch_video` is for watching the
+   whole thing: its reply carries the link, one frame sheet and the sound.
 2. One `look_at(rendered=true, output_times=[...])` with the hook (0, 0.3 s,
    1.0 s), every hero moment, the densest caption and the payoff (up to 8
-   times in that one call), then ONE `native_resolution=true` frame at the
-   hook (one time per call; previews are 720x1280) to read type sizes.
-   Check that every hero and the payoff look as intended in the pixels (an
-   Oct handback described a node graph the render showed as an empty box).
+   times in that one call), then `native_resolution=true` frames at the hook
+   and the payoff in one call (one image per time, up to 4 per reply; it
+   names any it did not return; previews are 720x1280). Check that every
+   hero and the payoff look as intended in the pixels (an Oct handback
+   described a node graph the render showed as an empty box).
 3. `audit_captions` once (heard-but-unshown words are defects, not
-   advisories) and `review_audio` on the opening and the joins (3 clips per
-   call); read the render's warnings.
-4. Measure, and write the numbers in the handback: picture area (card
-   width x height), the headline main line's cap height and the captions'
-   (share of frame height), the payoff's cap height against the largest
-   earlier lockup, the longest stretch without a beat. Picture area under
-   the Look floor or a hook headline no bigger than the captions after
-   following the pilot's recipe is a recipe or Valmera problem, not
-   something to re-render around: hand back `blocked` with the numbers.
+   advisories) and `review_audio` on the opening and the joins (up to 6 clips
+   per call); read the render's warnings.
+4. Copy the render's MEASURES numbers into the handback: picture area
+   (and upscale), the hook headline's cap height and the captions' (share
+   of frame height), the payoff's cap height against the largest other
+   lockup; add the longest stretch without a beat. Picture area under the
+   Look floor or a hook headline under 1.2x the captions after following
+   the pilot's recipe is a recipe or Valmera problem, not something to
+   re-render around: hand back `blocked` with the numbers.
 5. Measure against your Look's targets: hook at or before 0.6 s, visual
    change rate, hero count, picture area, sounds within budget and spacing
    (list each with its time, on-screen partner and level; `audit_audio_mix`
@@ -276,7 +273,7 @@ Hook: hook-tier word_slam by 1.1s ("Every computer has used weird type", kicker 
 Heroes: 6.4 garbage slam; 14.8 Apple Lisa photo + label; 18.6 counter 30–40 fonts; 26.9 "Let's get…" list_build
 Payoff: 33.6 "writing a paper / WITHOUT ONE" lockup, held 0.8s after the last word
 Camera/sound: no zoom, no sound; music off (no owner song)
-Measured: card 0.54 (1.9x); headline cap 3.6% vs captions 3.1%; payoff 9% > slam 6%; longest beatless 5.8s
+Measured (render MEASURES): card 0.54 (1.9x); hook cap 7.2% vs captions 3.1%; payoff 9% > slam 6%; longest beatless 5.8s
 Targets: change ~0.4s, 3 heroes, graphics ~30% of runtime
 Weakest: 9-13s "the fonts were…" setup with only captions (the next pass: an image of an early screen)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)
@@ -302,13 +299,7 @@ slot. A `blocked` handback is recorded the same way, its first line
 | Symptom | Working path |
 | --- | --- |
 | a tool's schema in YOUR client lacks a parameter these docs name (e.g. `set_picture_card` `source`/`panels`/`follow`, `add_freeze_frame` audio_mode 'hold') | your client cached `tools/list` when it connected; the server has them (Oct 2026). Start a fresh session to refresh the tool list; until then write the card with `apply_edit_batch` on the `effects` layer, copying the shape from `get_edl` and `framing.json` |
-| `watch_video(render=false)` returns a receipt without a link, frames or audio | rendered `look_at` batch + one native frame + `audit_captions` + `review_audio` |
-| `look_at` without `rendered=true` ignores picture cards and erase patches | judge framing only on rendered frames; `native_resolution` takes one time per call |
-| the `headline` template refuses a band under 0.06 and shrinks its text to fit the band (often below caption size) | looks.md **Card geometry**: band y 0.128-0.228 over a full-width card, at most 36 characters, or no band and a hook-tier `word_slam` |
-| `clean` captions ignore `anchor_y` inside a card; the caption-band estimator ignores a locked `anchor_y`, reports false collisions and mutes words under band graphics | check every caption state near the face on render 1; keep `mute_captions=false` and mute deliberately with `set_caption_mutes` |
-| graphic size and position estimates in write results run 2-3x off the render | size the payoff and band lockups on render 1, never on estimates |
-| make_shorts children can arrive with `frame` null (16:9 render, landscape stock search) | `get_edl`; `set_frame(ratio='9:16')` first |
-| `keep_segments` with `snap_to_words=true` can pull a neighbouring word or stutter into the cut | `snap_to_words=false` at edges with no pause; confirm with `review_audio` |
-| PICTURE CHECK "face cut by the card edge" measured on the source window and "HOOK OPENS MID-SOUND" contradicting `review_audio` | verify on rendered frames and `review_audio`; quote the result in the handback, do not re-render for it |
-| `erase_region` measures the same box as "gone" or "STILL VISIBLE" and a box repaint can leave a dark patch | check the patch on rendered frames once; keep the erased box inside an area the card crops tight |
-| `find_silences` takes no range and truncates on a long source | read `get_words` around the cut instead |
+| `clean` captions ignore `anchor_y` inside a card; the caption-band estimator ignores a locked `anchor_y`, reports false collisions and mutes words under band graphics | check every caption state near the face on render 1 (the render's CAPTION CHECK names heard words no caption shows; CAPTION UNDER A GRAPHIC / CROSSES THE CARD EDGE name collisions); keep `mute_captions=false` and mute deliberately with `set_caption_mutes` |
+| a deliberate caption mute (a word the speaker swallows) is reported by the blocking CAPTION CHECK like any heard-but-unshown word | carry the word on a graphic, or keep the mute and say why in the handback |
+| write-time size and position estimates for lockups (`word_slam`, `phrase_build`, the payoff) run up to 2-3x off the render | size the payoff and band lockups from render 1's MEASURES line, never on estimates (the `headline` claim alone is measured at write) |
+| `erase_region` repaints only its box: a picture-in-picture's frame or shadow outside it stays visible | draw the box over the whole inset, border included; check the patch on rendered frames once |
