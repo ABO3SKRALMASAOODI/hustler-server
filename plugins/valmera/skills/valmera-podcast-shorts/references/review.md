@@ -16,16 +16,28 @@ advisory, but read it before answering questions 1, 2 and 5.
 
 ## Tier 1: editor self-check
 
-The editor watches the render at 1x, looks at the hook, hero moments and
-payoff, fixes defects plus the single weakest moment, and hands back a note of
-at most 10 lines ([editing.md](editing.md) steps 5-6). The coordinator does
-not repeat this frame by frame.
+The editor checks the render on rendered frames and the audio tools, looks
+at the hook, hero moments and payoff, measures picture area, headline and
+caption cap heights and the payoff's size, fixes defects plus the single
+weakest moment, and hands back a note of at most 10 lines with those numbers
+([editing.md](editing.md) steps 5-6). The coordinator verifies the numbers
+on its own native frames rather than repeating the check frame by frame.
 
 ## Tier 2: coordinator batch review
 
-Review candidates in small batches as they arrive (2-4 at a time), while the
-freed editors start their next shorts. For each one, `watch_video(render=false)`
-at 1x with the sound on, then answer:
+Review each candidate as it arrives, ahead of any new edit (in a shared
+queue reviews go first). The run's first candidate is reviewed before a
+4th short is handed out (`run.py` enforces this gate), because its verdict
+decides whether the other briefs and the framing recipe hold.
+
+**Evidence, about 6-8 calls and 5 minutes** (`watch_video` returns no link,
+frames or audio on this deployment, so do not call it): one rendered
+`look_at` batch (0, 0.3, 1.0 s, each hero, the densest caption, the payoff,
+the last frame), one `native_resolution` frame at the hook and one at the
+payoff to read cap heights, `audit_captions`, and the editor's
+`review_audio` / `audit_audio_mix` results (spot-check one join with
+`review_audio` when the note flags it). The preview has no end card or
+corner mark: branding is checked on the final. Then answer:
 
 1. **Hook:** does a designed moment land by 0.6 s, with the hook line
    readable by 1.5 s, written from the clip's strongest line or statistic
@@ -63,14 +75,30 @@ at 1x with the sound on, then answer:
    preview (each finding repaired or kept with a reason), rights recorded
    for every asset?
 
+Measured floors are binary. Picture area under the Look's floor, a hook
+headline no bigger than the captions, a payoff smaller than an earlier
+lockup or a beatless stretch over ~8 s is a **no**, whatever the reason; a
+"source limit" explains it but does not pass it (Oct 2026: a fix verdict
+that waived a 0.31 card cost a fix pass, two renders and a failed export,
+and the short was killed for the same 0.31 card).
+
 Record it with `run.py review --checks hook=...,payoff=...,targets=...,attention=...,clean=...`.
 
 | Answers | Verdict |
 | --- | --- |
 | all yes | **ship**: note the strongest moment in one line |
-| one no that one change can repair | **fix**: one targeted fix (below) |
+| one no that one change can repair, and nothing else would still fail | **fix**: one targeted fix (below) |
 | attention is no, or several no | **kill**: say why; a weak story is not rescued by styling |
+| a Valmera defect decides it (a tool that errors, a template or layout the engine renders below the floor, an export that fails), or the editor handed back `blocked` | `run.py exception --status failed_technical`, next action "revive after Valmera fix: <defect>"; it is a product finding, not an editorial kill |
 | a technical failure outside the edit | `run.py exception` with the next action |
+
+**After every verdict ask: do the shorts in flight share this cause?** A
+layout, source, template or tool cause is shared. Then the coordinator
+stops handing out shorts, fixes `framing.json` and the open briefs (or
+stops the line, SKILL.md) before the next hand-out. Oct 2026: the first
+candidate showed the run-killing cause (picture 0.34, headline smaller
+than captions) at 23:15; it was reviewed at 00:04, after five more shorts
+had been started with the same defect.
 
 Each short gets at most one targeted fix. A second weak candidate is shipped
 if all five answers are yes, otherwise killed or recorded as an exception.
