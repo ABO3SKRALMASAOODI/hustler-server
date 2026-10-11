@@ -2812,7 +2812,13 @@ def _fx_picture_stage(stage, parts, vlabel, fx_plan, card_runs, fps):
     filters, ``vlabel`` unchanged."""
     mark = len(parts)
     out = fxgraph.apply_stage(stage, parts, vlabel, fx_plan)
-    if out != vlabel and card_runs:
+    # Only a stage whose compilers rebuild frames (zoompan, tmix: their
+    # output loses the tags) is wrapped — as stylize wraps only shake and
+    # motion_blur. The wrapper re-stamps the whole program on its own grid,
+    # which moved a t-gated graphic by a frame on the Jobs showcase (Wave 0
+    # integration); fxprims composites keep the entering frame and its tags.
+    if out != vlabel and card_runs \
+            and not fxgraph.stage_keeps_frame_tags(stage, fx_plan):
         out = _keep_layout_tags(parts, mark, vlabel, out, f"fx{stage[0]}",
                                 fps)
     return out

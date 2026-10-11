@@ -422,3 +422,37 @@ def test_a_composite_never_reformats_the_program(alpha):
     got = _framemd5(_graph(alpha, "region"), "vo")
     assert [i for i, (a, b) in enumerate(zip(base, got)) if a != b] == \
         list(range(10, 30))
+
+
+# ── card programs: tag-keeping fx stages are not re-stamped ─────────────
+
+def test_a_tag_keeping_stage_is_not_wrapped_on_a_card_program():
+    """Measured on the Jobs showcase (a picture-card program): wrapping the
+    world stage in renderer._keep_layout_tags re-stamped the whole program
+    on its own grid and a t-gated headline appeared a frame early. fxprims
+    composites keep each entering frame and its layout tags, so a stage
+    built only from them is not wrapped; any other compiler still is."""
+    import renderer
+
+    class Keeps(_Comp):
+        KEEPS_FRAME_TAGS = True
+    runs = {"c": [["c0r0", 0.0, 5.0]]}
+    edl = {"keep": [[0.0, 10.0]], "fx": [
+        {"id": "w", "type": "subject", "stage": "world", "start": 1.0,
+         "end": 2.0}]}
+    tl = Timeline(edl["keep"], [], [])
+    for comp, wrapped in ((Keeps(), False), (_Comp(), True)):
+        orig = fxgraph.compiler_for
+        fxgraph.compiler_for = lambda t, c=comp: c
+        try:
+            plan = fxgraph.prepare(edl, tl=tl, W=270, H=480, fps=25.0,
+                                   preview=True, workdir="/tmp")
+            parts = []
+            out = renderer._fx_picture_stage("world", parts, "v", plan,
+                                             runs, 25.0)
+        finally:
+            fxgraph.compiler_for = orig
+        g = ";".join(parts)
+        assert ("settb=AVTB" in g) is wrapped, g
+        assert out == ("ltfxwo" if wrapped else "fxo")
+    assert fxgraph.PROBE.KEEPS_FRAME_TAGS is True

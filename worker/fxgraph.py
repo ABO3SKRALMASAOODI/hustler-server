@@ -44,6 +44,14 @@ The object it resolves to (a module or an instance) provides:
   music_bus(ctx, items) -> label     the music bus
   cost_ms(plan, item)        optional: estimated ms for the report
   junction_frames(plan, item) optional: frames each side of a cut
+  KEEPS_FRAME_TAGS           True when its picture stages only composite
+                             through fxprims (window / region_fx / blend /
+                             track_matte) or timeline-enabled filters, which
+                             keep each entering frame and its metadata (the
+                             picture cards' layout tags). Default False: the
+                             renderer then wraps the stage on card programs
+                             (renderer._keep_layout_tags), as it does for
+                             stylize's frame-rebuilding kinds.
 
 ``ctx`` (``StageCtx``) carries the graph list and the plan helpers; window
 math and composites come from ``fxprims`` (window, blend, region_fx,
@@ -685,6 +693,16 @@ def _rollback(parts, mark, plan, items, err):
                   f"{str(err)[:120]})")
 
 
+def stage_keeps_frame_tags(stage, plan):
+    """Do all of this stage's compilers keep each entering frame (and its
+    metadata)? See KEEPS_FRAME_TAGS above."""
+    if plan is None:
+        return True
+    return all(getattr(plan._compilers.get(it.get("type")),
+                       "KEEPS_FRAME_TAGS", False)
+               for it in plan.by_stage.get(stage) or [])
+
+
 def apply_stage(stage, parts, vlabel, plan):
     """Compile this stage's items onto ``vlabel``; returns the new label.
     No plan or no items: appends nothing, returns ``vlabel``."""
@@ -913,6 +931,8 @@ class _Probe:
     FILTERS = ("split", "trim", "setpts", "tpad", "overlay", "format",
                "negate", "null", "crop", "alphamerge", "blend", "xfade",
                "concat", "nullsink", "volume", "anull", "scale")
+    # fxprims composites and timeline negate only: frames keep their tags
+    KEEPS_FRAME_TAGS = True
 
     def prepare(self, plan, item):
         op = item.get("op") or "noop"
