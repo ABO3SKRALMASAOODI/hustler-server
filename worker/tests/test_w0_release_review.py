@@ -259,3 +259,34 @@ def test_the_shared_rule_is_pure_and_fails_closed():
         raise OSError("db down")
     assert "could not be verified" in music_gate.gate_web_sounds(
         prev, new, boom)
+
+
+# ── the backend loads the motion modules by path ────────────────────────
+
+def test_the_backend_can_load_the_motion_modules_by_path(tmp_path):
+    """Production main's backend (routes/video.py) registers
+    worker/motion_engine.py and motion_templates.py under their plain names
+    WITHOUT the worker directory on sys.path. A top-level import of another
+    worker module there (clip_store, faultinject) fails the backend's import
+    — every API route down. Isolated interpreter, empty cwd: the worker dir
+    is not importable."""
+    import subprocess
+    worker = os.path.dirname(HERE)
+    code = (
+        "import importlib.util, sys\n"
+        f"W = {worker!r}\n"
+        "for name in ('motion_engine', 'motion_templates'):\n"
+        "    spec = importlib.util.spec_from_file_location(\n"
+        "        name, W + '/' + name + '.py')\n"
+        "    mod = importlib.util.module_from_spec(spec)\n"
+        "    sys.modules[name] = mod\n"
+        "    spec.loader.exec_module(mod)\n"
+        "import motion_engine\n"
+        "assert motion_engine._clip_store() is None\n"
+        "assert motion_engine._fault('chromium_crash:x') is False\n"
+        "assert motion_engine._prefetch_shared(['ab' * 20]) == frozenset()\n"
+        "print('loaded')\n")
+    out = subprocess.run([sys.executable, "-I", "-c", code],
+                         cwd=str(tmp_path), capture_output=True, text=True,
+                         timeout=60)
+    assert out.returncode == 0 and "loaded" in out.stdout, out.stderr[-800:]

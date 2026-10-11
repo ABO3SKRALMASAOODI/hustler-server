@@ -38,9 +38,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 
-import clip_store
-import faultinject
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOTION_DIR = os.path.join(HERE, "motion")
 TEMPLATES_DIR = os.path.join(MOTION_DIR, "templates")
@@ -682,6 +679,27 @@ def _even_box(x0, y0, x1, y1, W, H):
     return x0, y0, x1, y1
 
 
+# The worker's own helpers, imported on use. The backend loads THIS file by
+# path under its plain name (validate_edl reaches it through
+# motion_templates) without the worker directory on sys.path, so a top-level
+# import of another worker module would take the backend down at import.
+# Outside the worker both answer "not here".
+def _clip_store():
+    try:
+        import clip_store
+        return clip_store
+    except ImportError:
+        return None
+
+
+def _fault(name):
+    try:
+        import faultinject
+    except ImportError:
+        return False
+    return faultinject.fault(name)
+
+
 def _cache_get(key):
     """(local .mov, meta) from the container-local LRU, else from the shared
     content-addressed store (clip_store, R2) — a cold container renders a
@@ -713,7 +731,10 @@ def _write_json_atomic(path, value):
 def _shared_get(key):
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
-        got = clip_store.get(key, CACHE_DIR)
+        store = _clip_store()
+        if store is None:
+            return None
+        got = store.get(key, CACHE_DIR)
         if not got:
             return None
         mov, m = got
@@ -756,7 +777,8 @@ def _prefetch_shared(keys, budget_s=None):
     Never raises."""
     try:
         want = [k for k in dict.fromkeys(keys or ()) if not _local_present(k)]
-        if not want or not clip_store.available():
+        store = _clip_store()
+        if not want or store is None or not store.available():
             return frozenset()
     except Exception:  # noqa: BLE001
         return frozenset()
@@ -802,8 +824,11 @@ def _shared_put(key, path, meta):
     The file is the LRU's own copy, which outlives the render's workdir."""
     def run():
         try:
+            store = _clip_store()
+            if store is None:
+                return
             with _SHARED_PUT_SLOTS:
-                clip_store.put(key, path, dict(meta))
+                store.put(key, path, dict(meta))
         except Exception:
             pass
     try:
@@ -877,7 +902,7 @@ async def _render_one(browser, job, out_path, deadline):
     t_start = time.monotonic()
     # Fault injection (INTERFACES.md §6.2): this item's page dies, exactly
     # as a Chromium crash surfaces here — an error out of the page call.
-    if faultinject.fault(f"chromium_crash:{job.label}"):
+    if _fault(f"chromium_crash:{job.label}"):
         raise RuntimeError(f"{job.label}: Target crashed (injected "
                            "chromium_crash)")
     dw, dh = design_size(job.out_w, job.out_h)
