@@ -8,6 +8,16 @@
     "kind": [
       "strobe"
     ],
+    "sources": [
+      [
+        {
+          "kind": "next"
+        },
+        {
+          "kind": "previous"
+        }
+      ]
+    ],
     "hold_f": [
       3,
       4,

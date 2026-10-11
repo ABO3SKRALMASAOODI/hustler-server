@@ -305,3 +305,41 @@ def test_a_verb_writes_exactly_what_a_stale_client_batch_writes():
     fresh = schemas.validate_edl(schemas.default_edl(DUR), DUR).model_dump()
     via_batch = edit_batch.apply_batch(fresh, ops, DUR, KEYS)
     assert via_batch["fx"] == ctx.edl["fx"]
+
+
+def test_the_matte_is_asked_through_track_1as_helpers_when_present(
+        monkeypatch):
+    """With track 1A merged, a write asks for the person matte through
+    matte_track (its matte.person params, its launch rule), so the request
+    warms exactly the chunks a render reads, and a lane that may not launch
+    launches nothing."""
+    import sys
+    import types
+
+    import sidecars
+    seen = []
+    fake = types.ModuleType("matte_track")
+    src = sidecars.source_from("a" * 64, "proxy.mp4",
+                               {"duration": DUR, "fps": 30.0, "width": 960,
+                                "height": 540}, 7, [9.0])
+    fake.launch_source = lambda sha, proxy, index, pid: (
+        seen.append(("launch", sha, proxy["storage_key"], pid)) or src)
+    fake.sidecar_params = lambda: {"downsample_ratio": 0.375}
+    monkeypatch.setitem(sys.modules, "matte_track", fake)
+
+    def ensure(kind, source, ranges, priority="interactive", params=None):
+        seen.append(("ensure", kind, source is src, params))
+        return {"kind": kind}
+    monkeypatch.setattr(sidecars, "ensure", ensure)
+    ctx = Ctx()
+    out = st.add_subject_effect(ctx, kind="fill", start=4.0)
+    assert out.startswith("EDL v1 -> v2"), out
+    assert seen == [("launch", "a" * 64, "proxy.mp4", 7),
+                    ("ensure", "matte.person", True,
+                     {"downsample_ratio": 0.375})]
+    # a lane where 1A may not launch: nothing is requested from here
+    seen.clear()
+    fake.launch_source = lambda *a: None
+    out = st.add_subject_effect(Ctx(), kind="glow", start=6.0, end=7.0)
+    assert out.startswith("EDL v1 -> v2") and "Measuring" not in out
+    assert seen == []

@@ -6,9 +6,13 @@
   "stage": "world",
   "params": {
     "kind": [
+      "solid",
       "source",
-      "strobe",
-      "solid"
+      "strobe"
+    ],
+    "colour": [
+      "black",
+      "accent"
     ],
     "hold_subject": [
       true

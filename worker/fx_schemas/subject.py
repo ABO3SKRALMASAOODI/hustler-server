@@ -30,11 +30,15 @@ LIVE = True
 
 # flash_safety reading (FxItemBase.flash_times): a picture change that
 # returns within this long is a flash (an on/off pair inside one Harding
-# second, Wave 0's flash_risk counter); a strobe's
-# image changes are counted at this assumed program rate (flash_times has no
-# fps; flash_safety re-frames the seconds on the real one).
+# second, Wave 0's flash_risk counter). A strobe swaps every ``hold_f``
+# PROGRAM frames, so how often it flashes depends on the render rate, which
+# flash_times does not know: its changes are counted at the FASTEST rate a
+# program renders at (renderer caps finals at 60 fps). A 60p final then
+# never passes the limit uncounted (at an assumed 30, hold_f 12 read 2.5
+# flashes/s where a 59.94 final plays 5); a 25/30 fps program is counted
+# conservatively, and a strobe is usually asked for (an opt-in) anyway.
 SHORT_FLASH_S = 1.0
-ASSUMED_FPS = 30.0
+ASSUMED_FPS = 60.0
 
 SUBJECT_KINDS = ("fill", "poster", "glow", "outline", "negate", "exposure",
                  "isolate", "echo")
@@ -241,13 +245,23 @@ class BackgroundFx(FxItemBase):
                              "(this program is a canvas)")
         for src in [self.source] + list(self.sources or []):
             source_check(src, ctx, f"fx {self.id}")
-        if self.hold_t is not None and self.hold_t >= float(ctx.program_s):
-            raise ValueError(f"fx {self.id}: hold_t is past the program end")
+        if self.hold_t is not None and (
+                ctx.render_fragment
+                or self.hold_t >= float(ctx.program_s)):
+            # hold_t is a PROGRAM second, and only start/end follow the
+            # program when it changes: a keep edit re-anchors them
+            # (timeline._remap_fx) and a stitched or proof window rebases
+            # them onto its own clock (stitch._window_fx), never hold_t. A
+            # hold_t past the end would then refuse every later write, and
+            # inside a window it names another moment: the subject is held
+            # on the item's own first frame instead (the default).
+            self.hold_t = None
 
     def flash_times(self):
         """A plate strobe changes most of the frame on every swap: each
-        image change is a flash (counted at ASSUMED_FPS). Any other
-        background swap shorter than SHORT_FLASH_S is one flash."""
+        image change is a flash (counted at ASSUMED_FPS, the fastest render
+        rate). Any other background swap shorter than SHORT_FLASH_S is one
+        flash."""
         if self.start is None or self.end is None:
             return []
         if self.kind == "strobe":

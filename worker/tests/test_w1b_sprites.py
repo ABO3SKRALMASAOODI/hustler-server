@@ -69,14 +69,24 @@ def test_from_a_matte_clip_and_from_a_ready_sidecar(tmp_path, monkeypatch):
     img, box = sprites.cutout(rgb, alpha)
     assert img is not None and box[3] > 150
     import sidecars
-    calls = []
+    calls, handles = [], []
+    # a sprite READS a measured chunk: it never launches analysis
     monkeypatch.setattr(sidecars, "ensure",
                         lambda *a, **k: calls.append((a, k)) or "h")
-    monkeypatch.setattr(sidecars, "fetch", lambda h, d: [
-        {"t0": 0.5, "t1": 2.0, "path": mask, "key": "k", "meta": {}}])
-    got = sprites.from_sidecar(object(), src, 1.5, str(tmp_path))
+
+    def fetch(h, d):
+        handles.append(h)
+        return [{"t0": 0.5, "t1": 2.0, "path": mask, "key": "k", "meta": {}}]
+    monkeypatch.setattr(sidecars, "fetch", fetch)
+    ref = sidecars.source_from("b" * 64, "proxy.mp4",
+                               {"duration": 2.0, "fps": 25.0, "width": 640,
+                                "height": 360}, 1, [])
+    got = sprites.from_sidecar(ref, src, 1.5, str(tmp_path))
     assert got is not None and got[0].mode == "RGBA"
-    assert calls[0][1]["priority"] == "backfill"
+    assert calls == []
+    (h,) = handles
+    assert h.kind == "matte.person" and h.source_sha == "b" * 64
+    assert any(c.t0 <= 1.5 < c.t1 for c in h.chunks)
     # no chunk covers the second: None, never an exception
     monkeypatch.setattr(sidecars, "fetch", lambda h, d: [])
-    assert sprites.from_sidecar(object(), src, 1.5, str(tmp_path)) is None
+    assert sprites.from_sidecar(ref, src, 1.5, str(tmp_path)) is None

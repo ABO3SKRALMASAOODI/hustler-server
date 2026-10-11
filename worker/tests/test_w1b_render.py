@@ -522,3 +522,83 @@ def test_without_a_matte_stand_ins_draw_or_the_item_is_omitted(
         y1 = _yuv(r, 50)[0]
         lift = ((y1 - y0) / np.maximum(1, 235 - y0)).mean()
         assert 0.5 < lift < 0.7, lift          # the 0.6 full-frame flash
+
+
+# ── the other render lanes (review) ──────────────────────────────────────
+
+@pytest.fixture(scope="module")
+def lanes(work):
+    """Audio-only rebuilds, a stitched/proof window (render_fragment) with
+    a held subject, and a cut-away main-video plate."""
+    import stitch
+    from timeline import Timeline
+    keep = ((0.0, 2.5), (3.5, 6.0))
+    fx = [_sx("f", start=0.5, end=0.62, decay_f=2),
+          _bg("g", kind="gradient", colour="#ff0000", colour2="#0000ff",
+              start=1.0, end=2.0),
+          _bg("h", kind="source", colour=None, start=2.5, end=3.1,
+              hold_subject=True, hold_t=2.46,
+              source={"kind": "asset", "asset_key": "media/p1/clip.mp4"}),
+          _bg("m", kind="source", colour=None, start=3.5, end=4.3,
+              source={"kind": "source", "src_t": 2.8}),
+          _sx("c", kind="echo", start=4.4, end=5.0,
+              echo={"mode": "clone", "offsets_f": [4, 8]})]
+    full = _edl(fx, keep=keep)
+    win = stitch.window_edl(full, Timeline([list(k) for k in keep]), 2.0,
+                            4.0, fps=25.0)
+    cases = [_case(work, "a0", _edl(keep=keep), audio_only=True),
+             _case(work, "a1", full, audio_only=True),
+             _case(work, "v1", full, dump_frames=[88, 100]),
+             _case(work, "w1", win, render_fragment=True,
+                   suppress_outro=True, dump_frames=[14, 20])]
+    return {"res": w1b_probe.run(cases, os.path.join(work["dir"], "lanes")),
+            "win": win}
+
+
+def test_an_audio_only_rebuild_carries_subject_fx_and_its_audio(lanes):
+    a0, a1 = lanes["res"]["a0"], lanes["res"]["a1"]
+    assert a0["error"] is None and a1["error"] is None, a1["error"]
+    assert a1["audio"] and a1["audio"] == a0["audio"]
+
+
+def test_a_render_window_holds_the_items_first_frame(lanes, work):
+    """stitch._window_fx rebases start/end onto the window, never hold_t:
+    the window validates (it used to be refused: hold_t past its end) and
+    holds the item's own first frame there."""
+    (h,) = [i for i in lanes["win"]["fx"] if i["id"] == "h"]
+    assert h["hold_t"] == 2.46 and 0.45 <= h["start"] <= 0.55  # not rebased
+    w = lanes["res"]["w1"]
+    assert w["error"] is None, w["error"]
+    (wh,) = [i for i in w["edl"]["fx"] if i["id"] == "h"]
+    assert wh["hold_t"] is None
+    assert {r["id"]: r["rung"] for r in w["report"]}["h"] == "full"
+    # held on its first window frame (program 2.52 s = source 3.52 s)
+    m = program_masks(work, [0], keep=((3.52, 6.0),))[0]
+    core = _shrink(m >= 250, 3)
+    assert core.sum() > 500
+    a = _yuv(w, 14)[0]
+    b = _yuv(w, 20)[0]
+    assert np.abs(a - b)[core].max() <= 1                # the frozen body
+
+
+def test_a_cut_away_source_second_is_read_from_the_main_video(lanes, work):
+    """`source` src_t 2.8 is cut out of the program (keep 0-2.5, 3.5-6):
+    the plate is the main video from 2.8 s, framed like the picture."""
+    import renderer
+    v = lanes["res"]["v1"]
+    assert v["error"] is None
+    assert {r["id"]: r["rung"] for r in v["report"]}["m"] == "full"
+    # program frame 100 = 4.0 s = source 5.0 s, 0.5 s into the plate,
+    # which plays the main video from 2.8 s: source 3.3 s
+    mask = program_masks(work, [0], keep=((5.0, 6.0),))[0]
+    fit = renderer.frame_fit_filter("crop", W, H, None)
+    raw = subprocess.run(
+        ["ffmpeg", "-v", "error", "-ss", "3.3", "-i", work["src"],
+         "-frames:v", "1", "-vf", f"{fit},scale={W}:{H}",
+         "-pix_fmt", "yuv420p", "-f", "rawvideo", "-"],
+        capture_output=True, check=True).stdout
+    want = np.frombuffer(raw[:W * H], np.uint8).reshape(H, W).astype(int)
+    got = _yuv(v, 100)[0]
+    world = ~_grow(mask > 0, 3)
+    assert world.sum() > 1000
+    assert np.abs(got - want)[world].mean() <= 2.0

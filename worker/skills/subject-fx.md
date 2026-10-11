@@ -186,7 +186,7 @@ radial_blur with `radius`, source with a `source`, strobe with `sources` and
 
     {"action": "upsert", "layer": "fx", "id": "bg1", "value": {"id": "bg1",
      "type": "background", "stage": "world", "start": 3.0, "end": 6.0,
-     "kind": "blur", "radius": 0.025, "device": "background_swap"}}
+     "kind": "blur", "radius": 0.025, "device": "background_blur"}}
     {"action": "upsert", "layer": "fx", "id": "bg2", "value": {"id": "bg2",
      "type": "background", "stage": "world", "start": 15.0, "end": 15.6,
      "kind": "strobe", "hold_f": 4, "hold_subject": true, "hold_t": 14.96,
@@ -197,9 +197,17 @@ radial_blur with `radius`, source with a `source`, strobe with `sources` and
 
 A source is `{"kind": "asset", "asset_key": …, "offset_s", "loop"}` (a
 project image, video or screen recording), `{"kind": "source", "src_t": …}`
-(the main video from that source second — it must be in the program),
+(the main video from that source second: another shot, read from the
+main video even where the program never plays it),
 `{"kind": "program", "offset_s": …}`, `{"kind": "colour", "colour": …}`,
 or `{"kind": "next"}` / `{"kind": "previous"}` (the neighbouring shot's
 first / last frame, held).
+
+`hold_t` is a program second and does not move with the item: after a
+trim that moves a held background, write its `hold_t` again (a `hold_t`
+left past the end is dropped, and a preview window that renders the item
+alone holds the item's own first frame). Echo copies
+and plates read far ahead of their window are bounded per render (the
+farthest copies are left out, with the reason in the render report).
 
 Remove any of them: `{"action": "remove", "layer": "fx", "id": "sx1"}`.

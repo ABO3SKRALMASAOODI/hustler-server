@@ -127,7 +127,9 @@ def test_every_kind_in_one_batch_and_flash_events():
     ids = [e["id"] for e in evs]
     # fill, the 2-frame negate, the hold swap and every strobe change flash
     assert ids.count("f") == 1 and ids.count("n") == 1
-    assert ids.count("bh") == 1 and ids.count("bst") == 3
+    # a strobe counts every swap at the fastest render rate (60 fps): 0.4 s
+    # of hold_f 4 is 6 swaps there
+    assert ids.count("bh") == 1 and ids.count("bst") == 6
     for quiet in ("p", "ps", "g", "o", "e", "i", "c", "bs", "bb"):
         assert quiet not in ids, quiet
     counts = taste.device_counts(out)
@@ -158,7 +160,6 @@ def test_every_kind_in_one_batch_and_flash_events():
                                              "asset_key": "media/x/y.mp4"}),
      "not attached|not part of this project|asset"),
     (_bg(hold_t=2.0), "hold_t needs hold_subject"),
-    (_bg(hold_subject=True, hold_t=31.0), "past the program end"),
     (_sx(device="no_such_card"), "not a known device card"),
     (_bg(device="subject_fill_flash"), "writes fx type subject"),
 ])
@@ -212,6 +213,43 @@ def test_a_fast_plate_strobe_is_over_the_flash_limit_unless_asked():
     assert b["contains_flashing"]
 
 
+def test_a_stale_hold_t_never_refuses_a_write():
+    """hold_t is a program second that only the item's start/end follow
+    (timeline._remap_fx moves start/end on a keep edit, never hold_t): a
+    trim that leaves it past the end must not refuse the trim, or every
+    later write. The subject is then held on the item's first frame."""
+    import timeline
+    item = _clean(_bg(kind="solid", colour="black", start=25.0, end=25.4,
+                      hold_subject=True, hold_t=24.96,
+                      device="background_subject_hold"))
+    out = edit_batch.apply_batch(_base(), [_op(item)], DUR, KEYS)
+    assert out["fx"][0]["hold_t"] == 24.96
+    old_tl = timeline.Timeline(out["keep"])
+    cut = copy.deepcopy(out)
+    cut["keep"] = [[0.0, 2.0], [12.0, DUR]]
+    timeline.remap_program_items(cut, old_tl, timeline.Timeline(cut["keep"]))
+    assert cut["fx"][0]["start"] == 15.0          # it moved with its footage
+    got = schemas.validate_edl(cut, DUR).model_dump()
+    assert got["fx"][0]["hold_t"] is None and got["fx"][0]["hold_subject"]
+    # a hold_t inside the program is kept as written
+    assert edit_batch.apply_batch(_base(), [_op(dict(item, hold_t=3.0))],
+                                  DUR, KEYS)["fx"][0]["hold_t"] == 3.0
+
+
+def test_a_render_window_holds_the_items_own_first_frame():
+    """A stitched preview or proof window rebases start/end onto its own
+    clock (stitch._window_fx), not hold_t: inside a window hold_t would
+    name another moment, so the window holds the item's first frame."""
+    item = _clean(_bg(kind="solid", colour="black", start=1.0, end=1.4,
+                      hold_subject=True, hold_t=0.96))
+    e = dict(_base(), fx=[item])
+    full = schemas.validate_edl(copy.deepcopy(e), DUR).model_dump()
+    assert full["fx"][0]["hold_t"] == 0.96
+    win = schemas.validate_edl(copy.deepcopy(e), DUR,
+                               render_fragment=True).model_dump()
+    assert win["fx"][0]["hold_t"] is None
+
+
 def test_old_edls_keep_their_signature_with_1b_live():
     with open(os.path.join(HERE, "fixtures", "w0_inert_corpus.json")) as f:
         cases = json.load(f)
@@ -255,6 +293,23 @@ def test_track_1b_ships_its_cards_and_they_keep_the_owner_rules():
     flashy = {k for k, c in mine.items() if c["owner_flags"]["flash"]}
     assert flashy == {"subject_fill_flash", "subject_negate",
                       "background_subject_hold", "background_strobe"}
+
+
+@pytest.mark.parametrize("cid", CARDS)
+def test_each_cards_default_params_are_a_valid_item(cid):
+    """INTERFACES_W1.md §3.6: params are item field names, the first
+    choice the default, and 1F's planner builds a candidate from exactly
+    those values and dry-runs it through apply_batch (a refused candidate
+    is a card bug). A plate strobe defaults to the neighbouring shots, a
+    held subject to a solid world: neither needs media the planner has
+    not got."""
+    c = devices.load_cards()[cid]
+    vals = {k: (v[0] if isinstance(v, list) and v else v)
+            for k, v in c["params"].items()}
+    it = dict(vals, id="x", type=c["fx_type"], stage=c["stage"],
+              start=2.0, end=3.0, device=cid)
+    out = edit_batch.apply_batch(_base(), [_op(it)], DUR, KEYS)
+    assert out["fx"][0]["device"] == cid
 
 
 def test_cards_resolve_to_their_substitutes_without_a_matte():

@@ -282,23 +282,39 @@ def _ensure_matte(ctx, edl, tl, windows):
     (never waits). Returns a short note for the reply, or ''."""
     try:
         import db as dbx
+        import fxgraph
         import sidecars
         original = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
         proxy = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
         if not original or not proxy or not original.get("sha256"):
             return ""
-        video = (ctx.index or {}).get("video") or {}
-        meta = proxy.get("meta") or {}
-        # as sidecars.prefetch_top_shorts builds it: the index's duration
-        # (the chunk grid), the proxy's own geometry
-        info = {"duration": video.get("duration") or proxy.get("duration_s"),
-                "fps": proxy.get("fps") or meta.get("fps")
-                or video.get("fps"),
-                "width": proxy.get("width") or meta.get("width"),
-                "height": proxy.get("height") or meta.get("height")}
-        src = sidecars.source_from(original["sha256"], proxy["storage_key"],
-                                   info, ctx.project_id,
-                                   (ctx.index or {}).get("shots"))
+        # Track 1A's program matte keys and launches its chunks: when it is
+        # here, ask through its own helpers, so this request warms exactly
+        # the chunks a render reads (its matte.person params) and launches
+        # only where a lane may (never model_missing markers from a lane
+        # without the models).
+        launch = fxgraph.peer_fn("matte_track:launch_source")
+        params = None
+        if launch is not None:
+            src = launch(original["sha256"], proxy, ctx.index, ctx.project_id)
+            if src is None:
+                return ""
+            params = fxgraph.peer("matte_track:sidecar_params", default=None)
+        else:
+            video = (ctx.index or {}).get("video") or {}
+            meta = proxy.get("meta") or {}
+            # as sidecars.prefetch_top_shorts builds it: the index's
+            # duration (the chunk grid), the proxy's own geometry
+            info = {"duration": video.get("duration")
+                    or proxy.get("duration_s"),
+                    "fps": proxy.get("fps") or meta.get("fps")
+                    or video.get("fps"),
+                    "width": proxy.get("width") or meta.get("width"),
+                    "height": proxy.get("height") or meta.get("height")}
+            src = sidecars.source_from(original["sha256"],
+                                       proxy["storage_key"], info,
+                                       ctx.project_id,
+                                       (ctx.index or {}).get("shots"))
         ranges = []
         for a, b in windows:
             sa, sb = tl.out_to_src(a), tl.out_to_src(max(a, b - 0.01))
@@ -307,7 +323,7 @@ def _ensure_matte(ctx, edl, tl, windows):
         if not ranges:
             return ""
         h = sidecars.ensure("matte.person", src, ranges,
-                            priority="interactive")
+                            priority="interactive", params=params)
         st = sidecars.status(h)
         if st == "ready":
             return ""

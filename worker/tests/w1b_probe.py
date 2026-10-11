@@ -13,7 +13,7 @@ spec: {"workroot", "cases": [{"name", "src", "src_fps", "idx", "edl",
        "matte" (source-space gray video or null), "matte_status",
        "matte_windows", "hue" (bool), "preview", "want_wm",
        "asset_locals", "faults", "dump_frames", "png_frames", "graph",
-       "suppress_outro"}]}
+       "suppress_outro", "audio_only", "render_fragment"}]}
 """
 
 import json
@@ -50,7 +50,8 @@ def run_case(case, workroot):
     name = case["name"]
     wd = os.path.join(workroot, name)
     os.makedirs(wd, exist_ok=True)
-    out = os.path.join(workroot, f"{name}.mp4")
+    audio_only = bool(case.get("audio_only"))
+    out = os.path.join(workroot, f"{name}.{'m4a' if audio_only else 'mp4'}")
     rows, graphs = [], []
     tok = fxgraph.collect(rows)
     real_build = renderer.build_filtergraph
@@ -86,18 +87,32 @@ def run_case(case, workroot):
             edl = edit_batch.apply_batch(edl, case["ops"], dur_s,
                                          set(locals_))
             res["edl"] = edl
+        extra = {}
+        if audio_only:
+            extra["audio_only"] = True
+        if case.get("render_fragment"):
+            # a stitched / proof window: validated as the renderer does
+            import schemas
+            edl = schemas.validate_edl(
+                edl, float(case["idx"]["video"]["duration"]),
+                render_fragment=True).model_dump()
+            res["edl"] = edl
+            extra["render_fragment"] = True
         with faultinject.inject(*(case.get("faults") or [])):
             dur = renderer.render_edl(
                 edl, case["idx"],
                 case["src"], out, wd, preview=case.get("preview", True),
                 want_wm=case.get("want_wm", False), asset_locals=locals_,
-                suppress_outro=case.get("suppress_outro", False))
+                suppress_outro=case.get("suppress_outro", False), **extra)
         res["wall_s"] = round(time.time() - t, 3)
         ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
         res["cpu_s"] = round((ru1.ru_utime - ru0.ru_utime)
                              + (ru1.ru_stime - ru0.ru_stime), 3)
         res["duration"] = dur
-        if dur is not None and os.path.exists(out):
+        if dur is not None and os.path.exists(out) and audio_only:
+            res["path"] = out
+            res["audio"] = w0b_probe.audio_md5(out)
+        elif dur is not None and os.path.exists(out):
             res["path"] = out
             res["frames"] = w0b_probe.frame_md5s(out)
             res["audio"] = w0b_probe.audio_md5(out)

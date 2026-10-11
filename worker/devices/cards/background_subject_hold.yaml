@@ -7,9 +7,12 @@ fx_type: background
 stage: world
 params:
   kind:
+  - solid
   - source
   - strobe
-  - solid
+  colour:
+  - black
+  - accent
   hold_subject:
   - true
   hold_f:

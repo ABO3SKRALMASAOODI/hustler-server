@@ -107,9 +107,23 @@ def from_sidecar(source, video, src_t, dest_dir):
     sidecar chunk (never launches or waits for analysis). (image, bbox) or
     None when no measured chunk covers that second."""
     try:
+        import fxgraph
         import sidecars
-        h = sidecars.ensure("matte.person", source, [(src_t, src_t + 0.05)],
-                            priority="backfill")
+        # a READ handle (sidecars.ensure would launch the absent chunk), on
+        # the params the program matte keys with (track 1A's, when merged)
+        kind = "matte.person"
+        sp = sidecars.spec(kind)
+        resolved = sidecars.resolve_params(
+            kind, fxgraph.peer("matte_track:sidecar_params", default=None))
+        chunks = tuple(
+            sidecars.ChunkRef(sidecars.sidecar_key(
+                kind, source.sha256, sp["model_id"], sp["model_version"],
+                resolved, span), *span)
+            for span in sidecars.chunks_for(source.shots, source.duration_s,
+                                            [(src_t, src_t + 0.05)]))
+        h = sidecars.Handle(kind=kind, source_sha=source.sha256,
+                            chunks=chunks,
+                            params=sidecars.canonical_params(resolved))
         for ch in sidecars.fetch(h, dest_dir):
             if ch["t0"] - 1e-6 <= src_t < ch["t1"]:
                 rgb, alpha = decode_pair(video, ch["path"], src_t,

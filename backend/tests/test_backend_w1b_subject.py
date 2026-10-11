@@ -102,9 +102,10 @@ def test_subject_and_background_items_in_the_backend_process():
     assert r.returncode == 0, r.stderr[-3000:]
     got = json.loads(r.stdout.strip().splitlines()[-1])
     assert len(got["written"]) == 12
-    # the fill, the 2-frame negate, the hold swap, each strobe change
+    # the fill, the 2-frame negate, the hold swap, each strobe change (at
+    # the fastest render rate, 60 fps: 0.4 s of hold_f 4 is 6 swaps)
     assert got["events"].count("f") == 1 and got["events"].count("n") == 1
-    assert got["events"].count("bh") == 1 and got["events"].count("st") == 3
+    assert got["events"].count("bh") == 1 and got["events"].count("st") == 6
     assert got["refused"] == 3
     # the compiler never reaches the backend: only the schema member does
     assert "subject_fx" not in got["worker_modules"]
