@@ -157,12 +157,20 @@ def _program_behind(edl, item):
             "fp": "program-matte", "method": "program"}
 
 
-def _behind_through_program_matte(edl):
+def _behind_through_program_matte(edl, before=None):
     """Fill program-matte SubjectMattes in place (see above): a
     behind_subject motion item without ``behind``, and any text or motion
     item whose ``behind`` names PROGRAM_MATTE_KEY. Raises ValueError where
-    the window holds no main footage."""
+    the window of an item the batch WROTE holds no main footage; an item
+    the batch left untouched keeps its stored mask there (a keep edit or an
+    insert elsewhere in the batch is never refused for it — the render
+    draws it as a plain title until footage plays under it again)."""
     live = program_matte_live()
+    prev = {}
+    for layer in ("motion", "texts"):
+        for item in (before or {}).get(layer) or []:
+            if isinstance(item, dict) and item.get("id") is not None:
+                prev[(layer, item["id"])] = item
     for layer in ("motion", "texts"):
         for item in edl.get(layer) or []:
             if not isinstance(item, dict):
@@ -184,6 +192,9 @@ def _behind_through_program_matte(edl):
                                  "place the item with add_text_behind / "
                                  "add_motion_graphic(layer='behind_subject').")
             filled = _program_behind(edl, item)     # the CURRENT window
+            if filled is None and named and \
+                    prev.get((layer, item.get("id"))) == item:
+                continue                    # untouched: as it was
             if filled is None:
                 raise ValueError(
                     f"{layer} '{item.get('id')}' cannot go behind the "
@@ -364,7 +375,7 @@ def apply_batch(before, operations, duration, allowed_keys):
     _check_new_motion_params(before, edl)
     # A graphic behind the subject needs a subject mask: a measured clip
     # (add_motion_graphic builds one) or, from Wave 1, the program matte.
-    _behind_through_program_matte(edl)
+    _behind_through_program_matte(edl, before)
     normalized = validate_edl(edl, duration).model_dump()
     check_fx_devices(before, normalized)
     if isinstance(allowed_keys, dict):
