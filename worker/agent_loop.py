@@ -3041,7 +3041,7 @@ ALTERNATIVE_HINTS = [
      "animations."),
     (re.compile(r"(?i)voice.?over|narrat|music|song|soundtrack|audio|volume"),
      "What I CAN do: score the edit with music on any time range — a "
-     "licence-free CC0 bed from the built-in library by mood "
+     "licence-free CC0 track you pick from the built-in library "
      "(list_music_library), "
      "a specific song the user named (load acquisition, then find_song), "
      "any link they paste (a song URL, "
@@ -3100,8 +3100,8 @@ def _nearest_alternative(user_text):
                 import music_library
                 if not music_library.available():
                     hint = hint.replace(
-                        "a licence-free CC0 bed from the built-in library "
-                        "by mood (list_music_library), ", "")
+                        "a licence-free CC0 track you pick from the "
+                        "built-in library (list_music_library), ", "")
             # A deployment with sfx search off must not offer found sounds;
             # the approved library and the user's own files remain.
             if "sounds I find on the web" in hint \

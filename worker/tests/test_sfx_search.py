@@ -15,9 +15,20 @@ import json
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
 
+import pytest                                                  # noqa: E402
+
 import agent_tools                                             # noqa: E402
 import config                                                  # noqa: E402
 import sfx_search                                              # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _web_sfx_on(monkeypatch):
+    # The web-SFX chain is OFF by default (owner rule, Wave 0 — sounds come
+    # only from the approved library). These tests pin the chain itself, so
+    # they switch the owner flag on; tests/test_w0c_gates.py pins the
+    # default-off gate.
+    monkeypatch.setattr(config, "WEB_SFX_ENABLED", True)
 
 
 def _hit(title="Camera Shutter", dur=0.3, lic="cc0"):

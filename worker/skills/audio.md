@@ -167,10 +167,10 @@ LEVELS:
   'smooth')` when the bed pumps or swallows the first word after a pause.
 
 OTHER SOURCES:
-- `search_sfx`, the audition/fetch chain and `add_web_sfx` find a real
-  recording online only when the user explicitly asks for a specific sound
-  the library lacks (a crowd cheer, a door, rain). Relay licence lines when
-  they carry obligations.
+- Sound effects come only from the approved library: there is no web
+  sound. When the user asks for a specific sound it lacks (a crowd cheer, a
+  door, rain), `list_sound_library(role='<the sound>')` files it for the
+  owner to audition; place none and tell the user in one clause.
 - A sound the user uploads, or the sound off a clip they sent, places
   directly with `add_sfx` / `add_music`.
 - Keep real environmental sound when it already tells the truth; it is the
@@ -211,8 +211,9 @@ as work.
   'pictures' (a literal pun).
 - Sounds where nothing meaningful happens on screen, or a sound that fights
   the material (an impact under a tender admission).
-- Music added on the agent's own initiative, or a CC0 library bed chosen
-  when the user never asked for generic background music.
+- Music added on the agent's own initiative, or a CC0 library track the
+  agent chose: for generic background music, offer 2-4 tracks with
+  `ask_user` and place the one the user picks.
 - Cues whose peak lands off the visual (a hand pre-roll on top of the
   tool's, a riser `at` set before the payoff instead of on it); a hand-set
   gain the MIX line calls inaudible or too hot.

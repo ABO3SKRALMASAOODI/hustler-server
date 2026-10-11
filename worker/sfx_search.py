@@ -119,7 +119,10 @@ def _outage_hits(query, cap, count):
 
 
 def available():
-    return bool(config.SFX_SEARCH_ENABLED)
+    # Owner rule (Wave 0, 0C): web sounds are off unless the owner turns
+    # WEB_SFX_ENABLED on; SFX_SEARCH_ENABLED stays the provider switch.
+    return bool(config.SFX_SEARCH_ENABLED) and bool(
+        getattr(config, "WEB_SFX_ENABLED", False))
 
 
 _NOISY_WORDS = {

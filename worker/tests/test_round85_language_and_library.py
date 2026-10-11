@@ -210,7 +210,10 @@ def test_stale_sfx_scheme_gets_the_honest_web_first_rejection():
         db = _Db()
         project_id = 1
     sound, err = agent_tools._resolve_sfx(_Ctx(), "sfx:whoosh")
-    assert sound is None and "search_sfx" in err
+    # Owner rule (Wave 0): the approved library first; the web only when
+    # the owner turned web sounds on.
+    assert sound is None and "list_sound_library" in err
+    assert "search_sfx" not in err
 
 
 def test_unreliable_music_chain_is_retired_but_sfx_search_is_advertised():
@@ -220,13 +223,24 @@ def test_unreliable_music_chain_is_retired_but_sfx_search_is_advertised():
         assert gone not in agent_tools.TOOLS
     assert "search_sfx" in agent_tools.TOOLS
     assert "fetch_sfx" in agent_tools.TOOLS
-    assert not agent_tools._tool_disabled("search_sfx")
+    # Owner rule (Wave 0): web sounds are off and out of the live catalog
+    # unless the owner sets WEB_SFX_ENABLED.
+    assert agent_tools._tool_disabled("search_sfx")
     state = agent_prompt.project_state_block(
         "v", "idx", "edl", [], [])
     assert "sound-effects pack" not in state
     assert "no generic catalog search" in state
     assert "search_music" not in state
-    assert "search_sfx" in state                # found sounds advertised
+    assert "search_sfx" not in state
+    import config
+    saved = config.WEB_SFX_ENABLED
+    config.WEB_SFX_ENABLED = True
+    try:
+        assert not agent_tools._tool_disabled("search_sfx")
+        assert "search_sfx" in agent_prompt.project_state_block(
+            "v", "idx", "edl", [], [])        # advertised when the owner opts in
+    finally:
+        config.WEB_SFX_ENABLED = saved
     # The restored CC0 catalogue is advertised (its manifest ships).
     assert "list_music_library" in state and "add_library_music" in state
 
