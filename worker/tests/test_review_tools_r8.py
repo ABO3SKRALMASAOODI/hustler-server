@@ -436,6 +436,10 @@ def test_type_findings_name_a_small_hook_a_small_payoff_and_colliding_captions()
     assert lines[1].startswith("CAPTION CROSSES THE CARD EDGE at 1.0s")
     assert "payoff 'payoff' 4.0% (largest: 'stat' 6.0%)" in \
         render_qc.measures_line({"type": tq})
+    # a hero-word caption look lays its slam across the card by design
+    # (s05, Kinetic Poster 'stack'): no crossing; collisions still count
+    tq = render_qc.type_findings(tres, dict(tplan, look="stack"), cards)
+    assert tq["cross"] == [] and tq["collide"]
 
 
 def test_heard_but_unshown_words_are_one_blocking_line():

@@ -145,6 +145,10 @@ TYPE_INK = 200
 CAPTION_SAMPLES = 24
 COLLIDE_SHARE = .15         # a caption this much under a graphic's box
 EDGE_PAD = .004             # a caption this far past a card edge crosses it
+# Caption looks whose hero word is a poster lockup laid across the card by
+# design (motion_captions 'stack', 'lockup'): no line to keep inside it
+# (s05 of the Oct 10 run, Kinetic Poster: 'CLEARLY' spans the backdrop).
+HERO_CAPTION_LOOKS = ("stack", "lockup")
 BAND_EDGE_S = .65           # ...except at the band's very start or end:
                             # a graphic landing (leaving) this close to the
                             # headline's own edge takes the band from (to)
@@ -600,7 +604,7 @@ def _type_plan(edl, index, tl, W, H, fps, program_s):
     except Exception:  # noqa: BLE001
         unshown = None
     return {"items": items, "captions": segs, "unshown": unshown,
-            "hook": hook,
+            "look": motion_captions.look_of(e), "hook": hook,
             "payoff": _payoff_id([it for it in lockups if it["id"] != hook],
                                  program_s),
             "program_s": program_s, "W": W, "H": H, "fps": fps}
@@ -1678,7 +1682,8 @@ def type_findings(tres, tplan, cards):
     """{"caps": {...}, "collide": [...], "cross": [...]} from a type pass:
     the hook's, the captions' (median over cues) and every lockup's cap
     height; captions lying under (or over) a graphic's measured box; and
-    captions crossing a picture card's edge."""
+    captions crossing a picture card's edge (not a hero-word look's poster
+    lockup: HERO_CAPTION_LOOKS)."""
     items = {it["id"]: it for it in (tplan or {}).get("items") or []}
     meas = (tres or {}).get("items") or {}
     cue_caps = sorted(c["cap"] for c in (tres or {}).get("cues") or []
@@ -1709,7 +1714,7 @@ def type_findings(tres, tplan, cards):
                                 else "over"))
                 break
         for a, b, areas in cards or []:
-            if not a <= t < b:
+            if not a <= t < b or (tplan or {}).get("look") in HERO_CAPTION_LOOKS:
                 continue
             for ar in areas:
                 hit = None
