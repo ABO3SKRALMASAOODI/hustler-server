@@ -482,3 +482,34 @@ def test_main_video_plates_compile_to_closed_declared_composites(
         made += re.findall(r"\[([^\]]+)\]", m.group(3))
     assert set(made) - set(used) == {out}
     assert used.count("v0") == 1
+
+
+def test_an_item_that_fails_to_compile_is_rolled_back_alone(tmp_path,
+                                                             monkeypatch):
+    """fxgraph rolls back a whole compiler group: one bad item would omit
+    every subject effect and background of the stage. The compiler rolls
+    the item back alone, closes the matte pads it took, and the program
+    label carries on."""
+    def boom(self, label):
+        self.raw_mask()                        # takes a pad, then fails
+        raise RuntimeError("synthetic emit failure")
+    monkeypatch.setattr(subject_fx._Emit, "k_glow", boom)
+    items = [_sx("a", start=1.0, end=1.08),
+             _sx("g", kind="glow", start=1.5, end=2.0),
+             _bg("b", start=2.5, end=3.0)]
+    parts, out = _emit(tmp_path, monkeypatch, items)
+    made, used = [], []
+    for p in parts:
+        m = re.match(r"^((?:\[[^\]]+\])*)(.*?)((?:\[[^\]]+\])*)$", p, re.S)
+        used += re.findall(r"\[([^\]]+)\]", m.group(1))
+        made += re.findall(r"\[([^\]]+)\]", m.group(3))
+    assert len(made) == len(set(made))
+    external = {u for u in used if u not in made}
+    assert external <= {"v0"} | {f"pm{i}" for i in range(1, 20)} | \
+        {f"{i}:v" for i in range(1, 20)}, external
+    assert set(made) - set(used) == {out}
+    taken = {u for u in used if u.startswith("pm")}
+    assert len(taken) == 3                     # the glow's pad is closed
+    assert any(p.endswith("nullsink") and p.startswith("[pm")
+               for p in parts)
+    assert used.count("v0") == 1

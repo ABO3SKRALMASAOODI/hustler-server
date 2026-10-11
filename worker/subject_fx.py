@@ -787,15 +787,50 @@ class _Compiler:
 
     # -- emit ------------------------------------------------------------
     def stage(self, ctx, items):
+        """Each item is laid over the running program in start order. An
+        item that fails to compile is rolled back ALONE (its filters gone,
+        any mask pad it took from a provider closed with a nullsink, the
+        program label as it was) and reported omit: its siblings in this
+        stage still draw (fxgraph's own rollback drops the whole group)."""
         label = ctx.label
         edl_cache = plan_edl(ctx.plan)
+        real_mask = ctx.mask
         for it in sorted(items, key=lambda i: (float(i["start"]), i["id"])):
             st = _state(ctx.plan).get(it["id"]) or {"mode": "full"}
+            mark, taken = len(ctx.parts), []
+
+            def mask(lbl, space=None, _taken=taken):
+                pad = real_mask(lbl, space)
+                if pad is not None:
+                    _taken.append(pad)
+                return pad
+            ctx.mask = mask
             ctx.label = label
-            em = _Emit(ctx, it, st, edl_cache)
-            label = em.run(label)
+            try:
+                label = _Emit(ctx, it, st, edl_cache).run(label)
+            except Exception as e:  # noqa: BLE001 — degrade this item only
+                gone = _outputs(ctx.parts[mark:])
+                del ctx.parts[mark:]
+                for pad in taken:
+                    if pad not in gone:
+                        ctx.parts.append(f"[{pad}]nullsink")
+                ctx.note(it, "omit", f"compile failed ({type(e).__name__}: "
+                         f"{str(e)[:120]})")
+            finally:
+                ctx.mask = real_mask
         ctx.label = label
         return label
+
+
+def _outputs(parts):
+    """The pad labels a list of filtergraph parts produces."""
+    import re
+    out = set()
+    for p in parts:
+        m = re.search(r"((?:\[[^\]]+\])+)\s*$", p)
+        if m:
+            out.update(re.findall(r"\[([^\]]+)\]", m.group(1)))
+    return out
 
 
 # Measured costs (tests/w1b cost bench, Apple M5 Pro under load): per
