@@ -1,8 +1,8 @@
 """Shared Brevo delivery and the account-wide daily send budget.
 
-Brevo's entry plan accepts 300 transactional emails per UTC day.  Marketing
-and lifecycle mail may consume at most 280; verification, dunning, and founder
-alerts share the reserved final 20.  The reservation is a PostgreSQL row lock,
+Brevo's entry plan accepts 300 emails per UTC day.  Marketing
+and lifecycle mail may consume at most 200; verification, dunning, and founder
+alerts share the reserved final 100.  The reservation is a PostgreSQL row lock,
 so separate Gunicorn workers and scheduler threads cannot race past the cap.
 """
 
@@ -18,10 +18,10 @@ BREVO_SEND_URL = "https://api.brevo.com/v3/smtp/email"
 BREVO_ACCOUNT_URL = "https://api.brevo.com/v3/account"
 DAILY_LIMIT = max(1, int(os.getenv("BREVO_DAILY_LIMIT", "300")))
 CRITICAL_RESERVE = min(
-    DAILY_LIMIT, max(0, int(os.getenv("BREVO_CRITICAL_RESERVE", "20"))))
+    DAILY_LIMIT, max(0, int(os.getenv("BREVO_CRITICAL_RESERVE", "100"))))
 BULK_LIMIT = min(
     DAILY_LIMIT - CRITICAL_RESERVE,
-    max(0, int(os.getenv("BREVO_BULK_LIMIT", "280"))),
+    max(0, int(os.getenv("BREVO_BULK_LIMIT", "200"))),
 )
 
 

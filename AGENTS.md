@@ -25,7 +25,7 @@ work through it.
 
 ## Email operations
 
-- Brevo's free allowance is 300 emails/day. Keep the shared 280 marketing / 20 account-service budget and check Brevo's actual remaining credits before sending: HTTP 201 can mean queued, not delivered. Never infer available provider credits from the local day's counter alone.
+- Brevo's free allowance is 300 emails/day. Keep the shared 200 marketing / 100 account-service budget and check Brevo's actual remaining credits before sending: HTTP 201 can mean queued, not delivered. Never infer available provider credits from the local day's counter alone.
 - Marketing follows the admin's real-customer scope, except the main admin account remains included. Hidden pre-relaunch/test accounts must not consume marketing capacity.
 - Recent signups (last 30 days) receive 75% of available marketing capacity; older customers retain 25%, with unused shares reassigned. Keep the 48-hour gap and three-marketing-emails-per-seven-days ceiling.
 - `backend/routes/newsletter_campaigns.py` contains 27 distinct marketing messages. Lifecycle steps send once per topic; 12 editing lessons rotate by each recipient's successful history. No introductory offers or trial promises.
