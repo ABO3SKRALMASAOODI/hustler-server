@@ -1,0 +1,29 @@
+# AT-1F-6: proof_device on a 30 s program with a two-device change. The
+# landing frames it reports equal a manual frame count on the three
+# showcase windows; p50 wall <= 40 s.
+id: AT-1F-6
+track: 1F
+title: "proof_device: two-device change on a 30 s program, frame-exact landings"
+local_only: true
+interim: false
+reference: []
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+  - {vfl: V03, window: jobs_fonts}
+  - {vfl: V04, window: rogan_gamers}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "proof_device"
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: land_err_f, op: "<=", value: 0}
+  - {name: flash_risk, op: "<=", value: 3}
+  - {name: cost_ratio}
+expect:
+  wall_p50_s: 40
+  landing_equals_manual_count: true
+beyond: "every device is proved on rendered frames, with and without itself, and the landing is a measured frame number; the references were checked by eye"
+board: {stills: []}
+judges: {lenses: [motion], pass: all_no_major}

@@ -1,0 +1,32 @@
+# AT-1F-4 (agent mode): "less flashy" on an edit holding six one-frame
+# negatives the user had asked to strobe. set_intensity steps down, removes
+# the lowest-ranked ones in one write that lists their ids, and flash
+# safety passes on the rendered frames.
+id: AT-1F-4
+track: 1F
+title: "\"less flashy\": set_intensity trims the lowest-ranked negatives"
+local_only: true
+interim: false
+reference:
+  - {ref: "04", t: [1.93, 12.6], approx: false}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "less flashy"
+setup:                       # the edit the sentence lands on (apply_edit_batch ops)
+  intensity: charged
+  negatives: 6               # accent_negative items, the strongest bound to stresses
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: flash_risk, op: "<=", value: 3}
+expect:
+  tools_called: [set_intensity]
+  removed: 3
+  removed_are_lowest_ranked: true
+  diff_lists_ids: true
+beyond: "one sentence re-budgets the whole edit by rank, not by position, and the diff names every removed id; the reference had to be re-cut by hand"
+board: {stills: [5.0]}
+judges: {lenses: [motion, owner_rules], pass: all_no_major}

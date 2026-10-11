@@ -780,6 +780,53 @@ def unacknowledged_degradations(record, rows):
     return out
 
 
+def hold_final(record, rows, *, project_id=None, version=None):
+    """The final-export DEGRADED gate (Wave 1, 1F): ``rows`` are a FINAL
+    render's device rows that ``unacknowledged_degradations`` held. Returns
+    the verification record with one blocking ``device_degraded`` finding
+    per held row (marked ``final``), so the editor can fix the cause or
+    acknowledge exactly that instance with justify_verification_findings
+    (finding id or the code ``device_degraded``). Idempotent: a row already
+    recorded is not added twice. Never mutates ``record``."""
+    record = record or {}
+    if isinstance(record.get("record"), dict):
+        record = record["record"]
+    updated = json_record(record) if record else {
+        "verification_version": VERIFICATION_VERSION,
+        "project_id": int(project_id) if project_id is not None else None,
+        "edl_version": int(version) if version is not None else None,
+        "findings": [], "unresolved_findings": [], "justifications": [],
+        "advisories": [], "repairs": []}
+    findings = list(updated.get("findings") or [])
+    unresolved = list(updated.get("unresolved_findings") or [])
+    have = {row.get("finding_id") for row in findings}
+    for row in device_findings({"devices": rows}):
+        row["evidence"]["final"] = True
+        row["message"] = "Final export: " + row["message"]
+        row["finding_id"] = "vf_" + hashlib.sha256(
+            _canon(row).encode("utf-8")).hexdigest()[:16]
+        if row["finding_id"] in have:
+            continue
+        have.add(row["finding_id"])
+        findings.append(row)
+        unresolved.append(row)
+    updated["findings"] = findings
+    updated["unresolved_findings"] = unresolved
+    if unresolved:
+        updated["status"] = "repair_required"
+    return updated
+
+
+def final_hold_message(held):
+    """One line for the export path: what a held final degraded."""
+    names = ", ".join(f"{r.get('device') or r.get('id')} ({r.get('rung')})"
+                      for r in held[:4])
+    return ("This export is held: " + names + (" and more" if len(held) > 4
+                                               else "")
+            + " rendered below full quality. Ask the editor to fix it, or to "
+              "confirm it is acceptable, then export again.")
+
+
 def flash_assessment(edl, index=None, request_text=None):
     """flash_safety.assess for the record; None when it cannot be read."""
     try:

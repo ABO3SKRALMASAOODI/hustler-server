@@ -1,0 +1,36 @@
+# AT-1F-1 (agent mode): one sentence, the in-house agent, no music track.
+# The agent may use suggest_devices / apply_edit_batch / proof_device; the
+# expect block is 1F's extension for agent cases (read by the 1F agent
+# harness; refbench validate ignores keys it does not know).
+id: AT-1F-1
+track: 1F
+title: "\"make this a premium short\" on the SC-Thiel window, no track"
+local_only: true
+interim: false
+reference:
+  - {ref: "05", t: [0.23, 12.23], approx: false, board_t: 1.0}
+  - {ref: "22", t: [8.43, 12.33], approx: true}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "make this a premium short"
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: land_err_f, op: "<=", value: 1}
+  - {name: flash_risk, op: "<=", value: 3}
+  - {name: legibility, role: payload, op: ">=", value: 60}
+expect:
+  music: 0
+  zoom: 0
+  sfx: 0
+  punctuation_max: 2
+  matte_on_payoff: 1          # at least one matte_fx device bound to the payoff
+  ledger: {format: C, intensity: designed, within_budget: true}
+  reply_max_words: 60
+  proof_pass: true
+beyond: "from one sentence: the payoff device is chosen, bound to the spoken word, budgeted and proved on rendered frames before the reply; the references were hand-built per moment"
+board: {stills: [38.8], clip: [36.5, 40.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

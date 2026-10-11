@@ -534,6 +534,15 @@ FLASH_SAFE_MAX_PER_S = 3
 # ---- W1 1E end
 
 # ---- W1 1F (agent layer v1) begin
+# suggest_devices' model pass over the kept transcript (payload, negation,
+# number, contrast, emotion, profanity), cached per transcript in app_kv; the
+# lexical tagger and the prosody grid run either way. Off until measured on
+# production transcripts: one bounded editor-model call per new transcript,
+# inside the turn that asked.
+W1F_RHETORIC_LLM = os.getenv("W1F_RHETORIC_LLM", "0") == "1"
+# proof_device: how long the verb waits for its preview_check renders before
+# answering "still rendering" (the agent then calls wait_for_job).
+W1F_PROOF_WAIT_S = float(os.getenv("W1F_PROOF_WAIT_S", "240"))
 # ---- W1 1F end
 
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via

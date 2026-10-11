@@ -1,0 +1,74 @@
+{
+  "id": "subject_poster",
+  "family": "matte_fx",
+  "verb": "add_subject_effect",
+  "stage": "world",
+  "params": {
+    "kind": "poster",
+    "field": [
+      "accent"
+    ],
+    "keep_footage": [
+      true
+    ],
+    "span": [
+      "payoff_hold"
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ],
+    "lane_features": [
+      "ffmpeg:maskedmerge"
+    ]
+  },
+  "binds_to": [
+    "word.payoff",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 6
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 6
+    },
+    "charged": {
+      "per_short": 2,
+      "min_gap_s": 3
+    }
+  },
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "colour_field_card"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 2.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "23@\u22481.3",
+    "38@\u22480.3"
+  ],
+  "verify": [
+    "matte_flicker<=0.035",
+    "edge_chatter<=0.002"
+  ],
+  "status": "live",
+  "fx_type": "subject",
+  "description": "poster: the speaker kept on a flat accent field through the payoff"
+}

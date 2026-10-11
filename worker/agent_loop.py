@@ -766,6 +766,14 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
         layout = agent_tools._layout_report(ctx, calls_only=True)
         if layout:
             index_summary += "\n" + layout
+        # Wave 1 (1F): what analysis is measured and the person-matte
+        # coverage of the current cut (agent_tools.project_state).
+        try:
+            analysis = agent_tools.project_state_line(ctx)
+        except Exception:  # noqa: BLE001 — state is best effort
+            analysis = ""
+        if analysis:
+            index_summary += "\n" + analysis
         # Let joined evidence avoid duplicating a transcript that this exact
         # caller just received.  MCP contexts start false as well; state_block
         # flips them only when its project-state response contains COMPLETE.

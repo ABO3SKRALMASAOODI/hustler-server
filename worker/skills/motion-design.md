@@ -119,10 +119,11 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   make it the largest lockup of the short (the reply NOTEs a taller one);
   `hero` is ONE giant word per short (a line up to 30% of the frame height
   on a short word) set BEHIND the speaker: the write measures a person
-  matte and, when it cannot (a cut in the window, no person model, a still
-  speaker the photometric mask loses, a crop that follows the speaker),
-  draws it as a display slam above the picture, clear of the face, and says
-  HERO FALLBACK; a later edit that stops it going behind renders that same
+  matte (the program matte holds it under a follow crop, across cuts and
+  over speed ramps) and, when it cannot (no person model, a still speaker
+  the photometric mask loses, a window not measured yet), draws it as a
+  display slam above the picture, clear of the face, and says HERO
+  FALLBACK; a later edit that stops it going behind renders that same
   face-safe slam, never the giant word over the face. It is placed at head
   height so the head crosses the middle of the letters, and narrowed under a
   camera zoom (it is drawn before the zoom) so no letter leaves the frame.
@@ -275,7 +276,8 @@ LAYERING AND CAPTIONS:
   over the caption track; `below_captions` keeps captions on top (lower
   thirds, textures, background shapes); `behind_subject` composites the
   graphic behind the person's matte — the giant-word-behind-the-head look —
-  and needs a person in frame and no cut inside the window.
+  and needs a person in frame (follow crops, cuts and ramps in the window
+  are fine).
 - EVERY HEARD WORD REACHES THE SCREEN ONCE: captions and a graphic never
   say the same words twice, and no heard word is left to the sound.
   Leave `mute_captions` unset (the default): the captions drop the spoken
@@ -459,6 +461,16 @@ the engine scales it to the output. Runtime summary:
   scrims) — compare them with the safe area. Authored HTML has no `y` the
   keep-out can move: place it clear of the face yourself (a collision comes
   back as a NOTE).
+
+DEVICES AROUND THE GRAPHICS: `suggest_devices` plans the creative devices
+that bind to the same words your graphics land on — a silhouette flash or a
+poster on the payoff, a punctuation frame on a cut or the turn, a junction
+at a real scene change, a composite on a hero graphic (difference over a
+busy plate, footage inside its letters, a ghost stroke behind the subject).
+One device per moment: a hero graphic and a separate device on the same
+word is one stack too many unless the device IS the graphic's composite.
+Prove what you write with `proof_device`; read_skill devices says when each
+earns its place.
 
 ## Common failure modes
 

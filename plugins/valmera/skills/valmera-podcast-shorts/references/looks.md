@@ -331,6 +331,37 @@ get an invented music choice. With music off, in this order:
 5. Check with `audit_audio_mix` and the render's audio check: no digital
    silence over 0.3 s outside a deliberate stop-down or a flagged passage.
 
+### Devices (compositing, punctuation, finishing)
+
+Valmera's creative devices cut the speaker out once and reuse it, punctuate
+transients, and carry content-born junctions. In a podcast short they are
+punctuation for the story, never decoration, and every one is bound to a
+moment. Per short, on top of the graphics:
+
+| Device | Earns its place when | Podcast-short budget |
+| --- | --- | --- |
+| Silhouette flash (the speaker filled white or in the accent, 1-2 frames) | the payoff word, or the turn into the payoff | 0-1, at most 2 |
+| Poster (the speaker on a flat accent field) | through the payoff hold, or one section intro | 0-1 |
+| Hero word behind the speaker | the payoff word (follow crops, cuts and ramps are fine) | 1 per 6-8 s at most |
+| Punctuation frame (negative, white hit, threshold) | a real cut or the turn word (a contrast, a negation); never mid-word on the payoff | 0-2, one family per short section |
+| Junction (iris, matte cut, column wipe) | a real scene change; a jump cut inside one take stays a hard cut | 0-1 |
+| Grade window, colour isolation | a then-versus-now, a flashback, the subject against their world | 0-1 |
+| Finish (CRT or LCD re-photography, film) | archival footage or a screen the speaker talks about | 0-1, archival talks only |
+| Strobe, background swap, echo or clone | montage and sizzle on the owner's song; never in a talking short's body | 0 |
+
+Nothing punctuates the payoff hold (0.8-1.5 s after the payoff word); one
+device per moment; never the same device on consecutive shots; never more
+than 3 full-frame flashes in any second. Devices are silent and zoom-free:
+they never bring a sound or a camera move with them. Plan them with
+`suggest_devices` (it applies these budgets and returns each candidate's
+exact `apply_edit_batch` op), write the ones you keep in ONE batch, then
+`proof_device` them (editing.md step 5). Look affinities: Headline Pro and
+Clean Data at most one device (the payoff); Kinetic Poster the poster or a
+silhouette flash on the payoff plus a punctuation frame on the turn; Mono
+Noir a colour-isolation window; Cinematic Doc a film finish on archival
+footage; Creator Glow a soft glow, never a negative; Editorial Serif none or
+one.
+
 ### Never
 
 A picture band on a flat black void; a fade from black on frame 1 (if an old

@@ -12,6 +12,15 @@ Stills cannot prove motion. Easing, punch feel, pacing, shake, flash and whip
 energy happen between sampled frames, so findings in NEVER_BLOCK_CATEGORIES
 are advisory observations only (Oct 2026: the old rubric rewarded
 "restraint" and could block premium motion design it judged from stills).
+
+Wave 1 (track 1F): a motion finding becomes actionable only when a
+DETERMINISTIC metric corroborates it (``corroborate``): a failed proof
+metric on the same device (land_err_f, flash_risk, legibility, matte jitter,
+junction integrity, a face collision) or an EDL-level restraint finding at
+the same moment (flash rate, a device inside the payoff hold, one on
+consecutive shots). The critic also receives device strips — frames -3..+6
+around each proved device's landing, with and without it — so it judges
+the hit as a sequence, not a still.
 """
 
 import json
@@ -161,11 +170,60 @@ def parse_report(answer):
             "findings": clean, "rubric": rubric}
 
 
+# A motion finding and a failed metric this close in program time (seconds)
+# describe the same moment.
+CORROBORATION_WINDOW_S = 0.5
+
+
+def corroborate(report, evidence):
+    """Mark the NEVER_BLOCK findings a deterministic metric corroborates and
+    recompute the verdict. ``evidence``: [{id, time_s, metric, value, bar,
+    pass}] (motion_qa.critic_evidence). A finding is corroborated by a
+    failing row on its ``target_id`` or within CORROBORATION_WINDOW_S of its
+    ``time_s``; it then carries ``corroborated_by`` and blocks like a
+    visible defect. Nothing else changes; None stays None."""
+    if not report or not evidence:
+        return report
+    failing = [r for r in evidence if isinstance(r, dict)
+               and r.get("pass") is False]
+    if not failing:
+        return report
+    for f in report.get("findings") or []:
+        if f.get("category") not in NEVER_BLOCK_CATEGORIES:
+            continue
+        hits = []
+        for r in failing:
+            same_id = (f.get("target_id") and r.get("id") is not None
+                       and str(r["id"]) == str(f["target_id"]))
+            near = (f.get("time_s") is not None and r.get("time_s")
+                    is not None and abs(float(r["time_s"])
+                                        - float(f["time_s"]))
+                    <= CORROBORATION_WINDOW_S)
+            if same_id or near:
+                hits.append({"metric": r.get("metric"), "id": r.get("id"),
+                             "value": r.get("value"), "bar": r.get("bar")})
+        if hits:
+            f["corroborated_by"] = hits[:3]
+    report["verdict"] = ("repair" if any(blocks(x) for x in
+                                         report.get("findings") or [])
+                         else "pass")
+    return report
+
+
 def blocks(finding, min_confidence=0.72):
     """Whether one parsed finding is a delivery-blocking visible defect."""
     category = finding.get("category")
     if category in NEVER_BLOCK_CATEGORIES:
-        return False
+        # stills cannot prove motion: only a deterministic metric makes a
+        # motion finding actionable (corroborate), then at the base bar
+        if not finding.get("corroborated_by"):
+            return False
+        if finding.get("severity") not in ("blocker", "major"):
+            return False
+        try:
+            return float(finding.get("confidence") or 0.0) >= min_confidence
+        except (TypeError, ValueError):
+            return False
     severity = finding.get("severity")
     if severity == "blocker":
         threshold = min_confidence
@@ -276,6 +334,13 @@ where the stillness rule says they should. A `hold` beat is successful when
 the composition intentionally rests. Do not translate density into an effect
 quota or reject a novel curve merely because it lacks a familiar preset name.
 
+Tiles labeled "device strip <id>" show ONE device's landing as 10 frames,
+-3 to +6 around the frame it lands on (outlined): the top row with the
+device, the bottom row the same frames without it. Judge the hit as a
+sequence: does it land on the word or cut it is bound to, read as
+intentional, and leave the subject and the type readable? A flash or
+inverted frame there is the device itself, not damage.
+
 Do not flag expected pad/pad_blur background merely because bars exist. But do
 compare treatment ACROSS SHOTS: if a wide composition appropriately fits and a
 later clear close-up/product shot stays unnecessarily tiny in the same inset,
@@ -331,6 +396,14 @@ result is {{"verdict":"pass","findings":[]}}."""
 def _line(finding, prefix):
     where = (f" at {finding['time_s']:.1f}s"
              if finding.get("time_s") is not None else "")
+    if finding.get("corroborated_by"):
+        proof = ", ".join(
+            f"{h.get('metric')}"
+            + (f" {h['value']:g}" if isinstance(h.get("value"), (int, float))
+               else "")
+            + (f" (bar {h['bar']})" if h.get("bar") else "")
+            for h in finding["corroborated_by"])
+        where += f" [corroborated by {proof}]"
     target = (f" target={finding['target_id']}"
               if finding.get("target_id") else "")
     motif = (f" motif={finding['motion_motif']}"

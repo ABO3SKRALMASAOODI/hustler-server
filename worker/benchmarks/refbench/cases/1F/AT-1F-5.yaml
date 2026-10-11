@@ -1,0 +1,46 @@
+# AT-1F-5: suggest_devices over the footage library windows (the 20 with
+# speech or a cut to bind to). Every candidate set is bounded, bound,
+# exemplified, costed and owner-clean; the ops write in one batch.
+id: AT-1F-5
+track: 1F
+title: "suggest_devices on 20 VFL windows: bounded, bound, costed, owner-clean"
+local_only: true
+interim: false
+reference: []
+footage:
+  - {vfl: V01, window: thiel_ai_bigger}
+  - {vfl: V02, window: thiel_flying_cars}
+  - {vfl: V03, window: jobs_fonts}
+  - {vfl: V04, window: rogan_gamers}
+  - {vfl: V05, window: welt_cut}
+  - {vfl: V06, window: boom_mic}
+  - {vfl: V08, window: garry_closeup}
+  - {vfl: V09, window: jensen_windows}
+  - {vfl: V10, window: twoshot}
+  - {vfl: V11, window: stage_two_figures}
+  - {vfl: V12, window: gestures}
+  - {vfl: V12, window: walkon}
+  - {vfl: V13, window: dragon_unveil}
+  - {vfl: V14, window: thiel_jre}
+  - {vfl: V01, window: thiel_2004}
+  - {vfl: V01, window: thiel_3334}
+  - {vfl: V03, window: jobs_459}
+  - {vfl: V04, window: rowing_joke}
+  - {vfl: V07, window: white_room_macros}
+  - {vfl: V10, window: busy_plate}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "suggest_devices"
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: flash_risk, op: "<=", value: 3}
+expect:
+  max_candidates: 8
+  every_candidate: [bind, exemplar, est_ms, op]
+  zoom_or_sfx_without_flags: 0
+  ops_apply_in_one_batch: true
+beyond: "the planner binds every proposal to the spoken moment that earns it and proves it writable through apply_edit_batch, on any window, in under a second on a browserless lane"
+board: {stills: []}
+judges: {lenses: [owner_rules], pass: all_no_major}
