@@ -1332,13 +1332,18 @@ def apply_scoped_fixes(words, fixes):
 
     Unequal word counts divide the original spoken span between display
     tokens. This changes caption timing within that span, never audio/cuts.
+    An empty replacement deletes the words from the captions; an insert
+    break (``brk``) the first of them carried moves to the next word.
     """
     # A scoped edit beats a global one; within a scope, prefer a whole phrase.
     # Last-authored rules win ties without feeding replacements into each other.
     rules = sorted(reversed(fixes or []), key=lambda r:
                    (r.get("start") is None, -len(r["from"].split())))
-    out, i = [], 0
+    out, i, brk_at = [], 0, None
     while i < len(words):
+        if brk_at is not None and len(out) > brk_at:
+            out[brk_at]["brk"] = True
+            brk_at = None
         matched = False
         for rule in rules:
             source = rule["from"].split()
@@ -1353,6 +1358,8 @@ def apply_scoped_fixes(words, fixes):
             if rule.get("end") is not None and group[-1]["t1"] > rule["end"] + .001:
                 continue
             tokens = rule["to"].split()
+            if not tokens and group[0].get("brk"):
+                brk_at = len(out)
             start, end = group[0]["t0"], group[-1]["t1"]
             for j, token in enumerate(tokens):
                 if len(tokens) == len(group):
@@ -1374,6 +1381,8 @@ def apply_scoped_fixes(words, fixes):
         if not matched:
             out.append(dict(words[i]))
             i += 1
+    if brk_at is not None and len(out) > brk_at:
+        out[brk_at]["brk"] = True
     return out
 
 

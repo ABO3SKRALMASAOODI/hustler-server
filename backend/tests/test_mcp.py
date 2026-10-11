@@ -17,6 +17,7 @@ claude.ai performs it, plus the ways it should refuse.
 
 import base64
 import contextlib
+from types import SimpleNamespace
 import hashlib
 import json
 import os
@@ -2139,3 +2140,79 @@ def test_sync_wait_covers_a_typical_render_and_backs_off(monkeypatch):
     assert row["state"] == "done"
     assert sleeps[0] == mcpmod.POLL_S and max(sleeps) == mcpmod.POLL_MAX_S
     assert len(sleeps) < 60          # ~150 at a flat 0.2 s for 30 s
+
+
+# ── P2 (Oct 2026): upload plans as data, a queued analysis with its place ──
+
+@pytest.mark.parametrize("upload_plan", [
+    {"mode": "single", "url": "https://storage.example/put"},
+    {"mode": "multipart", "upload_id": "multi-7", "part_size": 500,
+     "part_urls": [{"part_number": i, "url": f"https://storage.example/part-{i}"}
+                   for i in (1, 2, 3)]},
+])
+def test_upload_start_returns_its_plan_as_structured_content(
+        client, monkeypatch, upload_plan):
+    monkeypatch.setattr(mcpmod.storage, "is_configured", lambda: True)
+    monkeypatch.setattr(mcpmod.storage, "validate_upload",
+                        lambda filename, size, kind: ("mp4", "video/mp4"))
+    monkeypatch.setattr(mcpmod.storage, "new_original_key",
+                        lambda project_id, ext, kind: "originals/3/talk.mp4")
+    monkeypatch.setattr(mcpmod.storage, "presign_upload",
+                        lambda key, size, content_type: upload_plan)
+    result = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_start",
+        "arguments": {"project_id": 3, "filename": "talk.mp4",
+                      "size_bytes": 1234, "kind": "original"},
+    }).get_json()["result"]
+    assert result["isError"] is False
+    plan = result["structuredContent"]
+    text = result["content"][0]["text"]
+    assert text.startswith("PROJECT 3")
+    # the text closes with the same plan (clients that read only text)
+    assert json.loads(text.rsplit("\n\n", 1)[-1]) == plan
+    assert plan["upload_finish_arguments"]["storage_key"] == "originals/3/talk.mp4"
+    if upload_plan["mode"] == "single":
+        assert plan["url"] == "https://storage.example/put"
+        return
+    # every part's URL with its bytes: no URL in the prose, no token needed
+    assert [(p["part_number"], p["offset"], p["length"]) for p in plan["parts"]] == \
+        [(1, 0, 500), (2, 500, 500), (3, 1000, 234)]
+    prose = text.rsplit("\n\n", 1)[0]
+    assert "https://storage.example/part-" not in prose
+    assert "valmera_upload.py" not in prose and "VALMERA_MCP_TOKEN" not in prose
+    assert "f.seek(x['offset'])" in prose and "parts=[" in prose
+
+
+def test_index_status_says_where_a_queued_analysis_stands(client, monkeypatch):
+    class Cur(FakeCur):
+        def execute(self, sql, params=()):
+            s = " ".join(sql.split())
+            if "type = 'index' ORDER BY id DESC LIMIT 1" in s:
+                self.rows = [{"id": 41, "state": DB["index_state"], "progress": 0,
+                              "error": None}]
+            elif "AS sub FROM users" in s:
+                self.rows = [{"sub": 0}]
+            elif "AS ahead" in s:
+                self.rows = [{"running": 2, "ahead": 3}]
+            elif "SAVEPOINT" in s:
+                self.rows = []
+            else:
+                super().execute(sql, params)
+
+    @contextlib.contextmanager
+    def vdb():
+        yield SimpleNamespace(cursor=Cur)
+
+    monkeypatch.setattr(mcpmod, "vdb", vdb)
+    monkeypatch.setattr(mcpmod, "_active_original",
+                        lambda cur, pid: {"sha256": "abc", "storage_key": "o/3.mp4"})
+    monkeypatch.setattr(mcpmod, "_index_row", lambda cur, sha: None)
+    DB["index_state"] = "queued"
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "index_status", "arguments": {"project_id": 3}}))
+    assert "queued — waiting for an analysis worker: 3 analysis job(s) ahead of it, " \
+           "2 running now (job 41)" in body
+    DB["index_state"] = "running"
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "index_status", "arguments": {"project_id": 3}}))
+    assert "running — 0% (job 41)" in body and "ahead" not in body

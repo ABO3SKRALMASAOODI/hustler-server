@@ -495,10 +495,12 @@ class CaptionItem(BaseModel):
 
 
 class CaptionCorrection(BaseModel):
-    # Output seconds: use both bounds to target one occurrence.
+    # Output seconds: use both bounds to target one occurrence. An empty
+    # ``to`` deletes the words from the captions (a stutter, a doubled word
+    # the cut kept): their sound stays, nothing is shown for it.
     model_config = {"populate_by_name": True, "extra": "forbid", "allow_inf_nan": False}
     from_text: str = Field(alias="from", min_length=1, max_length=1000)
-    to: str = Field(min_length=1, max_length=1000)
+    to: str = Field(max_length=1000)
     start: Optional[float] = Field(default=None, ge=0)
     end: Optional[float] = Field(default=None, ge=0)
 
@@ -556,8 +558,10 @@ class CaptionsFromTranscript(BaseModel):
         result = []
         for row in value or []:
             row = CaptionCorrection.model_validate(row).model_dump(by_alias=True, exclude_none=True)
-            if not row["from"].strip() or not row["to"].strip():
+            if not row["from"].strip():
                 raise ValueError("caption correction text cannot be blank")
+            if not row["to"].strip():
+                row["to"] = ""      # deletes the words from the captions
             if ("start" in row) != ("end" in row) or (
                     "start" in row and row["end"] <= row["start"]):
                 raise ValueError("caption correction requires start < end")
@@ -2429,17 +2433,21 @@ class StemMix(BaseModel):
 CLEAN_FILLS = ("text", "box")
 
 
-def patch_fingerprint(src_sha, regions, window):
+def patch_fingerprint(src_sha, regions, window, repaint=None):
     """Identity of one repainted WINDOW (round 92): which video, which
-    rectangles, which span. Content-addresses the patch clips so re-erasing
-    the same thing is a storage hit, the export can find (or rebuild) the
-    full-res twin deterministically, and a replaced upload is detected the
-    same way clean_fingerprint detects it for a whole cleaned source."""
-    payload = json.dumps(
-        {"w": [round(float(window[0]), 2), round(float(window[1]), 2)],
-         "r": [{k: r.get(k) for k in
-                ("x", "y", "w", "h", "start", "end", "fill")}
-               for r in (regions or [])]}, sort_keys=True)
+    rectangles, which span — and which repaint algorithm (PatchItem.repaint;
+    None, every patch written before it existed, keeps its fingerprint).
+    Content-addresses the patch clips so re-erasing the same thing is a
+    storage hit, the export can find (or rebuild) the full-res twin
+    deterministically, and a replaced upload is detected the same way
+    clean_fingerprint detects it for a whole cleaned source."""
+    body = {"w": [round(float(window[0]), 2), round(float(window[1]), 2)],
+            "r": [{k: r.get(k) for k in
+                   ("x", "y", "w", "h", "start", "end", "fill")}
+                  for r in (regions or [])]}
+    if repaint is not None:
+        body["a"] = int(repaint)
+    payload = json.dumps(body, sort_keys=True)
     return hashlib.sha1(f"{src_sha}|patch|{payload}".encode()).hexdigest()
 
 
@@ -2489,6 +2497,9 @@ class PatchItem(BaseModel):
     src_start: float
     src_end: float
     regions: List["CleanRegion"] = Field(default_factory=list)
+    # The repaint algorithm (inpaint.REPAINT_VERSION) the clips were built
+    # with; None = round 92, so an old EDL's export twin is built as before.
+    repaint: Optional[int] = None
 
 
 class CleanRegion(BaseModel):

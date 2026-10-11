@@ -69,6 +69,22 @@ DEFAULT_SAMPLES = 28
 PLATE_MIN_CLEAN = 3          # clean samples needed before a pixel is trusted
 PLATE_STATIC_MAD = 7.0       # mean abs deviation (0-255) for "same shot"
 
+# Repaint algorithm of a patch clip (PatchItem.repaint; None = the round-92
+# repaint, which old EDLs keep: their export rebuilds its full-res twin the
+# same way). v2 (Oct 2026, the PiP of a handheld call erased with fill='box'
+# in six shorts): a static plate is pasted only on frames whose surroundings
+# still match it (PLATE_FRAME_DIFF; a stale median left a grey pentagon where
+# the camera had moved), a whole-box hole is filled by a smooth membrane from
+# its surroundings instead of TELEA (which drags a dark neighbour inward in a
+# wedge), and the matched grain is measured robustly (an edge in the ring is
+# not noise: the std read the ceiling fixture as grain sigma 12 and the patch
+# came out sandy). The erase is then judged by how much of the box's own
+# picture survives (pattern_kept), not by stroke ink, which read that sand
+# as surviving text.
+REPAINT_VERSION = 2
+PLATE_FRAME_DIFF = 8.0       # mean abs diff (0-255) of a frame's context from the plate
+MEMBRANE_PX = 60000          # the membrane is solved at most this many pixels
+
 
 def _odd(n, lo=3):
     n = int(round(n))
@@ -311,6 +327,7 @@ class _Region:
         self.plate_ok = None        # bool mask: plate is trustworthy here
         self.static_fill_mask = None  # temporal text union, band coordinates
         self.static = False
+        self.repaint = None           # REPAINT_VERSION of the caller (None = round 92)
 
     def set_box(self, bx0, by0, bx1, by1):
         """(Re)place the inner rectangle and rebuild the processing crop.
@@ -556,9 +573,14 @@ def _build_plate(path, region, W, H, dur, samples=22):
         scope[region.iy0:region.iy1, region.ix0:region.ix1] = True
         repair = (~ok) & scope
         if repair.any() and (~repair).any():
-            region.plate = cv2.inpaint(
-                np.ascontiguousarray(region.plate),
-                repair.astype(np.uint8) * 255, 3, cv2.INPAINT_TELEA)
+            if (region.repaint or 0) >= 2 and region.fill == "box":
+                # a whole box is a hole TELEA wedges a dark neighbour into
+                # (the grey pentagon of Oct 2026): a membrane (repaint v2)
+                region.plate = _membrane(np.ascontiguousarray(region.plate), repair)
+            else:
+                region.plate = cv2.inpaint(
+                    np.ascontiguousarray(region.plate),
+                    repair.astype(np.uint8) * 255, 3, cv2.INPAINT_TELEA)
             ok = ok | repair
             region.static_fill_mask = repair.astype(np.uint8) * 255
     region.plate_ok = ok
@@ -625,13 +647,68 @@ def _telea(band, m):
     return np.where(m[..., None], up, band)
 
 
+def _grain_sigma_robust(band, mask):
+    """_grain_sigma from the median absolute high-pass (x1.4826): the noise
+    of the ring, not its edges (repaint v2)."""
+    keep = ~(mask > 0)
+    if keep.sum() < 200:
+        return 0.0
+    gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    hi = gray - cv2.GaussianBlur(gray, (0, 0), 1.2)
+    return float(np.clip(1.4826 * np.median(np.abs(hi[keep])), 0.0, 12.0))
+
+
+def _membrane(band, m, levels=(3, 8, 20, 45)):
+    """A smooth fill for a whole-box hole (repaint v2): every pixel the
+    weighted mean of the known pixels around it, coarse scales first and
+    finer ones where they reach, so the fill meets its surroundings at the
+    edge and blends them inside — a soft gradient, never a wedge. Solved at
+    MEMBRANE_PX (it is smooth), untouched pixels bit-exact."""
+    h, w = m.shape
+    k = min(1.0, (MEMBRANE_PX / float(max(1, h * w))) ** 0.5)
+    sw, sh = max(8, int(round(w * k))), max(8, int(round(h * k)))
+    small = band if k >= 1.0 else cv2.resize(band, (sw, sh), interpolation=cv2.INTER_AREA)
+    sm = m if k >= 1.0 else cv2.resize(m.astype(np.uint8), (sw, sh),
+                                         interpolation=cv2.INTER_NEAREST) > 0
+    known = (~sm).astype(np.float32)
+    img = small.astype(np.float32)
+    est = None
+    for s in reversed(levels):
+        s = max(1.0, s * k)
+        num = cv2.GaussianBlur(img * known[..., None], (0, 0), s)
+        den = cv2.GaussianBlur(known, (0, 0), s)[..., None]
+        cur = num / np.maximum(den, 1e-6)
+        if est is None:
+            est = cur
+        else:
+            wgt = np.clip(den / 0.5, 0.0, 1.0)
+            est = cur * wgt + est * (1.0 - wgt)
+    if k < 1.0:
+        est = cv2.resize(est, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.where(m[..., None], np.clip(est, 0, 255), band.astype(np.float32)
+                    ).astype(np.uint8)
+
+
+def _plate_fits(band, mask, region):
+    """Repaint v2: does this frame's picture around the hole still match the
+    static plate? (A shot is static over its samples, not frame by frame: a
+    handheld camera that settled for most of the window moved at its end.)"""
+    ctx = (mask == 0) & region.plate_ok
+    if ctx.sum() < 200:
+        return True
+    diff = np.abs(band.astype(np.float32) - region.plate.astype(np.float32)).mean(axis=2)
+    return float(diff[ctx].mean()) <= PLATE_FRAME_DIFF
+
+
 def _repaint(band, mask, region, rng=None):
     """Replace the masked pixels of one band, feathered and re-grained."""
     if not mask.any():
         return band
     out = band
     m = mask > 0
-    if region.plate is not None and region.plate_ok is not None:
+    v2 = (region.repaint or 0) >= 2
+    if region.plate is not None and region.plate_ok is not None and \
+            (not v2 or _plate_fits(band, mask, region)):
         use = m & region.plate_ok
         if use.any():
             out = np.where(use[..., None], region.plate, out)
@@ -641,15 +718,17 @@ def _repaint(band, mask, region, rng=None):
         # TELEA reconstructs from the boundary inwards — the right algorithm
         # for thin strokes and small shapes, which is what is left here after
         # the plate has covered whatever it could. _telea picks the resolution
-        # from the mask's own area (see config.INPAINT_MAX_PX).
-        out = _telea(out, m)
+        # from the mask's own area (see config.INPAINT_MAX_PX). A whole-box
+        # hole (v2) is a membrane instead (_membrane).
+        out = _membrane(out, m) if v2 and region.fill == "box" else _telea(out, m)
         filled = m
     # Thin text removal already inherits surrounding texture through TELEA
     # and the final video encode. Adding fresh random grain to glyph holes was
     # nondeterministic and the verification detector correctly read that new
     # high-frequency noise as surviving ink. Large box/object fills still get
     # matched grain because their smooth reconstructed area can reveal itself.
-    sigma = 0.0 if region.fill == "text" else _grain_sigma(band, mask)
+    sigma = 0.0 if region.fill == "text" else (
+        _grain_sigma_robust(band, mask) if v2 else _grain_sigma(band, mask))
     if sigma > 0.6 and filled.any():
         noise = (rng or np.random).normal(0.0, sigma, filled.shape)
         out = np.clip(out.astype(np.float32)
@@ -807,7 +886,7 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
 
 
 def build_patch(src, regions, window, out_path, *, crf=23, preset="veryfast",
-                progress_cb=None):
+                progress_cb=None, repaint=None):
     """Repaint `regions` inside ONE window of `src` and write a short,
     video-only PATCH CLIP covering exactly that window — round 92.
 
@@ -827,6 +906,9 @@ def build_patch(src, regions, window, out_path, *, crf=23, preset="veryfast",
     never blends phase-shifted neighbours. Frames with no active region pass
     through untouched (same bytes), which keeps a patch honest padding and
     all: it IS the source there.
+
+    ``repaint``: the algorithm (REPAINT_VERSION; None = round 92, which an
+    old EDL's export twin keeps).
 
     Returns clean_video's stats shape plus the snapped window.
     """
@@ -852,7 +934,9 @@ def build_patch(src, regions, window, out_path, *, crf=23, preset="veryfast",
                                     is not None else ps))
         rr["end"] = min(pe, float(rr.get("end") if rr.get("end")
                                   is not None else pe))
-        regs.append(_Region(rr, W, H))
+        reg = _Region(rr, W, H)
+        reg.repaint = repaint
+        regs.append(reg)
     if not regs:
         raise ValueError("no regions to patch")
     for r in regs:
@@ -1016,6 +1100,124 @@ def text_energy(path, box, *, at=None, samples=6):
     return round(sum(vals) / len(vals), 2) if vals else 0.0
 
 
+def _box_and_ring(frame, box, W, H):
+    """(box luma, mean luma of the ring around it) — the ring a quarter of
+    the box's size wide, inside the frame."""
+    x0, y0 = max(0, int(box[0] * W)), max(0, int(box[1] * H))
+    x1, y1 = min(W, int((box[0] + box[2]) * W)), min(H, int((box[1] + box[3]) * H))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None, None
+    gx, gy = max(4, (x1 - x0) // 4), max(4, (y1 - y0) // 4)
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    outer = g[max(0, y0 - gy):min(H, y1 + gy), max(0, x0 - gx):min(W, x1 + gx)]
+    inner = g[y0:y1, x0:x1]
+    n_ring = outer.size - inner.size
+    if n_ring <= 0:
+        return inner, float(inner.mean())
+    return inner, float((outer.sum() - inner.sum()) / n_ring)
+
+
+def pattern_kept(src, out, box, times, out_offset=0.0):
+    """How much of what made the box stand out from its surroundings in
+    `src` (x, y, w, h fractions) is still there in `out` (0-100): per time,
+    the projection of the out box's deviation from its own ring onto the
+    source box's deviation from its ring — its shape, texture and tone
+    alike. A repaint that removed the object keeps ~0 whatever its fill
+    looks like (matched grain, a smooth membrane); one that left it keeps
+    ~100, flat or textured. Stroke ink (text_energy) cannot judge a box: it
+    read the grain of a clean fill as surviving text (Oct 2026: a PiP that
+    was gone measured 55 -> 81 'STILL VISIBLE')."""
+    info = media.probe(src)
+    W, H = int(info["width"]), int(info["height"])
+    oi = media.probe(out)
+    OW, OH = int(oi["width"]), int(oi["height"])
+    vals = []
+    for t in times:
+        a = _grab(src, t, W, H)
+        b = _grab(out, max(0.0, t - out_offset), OW, OH)
+        if a is None or b is None:
+            continue
+        ia, ra = _box_and_ring(a, box, W, H)
+        ib, rb = _box_and_ring(b, box, OW, OH)
+        if ia is None or ib is None:
+            continue
+        if ib.shape != ia.shape:
+            ib = cv2.resize(ib, (ia.shape[1], ia.shape[0]), interpolation=cv2.INTER_AREA)
+        da, db = ia - ra, ib - rb
+        energy = float((da * da).sum())
+        if energy <= 1e-6 * da.size:
+            vals.append(0.0)            # nothing set the box apart: nothing to keep
+            continue
+        vals.append(min(1.0, max(0.0, float((da * db).sum()) / energy)))
+    return round(100.0 * sum(vals) / len(vals), 1) if vals else 0.0
+
+
+def erase_measure(src, out, regions, out_offset=0.0, samples=3):
+    """(before, after, metric) per region of one repaint — the honesty
+    check, at `samples` moments across each region's own window: 'ink'
+    (stroke energy, text fills) or 'pattern' (pattern_kept: 100 before, the
+    share of what set the box apart that survives after; box fills). Either
+    way gone = after <= max(1.5, before * 0.35)."""
+    before, after, metric = [], [], []
+    dur = float(media.probe(src)["duration"])
+    for r in regions:
+        rs = float(r.get("start") if r.get("start") is not None else out_offset)
+        re_ = float(r.get("end") if r.get("end") is not None else dur)
+        re_ = max(rs + 0.05, re_)
+        times = [rs + (re_ - rs) * (k + 0.5) / samples for k in range(samples)]
+        box = (r["x"], r["y"], r["w"], r["h"])
+        if str(r.get("fill") or "text") == "box":
+            before.append(100.0)
+            after.append(pattern_kept(src, out, box, times, out_offset))
+            metric.append("pattern")
+        else:
+            b = [text_energy(src, box, at=t) for t in times]
+            a = [text_energy(out, box, at=max(0.0, t - out_offset)) for t in times]
+            before.append(round(sum(b) / len(b), 2))
+            after.append(round(sum(a) / len(a), 2))
+            metric.append("ink")
+    return before, after, metric
+
+
+def _clamped(regions, stats):
+    """Regions with their windows clamped into the patch's own span."""
+    lo, hi = float(stats["src_start"]), float(stats["src_end"])
+    out = []
+    for r in regions:
+        rr = dict(r)
+        rr["start"] = max(lo, float(r["start"]) if r.get("start") is not None else lo)
+        rr["end"] = min(hi, float(r["end"]) if r.get("end") is not None else hi)
+        out.append(rr)
+    return out
+
+
+def erase_measure(src, out, regions, out_offset=0.0, samples=3):
+    """(before, after, metric) per region of one repaint — the honesty
+    check, at `samples` moments across each region's own window: 'ink'
+    (stroke energy, text fills) or 'pattern' (pattern_kept: 100 before, the
+    share of the box's picture that survives after; box fills). Either way
+    gone = after <= max(1.5, before * 0.35)."""
+    before, after, metric = [], [], []
+    dur = float(media.probe(src)["duration"])
+    for r in regions:
+        rs = float(r.get("start") if r.get("start") is not None else out_offset)
+        re_ = float(r.get("end") if r.get("end") is not None else dur)
+        re_ = max(rs + 0.05, re_)
+        times = [rs + (re_ - rs) * (k + 0.5) / samples for k in range(samples)]
+        box = (r["x"], r["y"], r["w"], r["h"])
+        if str(r.get("fill") or "text") == "box":
+            before.append(100.0)
+            after.append(pattern_kept(src, out, box, times, out_offset))
+            metric.append("pattern")
+        else:
+            b = [text_energy(src, box, at=t) for t in times]
+            a = [text_energy(out, box, at=max(0.0, t - out_offset)) for t in times]
+            before.append(round(sum(b) / len(b), 2))
+            after.append(round(sum(a) / len(a), 2))
+            metric.append("ink")
+    return before, after, metric
+
+
 def run_clean_job(worker_db, job):
     """Executor-side runner for the erase/repaint pass (round 67 — the
     capture/frames/track/matte shape: synchronous, no row, remote failure
@@ -1063,21 +1265,28 @@ def run_clean_job(worker_db, job):
         try:
             src = os.path.join(workdir, "src" + os.path.splitext(src_key)[1])
             storage.download_to(src_key, src)
-            mids = [(max(float(window[0]),
-                         min(float(window[1]) - 0.05,
-                             float(r.get("start") if r.get("start") is not None
-                                   else window[0])))
-                     + 0.4) for r in regions]
-            before = [text_energy(src, (r["x"], r["y"], r["w"], r["h"]),
-                                  at=t, samples=3)
-                      for r, t in zip(regions, mids)]
+            repaint = payload.get("repaint")
             out = os.path.join(workdir, "patch.mp4")
             stats = build_patch(src, regions, (window[0], window[1]), out,
-                                crf=int(payload.get("crf") or 23))
-            after = [text_energy(out, (r["x"], r["y"], r["w"], r["h"]),
-                                 at=max(0.05, t - stats["src_start"]),
-                                 samples=3)
-                     for r, t in zip(regions, mids)]
+                                crf=int(payload.get("crf") or 23),
+                                repaint=repaint)
+            if repaint:
+                before, after, metric = erase_measure(
+                    src, out, _clamped(regions, stats), stats["src_start"])
+                stats["metric"] = metric
+            else:
+                mids = [(max(float(window[0]),
+                             min(float(window[1]) - 0.05,
+                                 float(r.get("start") if r.get("start") is not None
+                                       else window[0])))
+                         + 0.4) for r in regions]
+                before = [text_energy(src, (r["x"], r["y"], r["w"], r["h"]),
+                                      at=t, samples=3)
+                          for r, t in zip(regions, mids)]
+                after = [text_energy(out, (r["x"], r["y"], r["w"], r["h"]),
+                                     at=max(0.05, t - stats["src_start"]),
+                                     samples=3)
+                         for r, t in zip(regions, mids)]
             storage.upload_file(out, out_key, "video/mp4")
             stats.update({"before": before, "after": after,
                           "out_bytes": os.path.getsize(out)})

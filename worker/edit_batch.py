@@ -53,6 +53,28 @@ def _motion_refs(edl):
     return refs
 
 
+def _check_new_motion_params(before, edl):
+    """A motion graphic a batch adds or changes passes add_motion_graphic's
+    strict parameter check (motion_templates.check_params): validate_edl's
+    lenient pass would store phrase_build row sizes 's'/'xl' the template
+    cannot read. Items the batch leaves as they were are not re-judged."""
+    import motion_templates
+    old = {m.get("id"): m for m in (before or {}).get("motion") or []
+           if isinstance(m, dict)}
+    for item in edl.get("motion") or []:
+        if not isinstance(item, dict):
+            continue
+        prev = old.get(item.get("id"))
+        if prev is not None and all(prev.get(k) == item.get(k)
+                                    for k in ("template", "params", "html")):
+            continue
+        try:
+            motion_templates.check_params(str(item.get("template") or ""),
+                                          item.get("params") or {}, html=item.get("html"))
+        except ValueError as e:
+            raise ValueError(f"motion '{item.get('id')}': {e}")
+
+
 def apply_batch(before, operations, duration, allowed_keys):
     if not isinstance(operations, list) or not 1 <= len(operations) <= 64:
         raise ValueError("Supply between 1 and 64 edit operations.")
@@ -139,6 +161,7 @@ def apply_batch(before, operations, duration, allowed_keys):
             raise ValueError(f"Duplicate ids in {layer}.")
     if (set(media_keys(edl)) | _motion_refs(edl)) - known - set(allowed_keys):
         raise ValueError("Use media attached to this project. A referenced asset is not available here.")
+    _check_new_motion_params(before, edl)
     for item in edl.get("motion") or []:
         # A graphic behind the subject needs its measured subject mask, which
         # only add_motion_graphic builds.

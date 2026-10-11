@@ -9,7 +9,8 @@
   "title": {"type": "str", "default": "", "max": 56, "hint": "optional heading; wrap a word in *stars* for the serif accent"},
   "accent": {"type": "color", "default": "#FFD400"},
   "backdrop": {"type": "enum", "values": ["none", "scrim"], "default": "none", "hint": "scrim = soft dark falloff behind the timeline; use it on bright or busy footage"},
-  "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.45, "hint": "vertical centre as frame fraction"}
+  "y": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.45, "hint": "vertical centre as frame fraction"},
+  "size": {"type": "float", "min": 0.5, "max": 1.0, "default": 1.0, "hint": "width of the timeline as a share of the safe width (1 = all of it); labels shrink with it down to the phone-readable floor, then wrap"}
  },
  "example": {"rows": [{"label": "1983", "sub": "First Mac ships"}, {"label": "1997", "sub": "Jobs returns"}, {"label": "2007", "sub": "iPhone"}], "title": "From garage to *giant*"},
  "sfx": [{"at": 0.0, "kind": "swish_short"}, {"at": 0.2, "kind": "pop_soft", "gain_db": -12, "repeat": {"param": "rows", "from": 0.2, "every": 0.26}}]} -->
@@ -65,7 +66,9 @@
   function layout() {
     stage.innerHTML = '';
     stage.classList.toggle('h', !vert);
-    const cw = SAFE.x1 - SAFE.x0;
+    // 'size' narrows the column the timeline is laid out in (its type
+    // follows, never below the phone-readable floor), centred in the frame
+    const fullW = SAFE.x1 - SAFE.x0, cw = fullW * Math.min(1, Math.max(0.5, Number(P.size) || 1));
     let y = 0, title = null;
     if (P.title.trim()) {
       title = MG.el('div', 'title', null, stage);
@@ -153,7 +156,7 @@
     els.forEach((e, i) => { e.dot.style.left = pts[i][0] + 'px'; e.dot.style.top = pts[i][1] + 'px'; });
     stage.style.width = cw + 'px'; stage.style.height = h + 'px';
     const k = Math.min(1, (SAFE.y1 - SAFE.y0) / h);
-    const x = SAFE.x0 + cw * (1 - k) / 2;
+    const x = SAFE.x0 + (fullW - cw * k) / 2;
     const top = Math.min(SAFE.y1 - h * k, Math.max(SAFE.y0, H * P.y - h * k / 2));
     const m = 70;
     let bx = [x - m, top - m, x + cw * k + m, top + h * k + m];

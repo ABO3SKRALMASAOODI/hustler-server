@@ -25,7 +25,9 @@ never reaches into the word on its far side:
 
   * an edge the transcript puts inside a word, where the sound is loud, is
     a mid-word cut: it moves OUT of the word (a start before its onset, an
-    end past its release), to the quietest point there;
+    end past its release), to the quietest point there — unless it keeps
+    less than KEEP_WORD_FRAC of the word: then it was aimed at the word's
+    far edge and moves past the word, which is cut (_past_word);
   * an edge the transcript puts inside a word where the sound is already
     quiet is the transcript being early or late: it is left where it is;
   * any other edge moves only when a point within reach is at least
@@ -76,6 +78,11 @@ WORD_EPS = 0.011        # word containment, as audit.word_at_boundary
 # transcript's onset runs late and its end early).
 PAD_START_S = 0.04
 PAD_END_S = 0.08
+# An edge keeping less than this share of the word it lands in was aimed at
+# the word's FAR edge (audit.KEEP_WORD_FRAC): it moves past the word, which
+# is cut, instead of out to the near side, which kept the stutter or doubled
+# word the editor was removing ('Yeah.|We', kept 16%; Oct 2026).
+KEEP_WORD_FRAC = 0.4
 SR = 16000
 FETCH_PAD_S = FLOOR_REACH_S + 0.1
 MAX_INPUTS = 24         # windows per ffmpeg call
@@ -134,14 +141,19 @@ class _Words:
                 return (t0, t1, text)
         return None
 
+    # A word edge within WORD_EPS of t is AT t (the containment rule):
+    # the index times words to 5 ms and the EDL keeps hundredths, so a start
+    # written at 1574.15 for 'a' (1574.155) sits 5 ms before 'pulling' ends
+    # — 'pulling' is the removed side's word there, which the tail reach
+    # must not cross (it reached 0.24 s back into it; Oct 2026).
     def end_before(self, t):
-        """The latest word end at or before t (+eps), or None."""
-        i = bisect.bisect_right(self.ends, t + 1e-6)
+        """The latest word end at or before t (+WORD_EPS), or None."""
+        i = bisect.bisect_right(self.ends, t + WORD_EPS)
         return self.ends[i - 1] if i else None
 
     def start_after(self, t):
-        """The earliest word start at or after t (-eps), or None."""
-        i = bisect.bisect_left(self.starts, t - 1e-6)
+        """The earliest word start at or after t (-WORD_EPS), or None."""
+        i = bisect.bisect_left(self.starts, t - WORD_EPS)
         return self.starts[i] if i < len(self.starts) else None
 
     def word_starting(self, t):
@@ -196,6 +208,8 @@ def place_edge(side, b, words, level=None, lo_limit=None, hi_limit=None):
     lo_limit = 0.0 if lo_limit is None else float(lo_limit)
     hi_limit = math.inf if hi_limit is None else float(hi_limit)
     hit = ws.inside(b)
+    if hit and _kept_share(side, b, hit) < KEEP_WORD_FRAC:
+        return _past_word(side, b, hit, ws, level, lo_limit, hi_limit)
     db_b = level(b) if level else None
     out = {"t": b, "why": None, "word": hit[2] if hit else None,
            "db_was": db_b, "db": db_b, "loud": False}
@@ -295,6 +309,44 @@ def place_edge(side, b, words, level=None, lo_limit=None, hi_limit=None):
     return out
 
 
+def _kept_share(side, b, hit):
+    t0, t1 = hit[0], hit[1]
+    span = max(1e-6, t1 - t0)
+    return (t1 - b) / span if side == "start" else (b - t0) / span
+
+
+def _past_word(side, b, hit, ws, level, lo_limit, hi_limit):
+    """place_edge for an edge that keeps only a sliver of its word: the
+    word is cut — a start moves past its end, an end before its start —
+    placed there as an edge between words (never back into the word)."""
+    t0, t1, text = hit
+    # on the hundredths grid the edge rounds toward the cut word, never
+    # into the kept word that may touch it (the index times words to 5 ms)
+    edge = (math.floor(t1 / GRID_S + 1e-6) if side == "start"
+            else math.ceil(t0 / GRID_S - 1e-6)) * GRID_S
+    edge = round(min(max(edge, lo_limit), hi_limit), 2)
+    db_b = level(b) if level else None
+    got = place_edge(side, edge, ws, level, lo_limit, hi_limit)
+    t = got["t"]
+    if level is None:
+        # no sound to read: clear the word's release (Whisper ends it early)
+        # or its onset (it starts it late), never reaching the next word
+        if side == "start":
+            nxt = ws.start_after(t1)
+            pad = PAD_END_S if nxt is None else min(PAD_END_S, max(0.0, nxt - t1) / 2)
+            t = math.floor((t1 + pad) / GRID_S + 1e-6) * GRID_S
+        else:
+            prv = ws.end_before(t0)
+            pad = PAD_START_S if prv is None else min(PAD_START_S, max(0.0, t0 - prv) / 2)
+            t = math.ceil((t0 - pad) / GRID_S - 1e-6) * GRID_S
+        t = round(min(max(t, lo_limit), hi_limit), 2)
+    out = {"t": b, "why": None, "word": text, "db_was": db_b,
+           "db": got.get("db"), "loud": bool(got.get("loud")), "dropped": True}
+    if abs(t - b) >= 0.005:
+        out.update(t=t, why="word")
+    return out
+
+
 def _is_loud(db, floor):
     """Sound (not a pause) at a cut: past the room-tone level and either
     plainly loud or well over the local floor."""
@@ -359,7 +411,8 @@ def refine_keep(keep, words, duration=None, prev_keep=None, level=None,
         spans[i][0 if side == "start" else 1] = new
         moves.append({"side": side, "old": b, "new": new, "why": got["why"],
                       "word": got["word"], "db_was": got["db_was"],
-                      "db": got["db"], "loud": bool(got.get("loud"))})
+                      "db": got["db"], "loud": bool(got.get("loud")),
+                      "dropped": bool(got.get("dropped"))})
     spans = [s for s in spans if s[1] - s[0] >= 0.05]
     spans.sort(key=lambda x: x[0])
     merged = []
@@ -384,7 +437,9 @@ def report(moves, checked):
         lvl = ""
         if m.get("db_was") is not None and m.get("db") is not None:
             lvl = f", {m['db_was']:.0f} -> {m['db']:.0f} dB"
-        what = (f"out of '{m['word']}'" if m["why"] == "word" and m["word"]
+        what = (f"past '{m['word']}', which it kept only a sliver of: cut"
+                if m["why"] == "word" and m["word"] and m.get("dropped") else
+                f"out of '{m['word']}'" if m["why"] == "word" and m["word"]
                 else "to the quiet point")
         bits.append(f"{m['side']} {m['old']:g}->{m['new']:g} ({what}{lvl})")
     lines = []

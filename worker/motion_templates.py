@@ -13,8 +13,11 @@ means a template is added by dropping in one file.
 
 Parameter types: str, text (multi-line), int, float, bool, color (#RRGGBB),
 enum (``values``), list (of strings; ``max_items``/``max``), rows (list of
-objects with string ``fields``), asset (a project storage key the renderer
-resolves to a local file served to the page at ``assets/<param>``).
+objects with string ``fields``; ``field_types`` {field: "number" | "flag" |
+[values]} makes check_params refuse a value the template cannot read), asset
+(a project storage key the renderer resolves to a local file served to the
+page at ``assets/<param>``). A spec's ``also`` lists further categories it is
+found under (list_motion_templates(category=...)).
 
 ``normalize_params`` is deliberately LENIENT (it runs inside validate_edl on
 stored EDLs, so a template that later drops a parameter must not invalidate
@@ -107,6 +110,14 @@ def persistent(item_or_name):
         return False
 
 
+def categories(s):
+    """A template's category and the others it also belongs to (spec
+    ``also``): the headline, marker_text and counter are type too, and a
+    list_motion_templates(category='type') that left them out sent editors
+    to a second, unfiltered call."""
+    return [s.get("category")] + [c for c in s.get("also") or [] if c != s.get("category")]
+
+
 def catalog(category=None):
     """Compact list for tool descriptions / list_motion_templates."""
     out = []
@@ -114,12 +125,13 @@ def catalog(category=None):
         s = _load()[n]
         if s.get("internal"):
             continue
-        if category and s.get("category") != category:
+        if category and category not in categories(s):
             continue
         params = {}
         for k, p in s["params"].items():
             d = {"type": p.get("type", "str")}
-            for key in ("required", "default", "values", "min", "max", "max_items", "fields", "hint"):
+            for key in ("required", "default", "values", "min", "max", "max_items", "fields",
+                        "field_types", "hint"):
                 if key in p:
                     d[key] = p[key]
             params[k] = d
@@ -127,10 +139,42 @@ def catalog(category=None):
                "description": s.get("description", ""), "duration": s.get("duration"),
                "layer": s.get("layer"), "params": params,
                "sfx": [c.get("kind") for c in s.get("sfx") or []]}
+        if s.get("also"):
+            row["also"] = list(s["also"])
         if s.get("persistent"):
             row["persistent"] = True
         out.append(row)
     return out
+
+
+# A row field the template reads with JavaScript parseFloat: anything else
+# ('xl', 'large') silently became the default size, so a lockup's 's'/'l'
+# ladder rendered every row the same size (Oct 2026 run). A number may carry
+# its unit ('0.5s', '1.6x'); parseFloat reads the number either way.
+_ROW_NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)\s*[sx]?$", re.I)
+_ROW_FLAG = {"", "0", "1", "true", "false", "yes", "no", "y", "n", "on", "off"}
+
+
+def _check_row(where, row, clean, fields, types):
+    """Strict checks on one rows-param object (spec ``field_types``): no
+    field the template never reads, a number where it reads a number, a
+    flag where it reads one, and an enumerated field's value from its list.
+    (The lenient path keeps an old EDL rendering exactly as before.)"""
+    unknown = sorted(str(k) for k in row if k not in fields)
+    if unknown:
+        raise ValueError(f"{where} has no field(s) {unknown}; a row takes "
+                         f"{', '.join(fields)}")
+    for f, kind in types.items():
+        val = clean.get(f, "")
+        if not val:
+            continue
+        if kind == "number" and not _ROW_NUMBER.match(val):
+            raise ValueError(f"{where}.{f} must be a number (e.g. 0.6, 1, 1.6), "
+                             f"not '{val}'")
+        if kind == "flag" and val.lower() not in _ROW_FLAG:
+            raise ValueError(f"{where}.{f} must be 1 or 0 (true/false), not '{val}'")
+        if isinstance(kind, list) and val.lower() not in kind:
+            raise ValueError(f"{where}.{f} must be one of {kind}, not '{val}'")
 
 
 def _coerce(name, key, p, v, strict):
@@ -211,10 +255,13 @@ def _coerce(name, key, p, v, strict):
         if strict and len(v) > mx_items:
             raise ValueError(f"{where} has {len(v)} rows; maximum {mx_items}")
         out = []
-        for row in v[:mx_items]:
+        for j, row in enumerate(v[:mx_items]):
             if not isinstance(row, dict):
                 raise ValueError(f"{where} rows must be objects with {fields}")
-            out.append({f: " ".join(str(row.get(f, "")).split())[:mx] for f in fields})
+            clean = {f: " ".join(str(row.get(f, "")).split())[:mx] for f in fields}
+            if strict:
+                _check_row(f"{where}[{j}]", row, clean, fields, p.get("field_types") or {})
+            out.append(clean)
         return out
     if t == "asset":
         v = str(v).strip()

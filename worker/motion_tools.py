@@ -162,8 +162,12 @@ def list_sound_library(ctx, role=None):
 def list_motion_templates(ctx, category=None):
     cat = motion_templates.catalog(category or None)
     if not cat:
-        return ("No motion templates match." if category else
-                "No motion templates are installed on this deployment.")
+        if category:
+            known = sorted({c for t in motion_templates.catalog()
+                            for c in motion_templates.categories(t) if c})
+            return (f"No motion templates match category '{category}'. Categories: "
+                    f"{', '.join(known)}.")
+        return "No motion templates are installed on this deployment."
     lines = []
     for t in cat:
         ps = []
@@ -173,10 +177,19 @@ def list_motion_templates(ctx, category=None):
                 bit += "*"
             if p["type"] == "enum":
                 bit += "=" + "|".join(map(str, p.get("values") or []))
+            elif p["type"] == "rows":
+                # a row's shape: the editor never has to guess it (Oct 2026
+                # run: rejected calls and 's'/'xl' sizes nobody read)
+                types = p.get("field_types") or {}
+                bit += "=[{" + ",".join(
+                    f + (":" + ("|".join(types[f]) if isinstance(types[f], list)
+                                else types[f]) if f in types else "")
+                    for f in p.get("fields") or []) + "}]"
             elif "default" in p and p["type"] not in ("text", "str"):
                 bit += f"={p['default']}"
             ps.append(bit)
-        lines.append(f"- {t['name']} [{t['category']}, ~{t['duration']}s]: {t['description']} "
+        cats = "/".join(c for c in motion_templates.categories(t) if c)
+        lines.append(f"- {t['name']} [{cats}, ~{t['duration']}s]: {t['description']} "
                      f"Params: {', '.join(ps)}" + (f". Sound: {', '.join(t['sfx'])}" if t["sfx"] else ""))
     return ("Motion templates (add_motion_graphic(template, start, end, params)). * = required.\n"
             + "\n".join(lines) +
@@ -2252,6 +2265,27 @@ BAND_SPILL_EST_TOL = 0.05
 SFX_DEFAULT = False
 
 
+def _flag(v):
+    """A boolean tool argument as a client sends it (True, 'true', 'false', 1)."""
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
+def _hoist_face_flag(spec, params, allow):
+    """(params, allow_face_overlap): the flag is an argument of the write,
+    not a template param — one passed inside params (two editors did, Oct
+    2026: "image_card has no parameter(s) ['allow_face_overlap']") is taken
+    as the argument, and 'false' is false."""
+    if isinstance(params, dict) and "allow_face_overlap" in params and \
+            "allow_face_overlap" not in ((spec or {}).get("params") or {}):
+        params = dict(params)
+        inner = params.pop("allow_face_overlap")
+        if allow is None:
+            allow = inner
+    return params, (None if allow is None else _flag(allow))
+
+
 def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
                        layer=None, box=None, mute_captions=None, sfx=None,
                        id=None, purpose=None, allow_face_overlap=None):
@@ -2267,6 +2301,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
             params = json.loads(params) if params.strip() else {}
         except ValueError:
             return "REJECTED: params must be a JSON object."
+    params, allow_face_overlap = _hoist_face_flag(spec, params, allow_face_overlap)
     try:
         motion_templates.check_params(template, params or {}, html=html)
     except ValueError as e:
@@ -2438,6 +2473,11 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             params = json.loads(params) if params.strip() else {}
         except ValueError:
             return "REJECTED: params must be a JSON object."
+    try:
+        params, allow_face_overlap = _hoist_face_flag(
+            motion_templates.spec(hit["template"]), params, allow_face_overlap)
+    except ValueError:
+        pass
     merged = dict(hit.get("params") or {}) if template is None else {}
     merged.update(params or {})
     if html is not None:

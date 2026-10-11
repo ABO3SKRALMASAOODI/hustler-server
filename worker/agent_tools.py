@@ -1448,7 +1448,16 @@ def get_editorial_map(ctx, start=0, end=None, focus="all", limit=None,
     if not 1 <= limit <= EDITORIAL_MAP_MAX_ROWS:
         return (f"REJECTED: limit must be 1..{EDITORIAL_MAP_MAX_ROWS}; use "
                 "start/end to page a long source without losing chronology.")
-    shown = rows[:limit]
+    ranks = {}
+    if str(focus or "").strip().lower() == "peaks" and rows:
+        # peaks are ranked by their measured evidence: the strongest `limit`
+        # are shown, in source order, each with its rank
+        ranked = editorial_index.rank_peaks(rows)
+        ranks = {id(r): (k, s, why) for k, s, why, r in ranked}
+        top = {id(r) for _k, _s, _w, r in ranked[:limit]}
+        shown = [r for r in rows if id(r) in top]
+    else:
+        shown = rows[:limit]
     _metric(ctx, "editorial_map_rows_returned", len(shown))
     summary = editorial_index.summary(result)
     measured = ", ".join(summary["measured"]) or "none"
@@ -1469,12 +1478,22 @@ def get_editorial_map(ctx, start=0, end=None, focus="all", limit=None,
            "is already in PROJECT STATE; sentence ids are the join key."
            if not include_text else "")
     )
+    if ranks:
+        header += (f"\nPEAKS RANKED by measured evidence (vocal stress x2, energy "
+                   "peak, rising energy, a pause after/before, a shot change): "
+                   f"the strongest {len(shown)} of {len(rows)}, in source order.")
     if not shown:
         return header + "\nNo rows match this focus/range."
-    body = "\n".join(_format_editorial_row(row, include_text=include_text)
-                     for row in shown)
+    body = "\n".join(
+        (f"peak #{ranks[id(row)][0]} ({ranks[id(row)][1]:g}: "
+         f"{', '.join(ranks[id(row)][2]) or 'no measured emphasis'}) " if ranks else "")
+        + _format_editorial_row(row, include_text=include_text)
+        for row in shown)
     tail = ""
-    if len(rows) > len(shown):
+    if ranks and len(rows) > len(shown):
+        tail = (f"\n...{len(rows) - len(shown)} weaker peak row(s) not shown: raise "
+                f"limit (max {EDITORIAL_MAP_MAX_ROWS}) or narrow start/end.")
+    elif len(rows) > len(shown):
         next_s = float(shown[-1].get("t1") or start)
         tail = (f"\n...{len(rows) - len(shown)} more matching row(s). "
                 f"Continue with get_editorial_map(start={next_s:g}, "
@@ -1507,20 +1526,32 @@ def _dead_air(ctx, min_s):
              if e - s >= min_s], "waveform")
 
 
-def find_silences(ctx, min_seconds=0.7):
+def find_silences(ctx, min_seconds=0.7, start=None, end=None):
     try:
         min_s = max(0.1, float(min_seconds))
+        lo = None if start is None else float(start)
+        hi = None if end is None else float(end)
     except (TypeError, ValueError):
-        return "REJECTED: min_seconds must be a number."
+        return "REJECTED: min_seconds, start and end must be numbers (source seconds)."
+    if lo is not None and hi is not None and hi <= lo:
+        return "REJECTED: end must be greater than start."
     words = ctx.index.get("words", [])
     gaps, basis = _dead_air(ctx, min_s)
+    span = ""
+    if lo is not None or hi is not None:
+        # a range (Oct 2026: a short's editor got the first 100 of 331 gaps
+        # of the whole podcast, none of them in its 40 s)
+        gaps = [g for g in gaps if (lo is None or g["end"] > lo)
+                and (hi is None or g["start"] < hi)]
+        span = (f" within {_fmt_t(lo if lo is not None else 0.0)}-"
+                f"{_fmt_t(hi) if hi is not None else 'end'}s")
     if not gaps:
         if basis == "waveform":
             return ("No speech was transcribed AND the audio never drops "
                     "below the noise floor — there is nothing this tool can "
                     "call a silence. Say so plainly; do not guess at pauses "
                     "from the picture.")
-        return f"No gaps in the speech of {min_s}s or longer."
+        return f"No gaps in the speech of {min_s}s or longer{span}."
     lines = []
     for g in gaps[:100]:
         s, e = g["start"], g["end"]
@@ -1539,12 +1570,29 @@ def find_silences(ctx, min_seconds=0.7):
         lines.append(f"{_fmt_t(s)}-{_fmt_t(e)} ({e - s:.2f}s, midpoint "
                      f"{_fmt_t((s + e) / 2)}){ctxt}{sound}")
     note = f"\n({len(gaps) - 100} more not shown)" if len(gaps) > 100 else ""
-    head = (f"{len(gaps)} gap(s) in the speech >= {min_s}s (spans where "
+    if not span:
+        note += _silence_range_hint(ctx)
+    head = (f"{len(gaps)} gap(s) in the speech >= {min_s}s{span} (spans where "
             "nobody is talking — this is what 'silence' means to the user, "
             "not just a quiet waveform)") if basis == "speech" else \
         (f"No speech was transcribed in this video, so these are the "
-         f"{len(gaps)} quiet-WAVEFORM span(s) >= {min_s}s")
+         f"{len(gaps)} quiet-WAVEFORM span(s) >= {min_s}s{span}")
     return _cap(head + ":\n" + "\n".join(lines) + note)
+
+
+def _silence_range_hint(ctx):
+    """A program that keeps a small part of a long source (a short cut
+    from a podcast) is told how to ask for its own span."""
+    try:
+        keep = ctx.latest_edl()["json"].get("keep") or []
+        dur = float(ctx.duration or 0)
+        a, b = float(keep[0][0]), float(keep[-1][1])
+    except Exception:  # noqa: BLE001
+        return ""
+    if dur <= 0 or b - a > 0.5 * dur:
+        return ""
+    return (f"\n(The whole {dur:.0f}s source. Your program keeps {a:.2f}-{b:.2f}s: "
+            f"find_silences(start={a:g}, end={b:g}) lists only that span.)")
 
 
 def edl_used_asset_keys(edl):
@@ -7637,6 +7685,26 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
     return res
 
 
+def _focus_rounding_note(ctx, payload, frame):
+    """Why a set_frame that asked for a new aim changed nothing: the focus
+    is stored to 0.001 of the source frame, so 0.5305 is the 0.53 already
+    set (Oct 2026: an editor nudging the crop off an edge band got a bare
+    NO CHANGE)."""
+    bits = []
+    for k in ("focus_x", "focus_y"):
+        want, got = payload.get(k), getattr(frame, k, None)
+        if want is not None and got is not None and abs(float(want) - got) > 1e-9:
+            bits.append(f"{k} {float(want):g} is stored as {got:g}")
+    if not bits:
+        return ""
+    v = (getattr(ctx, "index", None) or {}).get("video") or {}
+    px = f" (~{0.001 * float(v['width']):.0f} px of the source)" \
+        if v.get("width") else ""
+    return ("\nFOCUS ROUNDING: " + "; ".join(bits) + " — focus is kept to "
+            f"0.001 of the source frame{px}, so this is the crop already set. "
+            "Move it by 0.002 or more to shift the crop.")
+
+
 def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                _measured=False, focus_track=None, picture=None,
                _follow=False):
@@ -7691,6 +7759,8 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
             aimed += "; the crop follows the speaker inside the shot"
     res = ctx.write_edl(
         edl, f"output frame set to {frame.ratio} ({frame.mode}){aimed}")
+    if res.startswith("NO CHANGE"):
+        res += _focus_rounding_note(ctx, payload, frame)
     if follow_note and res.startswith(("EDL v", "NO CHANGE")):
         res += "\n" + follow_note
     if (res.startswith("EDL v") and frame.mode == "crop"
@@ -11045,7 +11115,7 @@ def _run_patch(ctx, window, group_regions):
     sha = row.get("sha256") or ""
     ctx._orig_sha = sha
     edl = ctx.latest_edl()["json"]
-    fp = patch_fingerprint(sha, group_regions, window)
+    fp = patch_fingerprint(sha, group_regions, window, inpaint.REPAINT_VERSION)
     key = f"patches/{ctx.project_id}/{fp[:16]}.mp4"
     if storage.exists(key):
         return key, fp, {}
@@ -11072,27 +11142,17 @@ def _run_patch(ctx, window, group_regions):
             ctx.project_id,
             {"mode": "patch", "src_key": src_key, "out_key": key,
              "regions": group_regions, "window": list(window),
-             "measure": True},
+             "measure": True, "repaint": inpaint.REPAINT_VERSION},
             user_id=ctx.job.get("user_id"))
     else:
         local_src = ctx.proxy_path()
         out = os.path.join(ctx.workdir, f"patch_{fp[:8]}.mp4")
-        mids = [max(window[0], min(window[1] - 0.05,
-                                   float(r.get("start")
-                                         if r.get("start") is not None
-                                         else window[0]))) + 0.4
-                for r in group_regions]
-        before = [inpaint.text_energy(local_src,
-                                      (r["x"], r["y"], r["w"], r["h"]),
-                                      at=t, samples=3)
-                  for r, t in zip(group_regions, mids)]
-        stats = inpaint.build_patch(local_src, group_regions, window, out)
-        stats["before"] = before
-        stats["after"] = [
-            inpaint.text_energy(out, (r["x"], r["y"], r["w"], r["h"]),
-                                at=max(0.05, t - stats["src_start"]),
-                                samples=3)
-            for r, t in zip(group_regions, mids)]
+        stats = inpaint.build_patch(local_src, group_regions, window, out,
+                                    repaint=inpaint.REPAINT_VERSION)
+        # the same honesty check the executor runs (inpaint.erase_measure)
+        stats["before"], stats["after"], stats["metric"] = inpaint.erase_measure(
+            local_src, out, inpaint._clamped(group_regions, stats),
+            stats["src_start"])
         storage.upload_file(out, key, "video/mp4")
     try:
         ctx.db.run(dbx.insert_asset, ctx.project_id, "patch", key,
@@ -11173,12 +11233,15 @@ def _apply_patches(ctx, new_items, what, drop=None):
         pid = _next_item_id(all_patches + entries, "pa")
         entries.append({"id": pid, "asset_key": key, "fp": fp,
                         "src_start": window[0], "src_end": window[1],
-                        "regions": members})
+                        "regions": members, "repaint": inpaint.REPAINT_VERSION})
         before = stats.get("before") or []
         after = stats.get("after") or []
-        for r, b, a in zip(members, before, after):
+        metric = stats.get("metric") or ["ink"] * len(before)
+        for r, b, a, how in zip(members, before, after, metric):
             gone = (b <= 0.5) or (a <= max(1.5, b * 0.35))
-            lines.append(f"[{r['id']}] ink {b:g} -> {a:g} "
+            what = (f"keeps {a:g}% of the box's original picture" if how == "pattern"
+                    else f"ink {b:g} -> {a:g}")
+            lines.append(f"[{r['id']}] {what} "
                          + ("— gone" if gone else "— STILL VISIBLE"))
         if any(p.get("escalated") for p in (stats.get("plates") or [])):
             lines.append(f"[{pid}] the text sat on a solid bar, so the "
@@ -11195,8 +11258,9 @@ def _apply_patches(ctx, new_items, what, drop=None):
     if lines:
         result += "\nMeasured on the repainted window: " + "; ".join(lines)
         if any("STILL" in ln for ln in lines):
-            result += ("\nOne rectangle still shows ink. Widen it (outlines "
-                       "and shadows sit outside the letters), or pass "
+            result += ("\nOne rectangle still shows ink or its original "
+                       "picture. Widen it (outlines, shadows and a window's "
+                       "frame sit outside a tight box), or pass "
                        "fill='box' to repaint the whole rectangle. Do NOT "
                        "tell the user it was removed until this measures "
                        "clean.")
@@ -21036,6 +21100,57 @@ def _ass_caption_rows(raw_text):
     return rows
 
 
+def _caption_graphics_report(edl, plan):
+    """(graphic_text, captions_under_graphics) for audit_captions, from the
+    same caption plan the render uses (worker/caption_carry.py):
+
+    * graphic_text — what each graphic (and text layer) puts on screen
+      beside the captions, and the caption words it shows instead of them;
+    * captions_under_graphics — caption words left on their usual band
+      under a graphic's box because no clear band was left: the graphic
+      covers or touches them.
+
+    The s04/s05 reviews (Oct 2026) had neither: image cards covered
+    CLEARLY, GROWTH and TRANSFORMERS while the audit passed."""
+    shown, under = [], []
+    for m in edl.get("motion") or []:
+        if not isinstance(m, dict) or m.get("_synthetic"):
+            continue
+        rep = plan.report.get(m.get("id")) or {}
+        text = " / ".join(" ".join(str(v).split())
+                          for _k, v in caption_carry.graphic_lines(m))
+        row = {"id": m.get("id"), "template": m.get("template"),
+               "start": m.get("start"), "end": m.get("end"), "text": text[:200]}
+        if rep.get("carried"):
+            row["shows_caption_words"] = " ".join(
+                str(w.get("w")) for w in rep["carried"])[:200]
+        if text or rep.get("carried"):
+            shown.append(row)
+        box = rep.get("box")
+        kept = []
+        for w in rep.get("kept") or [] if box else []:
+            # (a stretch blocked by a card's edge or another graphic lists
+            # every live graphic: only one whose box meets the band counts)
+            src_mid = w.get("src_t0", (float(w["t0"]) + float(w["t1"])) / 2.0)
+            if caption_carry.collides([box], caption_carry.normal_place(
+                    edl, float(src_mid))[0]):
+                kept.append(w)
+        if kept:
+            under.append({"id": m.get("id"), "start": m.get("start"),
+                          "end": m.get("end"), "box": rep.get("box"),
+                          "estimated_box": bool(rep.get("estimated")),
+                          "count": len(kept),
+                          "words": " ".join(str(w.get("w")) for w in kept)[:200]})
+    for item in edl.get("texts") or []:
+        if isinstance(item, dict) and str(item.get("text") or "").strip():
+            shown.append({"id": item.get("id"),
+                          "template": "text:" + str(item.get("template") or "title"),
+                          "start": item.get("start"), "end": item.get("end"),
+                          "text": " ".join(str(item["text"]).split())[:200]})
+    shown.sort(key=lambda r: float(r.get("start") or 0.0))
+    return shown, under
+
+
 def audit_captions(ctx, offset=0, limit=80):
     """Compile and mechanically audit the caption track before/after render.
 
@@ -21146,6 +21261,7 @@ def audit_captions(ctx, offset=0, limit=80):
     uncovered = []
     sound_off = []
     unshown = []
+    graphic_text, under_graphics = [], []
     first_late = None
     declared_max_words = None
     single_line_contract = False
@@ -21161,7 +21277,20 @@ def audit_captions(ctx, offset=0, limit=80):
         # The words the captions SHOULD show: whole-window mutes applied,
         # and the words graphics carry handed to them (word-level muting,
         # worker/caption_carry.py) — those are on screen, not lost.
-        words = caplib.caption_words(edl, ctx.index, tl)
+        plan = caplib.caption_plan(edl, ctx.index, tl)
+        words = plan.caption_words()
+        try:
+            graphic_text, under_graphics = _caption_graphics_report(edl, plan)
+        except Exception:  # noqa: BLE001 — the audit reports what it can
+            graphic_text, under_graphics = [], []
+        if under_graphics:
+            warnings.append(
+                f"{sum(u['count'] for u in under_graphics)} caption word(s) stay on "
+                "their band under a graphic's box ("
+                + ", ".join(u["id"] for u in under_graphics[:4])
+                + "): no clear band was left, so the graphic covers or touches them "
+                "(captions_under_graphics) — move or shrink it, or let it show "
+                "those words")
         for word in words:
             mid = (float(word["t0"]) + float(word["t1"])) / 2.0
             if not any(state["start"] - 0.011 <= mid <= state["end"] + 0.011
@@ -21290,6 +21419,8 @@ def audit_captions(ctx, offset=0, limit=80):
         "uncovered_word_count": len(uncovered),
         "sound_off_gaps": sound_off[:10],
         "heard_unshown": unshown[:20],
+        "graphic_text": graphic_text[:20],
+        "captions_under_graphics": under_graphics[:10],
         "overlaps": overlaps[:20],
         "warnings": warnings,
         "short_phrase_states": fragment_states,
@@ -24920,13 +25051,21 @@ def _source_sound_fallback(ctx):
     raise proxy_error
 
 
+# Listening windows per review_audio call, heard in batches of the audio
+# lane's own clip limit (llm.ask_audio hears 3): a reviewer checking five
+# joins got three heard and two silently dropped (Oct 2026).
+REVIEW_AUDIO_MAX_CLIPS = 6
+REVIEW_AUDIO_BATCH = 3
+
+
 def review_audio(ctx, asset_key=None, times=None, output_times=None,
-                 span_s=6.0, question=None):
+                 span_s=6.0, question=None, anchor="center"):
     """Bounded actual listening for uploads, source sound or rendered mix.
 
     The main editor receives the listener's assessment as evidence. This is
     never a write gate and never substitutes for authored role/timing state or
-    deterministic loudness/peak checks.
+    deterministic loudness/peak checks. ``anchor``: each window is centred on
+    its time (a join), starts at it (what a cut keeps after it) or ends at it.
     """
     if not llm.audio_review_available():
         return ("REJECTED: actual-audio review is not configured on this "
@@ -24936,6 +25075,10 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         span = min(max(float(span_s or 6.0), 0.1), 12.0)
     except (TypeError, ValueError):
         return "REJECTED: span_s must be a number between 0.1 and 12 seconds."
+    anchor = str(anchor or "center").strip().lower()
+    if anchor not in ("center", "start", "end"):
+        return "REJECTED: anchor must be center, start or end."
+    dropped = []
 
     def windows(raw_times, duration, label):
         if not raw_times:
@@ -24943,14 +25086,17 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         if not isinstance(raw_times, (list, tuple)):
             return None, f"REJECTED: {label} must be an array of seconds."
         try:
-            values = sorted({float(t) for t in raw_times})[:3]
+            values = sorted({float(t) for t in raw_times})
         except (TypeError, ValueError):
             return None, f"REJECTED: {label} must contain numeric seconds."
+        dropped.extend(values[REVIEW_AUDIO_MAX_CLIPS:])
+        values = values[:REVIEW_AUDIO_MAX_CLIPS]
         out = []
         for value in values:
             if value < 0 or value > duration + 0.05:
                 continue
-            start = max(0.0, min(value - span / 2,
+            lead = {"center": span / 2, "start": 0.0, "end": span}[anchor]
+            start = max(0.0, min(value - lead,
                                  max(0.0, duration - min(span, 0.5))))
             end = min(duration, start + span)
             # Short whooshes/clicks are real listening evidence too. The old
@@ -25083,17 +25229,33 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         "Do not infer from filenames and do not relabel an authored music track "
         "as voiceover. Purpose: " + str(question or "judge professional fit")[:2000]
         + ". Direction: " + (direction or "not specified"))
-    answer = llm.ask_audio(prompt, clips, labels, max_tokens=240,
-                           purpose="audio_asset_review")
-    if not answer:
+    answers = []
+    for k in range(0, len(clips), REVIEW_AUDIO_BATCH):
+        part = clips[k:k + REVIEW_AUDIO_BATCH]
+        # clip numbers run across batches, so 'CLIP 4' means the 4th window
+        numbered = prompt + (f" The clips below are CLIPS {k + 1}-{k + len(part)} of "
+                             f"{len(clips)}; answer for each by that number."
+                             if len(clips) > REVIEW_AUDIO_BATCH else "")
+        got = llm.ask_audio(numbered, part, labels[k:k + REVIEW_AUDIO_BATCH],
+                            max_tokens=240 + 60 * len(part),
+                            purpose="audio_asset_review")
+        if got:
+            answers.append(got if len(clips) <= REVIEW_AUDIO_BATCH else
+                           f"[CLIPS {k + 1}-{k + len(part)}] {got}")
+    if not answers:
         return ("UNAVAILABLE: Actual clips were extracted, but the listener did not return "
                 "usable evidence. Use measured analysis and do not repeat the "
                 "same call in this turn.")
     _metric(ctx, "audio_asset_reviews")
     _metric(ctx, "audio_review_clips", len(clips))
+    tail = ""
+    if dropped:
+        tail = (f" NOT HEARD (at most {REVIEW_AUDIO_MAX_CLIPS} windows per call): "
+                + ", ".join(f"{t:g}s" for t in dropped) + " — ask again for them.")
     return ("BOUNDED ACTUAL-AUDIO REVIEW — an audio-capable reviewer heard "
-            f"{'; '.join(labels)}. This is advisory evidence, not a write "
-            f"gate: {answer}")
+            + "; ".join(f"CLIP {i + 1}: {lab}" for i, lab in enumerate(labels))
+            + f". This is advisory evidence, not a write gate: {' '.join(answers)}"
+            + tail)
 
 
 def _frame_focus_at_source(edl, source_t):
@@ -27719,10 +27881,12 @@ TOOLS = {
          "brief": {"type": "string"},
          "completes_steps": {
              "type": "array", "items": {"type": "integer"}}}),
-    "find_silences": (find_silences, "Silences of at least min_seconds, with "
+    "find_silences": (find_silences, "Silences of at least min_seconds "
+                      "(start/end: a SOURCE-seconds range), with "
                       "midpoints and surrounding words — cut points should "
                       "snap to these midpoints or word boundaries.",
-                      {"min_seconds": {"type": "number"}}),
+                      {"min_seconds": {"type": "number"},
+                       "start": {"type": "number"}, "end": {"type": "number"}}),
     "list_assets": (list_assets, "Every file in this project — used on the "
                     "timeline AND unused uploads sitting in the library. "
                     "kind='music' lists audio (use its storage_key with "
@@ -29817,7 +29981,7 @@ TOOLS = {
                                      "items": {"type": "array",
                                                "items": {"type": "number"}}}}),
     "set_caption_fixes": (set_caption_fixes,
-        "Edit displayed captions. Default operation=replace replaces the COMPLETE active set. "
+        "Edit displayed captions; an empty to deletes the words. Default operation=replace replaces the COMPLETE active set. "
         "append upserts by matching text and scope; clear removes all; list returns active fixes "
         "and compiled caption preview. replacements accepts [from,to] pairs or objects with "
         "from,to and optional start,end in OUTPUT seconds to target one occurrence. "
@@ -30049,8 +30213,10 @@ TOOLS = {
     "review_audio": (review_audio, "Listen to bounded REAL audio through the "
                      "audio-review lane and return its professional assessment. "
                      "Pass asset_key for an uploaded/fetched song, audio-only "
-                     "file, clip or render; pass times for seconds within that "
+                     "file, clip or render; pass times (up to 6) for seconds within that "
                      "asset. With no asset_key, times reviews SOURCE sound. "
+                     "anchor: a window is centred on its time (a join), "
+                     "starts or ends there. "
                      "output_times reviews the CURRENT rendered program and "
                      "therefore requires render_preview first. Use this for "
                      "vibe, recording quality, intelligibility, masking and "
@@ -30064,6 +30230,8 @@ TOOLS = {
                       "output_times": {"type": "array",
                                        "items": {"type": "number"}},
                       "span_s": {"type": "number"},
+                      "anchor": {"type": "string",
+                                 "enum": ["center", "start", "end"]},
                       "question": {"type": "string"}}),
     "audit_audio_mix": (audit_audio_mix, "Deterministic audit of the CURRENT "
                         "EDL's authored music, voiceover and SFX roles, files, "
@@ -30829,9 +30997,7 @@ _COMPACT_CONTRACTS = {
     "list_motion_templates": (
         "READ the live motion library: each template's purpose, params "
         "(* = required) and built-in sound cues. Call once before designing the "
-        "hook, hero moments, CTAs or motion transitions; never guess params. "
-        "Optional category: type, data, callout, social, layout, transition, "
-        "texture, cta."),
+        "hook, hero moments, CTAs or motion transitions; never guess params."),
     "add_motion_graphic": (
         "Place a premium motion graphic on PROGRAM seconds: a template from "
         "list_motion_templates, or template='html' with your own MG-runtime "
