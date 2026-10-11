@@ -16000,8 +16000,10 @@ def _program_matte_note(prog, what, short=False):
             None or est is not None:
         return (("It is " if short else "MEASURING: the person matte for "
                  "that window is ") + f"being measured on the source{wait}. "
-                f"Until it is ready a render draws {what} in front and says "
-                "so — render again after that; nothing else needs to change.")
+                f"Until it is ready a preview draws {what} in front and says "
+                "so; a preview rendered after that, and the final export "
+                "(it waits for the measurement), sets it behind — nothing "
+                "else needs to change.")
     return (f"The person matte for that window is not measured yet; a "
             f"render draws {what} in front until it is, and says so.")
 
