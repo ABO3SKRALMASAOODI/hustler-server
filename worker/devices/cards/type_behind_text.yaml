@@ -23,8 +23,14 @@ never:
   - "inside the payoff hold of another depth device"
 owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
 rungs: [full, {substitute: type_in_front}, omit]
+# cost: CPU-ms per frame of the item's window, measured by
+# tools/at1a_matte.py --perf (AT-1A-perf, behind vs the same graphic in
+# front): a 9:16 preview adds 8.5 (local), AT-1A-1's 1080x1920 final 37.8
+# (the matte's blocks under the window are resampled whole); the
+# Cloudflare lanes at the cost model's ms_scale 2.0 (uncalibrated there).
+# fixed_ms is an estimate (chunk fetch + graph), not measured apart.
 cost:
-  ms_per_frame: {interactive: 6.0, batch: 4.0, local: 3.0}
+  ms_per_frame: {interactive: 17.0, batch: 75.6, local: 8.5}
   fixed_ms: 900
 exemplars: ["05@0.23–12.23", "09@1.27–21.6", "12@12.875"]
 verify: ["glyph_visible>=0.65", "matte_flicker<=0.035", "edge_chatter<=0.002"]

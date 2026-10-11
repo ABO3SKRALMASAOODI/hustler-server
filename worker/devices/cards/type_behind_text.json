@@ -62,9 +62,9 @@
   ],
   "cost": {
     "ms_per_frame": {
-      "interactive": 6.0,
-      "batch": 4.0,
-      "local": 3.0
+      "interactive": 17.0,
+      "batch": 75.6,
+      "local": 8.5
     },
     "fixed_ms": 900
   },
