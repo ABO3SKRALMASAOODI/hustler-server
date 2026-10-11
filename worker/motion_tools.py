@@ -2128,12 +2128,12 @@ def _persistent_contract(ctx, edl, item, items, place, passed=(), strict=True):
                     "one above the picture. On full-bleed footage use hook and beat "
                     "graphics instead, or pass y to place it deliberately."), ""
         top, bottom, what = band
-        if bottom - top < HEADLINE_MIN_BAND:
+        if bottom - top < HEADLINE_MIN_BAND - 1e-6:
             fix = ""
             try:
                 fix = _fix_text(_headline_fix(ctx, edl, dict(item, params=dict(
                     params, y=round((top + bottom) / 2.0, 4),
-                    height=round(max(0.01, bottom - top), 4))), band))
+                    height=round(max(0.01, bottom - top), 4))), band, card_only=True))
             except Exception as exc:  # noqa: BLE001 — the measured fix is advice
                 print(f"[motion] headline fix skipped: {str(exc)[:160]}", flush=True)
             return (f"REJECTED: the band above {what} is only {bottom - top:.3f} of the "
@@ -2279,6 +2279,8 @@ def headline_card(ctx, edl, item, band, target):
     need = band_type.needed_band(p, W, H, target)
     if need is None or not band:
         return None
+    # a band under HEADLINE_MIN_BAND is refused whatever it holds
+    need = max(need, HEADLINE_MIN_BAND)
     card_top = round(band[0] + need + HEADLINE_GAP, 3)
     card = band_type.largest_card(card_top, W, H, floor=CARD_FLOOR)
     src = _card_source_px(ctx, edl, float(item["start"]), float(item["end"]))
@@ -2333,12 +2335,14 @@ def _card_text(fit, band, with_=""):
                "or less)" if fed else ""))
 
 
-def _headline_fix(ctx, edl, item, band=None, target=None):
+def _headline_fix(ctx, edl, item, band=None, target=None, card_only=False):
     """The concrete ways to a claim at ``target`` (the captions' cap height),
     any one of: the card top (band height) that holds it, with the largest
     card left under that band against the picture floor; the claim length
     the present band holds; a kicker short enough to sit beside the corner
-    mark, or none — each with the size it needs. A list of phrases."""
+    mark, or none — each with the size it needs, and each only when it
+    measures at ``target``. ``card_only``: the band itself is refused (under
+    HEADLINE_MIN_BAND), so only a lower card fixes it. A list of phrases."""
     W, H = _canvas_size(ctx, edl)
     p = dict(item.get("params") or {})
     if target is None:
@@ -2359,6 +2363,7 @@ def _headline_fix(ctx, edl, item, band=None, target=None):
     also = ([f"size {size_need:g}"] if size_need > size_now + 1e-6 else []) \
         + ([f"kicker_y {ky:g} (the kicker beside the corner mark)"] if ok else [])
     with_ = f", with {' and '.join(also)}" if also else ""
+    with_size = f", with size {size_need:g}" if size_need > size_now + 1e-6 else ""
     fixes = []
     fit = headline_card(ctx, edl, dict(item, params=sized), band, target)
     if fit:
@@ -2366,25 +2371,35 @@ def _headline_fix(ctx, edl, item, band=None, target=None):
     else:
         need = band_type.needed_band(sized, W, H, target)
         if need is not None:
+            need = max(need, HEADLINE_MIN_BAND)
             fixes.append(f"height {need:.3f} or more (it is {_num_or(p, 'height', 0.15):.3f})"
                          f"{with_}")
+    if card_only:
+        return fixes
     chars = len(str(p.get("text") or "").replace("*", ""))
     n = band_type.max_claim_chars(sized, W, H, target)
     if 6 <= n < chars:
         fixes.append(f"a claim of about {n} characters or fewer (it has {chars}){with_}")
     if kick and not aside and not ok:
+        # a shorter kicker is set beside the mark only where the claim then
+        # sits right under it, and it fixes the claim only if the whole band
+        # then sets it at the target
         k = band_type.kicker_chars_beside(sized, W, H, strip)
-        if k >= 6:
+        lay_a = band_type.headline_layout(sized, W, H, kicker_beside=True)
+        near = bool(strip) and (_num_or(sized, "y", 0.0) - lay_a["block_h"] / 2.0
+                                <= strip[3] + KICKER_ASIDE_REACH)
+        if k >= 6 and near and lay_a["claim_cap"] >= target - 1e-6:
             fixes.append(f"a kicker of at most about {k} characters (it has {len(kick)}), "
-                         "which sits beside the corner mark")
+                         f"which sits beside the corner mark{with_size}")
         bare = dict(sized, kicker="")
         if band_type.headline_layout(bare, W, H)["claim_cap"] >= target - 1e-6:
             lay = band_type.headline_layout(sized, W, H)
             fixes.append(f"no kicker (it and its gap take {lay['block_h'] - lay['claim_h']:.3f} "
-                         "of the band; name the speaker in the claim)")
+                         f"of the band; name the speaker in the claim){with_size}")
         elif 6 <= band_type.max_claim_chars(bare, W, H, target) < chars and n < 6:
             fixes.append(f"no kicker and a claim of about "
-                         f"{band_type.max_claim_chars(bare, W, H, target)} characters or fewer")
+                         f"{band_type.max_claim_chars(bare, W, H, target)} characters or fewer"
+                         f"{with_size}")
     return fixes
 
 

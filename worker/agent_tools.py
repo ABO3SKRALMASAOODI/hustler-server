@@ -17488,8 +17488,15 @@ def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
     for layer in ("texts","vectors"):
         edl[layer]=[r for r in edl.get(layer) or []
                     if not r.get("id","").startswith(result["prefix"])] + result[layer]
-    return _fit_report(ctx.write_edl(edl, f"designed {kind} {id} in {palette}; editable type and vector layers with {result['minimum_hold_s']:g}s minimum reading time"),
-                       result.get("fit"))
+    written = _fit_report(ctx.write_edl(edl, f"designed {kind} {id} in {palette}; editable type and vector layers with {result['minimum_hold_s']:g}s minimum reading time"),
+                          result.get("fit"))
+    if kind == "headline" and str(written).startswith("EDL v"):
+        # its measured cap height against the captions (band_type)
+        import band_type
+        written += band_type.editorial_headline_note(
+            edl, (result.get("fit") or {}).get("font_size"), W, H,
+            max_size=editorial_graphics.HEADLINE_FONT_RANGE[1])
+    return written
 
 
 def remove_editorial_graphic(ctx, id):

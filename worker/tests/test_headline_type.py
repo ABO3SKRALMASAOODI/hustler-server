@@ -175,6 +175,26 @@ def test_the_browserless_estimate_holds_a_kicker_set_aside():
                                                      height=0.1, kicker_y=0.1066))
     assert stacked[1] == pytest.approx(0.13)
     assert aside[1] <= 0.1066 - 0.016 and aside[3] == stacked[3]
+    # the template stacks a left-aligned block's kicker whatever kicker_y says
+    left = keepout.nominal_ink("headline", spec, _p(text="x", kicker="ELON MUSK", y=0.18,
+                                                    height=0.1, kicker_y=0.1066, align="left"))
+    assert left[1] == pytest.approx(0.13)
+
+
+# A kicker too long for one line wraps at the floor size, max-width the
+# column: its box is the whole column, and set aside its lines start at the
+# column's LEFT edge — onto the corner mark.
+LONG_KICKER = "PAUL GRAHAM ON WRITING, THINKING CLEARLY"
+
+
+def test_a_wrapped_kicker_is_the_whole_column():
+    # (0.6: each line well clear of the column, so the page wraps it the same)
+    p = _p(text="Founders should *write*", kicker=LONG_KICKER, width=0.6, y=0.2, height=0.2)
+    lay = band_type.headline_layout(p, W, H)
+    assert lay["kicker_lines"] == 3 and lay["kicker_w"] == pytest.approx(0.6)
+    box = band_type.kicker_box(dict(p, kicker_y=0.1066), W, H)
+    assert box[0] == pytest.approx(0.2) and box[2] == pytest.approx(0.8)
+    assert not band_type.kicker_beside_fits(p, W, H, band_type.mark_strip(W, H, top=0.085))[0]
 
 
 def test_the_largest_card_for_a_band_and_a_floor():
@@ -393,6 +413,69 @@ def test_a_thin_band_is_refused_with_the_measured_fix():
         "size": 1.3, "width": 0.88}, id="hl")
     assert out.startswith("REJECTED") and "a headline needs 0.06" in out
     assert "FIX, any one of: (1) a card top at y" in out, out
+    # the band itself is refused: a shorter claim or kicker in it is no fix
+    assert "(2)" not in out and "characters" not in out, out
+
+
+def test_every_fix_named_measures_at_the_captions():
+    # the run's s01 (3442) over a 0.075 band: with the kicker beside the mark
+    # the claim still sets two lines far under the 'l' captions, so a shorter
+    # kicker is no fix; no kicker and a one-line claim is
+    ctx = _Ctx(_edl(card_top=0.215, size="l"))
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
+        "text": "Forcing an AI to *lie* is how 2001 went wrong", "kicker": ELON,
+        "size": 1.3, "width": 0.88}, id="hl")
+    assert out.startswith("REJECTED") and "SMALLER than" in out, out
+    assert "a kicker of at most" not in out
+    assert "no kicker and a claim of about" in out
+    # a card top never leaves a band the write refuses (HEADLINE_MIN_BAND)
+    edl = ctx.latest_edl()["json"]
+    item = {"start": 0.0, "end": 30.0, "params": _p(text="AI *wins*", y=0.16, height=0.06)}
+    fit = motion_tools.headline_card(ctx, edl, item, (0.128, 0.188, "the picture card"), 0.01)
+    assert fit["band"] >= motion_tools.HEADLINE_MIN_BAND
+    assert fit["top"] == pytest.approx(0.128 + motion_tools.HEADLINE_MIN_BAND
+                                       + motion_tools.HEADLINE_GAP, abs=1e-3)
+
+
+def test_a_wrapped_kicker_set_aside_onto_the_mark_is_refused():
+    ctx = _Ctx(_edl(card_top=0.30))
+    out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
+        "text": "Founders should *write*", "kicker": LONG_KICKER, "width": 0.6,
+        "x": 0.62, "kicker_y": 0.1066}, id="hl")
+    assert out.startswith("REJECTED") and "free-tier mark's zone" in out, out
+
+
+# ── the editorial headline (set_editorial_graphic kind='headline') ───────
+
+def test_the_editorial_headline_is_measured_against_the_captions():
+    import agent_tools
+    # libass sizes its Inter Display Bold rows by the Windows ascent +
+    # descent: font_size 0.052 (the default) drew a 34 px (0.0177) cap on a
+    # 9:16 render, 0.08 a 52 px one — two thirds of clean captions' 0.0265
+    assert band_type.ass_text_cap(0.052, W, H) == pytest.approx(0.0177, abs=4e-4)
+    assert band_type.ass_text_cap(0.08, W, H) == pytest.approx(0.0271, abs=6e-4)
+    ctx = _Ctx(_edl(card_top=0.30))
+    out = agent_tools.set_editorial_graphic(
+        ctx, "hl", "headline", "Kurzweil was too conservative", 0.0, 8.0,
+        speaker="Elon Musk", box=[0.08, 0.1, 0.92, 0.27])
+    assert out.startswith("EDL v1"), out
+    assert "HEADLINE TYPE (measured from the font files)" in out
+    assert "SMALLER than the captions" in out and "template='headline'" in out
+    need = float(out.split("SMALLER than the captions")[1].split("font_size ")[1].split(" ")[0])
+    target = band_type.caption_cap(ctx.latest_edl()["json"])[0]
+    assert band_type.ass_text_cap(need, W, H) >= target > band_type.ass_text_cap(need - 0.001, W, H)
+    # 'l' captions: no font_size the tool allows reaches them
+    ctx = _Ctx(_edl(card_top=0.30, size="l"))
+    out = agent_tools.set_editorial_graphic(
+        ctx, "hl", "headline", "Kurzweil was too conservative", 0.0, 8.0,
+        speaker="Elon Musk", box=[0.08, 0.1, 0.92, 0.27], font_size=0.085)
+    assert "no font_size up to 0.085 reaches them" in out, out
+    # no captions: nothing to hold it to
+    ctx = _Ctx(_edl(card_top=0.30, look=None))
+    out = agent_tools.set_editorial_graphic(
+        ctx, "hl", "headline", "Kurzweil was too conservative", 0.0, 8.0,
+        speaker="Elon Musk", box=[0.08, 0.1, 0.92, 0.27])
+    assert out.startswith("EDL v1") and "HEADLINE TYPE" not in out
 
 
 # ── the page ──────────────────────────────────────────────────────────────
@@ -435,6 +518,15 @@ async def _lay_out(cases):
         finally:
             await browser.close()
     return out
+
+
+@needs_browser
+def test_a_wrapped_kicker_set_aside_draws_the_column():
+    p = _p(text="Founders should *write*", kicker=LONG_KICKER, width=0.6, x=0.62,
+           y=0.2, height=0.2, kicker_y=0.1066)
+    got = asyncio.run(_lay_out([p]))[0]
+    k = [v / s for v, s in zip(got["kick"], (W, H, W, H))]
+    assert k == pytest.approx(band_type.kicker_box(p, W, H), abs=0.01)
 
 
 @needs_browser

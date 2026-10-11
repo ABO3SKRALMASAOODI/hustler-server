@@ -18,8 +18,11 @@ captions and say what makes it legible:
   Chromium (worker/fonts, worker/motion/fonts), through Pillow's basic
   layout (no shaping engine needed, identical on every lane). Chromium also
   applies kerning, so a line measured here runs a little WIDER than the
-  browser's: the estimate wraps no earlier than the page and errs small
-  (tests/test_headline_type.py holds it to the page within a few percent).
+  browser's (0-2% on real claims): the estimate wraps no later than the
+  page, and with WRAP_SAFETY / HEIGHT_SAFETY_PX a borderline fit is taken
+  one step down, so it errs small (tests/test_headline_type.py holds it to
+  the page within a few percent). Only a run of positively kerned pairs
+  ('WWWWW') measures narrower than the page.
 * ``caption_cap`` is the cap height the short's captions are drawn at
   (motion look, premium libass preset or the plain style), as a share of
   the frame height; libass sizes a face by its OS/2 Windows ascent +
@@ -67,6 +70,17 @@ NO_CAPTION_CAP = 0.026
 CARD_BOTTOM = 0.794
 # Clear space between the mark's reserved zone and a kicker set beside it.
 STRIP_GAP = 0.012
+# The page's tests of a fit, held a hair tighter here: a line wraps
+# WRAP_SAFETY of the column early, and where the block's height rests on
+# font metrics (a stacked kicker's size comes from the browser's own cap
+# measure; a serif accent line's box from its ascent and descent) it must
+# fit HEIGHT_SAFETY_PX inside the band. A borderline layout (the run's 3447
+# claim beside its kicker had 1.6 px of column to spare), where another
+# platform's glyph advances or line metrics could tip the page one 0.97
+# step down, is measured at that smaller step: the estimate errs small,
+# never large. (Line boxes alone are arithmetic, the same on every lane.)
+WRAP_SAFETY = 0.004
+HEIGHT_SAFETY_PX = 1.0
 
 _STAR_TOKEN_END = re.compile(r"\*([.,!?:;\"')’”]*)$")
 
@@ -192,7 +206,7 @@ def design_height(W, H):
 
 
 def _kicker_fit(text, col_w, size, Hd):
-    """MG.fitSecondary on the kicker: (font px, lines, widest line px)."""
+    """MG.fitSecondary on the kicker: (font px, lines, its box's width px)."""
     path = font_path(KICKER["family"], KICKER["weight"])
     floor = MIN_CAP * Hd / metrics(path)[0]
     hi = max(KICKER_MAX_PX * size, floor)
@@ -213,7 +227,9 @@ def _kicker_fit(text, col_w, size, Hd):
         fs *= 0.95
     lines = _greedy([text_width(path, w, fs, KICKER["track"]) for w in words],
                     text_width(path, " ", fs, KICKER["track"]), col_w)
-    return fs, len(lines), max(lines)
+    # wrapped, the kicker's box is the whole column (max-width: the column),
+    # and a kicker set aside starts its lines at the column's LEFT edge
+    return fs, len(lines), (col_w if len(lines) > 1 else max(lines))
 
 
 def _greedy(widths, space, col_w):
@@ -338,19 +354,22 @@ def headline_layout(params, W=1080, H=1920, kicker_beside=None):
     room = max(40.0, band_h - kh - gap)
     hi = min(CLAIM_MAX_PX * size, room)
     lo = min(CLAIM_MIN_PX, hi)
+    col_fit = col_w * (1.0 - WRAP_SAFETY)
+    metric = kh > 0 or any(serif for _em, serif in claim.words)
+    room_fit = room + 0.5 - (HEIGHT_SAFETY_PX if metric else 0.0)
     fs = hi
     fits = False
     while fs > lo:
-        h, lines, widest, _n = claim.layout(fs, col_w)
-        if h <= room + 0.5 and widest <= col_w + 1 and lines <= claim.max_lines:
+        h, lines, widest, _n = claim.layout(fs, col_fit)
+        if h <= room_fit and widest <= col_fit + 1 and lines <= claim.max_lines:
             fits = True
             break
         fs *= FIT_STEP
     fs = max(fs, lo)
-    h, lines, widest, n = claim.layout(fs, col_w)
-    line_w = _balanced_width(claim, fs, col_w) / 1080.0
+    h, lines, widest, n = claim.layout(fs, col_fit)
+    line_w = _balanced_width(claim, fs, col_fit) / 1080.0
     if not fits:
-        fits = h <= room + 0.5 and widest <= col_w + 1 and lines <= claim.max_lines
+        fits = h <= room_fit and widest <= col_fit + 1 and lines <= claim.max_lines
     # what caps it: the size knob, the band's height, or the column (its
     # words in the line limit, however tall the band)
     limit = "size"
@@ -358,8 +377,8 @@ def headline_layout(params, W=1080, H=1920, kicker_beside=None):
         limit = "band"
         f = CLAIM_MAX_PX * size
         while f > lo:
-            _h, li, wi, _n = claim.layout(f, col_w)
-            if wi <= col_w + 1 and li <= claim.max_lines:
+            _h, li, wi, _n = claim.layout(f, col_fit)
+            if wi <= col_fit + 1 and li <= claim.max_lines:
                 break
             f *= FIT_STEP
         if f <= fs * 1.0001:
@@ -457,12 +476,67 @@ def caption_cap(edl, W=1080, H=1920):
         px = max(10, round(caplib.FONT_SIZES.get(s.get("size"), 40) * f * caplib._size_scale(s)))
         fam = s.get("font") or "DejaVu Sans"
         label = "the captions"
-    fn = _ASS_FILES.get(" ".join(str(fam).split()))
-    ratio = _ASS_DEFAULT_CAP
+    return px * _ass_cap_ratio(fam) / float(H), label
+
+
+def _ass_cap_ratio(family):
+    """Cap height over the libass font size for an ASS family name."""
+    fn = _ASS_FILES.get(" ".join(str(family).split()))
     if fn and os.path.isfile(os.path.join(HERE, "fonts", fn)):
         path = os.path.join(HERE, "fonts", fn)
-        ratio = metrics(path)[0] / max(1e-6, ass_line_em(path))
-    return px * ratio / float(H), label
+        return metrics(path)[0] / max(1e-6, ass_line_em(path))
+    return _ASS_DEFAULT_CAP
+
+
+# ── the editorial headline (set_editorial_graphic kind='headline') ────────
+# Its rows are texts-layer lines in Inter Display Bold at font_size x the
+# frame's short edge, drawn by libass (graphics._compile_item): measured on a
+# render, font_size 0.052 (its default) draws a cap height of 0.0177 of a
+# 9:16 frame — two thirds of a clean caption track's 0.0265 — and even its
+# largest font_size, 0.085, stays under 'l' captions.
+EDITORIAL_FONT = "Inter Display Bold"
+
+
+def ass_text_cap(font_size, W=1080, H=1920, family=EDITORIAL_FONT):
+    """Cap height (share of the frame height) of a texts-layer line set at
+    ``font_size`` (a share of the frame's short edge) in ASS ``family``."""
+    px = max(6, round(float(font_size) * min(int(W), int(H))))
+    return px * _ass_cap_ratio(family) / float(H)
+
+
+def editorial_headline_note(edl, font_size, W=1080, H=1920, max_size=0.085, owns=1.2):
+    """The editorial headline's measured cap height against the captions,
+    with the font_size that reaches them (or that none up to ``max_size``
+    does); '' with no transcript captions or nothing to measure."""
+    try:
+        ref = caption_cap(edl, W, H)
+        if not ref or font_size is None:
+            return ""
+        target, who = ref
+        cap = ass_text_cap(font_size, W, H)
+    except Exception:  # noqa: BLE001 — a measurement is advice, never a block
+        return ""
+    ratio = cap / max(1e-6, target)
+    line = (f"\nHEADLINE TYPE (measured from the font files): the headline's cap height is "
+            f"{cap:.3f} of the frame height (font_size {float(font_size):g}) vs {who} "
+            f"{target:.3f}: {ratio:.2f}x.")
+    if ratio >= owns - 1e-6:
+        return line
+    goal = target * (owns if ratio >= 1.0 - 1e-6 else 1.0)
+    short = min(int(W), int(H))
+    need = math.ceil(math.ceil(goal * H / _ass_cap_ratio(EDITORIAL_FONT) - 1e-9)
+                     / short * 1000.0) / 1000.0
+    them = "them" if goal <= target else f"{owns:g}x"
+    reach = (f"font_size {need:g} reaches {them} (a shorter claim or a taller box keeps it "
+             "in three lines)" if need <= max_size + 1e-9 else
+             f"no font_size up to {max_size:g} reaches {them}")
+    alt = ("; over a card or letterbox the persistent headline template "
+           "(add_motion_graphic template='headline') sizes its claim to the band and "
+           "measures it at write")
+    if ratio >= 1.0 - 1e-6:
+        return line + f" Under {owns:g}x it reads as the captions' size, not the hook: {reach}{alt}."
+    return (line + " NOTE (headline type): SMALLER than the captions — the hook must not be "
+            f"the smallest type on screen: {reach}{alt}.")
 
 
 # ── the fix: band, length, card ───────────────────────────────────────────
