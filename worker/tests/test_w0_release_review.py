@@ -293,3 +293,28 @@ def test_the_backend_can_load_the_motion_modules_by_path(tmp_path):
                          cwd=str(tmp_path), capture_output=True, text=True,
                          timeout=60)
     assert out.returncode == 0 and "loaded" in out.stdout, out.stderr[-800:]
+
+
+def test_library_sounds_and_verified_keys_are_never_looked_up(web_off):
+    import db as dbx
+    import music_gate
+    import sound_library
+    ctx, fake = _ctx()
+    lookups = []
+    real_run = fake.run
+
+    def run(fn, *a, **k):
+        if fn is dbx.asset_by_key:
+            lookups.append(a[1])
+        return real_run(fn, *a, **k)
+    fake.run = run
+    sid = sound_library.catalog()[0]["id"]
+    lib_key = sound_library.asset_key(7, sid)
+    edl = dict(ctx.latest_edl()["json"])
+    assert ctx.write_edl(dict(edl, sfx=[_sfx(lib_key)]), "lib").startswith(
+        "EDL v")
+    music_gate.grant_sfx(ctx, MINE)            # what add_sfx does
+    edl = dict(ctx.latest_edl()["json"])
+    out = ctx.write_edl(dict(edl, sfx=edl["sfx"] + [_sfx(MINE, "s2")]), "m")
+    assert out.startswith("EDL v"), out
+    assert lookups == []
