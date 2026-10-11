@@ -531,6 +531,13 @@ FLASH_SAFE_MAX_PER_S = 3
 # ---- W1 1D end
 
 # ---- W1 1E (finishing and variants) begin
+# .cube LUTs are accepted up to this edge (INTERFACES_W1 §3.5; lutlib).
+LUT_MAX_SIZE = 65
+# make_variant_set: kinds per call (6 stay under 10 CPU-s on the agent lane).
+VARIANT_MAX_KINDS = int(os.getenv("VARIANT_MAX_KINDS", "6"))
+# Gate for a 1E card that ships dark (status: dark, flag: FINISH_LAB_DEVICES).
+FINISH_LAB_DEVICES = os.getenv("FINISH_LAB_DEVICES", "0").strip().lower() in (
+    "1", "true", "yes", "on")
 # ---- W1 1E end
 
 # ---- W1 1F (agent layer v1) begin

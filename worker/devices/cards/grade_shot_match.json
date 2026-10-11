@@ -1,0 +1,66 @@
+{
+  "id": "grade_shot_match",
+  "family": "finish",
+  "verb": "match_grade",
+  "fx_type": "grade_window",
+  "stage": "world",
+  "params": {
+    "lut": [
+      {
+        "strength": 1.0,
+        "origin": "match"
+      }
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:lut3d"
+    ]
+  },
+  "binds_to": [
+    "section",
+    "cut"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 2
+    },
+    "charged": {
+      "per_short": 3
+    }
+  },
+  "never": [
+    "matching across a deliberate look change"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 12.0,
+      "batch": 12.0,
+      "local": 6.0
+    },
+    "fixed_ms": 400
+  },
+  "exemplars": [
+    "11@0.867"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "Match one camera or day to the hero frame (CIELAB transfer baked to a 33^3 cube)",
+  "skill": "finishing"
+}

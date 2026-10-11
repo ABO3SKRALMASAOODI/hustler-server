@@ -1,0 +1,71 @@
+{
+  "id": "grade_lut_import",
+  "family": "finish",
+  "verb": "import_lut",
+  "fx_type": "grade_window",
+  "stage": "world",
+  "params": {
+    "lut": [
+      {
+        "strength": 1.0,
+        "origin": "import"
+      }
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:lut3d"
+    ]
+  },
+  "binds_to": [
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 2
+    },
+    "charged": {
+      "per_short": 3
+    }
+  },
+  "never": [
+    "decoration with no metaphor behind it",
+    "two finish families in one section"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "reduced": "graded without the LUT"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 12.0,
+      "batch": 12.0,
+      "local": 6.0
+    },
+    "fixed_ms": 400
+  },
+  "exemplars": [
+    "04@0",
+    "05@0"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "The user's own .cube look (up to 65^3), validated, at a chosen strength",
+  "skill": "finishing"
+}

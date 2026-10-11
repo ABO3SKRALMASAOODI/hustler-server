@@ -1,0 +1,26 @@
+# Track 1E device card (variant_set). Contract: devices/INTERFACES.md §5.
+id: variant_set
+family: finish
+verb: make_variant_set
+stage: pre_captions
+params: {}
+needs:
+  sidecars: []
+  lane_features: []
+binds_to: [beat, cut, time]
+budget:
+  calm: {per_short: 1}
+  designed: {per_short: 2}
+  charged: {per_short: 3}
+never: ['variants as decoration: each one is a metaphor (mechanism, inside the body, data)']
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 0.0, batch: 0.0, local: 0.0}
+  fixed_ms: 2500
+exemplars: [01@0.29–0.96, 17@1.43–2.0]
+verify: [determinism]
+status: live
+description: Registered variant stills of one frame (photo, negative, line, blueprint, thermal ...) for
+  strobes
+skill: finishing
