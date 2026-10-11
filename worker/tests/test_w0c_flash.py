@@ -139,7 +139,10 @@ def test_the_export_gate_reads_the_same_rule_loaded_by_path():
     src = open(os.path.join(os.path.dirname(path), os.pardir, "backend",
                             "routes", "video.py"), encoding="utf-8").read()
     assert 'wflash = _pure_worker_module("flash_safety")' in src
-    assert 'flash_flag["contains_flashing"] = True' in src
+    # the final job's payload is stamped by the backend's _flash_flag
+    # (unit-tested in backend/tests/test_w0c_flash_export.py)
+    assert 'return {"contains_flashing": True}' in src
+    assert '**_flash_flag(edl_row["json"])' in src
 
 
 def test_an_earlier_opt_in_is_acknowledged_not_thinned():
