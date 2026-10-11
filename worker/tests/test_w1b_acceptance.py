@@ -194,7 +194,7 @@ def test_at_1b_1_white_silhouette_flashes(A, at1, tag):
         "wall_s": {"with": fx["wall_s"], "without": ctl["wall_s"]},
         "cpu_s": {"with": fx.get("cpu_s"), "without": ctl.get("cpu_s")}})
     f = A.frame_of(d["items"][0]["start"], rf)
-    A.board("AT-1B-1", fx["path"], f / round(rf, 3) + 0.001, "22", 8.43,
+    A.board("AT-1B-1", fx["path"], f, "22", 8.43,
             footer=[f"{tag}: '{d['words'][0]}' frame {f}; IoU "
                     f"{metrics['landings'][0]['fill_iou']}"], tag=f"-{tag}")
 
@@ -237,7 +237,9 @@ def test_at_1b_1_beyond_one_call_hits_every_shot_of_a_montage(A,
 def at7(A):
     win = A.window("V01", "thiel_ai_bigger")
     keep = [[3.0, 9.0]]
-    base = A.edl(keep, focus=(0.42, 0.5))
+    # the speaker's face sits at x 0.45-0.62 of the 16:9 frame: a 9:16
+    # crop centred at 0.55 keeps it whole (0.42 cut it at the right edge)
+    base = A.edl(keep, focus=(0.55, 0.5))
     fps = win["fps"]
     a, b = A.span(A.frame_of(2.0, fps), 2, fps)
     item = {"id": "sx1", "type": "subject", "stage": "world", "start": a,
@@ -274,8 +276,7 @@ def test_at_1b_7_subject_only_negative_is_local(A, at7):
                                 "inside_mean_abs_delta": round(inside, 2)})
     assert loc["value"] == 0, loc
     assert inside > 60
-    A.board("AT-1B-7", fx["path"], fr[0] / round(at7["win"]["fps"], 3)
-            + 0.001, "13", 6.92,
+    A.board("AT-1B-7", fx["path"], fr[0], "13", 6.92,
             footer=[f"region_locality {loc['value']:.0f}; inside mean "
                     f"|delta| {inside:.0f}"])
 
@@ -283,7 +284,12 @@ def test_at_1b_7_subject_only_negative_is_local(A, at7):
 # ── AT-1B-2: poster silhouette on the Look's accent field ───────────────
 
 POSTER_CASES = {
-    "v01": ("V01", "thiel_ai_bigger", [[3.0, 9.0]], (0.42, 0.5)),
+    # V01: a crop that keeps the face whole (0.42 cut it at the edge).
+    # V11 stays at 0.5: framed whole (0.66) the soft hair edge of the
+    # 960-px matte, upscaled 3.5x by the stand-in, reads 41 in the band
+    # measure below (bar 40) with no plate fringe on inspection (the plate
+    # is black like the hair); 1A's guided upsampling of finals is the fix.
+    "v01": ("V01", "thiel_ai_bigger", [[3.0, 9.0]], (0.55, 0.5)),
     "v11": ("V11", "stage_two_figures", [[20.0, 26.0]], (0.5, 0.5)),
 }
 ACCENT = "#ff5a36"
@@ -378,7 +384,7 @@ def test_at_1b_2_poster_on_the_accent_field(A, at2, tag):
     assert met["field_vs_accent_max"] <= 2, met
     assert met["edge_chatter"] <= 0.002, met
     assert met["halo_band_p95_rgb_distance"] <= 40, met
-    t = (fr[len(fr) // 2]) / round(d["win"]["fps"], 3) + 0.001
+    t = int(fr[len(fr) // 2])
     A.board("AT-1B-2", sil["path"], t, "23", 2.5, tag=f"-{tag}-sil",
             footer=[f"field sigma {met['field_sigma']}, chatter "
                     f"{met['edge_chatter']}"])
@@ -657,7 +663,8 @@ def test_at_1b_5_glow_is_screen_light_with_a_bounded_halo(A, at5, tag):
         met["screen_residual_levels"] <= 3.0, met
     assert 0.02 <= met["halo_extent_share_of_height"] <= 0.04, met
     assert met["max_abs_delta_beyond_radius"] <= 2, met
-    A.board("AT-1B-5", fx["path"], 5.0, "36", 5.0, tag=f"-{tag}",
+    A.board("AT-1B-5", fx["path"], int(frames[1]), "36", 5.0,
+            tag=f"-{tag}",
             footer=[f"halo {met['halo_extent_share_of_height'] * 100:.1f}% "
                     f"of height; residual {met['screen_residual_levels']}"])
 
@@ -700,4 +707,4 @@ def test_at_1b_6_background_replaced_by_a_ui_recording(A):
                                 "metrics": met, "judge": "owner board"})
     assert met["subject_core_max_abs_delta"] == 0
     assert met["world_mean_abs_delta"] > 20
-    A.board("AT-1B-6", fx["path"], 3.0, "18", 10.72)
+    A.board("AT-1B-6", fx["path"], int(f), "18", 10.72)

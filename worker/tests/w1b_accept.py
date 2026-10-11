@@ -275,12 +275,36 @@ def ref_path(ref):
 
 
 def board(at, ours, t_ours, ref, t_ref, footer=(), tag=""):
+    """A 2-up still: the reference at ``t_ref`` seconds, ours at ``t_ours``
+    — an int is an exact FRAME index (a seek by seconds can land a frame
+    off, and a 1-frame device then shows its neighbour: AT-1B-1's board
+    showed a decay frame, not the hit)."""
     from benchmarks.refbench import boards
     out = os.path.join(OUT, "boards", f"{at}{tag}.png")
-    return boards.still_2up((ref_path(ref), t_ref, f"ref {ref}"),
-                            (ours, t_ours, f"Valmera {at}"), out,
-                            height=720, title=f"{at} vs {ref}@{t_ref:g}",
-                            footer=footer)
+    if not isinstance(t_ours, int):
+        return boards.still_2up((ref_path(ref), t_ref, f"ref {ref}"),
+                                (ours, t_ours, f"Valmera {at}"), out,
+                                height=720, title=f"{at} vs {ref}@{t_ref:g}",
+                                footer=footer)
+    from PIL import Image
+    height = 720
+    a = boards.grab(ref_path(ref), t_ref, height)
+    b = grab_frame(ours, t_ours, height)
+    gap, top = 24, 70
+    bottom = 40 + 30 * max(1, len(footer))
+    img = Image.new("RGB", (a.shape[1] + b.shape[1] + 3 * gap,
+                            top + height + bottom), boards.BG)
+    img.paste(Image.fromarray(a), (gap, top))
+    img.paste(Image.fromarray(b), (2 * gap + a.shape[1], top))
+    boards._caption(img, [f"{at} vs {ref}@{t_ref:g}"], 12, x=gap, size=26,
+                    color=boards.ACCENT)
+    boards._caption(img, [f"ref {ref}  @{t_ref:.2f}s"], 44, x=gap, size=18)
+    boards._caption(img, [f"Valmera {at}  frame {t_ours}"], 44,
+                    x=2 * gap + a.shape[1], size=18)
+    boards._caption(img, list(footer), top + height + 14, x=gap, size=20)
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    img.save(out)
+    return out
 
 
 def grab_frame(path, frame, height):
