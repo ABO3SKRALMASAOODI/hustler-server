@@ -32,7 +32,7 @@ ADMIN_EMAIL = "thevalmera@gmail.com"
 # The answer sets. Stored as stable slugs, never as display text, so the
 # labels can be reworded on the frontend without orphaning historic rows.
 CHANNELS = {"tiktok", "instagram", "youtube", "x", "google", "reddit",
-            "friend", "ai_chatbot", "other"}
+            "friend", "ai_chatbot", "valmera_message", "other"}
 USE_CASES = {"social_clips", "youtube_videos", "ads_marketing", "podcast",
              "course_tutorial", "client_work", "personal", "other"}
 GOALS = {"save_time", "no_editing_skill", "more_output", "better_quality",
@@ -274,11 +274,29 @@ def plan_intent():
 @onboarding_bp.route("/admin/onboarding", methods=["GET"])
 @admin_required
 def admin_onboarding():
-    """Every answer, plus the roll-ups worth looking at first."""
+    """Every answer (paged), plus the roll-ups worth looking at first.
+
+    Customers only (the same population as every other admin number), so the
+    owner's and test accounts' answers no longer count. `page`/`per_page`
+    page the rows (default 1 / 500, the old fixed limit); `total` is the true
+    number of answers.
+    """
+    from admin_metrics.defs import customer
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+        per_page = max(1, min(500, int(request.args.get("per_page", 500))))
+    except (TypeError, ValueError):
+        return jsonify({"error": "page and per_page must be numbers"}), 400
+    scope = customer("u")
     conn = get_db()
     try:
+        conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""SELECT count(*) AS n FROM onboarding_responses o
+                             JOIN users u ON u.id = o.user_id
+                            WHERE {scope}""")
+            total = int(cur.fetchone()["n"])
+            cur.execute(f"""
                 SELECT o.id, o.user_id, u.email, u.plan, u.created_at AS signed_up,
                        o.channel, o.channel_other, o.use_case, o.use_case_other,
                        o.goal, o.goal_other,
@@ -286,16 +304,17 @@ def admin_onboarding():
                        u.device_browser, o.skipped, o.created_at
                   FROM onboarding_responses o
                   JOIN users u ON u.id = o.user_id
+                 WHERE {scope}
                  ORDER BY o.created_at DESC
-                 LIMIT 500
-            """)
+                 LIMIT %s OFFSET %s
+            """, (per_page, (page - 1) * per_page))
             rows = [dict(r) for r in cur.fetchall()]
 
             def breakdown(col):
                 cur.execute(f"""
-                    SELECT COALESCE({col}, 'unanswered') AS k, COUNT(*) AS n
-                      FROM onboarding_responses
-                     WHERE skipped = false
+                    SELECT COALESCE(o.{col}, 'unanswered') AS k, COUNT(*) AS n
+                      FROM onboarding_responses o JOIN users u ON u.id = o.user_id
+                     WHERE o.skipped = false AND {scope}
                      GROUP BY 1 ORDER BY n DESC
                 """)
                 return [dict(r) for r in cur.fetchall()]
@@ -306,26 +325,30 @@ def admin_onboarding():
 
             # Answered vs skipped vs never shown — the response rate matters
             # as much as the answers.
-            cur.execute("""
+            cur.execute(f"""
                 SELECT
-                    (SELECT COUNT(*) FROM onboarding_responses
-                      WHERE skipped = false)                       AS answered,
-                    (SELECT COUNT(*) FROM onboarding_responses
-                      WHERE skipped = true)                        AS skipped,
-                    (SELECT COUNT(*) FROM users WHERE is_verified = 1) AS users
+                    count(*) FILTER (WHERE o.id IS NOT NULL
+                                       AND o.skipped = false) AS answered,
+                    count(*) FILTER (WHERE o.skipped = true) AS skipped,
+                    count(*) AS users
+                  FROM users u LEFT JOIN onboarding_responses o
+                    ON o.user_id = u.id
+                 WHERE {scope}
             """)
             totals = dict(cur.fetchone())
 
-            cur.execute("""
-                SELECT COALESCE(device_type, 'unknown') AS k, COUNT(*) AS n
-                  FROM users WHERE is_verified = 1
+            cur.execute(f"""
+                SELECT COALESCE(u.device_type, 'unknown') AS k, COUNT(*) AS n
+                  FROM users u WHERE {scope}
                  GROUP BY 1 ORDER BY n DESC
             """)
             devices = [dict(r) for r in cur.fetchall()]
 
         return jsonify({"responses": rows, "channels": channels,
                         "use_cases": use_cases, "goals": goals,
-                        "devices": devices, "totals": totals}), 200
+                        "devices": devices, "totals": totals,
+                        "page": page, "per_page": per_page, "total": total,
+                        "scope": "customers"}), 200
     finally:
         conn.close()
 
@@ -333,28 +356,44 @@ def admin_onboarding():
 @onboarding_bp.route("/admin/plan-intents", methods=["GET"])
 @admin_required
 def admin_plan_intents():
+    """Plan button presses. Customers only, plus presses made while signed
+    out (they cannot be scoped). `days` limits the window (default: all);
+    each summary row carries `people` (distinct) next to `presses`."""
+    from admin_metrics.defs import customer
+    try:
+        days = int(request.args["days"]) if request.args.get("days") else None
+    except (TypeError, ValueError):
+        return jsonify({"error": "days must be a number"}), 400
+    window = ("AND i.created_at >= NOW() - (%s || ' days')::interval"
+              if days else "")
+    params = (str(max(1, min(days, 3650))),) if days else ()
+    scope = f"(i.user_id IS NULL OR {customer('u')})"
     conn = get_db()
     try:
+        conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT i.id, i.user_id, COALESCE(i.email, u.email) AS email,
                        i.plan, i.billing, i.price_usd, i.device_type,
                        i.source, i.created_at, u.plan AS current_plan
                   FROM plan_intents i
                   LEFT JOIN users u ON u.id = i.user_id
+                 WHERE {scope} {window}
                  ORDER BY i.created_at DESC
                  LIMIT 500
-            """)
+            """, params)
             rows = [dict(r) for r in cur.fetchall()]
 
-            cur.execute("""
-                SELECT plan, billing, COUNT(*) AS presses,
-                       COUNT(DISTINCT COALESCE(user_id::text, email)) AS people
-                  FROM plan_intents
-                 GROUP BY plan, billing
+            cur.execute(f"""
+                SELECT i.plan, i.billing, COUNT(*) AS presses,
+                       COUNT(DISTINCT COALESCE(i.user_id::text, i.email)) AS people
+                  FROM plan_intents i LEFT JOIN users u ON u.id = i.user_id
+                 WHERE {scope} {window}
+                 GROUP BY i.plan, i.billing
                  ORDER BY presses DESC
-            """)
+            """, params)
             summary = [dict(r) for r in cur.fetchall()]
-        return jsonify({"intents": rows, "summary": summary}), 200
+        return jsonify({"intents": rows, "summary": summary,
+                        "days": days, "scope": "customers"}), 200
     finally:
         conn.close()

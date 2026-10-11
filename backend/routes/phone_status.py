@@ -12,6 +12,7 @@ from flask import Blueprint, current_app, jsonify, request
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
+from admin_metrics import live as live_metrics
 from routes.admin import _scope
 
 
@@ -127,11 +128,9 @@ def phone_status():
                    AND created_at >= %s AND created_at <= %s
             """, (starts_at, now_utc))
 
-            active_now = _count(cur, """
-                SELECT COUNT(DISTINCT COALESCE(NULLIF(device_id, ''), ip)) AS n
-                  FROM page_visits
-                 WHERE visited_at >= NOW() - INTERVAL '5 minutes'
-            """)
+            # The admin's "on the site now": people only, never robots,
+            # link previews or the owner's own devices.
+            active_now = live_metrics.people_now(cur)
             jobs_running = _count(cur, """
                 SELECT COUNT(*) AS n FROM video_jobs WHERE state = 'running'
             """)

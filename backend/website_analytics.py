@@ -1,14 +1,56 @@
 """Bounded first-party measurement. Never accept form text, query strings or tokens."""
 import re
+import threading
+import time
 import uuid
 from urllib.parse import urlsplit
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 from acquisition import clean_attribution
+from admin_metrics.defs import ROBOT_UA_RE
 from flask import current_app
 
 ID = re.compile(r'^[a-zA-Z0-9_-]{8,64}$')
-BOT = re.compile(r'bot|crawler|spider|slurp|headless|notebooklm|vercel-screenshot', re.I)
+# One robot list for the write path and every admin report (admin_metrics).
+BOT = ROBOT_UA_RE
+TRACKING_VALUES = ('tracked', 'privacy_signal', 'no_identity')
+SIGNUP_WRITE_FAILURES = {'count': 0}
+
+# Columns from migration 031 are detected, not assumed: until the migration is
+# applied by hand the beacon and signup writes behave exactly as before.
+_SCHEMA_TTL_S = 300
+_schema = {}
+_schema_lock = threading.Lock()
+
+
+def _schema_flags(cur):
+    now = time.monotonic()
+    with _schema_lock:
+        hit = _schema.get('flags')
+        if hit and now - hit[0] < _SCHEMA_TTL_S:
+            return hit[1]
+    cur.execute("""SELECT table_name, column_name, is_nullable
+                     FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND ((table_name = 'page_visits'
+                            AND column_name IN ('interacted', 'signed_in'))
+                        OR (table_name = 'website_signups'
+                            AND column_name IN ('tracking', 'device_id')))""")
+    rows = {(r['table_name'], r['column_name']): r['is_nullable'] for r in cur.fetchall()}
+    flags = {
+        'interacted': ('page_visits', 'interacted') in rows,
+        'signed_in': ('page_visits', 'signed_in') in rows,
+        'signup_tracking': ('website_signups', 'tracking') in rows
+                           and rows.get(('website_signups', 'device_id')) == 'YES',
+    }
+    with _schema_lock:
+        _schema['flags'] = (now, flags)
+    return flags
+
+
+def reset_schema_cache():
+    with _schema_lock:
+        _schema.clear()
 EVENTS = frozenset({
  'signup_cta', 'upload_cta', 'edit_cta', 'pricing_cta', 'google_start',
  'email_start', 'email_code_start', 'email_code_error', 'email_code_success', 'register_submit', 'register_success', 'register_error',
@@ -72,6 +114,8 @@ def clean_payload(data):
               'search' if any(h in host for h in ('google.','bing.','duckduckgo.','yahoo.')) else
               'social' if any(host == h or host.endswith('.'+h) for h in ('tiktok.com','youtube.com','instagram.com','x.com','facebook.com','reddit.com','linkedin.com')) else 'referral')
     return dict(device_id=ids[0], session_id=ids[1], visit_id=visit,
+                interacted=data.get('interacted') is True,
+                signed_in=data.get('signed_in') is True,
                 page=safe_path(data.get('page')), active=active,
                 scroll=bounded_number(data.get('scroll_depth'), 100),
                 reason=data.get('exit_reason') if data.get('exit_reason') in ('hidden','pagehide','navigation','heartbeat','event') else 'heartbeat',
@@ -96,16 +140,24 @@ def save_visit(data, user_agent):
             cur.execute("SELECT count(*) AS n FROM page_visits WHERE device_id=%s AND visited_at > (now() AT TIME ZONE 'UTC')-interval '1 minute'", (p['device_id'],))
             if cur.fetchone()['n'] >= 60:
                 return False
-            cur.execute('''INSERT INTO page_visits
+            flags = _schema_flags(cur)
+            # interacted/signed_in only ever turn on: a later beacon from an idle
+            # tab can never undo the scroll or click an earlier one reported.
+            extra_cols = ''.join(f',{c}' for c in ('interacted', 'signed_in') if flags[c])
+            extra_vals = ''.join(',%s' for c in ('interacted', 'signed_in') if flags[c])
+            extra_set = ''.join(f',{c}=page_visits.{c} OR EXCLUDED.{c}'
+                                for c in ('interacted', 'signed_in') if flags[c])
+            extra_params = tuple(p[c] for c in ('interacted', 'signed_in') if flags[c])
+            cur.execute(f'''INSERT INTO page_visits
                 (analytics_id,page,device_id,session_id,ip,user_agent,country,referrer,
-                 referrer_source,device_type,browser,time_on_page,last_seen_at,scroll_depth,exit_reason,attribution)
-                VALUES (%s,%s,%s,%s,NULL,%s,'Unknown',%s,%s,%s,%s,%s,now() AT TIME ZONE 'UTC',%s,%s,%s)
+                 referrer_source,device_type,browser,time_on_page,last_seen_at,scroll_depth,exit_reason,attribution{extra_cols})
+                VALUES (%s,%s,%s,%s,NULL,%s,'Unknown',%s,%s,%s,%s,%s,now() AT TIME ZONE 'UTC',%s,%s,%s{extra_vals})
                 ON CONFLICT (analytics_id) DO UPDATE SET
                   time_on_page=GREATEST(page_visits.time_on_page,EXCLUDED.time_on_page),
                   scroll_depth=GREATEST(page_visits.scroll_depth,EXCLUDED.scroll_depth),
-                  last_seen_at=EXCLUDED.last_seen_at,exit_reason=EXCLUDED.exit_reason
+                  last_seen_at=EXCLUDED.last_seen_at,exit_reason=EXCLUDED.exit_reason{extra_set}
                 WHERE page_visits.device_id=EXCLUDED.device_id AND page_visits.session_id=EXCLUDED.session_id
-                RETURNING analytics_id''', (p['visit_id'],p['page'],p['device_id'],p['session_id'],user_agent[:300],p['referrer'],p['source'],device,browser,p['active'],p['scroll'],p['reason'],Json(p['attribution'])))
+                RETURNING analytics_id''', (p['visit_id'],p['page'],p['device_id'],p['session_id'],user_agent[:300],p['referrer'],p['source'],device,browser,p['active'],p['scroll'],p['reason'],Json(p['attribution']),*extra_params))
             if not cur.fetchone():
                 return False
             cur.execute('SELECT count(*) AS n FROM website_events WHERE visit_id=%s', (p['visit_id'],))
@@ -117,20 +169,46 @@ def save_visit(data, user_agent):
     finally:
         conn.close()
 
+def signup_tracking(data):
+    """What the browser sent at signup: tracked ids, a privacy signal, or nothing."""
+    if identity(data):
+        return 'tracked'
+    if isinstance(data, dict) and data.get('tracking') == 'privacy_signal':
+        return 'privacy_signal'
+    return 'no_identity'
+
+
 def record_signup(user_id, data):
-    """Called ONLY by successful first verification / new Google exchange."""
+    """Called ONLY by successful first verification / new Google exchange.
+
+    Once migration 031 is applied, ALWAYS writes exactly one row per new
+    verified account, so "where did they come from" is never silently empty:
+    tracking = tracked | privacy_signal | no_identity. Privacy-signal browsers
+    store no ids and no labels (privacy policy: we honour DNT/GPC). Before the
+    migration it keeps the old behaviour (a row only when ids were sent).
+    """
     ids = identity(data)
-    if not ids:
-        return
+    tracking = signup_tracking(data)
     conn = None
     try:
         conn = connect()
         with conn, conn.cursor() as cur:
-            cur.execute('''INSERT INTO website_signups(user_id,device_id,session_id,attribution)
-                           SELECT id,%s,%s,%s FROM users WHERE id=%s AND is_verified=1
-                           ON CONFLICT(user_id) DO NOTHING''', (*ids, Json(clean_attribution(data.get('attribution'))), user_id))
+            if _schema_flags(cur)['signup_tracking']:
+                attribution = Json(clean_attribution(data.get('attribution'))) if ids else None
+                cur.execute('''INSERT INTO website_signups(user_id,device_id,session_id,attribution,tracking)
+                               SELECT id,%s,%s,%s,%s FROM users WHERE id=%s AND is_verified=1
+                               ON CONFLICT(user_id) DO NOTHING''',
+                            (ids[0] if ids else None, ids[1] if ids else None,
+                             attribution, tracking, user_id))
+            elif ids:
+                cur.execute('''INSERT INTO website_signups(user_id,device_id,session_id,attribution)
+                               SELECT id,%s,%s,%s FROM users WHERE id=%s AND is_verified=1
+                               ON CONFLICT(user_id) DO NOTHING''', (*ids, Json(clean_attribution(data.get('attribution'))), user_id))
     except Exception:
-        current_app.logger.warning('Signup attribution unavailable')
+        # Never fail a signup over measurement, but never hide the loss either.
+        SIGNUP_WRITE_FAILURES['count'] += 1
+        current_app.logger.exception('Signup source could not be saved (%s failures since start)',
+                                     SIGNUP_WRITE_FAILURES['count'])
     finally:
         if conn is not None:
             conn.close()
