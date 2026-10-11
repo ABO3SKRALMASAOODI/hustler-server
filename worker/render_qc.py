@@ -139,7 +139,8 @@ SRC_FACE_CHIN_IN = .06
 PICTURE_FLOOR = .54
 # Type, measured on the compositions themselves (motion_engine.probe at
 # full design size): ink at INK_ALPHA, letters standing on one baseline,
-# cap height = the tall letters' median. Bounded by its own budget.
+# cap height = the tall letters' median. Bounded by its own budget, inside
+# the check's (BUDGET_S: a render job waits for the whole check).
 TYPE_BUDGET_S = 30.0
 TYPE_INK = 200
 CAPTION_SAMPLES = 24
@@ -2089,9 +2090,14 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
                               f"{MAX_FULL_PASS_S:.0f}s type pass")
     elif measurable:
         try:
-            tres = type_pass(tplan, time.monotonic() + TYPE_BUDGET_S)
+            # within the check's own budget (it runs before the render job
+            # completes: a preview waits for it), at most TYPE_BUDGET_S
+            type_deadline = min(deadline, time.monotonic() + TYPE_BUDGET_S)
+            tres = type_pass(tplan, type_deadline)
             if tres:
                 res["type"] = type_findings(tres, tplan, plan_.get("cards"))
+            elif type_deadline - time.monotonic() < 3.0:
+                res["skipped"].append("type: the check's time budget was spent")
             else:
                 res["skipped"].append("type: no browser to measure it here")
         except Exception as exc:  # noqa: BLE001

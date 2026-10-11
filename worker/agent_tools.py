@@ -103,7 +103,7 @@ import sfx_placement
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
-                     custom_chain_error, patch_fingerprint,
+                     custom_chain_error, patch_clip_key, patch_fingerprint,
                      EDLValidationError, Frame, PictureCard,
                      HEX_COLOR,
                      canvas_edl, clip_anim, default_edl, describe_edl,
@@ -3676,8 +3676,13 @@ def _layout_report(ctx, edl_json=None, calls_only=False):
         return ""
     if calls_only and not layout.get("windows"):
         return ""
-    edl_json = edl_json if edl_json is not None else ctx.latest_edl()["json"]
-    keep = [list(k) for k in edl_json.get("keep") or []]
+    try:
+        # a report never costs the caller (the project state, get_video_info)
+        edl_json = edl_json if edl_json is not None else ctx.latest_edl()["json"]
+        keep = [list(k) for k in edl_json.get("keep") or []]
+    except Exception as exc:  # noqa: BLE001
+        print(f"[source_layout] report skipped: {str(exc)[:160]}", flush=True)
+        return ""
     tl = None
     try:
         tl = Timeline(edl_json.get("keep") or [], edl_json.get("inserts") or [],
@@ -11403,9 +11408,11 @@ def _patch_groups(items, duration):
 
 def _run_patch(ctx, window, group_regions):
     """Build (or find) ONE proxy-res patch clip for `window`. Returns
-    (asset_key, fp, stats) — stats carries before/after ink when the clip
-    was freshly built, {} when it already existed (it measured clean when it
-    was first made; that is why it is cached).
+    (asset_key, fp, stats, repaint) — stats carries before/after ink when
+    the clip was freshly built, {} when it already existed (it measured
+    clean when it was first made; that is why it is cached); ``repaint`` the
+    algorithm the clip was built with (PatchItem.repaint: None when an
+    executor still on the round-92 repaint built it, mid-rollout).
 
     Round 92: this replaces the whole-file clean pass for erases. The clip
     repaints only [window] of the PREVIEW SOURCE — the cleaned proxy when a
@@ -11419,10 +11426,11 @@ def _run_patch(ctx, window, group_regions):
     sha = row.get("sha256") or ""
     ctx._orig_sha = sha
     edl = ctx.latest_edl()["json"]
-    fp = patch_fingerprint(sha, group_regions, window, inpaint.REPAINT_VERSION)
-    key = f"patches/{ctx.project_id}/{fp[:16]}.mp4"
+    fp = patch_fingerprint(sha, group_regions, window)
+    repaint = inpaint.REPAINT_VERSION
+    key = patch_clip_key(ctx.project_id, fp, repaint)
     if storage.exists(key):
-        return key, fp, {}
+        return key, fp, {}, repaint
     # The export rebuilds this patch at FULL resolution from the original —
     # refuse at erase time anything that could not finish there, so an
     # accepted erase is always an exportable one.
@@ -11446,13 +11454,27 @@ def _run_patch(ctx, window, group_regions):
             ctx.project_id,
             {"mode": "patch", "src_key": src_key, "out_key": key,
              "regions": group_regions, "window": list(window),
-             "measure": True, "repaint": inpaint.REPAINT_VERSION},
+             "measure": True, "repaint": repaint},
             user_id=ctx.job.get("user_id"))
+        if isinstance(stats, dict) and "metric" not in stats:
+            # An executor one release behind (a rolling deploy) ignores
+            # 'repaint' and builds the round-92 repaint, measured by its
+            # stroke ink. Record what was built, under the round-92 key, so
+            # the clip is never served (or cached) as a newer repaint.
+            repaint = None
+            legacy = patch_clip_key(ctx.project_id, fp, None)
+            try:
+                storage.copy_object(key, legacy)
+                storage.delete_keys([key])
+                key = legacy
+            except Exception as exc:  # noqa: BLE001 — the clip stays where it is
+                print(f"[erase] round-92 patch not re-keyed "
+                      f"({str(exc)[:120]})", flush=True)
     else:
         local_src = ctx.proxy_path()
         out = os.path.join(ctx.workdir, f"patch_{fp[:8]}.mp4")
         stats = inpaint.build_patch(local_src, group_regions, window, out,
-                                    repaint=inpaint.REPAINT_VERSION)
+                                    repaint=repaint)
         # the same honesty check the executor runs (inpaint.erase_measure)
         stats["before"], stats["after"], stats["metric"] = inpaint.erase_measure(
             local_src, out, inpaint._clamped(group_regions, stats),
@@ -11468,7 +11490,7 @@ def _run_patch(ctx, window, group_regions):
         print(f"[erase] patch asset row not recorded ({str(e)[:120]}) — "
               "the clip itself is in storage and the EDL points at it",
               flush=True)
-    return key, fp, stats or {}
+    return key, fp, stats or {}, repaint
 
 
 def _rect_cover(a, b):
@@ -11531,21 +11553,21 @@ def _apply_patches(ctx, new_items, what, drop=None):
     groups = _patch_groups(new_items, ctx.duration)
     entries, lines = [], []
     for window, members in groups:
-        key, fp, stats = _run_patch(ctx, window, members)
+        key, fp, stats, repaint = _run_patch(ctx, window, members)
         # ids count the DROPPED patches too — "replaced pa1" must never
         # name the same id as the patch that replaced it.
         pid = _next_item_id(all_patches + entries, "pa")
         entries.append({"id": pid, "asset_key": key, "fp": fp,
                         "src_start": window[0], "src_end": window[1],
-                        "regions": members, "repaint": inpaint.REPAINT_VERSION})
+                        "regions": members, "repaint": repaint})
         before = stats.get("before") or []
         after = stats.get("after") or []
         metric = stats.get("metric") or ["ink"] * len(before)
         for r, b, a, how in zip(members, before, after, metric):
             gone = (b <= 0.5) or (a <= max(1.5, b * 0.35))
-            what = (f"keeps {a:g}% of the box's original picture" if how == "pattern"
-                    else f"ink {b:g} -> {a:g}")
-            lines.append(f"[{r['id']}] {what} "
+            measured = (f"keeps {a:g}% of the box's original picture"
+                        if how == "pattern" else f"ink {b:g} -> {a:g}")
+            lines.append(f"[{r['id']}] {measured} "
                          + ("— gone" if gone else "— STILL VISIBLE"))
         if any(p.get("escalated") for p in (stats.get("plates") or [])):
             lines.append(f"[{pid}] the text sat on a solid bar, so the "

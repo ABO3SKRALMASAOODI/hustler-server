@@ -56,7 +56,8 @@ import motion_templates  # noqa: E402
 import motion_tools  # noqa: E402
 import number_reveal  # noqa: E402
 from schemas import (CaptionsFromTranscript, Frame, PatchItem,  # noqa: E402
-                     default_edl, patch_fingerprint, validate_edl)
+                     default_edl, patch_clip_key, patch_fingerprint,
+                     validate_edl)
 
 
 # ── 1. phrase_build rows ─────────────────────────────────────────────────
@@ -496,8 +497,10 @@ def test_a_whole_box_hole_is_a_smooth_membrane_not_a_dark_wedge():
 def test_a_patch_records_its_repaint_and_old_patches_keep_their_fingerprint():
     regs = [dict(BOX)]
     legacy = patch_fingerprint("sha", regs, (0.0, 3.0))
-    assert patch_fingerprint("sha", regs, (0.0, 3.0), None) == legacy
-    assert patch_fingerprint("sha", regs, (0.0, 3.0), 2) != legacy
+    # the algorithm keys the clips, never the fingerprint every deployed
+    # renderer checks (tests/test_release_skew.py)
+    assert patch_clip_key(1, legacy, 2) != patch_clip_key(1, legacy, None)
+    assert patch_clip_key(1, legacy, None) == f"patches/1/{legacy[:16]}.mp4"
     item = PatchItem(id="pa1", asset_key="patches/1/x.mp4", fp=legacy, src_start=0.0,
                      src_end=3.0, regions=regs)
     assert item.repaint is None

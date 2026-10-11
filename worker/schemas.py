@@ -2433,22 +2433,38 @@ class StemMix(BaseModel):
 CLEAN_FILLS = ("text", "box")
 
 
-def patch_fingerprint(src_sha, regions, window, repaint=None):
+def patch_fingerprint(src_sha, regions, window):
     """Identity of one repainted WINDOW (round 92): which video, which
-    rectangles, which span — and which repaint algorithm (PatchItem.repaint;
-    None, every patch written before it existed, keeps its fingerprint).
-    Content-addresses the patch clips so re-erasing the same thing is a
-    storage hit, the export can find (or rebuild) the full-res twin
-    deterministically, and a replaced upload is detected the same way
-    clean_fingerprint detects it for a whole cleaned source."""
-    body = {"w": [round(float(window[0]), 2), round(float(window[1]), 2)],
-            "r": [{k: r.get(k) for k in
-                   ("x", "y", "w", "h", "start", "end", "fill")}
-                  for r in (regions or [])]}
-    if repaint is not None:
-        body["a"] = int(repaint)
-    payload = json.dumps(body, sort_keys=True)
+    rectangles, which span. Content-addresses the patch clips so re-erasing
+    the same thing is a storage hit, the export can find (or rebuild) the
+    full-res twin deterministically, and a replaced upload is detected the
+    same way clean_fingerprint detects it for a whole cleaned source.
+
+    The repaint ALGORITHM (PatchItem.repaint) is deliberately not part of
+    it: every deployed renderer checks a stored fp against this exact
+    formula and drops a patch that does not match as 'a repaint of a
+    replaced video'. A version folded in here made a renderer one release
+    behind (a lane mid-rollout) drop every new erase from previews and
+    finals, and a write by such a lane (which strips the unknown field)
+    made the drop permanent. The version keys the stored clips instead
+    (patch_clip_key)."""
+    payload = json.dumps(
+        {"w": [round(float(window[0]), 2), round(float(window[1]), 2)],
+         "r": [{k: r.get(k) for k in
+                ("x", "y", "w", "h", "start", "end", "fill")}
+               for r in (regions or [])]}, sort_keys=True)
     return hashlib.sha1(f"{src_sha}|patch|{payload}".encode()).hexdigest()
+
+
+def patch_clip_key(project_id, fp, repaint=None, full=False):
+    """Storage key of a patch clip: the proxy-res clip the erase builds, or
+    (``full``) the full-res twin an export materializes. A round-92 repaint
+    (``repaint`` None) keeps the keys every release has used; a newer repaint
+    gets its own (``_r2``), so a clip of one algorithm is never served as the
+    other's — while an older renderer, which derives the round-92 full key
+    from fp, builds and finds round-92 twins only there."""
+    tag = f"_r{int(repaint)}" if repaint else ""
+    return f"patches/{project_id}/{fp[:16]}{tag}{'_full' if full else ''}.mp4"
 
 
 def clean_fingerprint(src_sha, regions, cursor=None):
@@ -2499,6 +2515,7 @@ class PatchItem(BaseModel):
     regions: List["CleanRegion"] = Field(default_factory=list)
     # The repaint algorithm (inpaint.REPAINT_VERSION) the clips were built
     # with; None = round 92, so an old EDL's export twin is built as before.
+    # Not part of fp (see patch_fingerprint): it keys the clips instead.
     repaint: Optional[int] = None
 
 

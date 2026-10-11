@@ -50,7 +50,8 @@ import stitch
 import storage
 import timeline as timeline_mod
 import travel
-from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
+from schemas import (clean_fingerprint, patch_fingerprint, patch_clip_key,
+                     EDLValidationError,
                      is_canvas_program, keep_boundaries, master_loudness,
                      quad_bbox, speed_pieces, subject_matte_geom, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
@@ -7845,14 +7846,15 @@ def _run_render_job(worker_db, job):
         # patch clips as stored; a FINAL needs each patch's full-resolution
         # twin, materialized here (window-sized work on the already-download-
         # ed original) exactly once — the key is content-addressed by the
-        # patch fingerprint, so every later export finds it. A patch whose
-        # fingerprint no longer matches this upload is a repaint of a
-        # REPLACED video and is dropped, same rule as clean_source_key.
+        # patch fingerprint and its repaint algorithm (patch_clip_key), so
+        # every later export finds it. A patch whose fingerprint no longer
+        # matches this upload is a repaint of a REPLACED video and is
+        # dropped, same rule as clean_source_key.
         patch_locals = {}
         for pt in (edl_row["json"].get("patches") or []):
             if src_sha != "canvas" and pt.get("fp") != patch_fingerprint(
                     src_sha, pt.get("regions") or [],
-                    (pt.get("src_start"), pt.get("src_end")), pt.get("repaint")):
+                    (pt.get("src_start"), pt.get("src_end"))):
                 print(f"[render {job_id}] ignoring patch {pt['id']}: it "
                       "repaints a different upload (the video was replaced)",
                       flush=True)
@@ -7863,8 +7865,8 @@ def _run_render_job(worker_db, job):
                         pt["asset_key"], workdir) \
                         or _fetch_into(workdir, pt["asset_key"], pt["id"])
                 else:
-                    fkey = pt.get("full_key") \
-                        or f"patches/{project_id}/{pt['fp'][:16]}_full.mp4"
+                    fkey = pt.get("full_key") or patch_clip_key(
+                        project_id, pt["fp"], pt.get("repaint"), full=True)
                     if not storage.exists(fkey):
                         import inpaint as _inp
                         flocal = os.path.join(workdir,
