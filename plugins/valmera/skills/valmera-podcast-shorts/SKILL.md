@@ -109,7 +109,11 @@ disagree, v9 wins on method and the brief wins on preferences.
    (fewer if fewer clear the bar), a standard tier only when asked, and a
    one-line reason for every story left out.
 4. **Materialize once.** One `make_shorts` call with verified sentence
-   boundaries and a 0-100 score.
+   boundaries and a 0-100 score. Its reply (or `shorts_status(parent)` once
+   the children exist) carries the **SOURCE LAYOUT**: a call window, its
+   status bar and buttons, the host's self-view, and the largest card at
+   <= 2x with and without a headline band. Every child starts 9:16 from it;
+   brief each Look against those numbers, not by eye.
 5. **Brief** while the children build (4-7 min): for each short a Look, a
    structure and a 150-word brief with a beat sheet (hook, turn, payoff,
    2-4 hero moments with exact word cues), saved as

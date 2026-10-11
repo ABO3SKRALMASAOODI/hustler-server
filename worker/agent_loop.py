@@ -761,6 +761,11 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
                       f"{v['width']}x{v['height']} @ {v['fps']}fps, "
                       f"audio={'yes' if v['has_audio'] else 'no'}.")
         index_summary = _index_summary(index)
+        # What the frame is made of (a call window, its chrome, the host's
+        # self-view), measured once on the source and shared by its shorts.
+        layout = agent_tools._layout_report(ctx, calls_only=True)
+        if layout:
+            index_summary += "\n" + layout
         # Let joined evidence avoid duplicating a transcript that this exact
         # caller just received.  MCP contexts start false as well; state_block
         # flips them only when its project-state response contains COMPLETE.

@@ -62,6 +62,7 @@ import sfx_search
 import sfx_judge
 import sheets
 import song_find
+import source_layout
 import spatial
 import stock
 import storage
@@ -955,7 +956,9 @@ def get_video_info(ctx):
             f"{gap_txt}. "
             f"Current EDL v{edl['version']}: "
             f"{describe_edl(edl['json'], v['duration'], _source_shape(ctx))}."
-            + (f"\n{prog}" if prog else ""))
+            + (f"\n{prog}" if prog else "")
+            + (f"\n{layout}" if (layout := _layout_report(ctx, edl["json"]))
+               else ""))
 
 
 def get_transcript(ctx, start=0, end=None, asset_key=None):
@@ -3471,6 +3474,202 @@ def _get_spatial(ctx):
     ctx._spatial = spatial.get_or_compute_for_index(
         ctx.db, dbx, index_row, ctx.proxy_path(), ctx.workdir)
     return ctx._spatial
+
+
+def _get_source_layout(ctx, compute=False):
+    """The main source's layout sidecar (source_layout.py), or None.
+    ``compute`` measures and persists it for an index that predates it (one
+    pass over the proxy, ~10 s); otherwise only a stored one is read. Every
+    short shares its parent's index row, so one measurement serves all."""
+    cached = getattr(ctx, "_source_layout", None)
+    if cached:
+        return cached
+    index = getattr(ctx, "index", None) or {}
+    layout = index.get("source_layout") if isinstance(index, dict) else None
+    if not source_layout.valid(layout):
+        layout = None
+        failed = getattr(ctx, "_source_layout_failed", None)
+        if not compute or not getattr(ctx, "has_main_video", False) or (
+                failed is not None and time.monotonic() - failed < 600):
+            return None
+        try:
+            original = ctx.db.run(dbx.latest_asset, ctx.project_id,
+                                  "original")
+            row = (original and original.get("sha256") and
+                   ctx.db.run(dbx.get_index_by_sha, original["sha256"]))
+            if row:
+                layout = source_layout.get_or_compute_for_index(
+                    ctx.db, dbx, row, ctx.proxy_path(), ctx.workdir)
+                if isinstance(index, dict):
+                    index["source_layout"] = layout
+        except Exception as exc:
+            print(f"[source_layout] unavailable: {str(exc)[:160]}",
+                  flush=True)
+            layout = None
+        if not layout:
+            try:
+                ctx._source_layout_failed = time.monotonic()
+            except Exception:
+                pass
+            return None
+    try:
+        ctx._source_layout = layout
+    except Exception:
+        pass
+    return layout
+
+
+def _layout_canvas(ctx, ratio="9:16"):
+    v = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        return renderer.frame_dims(int(float(v["width"])),
+                                   int(float(v["height"])), ratio,
+                                   delivery=True)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return 1080, 1920
+
+
+def _layout_report(ctx, edl_json=None, calls_only=False):
+    """The SOURCE LAYOUT block for this project's kept footage ('' when the
+    source has none measured; with ``calls_only``, '' for a source with no
+    call window too — an ordinary camera source has nothing to add)."""
+    layout = _get_source_layout(ctx)
+    if not layout or not getattr(ctx, "has_main_video", False):
+        return ""
+    if calls_only and not layout.get("windows"):
+        return ""
+    edl_json = edl_json if edl_json is not None else ctx.latest_edl()["json"]
+    keep = [list(k) for k in edl_json.get("keep") or []]
+    tl = None
+    try:
+        tl = Timeline(edl_json.get("keep") or [], edl_json.get("inserts") or [],
+                      edl_json.get("speed") or [])
+    except Exception:
+        tl = None
+    W, H = _layout_canvas(ctx)
+    try:
+        return source_layout.report(
+            layout, keep=keep or None, W=W, H=H,
+            to_program=(tl.src_to_out if tl is not None else None))
+    except Exception as exc:
+        print(f"[source_layout] report failed: {str(exc)[:160]}", flush=True)
+        return ""
+
+
+def _pip_erased(edl, win):
+    """True when the EDL repaints the call's self-view (erase_region over
+    most of its box)."""
+    pip = (win or {}).get("pip")
+    if not pip:
+        return False
+    area = (pip[2] - pip[0]) * (pip[3] - pip[1])
+    regions = list(((edl.get("source_clean") or {}).get("regions") or []))
+    for p in edl.get("patches") or []:
+        regions += list(p.get("regions") or [])
+    for r in regions:
+        try:
+            box = [float(r["x"]), float(r["y"]), float(r["x"]) + float(r["w"]),
+                   float(r["y"]) + float(r["h"])]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if source_layout._overlap(box, pip) >= .8 * area:
+            return True
+    return False
+
+
+def _layout_card(ctx, edl, spans, box, canvas, chosen=True):
+    """(box, SOURCE rect, note) for a source='auto' card over a window that
+    is mostly a CALL (source_layout.py), or None. The rect is the call's
+    picture (its status bar and buttons cropped off) at the box's aspect,
+    holding the guest's head; the box narrows rather than enlarge past 2x.
+    An omitted box (``chosen`` False) takes the largest card at <= 2x."""
+    layout = _get_source_layout(ctx, compute=True)
+    if not layout or not spans:
+        return None
+    win, share, _kinds = source_layout.call_share(layout, spans)
+    if win is None or share < source_layout.CALL_CARD_SHARE:
+        return None
+    v = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        sw, sh = float(v["width"]), float(v["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    W, H = canvas
+    if chosen:
+        nbox, rect, k, head_ok, pip = source_layout.card_for_box(
+            win, sw, sh, box, W, H)
+    else:
+        plan = source_layout.card_plan(win, sw, sh, W, H)
+        nbox, rect, k, head_ok, pip = (plan["box"], plan["source"], plan["k"],
+                                       plan["head_ok"], plan["pip"])
+    fmt = source_layout.fmt
+    note = (f"CALL LAYOUT (measured on the source): {share * 100:.0f}% of this "
+            f"window is the call {fmt(win['rect'])}, so the card shows the "
+            f"call's picture {fmt(rect)} — its status bar and buttons cropped "
+            "off, the guest's measured face inside")
+    if chosen and any(abs(a - b) > 1e-3 for a, b in zip(nbox, box)):
+        note += (f"; the box narrowed to {fmt(nbox)} so the picture stays at "
+                 f"{k:.2f}x (filling the box would enlarge it past "
+                 f"{source_layout.UPSCALE_CAP:g}x)")
+    elif not chosen:
+        note += (f"; no box given: the largest card at <= "
+                 f"{source_layout.UPSCALE_CAP:g}x, {fmt(nbox)}")
+    if head_ok is False:
+        note += ("; the guest's measured face does NOT fit whole in this box "
+                 "— a taller box (or no box) keeps it")
+    if pip in ("cut", "inside") and not _pip_erased(edl, win):
+        call = source_layout.erase_call(
+            win, min(float(a) for a, _b in spans),
+            max(float(b) for _a, b in spans))
+        note += (f"; the host's self-view {fmt(win['pip'])} is "
+                 + ("CUT by this card — a face must never be cut: erase it "
+                    "first with " if pip == "cut" else
+                    "whole inside the card (erase it for a clean picture: ")
+                 + call + ("" if pip == "cut" else ")"))
+    if share < .98:
+        note += (f"; {100 - share * 100:.0f}% of the window is not the call "
+                 "(another shot): end the card at that cut, or this rect shows "
+                 "the wrong place there")
+    return nbox, rect, note, share
+
+
+def _layout_reframe(ctx, ratio, mode):
+    """auto_reframe on a CALL layout (source_layout.py): one crop aim per
+    shot — the call window centred and whole, the other shots on their own
+    speaker with every face wholly in or out, fitted where no aim can —
+    plus what the call offers a card. None when the kept footage is not
+    mostly a call (every other source reframes exactly as before)."""
+    if mode != "auto" or not getattr(ctx, "has_main_video", False):
+        return None          # an explicit mode always wins
+    try:
+        rw, rh = (float(x) for x in str(ratio).split(":"))
+    except (TypeError, ValueError):
+        return None
+    if rw > rh:
+        return None
+    edl = ctx.latest_edl()["json"]
+    keep = edl.get("keep") or [[0.0, ctx.duration]]
+    layout = _get_source_layout(ctx, compute=True)
+    if not layout:
+        return None
+    win, share, _kinds = source_layout.call_share(layout, keep)
+    if win is None or share < source_layout.CALL_LAYOUT_SHARE:
+        return None
+    v = ctx.index["video"]
+    frame, why = source_layout.frame_for(layout, keep, str(ratio),
+                                         v.get("width"), v.get("height"))
+    res = set_frame(ctx, str(ratio), frame["mode"], frame.get("focus_x"),
+                    frame.get("focus_y"), _measured=True,
+                    focus_track=frame.get("focus_track"))
+    if not isinstance(res, str) or not res.startswith(("EDL v", "NO CHANGE")):
+        return res
+    W, H = _layout_canvas(ctx, str(ratio))
+    lines = source_layout.window_lines(
+        win, float(v["width"]), float(v["height"]), W, H, windows=keep,
+        layout=layout)
+    return (res + "\nMEASURED SOURCE LAYOUT: " + why + ". This is a crop of "
+            "the whole frame; the call itself is best shown as a card:\n"
+            + "\n".join("- " + ln for ln in lines))
 
 
 def _get_motion(ctx):
@@ -9175,6 +9374,12 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
         return ("REJECTED: mode must be 'auto' (measure the footage and "
                 "choose), 'crop' (fill the frame, cutting the sides), 'pad' "
                 "or 'pad_blur' (fit the WHOLE picture into the new frame).")
+    # A call composited over a broadcast frame (source_layout.py) is framed
+    # from its measured layout, not from a face and the detail around it:
+    # that read the Diamandis call as a wide shot and fitted it (Oct 2026).
+    laid = _layout_reframe(ctx, ratio, mode)
+    if laid is not None:
+        return laid
     # A measured per-shot track is strictly richer evidence than another
     # generic `auto` request. Preview critics commonly ask to "re-measure" a
     # composition they dislike; if that later measurement is temporarily
@@ -17109,6 +17314,18 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         card_box = list(PICTURE_CARD_BOX)
     card_source, card_track, card_follow = None, None, None
     video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
+    call_share = 0.0
+    if panels is None and source == "auto" and fit in (None, "crop") and \
+            spans and not video_lowres and canvas[1] > canvas[0]:
+        # a CALL composited over the frame (source_layout.py): the card
+        # shows the call's picture, never a face crop of the whole frame
+        # (a wide shot of a phone on its backdrop)
+        call = _layout_card(ctx, edl, spans, card_box, canvas,
+                            chosen=box is not None)
+        if call is not None:
+            card_box, source, call_note, call_share = call
+            fit = "crop"
+            report.append(call_note)
     # (a 9:16 frame only — ARCHIVAL_CARD_BOX is placed between its bands — and
     # one speaker: a two-shot keeps the whole stage, as a crop would decide
     # who to frame)
@@ -17145,6 +17362,8 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             "the headline and caption bands kept")
     cuts = (_card_cuts(ctx, edl, spans)
             if spans and (source != "program" or panels) else [])
+    if call_share >= .98:
+        cuts = []          # every shot of the window is the same call
     cut_list = ", ".join(f"{t:g}s" for t in cuts[:3])
     dense_failure = None
     if panels is None and source == "auto" and cuts and not video_lowres \
@@ -26916,16 +27135,21 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
     snapped = ("Snapped to sentence boundaries (snap='sentence'; pass "
                "snap='none' to reject instead): " + "; ".join(moves) + ". "
                if moves else "")
+    layout = _layout_report(ctx, calls_only=True)
     return (snapped +
             f"Shorts story search started as job {job_id}. It {selection} and "
             "creates each complete source story as its own LOCKED child "
-            "project. It does not style, reframe, caption, add B-roll/music, "
-            "or render a creative edit. The resulting cards arrive inside "
-            "this project's chat. In Studio, the user's Edit press boots a "
-            "fresh child editor. An MCP caller must instead open a child and "
-            "edit it directly with ordinary tools; it must never delegate to "
-            "Valmera's child agent. Poll this exact run with "
-            f"wait_for_job(job_id={job_id}) or shorts_status.")
+            "project, framed 9:16 from the source's measured layout (a call "
+            "is cropped on the call window; each child's get_video_info "
+            "names its best card). It does not style, caption, add "
+            "B-roll/music, or render a creative edit. The resulting cards "
+            "arrive inside this project's chat. In Studio, the user's Edit "
+            "press boots a fresh child editor. An MCP caller must instead "
+            "open a child and edit it directly with ordinary tools; it must "
+            "never delegate to Valmera's child agent. Poll this exact run with "
+            f"wait_for_job(job_id={job_id}) or shorts_status."
+            + (f"\n{layout}\nRead this before briefing: it is the frame "
+               "every short inherits." if layout else ""))
 
 
 def _shorts_children(ctx):

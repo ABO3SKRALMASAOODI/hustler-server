@@ -4389,6 +4389,10 @@ class VideoIndex(BaseModel):
     # Pixel-measured face/text/UI track with its own version, computed lazily
     # for old indexes to avoid a fleet-wide re-index storm.
     spatial: Optional[dict] = None
+    # What the frame is made of (worker/source_layout.py: call windows, their
+    # chrome and self-view, per-shot kinds and faces), versioned and lazily
+    # computed like spatial; every short shares it through this row.
+    source_layout: Optional[dict] = None
     # Hierarchical, content-addressed visual evidence. ``tile_keys`` remains
     # for backwards compatibility and the Studio scrubber; agent orientation
     # prefers this storyboard because its representatives are selected from

@@ -2487,6 +2487,17 @@ def set_index_spatial(conn, sha256, spatial_json, pipeline_version):
         """, (json.dumps(spatial_json), sha256, pipeline_version))
 
 
+def set_index_source_layout(conn, sha256, layout_json, pipeline_version):
+    """Merge only the source-layout sidecar; see set_index_perception's
+    race rule."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE indexes
+            SET json = jsonb_set(json, '{source_layout}', %s::jsonb)
+            WHERE video_sha256 = %s AND pipeline_version = %s
+        """, (json.dumps(layout_json), sha256, pipeline_version))
+
+
 def set_index_motion(conn, sha256, motion_json, pipeline_version):
     """Merge only the motion sidecar; see set_index_perception's race rule."""
     with conn.cursor() as cur:
