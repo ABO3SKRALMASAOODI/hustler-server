@@ -2107,7 +2107,12 @@ MASTER_VERSION = 1
 # Also v4 (round 7 final review, same release): a slam entrance's oversized
 # first frames stay inside the picture (the start scale shrinks below 1.5x
 # for a wide line).
-LEGIBILITY_VERSION = 4
+# v5 (P2 template track, Oct 2026): a counter's label takes the number's ink
+# (`color`; dark ink on a light card read white), the persistent headline
+# breaks its claim at ' / ' instead of printing the slash, and
+# timeline_steps/glow_title/image_card read their new size/x knobs (defaults
+# render as before).
+LEGIBILITY_VERSION = 5
 
 # Word-level caption muting (worker/caption_carry.py): a motion graphic with
 # mute_captions unset hides only the spoken words it shows, the rest stay

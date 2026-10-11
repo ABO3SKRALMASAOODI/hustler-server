@@ -7848,7 +7848,7 @@ def _run_render_job(worker_db, job):
         for pt in (edl_row["json"].get("patches") or []):
             if src_sha != "canvas" and pt.get("fp") != patch_fingerprint(
                     src_sha, pt.get("regions") or [],
-                    (pt.get("src_start"), pt.get("src_end"))):
+                    (pt.get("src_start"), pt.get("src_end")), pt.get("repaint")):
                 print(f"[render {job_id}] ignoring patch {pt['id']}: it "
                       "repaints a different upload (the video was replaced)",
                       flush=True)
@@ -7869,7 +7869,7 @@ def _run_render_job(worker_db, job):
                             src_local,
                             [dict(r) for r in pt.get("regions") or []],
                             (float(pt["src_start"]), float(pt["src_end"])),
-                            flocal, crf=18)
+                            flocal, crf=18, repaint=pt.get("repaint"))
                         storage.upload_file(flocal, fkey, "video/mp4")
                         patch_locals[pt["id"]] = flocal
                     else:

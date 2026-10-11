@@ -223,12 +223,14 @@ try:
                                    start=2.0, end=5.0, fill="box")
     check("erase_region writes a patch entry",
           res.startswith("EDL v") and len(ctx.written["patches"]) == 1)
-    # The verdict itself is content-dependent (on flat synthetic the stroke
-    # metric misreads matched grain — the box-brightness checks above are
-    # the ground truth here); what this pins is that the measurement RAN and
-    # was reported, so the agent always sees numbers, never a bare claim.
+    # The measurement RAN and was reported, so the agent always sees
+    # numbers, never a bare claim. A box is judged by how much of what set
+    # it apart survives (inpaint.pattern_kept), not by stroke ink — which
+    # misread the matched grain of this very repaint as surviving text — so
+    # the verdict now agrees with the brightness ground truth above.
     check("the honesty measure rode along",
-          "Measured on the repainted window" in res and "ink" in res)
+          "Measured on the repainted window" in res
+          and "of the box's original picture — gone" in res)
     check("the patch clip was uploaded",
           any(k.startswith("patches/") for k in uploads))
     pid = ctx.written["patches"][0]["id"]

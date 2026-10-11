@@ -12,6 +12,12 @@ Everything here is pure functions over plain data — no DB, no network.
 import bisect
 
 EPS = 0.011   # times are rounded to 0.01s; boundaries must be STRICTLY inside
+# An edge that keeps less than this share of the word it lands in was aimed
+# at the word's far edge: snapping "outward" there pulled in the stutter or
+# doubled word the editor was cutting ('What|what is', kept 16% of 'What';
+# Oct 2026, 14 edges over 5 shorts kept 8-34%). Such an edge drops the word;
+# from this share up the whole word is kept, as before.
+KEEP_WORD_FRAC = 0.4
 
 
 def word_at_boundary(words, b):
@@ -131,10 +137,19 @@ def midword_audit(keep, words, duration=None):
             for h in midword_boundaries(keep, words, duration)]
 
 
+def kept_share(side, b, t0, t1):
+    """Share of the word [t0, t1] a keep edge at b keeps ('start': the part
+    after b, 'end': the part before it)."""
+    span = max(1e-6, float(t1) - float(t0))
+    return (float(t1) - b) / span if side == "start" else (b - float(t0)) / span
+
+
 def snap_keep_to_words(keep, words, duration):
     """Move any keep boundary that lands inside a word OUTWARD to the word
     edge (span start -> word start, span end -> word end), so whole words
-    survive. Returns a new merged, sorted keep list.
+    survive — unless it keeps less than KEEP_WORD_FRAC of the word: then it
+    moves to the word's far edge and the word is cut. Returns a new merged,
+    sorted keep list.
 
     Round 100 — BREATH PADDING on the snapped edges. Whisper's word t1 runs
     consistently early (the model marks the end of the voiced core, not the
@@ -146,18 +161,26 @@ def snap_keep_to_words(keep, words, duration):
     starts = sorted(float(w["t0"]) for w in words) if words else []
     ends = sorted(float(w["t1"]) for w in words) if words else []
 
+    # A word that TOUCHES the edge (starts exactly where the snapped word
+    # ends: 'What|what is', 'an|an AI') is the neighbour the pad must not
+    # swallow: the lead-in of 'what' at 974.90 reached into 'What' and the
+    # audio-safe pass then kept all of it (Oct 2026, four shorts).
     def _next_start_after(t):
-        i = bisect.bisect_right(starts, t + 1e-6)
+        i = bisect.bisect_left(starts, t - 1e-6)
         return starts[i] if i < len(starts) else None
 
     def _prev_end_before(t):
-        i = bisect.bisect_left(ends, t - 1e-6)
+        i = bisect.bisect_right(ends, t + 1e-6)
         return ends[i - 1] if i > 0 else None
 
     snapped = []
     for s, e in keep:
         hs = word_at_boundary(words, s)
         he = word_at_boundary(words, e)
+        if hs and kept_share("start", s, hs["t0"], hs["t1"]) < KEEP_WORD_FRAC:
+            s, hs = float(hs["t1"]), None        # the word is cut: start after it
+        if he and kept_share("end", e, he["t0"], he["t1"]) < KEEP_WORD_FRAC:
+            e, he = float(he["t0"]), None        # ...end before it
         ns = round(hs["t0"], 2) if hs else s
         ne = round(he["t1"], 2) if he else e
         if he:
