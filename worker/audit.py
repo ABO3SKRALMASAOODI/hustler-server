@@ -130,11 +130,52 @@ def boundary_warning_lines(keep, words, silences, duration=None, skip=()):
     return lines
 
 
-def midword_audit(keep, words, duration=None):
-    """Compact strings for render results / logs."""
+def midword_audit(keep, words, duration=None, source=None, timeout=10.0,
+                  frame_s=1.0 / 30.0):
+    """Compact strings for render results / logs.
+
+    With ``source`` (the source media the render read: a path or a URL
+    ffmpeg range-reads), each boundary the transcript puts inside a word is
+    reported only where the SOUND there is loud — judged exactly as the
+    audio-safe keep tools judge it (cut_audio.place_edge). Those tools leave
+    an edge inside a transcript word on purpose when its sound is already
+    quiet (Whisper's onsets run late and its ends early), and the render's
+    audit used to flag the very edge they chose (Oct 10 podcast run, s04 and
+    s05). Unread sound keeps the transcript's verdict."""
+    hits = midword_boundaries(keep, words, duration)
+    if hits and source:
+        hits = _audible(hits, source, duration, timeout, frame_s)
     return [f"boundary {h['boundary']:.2f} inside '{h['word']}' "
-            f"({h['t0']:.2f}-{h['t1']:.2f})"
-            for h in midword_boundaries(keep, words, duration)]
+            f"({h['t0']:.2f}-{h['t1']:.2f}"
+            + (f", sound {h['db']:.0f} dB" if h.get("db") is not None else "")
+            + ")"
+            for h in hits]
+
+
+def _audible(hits, source, duration, timeout, frame_s):
+    """``hits`` (midword_boundaries) whose sound is loud at the cut, each
+    with its level in ``db``; all of them when the sound cannot be read."""
+    try:
+        import cut_audio
+        level = cut_audio.source_levels(
+            source, [h["boundary"] for h in hits], duration, timeout=timeout)
+    except Exception:  # noqa: BLE001 — a diagnostic never fails a render
+        level = None
+    if level is None:
+        return hits
+    end_level = cut_audio._robust(level, frame_s)
+    out = []
+    for h in hits:
+        lv = end_level if h["kind"] == "end" else level
+        db = lv(h["boundary"])
+        if db is None:
+            out.append(h)
+            continue
+        # the floor read on the same reader place_edge judged that edge on
+        # (an end's: the loudest of the frame either side)
+        if cut_audio._is_loud(db, cut_audio._floor(lv, h["boundary"])):
+            out.append(dict(h, db=db))
+    return out
 
 
 def kept_share(side, b, t0, t1):

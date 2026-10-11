@@ -1180,6 +1180,37 @@ def test_watch_video_public_result_preserves_false_preview_receipt(
     assert [block["type"] for block in public["content"]] == ["text"]
 
 
+def test_watch_video_structured_result_carries_the_link_and_the_frames(
+        client, monkeypatch):
+    """A client that shows structuredContent instead of the text blocks got
+    a bare receipt from every watch_video(render=false) on the Oct 10
+    podcast run: no link, no frames. The structured result now carries the
+    link, the reply's guidance and exactly what rode along."""
+    _served(monkeypatch)
+    DB["job_result"]["preview"] = {
+        "asset_id": 44, "edl_version": 8, "duration_s": 61.2,
+        "audio_model_review": False}
+    DB["job_result"]["images"] = [{
+        "storage_key": "media/3/look_1.jpg", "edl_version": 8,
+        "label": "The program, 12 moments across 0.00-61.20s",
+        "mime_type": "image/jpeg"}]
+    monkeypatch.setattr(mcpmod.storage, "get_object_whole",
+                        lambda key, cap: b"\xff\xd8jpeg")
+
+    public = _call_watch(client, render=False)
+
+    url = "https://cdn.example/media/3/mv_abc.mp4?sig=1"
+    structured = public["structuredContent"]
+    assert structured["url"] == url
+    assert structured["download_receipt"]["url"] == url
+    assert "Download: " + url in structured["message"]
+    assert structured["attached"] == {"frame_sheets": 1, "audio": False,
+                                      "video_inline": False}
+    assert structured["frame_urls"] == [
+        "https://cdn.example/media/3/look_1.jpg?sig=1"]
+    assert [b["type"] for b in public["content"]] == ["text", "text", "image"]
+
+
 def test_version_pinned_preview_download_returns_server_receipt(
         client, monkeypatch):
     DB["render_assets"] = [{

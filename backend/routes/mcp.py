@@ -595,9 +595,11 @@ SESSION_TOOLS = [
         "the viewer sees it — it renders the current edit first if it has "
         "not been rendered; 'source' is the raw uploaded footage; 'asset' is "
         "one uploaded clip (pass asset_key). start/end watch a window rather "
-        "than the whole thing. It comes back as a direct download link — a "
-        "plain MP4 you fetch and watch. Cheap: normally it hands over a file "
-        "that already exists, untouched.",
+        "than the whole thing. The reply, in this call: a direct download "
+        "link to a plain MP4 (structuredContent.url too), plus — unless "
+        "frames=false — ONE sheet of sampled frames as an image and the "
+        "window's sound as audio when it fits. Cheap: normally it hands over "
+        "a file that already exists, untouched.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer",
                         "description": "Required immutable project scope."},
@@ -2350,10 +2352,29 @@ def _t_watch_video(tok, args):
             "blob": blob}})
     public = {"content": content, "isError": bool(missing)}
     structured = _editor_structured_content(result)
+    # A client that shows structuredContent INSTEAD of the text blocks (the
+    # Oct 10 podcast run: every reviewer's watch_video(render=false) came back
+    # as a bare receipt) must still get the video: the link, the guidance and
+    # exactly what rode along with it travel here too.
+    structured["url"] = url
+    structured["message"] = content[0]["text"]
+    structured["attached"] = {"frame_sheets": delivered_images,
+                              "audio": bool(audio_content),
+                              "video_inline": bool(blob)}
+    frame_urls = []
+    for img in result.get("images") or []:
+        try:
+            if (img or {}).get("storage_key"):
+                frame_urls.append(storage.presign_get(img["storage_key"]))
+        except Exception:
+            continue
+    if frame_urls:
+        structured["frame_urls"] = frame_urls
     if isinstance(result.get("preview"), dict):
         try:
             structured["download_receipt"] = _record_download_receipt(
                 tok, project_id, result["preview"])
+            structured["download_receipt"]["url"] = url
         except Exception:
             structured["download_receipt_error"] = "receipt_persistence_failed"
     if missing:

@@ -6460,10 +6460,13 @@ def _stream_report(path):
 
 
 def picture_qc(edl_json, index, out_path, out_info, variant, want_wm,
-               wm_settings=None, src_shape=None, job_id=None, budget_s=None):
+               wm_settings=None, src_shape=None, job_id=None, budget_s=None,
+               src_path=None):
     """render_qc on a finished render, or None (a render never fails over
     its own review). The plan reads the EDL exactly as render_edl does
-    (render_plan.canonical_program), on the output's own geometry."""
+    (render_plan.canonical_program), on the output's own geometry;
+    ``src_path`` (the source the render read) is where the faces inside
+    picture cards are read."""
     try:
         import render_qc
         edl = validate_edl(render_plan.canonical_program(edl_json),
@@ -6482,7 +6485,8 @@ def picture_qc(edl_json, index, out_path, out_info, variant, want_wm,
             outro_s=outro_seconds(variant == "preview"), want_wm=bool(want_wm),
             wm_anchor_y=anchor, src_fps=video.get("fps"))
         res = render_qc.check(out_path, plan_,
-                              budget_s=budget_s or render_qc.BUDGET_S)
+                              budget_s=budget_s or render_qc.BUDGET_S,
+                              src_path=src_path)
         if res and res.get("findings"):
             print(f"[render {job_id}] PICTURE QC {variant}: "
                   + "; ".join(f[:120] for f in res["findings"]), flush=True)
@@ -8220,7 +8224,7 @@ def _run_render_job(worker_db, job):
         if not proof_only and variant in ("preview", "final"):
             picture_qc_res = picture_qc(
                 edl_row["json"], index, out_local, out_info, variant,
-                want_wm, wm_settings, src_shape, job_id)
+                want_wm, wm_settings, src_shape, job_id, src_path=src_local)
         # Deterministic measurements are always-on.  When the edit authors
         # music/SFX/voiceover, also cut a few tiny excerpts while the finished
         # render is already local.  The dispatcher can hand those to the
@@ -8388,10 +8392,13 @@ def _run_render_job(worker_db, job):
         # Deterministic mid-word audit: keep boundaries that clip a word,
         # computed straight from the index — visible in logs and to the
         # agent even if it ignored the write-time warnings. Meaningless (and
-        # unsafe: index is {} with no ['video']) for a canvas program.
+        # unsafe: index is {} with no ['video']) for a canvas program. Read
+        # against the source's sound: an edge the audio-safe keep tools left
+        # in a transcript word whose sound is quiet is no mid-word cut.
         mw = [] if is_canvas else audit.midword_audit(
             edl_row["json"]["keep"], index.get("words", []),
-            index["video"]["duration"])
+            index["video"]["duration"], source=src_local,
+            frame_s=1.0 / float((index.get("video") or {}).get("fps") or 30.0))
         if mw:
             print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
                   flush=True)
