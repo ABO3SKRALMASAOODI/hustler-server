@@ -996,3 +996,15 @@ def test_a_large_project_says_what_still_opens():
     assert "a version still opens by its number" in \
         capped["truncated_reason"].lower()
     assert "Open their tabs" not in capped["truncated_reason"]
+
+
+def test_a_shortened_body_keeps_the_whole_response_under_1_mb():
+    """A 1.1 MB video analysis came back as 1.07 MiB: the cut JSON text was
+    escaped again inside a string. The cut now accounts for that."""
+    quoted = {"words": [{"w": '"quoted"', "t": i} for i in range(60000)]}
+    body, cut = projects._capped(quoted)
+    assert cut and set(body) == {"_truncated_json"}
+    sent = json.dumps({"meta": {"x": "y" * 2000}, "data": {"index": body}})
+    assert len(sent) < MB
+    small, cut_small = projects._capped({"a": 1})
+    assert small == {"a": 1} and not cut_small

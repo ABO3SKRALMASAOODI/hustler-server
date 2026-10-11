@@ -705,11 +705,24 @@ def enforce_cap(out, cap=SIZE_CAP):
 DETAIL_CAP = 1024 * 1024
 
 
+# Room for the response wrapper ({meta, data}) around a shortened body.
+_WRAPPER_ROOM = 16 * 1024
+
+
 def _capped(value):
+    """The body as-is when its JSON fits DETAIL_CAP; otherwise the start of
+    its JSON text, cut so the text *as sent* (quotes and backslashes escaped
+    again inside a string) still keeps the whole response under the cap."""
     text = json.dumps(value, default=str)
     if len(text) <= DETAIL_CAP:
         return value, False
-    return {"_truncated_json": text[:DETAIL_CAP]}, True
+    budget = DETAIL_CAP - _WRAPPER_ROOM
+    cut = text[:budget]
+    over = len(json.dumps(cut)) - budget
+    while over > 0:
+        cut = cut[:len(cut) - max(over, 1)]
+        over = len(json.dumps(cut)) - budget
+    return {"_truncated_json": cut}, True
 
 
 def project_session(cur, project_id):
