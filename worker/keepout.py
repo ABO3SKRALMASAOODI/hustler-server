@@ -1143,7 +1143,13 @@ def _headline_ink(params, y):
     w = num(params, "width", 0.84)
     h = num(params, "height", 0.15)
     x = num(params, "x", 0.5)
-    return (x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0)
+    top = y - h / 2.0
+    if num(params, "kicker_y", 0.0) > 0 and str(params.get("kicker") or "").strip() \
+            and str(params.get("align") or "center") != "left":
+        # a kicker set aside, on its own line beside the corner mark (a
+        # centred block only: headline.html stacks a left-aligned one)
+        top = min(top, num(params, "kicker_y", 0.0) - 0.02)
+    return (x - w / 2.0, top, x + w / 2.0, y + h / 2.0)
 
 
 # The lower third is the graphic placed beside a face by design, and its box

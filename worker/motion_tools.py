@@ -19,6 +19,7 @@ import os
 import re
 import tempfile
 
+import band_type
 import caption_carry
 import caption_place
 import config  # noqa: F401  (kept for parity with other tool modules)
@@ -2073,13 +2074,20 @@ def headline_band(edl, s, e, W, H, src=None):
     return band_top(W, H), top - HEADLINE_GAP, what
 
 
+def feed_top(W, H):
+    """The highest any band type may reach: below the 9:16 feed header."""
+    return HEADLINE_SAFE_TOP if H / max(W, 1) >= 1.6 else HEADLINE_SAFE_TOP_FLAT
+
+
 def band_top(W, H):
     """The highest a band graphic may reach on a W x H frame: below the 9:16
     feed header and below the free-tier mark's reserved zone
     (keepout.watermark_zone, top-left: the judged Jobs kickers at y
     0.09-0.115 sat on it). A paid export has no mark; its zone is reserved
-    all the same — the edit does not know the tier."""
-    safe = HEADLINE_SAFE_TOP if H / max(W, 1) >= 1.6 else HEADLINE_SAFE_TOP_FLAT
+    all the same — the edit does not know the tier. That is the top of a
+    full-width line; the mark covers the top-left only, so a short line may
+    sit beside it, higher (band_type.mark_strip: the headline's kicker)."""
+    safe = feed_top(W, H)
     try:
         mark = keepout.watermark_zone(W, H)
         safe = max(safe, float(mark[3]))
@@ -2088,10 +2096,12 @@ def band_top(W, H):
     return round(safe, 4)
 
 
-def _persistent_contract(ctx, edl, item, items, place):
+def _persistent_contract(ctx, edl, item, items, place, passed=(), strict=True):
     """Check and place a persistent (headline) item in place. Returns
     (error or None, note). ``place``: centre it in the free band (no y was
-    given)."""
+    given). ``passed``: the params the editor gave (the write never
+    overrides those); ``strict``: a claim measured smaller than the
+    captions is refused (else a NOTE: an edit that leaves its type alone)."""
     s, e = float(item["start"]), float(item["end"])
     if e - s < HEADLINE_MIN_S - 1e-6:
         return (f"REJECTED: a persistent {item['template']} holds a band for the "
@@ -2131,16 +2141,386 @@ def _persistent_contract(ctx, edl, item, items, place):
                     "one above the picture. On full-bleed footage use hook and beat "
                     "graphics instead, or pass y to place it deliberately."), ""
         top, bottom, what = band
-        if bottom - top < HEADLINE_MIN_BAND:
+        if bottom - top < HEADLINE_MIN_BAND - 1e-6:
+            fix = ""
+            try:
+                fix = _fix_text(_headline_fix(ctx, edl, dict(item, params=dict(
+                    params, y=round((top + bottom) / 2.0, 4),
+                    height=round(max(0.01, bottom - top), 4))), band, card_only=True))
+            except Exception as exc:  # noqa: BLE001 — the measured fix is advice
+                print(f"[motion] headline fix skipped: {str(exc)[:160]}", flush=True)
             return (f"REJECTED: the band above {what} is only {bottom - top:.3f} of the "
                     f"frame height (y {top:.3f}-{bottom:.3f}); a headline needs "
-                    f"{HEADLINE_MIN_BAND:g}. Lower or shrink the picture, or pass y."), ""
+                    f"{HEADLINE_MIN_BAND:g}. Lower or shrink the picture, or pass y.{fix}"), ""
         params["y"] = round((top + bottom) / 2.0, 4)
         params["height"] = round(min(0.3, bottom - top), 4)
         item["params"] = params
         note = (f"\nHEADLINE: placed in the band above {what} (y {top:.3f}-{bottom:.3f}, "
                 f"centre {params['y']:g}).")
-    return None, note
+    err, type_note = _headline_type(ctx, edl, item, band, place, set(passed or ()), strict)
+    if err:
+        return err, ""
+    return None, note + type_note
+
+
+# ── the headline's measured type (band_type) ──────────────────────────────
+# Diamandis run, Oct 2026: in 7 of 9 shorts the standing claim rendered
+# SMALLER than the captions under it (a thin band, the kicker and its gap
+# taking a third of it, headline.html shrinking the claim to fit, down to
+# 28 px) and nothing said so before a reviewer did. The write measures the
+# claim from the font files (band_type.headline_layout: the template's own
+# layout pass), reports its cap height against the captions', refuses one
+# smaller than them and names the card top, claim length or kicker that
+# makes it legible. In the band it first takes what costs no design toward
+# a claim that owns the band (HEADLINE_OWNS_RATIO): the kicker on its own
+# line beside the corner mark (the mark covers the top-left only, so the
+# band is the claim's) and a larger ``size`` — never a param the editor
+# passed.
+# The params whose change re-measures the claim strictly (an edit that
+# leaves them alone is measured into a NOTE).
+HEADLINE_TYPE_KEYS = frozenset(("text", "kicker", "kicker_y", "size", "width", "height",
+                                "style", "accent_style", "y", "x", "align"))
+# A claim under this many times the captions' cap height reads as the same
+# size as them (reviewers flag "no bigger than the captions").
+HEADLINE_OWNS_RATIO = 1.2
+# The picture-area floor the card advice is checked against (looks: a card
+# covers at least 0.54 of the canvas).
+CARD_FLOOR = 0.54
+# A kicker set beside the mark sits right above the claim: the claim's top
+# within this of the strip's bottom.
+KICKER_ASIDE_REACH = 0.035
+
+
+def _caption_target(edl, W, H):
+    """(cap height, label, captioned): the captions' cap height the claim is
+    held to; a program with no caption track is held, advisory only, to a
+    clean track's."""
+    ref = band_type.caption_cap(edl, W, H)
+    if ref:
+        return ref[0], ref[1], True
+    return band_type.NO_CAPTION_CAP, "a clean caption track (none here)", False
+
+
+def _mark_strip(W, H):
+    return band_type.mark_strip(W, H, top=feed_top(W, H))
+
+
+def _solve_band_headline(p, W, H, target, passed):
+    """The free moves toward a claim HEADLINE_OWNS_RATIO x the captions, for
+    params the editor did not pass: the kicker beside the corner mark when
+    it fits there, right above the claim, and the claim gains; then a
+    larger size when the size caps the claim. (params, layout, moves)."""
+    goal = target * HEADLINE_OWNS_RATIO
+    lay = band_type.headline_layout(p, W, H)
+    moves = []
+    if lay["claim_cap"] >= goal - 1e-6:
+        return p, lay, moves
+    strip = _mark_strip(W, H)
+    if lay["kicker_px"] and not lay["kicker_beside"] and "kicker_y" not in passed:
+        ok, ky = band_type.kicker_beside_fits(p, W, H, strip)
+        if ok:
+            p2 = dict(p, kicker_y=ky)
+            lay2 = band_type.headline_layout(p2, W, H)
+            claim_top = _num_or(p2, "y", 0.0) - lay2["block_h"] / 2.0
+            if lay2["claim_cap"] > lay["claim_cap"] * 1.02 \
+                    and claim_top <= strip[3] + KICKER_ASIDE_REACH:
+                p, lay = p2, lay2
+                moves.append(f"kicker_y {ky:g} (the kicker on its own line beside the "
+                             "corner mark; the band is the claim's)")
+    if lay["claim_cap"] < goal - 1e-6 and lay["limit"] == "size" and "size" not in passed:
+        now = _num_or(p, "size", 1.0)
+        size = band_type.needed_size(p, W, H, goal) or band_type.SIZE_MAX
+        lay2 = band_type.headline_layout(dict(p, size=size), W, H)
+        if size > now + 1e-6 and lay2["claim_cap"] > lay["claim_cap"] * 1.01:
+            # the band or the column may stop it short of that size: the
+            # smallest size (in 0.01 steps) that sets the claim as large as
+            # any up to it does, or at the goal
+            steps = [round(now + 0.01 * k, 2)
+                     for k in range(1, int(round((size - now) / 0.01)) + 1)]
+            lays = [(sz, band_type.headline_layout(dict(p, size=sz), W, H)) for sz in steps]
+            best = min(goal, max(ly["claim_cap"] for _sz, ly in lays))
+            size, lay = next((sz, ly) for sz, ly in lays if ly["claim_cap"] >= best - 1e-6)
+            p = dict(p, size=size)
+            moves.append(f"size {size:g}")
+    return p, lay, moves
+
+
+def _lines(n):
+    return f"{n} line{'s' if n != 1 else ''}"
+
+
+def _type_line(lay, target, who, moves=()):
+    ratio = lay["claim_cap"] / max(1e-6, target)
+    ink = lay["ink"]
+    line = (f"\nHEADLINE TYPE (measured from the font files): the claim's cap height is "
+            f"{lay['claim_cap']:.3f} of the frame height ({lay['claim_px']:.0f} px type, "
+            f"{_lines(lay['claim_lines'])}; its type draws x {ink[0]:.2f}-{ink[2]:.2f}, "
+            f"y {ink[1]:.3f}-{ink[3]:.3f}) vs {who} {target:.3f}: {ratio:.2f}x.")
+    if moves:
+        line += " Set for it: " + "; ".join(moves) + "."
+    return line
+
+
+def _card_source_px(ctx, edl, s, e):
+    """(w, h) source pixels of the source window the card live over program
+    [s, e] shows, or None."""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    if not video.get("width") or not video.get("height"):
+        return None
+    for cd in ((edl.get("effects") or {}).get("picture_cards") or []):
+        try:
+            a, b = float(cd["start"]), float(cd["end"])
+            src = cd.get("source")
+            if min(b, e) - max(a, s) < 0.5 * (e - s) or not isinstance(src, (list, tuple)) \
+                    or len(src) != 4 or cd.get("panels"):
+                continue
+            return ((float(src[2]) - float(src[0])) * float(video["width"]),
+                    (float(src[3]) - float(src[1])) * float(video["height"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
+
+
+def headline_card(ctx, edl, item, band, target):
+    """The largest card under the band a claim at ``target`` cap height
+    needs: {top, band, card, fed}. ``card`` is band_type.largest_card
+    against CARD_FLOOR; ``fed`` the largest this card's source window fills
+    at 2x or less, when that is smaller (None otherwise). None when no band
+    holds the claim at this size, or there is no band."""
+    W, H = _canvas_size(ctx, edl)
+    p = dict(item.get("params") or {})
+    need = band_type.needed_band(p, W, H, target)
+    if need is None or not band:
+        return None
+    # a band under HEADLINE_MIN_BAND is refused whatever it holds
+    need = max(need, HEADLINE_MIN_BAND)
+    card_top = round(band[0] + need + HEADLINE_GAP, 3)
+    card = band_type.largest_card(card_top, W, H, floor=CARD_FLOOR)
+    src = _card_source_px(ctx, edl, float(item["start"]), float(item["end"]))
+    fed = band_type.largest_card(card_top, W, H, floor=CARD_FLOOR, src_px=src) if src else None
+    if fed and fed["box"] == card["box"]:
+        fed = None
+    return {"top": card_top, "band": need, "card": card, "fed": fed}
+
+
+def _card_room_note(ctx, edl, item, band):
+    """A NOTE when the picture card live under the headline covers less than
+    CARD_FLOOR of the frame and the band leaves room for a larger one: the
+    largest card under this band (band_type.largest_card), '' otherwise."""
+    if not band:
+        return ""
+    s, e = float(item["start"]), float(item["end"])
+    import picture_cards
+    area = None
+    for cd in ((edl.get("effects") or {}).get("picture_cards") or []):
+        try:
+            if min(float(cd["end"]), e) - max(float(cd["start"]), s) < 0.5 * (e - s):
+                continue
+            area = sum((float(b[2]) - float(b[0])) * (float(b[3]) - float(b[1]))
+                       for b in picture_cards.card_boxes(cd))
+            break
+        except (KeyError, TypeError, ValueError):
+            continue
+    if area is None or area >= CARD_FLOOR - 1e-6:
+        return ""
+    W, H = _canvas_size(ctx, edl)
+    top = round(band[1] + HEADLINE_GAP, 3)
+    card = band_type.largest_card(top, W, H, floor=CARD_FLOOR)
+    if card["area"] < area + 0.02:
+        return ""
+    src = _card_source_px(ctx, edl, s, e)
+    fed = band_type.largest_card(top, W, H, floor=CARD_FLOOR, src_px=src) if src else None
+    return (f"\nNOTE (card): the picture card covers {area:.2f} of the frame, under the "
+            f"{CARD_FLOOR:g} picture floor; under this band the largest card is {card['box']}, "
+            f"area {card['area']:.2f} ({'meets' if card['meets_floor'] else 'also under'} it)"
+            + (f"; its source window fills {fed['box']}, area {fed['area']:.2f}, at 2x or "
+               "less" if fed and fed["box"] != card["box"] else "") + ".")
+
+
+def _card_text(fit, band, with_=""):
+    card, fed = fit["card"], fit["fed"]
+    return (f"a card top at y {fit['top']:.3f} or lower (a band of {fit['band']:.3f} from y "
+            f"{band[0]:.3f}; it is {band[1] - band[0]:.3f}){with_}: the largest card under it "
+            f"is {card['box']}, area {card['area']:.2f}"
+            + (" — meets" if card["meets_floor"] else " — UNDER")
+            + f" the {CARD_FLOOR:g} picture floor"
+            + (f" (this card's source window fills {fed['box']}, area {fed['area']:.2f}, at 2x "
+               "or less)" if fed else ""))
+
+
+def _headline_fix(ctx, edl, item, band=None, target=None, card_only=False):
+    """The concrete ways to a claim at ``target`` (the captions' cap height),
+    any one of: the card top (band height) that holds it, with the largest
+    card left under that band against the picture floor; the claim length
+    the present band holds; a kicker short enough to sit beside the corner
+    mark, or none — each with the size it needs, and each only when it
+    measures at ``target``. ``card_only``: the band itself is refused (under
+    HEADLINE_MIN_BAND), so only a lower card fixes it. A list of phrases."""
+    W, H = _canvas_size(ctx, edl)
+    p = dict(item.get("params") or {})
+    if target is None:
+        target = _caption_target(edl, W, H)[0]
+    size_now = _num_or(p, "size", 1.0)
+    size_need = band_type.needed_size(p, W, H, target)
+    if size_need is None:
+        return [f"no band or size up to {band_type.SIZE_MAX:g} sets this style that large: "
+                "another style, or a hook-tier word_slam for the hook"]
+    sized = dict(p, size=max(size_now, size_need))
+    kick = " ".join(str(p.get("kicker") or "").split())
+    strip = _mark_strip(W, H)
+    aside = band_type.headline_layout(p, W, H)["kicker_beside"]
+    ok, ky = (band_type.kicker_beside_fits(sized, W, H, strip)
+              if kick and not aside else (False, 0.0))
+    if ok:
+        sized["kicker_y"] = ky
+    also = ([f"size {size_need:g}"] if size_need > size_now + 1e-6 else []) \
+        + ([f"kicker_y {ky:g} (the kicker beside the corner mark)"] if ok else [])
+    with_ = f", with {' and '.join(also)}" if also else ""
+    with_size = f", with size {size_need:g}" if size_need > size_now + 1e-6 else ""
+    fixes = []
+    fit = headline_card(ctx, edl, dict(item, params=sized), band, target)
+    if fit:
+        fixes.append(_card_text(fit, band, with_))
+    else:
+        need = band_type.needed_band(sized, W, H, target)
+        if need is not None:
+            need = max(need, HEADLINE_MIN_BAND)
+            fixes.append(f"height {need:.3f} or more (it is {_num_or(p, 'height', 0.15):.3f})"
+                         f"{with_}")
+    if card_only:
+        return fixes
+    chars = len(str(p.get("text") or "").replace("*", ""))
+    n = band_type.max_claim_chars(sized, W, H, target)
+    if 6 <= n < chars:
+        fixes.append(f"a claim of about {n} characters or fewer (it has {chars}){with_}")
+    if kick and not aside and not ok:
+        # a shorter kicker is set beside the mark only where the claim then
+        # sits right under it, and it fixes the claim only if the whole band
+        # then sets it at the target
+        k = band_type.kicker_chars_beside(sized, W, H, strip)
+        lay_a = band_type.headline_layout(sized, W, H, kicker_beside=True)
+        near = bool(strip) and (_num_or(sized, "y", 0.0) - lay_a["block_h"] / 2.0
+                                <= strip[3] + KICKER_ASIDE_REACH)
+        if k >= 6 and near and lay_a["claim_cap"] >= target - 1e-6:
+            fixes.append(f"a kicker of at most about {k} characters (it has {len(kick)}), "
+                         f"which sits beside the corner mark{with_size}")
+        bare = dict(sized, kicker="")
+        if band_type.headline_layout(bare, W, H)["claim_cap"] >= target - 1e-6:
+            lay = band_type.headline_layout(sized, W, H)
+            fixes.append(f"no kicker (it and its gap take {lay['block_h'] - lay['claim_h']:.3f} "
+                         f"of the band; name the speaker in the claim){with_size}")
+        elif 6 <= band_type.max_claim_chars(bare, W, H, target) < chars and n < 6:
+            fixes.append(f"no kicker and a claim of about "
+                         f"{band_type.max_claim_chars(bare, W, H, target)} characters or fewer"
+                         f"{with_size}")
+    return fixes
+
+
+def _fix_text(fixes, lead="FIX, any one of"):
+    if not fixes:
+        return ""
+    return f" {lead}: " + "; ".join(f"({k + 1}) {f}" for k, f in enumerate(fixes)) + "."
+
+
+def _num_or(p, key, default):
+    try:
+        return float(p.get(key) if p.get(key) is not None else default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _kicker_clash(p, lay, W, H):
+    """What a kicker set aside (kicker_y) runs onto — the free-tier mark's
+    zone, the feed header, the claim — with the fix; '' when it is clear."""
+    box = band_type.kicker_box(p, W, H, lay)
+    if not box:
+        return ""
+    hits = []
+    try:
+        mark = keepout.watermark_zone(W, H)
+        if box[0] < mark[2] and box[2] > mark[0] and box[1] < mark[3] and box[3] > mark[1]:
+            hits.append(f"the free-tier mark's zone (x {mark[0]:.2f}-{mark[2]:.2f}, "
+                        f"y {mark[1]:.3f}-{mark[3]:.3f})")
+    except Exception:  # noqa: BLE001 — no mark geometry: the other checks
+        pass
+    if box[1] < feed_top(W, H) - 1e-3:
+        hits.append(f"the feed header (above y {feed_top(W, H):.3f})")
+    claim_top = _num_or(p, "y", 0.0) - lay["block_h"] / 2.0
+    if box[3] > claim_top + 0.004:
+        hits.append(f"the claim (its top at y {claim_top:.3f})")
+    if not hits:
+        return ""
+    k = band_type.kicker_chars_beside(p, W, H, _mark_strip(W, H))
+    return (f"the kicker set beside the corner mark (kicker_y {_num_or(p, 'kicker_y', 0):g}) "
+            f"draws x {box[0]:.3f}-{box[2]:.3f}, y {box[1]:.3f}-{box[3]:.3f}, onto "
+            f"{' and '.join(hits)}. "
+            + (f"About {k} characters fit there; " if k >= 6 else "")
+            + "kicker_y 0 sets it above the claim.")
+
+
+def _headline_type(ctx, edl, item, band, place, passed, strict):
+    """Measure the headline's claim against the captions: (error, note).
+    Strict refuses a claim smaller than the captions (a program with none is
+    only noted); otherwise the miss is a NOTE."""
+    try:
+        W, H = _canvas_size(ctx, edl)
+        target, who, captioned = _caption_target(edl, W, H)
+        p = dict(item.get("params") or {})
+        y = _num_or(p, "y", 0.0)
+        if band and not band[0] - 0.02 <= y <= band[1] + 0.02:
+            band = None              # set off the band on purpose: no band advice
+        if band and (place or strict):
+            p, lay, moves = _solve_band_headline(p, W, H, target, passed)
+            item["params"] = p
+        else:
+            lay, moves = band_type.headline_layout(p, W, H), []
+        clash = _kicker_clash(p, lay, W, H)
+        if clash and "kicker_y" not in passed and (place or strict):
+            # the write's own kicker_y (an edit made the kicker longer):
+            # back above the claim, and the claim is measured there
+            p = dict(p, kicker_y=0.0)
+            lay, clash = band_type.headline_layout(p, W, H), ""
+            moves = moves + ["kicker_y 0 (the kicker no longer fits beside the corner mark: "
+                             "back above the claim)"]
+            item["params"] = p
+    except Exception as exc:  # noqa: BLE001 — a measurement never blocks a write
+        print(f"[motion] headline type skipped: {str(exc)[:160]}", flush=True)
+        return None, ""
+    strict = strict and captioned
+    if clash and strict:
+        return "REJECTED: " + clash, ""
+    clash = f"\nNOTE (headline kicker): {clash}" if clash else ""
+    line = _type_line(lay, target, who, moves)
+    try:
+        clash += _card_room_note(ctx, edl, item, band)
+    except Exception as exc:  # noqa: BLE001 — advice
+        print(f"[motion] card room skipped: {str(exc)[:160]}", flush=True)
+    ratio = lay["claim_cap"] / max(1e-6, target)
+    if ratio >= HEADLINE_OWNS_RATIO - 1e-6:
+        return None, line + clash
+    goal = target * (HEADLINE_OWNS_RATIO if ratio >= 1.0 - 1e-6 else 1.0)
+    try:
+        fixes = _headline_fix(ctx, edl, item, band, goal)
+    except Exception as exc:  # noqa: BLE001 — the fix is advice
+        print(f"[motion] headline fix skipped: {str(exc)[:160]}", flush=True)
+        fixes = []
+    if ratio >= 1.0 - 1e-6:
+        return None, (line + f" Under {HEADLINE_OWNS_RATIO:g}x it reads as the captions' size, "
+                      "not the hook." + _fix_text(fixes[:2], f"To {HEADLINE_OWNS_RATIO:g}x, any "
+                                                  "one of") + clash)
+    why = {"size": f"its size {_num_or(p, 'size', 1.0):g} caps it",
+           "width": (f"its words fill the column in {_lines(lay['max_lines'])} at that "
+                     "size")}.get(lay["limit"]) or (
+        f"the band leaves it {lay['room']:.3f} of the frame height"
+        + (" after the kicker and its gap" if lay["kicker_px"] and not lay["kicker_beside"]
+           else ""))
+    msg = (f"the headline's claim measures a cap height of {lay['claim_cap']:.3f} of the frame "
+           f"height ({lay['claim_px']:.0f} px type, {_lines(lay['claim_lines'])}) — SMALLER "
+           f"than {who} ({target:.3f}; {ratio:.2f}x): {why}. The hook must not be the "
+           f"smallest type on screen.{_fix_text(fixes)}")
+    if strict:
+        return "REJECTED: " + msg, ""
+    return None, f"\nNOTE (headline type): {msg}{clash}"
 
 
 def _yield_report(ctx, edl, item):
@@ -2371,7 +2751,8 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     band_note = ""
     if persistent:
         err, band_note = _persistent_contract(
-            ctx, edl, item, items, place="y" not in (params or {}))
+            ctx, edl, item, items, place="y" not in (params or {}),
+            passed=(params or {}).keys())
         if err:
             return err
         if sfx:
@@ -2531,7 +2912,9 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         became = template is not None and not motion_templates.persistent(
             json.loads(old_shape)[2] or "")
         err, band_note = _persistent_contract(
-            ctx, edl, hit, items, place=became and "y" not in (params or {}))
+            ctx, edl, hit, items, place=became and "y" not in (params or {}),
+            passed=(params or {}).keys(),
+            strict=became or bool(set(params or {}) & HEADLINE_TYPE_KEYS))
         if err:
             return err
         if sfx:
