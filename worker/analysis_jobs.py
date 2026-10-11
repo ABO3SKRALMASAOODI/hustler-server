@@ -554,7 +554,8 @@ def _child_matte(spec, ch):
     else:
         sess = personseg.rvm_session_at(engine["path"],
                                         engine.get("threads") or 0)
-        stream = personseg.rvm_stream_on(sess, w, h)
+        stream = personseg.rvm_stream_on(
+            sess, w, h, downsample_ratio=params.get("downsample_ratio"))
 
         def alpha_of(frame):
             return stream.step(frame, cv2)

@@ -916,11 +916,21 @@ def matte_info(plan, label="person"):
                ones (glow) there
       qa       {"flicker", "edge_chatter"} program-wide maxima, or {}
 
-    STUB until 1A: always absent."""
-    return {"label": label, "status": "absent", "source": None,
-            "reason": "no program matte on this render (fxgraph."
-                      "program_matte is a stub until track 1A)",
-            "windows": [], "qa": {}}
+    Track 1A (worker/matte_track.py): the ``matte.person`` sidecar chunks
+    under the windows this render's consumers asked for, read (and, on a
+    render that may launch, requested) through sidecars.py. A plan with no
+    timeline or source identity — and every plan while the program matte is
+    off — reads absent."""
+    try:
+        import matte_track
+        pm = matte_track.for_plan(plan)
+        if pm is not None:
+            return pm.info(label)
+        return matte_track.absent_info(label)
+    except Exception:  # noqa: BLE001 — a matte question never fails a render
+        return {"label": label, "status": "absent", "source": None,
+                "reason": "no program matte on this render",
+                "windows": [], "qa": {}}
 
 
 def request_matte(plan, item, label="person", space="world"):
@@ -933,6 +943,11 @@ def request_matte(plan, item, label="person", space="world"):
             key = (str(label), "screen" if space == "screen" else "world")
             plan.matte_requests.setdefault(key, []).append(
                 (item or {}).get("id"))
+            import matte_track
+            pm = matte_track.for_plan(plan)
+            if pm is not None:
+                pm.want_item(item, str(label).split(":", 1)[0],
+                             "screen" if space == "screen" else "world")
         return matte_info(plan, label)
     except Exception:  # noqa: BLE001 — a matte question never fails a render
         return {"label": label, "status": "absent", "source": None,
@@ -942,19 +957,36 @@ def request_matte(plan, item, label="person", space="world"):
 def program_matte(plan, space="world"):
     """The person matte in program space (``space`` world: the picture's
     geometry before the camera; screen: after it), as a FRESH gray pad the
-    caller consumes, or None. STUB — returns None until track 1A builds it
-    from source-space ``matte.person`` sidecars. 1B, 1C and 1D treat None as
-    "matte absent": their substitute rung."""
-    return None
+    caller consumes, or None (absent: 1B, 1C and 1D take their substitute
+    rung). Built by the renderer from source-space ``matte.person`` sidecars
+    through the picture's own per-block chain (worker/matte_track.py) — only
+    on a render whose consumers asked in prepare (``request_matte``)."""
+    try:
+        import matte_track
+        pm = matte_track.for_plan(plan, create=False)
+        if pm is None or not pm.active:
+            return None
+        return pm.pad("screen" if space == "screen" else "world", "person")
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def handle_matte(ctx, side):
     """At the ``junction`` stage: the person matte of one side's 2h-frame
     handle stream (``side`` "a" = outgoing, "b" = incoming), measured on the
     handle's own SOURCE frames (frames past an out-point are not in the
-    program matte), as a fresh gray pad, or None. STUB until 1A; 1D's
-    ``matte_cut`` takes its substitute rung on None."""
-    return None
+    program matte), as a fresh gray pad, or None (1D's ``matte_cut`` takes
+    its substitute rung). The renderer hands each junction a builder
+    (``ctx.junction["matte"]``) that carries the sidecar frames under the
+    handle through the handle's own normalize chain."""
+    try:
+        build = ((getattr(ctx, "junction", None) or {}).get("matte")
+                 if ctx is not None else None)
+        if build is None or side not in ("a", "b"):
+            return None
+        return build(side)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _person_mask(plan, name, space, ctx):

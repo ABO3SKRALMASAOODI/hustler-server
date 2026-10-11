@@ -528,35 +528,27 @@ def hero_front(item, why):
 
 def behind_why(edl, tl, item, geom_now=None):
     """Why the behind_subject ``item`` cannot composite behind the subject
-    in this program (None when it can, the mask download aside) — the
-    renderer's rules: the mask is one continuous 1x clip of its source span
-    in the framing it was measured in."""
-    import follow
-    import picture_cards
-    from schemas import subject_matte_geom
-    b = item.get("behind") or {}
-    if not b:
-        return "it carries no subject mask"
-    a_src, b_src = float(b["src_start"]), float(b["src_end"])
-    pieces = tl.span_to_out(a_src, b_src)
-    if not pieces:
+    in this program (None when it can, the mask download aside).
+
+    Its stored mask clip serves while it fits — one continuous 1x clip of
+    its source span in the framing it was measured in
+    (matte_track.stored_mask_why, the Wave 0 rules). Where it does not (a
+    follow crop, a cut, a ramp, a card, a new framing) and for an item that
+    names the program matte, the PROGRAM matte serves it (Wave 1, track 1A:
+    the person matte carried through the picture's own chain), so with the
+    program matte on only "no main footage under the window" refuses here.
+    Whether that matte is measured yet is the render's question: a render
+    without it draws the item's face-safe fallback and says so."""
+    import matte_track
+    why = matte_track.stored_mask_why(edl, tl, item, geom_now)
+    if why is None or not matte_track.live() or not item.get("behind"):
+        return why
+    try:
+        s, e = float(item["start"]), float(item["end"])
+    except (KeyError, TypeError, ValueError):
+        return why
+    if not matte_track.program_to_source(tl, s, e):
         return "its footage is no longer in the edit"
-    if len(pieces) > 1:
-        return "a cut now falls inside its window"
-    ramp = tl.ramp_over(a_src, b_src)
-    if ramp:
-        # The mask is one 1x clip of source frames; a ramp shortens (or
-        # stretches) that footage's program window, so the trimmed mask
-        # would slide off the subject.
-        return f"speed ramp {ramp[0]} now covers its footage"
-    if geom_now is None:
-        geom_now = subject_matte_geom(edl.get("frame"))
-    if b.get("geom") and b["geom"] != geom_now:
-        return "the framing changed since its mask was measured"
-    if picture_cards.overlaps_source_card(edl, pieces):
-        return "a source-fed picture card re-frames its footage"
-    if follow.moves_during(edl, [(a_src, b_src)]):
-        return "the crop follows the speaker across its footage"
     return None
 
 
