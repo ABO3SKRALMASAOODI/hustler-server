@@ -39,6 +39,29 @@ WHAT IS NOT HERE. Pixels (fxgraph / the compilers), the sidecar job
 (analysis_jobs.py), the store (sidecars.py). Faces: ``face_mask`` draws
 the faces.yunet boxes as soft ellipses in source space and sends them
 through the same chain; ``face_box`` maps a face to program fractions.
+
+THROUGH APPLY_EDIT_BATCH (an MCP client that cached its tool list before
+Wave 1; edit_batch fills the program-matte SubjectMatte, the renderer draws
+it — the words in front, and saying so, while the matte is measuring):
+
+  a graphic behind the speaker
+    {"action": "upsert", "layer": "motion", "id": "m1",
+     "value": {"id": "m1", "layer": "behind_subject"}}
+  words behind the speaker
+    {"action": "upsert", "layer": "texts", "id": "t9", "value": {
+     "id": "t9", "text": "FLYING CARS", "start": 2.0, "end": 9.0,
+     "template": "title", "size_scale": 2.4,
+     "behind": {"asset_key": "sidecar:matte.person"}}}
+  screen-locked under a push (track 1C's composite slot)
+    {"action": "upsert", "layer": "motion", "id": "m1",
+     "value": {"id": "m1", "layer": "behind_subject",
+               "composite": {"stage": "screen"}}}
+  back in front / gone
+    {"action": "upsert", "layer": "motion", "id": "m1",
+     "value": {"id": "m1", "layer": "above_captions"}}
+    {"action": "upsert", "layer": "texts", "id": "t9",
+     "value": {"id": "t9", "behind": null}}
+    {"action": "remove", "layer": "texts", "id": "t9"}
 """
 
 import contextvars

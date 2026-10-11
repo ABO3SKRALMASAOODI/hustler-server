@@ -125,6 +125,20 @@ def render(S, edl, out, *, preview=False, matte_view=False, live=True):
     matte_track.LIVE = live
     warnings = []
     tok = motion_layer.collect_warnings(warnings)
+    saved_run = renderer._render_media_run
+    if matte_view:
+        # the matte is measured from a LOSSLESS encode (the codec's edge
+        # noise is not the matte's)
+        def _lossless(cmd, **kw):
+            cmd = list(cmd)
+            if "-crf" in cmd:
+                cmd[cmd.index("-crf") + 1] = "0"
+            for flag in ("-maxrate", "-bufsize"):
+                while flag in cmd:
+                    i = cmd.index(flag)
+                    del cmd[i:i + 2]
+            return saved_run(cmd, **kw)
+        renderer._render_media_run = _lossless
     t0 = time.time()
     try:
         with ink.capture_overlays() as placed:
@@ -132,6 +146,7 @@ def render(S, edl, out, *, preview=False, matte_view=False, live=True):
             renderer.render_edl(e, S["index"], S["path"], out, work,
                                 preview)
     finally:
+        renderer._render_media_run = saved_run
         motion_layer.stop_collecting(tok)
         motion_layer.composite_behind = saved
         matte_track.LIVE = saved_live
@@ -337,17 +352,21 @@ def case_1a3(out, preview):
     and a giant word SCREEN-LOCKED behind the head (composite.stage
     'screen': after the camera, through the screen-space matte). Wave 0's
     behind graphics rode the zoom."""
+    # the head whole in the 9:16 crop, looking into the frame's left
+    # third: the word's wall
     src_edl = {"keep": [[150.4, 162.4]],
-               "frame": {"ratio": "9:16", "mode": "crop", "focus_x": 0.38,
+               "frame": {"ratio": "9:16", "mode": "crop", "focus_x": 0.46,
                          "focus_y": 0.4}}
     S = setup("V01", "thiel_ai_bigger", src_edl, out)
     dur = float(S["info"]["duration"])
     zoom = {"action": "set", "layer": "effects", "value": {
         "zooms": [{"id": "z1", "start": 1.0, "end": 9.3, "mode": "push_in",
                    "strength": 0.26}]}}
-    hero = _hero("h1", "BIGGER", 1.0, 9.3, y=0.24, entrance="pop")
+    hero = _hero("h1", "BIGGER", 1.0, 9.3, y=0.13, entrance="pop",
+                 role="condensed")
     hero["value"]["composite"] = {"stage": "screen"}
-    world = _hero("h2", "BIGGER", 1.0, 9.3, y=0.24, entrance="pop")
+    world = _hero("h2", "BIGGER", 1.0, 9.3, y=0.13, entrance="pop",
+                  role="condensed")
     edl = apply_ops(S["edl"], [zoom, hero], dur)
     edl_world = apply_ops(S["edl"], [zoom, world], dur)
     return S, edl, {"items": ["h1"], "ref": "05",
@@ -525,6 +544,54 @@ def glyph_drift(render_path, matte_path, rec, fps, step=3, reach=4):
             "nonzero": [o for o in offs if o[1] or o[2]][:10]}
 
 
+def glyph_drift_vs(render_path, control_path, matte_path, rec, fps, step=3,
+                   reach=4):
+    """Per frame, the (dx, dy) that best registers the render's type band
+    (glyphs + anti-aliased edges + 2 px, the subject excluded) on the
+    CONTROL — the same graphic drawn in front, i.e. screen-locked by
+    construction. Flat glyph interiors make an absolute match ambiguous
+    by the erosion (the control itself reads +-2 px against its own
+    clip); against the control 0 means the type sits exactly where a
+    screen overlay sits."""
+    from benchmarks.refbench import ink
+    from qa_metrics import _dilate
+    f0 = int(np.ceil(rec["start"] * fps)) + 3
+    f1 = int(np.floor(rec["end"] * fps)) - 3
+    frames = list(range(f0, f1, step))
+    R = _frames(render_path, frames)
+    C = _frames(control_path, frames)
+    M = _frames(matte_path, frames, gray=True)
+    worst, offs = 0, []
+    for f in frames:
+        if f not in R or f not in C or f not in M:
+            continue
+        H, W = R[f].shape[:2]
+        g = ink.glyphs(rec, f, fps, (H, W))
+        if g is None:
+            continue
+        m = (M[f][..., 0] if M[f].ndim == 3 else M[f]) > 60
+        sel = _dilate(g["alpha"] >= 128, 2) & ~_dilate(m, 4 + reach)
+        ys, xs = np.nonzero(sel)
+        if len(xs) < 300:
+            continue
+        want = C[f][ys, xs].astype(np.int16)
+        best = None
+        for dy in range(-reach, reach + 1):
+            for dx in range(-reach, reach + 1):
+                yy = np.clip(ys + dy, 0, H - 1)
+                xx = np.clip(xs + dx, 0, W - 1)
+                e = float(np.abs(R[f][yy, xx].astype(np.int16) - want)
+                          .mean())
+                if best is None or e < best[0] - 1e-9 or (
+                        abs(e - best[0]) <= 1e-9
+                        and abs(dx) + abs(dy) < abs(best[1]) + abs(best[2])):
+                    best = (e, dx, dy)
+        offs.append((f, best[1], best[2]))
+        worst = max(worst, abs(best[1]), abs(best[2]))
+    return {"max_px": worst, "frames": len(offs),
+            "nonzero": [o for o in offs if o[1] or o[2]][:10]}
+
+
 def run(case_id, out, preview):
     import qa_metrics
     cdir = os.path.join(out, case_id)
@@ -562,9 +629,18 @@ def run(case_id, out, preview):
             continue
         r = occlusion(rp, mp, rec, fps)
         r.update(matte_quality(mp, rec, fps, rp))
-        if spec.get("drift_item") == iid:
-            r["glyph_drift"] = glyph_drift(rp, mp, rec, fps)
         res["items"][iid] = r
+    if spec.get("drift_item"):
+        iid = spec["drift_item"]
+        rec, crec = placed.get(iid), _pc.get(iid)
+        if rec and crec:
+            res["items"][iid]["glyph_drift"] = glyph_drift_vs(
+                rp, cp, mp, rec, fps)
+            # the absolute read, on the render and on the control (the
+            # flat-glyph ambiguity: the control is screen-locked)
+            res["items"][iid]["glyph_drift_abs"] = {
+                "render": glyph_drift(rp, mp, rec, fps)["max_px"],
+                "control": glyph_drift(cp, mp, crec, fps)["max_px"]}
     if spec.get("labels"):
         res["label_iou"] = label_iou(S, *spec["labels"])
     if spec.get("cut_prog") is not None:
