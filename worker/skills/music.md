@@ -15,7 +15,8 @@ payoff, room before a reveal, a button on the ending.
   play better with a song, say so in one clause of the reply and let the user
   send or name one.
 - Generic background music from the CC0 library only when the user explicitly
-  asks for generic background music.
+  asks for generic background music — and the user picks the track: offer
+  2-4 with `ask_user`, never choose one yourself.
 - A missing bed is never a defect to repair on your own; digital silence is
   (fix it with the source's natural sound, not invented music).
 
@@ -42,10 +43,10 @@ order:
    the licensed version in-app when posting.
 3. Generic background music, only when the user explicitly asks for it: the
    Valmera music library when its tools are listed (the list_music_library
-   tool browses licence-free CC0 tracks by mood and the add_library_music
-   tool places one as a ducked bed; apply_look's music option, where the
-   schema lists it, follows the same rule). Name the track you chose; CC0
-   carries no credit or licence obligation.
+   tool browses licence-free CC0 tracks by mood; offer 2-4 that fit with
+   `ask_user`, and the add_library_music tool places the one the user picks
+   as a ducked bed; apply_look's music option takes only that pick). Name the
+   track they picked; CC0 carries no credit or licence obligation.
 4. A video can be a sound source: pass the clip's storage_key to
    `add_music`.
 If the user asked for music and no route works, finish the edit with the
@@ -54,10 +55,10 @@ source's speech and a strong picture rhythm and say music was not available
 
 CHOOSE WITHIN WHAT THE USER GAVE: with their track, choose the section, not
 the song — the part whose energy matches the story. With a generic request,
-choose by content: insight → cinematic, ambient or inspiring beds that stay
-out of the words; business, product and education → corporate or chill;
-hype → hiphop or upbeat; stakes → dramatic; tender stories → sparse ambient
-that can drop out.
+choose which tracks to OFFER by content: insight → cinematic, ambient or
+inspiring beds that stay out of the words; business, product and education →
+corporate or chill; hype → hiphop or upbeat; stakes → dramatic; tender
+stories → sparse ambient that can drop out.
 
 LEVELS AND DUCKING: under speech the bed sits about 13–20 dB below the voice
 (the `add_music` default is -18 dB ducked); `set_music_fit(duck_mode='smooth')`

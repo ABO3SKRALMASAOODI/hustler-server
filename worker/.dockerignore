@@ -1,5 +1,8 @@
 tests/
 tools/
+# refbench (Wave 0 0D) is a dev-only harness: case specs, footage-library
+# metadata and judge prompts never ship in an executor image
+benchmarks/
 __pycache__/
 *.py[cod]
 .pytest_cache/

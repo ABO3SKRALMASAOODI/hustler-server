@@ -1,0 +1,25 @@
+# Wave 0 baseline board: today's best output on the window every later wave re-renders.
+id: BASE-2
+track: W0
+title: "Jobs: Computer fonts were garbage (v5)"
+local_only: true
+interim: false
+reference:
+  - {ref: "02", t: [0.0, 18.7], approx: false}
+  - {ref: "35", t: [0.0, 10.7], approx: true}
+footage:
+  - {vfl: V03, t: [1691.66, 1783.84]}
+music: null
+aspect: "9:16"
+mode: engine
+edl: {base: "baseline:jobs_final8.json", window_ref: V03/jobs_fonts, index: idx_jobs_v3.json, name: jobs}
+chat: null
+render: {variant: final, use: "~/Documents/Valmera/Showcase Shorts 2026-10-10/v5 02 Jobs - Computer fonts were garbage.mp4"}
+allow: []
+metrics:
+  - {name: legibility, op: ">=", value: 60}
+  - {name: land_err_f, op: "<=", value: 1}
+  - {name: flash_risk, op: "<=", value: 3}
+beyond: "baseline: today's output, measured on the identical source window every later wave re-renders, so progress is a number and not a memory"
+board: {stills: [1.0, 15.6, 21.2], clip: [14.6, 18.6]}
+judges: {lenses: [motion, craft, owner_rules], pass: owner}

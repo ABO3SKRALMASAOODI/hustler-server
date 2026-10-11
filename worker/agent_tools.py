@@ -12,11 +12,15 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import schemas as _schemas_mod
+import tools_ext
 
 import audio_qc
 import render_qc
@@ -99,6 +103,11 @@ import jump_cut_report
 import music_library
 import sound_library
 import sfx_mix
+# Owner rules in code (Wave 0, track 0C): music provenance and library picks,
+# the missing-sound queue (worker/devices/INTERFACES.md §6.1).
+import music_gate
+import sound_requests
+import hooks
 import sfx_placement
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
@@ -615,6 +624,21 @@ class ToolContext:
             source_shape=_source_shape(self))
         if violations:
             return scope_guard.rejection_message(prev["version"], violations)
+        # Owner rule (Wave 0, 0C): agents never choose music. Every write —
+        # add_music, a library pick, apply_look, swap_music, apply_edit_batch
+        # — stamps the provenance of a track new to the edit and refuses one
+        # nobody chose (music_gate.check_write; existing tracks keep theirs).
+        music_refusal = music_gate.check_write(self, prev["json"], normalized)
+        if music_refusal:
+            return f"REJECTED (EDL v{prev['version']} unchanged): {music_refusal}"
+        # Owner rule 2: with web sounds off, no write (add_sfx or an edit
+        # batch) places a sound search_sfx fetched earlier; sounds already in
+        # the edit keep playing.
+        sfx_refusal = music_gate.check_sfx_write(self, prev["json"],
+                                                 normalized)
+        if sfx_refusal:
+            return (f"REJECTED (EDL v{prev['version']} unchanged): "
+                    + sfx_refusal.replace("REJECTED: ", "", 1))
         advisories = quality_gate.advisory_findings(
             prev["json"], normalized, self.user_message)
         if edl_signature(normalized) == edl_signature(prev["json"]):
@@ -656,6 +680,13 @@ class ToolContext:
                 f"Before: {before}. After: {after}.")
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
+        # The device ledger (Wave 0, 0C; INTERFACES.md §6.3): a write that
+        # added, removed or changed a device returns its family counts
+        # against the budgets — advisory, never a reason to add one.
+        ledger_note = taste.write_ledger_note(prev["json"], normalized,
+                                              self.index)
+        if ledger_note:
+            line += "\n" + ledger_note
         # Jump cuts this write put in the hook, or framing steps too small to
         # read as a cut (index evidence only; never blocks, never adds a zoom).
         if self.has_main_video:
@@ -1653,8 +1684,10 @@ def list_assets(ctx, kind=None):
                     "acquisition department and find_song can locate a link. "
                     "For a generic genre/vibe or a trending platform sound, "
                     "ask the user to attach the file (paperclip button in "
-                    "chat, mp3/wav/m4a) instead of repeatedly searching. "
-                    "search_sfx remains for one-shot sound effects.")
+                    "chat, mp3/wav/m4a) instead of repeatedly searching, or "
+                    "offer library tracks with ask_user and place their "
+                    "pick. Sound effects come from the approved library "
+                    "(list_sound_library).")
         return f"No {canonical} assets in this project."
     try:
         edl_row = ctx.latest_edl()
@@ -3095,8 +3128,22 @@ def _merge_touching(spans):
 
 # The shared re-anchoring pass lives in timeline.py (round 35.1) so the
 # backend UI ops apply the IDENTICAL anchor policy — one implementation,
-# every surface. Alias kept for the existing call sites below.
-_remap_program_items = timeline_mod.remap_program_items
+# every surface. Then the device re-solvers run on the re-anchored EDL
+# (hooks.on_keep_change, INTERFACES.md §6.4; the backend's Studio keep path
+# does the same). An EDL with no fx and no registered keep_change re-solver
+# is exactly the shared pass, untouched.
+def _remap_program_items(edl, old_tl, new_tl):
+    before = copy.deepcopy(edl) if (edl.get("fx")
+                                    or hooks.registered("keep_change")) \
+        else None
+    notes = timeline_mod.remap_program_items(edl, old_tl, new_tl)
+    if before is None:
+        return notes
+    solved, more = hooks.on_keep_change(before, edl, old_tl, new_tl)
+    if solved is not edl:
+        edl.clear()
+        edl.update(solved)
+    return list(notes or []) + list(more or [])
 
 
 # Shot-cut hygiene. A keep edge a few frames past a SOURCE camera cut shows
@@ -6203,6 +6250,9 @@ def find_song(ctx, query):
         hits = _search_named_youtube(ctx, q, "song")
     except song_find.SongFindError as e:
         hits, search_error = [], e
+    # Owner rule (Wave 0, 0C): the user NAMED this song; what fetch_url then
+    # downloads for it is stamped user_named (music_gate).
+    music_gate.note_named_song(ctx, q, hits)
     if not hits and search_error is None:
         return (f"No results for \"{q}\". Check the spelling with the "
                 "user, or ask them to paste a link to the track "
@@ -6548,13 +6598,39 @@ def find_footage(ctx, query):
             "used and where it came from (title + channel).")
 
 
+def _sfx_sources_hint():
+    """Where a sound may come from (owner rule, Wave 0: the approved
+    library first; the web only when the owner turned web sounds on)."""
+    hint = ("list_sound_library for the owner-approved recordings "
+            "(storage_key 'sound:<id>'), or list_assets(kind='music') for "
+            "the user's own uploads")
+    if sfx_search.available():
+        hint += ("; search_sfx finds a real sound online when the user asks "
+                 "for one the library lacks (fetch_sfx downloads it)")
+    return hint
+
+
+def _web_sfx_refusal(ctx, query, at=None):
+    """Owner rule (Wave 0, 0C): sound effects come only from the approved
+    library. With the web-SFX chain off, a request for a sound the library
+    lacks is filed for the owner to audition (sound_requests) and declined
+    in one clause; nothing is fetched from the web."""
+    base = ("REJECTED: web sounds are off — sound effects come only from the "
+            "owner-approved library (list_sound_library), or a file the user "
+            "uploads (add_sfx), or the sound off a clip they sent.")
+    q = " ".join(str(query or "").split())
+    if not q:
+        return base
+    rid = sound_requests.file(ctx, q, at=at, purpose="web-SFX request")
+    return (base + " Tell the user in one clause: "
+            + sound_requests.decline_clause(q, rid))
+
+
 def search_sfx(ctx, query, max_seconds=None):
     """READ: find a real recorded sound effect on the open web — the
     editor's whoosh/shutter/click, not a synthesized guess."""
     if not sfx_search.available():
-        return ("REJECTED: sound-effect search is disabled on this "
-                "deployment — place a file the user uploads (add_sfx), or "
-                "take the sound off a clip they sent.")
+        return _web_sfx_refusal(ctx, query)
     try:
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
@@ -6719,6 +6795,8 @@ def _normalize_sfx_for_storage(source, destination):
 
 def audition_sfx_candidates(ctx, ids, purpose):
     """Compare the actual transient shape of multiple search results."""
+    if not sfx_search.available():
+        return _web_sfx_refusal(ctx, None)
     if not isinstance(ids, (list, tuple)):
         return "REJECTED: ids must be an array of search_sfx result ids."
     unique = []
@@ -6869,6 +6947,8 @@ def _download_sfx_hit(ctx, hit):
 def fetch_sfx(ctx, id):
     """WRITE (to the project's assets): download a search_sfx hit and
     register it as a normal audio asset, ready for add_sfx."""
+    if not sfx_search.available():
+        return _web_sfx_refusal(ctx, None)
     hit, recover_error = _recover_search_hit(ctx, "sfx", id,
                                              sfx_search.resolve)
     if not hit:
@@ -6890,8 +6970,7 @@ def add_web_sfx(ctx, query, at, gain_db=-6.0, max_seconds=None,
                 allow_none=True):
     """Search, acoustically compare, store and place a real one-shot."""
     if not sfx_search.available():
-        return ("REJECTED: web sound-effect search is disabled. Use add_sfx "
-                "with a user-uploaded audio or video asset.")
+        return _web_sfx_refusal(ctx, query, at=at)
     try:
         at_n = float(at)
         gain_n = float(gain_db)
@@ -7055,6 +7134,16 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
     # sound that plays is the audio extracted from it, never the video object.
     storage_key = track["storage_key"]
     edl = dict(ctx.latest_edl()["json"])
+    # Owner rule (Wave 0, 0C): who chose this track. The user's upload or
+    # clip, a song they named, or a library track they picked; anything else
+    # (a library track nobody picked, agent-searched web music) is refused
+    # before the write (music_gate; the write gate re-checks).
+    provenance, gate_err = music_gate.provenance_for(ctx, storage_key, edl,
+                                                     resolved=True)
+    if gate_err:
+        return gate_err
+    if provenance:
+        music_gate.grant(ctx, storage_key, provenance)
     # Clamp against the FINAL program duration (kept footage + inserts), not
     # just the kept footage — otherwise music can never reach the end of a
     # video that has clips/images spliced in. Matches add_zoom / add_voiceover.
@@ -7126,7 +7215,7 @@ def add_music(ctx, storage_key, start=None, end=None, gain_db=None,
             "duck_mode": "smooth" if duck else None,
             "offset_s": off, "fade_in_s": fi or None,
             "fade_out_s": fo or None, "loop": True if loop else None,
-            "purpose": purpose_n}
+            "purpose": purpose_n, "provenance": provenance}
     music.append(item)
     edl["music"] = music
     res = ctx.write_edl(
@@ -7249,8 +7338,7 @@ def _resolve_sfx(ctx, storage_key):
         return None, (
             "REJECTED: that file is the video's OWN extracted audio track "
             "(a transcription artifact), not a sound effect. Use "
-            "search_sfx to find the real sound online, or "
-            "list_assets(kind='music') for the user's own uploads.")
+            + _sfx_sources_hint() + ".")
     if asset and asset["kind"] == "video_clip":
         if getattr(ctx, "_recipe_staging", False):
             return None, (
@@ -7267,12 +7355,23 @@ def _resolve_sfx(ctx, storage_key):
     if not asset or asset["kind"] != "music":
         return None, (
             f"REJECTED: '{storage_key}' is not an audio asset in this "
-            "project. search_sfx finds real sounds online (fetch_sfx "
-            "downloads one), or list_assets(kind='music') for the user's "
-            "uploads.")
+            "project. Use " + _sfx_sources_hint() + ".")
+    if _web_found_sound(asset) and not sfx_search.available():
+        # Owner rule 2 (Wave 0): with web sounds off, a sound an earlier
+        # search_sfx fetched into this project is not placed either.
+        return None, (
+            "REJECTED: that sound was found online by search_sfx, and web "
+            "sounds are off — sound effects come only from the owner-approved "
+            "library. Use " + _sfx_sources_hint() + ".")
     return {"name": _asset_name(asset),
             "duration_s": asset.get("duration_s"), "library": False,
             "storage_key": storage_key}, None
+
+
+def _web_found_sound(asset):
+    """A sound search_sfx / audition_sfx_candidates fetched from the web
+    (_download_sfx_hit records it so), not one the user uploaded."""
+    return music_gate.web_found_sound(asset)
 
 
 # A non-library sound's level when the editor sets none: the schema's and the
@@ -7318,6 +7417,9 @@ def add_sfx(ctx, storage_key, at, gain_db=None, purpose=None, offset_s=None,
     if err:
         return err
     storage_key = sound["storage_key"]      # a video resolves to its audio
+    # _resolve_sfx already refused a web-found sound while web sounds are
+    # off (owner rule 2): the write gate need not look this key up again.
+    music_gate.grant_sfx(ctx, storage_key)
     lib_id = sound.get("sound_id") or sound_library.id_for_key(storage_key)
     try:
         at = float(at)
@@ -7600,7 +7702,15 @@ def swap_music(ctx, id, storage_key):
     dropped_offset = hit.get("offset_s")
     hit["offset_s"] = None
     edl["music"] = items
+    # Devices bound to this track's beats re-solve on a swap (Wave 0, 0C:
+    # hooks.on_music_swap; later tracks register their re-solvers). Inert
+    # until a device or a re-solver exists.
+    swap_notes = []
+    if hooks.registered("music_swap") or edl.get("fx"):
+        edl, swap_notes = hooks.on_music_swap(edl, id, id)
     res = ctx.write_edl(edl, f"music {id}: '{old}' -> '{track['name']}'")
+    if swap_notes and not str(res).startswith(("REJECTED", "NO CHANGE")):
+        res += "\nDevices: " + "; ".join(swap_notes)
     if dropped_offset and not str(res).startswith("REJECTED"):
         res += (f"\nNote: the {dropped_offset}s start-offset was cleared — it "
                 "pointed into the old track. Set it again if you want one.")
@@ -20130,6 +20240,12 @@ def fetch_url(ctx, url, as_kind=None):
         shutil.rmtree(workdir, ignore_errors=True)
 
     motion_profile = getattr(ctx, "_last_download_motion_profile", None)
+    # Owner rule (Wave 0, 0C): a link fetched as music is a song the user
+    # named or supplied — its provenance travels with the asset (music_gate).
+    music_meta = ({"music_provenance": "user_named",
+                   "named_song": music_gate.named_song_for(
+                       ctx, got.get("source_url") or url)}
+                  if kind == url_media.KIND_AUDIO else {})
     ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
                bytes_=got.get("bytes"), duration_s=got.get("duration_s"),
                width=got.get("width"), height=got.get("height"),
@@ -20146,7 +20262,8 @@ def fetch_url(ctx, url, as_kind=None):
                      "license_note": ("Usage rights were not assessed by "
                                       "the fetch operation; downloading does "
                                       "not by itself grant republication "
-                                      "rights.")})
+                                      "rights."),
+                     **music_meta})
     ctx.urls_fetched.append({"storage_key": key, "kind": kind,
                              "url": got["source_url"],
                              "filename": got["filename"],
@@ -24060,7 +24177,16 @@ def ask_user(ctx, question):
     q = (question or "").strip()
     if not q:
         return "REJECTED: question is empty."
-    raise AskUser(q[:600])
+    q = q[:600]
+    # Owner rule (Wave 0, 0C): a question that offers library tracks opens
+    # a pick offer — the only way a library track becomes the user's pick
+    # (music_gate). The in-app user's reply is checked against it next turn;
+    # an MCP caller (a model relaying its own user) is handed the pick token
+    # to pass back with the user's words.
+    offer = music_gate.open_offer(ctx, q)
+    if offer and music_gate.is_mcp(ctx):
+        q = q + music_gate.offer_note(offer)
+    raise AskUser(q)
 
 
 def _tool_identifier(value):
@@ -26448,9 +26574,10 @@ def suggest_emphasis(ctx):
 #   engine is unavailable), one committed grade (preset + continuous values
 #   that REPLACE any earlier custom grade), texture (grain/vignette/
 #   halation, replacing earlier whole-program texture), one scene-transition
-#   style, no fade from black on vertical, and — only when asked
-#   (music='auto', a mood or a slug) — a ducked CC0 library bed. They return
-#   the hero-moment templates to place next.
+#   style, no fade from black on vertical, and — only with the slug of a
+#   library track the USER picked (Wave 0 music gate; never 'auto' or a
+#   mood) — a ducked CC0 library bed. They return the hero-moment templates
+#   to place next.
 #
 # Owner, Oct 10 2026: ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES. A
 # look places NO sound unless asked: transition_sounds=true sounds a budgeted,
@@ -26817,8 +26944,13 @@ def _look_hero_templates(look, limit=4):
     return out
 
 
-def _look_music_choice(look, music):
-    """(request, error). request is None, ('moods', tuple) or ('track', row)."""
+def _look_music_choice(look, music, ctx=None):
+    """(request, error). request is None or ('track', row).
+
+    Owner rule (Wave 0, 0C): agents never choose music, so a look never
+    picks a bed — 'auto' and a mood (the look choosing a track) are refused;
+    only an exact slug the USER picked is placed (music_gate.resolve_pick,
+    the same gate as add_library_music)."""
     if music is None:
         return None, None
     mv = str(music).strip().lower()
@@ -26828,17 +26960,29 @@ def _look_music_choice(look, music):
         return None, ("REJECTED: the built-in music library is not available "
                       "on this deployment — call apply_look again without "
                       "music, and use the user's own track for music.")
-    if mv == "auto":
-        return ("moods", tuple(look.get("music") or ())), None
-    if mv in music_library.MOODS:
-        return ("moods", (mv,)), None
+    if mv == "auto" or mv in music_library.MOODS:
+        return None, ("REJECTED: apply_look never picks music — agents never "
+                      "choose music. Call apply_look without music, offer "
+                      "2-4 library tracks in the look's moods ("
+                      + ", ".join(look.get("music") or music_library.MOODS)
+                      + ") with ask_user, then place the user's pick (music="
+                      "<their slug>, or add_library_music).")
     track, err = music_library.find(mv)
     if err:
         detail = err.split("REJECTED: ", 1)[-1]
-        return None, ("REJECTED: music must be 'auto', a mood ("
-                      + ", ".join(music_library.MOODS)
-                      + ") or an exact slug from list_music_library. "
-                      + detail)
+        return None, ("REJECTED: music must be the exact slug of the library "
+                      "track the user picked (list_music_library). " + detail)
+    if ctx is not None:
+        _pick, err = music_gate.resolve_pick(ctx, track["slug"])
+        if err:
+            if music_gate.is_mcp(ctx):
+                # apply_look has no user_pick: over MCP the pick travels
+                # with add_library_music.
+                err = err.split(" Over MCP pass user_pick", 1)[0] + (
+                    " Over MCP: apply_look without music, then "
+                    f"add_library_music(slug='{track['slug']}', user_pick="
+                    "'<pick token> <the user's own words>').")
+            return None, err
     return ("track", track), None
 
 
@@ -26868,7 +27012,7 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                 + ", ".join(sorted(LOOKS))
                 + ". Each composes captions, grade, texture, transitions "
                   "and fades in one version.")
-    music_req, music_err = _look_music_choice(look, music)
+    music_req, music_err = _look_music_choice(look, music, ctx)
     if music_err:
         return music_err
     sounds_req = _look_sounds_flag(transition_sounds)
@@ -27177,18 +27321,13 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                          + " already scores this edit (swap_music or "
                            "remove_music to change it).")
         else:
-            if music_req[0] == "track":
-                track = music_req[1]
-            else:
-                track = music_library.pick(
-                    music_req[1], f"{ctx.project_id}:{n}",
-                    avoid=music_library.used_by_user(ctx))
-            key, err = ((None, "no library track matches those moods")
-                        if not track else
-                        music_library.ensure_project_asset(ctx, track))
+            # Only the user's pick reaches here (_look_music_choice).
+            track = music_req[1]
+            key, err = music_library.ensure_project_asset(ctx, track)
             if err:
                 notes.append("music NOT added — " + err)
             else:
+                music_gate.grant(ctx, key, "user_picked_library")
                 prog = program_duration(edl)
                 bed = _speech_overlap_s(ctx, edl, 0.0, prog) >= 1.0
                 stage = _RecipeContext(ctx, edl, row["version"])
@@ -27261,8 +27400,8 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
         if system and not music_placed and music_req is None \
                 and not edl.get("music"):
             res += ("\nMusic: none. Only when the user asks for background "
-                    "music, music='auto' (or add_library_music) lays a CC0 "
-                    "bed — never on your own initiative.")
+                    "music: offer library tracks with ask_user and place "
+                    "the one they pick — never on your own initiative.")
     return res
 
 
@@ -27955,7 +28094,7 @@ TOOLS = {
                     "keep", "speed", "inserts", "frame", "captions",
                     "caption_mutes", "texts", "vectors", "music", "sfx",
                     "voiceover", "volume", "master", "effects", "overlays", "canvas",
-                    "motion"]},
+                    "motion"] + (["fx"] if _schemas_mod.FX_AUTHORABLE_TYPES else [])},
                 "id": {"type": "string", "description": "Existing item id for upsert/remove; omit for whole-layer set."},
                 "value": {"description": "set: complete layer value (array for texts/inserts/music). upsert: one item object merged by id. reorder: all insert ids. Read get_edl for exact shapes."}},
                 "required": ["action", "layer"]}}}),
@@ -28713,6 +28852,8 @@ TOOLS = {
                   "override that. storage_key is an exact key from "
                   "list_assets(kind='music') — the user's own uploads or a "
                   "track fetch_url just downloaded — never invent one. "
+                  "Agents never choose music: a library track is placed "
+                  "only by add_library_music after the user picks it. "
                   "Choose from the user's direction, metadata, context and "
                   "measured get_audio_analysis evidence. "
                   "start/end are OUTPUT-timeline seconds "
@@ -28825,7 +28966,8 @@ TOOLS = {
                 "a reason the tool becomes unavailable. "
                 "storage_key is 'sound:<id>' for an approved library "
                 "recording (list_sound_library), or an exact key from "
-                "fetch_sfx or list_assets(kind='music') — never invent one. "
+                "list_assets(kind='music') for a sound the user supplied — "
+                "never invent one, never a web sound. "
                 "`at` is an OUTPUT-timeline second (the edited program, not "
                 "source time). For a library recording `at` is the moment it "
                 "HITS — the visual frame its peak belongs on: the tool starts "
@@ -28874,8 +29016,9 @@ TOOLS = {
                    {"id": {"type": "string"}}),
     "swap_music": (swap_music, "Replace the TRACK of an existing music item "
                    "while keeping its position, level and fit — THE tool for "
-                   "'use a different song' / 'try something more upbeat'. "
-                   "id from get_edl; storage_key as for add_music.",
+                   "'use a different song'. The new track is the user's: "
+                   "their upload, a song they named or a library track they "
+                   "picked. id from get_edl; storage_key as for add_music.",
                    {"id": {"type": "string"},
                     "storage_key": {"type": "string"}}),
     "set_music_fit": (set_music_fit, "Retime or refit EXISTING music in "
@@ -30797,23 +30940,21 @@ TOOLS = {
                    "warm), 'meme' (impact xl captions, flash cuts, grain); "
                    "their fades apply to landscape only. Transitions fire "
                    "only at real scene changes (B-roll/inserts/new shots), "
-                   "never on jump cuts. ONLY when the user asked for music: "
-                   "music='auto' (the look's moods), a mood or an exact "
-                   "library slug lays a ducked CC0 bed (-18 to -22 dB) when "
-                   "the edit has no music yet; otherwise omit music — never "
-                   "add music on your own initiative. Preserves existing "
+                   "never on jump cuts. music= takes only the exact slug of "
+                   "a library track the USER picked (offer tracks with "
+                   "ask_user; never 'auto' or a mood — agents never choose "
+                   "music) and lays it as a ducked CC0 bed (-18 to -22 dB) "
+                   "when the edit has no music yet; otherwise omit music. "
+                   "Preserves existing "
                    "emphasis_words, else picks them from the transcript. "
                    "Never touches cuts. Every component can be adjusted "
                    "afterwards with its own tool.",
                    {"name": {"type": "string",
                              "enum": sorted(LOOKS)},
                     "music": {"type": "string",
-                              "description": "'auto' = a CC0 library bed "
-                              "in the look's moods; or a mood (upbeat, "
-                              "chill, cinematic, corporate, dramatic, "
-                              "hiphop, ambient, inspiring); or an exact "
-                              "slug from list_music_library. Omit to leave "
-                              "music unchanged."},
+                              "description": "Exact slug of the library "
+                              "track the user picked (ask_user offers "
+                              "them). Omit to leave music unchanged."},
                     "transition_sounds": {
                         "type": "boolean",
                         "description": "Opt in to library sounds on a "
@@ -30888,7 +31029,9 @@ TOOLS = {
                           "items": {"type": "string"}}}),
     "ask_user": (ask_user, "Ask the user a specific question and wait for "
                  "their reply (ends this turn). Use whenever a material "
-                 "choice genuinely belongs to the user.",
+                 "choice genuinely belongs to the user — background music "
+                 "always does: list 2-4 exact library track titles and "
+                 "place the one they pick.",
                  {"question": {"type": "string"}}),
     "wait_for_job": (wait_for_job, "Wait up to 45 seconds for an existing job in this project. "
                      "Use the exact job ID from a pending render/scout receipt. Never creates "
@@ -31332,6 +31475,9 @@ def _tool_disabled(name, model=None):
     """Tools whose backing service is not configured are hidden entirely —
     the model must never see (or advertise) a capability that would only
     return 'unavailable'."""
+    ext = tools_ext.is_disabled(name)
+    if ext is not None:
+        return ext
     if name == "edit_shorts":
         return True
     if name == "review_audio":
@@ -31356,7 +31502,10 @@ def _tool_disabled(name, model=None):
         return not song_find.footage_available()
     if name in ("search_sfx", "audition_sfx_candidates", "fetch_sfx",
                 "add_web_sfx"):
-        return not sfx_search.available()
+        # Owner rule (Wave 0, 0C): sounds come only from the approved
+        # library; the web-SFX chain leaves the live catalog unless the
+        # owner sets WEB_SFX_ENABLED (a missing sound is a sound_request).
+        return not (config.WEB_SFX_ENABLED and sfx_search.available())
     if name in ("list_motion_templates", "add_motion_graphic",
                 "set_motion_graphic"):
         # Authoring is a fleet capability: the MCP/agent lanes that run these
@@ -31515,8 +31664,8 @@ _COMPACT_CONTRACTS = {
     "add_sfx": (
         "One-shot sound at an OUTPUT second. storage_key 'sound:<id>' places "
         "an approved library recording (list_sound_library); otherwise an "
-        "exact key from list_assets, or from fetch_sfx when the user asked "
-        "for a specific sound the library lacks; never invented. Leave "
+        "exact key from list_assets for a sound the user supplied; never "
+        "invented, never a web sound. Leave "
         "gain_db unset: a library recording is levelled against the voice at "
         "its hit (MIX/CHECK lines). Its `at` is the frame it HITS: the tool "
         "starts it early by its measured peak (a riser ends on `at`, typing "
@@ -31550,8 +31699,8 @@ _COMPACT_CONTRACTS = {
         "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
         "Places no sound unless transition_sounds=true (sounds are optional, "
         "never rules); read the receipt before adding junction cues. Its music "
-        "option (when listed) lays a library "
-        "bed: pass it only when the user asked for background music. One look "
+        "option, only when the user asked for background music, takes the "
+        "library track they picked. One look "
         "per edit; refine components with their own tools; no fade-in on "
         "vertical reels (set_fades)."),
     "punch_in_on_emphasis": (
@@ -31967,3 +32116,10 @@ def _execute(ctx, name, args):
     ctx.last_structured_tool_outcome = outcome.to_dict()
     ctx._executing_tool = previous_executing_tool
     return outcome.render_text()
+
+
+# Department tools (worker/tools_ext/, worker/devices/INTERFACES.md §7). The
+# one Wave 0 loader call: new verbs register themselves into TOOLS,
+# TOOL_DOMAINS and the load_tools enums from their own modules, outside the
+# core compact catalog. Keep this the last statement of the module.
+tools_ext.install(sys.modules[__name__])

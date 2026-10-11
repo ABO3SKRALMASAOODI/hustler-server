@@ -9,6 +9,7 @@ chat_sessions / chat_messages tables (one session per project, plus an
 'activity' role for agent tool calls).
 """
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -120,6 +121,19 @@ def _pure_worker_module(name):
 
 wplayback = _pure_worker_module("playback_plan")
 wbatch = _pure_worker_module("edit_batch")
+# Flash safety (Wave 0, owner decision): an export past the flash-safe limit
+# is flagged contains_flashing on its final job (worker/flash_safety.py). It
+# reads flash transitions at their junctions through the timeline loaded
+# above (registered under its unique name, so nothing else resolves it).
+sys.modules.setdefault("worker_timeline", wtimeline)
+wflash = _pure_worker_module("flash_safety")
+# Owner rule 1 (Wave 0, 0C): agents never choose music. The worker gates
+# every agent write it makes (music_gate.check_write); an MCP edit batch is
+# written HERE, so it runs the same pure gate (_mcp_music_gate below).
+wmusic = _pure_worker_module("music_gate")
+# Device re-solvers after a keep change (Wave 0; INTERFACES.md §6.4): the
+# Studio keep path runs the same pure hooks the agent's keep writes run.
+whooks = _pure_worker_module("hooks")
 
 video_bp = Blueprint("video", __name__)
 
@@ -239,10 +253,13 @@ def _image_edit_enabled():
 
 def _sfx_search_enabled():
     """Mirrors the worker's search_sfx availability (worker/sfx_search) —
-    keyless web search for real recorded sounds, on unless the deployment
-    switches it off. AI sound generation is gone (2026-08-08): synthesized
-    one-shots read as uncanny under real footage."""
-    return os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
+    keyless web search for real recorded sounds. Owner rule (Wave 0): sound
+    effects come only from the approved library, so web sounds are off
+    unless the owner sets WEB_SFX_ENABLED=1 (worker/config.py). AI sound
+    generation is gone (2026-08-08): synthesized one-shots read as uncanny
+    under real footage."""
+    return (os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
+            and os.getenv("WEB_SFX_ENABLED", "0") == "1")
 
 
 def _web_record_enabled():
@@ -4645,10 +4662,97 @@ def _reanchor_after_op(old_j, new_edl, desc):
         new_tl = wtimeline.Timeline(new_edl.get("keep") or [],
                                     new_edl.get("inserts") or [],
                                     new_edl.get("speed") or [])
+        before = copy.deepcopy(new_edl) if new_edl.get("fx") else None
         notes = wtimeline.remap_program_items(new_edl, old_tl, new_tl)
+        if before is not None:
+            new_edl, more = whooks.on_keep_change(before, new_edl, old_tl,
+                                                  new_tl)
+            notes = list(notes or []) + list(more or [])
         if notes:
             desc += " — " + _said(notes)
     return new_edl, desc
+
+
+def _mcp_music_gate(cur, project_id, before, after):
+    """Owner rule 1 on the MCP batch path (worker/devices/INTERFACES.md
+    §4.3: edit_batch writes that add a music item). The same pure gate the
+    worker's writes run (worker/music_gate.gate_items): a track new to the
+    edit gets its provenance from its project asset — an upload or the sound
+    of a clip is user_upload, a link the user named is user_named, a library
+    copy is user_picked_library only when the user picked it
+    (add_library_music records the pick) — never from what the batch claims,
+    and a track nobody chose is refused. Tracks already in the edit, or
+    anywhere in its history, keep their provenance. Returns an error string
+    or None; stamps ``after`` in place."""
+    before_keys = {m.get("storage_key") for m in (before or {}).get("music")
+                   or [] if isinstance(m, dict)}
+    new_keys = sorted({m.get("storage_key") for m in (after or {}).get("music")
+                       or [] if isinstance(m, dict) and m.get("storage_key")
+                       and m.get("storage_key") not in before_keys})
+    assets, picks, source_rows = {}, {}, {}
+    if new_keys:
+        cur.execute("SELECT storage_key, kind, meta FROM assets "
+                    "WHERE project_id=%s AND storage_key = ANY(%s)",
+                    (project_id, new_keys))
+        assets = {row["storage_key"]: row for row in cur.fetchall() or ()}
+        # The video an extracted soundtrack came from: the sound of a clip
+        # an agent found (stock, AI video) is not the user's choice.
+        sources = sorted({wmusic.extracted_from(a) for a in assets.values()}
+                         - {None})
+        if sources:
+            cur.execute("SELECT storage_key, kind, meta FROM assets "
+                        "WHERE project_id=%s AND storage_key = ANY(%s)",
+                        (project_id, sources))
+            source_rows = {row["storage_key"]: row
+                           for row in cur.fetchall() or ()}
+        else:
+            source_rows = {}
+        cur.execute("SELECT to_regclass('public.app_kv') AS t")
+        if (cur.fetchone() or {}).get("t"):
+            cur.execute("SELECT value FROM app_kv WHERE key = %s",
+                        (wmusic.picks_key(project_id),))
+            row = cur.fetchone()
+            try:
+                picks = json.loads((row or {}).get("value") or "{}")
+            except (TypeError, ValueError):
+                picks = {}
+            if not isinstance(picks, dict):
+                picks = {}
+
+    def seen_before(key):
+        cur.execute(wmusic.HISTORY_SQL, wmusic.history_args(project_id, key))
+        return cur.fetchone() is not None
+
+    def decide(key):
+        asset = assets.get(key)
+        prov, err = wmusic.decide(
+            key, asset, is_picked=lambda slug: slug in picks,
+            seen_before=seen_before,
+            source=source_rows.get(wmusic.extracted_from(asset)))
+        if err == wmusic.REFUSE_PICK:
+            err += (" Over MCP: ask_user, then add_library_music(slug, "
+                    "user_pick=...) places the track they pick.")
+        return prov, err
+
+    return wmusic.gate_items(before, after, decide)
+
+
+def _mcp_web_sound_gate(cur, project_id, before, after):
+    """Owner rule 2 on the MCP batch path: while web sounds are off, a batch
+    may not place a sound an earlier search_sfx fetched into the project
+    (worker/music_gate.gate_web_sounds, the same rule the worker's writes
+    run). Sounds already in the edit keep playing. Error string or None."""
+    if _sfx_search_enabled():
+        return None
+    keys = wmusic.new_sfx_keys(before, after)
+    if not keys:
+        return None
+    cur.execute("SELECT storage_key, kind, meta FROM assets "
+                "WHERE project_id=%s AND storage_key = ANY(%s)",
+                (project_id, keys))
+    rows = {row["storage_key"]: row for row in cur.fetchall() or ()}
+    err = wmusic.gate_web_sounds(before, after, rows.get)
+    return err.replace("REJECTED: ", "", 1) if err else None
 
 
 def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
@@ -4702,6 +4806,13 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                               f"changed ({type(exc).__name__}: {str(exc)[:300]}). "
                               "This is a Valmera fault, not your request."),
                     "code": "batch_validation_fault"}, 500
+        if origin == "mcp":
+            refusal = _mcp_music_gate(cur, project_id, latest["json"],
+                                      normalized) \
+                or _mcp_web_sound_gate(cur, project_id, latest["json"],
+                                       normalized)
+            if refusal:
+                return {"error": refusal[:500]}, 400
         work = wplayback.changed_work(latest["json"], normalized)
         changed = wschemas.edl_signature(latest["json"]) != wschemas.edl_signature(normalized)
         version = base
@@ -5420,6 +5531,20 @@ def get_edl_version(user_id, project_id, version):
                             "created_by": row["created_by"]}})
 
 
+def _flash_flag(edl_json):
+    """Owner decision (Wave 0, flash safety): a program past the flash-safe
+    limit reached export only through the user's opt-in (the verifier
+    blocks it otherwise), so its final job is flagged contains_flashing.
+    {} for every other export (its payload is unchanged) and whenever the
+    program cannot be read: a reading failure never blocks an export."""
+    try:
+        if wflash.assess(edl_json)["over_limit"]:
+            return {"contains_flashing": True}
+    except Exception:  # noqa: BLE001
+        pass
+    return {}
+
+
 def _request_final(cur, user_id, project_id, version, render_group=None,
                    reuse_existing=False):
     """One export gate shared by individual and explicit batch requests."""
@@ -5589,7 +5714,8 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
     # The same-project final guard above prevents duplicate encodes; queue
     # ordering and worker lanes own actual fleet capacity.
     job_id = _enqueue(cur, project_id, user_id, "final",
-                      {"edl_version": version, **({"render_group": render_group} if render_group else {})})
+                      {"edl_version": version, **({"render_group": render_group} if render_group else {}),
+                       **_flash_flag(edl_row["json"])})
     record_client_event(
         user_id, project_id, "export_job_started",
         detail={"job_id": job_id, "version": version}, origin="server")

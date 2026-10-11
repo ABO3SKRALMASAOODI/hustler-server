@@ -180,3 +180,43 @@ def rvm_stream(width, height):
             return np.clip(pha[0, 0].astype(np.float32), 0.0, 1.0)
 
     return _Stream()
+
+
+# ── Wave 0 track 0A additions (sidecar analysis; add-only) ───────────────
+# The sidecar child (analysis_jobs.py) runs RVM in its OWN process, so a
+# chunk that is OOM-killed takes only that child down, never the executor.
+# These build a session on an explicit (sha256-verified) file with an
+# explicit thread count instead of the shared, latched one above.
+
+def rvm_session_at(path, threads=0):
+    """An independent RVM ONNX session on ``path``; ``threads`` intra-op
+    threads (0 = onnxruntime's default, every core of the lane)."""
+    import onnxruntime as ort
+    so = ort.SessionOptions()
+    so.log_severity_level = 3
+    if threads and int(threads) > 0:
+        so.intra_op_num_threads = int(threads)
+    return ort.InferenceSession(path, so, providers=["CPUExecutionProvider"])
+
+
+def rvm_stream_on(sess, width, height):
+    """rvm_stream() on a given session: frames IN ORDER, BGR uint8 at
+    (height, width) in, soft alpha float32 (height, width) in 0..1 out. The
+    recurrent state starts empty, i.e. it resets at every stream (chunk)."""
+    ds = np.array([min(1.0, 512.0 / float(max(width, height, 1)))],
+                  np.float32)
+    state = {"rec": [np.zeros([1, 1, 1, 1], np.float32)] * 4}
+
+    class _Stream:
+        def step(self, frame_bgr, cv2):
+            src = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB) \
+                .astype(np.float32) / 255.0
+            src = np.ascontiguousarray(src.transpose(2, 0, 1))[None]
+            rec = state["rec"]
+            _fgr, pha, r1, r2, r3, r4 = sess.run(None, {
+                "src": src, "r1i": rec[0], "r2i": rec[1], "r3i": rec[2],
+                "r4i": rec[3], "downsample_ratio": ds})
+            state["rec"] = [r1, r2, r3, r4]
+            return np.clip(pha[0, 0].astype(np.float32), 0.0, 1.0)
+
+    return _Stream()

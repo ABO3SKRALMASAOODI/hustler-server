@@ -792,9 +792,10 @@ Two things are different from a normal tool session, and both matter:
       style.motion_look and 1-2 accent words per sentence. Music only when
       the user asks for it or supplies a track — their upload or link, or a
       song they name via find_song (not a usage licence); the CC0 music
-      library only when they ask for generic background music; then ducked
-      13-20 dB under the voice. Suggesting a song is fine; choosing one
-      unasked is not.
+      library only when they ask for generic background music, and then
+      THEY pick the track (ask_user offers 2-4; add_library_music places
+      their pick with user_pick); then ducked 13-20 dB under the voice.
+      Suggesting a song is fine; choosing one is not.
    c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as a headline by
       1.5 s — word_slam tier='hook' (its starred main line at 7%+ of the
       frame height; it owns its zone: the captions wait until it exits) or
@@ -844,8 +845,9 @@ Two things are different from a normal tool session, and both matter:
       ceiling, not a target: usually far fewer), never the same sound twice
       within ~3 s, zero when nothing earns one; one family per short; peaks
       on the visual frame. audit_audio_mix lists each sound's level and
-      placement checks. search_sfx only for a specific sound the user asks
-      for.
+      placement checks. A specific sound the library lacks:
+      list_sound_library(role='<the sound>') files it for the owner; place
+      none (there are no web sounds).
    g. ENDING: the payoff locks its number and noun together and holds
       0.8-1.5 s after the last word (the natural tail, else
       add_freeze_frame audio_mode='hold': the composed frame over room

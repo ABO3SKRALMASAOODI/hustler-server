@@ -1,0 +1,18 @@
+{
+  "name": "yunet",
+  "model_id": "face_detection_yunet_2023mar",
+  "model_version": "2023mar",
+  "kinds": ["faces.yunet"],
+  "file": "face_detection_yunet_2023mar.onnx",
+  "url": "https://github.com/opencv/opencv_zoo/raw/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+  "source": "https://github.com/opencv/opencv_zoo",
+  "licence": "MIT",
+  "licence_url": "https://github.com/opencv/opencv_zoo/blob/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/LICENSE",
+  "commercial_use": true,
+  "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4",
+  "bytes": 232589,
+  "images": ["interactive", "batch", "agent", "vision"],
+  "env": "YUNET_MODEL",
+  "runtime": "cv2.FaceDetectorYN (opencv-python-headless 4.10)",
+  "notes": "Pinned to the opencv_zoo commit that published the 2023mar weights (ROADMAP §7). Every lane, ~2 ms/frame at 320 px on one local core."
+}

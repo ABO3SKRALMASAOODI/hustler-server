@@ -1,0 +1,33 @@
+# AT-0D-1 (part c): the harness runs the FLASH TRANSITION on V02 840.47-880.51.
+id: AT-0D-1c
+track: 0D
+title: white flash transition on a hard cut inside the Thiel window
+local_only: true
+interim: false
+reference:
+  - {ref: "14", t: [11.5, 12.0], approx: false, board_t: 11.67}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[846.0, 850.4], [857.2, 861.2]]   # one cut at program 4.40 s
+  focus: [0.41, 0.31]
+  ops:
+    - {action: upsert, layer: motion, id: fl,
+       value: {id: fl, template: flash_transition, start: 4.3, end: 4.6,
+               params: {tone: white}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: land_err_f, item: fl, event: flash_peak, target: {cut: 1},
+     op: "<=", value: 1}
+  - {name: flash_risk, op: "<=", value: 3}
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: cost_ratio}
+beyond: "the flash is duration-neutral (program length and audio bit-identical with and without it) and its flash rate is measured on the rendered frames"
+board: {stills: [4.4], clip: [2.4, 6.4]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

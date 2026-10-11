@@ -100,6 +100,14 @@ def registered_tool_names(path: Path = TOOLS_SOURCE) -> set[str]:
                         and isinstance(target.slice, ast.Constant)
                         and isinstance(target.slice.value, str)):
                     names.add(target.slice.value)
+    # Department tools (tools_ext/<name>.py, installed by agent_tools at
+    # import): each module's TOOL_SPECS must be a module-level dict literal
+    # so this static read sees exactly what the runtime registers.
+    ext_dir = path.parent / "tools_ext"
+    if ext_dir.is_dir():
+        for module in sorted(ext_dir.glob("*.py")):
+            if not module.name.startswith("_"):
+                names |= _dict_literal_keys(module, "TOOL_SPECS")
     return names
 
 

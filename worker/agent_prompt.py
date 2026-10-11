@@ -157,7 +157,7 @@ YOUR SENSES — refreshed every message, never stale:
 - THE PROGRAM MAP: the numbered scene map of the CURRENT edit in viewer order — each scene's output window and where its pixels come from (a source range, or an inserted clip by name). It updates with every write; a tool result's "After:" state is the new program.
 - YOUR EYES ON DEMAND: look_at(times=[...]) hands you actual frames of the source; look_at(output_times=[...]) frames of the ASSEMBLED program (inserts included, tiles labeled with their scene); look_at_asset for any uploaded clip, image or render. Use these whenever closer evidence will improve a zoom, crop, placement, or disputed visual judgment; they are aids, not permission gates. Every delivered frame carries a faint tenths grid ((0,0) = top-left), which can inform aim points, rects and positions.
 - LONG VISUAL SEARCH: when a long video's requested highlights are visual rather than searchable speech (gameplay saves/fails, gestures, appearances, action), call find_visual_moments ONCE for the concrete event, verify its candidates in ONE batched look_at, then write. Never manually sweep a long source with serial look_at calls.
-- SOUND EVIDENCE: get_audio_analysis measures tempo, beats and energy without a model call; every preview's AUDIO CHECK measures rendered loudness, peaks and dead air. When deployed, review_audio and the music/SFX audition tools send bounded REAL excerpts to an audio-capable reviewer and return its explicitly labeled listening evidence; a designed preview may include an ACTUAL-AUDIO REVIEW of the combined mix. You do not hear continuous playback yourself: never expand a reviewed excerpt into a claim about unheard seconds, and never claim listening when the tool says the lane was unavailable. Combine listening, authored state, measurements, the brief and your judgment.
+- SOUND EVIDENCE: get_audio_analysis measures tempo, beats and energy without a model call; every preview's AUDIO CHECK measures rendered loudness, peaks and dead air. When deployed, review_audio sends bounded REAL excerpts to an audio-capable reviewer and returns its explicitly labeled listening evidence; a designed preview may include an ACTUAL-AUDIO REVIEW of the combined mix. You do not hear continuous playback yourself: never expand a reviewed excerpt into a claim about unheard seconds, and never claim listening when the tool says the lane was unavailable. Combine listening, authored state, measurements, the brief and your judgment.
 
 TWO CLOCKS, NEVER CONFUSED:
 - SOURCE seconds: the raw footage's clock — the keep list, set_volume, set_speed and the transcript live here.
@@ -278,12 +278,15 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     if music_library.available():
         library = owner_rule + (
             "When they ask for generic background music without naming a "
-            "song, a built-in CC0 library offers moods (list_music_library, "
-            "then add_library_music) — licence-verified, no credit needed. "
+            "song, offer 2-4 tracks from the built-in CC0 library "
+            "(list_music_library) with ask_user and place the one THEY pick "
+            "(add_library_music) — never pick for them, even for 'some "
+            "background music'; licence-verified, no credit needed. "
             "There is no generic catalog search. ")
-        vibe = ("For a genre/vibe request with no link, use the closest "
-                "library mood (say so when their genre is not one of them) "
-                "or a music asset already in the project; ")
+        vibe = ("For a genre/vibe request with no link, offer the closest "
+                "library tracks to pick from (say so when their genre is not "
+                "one of the moods) or use a music asset already in the "
+                "project; ")
     else:
         library = owner_rule + "No bundled tracks and no generic catalog search. "
         vibe = ("For a genre/vibe request with no link, use a music asset "
@@ -305,6 +308,11 @@ def project_state_block(video, index_summary, edl_line, history_lines,
             "asks for a specific sound the library lacks (by its physical "
             "name: 'crowd cheer', 'door slam'); fetch_sfx downloads the pick "
             "for add_sfx. License terms ride each hit — relay them.")
+    else:
+        sfx_line += (
+            " A specific sound it lacks: list_sound_library(role='<the "
+            "sound>') files it for the owner; place none and say so in one "
+            "clause.")
     lines.append(sfx_line)
     import stock
     _broll = []

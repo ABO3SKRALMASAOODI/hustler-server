@@ -1,0 +1,37 @@
+# AT-0D-1 (part a): the harness runs TEXT-BEHIND on V02 840.47-880.51.
+id: AT-0D-1a
+track: 0D
+title: text-behind title over the SC-Thiel lectern shot, 9:16 crop
+local_only: true
+interim: false
+reference:
+  - {ref: "05", t: [0.23, 12.23], approx: false, board_t: 1.0}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[855.4, 864.0]]          # source seconds inside the window
+  focus: [0.41, 0.31]             # the v5 framing of this shot
+  ops:
+    - {action: upsert, layer: texts, id: tb1,
+       value: {id: tb1, text: "TECHNOLOGY", start: 2.0, end: 6.0,
+               template: title, size_scale: 2.4, y: 0.40,
+               mute_captions: true}}
+    - {harness: behind_matte, layer: texts, id: tb1}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: glyph_visible, item: tb1, op: ">=", value: 0.65}
+  - {name: legibility, item: tb1, role: payload, op: ">=", value: 60}
+  - {name: matte_flicker, item: tb1, op: "<=", value: 0.035}
+  - {name: edge_chatter, item: tb1, op: "<=", value: 0.002}
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: flash_risk, op: "<=", value: 3}
+  - {name: cost_ratio}
+beyond: "placed from one write on a 9:16 re-frame of a 16:9 interview, with glyph visibility and matte flicker measured; the reference was rotoscoped by hand for one aspect"
+board: {stills: [4.0], clip: [2.0, 6.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

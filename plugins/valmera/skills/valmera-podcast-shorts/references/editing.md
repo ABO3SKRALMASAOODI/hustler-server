@@ -32,8 +32,8 @@ Valmera gets fixed.
   cues. Params change; never guess them from memory or from these docs.
 - `list_sound_library()`: the owner-approved real recordings with their use
   and measured hit level (add_sfx levels each against the voice). These are
-  the only sounds you use: never `search_sfx`,
-  `add_web_sfx` or a music library, and never a song you chose.
+  the only sounds you use: never an online sound or a music library
+  track, and never a song you chose.
 - Read a tool's schema before its first use. Do not read Valmera backend
   source code to guess EDL fields; typed tools and `get_edl` show the shapes.
 

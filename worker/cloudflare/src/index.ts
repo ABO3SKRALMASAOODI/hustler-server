@@ -63,6 +63,11 @@ interface Env {
   AGENT: DurableObjectNamespace<ValmeraAgent>;
   MCP: DurableObjectNamespace<ValmeraMcp>;
   SHORTS: DurableObjectNamespace<ValmeraShorts>;
+  // The ValmeraVision lane (worker/devices/INTERFACES.md §2.6) is DARK: this
+  // binding exists only when the deploy workflow merges cloudflare/vision.jsonc
+  // (repository variable VALMERA_VISION_LANE == '1', not approved by the
+  // owner). While it is unbound, sidecar jobs run on the batch lane.
+  VISION?: DurableObjectNamespace<ValmeraVision>;
   EXECUTOR_SECRET: string;
   DATABASE_URL: string;
   S3_ENDPOINT: string;
@@ -92,7 +97,7 @@ const INTERACTIVE_TYPES = new Set([
 ]);
 const BATCH_TYPES = new Set([
   "index", "final", "capture", "track", "matte", "smatch", "clean",
-  "stems", "fetch", "search", "stock_acquire", "ytprobe", "faces",
+  "stems", "fetch", "search", "stock_acquire", "ytprobe", "faces", "sidecar",
   // Capacity failover only: when the interactive class cannot provide a
   // container, the dispatcher may start the same media job here. The batch
   // image is the interactive image built with FULL_COMPUTE=1 (a superset)
@@ -105,7 +110,10 @@ const SHORTS_TYPES = new Set(["shorts_plan"]);
 const SYNCHRONOUS_TYPES = new Set([
   "capture", "frames", "track", "matte", "smatch", "clean", "stems",
   "fetch", "search", "stock_acquire", "ytprobe", "mcp_media", "faces",
+  "sidecar",
 ]);
+// The dark ValmeraVision lane runs sidecar analysis only.
+const VISION_TYPES = new Set(["sidecar"]);
 const CALL_ID = /^[a-zA-Z0-9_-]{8,96}$/;
 const LAUNCH_ID = /^[a-zA-Z0-9_-]{8,64}$/;
 // What the Containers runtime and SDK say when no container could be
@@ -126,7 +134,20 @@ const SHARD_COUNTS = {
 // parallel editors never crowds index, final or the other synchronous media
 // tools off the lane. A busy pair only leaves the caller its own pass.
 const FACES_SHARDS = 2;
+// Sidecar analysis (`sidecar`, Wave 0 track 0A: person mattes and face
+// boxes, measured once per source and cached in R2) is prefetch and
+// interactive-priority model work on the batch lane while the vision lane is
+// dark. It may hold at most these shards, the ones just below the faces
+// pair, so a burst of analysis never crowds index or final off the lane.
+// The dispatcher picks the slot (worker/remote.py _sidecar_nonce): the first
+// 8 hex digits of the call digest modulo SIDECAR_SHARDS, so parallel chunks
+// land on distinct shards and a retry lands on a different one.
+const SIDECAR_SHARDS = 3;
+const SIDECAR_PREFIX = "cf-sidecar-";
+// Instance pool of the dark vision lane when its overlay is deployed.
+const VISION_SHARDS = 12;
 type Lane = keyof typeof SHARD_COUNTS;
+type RoutedLane = Lane | "vision";
 const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // startAndWaitForPorts normally returns inside its 120-second port-ready
 // bound. A Worker version replacement can instead abandon the handler after
@@ -238,7 +259,25 @@ function shardName(lane: Lane, callId: string): string {
   if (lane === "batch" && callId.startsWith("cf-faces-")) {
     return `${lane}-${SHARD_COUNTS.batch - 1 - ((hash >>> 0) % FACES_SHARDS)}`;
   }
+  if (lane === "batch" && callId.startsWith(SIDECAR_PREFIX)) {
+    return `${lane}-${SHARD_COUNTS.batch - 1 - FACES_SHARDS - sidecarSlot(callId)}`;
+  }
   return `${lane}-${(hash >>> 0) % SHARD_COUNTS[lane]}`;
+}
+
+function sidecarSlot(callId: string): number {
+  const head = callId.slice(SIDECAR_PREFIX.length, SIDECAR_PREFIX.length + 8);
+  const value = /^[0-9a-f]{8}$/.test(head) ? parseInt(head, 16) : 0;
+  return value % SIDECAR_SHARDS;
+}
+
+function visionShardName(callId: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < callId.length; i += 1) {
+    hash ^= callId.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `vision-${(hash >>> 0) % VISION_SHARDS}`;
 }
 
 function json(value: unknown, status = 200): Response {
@@ -342,12 +381,16 @@ abstract class ValmeraContainer extends Container<Env> {
         "preview", "preview_check", "final", "index", "filmstrip",
         "agent_turn", "mcp_tool", "shorts_plan", "capture", "frames",
         "track", "matte", "smatch", "clean", "stems", "fetch", "search",
-        "stock_acquire", "ytprobe", "mcp_media", "faces",
+        "stock_acquire", "ytprobe", "mcp_media", "faces", "sidecar",
       ].join(","),
       CLOUDFLARE_SYNCHRONOUS_TYPES: [
         "capture", "frames", "track", "matte", "smatch", "clean", "stems",
         "fetch", "search", "stock_acquire", "ytprobe", "mcp_media", "faces",
+        "sidecar",
       ].join(","),
+      // Children route sidecar calls to the vision lane only when its
+      // binding is deployed (the overlay); otherwise to the batch lane.
+      VISION_LANE_ENABLED: this.env.VISION ? "1" : "0",
       CLOUDFLARE_EXECUTOR_URL: optional(this.env.CLOUDFLARE_EXECUTOR_URL),
       CLOUDFLARE_MODAL_FALLBACK: "0",
       CLOUDFLARE_MAX_SOURCE_DURATION_S: "0",
@@ -1118,6 +1161,13 @@ export class ValmeraShorts extends ValmeraContainer {
   protected readonly containerProfile = "standard-1" as const;
   protected readonly workerRole = "shorts_executor" as const;
 }
+// DARK (INTERFACES.md §2.6): exported so the cloudflare/vision.jsonc overlay
+// can bind it, unused while wrangler.jsonc does not. ONNX-only standard-4
+// image (Dockerfile.vision) serving the `sidecar` job kind.
+export class ValmeraVision extends ValmeraContainer {
+  protected readonly containerProfile = "standard-4" as const;
+  protected readonly workerRole = "executor" as const;
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -1160,14 +1210,19 @@ export default {
         .fetch("https://container.internal/probe");
     }
     const match = url.pathname.match(
-      /^\/calls\/(interactive|batch|agent|mcp|shorts)\/([^/]+)(\/complete|\/abandon)?$/,
+      /^\/calls\/(interactive|batch|agent|mcp|shorts|vision)\/([^/]+)(\/complete|\/abandon)?$/,
     );
     if (!match || !CALL_ID.test(match[2])) {
       return json({ error: "not found", safe_to_fallback: true }, 404);
     }
     const [, rawLane, callId] = match;
-    const lane = rawLane as Lane;
-    const shard = shardName(lane, callId);
+    const lane = rawLane as RoutedLane;
+    if (lane === "vision" && !env.VISION) {
+      // The dark lane is not deployed: nothing was accepted, so the
+      // dispatcher falls back to the batch lane.
+      return json({ error: "vision lane is not deployed", safe_to_fallback: true }, 404);
+    }
+    const shard = lane === "vision" ? visionShardName(callId) : shardName(lane, callId);
     const namespaces = {
       interactive: env.INTERACTIVE,
       batch: env.BATCH,
@@ -1175,7 +1230,9 @@ export default {
       mcp: env.MCP,
       shorts: env.SHORTS,
     };
-    const stub = namespaces[lane].getByName(shard);
+    const stub = lane === "vision"
+      ? (env.VISION as DurableObjectNamespace<ValmeraVision>).getByName(shard)
+      : namespaces[lane].getByName(shard);
     const action = match[3] ? match[3].slice(1) : "";
     if (request.method === "GET" && !action) {
       return stub.fetch(`https://container.internal/status/${callId}`);
@@ -1183,12 +1240,13 @@ export default {
     if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
     const body = (await request.json()) as { job?: ExecutorJob };
     const jobType = body.job?.type ?? "";
-    const allowedByLane: Record<Lane, Set<string>> = {
+    const allowedByLane: Record<RoutedLane, Set<string>> = {
       interactive: INTERACTIVE_TYPES,
       batch: BATCH_TYPES,
       agent: AGENT_TYPES,
       mcp: MCP_TYPES,
       shorts: SHORTS_TYPES,
+      vision: VISION_TYPES,
     };
     const allowed = allowedByLane[lane];
     // watch_video's MCP job is media work that both executor lanes run

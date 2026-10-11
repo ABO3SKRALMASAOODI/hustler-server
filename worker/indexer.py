@@ -647,6 +647,11 @@ def run_index_job(worker_db, job):
         except Exception as exc:
             print(f"[index {job_id}] project-ready event dropped: {exc}",
                   flush=True)
+        # Wave 0 track 0A: prefetch the faces sidecar (gated by
+        # SIDECAR_PREFETCH / YUNET_KEEPOUT; returns at once, never raises).
+        import sidecars
+        sidecars.prefetch_after_index(project_id, sha, proxy_key, proxy_info,
+                                      shots, duration=info["duration"])
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,

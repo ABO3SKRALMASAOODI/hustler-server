@@ -73,7 +73,11 @@ def test_compact_catalog_keeps_batch_and_animation_contracts(monkeypatch):
     batch = schemas['apply_edit_batch']
     assert 'set replaces one complete layer' in batch['description']
     props = batch['parameters']['properties']['operations']['items']['properties']
-    assert set(props['layer']['enum']) == edit_batch.LAYERS
+    # 'fx' is accepted always but advertised only once an fx type is
+    # registered (worker/devices/INTERFACES.md section 4).
+    from schemas import FX_AUTHORABLE_TYPES
+    assert set(props['layer']['enum']) == edit_batch.LAYERS - (
+        set() if FX_AUTHORABLE_TYPES else {'fx'})
     assert 'upsert' in props['value']['description']
     assert 'bounded by end-start' in schemas['add_text']['description']
 

@@ -1,0 +1,31 @@
+{
+  "_comment": [
+    "DARK overlay for the ValmeraVision lane (worker/devices/INTERFACES.md 2.6, ROADMAP Wave 0 track 0A).",
+    "It is merged into wrangler.jsonc by vision-overlay.cjs ONLY when the repository variable",
+    "VALMERA_VISION_LANE == '1'. The owner has not approved new paid capacity, so that variable is unset:",
+    "sidecar jobs run on the existing batch lane and wrangler.jsonc stays exactly as it is.",
+    "Deploying this overlay adds a migration (v3); removing the lane later needs a deleted_classes migration.",
+    "The lane is not in the deploy workflow's probe/verify set."
+  ],
+  "containers": [
+    {
+      "class_name": "ValmeraVision",
+      "image": "../Dockerfile.vision",
+      "image_build_context": "..",
+      "image_vars": {"SOURCE_VERSION": "set-by-deploy-workflow"},
+      "max_instances": 12,
+      "instance_type": "standard-4",
+      "constraints": {"regions": ["WNAM"]},
+      "rollout_active_grace_period": 300,
+      "rollout_step_percentage": [100]
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {"name": "VISION", "class_name": "ValmeraVision"}
+    ]
+  },
+  "migrations": [
+    {"tag": "v3", "new_sqlite_classes": ["ValmeraVision"]}
+  ]
+}

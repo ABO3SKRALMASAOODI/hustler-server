@@ -113,13 +113,22 @@ jobs:
 
       - name: publish Worker and Container images
         working-directory: worker/cloudflare
+        env:
+          # The ValmeraVision lane is DARK (worker/devices/INTERFACES.md §2.6):
+          # its overlay is merged only when the owner sets this repository
+          # variable to '1'. Unset, the deployed config is wrangler.jsonc.
+          VALMERA_VISION_LANE: ${{ vars.VALMERA_VISION_LANE }}
         run: |
           source_version=$(cd .. && python -c "import version; print(version.code_version())")
           export SOURCE_VERSION="$source_version"
           node <<'NODE'
           const fs = require("fs");
           const path = "wrangler.jsonc";
-          const config = JSON.parse(fs.readFileSync(path, "utf8"));
+          let config = JSON.parse(fs.readFileSync(path, "utf8"));
+          if (process.env.VALMERA_VISION_LANE === "1") {
+            config = require("./vision-overlay.cjs").mergeVisionOverlay(config);
+            console.log("VALMERA_VISION_LANE=1: deploying the ValmeraVision overlay");
+          }
           for (const container of config.containers) {
             container.image_vars = {
               ...(container.image_vars || {}),

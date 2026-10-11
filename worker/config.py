@@ -504,6 +504,16 @@ FIND_SONG_USER_IDS = os.getenv("FIND_SONG_USER_IDS", "").strip()
 # deleted bundled pack and AI sound generation.
 SFX_SEARCH_ENABLED = os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
 SFX_FETCH_MAX_MB = int(os.getenv("SFX_FETCH_MAX_MB", "20"))
+# Wave 0 owner rules in code (track 0C; worker/devices/INTERFACES.md §6.1).
+# Sound effects come only from the owner-approved library: the web-SFX chain
+# (search_sfx, audition_sfx_candidates, fetch_sfx, add_web_sfx) is OFF and
+# out of the live catalog unless the owner sets WEB_SFX_ENABLED=1. A sound
+# the library lacks becomes a sound_requests row the owner auditions by ear.
+WEB_SFX_ENABLED = os.getenv("WEB_SFX_ENABLED", "0") == "1"
+# Flash safety (owner decision, roadmap default): automatic proposals keep
+# at most this many full-frame flashes in any one second; an export the
+# user opted into past it is flagged contains_flashing (flash_safety.py).
+FLASH_SAFE_MAX_PER_S = 3
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via
 # Openverse (Wikimedia/Flickr — real people, companies, events); video
 # stock needs PEXELS_API_KEY/PIXABAY_API_KEY. Topical web VIDEO is
@@ -1013,7 +1023,7 @@ CLOUDFLARE_EXECUTOR_TYPES = frozenset(
         "CLOUDFLARE_EXECUTOR_TYPES",
         "preview,preview_check,final,index,filmstrip,agent_turn,mcp_tool,"
         "shorts_plan,capture,frames,track,matte,smatch,clean,stems,fetch,"
-        "search,stock_acquire,ytprobe,mcp_media,faces").split(",")
+        "search,stock_acquire,ytprobe,mcp_media,faces,sidecar").split(",")
     if part.strip())
 # Stateless synchronous tools do not own a video_jobs row. Every member is
 # idempotent from the caller's perspective and is routed to a right-sized
@@ -1023,8 +1033,65 @@ CLOUDFLARE_SYNCHRONOUS_TYPES = frozenset(
     part.strip() for part in os.getenv(
         "CLOUDFLARE_SYNCHRONOUS_TYPES",
         "capture,frames,track,matte,smatch,clean,stems,fetch,search,"
-        "stock_acquire,ytprobe,mcp_media,faces").split(",")
+        "stock_acquire,ytprobe,mcp_media,faces,sidecar").split(",")
     if part.strip())
+# ── Sidecar analysis (Wave 0 track 0A; worker/sidecars.py, INTERFACES.md §2) ─
+# Model outputs (person mattes, face boxes) measured ONCE per source, in
+# source space, and cached in R2 under content keys. Every sidecar job is the
+# one synchronous `sidecar` kind (jobs_ext/sidecar.py -> analysis_jobs.py).
+#
+# The ValmeraVision lane is DARK: no new paid capacity is approved, so the
+# kind runs on the existing batch lane (standard-4: RVM + YuNet baked), held
+# to SIDECAR_SHARDS of its 8 shards by the Worker. Containers set
+# VISION_LANE_ENABLED themselves from their binding (cloudflare/src/index.ts);
+# the dispatcher's env flips it only after the owner approves the lane.
+VISION_LANE_ENABLED = os.getenv("VISION_LANE_ENABLED", "0") == "1"
+# Mirrors SIDECAR_SHARDS in cloudflare/src/index.ts: chunk calls are spread
+# over exactly these batch shards (remote._sidecar_nonce picks the slot).
+SIDECAR_SHARDS = max(1, min(8, int(os.getenv("SIDECAR_SHARDS", "3"))))
+# Concurrent sidecar calls one process keeps in flight (its launcher pool).
+SIDECAR_MAX_INFLIGHT = max(1, min(16, int(os.getenv(
+    "SIDECAR_MAX_INFLIGHT", str(SIDECAR_SHARDS)))))
+# Prefetch (after index: faces; after make_shorts ranking: the person matte
+# of the top shorts' kept ranges). OFF in Wave 0: nothing reads a sidecar
+# until a consumer ships (YUNET_KEEPOUT below, Wave 1 devices), and an unread
+# analysis is batch time spent for nothing. Faces also prefetch whenever
+# YUNET_KEEPOUT is on, so that single flip is enough to make keep-out use them.
+SIDECAR_PREFETCH = os.getenv("SIDECAR_PREFETCH", "0") == "1"
+SIDECAR_PREFETCH_TOP_SHORTS = max(0, min(10, int(os.getenv(
+    "SIDECAR_PREFETCH_TOP_SHORTS", "3"))))
+# The budget a FINAL render passes to sidecars.wait for pending sidecars
+# before degrading (ROADMAP A1; read by the Wave 1 consumers); previews
+# pass 0. VALMERA_SIDECAR_DIR (read by sidecars.py itself) points the store
+# at a local directory in development and tests.
+SIDECAR_FINAL_WAIT_S = max(0.0, min(90.0, float(os.getenv(
+    "SIDECAR_FINAL_WAIT_S", "90"))))
+# A failed chunk is not retried before this (a fresh ensure() after it is a
+# new attempt pair); version skew clears sooner because a deploy converges.
+SIDECAR_FAILED_RETRY_S = float(os.getenv("SIDECAR_FAILED_RETRY_S", "21600"))
+SIDECAR_SKEW_RETRY_S = float(os.getenv("SIDECAR_SKEW_RETRY_S", "600"))
+# ONNX threads per sidecar child (0 = onnxruntime's default: every core of
+# the lane, which is right for one chunk per standard-4 shard).
+SIDECAR_ORT_THREADS = max(0, int(os.getenv("SIDECAR_ORT_THREADS", "0")))
+# YuNet (OpenCV Zoo, MIT, 0.23 MB; worker/models/yunet.json) is baked into
+# every image by worker/models/bake.py.
+YUNET_MODEL = os.getenv(
+    "YUNET_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "models", "face_detection_yunet_2023mar.onnx"))
+# keepout.face_track reads ready faces.yunet sidecars before the index's
+# cascade samples. Off until AT-0A-4 is accepted; the round lead flips it.
+YUNET_KEEPOUT = os.getenv("YUNET_KEEPOUT", "0") == "1"
+# Shared tier of the motion-graphic clip cache (worker/clip_store.py,
+# R2 prefix motion-clips/). Best effort. OFF by default until the bucket has
+# its 90-day lifecycle rule for motion-clips/ and sidecars/ (WAVE0_RELEASE
+# §5; `wrangler r2 bucket lifecycle add`, never `set`): without it shared
+# clips (~4 MB each) grow storage with no bound and outlive project and
+# account deletion. Set CLIP_STORE_ENABLED=1 on the lanes once the rule is in.
+CLIP_STORE_ENABLED = os.getenv("CLIP_STORE_ENABLED", "0") == "1"
+CLIP_STORE_DIR = os.getenv("VALMERA_CLIP_STORE_DIR", "").strip()
+CLIP_STORE_MAX_BYTES = int(float(os.getenv(
+    "CLIP_STORE_MAX_BYTES", str(256 * 1024 * 1024))))
 # Observe an accepted call through its startup phase, then reconnect through
 # the named status route. A Worker deployment can abandon a Durable Object
 # handler after it records `starting` but before it sends `/run`; waiting the
@@ -1174,6 +1241,7 @@ EXECUTION_CLASS_BY_JOB_TYPE = {
     "track": "heavy_media",
     "matte": "heavy_media",
     "faces": "heavy_media",
+    "sidecar": "heavy_media",
     "smatch": "heavy_media",
     "clean": "heavy_media",
     "stems": "heavy_media",
@@ -1403,6 +1471,12 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # turn, so it must stay under AGENT_TURN_TIMEOUT_S (720) with margin for
     # the turn's other steps.
     "clean": int(os.getenv("REMOTE_TIMEOUT_CLEAN_S", "600")),
+    # Sidecar analysis (Wave 0 track 0A): one call measures a group of
+    # source chunks — a person-matte chunk is <=15 s at <=30 fps (~60 s of
+    # RVM on a standard-4 shard), a faces group ~10 min of footage at 10 fps.
+    # Prefetch and device writes never wait on it (sidecars.ensure returns at
+    # once); this bounds one call, and stays under the MCP child budget.
+    "sidecar": int(os.getenv("REMOTE_TIMEOUT_SIDECAR_S", "900")),
 }
 
 

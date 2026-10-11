@@ -7,15 +7,19 @@ import copy
 import json
 
 try:
-    from schemas import validate_edl
+    from schemas import FX_AUTHORABLE_TYPES, FX_TYPES, validate_edl
 except ImportError:
-    from worker_schemas import validate_edl
+    from worker_schemas import FX_AUTHORABLE_TYPES, FX_TYPES, validate_edl
 
+# "fx" (Wave 0 seam, worker/devices/INTERFACES.md §4): registered effect
+# items by id. Accepted here always; advertised in apply_edit_batch's layer
+# enum only once an AUTHORABLE type is registered (schemas.
+# FX_AUTHORABLE_TYPES), because until then validation rejects any item.
 LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "caption_mutes", "texts", "vectors", "music", "sfx", "voiceover", "volume", "master",
-    "effects", "overlays", "canvas", "motion"))
+    "effects", "overlays", "canvas", "motion", "fx"))
 ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
-    "motion"))
+    "motion", "fx"))
 
 
 def project_media_keys(conn, project_id):
@@ -116,6 +120,14 @@ def apply_batch(before, operations, duration, allowed_keys):
         if action == "set" and layer in ITEM_LAYERS and op.get("id") \
                 and isinstance(op.get("value"), dict):
             action = op["action"] = "upsert"
+        if layer == "fx":
+            # Engine/test fx types render but are never authored.
+            value = op.get("value")
+            for item in (value if isinstance(value, list) else [value]):
+                kind = item.get("type") if isinstance(item, dict) else None
+                if kind in FX_TYPES and kind not in FX_AUTHORABLE_TYPES:
+                    raise ValueError(f"fx type {kind} is internal to the "
+                                     "engine and cannot be authored.")
         if not isinstance(layer, str) or layer not in LAYERS:
             raise ValueError(f"Unsupported batch layer: {layer}. "
                              "Use get_edl for exact layer shapes; transitions "

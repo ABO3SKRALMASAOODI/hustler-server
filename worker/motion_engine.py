@@ -27,6 +27,7 @@ the page runs in a disposable context.
 
 import asyncio
 import base64
+import contextvars
 import hashlib
 import json
 import os
@@ -40,6 +41,12 @@ from dataclasses import dataclass, field
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOTION_DIR = os.path.join(HERE, "motion")
 TEMPLATES_DIR = os.path.join(MOTION_DIR, "templates")
+# Shared page libraries (Wave 0 seam, track 0B): a motion/lib/<name>.js is
+# appended to the runtime (name order) of every document that uses it
+# (libs_used: the page names MG.<name> or carries the _<name> param), and
+# every library enters every clip cache key. Device tracks add a file here
+# (1C: paint.js); nobody edits runtime.js for a library.
+LIB_DIR = os.path.join(MOTION_DIR, "lib")
 FONTS_DIR = os.path.join(HERE, "fonts")
 
 # Bump when runtime.js, the document wrapper or capture semantics change:
@@ -328,15 +335,55 @@ def strip_line_comments(src):
     return "\n".join(out)
 
 
-def _runtime_js():
+def _lib_files():
+    try:
+        names = sorted(n for n in os.listdir(LIB_DIR) if n.endswith(".js"))
+    except OSError:
+        return []
+    return [os.path.join(LIB_DIR, n) for n in names]
+
+
+def _lib_name(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def _runtime_js(libs=None):
+    """runtime.js, then motion/lib/*.js in name order, comments stripped.
+
+    ``libs``: the library names (file stems) a document uses; None means
+    every library (what a clip key hashes, so a change to any library
+    re-keys every clip). With no library this is runtime.js exactly as
+    before Wave 0."""
     path = os.path.join(MOTION_DIR, "runtime.js")
-    st = os.stat(path)
-    key = (path, st.st_mtime_ns, st.st_size)
+    lib_files = _lib_files()
+    if libs is not None:
+        want = set(libs)
+        lib_files = [p for p in lib_files if _lib_name(p) in want]
+    files = [path] + lib_files
+    key = tuple((p, st.st_mtime_ns, st.st_size)
+                for p, st in ((p, os.stat(p)) for p in files))
     if key not in _RUNTIME_CACHE:
-        with open(path, "r", encoding="utf-8") as f:
+        chunks = []
+        for p in files:
+            with open(p, "r", encoding="utf-8") as f:
+                chunks.append(strip_line_comments(f.read()))
+        if len(_RUNTIME_CACHE) >= 16:
             _RUNTIME_CACHE.clear()
-            _RUNTIME_CACHE[key] = strip_line_comments(f.read())
+        _RUNTIME_CACHE[key] = "\n".join(chunks)
     return _RUNTIME_CACHE[key]
+
+
+def libs_used(body, params=None):
+    """The motion/lib libraries a document uses: ``<name>.js`` joins it when
+    the page names ``MG.<name>`` or its params carry ``_<name>`` (beats.js:
+    ``MG.beats`` / ``_beats``). Every other document carries runtime.js
+    alone, byte for byte as before Wave 0: each caption segment holds the
+    runtime under the 200 KB document cap (Wave 0 final review: joining
+    every library to every page pushed caption pages past their headroom)."""
+    text = str(body or "")
+    keys = set((params or {}).keys()) if isinstance(params, dict) else set()
+    return [n for n in (_lib_name(p) for p in _lib_files())
+            if f"MG.{n}" in text or f"_{n}" in keys]
 
 
 BASE_CSS = """
@@ -363,8 +410,74 @@ def design_size(width, height):
     return w, h
 
 
+# params._beats (Wave 0 seam, track 0B): a rhythm the page can move on,
+# in COMPOSITION seconds — {"t": beats, "down": downbeats, "on": [[t, cls,
+# strength], ...], "src": "music" | "speech"}. Bounded so a dense map never
+# pushes a composition over MAX_HTML_BYTES.
+BEATS_MAX = 512
+
+
+def _beat_list(values, lo, hi):
+    out = []
+    for v in values or []:
+        try:
+            t = float(v)
+        except (TypeError, ValueError):
+            continue
+        if lo - 1e-6 <= t <= hi + 1e-6:
+            out.append(round(t, 3))
+    return sorted(set(out))[:BEATS_MAX]
+
+
+def normalize_beats(beats, duration):
+    """The ``_beats`` param from a loose description: sorted, deduplicated,
+    inside [0, duration], at most BEATS_MAX per list. None or empty: None."""
+    if not beats:
+        return None
+    hi = max(0.0, float(duration or 0.0))
+    if isinstance(beats, (list, tuple)):
+        beats = {"t": beats}
+    out = {"t": _beat_list(beats.get("t"), 0.0, hi),
+           "down": _beat_list(beats.get("down"), 0.0, hi)}
+    ons = []
+    for o in beats.get("on") or []:
+        try:
+            t, cls, st = float(o[0]), str(o[1])[:12], float(o[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if -1e-6 <= t <= hi + 1e-6:
+            ons.append([round(t, 3), cls, round(max(0.0, min(1.0, st)), 2)])
+    out["on"] = sorted(ons)[:BEATS_MAX]
+    if beats.get("src") in ("music", "speech"):
+        out["src"] = beats["src"]
+    if not (out["t"] or out["down"] or out["on"]):
+        return None
+    return out
+
+
+def beats_param(rhythm, *, start, end, phase=0.0, full_duration=None):
+    """``_beats`` for a motion item at program [start, end) from a
+    PROGRAM-clock RhythmMap (rhythm_types.to_program): every time moved to the
+    item's composition clock (program t -> t - start + phase)."""
+    if not rhythm:
+        return None
+    shift = float(phase or 0.0) - float(start)
+    dur = float(full_duration or (float(end) - float(start) + float(phase or 0.0)))
+
+    def mv(ts):
+        return [float(t) + shift for t in ts or []
+                if float(start) - 1e-6 <= float(t) < float(end) + 1e-6]
+    return normalize_beats({
+        "t": mv(rhythm.get("beats")), "down": mv(rhythm.get("downbeats")),
+        "on": [[float(o["t"]) + shift, o.get("cls", ""), o.get("strength", 0)]
+               for o in rhythm.get("onsets") or []
+               if float(start) - 1e-6 <= float(o["t"]) < float(end) + 1e-6],
+        "src": rhythm.get("source")}, dur)
+
+
 def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
-                   design_w=DESIGN_W, design_h=1920, plate=None, yields=None):
+                   design_w=DESIGN_W, design_h=1920, plate=None, yields=None,
+                   beats=None):
     """Wrap template/authored HTML with fonts, the runtime and its inputs.
 
     plate: the measured program picture under the item (worker/plate.py),
@@ -375,7 +488,14 @@ def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
     yields: a persistent graphic's hand-over windows (worker/motion_layer.
     yield_windows), {w: [[a, b], ...], out, in} in composition seconds,
     exposed as MG.yields — the runtime fades the whole page out before each
-    window and back after it. None (every other item) adds nothing."""
+    window and back after it. None (every other item) adds nothing.
+
+    beats: the item's rhythm (``beats_param`` / ``normalize_beats``), exposed
+    as MG.params._beats and read through MG.beats (motion/lib/beats.js).
+    None leaves the document exactly as it was."""
+    beats = normalize_beats(beats, duration)
+    if beats:
+        params = dict(params or {}, _beats=beats)
     init = {"params": params or {}, "theme": theme or {}, "duration": float(duration),
             "fps": float(fps), "W": int(design_w), "H": int(design_h)}
     if plate:
@@ -385,7 +505,7 @@ def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         f"<style>{_font_css()}\n:root{{--W:{int(design_w)}px;--H:{int(design_h)}px}}{BASE_CSS}</style>"
-        f"<script>{_runtime_js()}</script>"
+        f"<script>{_runtime_js(libs_used(body, params))}</script>"
         f"<script>Object.assign(window.MG,{_json_for_script(init)});</script>"
         "</head><body>"
         f"{body}"
@@ -425,19 +545,86 @@ class RenderJob:
     def key(self):
         h = hashlib.sha256()
         h.update(ENGINE_VERSION.encode())
+        h.update(_env_digest().encode())
         h.update(_runtime_js().encode())
         h.update(self.html.encode("utf-8"))
         h.update(json.dumps([self.out_w, self.out_h, round(self.fps, 4),
                              round(self.duration, 4), round(self.t0, 4), self.box],
                             sort_keys=True).encode())
         for k in sorted(self.assets or {}):
-            p = self.assets[k]
             try:
-                st = os.stat(p)
-                h.update(f"{k}:{st.st_size}:{int(st.st_mtime)}".encode())
+                h.update(f"{k}:{_asset_digest(self.assets[k])}".encode())
             except OSError:
                 h.update(f"{k}:missing".encode())
         return h.hexdigest()[:40]
+
+
+# Asset files enter the clip key by CONTENT (Wave 0 integration). The key
+# addresses the shared clip store (clip_store, R2) across containers and
+# projects: a size+mtime stamp misses on every cold container (a download's
+# mtime is its download time) and lets two different same-size files written
+# in the same second share a key — one project's picture in another's clip.
+# Hashing is memoised per (path, size, mtime_ns), so a file is read once.
+_ASSET_DIGESTS = {}
+_ASSET_DIGESTS_MAX = 1024
+
+
+def _asset_digest(path):
+    st = os.stat(path)
+    memo = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    hit = _ASSET_DIGESTS.get(memo)
+    if hit is None:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        hit = f"{st.st_size}:{h.hexdigest()}"
+        if len(_ASSET_DIGESTS) >= _ASSET_DIGESTS_MAX:
+            _ASSET_DIGESTS.clear()
+        _ASSET_DIGESTS[memo] = hit
+    return hit
+
+
+# What draws a page besides its document (Wave 0 final review). The shared
+# clip store outlives deploys — before it, every deploy started with empty
+# container caches — so a clip key must also name what a deploy can change
+# under an unchanged document: the bundled fonts (served by FILE NAME, so a
+# replaced font file keeps every document byte), this module's capture code
+# and the Chromium build. Hashed once per process (~11 MB of fonts, ~20 ms).
+_ENV_DIGEST = None
+
+
+def _env_digest():
+    global _ENV_DIGEST
+    if _ENV_DIGEST is not None:
+        return _ENV_DIGEST
+    h = hashlib.sha256()
+    for d in (FONTS_DIR, MOTION_FONTS_DIR):
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            names = []
+        for n in names:
+            p = os.path.join(d, n)
+            if n.startswith(".") or not os.path.isfile(p):
+                continue
+            try:
+                h.update(f"{os.path.basename(d)}/{n}:{_asset_digest(p)}"
+                         .encode())
+            except OSError:
+                h.update(f"{n}:missing".encode())
+    try:
+        with open(os.path.abspath(__file__), "rb") as f:
+            h.update(f.read())
+    except OSError:
+        h.update(b"engine:unreadable")
+    try:
+        from importlib import metadata
+        h.update(("playwright=" + metadata.version("playwright")).encode())
+    except Exception:  # noqa: BLE001 — a lane without playwright never renders
+        h.update(b"playwright=none")
+    _ENV_DIGEST = h.hexdigest()[:16]
+    return _ENV_DIGEST
 
 
 @dataclass
@@ -519,7 +706,33 @@ def _even_box(x0, y0, x1, y1, W, H):
     return x0, y0, x1, y1
 
 
+# The worker's own helpers, imported on use. The backend loads THIS file by
+# path under its plain name (validate_edl reaches it through
+# motion_templates) without the worker directory on sys.path, so a top-level
+# import of another worker module would take the backend down at import.
+# Outside the worker both answer "not here".
+def _clip_store():
+    try:
+        import clip_store
+        return clip_store
+    except ImportError:
+        return None
+
+
+def _fault(name):
+    try:
+        import faultinject
+    except ImportError:
+        return False
+    return faultinject.fault(name)
+
+
 def _cache_get(key):
+    """(local .mov, meta) from the container-local LRU, else from the shared
+    content-addressed store (clip_store, R2) — a cold container renders a
+    warm project's graphics without starting Chromium (AT-0A-2) — else None.
+    A key this render already asked the shared store for (_prefetch_shared)
+    is not asked again. Never raises."""
     path = os.path.join(CACHE_DIR, key + ".mov")
     meta = os.path.join(CACHE_DIR, key + ".json")
     if os.path.exists(path) and os.path.exists(meta):
@@ -530,7 +743,126 @@ def _cache_get(key):
             return path, m
         except Exception:
             return None
-    return None
+    if key in _SHARED_ASKED.get():
+        return None
+    return _shared_get(key)
+
+
+def _write_json_atomic(path, value):
+    tmp = path + f".{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w") as f:
+        json.dump(value, f)
+    os.replace(tmp, path)
+
+
+def _shared_get(key):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        store = _clip_store()
+        if store is None:
+            return None
+        got = store.get(key, CACHE_DIR)
+        if not got:
+            return None
+        mov, m = got
+        if not mov or not os.path.exists(mov) or not isinstance(m, dict) \
+                or not all(k in m for k in ("x", "y", "w", "h", "frames")):
+            return None
+        dst = os.path.join(CACHE_DIR, key + ".mov")
+        if os.path.abspath(mov) != os.path.abspath(dst):
+            tmp = dst + f".{os.getpid()}.{threading.get_ident()}.tmp"
+            shutil.copyfile(mov, tmp)
+            os.replace(tmp, dst)
+        _write_json_atomic(os.path.join(CACHE_DIR, key + ".json"), m)
+        return dst, m
+    except Exception:
+        return None
+
+
+# Shared-store reads on a render's path (Wave 0 final review). A preview with
+# 40 new caption segments misses the store 40 times; asked one by one, each
+# miss is a network round trip on the render's critical path, and a slow R2
+# (2 s connect + 10 s read per call) could stall a preview for minutes. So a
+# render asks for every key its local LRU lacks AT ONCE, on a few threads,
+# within one wall-clock budget; whatever has not answered by then renders in
+# Chromium as it always did.
+SHARED_GET_THREADS = 8
+SHARED_GET_BUDGET_S = float(os.getenv("MOTION_SHARED_GET_BUDGET_S", "6") or 6)
+_SHARED_ASKED = contextvars.ContextVar("motion_shared_asked",
+                                       default=frozenset())
+
+
+def _local_present(key):
+    return (os.path.exists(os.path.join(CACHE_DIR, key + ".mov"))
+            and os.path.exists(os.path.join(CACHE_DIR, key + ".json")))
+
+
+def _prefetch_shared(keys, budget_s=None):
+    """Copy every listed clip the local LRU lacks from the shared store into
+    it, in parallel, waiting at most ``budget_s``. Returns the keys it asked
+    for (hits are now local; misses and late answers render in Chromium).
+    Never raises."""
+    try:
+        want = [k for k in dict.fromkeys(keys or ()) if not _local_present(k)]
+        store = _clip_store()
+        if not want or store is None or not store.available():
+            return frozenset()
+    except Exception:  # noqa: BLE001
+        return frozenset()
+    budget = SHARED_GET_BUDGET_S if budget_s is None else float(budget_s)
+    lock = threading.Lock()
+    queue = list(want)
+    left = [len(want)]
+    done = threading.Event()
+
+    def worker():
+        while True:
+            with lock:
+                if not queue:
+                    return
+                key = queue.pop(0)
+            try:
+                _shared_get(key)
+            finally:
+                with lock:
+                    left[0] -= 1
+                    if left[0] <= 0:
+                        done.set()
+    try:
+        for _ in range(min(SHARED_GET_THREADS, len(want))):
+            threading.Thread(target=worker, daemon=True,
+                             name="clip-store-get").start()
+        done.wait(max(0.0, budget))
+    except Exception:  # noqa: BLE001
+        pass
+    with lock:
+        queue.clear()      # a late worker starts no new lookup
+    return frozenset(want)
+
+
+# At most this many clip uploads run at once per process: they share the
+# container's CPU and network with the render that made them.
+_SHARED_PUT_SLOTS = threading.BoundedSemaphore(2)
+
+
+def _shared_put(key, path, meta):
+    """Hand a fresh clip to the shared store on a daemon thread: the upload
+    never holds up the render that made the clip (best effort, never raises).
+    The file is the LRU's own copy, which outlives the render's workdir."""
+    def run():
+        try:
+            store = _clip_store()
+            if store is None:
+                return
+            with _SHARED_PUT_SLOTS:
+                store.put(key, path, dict(meta))
+        except Exception:
+            pass
+    try:
+        threading.Thread(target=run, daemon=True,
+                         name=f"clip-store-{key[:8]}").start()
+    except Exception:
+        pass
 
 
 def _cache_put(key, src, meta):
@@ -540,11 +872,11 @@ def _cache_put(key, src, meta):
         tmp = dst + f".{os.getpid()}.{threading.get_ident()}.tmp"
         shutil.copyfile(src, tmp)
         os.replace(tmp, dst)
-        with open(os.path.join(CACHE_DIR, key + ".json"), "w") as f:
-            json.dump(meta, f)
+        _write_json_atomic(os.path.join(CACHE_DIR, key + ".json"), meta)
         _cache_prune()
     except Exception:
-        pass
+        return
+    _shared_put(key, dst, meta)
 
 
 def _cache_prune():
@@ -595,6 +927,11 @@ async def _route_factory(job):
 
 async def _render_one(browser, job, out_path, deadline):
     t_start = time.monotonic()
+    # Fault injection (INTERFACES.md §6.2): this item's page dies, exactly
+    # as a Chromium crash surfaces here — an error out of the page call.
+    if _fault(f"chromium_crash:{job.label}"):
+        raise RuntimeError(f"{job.label}: Target crashed (injected "
+                           "chromium_crash)")
     dw, dh = design_size(job.out_w, job.out_h)
     scale = float(job.out_w) / float(dw)
     W, H = int(job.out_w), int(job.out_h)
@@ -712,13 +1049,21 @@ async def _render_all(jobs, out_dir, pages, budget_s):
     deadline = time.monotonic() + budget_s
     results = [None] * len(jobs)
     todo = []
-    for i, job in enumerate(jobs):
+    keys = []
+    for job in jobs:
         if job.duration <= 0 or job.duration > MAX_DURATION_S:
             raise MotionRenderError(f"{job.label}: duration must be 0-{MAX_DURATION_S:.0f}s")
         if len(job.html.encode("utf-8")) > MAX_HTML_BYTES:
             raise MotionRenderError(f"{job.label}: HTML exceeds {MAX_HTML_BYTES // 1000} KB")
-        key = job.key()
-        hit = _cache_get(key)
+        keys.append(job.key())
+    # one bounded, parallel read of the shared store for every local miss
+    asked = _prefetch_shared(keys)
+    token = _SHARED_ASKED.set(_SHARED_ASKED.get() | asked)
+    try:
+        lookups = [_cache_get(key) for key in keys]
+    finally:
+        _SHARED_ASKED.reset(token)
+    for i, (job, key, hit) in enumerate(zip(jobs, keys, lookups)):
         if hit:
             path, m = hit
             local = os.path.join(out_dir, f"mg_{key}.mov")
