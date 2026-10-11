@@ -794,13 +794,21 @@ def render_jobs(jobs, out_dir, pages=None, budget_s=900.0):
     return box["r"]
 
 
-async def _probe_all(jobs, times_list, budget_s):
+async def _probe_all(jobs, times_list, budget_s, measure=None):
     from playwright.async_api import async_playwright
     out = []
+    deadline = time.monotonic() + float(budget_s or 60.0)
     async with async_playwright() as p:
         browser = await p.chromium.launch(args=CHROME_ARGS)
         try:
             for job, times in zip(jobs, times_list):
+                if measure is not None and time.monotonic() > deadline:
+                    # a measuring caller asked for a bound: the rest unread
+                    out.append({"errors": ["probe budget spent"],
+                                "visible_frames": 0, "samples": len(times),
+                                "bboxes": [], "ink": [], "cover": [],
+                                "measures": []})
+                    continue
                 dw, dh = design_size(job.out_w, job.out_h)
                 ctx = await browser.new_context(viewport={"width": dw, "height": dh},
                                                 device_scale_factor=1)
@@ -814,7 +822,7 @@ async def _probe_all(jobs, times_list, budget_s):
                     cdp = await ctx.new_cdp_session(page)
                     await cdp.send("Emulation.setDefaultBackgroundColorOverride",
                                    {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
-                    visible, bboxes, inks, covers = 0, [], [], []
+                    visible, bboxes, inks, covers, measures = 0, [], [], [], []
 
                     def frac(bb):
                         return [round(v * 4.0 / dw, 3) if i % 2 == 0 else round(v * 4.0 / dh, 3)
@@ -832,10 +840,22 @@ async def _probe_all(jobs, times_list, budget_s):
                         # one entry per requested time (None = nothing that dense)
                         inks.append(frac(ib) if ib else None)
                         covers.append(frac(cb) if cb else None)
+                        if measure is not None:
+                            # the full design canvas, for a caller that
+                            # measures the type itself (render_qc)
+                            full = await cdp.send("Page.captureScreenshot", {
+                                "format": "png", "optimizeForSpeed": True,
+                                "clip": {"x": 0, "y": 0, "width": dw, "height": dh,
+                                         "scale": 1.0}})
+                            try:
+                                measures.append(measure(base64.b64decode(full["data"])))
+                            except Exception as e:  # noqa: BLE001
+                                measures.append({"error": str(e)[:120]})
                     errs = await page.evaluate("window.__mgErrors || []")
                     out.append({"errors": [str(e)[:200] for e in errs], "visible_frames": visible,
                                 "samples": len(times), "bboxes": bboxes, "ink": inks,
-                                "cover": covers})
+                                "cover": covers,
+                                **({"measures": measures} if measure is not None else {})})
                   except Exception as e:  # noqa: BLE001 — one bad composition
                     out.append({"errors": [str(e).splitlines()[0][:200]], "visible_frames": 0,
                                 "samples": len(times), "bboxes": [], "ink": [], "cover": []})
@@ -846,18 +866,21 @@ async def _probe_all(jobs, times_list, budget_s):
     return out
 
 
-def probe(jobs, times_list, budget_s=60.0):
+def probe(jobs, times_list, budget_s=60.0, measure=None):
     """Cheap write-time check: load each composition, seek the given item-local
     times at quarter scale, and report script errors and visible coverage
     (bboxes as frame fractions, one per visible moment). ``ink`` and
     ``cover`` hold one entry per requested time: the box of the pixels at
     INK_ALPHA (what hides a face) and at COVER_ALPHA (what a caption must
-    clear), or None. Raises MotionRenderError when the browser itself cannot
-    run."""
+    clear), or None. ``measure`` (optional): called with the full-size PNG
+    of the design canvas at every requested time; its answers come back in
+    ``measures`` (one per time), and ``budget_s`` then bounds the whole
+    probe (compositions past it come back unread). Raises MotionRenderError
+    when the browser itself cannot run."""
     if not available():
         raise MotionRenderError("motion graphics renderer unavailable: "
                                 + unavailable_reason())
-    coro = _probe_all(list(jobs), list(times_list), budget_s)
+    coro = _probe_all(list(jobs), list(times_list), budget_s, measure)
     try:
         asyncio.get_running_loop()
     except RuntimeError:

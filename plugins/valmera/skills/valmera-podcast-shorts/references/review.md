@@ -30,11 +30,13 @@ queue reviews go first). The run's first candidate is reviewed before a
 4th short is handed out (`run.py` enforces this gate), because its verdict
 decides whether the other briefs and the framing recipe hold.
 
-**Evidence, about 6-8 calls and 5 minutes** (`watch_video` returns no link,
-frames or audio on this deployment, so do not call it): one rendered
-`look_at` batch (0, 0.3, 1.0 s, each hero, the densest caption, the payoff,
-the last frame), one `native_resolution` frame at the hook and one at the
-payoff to read cap heights, `audit_captions`, and the editor's
+**Evidence, about 6-8 calls and 5 minutes:** `render_preview(report=true)`
+on the candidate (the stored PICTURE CHECK, CAPTION CHECK, MEASURES line and
+advisories, no new render: the measured picture area, upscale and cap
+heights the floors below are judged on), one rendered `look_at` batch (0,
+0.3, 1.0 s, each hero, the densest caption, the payoff, the last frame),
+`native_resolution` frames at the hook and the payoff in one call to confirm
+those numbers by eye, `audit_captions`, and the editor's
 `review_audio` / `audit_audio_mix` results (spot-check one join with
 `review_audio` when the note flags it). The preview has no end card or
 corner mark: branding is checked on the final. Then answer:
@@ -76,8 +78,9 @@ corner mark: branding is checked on the final. Then answer:
    for every asset?
 
 Measured floors are binary. Picture area under the Look's floor, a hook
-headline no bigger than the captions, a payoff smaller than an earlier
-lockup or a beatless stretch over ~8 s is a **no**, whatever the reason; a
+under its size rule (a band headline's claim under 1.2x the captions' cap
+height, a hook-tier slam's main line under 7% of the frame height), a
+payoff smaller than an earlier lockup or a beatless stretch over ~8 s is a **no**, whatever the reason; a
 "source limit" explains it but does not pass it (Oct 2026: a fix verdict
 that waived a 0.31 card cost a fix pass, two renders and a failed export,
 and the short was killed for the same 0.31 card).

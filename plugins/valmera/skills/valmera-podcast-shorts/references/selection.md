@@ -108,20 +108,25 @@ editors (Oct 2026: each editor spent 10-30 calls re-solving the same phone
 call window and 8 of 9 still ended below the picture floor). Skip it only
 when every short is full-bleed on a clean modern source. About 15 minutes:
 
-1. `get_edl` the child; `set_frame(ratio='9:16')` if `frame` is null
-   (children can arrive 16:9, and a first render on them is wasted).
-2. Pick the layout from looks.md **Card geometry** that the source fit
-   allows, and set it in the order editing.md requires: the card with its
-   source rect through `apply_edit_batch` (effects layer) BEFORE any erase
-   patch, stock overlay or motion graphic exists; then `erase_region` (box
-   fill) on a picture-in-picture or call UI that would sit inside the card;
-   then the headline (`add_motion_graphic(template='headline')` or a
-   hook-tier `word_slam`) with the speaker's real headline text.
+1. `get_edl` the child: it starts 9:16 from the SOURCE LAYOUT (the
+   make_shorts reply and `get_video_info` name its call window, self-view
+   and largest card at <= 2x with and without a headline band).
+2. Pick the layout from looks.md **Card geometry** that the source fit and
+   the SOURCE LAYOUT allow, and set it in the order editing.md requires:
+   the card (`set_picture_card`; on a call source `source='auto'` frames
+   the call's picture at <= 2x, keeps the face whole and names the
+   `erase_region` for the host's self-view); then that `erase_region` (box
+   fill, the inset's border included) on a picture-in-picture or call UI
+   that would sit inside the card; then the headline
+   (`add_motion_graphic(template='headline')`, whose write measures the
+   claim against the captions and names the fix, or a hook-tier
+   `word_slam`) with the speaker's real headline text.
 3. `render_preview(quality='approval')`, then one rendered `look_at` at
-   ~1 s and mid-clip and one `native_resolution` frame at ~1 s. Measure:
-   picture area (card width x height), the face fully inside the card,
-   upscale (from the result), the headline main line's cap height against
-   the caption cap height, erase residue.
+   ~1 s and mid-clip and `native_resolution` frames at ~1 s and the payoff
+   in one call. Read the render's MEASURES line (picture area and upscale,
+   the headline's and captions' cap heights) and PICTURE CHECK (a face cut
+   by the card edge, or at a call window's edge as a source limit); check
+   the face fully inside the card and the erase residue by eye.
 4. `export_final` on that version once and `wait_for_job`: proof that a
    layout with motion graphics exports on today's deployment (Oct 2026: it
    did not, and every edit of the run was unexportable).
@@ -131,8 +136,9 @@ when every short is full-bleed on a clean modern source. About 15 minutes:
    the layouts that failed and why. Every brief copies it as `framing`.
 
 Decide from the measurement, not from the table: if the floor (0.54, or
-0.48 Editorial Serif) or a headline at least as large as the captions is
-out of reach with a headline band, use the no-band layout (a hook-tier
+0.48 Editorial Serif) or a headline claim at 1.2x the captions is out of
+reach with a headline band (the headline write's FIX names the card top it
+needs and the card that leaves), use the no-band layout (a hook-tier
 `word_slam` carries the hook and the name) and assign Looks and structures
 that work without a persistent band. If no layout reaches the floor at the
 2x upscale cap, the source is not premium material: pick fewer shorts from
@@ -144,10 +150,11 @@ fails on a Valmera defect, stop the line (SKILL.md).
 `Name: claim`, using the verified speaker and a faithful paraphrase of the
 clip's strongest line or statistic, at most about 60 characters (the
 publishing title and `make_shorts` title). The on-screen text is shorter:
-a persistent headline band fits two lines, and its main line reaches
-caption size only at about 36 characters or fewer, so give the brief an
-`onscreen_headline` of at most 36 characters (the claim alone when the name
-sits in the hook's kicker). Where the headline's wording comes from outside
+a persistent headline band fits two lines, and over the 0.1 band its main
+line reaches 1.2x caption size only at about 36 characters or fewer (the
+write measures it), so give the brief an `onscreen_headline` of at most 36
+characters (the claim alone when the name sits in the hook's kicker or a
+short kicker beside the corner mark). Where the headline's wording comes from outside
 the clip (the host's question), quote that context line with its source
 time in the brief, so review need not search for it. It is
 payoff-led: a specific claim the ending completes ("Peter Thiel: They

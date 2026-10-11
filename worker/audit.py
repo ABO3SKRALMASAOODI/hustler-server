@@ -12,6 +12,12 @@ Everything here is pure functions over plain data — no DB, no network.
 import bisect
 
 EPS = 0.011   # times are rounded to 0.01s; boundaries must be STRICTLY inside
+# An edge that keeps less than this share of the word it lands in was aimed
+# at the word's far edge: snapping "outward" there pulled in the stutter or
+# doubled word the editor was cutting ('What|what is', kept 16% of 'What';
+# Oct 2026, 14 edges over 5 shorts kept 8-34%). Such an edge drops the word;
+# from this share up the whole word is kept, as before.
+KEEP_WORD_FRAC = 0.4
 
 
 def word_at_boundary(words, b):
@@ -124,17 +130,67 @@ def boundary_warning_lines(keep, words, silences, duration=None, skip=()):
     return lines
 
 
-def midword_audit(keep, words, duration=None):
-    """Compact strings for render results / logs."""
+def midword_audit(keep, words, duration=None, source=None, timeout=10.0,
+                  frame_s=1.0 / 30.0):
+    """Compact strings for render results / logs.
+
+    With ``source`` (the source media the render read: a path or a URL
+    ffmpeg range-reads), each boundary the transcript puts inside a word is
+    reported only where the SOUND there is loud — judged exactly as the
+    audio-safe keep tools judge it (cut_audio.place_edge). Those tools leave
+    an edge inside a transcript word on purpose when its sound is already
+    quiet (Whisper's onsets run late and its ends early), and the render's
+    audit used to flag the very edge they chose (Oct 10 podcast run, s04 and
+    s05). Unread sound keeps the transcript's verdict."""
+    hits = midword_boundaries(keep, words, duration)
+    if hits and source:
+        hits = _audible(hits, source, duration, timeout, frame_s)
     return [f"boundary {h['boundary']:.2f} inside '{h['word']}' "
-            f"({h['t0']:.2f}-{h['t1']:.2f})"
-            for h in midword_boundaries(keep, words, duration)]
+            f"({h['t0']:.2f}-{h['t1']:.2f}"
+            + (f", sound {h['db']:.0f} dB" if h.get("db") is not None else "")
+            + ")"
+            for h in hits]
+
+
+def _audible(hits, source, duration, timeout, frame_s):
+    """``hits`` (midword_boundaries) whose sound is loud at the cut, each
+    with its level in ``db``; all of them when the sound cannot be read."""
+    try:
+        import cut_audio
+        level = cut_audio.source_levels(
+            source, [h["boundary"] for h in hits], duration, timeout=timeout)
+    except Exception:  # noqa: BLE001 — a diagnostic never fails a render
+        level = None
+    if level is None:
+        return hits
+    end_level = cut_audio._robust(level, frame_s)
+    out = []
+    for h in hits:
+        lv = end_level if h["kind"] == "end" else level
+        db = lv(h["boundary"])
+        if db is None:
+            out.append(h)
+            continue
+        # the floor read on the same reader place_edge judged that edge on
+        # (an end's: the loudest of the frame either side)
+        if cut_audio._is_loud(db, cut_audio._floor(lv, h["boundary"])):
+            out.append(dict(h, db=db))
+    return out
+
+
+def kept_share(side, b, t0, t1):
+    """Share of the word [t0, t1] a keep edge at b keeps ('start': the part
+    after b, 'end': the part before it)."""
+    span = max(1e-6, float(t1) - float(t0))
+    return (float(t1) - b) / span if side == "start" else (b - float(t0)) / span
 
 
 def snap_keep_to_words(keep, words, duration):
     """Move any keep boundary that lands inside a word OUTWARD to the word
     edge (span start -> word start, span end -> word end), so whole words
-    survive. Returns a new merged, sorted keep list.
+    survive — unless it keeps less than KEEP_WORD_FRAC of the word: then it
+    moves to the word's far edge and the word is cut. Returns a new merged,
+    sorted keep list.
 
     Round 100 — BREATH PADDING on the snapped edges. Whisper's word t1 runs
     consistently early (the model marks the end of the voiced core, not the
@@ -146,18 +202,26 @@ def snap_keep_to_words(keep, words, duration):
     starts = sorted(float(w["t0"]) for w in words) if words else []
     ends = sorted(float(w["t1"]) for w in words) if words else []
 
+    # A word that TOUCHES the edge (starts exactly where the snapped word
+    # ends: 'What|what is', 'an|an AI') is the neighbour the pad must not
+    # swallow: the lead-in of 'what' at 974.90 reached into 'What' and the
+    # audio-safe pass then kept all of it (Oct 2026, four shorts).
     def _next_start_after(t):
-        i = bisect.bisect_right(starts, t + 1e-6)
+        i = bisect.bisect_left(starts, t - 1e-6)
         return starts[i] if i < len(starts) else None
 
     def _prev_end_before(t):
-        i = bisect.bisect_left(ends, t - 1e-6)
+        i = bisect.bisect_right(ends, t + 1e-6)
         return ends[i - 1] if i > 0 else None
 
     snapped = []
     for s, e in keep:
         hs = word_at_boundary(words, s)
         he = word_at_boundary(words, e)
+        if hs and kept_share("start", s, hs["t0"], hs["t1"]) < KEEP_WORD_FRAC:
+            s, hs = float(hs["t1"]), None        # the word is cut: start after it
+        if he and kept_share("end", e, he["t0"], he["t1"]) < KEEP_WORD_FRAC:
+            e, he = float(he["t0"]), None        # ...end before it
         ns = round(hs["t0"], 2) if hs else s
         ne = round(he["t1"], 2) if he else e
         if he:

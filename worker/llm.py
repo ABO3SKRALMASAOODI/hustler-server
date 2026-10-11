@@ -722,13 +722,15 @@ def _audio_answer_is_actionable(answer, purpose):
 
 
 def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
-              purpose="audio_review"):
+              purpose="audio_review", number_from=1):
     """Listen to bounded real clips and return advisory editorial evidence.
 
     This lane never grants permission to edit and never blocks an approved
     choice.  Failures return ``None`` so measured waveform/audio-QC evidence
     stays the always-on fallback.  Audio bytes are never persisted in llm_calls;
     only the labels, answer and provider usage are recorded.
+    ``number_from``: the first clip's number (a caller hearing more windows
+    than one call takes numbers them across its calls: CLIP 4-6).
     """
     global _audio_review_dead
     if not audio_review_available() or not audio_paths:
@@ -739,7 +741,7 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
     for i, path in enumerate(audio_paths[:3]):
         label = (labels[i] if i < len(labels)
                  else str(path).rsplit("/", 1)[-1])
-        content.append({"type": "text", "text": f"CLIP {i + 1}: {label}"})
+        content.append({"type": "text", "text": f"CLIP {int(number_from) + i}: {label}"})
         try:
             content.append(audio_part(path))
         except Exception as exc:

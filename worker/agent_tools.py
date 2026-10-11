@@ -62,6 +62,7 @@ import sfx_search
 import sfx_judge
 import sheets
 import song_find
+import source_layout
 import spatial
 import stock
 import storage
@@ -102,7 +103,7 @@ import sfx_placement
 import version as worker_version
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
-                     custom_chain_error, patch_fingerprint,
+                     custom_chain_error, patch_clip_key, patch_fingerprint,
                      EDLValidationError, Frame, PictureCard,
                      HEX_COLOR,
                      canvas_edl, clip_anim, default_edl, describe_edl,
@@ -955,7 +956,9 @@ def get_video_info(ctx):
             f"{gap_txt}. "
             f"Current EDL v{edl['version']}: "
             f"{describe_edl(edl['json'], v['duration'], _source_shape(ctx))}."
-            + (f"\n{prog}" if prog else ""))
+            + (f"\n{prog}" if prog else "")
+            + (f"\n{layout}" if (layout := _layout_report(ctx, edl["json"]))
+               else ""))
 
 
 def get_transcript(ctx, start=0, end=None, asset_key=None):
@@ -1448,7 +1451,16 @@ def get_editorial_map(ctx, start=0, end=None, focus="all", limit=None,
     if not 1 <= limit <= EDITORIAL_MAP_MAX_ROWS:
         return (f"REJECTED: limit must be 1..{EDITORIAL_MAP_MAX_ROWS}; use "
                 "start/end to page a long source without losing chronology.")
-    shown = rows[:limit]
+    ranks = {}
+    if str(focus or "").strip().lower() == "peaks" and rows:
+        # peaks are ranked by their measured evidence: the strongest `limit`
+        # are shown, in source order, each with its rank
+        ranked = editorial_index.rank_peaks(rows)
+        ranks = {id(r): (k, s, why) for k, s, why, r in ranked}
+        top = {id(r) for _k, _s, _w, r in ranked[:limit]}
+        shown = [r for r in rows if id(r) in top]
+    else:
+        shown = rows[:limit]
     _metric(ctx, "editorial_map_rows_returned", len(shown))
     summary = editorial_index.summary(result)
     measured = ", ".join(summary["measured"]) or "none"
@@ -1469,12 +1481,22 @@ def get_editorial_map(ctx, start=0, end=None, focus="all", limit=None,
            "is already in PROJECT STATE; sentence ids are the join key."
            if not include_text else "")
     )
+    if ranks:
+        header += (f"\nPEAKS RANKED by measured evidence (vocal stress x2, energy "
+                   "peak, rising energy, a pause after/before, a shot change): "
+                   f"the strongest {len(shown)} of {len(rows)}, in source order.")
     if not shown:
         return header + "\nNo rows match this focus/range."
-    body = "\n".join(_format_editorial_row(row, include_text=include_text)
-                     for row in shown)
+    body = "\n".join(
+        (f"peak #{ranks[id(row)][0]} ({ranks[id(row)][1]:g}: "
+         f"{', '.join(ranks[id(row)][2]) or 'no measured emphasis'}) " if ranks else "")
+        + _format_editorial_row(row, include_text=include_text)
+        for row in shown)
     tail = ""
-    if len(rows) > len(shown):
+    if ranks and len(rows) > len(shown):
+        tail = (f"\n...{len(rows) - len(shown)} weaker peak row(s) not shown: raise "
+                f"limit (max {EDITORIAL_MAP_MAX_ROWS}) or narrow start/end.")
+    elif len(rows) > len(shown):
         next_s = float(shown[-1].get("t1") or start)
         tail = (f"\n...{len(rows) - len(shown)} more matching row(s). "
                 f"Continue with get_editorial_map(start={next_s:g}, "
@@ -1507,20 +1529,32 @@ def _dead_air(ctx, min_s):
              if e - s >= min_s], "waveform")
 
 
-def find_silences(ctx, min_seconds=0.7):
+def find_silences(ctx, min_seconds=0.7, start=None, end=None):
     try:
         min_s = max(0.1, float(min_seconds))
+        lo = None if start is None else float(start)
+        hi = None if end is None else float(end)
     except (TypeError, ValueError):
-        return "REJECTED: min_seconds must be a number."
+        return "REJECTED: min_seconds, start and end must be numbers (source seconds)."
+    if lo is not None and hi is not None and hi <= lo:
+        return "REJECTED: end must be greater than start."
     words = ctx.index.get("words", [])
     gaps, basis = _dead_air(ctx, min_s)
+    span = ""
+    if lo is not None or hi is not None:
+        # a range (Oct 2026: a short's editor got the first 100 of 331 gaps
+        # of the whole podcast, none of them in its 40 s)
+        gaps = [g for g in gaps if (lo is None or g["end"] > lo)
+                and (hi is None or g["start"] < hi)]
+        span = (f" within {_fmt_t(lo if lo is not None else 0.0)}-"
+                f"{_fmt_t(hi) if hi is not None else 'end'}s")
     if not gaps:
         if basis == "waveform":
             return ("No speech was transcribed AND the audio never drops "
                     "below the noise floor — there is nothing this tool can "
                     "call a silence. Say so plainly; do not guess at pauses "
                     "from the picture.")
-        return f"No gaps in the speech of {min_s}s or longer."
+        return f"No gaps in the speech of {min_s}s or longer{span}."
     lines = []
     for g in gaps[:100]:
         s, e = g["start"], g["end"]
@@ -1539,12 +1573,29 @@ def find_silences(ctx, min_seconds=0.7):
         lines.append(f"{_fmt_t(s)}-{_fmt_t(e)} ({e - s:.2f}s, midpoint "
                      f"{_fmt_t((s + e) / 2)}){ctxt}{sound}")
     note = f"\n({len(gaps) - 100} more not shown)" if len(gaps) > 100 else ""
-    head = (f"{len(gaps)} gap(s) in the speech >= {min_s}s (spans where "
+    if not span:
+        note += _silence_range_hint(ctx)
+    head = (f"{len(gaps)} gap(s) in the speech >= {min_s}s{span} (spans where "
             "nobody is talking — this is what 'silence' means to the user, "
             "not just a quiet waveform)") if basis == "speech" else \
         (f"No speech was transcribed in this video, so these are the "
-         f"{len(gaps)} quiet-WAVEFORM span(s) >= {min_s}s")
+         f"{len(gaps)} quiet-WAVEFORM span(s) >= {min_s}s{span}")
     return _cap(head + ":\n" + "\n".join(lines) + note)
+
+
+def _silence_range_hint(ctx):
+    """A program that keeps a small part of a long source (a short cut
+    from a podcast) is told how to ask for its own span."""
+    try:
+        keep = ctx.latest_edl()["json"].get("keep") or []
+        dur = float(ctx.duration or 0)
+        a, b = float(keep[0][0]), float(keep[-1][1])
+    except Exception:  # noqa: BLE001
+        return ""
+    if dur <= 0 or b - a > 0.5 * dur:
+        return ""
+    return (f"\n(The whole {dur:.0f}s source. Your program keeps {a:.2f}-{b:.2f}s: "
+            f"find_silences(start={a:g}, end={b:g}) lists only that span.)")
 
 
 def edl_used_asset_keys(edl):
@@ -1701,7 +1752,8 @@ def list_assets(ctx, kind=None):
     return result
 
 
-def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None):
+def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None,
+                    separate=False):
     """The round-67 direct-sight tail shared by look_at / look_at_asset.
 
     When the agent model itself reads images (llm.agent_sees), the captured
@@ -1733,21 +1785,38 @@ def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None
             (getattr(ctx, "direct_sight", False)
              and llm.agent_sees(ctx.agent_model)):
         try:
-            if len(gridded) == 1:
-                sheet = gridded[0]
+            if separate and len(gridded) > 1:
+                # native detail (round 8 review tools): one full-size image
+                # per time — a contact sheet would shrink every tile again
+                pages = [(f"{subject_line} — {lb}", fp, [lb])
+                         for lb, fp in zip(labels, gridded)]
+            elif len(gridded) == 1:
+                pages = [(f"{subject_line} — {', '.join(labels)}",
+                          gridded[0], list(labels))]
             else:
                 sheet = os.path.join(
                     ctx.workdir, f"look_sheet_{uuid.uuid4().hex[:8]}.jpg")
                 sheets.build_timestamp_sheet(list(zip(labels, gridded)),
                                              sheet)
-            ctx.pending_images.append(
-                (f"{subject_line} — {', '.join(labels)}", sheet))
-            if provenance is not None:
-                if not hasattr(ctx, "_pending_image_metadata"):
-                    ctx._pending_image_metadata = {}
-                ctx._pending_image_metadata[sheet] = dict(
-                    provenance, capture_job_id=getattr(ctx, "job", {}).get("id"),
-                    timestamp_labels=list(labels))
+                pages = [(f"{subject_line} — {', '.join(labels)}", sheet,
+                          list(labels))]
+            for label, sheet, page_labels in pages:
+                ctx.pending_images.append((label, sheet))
+                if provenance is not None:
+                    if not hasattr(ctx, "_pending_image_metadata"):
+                        ctx._pending_image_metadata = {}
+                    ctx._pending_image_metadata[sheet] = dict(
+                        provenance,
+                        capture_job_id=getattr(ctx, "job", {}).get("id"),
+                        timestamp_labels=page_labels)
+            if len(pages) > 1:
+                return (f"Captured {len(frames)} frame(s): {', '.join(labels)}"
+                        f" — {len(pages)} full-detail images, one per time, "
+                        "in that order, follow this message. LOOK AT THEM "
+                        "YOURSELF and answer from what you see"
+                        + (f" (your question: {question})" if question else "")
+                        + ". The faint grid marks TENTHS of the frame "
+                        "((0,0) = top-left).")
             return (f"Captured {len(frames)} frame(s): {', '.join(labels)}. "
                     "The picture follows this message — LOOK AT IT YOURSELF "
                     "and answer from what you see"
@@ -1772,6 +1841,54 @@ def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None
         gridded, purpose="vision_look", image_names=labels)
     return _cap(answer or "The vision model did not return an answer; "
                           "proceed using the transcript and shot captions.")
+
+
+def _patched_frame(ctx, edl, src_t, fp):
+    """Write the repainted frame at SOURCE second ``src_t`` to ``fp`` when
+    an erase patch's window holds it (round 92 patches replace the source
+    there, before anything else); returns the tile-label suffix ('' when no
+    patch holds it, a note when its clip cannot be read: the tile then shows
+    the un-repainted source)."""
+    for pt in edl.get("patches") or []:
+        try:
+            a, b = float(pt["src_start"]), float(pt["src_end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not a <= src_t <= b:
+            continue
+        key = pt.get("asset_key")
+        local = os.path.join(ctx.workdir, "patch_" + os.path.basename(str(key)))
+        try:
+            if not os.path.exists(local):
+                storage.download_to(key, local)
+            media.frame_at(local, max(0.0, src_t - a), fp)
+            return f" [erase patch {pt.get('id')} applied]"
+        except Exception as ex:  # noqa: BLE001 — show the source, say so
+            return (f" [erase patch {pt.get('id')} NOT shown: "
+                    f"{str(ex)[:60]}]")
+    return ""
+
+
+def _card_view(ctx, idx, raw, fitted, sfx, edl, t, src_t, zooms, prog_end,
+               vid):
+    """The picture card on screen at output second ``t`` composed onto the
+    tile (card_geom.compose): (path, label suffix). The tile is unchanged
+    when no card holds ``t``."""
+    import card_geom
+    if card_geom.card_at(edl, t) is None or not vid.get("width"):
+        return fitted, sfx
+    from PIL import Image
+    program = Image.open(fitted).convert("RGB")
+    W, H = program.size
+    zoom = renderer.zoom_state_at(zooms, t, prog_end, size=(W, H))
+    img = card_geom.compose(Image.open(raw).convert("RGB"), program, edl, t,
+                            src_t, vid["width"], vid["height"], zoom)
+    if img is None:
+        return fitted, sfx
+    out = os.path.join(ctx.workdir, f"lookout_card{idx}.jpg")
+    img.save(out, "JPEG", quality=88)
+    card = card_geom.card_at(edl, t)
+    return out, sfx + f" [picture card '{card.get('id') or 'card'}']"
 
 
 def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
@@ -1958,7 +2075,12 @@ def _look_at_output(ctx, output_times, question):
             for i, s, lb in mains:
                 fp = os.path.join(ctx.workdir, f"lookout_m{i}.jpg")
                 try:
-                    media.frame_at(path, s, fp)
+                    # an erased window reads from its repaint (patch) clip,
+                    # as the render overlays it on the source clock
+                    patched = _patched_frame(ctx, edl["json"], s, fp)
+                    if not patched.endswith(" applied]"):
+                        media.frame_at(path, s, fp)
+                    lb += patched
                     results[i] = (fp, lb)
                 except media.MediaError as ex:
                     main_err = str(ex)
@@ -2012,6 +2134,7 @@ def _look_at_output(ctx, output_times, question):
     src_of = {i: s for i, k, s, _lb in plan if k == "main"}
     for i in sorted(results):
         fp, lb = results[i]
+        raw = fp
         t = wants[i]
         try:
             blk = _block_at(t)
@@ -2024,6 +2147,9 @@ def _look_at_output(ctx, output_times, question):
                 prog_end, blk["kind"] == "footage",
                 crop=blk.get("crop"), fit=blk.get("fit"),
                 picture=frame_cfg.get("picture"))
+            if i in src_of and blk["kind"] == "footage":
+                fp, sfx = _card_view(ctx, i, raw, fp, sfx, edl["json"], t,
+                                     src_of[i], fxz, prog_end, vid)
         except Exception as ex:
             print(f"[look] output geometry skipped ({ex})", flush=True)
             sfx = ""
@@ -2045,10 +2171,11 @@ def _look_at_output(ctx, output_times, question):
     out = _deliver_frames(
         ctx, frames, labels, question,
         f"Frames of the ASSEMBLED PROGRAM (EDL v{edl['version']} output "
-        f"timeline, {prog_end:g}s) in TRUE output geometry — canvas fit and "
-        "any zoom active at each moment are applied (a tile says so in its "
-        "label); captions/texts/grades/overlays still burn in at render "
-        "and are not shown")
+        f"timeline, {prog_end:g}s) in TRUE output geometry — canvas fit, "
+        "any zoom, picture cards (backdrop and windows) and erase patches "
+        "are applied (a tile says so in its label); captions, texts, motion "
+        "graphics, grades and overlays burn in at render only — "
+        "look_at(rendered=true) shows them")
     if any("zoom on screen" in lb for lb in labels):
         # Round 74: an agent read a rect off a tile that was already zoomed
         # and aimed the next zoom at those numbers — which are SCREEN
@@ -2616,6 +2743,14 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None,
             e = min(dur, s + 1.0)
         n = 6 if e - s > 20 else 4
         times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
+    deferred = []
+    if native_resolution and getattr(ctx, "sight_out", False) and \
+            len(times) > config.MCP_IMAGE_PAGE_SIZE:
+        # One full-detail image per time, and one transport page per reply:
+        # the rest would ride out on the caller's NEXT call. Decode only
+        # what this reply carries and name the rest.
+        deferred = times[config.MCP_IMAGE_PAGE_SIZE:]
+        times = times[:config.MCP_IMAGE_PAGE_SIZE]
     evidence_key = ("look_asset", str(asset_key),
                     tuple(round(float(t), 3) for t in times))
     if native_resolution:
@@ -2671,7 +2806,8 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None,
         f"Frames from '{name}' ({asset['kind']}, {dur:.0f}s long)",
         provenance={"asset_id": asset["id"],
                     "edl_version": (asset.get("meta") or {}).get("edl_version"),
-                    "clock": "output" if asset["kind"] == "render" else "asset"})
+                    "clock": "output" if asset["kind"] == "render" else "asset"},
+        separate=bool(native_resolution))
     evidence.add(evidence_key)
     measured = motion_judge.describe(motion_profile)
     ref_grammar = ""
@@ -2681,6 +2817,11 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None,
             reference_profile.from_index(asset_index))
         if ref_grammar:
             _metric(ctx, "references_profiled")
+    if deferred:
+        out += (f"\nNative detail is one image per time and one reply carries "
+                f"{config.MCP_IMAGE_PAGE_SIZE}: NOT captured — "
+                + ", ".join(f"{t:.2f}s" for t in deferred)
+                + ". Call again with those times.")
     return _cap(out + f"\n(clip is {dur:.1f}s long; call again with times "
                       "or a narrower start/end to zoom into a region)"
                 + (f"\n{measured}" if measured else "")
@@ -3471,6 +3612,216 @@ def _get_spatial(ctx):
     ctx._spatial = spatial.get_or_compute_for_index(
         ctx.db, dbx, index_row, ctx.proxy_path(), ctx.workdir)
     return ctx._spatial
+
+
+def _get_source_layout(ctx, compute=False):
+    """The main source's layout sidecar (source_layout.py), or None.
+    ``compute`` measures and persists it for an index that predates it (one
+    pass over the proxy, ~10 s); otherwise only a stored one is read. Every
+    short shares its parent's index row, so one measurement serves all."""
+    cached = getattr(ctx, "_source_layout", None)
+    if cached:
+        return cached
+    index = getattr(ctx, "index", None) or {}
+    layout = index.get("source_layout") if isinstance(index, dict) else None
+    if not source_layout.valid(layout):
+        layout = None
+        failed = getattr(ctx, "_source_layout_failed", None)
+        if not compute or not getattr(ctx, "has_main_video", False) or (
+                failed is not None and time.monotonic() - failed < 600):
+            return None
+        try:
+            original = ctx.db.run(dbx.latest_asset, ctx.project_id,
+                                  "original")
+            row = (original and original.get("sha256") and
+                   ctx.db.run(dbx.get_index_by_sha, original["sha256"]))
+            if row:
+                layout = source_layout.get_or_compute_for_index(
+                    ctx.db, dbx, row, ctx.proxy_path(), ctx.workdir)
+                if isinstance(index, dict):
+                    index["source_layout"] = layout
+        except Exception as exc:
+            print(f"[source_layout] unavailable: {str(exc)[:160]}",
+                  flush=True)
+            layout = None
+        if not layout:
+            try:
+                ctx._source_layout_failed = time.monotonic()
+            except Exception:
+                pass
+            return None
+    try:
+        ctx._source_layout = layout
+    except Exception:
+        pass
+    return layout
+
+
+def _layout_canvas(ctx, ratio="9:16"):
+    v = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        return renderer.frame_dims(int(float(v["width"])),
+                                   int(float(v["height"])), ratio,
+                                   delivery=True)
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return 1080, 1920
+
+
+def _layout_report(ctx, edl_json=None, calls_only=False):
+    """The SOURCE LAYOUT block for this project's kept footage ('' when the
+    source has none measured; with ``calls_only``, '' for a source with no
+    call window too — an ordinary camera source has nothing to add)."""
+    layout = _get_source_layout(ctx)
+    if not layout or not getattr(ctx, "has_main_video", False):
+        return ""
+    if calls_only and not layout.get("windows"):
+        return ""
+    try:
+        # a report never costs the caller (the project state, get_video_info)
+        edl_json = edl_json if edl_json is not None else ctx.latest_edl()["json"]
+        keep = [list(k) for k in edl_json.get("keep") or []]
+    except Exception as exc:  # noqa: BLE001
+        print(f"[source_layout] report skipped: {str(exc)[:160]}", flush=True)
+        return ""
+    tl = None
+    try:
+        tl = Timeline(edl_json.get("keep") or [], edl_json.get("inserts") or [],
+                      edl_json.get("speed") or [])
+    except Exception:
+        tl = None
+    W, H = _layout_canvas(ctx)
+    try:
+        return source_layout.report(
+            layout, keep=keep or None, W=W, H=H,
+            to_program=(tl.src_to_out if tl is not None else None))
+    except Exception as exc:
+        print(f"[source_layout] report failed: {str(exc)[:160]}", flush=True)
+        return ""
+
+
+def _pip_erased(edl, win):
+    """True when the EDL repaints the call's self-view (erase_region over
+    most of its box)."""
+    pip = (win or {}).get("pip")
+    if not pip:
+        return False
+    area = (pip[2] - pip[0]) * (pip[3] - pip[1])
+    regions = list(((edl.get("source_clean") or {}).get("regions") or []))
+    for p in edl.get("patches") or []:
+        regions += list(p.get("regions") or [])
+    for r in regions:
+        try:
+            box = [float(r["x"]), float(r["y"]), float(r["x"]) + float(r["w"]),
+                   float(r["y"]) + float(r["h"])]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if source_layout._overlap(box, pip) >= .8 * area:
+            return True
+    return False
+
+
+def _layout_card(ctx, edl, spans, box, canvas, chosen=True):
+    """(box, SOURCE rect, note) for a source='auto' card over a window that
+    is mostly a CALL (source_layout.py), or None. The rect is the call's
+    picture (its status bar and buttons cropped off) at the box's aspect,
+    holding the guest's head; the box narrows rather than enlarge past 2x.
+    An omitted box (``chosen`` False) takes the largest card at <= 2x."""
+    layout = _get_source_layout(ctx, compute=True)
+    if not layout or not spans:
+        return None
+    win, share, _kinds = source_layout.call_share(layout, spans)
+    if win is None or share < source_layout.CALL_CARD_SHARE:
+        return None
+    v = (getattr(ctx, "index", None) or {}).get("video") or {}
+    try:
+        sw, sh = float(v["width"]), float(v["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    W, H = canvas
+    if chosen:
+        nbox, rect, k, head_ok, pip = source_layout.card_for_box(
+            win, sw, sh, box, W, H)
+    else:
+        plan = source_layout.card_plan(win, sw, sh, W, H)
+        nbox, rect, k, head_ok, pip = (plan["box"], plan["source"], plan["k"],
+                                       plan["head_ok"], plan["pip"])
+    fmt = source_layout.fmt
+    note = (f"CALL LAYOUT (measured on the source): {share * 100:.0f}% of this "
+            f"window is the call {fmt(win['rect'])}, so the card shows the "
+            f"call's picture {fmt(rect)} — its status bar and buttons cropped "
+            "off, the guest's measured face inside")
+    if chosen and any(abs(a - b) > 1e-3 for a, b in zip(nbox, box)):
+        def aspect(b):
+            return (b[2] - b[0]) * W / max(1e-6, (b[3] - b[1]) * H)
+        why = []
+        if abs(aspect(nbox) - aspect(box)) > 1e-2:
+            why.append("the guest's measured face stays whole (a box this "
+                       "wide cuts it)")
+        if k >= source_layout.UPSCALE_CAP - 1e-3:
+            why.append(f"the picture stays at {k:.2f}x (filling the box "
+                       "would enlarge it past "
+                       f"{source_layout.UPSCALE_CAP:g}x)")
+        note += (f"; the box narrowed to {fmt(nbox)} so "
+                 + (" and ".join(why) or f"the picture stays at {k:.2f}x"))
+    elif not chosen:
+        note += (f"; no box given: the largest card at <= "
+                 f"{source_layout.UPSCALE_CAP:g}x, {fmt(nbox)}")
+    if head_ok is False:
+        note += ("; the guest's measured face does NOT fit whole in this box "
+                 "— a taller box (or no box) keeps it")
+    if pip in ("cut", "inside") and not _pip_erased(edl, win):
+        call = source_layout.erase_call(
+            win, min(float(a) for a, _b in spans),
+            max(float(b) for _a, b in spans))
+        note += (f"; the host's self-view {fmt(win['pip'])} is "
+                 + ("CUT by this card — a face must never be cut: erase it "
+                    "first with " if pip == "cut" else
+                    "whole inside the card (erase it for a clean picture: ")
+                 + call + ("" if pip == "cut" else ")"))
+    if share < .98:
+        note += (f"; {100 - share * 100:.0f}% of the window is not the call "
+                 "(another shot): end the card at that cut, or this rect shows "
+                 "the wrong place there")
+    return nbox, rect, note, share
+
+
+def _layout_reframe(ctx, ratio, mode):
+    """auto_reframe on a CALL layout (source_layout.py): one crop aim per
+    shot — the call window centred and whole, the other shots on their own
+    speaker with every face wholly in or out, fitted where no aim can —
+    plus what the call offers a card. None when the kept footage is not
+    mostly a call (every other source reframes exactly as before)."""
+    if mode != "auto" or not getattr(ctx, "has_main_video", False):
+        return None          # an explicit mode always wins
+    try:
+        rw, rh = (float(x) for x in str(ratio).split(":"))
+    except (TypeError, ValueError):
+        return None
+    if rw > rh:
+        return None
+    edl = ctx.latest_edl()["json"]
+    keep = edl.get("keep") or [[0.0, ctx.duration]]
+    layout = _get_source_layout(ctx, compute=True)
+    if not layout:
+        return None
+    win, share, _kinds = source_layout.call_share(layout, keep)
+    if win is None or share < source_layout.CALL_LAYOUT_SHARE:
+        return None
+    v = ctx.index["video"]
+    frame, why = source_layout.frame_for(layout, keep, str(ratio),
+                                         v.get("width"), v.get("height"))
+    res = set_frame(ctx, str(ratio), frame["mode"], frame.get("focus_x"),
+                    frame.get("focus_y"), _measured=True,
+                    focus_track=frame.get("focus_track"))
+    if not isinstance(res, str) or not res.startswith(("EDL v", "NO CHANGE")):
+        return res
+    W, H = _layout_canvas(ctx, str(ratio))
+    lines = source_layout.window_lines(
+        win, float(v["width"]), float(v["height"]), W, H, windows=keep,
+        layout=layout)
+    return (res + "\nMEASURED SOURCE LAYOUT: " + why + ". This is a crop of "
+            "the whole frame; the call itself is best shown as a card:\n"
+            + "\n".join("- " + ln for ln in lines))
 
 
 def _get_motion(ctx):
@@ -7637,6 +7988,26 @@ def set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
     return res
 
 
+def _focus_rounding_note(ctx, payload, frame):
+    """Why a set_frame that asked for a new aim changed nothing: the focus
+    is stored to 0.001 of the source frame, so 0.5305 is the 0.53 already
+    set (Oct 2026: an editor nudging the crop off an edge band got a bare
+    NO CHANGE)."""
+    bits = []
+    for k in ("focus_x", "focus_y"):
+        want, got = payload.get(k), getattr(frame, k, None)
+        if want is not None and got is not None and abs(float(want) - got) > 1e-9:
+            bits.append(f"{k} {float(want):g} is stored as {got:g}")
+    if not bits:
+        return ""
+    v = (getattr(ctx, "index", None) or {}).get("video") or {}
+    px = f" (~{0.001 * float(v['width']):.0f} px of the source)" \
+        if v.get("width") else ""
+    return ("\nFOCUS ROUNDING: " + "; ".join(bits) + " — focus is kept to "
+            f"0.001 of the source frame{px}, so this is the crop already set. "
+            "Move it by 0.002 or more to shift the crop.")
+
+
 def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
                _measured=False, focus_track=None, picture=None,
                _follow=False):
@@ -7691,6 +8062,8 @@ def _set_frame(ctx, ratio, mode="crop", focus_x=None, focus_y=None,
             aimed += "; the crop follows the speaker inside the shot"
     res = ctx.write_edl(
         edl, f"output frame set to {frame.ratio} ({frame.mode}){aimed}")
+    if res.startswith("NO CHANGE"):
+        res += _focus_rounding_note(ctx, payload, frame)
     if follow_note and res.startswith(("EDL v", "NO CHANGE")):
         res += "\n" + follow_note
     if (res.startswith("EDL v") and frame.mode == "crop"
@@ -9175,6 +9548,12 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
         return ("REJECTED: mode must be 'auto' (measure the footage and "
                 "choose), 'crop' (fill the frame, cutting the sides), 'pad' "
                 "or 'pad_blur' (fit the WHOLE picture into the new frame).")
+    # A call composited over a broadcast frame (source_layout.py) is framed
+    # from its measured layout, not from a face and the detail around it:
+    # that read the Diamandis call as a wide shot and fitted it (Oct 2026).
+    laid = _layout_reframe(ctx, ratio, mode)
+    if laid is not None:
+        return laid
     # A measured per-shot track is strictly richer evidence than another
     # generic `auto` request. Preview critics commonly ask to "re-measure" a
     # composition they dislike; if that later measurement is temporarily
@@ -11029,9 +11408,11 @@ def _patch_groups(items, duration):
 
 def _run_patch(ctx, window, group_regions):
     """Build (or find) ONE proxy-res patch clip for `window`. Returns
-    (asset_key, fp, stats) — stats carries before/after ink when the clip
-    was freshly built, {} when it already existed (it measured clean when it
-    was first made; that is why it is cached).
+    (asset_key, fp, stats, repaint) — stats carries before/after ink when
+    the clip was freshly built, {} when it already existed (it measured
+    clean when it was first made; that is why it is cached); ``repaint`` the
+    algorithm the clip was built with (PatchItem.repaint: None when an
+    executor still on the round-92 repaint built it, mid-rollout).
 
     Round 92: this replaces the whole-file clean pass for erases. The clip
     repaints only [window] of the PREVIEW SOURCE — the cleaned proxy when a
@@ -11046,9 +11427,10 @@ def _run_patch(ctx, window, group_regions):
     ctx._orig_sha = sha
     edl = ctx.latest_edl()["json"]
     fp = patch_fingerprint(sha, group_regions, window)
-    key = f"patches/{ctx.project_id}/{fp[:16]}.mp4"
+    repaint = inpaint.REPAINT_VERSION
+    key = patch_clip_key(ctx.project_id, fp, repaint)
     if storage.exists(key):
-        return key, fp, {}
+        return key, fp, {}, repaint
     # The export rebuilds this patch at FULL resolution from the original —
     # refuse at erase time anything that could not finish there, so an
     # accepted erase is always an exportable one.
@@ -11072,27 +11454,31 @@ def _run_patch(ctx, window, group_regions):
             ctx.project_id,
             {"mode": "patch", "src_key": src_key, "out_key": key,
              "regions": group_regions, "window": list(window),
-             "measure": True},
+             "measure": True, "repaint": repaint},
             user_id=ctx.job.get("user_id"))
+        if isinstance(stats, dict) and "metric" not in stats:
+            # An executor one release behind (a rolling deploy) ignores
+            # 'repaint' and builds the round-92 repaint, measured by its
+            # stroke ink. Record what was built, under the round-92 key, so
+            # the clip is never served (or cached) as a newer repaint.
+            repaint = None
+            legacy = patch_clip_key(ctx.project_id, fp, None)
+            try:
+                storage.copy_object(key, legacy)
+                storage.delete_keys([key])
+                key = legacy
+            except Exception as exc:  # noqa: BLE001 — the clip stays where it is
+                print(f"[erase] round-92 patch not re-keyed "
+                      f"({str(exc)[:120]})", flush=True)
     else:
         local_src = ctx.proxy_path()
         out = os.path.join(ctx.workdir, f"patch_{fp[:8]}.mp4")
-        mids = [max(window[0], min(window[1] - 0.05,
-                                   float(r.get("start")
-                                         if r.get("start") is not None
-                                         else window[0]))) + 0.4
-                for r in group_regions]
-        before = [inpaint.text_energy(local_src,
-                                      (r["x"], r["y"], r["w"], r["h"]),
-                                      at=t, samples=3)
-                  for r, t in zip(group_regions, mids)]
-        stats = inpaint.build_patch(local_src, group_regions, window, out)
-        stats["before"] = before
-        stats["after"] = [
-            inpaint.text_energy(out, (r["x"], r["y"], r["w"], r["h"]),
-                                at=max(0.05, t - stats["src_start"]),
-                                samples=3)
-            for r, t in zip(group_regions, mids)]
+        stats = inpaint.build_patch(local_src, group_regions, window, out,
+                                    repaint=repaint)
+        # the same honesty check the executor runs (inpaint.erase_measure)
+        stats["before"], stats["after"], stats["metric"] = inpaint.erase_measure(
+            local_src, out, inpaint._clamped(group_regions, stats),
+            stats["src_start"])
         storage.upload_file(out, key, "video/mp4")
     try:
         ctx.db.run(dbx.insert_asset, ctx.project_id, "patch", key,
@@ -11104,7 +11490,7 @@ def _run_patch(ctx, window, group_regions):
         print(f"[erase] patch asset row not recorded ({str(e)[:120]}) — "
               "the clip itself is in storage and the EDL points at it",
               flush=True)
-    return key, fp, stats or {}
+    return key, fp, stats or {}, repaint
 
 
 def _rect_cover(a, b):
@@ -11167,18 +11553,21 @@ def _apply_patches(ctx, new_items, what, drop=None):
     groups = _patch_groups(new_items, ctx.duration)
     entries, lines = [], []
     for window, members in groups:
-        key, fp, stats = _run_patch(ctx, window, members)
+        key, fp, stats, repaint = _run_patch(ctx, window, members)
         # ids count the DROPPED patches too — "replaced pa1" must never
         # name the same id as the patch that replaced it.
         pid = _next_item_id(all_patches + entries, "pa")
         entries.append({"id": pid, "asset_key": key, "fp": fp,
                         "src_start": window[0], "src_end": window[1],
-                        "regions": members})
+                        "regions": members, "repaint": repaint})
         before = stats.get("before") or []
         after = stats.get("after") or []
-        for r, b, a in zip(members, before, after):
+        metric = stats.get("metric") or ["ink"] * len(before)
+        for r, b, a, how in zip(members, before, after, metric):
             gone = (b <= 0.5) or (a <= max(1.5, b * 0.35))
-            lines.append(f"[{r['id']}] ink {b:g} -> {a:g} "
+            measured = (f"keeps {a:g}% of the box's original picture"
+                        if how == "pattern" else f"ink {b:g} -> {a:g}")
+            lines.append(f"[{r['id']}] {measured} "
                          + ("— gone" if gone else "— STILL VISIBLE"))
         if any(p.get("escalated") for p in (stats.get("plates") or [])):
             lines.append(f"[{pid}] the text sat on a solid bar, so the "
@@ -11195,8 +11584,9 @@ def _apply_patches(ctx, new_items, what, drop=None):
     if lines:
         result += "\nMeasured on the repainted window: " + "; ".join(lines)
         if any("STILL" in ln for ln in lines):
-            result += ("\nOne rectangle still shows ink. Widen it (outlines "
-                       "and shadows sit outside the letters), or pass "
+            result += ("\nOne rectangle still shows ink or its original "
+                       "picture. Widen it (outlines, shadows and a window's "
+                       "frame sit outside a tight box), or pass "
                        "fill='box' to repaint the whole rectangle. Do NOT "
                        "tell the user it was removed until this measures "
                        "clean.")
@@ -17109,6 +17499,18 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         card_box = list(PICTURE_CARD_BOX)
     card_source, card_track, card_follow = None, None, None
     video_lowres = picture_cards.is_lowres(video.get("width"), video.get("height"))
+    call_share = 0.0
+    if panels is None and source == "auto" and fit in (None, "crop") and \
+            spans and not video_lowres and canvas[1] > canvas[0]:
+        # a CALL composited over the frame (source_layout.py): the card
+        # shows the call's picture, never a face crop of the whole frame
+        # (a wide shot of a phone on its backdrop)
+        call = _layout_card(ctx, edl, spans, card_box, canvas,
+                            chosen=box is not None)
+        if call is not None:
+            card_box, source, call_note, call_share = call
+            fit = "crop"
+            report.append(call_note)
     # (a 9:16 frame only — ARCHIVAL_CARD_BOX is placed between its bands — and
     # one speaker: a two-shot keeps the whole stage, as a crop would decide
     # who to frame)
@@ -17145,6 +17547,8 @@ def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
             "the headline and caption bands kept")
     cuts = (_card_cuts(ctx, edl, spans)
             if spans and (source != "program" or panels) else [])
+    if call_share >= .98:
+        cuts = []          # every shot of the window is the same call
     cut_list = ", ".join(f"{t:g}s" for t in cuts[:3])
     dense_failure = None
     if panels is None and source == "auto" and cuts and not video_lowres \
@@ -17488,8 +17892,15 @@ def set_editorial_graphic(ctx, id, kind, text, start, end, secondary=None,
     for layer in ("texts","vectors"):
         edl[layer]=[r for r in edl.get(layer) or []
                     if not r.get("id","").startswith(result["prefix"])] + result[layer]
-    return _fit_report(ctx.write_edl(edl, f"designed {kind} {id} in {palette}; editable type and vector layers with {result['minimum_hold_s']:g}s minimum reading time"),
-                       result.get("fit"))
+    written = _fit_report(ctx.write_edl(edl, f"designed {kind} {id} in {palette}; editable type and vector layers with {result['minimum_hold_s']:g}s minimum reading time"),
+                          result.get("fit"))
+    if kind == "headline" and str(written).startswith("EDL v"):
+        # its measured cap height against the captions (band_type)
+        import band_type
+        written += band_type.editorial_headline_note(
+            edl, (result.get("fit") or {}).get("font_size"), W, H,
+            max_size=editorial_graphics.HEADLINE_FONT_RANGE[1])
+    return written
 
 
 def remove_editorial_graphic(ctx, id):
@@ -21036,6 +21447,58 @@ def _ass_caption_rows(raw_text):
     return rows
 
 
+def _caption_graphics_report(edl, plan):
+    """(graphic_text, captions_under_graphics) for audit_captions, from the
+    same caption plan the render uses (worker/caption_carry.py):
+
+    * graphic_text — what each graphic (and text layer) puts on screen
+      beside the captions, and the caption words it shows instead of them;
+    * captions_under_graphics — caption words left on their usual band
+      under a graphic's box because no clear band was left: the graphic
+      covers or touches them.
+
+    The s04/s05 reviews (Oct 2026) had neither: image cards covered
+    CLEARLY, GROWTH and TRANSFORMERS while the audit passed."""
+    shown, under = [], []
+    for m in edl.get("motion") or []:
+        if not isinstance(m, dict) or m.get("_synthetic"):
+            continue
+        rep = plan.report.get(m.get("id")) or {}
+        text = " / ".join(" ".join(str(v).split())
+                          for k, v in caption_carry.graphic_lines(m)
+                          if not str(k).startswith("asset"))     # a file, not text
+        row = {"id": m.get("id"), "template": m.get("template"),
+               "start": m.get("start"), "end": m.get("end"), "text": text[:200]}
+        if rep.get("carried"):
+            row["shows_caption_words"] = " ".join(
+                str(w.get("w")) for w in rep["carried"])[:200]
+        if text or rep.get("carried"):
+            shown.append(row)
+        box = rep.get("box")
+        kept = []
+        for w in rep.get("kept") or [] if box else []:
+            # (a stretch blocked by a card's edge or another graphic lists
+            # every live graphic: only one whose box meets the band counts)
+            src_mid = w.get("src_t0", (float(w["t0"]) + float(w["t1"])) / 2.0)
+            if caption_carry.collides([box], caption_carry.normal_place(
+                    edl, float(src_mid))[0]):
+                kept.append(w)
+        if kept:
+            under.append({"id": m.get("id"), "start": m.get("start"),
+                          "end": m.get("end"), "box": rep.get("box"),
+                          "estimated_box": bool(rep.get("estimated")),
+                          "count": len(kept),
+                          "words": " ".join(str(w.get("w")) for w in kept)[:200]})
+    for item in edl.get("texts") or []:
+        if isinstance(item, dict) and str(item.get("text") or "").strip():
+            shown.append({"id": item.get("id"),
+                          "template": "text:" + str(item.get("template") or "title"),
+                          "start": item.get("start"), "end": item.get("end"),
+                          "text": " ".join(str(item["text"]).split())[:200]})
+    shown.sort(key=lambda r: float(r.get("start") or 0.0))
+    return shown, under
+
+
 def audit_captions(ctx, offset=0, limit=80):
     """Compile and mechanically audit the caption track before/after render.
 
@@ -21146,6 +21609,7 @@ def audit_captions(ctx, offset=0, limit=80):
     uncovered = []
     sound_off = []
     unshown = []
+    graphic_text, under_graphics = [], []
     first_late = None
     declared_max_words = None
     single_line_contract = False
@@ -21161,7 +21625,20 @@ def audit_captions(ctx, offset=0, limit=80):
         # The words the captions SHOULD show: whole-window mutes applied,
         # and the words graphics carry handed to them (word-level muting,
         # worker/caption_carry.py) — those are on screen, not lost.
-        words = caplib.caption_words(edl, ctx.index, tl)
+        plan = caplib.caption_plan(edl, ctx.index, tl)
+        words = plan.caption_words()
+        try:
+            graphic_text, under_graphics = _caption_graphics_report(edl, plan)
+        except Exception:  # noqa: BLE001 — the audit reports what it can
+            graphic_text, under_graphics = [], []
+        if under_graphics:
+            warnings.append(
+                f"{sum(u['count'] for u in under_graphics)} caption word(s) stay on "
+                "their band under a graphic's box ("
+                + ", ".join(u["id"] for u in under_graphics[:4])
+                + "): no clear band was left, so the graphic covers or touches them "
+                "(captions_under_graphics) — move or shrink it, or let it show "
+                "those words")
         for word in words:
             mid = (float(word["t0"]) + float(word["t1"])) / 2.0
             if not any(state["start"] - 0.011 <= mid <= state["end"] + 0.011
@@ -21290,6 +21767,8 @@ def audit_captions(ctx, offset=0, limit=80):
         "uncovered_word_count": len(uncovered),
         "sound_off_gaps": sound_off[:10],
         "heard_unshown": unshown[:20],
+        "graphic_text": graphic_text[:20],
+        "captions_under_graphics": under_graphics[:10],
         "overlaps": overlaps[:20],
         "warnings": warnings,
         "short_phrase_states": fragment_states,
@@ -21862,7 +22341,93 @@ def wait_for_job(ctx, job_id):
         time.sleep(min(1.0, remaining))
 
 
-def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
+def _stored_render_report(ctx, row):
+    """render_preview(report=true): the stored report of the complete
+    preview that already exists — PICTURE CHECK and its measures, AUDIO
+    CHECK, MID-WORD AUDIT, motion items the render could not draw, and the
+    version's verification record — read from the render job's result.
+    Nothing is rendered, enqueued or reviewed again (Oct 10 podcast run:
+    reviewers could only see a render's advisories by rendering again)."""
+    version = row["version"]
+    asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
+                       version)
+    stale = ""
+    if not asset:
+        asset = ctx.db.run(dbx.latest_render, ctx.project_id, "preview")
+        if not asset:
+            return ("PREREQUISITE: no complete preview exists to report on — "
+                    "call render_preview(complete=true) first.")
+        old = (asset.get("meta") or {}).get("edl_version")
+        stale = (f" STALE: the edit is now at v{version}; this is the report "
+                 f"of v{old}, and nothing changed since is in it.")
+    meta = asset.get("meta") or {}
+    result = {}
+    try:
+        job = ctx.db.run(dbx.get_job, int(meta["render_job_id"]))
+        result = (job or {}).get("result") or {}
+    except (KeyError, TypeError, ValueError):
+        result = {}
+    except Exception:  # noqa: BLE001 — the asset's own meta still reports
+        result = {}
+    pq = result.get("picture_qc") or meta.get("picture_qc") or {}
+    aq = result.get("audio_qc") or meta.get("audio_qc") or {}
+    rv = meta.get("edl_version")
+    lines = [f"RENDER REPORT (read-only: nothing was rendered or enqueued) — "
+             f"complete preview of EDL v{rv}: asset {asset.get('id')}, "
+             f"{meta.get('quality', 'draft')}, {asset.get('duration_s')}s."
+             + stale]
+    pqf = pq.get("findings") or []
+    if pqf:
+        lines.append("PICTURE CHECK (measured on the rendered frames): "
+                     + "; ".join(pqf))
+    elif pq:
+        lines.append(render_qc.summary_line(pq).strip()
+                     or "PICTURE CHECK: clean.")
+    else:
+        lines.append("PICTURE CHECK: this render carries none (rendered "
+                     "before the check existed, or the check could not run).")
+    measures = render_qc.measures_line(pq).strip()
+    if measures:
+        lines.append(measures)
+    if pq.get("advice"):
+        lines.append("PICTURE MEASURES (advisory — the Look's rules): "
+                     + "; ".join(pq["advice"]))
+    unshown = render_qc.unshown_line(pq)
+    if unshown:
+        lines.append("CAPTION CHECK: " + unshown)
+    aqf = aq.get("findings") or []
+    if aqf:
+        lines.append("AUDIO CHECK: " + "; ".join(aqf))
+    summary = audio_qc.summary_line(aq).strip()
+    if summary:
+        lines.append(summary)
+    mw = result.get("midword_audit") or []
+    if mw:
+        lines.append("MID-WORD AUDIT: " + "; ".join(mw[:8]))
+    mwarn = result.get("motion_warnings") or meta.get("motion_warnings") or []
+    if mwarn:
+        lines.append("MOTION NOT DRAWN: " + "; ".join(mwarn[:6]))
+    try:
+        rec = ctx.db.run(dbx.get_verification_record, ctx.project_id, int(rv))
+    except Exception:  # noqa: BLE001
+        rec = None
+    if rec:
+        record = rec.get("record") or {}
+        open_ = [f"{f.get('finding_id')}: {str(f.get('message'))[:160]}"
+                 for f in record.get("findings") or []
+                 if quality_verifier.is_blocking(f)
+                 and f.get("finding_id") not in {
+                     j.get("finding_id") for j in
+                     record.get("justifications") or []}]
+        lines.append(f"VERIFICATION RECORD v{rv}: {rec.get('status')}"
+                     + (" — open: " + " | ".join(open_[:6]) if open_ else ""))
+    return "\n".join(lines)
+
+
+def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
+                   report=False):
+    if report:
+        return _stored_render_report(ctx, ctx.latest_edl())
     if quality not in ("draft", "approval"):
         return "REJECTED: quality must be draft or approval."
     if quality == "approval":
@@ -22029,8 +22594,12 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
             mw = result.get("midword_audit") or []
             if mw:
                 note += (" MID-WORD AUDIT: " + "; ".join(mw[:5])
-                         + " — snap these boundaries to word edges "
-                           "(get_words) and re-render.")
+                         + " — each edge cuts into a word whose sound is "
+                           "loud there (a printed level is measured on the "
+                           "source; edges the keep tools left in quiet sound "
+                           "are not listed): rewrite the keep (its tools "
+                           "place edges audio-safely; get_words) and "
+                           "re-render.")
             note += _motion_warning_line(result)
             # Caption audit on what actually survived the cut: captions are
             # usually enabled BEFORE later cuts, so the add-time warning
@@ -22134,15 +22703,34 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
             # each one or keeps it deliberately and says why.
             pq = result.get("picture_qc") or {}
             pqf = pq.get("findings") or []
-            ctx.last_picture_qc_findings = list(pqf[:4])
+            ctx.last_picture_qc_findings = list(pqf[:render_qc.MAX_FINDINGS])
             if pqf:
                 ctx.last_taste.extend(
-                    f"picture QC: {finding}" for finding in pqf[:4])
+                    f"picture QC: {finding}"
+                    for finding in pqf[:render_qc.MAX_FINDINGS])
                 note += (" PICTURE CHECK (measured on the rendered frames): "
-                         + "; ".join(pqf[:4])
+                         + "; ".join(pqf[:render_qc.MAX_FINDINGS])
                          + " — fix these, or keep one deliberately and say "
                            "why in one clause.")
             note += render_qc.summary_line(pq)
+            # The measures reviewers used to estimate by eye (picture area
+            # vs the floor, cap heights) ride on every complete render; the
+            # Look's rules on them are advisories, never a defect alone.
+            note += render_qc.measures_line(pq)
+            pqa = pq.get("advice") or []
+            if pqa:
+                ctx.last_taste_advisory = list(
+                    getattr(ctx, "last_taste_advisory", None) or []) + [
+                    f"picture measures: {line}" for line in pqa]
+                note += (" PICTURE MEASURES (advisory — the Look's rules; "
+                         "keep one if intentional): " + "; ".join(pqa) + ".")
+            unshown = render_qc.unshown_line(pq)
+            if unshown:
+                # blocking, never a taste call: the owner's rule
+                ctx.last_taste.append(f"caption QC: {unshown}")
+                note += (" CAPTION CHECK: " + unshown + " — repair it "
+                         "(caption them, carry them on the graphic, or move "
+                         "the graphic off the caption band).")
             audio_review = _review_render_audio(ctx, row, result)
             if audio_review:
                 reused = (" (reused: rendered audio program unchanged)"
@@ -24920,13 +25508,21 @@ def _source_sound_fallback(ctx):
     raise proxy_error
 
 
+# Listening windows per review_audio call, heard in batches of the audio
+# lane's own clip limit (llm.ask_audio hears 3): a reviewer checking five
+# joins got three heard and two silently dropped (Oct 2026).
+REVIEW_AUDIO_MAX_CLIPS = 6
+REVIEW_AUDIO_BATCH = 3
+
+
 def review_audio(ctx, asset_key=None, times=None, output_times=None,
-                 span_s=6.0, question=None):
+                 span_s=6.0, question=None, anchor="center"):
     """Bounded actual listening for uploads, source sound or rendered mix.
 
     The main editor receives the listener's assessment as evidence. This is
     never a write gate and never substitutes for authored role/timing state or
-    deterministic loudness/peak checks.
+    deterministic loudness/peak checks. ``anchor``: each window is centred on
+    its time (a join), starts at it (what a cut keeps after it) or ends at it.
     """
     if not llm.audio_review_available():
         return ("REJECTED: actual-audio review is not configured on this "
@@ -24936,6 +25532,10 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         span = min(max(float(span_s or 6.0), 0.1), 12.0)
     except (TypeError, ValueError):
         return "REJECTED: span_s must be a number between 0.1 and 12 seconds."
+    anchor = str(anchor or "center").strip().lower()
+    if anchor not in ("center", "start", "end"):
+        return "REJECTED: anchor must be center, start or end."
+    dropped = []
 
     def windows(raw_times, duration, label):
         if not raw_times:
@@ -24943,14 +25543,17 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         if not isinstance(raw_times, (list, tuple)):
             return None, f"REJECTED: {label} must be an array of seconds."
         try:
-            values = sorted({float(t) for t in raw_times})[:3]
+            values = sorted({float(t) for t in raw_times})
         except (TypeError, ValueError):
             return None, f"REJECTED: {label} must contain numeric seconds."
+        dropped.extend(values[REVIEW_AUDIO_MAX_CLIPS:])
+        values = values[:REVIEW_AUDIO_MAX_CLIPS]
         out = []
         for value in values:
             if value < 0 or value > duration + 0.05:
                 continue
-            start = max(0.0, min(value - span / 2,
+            lead = {"center": span / 2, "start": 0.0, "end": span}[anchor]
+            start = max(0.0, min(value - lead,
                                  max(0.0, duration - min(span, 0.5))))
             end = min(duration, start + span)
             # Short whooshes/clicks are real listening evidence too. The old
@@ -25083,17 +25686,34 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
         "Do not infer from filenames and do not relabel an authored music track "
         "as voiceover. Purpose: " + str(question or "judge professional fit")[:2000]
         + ". Direction: " + (direction or "not specified"))
-    answer = llm.ask_audio(prompt, clips, labels, max_tokens=240,
-                           purpose="audio_asset_review")
-    if not answer:
+    answers = []
+    for k in range(0, len(clips), REVIEW_AUDIO_BATCH):
+        part = clips[k:k + REVIEW_AUDIO_BATCH]
+        # clip numbers run across batches, so 'CLIP 4' means the 4th window
+        numbered = prompt + (f" The clips below are CLIPS {k + 1}-{k + len(part)} of "
+                             f"{len(clips)}; answer for each by that number."
+                             if len(clips) > REVIEW_AUDIO_BATCH else "")
+        more = {"number_from": k + 1} if len(clips) > REVIEW_AUDIO_BATCH else {}
+        got = llm.ask_audio(numbered, part, labels[k:k + REVIEW_AUDIO_BATCH],
+                            max_tokens=240 + 60 * len(part),
+                            purpose="audio_asset_review", **more)
+        if got:
+            answers.append(got if len(clips) <= REVIEW_AUDIO_BATCH else
+                           f"[CLIPS {k + 1}-{k + len(part)}] {got}")
+    if not answers:
         return ("UNAVAILABLE: Actual clips were extracted, but the listener did not return "
                 "usable evidence. Use measured analysis and do not repeat the "
                 "same call in this turn.")
     _metric(ctx, "audio_asset_reviews")
     _metric(ctx, "audio_review_clips", len(clips))
+    tail = ""
+    if dropped:
+        tail = (f" NOT HEARD (at most {REVIEW_AUDIO_MAX_CLIPS} windows per call): "
+                + ", ".join(f"{t:g}s" for t in dropped) + " — ask again for them.")
     return ("BOUNDED ACTUAL-AUDIO REVIEW — an audio-capable reviewer heard "
-            f"{'; '.join(labels)}. This is advisory evidence, not a write "
-            f"gate: {answer}")
+            + "; ".join(f"CLIP {i + 1}: {lab}" for i, lab in enumerate(labels))
+            + f". This is advisory evidence, not a write gate: {' '.join(answers)}"
+            + tail)
 
 
 def _frame_focus_at_source(edl, source_t):
@@ -26916,16 +27536,21 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
     snapped = ("Snapped to sentence boundaries (snap='sentence'; pass "
                "snap='none' to reject instead): " + "; ".join(moves) + ". "
                if moves else "")
+    layout = _layout_report(ctx, calls_only=True)
     return (snapped +
             f"Shorts story search started as job {job_id}. It {selection} and "
             "creates each complete source story as its own LOCKED child "
-            "project. It does not style, reframe, caption, add B-roll/music, "
-            "or render a creative edit. The resulting cards arrive inside "
-            "this project's chat. In Studio, the user's Edit press boots a "
-            "fresh child editor. An MCP caller must instead open a child and "
-            "edit it directly with ordinary tools; it must never delegate to "
-            "Valmera's child agent. Poll this exact run with "
-            f"wait_for_job(job_id={job_id}) or shorts_status.")
+            "project, framed 9:16 from the source's measured layout (a call "
+            "is cropped on the call window; each child's get_video_info "
+            "names its best card). It does not style, caption, add "
+            "B-roll/music, or render a creative edit. The resulting cards "
+            "arrive inside this project's chat. In Studio, the user's Edit "
+            "press boots a fresh child editor. An MCP caller must instead "
+            "open a child and edit it directly with ordinary tools; it must "
+            "never delegate to Valmera's child agent. Poll this exact run with "
+            f"wait_for_job(job_id={job_id}) or shorts_status."
+            + (f"\n{layout}\nRead this before briefing: it is the frame "
+               "every short inherits." if layout else ""))
 
 
 def _shorts_children(ctx):
@@ -27719,10 +28344,12 @@ TOOLS = {
          "brief": {"type": "string"},
          "completes_steps": {
              "type": "array", "items": {"type": "integer"}}}),
-    "find_silences": (find_silences, "Silences of at least min_seconds, with "
+    "find_silences": (find_silences, "Silences of at least min_seconds "
+                      "(start/end: a SOURCE-seconds range), with "
                       "midpoints and surrounding words — cut points should "
                       "snap to these midpoints or word boundaries.",
-                      {"min_seconds": {"type": "number"}}),
+                      {"min_seconds": {"type": "number"},
+                       "start": {"type": "number"}, "end": {"type": "number"}}),
     "list_assets": (list_assets, "Every file in this project — used on the "
                     "timeline AND unused uploads sitting in the library. "
                     "kind='music' lists audio (use its storage_key with "
@@ -27787,8 +28414,10 @@ TOOLS = {
                 "text, a precise instant. The transcript is ASR and can be wrong; "
                 "inspect confidence and sentence context using "
                 "get_words / the transcript — never look to lip-read or "
-                "guess a word. IMPORTANT: the assembled geometry view omits "
-                "burn-ins. Set rendered=true after render_preview to inspect "
+                "guess a word. IMPORTANT: the assembled geometry view "
+                "composes picture cards (backdrop and windows) and erase "
+                "patches but omits burn-ins (captions, text, motion graphics, "
+                "grade). Set rendered=true after render_preview to inspect "
                 "the CURRENT preview's real pixels—including captions, text, "
                 "overlays and grade. In rendered mode output_times (or times) "
                 "are output seconds and any useful set can be batched for "
@@ -27800,7 +28429,7 @@ TOOLS = {
                  "start": {"type": "number"},
                  "end": {"type": "number"},
                  "rendered": {"type": "boolean"},
-                 "native_resolution": {"type": "boolean", "description": "With rendered=true, preserve image width up to 1920px; request one time for full-detail approval pixels without another encode."}}),
+                 "native_resolution": {"type": "boolean", "description": "With rendered=true, keep width up to 1920px: each time is its own full-detail image (no contact sheet), no re-encode."}}),
     "look_at_asset": (look_at_asset, "YOUR OWN EYES on an UPLOADED clip or "
                       "image, or a finished RENDER (storage_key from "
                       "list_assets; kind='render' lists past previews/"
@@ -27825,7 +28454,7 @@ TOOLS = {
                        "question": {"type": "string"},
                        "start": {"type": "number"},
                        "end": {"type": "number"},
-                       "native_resolution": {"type": "boolean", "description": "Preserve image width up to 1920px; one requested time avoids contact-sheet downscaling."}}),
+                       "native_resolution": {"type": "boolean", "description": "Keep width up to 1920px: each time is its own full-detail image (no contact sheet)."}}),
     "keep_segments": (keep_segments, "REPLACE the keep list (SOURCE "
                       "[[start,end],...]); new cut edges land audio-safe. "
                       "Everything else is cut. Use only for "
@@ -29817,7 +30446,7 @@ TOOLS = {
                                      "items": {"type": "array",
                                                "items": {"type": "number"}}}}),
     "set_caption_fixes": (set_caption_fixes,
-        "Edit displayed captions. Default operation=replace replaces the COMPLETE active set. "
+        "Edit displayed captions; an empty to deletes the words. Default operation=replace replaces the COMPLETE active set. "
         "append upserts by matching text and scope; clear removes all; list returns active fixes "
         "and compiled caption preview. replacements accepts [from,to] pairs or objects with "
         "from,to and optional start,end in OUTPUT seconds to target one occurrence. "
@@ -30049,8 +30678,10 @@ TOOLS = {
     "review_audio": (review_audio, "Listen to bounded REAL audio through the "
                      "audio-review lane and return its professional assessment. "
                      "Pass asset_key for an uploaded/fetched song, audio-only "
-                     "file, clip or render; pass times for seconds within that "
+                     "file, clip or render; pass times (up to 6) for seconds within that "
                      "asset. With no asset_key, times reviews SOURCE sound. "
+                     "anchor: a window is centred on its time (a join), "
+                     "starts or ends there. "
                      "output_times reviews the CURRENT rendered program and "
                      "therefore requires render_preview first. Use this for "
                      "vibe, recording quality, intelligibility, masking and "
@@ -30064,6 +30695,8 @@ TOOLS = {
                       "output_times": {"type": "array",
                                        "items": {"type": "number"}},
                       "span_s": {"type": "number"},
+                      "anchor": {"type": "string",
+                                 "enum": ["center", "start", "end"]},
                       "question": {"type": "string"}}),
     "audit_audio_mix": (audit_audio_mix, "Deterministic audit of the CURRENT "
                         "EDL's authored music, voiceover and SFX roles, files, "
@@ -30224,9 +30857,15 @@ TOOLS = {
         "budget, payoff hold), advisory: act on what hurts this short, never with a zoom or a sound. "
         "A complete render carries a PICTURE CHECK measured on its own frames: a face within ~6% "
         "of the frame's (or its card's) edge, a single-frame jump or pop that is not on a cut, a "
-        "missing end card or watermark. Repair each one or keep it deliberately and say why.",
+        "missing end card or watermark, captions that collide with a graphic or cross a card "
+        "edge; a CAPTION CHECK names heard words no caption or graphic shows (blocking). Repair "
+        "each one or keep it deliberately and say why. Its MEASURES line gives picture area vs "
+        "the 0.54 card floor, upscale and cap heights; PICTURE MEASURES (advisory) name a hook "
+        "smaller than the captions or a payoff that is not the largest lockup. report=true "
+        "re-reads that stored report for the existing preview without rendering anything.",
         {"complete": {"type": "boolean"},
-         "quality": {"type": "string", "enum": ["draft", "approval"]}}),
+         "quality": {"type": "string", "enum": ["draft", "approval"]},
+         "report": {"type": "boolean"}}),
     "justify_verification_findings": (
         justify_verification_findings,
         "Resolve a genuine verification false positive only after direct "
@@ -30807,13 +31446,13 @@ _COMPACT_CONTRACTS = {
         "Read inserts in get_edl first."),
     "look_at": (
         "See frames now, no render needed: times=[...] are SOURCE seconds; "
-        "output_times=[...] show the assembled edit (inserts, framing, zoom; "
-        "not captions/text/grade) to aim zooms and place type. rendered=true "
-        "needs render_preview first: it reads only a COMPLETE preview of the "
-        "current EDL version (render_preview(complete=true); a changed-section "
-        "proof is rejected) and shows real captions, motion graphics and grade: batch "
-        "up to 8 dense output_times around a landing to judge motion. Read "
-        "positions off the tenths grid. Uploads: look_at_asset."),
+        "output_times=[...] show the assembled edit (inserts, framing, zoom, "
+        "cards, erase patches; not captions/text/grade) to aim zooms and place "
+        "type. rendered=true needs render_preview first: only a COMPLETE "
+        "preview of the current EDL version (render_preview(complete=true); a changed-section "
+        "proof is rejected) shows real captions, motion graphics and grade: batch "
+        "up to 8 dense output_times around a landing. Read positions off the "
+        "tenths grid. Uploads: look_at_asset."),
     "look_at_asset": (
         "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
         "Times are relative to that source. For audio use get_audio_analysis; "
@@ -30829,9 +31468,7 @@ _COMPACT_CONTRACTS = {
     "list_motion_templates": (
         "READ the live motion library: each template's purpose, params "
         "(* = required) and built-in sound cues. Call once before designing the "
-        "hook, hero moments, CTAs or motion transitions; never guess params. "
-        "Optional category: type, data, callout, social, layout, transition, "
-        "texture, cta."),
+        "hook, hero moments, CTAs or motion transitions; never guess params."),
     "add_motion_graphic": (
         "Place a premium motion graphic on PROGRAM seconds: a template from "
         "list_motion_templates, or template='html' with your own MG-runtime "

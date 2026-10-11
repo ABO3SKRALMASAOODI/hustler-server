@@ -3,8 +3,9 @@
 One job scouts a long indexed video for genuinely complete, worthwhile
 micro-stories. Each selected story becomes a LOCKED child project that shares
 the parent's original + proxy BY STORAGE KEY and starts with exactly one
-editorial decision: the parent scout's story cut. It is deliberately not
-styled, reframed, captioned, scored, or rendered here.
+editorial decision: the parent scout's story cut, plus the 9:16 frame the
+source's measured layout gives it (source_layout.py; never none). It is
+deliberately not styled, captioned, scored, or rendered here.
 
 The user explicitly presses Edit on a card to boot a fresh full-tool editing
 agent inside that child. This separation is the product contract: the parent
@@ -39,9 +40,10 @@ import db as dbx
 import llm
 import reference_profile as reference_grammar
 import shorts_judge
+import source_layout
 import storage
 from psycopg2.extras import Json
-from schemas import GRADE_PRESETS
+from schemas import GRADE_PRESETS, Frame
 
 CLIP_MIN_S = 10.0          # technical floor; the scout still judges the story
 CLIP_MAX_S = 120.0         # complete social stories may need more than 60s
@@ -1024,7 +1026,8 @@ def _same_story_cut(keep, candidates, fps=None):
 
 def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
                       materialization_key=None):
-    """Cut the parent's chosen story and nothing else.
+    """Cut the parent's chosen story and nothing else (plus its 9:16
+    frame from the measured source layout: _seed_frame).
 
     This is intentionally small. The fresh agent started by the card's Edit
     button must make every creative decision after it has watched this exact
@@ -1054,21 +1057,77 @@ def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
         before = ctx.latest_edl()
         if _same_story_cut((before.get("json") or {}).get("keep"),
                            (expected_keep, word_keep), fps):
-            return (before["version"],
-                    "recovered existing word-snapped story seed")
-        result = agent_tools.execute(
-            ctx, "keep_segments",
-            {"segments": [[clip["start"], clip["end"]]],
-             "snap_to_words": True})
-        row = ctx.latest_edl()
-        if not _same_story_cut((row.get("json") or {}).get("keep"),
-                               (expected_keep,), fps):
-            raise RuntimeError(
-                "story seed did not produce the deterministic word-snapped "
-                "source range")
-        return row["version"], str(result).splitlines()[0][:200]
+            version, note = (before["version"],
+                             "recovered existing word-snapped story seed")
+        else:
+            result = agent_tools.execute(
+                ctx, "keep_segments",
+                {"segments": [[clip["start"], clip["end"]]],
+                 "snap_to_words": True})
+            row = ctx.latest_edl()
+            if not _same_story_cut((row.get("json") or {}).get("keep"),
+                                   (expected_keep,), fps):
+                raise RuntimeError(
+                    "story seed did not produce the deterministic "
+                    "word-snapped source range")
+            version, note = row["version"], str(result).splitlines()[0][:200]
+        framed = _seed_frame(ctx)
+        if framed:
+            version, note = framed[0], f"{note}; {framed[1]}"[:300]
+        return version, note
     finally:
         shutil.rmtree(wd, ignore_errors=True)
+
+
+def _seed_frame(ctx):
+    """The story cut's 9:16 frame — never none: a child cut with no frame
+    rendered 16:9 and searched landscape stock (the Diamandis run). Framed
+    from the parent's measured source layout (source_layout.frame_for: a
+    call cropped on the call window, its other shots fitted whole; any
+    other source aimed once on its speaker when that cuts no face, else
+    fitted). (version, note), or None when the cut already has a frame."""
+    row = ctx.latest_edl()
+    edl = dict(row.get("json") or {})
+    if edl.get("frame"):
+        return None
+    video = (ctx.index or {}).get("video") or {}
+    try:
+        frame, why = source_layout.frame_for(
+            (ctx.index or {}).get("source_layout"), edl.get("keep") or [],
+            "9:16", video.get("width"), video.get("height"))
+        edl["frame"] = Frame.model_validate(frame).model_dump()
+    except Exception as exc:
+        # a malformed or unreadable layout never costs the board a child:
+        # the whole frame fitted is always a valid 9:16 start
+        frame = {"ratio": "9:16", "mode": "pad_blur"}
+        why = f"source layout unusable ({str(exc)[:80]}): the whole frame " \
+              "is fitted until auto_reframe measures it"
+        edl["frame"] = Frame.model_validate(frame).model_dump()
+    res = ctx.write_edl(edl, f"output frame set to 9:16 ({frame['mode']}) "
+                             f"from the source layout: {why}")
+    if not str(res).startswith("EDL v"):
+        raise RuntimeError(f"story seed could not set its frame: {res}"[:300])
+    return ctx.latest_edl()["version"], f"9:16 frame: {why}"
+
+
+def _source_layout_for(worker_db, job, project, idx_row, index, workdir):
+    """The parent source's layout sidecar (source_layout.py), measured now
+    when its index predates it — one pass over the shared proxy, persisted
+    to the index row every child reads. None when it cannot be measured
+    (the children are then fitted 9:16 until their editor reframes)."""
+    layout = index.get("source_layout")
+    if source_layout.valid(layout):
+        return layout
+    try:
+        ctx = agent_tools.ToolContext(worker_db, job, project, index, workdir)
+        layout = source_layout.get_or_compute_for_index(
+            worker_db, dbx, idx_row, ctx.proxy_path(), workdir)
+    except Exception as exc:
+        print(f"[shorts {job['id']}] source layout unavailable: "
+              f"{str(exc)[:200]}", flush=True)
+        return None
+    index["source_layout"] = layout
+    return layout
 
 
 # ------------------------------------------------------------------ the job
@@ -1264,10 +1323,18 @@ def run_shorts_plan(worker_db, job):
         # no source sound to hear (137 refusals across 19% of shorts).
         audio = worker_db.run(dbx.latest_asset, project_id, "audio")
         n = len(clips)
-        # The scout creates RAW STORY CUTS. No caption preset, crop, grade,
-        # zoom, B-roll, music, final render, or other creative choice belongs
-        # here. Each card stays locked until the user explicitly boots its
-        # fresh editor.
+        # What the source frame is made of, measured once for every child
+        # (they share this index row): their 9:16 frames come from it, and
+        # the board and each child's get_video_info report it.
+        layout = _source_layout_for(worker_db, job, project, idx_row, index,
+                                    workdir)
+        if layout and layout.get("windows") and layout.get("summary"):
+            shorts_meta["source_layout"] = layout["summary"]
+        # The scout creates RAW STORY CUTS. No caption preset, grade, zoom,
+        # B-roll, music, final render, or other creative choice belongs
+        # here — only the 9:16 frame the measured layout gives every child
+        # (never none). Each card stays locked until the user explicitly
+        # boots its fresh editor.
         for position, clip in enumerate(clips, 1):
             clip["materialization_key"] = _short_materialization_key(
                 project_id, job_id, clip["order"])
@@ -1301,6 +1368,10 @@ def run_shorts_plan(worker_db, job):
                 # explicitly the raw selection boundary, not a styled edit.
                 clip["edl_version"] = version
                 clip["seed_note"] = seed_note
+            line = source_layout.child_line(
+                layout, [[clip["start"], clip["end"]]])
+            if line:
+                clip["source_layout"] = line
             clip["edit_status"] = "locked"
             worker_db.run(_save_shorts_meta, project_id, shorts_meta)
             worker_db.run(dbx.set_progress, job_id,

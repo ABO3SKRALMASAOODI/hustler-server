@@ -595,9 +595,11 @@ SESSION_TOOLS = [
         "the viewer sees it — it renders the current edit first if it has "
         "not been rendered; 'source' is the raw uploaded footage; 'asset' is "
         "one uploaded clip (pass asset_key). start/end watch a window rather "
-        "than the whole thing. It comes back as a direct download link — a "
-        "plain MP4 you fetch and watch. Cheap: normally it hands over a file "
-        "that already exists, untouched.",
+        "than the whole thing. The reply, in this call: a direct download "
+        "link to a plain MP4 (structuredContent.url too), plus — unless "
+        "frames=false — ONE sheet of sampled frames as an image and the "
+        "window's sound as audio when it fits. Cheap: normally it hands over "
+        "a file that already exists, untouched.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer",
                         "description": "Required immutable project scope."},
@@ -1654,35 +1656,68 @@ def _t_upload_start(tok, args):
     finish_call, finish_args = _upload_finish_call(
         project_id, key, filename, kind, role, duration_s,
         out.get("upload_id"))
+    expires = int(getattr(storage, "PRESIGN_UPLOAD_EXPIRY", 43200))
     if out.get("mode") == "single":
-        return (
+        plan = {"mode": "single", "storage_key": key,
+                "content_type": content_type, "url": out["url"],
+                "expires_in_s": expires,
+                "upload_finish_arguments": finish_args}
+        text = (
             f"Upload the file with this exact command, then call "
             f"upload_finish({finish_call}).\n\n"
             f"curl -sS -f -X PUT -H 'Content-Type: {content_type}' "
             f"--upload-file '<LOCAL PATH>' '{out['url']}'\n\n"
-            "The URL is valid for 12 hours and carries the whole upload — "
-            "it is long, do not edit or wrap it.\n\n"
-            + json.dumps({"mode": "single", "storage_key": key,
-                          "content_type": content_type, "url": out["url"],
-                          "upload_finish_arguments": finish_args}))
+            f"The URL is valid for {expires // 3600} hours and carries the whole "
+            "upload — it is long, do not edit or wrap it. The same plan is in "
+            "this result's structured content.\n\n" + json.dumps(plan))
+        return _upload_plan_result(tok, project_id, text, plan)
 
     # Multipart. Every part but the last must be exactly part_size bytes, and
     # each PUT returns an ETag header that upload_finish needs back in order.
-    parts = out.get("part_urls") or []
-    return (
+    # The plan is DATA (structuredContent, and the JSON closing the text):
+    # every part's URL with its byte offset and length, never a wall of URLs
+    # in prose (Oct 2026: 39 of them), and a recipe that needs no token.
+    part_size = int(out.get("part_size") or 0)
+    raw = out.get("part_urls") or []
+    parts = []
+    for i, p_ in enumerate(raw):
+        offset = i * part_size
+        parts.append({"part_number": p_["part_number"], "url": p_["url"],
+                      "offset": offset,
+                      "length": max(0, min(part_size, nbytes - offset))})
+    plan = {"mode": "multipart", "storage_key": key,
+            "upload_id": out.get("upload_id"), "part_size": part_size,
+            "size_bytes": nbytes, "expires_in_s": expires, "parts": parts,
+            "upload_finish_arguments": finish_args}
+    text = (
         f"This file needs a MULTIPART upload: {len(parts)} parts of "
-        f"{out.get('part_size')} bytes (the last part is whatever remains). "
-        f"Run `python3 scripts/valmera_upload.py <LOCAL PATH> --project "
-        f"{project_id}` if you have "
-        f"the repo — it does all of this, including the retries — or PUT each "
-        f"part yourself with `curl -D-` and keep the ETag header from every "
-        f"response.\n\n"
+        f"{part_size} bytes (the last part is whatever remains). The plan — "
+        "each part's URL, byte offset and length — is this result's "
+        "structured content and the JSON at the end of this text. Save that "
+        "JSON as plan.json, then PUT every part and collect its ETag; this "
+        "needs only python3 (no token) and prints the complete upload_finish "
+        "arguments:\n\n"
+        "python3 - '<LOCAL PATH>' plan.json <<'EOF'\n"
+        "import json,sys,urllib.request as u\n"
+        "f=open(sys.argv[1],'rb');p=json.load(open(sys.argv[2]));done=[]\n"
+        "for x in p['parts']:\n"
+        "    f.seek(x['offset']);r=u.urlopen(u.Request(x['url'],f.read(x['length']),method='PUT'),timeout=900)\n"
+        "    done.append({'part_number':x['part_number'],'etag':r.headers['ETag']})\n"
+        "print(json.dumps(dict(p['upload_finish_arguments'],parts=done)))\n"
+        "EOF\n\n"
         f"Then call upload_finish({finish_call}, "
-        f"parts=[{{\"part_number\": 1, \"etag\": \"...\"}}, ...]).\n\n"
-        + json.dumps({"mode": "multipart", "storage_key": key,
-                      "upload_id": out.get("upload_id"),
-                      "part_size": out.get("part_size"), "parts": parts,
-                      "upload_finish_arguments": finish_args}))
+        f"parts=[{{\"part_number\": 1, \"etag\": \"...\"}}, ...]) with "
+        "the printed arguments.\n\n" + json.dumps(plan))
+    return _upload_plan_result(tok, project_id, text, plan)
+
+
+def _upload_plan_result(tok, project_id, text, plan):
+    """upload_start's answer: the instructions as text, the plan as
+    structuredContent (MCP 2025-06-18) for a client that reads data."""
+    identity = _session_project_identity(tok, project_id)
+    return {"content": [{"type": "text",
+                         "text": (identity + "\n" if identity else "") + text}],
+            "structuredContent": plan, "isError": False}
 
 
 def _t_upload_finish(tok, args):
@@ -1746,15 +1781,60 @@ def _t_index_status(tok, args):
                        WHERE project_id = %s AND type = 'index'
                        ORDER BY id DESC LIMIT 1""", (project_id,))
         job = cur.fetchone()
+        queue = (_index_queue(cur, job["id"], tok["user_id"])
+                 if job and job["state"] == "queued" else None)
     if not job:
         return ("The video is uploaded but no analysis job exists — call "
                 "upload_finish, or re-open the project in the studio.")
     if job["state"] == "failed":
         return (f"Analysis FAILED: {job['error']}. The video cannot be "
                 "edited until it is re-uploaded and analyzed.")
+    if job["state"] == "queued":
+        where = ""
+        if queue:
+            where = (f": {queue['ahead']} analysis job(s) ahead of it, "
+                     f"{queue['running']} running now")
+        return (f"queued — waiting for an analysis worker{where} (job "
+                f"{job['id']}). It starts on its own; poll index_status (or "
+                "wait_for_job) rather than re-uploading. Transcript, shots and "
+                "silences are unavailable until this reaches done.")
     return (f"{job['state']} — {job['progress']}% (job {job['id']}). "
             "Transcript, shots and silences are unavailable until this "
             "reaches done.")
+
+
+def _index_queue(cur, job_id, user_id):
+    """{'ahead', 'running'} for a queued index job, in the worker's claim
+    order (worker/db.claim_job: subscribers' jobs first, then by id), or
+    None when it cannot be read. Oct 2026: index_status said only 'queued —
+    0%', and an agent could not tell a busy queue from a stuck upload."""
+    try:
+        cur.execute("SAVEPOINT index_queue")
+        cur.execute("SELECT COALESCE(is_subscribed, 0) AS sub FROM users "
+                    "WHERE id = %s", (int(user_id),))
+        mine = int((cur.fetchone() or {}).get("sub") or 0)
+        cur.execute("""
+            SELECT COUNT(*) FILTER (WHERE j.state = 'running'
+                       AND j.heartbeat_at >= NOW() - INTERVAL '120 seconds')
+                       AS running,
+                   COUNT(*) FILTER (WHERE j.state = 'queued' AND j.id <> %s
+                       AND (COALESCE(u.is_subscribed, 0) > %s
+                            OR (COALESCE(u.is_subscribed, 0) = %s
+                                AND j.id < %s)))
+                       AS ahead
+            FROM video_jobs j LEFT JOIN users u ON u.id = j.user_id
+            WHERE j.type = 'index' AND j.state IN ('running', 'queued')""",
+                    (job_id, mine, mine, job_id))
+        row = cur.fetchone() or {}
+        cur.execute("RELEASE SAVEPOINT index_queue")
+        return {"ahead": int(row.get("ahead") or 0),
+                "running": int(row.get("running") or 0)}
+    except Exception:  # noqa: BLE001 — the status answers without it
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT index_queue")
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
 
 def _t_shorts_status(tok, args):
@@ -1919,6 +1999,8 @@ def _t_shorts_status(tok, args):
             bits.append("story: " + " -> ".join(
                 str(story.get(stage) or "?")[:90]
                 for stage in ("setup", "development", "payoff")))
+        if clip.get("source_layout"):
+            bits.append("frame: " + str(clip["source_layout"])[:200])
         if clip.get("visual_direction"):
             bits.append("design: " + str(clip["visual_direction"])[:180])
         if clip.get("broll"):
@@ -1935,8 +2017,12 @@ def _t_shorts_status(tok, args):
             "user when the edit is ready to export. Valmera's in-house agent "
             "is not callable over MCP; this MCP model must make every child "
             "edit itself.")
+    # What the source frame is made of (worker/source_layout.py), measured
+    # once by the planner: read before briefing — every child inherits it.
+    layout = str(shorts.get("source_layout") or "")[:2400]
     return parent_note + head + f" {len(clips)} clip(s):\n" + \
-        "\n".join(lines) + "\n\n" + tail
+        "\n".join(lines) + ("\n\n" + layout if layout else "") + \
+        "\n\n" + tail
 
 
 def _t_wait_for_job(tok, args):
@@ -2272,10 +2358,29 @@ def _t_watch_video(tok, args):
             "blob": blob}})
     public = {"content": content, "isError": bool(missing)}
     structured = _editor_structured_content(result)
+    # A client that shows structuredContent INSTEAD of the text blocks (the
+    # Oct 10 podcast run: every reviewer's watch_video(render=false) came back
+    # as a bare receipt) must still get the video: the link, the guidance and
+    # exactly what rode along with it travel here too.
+    structured["url"] = url
+    structured["message"] = content[0]["text"]
+    structured["attached"] = {"frame_sheets": delivered_images,
+                              "audio": bool(audio_content),
+                              "video_inline": bool(blob)}
+    frame_urls = []
+    for img in result.get("images") or []:
+        try:
+            if (img or {}).get("storage_key"):
+                frame_urls.append(storage.presign_get(img["storage_key"]))
+        except Exception:
+            continue
+    if frame_urls:
+        structured["frame_urls"] = frame_urls
     if isinstance(result.get("preview"), dict):
         try:
             structured["download_receipt"] = _record_download_receipt(
                 tok, project_id, result["preview"])
+            structured["download_receipt"]["url"] = url
         except Exception:
             structured["download_receipt_error"] = "receipt_persistence_failed"
     if missing:

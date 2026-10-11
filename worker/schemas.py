@@ -495,10 +495,12 @@ class CaptionItem(BaseModel):
 
 
 class CaptionCorrection(BaseModel):
-    # Output seconds: use both bounds to target one occurrence.
+    # Output seconds: use both bounds to target one occurrence. An empty
+    # ``to`` deletes the words from the captions (a stutter, a doubled word
+    # the cut kept): their sound stays, nothing is shown for it.
     model_config = {"populate_by_name": True, "extra": "forbid", "allow_inf_nan": False}
     from_text: str = Field(alias="from", min_length=1, max_length=1000)
-    to: str = Field(min_length=1, max_length=1000)
+    to: str = Field(max_length=1000)
     start: Optional[float] = Field(default=None, ge=0)
     end: Optional[float] = Field(default=None, ge=0)
 
@@ -556,8 +558,10 @@ class CaptionsFromTranscript(BaseModel):
         result = []
         for row in value or []:
             row = CaptionCorrection.model_validate(row).model_dump(by_alias=True, exclude_none=True)
-            if not row["from"].strip() or not row["to"].strip():
+            if not row["from"].strip():
                 raise ValueError("caption correction text cannot be blank")
+            if not row["to"].strip():
+                row["to"] = ""      # deletes the words from the captions
             if ("start" in row) != ("end" in row) or (
                     "start" in row and row["end"] <= row["start"]):
                 raise ValueError("caption correction requires start < end")
@@ -2434,13 +2438,33 @@ def patch_fingerprint(src_sha, regions, window):
     rectangles, which span. Content-addresses the patch clips so re-erasing
     the same thing is a storage hit, the export can find (or rebuild) the
     full-res twin deterministically, and a replaced upload is detected the
-    same way clean_fingerprint detects it for a whole cleaned source."""
+    same way clean_fingerprint detects it for a whole cleaned source.
+
+    The repaint ALGORITHM (PatchItem.repaint) is deliberately not part of
+    it: every deployed renderer checks a stored fp against this exact
+    formula and drops a patch that does not match as 'a repaint of a
+    replaced video'. A version folded in here made a renderer one release
+    behind (a lane mid-rollout) drop every new erase from previews and
+    finals, and a write by such a lane (which strips the unknown field)
+    made the drop permanent. The version keys the stored clips instead
+    (patch_clip_key)."""
     payload = json.dumps(
         {"w": [round(float(window[0]), 2), round(float(window[1]), 2)],
          "r": [{k: r.get(k) for k in
                 ("x", "y", "w", "h", "start", "end", "fill")}
                for r in (regions or [])]}, sort_keys=True)
     return hashlib.sha1(f"{src_sha}|patch|{payload}".encode()).hexdigest()
+
+
+def patch_clip_key(project_id, fp, repaint=None, full=False):
+    """Storage key of a patch clip: the proxy-res clip the erase builds, or
+    (``full``) the full-res twin an export materializes. A round-92 repaint
+    (``repaint`` None) keeps the keys every release has used; a newer repaint
+    gets its own (``_r2``), so a clip of one algorithm is never served as the
+    other's — while an older renderer, which derives the round-92 full key
+    from fp, builds and finds round-92 twins only there."""
+    tag = f"_r{int(repaint)}" if repaint else ""
+    return f"patches/{project_id}/{fp[:16]}{tag}{'_full' if full else ''}.mp4"
 
 
 def clean_fingerprint(src_sha, regions, cursor=None):
@@ -2489,6 +2513,10 @@ class PatchItem(BaseModel):
     src_start: float
     src_end: float
     regions: List["CleanRegion"] = Field(default_factory=list)
+    # The repaint algorithm (inpaint.REPAINT_VERSION) the clips were built
+    # with; None = round 92, so an old EDL's export twin is built as before.
+    # Not part of fp (see patch_fingerprint): it keys the clips instead.
+    repaint: Optional[int] = None
 
 
 class CleanRegion(BaseModel):
@@ -4389,6 +4417,10 @@ class VideoIndex(BaseModel):
     # Pixel-measured face/text/UI track with its own version, computed lazily
     # for old indexes to avoid a fleet-wide re-index storm.
     spatial: Optional[dict] = None
+    # What the frame is made of (worker/source_layout.py: call windows, their
+    # chrome and self-view, per-shot kinds and faces), versioned and lazily
+    # computed like spatial; every short shares it through this row.
+    source_layout: Optional[dict] = None
     # Hierarchical, content-addressed visual evidence. ``tile_keys`` remains
     # for backwards compatibility and the Studio scrubber; agent orientation
     # prefers this storyboard because its representatives are selected from

@@ -115,20 +115,24 @@ disagree, v9 wins on method and the brief wins on preferences.
    first: what the picture allows (a call window, a picture-in-picture,
    UI, logos, a 4:3 archive) decides the layouts and so the Looks.
 4. **Materialize once.** One `make_shorts` call with verified sentence
-   boundaries and a 0-100 score.
+   boundaries and a 0-100 score. Its reply (or `shorts_status(parent)` once
+   the children exist) carries the **SOURCE LAYOUT**: a call window, its
+   status bar and buttons, the host's self-view, and the largest card at
+   <= 2x with and without a headline band. Every child starts 9:16 from it.
 5. **Pilot the frame and the export path once per source** (selection.md,
    **Framing pilot**; about 15 min, 1 render, 1 export) on the rank-1 child
    whenever a short will use a card or letterbox or the source has
-   obstacles: set the layout the briefs will use, render, measure picture
-   area and headline vs caption cap height on a native frame, and export it
-   once. Save `selection/framing.json`; every brief copies it. If no layout
-   meets the Look floors, change the Looks and structures to one that does
-   (looks.md, **Card geometry**); if Valmera cannot render or export the
-   proven layout, stop here and report the product defect (**Stop the
-   line**). Oct 2026: 8 of 9 shorts died on a frame the pilot would have
-   caught in the first 20 minutes.
+   obstacles: set the layout the briefs will use (start from the SOURCE
+   LAYOUT's card), render, read the measured picture area and headline vs
+   caption cap height from the render result, and export it once. Save
+   `selection/framing.json`; every brief copies it. If no layout meets the
+   Look floors, change the Looks and structures to one that does (looks.md,
+   **Card geometry**); if Valmera cannot render or export the proven layout,
+   stop here and report the product defect (**Stop the line**). Oct 2026: 8
+   of 9 shorts died on a frame the pilot would have caught in the first 20
+   minutes.
 6. **Brief.** Draft while the children build (4-7 min), finish with the
-   pilot's measurements (Looks and layouts it allows): for each short a Look, a
+   pilot's measurements (Looks and layouts it allows), not by eye: for each short a Look, a
    structure and a 150-word brief with a beat sheet (hook, turn, payoff,
    2-4 hero moments with exact word cues, no source gap over 12 s),
    saved as `assignments/<id>.json` with `child_project_id`, `rank`,
@@ -265,11 +269,13 @@ Tools change; the live server schema wins over any doc. A client caches
 `tools/list` when it connects, so a long-lived session can miss parameters
 the server added since (Oct 2026: `set_picture_card` `source`/`panels`/
 `follow`, `add_freeze_frame` audio_mode 'hold'); start a fresh session to
-refresh it. Real limits as of Oct 2026 (`watch_video` returning no link, the
-headline band starting below the free-tier mark, captions inside cards) are
-in editing.md **Known Valmera limits** with the working path. Read it before
-the pilot and before editing; never spend more than two calls rediscovering
-one.
+refresh it. Real limits as of Oct 2026 (captions inside cards, write-time
+size estimates for lockups) are in editing.md **Known Valmera limits** with
+the working path. Read it before the pilot and before editing; never spend
+more than two calls rediscovering one. The render result measures what
+reviewers used to estimate (its MEASURES line: picture area and upscale,
+hook, caption and payoff cap heights), and the `headline` write measures its
+claim against the captions and names the fix when it is smaller.
 
 ## Run state (`scripts/run.py`, `--help` on each command)
 

@@ -8,6 +8,7 @@
   "style": {"type": "enum", "values": ["clean", "frame", "polaroid"], "default": "clean", "hint": "clean = borderless photo card; frame = dark rounded frame with caption strip; polaroid = white print"},
   "aspect": {"type": "enum", "values": ["auto", "landscape", "portrait", "square", "wide"], "default": "auto", "hint": "auto keeps the image's own shape (clamped)"},
   "direction": {"type": "enum", "values": ["right", "left", "bottom"], "default": "right", "hint": "side the card swings in from"},
+  "x": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.5, "hint": "horizontal centre as frame fraction (move a narrow card beside the face); the card is always kept inside the safe area"},
   "y": {"type": "float", "min": 0.15, "max": 0.85, "default": 0.36, "hint": "vertical centre as frame fraction (keep it off the face); the card is always kept inside the safe area"},
   "size": {"type": "float", "min": 0.4, "max": 0.89, "default": 0.78, "hint": "card width as frame-width fraction"},
   "accent": {"type": "color", "default": "#FF453A", "hint": "chip dot colour"},
@@ -163,7 +164,7 @@
     // the hold pose is tilted and pushed in (~3% taller in projection), so
     // keep a 2% margin inside the safe area
     const cy = MG.clamp(P.y * H, H * (sTop + 0.02) + ch / 2, H * (sBot - 0.02) - ch / 2);
-    const left = (W - cw) / 2, top = cy - ch / 2;
+    const left = MG.clamp(P.x * W - cw / 2, Math.min(60, (W - cw) / 2), Math.max(W - 60 - cw, (W - cw) / 2)), top = cy - ch / 2;
     card.style.left = left + 'px';
     card.style.top = top + 'px';
     if (chip) {

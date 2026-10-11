@@ -832,6 +832,53 @@ NOMINAL_INK = {
 }
 
 
+# P2 knobs (Oct 2026) the browserless estimate must follow, never undercut:
+# image_card keeps its card 60 design px (of 1080) inside the frame's sides
+# (image_card.html), so an x near an edge stops there and so does its ink;
+# timeline_steps' size is a LAYOUT width (timeline_steps.html): a narrower
+# column wraps its notes and, at 4+ stops, stacks them in a column — taller,
+# never a scaled-down box (measured: 4 stops with notes at size 0.75 stand
+# 0.40 of the frame, against 0.17 at full width).
+# glow_title's size above 1 lifts only its height cap: the title never runs
+# past the width its example already fills, so the box does not grow with it.
+SIDE_CLAMP = {"image_card": 60.0 / 1080 - 0.006}
+LAYOUT_WIDTH = frozenset(("timeline_steps",))
+WIDTH_BOUND = frozenset(("glow_title",))
+
+
+def _clamp_sides(box, m):
+    x0, y0, x1, y1 = box
+    if x1 - x0 >= 1.0 - 2 * m:
+        return shift(box, 0.5 - (x0 + x1) / 2.0, 0.0)
+    if x0 < m:
+        return shift(box, m - x0, 0.0)
+    if x1 > 1.0 - m:
+        return shift(box, (1.0 - m) - x1, 0.0)
+    return box
+
+
+def _layout_width_ink(params, row, k, dx, y, frame):
+    """timeline_steps narrowed by its size knob (k < 1): the width follows
+    k; the height grows as the notes wrap (~1/sqrt(k)), and a portrait row
+    of 4+ stops goes vertical (the template's readable-floor rule) at about
+    a tenth of the frame per stop, kept inside the template's safe band."""
+    x0, top, x1, bottom = row
+    rows = [r for r in (params.get("rows") or []) if isinstance(r, dict)]
+    n = len(rows)
+    notes = any(str(r.get("sub") or "").strip() for r in rows)
+    titled = bool(str(params.get("title") or "").strip())
+    port = frame is None or portrait(*frame)
+    y_lo, y_hi = (0.08, 0.80) if port else (0.06, 0.94)
+    if port and n >= 4 and (notes or n >= 5 or k <= 0.6):
+        h = 0.08 + 0.1 * n + (0.07 if titled else 0.0)
+    else:
+        h = (bottom - top) / k ** 0.5
+    h = min(h, y_hi - y_lo)
+    cy = y + (top + bottom) / 2.0
+    y0 = min(y_hi - h, max(y_lo, cy - h / 2.0))
+    return (0.5 + dx - (0.5 - x0) * k, y0, 0.5 + dx + (x1 - 0.5) * k, y0 + h)
+
+
 def nominal_ink(template, spec, params, frame=None):
     """The estimated ink box of a library template at these params, or None.
     ``frame`` = (W, H) lets the box follow a template's own clamp into the
@@ -871,8 +918,15 @@ def nominal_ink(template, spec, params, frame=None):
             dy = max(0.0, CLAMP_BAND[0] - box[1]) - max(0.0, box[3] - CLAMP_BAND[1])
             box = shift(box, 0.0, dy)
         return box
+    if template in LAYOUT_WIDTH and k < 1.0:
+        return _layout_width_ink(params or {}, row, k, dx, y, frame)
+    if template in WIDTH_BOUND:
+        k = min(k, 1.0)
     x0, top, x1, bottom = row
-    return (0.5 + dx - (0.5 - x0) * k, y + top * k, 0.5 + dx + (x1 - 0.5) * k, y + bottom * k)
+    box = (0.5 + dx - (0.5 - x0) * k, y + top * k, 0.5 + dx + (x1 - 0.5) * k, y + bottom * k)
+    if template in SIDE_CLAMP:
+        box = _clamp_sides(box, SIDE_CLAMP[template])
+    return box
 
 
 # word_slam's tiers (round 4): the hero word fills ~94% of the width (at
@@ -1089,7 +1143,13 @@ def _headline_ink(params, y):
     w = num(params, "width", 0.84)
     h = num(params, "height", 0.15)
     x = num(params, "x", 0.5)
-    return (x - w / 2.0, y - h / 2.0, x + w / 2.0, y + h / 2.0)
+    top = y - h / 2.0
+    if num(params, "kicker_y", 0.0) > 0 and str(params.get("kicker") or "").strip() \
+            and str(params.get("align") or "center") != "left":
+        # a kicker set aside, on its own line beside the corner mark (a
+        # centred block only: headline.html stacks a left-aligned one)
+        top = min(top, num(params, "kicker_y", 0.0) - 0.02)
+    return (x - w / 2.0, top, x + w / 2.0, y + h / 2.0)
 
 
 # The lower third is the graphic placed beside a face by design, and its box
@@ -1260,10 +1320,14 @@ def candidates(template, spec, params, box, variants, zones, W, H,
         [(dict(p), tuple(b), patch_cost(p, params, spec)) for p, b in variants if b]
     sizer = next((k for k in ("width", "size", "scale")
                   if (pspec.get(k) or {}).get("type") == "float"), None)
+    if template in LAYOUT_WIDTH:
+        sizer = None        # a narrower layout is taller, not a smaller box
     if sizer and predict:
         # an unset size knob reads as its maximum (word_slam's width: 0.85)
         sp = pspec[sizer]
         cur = num(params, sizer, sp.get("default", sp.get("max", 1.0)))
+        if template in WIDTH_BOUND:
+            cur = min(cur, 1.0)     # its box is the size-1 box above 1
         lo = float(sp.get("min", 0.0))
         for p, b, c in list(horiz):
             cx = (b[0] + b[2]) / 2.0
@@ -1290,6 +1354,8 @@ def candidates(template, spec, params, box, variants, zones, W, H,
                 nb = shift(b, d, 0.0)
                 if nb[0] < -EDGE_TOL or nb[2] > 1 + EDGE_TOL:
                     continue
+                if template in SIDE_CLAMP and _clamp_sides(nb, SIDE_CLAMP[template]) != nb:
+                    continue        # the template stops it short of there
                 horiz.append((dict(p, x=nx), nb, c + 0.5 * abs(d)))
     ys = pspec.get("y") if (pspec.get("y") or {}).get("type") == "float" else None
     ycur = num(params, "y", (ys or {}).get("default", 0.5)) if ys else None
