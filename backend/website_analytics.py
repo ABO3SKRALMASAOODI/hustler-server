@@ -15,6 +15,11 @@ EVENTS = frozenset({
  'login_submit', 'login_success', 'login_error', 'verify_submit',
  'verify_error', 'verify_success', 'resend_code', 'resend_error',
  'google_error', 'google_success', 'form_started', 'form_invalid',
+ # the proof-first funnel (landing results wall, before/after, demo replay,
+ # onboarding examples): what visitors actually watch before signing up
+ 'proof_view', 'showcase_sound', 'before_after_toggle', 'demo_replay_start',
+ 'demo_replay_step', 'demo_replay_complete', 'starter_request_pick',
+ 'onboarding_example_view',
 })
 
 def identity(data):
