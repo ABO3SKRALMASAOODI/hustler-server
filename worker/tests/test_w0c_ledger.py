@@ -111,7 +111,9 @@ def test_a_device_write_returns_the_ledger_line_and_others_do_not():
                                  "strength": 0.15, "mode": "punch"}]}
     out = ctx.write_edl(edl, "a punch")
     assert "\nLEDGER (advisory): punctuation 0/2 · matte 0/2 · depth 0/2 · " \
-           "zoom 1 · sfx 0/2" in out, out
+           "zoom 1 · sfx 0" in out, out
+    # an optional family's ceiling never reads as free slots to fill
+    assert "sfx 0/" not in out
 
 
 def test_write_ledger_note_is_quiet_without_a_device_change():

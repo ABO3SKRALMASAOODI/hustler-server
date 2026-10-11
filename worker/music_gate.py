@@ -13,7 +13,10 @@ Where the gate holds:
     so add_music, add_library_music, apply_look(music=), swap_music and
     apply_edit_batch writes to the music layer all pass through it. A track
     already in the edit (or anywhere in its history) keeps its provenance:
-    gain, fit, mute and split edits never need a new pick.
+    gain, fit, mute and split edits never need a new pick. An MCP edit batch
+    is written by the backend (routes/video.apply_edit_batch_core), which
+    loads this file by path and runs the same pure core (``decide``,
+    ``gate_items``) — so nothing here imports worker-only modules at load.
   * ``provenance_for`` derives provenance from the PROJECT ASSET, never from
     what a write claims: an uploaded file is ``user_upload``; a link fetched
     with fetch_url is ``user_named``; a library copy is
@@ -37,8 +40,6 @@ import re
 import secrets
 import time
 
-import db as dbx
-
 PROVENANCES = ("user_upload", "user_named", "user_picked_library")
 LEGACY = "legacy"
 OFFER_TTL_S = 7 * 24 * 3600
@@ -56,11 +57,32 @@ REFUSE_PICK = (
     "mood or 'you choose' is not a pick.")
 
 
+WEB_SEARCH_REFUSAL = (
+    "REJECTED: that track was found by an agent web search, and agents never "
+    "choose music. Use the user's own upload, a song they named (find_song, "
+    "fetch_url) or a library track they pick.")
+SFX_REFUSAL = ("REJECTED: that file is a sound effect, not music — place it "
+               "with add_sfx.")
+AGENT_CLIP_REFUSAL = (
+    "REJECTED: that sound was taken from a clip an agent found or generated "
+    "(stock, AI video), and agents never choose music. Use the user's own "
+    "upload or clip, a song they named (find_song, fetch_url) or a library "
+    "track they pick.")
+
+
 class MusicGateError(ValueError):
     """A new music item without an allowed provenance."""
 
 
 # ── helpers ─────────────────────────────────────────────────────────────
+
+def _dbx():
+    """The worker's db module, imported on use: the backend loads this file
+    by path for its MCP batch gate (pure functions only) and has no
+    worker ``db`` to import."""
+    import db as dbx
+    return dbx
+
 
 def _root(ctx):
     """The real ToolContext under staging views (recipes, sequences)."""
@@ -82,7 +104,7 @@ def _pid(ctx):
 
 def _kv_get(ctx, key):
     try:
-        raw = ctx.db.run(dbx.kv_get, key)
+        raw = ctx.db.run(_dbx().kv_get, key)
         return json.loads(raw) if raw else None
     except Exception:  # noqa: BLE001
         return None
@@ -90,7 +112,7 @@ def _kv_get(ctx, key):
 
 def _kv_put(ctx, key, value):
     try:
-        ctx.db.run(dbx.kv_put, key, json.dumps(value, sort_keys=True))
+        ctx.db.run(_dbx().kv_put, key, json.dumps(value, sort_keys=True))
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -155,6 +177,24 @@ def classify_asset(asset, storage_key=None):
     if meta.get("fetched"):
         return "user_named"
     return "user_upload"
+
+
+def extracted_from(asset):
+    """The storage key of the video an extracted soundtrack came from
+    (agent_tools._audio_from_clip records it), else None."""
+    meta = (asset or {}).get("meta") or {}
+    if meta.get("extracted_from_video") and meta.get("from_asset_key"):
+        return str(meta["from_asset_key"])
+    return None
+
+
+def agent_acquired(asset):
+    """A clip an agent brought in on its own (stock search, AI generation),
+    not one the user uploaded or linked."""
+    meta = (asset or {}).get("meta") or {}
+    caption = str(meta.get("caption") or "")
+    return bool(meta.get("stock") or meta.get("research_candidate_id")
+                or caption.startswith("AI-generated"))
 
 
 # ── offers and picks ────────────────────────────────────────────────────
@@ -377,6 +417,21 @@ def _granted(ctx, key):
     return (getattr(_root(ctx), "_music_grants", None) or {}).get(key)
 
 
+# An earlier version of this project played this exact track (shared with
+# the backend's MCP batch gate).
+HISTORY_SQL = ("SELECT 1 FROM edls WHERE project_id = %s AND "
+               "json::jsonb @> %s::jsonb LIMIT 1")
+
+
+def history_args(project_id, key):
+    return (project_id, json.dumps({"music": [{"storage_key": key}]}))
+
+
+def picks_key(project_id):
+    """The app_kv row holding a project's library picks."""
+    return _PICKS_KEY.format(pid=project_id)
+
+
 def _seen_in_history(ctx, key):
     """Has this exact track played in an earlier version of this project?
     Then re-adding it (an undo, a rebuild) is not a new choice."""
@@ -386,9 +441,7 @@ def _seen_in_history(ctx, key):
 
     def q(conn):
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM edls WHERE project_id = %s AND "
-                        "json::jsonb @> %s::jsonb LIMIT 1",
-                        (pid, json.dumps({"music": [{"storage_key": key}]})))
+            cur.execute(HISTORY_SQL, history_args(pid, key))
             return cur.fetchone() is not None
     try:
         return bool(ctx.db.run(q))
@@ -407,6 +460,43 @@ def _existing(edl, key):
     return found, prov
 
 
+def decide(key, asset, *, is_picked, seen_before, pick=None, source=None):
+    """(provenance, error) for a track new to the edit, from its project
+    ``asset`` row (never from what a write claims). Pure: the worker's write
+    gate and the backend's MCP batch gate (routes/video.py) share it.
+
+    ``is_picked(slug)``: the user picked that library track before in this
+    project. ``seen_before(key)``: the track played in an earlier version, so
+    re-adding it is not a new choice (provenance stays legacy). ``pick(slug)``
+    resolves a pick from the user's own words now; without it an unpicked
+    library track is refused. ``source``: the asset row of the video an
+    extracted soundtrack came from (``extracted_from``), when known — the
+    sound of a clip an agent found is not the user's."""
+    kind = classify_asset(asset, key)
+    if kind in ("user_upload", "user_named"):
+        if source is not None and agent_acquired(source):
+            if seen_before(key):
+                return None, None
+            return None, AGENT_CLIP_REFUSAL
+        return kind, None
+    if kind == "library":
+        slug = library_slug(key, (asset or {}).get("meta"))
+        if slug and is_picked(slug):
+            return "user_picked_library", None
+        if seen_before(key):
+            return None, None
+        if slug and pick is not None:
+            return pick(slug)
+        return None, REFUSE_PICK
+    if kind == "web_search":
+        if seen_before(key):
+            return None, None
+        return None, WEB_SEARCH_REFUSAL
+    if kind == "sfx":
+        return None, SFX_REFUSAL
+    return None, (f"REJECTED: '{key}' is not a music asset in this project.")
+
+
 def provenance_for(ctx, storage_key, edl=None, user_pick=None,
                    resolved=False):
     """(provenance, error) for placing ``storage_key`` as music now.
@@ -423,44 +513,38 @@ def provenance_for(ctx, storage_key, edl=None, user_pick=None,
         return prov, None
     asset = None
     try:
-        asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
+        asset = ctx.db.run(_dbx().asset_by_key, ctx.project_id, key)
     except Exception:  # noqa: BLE001
         asset = None
     if asset is None and resolved:
         asset = {"kind": "music", "storage_key": key, "meta": {}}
-    kind = classify_asset(asset, key)
-    if kind in ("user_upload", "user_named"):
-        return kind, None
-    if kind == "library":
-        slug = library_slug(key, (asset or {}).get("meta"))
-        if slug and picked(ctx, slug):
-            return "user_picked_library", None
-        if _seen_in_history(ctx, key):
-            return None, None
-        if slug:
-            _rec, err = resolve_pick(ctx, slug, user_pick=user_pick)
-            if not err:
-                return "user_picked_library", None
-            return None, err
-        return None, REFUSE_PICK
-    if kind == "web_search":
-        if _seen_in_history(ctx, key):
-            return None, None
-        return None, ("REJECTED: that track was found by an agent web "
-                      "search, and agents never choose music. Use the "
-                      "user's own upload, a song they named (find_song, "
-                      "fetch_url) or a library track they pick.")
-    if kind == "sfx":
-        return None, ("REJECTED: that file is a sound effect, not music — "
-                      "place it with add_sfx.")
-    return None, (f"REJECTED: '{key}' is not a music asset in this project.")
+
+    source = None
+    src_key = extracted_from(asset)
+    if src_key:
+        try:
+            source = ctx.db.run(_dbx().asset_by_key, ctx.project_id, src_key)
+        except Exception:  # noqa: BLE001
+            source = None
+
+    def _pick(slug):
+        _rec, err = resolve_pick(ctx, slug, user_pick=user_pick)
+        return (None, err) if err else ("user_picked_library", None)
+
+    return decide(key, asset, is_picked=lambda slug: bool(picked(ctx, slug)),
+                  seen_before=lambda k: _seen_in_history(ctx, k), pick=_pick,
+                  source=source)
 
 
-def check_write(ctx, prev_edl, new_edl):
-    """Gate one agent EDL write. Stamps provenance on every music item whose
-    track is new to the edit (in place on ``new_edl``) and keeps the
-    provenance of tracks already there; returns an error string, or None
-    when the write may proceed."""
+def gate_items(prev_edl, new_edl, decide_key):
+    """Gate one EDL write against its previous version (pure core of
+    ``check_write``; the backend's MCP batch gate uses it too). Every music
+    item whose track is new to the edit gets the provenance
+    ``decide_key(storage_key) -> (provenance, error)`` returns, stamped in
+    place on ``new_edl``; a track already there keeps its provenance whatever
+    the write claims. Returns an error string, or None when the write may
+    proceed. A decision that raises refuses that track (fail closed) instead
+    of failing the write with a traceback."""
     items = (new_edl or {}).get("music") or []
     if not items:
         return None
@@ -482,12 +566,26 @@ def check_write(ctx, prev_edl, new_edl):
                 m["provenance"] = inherited
             continue
         if key not in decided:
-            prov, err = provenance_for(ctx, key)
+            try:
+                prov, err = decide_key(key)
+            except Exception:  # noqa: BLE001 — never a traceback, never a pass
+                prov, err = None, ("REJECTED: who chose this track could not "
+                                   "be verified, so nothing was placed; try "
+                                   "again.")
             if err:
                 return "music gate: " + err.replace("REJECTED: ", "", 1)
             decided[key] = prov
         m["provenance"] = decided[key]
     return None
+
+
+def check_write(ctx, prev_edl, new_edl):
+    """Gate one agent EDL write. Stamps provenance on every music item whose
+    track is new to the edit (in place on ``new_edl``) and keeps the
+    provenance of tracks already there; returns an error string, or None
+    when the write may proceed."""
+    return gate_items(prev_edl, new_edl,
+                      lambda key: provenance_for(ctx, key))
 
 
 def validate_new_items(prev_edl, new_edl):

@@ -97,6 +97,10 @@ wbatch = _pure_worker_module("edit_batch")
 # above (registered under its unique name, so nothing else resolves it).
 sys.modules.setdefault("worker_timeline", wtimeline)
 wflash = _pure_worker_module("flash_safety")
+# Owner rule 1 (Wave 0, 0C): agents never choose music. The worker gates
+# every agent write it makes (music_gate.check_write); an MCP edit batch is
+# written HERE, so it runs the same pure gate (_mcp_music_gate below).
+wmusic = _pure_worker_module("music_gate")
 
 video_bp = Blueprint("video", __name__)
 
@@ -4631,6 +4635,70 @@ def _reanchor_after_op(old_j, new_edl, desc):
     return new_edl, desc
 
 
+def _mcp_music_gate(cur, project_id, before, after):
+    """Owner rule 1 on the MCP batch path (worker/devices/INTERFACES.md
+    §4.3: edit_batch writes that add a music item). The same pure gate the
+    worker's writes run (worker/music_gate.gate_items): a track new to the
+    edit gets its provenance from its project asset — an upload or the sound
+    of a clip is user_upload, a link the user named is user_named, a library
+    copy is user_picked_library only when the user picked it
+    (add_library_music records the pick) — never from what the batch claims,
+    and a track nobody chose is refused. Tracks already in the edit, or
+    anywhere in its history, keep their provenance. Returns an error string
+    or None; stamps ``after`` in place."""
+    before_keys = {m.get("storage_key") for m in (before or {}).get("music")
+                   or [] if isinstance(m, dict)}
+    new_keys = sorted({m.get("storage_key") for m in (after or {}).get("music")
+                       or [] if isinstance(m, dict) and m.get("storage_key")
+                       and m.get("storage_key") not in before_keys})
+    assets, picks, source_rows = {}, {}, {}
+    if new_keys:
+        cur.execute("SELECT storage_key, kind, meta FROM assets "
+                    "WHERE project_id=%s AND storage_key = ANY(%s)",
+                    (project_id, new_keys))
+        assets = {row["storage_key"]: row for row in cur.fetchall() or ()}
+        # The video an extracted soundtrack came from: the sound of a clip
+        # an agent found (stock, AI video) is not the user's choice.
+        sources = sorted({wmusic.extracted_from(a) for a in assets.values()}
+                         - {None})
+        if sources:
+            cur.execute("SELECT storage_key, kind, meta FROM assets "
+                        "WHERE project_id=%s AND storage_key = ANY(%s)",
+                        (project_id, sources))
+            source_rows = {row["storage_key"]: row
+                           for row in cur.fetchall() or ()}
+        else:
+            source_rows = {}
+        cur.execute("SELECT to_regclass('public.app_kv') AS t")
+        if (cur.fetchone() or {}).get("t"):
+            cur.execute("SELECT value FROM app_kv WHERE key = %s",
+                        (wmusic.picks_key(project_id),))
+            row = cur.fetchone()
+            try:
+                picks = json.loads((row or {}).get("value") or "{}")
+            except (TypeError, ValueError):
+                picks = {}
+            if not isinstance(picks, dict):
+                picks = {}
+
+    def seen_before(key):
+        cur.execute(wmusic.HISTORY_SQL, wmusic.history_args(project_id, key))
+        return cur.fetchone() is not None
+
+    def decide(key):
+        asset = assets.get(key)
+        prov, err = wmusic.decide(
+            key, asset, is_picked=lambda slug: slug in picks,
+            seen_before=seen_before,
+            source=source_rows.get(wmusic.extracted_from(asset)))
+        if err == wmusic.REFUSE_PICK:
+            err += (" Over MCP: ask_user, then add_library_music(slug, "
+                    "user_pick=...) places the track they pick.")
+        return prov, err
+
+    return wmusic.gate_items(before, after, decide)
+
+
 def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
     """Authenticated caller, one transaction, one revision, no compute job."""
     try:
@@ -4676,6 +4744,11 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                 (original or {}).get("duration_s") or None, keys)
         except (ValueError, TypeError, wschemas.EDLValidationError) as exc:
             return {"error": str(exc)[:500]}, 400
+        if origin == "mcp":
+            refusal = _mcp_music_gate(cur, project_id, latest["json"],
+                                      normalized)
+            if refusal:
+                return {"error": refusal[:500]}, 400
         work = wplayback.changed_work(latest["json"], normalized)
         changed = wschemas.edl_signature(latest["json"]) != wschemas.edl_signature(normalized)
         version = base

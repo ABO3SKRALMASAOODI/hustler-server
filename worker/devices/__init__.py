@@ -437,6 +437,11 @@ def _missing(card_, lane, sidecar_status, feats):
     return out
 
 
+def _omit(reason):
+    return {"rung": "omit", "reason": str(reason)[:200], "substitute": None,
+            "params": {}, "est_ms": 0.0}
+
+
 def resolve_detail(card_id, *, lane, sidecar_status, budget_ms=None,
                    frames=0, cards=None, _depth=0):
     """The full resolver answer: {rung, reason, substitute, params, est_ms}.
@@ -446,8 +451,20 @@ def resolve_detail(card_id, *, lane, sidecar_status, budget_ms=None,
     the same inputs at the reduced cost; a ``substitute`` rung resolves the
     named card (or a built-in substitute, which needs nothing) at its own
     cost; ``omit`` always resolves. Nothing raises: an unknown card, a dark
-    card, a broken card or a budget of zero all come back as ``omit`` with
-    the reason."""
+    card, a broken card, an unreadable cost model or a budget of zero all
+    come back as ``omit`` with the reason (a creative device may degrade;
+    it never fails a render)."""
+    try:
+        return _resolve_detail(card_id, lane=lane,
+                               sidecar_status=sidecar_status,
+                               budget_ms=budget_ms, frames=frames,
+                               cards=cards, _depth=_depth)
+    except Exception as e:  # noqa: BLE001 — never fail the render
+        return _omit(f"resolver error: {type(e).__name__}: {e}")
+
+
+def _resolve_detail(card_id, *, lane, sidecar_status, budget_ms=None,
+                    frames=0, cards=None, _depth=0):
     try:
         cards = cards if cards is not None else load_cards()
     except Exception as e:  # noqa: BLE001 — a bad card set never fails a render
@@ -496,7 +513,7 @@ def resolve_detail(card_id, *, lane, sidecar_status, budget_ms=None,
                 why.append(f"{sub} over budget")
                 continue
             if sub in cards and _depth < 2:
-                inner = resolve_detail(sub, lane=lane,
+                inner = _resolve_detail(sub, lane=lane,
                                        sidecar_status=sidecar_status,
                                        budget_ms=budget_ms, frames=frames,
                                        cards=cards, _depth=_depth + 1)
@@ -527,9 +544,13 @@ def resolve(card_id, *, lane, sidecar_status, budget_ms=None, frames=0):
 
 def report_row(item_id, card_id, stage, detail, family=None):
     """One row of the render report's ``devices`` block (§6.3)."""
-    if family is None:
-        family = ((card(card_id) or {}).get("family")
-                  if card_id else None)
+    if not isinstance(card_id, str):
+        card_id = None
+    if family is None and card_id:
+        try:
+            family = (card(card_id) or {}).get("family")
+        except Exception:  # noqa: BLE001 — a report row never raises
+            family = None
     reason = detail.get("reason") or ""
     if detail.get("substitute") and detail["substitute"] not in reason:
         reason = (reason + f" -> {detail['substitute']}").strip()
@@ -544,19 +565,34 @@ def plan_rows(items, *, lane, sidecar_status, budget_ms=None, fps=30.0,
     end}), spending ``budget_ms`` across them in program order: each device
     resolves against what the earlier ones left. fxgraph.prepare may call
     this; the tests and the fault suite do."""
-    cards = cards if cards is not None else load_cards()
-    left = None if budget_ms is None else float(budget_ms)
+    try:
+        cards = cards if cards is not None else load_cards()
+    except Exception as e:  # noqa: BLE001 — a bad card set omits, never fails
+        cards, card_error = {}, f"cards unavailable: {e}"
+    else:
+        card_error = None
+    try:
+        left = None if budget_ms is None else float(budget_ms)
+    except (TypeError, ValueError):
+        left = None
     rows = []
-    for it in items:
+    for it in items or ():
+        it = it if isinstance(it, dict) else {}
         dev = it.get("device")
-        start, end = it.get("start"), it.get("end")
-        frames = (max(1, round(float(end) * fps) - round(float(start) * fps))
-                  if start is not None and end is not None else 1)
-        d = resolve_detail(dev, lane=lane, sidecar_status=sidecar_status,
-                           budget_ms=left, frames=frames, cards=cards)
+        try:
+            start, end = it.get("start"), it.get("end")
+            frames = (max(1, round(float(end) * fps)
+                          - round(float(start) * fps))
+                      if start is not None and end is not None else 1)
+        except (TypeError, ValueError):
+            frames = 1
+        d = (_omit(card_error) if card_error else
+             resolve_detail(dev, lane=lane, sidecar_status=sidecar_status,
+                            budget_ms=left, frames=frames, cards=cards))
         if left is not None:
-            left = max(0.0, left - d["est_ms"])
-        fam = (cards.get(dev) or {}).get("family") if dev else None
+            left = max(0.0, left - float(d.get("est_ms") or 0.0))
+        fam = (cards.get(dev) or {}).get("family") \
+            if dev and isinstance(dev, str) else None
         rows.append(report_row(it.get("id"), dev, it.get("stage"), d,
                                family=fam))
     return rows

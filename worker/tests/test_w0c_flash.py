@@ -108,7 +108,9 @@ def test_the_verifier_blocks_unasked_flashing_and_flags_opt_in():
     codes = [r["code"] for r in rec["unresolved_findings"]]
     assert quality_verifier.FLASH_FINDING in codes
     assert rec["status"] == "repair_required"
-    assert rec["contains_flashing"] is False
+    # the program flashes past the limit: whatever lets it export (thinning
+    # aside) is an opt-in, so the record carries the export flag already
+    assert rec["contains_flashing"] is True
     rec = quality_verifier.build_verification_record(
         7, 3, {}, edl, {}, preview=preview,
         request_text="strobe him white on every kick")
@@ -138,3 +140,27 @@ def test_the_export_gate_reads_the_same_rule_loaded_by_path():
                             "routes", "video.py"), encoding="utf-8").read()
     assert 'wflash = _pure_worker_module("flash_safety")' in src
     assert 'flash_flag["contains_flashing"] = True' in src
+
+
+def test_an_earlier_opt_in_is_acknowledged_not_thinned():
+    """Opt-in is read from the current request; a follow-up turn on an edit
+    the user asked to strobe ("fix the typo") gets a finding the editor
+    acknowledges by naming the earlier request — it never has to strip the
+    user's own flashing to export."""
+    edl = _flashy_edl(5)
+    preview = {"edl_version": 4, "storage_key": "r.mp4"}
+    rec = quality_verifier.build_verification_record(
+        7, 4, {}, edl, {}, preview=preview, request_text="fix the typo")
+    row = next(r for r in rec["unresolved_findings"]
+               if r["code"] == quality_verifier.FLASH_FINDING)
+    assert "earlier message" in row["repair"]
+    assert "asked for it earlier" in row["message"]     # what the editor reads
+    assert "justify_verification_findings" in row["repair"]
+    assert quality_verifier.FLASH_FINDING not in \
+        quality_verifier.NON_JUSTIFIABLE_FINDINGS
+    done = quality_verifier.justify_findings(
+        rec, [row["finding_id"]],
+        "The user asked for 'strobe him white on every kick' two messages "
+        "ago; this turn only fixed a typo.")
+    assert done["status"] == "justified"
+    assert done["contains_flashing"] is True

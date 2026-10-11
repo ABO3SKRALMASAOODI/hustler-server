@@ -129,6 +129,38 @@ def test_restoring_a_track_from_the_edit_history_is_not_a_new_choice():
     assert out.startswith("EDL v7 -> v8"), out
 
 
+def test_a_gate_that_cannot_decide_refuses_without_a_traceback(monkeypatch):
+    """A failure inside the provenance decision (an unreadable library, a
+    database hiccup the helpers did not absorb) refuses only the new track:
+    the write returns a REJECTED line, never raises, never passes."""
+    ctx, fake = tool_context(default_edl(20.0))
+    upload_asset(fake, "music/7/my-song.mp3")
+
+    def boom(*_a, **_k):
+        raise RuntimeError("library manifest unreadable")
+    monkeypatch.setattr(music_gate, "classify_asset", boom)
+    out = ctx.write_edl(_with_music(_music("music/7/my-song.mp3")), "music")
+    assert out.startswith("REJECTED (EDL v7 unchanged): music gate"), out
+    assert "could not be verified" in out and len(fake.rows) == 1
+
+
+def test_the_shared_gate_core_loads_without_the_worker_db():
+    """backend/routes/video.py loads music_gate by path for the MCP batch
+    gate: it must import nothing worker-only at module level."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("worker_music_gate_probe",
+                                                  music_gate.__file__)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.decide(LIB_KEY, None, is_picked=lambda s: False,
+                      seen_before=lambda k: False)[1] == mod.REFUSE_PICK
+    assert mod.decide("music/7/song.mp3", {"kind": "music", "meta": {}},
+                      is_picked=lambda s: False,
+                      seen_before=lambda k: False) == ("user_upload", None)
+    src = open(music_gate.__file__, encoding="utf-8").read()
+    assert "\nimport db" not in src
+
+
 def test_agent_searched_web_music_and_sound_effects_are_refused():
     ctx, fake = tool_context(default_edl(20.0))
     upload_asset(fake, "music/7/found.mp3",
@@ -154,6 +186,28 @@ def test_named_songs_and_extracted_clip_audio_are_the_users():
     assert music_gate.classify_asset(None, "legacy-music/x.mp3") == "library"
     assert music_gate.classify_asset(
         {"kind": "music", "meta": {"source": "valmera-sound-library"}}) == "sfx"
+
+
+def test_the_sound_of_a_clip_an_agent_found_is_not_the_users():
+    """Extracted audio is the user's only when the video was: the
+    soundtrack of a stock or AI-generated clip the agent brought in is the
+    agent choosing music."""
+    ctx, fake = tool_context(default_edl(20.0))
+    fake.assets["clips/7/stock.mp4"] = {
+        "kind": "video_clip", "storage_key": "clips/7/stock.mp4",
+        "meta": {"stock": True, "provider": "pexels"}}
+    fake.assets["clips/7/mine.mp4"] = {
+        "kind": "video_clip", "storage_key": "clips/7/mine.mp4",
+        "meta": {"filename": "my clip.mp4"}}
+    upload_asset(fake, "music/7/aaa.m4a", extracted_from_video=True,
+                 from_asset_key="clips/7/stock.mp4")
+    upload_asset(fake, "music/7/bbb.m4a", extracted_from_video=True,
+                 from_asset_key="clips/7/mine.mp4")
+    out = ctx.write_edl(_with_music(_music("music/7/aaa.m4a")), "bed")
+    assert out.startswith("REJECTED") and "agent found" in out, out
+    out = ctx.write_edl(_with_music(_music("music/7/bbb.m4a")), "bed")
+    assert out.startswith("EDL v7 -> v8"), out
+    assert fake.rows[-1]["json"]["music"][0]["provenance"] == "user_upload"
 
 
 def test_find_song_and_fetch_url_record_user_named(monkeypatch, tmp_path):

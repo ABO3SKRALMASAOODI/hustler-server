@@ -5,7 +5,7 @@
     "local": {
       "ms_scale": 1.0,
       "calibrated": true,
-      "basis": "measured: render CPU time of 40 + 20 local renders (Apple M5 Pro, ffmpeg 9.0; best of two) at load average ~40; the 20 held-out EDLs re-measured at load 13-23 all stayed within ±25%. On an idle machine (load ~5) previews cost ~25% less CPU than this fit predicts: machine state is a lane scale (ms_scale), not a change in the model's shape. parallel is an estimate",
+      "basis": "measured: render CPU time of 40 + 20 local renders (Apple M5 Pro, ffmpeg 9.0; best of two) at load average ~40; two independent re-measurements of the 20 held-out EDLs (load 13-23 and 20-26) reproduced 20/20 and 19/20 within ±25% (the outlier both times the 10 s plain 16:9 preview, whose fixed cost dominates). On an idle machine (load ~5) previews cost ~25% less CPU than this fit predicts: machine state is a lane scale (ms_scale), not a change in the model's shape. parallel is NOT validated: on this shared machine the measured CPU/wall ratio was 1.3-3.7 for previews (median ~1.8-2.4) and 1.9-5.2 for finals (median ~2.5-4.0) depending on load, so wall time from CPU / parallel is an estimate here too",
       "parallel": 2.0
     },
     "interactive": {

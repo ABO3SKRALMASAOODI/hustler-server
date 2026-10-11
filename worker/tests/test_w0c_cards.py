@@ -347,6 +347,34 @@ def test_dark_unknown_and_broken_never_raise(monkeypatch, tmp_path):
     assert rung == "omit" and why.startswith("cards unavailable")
 
 
+def test_an_unreadable_cost_model_or_bad_items_never_raise(monkeypatch,
+                                                           tmp_path):
+    """The resolver sits on the render path (fxgraph.prepare): whatever
+    breaks under it — the cost model file, a malformed fx item, a broken
+    card set — the device is omitted with the reason, the render goes on."""
+    use_cards(monkeypatch, six_matte_cards(), tmp_path)
+
+    def gone():
+        raise FileNotFoundError("cost_model.json")
+    monkeypatch.setattr(devices, "cost_model", gone)
+    rung, why = devices.resolve("subject_glow", lane="batch",
+                                sidecar_status={"matte.person": "ready"},
+                                frames=12)
+    assert rung == "omit" and "resolver error" in why
+    rows = devices.plan_rows(
+        [None, {"id": "a", "device": ["not", "an", "id"]},
+         {"id": "b", "device": "subject_glow", "start": "x", "end": None}],
+        lane="batch", sidecar_status={"matte.person": "ready"},
+        budget_ms="lots")
+    assert [r["rung"] for r in rows] == ["omit", "omit", "omit"]
+    monkeypatch.setattr(devices, "load_cards",
+                        lambda *_a: (_ for _ in ()).throw(ValueError("bad")))
+    rows = devices.plan_rows([{"id": "c", "device": "subject_glow"}],
+                             lane="batch", sidecar_status={})
+    assert rows[0]["rung"] == "omit"
+    assert rows[0]["reason"].startswith("cards unavailable")
+
+
 def test_plan_rows_spend_one_budget_in_program_order(monkeypatch, tmp_path):
     use_cards(monkeypatch, six_matte_cards(), tmp_path)
     items = [{"id": f"fx{i}", "device": "poster_silhouette",

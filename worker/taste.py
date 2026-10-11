@@ -1470,6 +1470,8 @@ DEVICE_BUDGETS = {
           "zoom": None, "sfx": None},
 }
 LEDGER_SEP = " · "
+# Families that are never a default and never a target (owner rule 3).
+OPTIONAL_FAMILIES = ("zoom", "sfx")
 
 
 def infer_format(edl, index=None):
@@ -1544,8 +1546,12 @@ class Ledger:
         bits = []
         for fam in LEDGER_FAMILIES:
             n, cap = self.counts.get(fam, 0), self.budgets.get(fam)
-            bits.append(f"{fam} {n}/{cap}" if cap is not None
-                        else f"{fam} {n}")
+            # Zooms and sounds are optional, never defaults (owner rule 3):
+            # their ceiling is shown only once it is exceeded, so the line
+            # never reads as free slots to fill ("sfx 0/2").
+            show_cap = cap is not None and (
+                fam not in OPTIONAL_FAMILIES or n > cap)
+            bits.append(f"{fam} {n}/{cap}" if show_cap else f"{fam} {n}")
         for fam, n in sorted(self.counts.items()):
             if fam not in LEDGER_FAMILIES and n:
                 bits.append(f"{fam} {n}")
