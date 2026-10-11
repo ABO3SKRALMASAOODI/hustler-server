@@ -2470,7 +2470,7 @@ def look_at(ctx, times=None, question="", start=None, end=None,
     return out
 
 
-def project_state(ctx):
+def project_state(ctx, edl=None):
     """The analysis half of the project state (Wave 1, 1F): which sidecars
     are measured for the main video (sidecars.summary) and what the person
     matte covers on the CURRENT program (matte_status: ready / partial /
@@ -2480,38 +2480,39 @@ def project_state(ctx):
         return {}
     out = {}
     try:
+        import devices
+        live_cards = bool(devices.load_cards())
+    except Exception:  # noqa: BLE001
+        live_cards = False
+    try:
+        if edl is None:
+            edl = ctx.latest_edl()["json"]
+        has_fx = bool(edl.get("fx"))
+    except Exception:  # noqa: BLE001
+        has_fx = False
+    if not (live_cards or has_fx):
+        # no device can use analysis yet: the state stays as it was, and
+        # no store listing is paid for on every turn
+        return {}
+    try:
         import sidecars
         sha = sidecars.index_source_sha(ctx.index)
         out["sidecars"] = sidecars.summary(sha) if sha else {}
     except Exception as exc:  # noqa: BLE001 — state is best effort
         out["sidecars"] = {"error": str(exc)[:80]}
     try:
-        import devices
-        live_cards = bool(devices.load_cards())
-    except Exception:  # noqa: BLE001
-        live_cards = False
-    try:
-        has_fx = bool(ctx.latest_edl()["json"].get("fx"))
-    except Exception:  # noqa: BLE001
-        has_fx = False
-    if not (live_cards or has_fx or any(
-            isinstance(v, dict) and any(v.values())
-            for v in (out.get("sidecars") or {}).values())):
-        # nothing a device could use yet: the state stays as it was
-        return {}
-    try:
         import tools_ext.verify_tools as verify_tools
-        edl = ctx.latest_edl()["json"]
-        out["matte_status"] = verify_tools.matte_state(ctx, edl)
+        out["matte_status"] = verify_tools.matte_state(ctx, edl or {})
         out["intensity"] = verify_tools.project_intensity(ctx)
     except Exception as exc:  # noqa: BLE001
         out["matte_status"] = {"status": "unknown", "error": str(exc)[:80]}
     return out
 
 
-def project_state_line(ctx):
-    """One line of project_state for the CURRENT PROJECT STATE block."""
-    state = project_state(ctx)
+def project_state_line(ctx, edl=None):
+    """One line of project_state for the CURRENT PROJECT STATE block
+    (``edl``: the EDL json the caller already read)."""
+    state = project_state(ctx, edl)
     if not state:
         return ""
     bits = []

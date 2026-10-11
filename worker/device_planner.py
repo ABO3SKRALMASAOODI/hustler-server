@@ -1149,6 +1149,11 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
             try:
                 _dry_run(edl, chosen, op, duration, media_keys)
             except (ValueError, TypeError) as e:
+                if cid not in {r[0] for r in rejected}:
+                    # once per card: a card whose params the write path
+                    # refuses is a card bug, visible in the worker log
+                    print(f"[planner] {cid} candidate refused by "
+                          f"apply_batch: {str(e)[:160]}", flush=True)
                 rejected.append((cid, str(e)[:160]))
                 continue
         cand.update({"moment": m, "notes": p["notes"], "rung": p["rung"],

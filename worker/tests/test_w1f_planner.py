@@ -291,8 +291,8 @@ def test_planner_without_cards_proposes_nothing_and_says_so():
     assert "zero devices is allowed" in text
 
 
-def test_production_has_no_device_card_yet():
-    """Wave 1 cards ship with tracks 1A-1E; this branch carries none, so
-    the planner is inert in production until they merge."""
+def test_every_live_card_carries_an_owned_prefix():
+    """Wave 1 cards ship with tracks 1A-1E (this branch carries none, so
+    the planner proposes nothing in production until they merge)."""
     assert all(c.split("_", 1)[0] in devices.CARD_PREFIXES
                for c in devices.load_cards())
