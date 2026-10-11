@@ -4,6 +4,7 @@
  "params": {
   "text": {"type": "str", "required": true, "max": 80, "hint": "the claim, 3-12 words, third person ('Jobs called 1983 computer fonts *garbage*'); at most one *accent* span"},
   "kicker": {"type": "str", "default": "", "max": 40, "hint": "optional small line above it: who + when ('Steve Jobs, 1983')"},
+  "kicker_y": {"type": "float", "min": 0.0, "max": 0.5, "default": 0.0, "hint": "0 = the kicker sits above the claim; > 0 (set by the write when the band is tight) = the kicker's line centre beside the corner mark, right-aligned to the column, leaving the whole band to the claim"},
   "style": {"type": "enum", "values": ["sans", "serif", "condensed"], "default": "sans", "hint": "sans = heavy grotesk sentence case; serif = Instrument Serif; condensed = tall condensed caps"},
   "accent_style": {"type": "enum", "values": ["color", "serif"], "default": "color", "hint": "the accent span in the accent colour, or also set in italic serif"},
   "x": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.5, "hint": "horizontal centre of the block (frame fraction)"},
@@ -40,16 +41,22 @@
   const S = STYLE[P.style] || STYLE.sans;
   const colW = W * P.width, bandH = H * P.height;
   const left = P.align === 'left';
+  // a kicker set ASIDE sits on its own line beside the corner mark (the
+  // mark covers the top-left only), right-aligned to the column: the whole
+  // band is the claim's
+  const aside = String(P.kicker || '').trim() && P.kicker_y > 0 && !left;
   let kick = null, claim = null, BKS = [];
   const build = () => {
     blk.textContent = '';
+    if (kick && kick.parentElement) kick.remove();
     blk.style.width = colW + 'px';
     blk.style.alignItems = left ? 'flex-start' : 'center';
     blk.style.textAlign = left ? 'left' : 'center';
     kick = null;
     if (String(P.kicker || '').trim()) {
-      kick = MG.el('div', 'kick', String(P.kicker).trim(), blk);
+      kick = MG.el('div', 'kick', String(P.kicker).trim(), aside ? MG.$('.mg-root') : blk);
       kick.style.color = P.color;
+      if (aside) kick.style.position = 'absolute';
     }
     claim = MG.el('div', 'claim', null, blk);
     Object.assign(claim.style, { fontFamily: S.css, fontWeight: S.weight, letterSpacing: S.track,
@@ -69,10 +76,10 @@
     if (kick) {
       kick.style.fontSize = '40px';
       MG.fitSecondary(kick, { width: colW, max: Math.max(MG.minType(kick), 46 * P.size) });
-      kh = kick.getBoundingClientRect().height;
+      kh = aside ? 0 : kick.getBoundingClientRect().height;
     }
-    const gap = kick ? Math.max(6, 0.012 * H * P.size) : 0;
-    if (kick) kick.style.marginBottom = gap + 'px';
+    const gap = kick && !aside ? Math.max(6, 0.012 * H * P.size) : 0;
+    if (kick && !aside) kick.style.marginBottom = gap + 'px';
     // the claim: as large as fits the column and the band, in balanced lines
     // (two for a short claim, three at most) and a step below hero type
     const room = Math.max(40, bandH - kh - gap);
@@ -90,6 +97,11 @@
     const r0 = blk.getBoundingClientRect();
     blk.style.left = (W * P.x - colW / 2) + 'px';
     blk.style.top = (H * P.y - r0.height / 2) + 'px';
+    if (aside) {
+      const k0 = kick.getBoundingClientRect();
+      kick.style.left = (W * P.x + colW / 2 - k0.width) + 'px';
+      kick.style.top = (H * P.kicker_y - k0.height / 2) + 'px';
+    }
     // the ink, not the column: what the band holds
     const wordRects = MG.$$('.mg-w', claim).map(e => e.getBoundingClientRect());
     const kr = kick ? kick.getBoundingClientRect() : null;
@@ -127,6 +139,7 @@
     const b = leave > 0 ? 1 - MG.ease.inCubic(MG.range(t, D - leave, leave)) : 1;
     const y = P.entrance === 'rise' ? (1 - a) * 18 : 0;
     MG.set(blk, { y, opacity: a * b });
+    if (aside && kick) MG.set(kick, { y, opacity: a * b });
     BKS.forEach(bk => { bk.style.opacity = (a * b).toFixed(4); });
   });
 })();
