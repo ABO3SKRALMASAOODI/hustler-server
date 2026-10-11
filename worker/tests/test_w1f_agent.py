@@ -291,6 +291,9 @@ def test_the_worker_export_path_holds_an_unacknowledged_degraded_final():
     result2 = {"render_asset_id": 78, "devices": [ROW]}
     assert job_completion.hold_degraded_final(db2, job, result2) == []
     assert "export_held" not in result2
+    # ...and is stamped judged-and-released: the backend holds an UNSTAMPED
+    # final with degraded rows (routes/video.final_degraded_hold)
+    assert db2.meta == {"degraded_hold": []}
     # previews and clean finals are untouched
     assert job_completion.hold_degraded_final(
         _WDB(), dict(job, type="preview"), {"devices": [ROW]}) == []
@@ -319,6 +322,18 @@ def test_acknowledging_releases_exactly_the_held_final():
         "substitute reads fine for this short")
     assert job_completion.refresh_final_hold(db, 5, 9, acked) == []
     assert db.meta["degraded_hold"] == []
+    # a final whose commit never stamped it (the stamp failed) is judged on
+    # the next acknowledgement from its own device rows
+    db.meta = {"devices": [ROW, dict(ROW, id="ok", rung="full")]}
+    assert job_completion.refresh_final_hold(db, 5, 9, rec) == [ROW]
+    assert db.meta["degraded_hold"] == [ROW]
+    db.meta = {"devices": [ROW]}
+    assert job_completion.refresh_final_hold(db, 5, 9, acked) == []
+    assert db.meta["degraded_hold"] == []
+    # a final with nothing degraded is left alone
+    db.meta = {"devices": [dict(ROW, rung="full")]}
+    assert job_completion.refresh_final_hold(db, 5, 9, rec) == []
+    assert "degraded_hold" not in db.meta
 
 
 # ── close-out guidance ───────────────────────────────────────────────────

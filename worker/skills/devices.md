@@ -140,10 +140,13 @@ at the landings → `audit_motion` before handing over.
 
 1. Landing error: rebind or move the item (its `bind.offset_f` shifts it by
    whole frames), then prove again.
-2. Rendered as a substitute or left out: the report names the reason; if the
-   matte is measuring, wait and re-render; otherwise tell the user what it
-   rendered as. A final with an unacknowledged degraded device is held until
-   it is fixed or acknowledged with justify_verification_findings.
+2. Rendered as a substitute or left out: the report names the reason. If
+   the matte was still measuring, wait until the ANALYSIS line says it is
+   ready, then `render_preview(quality='approval')`: a draft render of the
+   same version, and a stitched draft of an unchanged device, reuse the
+   substitute frames. Otherwise tell the user what it rendered as. A final
+   with an unacknowledged degraded device is held until it is fixed (a new
+   version) or acknowledged with justify_verification_findings.
 3. Over budget or too busy: `set_intensity` one step down removes the
    lowest-ranked devices in one write that lists their ids; or remove the
    weakest by id.
@@ -164,7 +167,8 @@ shapes are:
   "value": {"id": "<id>", "type": "<type>", "stage": "<stage>", "start":
   <s>, "end": <s>, ..., "device": "<card id>", "bind": {"on": "stress",
   "ref": <word index>, "rhythm": "speech"}}} — a junction carries "at" (its
-  cut) instead of start and end;
+  cut) instead of start and end; written by hand without a candidate's
+  word index, bind it by time: {"on": "time", "ref": <program second>};
 - remove: {"action": "remove", "layer": "fx", "id": "<id>"};
 - a motion graphic's composite: {"action": "upsert", "layer": "motion",
   "id": "<motion id>", "value": {"id": "<motion id>", "composite":

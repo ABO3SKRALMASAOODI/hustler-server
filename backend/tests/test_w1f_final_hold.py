@@ -25,11 +25,18 @@ ROW = {"id": "sx1", "device": "subject_fill_flash", "rung": "substitute",
        "reason": "matte.person pending -> full_frame_flash"}
 
 
-def test_hold_reads_only_the_stamp():
+def test_hold_reads_the_stamp_and_holds_an_unjudged_final():
     assert video.final_degraded_hold({}) == []
     assert video.final_degraded_hold({"degraded_hold": []}) == []
     assert video.final_degraded_hold({"degraded_hold": [ROW, "x"]}) == [ROW]
-    assert video.final_degraded_hold({"devices": [ROW]}) == []
+    # the stamp is the worker's judgement: [] releases even degraded rows
+    assert video.final_degraded_hold({"degraded_hold": [],
+                                      "devices": [ROW]}) == []
+    # before the job commits (or when its stamp failed) the render's own
+    # degraded rows hold it: never downloadable unjudged
+    assert video.final_degraded_hold({"devices": [ROW]}) == [ROW]
+    full = dict(ROW, rung="full")
+    assert video.final_degraded_hold({"devices": [full]}) == []
     msg = video.final_hold_message([ROW])
     assert msg.startswith("This export is held: subject_fill_flash "
                           "(substitute)")

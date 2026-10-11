@@ -60,11 +60,14 @@ def hold_degraded_final(worker_db, job, result):
 
     A final whose ``devices`` report has a rung other than ``full`` that the
     version's verification record has not acknowledged is HELD: its asset
-    meta is stamped ``degraded_hold`` (the backend's _final_gate refuses the
-    download either way, from the same rows), the held rows become blocking
-    ``device_degraded`` findings on that record so the editor can fix or
-    acknowledge them, and the result says why. Best effort: a failure here
-    is logged and never fails the commit (the backend gate still holds)."""
+    meta is stamped ``degraded_hold`` (stamped [] when every degraded row is
+    acknowledged: the backend's _final_gate holds an unstamped final with
+    degraded rows, so it is never downloadable before this judgement), the
+    held rows become blocking ``device_degraded`` findings on that record so
+    the editor can fix or acknowledge them, and the result says why. Best
+    effort: a failure here is logged and never fails the commit (the
+    unstamped final stays held by the backend gate until
+    ``refresh_final_hold`` judges it)."""
     rows = [r for r in (result or {}).get("devices") or []
             if isinstance(r, dict) and r.get("rung") != "full"]
     if job.get("type") != "final" or not rows:
@@ -75,13 +78,16 @@ def hold_degraded_final(worker_db, job, result):
         record = worker_db.run(dbx.get_verification_record,
                                job["project_id"], version)
         held = quality_verifier.unacknowledged_degradations(record, rows)
+        asset_id = result.get("render_asset_id") or result.get("asset_id")
         if not held:
+            if asset_id:
+                worker_db.run(dbx.update_asset_meta, asset_id,
+                              {"degraded_hold": []})
             return []
         updated = quality_verifier.hold_final(
             record, held, project_id=job["project_id"], version=version)
         worker_db.run(dbx.upsert_verification_record, job["project_id"],
                       version, updated)
-        asset_id = result.get("render_asset_id") or result.get("asset_id")
         if asset_id:
             worker_db.run(dbx.update_asset_meta, asset_id,
                           {"degraded_hold": held})
@@ -104,10 +110,14 @@ def refresh_final_hold(worker_db, project_id, version, record):
         asset = worker_db.run(dbx.find_render_asset, project_id, "final",
                               int(version))
         meta = (asset or {}).get("meta") or {}
-        if not asset or not meta.get("degraded_hold"):
+        if not asset:
             return []
-        rows = [r for r in meta.get("devices") or meta["degraded_hold"]
-                if isinstance(r, dict) and r.get("rung") != "full"]
+        if "degraded_hold" in meta and not meta.get("degraded_hold"):
+            return []                 # judged and released already
+        rows = [r for r in meta.get("devices") or meta.get("degraded_hold")
+                or [] if isinstance(r, dict) and r.get("rung") != "full"]
+        if not rows:
+            return []
         held = quality_verifier.unacknowledged_degradations(record, rows)
         worker_db.run(dbx.update_asset_meta, asset["id"],
                       {"degraded_hold": held})

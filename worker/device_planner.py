@@ -151,6 +151,22 @@ def norm(word):
     return t.replace("’", "'")
 
 
+_QUESTION_WORDS = frozenset("when where why how what who whom".split())
+
+
+def weak_word(word):
+    """A word the prosody grid may hear as stressed that no device should
+    land on by itself: a contraction that is not a negation (you've, we'll,
+    let's) or a bare question word. Rhetoric tags override this (a negation
+    or a contrast is never weak)."""
+    tok = norm(word)
+    if not tok:
+        return True
+    if "'" in tok:
+        return not (tok.endswith("n't") or tok == "cannot")
+    return tok in _QUESTION_WORDS
+
+
 def _content(tok):
     try:
         import prosody_grid
@@ -545,7 +561,6 @@ def moments(edl, index, *, rhetoric=None, maps=None, fps=None):
         print(f"[planner] beat sheet skipped: {type(e).__name__}: {e}",
               flush=True)
     speech = _speech_onsets(edl, index, tl)
-    by_src_t = {round(w["s0"], 4): w for w in words}
     by_prog_t = {round(w["t0"], 3): w for w in words}
     stress = {}
     out = []
@@ -567,6 +582,10 @@ def moments(edl, index, *, rhetoric=None, maps=None, fps=None):
     for w in words:
         tags = tags_by_src.get(w["i"], set())
         base = stress.get(w["i"])
+        if base is not None and not tags and weak_word(w["w"]):
+            # heard as stressed, but a pronoun contraction or a question
+            # word carries no point of its own: no device lands on it
+            base = None
         if base is None and not tags:
             continue
         strength = (base if base is not None else 0.35) + sum(

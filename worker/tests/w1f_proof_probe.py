@@ -83,6 +83,38 @@ def run_rate(workdir, name, rate):
     return out
 
 
+def long_junction(workdir, rate="29.97", frame=True):
+    """A junction far longer than the -3..+6 strip (9 frames each side of
+    its cut): its landing is the centre of its WHOLE run, so the proof
+    renders and reads all of it. ``frame`` False: a frameless program, whose
+    reference without its only fx item renders on another clock — the
+    audio is then not compared, and the proof says so."""
+    src = source(workdir, "lj", rate)
+    info = media.probe(src)
+    fps = float(info["fps"])
+    index = {"video": {"duration": info["duration"], "width": info["width"],
+                       "height": info["height"], "fps": fps,
+                       "has_audio": True}, "words": []}
+    end = round(info["duration"] - 0.1, 2)
+    edl = {"keep": [[0.0, 1.6], [2.2, end]],
+           "fx": [{"id": "jl", "type": "fx_probe", "stage": "junction",
+                   "op": "dissolve", "at": 1.6, "frames": 9}]}
+    if frame:
+        edl["frame"] = {"ratio": "16:9", "mode": "crop"}
+    edl = schemas.validate_edl(edl, info["duration"]).model_dump()
+    wd = os.path.join(workdir, f"proof_long_junction_{int(frame)}")
+    res = motion_qa.proof(None, edl, ids=["jl"],
+                          renderer=motion_qa.LocalRenderer(index, src, wd),
+                          index=index, workdir=wd, cards={})
+    d = res["devices"][0]
+    return {"pass": res["pass"], "landing_f": d["landing_f"],
+            "planned_f": d["planned_f"], "event_f": d["event_f"],
+            "window": res["render"]["window"], "notes": res["notes"],
+            "metrics": {k: {"value": v.get("value"), "pass": v.get("pass"),
+                            "detail": v.get("detail")}
+                        for k, v in d["metrics"].items()}}
+
+
 class _NoWithout(motion_qa.LocalRenderer):
     def render(self, edl, ranges, tag):
         if tag == "without":
@@ -282,6 +314,14 @@ def main():
         import traceback
         report["jobs"] = {"error": str(e),
                           "trace": traceback.format_exc()[-2500:]}
+    for key, framed in (("long_junction", True),
+                        ("long_junction_frameless", False)):
+        try:
+            report[key] = long_junction(workdir, frame=framed)
+        except Exception as e:  # noqa: BLE001
+            import traceback
+            report[key] = {"error": str(e),
+                           "trace": traceback.format_exc()[-2500:]}
     try:
         report["temporal"] = temporal(workdir)
     except Exception as e:  # noqa: BLE001

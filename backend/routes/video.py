@@ -5474,11 +5474,21 @@ def final_degraded_hold(meta):
     version's verification record has not acknowledged. The worker computes
     them with quality_verifier.unacknowledged_degradations when the final
     commits and again whenever the editor acknowledges a finding, and
-    stamps them on the asset (``degraded_hold``), so this read needs no
-    query. [] = downloadable."""
-    held = (meta or {}).get("degraded_hold")
-    return [r for r in held if isinstance(r, dict)] \
-        if isinstance(held, list) else []
+    stamps them on the asset (``degraded_hold``, [] when every one is
+    acknowledged), so this read needs no query. Until that stamp exists (the
+    moments between the render storing the asset and its job committing, or
+    a commit whose stamp failed) every degraded row of the render's own
+    ``devices`` report holds it: a degraded device never ships unjudged.
+    [] = downloadable."""
+    meta = meta or {}
+    if "degraded_hold" in meta:
+        held = meta.get("degraded_hold")
+        return [r for r in held if isinstance(r, dict)] \
+            if isinstance(held, list) else []
+    rows = meta.get("devices")
+    return [r for r in rows if isinstance(r, dict)
+            and r.get("rung") != "full"] \
+        if isinstance(rows, list) else []
 
 
 def final_hold_message(held):

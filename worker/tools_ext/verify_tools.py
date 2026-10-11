@@ -21,8 +21,6 @@ proof renders on the existing ``preview_check`` job. 1F also edits the shared
 skills and agent_prompt.py at wave close-out.
 """
 
-import json
-
 DEPARTMENT = "verify"
 
 # Pinned verb names (INTERFACES_W1.md §4). Renaming one is a round-lead
@@ -130,6 +128,70 @@ def music_maps(ctx, edl):
     return out
 
 
+def matte_source(ctx):
+    """The SourceRef matte.person sidecars of this project's main video are
+    keyed and launched on (sidecars.prefetch_top_shorts' convention: the
+    index's sha and duration, the proxy's key and geometry), or None."""
+    import db as dbx
+    import sidecars
+    index = ctx.index or {}
+    sha = sidecars.index_source_sha(index)
+    video = index.get("video") or {}
+    if not sha or not video.get("duration"):
+        return None
+    proxy = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy")
+    if not proxy or not proxy.get("storage_key"):
+        return None
+    info = {"duration": video.get("duration"),
+            "fps": proxy.get("fps") or video.get("fps"),
+            "width": proxy.get("width") or video.get("width"),
+            "height": proxy.get("height") or video.get("height")}
+    return sidecars.source_from(sha, proxy["storage_key"], info,
+                                ctx.project_id, index.get("shots"))
+
+
+def warm_matte(ctx, edl, cands):
+    """Start measuring the person matte under the matte candidates (the
+    windows they would draw on), at interactive priority, never waiting —
+    the "measuring" their reason promises. A batch written from these ops
+    launches nothing itself (INTERFACES_W1.md §1.7), so without this the
+    first preview would be the first to ask, and draw the substitute.
+    Returns the number of source ranges asked for (0: none, or no store)."""
+    import device_planner
+    from timeline import Timeline
+    want = [c for c in cands or []
+            if c.get("family") in device_planner.MATTE_FAMILIES]
+    if not want:
+        return 0
+    try:
+        import sidecars
+        src = matte_source(ctx)
+        if src is None:
+            return 0
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        ranges = []
+        for c in want:
+            v = (c.get("op") or {}).get("value") or {}
+            a = v.get("start", c.get("at"))
+            b = v.get("end", a)
+            if a is None:
+                continue
+            pts = [p for p in (tl.out_to_src(float(a)),
+                               tl.out_to_src(max(float(a),
+                                                 float(b) - 0.01)))
+                   if p is not None]
+            if pts:
+                ranges.append((max(0.0, min(pts) - 0.02), max(pts) + 0.02))
+        if not ranges:
+            return 0
+        sidecars.ensure("matte.person", src, ranges, priority="interactive")
+        return len(ranges)
+    except Exception as e:  # noqa: BLE001 — a suggestion never fails on it
+        print(f"[suggest_devices] matte warm-up skipped: {e}", flush=True)
+        return 0
+
+
 def matte_state(ctx, edl):
     """{status, estimate_s, person} for the program's kept footage:
     ready / partial / pending / absent from the matte.person sidecars over
@@ -170,6 +232,26 @@ def matte_state(ctx, edl):
     return out
 
 
+# Owner rule: a zoom or a sound is proposed only when the user ASKED for one.
+# "no zooms", "don't zoom", "remove the whoosh", "without sound effects" name
+# the thing to refuse it: a mention preceded by a negation or a removal verb
+# in the same clause is not an ask.
+_ZOOM_ASK = r"(zoom|punch[- ]?in|push[- ]?in)\w*"
+_SFX_ASK = r"(sound[- ]?effects?|sfx|whoosh\w*|swoosh\w*)"
+_REFUSAL = (r"\b(no|not|never|don'?t|do not|without|stop|remove|delete|drop|"
+            r"cut|kill|lose|less|fewer|zero|nothing|avoid|skip|minus)\b")
+
+
+def _asks_for(text, pattern):
+    import re
+    for m in re.finditer(r"\b" + pattern, text, re.I):
+        clause = re.split(r"[.!?;,]|\b(?:but|and then|then)\b",
+                          text[:m.start()], flags=re.I)[-1]
+        if not re.search(_REFUSAL, clause, re.I):
+            return True
+    return False
+
+
 def _asked(ctx, asked):
     out = {str(a).lower() for a in (asked or ()) if str(a).lower() in _ASKED}
     text = str(getattr(ctx, "user_message", "") or "")
@@ -179,12 +261,9 @@ def _asked(ctx, asked):
             out.add("flash")
     except Exception:  # noqa: BLE001
         pass
-    import re
-    if re.search(r"\b(zoom|punch[- ]?in|push[- ]?in)\w*", text, re.I) and \
-            not re.search(r"\bno\s+zoom", text, re.I):
+    if _asks_for(text, _ZOOM_ASK):
         out.add("zoom")
-    if re.search(r"\b(sound effect|sfx|whoosh|swoosh)\w*", text, re.I) and \
-            not re.search(r"\bno\s+(sound|sfx)", text, re.I):
+    if _asks_for(text, _SFX_ASK):
         out.add("sfx")
     return out
 
@@ -216,13 +295,14 @@ def suggest_devices(ctx, start=None, end=None, families=None, intensity=None,
         keys = ctx.db.run(edit_batch.project_media_keys, ctx.project_id)
     except Exception:  # noqa: BLE001
         keys = {}
+    matte = matte_state(ctx, edl)
     try:
         cands = device_planner.suggest(
             edl, ctx.index or {}, intensity=level, window=window,
             families=families, asked=_asked(ctx, asked),
             max_n=max_candidates or device_planner.MAX_CANDIDATES,
             rhetoric=_rhetoric(ctx, edl), maps=music_maps(ctx, edl),
-            matte=matte_state(ctx, edl), weights=weights,
+            matte=matte, weights=weights,
             duration=ctx.duration or None, media_keys=set(keys),
             request_text=getattr(ctx, "user_message", None))
     except ValueError as e:
@@ -230,6 +310,8 @@ def suggest_devices(ctx, start=None, end=None, families=None, intensity=None,
     except Exception as e:  # noqa: BLE001
         return f"Could not plan devices ({type(e).__name__}: {str(e)[:160]})."
     ctx._last_device_candidates = cands
+    if matte.get("status") != "ready":
+        warm_matte(ctx, edl, cands)
     try:
         line = taste.ledger(edl, intensity=level, index=ctx.index).line()
     except Exception:  # noqa: BLE001
@@ -261,10 +343,14 @@ def set_intensity(ctx, level):
     row = ctx.latest_edl()
     edl = row["json"]
     try:
+        # A calmer level drops flashes past flash safety even when the user
+        # once asked to strobe. Charged is a step UP: it never removes a
+        # flash the edit already carries (it never adds one either; the
+        # export's flash gate still judges the edit as written).
         removals = device_planner.trim_plan(
             edl, ctx.index or {}, level, maps=music_maps(ctx, edl),
             request_text=getattr(ctx, "user_message", None),
-            opted_in=None if level == "charged" else False)
+            opted_in=level == "charged")
     except Exception as e:  # noqa: BLE001
         return f"Could not plan the trim ({type(e).__name__}: {str(e)[:160]})."
     _get, put = _kv(ctx)
@@ -367,7 +453,8 @@ def _deliver(ctx, result):
         sees = False
     if not sees:
         return
-    for d in result.get("devices") or []:
+    # two images per device; the text lines cover the rest
+    for d in (result.get("devices") or [])[:4]:
         for key, what in (("strip", "frames -3..+6, with (top) / without "
                                     "(bottom)"),
                           ("onion", "pixels the device changed (red)")):

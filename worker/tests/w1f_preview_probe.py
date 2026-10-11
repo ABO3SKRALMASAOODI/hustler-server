@@ -176,9 +176,9 @@ def check_gates(edl, index, cards_dir):
     return out
 
 
-def check_trim(edl, index, cards):
-    """Six negatives inside 1.2 s that the user once opted into; 'less
-    flashy' = calm: flash safety and the budgets trim the lowest-ranked."""
+def six_negatives(edl, index):
+    """The edit with six one-frame negatives inside 1.2 s (the strongest,
+    neg2, bound to a stressed word)."""
     plan = device_planner.moments(edl, index)
     words = [w for w in plan["words"]]
     fx = []
@@ -192,9 +192,15 @@ def check_trim(edl, index, cards):
                    "device": "accent_negative"})
     # the strongest one is bound to a stressed word
     fx[2]["bind"] = {"on": "word", "ref": base["i"], "rhythm": "speech"}
-    edl2 = edit_batch.apply_batch(edl, [{"action": "upsert", "layer": "fx",
+    return edit_batch.apply_batch(edl, [{"action": "upsert", "layer": "fx",
                                          "id": i["id"], "value": i}
                                         for i in fx], DURATION, set())
+
+
+def check_trim(edl, index, cards):
+    """Six negatives inside 1.2 s that the user once opted into; 'less
+    flashy' = calm: flash safety and the budgets trim the lowest-ranked."""
+    edl2 = six_negatives(edl, index)
     cards = dict(cards)
     before = flash_safety.assess(edl2, request_text="strobe it")
     rm = device_planner.trim_plan(edl2, index, "charged", cards=cards,
@@ -279,6 +285,12 @@ def check_verbs(edl, index, cards_dir):
     out["bad_level"] = vt.set_intensity(ctx, "loud")
     out["nothing_to_trim"] = vt.set_intensity(ctx, "charged")
     out["proof_unknown"] = vt.proof_device(ctx, ids=["nope"])
+    # a step UP never removes a flash the edit carries (the user strobed
+    # it earlier; "more energy" is not a new opt-in)
+    up = FakeCtx(six_negatives(edl, index), index)
+    up.user_message = "more energy"
+    out["charged_up"] = vt.set_intensity(up, "charged")
+    out["charged_up_fx"] = [i["id"] for i in up.versions[-1]["fx"]]
     return out
 
 

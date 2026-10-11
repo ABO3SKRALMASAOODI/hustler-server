@@ -73,6 +73,34 @@ def test_without_a_reference_the_strip_reads_its_own_change(report):
     assert any("strip's own" in n for n in t["notes"])
 
 
+def test_a_long_junction_lands_on_its_cut(report):
+    """A 0.6 s junction (9 frames each side) is read over its whole run:
+    reading only the -3..+6 strip would put its centre two frames late."""
+    j = report["long_junction"]
+    assert "error" not in j, j
+    assert j["event_f"] == j["planned_f"] == j["landing_f"], j
+    assert j["metrics"]["land_err_f"]["pass"] is True
+    integrity = j["metrics"]["duration_exact"]
+    assert integrity["pass"] is True and \
+        integrity["detail"]["audio_identical"] is True, integrity
+    assert j["pass"] is True, j
+
+
+def test_a_frameless_reference_on_another_clock_is_not_misread(report):
+    """A frameless program whose only fx item is the junction: without it
+    the reference takes the cheap graph (another clock), so its audio
+    cannot match — the proof compares frames only and says why, instead of
+    failing a junction that preserved the duration."""
+    j = report["long_junction_frameless"]
+    assert "error" not in j, j
+    assert any("another clock" in n for n in j["notes"]), j["notes"]
+    integrity = j["metrics"]["duration_exact"]
+    assert integrity["value"] == 0.0 and integrity["pass"] is True
+    assert integrity["detail"]["audio_identical"] is None
+    assert "another clock" in integrity["detail"]["why"]
+    assert abs(j["event_f"] - j["planned_f"]) <= 1, j
+
+
 def test_production_path_proves_on_preview_check_jobs(report):
     """proof_jobs: one preview_check job for the current version and one for
     the earlier version that lacks the devices (the reference), read from
@@ -116,10 +144,116 @@ def test_device_items_and_ablation():
     assert [i["id"] for i in out["fx"]] == ["m"]
     assert [m["id"] for m in out["motion"]] == ["g", "p"]
     assert out["motion"][0]["composite"] is None
-    # the reference keeps the program's block clock (a 'source' frame)
-    assert out["frame"] == {"ratio": "source", "mode": "crop"}
+    assert "frame" not in out
+    # a frameless program left with no picture fx leaves the block clock
+    # (a 'source' frame validates to no frame: it cannot hold it there)
+    assert motion_qa.same_clock(edl, out) is False
     framed = dict(edl, frame={"ratio": "9:16", "mode": "crop"})
-    assert motion_qa.ablate(framed, devs)["frame"]["ratio"] == "9:16"
+    assert motion_qa.same_clock(framed, motion_qa.ablate(framed, devs))
+    assert motion_qa.same_clock(
+        dict(edl, frame={"ratio": "source"}),
+        dict(out, frame={"ratio": "source"})) is False
+    assert motion_qa.same_clock({"fx": []}, {"fx": []})
+
+
+class _JobCtx:
+    """The ToolContext parts JobRenderer reads, over a fake queue."""
+
+    def __init__(self, versions, jobs=None, lease=True, done=None):
+        self.versions, self.jobs = versions, dict(jobs or {})
+        self.lease, self.done, self.enqueued = lease, done, []
+        self.project_id, self.workdir = 3, "."
+        self.job = {"id": 9, "user_id": 2, "total_claims": 1,
+                    "type": "agent_turn", "payload": {}}
+        ctx = self
+
+        class DB:
+            def run(self, fn, *a):
+                name = getattr(fn, "__name__", "")
+                if name == "edl_history":
+                    return [{"version": v} for v in sorted(ctx.versions,
+                                                           reverse=True)]
+                if name == "get_edl_version":
+                    return {"version": a[1], "json": ctx.versions[a[1]]}
+                if name == "lease_is_current":
+                    return ctx.lease
+                if name == "get_job":
+                    return ctx.jobs.get(a[0])
+                if name == "q":                 # the finished-job lookup
+                    return ctx.done
+                if name == "get_or_enqueue_preview_check_job":
+                    ctx.enqueued.append(a[2])
+                    return 100 + len(ctx.enqueued), True
+                raise AssertionError(name)
+        self.db = DB()
+
+    def latest_edl(self):
+        v = max(self.versions)
+        return {"version": v, "json": self.versions[v]}
+
+
+def test_job_reference_is_this_edit_minus_exactly_the_devices():
+    base = {"keep": [[0.0, 9.0]], "frame": {"ratio": "9:16", "mode": "crop"},
+            "captions": {"mode": "from_transcript"}, "fx": [], "motion": []}
+    dev = {"id": "n1", "type": "accent", "stage": "pre_captions",
+           "start": 1.0, "end": 1.04}
+    cur = dict(base, fx=[dev])
+    devs = motion_qa.device_items(cur)
+    # the devices written in their own batch: v1 is the exact reference
+    jr = motion_qa.JobRenderer(_JobCtx({1: base, 2: cur}), devs=devs)
+    assert jr._version_for("without", cur) == (1, base)
+    # devices written together with a caption change: v1 would read the
+    # caption change as the device's, so there is no exact reference
+    other = dict(base, captions={"mode": "from_transcript", "style": "x"})
+    jr = motion_qa.JobRenderer(_JobCtx({1: other, 2: cur}), devs=devs)
+    v, why = jr._version_for("without", cur)
+    assert v is None and "differs" in why
+    # a frameless program: the reference without fx renders on another clock
+    bare = dict(base, frame=None)
+    jr = motion_qa.JobRenderer(_JobCtx({1: bare, 2: dict(bare, fx=[dev])}),
+                               devs=devs)
+    v, why = jr._version_for("without", dict(bare, fx=[dev]))
+    assert v is None and "clock" in why
+    # a cleared composite and an absent key are the same picture
+    mo = dict(base, motion=[{"id": "g", "start": 1, "end": 2}])
+    mc = dict(base, motion=[{"id": "g", "start": 1, "end": 2,
+                             "composite": {"blend": "difference"}}])
+    jr = motion_qa.JobRenderer(_JobCtx({1: mo, 2: mc}),
+                               devs=motion_qa.device_items(mc))
+    assert jr._version_for("without", mc)[0] == 1
+
+
+def test_job_waits_never_misread_a_superseded_or_dead_render():
+    import db as dbx
+    jobs = {5: {"state": "done", "result": {"superseded_by": 8}},
+            6: {"state": "done", "result": {"render_asset_id": 41}},
+            7: {"state": "failed", "error": "boom"},
+            8: {"state": "running"}}
+    jr = motion_qa.JobRenderer(_JobCtx({1: {}}, jobs), poll_s=0.01)
+    deadline = __import__("time").time() + 0.05
+    for jid, want in ((5, "superseded"), (7, "boom"), (8, "still")):
+        jr.jobs["t"] = (jid, 1)
+        res, why = jr.wait("t", deadline)
+        assert res is None and want in why, (jid, why)
+    jr.jobs["t"] = (6, 1)
+    assert jr.wait("t", deadline) == ({"render_asset_id": 41}, None)
+    # a turn whose lease ended stops waiting at once
+    jr = motion_qa.JobRenderer(_JobCtx({1: {}}, jobs, lease=False))
+    jr.jobs["t"] = (8, 1)
+    with pytest.raises(dbx.JobLeaseLost):
+        jr.wait("t", deadline + 60)
+
+
+def test_a_finished_proof_render_is_reused_not_rendered_again():
+    cur = {"keep": [[0.0, 9.0]], "fx": [{"id": "n1", "stage": "world",
+                                         "start": 1.0, "end": 1.04}]}
+    ctx = _JobCtx({2: cur}, done=55)
+    jr = motion_qa.JobRenderer(ctx, devs=motion_qa.device_items(cur))
+    assert jr.enqueue("with", cur, [[0.5, 1.5]]) == (55, None)
+    assert ctx.enqueued == []
+    ctx.done = None
+    jid, _why = jr.enqueue("with", cur, [[0.5, 1.5]])
+    assert jid == 101 and ctx.enqueued[0]["proof_device"] == "with"
 
 
 def test_summary_lines_flag_failures():

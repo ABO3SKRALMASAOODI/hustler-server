@@ -227,13 +227,16 @@ def removal_weights(counts):
 
 
 def recent_edls(conn, project_id, limit=HISTORY_VERSIONS):
-    """The project's last ``limit`` EDL versions, oldest first (one query)."""
+    """The fx layer of the project's last ``limit`` EDL versions, oldest
+    first, as {"fx": [...]} (one query; only the layer removal learning
+    reads, not twelve whole documents)."""
     with conn.cursor() as cur:
-        cur.execute("""SELECT version, json FROM edls WHERE project_id = %s
+        cur.execute("""SELECT version, json->'fx' AS fx FROM edls
+                       WHERE project_id = %s
                        ORDER BY version DESC LIMIT %s""",
                     (project_id, int(limit)))
         rows = cur.fetchall()
-    return [r["json"] for r in reversed(rows or []) if r.get("json")]
+    return [{"fx": r.get("fx") or []} for r in reversed(rows or [])]
 
 
 def removal_note(counts):

@@ -24191,11 +24191,18 @@ def _preview_critic_report(ctx, result, plan=None):
             f.get("category") in preview_critic.NEVER_BLOCK_CATEGORIES
             for f in report.get("findings") or []):
         # Wave 1 (1F): a motion finding is actionable only when a
-        # deterministic metric corroborates it
+        # deterministic metric corroborates it — a proof of THIS version
+        # only (a device moved since keeps its id, not its old failure)
         try:
+            proofed = getattr(ctx, "last_device_proof", None) or {}
+            try:
+                current = int(ctx.latest_edl()["version"])
+            except Exception:
+                current = None
             report = preview_critic.corroborate(report, motion_qa.critic_evidence(
                 edl, ctx.index,
-                proof_result=getattr(ctx, "last_device_proof", None),
+                proof_result=(proofed if proofed.get("edl_version") == current
+                              and current is not None else None),
                 request_text=getattr(ctx, "user_message", None)))
         except Exception as exc:
             print(f"[critic] corroboration skipped: {exc}", flush=True)

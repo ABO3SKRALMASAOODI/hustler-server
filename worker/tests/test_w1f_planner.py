@@ -282,6 +282,11 @@ def test_verbs_on_a_tool_context(probe):
     assert v["bad_level"].startswith("REJECTED")
     assert "unchanged" in v["nothing_to_trim"]
     assert v["proof_unknown"].startswith("REJECTED")
+    # a step up to charged trims only what the charged budgets refuse,
+    # never a flash for flash safety (the user strobed it earlier)
+    assert "flash safety" not in v["charged_up"], v["charged_up"]
+    assert sorted(set(f"neg{k}" for k in range(6)) - set(
+        v["charged_up_fx"])) == sorted(probe["trim"]["charged_removed"])
 
 
 def test_planner_without_cards_proposes_nothing_and_says_so():
@@ -296,3 +301,142 @@ def test_every_live_card_carries_an_owned_prefix():
     the planner proposes nothing in production until they merge)."""
     assert all(c.split("_", 1)[0] in devices.CARD_PREFIXES
                for c in devices.load_cards())
+
+
+# ── review fixes (owner rules and taste) ─────────────────────────────────
+
+def test_a_pronoun_contraction_or_question_word_never_earns_a_device():
+    """The prosody grid can hear 'you've' or 'where' as stressed; a
+    silhouette flash there is decoration. Negations stay turns."""
+    for w in ("you've", "We'll", "let's", "it'll", "where", "What?"):
+        assert device_planner.weak_word(w), w
+    for w in ("don't", "can't", "cannot", "140", "dollars", "never"):
+        assert not device_planner.weak_word(w), w
+    words, t = [], 0.4
+    for tok in "You've seen where the money went. It cost 140 dollars."\
+            .split():
+        words.append({"w": tok, "t0": round(t, 2), "t1": round(t + 0.3, 2)})
+        t += 0.4
+    index = {"video": {"duration": 10.0, "fps": 30.0}, "words": words}
+    edl = {"keep": [[0.0, 10.0]], "inserts": [], "speed": []}
+    import prosody_grid
+    real = prosody_grid.stress_peaks
+    prosody_grid.stress_peaks = lambda ws, sc: list(range(len(ws)))
+    try:
+        plan = device_planner.moments(edl, index)
+    finally:
+        prosody_grid.stress_peaks = real
+    said = {m["word"] for m in plan["moments"]
+            if m["kind"] in ("stress", "word", "word.payoff")}
+    assert "you've" not in said and "where" not in said
+    assert "140" in said and plan["payoff"]["word"] == "140"
+
+
+def test_zoom_and_sound_asks_respect_negation():
+    import tools_ext.verify_tools as vt
+
+    class Ctx:
+        user_message = ""
+
+    def asked(text, extra=()):
+        c = Ctx()
+        c.user_message = text
+        return vt._asked(c, extra)
+    assert "zoom" in asked("punch in on the payoff")
+    assert "zoom" in asked("zoom in on 140, keep it calm")
+    assert "sfx" in asked("add a whoosh on the cut")
+    for text in ("no zooms please", "don't zoom", "remove the zoom",
+                 "without sound effects", "less zooming, no whoosh",
+                 "stop adding sfx"):
+        got = asked(text)
+        assert "zoom" not in got and "sfx" not in got, (text, got)
+    got = asked("don't add sound effects, just zoom on the payoff")
+    assert "zoom" in got and "sfx" not in got
+    assert asked("", ["zoom", "music"]) == {"zoom"}
+
+
+def test_set_intensity_steps_up_without_thinning_flashes(monkeypatch):
+    """Lowering thins flashes past flash safety whatever was opted into
+    before; raising to charged never removes a flash the edit carries."""
+    sys.path.insert(0, HERE)
+    import w1f_preview_probe as probe_mod
+    import tools_ext.verify_tools as vt
+    seen = {}
+
+    def fake(edl, index, level, **kw):
+        seen[level] = kw.get("opted_in")
+        return []
+    monkeypatch.setattr(device_planner, "trim_plan", fake)
+    edl, index = probe_mod.program()
+    ctx = probe_mod.FakeCtx(edl, index)
+    ctx.user_message = "more energy"
+    for level in ("charged", "designed", "calm"):
+        assert "Intensity set to " + level in vt.set_intensity(ctx, level)
+    assert seen == {"charged": True, "designed": False, "calm": False}
+
+
+def test_removal_history_reads_only_the_fx_layer():
+    class Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params):
+            self.sql = sql
+            assert "json->'fx'" in sql and params == (7, 12)
+
+        def fetchall(self):
+            return [{"version": 3, "fx": None},
+                    {"version": 2, "fx": [{"id": "n1",
+                                           "device": "accent_negative"}]}]
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+    got = preference_memory.recent_edls(Conn(), 7)
+    assert got == [{"fx": [{"id": "n1", "device": "accent_negative"}]},
+                   {"fx": []}]
+    assert preference_memory.removal_counts(got)["devices"] == \
+        {"accent_negative": 1}
+
+
+def test_suggest_starts_measuring_the_matte_its_candidates_need(monkeypatch):
+    """A batch written from the candidates' ops launches no sidecar, so the
+    planner starts the matte under its matte candidates itself (the
+    "measuring" its reasons promise), never waiting, on the proxy's
+    geometry — and nothing for candidates that need no matte."""
+    import sidecars
+    import tools_ext.verify_tools as vt
+    calls = []
+    monkeypatch.setattr(sidecars, "index_source_sha", lambda index: "ab" * 32)
+    monkeypatch.setattr(sidecars, "ensure",
+                        lambda kind, src, ranges, priority=None:
+                        calls.append((kind, src, ranges, priority)))
+
+    class DB:
+        def run(self, fn, *a):
+            assert fn.__name__ == "latest_asset" and a[1] == "proxy"
+            return {"storage_key": "proxies/p.mp4", "fps": 30.0,
+                    "width": 960, "height": 540}
+
+    class Ctx:
+        db, project_id = DB(), 7
+        index = {"video": {"duration": 40.0, "width": 1920,
+                           "height": 1080, "fps": 30.0},
+                 "shots": [{"start": 0.0}, {"start": 20.0}]}
+    edl = {"keep": [[0.0, 14.5], [20.0, 30.0]]}
+    cands = [{"family": "matte_fx", "at": 16.0,
+              "op": {"value": {"start": 16.0, "end": 16.07}}},
+             {"family": "punctuation", "at": 3.0,
+              "op": {"value": {"start": 3.0, "end": 3.03}}}]
+    assert vt.warm_matte(Ctx(), edl, cands) == 1
+    kind, src, ranges, priority = calls[0]
+    assert kind == "matte.person" and priority == "interactive"
+    assert (src.width, src.height, src.storage_key) == (
+        960, 540, "proxies/p.mp4")
+    (a, b), = ranges              # program 16.0 s = source 21.5 s
+    assert 21.4 < a < 21.5 < b < 21.6
+    calls.clear()
+    assert vt.warm_matte(Ctx(), edl, cands[1:]) == 0 and calls == []

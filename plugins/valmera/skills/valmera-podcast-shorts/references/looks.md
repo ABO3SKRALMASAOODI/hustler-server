@@ -347,7 +347,7 @@ moment. Per short, on top of the graphics:
 | Junction (iris, matte cut, column wipe) | a real scene change; a jump cut inside one take stays a hard cut | 0-1 |
 | Grade window, colour isolation | a then-versus-now, a flashback, the subject against their world | 0-1 |
 | Finish (CRT or LCD re-photography, film) | archival footage or a screen the speaker talks about | 0-1, archival talks only |
-| Strobe, background swap, echo or clone | montage and sizzle on the owner's song; never in a talking short's body | 0 |
+| Strobe, background swap, echo or clone | montage and sizzle on a song the user supplied; never in a talking short's body | 0 |
 
 Nothing punctuates the payoff hold (0.8-1.5 s after the payoff word); one
 device per moment; never the same device on consecutive shots; never more
@@ -355,7 +355,12 @@ than 3 full-frame flashes in any second. Devices are silent and zoom-free:
 they never bring a sound or a camera move with them. Plan them with
 `suggest_devices` (it applies these budgets and returns each candidate's
 exact `apply_edit_batch` op), write the ones you keep in ONE batch, then
-`proof_device` them (editing.md step 5). Look affinities: Headline Pro and
+`proof_device` them (editing.md step 5). If your tool list has no
+`suggest_devices` (the session connected before the device release), the
+devices are still reachable: `read_skill('devices')` gives the exact
+`apply_edit_batch` shapes; write at most the payoff device that way, on
+the payoff word's first frame in program seconds (`get_kept_transcript`),
+with `"bind": {"on": "time", "ref": <that second>}`. Look affinities: Headline Pro and
 Clean Data at most one device (the payoff); Kinetic Poster the poster or a
 silhouette flash on the payoff plus a punctuation frame on the turn; Mono
 Noir a colour-isolation window; Cinematic Doc a film finish on archival

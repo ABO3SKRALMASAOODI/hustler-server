@@ -115,7 +115,9 @@ def _touches(item, a, b):
 
 def ablate(edl, devs):
     """The EDL without ``devs``: fx items removed, a motion item's
-    composite cleared, a behind-subject graphic removed."""
+    composite cleared, a behind-subject graphic removed. (A frameless
+    program that loses its last fx item leaves the block clock: see
+    ``same_clock``.)"""
     out = copy.deepcopy(edl)
     gone_fx = {d["id"] for d in devs if d["layer"] == "fx"}
     out["fx"] = [i for i in out.get("fx") or []
@@ -131,16 +133,23 @@ def ablate(edl, devs):
             m = dict(m, composite=None)
         motion.append(m)
     out["motion"] = motion
-    if not out.get("frame") and _needs_block_clock(edl) and \
-            not _needs_block_clock(out):
-        # Frame-addressed fx put the program on the normalized block clock
-        # (fxgraph needs_cfr). Without them a frameless program would take
-        # the cheap graph: cuts on another clock, every later frame a
-        # fraction of a frame away. A 'source' frame keeps the same clock
-        # and the same geometry, so the reference differs by the devices
-        # alone.
-        out["frame"] = {"ratio": "source", "mode": "crop"}
     return out
+
+
+def _framed(edl):
+    fr = (edl or {}).get("frame") or {}
+    return bool(fr.get("ratio") and fr.get("ratio") != "source")
+
+
+def same_clock(edl, ref):
+    """Whether a reference EDL renders on the program's clock. Frame-
+    addressed fx put a program on the normalized block clock (fxgraph
+    needs_cfr), and so does an output frame; a frameless reference with no
+    fx takes the cheap graph, whose cuts — and audio — sit up to a fraction
+    of a frame elsewhere. (A 'source' frame validates to no frame at all.)"""
+    if not _needs_block_clock(edl):
+        return True
+    return _framed(ref) or _needs_block_clock(ref)
 
 
 def front_variant(edl, devs):
@@ -162,6 +171,24 @@ def front_variant(edl, devs):
 def _needs_block_clock(edl):
     return any(isinstance(i, dict) and i.get("stage") != "music_bus"
                for i in (edl or {}).get("fx") or [])
+
+
+def _pure(value):
+    """``value`` with None, empty lists and empty dicts dropped at every
+    depth: two stored EDLs that render the same compare equal whatever
+    defaults each version's writer spelled out (a cleared composite is
+    None, an absent fx layer is [])."""
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            v = _pure(v)
+            if v is None or v == [] or v == {}:
+                continue
+            out[k] = v
+        return out
+    if isinstance(value, (list, tuple)):
+        return [_pure(v) for v in value]
+    return value
 
 
 # ── frames ───────────────────────────────────────────────────────────────
@@ -200,13 +227,48 @@ def landing(item, fps, *, kind="fx", words=None, timeline=None, maps=None):
     return int(land), int(planned)
 
 
-def proof_windows(frames, fps, program_s, pad_f=2):
-    """Program-second windows covering every [f-3-pad, f+6+pad] strip,
+def extent_f(item, fps):
+    """(before, after): the frames around its landing a device's proof must
+    render and read — the -3..+6 strip, or a whole junction (its h frames
+    each side of the cut, plus one), so its centre is read from its full
+    run."""
+    if (item or {}).get("stage") != "junction":
+        return STRIP_BEFORE, STRIP_AFTER
+    h = None
+    try:
+        import fxgraph
+        fn = getattr(fxgraph.compiler_for(item.get("type")),
+                     "junction_frames", None)
+        if fn is not None:
+            h = int(fn(fxgraph.FxPlan(fps=fps, program_s=1e6), item) or 0)
+    except Exception:  # noqa: BLE001
+        h = None
+    if not h:
+        try:
+            d = float(item.get("duration_s") or 0.0)
+        except (TypeError, ValueError):
+            d = 0.0
+        if d <= 0:
+            try:
+                import fxgraph
+                d = float(fxgraph.DEFAULT_JUNCTION_S)
+            except Exception:  # noqa: BLE001
+                d = 0.4
+        h = int(math.ceil(d * _fps3(fps) / 2.0))
+    half = int(h) + 1
+    return max(STRIP_BEFORE, half), max(STRIP_AFTER, half)
+
+
+def proof_windows(frames, fps, program_s, pad_f=2, extents=None):
+    """Program-second windows covering every [f-3-pad, f+6+pad] strip (or
+    the device's own ``extents`` (before, after), aligned with ``frames``),
     merged, on the frame grid."""
     spans = []
-    for f in frames:
-        a = max(0, f - STRIP_BEFORE - pad_f)
-        b = f + STRIP_AFTER + 1 + pad_f
+    for k, f in enumerate(frames):
+        before, after = (extents[k] if extents else
+                         (STRIP_BEFORE, STRIP_AFTER))
+        a = max(0, f - before - pad_f)
+        b = f + after + 1 + pad_f
         spans.append([a, b])
     spans.sort()
     merged = []
@@ -339,10 +401,12 @@ class LocalRenderer:
 
 class JobRenderer:
     """Production: ``preview_check`` jobs (the existing changed-section
-    proof kind) on the agent's ToolContext. ``render(edl, ranges, tag)``
-    renders the CURRENT version for tag "with"; for "without" it renders the
-    newest earlier version that lacks the proved devices on the same
-    timeline, or returns (None, reason)."""
+    proof kind) on the agent's ToolContext. ``enqueue("with", ...)`` renders
+    the CURRENT version; ``enqueue("without", ...)`` renders the newest
+    earlier version that is this edit minus exactly the proved devices, or
+    answers (None, reason). A finished proof render of the same exact
+    request (``render_signature``: EDL, ranges, deployed code) is reused, so
+    asking again after "still rendering" never renders twice."""
 
     lane = "interactive"
 
@@ -356,14 +420,18 @@ class JobRenderer:
         self.expected_fps = expected_fps
 
     def _version_for(self, tag, edl):
+        """(version, json) to render for ``tag``; ``edl`` is the CURRENT
+        edit (with the devices). The reference must equal it minus the
+        devices in everything that renders — a version that also differs
+        in captions, graphics or the cut would read those changes as the
+        device's — and must render on the same clock."""
         import db as dbx
         ctx = self.ctx
         cur = ctx.latest_edl()
         if tag == "with":
             return int(cur["version"]), cur.get("json")
         ids = {d["id"] for d in self.devs}
-        geometry = ("keep", "inserts", "speed", "frame", "canvas")
-        want = {k: _canon((edl or {}).get(k)) for k in geometry}
+        target = _pure(ablate(edl or {}, self.devs))
         try:
             history = ctx.db.run(dbx.edl_history, ctx.project_id, 12)
         except Exception as e:  # noqa: BLE001
@@ -374,21 +442,46 @@ class JobRenderer:
                 continue
             got = ctx.db.run(dbx.get_edl_version, ctx.project_id, v)
             j = (got or {}).get("json") or {}
-            present = {str(i.get("id")) for i in j.get("fx") or []} | {
+            present = {str(i.get("id")) for i in j.get("fx") or []
+                       if isinstance(i, dict)} | {
                 str(m.get("id")) for m in j.get("motion") or []
-                if m.get("composite") is not None
-                or m.get("layer") == "behind_subject"}
+                if isinstance(m, dict) and (
+                    m.get("composite") is not None
+                    or m.get("layer") == "behind_subject")}
             if present & ids:
                 continue
-            if all(_canon(j.get(k)) == want[k] for k in geometry):
-                if not j.get("frame") and not _needs_block_clock(j) and \
-                        _needs_block_clock(edl or {}):
-                    return None, (f"v{v} renders on another clock (no frame, "
-                                  "no fx)")
-                return v, j
-            return None, (f"v{v} lacks the devices but its timeline or frame "
-                          "differs")
+            if _pure(j) != target:
+                return None, (f"v{v} lacks the devices but also differs from "
+                              "this edit in other ways (write the devices "
+                              "in their own batch for an exact reference)")
+            if not same_clock(edl or {}, j):
+                return None, (f"v{v} renders on another clock (no frame, "
+                              "no fx)")
+            return v, j
         return None, "no earlier version without these devices"
+
+    def _finished(self, signature):
+        """The newest DONE preview_check job of this exact request that
+        produced a reel, or None."""
+        if not signature:
+            return None
+
+        def q(conn):
+            with conn.cursor() as cur:
+                cur.execute("""SELECT id FROM video_jobs
+                               WHERE project_id = %s
+                                 AND type = 'preview_check'
+                                 AND state = 'done'
+                                 AND payload->>'render_signature' = %s
+                                 AND result->>'render_asset_id' IS NOT NULL
+                               ORDER BY id DESC LIMIT 1""",
+                            (self.ctx.project_id, signature))
+                row = cur.fetchone()
+                return row["id"] if row else None
+        try:
+            return self.ctx.db.run(q)
+        except Exception:  # noqa: BLE001 — reuse is an optimisation
+            return None
 
     def enqueue(self, tag, edl, ranges):
         import agent_tools
@@ -399,6 +492,12 @@ class JobRenderer:
         ctx = self.ctx
         pages = [ranges[i:i + 6] for i in range(0, len(ranges), 6)]
         flat = [p for page in pages for p in page]
+        signature = agent_tools._render_signature(
+            {"json": got, "version": version}, "preview_check", flat)
+        done = self._finished(signature)
+        if done is not None:
+            self.jobs[tag] = (done, version)
+            return done, None
         payload = agent_tools._child_payload(ctx, {
             "edl_version": version, "check_ranges": flat,
             "check_pages": pages, "proof_pages": len(pages),
@@ -407,31 +506,56 @@ class JobRenderer:
             "proof_device": tag,
             "proof_geometry": {"long_edge": PROOF_LONG_EDGE,
                                "max_fps": PROOF_MAX_FPS},
-            "render_signature": agent_tools._render_signature(
-                {"json": got, "version": version}, "preview_check",
-                flat)})
+            "render_signature": signature})
         job_id, _created = ctx.db.run(
             dbx.get_or_enqueue_preview_check_job, ctx.project_id,
             ctx.job["user_id"], payload)
         self.jobs[tag] = (job_id, version)
         return job_id, None
 
+    def _lease_check(self):
+        """A proof never outlives the turn that asked for it (the same rule
+        as wait_for_job)."""
+        import db as dbx
+        job = getattr(self.ctx, "job", None) or {}
+        if job.get("total_claims") is None or job.get("id") is None:
+            return
+        if not self.ctx.db.run(dbx.lease_is_current, job["id"],
+                               job["total_claims"]):
+            raise dbx.JobLeaseLost(
+                "Agent execution ended while waiting for a device proof")
+
     def wait(self, tag, deadline):
+        """(result, None) once the render is done, else (None, why)."""
         import db as dbx
         job_id, _v = self.jobs[tag]
-        while time.time() < deadline:
-            job = self.ctx.db.run(dbx.get_job, job_id)
-            if job["state"] == "done":
-                return job.get("result") or {}, None
-            if job["state"] == "failed":
+        while True:
+            self._lease_check()
+            job = self.ctx.db.run(dbx.get_job, job_id) or {}
+            state = job.get("state")
+            if state == "done":
+                result = job.get("result") or {}
+                if result.get("superseded_by"):
+                    return None, (f"job {job_id} was superseded by EDL "
+                                  f"v{result['superseded_by']}")
+                if not result.get("render_asset_id"):
+                    return None, f"job {job_id} produced no proof reel"
+                return result, None
+            if state == "failed":
                 return None, str(job.get("error") or "proof render failed")
+            if state not in ("queued", "running"):
+                return None, f"job {job_id} is {state}"
+            if time.time() >= deadline:
+                return None, f"still rendering (job {job_id})"
             time.sleep(self.poll_s)
-        return None, f"still rendering (job {job_id})"
 
     def reel(self, result):
         import db as dbx
         import storage
         asset = self.ctx.db.run(dbx.get_asset, result["render_asset_id"])
+        if not asset or not asset.get("storage_key"):
+            raise RuntimeError(f"proof reel asset {result['render_asset_id']} "
+                               "is gone")
         local = os.path.join(self.ctx.workdir,
                              f"proof_{result['render_asset_id']}.mp4")
         if not os.path.exists(local):
@@ -524,15 +648,17 @@ def _family(dev, cards):
 
 def measure_device(dev, with_reel, without_reel, *, fps, land_f, planned_f,
                    cards=None, workdir=None, ledger=None, full_frame=None,
-                   front_reel=None):
+                   front_reel=None, ref_same_clock=True):
     """One device's proof: strip and onion images and its metrics."""
     import numpy as np
     import qa_metrics
     fam = _family(dev, cards)
     item = dev["item"]
     strip_f = list(range(land_f - STRIP_BEFORE, land_f + STRIP_AFTER + 1))
-    lo = land_f - STRIP_BEFORE - 1
-    want = [f for f in range(lo, land_f + STRIP_AFTER + 1) if f >= 0]
+    # a junction is read over its whole run (its centre is its landing)
+    before, after = extent_f(item, fps)
+    lo = land_f - before - 1
+    want = [f for f in range(lo, land_f + after + 1) if f >= 0]
     w = with_reel.frames(want)
     wo = without_reel.frames(want + [lo - 1, want[-1] + 1]) \
         if without_reel is not None else {}
@@ -590,8 +716,8 @@ def measure_device(dev, with_reel, without_reel, *, fps, land_f, planned_f,
                     "landing"}, passed=False if wo else None)
     # junction integrity: the same frames and the same audio either way
     if dev["kind"] == "fx" and item.get("stage") == "junction" and wo:
-        metrics["duration_exact"] = _junction_integrity(with_reel,
-                                                        without_reel, land_f)
+        metrics["duration_exact"] = _junction_integrity(
+            with_reel, without_reel, land_f, audio=ref_same_clock)
     # changed region at the settle frame (+6) and across the strip
     settle = land_f + STRIP_AFTER
     acc = None
@@ -709,10 +835,12 @@ def measure_device(dev, with_reel, without_reel, *, fps, land_f, planned_f,
             "event_f": event_f, "metrics": metrics, **images}
 
 
-def _junction_integrity(with_reel, without_reel, land_f):
+def _junction_integrity(with_reel, without_reel, land_f, audio=True):
     """duration_exact over the proof piece holding the cut (the whole reel
     when the render is one file): frame count and decoded audio, with the
-    junction and without it."""
+    junction and without it. ``audio`` False: the reference renders on
+    another clock (a frameless program left without fx), so only the frame
+    count is compared and the metric says so."""
     import qa_metrics
     sw, _k = with_reel.locate(land_f)
     so, _k2 = without_reel.locate(land_f)
@@ -724,10 +852,17 @@ def _junction_integrity(with_reel, without_reel, land_f):
                                       without_fx=so["path"])
     except Exception as e:  # noqa: BLE001
         return _metric("duration_exact", None, None, {"why": str(e)[:120]})
-    return _metric("duration_exact", r["value"], None,
-                   {"audio_identical": r["detail"].get("audio_identical"),
-                    "frames": [r["detail"].get("frames_with"),
-                               r["detail"].get("frames_without")]},
+    detail = {"audio_identical": r["detail"].get("audio_identical"),
+              "frames": [r["detail"].get("frames_with"),
+                         r["detail"].get("frames_without")]}
+    if not audio:
+        detail["audio_identical"] = None
+        detail["why"] = ("audio not compared: the reference renders on "
+                         "another clock (a frameless program without fx)")
+        return _metric("duration_exact", r["value"], None, detail,
+                       passed=(r["value"] == 0.0
+                               if r["value"] is not None else None))
+    return _metric("duration_exact", r["value"], None, detail,
                    passed=r["pass"])
 
 
@@ -839,8 +974,9 @@ def plan_proof(edl, devs, index=None, maps=None):
     words = (index or {}).get("words") or None
     lands = {d["id"]: landing(d["item"], fps, kind=d["kind"], words=words,
                               timeline=tl, maps=maps) for d in devs}
-    ranges = proof_windows([lf for lf, _pf in lands.values()], fps,
-                           tl.out_duration)
+    ranges = proof_windows([lands[d["id"]][0] for d in devs], fps,
+                           tl.out_duration,
+                           extents=[extent_f(d["item"], fps) for d in devs])
     return fps, lands, ranges
 
 
@@ -905,7 +1041,14 @@ def proof(tool_ctx, edl, *, ids=None, window=None, renderer=None,
     # picture device sharing that window would not line up.
     for k, group in enumerate(_groups(devs)):
         tag = "without" if k == 0 else f"without{k}"
-        wo_reel, woinfo = _render(renderer, ablate(edl, group),
+        ref = ablate(edl, group)
+        clock = same_clock(edl, ref)
+        if not clock:
+            out["notes"].append(
+                f"the reference without {', '.join(d['id'] for d in group)} "
+                "renders on another clock (a frameless program left with "
+                "no fx): its audio is not compared")
+        wo_reel, woinfo = _render(renderer, ref,
                                   winfo.get("segments") or ranges, tag)
         if wo_reel is None:
             out["notes"].append(f"no render without {', '.join(d['id'] for d in group)} "
@@ -917,7 +1060,8 @@ def proof(tool_ctx, edl, *, ids=None, window=None, renderer=None,
                                     winfo.get("segments") or ranges,
                                     f"front{k}")
         analyse(out, edl, group, lands, fps, with_reel, winfo, wo_reel,
-                cards=cards, workdir=wd, front_reel=front)
+                cards=cards, workdir=wd, front_reel=front,
+                ref_same_clock=clock)
     out["render"]["wall_s"] = round(time.monotonic() - t0, 2)
     return out
 
@@ -930,7 +1074,7 @@ def _groups(devs):
 
 
 def analyse(out, edl, devs, lands, fps, with_reel, winfo, wo_reel, *,
-            cards, workdir, front_reel=None):
+            cards, workdir, front_reel=None, ref_same_clock=True):
     """Measure every device on a with/without pair of proof reels."""
     import fxgraph
     out["render"]["fps"] = winfo.get("fps")
@@ -948,7 +1092,8 @@ def analyse(out, edl, devs, lands, fps, with_reel, winfo, wo_reel, *,
         row = rows.get(d["id"]) or static.get(d["id"]) or {}
         m = measure_device(d, with_reel, wo_reel, fps=reel_fps, land_f=lf,
                            planned_f=pf, cards=cards, workdir=workdir,
-                           ledger=out.get("ledger"), front_reel=front_reel)
+                           ledger=out.get("ledger"), front_reel=front_reel,
+                           ref_same_clock=ref_same_clock)
         rec = {"id": d["id"], "type": d["type"],
                "device": d.get("device"),
                "family": _family(d, cards),
@@ -1006,25 +1151,40 @@ def proof_jobs(ctx, edl, *, ids=None, window=None, index=None,
     if job_w is None:
         out["notes"].append(f"proof render not started: {why}")
         return out
-    job_wo, why_wo = jr.enqueue("without", ablate(edl, devs), ranges)
+    job_wo, why_wo = jr.enqueue("without", edl, ranges)
     deadline = time.time() + float(budget_s)
     res_w, err = jr.wait("with", deadline)
     if res_w is None:
-        out["pending"] = {"with": job_w, "without": job_wo}
+        if str(err).startswith("still rendering"):
+            out["pending"] = {"with": job_w, "without": job_wo}
         out["notes"].append(f"proof render: {err}")
         return out
-    reel_w, info_w = jr.reel(res_w)
+    try:
+        reel_w, info_w = jr.reel(res_w)
+    except Exception as e:  # noqa: BLE001 — a proof never fails a turn
+        out["notes"].append(f"proof render unreadable: {type(e).__name__}: "
+                            f"{str(e)[:160]}")
+        return out
     reel_wo = None
     if job_wo is not None:
         res_wo, err_wo = jr.wait("without", deadline)
         if res_wo is not None:
-            reel_wo, _info = jr.reel(res_wo)
+            try:
+                reel_wo, _info = jr.reel(res_wo)
+            except Exception as e:  # noqa: BLE001
+                why_wo = f"{type(e).__name__}: {str(e)[:120]}"
         else:
             why_wo = err_wo
     if reel_wo is None:
         out["notes"].append(f"no render without the devices ({why_wo}); "
                             "landings and onions read the strip's own "
                             "frame-to-frame change")
+    rate = float(info_w.get("fps") or 0.0)
+    if rate and rate < fps - 0.5:
+        out["notes"].append(
+            f"the proof rendered at {rate:g} fps (the preview cap) against "
+            f"the program's {fps:g} fps: a 1-frame device can fall between "
+            "proof frames, and landings are counted in proof frames")
     out["render"]["wall_s"] = round(time.monotonic() - t0, 2)
     out["render"]["jobs"] = {k: v[0] for k, v in jr.jobs.items()}
     return analyse(out, edl, devs, lands, fps, reel_w, info_w, reel_wo,
@@ -1277,18 +1437,10 @@ def _ensure_matte(ctx, src_t):
     waits: the device write would ask for it anyway."""
     try:
         import sidecars
-        index = ctx.index or {}
-        sha = sidecars.index_source_sha(index)
-        video = index.get("video") or {}
-        if not sha or not video.get("duration"):
+        import tools_ext.verify_tools as vt
+        src = vt.matte_source(ctx)
+        if src is None:
             return None, "no source identity for a matte on this footage"
-        try:
-            ctx.proxy_path()
-        except Exception:  # noqa: BLE001
-            pass
-        key = getattr(ctx, "_proxy_key", None)
-        src = sidecars.source_from(sha, key, video, ctx.project_id,
-                                   index.get("shots"))
         h = sidecars.ensure("matte.person", src,
                             [(max(0.0, src_t - 0.02), src_t + 0.02)],
                             priority="interactive")
