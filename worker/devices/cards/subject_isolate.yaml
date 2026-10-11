@@ -1,0 +1,66 @@
+# Track 1B device card (subject_isolate). Authoring source; compile with
+#   cd worker && python -m devices.compiler
+id: subject_isolate
+family: matte_fx
+verb: add_subject_effect
+fx_type: subject
+stage: world
+params:
+  kind: isolate
+  scope:
+  - subject
+  - background
+  hue:
+  - auto
+  hue_op:
+  - union
+  - intersect
+needs:
+  sidecars:
+  - matte.person
+  lane_features:
+  - ffmpeg:alphamerge
+  - ffmpeg:overlay
+  footage: a person in shot (matte coverage >= 0.4% of the frame)
+binds_to:
+- section
+- drop
+- word.payoff
+budget:
+  calm:
+    per_short: 1
+    min_gap_s: 8
+  designed:
+    per_short: 1
+    min_gap_s: 6
+  charged:
+    per_short: 2
+    min_gap_s: 4
+never:
+- for the whole short unless it is the look
+- with a hue the subject does not wear
+owner_flags:
+  adds_sound: false
+  adds_zoom: false
+  flash: false
+rungs:
+- full
+- reduced
+- substitute: hue_key_only
+- omit
+cost:
+  ms_per_frame:
+    interactive: 5.6
+    batch: 34.0
+    local: 2.8
+  fixed_ms: 60
+exemplars:
+- 40@≈0.0–23.0
+- 40@≈4.67
+verify:
+- region_locality
+- matte_flicker<=0.035
+status: live
+description: the subject keeps its colour while the world goes mono (or joined with a hue
+  key)
+skill: subject-fx

@@ -26,7 +26,15 @@ from . import (FxColour, FxItemBase, FxRegion, FxSource, live,
 
 TRACK = "1b"
 # Track 1B flips this when subject_fx.py compiles both types.
-LIVE = False
+LIVE = True
+
+# flash_safety reading (FxItemBase.flash_times): a picture change that
+# returns within this long is a flash (an on/off pair inside one Harding
+# second, Wave 0's flash_risk counter); a strobe's
+# image changes are counted at this assumed program rate (flash_times has no
+# fps; flash_safety re-frames the seconds on the real one).
+SHORT_FLASH_S = 1.0
+ASSUMED_FPS = 30.0
 
 SUBJECT_KINDS = ("fill", "poster", "glow", "outline", "negate", "exposure",
                  "isolate", "echo")
@@ -142,8 +150,35 @@ class SubjectFx(FxItemBase):
                              "(this program is a canvas)")
         region_check(self.region, ctx, f"fx {self.id}")
 
+    def flash_times(self):
+        """A fill is a flash of the subject (counted, conservatively, as a
+        full-frame flash: a close subject covers most of a 9:16 frame); a
+        short negate, poster or strong exposure change is one too. Glows,
+        outlines, isolation and echoes change no large area abruptly."""
+        if self.start is None or self.end is None:
+            return []
+        short = (self.end - self.start) <= SHORT_FLASH_S + 1e-9
+        k = self.kind
+        if k == "fill":
+            return [self.start]
+        if k in ("negate", "poster") and short:
+            return [self.start]
+        if k == "exposure" and short and abs(self.ev or 0.0) >= 1.0:
+            return [self.start]
+        return []
+
     def describe(self):
-        return f"{super().describe()} ({self.kind}, {self.scope})"
+        bits = [self.kind, self.scope]
+        if self.colour:
+            bits.append(self.colour)
+        if self.kind == "echo" and self.echo is not None:
+            bits.append(f"{self.echo.mode} -" + ",".join(
+                str(k) for k in self.echo.offsets_f) + "f")
+        if self.hue:
+            bits.append(f"hue {self.hue}")
+        if self.device:
+            bits.append(self.device)
+        return f"{super().describe()} ({', '.join(bits)})"
 
 
 class BackgroundFx(FxItemBase):
@@ -209,9 +244,32 @@ class BackgroundFx(FxItemBase):
         if self.hold_t is not None and self.hold_t >= float(ctx.program_s):
             raise ValueError(f"fx {self.id}: hold_t is past the program end")
 
+    def flash_times(self):
+        """A plate strobe changes most of the frame on every swap: each
+        image change is a flash (counted at ASSUMED_FPS). Any other
+        background swap shorter than SHORT_FLASH_S is one flash."""
+        if self.start is None or self.end is None:
+            return []
+        if self.kind == "strobe":
+            step = self.hold_f / ASSUMED_FPS
+            out, t = [], self.start
+            while t < self.end - 1e-9:
+                out.append(round(t, 4))
+                t += step
+            return out
+        if (self.end - self.start) <= SHORT_FLASH_S + 1e-9:
+            return [self.start]
+        return []
+
     def describe(self):
-        held = ", subject held" if self.hold_subject else ""
-        return f"{super().describe()} ({self.kind}{held})"
+        bits = [self.kind]
+        if self.hold_subject:
+            bits.append("subject held"
+                        + (f" @{self.hold_t:g}s" if self.hold_t is not None
+                           else ""))
+        if self.device:
+            bits.append(self.device)
+        return f"{super().describe()} ({', '.join(bits)})"
 
 
 FX_MEMBERS = (SubjectFx, BackgroundFx) if live(LIVE, TRACK) else ()

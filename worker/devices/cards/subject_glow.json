@@ -1,0 +1,92 @@
+{
+  "id": "subject_glow",
+  "family": "matte_fx",
+  "verb": "add_subject_effect",
+  "fx_type": "subject",
+  "stage": "world",
+  "params": {
+    "kind": "glow",
+    "colour": [
+      "white",
+      "accent",
+      "#ffd23f"
+    ],
+    "radius": [
+      0.05,
+      0.035,
+      0.07
+    ],
+    "intensity": [
+      0.9,
+      1.0,
+      0.6
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ],
+    "lane_features": [
+      "ffmpeg:alphamerge",
+      "ffmpeg:overlay"
+    ],
+    "footage": "a person in shot (matte coverage >= 0.4% of the frame)"
+  },
+  "binds_to": [
+    "section",
+    "word.payoff",
+    "stress",
+    "drop"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 6
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 2
+    }
+  },
+  "never": [
+    "on every shot (one glowing figure per idea)",
+    "under captions that need the plate's contrast"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "reduced",
+    {
+      "substitute": "halation"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 22.0,
+      "batch": 144.0,
+      "local": 11.0
+    },
+    "fixed_ms": 80
+  },
+  "exemplars": [
+    "01@1.708",
+    "36@≈4.0–6.0",
+    "33@≈6.0"
+  ],
+  "verify": [
+    "matte_flicker<=0.035",
+    "region_locality"
+  ],
+  "status": "live",
+  "description": "light around the subject: a luminous rim with a soft falloff, screened onto the picture",
+  "skill": "subject-fx"
+}
