@@ -64,6 +64,13 @@ PROGRAM_FP = "program-matte"
 PROGRAM_METHOD = "program"
 
 LABELS = ("person", "face")
+# Filters the program-matte chain emits (the renderer checks this lane has
+# every one before it builds it; fxgraph.filter_missing, the
+# ffmpeg_filter_missing fault). The picture's own geometry filters (crop,
+# scale, pad, perspective, zoompan, overlay, dblur) are the picture's.
+FILTERS = ("interleave", "lut", "alphamerge", "erosion", "overlay", "trim",
+           "setpts", "tpad", "concat", "color", "split", "format", "scale",
+           "nullsink", "null", "fps")
 SPACES = ("world", "screen")
 
 # Chunk QA bars (the manifest's ``qa``: analysis_jobs._MatteQA, a 12 px band
@@ -274,6 +281,25 @@ def curve_expr(lo, hi):
     return f"255*{t}*{t}*(3-2*{t})"
 
 
+EDGE_DEFAULT = "0.2,0.8"
+# Behind-subject composites pull the matte's edge this far inside the
+# subject (3x3 erosion passes per 1080 px of frame height, config
+# MATTE_BEHIND_SHRINK): a 540p matte enlarged 3-4x carries a pixel or two
+# of the wall beyond the subject's edge, and laid over the type that reads
+# as a light rim round the head.
+BEHIND_SHRINK_PER_1080 = 1.5
+
+
+def behind_shrink_px(height):
+    cfg = _config()
+    per = getattr(cfg, "MATTE_BEHIND_SHRINK", BEHIND_SHRINK_PER_1080) \
+        if cfg else BEHIND_SHRINK_PER_1080
+    try:
+        return max(0, min(4, int(round(float(per) * float(height) / 1080.0))))
+    except (TypeError, ValueError):
+        return 0
+
+
 def edge_lut():
     """The output-resolution edge curve (config MATTE_EDGE: "lo,hi" or
     off): after the 3-4x enlargement a 540p matte's edge is a 3-4 px ramp;
@@ -281,7 +307,9 @@ def edge_lut():
     midline is, a pixel or so wide — crisp like a hand roto, anti-aliased,
     and it cannot move the edge."""
     cfg = _config()
-    raw = getattr(cfg, "MATTE_EDGE", "0.2,0.8") if cfg else "0.2,0.8"
+    raw = getattr(cfg, "MATTE_EDGE", EDGE_DEFAULT) if cfg else EDGE_DEFAULT
+    if str(raw).strip().lower() in ("", "off", "0", "none"):
+        return None
     try:
         lo, hi = (float(v) for v in str(raw).split(","))
         if 0.0 <= lo < hi <= 1.0:
@@ -513,11 +541,32 @@ class ProgramMatte:
             return 0.0
 
     def _face_info(self, label):
+        """The face mask's MatteInfo: ready where faces.yunet chunks are
+        measured over the wanted windows (a status read; the ellipses are
+        drawn at materialize)."""
         if self.source is None:
             return absent_info(label, "no source identity on this render")
-        if self.face_files:
+        try:
+            import sidecars
+            ranges = []
+            for t0, t1, _i, lab, _sp in self.wants:
+                if lab == "face":
+                    ranges += program_to_source(self.tl, t0, t1)
+            ranges = merge(ranges)
+            spans = sidecars.chunks_for(self.source.shots,
+                                        self.source.duration_s, ranges)
+            ready = sidecars.ready_chunks(
+                "faces.yunet", self.source.sha256, self.source.shots,
+                self.source.duration_s, ranges)
+        except Exception:  # noqa: BLE001
+            spans, ready = [], []
+        if spans and len(ready) == len(spans) or self.face_files:
             return {"label": label, "status": "ready", "source": "yunet",
                     "reason": "face boxes from faces.yunet",
+                    "windows": [], "qa": {}}
+        if ready:
+            return {"label": label, "status": "partial", "source": "yunet",
+                    "reason": "faces.yunet measured over part of the window",
                     "windows": [], "qa": {}}
         return absent_info(label, "no ready faces.yunet sidecar covers the "
                            "window")

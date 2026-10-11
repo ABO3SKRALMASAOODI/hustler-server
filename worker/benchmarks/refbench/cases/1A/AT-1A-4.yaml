@@ -1,0 +1,37 @@
+# AT-1A-4: continuous lockups behind a close-up (coverage 0.6-0.7: refused
+# by Wave 0's coverage cap). Runner: worker/tools/at1a_matte.py.
+id: AT-1A-4
+track: 1A
+title: continuous lockups behind the head of a close-up the coverage cap used to refuse
+local_only: true
+interim: false
+reference:
+  - {ref: "09", t: [1.27, 21.6], approx: false, board_t: 2.0}
+footage:
+  - {vfl: V08, window: garry_closeup}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[842.0, 856.0]]
+  focus: [0.5, 0.4]
+  ops:
+    - {action: upsert, layer: motion, id: h1,
+       value: {id: h1, template: word_slam, start: 0.6, end: 4.8,
+               layer: behind_subject,
+               params: {text: FOUNDERS, tier: hero, y: 0.22, entrance: pop}}}
+    - {action: upsert, layer: motion, id: h2,
+       value: {id: h2, template: word_slam, start: 5.4, end: 9.6,
+               layer: behind_subject,
+               params: {text: BUILD, tier: hero, y: 0.22, entrance: pop}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: matte_flicker, item: h1, op: "<=", value: 0.035}
+  - {name: matte_iou, op: ">=", value: 0.92, labels: V08/garry_closeup/person}
+  - {name: glyph_visible, item: h1}
+beyond: "the write judges the words' visible share instead of refusing the close-up; the same lockups re-solve for any crop of the shot"
+board: {stills: [2.0, 7.0], clip: [0.6, 4.8]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

@@ -139,3 +139,46 @@ def frames(path, size=None):
 def iou(a, b):
     u = np.logical_or(a, b).sum()
     return 1.0 if u == 0 else float(np.logical_and(a, b).sum()) / float(u)
+
+
+def write_faces(store_root, src, *, rw=80, rh=160, y=100, cut_at=None,
+                face_h=60):
+    """faces.yunet chunks for every grid chunk of ``src``: one "face" box,
+    the top ``face_h`` px of the rectangle, every 0.1 s (the sidecar's 10
+    fps), as frame fractions. Returns the chunk keys."""
+    import sidecars
+    sp = sidecars.spec("faces.yunet")
+    resolved = sidecars.resolve_params("faces.yunet", None)
+    store = sidecars.LocalStore(store_root)
+    os.makedirs(store_root, exist_ok=True)
+    sw, sh = float(src.width), float(src.height)
+    keys = []
+    for t0, t1 in sidecars.chunk_ranges(src.shots, src.duration_s):
+        key = sidecars.sidecar_key("faces.yunet", src.sha256, sp["model_id"],
+                                   sp["model_version"], resolved, (t0, t1))
+        samples = []
+        n = int(round((t1 - t0) * 10))
+        for i in range(n):
+            t = round(t0 + i / 10.0, 3)
+            x = rect_at(t, cut_at=cut_at)
+            samples.append({"t": t, "faces": [[
+                round(x / sw, 4), round(y / sh, 4),
+                round((x + rw) / sw, 4), round((y + face_h) / sh, 4), 0.95]]})
+        data = json.dumps({"version": 1, "fps": 10.0, "width": 320,
+                           "height": 180, "samples": samples}).encode()
+        store.put_bytes(sidecars.data_key("faces.yunet", src.sha256, key),
+                        data)
+        manifest = {
+            "manifest_version": sidecars.MANIFEST_VERSION, "key": key,
+            "kind": "faces.yunet", "model_id": sp["model_id"],
+            "model_version": sp["model_version"], "params": resolved,
+            "src_range": [t0, t1], "fps": 10.0, "frames": n, "width": 320,
+            "height": 180, "format": sp["format"], "ext": sp["ext"],
+            "bytes": len(data), "created_at": time.time(),
+            "qa": {"flicker": None, "edge_chatter": None, "coverage": 1.0},
+            "engine": "yunet", "source_sha": src.sha256}
+        store.put_bytes(sidecars.manifest_key("faces.yunet", src.sha256,
+                                              key),
+                        json.dumps(manifest).encode("utf-8"))
+        keys.append(key)
+    return keys

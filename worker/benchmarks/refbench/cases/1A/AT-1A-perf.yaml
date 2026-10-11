@@ -1,0 +1,25 @@
+# AT-1A-perf: the matte's costs. Runner: worker/tools/at1a_matte.py --perf
+# (sidecar wall on 3 local 4-thread slots + the production projection; the
+# preview's added seconds for a 12 s window) and every case's cost_ratio
+# (render with the program matte / the same graphics drawn in front).
+id: AT-1A-perf
+track: 1A
+title: 60 s sidecar p95, preview cost of a 12 s window, final cost ratio
+local_only: true
+interim: false
+reference: []
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+  - {vfl: V01, window: thiel_ai_bigger}
+music: null
+aspect: "9:16"
+mode: engine
+edl: {base: vfl_default, ops: []}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: cost_ratio, op: "<=", value: 1.25}
+beyond: "one measurement per source serves every short, aspect and re-cut; a re-edit never re-measures"
+board: {stills: []}
+judges: {lenses: [owner_rules], pass: owner}

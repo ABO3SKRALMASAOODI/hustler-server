@@ -1,0 +1,43 @@
+# AT-1A-1: giant lockups behind the head under the DEFAULT follow crop.
+# Runner: worker/tools/at1a_matte.py (the program matte needs the window's
+# matte.person sidecars measured on the rendered file; refbench's engine
+# render has no sidecar store, so the 1A runner drives these cases).
+id: AT-1A-1
+track: 1A
+title: giant lockups behind the head on the 9:16 follow-cropped SC-Thiel short, through the program matte
+local_only: true
+interim: false
+reference:
+  - {ref: "05", t: [0.23, 12.23], approx: false, board_t: 0.5}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: "baseline:v5/thiel_final8.json"   # its keep (7 spans) and follow crop only
+  ops:
+    - {action: upsert, layer: motion, id: h1,
+       value: {id: h1, template: word_slam, start: 1.0, end: 4.2,
+               layer: behind_subject,
+               params: {text: TECHNOLOGY, tier: hero, y: 0.27, entrance: slam}}}
+    - {action: upsert, layer: motion, id: h2,
+       value: {id: h2, template: word_slam, start: 19.5, end: 22.4,
+               layer: behind_subject,
+               params: {text: BITS, tier: hero, y: 0.27, entrance: slam}}}
+    - {action: upsert, layer: motion, id: h3,
+       value: {id: h3, template: word_slam, start: 30.0, end: 32.6,
+               layer: behind_subject,
+               params: {text: FLYING CARS, tier: hero, y: 0.27, entrance: slam}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: matte_iou, item: h1, op: ">=", value: 0.90}   # subject-over-type occlusion IoU
+  - {name: matte_iou, item: h3, op: ">=", value: 0.90}
+  - {name: matte_flicker, item: h1, op: "<=", value: 0.035}
+  - {name: edge_chatter, item: h1, op: "<=", value: 0.002}
+  - {name: cost_ratio}
+beyond: "written as three apply_edit_batch upserts with no mask, rendered behind the head under a crop that follows the speaker across cuts; the reference was one rotoscoped 16:9 shot"
+board: {stills: [2.6, 20.8, 31.6], clip: [29.8, 32.6]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

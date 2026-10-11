@@ -1,0 +1,33 @@
+# Track 1A (Matte Stack v2). Words set BEHIND the speaker; the person matte
+# is measured once in source space (matte.person) and carried through the
+# picture's own framing — a follow crop, cuts, ramps and cards included.
+id: type_behind_text
+family: type_depth
+verb: add_text_behind
+stage: texts
+params:
+  template: [title]
+  size_scale: [2.4, 2.0, 3.0]
+needs:
+  sidecars: [matte.person]
+  lane_features: ["ffmpeg:alphamerge", "ffmpeg:overlay"]
+  footage: "a person in the shot; any framing (follow crop, cuts, speed ramps and source cards are re-solved)"
+binds_to: [word.payoff, phrase_end, section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 2, min_gap_s: 6}
+  charged: {per_short: 4, min_gap_s: 4}
+never:
+  - "small type the whole head hides: bigger type, never smaller"
+  - "over footage with no person in it"
+  - "inside the payoff hold of another depth device"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, {substitute: type_in_front}, omit]
+cost:
+  ms_per_frame: {interactive: 6.0, batch: 4.0, local: 3.0}
+  fixed_ms: 900
+exemplars: ["05@0.23–12.23", "09@1.27–21.6", "12@12.875"]
+verify: ["glyph_visible>=0.65", "matte_flicker<=0.035", "edge_chatter<=0.002"]
+status: live
+description: "words set behind the speaker, the subject cut out of every frame through the picture's own framing"
+skill: text-graphics

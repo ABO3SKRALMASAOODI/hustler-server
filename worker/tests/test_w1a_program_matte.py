@@ -318,3 +318,32 @@ def test_handle_matte_carries_each_side_past_the_cut(tmp_path):
     for side in ("a", "b"):
         assert len(out[side]) == 12
         assert min(out[side]) >= 0.98, (side, out[side])
+
+
+def test_face_mask_and_face_box_follow_the_faces(tmp_path):
+    """The ``face`` mask label (matte_track.face_mask, faces.yunet boxes as
+    soft ellipses carried through the same chain) sits on the face in
+    program space, and face_box maps a face into program fractions.
+    Child process: VALMERA_FX_PROBE=1."""
+    import subprocess
+    env = dict(os.environ, VALMERA_FX_PROBE="1", SKIP_DB_INIT="1",
+               DATABASE_URL="postgresql://stub/stub")
+    r = subprocess.run([sys.executable, os.path.join(HERE,
+                                                     "w1a_face_probe.py"),
+                        str(tmp_path)], cwd=os.path.dirname(HERE), env=env,
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stderr[-3000:]
+    out = json.loads(r.stdout.strip().splitlines()[-1])
+    assert out["info"]["status"] == "ready", out["info"]
+    rows = [row for row in out["rows"] if row[1] is not None]
+    assert len(rows) >= 8
+    # centroid of the mask vs the face (the rectangle's top): within a few
+    # px at 270x480 (the ellipse is the box grown 1.25x, soft-edged)
+    assert all(abs(dx) <= 6 and abs(dy) <= 3 for _k, dx, dy in rows), rows
+    x0, y0, x1, y1 = out["box"]
+    # source rect at program 3.0 s (source 3.4 s): x 244..324, y 100..160
+    # in a 640x360 frame, 9:16 crop aimed at 0.4 -> 270x480 preview
+    k = 480 / 360.0
+    cx = min(max(0.4 * 640 * k - 135, 0), 640 * k - 270)
+    assert abs(x0 - (244 * k - cx) / 270) < 0.01
+    assert abs(y0 - 100 * k / 480) < 0.01 and abs(y1 - 160 * k / 480) < 0.01

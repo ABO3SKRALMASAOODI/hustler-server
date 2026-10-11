@@ -4006,8 +4006,29 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if pm is not None and do_norm and n > 0:
         grid = pm_grid = (focus_origin if focus_origin is not None else 0.0,
                           float(src_fps or fps))
+        # Only the blocks under a window someone asked for carry the
+        # matte; every other block is black (inert) and costs nothing —
+        # one text behind the subject in a minute-long program decodes and
+        # reframes the matte of its own seconds, not the minute's.
+        seg_win, acc_ = {}, 0.0
+        for kind_, idx_, L_ in order:
+            Lb = blk_len.get((kind_, idx_), L_)
+            if kind_ == "seg":
+                seg_win[idx_] = (acc_, acc_ + Lb)
+            elif idx_ in hold_prev:
+                a_, b_ = seg_win[hold_prev[idx_]]
+                seg_win[hold_prev[idx_]] = (a_, acc_ + Lb)   # it holds on
+            acc_ += Lb
+        f3k = round(float(fps), 3)
+        pm_need = {i for i in range(n)
+                   if not blk_frames.get(("seg", i))
+                   or any(t1 > seg_win[i][0] - 2.0 / f3k
+                          and t0 < seg_win[i][1] + 2.0 / f3k
+                          for t0, t1, *_r in pm.wants)}
         cover = pm_cover = [(float(s), float(_video_end(i, e)))
-                            for i, (s, e) in enumerate(keep)]
+                            for i, (s, e) in enumerate(keep)
+                            if i in pm_need] or [(float(keep[0][0]),
+                                                  float(keep[0][1]))]
         f3j = round(float(fps), 3)
         for sp_ in fx_juncs:
             # junction handles read past an out-point / before an in-point
@@ -4030,6 +4051,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       ":flags=bilinear,format=gray")
             pm_up[lab] = up
             for i, (s, e) in enumerate(keep):
+                if i not in pm_need:
+                    nf = blk_frames[("seg", i)]
+                    parts.append(f"color=c=black:s={W}x{H}:r={f3k:.3f}:"
+                                 f"d={(nf + 2) / f3k:.6f},format=gray,"
+                                 f"trim=end_frame={nf},setpts=PTS-STARTPTS"
+                                 f"[pm{x}b{i}]")
+                    pm_blk[(lab, "seg", i)] = f"pm{x}b{i}"
+                    continue
                 tap = pm.source_tap(parts, lab, cover, grid)
                 raw = f"pm{x}r{i}"
                 if speed:
@@ -4379,6 +4408,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             parts.append(f"[{labs[0]}]null[{out}]" if len(labs) == 1 else
                          "".join(f"[{x}]" for x in labs)
                          + f"concat=n={len(labs)}:v=1:a=0[{out}]")
+            edge = matte_track.edge_lut() if lab == "person" else None
+            if edge:
+                # the edge at render resolution (matte_track.edge_lut)
+                parts.append(f"[{out}]lut=c0='{edge}'[{out}e]")
+                out = f"{out}e"
             pm_cur[lab] = out
 
     vlabel = "vc"
@@ -4765,8 +4799,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             return None
         f0, f1 = fxgraph.fxprims.frame_span(win[0], win[1], fps)
         stop = max(0, n_prog - f1) + int(round(fps)) + 2
+        # the composite's own edge: a pixel inside the subject's contour,
+        # so no sliver of the wall behind the subject is laid over the
+        # type (matte_track.behind_shrink_px)
+        shrink = "".join(",erosion" for _k in range(
+            matte_track.behind_shrink_px(H)))
         parts.append(f"[{pad}]trim=start_frame={f0}:end_frame={f1},"
-                     f"setpts=PTS-STARTPTS,tpad=start={f0}:stop={stop}:"
+                     f"setpts=PTS-STARTPTS{shrink},"
+                     f"tpad=start={f0}:stop={stop}:"
                      "start_mode=add:stop_mode=add:color=black,"
                      # rounded, never truncated: N/fps/TB on a 1/fps
                      # link is 56.999... for N = 57 at 25 fps, and a
@@ -4785,8 +4825,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 motion_layer.warn(f"hero word '{m_item.get('id')}' not "
                                   "drawn: its person matte is unavailable")
                 return vlabel
+            motion_layer.warn(f"motion '{m_item.get('id')}' rendered above "
+                              "the picture instead of behind the subject: "
+                              "its person matte is unavailable on this "
+                              "render")
             return motion_layer.overlay_clip(parts, vlabel, m_idx, m_item,
                                              m_clip, fps, f"mgs{j}")
+        print(f"[render] behind-text {(item.get('item') or {}).get('id')}: "
+              "its person matte is unavailable on this render — burning it "
+              "as a plain title", flush=True)
         parts.append(f"[{vlabel}]subtitles=filename='{item['ass']}'"
                      f":fontsdir='{caplib.FONTS_DIR}'[bht{j}]")
         return f"bht{j}"
@@ -6334,12 +6381,18 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
         return _render_media_run(cmd, cancelled_cb=cancelled_cb, **run_kw)
     except media.MediaError as e:
         plan = fx_box[0]
-        if plan is None or plan.empty or (cancelled_cb and cancelled_cb()) \
+        # a program matte (Wave 1, 1A) is fx plumbing too: an EDL whose only
+        # device is a word behind the subject retries without it as well
+        pm_on = getattr(plan, "pm", None) is not None
+        if plan is None or (plan.empty and not pm_on) \
+                or (cancelled_cb and cancelled_cb()) \
                 or "timed out" in str(e) or "cancelled" in str(e):
             raise
         print(f"[render] fx graph failed ({str(e).splitlines()[-1][:200] if str(e) else e!r})"
               " — re-rendering without fx", flush=True)
         fx_box[0] = fxgraph.without_fx(plan, e)
+        if getattr(fx_box[0], "pm", None) is not None:
+            fx_box[0].pm = None        # the behind items are drawn in front
         return _render_media_run(rebuild(), cancelled_cb=cancelled_cb,
                                  **run_kw)
 
@@ -6763,6 +6816,12 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     pm = None
     if not audio_only and matte_track.live():
         pm_src = matte_track.read_source(index)
+        lacks = fxgraph.missing_filters(matte_track.FILTERS) \
+            if pm_src is not None else []
+        if lacks:
+            print(f"[render] program matte off: this ffmpeg lacks "
+                  f"{', '.join(lacks)}", flush=True)
+            pm_src = None
         if pm_src is not None:
             pm = matte_track.ProgramMatte(
                 tl, pm_src, preview=preview, workdir=workdir,
