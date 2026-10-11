@@ -826,22 +826,31 @@ def build_map(name, W, H, scale=1.0):
     if name == "lcd_grid":
         p = max(3.0, 4.6 * s * scale)
         ss = 3
-        hy, hx = np.mgrid[0:H * ss, 0:W * ss].astype(np.float64) / ss
         a = math.radians(0.7)
-        u = hx * math.cos(a) + hy * math.sin(a)
-        v = -hx * math.sin(a) + hy * math.cos(a)
-        fu = (u / p) % 1.0
-        fv = (v / p) % 1.0
-        sub = np.floor(fu * 3).astype(int)
-        inner = ((fu * 3) % 1.0 > 0.12) & ((fu * 3) % 1.0 < 0.9) & \
-            (fv < 0.84)
         # each subpixel leaks a little into the other two channels; the
         # leaks balance (every channel sums to 365) so white stays white
         # and the cast is the gain curve's choice, not the grid's
         lit = np.array([[255, 52, 58], [58, 255, 52], [52, 58, 255]],
                        float)
-        img = lit[sub] * inner[..., None] + 10.0 * (~inner)[..., None]
-        img = img.reshape(H, ss, W, ss, 3).mean(axis=(1, 3))
+        # 3x supersampled in bands of output rows: the same numbers as one
+        # full-frame pass, at a bounded footprint (the whole 3x grid of a
+        # 1080x1920 frame peaked at 2.7 GB in the render process, 3.6 GB
+        # and 23 s at 4K — an OOM kill on a smaller lane, not a degrade)
+        img = np.empty((H, W, 3), np.float64)
+        hx = np.arange(W * ss, dtype=np.float64)[None, :] / ss
+        band = 32
+        for r0 in range(0, H, band):
+            r1 = min(H, r0 + band)
+            hy = np.arange(r0 * ss, r1 * ss, dtype=np.float64)[:, None] / ss
+            u = hx * math.cos(a) + hy * math.sin(a)
+            v = -hx * math.sin(a) + hy * math.cos(a)
+            fu = (u / p) % 1.0
+            fv = (v / p) % 1.0
+            sub = np.floor(fu * 3).astype(int)
+            inner = ((fu * 3) % 1.0 > 0.12) & ((fu * 3) % 1.0 < 0.9) & \
+                (fv < 0.84)
+            blk = lit[sub] * inner[..., None] + 10.0 * (~inner)[..., None]
+            img[r0:r1] = blk.reshape(r1 - r0, ss, W, ss, 3).mean(axis=(1, 3))
         # the lens vignette of the camera that photographed the screen
         r = np.hypot((xx / W - 0.5) / 0.5, (yy / H - 0.5) / 0.5) / \
             math.sqrt(2)

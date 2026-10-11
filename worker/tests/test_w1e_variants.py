@@ -193,3 +193,38 @@ def test_hue_mask_provider_marks_the_colour(made, tmp_path):
     assert fxgraph.mask(plan, "hue:nothex", "world", ctx=ctx) is None
     key = gradewin.hue_key("#c8202a")
     assert key.exclude_skin is True
+
+
+def test_the_lcd_grid_map_builds_in_bounded_memory():
+    """The LCD map is 3x supersampled. Built as one full-frame grid it
+    peaked at 2.7 GB in the render process for a 1080x1920 final (3.6 GB at
+    4K): an OOM kill on a smaller lane, not a degrade. Built in bands of
+    rows it is the same picture at a fraction of that."""
+    import tracemalloc
+    tracemalloc.start()
+    try:
+        im = finish.build_map("lcd_grid", 1080, 1920)
+        _cur, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert im.size == (1080, 1920)
+    assert peak < 400 * 1024 * 1024, peak
+    # banding changes no pixel: the same 3x3 means as the full-grid pass
+    small = np.asarray(finish.build_map("lcd_grid", 96, 64, 1.3)).astype(
+        np.float64)
+    p = max(3.0, 4.6 * (64 / 1080.0) * 1.3)
+    import math
+    hy, hx = np.mgrid[0:64 * 3, 0:96 * 3].astype(np.float64) / 3
+    a = math.radians(0.7)
+    u = hx * math.cos(a) + hy * math.sin(a)
+    v = -hx * math.sin(a) + hy * math.cos(a)
+    fu, fv = (u / p) % 1.0, (v / p) % 1.0
+    sub = np.floor(fu * 3).astype(int)
+    inner = ((fu * 3) % 1.0 > 0.12) & ((fu * 3) % 1.0 < 0.9) & (fv < 0.84)
+    lit = np.array([[255, 52, 58], [58, 255, 52], [52, 58, 255]], float)
+    full = (lit[sub] * inner[..., None] + 10.0 * (~inner)[..., None]) \
+        .reshape(64, 3, 96, 3, 3).mean(axis=(1, 3))
+    yy, xx = np.mgrid[0:64, 0:96].astype(np.float64)
+    r = np.hypot((xx / 96 - 0.5) / 0.5, (yy / 64 - 0.5) / 0.5) / math.sqrt(2)
+    full = full * (1.0 - 0.42 * np.clip(r, 0, 1) ** 2.2)[..., None]
+    assert np.array_equal(small, np.clip(full, 0, 255).astype("uint8"))

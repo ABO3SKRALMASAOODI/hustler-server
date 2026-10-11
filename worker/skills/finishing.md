@@ -87,6 +87,9 @@ REGISTERED VARIANTS (`make_variant_set`):
 - Keeping a hue that the speaker's skin shares: the face blotches in and
   out of colour. Check the kept colour against the face first; use
   `keep_skin=True` or a different hue.
+- Lips are red too: a red key (a curtain, a jacket) on a talking-head
+  close-up keeps the mouth red in a grey face. Look at the mouth; narrow
+  `tolerance` (0.04-0.05), or `keep_skin=True` (the whole face natural).
 - A ramp that ends a frame after the drop: colour arrives late. The window
   END is the drop second; `ramp_out_f` eases the frames before it.
 - A finish as decoration on a talking head with nothing to say about a
@@ -109,7 +112,8 @@ grid must be visible and the type still legible.
 
 1. Wrong timing: rewrite the same id with corrected start/end
    (`set_grade_window(id=...)` or `add_finish(id=...)`).
-2. A colour key that catches skin: narrow `tolerance`, or `keep_skin=True`.
+2. A colour key that catches skin or lips: narrow `tolerance`, or
+   `keep_skin=True`.
 3. Too strong: lower `strength` (finishes, LUTs) or saturation/contrast.
 4. Wrong device for the moment: `remove_finish(ids=[...])` and choose
    another family, or none.
