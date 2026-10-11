@@ -174,6 +174,10 @@ def r25(work):
         _case(work, "screen_grade", dict(b, fx=[_gw(
             "s1", 1.0, 2.0, stage="screen", temperature=0.6,
             split_tone={"shadows": "#1f4e79", "highlights": "#e9b44c"},
+            protect=["skin", "brand"], brand_hue="#e9b44c")])),
+        _case(work, "lut_iso", dict(b, fx=[_gw(
+            "s2", 2.0, 3.0, isolate={"hue": "#ff0000", "tolerance": 0.06},
+            lut={"asset_key": LUT_KEY, "strength": 0.5},
             protect=["skin"])])),
     ]
     for k in KINDS:
@@ -276,6 +280,9 @@ def test_over_type_and_screen_stages(r25):
     assert ot["report"][0]["rung"] == "full"
     st = _ok(r25, "screen_grade")
     assert _diff(base, st) == list(range(25, 50))
+    li = _ok(r25, "lut_iso")                 # LUT + key + protect, planar
+    assert _diff(base, li) == list(range(50, 75))
+    assert [r["rung"] for r in li["report"]] == ["full"]
 
 
 def test_seeded_finishes_are_deterministic(r25):
@@ -388,6 +395,59 @@ def test_frame_exact_at_every_rate(rates, tag):
     num, den = (int(x) for x in b["probe"]["r_frame_rate"].split("/"))
     assert abs(num / den - RATES[tag][1]) < 0.01
     assert _diff(b, g) == [97, 107, 108], tag
+
+
+# ── the window clock: no frame shown twice, at any rate ────────────────
+#
+# A finish that reads a precomputed map (a looped still), a synthesized
+# plate (black, grain) or a region still syncs those streams with the
+# window's frames. Stamped on different time bases (1/25 for a PNG, 1/fps
+# for a lavfi source, microseconds for the program after its concat) they
+# disagreed by a rounding microsecond, framesync emitted BOTH events and the
+# window played its frames twice — an LCD window at 30 fps ran at half
+# speed (found on the AT-1E-5 FX-UI capture; 25 fps hid it). testsrc2
+# changes every frame and the encodes are lossless, so a repeated frame is
+# a repeated md5.
+
+CLOCKED = (("lcd", {}), ("crt", {}), ("led", {}), ("halftone", {}),
+           ("film", {}), ("kaleidoscope", {}), ("blueprint", {}),
+           ("night_vision", {"palette": "goggles"}))
+
+
+@pytest.fixture(scope="module")
+def clocked(work):
+    cases = []
+    for tag, r in (("2997", "30000/1001"), ("5994", "60000/1001"),
+                   ("24", "24")):
+        b = _base(keep=((0.0, 4.0), (5.0, 7.0)))
+        for i, (k, kw) in enumerate(CLOCKED):
+            cases.append(_case(work, f"{tag}_{k}", dict(b, fx=[_fi(
+                f"c_{k}", k, 1.0, 2.0, **kw)]), src=work["src"][r]))
+        cases.append(_case(work, f"{tag}_region", dict(b, fx=[_gw(
+            "c_rg", 1.0, 2.0, ev=1.0,
+            region={"shape": "ellipse", "box": [0.2, 0.2, 0.8, 0.8]})]),
+            src=work["src"][r]))
+    old = os.environ.get("PREVIEW_MAX_FPS")
+    os.environ["PREVIEW_MAX_FPS"] = "60"
+    try:
+        return _run(work, cases, "clocked")
+    finally:
+        if old is None:
+            os.environ.pop("PREVIEW_MAX_FPS", None)
+        else:
+            os.environ["PREVIEW_MAX_FPS"] = old
+
+
+@pytest.mark.parametrize("tag", ("2997", "5994", "24"))
+@pytest.mark.parametrize("kind", [k for k, _ in CLOCKED] + ["region"])
+def test_a_window_never_shows_a_frame_twice(clocked, tag, kind):
+    r = _ok(clocked, f"{tag}_{kind}")
+    assert all(x["rung"] == "full" for x in r["report"]), r["report"]
+    fr = r["frames"]
+    fps = {"2997": 29.97002997, "5994": 59.94005994, "24": 24.0}[tag]
+    f0, f1 = round(1.0 * fps), round(2.0 * fps)
+    repeats = [k for k in range(f0, f1 + 2) if fr[k] == fr[k - 1]]
+    assert repeats == [], (kind, tag, repeats)
 
 
 # ── brand integrity (AT-0B-5 pattern) ────────────────────────────────────

@@ -30,7 +30,9 @@ metrics:
 device_metrics:
   - {name: bg_saturation, op: "<=", value: 0.03}
   - {name: kept_delta_e, op: "<=", value: 3.0}
-  - {name: fringe_saturation, op: "<=", value: 0.08}
+  # "no chroma fringe": the render's mean CIELAB chroma C* 2-4 px outside
+  # the kept colour, on pixels that are not the colour, on the dE scale
+  - {name: fringe_chroma, op: "<=", value: 3.0}
 # The roadmap's final footage (HC-D): a red coat crossing a grey square,
 # its hue AND key width solved from the shot by the verb's own solver
 # (gradewin.hue_from_frames / key_from_frames, as isolate_colour does).

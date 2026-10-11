@@ -62,6 +62,7 @@ class Ctx:
         self.version = 3
         self.writes = []
         self._proxy = proxy
+        self.index = {"video": {"fps": 29.97, "duration": DUR}}
 
     def latest_edl(self):
         return {"version": self.version, "json": copy.deepcopy(self._edl)}
@@ -344,3 +345,24 @@ def test_make_variant_set_uploads_registered_stills(tmp_path, uploads):
         "REJECTED")
     assert "at most" in ft.make_variant_set(ctx, t=2, kinds=list(
         "photo negative line blueprint thermal xray solarise".split()))
+
+
+def test_section_edges_snap_onto_the_cut_frame(tmp_path):
+    """A cut at program 3.99 s (29.97 fps) is first shown on frame 120
+    (ceil 119.58); round(3.99 * 29.97) = 120 too, but 7.99 -> frame 239.46:
+    round = 239, the block starts on 240. A section given the cut's own
+    second must start ON the cut frame."""
+    import fxprims
+    import renderer
+    edl = _base()
+    edl["keep"] = [[0.0, 3.99], [5.0, 9.0], [12.0, 20.0]]
+    edl = schemas.validate_edl(edl, DUR).model_dump()
+    ctx = Ctx(tmp_path, edl=edl)
+    ft.set_grade_window(ctx, start=3.99, end=7.99, saturation=0)
+    it = ctx.writes[-1][0]["fx"][0]
+    for t, cut in ((it["start"], 3.99), (it["end"], 7.99)):
+        assert fxprims.frame_at(t, 29.97) == renderer.first_frame_at(
+            cut, 29.97), (t, cut)
+    ft.add_finish(ctx, "film", 2.0, 3.0)                 # not near a cut
+    f = ctx.writes[-1][0]["fx"][-1]
+    assert (f["start"], f["end"]) == (2.0, 3.0)

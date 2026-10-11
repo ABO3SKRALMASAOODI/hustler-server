@@ -59,7 +59,8 @@ LUTS AND MATCHING:
   65^3, validated, at `strength` 0-1.
 - `match_grade(hero_t=<second of the hero frame>, start, end)` matches a
   section to the hero (mkl by default, reinhard for a gentler move) and
-  reports the colour gap before and after.
+  reports the colour gap before and after. It learns from what both shots
+  share; neon and colours more saturated than that keep their own.
 
 FINISHES (`add_finish`):
 - lcd / crt / led: a UI capture or a quote card re-photographed off a

@@ -126,6 +126,13 @@ def ramp_weights(n, ramp_in=0, ramp_out=0):
     return w
 
 
+def window_clock(fps):
+    """The stamp every stream of a window carries: frame k at k / fps on
+    the microsecond time base (the program's after a concat), computed by
+    one formula so synced filters see EQUAL timestamps (window_composite)."""
+    return f"settb=AVTB,setpts=N/{fxprims.fps3(fps):.3f}/TB"
+
+
 def window_composite(ctx, label, spans, build, *, mask=None, opacity=1.0,
                      ramp_in=0, ramp_out=0, uid=None):
     """Replace the frames ``spans`` of ``label`` with ``build``'s picture.
@@ -149,7 +156,15 @@ def window_composite(ctx, label, spans, build, *, mask=None, opacity=1.0,
     u = uid or ctx.uid("fw")
     ov = fxprims.composite_overlay(parts, label)
     expr = fxprims.enable_expr(spans)
-    trim = f"trim=start_frame={f0}:end_frame={f1},setpts=PTS-STARTPTS"
+    # every stream of the window (the frames, a mask, the maps) is stamped
+    # by ONE formula on ONE time base, so the filters that sync them pair
+    # frame k with frame k: the program arrives in microseconds after a
+    # concat, a looped still in 1/framerate, and 1/30 s against
+    # microseconds disagrees by a rounding microsecond every third frame —
+    # enough for framesync to emit both, doubling the window's frames
+    # (measured: an LCD window played at half speed, test_w1e_render)
+    trim = (f"trim=start_frame={f0}:end_frame={f1},"
+            f"{window_clock(fps)}")
     parts.append(f"[{label}]split[{u}a][{u}b]")
     # ``scale`` (identity size) breaks the format group: the branch is
     # yuv420p whatever the program runs in, and the program keeps its own
@@ -359,7 +374,8 @@ def _darken(g, label, mapname):
     maskedmerge toward black with the map's weight on all three planes."""
     x = g.add(label, "format=yuv420p")
     blk = g.add([], f"color=c=black:s={g.W}x{g.H}:r={g.fps:.3f},"
-                    f"format=yuv420p,trim=end_frame={g.n},setpts=PTS-STARTPTS")
+                    f"format=yuv420p,trim=end_frame={g.n},"
+                    f"{window_clock(g.fps)}")
     m = g.map(mapname, yuv_mask=True)
     return g.add([blk, x, m], "maskedmerge")
 
@@ -393,13 +409,16 @@ def _scale(it):
 
 def _lcd(g, src, it):
     p = max(3.0, 4.6 * g.s * _scale(it))
-    x = _blur(g, src, 0.32 * p)
+    x = _blur(g, src, 0.22 * p)
     x = _multiply(g, x, "lcd_grid")
+    # the grid passes a third of the light: the gain brings a natural
+    # shot back to its own mean brightness (measured on V03: 86 -> 90; at
+    # 3.1 it sat at 73 and a dark UI's whites at 161 of 251)
     x = g.add(x, "lutrgb=r='{}':g='{}':b='{}'".format(*(
-        table_expr(t) for t in _gain_curve(3.1, lift=(12, 15, 20),
-                                           cast=(0.93, 0.97, 1.0)))))
+        table_expr(t) for t in _gain_curve(4.5, lift=(6, 6, 10),
+                                           cast=(0.965, 0.94, 1.0)))))
     x = _bloom(g, x, 7.0 * g.s, 0.22)
-    x = g.add(x, "eq=saturation=1.22")
+    x = g.add(x, "eq=saturation=1.18")
     # the camera's edge falloff: the frame's rim is a touch out of focus
     # (the grid map carries the lens vignette)
     a, b = g.split(x)
@@ -436,8 +455,8 @@ def _led(g, src, it):
                    f"crop={g.W}:{g.H}:0:0")
     x = _multiply(g, x, "led_dots")
     x = g.add(x, "lutrgb=r='{}':g='{}':b='{}'".format(*(
-        table_expr(t) for t in _gain_curve(2.6))))
-    x = _bloom(g, x, 1.1 * p, 0.28)
+        table_expr(t) for t in _gain_curve(3.3))))
+    x = _bloom(g, x, 1.1 * p, 0.3)
     x = g.add(x, "eq=saturation=1.3")
     return _barrel(g, x, 0.03, 0.01)
 
@@ -547,13 +566,12 @@ def _film(g, src, it):
         table_expr(_tbl(lambda v: max(0.0, v - 0.72) * 0.25))))
     b = _blur(g, b, 8.0 * g.s, out_fmt="gbrp")
     x = g.add([a, b], "blend=all_mode=screen:all_opacity=0.45")
-    grain = float(it.get("strength") if it.get("strength") is not None
-                  else 1.0)
+    # (strength is the finish's opacity; the grain itself is one stock)
     gr = g.add([], f"color=c=black:s={W}x{H}:r={g.fps:.3f},"
                "format=yuv420p,lutyuv=y=128:u=128:v=128,"
-               f"noise=c0s={int(18 + 8 * grain)}:c0f=t"
+               f"noise=c0s=24:c0f=t"
                f":all_seed={_noise_expr_seed(g, 7)},trim=end_frame={g.n},"
-               "setpts=PTS-STARTPTS")
+               f"{window_clock(g.fps)}")
     x = g.add(x, "format=yuv420p")
     # softlight on luma only (a 0.5-grey plate is neutral); "normal" keeps
     # the first input's chroma
@@ -792,7 +810,10 @@ def build_map(name, W, H, scale=1.0):
         sub = np.floor(fu * 3).astype(int)
         inner = ((fu * 3) % 1.0 > 0.12) & ((fu * 3) % 1.0 < 0.9) & \
             (fv < 0.84)
-        lit = np.array([[255, 62, 48], [52, 255, 74], [64, 84, 255]],
+        # each subpixel leaks a little into the other two channels; the
+        # leaks balance (every channel sums to 365) so white stays white
+        # and the cast is the gain curve's choice, not the grid's
+        lit = np.array([[255, 52, 58], [58, 255, 52], [52, 58, 255]],
                        float)
         img = lit[sub] * inner[..., None] + 10.0 * (~inner)[..., None]
         img = img.reshape(H, ss, W, ss, 3).mean(axis=(1, 3))
@@ -803,7 +824,7 @@ def build_map(name, W, H, scale=1.0):
         return Image.fromarray(np.clip(img, 0, 255).astype("uint8"), "RGB")
     if name == "edge_falloff":
         r = np.hypot((xx / W - 0.5) / 0.5, (yy / H - 0.5) / 0.5) / math.sqrt(2)
-        m = np.clip((r - 0.45) / 0.5, 0, 1) ** 1.5
+        m = np.clip((r - 0.55) / 0.45, 0, 1) ** 1.6
         return Image.fromarray((m * 255).astype("uint8"), "L")
     if name == "crt_mask":
         scan = max(2.0, 4.0 * s * scale)
@@ -825,7 +846,7 @@ def build_map(name, W, H, scale=1.0):
         fx = (xx % p) / p - 0.5
         fy = (yy % p) / p - 0.5
         rr = np.hypot(fx, fy)
-        dot = np.clip((0.36 - rr) / 0.07, 0, 1)
+        dot = np.clip((0.40 - rr) / 0.07, 0, 1)
         m = 0.05 + 0.95 * dot
         img = np.repeat((m * 255)[..., None], 3, axis=2)
         return Image.fromarray(img.astype("uint8"), "RGB")
@@ -862,7 +883,7 @@ def build_map(name, W, H, scale=1.0):
 
 def map_path(workdir, name, W, H, scale=1.0):
     """Write (once) and return the PNG of a map for this size."""
-    key = hashlib.sha256(f"{name}|{W}|{H}|{scale:.4f}|v3".encode()) \
+    key = hashlib.sha256(f"{name}|{W}|{H}|{scale:.4f}|v5".encode()) \
         .hexdigest()[:16]
     path = os.path.join(workdir, f"fxmap_{name}_{key}.png")
     if not os.path.exists(path):
@@ -960,7 +981,7 @@ class _Finish:
             if raw is not None:
                 matte = f"{u}mt"
                 ctx.parts.append(f"[{raw}]trim=start_frame={f0}:end_frame="
-                                 f"{f1},setpts=PTS-STARTPTS,format=gray"
+                                 f"{f1},{window_clock(ctx.fps)},format=gray"
                                  f"[{matte}]")
             else:
                 ctx.note(it, "reduced", f"{it.get('kind')} unweighted: the "
@@ -993,7 +1014,7 @@ def _map_getter(parts, src, n, fps, tag):
     window's n frames on the branch clock (``loop`` repeats the processed
     frame; the PNG is decoded and prepared once)."""
     tail = (f"loop=loop=-1:size=1:start=0,trim=end_frame={n},"
-            f"setpts=N/{fxprims.fps3(fps):.3f}/TB")
+            f"{window_clock(fps)}")
 
     def get(W=None, H=None):
         out = f"{tag}m"

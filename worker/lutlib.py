@@ -366,6 +366,11 @@ DEFAULT_TOLERANCE = 0.12      # x 180 deg half-width (pinned field default)
 DEFAULT_SOFTNESS = 0.1        # x 90 deg feather
 
 
+# relative saturation = chroma radius / max(luma - 16, REL_FLOOR): the
+# floor keeps near-black noise from reading as saturated
+REL_FLOOR = 12.0
+
+
 class HueKey:
     """Solved numbers of one hue key (see the module doc)."""
 
@@ -381,10 +386,20 @@ class HueKey:
         r_t = max(self.radius, 8.0)
         self.sat_lo = max(4.0, 0.33 * r_t)
         self.sat_hi = max(self.sat_lo + 4.0, 0.55 * r_t)
+        # with luma, saturation is RELATIVE (chroma over brightness, as
+        # HSV's S): the shadowed fold of a red coat has a third of the
+        # coat's chroma but the same relative saturation
+        rel_t = max(self.radius, 4.0) / max(_y - 16.0, REL_FLOOR)
+        self.rel_lo = max(0.06, 0.35 * rel_t)
+        self.rel_hi = max(self.rel_lo + 0.05, 0.6 * rel_t)
         # Skin never counts as a kept colour unless the colour IS skin:
         # ruddy skin sits 20-30 degrees from red, inside a red key. (The
         # render gates skin by luma too, so a dark red is never "skin".)
         self.exclude_skin = float(skin_weight(cb, cr, _y)) < 0.5
+        # ... but never at the kept colour itself: a deep pinkish red can
+        # sit on the skin box's edge; within this chroma distance of the
+        # target the skin gate stands down
+        self.near = (cb, cr, max(6.0, 0.15 * r_t), max(12.0, 0.35 * r_t))
 
     def as_dict(self):
         return {"colour": self.colour, "angle": round(self.angle, 6),
@@ -392,6 +407,8 @@ class HueKey:
                 "half": round(self.half, 6), "soft": round(self.soft, 6),
                 "sat_lo": round(self.sat_lo, 3),
                 "sat_hi": round(self.sat_hi, 3),
+                "rel_lo": round(self.rel_lo, 4),
+                "rel_hi": round(self.rel_hi, 4),
                 "exclude_skin": self.exclude_skin}
 
 
@@ -402,30 +419,58 @@ def _smooth(lo, hi, x):
 
 def hue_weight(key, cb, cr, y=None):
     """0..1 membership of chroma (cb, cr) (8-bit, any shape) in the key.
-    With luma ``y`` the key's skin exclusion applies (as the render does);
-    without it this is the chroma-only weight (``hue_expr``)."""
+
+    With luma ``y`` (what the render uses): the saturation gate is
+    relative to brightness and skin is excluded as the key asks. Without
+    it: the chroma-only weight (``hue_expr``, the brand-hue protection)."""
     du, dv = np.asarray(cb, np.float64) - 128.0, \
         np.asarray(cr, np.float64) - 128.0
     ang = np.arctan2(dv, du)
     d = np.abs((ang - key.angle + 3 * np.pi) % (2 * np.pi) - np.pi)
     wh = 1.0 - _smooth(key.half, key.half + key.soft, d)
-    ws = _smooth(key.sat_lo, key.sat_hi, np.hypot(du, dv))
-    if key.exclude_skin and y is not None:
-        ws = ws * (1.0 - skin_weight(cb, cr, y))
+    if y is None:
+        return wh * _smooth(key.sat_lo, key.sat_hi, np.hypot(du, dv))
+    yv = np.asarray(y, np.float64)
+    # the radius as the render carries it (x2, clipped to 8 bits; ffmpeg's
+    # lut2 truncates to whole levels)
+    rad2 = np.floor(np.minimum(255.0, 2 * np.hypot(du, dv)))
+    rel = (rad2 / 2.0) / np.maximum(yv - 16.0, REL_FLOOR)
+    ws = _smooth(key.rel_lo, key.rel_hi, rel)
+    if key.exclude_skin:
+        ws = ws * (1.0 - skin_weight(cb, cr, y, near=key.near))
     return wh * ws
 
 
+def _sm_expr(lo, hi, v):
+    t = f"clip(({v}-({lo:.6f}))/{max(1e-9, hi - lo):.6f},0,1)"
+    return f"({t}*{t}*(3-2*{t}))"
+
+
 def hue_expr(key, scale=255):
-    """The same weight as an ffmpeg ``lut2`` expression over x = Cb and
-    y = Cr (8-bit), times ``scale``. smoothstep is written out so ffmpeg
-    and numpy evaluate one formula."""
-    def sm(lo, hi, v):
-        t = f"clip(({v}-({lo:.6f}))/{max(1e-9, hi - lo):.6f},0,1)"
-        return f"({t}*{t}*(3-2*{t}))"
+    """The chroma-only weight as an ffmpeg ``lut2`` expression over x = Cb
+    and y = Cr (8-bit), times ``scale``. smoothstep is written out so
+    ffmpeg and numpy evaluate one formula."""
     d = (f"abs(mod(atan2(y-128,x-128)-({key.angle:.6f})+3*PI,2*PI)-PI)")
-    wh = f"(1-{sm(key.half, key.half + key.soft, d)})"
-    ws = sm(key.sat_lo, key.sat_hi, "hypot(x-128,y-128)")
+    wh = f"(1-{_sm_expr(key.half, key.half + key.soft, d)})"
+    ws = _sm_expr(key.sat_lo, key.sat_hi, "hypot(x-128,y-128)")
     return f"{scale}*{wh}*{ws}"
+
+
+def hue_angle_expr(key, scale=255):
+    """lut2 over (Cb, Cr): the hue gate alone."""
+    d = (f"abs(mod(atan2(y-128,x-128)-({key.angle:.6f})+3*PI,2*PI)-PI)")
+    return f"{scale}*(1-{_sm_expr(key.half, key.half + key.soft, d)})"
+
+
+# lut2 over (Cb, Cr): the chroma radius x2 (8-bit), for the relative gate
+RADIUS2_EXPR = "min(255,2*hypot(x-128,y-128))"
+
+
+def rel_gate_expr(key, scale=255):
+    """lut2 over x = luma (at chroma size), y = RADIUS2_EXPR: the
+    relative-saturation gate of the key."""
+    rel = f"((y/2)/max(x-16,{REL_FLOOR:.1f}))"
+    return f"{scale}*{_sm_expr(key.rel_lo, key.rel_hi, rel)}"
 
 
 # Skin: the classic Cb/Cr cluster (Chai & Ngan), softened by 6 levels.
@@ -441,11 +486,17 @@ SKIN_MIN_RADIUS = (6.0, 12.0)
 SKIN_MIN_LUMA = (48.0, 72.0)
 
 
-def skin_weight(cb, cr, y=None):
+def skin_weight(cb, cr, y=None, near=None):
     """0..1 skin membership from chroma (the Cb/Cr box), times the luma
-    gate when ``y`` is given (dark reds are not skin)."""
+    gate when ``y`` is given (dark reds are not skin). ``near`` (cb_t,
+    cr_t, d0, d1): no skin within d0 of that chroma, full beyond d1 (a
+    key's own colour is never excluded as skin)."""
     cb = np.asarray(cb, np.float64)
     cr = np.asarray(cr, np.float64)
+    if near is not None:
+        c0, r0, d0, d1 = near
+        far = _smooth(d0, d1, np.hypot(cb - c0, cr - r0))
+        return skin_weight(cb, cr, y) * far
     if y is not None:
         return skin_weight(cb, cr) * _smooth(SKIN_MIN_LUMA[0],
                                              SKIN_MIN_LUMA[1],
@@ -459,16 +510,23 @@ def skin_weight(cb, cr, y=None):
     return w
 
 
-def skin_expr(scale=255):
+def skin_expr(scale=255, near=None):
+    """lut2 over (Cb, Cr): the chroma skin weight (see skin_weight; luma
+    gating is skin_luma_expr, applied after)."""
     def sm(lo, hi, v):
         t = f"clip(({v}-({lo:.3f}))/{hi - lo:.3f},0,1)"
         return f"({t}*{t}*(3-2*{t}))"
     s = SKIN_SOFT
+    far = ""
+    if near is not None:
+        c0, r0, d0, d1 = near
+        far = "*" + _sm_expr(d0, d1, f"hypot(x-({c0:.4f}),y-({r0:.4f}))")
     return (f"{scale}*{sm(SKIN_CB[0] - s, SKIN_CB[0], 'x')}"
             f"*(1-{sm(SKIN_CB[1], SKIN_CB[1] + s, 'x')})"
             f"*{sm(SKIN_CR[0] - s, SKIN_CR[0], 'y')}"
             f"*(1-{sm(SKIN_CR[1], SKIN_CR[1] + s, 'y')})"
-            f"*{sm(SKIN_MIN_RADIUS[0], SKIN_MIN_RADIUS[1], 'hypot(x-128,y-128)')}")
+            f"*{sm(SKIN_MIN_RADIUS[0], SKIN_MIN_RADIUS[1], 'hypot(x-128,y-128)')}"
+            f"{far}")
 
 
 def skin_luma_expr():
@@ -569,13 +627,31 @@ def _sample(rgb, max_px=200_000, seed=7):
     return x
 
 
-def match_transform(src_rgb, ref_rgb, method="mkl"):
-    """A function lab -> lab mapping the colour distribution of ``src_rgb``
-    (the shot to correct) onto ``ref_rgb`` (the hero), in CIELAB.
-    ``method``: 'reinhard' (per-channel mean/std) or 'mkl' (full
-    covariance)."""
-    ls = rgb_to_lab(_sample(src_rgb))
-    lr = rgb_to_lab(_sample(ref_rgb))
+def shared_content(ls, lr, bins=(6, 6, 6), floor=0.002, least=0.2):
+    """Masks over two CIELAB pixel sets keeping only the colours BOTH shots
+    contain (3D histogram bins holding >= ``floor`` of each set): a black
+    T-shirt in one shot and a white shirt in the other are content, not a
+    colour cast, and must not drive the match. Falls back to everything
+    when less than ``least`` of either set is shared."""
+    lo = np.array([0.0, -60.0, -60.0])
+    hi = np.array([100.0, 60.0, 60.0])
+    nb = np.array(bins)
+
+    def idx(lab):
+        q = np.clip(((lab - lo) / (hi - lo) * nb).astype(int), 0, nb - 1)
+        return (q[:, 0] * nb[1] + q[:, 1]) * nb[2] + q[:, 2]
+    ia, ib = idx(ls), idx(lr)
+    n = int(np.prod(nb))
+    ha = np.bincount(ia, minlength=n) / max(1, len(ia))
+    hb = np.bincount(ib, minlength=n) / max(1, len(ib))
+    ok = (ha >= floor) & (hb >= floor)
+    ma, mb = ok[ia], ok[ib]
+    if ma.mean() < least or mb.mean() < least:
+        return np.ones(len(ls), bool), np.ones(len(lr), bool)
+    return ma, mb
+
+
+def _fit(ls, lr, method):
     ms, cs = _stats(ls)
     mr, cr = _stats(lr)
     if method == "reinhard":
@@ -585,17 +661,53 @@ def match_transform(src_rgb, ref_rgb, method="mkl"):
     return lambda lab: (np.asarray(lab) - ms) @ T.T + mr
 
 
+def _match_lab(src_rgb, ref_rgb, shared=True):
+    ls = rgb_to_lab(_sample(src_rgb))
+    lr = rgb_to_lab(_sample(ref_rgb))
+    if not shared:
+        return ls, lr
+    ma, mb = shared_content(ls, lr)
+    return ls[ma], lr[mb]
+
+
+def match_transform(src_rgb, ref_rgb, method="mkl", shared=True):
+    """A function lab -> lab mapping the colour distribution of ``src_rgb``
+    (the shot to correct) onto ``ref_rgb`` (the hero), in CIELAB.
+    ``method``: 'reinhard' (per-channel mean/std) or 'mkl' (full
+    covariance). ``shared`` fits on the colours both shots contain
+    (``shared_content``: coarse bins, so a cast of a few dE keeps its
+    colours shared), so different wardrobe never reads as a cast."""
+    return _fit(*_match_lab(src_rgb, ref_rgb, shared), method)
+
+
+# The fit is a linear map learnt on the colours the shots share (walls,
+# skin, neutrals). Beyond the chroma it was learnt on, it is
+# extrapolation: a saturated neon sign or a brand colour the shared
+# content never sampled would be pushed by a correction meant for
+# lit surfaces. The correction fades out over this many C* units past the
+# fitted content's 99th-percentile chroma.
+MATCH_CHROMA_FADE = 25.0
+
+
 def match_lut(src_rgb, ref_rgb, method="mkl", size=MATCH_SIZE,
-              strength=1.0, limit=None):
+              strength=1.0, limit=None, shared=True):
     """A Lut that makes ``src_rgb``'s shot look like ``ref_rgb``'s.
 
     ``limit`` (Lab units, default None) caps how far any lattice colour may
-    move, so a match on unlucky frames can never wreck a shot. Neutrals
-    stay neutral within the reference's own cast."""
-    fn = match_transform(src_rgb, ref_rgb, method)
+    move, so a match on unlucky frames can never wreck a shot. Colours
+    more saturated than anything the fit was learnt on keep their own
+    colour (MATCH_CHROMA_FADE). Neutrals stay neutral within the
+    reference's own cast."""
+    ls, lr = _match_lab(src_rgb, ref_rgb, shared)
+    fn = _fit(ls, lr, method)
+    c_fit = float(np.percentile(np.hypot(ls[:, 1], ls[:, 2]), 99)) \
+        if len(ls) else 0.0
     grid = identity(size).table.astype(np.float64)
     lab = rgb_to_lab(grid)
     out = fn(lab)
+    keep = _smooth(c_fit, c_fit + MATCH_CHROMA_FADE,
+                   np.hypot(lab[..., 1], lab[..., 2]))[..., None]
+    out = out + (lab - out) * keep
     if limit:
         d = out - lab
         n = np.linalg.norm(d, axis=-1, keepdims=True)

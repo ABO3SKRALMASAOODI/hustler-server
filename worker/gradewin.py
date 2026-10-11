@@ -13,7 +13,7 @@ How a grade is built (every step a per-value table, ROADMAP §2):
   luma         one ``lut`` table: exposure in linear light with a soft
                shoulder, contrast about mid-grey
   isolate      a hue key over the SOURCE chroma (``lut2`` on Cb/Cr at
-               chroma resolution, lightly smoothed) scales chroma: the kept
+               chroma resolution, unsmoothed) scales chroma: the kept
                hue is untouched, everything else goes to neutral grey
   chroma       ``lut`` (saturation) or ``lut2`` over (luma, chroma) when the
                offset depends on brightness: temperature, tint and the
@@ -81,13 +81,13 @@ def hue_key(colour, tolerance=lutlib.DEFAULT_TOLERANCE,
     return lutlib.HueKey(colour, tolerance, softness)
 
 
-def emit_skin(parts, u_label, v_label, y_label, out, *, uid):
+def emit_skin(parts, u_label, v_label, y_label, out, *, uid, near=None):
     """Gray skin weight at CHROMA resolution from two chroma planes and the
     luma at chroma size (all consumed): the Cb/Cr skin box, gated by
-    brightness (a dark red curtain shares skin's chroma, never its
-    luma)."""
-    parts.append(f"[{u_label}][{v_label}]lut2=c0='{lutlib.skin_expr()}'"
-                 f"[{uid}skc]")
+    brightness (a dark red curtain shares skin's chroma, never its luma);
+    ``near`` keeps a key's own colour out of it."""
+    parts.append(f"[{u_label}][{v_label}]lut2=c0='"
+                 f"{lutlib.skin_expr(near=near)}'[{uid}skc]")
     parts.append(f"[{y_label}][{uid}skc]lut2=c0='{lutlib.skin_luma_expr()}'"
                  f"[{out}]")
     return out
@@ -97,22 +97,39 @@ def emit_hue_weight(parts, u_label, v_label, out, key, *, uid,
                     y_label=None, smooth=0.7):
     """Gray weight map at CHROMA resolution: 255 where the picture is the
     key's colour. Consumes the two chroma planes and, when given, the luma
-    at chroma size: then skin is excluded as the key asks (lutlib.HueKey.
-    exclude_skin), exactly as lutlib.hue_weight(..., y) computes it."""
+    at chroma size: then saturation is judged relative to brightness and
+    skin is excluded as the key asks (lutlib.HueKey.exclude_skin) — exactly
+    lutlib.hue_weight(..., y). Without luma: the chroma-only weight."""
     blur = f",gblur=sigma={smooth:.2f}" if smooth else ""
-    if not (key.exclude_skin and y_label):
-        if y_label:
-            parts.append(f"[{y_label}]nullsink")
+    if not y_label:
         parts.append(f"[{u_label}][{v_label}]lut2=c0='"
                      f"{lutlib.hue_expr(key)}'{blur}[{out}]")
         return out
-    parts.append(f"[{u_label}]split[{uid}hu1][{uid}hu2]")
-    parts.append(f"[{v_label}]split[{uid}hv1][{uid}hv2]")
-    parts.append(f"[{uid}hu1][{uid}hv1]lut2=c0='{lutlib.hue_expr(key)}'"
-                 f"[{uid}hw]")
-    emit_skin(parts, f"{uid}hu2", f"{uid}hv2", y_label, f"{uid}hs",
-              uid=f"{uid}h")
-    parts.append(f"[{uid}hw][{uid}hs]lut2=c0='x*(255-y)/255'{blur}[{out}]")
+    skin = key.exclude_skin
+    n = 3 if skin else 2
+    us = [f"{uid}hu{i}" for i in range(n)]
+    vs = [f"{uid}hv{i}" for i in range(n)]
+    parts.append(f"[{u_label}]split={n}" + "".join(f"[{x}]" for x in us))
+    parts.append(f"[{v_label}]split={n}" + "".join(f"[{x}]" for x in vs))
+    if skin:
+        parts.append(f"[{y_label}]split[{uid}hy1][{uid}hy2]")
+        y1, y2 = f"{uid}hy1", f"{uid}hy2"
+    else:
+        y1, y2 = y_label, None
+    parts.append(f"[{us[0]}][{vs[0]}]lut2=c0='{lutlib.hue_angle_expr(key)}'"
+                 f"[{uid}ha]")
+    parts.append(f"[{us[1]}][{vs[1]}]lut2=c0='{lutlib.RADIUS2_EXPR}'"
+                 f"[{uid}hr]")
+    parts.append(f"[{y1}][{uid}hr]lut2=c0='{lutlib.rel_gate_expr(key)}'"
+                 f"[{uid}hg]")
+    last = out if not skin else f"{uid}hw"
+    parts.append(f"[{uid}ha][{uid}hg]lut2=c0='x*y/255'"
+                 f"{blur if not skin else ''}[{last}]")
+    if skin:
+        emit_skin(parts, us[2], vs[2], y2, f"{uid}hs", uid=f"{uid}h",
+                  near=key.near)
+        parts.append(f"[{uid}hw][{uid}hs]lut2=c0='x*(255-y)/255'{blur}"
+                     f"[{out}]")
     return out
 
 
@@ -393,6 +410,14 @@ class _Grade:
             per_mpx += COST_LUT_EXTRA[2]
         return fixed + (f1 - f0) * (per_f + mpx * per_mpx)
 
+    def landing(self, plan, item):
+        """The frame a grade LANDS on (proof strips, land_err_f): a grade
+        that ramps OUT lands where it is fully gone (the drop it hands
+        colour back on: its end frame); any other lands on its first."""
+        if item.get("ramp_out_f"):
+            return [fxprims.frame_at(float(item["end"]), plan.fps)]
+        return [fxprims.frame_at(float(item["start"]), plan.fps)]
+
     def stage(self, ctx, items):
         label = ctx.label
         for it in items:
@@ -454,10 +479,9 @@ def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
                       iso.get("softness", 0.1))
     skin_p, bkey = protect_kinds(item)
     # consumers of the SOURCE planes
-    n_su = (1 if key else 0) + (1 if skin_p else 0) + (1 if bkey else 0) \
-        + (1 if need["protect"] else 0)
-    n_sy = (1 if key is not None and key.exclude_skin else 0) + \
-        (1 if skin_p else 0)
+    n_su = (1 if key is not None else 0) + (1 if skin_p else 0) + \
+        (1 if bkey else 0) + (1 if need["protect"] else 0)
+    n_sy = (1 if key is not None else 0) + (1 if skin_p else 0)
     need_src = n_su > 0
     if need["lut"]:
         if need_src:
@@ -510,9 +534,12 @@ def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
         ys = (f"{u}ysu", f"{u}ysv")
     cu, cv = f"{u}u", f"{u}v"
     if key is not None:
+        # unsmoothed: the weight scales chroma AT chroma resolution and
+        # the decoder's upsampling softens it; a blur here spread the kept
+        # colour onto its neighbours (V04 neon: fringe C* 3.5 -> ~1 without,
+        # kept dE no worse; measured on AT-1E-1's frames)
         emit_hue_weight(parts, sus.pop(0), svs.pop(0), f"{u}wi", key,
-                        uid=f"{u}i",
-                        y_label=sys_.pop(0) if key.exclude_skin else None)
+                        uid=f"{u}i", y_label=sys_.pop(0), smooth=0)
         wi = _fan(parts, f"{u}wi", 2, f"{u}wf")
         parts.append(f"[{cu}][{wi[0]}]lut2=c0='128+(x-128)*y/255'[{u}ui]")
         parts.append(f"[{cv}][{wi[1]}]lut2=c0='128+(x-128)*y/255'[{u}vi]")

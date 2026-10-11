@@ -70,6 +70,41 @@ def _window(edl, start, end):
     return s, e
 
 
+def _fps(ctx):
+    try:
+        return float(((ctx.index or {}).get("video") or {}).get("fps")
+                     or 30.0)
+    except (TypeError, ValueError, AttributeError):
+        return 30.0
+
+
+def _snap_to_cuts(edl, s, e, fps):
+    """Edges within 1.5 frames of a cut land ON the cut's first frame.
+
+    The render starts each block on first_frame_at(T) (ceil), while an fx
+    window's frames are round(t * fps): a section written at the cut's
+    exact program second (7.99 at 29.97 -> frame 239.46) would start a
+    frame BEFORE the shot changes. Snapped to the cut frame's own time
+    (frame / fps, to the centisecond above), it starts on it."""
+    try:
+        import math
+        import renderer
+        from timeline import Timeline
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        cuts = [float(o) for o in tl.offsets[1:]]
+    except Exception:  # noqa: BLE001 — snapping is a refinement
+        return s, e
+
+    def snap(t):
+        for c in cuts:
+            if abs(t - c) * fps <= 1.5:
+                k = renderer.first_frame_at(c, fps)
+                return math.ceil(k / round(fps, 3) * 100 - 1e-6) / 100.0
+        return t
+    return round(snap(s), 2), round(snap(e), 2)
+
+
 def _obj(v, name):
     if v is None or isinstance(v, (dict, list)):
         return v
@@ -139,6 +174,7 @@ def set_grade_window(ctx, start=None, end=None, saturation=None, ev=None,
     edl, _v = _edl(ctx)
     try:
         s, e = _window(edl, start, end)
+        s, e = _snap_to_cuts(edl, s, e, _fps(ctx))
         split_tone = _obj(split_tone, "split_tone")
         region = _obj(region, "region")
     except ValueError as x:
@@ -174,6 +210,7 @@ def isolate_colour(ctx, hue="auto", keep="hue", start=None, end=None,
     edl, _v = _edl(ctx)
     try:
         s, e = _window(edl, start, end)
+        s, e = _snap_to_cuts(edl, s, e, _fps(ctx))
     except ValueError as x:
         return _rejected(str(x))
     keep = (keep or "hue").strip().lower()
@@ -400,6 +437,7 @@ def add_finish(ctx, kind, start=None, end=None, strength=None, scale=None,
         return _rejected("kind is one of " + ", ".join(FINISH_KINDS))
     try:
         s, e = _window(edl, start, end)
+        s, e = _snap_to_cuts(edl, s, e, _fps(ctx))
         region = _obj(region, "region")
     except ValueError as x:
         return _rejected(str(x))

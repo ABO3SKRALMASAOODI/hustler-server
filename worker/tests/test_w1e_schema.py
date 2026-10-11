@@ -6,7 +6,6 @@ a stale MCP client's batch is refused with the very message a verb would
 get. The module is also loaded the way the backend loads it (by path,
 without the worker on sys.path)."""
 
-import copy
 import json
 import os
 import subprocess
@@ -206,3 +205,16 @@ def test_the_member_loads_by_path_without_the_worker_tree(tmp_path):
     lines = r.stdout.strip().splitlines()
     assert json.loads(lines[0]) == ["grade_window", "finish"]
     assert lines[1] == "worker modules imported: []"
+
+
+def test_landing_frames():
+    import fxgraph
+    plan = fxgraph.FxPlan(W=64, H=64, fps=25.0, program_s=20.0)
+    drop = {"id": "g", "type": "grade_window", "stage": "world",
+            "start": 0.0, "end": 3.64, "saturation": 0.0, "ramp_out_f": 3}
+    assert fxgraph.landing_frames(plan, drop) == [91]
+    plain = dict(drop, ramp_out_f=0, start=2.0)
+    assert fxgraph.landing_frames(plan, plain) == [50]
+    fin = {"id": "f", "type": "finish", "stage": "world", "start": 1.0,
+           "end": 2.0, "kind": "crt"}
+    assert fxgraph.landing_frames(plan, fin) == [25]

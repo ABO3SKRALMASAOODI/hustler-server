@@ -15,8 +15,12 @@ Device metrics (defined here, measured on the rendered frames):
   bg_saturation      mean HSV saturation of everything the hue key does NOT
                      keep (3 px away from kept pixels), rendered     [1E-1]
   kept_delta_e       mean CIEDE2000 render vs control over kept pixels
-  fringe_saturation  mean saturation in the 1-4 px band outside kept
-                     pixels (a chroma fringe shows up here)
+  fringe_chroma      mean CIELAB chroma C* of the render in the 2-4 px
+                     band outside kept pixels, over pixels that are not
+                     the colour (a chroma fringe shows up here; C* is on
+                     the dE scale, so the bar matches kept_delta_e's.
+                     HSV saturation is NOT used: near black it reads
+                     (15,10,12) as 0.33 "saturated")
   mono_before_drop   max chroma deviation (8-bit) of frames before the
                      ramp                                            [1E-2]
   ramp_monotone      1 when the ramp frames rise strictly into the drop
@@ -124,10 +128,29 @@ def build(case, win, *, assets=None, extra_ops=None):
     return control, edl, dict(assets or {})
 
 
+DEVICE_ROWS = {}
+
+
 def render(edl, win, out, workdir, *, preview=False, locals_=None):
+    """engine.render, with the case's local media visible to the fx
+    compilers too (a LUT asset; gradewin reads VALMERA_FX_ASSET_LOCALS on
+    test lanes) and the device report rows kept per output."""
+    import fxgraph
     from . import engine
-    return engine.render(edl, win, out, workdir, preview=preview,
-                         locals_=locals_ or {})
+    old = os.environ.get("VALMERA_FX_ASSET_LOCALS")
+    os.environ["VALMERA_FX_ASSET_LOCALS"] = json.dumps(locals_ or {})
+    rows = []
+    tok = fxgraph.collect(rows)
+    try:
+        return engine.render(edl, win, out, workdir, preview=preview,
+                             locals_=locals_ or {})
+    finally:
+        fxgraph.stop_collecting(tok)
+        DEVICE_ROWS[out] = fxgraph.merge_report(rows)
+        if old is None:
+            os.environ.pop("VALMERA_FX_ASSET_LOCALS", None)
+        else:
+            os.environ["VALMERA_FX_ASSET_LOCALS"] = old
 
 
 def frames(path, idx=None, *, size=None, count=None):
@@ -269,9 +292,17 @@ def finish_verdict(case, cdir, *, render_path, control_path, edl, metrics,
                                                          control_path)
         except Exception as e:  # noqa: BLE001
             st_detail["brand_integrity_yuv"] = {"error": str(e)[:200]}
+    devices = DEVICE_ROWS.get(render_path) or []
+    not_full = [r for r in devices if r.get("rung") != "full"]
+    if not_full:
+        # a device that did not render at full strength fails the case
+        # loudly: the numbers above would describe a degraded render
+        metrics["devices_full"] = _result(float(len(not_full)), ("<=", 0),
+                                          {"rows": not_full})
     v = verdict.build(case, render_path=render_path,
                       variant=case["render"]["variant"], wall_s=wall_s,
                       metrics=metrics, standing=st, standing_detail=st_detail,
+                      devices=devices,
                       board=board or {}, extra=dict(extra or {}, metric_detail={
                           k: m.get("detail") for k, m in metrics.items()}))
     p = verdict.write(v, cdir)
@@ -362,7 +393,7 @@ def _pinned(case, run, fps):
 # ── AT-1E-1: B&W world, one colour kept ─────────────────────────────────
 
 def keep_metrics(ctrl, rend, key):
-    """bg_saturation, kept_delta_e, fringe_saturation on one frame pair."""
+    """bg_saturation, kept_delta_e, fringe_chroma on one frame pair."""
     import lutlib
     c = ycc(ctrl)
     w = lutlib.hue_weight(key, c[..., 1], c[..., 2], c[..., 0])
@@ -383,7 +414,11 @@ def keep_metrics(ctrl, rend, key):
     # the object's own anti-aliased edge and the 4:2:0 chroma sample
     band = dilate(kept, 4) & ~dilate(kept, 1) & (w < 0.02)
     if band.sum() > 50:
-        out["fringe_saturation"] = float(sat[band].mean())
+        lab = lutlib.rgb_to_lab(rend[band] / 255.0)
+        chroma = np.hypot(lab[..., 1], lab[..., 2])
+        out["fringe_chroma"] = float(chroma.mean())
+        out["fringe_chroma_p95"] = float(np.percentile(chroma, 95))
+        out["fringe_hsv_saturation"] = float(sat[band].mean())
         out["fringe_px"] = int(band.sum())
     return out
 
@@ -400,7 +435,7 @@ def run_keep(case, win, cdir, *, hue, tolerance, label, softness=0.1):
     key = gradewin.hue_key(hue, tolerance, softness)
     per = [keep_metrics(cf[i], rf[i], key) for i in sample if i in rf]
     agg = {}
-    for k in ("bg_saturation", "kept_delta_e", "fringe_saturation"):
+    for k in ("bg_saturation", "kept_delta_e", "fringe_chroma"):
         vals = [p[k] for p in per if p.get(k) is not None]
         agg[k] = (max(vals) if k != "kept_delta_e" else float(np.mean(vals))
                   ) if vals else None
@@ -531,11 +566,25 @@ def edge_precision(photo, variant, tol=3):
 
 # ── AT-1E-5: screens ────────────────────────────────────────────────────
 
-def grid_contrast(gray, pitch):
-    """Energy at the screen grid's frequency over its spectral neighbours
-    in a 256 px crop (> 3: the subpixel pattern is visible at 100 %)."""
+def lit_crop(gray, size=256, step=64):
+    """(y0, x0) of the brightest ``size`` crop: a 100 % crop of the
+    picture's content, not of a black void (a UI page is mostly black)."""
     h, w = gray.shape
-    y0, x0 = h // 2 - 128, w // 2 - 128
+    best, at = -1.0, (max(0, h // 2 - size // 2), max(0, w // 2 - size // 2))
+    for y0 in range(0, max(1, h - size + 1), step):
+        for x0 in range(0, max(1, w - size + 1), step):
+            m = float(gray[y0:y0 + size, x0:x0 + size].mean())
+            if m > best:
+                best, at = m, (y0, x0)
+    return at
+
+
+def grid_contrast(gray, pitch, at=None):
+    """Energy at the screen grid's frequency over its spectral neighbours
+    in a 256 px crop at ``at`` (default: the centre; > 3: the subpixel
+    pattern is visible at 100 %)."""
+    h, w = gray.shape
+    y0, x0 = at or (h // 2 - 128, w // 2 - 128)
     crop = gray[y0:y0 + 256, x0:x0 + 256].astype(np.float64)
     crop -= crop.mean()
     win = np.hanning(256)[:, None] * np.hanning(256)[None, :]
@@ -577,38 +626,37 @@ def record_ui(url, out, *, seconds=4.0, fps=30, css=(540, 960), scale=2):
 
 
 def barrel_pct(kind, W, H, workdir):
-    """Corner displacement (% of the half diagonal) of a grid chart drawn
-    through finish ``kind``: the outermost bright line's bow."""
+    """TV distortion (%) of finish ``kind``: one bright horizontal line 8 %
+    from the top of a W x H chart, drawn through the finish; its bow (the
+    line's height at the centre minus at 15 % / 85 % of the width) over
+    the frame height. Luma-weighted centroids, so LED dots and a CRT bezel
+    do not move the measurement."""
     import finish
     from PIL import Image, ImageDraw
     im = Image.new("RGB", (W, H), (0, 0, 0))
-    d = ImageDraw.Draw(im)
-    step = W // 12
-    for x in range(step // 2, W, step):
-        d.line([(x, 0), (x, H)], fill=(255, 255, 255), width=3)
-    for y in range(step // 2, H, step):
-        d.line([(0, y), (W, y)], fill=(255, 255, 255), width=3)
-    src = os.path.join(workdir, f"grid_{W}x{H}.png")
+    y0 = int(H * 0.08)
+    ImageDraw.Draw(im).rectangle([0, y0 - 3, W, y0 + 3],
+                                 fill=(255, 255, 255))
+    src = os.path.join(workdir, f"hline_{W}x{H}.png")
     im.save(src)
-    g, maps = finish.still_graph(kind, W, H, {"id": f"grid_{kind}"},
+    g, maps = finish.still_graph(kind, W, H, {"id": f"hline_{kind}"},
                                  workdir)
-    out = os.path.join(workdir, f"grid_{kind}.png")
+    out = os.path.join(workdir, f"hline_{kind}.png")
     subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", src]
                    + sum((["-i", m] for m in maps), [])
                    + ["-filter_complex", g, "-map", "[out]", "-frames:v",
                       "1", out], check=True)
     a = np.asarray(Image.open(out).convert("L")).astype(np.float64)
-    x_line = step // 2
-    cols = []
-    for y in (int(H * 0.08), H // 2):
-        row = a[y, :W // 4]
-        cols.append(int(np.argmax(row > row.max() * 0.5)) if row.max() > 30
-                    else None)
-    if None in cols:
-        return None
-    bow = abs(cols[1] - cols[0])
-    return 100.0 * bow / (0.5 * math.hypot(W, H)), {"line_x": x_line,
-                                                     "cols": cols}
+
+    def centroid(xc):
+        band = a[:int(H * 0.3), max(0, xc - 8):xc + 8].mean(axis=1)
+        band = np.where(band > band.max() * 0.35, band, 0.0)
+        ys = np.arange(len(band))
+        return float((band * ys).sum() / max(band.sum(), 1e-9))
+    yc = centroid(W // 2)
+    ye = (centroid(int(W * 0.15)) + centroid(int(W * 0.85))) / 2
+    return 100.0 * abs(yc - ye) / H, {"y_centre": round(yc, 2),
+                                      "y_edges": round(ye, 2)}
 
 
 # ── runners ─────────────────────────────────────────────────────────────
@@ -658,7 +706,7 @@ def at_1e_1(case):
             "pass": {k: v["pass"] for k, v in hm.items()},
             "board": hboard["images"]}
         for k, v in hm.items():
-            if k in ("bg_saturation", "kept_delta_e", "fringe_saturation"):
+            if k in ("bg_saturation", "kept_delta_e", "fringe_chroma"):
                 metrics[f"hcd_{k}"] = v
         board["images"] += hboard["images"]
     return finish_verdict(case, cdir, render_path=run["rpath"],
@@ -932,18 +980,22 @@ def at_1e_5(case):
         H, W = r.shape[:2]
         pitch = max(3.0, 4.6 * min(W, H) / 1080.0 * float(it.get("scale")
                                                          or 1.0))
-        gc = grid_contrast(cv2.cvtColor(r, cv2.COLOR_RGB2GRAY), pitch)
-        gc0 = grid_contrast(cv2.cvtColor(c, cv2.COLOR_RGB2GRAY), pitch)
+        cg = cv2.cvtColor(c, cv2.COLOR_RGB2GRAY)
+        at = lit_crop(cg)
+        gc = grid_contrast(cv2.cvtColor(r, cv2.COLOR_RGB2GRAY), pitch, at)
+        gc0 = grid_contrast(cg, pitch, at)
         if "subpixel_contrast" in table:
             metrics["subpixel_contrast"] = _result(gc, _bar(
                 table["subpixel_contrast"]), {"control": gc0,
-                                              "pitch_px": pitch})
+                                              "pitch_px": pitch,
+                                              "crop_at": list(at)})
+        cy, cx = at[0] + 128, at[1] + 128
+        y0, x0 = max(0, cy - 200), max(0, cx - 200)
         rows.append(("FX-UI (valmera.io capture): control | LCD | 100% crop",
                      [("control", _h(c, 480)), ("lcd", _h(r, 480)),
-                      ("100% crop", r[H // 2 - 200:H // 2 + 200,
-                                      W // 2 - 200:W // 2 + 200])]))
+                      ("100% crop", r[y0:y0 + 400, x0:x0 + 400])]))
         extra["ui_edl"] = os.path.join(udir, "edl.json")
-    # barrel on a grid chart, every screen kind
+    # barrel (TV distortion) on a line chart, every screen kind
     worst = 0.0
     bdetail = {}
     for kind in ("lcd", "crt", "led"):
@@ -1046,8 +1098,8 @@ def at_1e_6(case):
     fps = fps_of(run["rpath"])
     patches = case["patches"]
     before, after, counts = {}, {}, {}
-    idx = [int(round(fps * (0.5 + i))) for i in range(int(
-        run["program_s"]) - 1)][:8]
+    n = int(run["program_s"] * fps)
+    idx = list(range(3, max(4, n - 3), max(1, n // 10)))
     cfr, rfr = frames(run["cpath"], idx), frames(run["rpath"], idx)
     for name, cls in patches.items():
         hl, nh = class_lab(hf, cls)
@@ -1094,16 +1146,26 @@ def at_1e_7(case):
     win = engine.window_for_case(case)
     run = _render_pair(case, win, cdir)
     fps = fps_of(run["rpath"])
+    import renderer
     tl = Timeline(run["edl"]["keep"], [], [])
-    cuts = [int(math.floor(float(o) * fps + 0.5)) for o in tl.offsets[1:]]
+    # the render's own cut frames: the block clock starts block j on
+    # first_frame_at(T_j)
+    cuts = [renderer.first_frame_at(float(o), fps) for o in tl.offsets[1:]]
+    windows = {}
+    for it in run["edl"]["fx"]:
+        windows[it["id"]] = (
+            int(math.floor(float(it["start"]) * fps + 0.5)),
+            int(math.floor(float(it["end"]) * fps + 0.5)))
     md5r, md5c = md5_list(run["rpath"]), md5_list(run["cpath"])
     worst = 0
     det = {}
     for it in run["edl"]["fx"]:
         a = int(math.floor(float(it["start"]) * fps + 0.5))
         b = int(math.floor(float(it["end"]) * fps + 0.5))
+        others = {f for k, (x, y) in windows.items() if k != it["id"]
+                  for f in range(x, y)}
         changed = [i for i in range(max(0, a - 5), min(len(md5r), b + 5))
-                   if md5r[i] != md5c[i]]
+                   if md5r[i] != md5c[i] and i not in others]
         first, last = (changed[0], changed[-1]) if changed else (None, None)
         ca = min(cuts, key=lambda c: abs(c - a)) if cuts else a
         err = abs((first if first is not None else -10 ** 6) - ca)
@@ -1141,7 +1203,6 @@ def at_1e_7(case):
     rows.append(("references (internal)", refs))
     from . import boards
     clip = None
-    rp = reference_path(case["reference"][0]["ref"])
     board = sheet(rows, os.path.join(bd, "sections_board.png"))
     try:
         clip = boards.contact(run["rpath"], os.path.join(

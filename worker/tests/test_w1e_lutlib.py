@@ -249,9 +249,24 @@ def test_match_lut_undoes_a_colour_cast(method):
     lut = lutlib.match_lut(cast, hero, method=method)
     fixed = lutlib.apply(lut, cast)
     after = lutlib.mean_delta_e(fixed, hero)
-    assert before > 5 and after < (0.4 if method == "mkl" else 0.5) * \
-        before, (before, after)
+    assert before > 5 and after < 0.5 * before, (before, after)
     assert after < (3.0 if method == "mkl" else 3.5)
+
+
+def test_match_leaves_colours_beyond_the_fit_alone():
+    """The fit is learnt on lit surfaces (walls, skin); a neon sign more
+    saturated than anything it was learnt on keeps its own colour, while
+    the surfaces are still corrected (AT-1E-6's set lights)."""
+    rng = np.random.default_rng(5)
+    hero = rng.random((4000, 3)) * 0.35 + 0.35            # muted surfaces
+    cast = np.clip(hero * [1.06, 0.98, 0.88], 0, 1)
+    lut = lutlib.match_lut(cast, hero)
+    assert lutlib.mean_delta_e(lutlib.apply(lut, cast), hero) < \
+        0.5 * lutlib.mean_delta_e(cast, hero)
+    neon = np.array([[1.0, 0.82, 0.08], [0.95, 0.12, 0.10]])
+    moved = lutlib.delta_e2000(lutlib.rgb_to_lab(neon),
+                               lutlib.rgb_to_lab(lutlib.apply(lut, neon)))
+    assert moved.max() < 1.0, moved
 
 
 def test_match_limit_caps_the_move():
@@ -284,3 +299,64 @@ def test_bake_cube_runs_the_real_chain(tmp_path):
     (tmp_path / "big.cube").write_text(big)
     with pytest.raises(lutlib.LutError, match="outside 2..8"):
         gradelut.read_cube(str(tmp_path / "big.cube"), max_size=8)
+
+
+def test_match_ignores_wardrobe_that_only_one_shot_has():
+    """Same set, two days: the hero wears black, the other shot white and
+    is lit warmer. Fitting on the shared colours undoes the cast without
+    dragging the white shirt toward black."""
+    rng = np.random.default_rng(11)
+    set_px = np.clip(rng.normal([0.45, 0.12, 0.13], 0.04, (6000, 3)), 0, 1)
+    skin = np.clip(rng.normal([0.78, 0.58, 0.48], 0.04, (3000, 3)), 0, 1)
+    black = np.clip(rng.normal(0.08, 0.02, (4000, 3)), 0, 1)
+    white = np.clip(rng.normal(0.9, 0.02, (4000, 3)), 0, 1)
+    hero = np.concatenate([set_px, skin, black])
+    warm = np.array([1.06, 0.98, 0.9])
+    shot = np.clip(np.concatenate([set_px, skin, white]) * warm, 0, 1)
+    for shared, worst in ((True, 2.5), (False, None)):
+        lut = lutlib.match_lut(shot, hero, shared=shared)
+        fixed = lutlib.apply(lut, shot)
+        d_skin = lutlib.mean_delta_e(fixed[6000:9000], skin)
+        d_white = lutlib.mean_delta_e(fixed[9000:], white)
+        if worst is not None:
+            assert d_skin < worst and d_white < 6, (d_skin, d_white)
+        else:
+            unshared = (d_skin, d_white)
+    assert unshared[1] > 6          # the naive fit darkens the white shirt
+
+
+@needs_ffmpeg
+def test_the_luma_aware_key_is_one_formula_in_numpy_and_ffmpeg():
+    """The render's chain (hue gate, radius, relative-saturation gate,
+    skin) against lutlib.hue_weight(..., y), within the 8-bit steps the
+    chain quantises through."""
+    rng = np.random.default_rng(4)
+    yy = rng.integers(16, 236, (96, 96))
+    cb = rng.integers(60, 200, (96, 96))
+    cr = rng.integers(60, 220, (96, 96))
+    for colour in ("#8a1c27", "#361113", "#2a7fd4"):
+        key = gradewin.hue_key(colour, 0.06, 0.08)
+        wh = _lut2(lutlib.hue_angle_expr(key), cb, cr)
+        r2 = _lut2(lutlib.RADIUS2_EXPR, cb, cr)
+        g = _lut2(lutlib.rel_gate_expr(key), yy, r2)
+        w = _lut2("x*y/255", wh, g)
+        if key.exclude_skin:
+            sk = _lut2(lutlib.skin_luma_expr(), yy,
+                       _lut2(lutlib.skin_expr(near=key.near), cb, cr))
+            w = _lut2("x*(255-y)/255", w, sk)
+        mine = lutlib.hue_weight(key, cb, cr, yy) * 255
+        assert np.abs(w - mine).max() <= 4, colour
+
+
+def test_relative_saturation_keeps_a_coats_shadows():
+    """A red coat's fold in shadow (a third of the chroma at a third of the
+    brightness) stays in the key; a grey street never enters it."""
+    key = gradewin.hue_key("#8a1c27", 0.04, 0.06)
+    lit = lutlib.rgb_to_ycc8(np.array([138, 28, 39]) / 255.0)
+    fold = lutlib.rgb_to_ycc8(np.array([60, 14, 18]) / 255.0)
+    grey = lutlib.rgb_to_ycc8(np.array([120, 118, 116]) / 255.0)
+    w = [float(lutlib.hue_weight(key, c[1], c[2], c[0]))
+         for c in (lit, fold, grey)]
+    assert w[0] > 0.95 and w[1] > 0.95 and w[2] < 0.01, w
+    # the chroma-only gate (no luma) would have dropped the fold
+    assert float(lutlib.hue_weight(key, fold[1], fold[2])) < 0.5
