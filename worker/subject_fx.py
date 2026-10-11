@@ -58,7 +58,7 @@ import fxprims
 FILTERS = ("split", "trim", "setpts", "tpad", "overlay", "format",
            "alphamerge", "lut", "lutyuv", "color", "gblur", "dilation",
            "erosion", "blend", "scale", "negate", "hue", "loop", "nullsink",
-           "null", "crop", "mix", "fps", "setsar")
+           "null", "crop", "mix", "fps", "setsar", "pad")
 # Composites are overlays onto the program stream: frames keep their tags.
 KEEPS_FRAME_TAGS = True
 
@@ -120,6 +120,19 @@ SUBSTITUTES = {"fill": "full_frame_flash", "poster": "colour_field_card",
 # renderer's own source cache).
 ASSET_LOCALS = contextvars.ContextVar("subject_fx_asset_locals",
                                       default=None)
+
+# Memory a time-shifted copy of the picture may hold inside the ffmpeg graph.
+# A branch that shows program frame t + d at frame t makes ``split`` queue d
+# frames on the other side until frame t + d is decoded (a plate 17 s ahead
+# held +1.3 GB at 1080x1920, measured); an echo copy k frames back queues k
+# frames of picture and matte (offsets 30..240 held +3 GB). Both are bounded
+# here, in bytes at a 1080x1920 frame (whatever the render's size, so a
+# preview decides exactly as its final), at the measured ~1.5 B/px a queued
+# frame costs (1.48 ahead, 1.34 per echo copy-frame).
+READ_AHEAD_BUDGET_MB = 400.0
+ECHO_BUFFER_BUDGET_MB = 1000.0
+QUEUED_BYTES_PER_PX = 1.5
+BUDGET_FRAME_PX = 1080 * 1920
 
 _STATE = "_w1b_state"
 # RGB round trips (glow, halation, blurs) convert with accurate rounding: the
@@ -254,6 +267,52 @@ def plan_edl(plan):
     return d["_w1b_edl"]
 
 
+def render_env(plan):
+    """{"src_path", "asset_locals"} of the render this plan belongs to:
+    ``plan.media`` when the plan carries it, else the pinned parameters of
+    the calling ``renderer.render_edl`` frame (the main video the render
+    reads, and the media it already holds locally). Read once, in
+    ``prepare``; each value may be None. Never raises."""
+    d = plan.__dict__
+    hit = d.get("_w1b_env")
+    if hit is not None:
+        return hit
+    env = {"src_path": None, "asset_locals": None}
+    media = d.get("media")
+    if isinstance(media, dict):
+        env["src_path"] = media.get("src_path")
+        env["asset_locals"] = media.get("asset_locals")
+    if env["src_path"] is None:
+        try:
+            import sys
+            rend = getattr(sys.modules.get("renderer"), "render_edl", None)
+            code = getattr(rend, "__code__", None)
+            f, depth = sys._getframe(1), 0
+            while f is not None and code is not None and depth < 80:
+                if f.f_code is code:
+                    sp = f.f_locals.get("src_path")
+                    al = f.f_locals.get("asset_locals")
+                    if isinstance(sp, str) and sp:
+                        env["src_path"] = sp
+                    if isinstance(al, dict) and env["asset_locals"] is None:
+                        env["asset_locals"] = al
+                    break
+                f, depth = f.f_back, depth + 1
+        except Exception:  # noqa: BLE001 — context is best effort
+            pass
+    d["_w1b_env"] = env
+    return env
+
+
+def budget_frames(budget_mb, bytes_per_px):
+    """Frames a time-shifted branch may queue within ``budget_mb``."""
+    return max(1, int(budget_mb * 1e6 // (BUDGET_FRAME_PX * bytes_per_px)))
+
+
+def _ahead_cap():
+    return budget_frames(READ_AHEAD_BUDGET_MB, QUEUED_BYTES_PER_PX)
+
+
 def _get(item, key, default=None):
     v = item.get(key)
     return default if v is None else v
@@ -291,15 +350,95 @@ def _cuts(plan):
 
 # ------------------------------------------------------------------ media
 def asset_path(plan, key):
-    """A local path (or ranged URL) ffmpeg can read for media ``key``."""
+    """A local path (or ranged URL) ffmpeg can read for media ``key``: the
+    render's own local copy when it holds one, else the renderer's source
+    cache / download, under a name of this key alone (two plates never
+    share a download path), with large videos range-read like overlays."""
     locs = ASSET_LOCALS.get()
     if locs and key in locs and os.path.exists(locs[key]):
         return locs[key]
+    import hashlib
     import renderer
-    return renderer._render_asset_source(key, "fx", 0, plan.workdir)
+    image = os.path.splitext(str(key))[1].lower() in _IMAGE_EXTS
+    uniq = "w1b" + hashlib.sha256(str(key).encode()).hexdigest()[:12]
+    return renderer._render_asset_source(
+        key, "fx" if image else "overlay", uniq, plan.workdir,
+        render_env(plan).get("asset_locals"))
 
 
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif")
+
+
+def _main_plan(plan, item, src_t, n, tag, freeze=False):
+    """A plate read straight from the main video at SOURCE second
+    ``src_t`` (its own ffmpeg input: nothing queues in the program graph),
+    or None when this render names no main video."""
+    path = render_env(plan).get("src_path")
+    if not path or src_t is None:
+        return None
+    dur = (1.0 if freeze else n / plan.fps3) + 1.0
+    ikey = f"w1b:{item['id']}:{tag}:main"
+    plan.add_input(ikey, ["-ss", f"{max(0.0, float(src_t)):.3f}", "-t",
+                          f"{dur:.3f}", "-i", path])
+    return {"kind": "main", "key": ikey, "freeze": bool(freeze),
+            "fit": _fit_chain(plan)}
+
+
+def _fit_chain(plan):
+    """The picture's own static framing (renderer.frame_fit_filter with
+    the EDL's ratio mode, focus and picture rect) for main-video plates;
+    a centre cover crop when it cannot be read."""
+    W, H = int(plan.W), int(plan.H)
+    cover = (f"scale={W}:{H}:force_original_aspect_ratio=increase:"
+             f"flags=bicubic,crop={W}:{H}")
+    try:
+        import renderer
+        fr = (plan_edl(plan) or {}).get("frame") or {}
+        ratio = fr.get("ratio")
+        mode = (fr.get("mode") or "crop") if ratio not in (None, "source") \
+            else "crop"
+        focus = None
+        if fr.get("focus_x") is not None or fr.get("focus_y") is not None:
+            focus = (fr.get("focus_x"), fr.get("focus_y"))
+        fit = renderer.frame_fit_filter(mode, W, H, focus, pad_color="black",
+                                        picture=fr.get("picture"))
+        return f"{fit},scale={W}:{H}" if fit else cover
+    except Exception:  # noqa: BLE001 — a framing never fails a render
+        return cover
+
+
+def _queued(f0, frame, n, freeze=False):
+    """Frames a program plate from ``frame`` makes the graph hold for a
+    window starting at ``f0``: a plate AHEAD holds the program frames up to
+    it; one from the PAST holds its own frames until the window starts (at
+    most its n frames; a frozen frame is one)."""
+    if frame > f0:
+        return frame - f0
+    return 1 if freeze else min(n, f0 - frame)
+
+
+def _program_plan(plan, item, frame, n, tag, freeze=False):
+    """A plate from program frame ``frame`` on, read from the program while
+    the frames it holds in the graph stay within READ_AHEAD_BUDGET_MB, else
+    from the main video (or, with no main video on this render, dropped with
+    the reason)."""
+    f0, _f1 = _span_frames(plan, item)
+    frame = int(frame)
+    if _queued(f0, frame, n, freeze) <= _ahead_cap():
+        if freeze:
+            return {"kind": "freeze", "frame": frame}, None
+        return {"kind": "program", "from": frame}, None
+    src_t = None
+    try:
+        src_t = plan.tl.out_to_src(fxprims.frame_time(frame, plan.fps))
+    except Exception:  # noqa: BLE001
+        src_t = None
+    got = _main_plan(plan, item, src_t, n, tag, freeze)
+    if got:
+        return got, None
+    return None, (f"its plate is {abs(frame - f0) / plan.fps3:.1f} s away "
+                  "in the program, more than one render may hold, and this "
+                  "render has no main video to read it from")
 
 
 def _source_plan(plan, item, src, n, tag):
@@ -311,30 +450,41 @@ def _source_plan(plan, item, src, n, tag):
         return {"kind": "colour", "colour": src.get("colour")}, None
     if kind == "program":
         off = int(round(float(src.get("offset_s") or 0.0) * plan.fps3))
-        return {"kind": "program", "from": f0 + off}, None
+        return _program_plan(plan, item, f0 + off, n, tag)
     if kind == "source":
+        # the main video from that SOURCE second: another shot. Footage the
+        # program plays near this window is read from the program (its own
+        # framing); anything else from the main video itself.
+        src_t = float(src["src_t"])
         t = None
         try:
-            t = plan.tl.src_to_out(float(src["src_t"]))
+            t = plan.tl.src_to_out(src_t)
         except Exception:  # noqa: BLE001
             t = None
-        if t is None:
-            return None, (f"source second {float(src['src_t']):g} is not in "
-                          "this program (fx compilers read the program, not "
-                          "the main video's cut-away footage)")
-        return {"kind": "program",
-                "from": fxprims.frame_at(t, plan.fps)}, None
+        if t is not None:
+            frame = fxprims.frame_at(t, plan.fps)
+            if _queued(f0, frame, n) <= _ahead_cap():
+                return {"kind": "program", "from": frame}, None
+        got = _main_plan(plan, item, src_t, n, tag)
+        if got:
+            return got, None
+        if t is not None:
+            return _program_plan(plan, item, fxprims.frame_at(t, plan.fps),
+                                 n, tag)
+        return None, (f"source second {src_t:g} is not in this program and "
+                      "this render has no main video to read it from")
     if kind in ("next", "previous"):
         cuts = _cuts(plan)
         if kind == "next":
             after = [c for c in cuts if c >= f0]
             if not after:
                 return None, "no cut after this window for a next-shot fill"
-            return {"kind": "freeze", "frame": after[0]}, None
+            return _program_plan(plan, item, after[0], n, tag, freeze=True)
         before = [c for c in cuts if c <= f1]
         if not before:
             return None, "no cut before this window for a previous-shot fill"
-        return {"kind": "freeze", "frame": before[-1] - 1}, None
+        return _program_plan(plan, item, before[-1] - 1, n, tag,
+                             freeze=True)
     if kind == "asset":
         key = src.get("asset_key")
         try:
@@ -393,12 +543,19 @@ class _Compiler:
               else "world"}
         _state(plan)[item["id"]] = st
         plan_edl(plan)
+        render_env(plan)       # read while the render's frame is on the stack
         d = plan.devices.get(item.get("id")) or {}
         st["reduced"] = d.get("rung") == "reduced"
+        # Ask FIRST (INTERFACES_W1.md §1.1): the request records THIS item's
+        # window, so the program matte measures exactly it (and a render
+        # that may launch sidecars asks for it: a stale client's batch
+        # launches nothing, §1.7), and the answer describes this window.
+        # matte_info before any request reads "no window asked" on 1A's
+        # program matte: every item would take its substitute.
+        info = fxgraph.request_matte(plan, item, "person", st["space"])
         sub = d.get("substitute") if d.get("rung") == "substitute" else None
         if sub:
             return self._prepare_substitute(plan, item, st, sub, None)
-        info = fxgraph.matte_info(plan, "person")
         status = (info or {}).get("status")
         if status not in ("ready", "partial"):
             reason = (info or {}).get("reason") or "no person matte"
@@ -418,7 +575,6 @@ class _Compiler:
                     f"{str(e)[:120]})")
         if got and got[0] == "omit":
             return got
-        fxgraph.request_matte(plan, item, "person", st["space"])
         rung = got
         missing = _partial(info, item)
         if missing and not rung:
@@ -475,9 +631,10 @@ class _Compiler:
                                              radius=r, fill=255)
         path = os.path.join(plan.workdir, f"w1b_card_{item['id']}.png")
         im.save(path)
+        f0, f1 = _span_frames(plan, item)
         plan.add_input(f"w1b:{item['id']}:card", [
             "-loop", "1", "-framerate", f"{plan.fps3:.3f}", "-t",
-            f"{plan.program_s + 1.0:.3f}", "-i", path])
+            f"{(f1 - f0) / plan.fps3 + 1.0:.3f}", "-i", path])
 
     @staticmethod
     def _prepare_region(plan, item, st):
@@ -512,13 +669,45 @@ class _Compiler:
             offs = sorted({int(k) for k in echo.get("offsets_f") or []})
             if not offs:
                 return ("omit", "an echo needs offsets")
-            st["offsets"] = offs
+            # copy k queues k frames of picture and matte in the graph: keep
+            # the nearest copies within ECHO_BUFFER_BUDGET_MB
+            cap = budget_frames(ECHO_BUFFER_BUDGET_MB, QUEUED_BYTES_PER_PX)
+            kept, used = [], 0
+            for k in offs:
+                if used + k > cap:
+                    break
+                kept.append(k)
+                used += k
+            st["offsets"] = kept
+            if not kept:
+                return ("omit", f"echo copies {offs[0]}+ frames back hold "
+                        "more frames than one render may buffer")
+            if len(kept) < len(offs):
+                left = ", ".join(str(k) for k in offs[len(kept):])
+                return ("reduced", f"echo copies {left} frames back left "
+                        "out (more frames than one render may buffer); the "
+                        "nearest copies are drawn")
         return None
 
     def _prepare_background(self, plan, item, st):
         kind = item.get("kind")
         f0, f1 = _span_frames(plan, item)
         n = f1 - f0
+        notes = []
+        # the held frame first: a reduced plate list must never cost the
+        # hold (the subject would play live over the swapped world)
+        if item.get("hold_subject"):
+            ht = item.get("hold_t")
+            h = fxprims.frame_at(float(item["start"] if ht is None else ht),
+                                 plan.fps)
+            h = max(0, min(plan.n_frames - 1, h))
+            if h - f0 > _ahead_cap():
+                # a frozen frame far AHEAD queues every frame up to it
+                h = f0
+                notes.append("hold_t is too far after this window to hold "
+                             "that frame; the subject is held on the "
+                             "window's first frame")
+            st["hold"] = h
         if kind == "gradient":
             st["gradient"] = self._gradient(plan, item)
         if kind == "source":
@@ -539,13 +728,10 @@ class _Compiler:
                 return ("omit", "; ".join(dropped)[:200] or "no plates")
             st["sources"] = plans
             if dropped:
-                return ("reduced", f"{len(dropped)} plate(s) dropped: "
-                        + dropped[0][:120])
-        if item.get("hold_subject"):
-            ht = item.get("hold_t")
-            h = fxprims.frame_at(float(item["start"] if ht is None else ht),
-                                 plan.fps)
-            st["hold"] = max(0, min(plan.n_frames - 1, h))
+                notes.append(f"{len(dropped)} plate(s) dropped: "
+                             + dropped[0][:120])
+        if notes:
+            return ("reduced", "; ".join(notes)[:240])
         return None
 
     @staticmethod
@@ -576,9 +762,10 @@ class _Compiler:
         path = os.path.join(plan.workdir, f"w1b_grad_{item['id']}.png")
         Image.fromarray(img, "RGB").save(path)
         key = f"w1b:{item['id']}:grad"
+        f0, f1 = _span_frames(plan, item)
         plan.add_input(key, ["-loop", "1", "-framerate", f"{plan.fps3:.3f}",
-                             "-t", f"{plan.program_s + 1.0:.3f}", "-i",
-                             path])
+                             "-t", f"{(f1 - f0) / plan.fps3 + 1.0:.3f}",
+                             "-i", path])
         return key
 
     # -- report hooks ----------------------------------------------------
@@ -1276,6 +1463,19 @@ class _Emit:
             self.p.append(f"[{pics.pop()}]trim=start_frame={fr}:end_frame="
                           f"{fr + 1},loop=loop={self.n - 1}:size=1:start=0,"
                           f"{self.restamp}[{out}]")
+            return out
+        if kind == "main":
+            lab = self.ctx.input_label(src["key"])
+            if lab is None:
+                raise RuntimeError("a main-video plate was never bound")
+            tail = (f"trim=end_frame=1,loop=loop={self.n - 1}:size=1:start=0"
+                    if src.get("freeze") else
+                    f"tpad=stop={self.n}:stop_mode=clone,"
+                    f"trim=end_frame={self.n}")
+            self.p.append(
+                f"[{lab}]fps={self.F:.3f},format=yuv420p,{src['fit']},"
+                f"setsar=1,format=yuv420p,{self.restamp},{tail},"
+                f"{self.restamp}[{out}]")
             return out
         if kind == "input":
             lab = self.ctx.input_label(src["key"])

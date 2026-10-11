@@ -76,17 +76,19 @@ C = subject_fx.COMPILER
 def test_without_a_matte_each_kind_takes_its_substitute(tmp_path,
                                                         monkeypatch, item,
                                                         want):
-    _matte(monkeypatch, "absent")
+    calls = _matte(monkeypatch, "absent")
     plan = _plan(tmp_path)
     got = C.prepare(plan, item)
     assert got[0] == want[0], got
     if want[1]:
         assert subject_fx._state(plan)[item["id"]]["substitute"] == want[1]
         assert want[1] in got[1]
-    assert plan.matte_requests == {}         # no matte asked for
+    # the window is still ASKED for: the render that may launch sidecars
+    # measures it, so the next render draws the real device (§1.7)
+    assert calls == [(item["id"], "person", "world")]
 
 
-def test_the_resolvers_substitute_is_drawn_without_asking_the_matte(
+def test_the_resolvers_substitute_is_drawn_and_its_window_asked_for(
         tmp_path, monkeypatch):
     calls = _matte(monkeypatch, "ready")
     plan = _plan(tmp_path)
@@ -94,7 +96,36 @@ def test_the_resolvers_substitute_is_drawn_without_asking_the_matte(
                          "full_frame_flash", "params": {"intensity": 0.6}}
     assert C.prepare(plan, _sx()) is None    # keeps the resolver's reason
     assert subject_fx._state(plan)["a"]["mode"] == "substitute"
-    assert calls == []
+    assert calls == [("a", "person", "world")]
+
+
+def test_the_matte_is_asked_for_before_its_answer_is_read(tmp_path,
+                                                          monkeypatch):
+    """Track 1A's program matte answers for the windows ASKED so far
+    (matte_track.ProgramMatte.info): read before this item's request, it
+    says "no window asked" (every item took its substitute when merged
+    with 1A), or describes another item's window."""
+    wants = []
+
+    def info(plan, label="person"):
+        if not wants:
+            return {"label": label, "status": "absent", "source": None,
+                    "reason": "no window asked for the matte",
+                    "windows": [], "qa": {}}
+        return {"label": label, "status": "ready", "source": "rvm",
+                "reason": "measured", "qa": {},
+                "windows": [{"t0": a, "t1": b, "status": "ready",
+                             "ok": True} for a, b in wants]}
+
+    def request(plan, item, label="person", space="world"):
+        wants.append((float(item["start"]), float(item["end"])))
+        return info(plan, label)
+    monkeypatch.setattr(fxgraph, "matte_info", info)
+    monkeypatch.setattr(fxgraph, "request_matte", request)
+    plan = _plan(tmp_path)
+    assert C.prepare(plan, _sx()) is None
+    assert subject_fx._state(plan)["a"]["mode"] == "full"
+    assert wants == [(1.0, 2.0)]
 
 
 def test_a_ready_matte_is_requested_in_the_items_space(tmp_path,
@@ -328,3 +359,126 @@ def test_the_plan_edl_is_read_from_fxgraph_prepare(tmp_path, monkeypatch):
     fxgraph.prepare(edl, tl=Timeline([[0.0, 6.0]]), W=270, H=480, fps=25.0,
                     preview=True, workdir=str(tmp_path))
     assert seen["edl"]["captions"]["style"]["highlight_color"] == "#00ff88"
+
+
+# ── time-shifted branches stay bounded (review) ─────────────────────────
+
+def test_a_cut_away_source_second_is_read_from_the_main_video(tmp_path,
+                                                             monkeypatch):
+    """`source` = the main video from that source second (another shot):
+    footage the program does not play is read from the render's main video
+    (its own input), framed like the picture."""
+    _matte(monkeypatch)
+    plan = _plan(tmp_path, keep=((2.0, 8.0),))
+    plan.media = {"src_path": "/x/main.mp4"}
+    assert C.prepare(plan, _bg(kind="source", source={
+        "kind": "source", "src_t": 0.5})) is None
+    (src,) = subject_fx._state(plan)["b"]["sources"]
+    assert src["kind"] == "main" and not src["freeze"]
+    args = dict(plan.inputs)[src["key"]]
+    assert args[:2] == ["-ss", "0.500"] and args[-2:] == ["-i", "/x/main.mp4"]
+    assert "crop=270:480" in src["fit"]
+
+
+def test_a_plate_far_ahead_is_never_queued_in_the_graph(tmp_path,
+                                                        monkeypatch):
+    """A plate from program frames far AHEAD makes split queue every frame
+    up to it (+1.3 GB for 17 s at 1080x1920, measured): past the read-ahead
+    budget it comes from the main video, or is dropped without one."""
+    _matte(monkeypatch)
+    plan = _plan(tmp_path, program_s=60.0, keep=((0.0, 60.0),))
+    far = _bg(kind="source", source={"kind": "program", "offset_s": 40.0})
+    near = _bg("n", kind="source", source={"kind": "program",
+                                           "offset_s": 1.0})
+    rung, why = C.prepare(plan, far)
+    assert rung == "omit" and "away" in why
+    assert C.prepare(plan, near) is None
+    assert subject_fx._state(plan)["n"]["sources"] == [
+        {"kind": "program", "from": 50}]
+    # from the PAST a long plate holds its own frames until its window
+    # starts (+1.36 GB for 10 s from 11 s earlier, measured)
+    past = _bg("p", kind="source", start=40.0, end=50.0,
+               source={"kind": "program", "offset_s": -30.0})
+    rung, why = C.prepare(plan, past)
+    assert rung == "omit" and "away" in why
+    short = _bg("q", kind="source", start=40.0, end=40.5,
+                source={"kind": "program", "offset_s": -30.0})
+    assert C.prepare(plan, short) is None          # 13 frames: in the graph
+    plan.media = {"src_path": "/x/main.mp4"}
+    plan.__dict__.pop("_w1b_env", None)
+    assert C.prepare(plan, far) is None
+    (src,) = subject_fx._state(plan)["b"]["sources"]
+    assert src["kind"] == "main"
+    assert dict(plan.inputs)[src["key"]][:2] == ["-ss", "41.000"]
+    assert C.prepare(plan, past) is None
+    (src,) = subject_fx._state(plan)["p"]["sources"]
+    assert src["kind"] == "main"
+    assert dict(plan.inputs)[src["key"]][:2] == ["-ss", "10.000"]
+
+
+def test_echo_copies_beyond_the_buffer_budget_are_left_out(tmp_path,
+                                                           monkeypatch):
+    """Copy k queues k frames (offsets 30..240 held +3 GB at 1080x1920,
+    measured): the nearest copies within ECHO_BUFFER_BUDGET_MB are drawn,
+    the same on every lane."""
+    _matte(monkeypatch)
+    cap = subject_fx.budget_frames(subject_fx.ECHO_BUFFER_BUDGET_MB,
+                                   subject_fx.QUEUED_BYTES_PER_PX)
+    offs = [30, 60, 90, 120, 150, 180, 210, 240]
+    for W, H in ((270, 480), (1080, 1920)):
+        plan = _plan(tmp_path, W=W, H=H)
+        rung, why = C.prepare(plan, _sx(kind="echo", echo={
+            "mode": "trail", "offsets_f": offs}))
+        kept = subject_fx._state(plan)["a"]["offsets"]
+        assert rung == "reduced" and "left out" in why
+        assert kept == offs[:len(kept)] and sum(kept) <= cap < sum(
+            offs[:len(kept) + 1])
+    plan = _plan(tmp_path)
+    assert C.prepare(plan, _sx(kind="echo", echo={"offsets_f": [4, 8]})) \
+        is None
+
+
+def test_a_held_frame_survives_dropped_plates_and_stays_bounded(
+        tmp_path, monkeypatch):
+    _matte(monkeypatch)
+    plan = _plan(tmp_path, keep=((2.0, 8.0),))
+    rung, why = C.prepare(plan, _bg(kind="strobe", hold_subject=True,
+                                    hold_t=0.9, sources=[
+                                        {"kind": "source", "src_t": 0.5},
+                                        {"kind": "colour",
+                                         "colour": "white"}]))
+    assert rung == "reduced" and "dropped" in why
+    assert subject_fx._state(plan)["b"]["hold"] == fxprims.frame_at(0.9,
+                                                                    25.0)
+    plan = _plan(tmp_path, program_s=60.0, keep=((0.0, 60.0),))
+    rung, why = C.prepare(plan, _bg(hold_subject=True, hold_t=50.0))
+    assert rung == "reduced" and "held on the window's first frame" in why
+    assert subject_fx._state(plan)["b"]["hold"] == 25
+
+
+def test_main_video_plates_compile_to_closed_declared_composites(
+        tmp_path, monkeypatch):
+    _matte(monkeypatch)
+    plan = _plan(tmp_path, keep=((2.0, 8.0),))
+    plan.media = {"src_path": "/x/main.mp4"}
+    items = [_bg("m", kind="source", source={"kind": "source",
+                                             "src_t": 0.5}),
+             _bg("s", kind="strobe", start=3.0, end=4.0, sources=[
+                 {"kind": "source", "src_t": 0.2},
+                 {"kind": "colour", "colour": "white"}])]
+    for it in items:
+        assert C.prepare(plan, it) is None, it["id"]
+        plan._compilers[it["type"]] = C
+        plan.by_stage["world"].append(it)
+    plan.bind_inputs([], 1)
+    parts = []
+    out = C.stage(fxgraph.StageCtx(plan, "world", parts, "v0"),
+                  plan.by_stage["world"])
+    assert _names(parts) <= set(subject_fx.FILTERS)
+    made, used = [], []
+    for p in parts:
+        m = re.match(r"^((?:\[[^\]]+\])*)(.*?)((?:\[[^\]]+\])*)$", p, re.S)
+        used += re.findall(r"\[([^\]]+)\]", m.group(1))
+        made += re.findall(r"\[([^\]]+)\]", m.group(3))
+    assert set(made) - set(used) == {out}
+    assert used.count("v0") == 1
