@@ -4788,31 +4788,52 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # Motion graphics on layer='behind_subject' use the very same composite:
     # their entry carries {"motion": (clip_input, item, clip)} instead of an
     # ASS file, and the clip is overlaid on the copy where the words burn.
-    n_prog = fxgraph.fxprims.frame_at(tl.out_duration, fps)
-
-    def _pm_window(j, win, space):
+    def _pm_window(j, win, space, seg):
         """The program matte (``space``) over one item's window, black
-        (inert) everywhere else, the whole programme long: the shape the
-        stored masks have always had here. None: no matte on this render."""
+        (inert) on the rest of ``seg`` = [a, b) program frames — the frames
+        the item's composite runs on, stamped where they sit in the
+        program. None: no matte on this render."""
         pad = pm.pad(space, "person") if pm is not None else None
         if pad is None:
             return None
         f0, f1 = fxgraph.fxprims.frame_span(win[0], win[1], fps)
-        stop = max(0, n_prog - f1) + int(round(fps)) + 2
+        a, b = seg
         # the composite's own edge: a pixel or two inside the subject's
         # contour, so no sliver of the wall behind the subject is laid
         # over the type (matte_track.behind_inset)
         shrink = matte_track.behind_inset(H)
         parts.append(f"[{pad}]trim=start_frame={f0}:end_frame={f1},"
                      f"setpts=PTS-STARTPTS{shrink},"
-                     f"tpad=start={f0}:stop={stop}:"
+                     f"tpad=start={f0 - a}:stop={max(0, b - f1) + 2}:"
                      "start_mode=add:stop_mode=add:color=black,"
                      # rounded, never truncated: N/fps/TB on a 1/fps
                      # link is 56.999... for N = 57 at 25 fps, and a
                      # truncated stamp pairs the frame one early
-                     f"setpts='floor(N/{fxgraph.fxprims.fps3(fps):.3f}"
+                     f"setpts='floor((N+{a})/{fxgraph.fxprims.fps3(fps):.3f}"
                      f"/TB+0.5)',format=gray[bhm{j}]")
         return f"bhm{j}"
+
+    def _pm_composite(j, vlabel, item, win, space):
+        """One program-matte item composited behind the subject ON ITS OWN
+        FRAMES: the picture's window (two frames either side) is split off
+        with its timestamps, composited there (motion_layer.composite_behind,
+        the seam 1C extends) and laid back over the untouched picture — the
+        rest of the programme passes through without a mask, an alphamerge
+        or an overlay pass of its own. None: no matte on this render."""
+        f0, f1 = fxgraph.fxprims.frame_span(win[0], win[1], fps)
+        seg = (max(0, f0 - 2), f1 + 2)
+        mask = _pm_window(j, win, space, seg)
+        if mask is None:
+            return None
+        parts.append(f"[{vlabel}]split[pcf{j}][pcs{j}]")
+        parts.append(f"[pcs{j}]trim=start_frame={seg[0]}:"
+                     f"end_frame={seg[1]}[pcw{j}]")
+        comp = motion_layer.composite_behind(
+            parts, f"pcw{j}", mask, j, fps=fps, motion=item.get("motion"),
+            ass_path=item.get("ass"), fonts_dir=caplib.FONTS_DIR,
+            plan=fx_plan)
+        parts.append(f"[pcf{j}][{comp}]overlay=0:0:eof_action=pass[pco{j}]")
+        return f"pco{j}"
 
     def _in_front(j, vlabel, item):
         """A program-matte item this render cannot set behind (the fx
@@ -4845,14 +4866,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             if item.get("stage") == "screen":
                 screen_behind.append((j, item, win))
                 continue
-            mask = _pm_window(j, win, "world")
-            if mask is None:
-                vlabel = _in_front(j, vlabel, item)
-                continue
-            vlabel = motion_layer.composite_behind(
-                parts, vlabel, mask, j, fps=fps, motion=item.get("motion"),
-                ass_path=item.get("ass"), fonts_dir=caplib.FONTS_DIR,
-                plan=fx_plan)
+            out = _pm_composite(j, vlabel, item, win, "world")
+            vlabel = out if out is not None else _in_front(j, vlabel, item)
             continue
         b_start, b_end = win
         b_dur = max(0.05, b_end - b_start)
@@ -5014,14 +5029,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # screen-space matte, so a push the user asked for moves the picture
     # and the subject while the type holds still (ROADMAP AT-1A-3).
     for j, item, win in screen_behind:
-        mask = _pm_window(j, win, "screen")
-        if mask is None:
-            vlabel = _in_front(j, vlabel, item)
-            continue
-        vlabel = motion_layer.composite_behind(
-            parts, vlabel, mask, j, fps=fps, motion=item.get("motion"),
-            ass_path=item.get("ass"), fonts_dir=caplib.FONTS_DIR,
-            plan=fx_plan)
+        out = _pm_composite(j, vlabel, item, win, "screen")
+        vlabel = out if out is not None else _in_front(j, vlabel, item)
     # ---- screen takeovers (round 55): content pinned INTO the footage ----
     # Emitted after the zoom because the corner path is written in POST-push
     # screen space, and before the PIP overlays because a takeover is the
