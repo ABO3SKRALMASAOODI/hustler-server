@@ -1083,8 +1083,12 @@ YUNET_MODEL = os.getenv(
 # cascade samples. Off until AT-0A-4 is accepted; the round lead flips it.
 YUNET_KEEPOUT = os.getenv("YUNET_KEEPOUT", "0") == "1"
 # Shared tier of the motion-graphic clip cache (worker/clip_store.py,
-# R2 prefix motion-clips/). Best effort; off only for diagnosis.
-CLIP_STORE_ENABLED = os.getenv("CLIP_STORE_ENABLED", "1") == "1"
+# R2 prefix motion-clips/). Best effort. OFF by default until the bucket has
+# its 90-day lifecycle rule for motion-clips/ and sidecars/ (WAVE0_RELEASE
+# §5; `wrangler r2 bucket lifecycle add`, never `set`): without it shared
+# clips (~4 MB each) grow storage with no bound and outlive project and
+# account deletion. Set CLIP_STORE_ENABLED=1 on the lanes once the rule is in.
+CLIP_STORE_ENABLED = os.getenv("CLIP_STORE_ENABLED", "0") == "1"
 CLIP_STORE_DIR = os.getenv("VALMERA_CLIP_STORE_DIR", "").strip()
 CLIP_STORE_MAX_BYTES = int(float(os.getenv(
     "CLIP_STORE_MAX_BYTES", str(256 * 1024 * 1024))))
