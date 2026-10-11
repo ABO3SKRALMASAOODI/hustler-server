@@ -48,6 +48,11 @@ _CHANGEABLE_TOP = ("texts", "vectors", "patches", "overlays", "motion")
 _CHANGEABLE_FX = ("zooms", "regions", "custom", "picture_cards")
 
 _PAD_S = 0.5
+# EDL.fx (Wave 0 seams): picture-stage and junction items are video-local
+# windows; music_bus items shape the sound and stay structural (a stitched
+# preview keeps the previous preview's audio). A junction item's window is
+# its cut plus at least this much each side (_fx_window).
+_FX_JUNCTION_PAD_S = 1.0
 # A zoom edge within camera.CUT_HOLD_FRAMES of a cut is moved onto it
 # (camera.hold_through_cuts), and a piece's own end counts as a cut. A zoom
 # is therefore contained with this much room on both sides: the cut it may
@@ -72,11 +77,34 @@ def _canon(v):
     return v
 
 
+def _fx_video(items):
+    return [i for i in items or [] if isinstance(i, dict)
+            and i.get("stage") != "music_bus"]
+
+
+def _fx_window(item):
+    """(a, b) program span an fx video item can touch."""
+    if item.get("stage") == "junction":
+        at = float(item.get("at") or 0.0)
+        # fxgraph caps a junction's half-window at half the shorter shot:
+        # a piece must hold 2h frames of each shot for the same window.
+        pad = max(_FX_JUNCTION_PAD_S,
+                  2.0 * float(item.get("frames") or 0) / 24.0 + 0.1,
+                  float(item.get("duration_s") or 0.0) + 0.1)
+        return max(0.0, at - pad), at + pad
+    return float(item["start"]), float(item["end"])
+
+
 def _strip(edl):
     """(structural-dump, changeable-dump) for comparison."""
     e = json.loads(json.dumps(edl or {}))
     fx = e.get("effects") or {}
+    fx_items = e.pop("fx", None) or []
+    bus = [i for i in fx_items if i not in _fx_video(fx_items)]
+    if bus:
+        e["fx"] = bus
     changeable = {k: e.pop(k, None) for k in _CHANGEABLE_TOP}
+    changeable["fx"] = _fx_video(fx_items) or None
     for k in _CHANGEABLE_FX:
         changeable[k] = fx.pop(k, None) if isinstance(fx, dict) else None
     e["effects"] = fx
@@ -130,6 +158,9 @@ def _item_windows(edl, tl, duration):
     for c in (fx.get("custom") or []):
         if c.get("start") is not None:
             out.append((float(c["start"]), float(c["end"]), "custom"))
+    for it in _fx_video(edl.get("fx")):
+        a, b = _fx_window(it)
+        out.append((a, min(b, duration) if duration else b, "fx"))
     return out
 
 
@@ -145,7 +176,8 @@ def _canon_items(edl):
                          ("zooms", fx.get("zooms")),
                          ("regions", fx.get("regions")),
                          ("picture_cards", fx.get("picture_cards")),
-                         ("custom", fx.get("custom"))):
+                         ("custom", fx.get("custom")),
+                         ("fx", _fx_video(edl.get("fx")))):
         d = {}
         for i, it in enumerate(items or []):
             d[it.get("id") or f"#{i}"] = json.dumps(it, sort_keys=True)
@@ -202,11 +234,14 @@ def plan(prev_edl, new_edl, tl_prev, tl_new, duration, out_duration):
                    "regions": fx.get("regions"),
                    "picture_cards": fx.get("picture_cards"),
                    "motion": edl.get("motion"),
-                   "custom": fx.get("custom")}.get(l) or []
+                   "custom": fx.get("custom"),
+                   "fx": _fx_video(edl.get("fx"))}.get(l) or []
             for idx, it in enumerate(src):
                 if (it.get("id") or f"#{idx}") != i:
                     continue
-                if l == "patches":
+                if l == "fx":
+                    spans_old[(l, i)].append(_fx_window(it))
+                elif l == "patches":
                     spans_old[(l, i)] += [
                         (a, b) for a, b in tl.span_to_out(
                             float(it["src_start"]), float(it["src_end"]))]
@@ -608,13 +643,61 @@ def _clip_program_zooms(items, w0, w1):
     return out
 
 
-def window_edl(edl, tl, w0, w1, keep_audio=False):
+def _window_fx(items, w0, w1, fps, music_ids):
+    """EDL.fx items rebased onto a piece's own clock [0, w1 - w0).
+
+    With the render rate known, picture windows are rebased through FRAMES —
+    local frame = program frame - the piece's first frame — and written back
+    on the 0.01 s grid, which names a frame exactly up to 100 fps: a 1-frame
+    item lands on the same picture in the piece as in the full render.
+    Junction items survive when their cut is inside the piece; music_bus
+    items when their music item does."""
+    out = []
+    span = round(w1 - w0, 6)
+    if fps:
+        f3 = round(float(fps), 3)
+        base = math.floor(w0 * f3 + 0.5 + 1e-9)
+
+        def local(t):
+            return round((math.floor(float(t) * f3 + 0.5 + 1e-9) - base)
+                         / f3, 2)
+    else:
+        def local(t):
+            return round(float(t) - w0, 2)
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        stage = it.get("stage")
+        if stage == "music_bus":
+            if it.get("music_id") in music_ids:
+                out.append(dict(it))
+            continue
+        if stage == "junction":
+            at = float(it.get("at") or 0.0)
+            if w0 + 0.05 < at < w1 - 0.05:
+                out.append({**it, "at": max(0.0, local(at))})
+            continue
+        a, b = float(it["start"]), float(it["end"])
+        if b <= w0 + 1e-6 or a >= w1 - 1e-6:
+            continue
+        la, lb = max(0.0, local(max(a, w0))), min(local(min(b, w1)),
+                                                   round(span, 2))
+        if lb - la < 0.01 - 1e-9:
+            continue
+        out.append({**it, "start": la, "end": lb})
+    return out
+
+
+def window_edl(edl, tl, w0, w1, keep_audio=False, fps=None):
     """The EDL that renders output [w0, w1] of `edl`, standalone.
 
     Full-preview stitching calls this with windows expand() grew to contain
     every intersecting element.  Changed-section proofs can subsequently
     clamp that expansion to their physical render budget, so text/vector and
-    overlay items also support safe boundary clipping here."""
+    overlay items also support safe boundary clipping here.
+
+    fps: the render rate, when known — EDL.fx windows are then rebased
+    frame-exactly (_window_fx)."""
     e = json.loads(json.dumps(edl))
     keep, speed = [], []
     for (s0, s1), pcs, off, L in zip(tl.segs, tl.pieces, tl.offsets,
@@ -882,6 +965,9 @@ def window_edl(edl, tl, w0, w1, keep_audio=False):
     else:
         e["music"], e["sfx"], e["voiceover"] = [], [], []
     e["effects"] = fx
+    if e.get("fx"):
+        e["fx"] = _window_fx(e["fx"], w0, w1, fps,
+                             {m.get("id") for m in e.get("music") or []})
     return e
 
 
@@ -1058,7 +1144,9 @@ def _strip_timeline(edl):
     """Structural dump with the timeline (keep/speed) and the audio layers
     removed as well — what MUST still be equal for timeline mode."""
     s, _changeable = _strip(edl)
-    for k in ("keep", "speed", "inserts", "captions", "caption_mutes") + AUDIO_FIELDS:
+    # "fx" here holds only music_bus items: sound, rebuilt with the audio.
+    for k in ("keep", "speed", "inserts", "captions", "caption_mutes",
+              "fx") + AUDIO_FIELDS:
         s.pop(k, None)
     return s
 
@@ -1167,6 +1255,9 @@ def carve_runs(runs, spans):
 
 
 def _out_spans_of_item(layer, it, tl, out_duration):
+    if layer == "fx":
+        a, b = _fx_window(it)
+        return [(a, min(b, out_duration))]
     if layer == "patches":
         return list(tl.span_to_out(float(it["src_start"]),
                                    float(it["src_end"])))
@@ -1301,6 +1392,8 @@ def plan_timeline(prev_edl, new_edl, tl_prev, tl_new, out_duration,
     for st in (fx.get("stylize") or []):
         if st.get("start") is not None:
             anchored.append((float(st["start"]), float(st["end"])))
+    for it in _fx_video(new_edl.get("fx")):
+        anchored.append(_fx_window(it))
     for a, b in anchored:
         for ra, rb, rd in shifted:
             lo, hi = max(a, ra), min(b, rb)

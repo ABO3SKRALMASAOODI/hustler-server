@@ -37,9 +37,17 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+import clip_store
+import faultinject
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 MOTION_DIR = os.path.join(HERE, "motion")
 TEMPLATES_DIR = os.path.join(MOTION_DIR, "templates")
+# Shared page libraries (Wave 0 seam, track 0B): every motion/lib/*.js is
+# appended to the runtime in name order — so to every document and every
+# clip cache key. Device tracks add a file here (1C: paint.js); nobody edits
+# runtime.js for a library.
+LIB_DIR = os.path.join(MOTION_DIR, "lib")
 FONTS_DIR = os.path.join(HERE, "fonts")
 
 # Bump when runtime.js, the document wrapper or capture semantics change:
@@ -328,14 +336,28 @@ def strip_line_comments(src):
     return "\n".join(out)
 
 
+def _lib_files():
+    try:
+        names = sorted(n for n in os.listdir(LIB_DIR) if n.endswith(".js"))
+    except OSError:
+        return []
+    return [os.path.join(LIB_DIR, n) for n in names]
+
+
 def _runtime_js():
+    """runtime.js, then every motion/lib/*.js in name order, comments
+    stripped. With no library files this is runtime.js exactly as before."""
     path = os.path.join(MOTION_DIR, "runtime.js")
-    st = os.stat(path)
-    key = (path, st.st_mtime_ns, st.st_size)
+    files = [path] + _lib_files()
+    key = tuple((p, st.st_mtime_ns, st.st_size)
+                for p, st in ((p, os.stat(p)) for p in files))
     if key not in _RUNTIME_CACHE:
-        with open(path, "r", encoding="utf-8") as f:
-            _RUNTIME_CACHE.clear()
-            _RUNTIME_CACHE[key] = strip_line_comments(f.read())
+        chunks = []
+        for p in files:
+            with open(p, "r", encoding="utf-8") as f:
+                chunks.append(strip_line_comments(f.read()))
+        _RUNTIME_CACHE.clear()
+        _RUNTIME_CACHE[key] = "\n".join(chunks)
     return _RUNTIME_CACHE[key]
 
 
@@ -363,8 +385,74 @@ def design_size(width, height):
     return w, h
 
 
+# params._beats (Wave 0 seam, track 0B): a rhythm the page can move on,
+# in COMPOSITION seconds — {"t": beats, "down": downbeats, "on": [[t, cls,
+# strength], ...], "src": "music" | "speech"}. Bounded so a dense map never
+# pushes a composition over MAX_HTML_BYTES.
+BEATS_MAX = 512
+
+
+def _beat_list(values, lo, hi):
+    out = []
+    for v in values or []:
+        try:
+            t = float(v)
+        except (TypeError, ValueError):
+            continue
+        if lo - 1e-6 <= t <= hi + 1e-6:
+            out.append(round(t, 3))
+    return sorted(set(out))[:BEATS_MAX]
+
+
+def normalize_beats(beats, duration):
+    """The ``_beats`` param from a loose description: sorted, deduplicated,
+    inside [0, duration], at most BEATS_MAX per list. None or empty: None."""
+    if not beats:
+        return None
+    hi = max(0.0, float(duration or 0.0))
+    if isinstance(beats, (list, tuple)):
+        beats = {"t": beats}
+    out = {"t": _beat_list(beats.get("t"), 0.0, hi),
+           "down": _beat_list(beats.get("down"), 0.0, hi)}
+    ons = []
+    for o in beats.get("on") or []:
+        try:
+            t, cls, st = float(o[0]), str(o[1])[:12], float(o[2])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if -1e-6 <= t <= hi + 1e-6:
+            ons.append([round(t, 3), cls, round(max(0.0, min(1.0, st)), 2)])
+    out["on"] = sorted(ons)[:BEATS_MAX]
+    if beats.get("src") in ("music", "speech"):
+        out["src"] = beats["src"]
+    if not (out["t"] or out["down"] or out["on"]):
+        return None
+    return out
+
+
+def beats_param(rhythm, *, start, end, phase=0.0, full_duration=None):
+    """``_beats`` for a motion item at program [start, end) from a
+    PROGRAM-clock RhythmMap (rhythm_types.to_program): every time moved to the
+    item's composition clock (program t -> t - start + phase)."""
+    if not rhythm:
+        return None
+    shift = float(phase or 0.0) - float(start)
+    dur = float(full_duration or (float(end) - float(start) + float(phase or 0.0)))
+
+    def mv(ts):
+        return [float(t) + shift for t in ts or []
+                if float(start) - 1e-6 <= float(t) < float(end) + 1e-6]
+    return normalize_beats({
+        "t": mv(rhythm.get("beats")), "down": mv(rhythm.get("downbeats")),
+        "on": [[float(o["t"]) + shift, o.get("cls", ""), o.get("strength", 0)]
+               for o in rhythm.get("onsets") or []
+               if float(start) - 1e-6 <= float(o["t"]) < float(end) + 1e-6],
+        "src": rhythm.get("source")}, dur)
+
+
 def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
-                   design_w=DESIGN_W, design_h=1920, plate=None, yields=None):
+                   design_w=DESIGN_W, design_h=1920, plate=None, yields=None,
+                   beats=None):
     """Wrap template/authored HTML with fonts, the runtime and its inputs.
 
     plate: the measured program picture under the item (worker/plate.py),
@@ -375,7 +463,14 @@ def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
     yields: a persistent graphic's hand-over windows (worker/motion_layer.
     yield_windows), {w: [[a, b], ...], out, in} in composition seconds,
     exposed as MG.yields — the runtime fades the whole page out before each
-    window and back after it. None (every other item) adds nothing."""
+    window and back after it. None (every other item) adds nothing.
+
+    beats: the item's rhythm (``beats_param`` / ``normalize_beats``), exposed
+    as MG.params._beats and read through MG.beats (motion/lib/beats.js).
+    None leaves the document exactly as it was."""
+    beats = normalize_beats(beats, duration)
+    if beats:
+        params = dict(params or {}, _beats=beats)
     init = {"params": params or {}, "theme": theme or {}, "duration": float(duration),
             "fps": float(fps), "W": int(design_w), "H": int(design_h)}
     if plate:
@@ -520,6 +615,10 @@ def _even_box(x0, y0, x1, y1, W, H):
 
 
 def _cache_get(key):
+    """(local .mov, meta) from the container-local LRU, else from the shared
+    content-addressed store (clip_store, R2) — a cold container renders a
+    warm project's graphics without starting Chromium (AT-0A-2) — else None.
+    Never raises."""
     path = os.path.join(CACHE_DIR, key + ".mov")
     meta = os.path.join(CACHE_DIR, key + ".json")
     if os.path.exists(path) and os.path.exists(meta):
@@ -530,7 +629,45 @@ def _cache_get(key):
             return path, m
         except Exception:
             return None
-    return None
+    return _shared_get(key)
+
+
+def _shared_get(key):
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        got = clip_store.get(key, CACHE_DIR)
+        if not got:
+            return None
+        mov, m = got
+        if not mov or not os.path.exists(mov) or not isinstance(m, dict) \
+                or not all(k in m for k in ("x", "y", "w", "h", "frames")):
+            return None
+        dst = os.path.join(CACHE_DIR, key + ".mov")
+        if os.path.abspath(mov) != os.path.abspath(dst):
+            tmp = dst + f".{os.getpid()}.{threading.get_ident()}.tmp"
+            shutil.copyfile(mov, tmp)
+            os.replace(tmp, dst)
+        with open(os.path.join(CACHE_DIR, key + ".json"), "w") as f:
+            json.dump(m, f)
+        return dst, m
+    except Exception:
+        return None
+
+
+def _shared_put(key, path, meta):
+    """Hand a fresh clip to the shared store on a daemon thread: the upload
+    never holds up the render that made the clip (best effort, never raises).
+    The file is the LRU's own copy, which outlives the render's workdir."""
+    def run():
+        try:
+            clip_store.put(key, path, dict(meta))
+        except Exception:
+            pass
+    try:
+        threading.Thread(target=run, daemon=True,
+                         name=f"clip-store-{key[:8]}").start()
+    except Exception:
+        pass
 
 
 def _cache_put(key, src, meta):
@@ -544,7 +681,8 @@ def _cache_put(key, src, meta):
             json.dump(meta, f)
         _cache_prune()
     except Exception:
-        pass
+        return
+    _shared_put(key, dst, meta)
 
 
 def _cache_prune():
@@ -595,6 +733,11 @@ async def _route_factory(job):
 
 async def _render_one(browser, job, out_path, deadline):
     t_start = time.monotonic()
+    # Fault injection (INTERFACES.md §6.2): this item's page dies, exactly
+    # as a Chromium crash surfaces here — an error out of the page call.
+    if faultinject.fault(f"chromium_crash:{job.label}"):
+        raise RuntimeError(f"{job.label}: Target crashed (injected "
+                           "chromium_crash)")
     dw, dh = design_size(job.out_w, job.out_h)
     scale = float(job.out_w) / float(dw)
     W, H = int(job.out_w), int(job.out_h)

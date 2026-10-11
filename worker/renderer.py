@@ -35,6 +35,7 @@ import execution_inputs
 import db as dbx
 import dialogue_level
 import follow
+import fxgraph
 import gradelut
 import graphics
 import media
@@ -52,7 +53,8 @@ import timeline as timeline_mod
 import travel
 from schemas import (clean_fingerprint, patch_fingerprint, EDLValidationError,
                      is_canvas_program, keep_boundaries, master_loudness,
-                     quad_bbox, speed_pieces, subject_matte_geom, validate_edl)
+                     quad_bbox, speed_pieces, strip_unknown_fx,
+                     subject_matte_geom, validate_edl)
 from timeline import Timeline, merge_spans, transition_junctions
 
 DUCK_DB = -12.0            # music under speech AND program audio under voiceover
@@ -2803,6 +2805,78 @@ def _render_junctions(edl, index, blk_tags):
             if groups[k] != groups[k + 1] and groups[k] in real}
 
 
+def _fx_picture_stage(stage, parts, vlabel, fx_plan, card_runs, fps):
+    """fxgraph.apply_stage for a stage UPSTREAM of the picture cards: when a
+    source-fed card exists its frames must keep their layout tags, so the
+    stage is wrapped like stylize is (_keep_layout_tags). No items: no
+    filters, ``vlabel`` unchanged."""
+    mark = len(parts)
+    out = fxgraph.apply_stage(stage, parts, vlabel, fx_plan)
+    if out != vlabel and card_runs:
+        out = _keep_layout_tags(parts, mark, vlabel, out, f"fx{stage[0]}",
+                                fps)
+    return out
+
+
+def _fx_cuts(order, keep, edl_keep, blk_frames):
+    """[(k, cut_frame, frames_before, frames_after)] for every real cut
+    between render blocks k and k+1 on the block clock. Pieces of one kept
+    span (focus, follow or card splits) are not cuts."""
+    if not blk_frames:
+        return []
+    ek = [(float(a), float(b)) for a, b in edl_keep or []]
+
+    def origin(kind, idx):
+        if kind != "seg":
+            return ("ins", idx)
+        s_, e_ = keep[idx]
+        for j, (a, b) in enumerate(ek):
+            if a - 1e-6 <= s_ and e_ <= b + 1e-6:
+                return ("seg", j)
+        return ("local", s_)
+
+    cuts, acc = [], 0
+    for k in range(len(order) - 1):
+        ka, ia, _l = order[k]
+        kb, ib, _l = order[k + 1]
+        na, nb = blk_frames.get((ka, ia)), blk_frames.get((kb, ib))
+        if na is None or nb is None:
+            return []
+        acc += na
+        oa, ob = origin(ka, ia), origin(kb, ib)
+        if oa == ob and oa[0] == "seg":
+            continue
+        cuts.append((k, acc, na, nb))
+    return cuts
+
+
+def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
+                   card_layout, src_dur):
+    """Where a junction side's source handle comes from: the main footage
+    past a plain kept span's out-point (side "out") or before its in-point
+    ("in") — or None (the edge frame is frozen): an insert, a card block, a
+    sped / censored / repainted / padded program, or no footage there. The
+    in-side floor is a second before the first kept span (the main input may
+    seek there)."""
+    kind, idx, _l = entry
+    if kind != "seg" or no_source or idx in card_layout:
+        return None
+    f3 = round(float(fps), 3)
+    s_, _e = (float(v) for v in keep[idx])
+    nf = blk_frames.get((kind, idx))
+    if nf is None:
+        return None
+    if side == "out":
+        if s_ + (nf + h) / f3 > float(src_dur) + 1e-3:
+            return None
+        return {"seg": idx, "frames": nf}
+    start = s_ - h / f3
+    floor = max(0.0, min(float(a) for a, _b in keep) - 1.0)
+    if start < floor - 1e-6:
+        return None
+    return {"seg": idx, "start": round(start, 6)}
+
+
 def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       music_inputs, index, preview,
                       W=None, H=None, fps=30.0, frame_mode=None,
@@ -2820,7 +2894,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       picture_card_inputs=None, main_video_inputs=None,
                       loudness="auto", dialogue_gain=None,
                       dialogue_probe=False, focus_origin=None,
-                      program_edges=None):
+                      program_edges=None, fx_plan=None):
     """Input layout: [0] main source video; anullsrc at silence_idx when
     needed (no main audio, image inserts, or silent clip inserts); then one
     input per music item, insert item and voiceover item in EDL order.
@@ -2852,6 +2926,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     program_edges: (head, tail) — does this graph hold the programme's TRUE
     start / end? Those edges get the de-click fades (edge_fades). None (a
     bare graph, a stitched piece) adds none.
+    fx_plan: fxgraph.prepare's plan for the EDL's fx items (Wave 0 seams,
+    INTERFACES.md §4.4). None or an empty plan emits the exact legacy graph:
+    every stage hook appends nothing when it has no items.
     """
     # The program clock is the picture clock. Music can remain parked beyond
     # this boundary in the EDL, but its temporary render window is clamped.
@@ -3074,7 +3151,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                or bool(shifts) or screen_frame is not None
                or bool(fx.get("picture_cards"))
                or bool(behind_inputs)
-               or any(s.get("kind") == "shake" for s in stylize))
+               or any(s.get("kind") == "shake" for s in stylize)
+               # fx windows address program frames (enable on n): the
+               # program must run on the normalized block clock
+               or bool(fx_plan is not None and fx_plan.needs_cfr))
     mode = frame_mode or (edl.get("frame") or {}).get("mode") or "crop"
 
     # The global grade (preset, then custom) is a per-pixel map. Run after
@@ -3276,6 +3356,25 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 [L for _k, _i, L in order], fps)):
             blk_frames[(kind, idx)] = nf
             blk_len[(kind, idx)] = nf / round(float(fps), 3)
+    # ---- fx junctions (Wave 0 seams): which cut each junction item names,
+    # its window, and where its source handles come from. Only on the block
+    # clock (fx junction items force do_norm), so every cut has a frame.
+    fx_juncs = []
+    if fx_plan is not None and fx_plan.junction_items:
+        fx_juncs = fxgraph.junction_specs(
+            fx_plan, _fx_cuts(order, keep, edl.get("keep"), blk_frames))
+        for spec in fx_juncs:
+            ka, kb = spec["k"], spec["k"] + 1
+            spec["a_src"] = _fx_handle_src(
+                order[ka], keep, blk_frames, spec["h"], fps, "out",
+                speed or regions or patch_inputs or src_pad > 0,
+                card_layout, src_dur)
+            spec["b_src"] = _fx_handle_src(
+                order[kb], keep, blk_frames, spec["h"], fps, "in",
+                speed or regions or patch_inputs or src_pad > 0,
+                card_layout, src_dur)
+    fx_taps = [sp for sp in fx_juncs for key in ("a_src", "b_src")
+               if sp.get(key)]
     # Each segment's own sound: its span of the source, as long as its block.
     # Across a source-contiguous join (a focus-handoff or speed split) the
     # sound runs on from where the previous block's left off, so a block a
@@ -3541,8 +3640,24 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # no repaint patches, no picture-track pad). Each segment's video tap
     # comes from the input that holds it; every frame it receives carries
     # the same source timestamp (-copyts) the single split delivered.
+    if fx_taps:
+        # Source handles for fx junctions read the main picture like the
+        # blocks do: one more tap each (the bounded per-cluster reads stay
+        # off — a handle may sit outside every cluster's window).
+        taps = [f"fxh{i}" for i in range(sum(
+            1 for sp in fx_juncs for key in ("a_src", "b_src")
+            if sp.get(key)))]
+        parts.append(f"[{vsrc}]split={len(taps) + 1}[fxsrc]"
+                     + "".join(f"[{t}]" for t in taps))
+        vsrc = "fxsrc"
+        t_iter = iter(taps)
+        for sp in fx_juncs:
+            for key in ("a_src", "b_src"):
+                if sp.get(key):
+                    sp[key]["tap"] = next(t_iter)
     owners = None
-    if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0:
+    if main_video_inputs and n > 1 and not patch_inputs and src_pad <= 0 \
+            and not fx_taps:
         owners = []
         for seg_a, seg_b in keep:
             hit = [ix for ix, a, b in main_video_inputs
@@ -3941,10 +4056,94 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 faded.append((out_lab, alab, bd))
             blocks = faded
 
+    # ---- fx junctions (Wave 0 seams, INTERFACES.md §4.4) ----------------
+    # Each junction item's cut gets two 2h-frame streams: the outgoing
+    # block's last h frames + h frames of its footage past the out-point,
+    # and h frames before the incoming block's in-point + its first h
+    # frames (the edge frame frozen where there is no source handle). The
+    # compiled window replaces program frames [cut-h, cut+h) after concat.
+    # No junction items: nothing here runs.
+    fx_windows = []
+    for spec in fx_juncs:
+        h, ka, kb = spec["h"], spec["k"], spec["k"] + 1
+        u = f"fxj{ka}"
+        f3 = round(float(fps), 3)
+        tail = f"fps={f3:.3f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p"
+
+        def _own(k, side):
+            vlab, alab, bd = blocks[k]
+            parts.append(f"[{vlab}]split[{vlab}{u}{side}][{u}{side}t]")
+            blocks[k] = (f"{vlab}{u}{side}", alab, bd)
+            nb = blk_frames[order[k][:2]]
+            if side == "a":
+                parts.append(f"[{u}at]trim=start_frame={max(0, nb - h)},"
+                             f"setpts=PTS-STARTPTS[{u}ao]")
+            else:
+                parts.append(f"[{u}bt]trim=end_frame={h},"
+                             f"setpts=PTS-STARTPTS[{u}bo]")
+            return f"{u}{side}o"
+
+        def _handle(src, side):
+            # the block's own frame grid: same trim start, same fps, so
+            # handle frame j is the frame the block would have shown next
+            i = src["seg"]
+            if side == "a":
+                a0 = float(keep[i][0])
+                a1 = a0 + (src["frames"] + h + 2) / f3
+                sel = (f"trim=start_frame={src['frames']}:"
+                       f"end_frame={src['frames'] + h}")
+            else:
+                a0 = float(src["start"])
+                a1 = float(keep[i][0]) + 2.0 / f3
+                sel = f"trim=end_frame={h}"
+            parts.append(f"[{src['tap']}]trim=start={a0:.3f}:end={a1:.3f},"
+                         f"setpts=PTS-STARTPTS,fps={f3:.3f},{sel},"
+                         f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop={h},"
+                         f"trim=end_frame={h}[{u}{side}r]")
+            seg_focus, seg_mode = _frame_for(*keep[i])
+            fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
+                     if _fspans and seg_mode == "crop" else None)
+            if fspan:
+                edge = float(keep[i][1]) if side == "a" else float(keep[i][0])
+                seg_focus = follow.centre_at(fspan, edge)
+            _normalize_video(parts, f"{u}{side}r", f"{u}{side}h", W, H, fps,
+                             seg_mode, f"{u}{side}n", focus=seg_focus,
+                             seg_dur=h / f3, frames=h,
+                             picture=(edl.get("frame") or {}).get("picture"),
+                             grade=block_grade, src_size=main_src_size)
+            return f"{u}{side}h"
+
+        a_own, b_own = _own(ka, "a"), _own(kb, "b")
+        if spec.get("a_src"):
+            a_h = _handle(spec["a_src"], "a")
+            parts.append(f"[{a_own}][{a_h}]concat=n=2:v=1:a=0,{tail}"
+                         f"[{u}A]")
+        else:
+            parts.append(f"[{a_own}]tpad=stop_mode=clone:stop={h},{tail}"
+                         f"[{u}A]")
+        if spec.get("b_src"):
+            b_h = _handle(spec["b_src"], "b")
+            parts.append(f"[{b_h}][{b_own}]concat=n=2:v=1:a=0,{tail}"
+                         f"[{u}B]")
+        else:
+            parts.append(f"[{b_own}]tpad=start_mode=clone:start={h},{tail}"
+                         f"[{u}B]")
+        jw = fxgraph.apply_junction(
+            parts, f"{u}A", f"{u}B",
+            {"k": ka, "frame": spec["frame"], "h": h, "items": spec["items"],
+             "at": spec["frame"] / f3,
+             "a_handle": "source" if spec.get("a_src") else "freeze",
+             "b_handle": "source" if spec.get("b_src") else "freeze"},
+            fx_plan)
+        if jw:
+            fx_windows.append((spec["frame"], h, jw))
+
     pairs = "".join(f"[{v}][{a}]" for v, a, _d in blocks)
     parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
 
     vlabel = "vc"
+    if fx_windows:
+        vlabel = fxgraph.junction_overlay(parts, vlabel, fx_windows, fx_plan)
     # Draft previews (capped at 480 high) resample the camera linearly:
     # ~2.2x cheaper, ~5% softer only while a move is on screen. Approval
     # previews and finals stay cubic (zoompan's sharpness). Stitching only
@@ -3964,7 +4163,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # at most (one sampling map each). Pans aim, so targeted maths.
         positions = tl.insert_positions()
         parts.extend(camera.camera_chain(
-            "vc", "vcins", W, H, fps,
+            vlabel, "vcins", W, H, fps,
             [camera.insert_motion_shot(motion, positions[j][0], dur, fps)
              for j, motion, dur in insert_motion],
             targeted=True, max_groups=2, max_instances=2,
@@ -4267,6 +4466,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                                         f"c{ci}", fps)
         vlabel = out_lab
 
+    # ---- fx: world stage (Wave 0 seams) — on the footage, before the
+    # behind-subject composite and the camera, so it rides every zoom.
+    vlabel = _fx_picture_stage("world", parts, vlabel, fx_plan, card_runs,
+                               fps)
+
     # ---- words BEHIND the subject (round 60) -----------------------------
     # The one composite that has to happen BEFORE the zoom stage.
     #
@@ -4519,6 +4723,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             f":enable='between(t,{o_start:.3f},{o_start + o_dur:.3f})'"
             f"[vtk{j}]")
         vlabel = f"vtk{j}"
+    # ---- fx: screen stage — after the camera, screen-locked.
+    vlabel = _fx_picture_stage("screen", parts, vlabel, fx_plan, card_runs,
+                               fps)
     # ---- overlays (round 35): PIP / b-roll / logo layer -----------------
     for j, (idx, item) in enumerate(overlay_inputs):
         o_start = float(item["start"])
@@ -4640,6 +4847,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # Browser-rendered motion design under the dialogue captions...
     vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
                                        "below_captions", fps)
+    # ---- fx: pre_captions stage — over cards and graphics, under the words.
+    vlabel = fxgraph.apply_stage("pre_captions", parts, vlabel, fx_plan)
     if ass_path:
         # fontsdir points libass at the premium fonts bundled with the
         # worker (worker/fonts) — system fontconfig still supplies DejaVu
@@ -4675,6 +4884,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # frame-shift bars, floating plate, watermark and end card).
     vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
                                        "above_captions", fps)
+    # ---- fx: over_type stage — over every text layer, and still UNDER the
+    # aspect bars, the screen-frame plate, the watermark and the end card
+    # (owner rule 4; tests/test_w0b_render.py pins it bit-exact).
+    vlabel = fxgraph.apply_stage("over_type", parts, vlabel, fx_plan)
     # ---- mid-video aspect change (round 51) -----------------------------
     # The bars go on ABOVE the captions on purpose: when the frame narrows to
     # 9:16, anything outside the new window is outside the FRAME, and a caption
@@ -4923,16 +5136,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 f"asetpts=PTS-STARTPTS{fades},"
                 f"volume={item.get('gain_db', -18)}dB,"
                 f"aresample=48000{delay}{duck}[mus{j}]")
+            # fx: music_bus stage — this item's bus, on the program clock,
+            # after its own fit and fades, before ducking and the mix.
+            mus = fxgraph.apply_music_bus(parts, f"mus{j}", item.get("id"),
+                                          fx_plan)
             if smooth:
                 # After adelay both streams share the program clock, so the
                 # compressor reacts to the words playing at that instant.
                 # threshold 0.03 ~= -30dBFS: real speech, not room tone.
-                parts.append(f"[mus{j}][dref{j}]sidechaincompress="
+                parts.append(f"[{mus}][dref{j}]sidechaincompress="
                              f"threshold=0.03:ratio=12:attack=180:"
                              f"release=550[musc{j}]")
                 mix_labels.append(f"[musc{j}]")
             else:
-                mix_labels.append(f"[mus{j}]")
+                mix_labels.append(f"[{mus}]")
     for j, (input_idx, vo, vd) in enumerate(vo_inputs):
         delay_ms = int(max(0.0, float(vo["start_output_s"])) * 1000)
         delay = f",adelay={delay_ms}:all=1" if delay_ms > 0 else ""
@@ -5124,7 +5341,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     discard_audio, program_edges: see render_edl."""
     if program_edges is None:
         program_edges = (not render_fragment, not render_fragment)
-    edl = validate_edl(edl_dict, render_fragment=render_fragment).model_dump()
+    canvas_dict, fx_dropped = strip_unknown_fx(edl_dict)
+    if fx_dropped:
+        fxgraph.note_dropped(edl_dict, fx_dropped)
+    edl = validate_edl(canvas_dict,
+                       render_fragment=render_fragment).model_dump()
     canvas = edl["canvas"]
     W, H = int(canvas["width"]), int(canvas["height"])
     fps = max(1.0, min(float(canvas.get("fps") or 30.0), 60.0))
@@ -5287,6 +5508,10 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     # Base stages are lossless building blocks: the final composition alone
     # masters (and levels) the joined program, exactly once.
     master = None if _base_stage else master_loudness(edl)
+    # fx belong to the final composition, never to a bounded base stage.
+    fx_box = [fxgraph.prepare({} if _base_stage else edl, tl=tl, W=W, H=H,
+                              fps=fps, preview=preview, workdir=workdir)]
+    next_idx = fx_box[0].bind_inputs(extra_inputs, next_idx)
 
     def _graph(**extra):
         return build_filtergraph(edl, tl.out_duration, False, tl, ass_path,
@@ -5306,7 +5531,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
                                  picture_card_inputs=picture_card_inputs,
                                  motion_inputs=motion_inputs,
                                  loudness=master,
-                                 program_edges=program_edges, **extra)
+                                 program_edges=program_edges,
+                                 fx_plan=fx_box[0], **extra)
 
     dialogue_gain = None
     if master == "social" and not discard_audio:
@@ -5319,14 +5545,18 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         graph = _prune_graph_to_audio(graph)
         expected_out_s = (program_render_s(tl, fps)
                           + music_tail_ext(edl, tl.out_duration) + outro_s)
-        cmd = ["ffmpeg", "-y", *extra_inputs,
-               *_graph_args(graph, workdir), "-map", "[aout]",
-               "-c:a", "aac", "-b:a", "128k" if preview else "192k",
-               "-t", f"{expected_out_s:.3f}", "-movflags", "+faststart",
-               "-progress", "pipe:1", "-nostats", out_path]
-        _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
-                  progress_cb=progress_cb, expected_out_s=expected_out_s,
-                  cancelled_cb=cancelled_cb)
+        def _audio_cmd(g):
+            return ["ffmpeg", "-y", *extra_inputs,
+                    *_graph_args(g, workdir), "-map", "[aout]",
+                    "-c:a", "aac", "-b:a", "128k" if preview else "192k",
+                    "-t", f"{expected_out_s:.3f}", "-movflags", "+faststart",
+                    "-progress", "pipe:1", "-nostats", out_path]
+        _fx_run(_audio_cmd(graph), fx_box,
+                lambda: _audio_cmd(_prune_graph_to_audio(
+                    _graph(dialogue_gain=dialogue_gain))),
+                cancelled_cb,
+                timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+                progress_cb=progress_cb, expected_out_s=expected_out_s)
         return media.probe_audio_duration(out_path)
 
     if _source_stage:
@@ -5354,19 +5584,21 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         start, span = _batch_window
         start = math.ceil((start - 1e-8) * fps) / fps
         keyframes = ["-force_key_frames", f"{start:.6f},{start + span:.6f}"]
-    cmd = ["ffmpeg", "-y",
-           *(["-filter_complex_threads", "2"] if _base_stage else []),
-           *_stable_video_inputs(extra_inputs, decoder_threads=(
-               4 if _source_stage else 1 if _base_stage else None)),
-           *_graph_args(graph, workdir), "-map", "[vout]", "-map", "[aout]",
-           *encode, *keyframes, *_output_clock(fps),
-           "-t", f"{expected_out_s:.6f}",
-           *([] if _base_stage else ["-movflags", "+faststart"]),
-           "-progress", "pipe:1", "-nostats", out_path]
-    _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
-              progress_cb=progress_cb,
-              expected_out_s=expected_out_s,
-              cancelled_cb=cancelled_cb)
+    def _video_cmd(g):
+        return ["ffmpeg", "-y",
+                *(["-filter_complex_threads", "2"] if _base_stage else []),
+                *_stable_video_inputs(extra_inputs, decoder_threads=(
+                    4 if _source_stage else 1 if _base_stage else None)),
+                *_graph_args(g, workdir), "-map", "[vout]", "-map", "[aout]",
+                *encode, *keyframes, *_output_clock(fps),
+                "-t", f"{expected_out_s:.6f}",
+                *([] if _base_stage else ["-movflags", "+faststart"]),
+                "-progress", "pipe:1", "-nostats", out_path]
+    _fx_run(_video_cmd(graph), fx_box,
+            lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain)),
+            cancelled_cb,
+            timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+            progress_cb=progress_cb, expected_out_s=expected_out_s)
     return media.duration_of(out_path)
 
 
@@ -5758,6 +5990,27 @@ def _repair_legacy_insert_boundaries(edl_dict):
     return repaired or edl_dict
 
 
+def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
+    """Run a render command; when it fails with fx items in the graph, run
+    it once more WITHOUT them (every item reported ``omit`` with the cause):
+    a creative device can degrade, it can never fail a render (ROADMAP A3).
+    Cancellation, a lost lease and a timeout are not retried — the budget is
+    spent. ``fx_box`` holds the plan the graph builder reads; ``rebuild()``
+    returns the command for the graph rebuilt from it."""
+    try:
+        return _render_media_run(cmd, cancelled_cb=cancelled_cb, **run_kw)
+    except media.MediaError as e:
+        plan = fx_box[0]
+        if plan is None or plan.empty or (cancelled_cb and cancelled_cb()) \
+                or "timed out" in str(e) or "cancelled" in str(e):
+            raise
+        print(f"[render] fx graph failed ({str(e).splitlines()[-1][:200] if str(e) else e!r})"
+              " — re-rendering without fx", flush=True)
+        fx_box[0] = fxgraph.without_fx(plan, e)
+        return _render_media_run(rebuild(), cancelled_cb=cancelled_cb,
+                                 **run_kw)
+
+
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                progress_cb=None, want_wm=False, wm_settings=None,
                cancelled_cb=None,
@@ -5812,6 +6065,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     info = media.probe(src_path)
     src_dur = info["duration"]
     render_dict = _repair_legacy_insert_boundaries(edl_dict)
+    # Version skew (INTERFACES.md §4.1): an fx type this lane does not know
+    # is dropped and reported (rung omit) — never a failed render.
+    render_dict, fx_dropped = strip_unknown_fx(render_dict)
+    if fx_dropped:
+        fxgraph.note_dropped(edl_dict, fx_dropped)
     keep_end = max(
         (float(e) for _s, e in (render_dict.get("keep") or [])),
         default=0.0)
@@ -6271,6 +6529,12 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                    round(pieces[0][1], 3))))
             next_idx += 1
         motion_inputs = [mi for mi in motion_inputs if mi[1] is not None]
+    # EDL.fx (Wave 0 seams): rungs decided and inputs allocated once; an
+    # EDL without fx gets an empty plan and the exact legacy graph.
+    fx_box = [fxgraph.prepare(edl, tl=tl, W=W, H=H, fps=fps,
+                              preview=preview, workdir=workdir)]
+    next_idx = fx_box[0].bind_inputs(extra_inputs, next_idx)
+
     def _graph(**extra):
         return build_filtergraph(edl, src_dur, info["has_audio"], tl, ass_path,
                                  music_inputs, index, preview,
@@ -6298,6 +6562,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  main_video_inputs=main_video_inputs,
                                  focus_origin=focus_origin,
                                  program_edges=program_edges,
+                                 fx_plan=fx_box[0],
                                  **extra)
 
     # Mastered mixes level the dialogue first, from one measurement pass of
@@ -6320,16 +6585,19 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         graph = _prune_graph_to_audio(graph)
         expected_out_s = (program_render_s(tl, fps)
                           + music_tail_ext(edl, tl.out_duration) + outro_s)
-        cmd = ["ffmpeg", "-y", *main_input_args, *extra_inputs,
-               *_graph_args(graph, workdir), "-map", "[aout]",
-               "-c:a", "aac", "-b:a", "128k" if preview else "192k",
-               "-t", f"{expected_out_s:.3f}",
-               "-movflags", "+faststart",
-               "-progress", "pipe:1", "-nostats", out_path]
-        _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
-                  progress_cb=progress_cb,
-                  expected_out_s=expected_out_s,
-                  cancelled_cb=cancelled_cb)
+        def _audio_cmd(g):
+            return ["ffmpeg", "-y", *main_input_args, *extra_inputs,
+                    *_graph_args(g, workdir), "-map", "[aout]",
+                    "-c:a", "aac", "-b:a", "128k" if preview else "192k",
+                    "-t", f"{expected_out_s:.3f}",
+                    "-movflags", "+faststart",
+                    "-progress", "pipe:1", "-nostats", out_path]
+        _fx_run(_audio_cmd(graph), fx_box,
+                lambda: _audio_cmd(_prune_graph_to_audio(
+                    _graph(dialogue_gain=dialogue_gain))),
+                cancelled_cb,
+                timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+                progress_cb=progress_cb, expected_out_s=expected_out_s)
         return media.probe_audio_duration(out_path)
 
     if preview:
@@ -6346,18 +6614,22 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 
     expected_out_s = (program_render_s(tl, fps)
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
-    cmd = ["ffmpeg", "-y", *_stable_video_inputs(main_input_args + extra_inputs),
-           *_graph_args(graph, workdir), "-map", "[vout]", "-map", "[aout]",
-           *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
-           "-movflags", "+faststart",
-           "-progress", "pipe:1", "-nostats", out_path]
+
+    def _video_cmd(g):
+        return ["ffmpeg", "-y",
+                *_stable_video_inputs(main_input_args + extra_inputs),
+                *_graph_args(g, workdir), "-map", "[vout]", "-map", "[aout]",
+                *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
+                "-movflags", "+faststart",
+                "-progress", "pipe:1", "-nostats", out_path]
     # Progress is percent-of-expected, so it must be the RENDERED length. Left
     # at the programme duration the bar hits 99.9% at programme end and then
     # flatlines through the whole end card.
-    _render_media_run(cmd, timeout=_render_ffmpeg_timeout(preview, expected_out_s),
-              progress_cb=progress_cb,
-              expected_out_s=expected_out_s,
-              cancelled_cb=cancelled_cb)
+    _fx_run(_video_cmd(graph), fx_box,
+            lambda: _video_cmd(_graph(dialogue_gain=dialogue_gain)),
+            cancelled_cb,
+            timeout=_render_ffmpeg_timeout(preview, expected_out_s),
+            progress_cb=progress_cb, expected_out_s=expected_out_s)
     return media.duration_of(out_path)
 
 
@@ -6466,8 +6738,8 @@ def picture_qc(edl_json, index, out_path, out_info, variant, want_wm,
     (render_plan.canonical_program), on the output's own geometry."""
     try:
         import render_qc
-        edl = validate_edl(render_plan.canonical_program(edl_json),
-                           1e9).model_dump()
+        edl = validate_edl(strip_unknown_fx(
+            render_plan.canonical_program(edl_json))[0], 1e9).model_dump()
         W, H = int(out_info["width"]), int(out_info["height"])
         fps = float(out_info.get("fps") or 30.0)
         src_w, src_h = (src_shape or (None, None))[:2]
@@ -6800,7 +7072,7 @@ def _composition_geometry(edl, src_local, preview):
 
 
 def _stitch_window(edl, tl, a, b, geometry):
-    window = stitch.window_edl(edl, tl, a, b)
+    window = stitch.window_edl(edl, tl, a, b, fps=geometry[2])
     if not window.get("keep") and window.get("inserts") and not window.get("canvas"):
         W, H, fps = geometry
         window["canvas"] = dict(width=int(W), height=int(H), fps=float(fps), bg_color="#000000")
@@ -7341,7 +7613,10 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     duration0 = float((index.get("video") or {}).get("duration") or 0.0)
     keep_end = max((float(e) for _s, e in
                     (edl_row["json"].get("keep") or [])), default=0.0)
-    edl = validate_edl(edl_row["json"], max(duration0, keep_end)).model_dump()
+    # version skew: an fx type this lane does not know degrades (render_edl
+    # reports it), it never fails the proof
+    proof_dict, _dropped = strip_unknown_fx(edl_row["json"])
+    edl = validate_edl(proof_dict, max(duration0, keep_end)).model_dump()
     tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
                   edl.get("speed") or [])
     duration = float(tl.out_duration)
@@ -7384,7 +7659,8 @@ def _render_changed_sections(job_id, edl_row, index, src_local, workdir,
     pieces, offsets = [], []
     elapsed = 0.0
     for i, (a, b) in enumerate(ranges):
-        window = stitch.window_edl(edl, tl, a, b, keep_audio=True)
+        window = stitch.window_edl(edl, tl, a, b, keep_audio=True,
+                                   fps=max(1.0, min(float(_fps), 60.0)))
         if not window.get("keep") and window.get("inserts") \
                 and not window.get("canvas"):
             # A proof window entirely inside B-roll has no main-source span.
@@ -7703,7 +7979,9 @@ def _run_render_job(worker_db, job):
                     "quality": cached_meta.get("quality", "draft"),
                     "sha256": cached.get("sha256"), "cached": True,
                     **({"motion_warnings": cached_meta["motion_warnings"]}
-                       if cached_meta.get("motion_warnings") else {})}
+                       if cached_meta.get("motion_warnings") else {}),
+                    **({"devices": cached_meta["devices"]}
+                       if cached_meta.get("devices") else {})}
     plate_id = None              # the main source's identity for plate.py's cache
     if is_canvas:
         index = {}
@@ -7753,6 +8031,10 @@ def _run_render_job(worker_db, job):
     # the editor, not only the log: the render still succeeds without them.
     motion_warnings = []
     motion_token = motion_layer.collect_warnings(motion_warnings)
+    # EDL.fx device decisions (rung per item, INTERFACES.md §6.3) for the
+    # result's and the asset's ``devices`` block.
+    fx_rows = []
+    fx_token = fxgraph.collect(fx_rows)
     # A final measures the plate under its graphics from the original; the
     # preview already measured the same picture from the proxy (plate.py).
     plate_token = plate.source_scope(plate_id)
@@ -8059,6 +8341,12 @@ def _run_render_job(worker_db, job):
             _verify_render(edl_row["json"], out_local, out_dur, job_id,
                            variant, src_path=src_local, src_dur=src_dur)
         _mark("verify_s")
+        try:
+            fx_devices = fxgraph.job_report(edl_row["json"], fx_rows)
+        except Exception as fe:  # noqa: BLE001 — a report never fails a job
+            print(f"[render {job_id}] devices report skipped "
+                  f"({str(fe)[:160]})", flush=True)
+            fx_devices = []
 
         sheet_key = reused_visual_meta.get("sheet_key")
         sheet_local = None if sheet_key else os.path.join(workdir, "result_sheet.jpg")
@@ -8382,7 +8670,8 @@ def _run_render_job(worker_db, job):
                   "wm_p": (watermark_position(wm_settings)
                            if want_wm else None),
                   **({"motion_warnings": motion_warnings[:12]}
-                     if motion_warnings else {})})
+                     if motion_warnings else {}),
+                  **({"devices": fx_devices} if fx_devices else {})})
         # Completed renders, including proof reels, remain recoverable history.
         # Never delete an asset referenced by an issued receipt.
         # Deterministic mid-word audit: keep boundaries that clip a word,
@@ -8414,6 +8703,7 @@ def _run_render_job(worker_db, job):
                 "midword_audit": mw,
                 **({"motion_warnings": motion_warnings[:12]}
                    if motion_warnings else {}),
+                **({"devices": fx_devices} if fx_devices else {}),
                 "audio_qc": audio_qc_res, "listen_keys": listen_keys,
                 "picture_qc": picture_qc_res,
                 "audio_model_review": audio_model_review}
@@ -8436,5 +8726,6 @@ def _run_render_job(worker_db, job):
         timings.update(detail)
         _RENDER_DETAIL.reset(detail_token)
         motion_layer.stop_collecting(motion_token)
+        fxgraph.stop_collecting(fx_token)
         plate.end_source_scope(plate_token)
         shutil.rmtree(workdir, ignore_errors=True)
