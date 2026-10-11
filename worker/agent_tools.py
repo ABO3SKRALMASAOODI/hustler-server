@@ -1701,7 +1701,8 @@ def list_assets(ctx, kind=None):
     return result
 
 
-def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None):
+def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None,
+                    separate=False):
     """The round-67 direct-sight tail shared by look_at / look_at_asset.
 
     When the agent model itself reads images (llm.agent_sees), the captured
@@ -1733,21 +1734,38 @@ def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None
             (getattr(ctx, "direct_sight", False)
              and llm.agent_sees(ctx.agent_model)):
         try:
-            if len(gridded) == 1:
-                sheet = gridded[0]
+            if separate and len(gridded) > 1:
+                # native detail (round 8 review tools): one full-size image
+                # per time — a contact sheet would shrink every tile again
+                pages = [(f"{subject_line} — {lb}", fp, [lb])
+                         for lb, fp in zip(labels, gridded)]
+            elif len(gridded) == 1:
+                pages = [(f"{subject_line} — {', '.join(labels)}",
+                          gridded[0], list(labels))]
             else:
                 sheet = os.path.join(
                     ctx.workdir, f"look_sheet_{uuid.uuid4().hex[:8]}.jpg")
                 sheets.build_timestamp_sheet(list(zip(labels, gridded)),
                                              sheet)
-            ctx.pending_images.append(
-                (f"{subject_line} — {', '.join(labels)}", sheet))
-            if provenance is not None:
-                if not hasattr(ctx, "_pending_image_metadata"):
-                    ctx._pending_image_metadata = {}
-                ctx._pending_image_metadata[sheet] = dict(
-                    provenance, capture_job_id=getattr(ctx, "job", {}).get("id"),
-                    timestamp_labels=list(labels))
+                pages = [(f"{subject_line} — {', '.join(labels)}", sheet,
+                          list(labels))]
+            for label, sheet, page_labels in pages:
+                ctx.pending_images.append((label, sheet))
+                if provenance is not None:
+                    if not hasattr(ctx, "_pending_image_metadata"):
+                        ctx._pending_image_metadata = {}
+                    ctx._pending_image_metadata[sheet] = dict(
+                        provenance,
+                        capture_job_id=getattr(ctx, "job", {}).get("id"),
+                        timestamp_labels=page_labels)
+            if len(pages) > 1:
+                return (f"Captured {len(frames)} frame(s): {', '.join(labels)}"
+                        f" — {len(pages)} full-detail images, one per time, "
+                        "in that order, follow this message. LOOK AT THEM "
+                        "YOURSELF and answer from what you see"
+                        + (f" (your question: {question})" if question else "")
+                        + ". The faint grid marks TENTHS of the frame "
+                        "((0,0) = top-left).")
             return (f"Captured {len(frames)} frame(s): {', '.join(labels)}. "
                     "The picture follows this message — LOOK AT IT YOURSELF "
                     "and answer from what you see"
@@ -1772,6 +1790,54 @@ def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None
         gridded, purpose="vision_look", image_names=labels)
     return _cap(answer or "The vision model did not return an answer; "
                           "proceed using the transcript and shot captions.")
+
+
+def _patched_frame(ctx, edl, src_t, fp):
+    """Write the repainted frame at SOURCE second ``src_t`` to ``fp`` when
+    an erase patch's window holds it (round 92 patches replace the source
+    there, before anything else); returns the tile-label suffix ('' when no
+    patch holds it, a note when its clip cannot be read: the tile then shows
+    the un-repainted source)."""
+    for pt in edl.get("patches") or []:
+        try:
+            a, b = float(pt["src_start"]), float(pt["src_end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not a <= src_t <= b:
+            continue
+        key = pt.get("asset_key")
+        local = os.path.join(ctx.workdir, "patch_" + os.path.basename(str(key)))
+        try:
+            if not os.path.exists(local):
+                storage.download_to(key, local)
+            media.frame_at(local, max(0.0, src_t - a), fp)
+            return f" [erase patch {pt.get('id')} applied]"
+        except Exception as ex:  # noqa: BLE001 — show the source, say so
+            return (f" [erase patch {pt.get('id')} NOT shown: "
+                    f"{str(ex)[:60]}]")
+    return ""
+
+
+def _card_view(ctx, idx, raw, fitted, sfx, edl, t, src_t, zooms, prog_end,
+               vid):
+    """The picture card on screen at output second ``t`` composed onto the
+    tile (card_geom.compose): (path, label suffix). The tile is unchanged
+    when no card holds ``t``."""
+    import card_geom
+    if card_geom.card_at(edl, t) is None or not vid.get("width"):
+        return fitted, sfx
+    from PIL import Image
+    program = Image.open(fitted).convert("RGB")
+    W, H = program.size
+    zoom = renderer.zoom_state_at(zooms, t, prog_end, size=(W, H))
+    img = card_geom.compose(Image.open(raw).convert("RGB"), program, edl, t,
+                            src_t, vid["width"], vid["height"], zoom)
+    if img is None:
+        return fitted, sfx
+    out = os.path.join(ctx.workdir, f"lookout_card{idx}.jpg")
+    img.save(out, "JPEG", quality=88)
+    card = card_geom.card_at(edl, t)
+    return out, sfx + f" [picture card '{card.get('id') or 'card'}']"
 
 
 def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
@@ -1958,7 +2024,12 @@ def _look_at_output(ctx, output_times, question):
             for i, s, lb in mains:
                 fp = os.path.join(ctx.workdir, f"lookout_m{i}.jpg")
                 try:
-                    media.frame_at(path, s, fp)
+                    # an erased window reads from its repaint (patch) clip,
+                    # as the render overlays it on the source clock
+                    patched = _patched_frame(ctx, edl["json"], s, fp)
+                    if not patched.endswith(" applied]"):
+                        media.frame_at(path, s, fp)
+                    lb += patched
                     results[i] = (fp, lb)
                 except media.MediaError as ex:
                     main_err = str(ex)
@@ -2012,6 +2083,7 @@ def _look_at_output(ctx, output_times, question):
     src_of = {i: s for i, k, s, _lb in plan if k == "main"}
     for i in sorted(results):
         fp, lb = results[i]
+        raw = fp
         t = wants[i]
         try:
             blk = _block_at(t)
@@ -2024,6 +2096,9 @@ def _look_at_output(ctx, output_times, question):
                 prog_end, blk["kind"] == "footage",
                 crop=blk.get("crop"), fit=blk.get("fit"),
                 picture=frame_cfg.get("picture"))
+            if i in src_of and blk["kind"] == "footage":
+                fp, sfx = _card_view(ctx, i, raw, fp, sfx, edl["json"], t,
+                                     src_of[i], fxz, prog_end, vid)
         except Exception as ex:
             print(f"[look] output geometry skipped ({ex})", flush=True)
             sfx = ""
@@ -2045,10 +2120,11 @@ def _look_at_output(ctx, output_times, question):
     out = _deliver_frames(
         ctx, frames, labels, question,
         f"Frames of the ASSEMBLED PROGRAM (EDL v{edl['version']} output "
-        f"timeline, {prog_end:g}s) in TRUE output geometry — canvas fit and "
-        "any zoom active at each moment are applied (a tile says so in its "
-        "label); captions/texts/grades/overlays still burn in at render "
-        "and are not shown")
+        f"timeline, {prog_end:g}s) in TRUE output geometry — canvas fit, "
+        "any zoom, picture cards (backdrop and windows) and erase patches "
+        "are applied (a tile says so in its label); captions, texts, motion "
+        "graphics, grades and overlays burn in at render only — "
+        "look_at(rendered=true) shows them")
     if any("zoom on screen" in lb for lb in labels):
         # Round 74: an agent read a rect off a tile that was already zoomed
         # and aimed the next zoom at those numbers — which are SCREEN
@@ -2671,7 +2747,8 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None,
         f"Frames from '{name}' ({asset['kind']}, {dur:.0f}s long)",
         provenance={"asset_id": asset["id"],
                     "edl_version": (asset.get("meta") or {}).get("edl_version"),
-                    "clock": "output" if asset["kind"] == "render" else "asset"})
+                    "clock": "output" if asset["kind"] == "render" else "asset"},
+        separate=bool(native_resolution))
     evidence.add(evidence_key)
     measured = motion_judge.describe(motion_profile)
     ref_grammar = ""
@@ -21862,7 +21939,93 @@ def wait_for_job(ctx, job_id):
         time.sleep(min(1.0, remaining))
 
 
-def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
+def _stored_render_report(ctx, row):
+    """render_preview(report=true): the stored report of the complete
+    preview that already exists — PICTURE CHECK and its measures, AUDIO
+    CHECK, MID-WORD AUDIT, motion items the render could not draw, and the
+    version's verification record — read from the render job's result.
+    Nothing is rendered, enqueued or reviewed again (Oct 10 podcast run:
+    reviewers could only see a render's advisories by rendering again)."""
+    version = row["version"]
+    asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
+                       version)
+    stale = ""
+    if not asset:
+        asset = ctx.db.run(dbx.latest_render, ctx.project_id, "preview")
+        if not asset:
+            return ("PREREQUISITE: no complete preview exists to report on — "
+                    "call render_preview(complete=true) first.")
+        old = (asset.get("meta") or {}).get("edl_version")
+        stale = (f" STALE: the edit is now at v{version}; this is the report "
+                 f"of v{old}, and nothing changed since is in it.")
+    meta = asset.get("meta") or {}
+    result = {}
+    try:
+        job = ctx.db.run(dbx.get_job, int(meta["render_job_id"]))
+        result = (job or {}).get("result") or {}
+    except (KeyError, TypeError, ValueError):
+        result = {}
+    except Exception:  # noqa: BLE001 — the asset's own meta still reports
+        result = {}
+    pq = result.get("picture_qc") or meta.get("picture_qc") or {}
+    aq = result.get("audio_qc") or meta.get("audio_qc") or {}
+    rv = meta.get("edl_version")
+    lines = [f"RENDER REPORT (read-only: nothing was rendered or enqueued) — "
+             f"complete preview of EDL v{rv}: asset {asset.get('id')}, "
+             f"{meta.get('quality', 'draft')}, {asset.get('duration_s')}s."
+             + stale]
+    pqf = pq.get("findings") or []
+    if pqf:
+        lines.append("PICTURE CHECK (measured on the rendered frames): "
+                     + "; ".join(pqf))
+    elif pq:
+        lines.append(render_qc.summary_line(pq).strip()
+                     or "PICTURE CHECK: clean.")
+    else:
+        lines.append("PICTURE CHECK: this render carries none (rendered "
+                     "before the check existed, or the check could not run).")
+    measures = render_qc.measures_line(pq).strip()
+    if measures:
+        lines.append(measures)
+    if pq.get("advice"):
+        lines.append("PICTURE MEASURES (advisory — the Look's rules): "
+                     + "; ".join(pq["advice"]))
+    unshown = render_qc.unshown_line(pq)
+    if unshown:
+        lines.append("CAPTION CHECK: " + unshown)
+    aqf = aq.get("findings") or []
+    if aqf:
+        lines.append("AUDIO CHECK: " + "; ".join(aqf))
+    summary = audio_qc.summary_line(aq).strip()
+    if summary:
+        lines.append(summary)
+    mw = result.get("midword_audit") or []
+    if mw:
+        lines.append("MID-WORD AUDIT: " + "; ".join(mw[:8]))
+    mwarn = result.get("motion_warnings") or meta.get("motion_warnings") or []
+    if mwarn:
+        lines.append("MOTION NOT DRAWN: " + "; ".join(mwarn[:6]))
+    try:
+        rec = ctx.db.run(dbx.get_verification_record, ctx.project_id, int(rv))
+    except Exception:  # noqa: BLE001
+        rec = None
+    if rec:
+        record = rec.get("record") or {}
+        open_ = [f"{f.get('finding_id')}: {str(f.get('message'))[:160]}"
+                 for f in record.get("findings") or []
+                 if quality_verifier.is_blocking(f)
+                 and f.get("finding_id") not in {
+                     j.get("finding_id") for j in
+                     record.get("justifications") or []}]
+        lines.append(f"VERIFICATION RECORD v{rv}: {rec.get('status')}"
+                     + (" — open: " + " | ".join(open_[:6]) if open_ else ""))
+    return "\n".join(lines)
+
+
+def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
+                   report=False):
+    if report:
+        return _stored_render_report(ctx, ctx.latest_edl())
     if quality not in ("draft", "approval"):
         return "REJECTED: quality must be draft or approval."
     if quality == "approval":
@@ -22029,8 +22192,12 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
             mw = result.get("midword_audit") or []
             if mw:
                 note += (" MID-WORD AUDIT: " + "; ".join(mw[:5])
-                         + " — snap these boundaries to word edges "
-                           "(get_words) and re-render.")
+                         + " — each edge cuts into a word whose sound is "
+                           "loud there (a printed level is measured on the "
+                           "source; edges the keep tools left in quiet sound "
+                           "are not listed): rewrite the keep (its tools "
+                           "place edges audio-safely; get_words) and "
+                           "re-render.")
             note += _motion_warning_line(result)
             # Caption audit on what actually survived the cut: captions are
             # usually enabled BEFORE later cuts, so the add-time warning
@@ -22134,15 +22301,34 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft"):
             # each one or keeps it deliberately and says why.
             pq = result.get("picture_qc") or {}
             pqf = pq.get("findings") or []
-            ctx.last_picture_qc_findings = list(pqf[:4])
+            ctx.last_picture_qc_findings = list(pqf[:render_qc.MAX_FINDINGS])
             if pqf:
                 ctx.last_taste.extend(
-                    f"picture QC: {finding}" for finding in pqf[:4])
+                    f"picture QC: {finding}"
+                    for finding in pqf[:render_qc.MAX_FINDINGS])
                 note += (" PICTURE CHECK (measured on the rendered frames): "
-                         + "; ".join(pqf[:4])
+                         + "; ".join(pqf[:render_qc.MAX_FINDINGS])
                          + " — fix these, or keep one deliberately and say "
                            "why in one clause.")
             note += render_qc.summary_line(pq)
+            # The measures reviewers used to estimate by eye (picture area
+            # vs the floor, cap heights) ride on every complete render; the
+            # Look's rules on them are advisories, never a defect alone.
+            note += render_qc.measures_line(pq)
+            pqa = pq.get("advice") or []
+            if pqa:
+                ctx.last_taste_advisory = list(
+                    getattr(ctx, "last_taste_advisory", None) or []) + [
+                    f"picture measures: {line}" for line in pqa]
+                note += (" PICTURE MEASURES (advisory — the Look's rules; "
+                         "keep one if intentional): " + "; ".join(pqa) + ".")
+            unshown = render_qc.unshown_line(pq)
+            if unshown:
+                # blocking, never a taste call: the owner's rule
+                ctx.last_taste.append(f"caption QC: {unshown}")
+                note += (" CAPTION CHECK: " + unshown + " — repair it "
+                         "(caption them, carry them on the graphic, or move "
+                         "the graphic off the caption band).")
             audio_review = _review_render_audio(ctx, row, result)
             if audio_review:
                 reused = (" (reused: rendered audio program unchanged)"
@@ -27787,8 +27973,10 @@ TOOLS = {
                 "text, a precise instant. The transcript is ASR and can be wrong; "
                 "inspect confidence and sentence context using "
                 "get_words / the transcript — never look to lip-read or "
-                "guess a word. IMPORTANT: the assembled geometry view omits "
-                "burn-ins. Set rendered=true after render_preview to inspect "
+                "guess a word. IMPORTANT: the assembled geometry view "
+                "composes picture cards (backdrop and windows) and erase "
+                "patches but omits burn-ins (captions, text, motion graphics, "
+                "grade). Set rendered=true after render_preview to inspect "
                 "the CURRENT preview's real pixels—including captions, text, "
                 "overlays and grade. In rendered mode output_times (or times) "
                 "are output seconds and any useful set can be batched for "
@@ -27800,7 +27988,7 @@ TOOLS = {
                  "start": {"type": "number"},
                  "end": {"type": "number"},
                  "rendered": {"type": "boolean"},
-                 "native_resolution": {"type": "boolean", "description": "With rendered=true, preserve image width up to 1920px; request one time for full-detail approval pixels without another encode."}}),
+                 "native_resolution": {"type": "boolean", "description": "With rendered=true, keep width up to 1920px: each time is its own full-detail image (no contact sheet), no re-encode."}}),
     "look_at_asset": (look_at_asset, "YOUR OWN EYES on an UPLOADED clip or "
                       "image, or a finished RENDER (storage_key from "
                       "list_assets; kind='render' lists past previews/"
@@ -27825,7 +28013,7 @@ TOOLS = {
                        "question": {"type": "string"},
                        "start": {"type": "number"},
                        "end": {"type": "number"},
-                       "native_resolution": {"type": "boolean", "description": "Preserve image width up to 1920px; one requested time avoids contact-sheet downscaling."}}),
+                       "native_resolution": {"type": "boolean", "description": "Keep width up to 1920px: each time is its own full-detail image (no contact sheet)."}}),
     "keep_segments": (keep_segments, "REPLACE the keep list (SOURCE "
                       "[[start,end],...]); new cut edges land audio-safe. "
                       "Everything else is cut. Use only for "
@@ -30224,9 +30412,15 @@ TOOLS = {
         "budget, payoff hold), advisory: act on what hurts this short, never with a zoom or a sound. "
         "A complete render carries a PICTURE CHECK measured on its own frames: a face within ~6% "
         "of the frame's (or its card's) edge, a single-frame jump or pop that is not on a cut, a "
-        "missing end card or watermark. Repair each one or keep it deliberately and say why.",
+        "missing end card or watermark, captions that collide with a graphic or cross a card "
+        "edge; a CAPTION CHECK names heard words no caption or graphic shows (blocking). Repair "
+        "each one or keep it deliberately and say why. Its MEASURES line gives picture area vs "
+        "the 0.54 card floor, upscale and cap heights; PICTURE MEASURES (advisory) name a hook "
+        "smaller than the captions or a payoff that is not the largest lockup. report=true "
+        "re-reads that stored report for the existing preview without rendering anything.",
         {"complete": {"type": "boolean"},
-         "quality": {"type": "string", "enum": ["draft", "approval"]}}),
+         "quality": {"type": "string", "enum": ["draft", "approval"]},
+         "report": {"type": "boolean"}}),
     "justify_verification_findings": (
         justify_verification_findings,
         "Resolve a genuine verification false positive only after direct "
@@ -30807,13 +31001,13 @@ _COMPACT_CONTRACTS = {
         "Read inserts in get_edl first."),
     "look_at": (
         "See frames now, no render needed: times=[...] are SOURCE seconds; "
-        "output_times=[...] show the assembled edit (inserts, framing, zoom; "
-        "not captions/text/grade) to aim zooms and place type. rendered=true "
-        "needs render_preview first: it reads only a COMPLETE preview of the "
-        "current EDL version (render_preview(complete=true); a changed-section "
-        "proof is rejected) and shows real captions, motion graphics and grade: batch "
-        "up to 8 dense output_times around a landing to judge motion. Read "
-        "positions off the tenths grid. Uploads: look_at_asset."),
+        "output_times=[...] show the assembled edit (inserts, framing, zoom, "
+        "cards, erase patches; not captions/text/grade) to aim zooms and place "
+        "type. rendered=true reads only a COMPLETE preview of the current EDL "
+        "version (render_preview(complete=true) first; a changed-section proof "
+        "is rejected) and shows real captions, motion graphics and grade: batch "
+        "up to 8 dense output_times around a landing. Read positions off the "
+        "tenths grid. Uploads: look_at_asset."),
     "look_at_asset": (
         "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
         "Times are relative to that source. For audio use get_audio_analysis; "
