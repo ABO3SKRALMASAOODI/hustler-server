@@ -1367,7 +1367,12 @@ def trim_plan(edl, index, level, *, cards=None, maps=None, rhetoric=None,
     optin = bool(opted_in) if opted_in is not None else \
         flash_safety.opted_in(request_text)
     if level != "charged" or not optin:
-        events = []
+        # the edit's own flashes outside the fx layer (flash transitions,
+        # flash stylize, flash templates) count toward every second but are
+        # not this dial's to remove: the device flashes thin around them
+        events = [{"t": e["t"], "strength": 9.0, "id": None}
+                  for e in flash_safety.flash_events(dict(edl, fx=[]),
+                                                     index)]
         for it in alive():
             card = cards.get(it.get("device")) or {}
             flag = _flash(card) if card else it.get("type") in (
@@ -1380,6 +1385,8 @@ def trim_plan(edl, index, level, *, cards=None, maps=None, rhetoric=None,
         _kept, thinned = flash_safety.plan(events, plan["fps"],
                                            opted_in=False)
         for e in thinned:
+            if e.get("id") is None:
+                continue
             it = next((i for i in items if i["id"] == e["id"]), None)
             if it is not None:
                 drop(it, "flash safety: more than "

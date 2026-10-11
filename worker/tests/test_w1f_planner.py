@@ -440,3 +440,29 @@ def test_suggest_starts_measuring_the_matte_its_candidates_need(monkeypatch):
     assert 21.4 < a < 21.5 < b < 21.6
     calls.clear()
     assert vt.warm_matte(Ctx(), edl, cands[1:]) == 0 and calls == []
+
+
+def test_trim_thins_device_flashes_around_the_edits_other_flashes():
+    """Flash stylize items count toward every second (flash_safety.assess
+    counts them) but are not the dial's to remove: the device flashes thin
+    around them until no second holds more than three."""
+    import flash_safety
+    cards = devices.load_cards(CARDS)
+    edl, index = _program()
+    edl = dict(edl, effects={"stylize": [
+        {"id": "s1", "kind": "flash", "start": 5.0, "end": 5.1},
+        {"id": "s2", "kind": "flash", "start": 5.3, "end": 5.4}]},
+        fx=[{"id": f"a{k}", "type": "accent", "stage": "pre_captions",
+             "kind": "negative", "start": t, "end": round(t + 0.04, 2),
+             "device": "accent_negative"}
+            for k, t in enumerate((5.1, 5.2, 5.5))])
+    assert flash_safety.assess(edl)["peak_per_s"] == 5
+    gone = device_planner.trim_plan(edl, index, "charged", cards=cards,
+                                    opted_in=False)
+    # the charged card budget drops one (closer than 0.34 s); flash safety
+    # then drops another, counted against the two stylize flashes
+    assert any(r["reason"].startswith("flash safety") for r in gone), gone
+    left = dict(edl, fx=[i for i in edl["fx"]
+                         if i["id"] not in {r["id"] for r in gone}])
+    assert flash_safety.assess(left)["peak_per_s"] <= 3
+    assert left["effects"]["stylize"] == edl["effects"]["stylize"]

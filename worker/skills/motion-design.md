@@ -467,8 +467,9 @@ that bind to the same words your graphics land on — a silhouette flash or a
 poster on the payoff, a punctuation frame on a cut or the turn, a junction
 at a real scene change, a composite on a hero graphic (difference over a
 busy plate, footage inside its letters, a ghost stroke behind the subject).
-One device per moment: a hero graphic and a separate device on the same
-word is one stack too many unless the device IS the graphic's composite.
+One device per moment: a hero graphic takes at most ONE device on its word
+— one that serves it (a silhouette flash under the payoff lockup, or the
+graphic's own composite) — never two devices stacked on one landing.
 Prove what you write with `proof_device`; read_skill devices says when each
 earns its place.
 
