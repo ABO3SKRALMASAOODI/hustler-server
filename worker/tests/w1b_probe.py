@@ -120,11 +120,32 @@ def run_case(case, workroot):
     return res
 
 
+def _once_more_after_a_hang(run):
+    """The local ffmpeg 9.0 build deadlocks now and then (all threads
+    parked, no CPU) on multi-input graphs under heavy load; 8.0 never did on
+    the same commands (scratch repro: ~5-35 % hangs vs 0 of 432). The child
+    bounds every ffmpeg call (FFMPEG_TIMEOUT_S, see ``run``) and runs a
+    timed-out command once more, so a stuck encoder costs minutes, not the
+    suite. A command that times out twice still fails the case."""
+    def wrapped(cmd, **kw):
+        try:
+            return run(cmd, **kw)
+        except Exception as e:  # noqa: BLE001
+            if "timed out" not in str(e):
+                raise
+            print(f"[w1b] {str(e)[:120]} — running it once more",
+                  file=sys.stderr, flush=True)
+            return run(cmd, **kw)
+    return wrapped
+
+
 def main(spec_path, out_path):
     import renderer
     import schemas
     assert "subject" in schemas.FX_TYPES, \
         "track 1B is not registered (set VALMERA_FX_PREVIEW=1b)"
+    renderer._render_media_run = _once_more_after_a_hang(
+        renderer._render_media_run)
     if os.environ.get("W1B_LOSSY") != "1":
         renderer._render_media_run = w0b_probe._lossless(
             renderer._render_media_run)
@@ -148,6 +169,8 @@ def run(cases, workroot, timeout=3600, env=None):
     e = dict(os.environ)
     e.update(env or {})
     e.setdefault("VALMERA_FX_PREVIEW", "1b")
+    # every test render is seconds long: a call this slow is a hung encoder
+    e.setdefault("FFMPEG_TIMEOUT_S", "600")
     e.pop("VALMERA_FX_PROBE", None)
     e["PYTHONPATH"] = os.pathsep.join(
         [WORKER, os.path.dirname(WORKER)]
