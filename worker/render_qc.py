@@ -124,6 +124,15 @@ OPEN_STRIP = .02
 OPEN_SKIP = .006
 DEAD_LUMA = 40
 DEAD_SHARE = .8
+# The frontal detector's box on the source is wider than the head and runs
+# below the chin: on the Oct 10 run's source (1080p, a 0.19-wide box) the
+# cheeks sit 11-14% of the box's width inside each side, the ears ~11%, and
+# the chin 6-8% of its height above its bottom. Judged as the box itself,
+# a face that fits its card (s05: hair touching both sides, cheeks inside)
+# read as "cut 21% past the card edge" on both sides. A card face is
+# measured on the box narrowed to the face (just outside the ear line).
+SRC_FACE_SIDE_IN = .10
+SRC_FACE_CHIN_IN = .06
 # The picture area every Look sets for a card layout (the podcast-shorts
 # skill's looks.md Card geometry: "a card on a designed backdrop covering at
 # least 0.54 of the canvas"; Editorial Serif's square card may go to 0.48).
@@ -1178,8 +1187,9 @@ def cut_faces(samples, plan_, src_windows=()):
     owner's rule). A turned face is judged on its leading side; ``over``
     the largest overreach seen (a share of the area). Inside
     ``src_windows`` (programme windows whose faces were read on the source
-    at its own resolution, source_card_faces) the detector box already
-    spans ear to ear, so the sides take no extra margin there."""
+    at its own resolution, source_card_faces) the box is already the face
+    narrowed to its ear line (src_face), so the sides take no extra margin
+    there."""
     cards = plan_.get("cards") or []
     wm = plan_.get("watermark") or {}
     mark = None
@@ -1418,12 +1428,22 @@ def _dead_side(gray, src, side):
     return float((strip < DEAD_LUMA).mean()) >= DEAD_SHARE
 
 
+def src_face(box):
+    """A frontal detector box read on the source, narrowed to the face it
+    holds (SRC_FACE_SIDE_IN, SRC_FACE_CHIN_IN): its sides at the ear line,
+    its bottom at the chin."""
+    w, h = box[2] - box[0], box[3] - box[1]
+    return [box[0] + SRC_FACE_SIDE_IN * w, box[1],
+            box[2] - SRC_FACE_SIDE_IN * w, box[3] - SRC_FACE_CHIN_IN * h]
+
+
 def source_card_faces(src_path, plan_, deadline):
     """[(t, [(box, look)], dead sides)] — the faces of every planned card
     sample (plan 'card_samples'), detected on the SOURCE frame the card
     shows at its own resolution (follow.detect inside the card's source
-    rects grown by SRC_REACH, not under an erase) and placed in the output
-    frame through the card's window (card_geom). ``dead sides``: the sides
+    rects grown by SRC_REACH, not under an erase), narrowed to the face
+    (src_face) and placed in the output frame through the card's window
+    (card_geom). ``dead sides``: the sides
     of the window holding the largest face past which the source has no
     picture. Samples a few seconds apart decode in one pass; None when the
     source cannot be read at all."""
@@ -1489,6 +1509,7 @@ def source_card_faces(src_path, plan_, deadline):
         dets = follow.detect(g, cv2, cascades, roi=roi)
         placed, dead, top = [], set(), 0.0
         for box, look in dets:
+            box = src_face(box)
             cx, cy = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
             if any(e[0] <= cx <= e[2] and e[1] <= cy <= e[3]
                    for e in row.get("erase") or []):
@@ -1562,6 +1583,18 @@ def ink_lines(png_bytes, threshold=TYPE_INK):
             "cap": max((ln["cap"] for ln in lines), default=None)}
 
 
+def _claim_cap(m, kicker=False):
+    """The cap height a lockup's reader takes as its size: its largest
+    line's — past a headline's kicker, the small who-and-when line drawn
+    ABOVE the claim (headline.html), which a squeezed band can leave larger
+    than the claim itself (s06 of the Oct 10 run: kicker 2.5%, claim 1.8%
+    of the frame height, read as a 2.4% hook)."""
+    lines = (m or {}).get("lines") or []
+    if kicker and len(lines) >= 2:
+        return max(ln["cap"] for ln in lines[1:])
+    return (m or {}).get("cap")
+
+
 def type_pass(tplan, deadline):
     """Measure the type of every graphic and of the motion captions on the
     compositions themselves (motion_engine.probe + ink_lines): {"items":
@@ -1575,6 +1608,9 @@ def type_pass(tplan, deadline):
     dw = 1080
     dh = max(2, int(round(dw * float(H) / max(float(W), 1.0))))
     jobs, times, keys = [], [], []
+    kickers = {it["id"]: bool(str(((it.get("item") or {}).get("params") or {})
+                                  .get("kicker") or "").strip())
+               for it in tplan.get("items") or []}
     for it in tplan.get("items") or []:
         span = it["end"] - it["start"]
         if span < .1:
@@ -1622,7 +1658,8 @@ def type_pass(tplan, deadline):
         if kind == "item":
             m = ms[-1] if ms else None
             if m and not m.get("error"):
-                out["items"][ref] = {"cap": m.get("cap"), "box": m.get("box"),
+                out["items"][ref] = {"cap": _claim_cap(m, kickers.get(ref)),
+                                     "box": m.get("box"),
                                      "t": round(prog_t[0], 2)}
             continue
         for text, t, m in zip(ref, prog_t, ms):
@@ -1716,10 +1753,13 @@ def _keyframe_times(path, program_s, most, deadline):
     return ts
 
 
-def clipped_faces(samples, plan_):
+def clipped_faces(samples, plan_, src_windows=()):
     """[(t0, t1, side, gap)] runs of samples whose main face sits within
     EDGE_CLIP of the frame's (or its card's) edge: side 'left' / 'right' /
-    'top' / 'bottom', gap the smallest share seen."""
+    'top' / 'bottom', gap the smallest share seen. Inside ``src_windows``
+    (card faces read on the source, narrowed to the face: src_face) a face
+    too wide for a clear margin on both sides is judged on its tighter
+    side: a face filling its card touches an edge (s07 of the Oct 10 run)."""
     cards = plan_.get("cards") or []
     wm = plan_.get("watermark") or {}
     mark = None
@@ -1769,6 +1809,10 @@ def clipped_faces(samples, plan_):
                     gaps.append(("left", (box[0] - area[0]) / aw))
                 if look >= 0:
                     gaps.append(("right", (area[2] - box[2]) / aw))
+            elif card and look == 0 and any(a <= t < b for a, b in src_windows):
+                gaps.append(min(("left", (box[0] - area[0]) / aw),
+                                ("right", (area[2] - box[2]) / aw),
+                                key=lambda g: g[1]))
             if fh <= 1.0 - 2.0 * EDGE_CLIP:
                 gaps += [("top", (box[1] - area[1]) / ah),
                          ("bottom", (area[3] - box[3]) / ah)]
@@ -1959,7 +2003,7 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
                     "card faces: read on the rendered card (no source frames)")
         res["faces"] = sum(1 for _t_, d in samples if d)
         res["clipped"] = [list(c) + [_limited(rows, c[0], c[1], c[2])]
-                          for c in clipped_faces(samples, plan_)]
+                          for c in clipped_faces(samples, plan_, covered)]
         res["cut"] = [list(c) + [_limited(rows, c[0], c[1], c[2])]
                       for c in cut_faces(samples, plan_, covered)]
         res["softened"] = [list(c) for c in softened_faces(samples, plan_)]

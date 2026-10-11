@@ -2692,6 +2692,14 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None,
             e = min(dur, s + 1.0)
         n = 6 if e - s > 20 else 4
         times = [s + (e - s) * (i + 0.5) / n for i in range(n)]
+    deferred = []
+    if native_resolution and getattr(ctx, "sight_out", False) and \
+            len(times) > config.MCP_IMAGE_PAGE_SIZE:
+        # One full-detail image per time, and one transport page per reply:
+        # the rest would ride out on the caller's NEXT call. Decode only
+        # what this reply carries and name the rest.
+        deferred = times[config.MCP_IMAGE_PAGE_SIZE:]
+        times = times[:config.MCP_IMAGE_PAGE_SIZE]
     evidence_key = ("look_asset", str(asset_key),
                     tuple(round(float(t), 3) for t in times))
     if native_resolution:
@@ -2758,6 +2766,11 @@ def look_at_asset(ctx, asset_key, question="", start=0, end=None, times=None,
             reference_profile.from_index(asset_index))
         if ref_grammar:
             _metric(ctx, "references_profiled")
+    if deferred:
+        out += (f"\nNative detail is one image per time and one reply carries "
+                f"{config.MCP_IMAGE_PAGE_SIZE}: NOT captured — "
+                + ", ".join(f"{t:.2f}s" for t in deferred)
+                + ". Call again with those times.")
     return _cap(out + f"\n(clip is {dur:.1f}s long; call again with times "
                       "or a narrower start/end to zoom into a region)"
                 + (f"\n{measured}" if measured else "")
@@ -31004,7 +31017,7 @@ _COMPACT_CONTRACTS = {
         "output_times=[...] show the assembled edit (inserts, framing, zoom, "
         "cards, erase patches; not captions/text/grade) to aim zooms and place "
         "type. rendered=true needs render_preview first: only a COMPLETE "
-        "preview of the current EDL version (complete=true; a changed-section "
+        "preview of the current EDL version (render_preview(complete=true); a changed-section "
         "proof is rejected) shows real captions, motion graphics and grade: batch "
         "up to 8 dense output_times around a landing. Read positions off the "
         "tenths grid. Uploads: look_at_asset."),

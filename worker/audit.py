@@ -165,7 +165,9 @@ def _audible(hits, source, duration, timeout, frame_s):
         if db is None:
             out.append(h)
             continue
-        if cut_audio._is_loud(db, cut_audio._floor(level, h["boundary"])):
+        # the floor read on the same reader place_edge judged that edge on
+        # (an end's: the loudest of the frame either side)
+        if cut_audio._is_loud(db, cut_audio._floor(lv, h["boundary"])):
             out.append(dict(h, db=db))
     return out
 

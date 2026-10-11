@@ -248,7 +248,7 @@ def test_card_faces_are_read_on_the_source_and_placed_through_the_card(
                        "duration": 4.0}}
     plan = render_qc.plan(edl, index, W=270, H=480, fps=30.0)
     assert plan["card_samples"] and plan["card_samples"][0]["wins"]
-    face = [.55, .30, .72, .60]                  # past the window's right edge
+    face = [.55, .30, .78, .60]                  # past the window's right edge
 
     def detect(gray, cv2=None, cascades=None, face_px=None, roi=None):
         assert roi is not None and roi[0] < .40 and roi[2] > .70
@@ -260,7 +260,9 @@ def test_card_faces_are_read_on_the_source_and_placed_through_the_card(
     t, dets, dead = rows[0]
     box, look = dets[0]
     win = plan["card_samples"][0]["wins"][0]
-    assert box == [round(v, 4) for v in card_geom.to_output(face, win)]
+    # the detector box narrowed to the face (src_face), then placed
+    assert box == [round(v, 4) for v in card_geom.to_output(
+        render_qc.src_face(face), win)]
     assert "right" in dead and "left" not in dead
     # the cut is reported as the source's own edge, with its honest fix
     cut = render_qc.cut_faces([(r[0], r[1]) for r in rows], plan,
@@ -282,6 +284,29 @@ def test_source_measured_card_faces_take_no_side_margin():
     samples = [(t, [near]) for t in (1.0, 1.5, 2.0)]
     assert render_qc.cut_faces(samples, plan)
     assert render_qc.cut_faces(samples, plan, [(0.0, 9.0)]) == []
+
+
+def test_a_face_that_fits_its_card_is_no_cut_on_the_source_box():
+    # s05 of the Oct 10 run at 1.75 s: the frontal box on the source runs
+    # past both ears (cheeks 11-14% of its width inside it), and judged as
+    # the box the face "ran 21% past" both card edges while the render
+    # showed it inside, hair touching. Narrowed to the face it fits.
+    win = ([0.25, 0.21, 0.75, 0.795], [0.44951, 0.1619, 0.61049, 0.75714])
+    haar = [0.4281, 0.3583, 0.6172, 0.6944]
+    plan = {"cards": [(0.0, 37.18, [win[0]])]}
+    raw = [(t, [(card_geom.to_output(haar, win), 0)]) for t in (1.0, 1.5, 2.0)]
+    old = render_qc.cut_faces(raw, plan, [(0.0, 37.18)])
+    assert old and old[0][3] > .1                              # the box itself
+    face = [(t, [(card_geom.to_output(render_qc.src_face(haar), win), 0)])
+            for t in (1.0, 1.5, 2.0)]
+    # at the edge, within the detector's own error — never a fifth past it
+    assert all(c[3] < .02 for c in render_qc.cut_faces(
+        face, plan, [(0.0, 37.18)]))
+    # ... and a face that fills its card is AT its tighter edge (s07): only
+    # where the faces were read on the source, never on rendered pixels
+    clip = render_qc.clipped_faces(face, plan, [(0.0, 37.18)])
+    assert clip and clip[0][2] == "left"
+    assert render_qc.clipped_faces(face, plan) == []
 
 
 # ── measures: picture area, type, captions ───────────────────────────────
@@ -331,6 +356,52 @@ def test_ink_lines_reads_cap_height_off_the_letters_standing_on_a_line():
     assert round(m["cap"] * 400) == 40
     assert m["box"][1] == pytest.approx(60 / 400)
     assert render_qc.ink_lines(_png([]))["box"] is None
+
+
+def test_a_headline_is_sized_by_its_claim_not_its_kicker():
+    # s06: the kicker ('ELON MUSK · MARCH 2024', all caps) drawn ABOVE the
+    # claim at 2.5% of the frame height, the band-squeezed claim at 1.8% —
+    # the reviewers' hook size; the largest line alone read 2.4%
+    rects = []
+    for i in range(8):                            # the kicker: 40 px caps
+        x = 10 + i * 22
+        rects.append([x, 100 - 40, x + 14, 99])
+    for i in range(10):                           # the claim: 28 px caps
+        x = 10 + i * 18
+        rects.append([x, 160 - 28, x + 12, 159])
+    m = render_qc.ink_lines(_png(rects))
+    assert round(m["cap"] * 400) == 40
+    assert round(render_qc._claim_cap(m, kicker=True) * 400) == 28
+    assert render_qc._claim_cap(m) == m["cap"]
+    one = render_qc.ink_lines(_png(rects[8:]))   # an empty kicker: one line
+    assert render_qc._claim_cap(one, kicker=True) == one["cap"]
+
+
+def _browser_ok():
+    try:
+        import motion_engine
+        return motion_engine.available()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+@pytest.mark.skipif(not _browser_ok(), reason="no headless Chromium")
+def test_the_type_pass_measures_a_headline_on_its_composition():
+    import motion_templates
+    params = motion_templates.check_params("headline", {
+        "text": "Jobs called 1983 computer fonts *garbage*",
+        "kicker": "Steve Jobs, 1983", "y": .15})
+    item = {"id": "headline", "template": "headline", "start": 0.0,
+            "end": 6.0, "params": params}
+    tplan = {"W": 540, "H": 960, "fps": 30.0, "captions": [], "items": [{
+        "id": "headline", "template": "headline", "start": 0.0, "end": 6.0,
+        "layer": "above_captions", "tier": None, "purpose": None,
+        "persistent": True, "box": None, "item": item}]}
+    tres = render_qc.type_pass(tplan, time.monotonic() + 90)
+    m = tres["items"]["headline"]
+    # the claim, measured past its kicker, on the full-size composition
+    assert 0.005 < m["cap"] < 0.1
+    assert 0.0 <= m["box"][1] < m["box"][3] < 0.35
 
 
 def test_type_findings_name_a_small_hook_a_small_payoff_and_colliding_captions():
@@ -415,6 +486,36 @@ def test_native_looks_come_back_one_full_detail_image_per_time(
     ctx.pending_images = []
     agent_tools._deliver_frames(ctx, frames, ["a", "b", "c"], "", "Frames")
     assert len(ctx.pending_images) == 1          # the contact sheet
+
+
+def test_native_looks_never_queue_pictures_for_the_next_mcp_call(
+        tmp_path, monkeypatch):
+    from PIL import Image
+    monkeypatch.setattr(agent_tools.config, "MCP_IMAGE_PAGE_SIZE", 4)
+    asset = {"id": 9, "kind": "render", "width": 1080, "meta": {}}
+    monkeypatch.setattr(agent_tools, "_resolve_media_asset",
+                        lambda ctx, key, kinds: (asset, None))
+    monkeypatch.setattr(agent_tools, "_asset_media_duration",
+                        lambda ctx, a: 30.0)
+    decoded = []
+
+    def frames(ctx, a, times, **kw):
+        decoded.extend(times)
+        out = []
+        for i, t in enumerate(times):
+            p = tmp_path / f"n{i}.jpg"
+            Image.new("RGB", (64, 36)).save(p)
+            out.append((i, str(p)))
+        return out, None
+    monkeypatch.setattr(agent_tools, "_asset_frames", frames)
+    ctx = SimpleNamespace(workdir=str(tmp_path), pending_images=[],
+                          sight_out=True, direct_sight=False, job={"id": 3})
+    out = agent_tools.look_at_asset(ctx, "renders/7/p.mp4",
+                                    times=[1, 2, 3, 4, 5, 6],
+                                    native_resolution=True)
+    # this reply carries one transport page; nothing is left queued
+    assert decoded == [1.0, 2.0, 3.0, 4.0] and len(ctx.pending_images) == 4
+    assert "NOT captured — 5.00s, 6.00s" in out
 
 
 def test_an_erased_window_is_read_from_its_patch_clip(tmp_path, monkeypatch):
