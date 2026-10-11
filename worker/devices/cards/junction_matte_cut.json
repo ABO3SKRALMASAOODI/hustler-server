@@ -48,7 +48,7 @@
   "owner_flags": {
     "adds_sound": false,
     "adds_zoom": false,
-    "flash": false
+    "flash": true
   },
   "rungs": [
     "full",
@@ -70,7 +70,8 @@
   ],
   "verify": [
     "duration_exact<=0",
-    "land_err_f<=1"
+    "land_err_f<=1",
+    "flash_risk<=3"
   ],
   "status": "live",
   "description": "The next shot through the outgoing speaker's silhouette, which grows to the frame (1A's handle matte).",

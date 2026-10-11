@@ -38,7 +38,7 @@ MOMENTS = ("stress", "word", "phrase_end", "cut", "beat", "downbeat",
            "onset")
 DENSITIES = ("sparse", "pulse", "accelerate", "8ths", "16ths")
 # per kind: (frames at peak, decay frames)
-ACCENT_SHAPE = {"white_hit": (1, 4), "colour_hit": (2, 2),
+ACCENT_SHAPE = {"white_hit": (1, 5), "colour_hit": (2, 2),
                 "negative": (1, 0), "box_invert": (2, 0),
                 "rgb_slice": (2, 0), "hue_step": (2, 0)}
 # junction style -> device card
@@ -133,6 +133,30 @@ def _new_id(edl, prefix, taken):
 def _opted_in(ctx):
     import flash_safety
     return flash_safety.opted_in(getattr(ctx, "user_message", "") or "")
+
+
+def _thin(ctx, edl, events, fps, replaced=()):
+    """flash_safety.plan over ``events`` with every flash the edit ALREADY
+    plays held fixed (the export gate counts them all together): a second
+    write never lands a hit where the program already flashes 3 times in
+    that second. The user's ask for flashing keeps everything."""
+    import flash_safety
+    if _opted_in(ctx):
+        return list(events), []
+    rest = dict(edl, fx=[i for i in edl.get("fx") or []
+                         if not (isinstance(i, dict)
+                                 and i.get("id") in set(replaced))])
+    try:
+        have = flash_safety.flash_events(rest,
+                                         getattr(ctx, "index", None) or {})
+    except Exception:  # noqa: BLE001 — a reading failure thins alone
+        have = []
+    fixed = [{"t": float(e["t"]), "strength": 1e9, "_fixed": True}
+             for e in have]
+    kept, thinned = flash_safety.plan(fixed + list(events), fps,
+                                      opted_in=False)
+    return ([e for e in kept if not e.get("_fixed")],
+            [e for e in thinned if not e.get("_fixed")])
 
 
 # ── moments ──────────────────────────────────────────────────────────────
@@ -392,16 +416,19 @@ def add_accent(ctx, kind, at=None, on=None, start=None, end=None, count=None,
                   "inverts too).")
     stage = "over_type" if scope == "all" else "pre_captions"
     # flash safety (automatic placements): <= 3 full-frame flashes a second
-    import flash_safety
     from fx_schemas.accents import FLASH_KINDS
     flashes = kind in FLASH_KINDS + ("matte_flash",) or \
         (kind == "box_invert" and reg is None)
-    full = reg is None or reg.get("shape") == "card"
+    # the same reading the export gate makes (AccentFx.flash_times): a hit
+    # is local only when its region is known to cover under a quarter of
+    # the frame; a card, a face or a glyph (anchors solved at render) and a
+    # large box count as full-frame
+    full = _region_is_full(reg)
     events = [{"t": m[0], "strength": m[1], "i": i,
                "full_frame": bool(flashes and full)}
               for i, m in enumerate(moments)]
     opted = _opted_in(ctx)
-    kept, thinned = flash_safety.plan(events, fps, opted_in=opted)
+    kept, thinned = _thin(ctx, edl, events, fps)
     keep_idx = {e["i"] for e in kept}
     taken, items, seen_frames = set(), [], set()
     for i, (t, _s, bind) in enumerate(moments):
@@ -465,6 +492,21 @@ def add_accent(ctx, kind, at=None, on=None, start=None, end=None, count=None,
         return out
     ids = ", ".join(it["id"] for it in items)
     return f"{out}\nids: {ids}{note}"
+
+
+def _region_is_full(reg):
+    """Does a hit inside ``reg`` count as a full-frame flash? The schema's
+    own reading (fx_schemas.accents.region_share / LOCAL_FLASH_SHARE), so
+    the verb thins exactly what the export gate would count."""
+    if reg is None:
+        return True
+    try:
+        from fx_schemas import FxRegion
+        from fx_schemas.accents import LOCAL_FLASH_SHARE, region_share
+        share = region_share(FxRegion.model_validate(reg))
+    except Exception:  # noqa: BLE001 — unreadable: count it (safe side)
+        return True
+    return share is None or share >= LOCAL_FLASH_SHARE
 
 
 def _card_exists(card_id):
@@ -718,20 +760,42 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
         if style == "datamosh":
             item["seed"] = 1
         items.append(item)
-    # flash safety on the cuts that flash (hit_flash, box_steps)
-    import flash_safety
-    if style in ("hit_flash", "box_steps"):
-        evs = [{"t": it["at"], "i": k} for k, it in enumerate(items)]
-        kept, thinned = flash_safety.plan(evs, fps, opted_in=_opted_in(ctx))
-        keep = {e["i"] for e in kept}
-        items = [it for k, it in enumerate(items) if k in keep]
+    # flash safety on the cuts that flash (hit_flash, box_steps, and
+    # matte_cut, whose substitute is a flash on the cut): each
+    # item's own reading (JunctionFx.flash_times — box steps flash once per
+    # large step), against the flashes the edit already plays; an item is
+    # kept only when every one of its flashes is
+    note = ""
+    if style in ("hit_flash", "box_steps", "matte_cut"):
+        from fx_schemas.accents import JunctionFx
+        evs = []
+        for k, it in enumerate(items):
+            try:
+                times = JunctionFx.model_validate(it).flash_times() or []
+            except Exception:  # noqa: BLE001 — the commit names the rule
+                times = [it["at"]]
+            evs += [{"t": t, "i": k} for t in times]
+        kept, thinned = _thin(ctx, edl, evs, fps, replaced=removed)
+        drop = {e["i"] for e in thinned}
+        held = [it for k, it in enumerate(items) if k in drop]
+        items = [it for k, it in enumerate(items) if k not in drop]
+        if held:
+            note = (f"; flash safety held {len(held)} back (≤3 full-frame "
+                    "flashes a second with the edit's other flashes; the "
+                    "user did not ask for flashing)")
+        if not items and not ops:
+            return _r("every placement was removed by flash safety: the "
+                      "program already flashes there. Use a style that "
+                      "does not flash, or ask the user whether they want "
+                      "flashing.")
     ops += [w.upsert_fx(it) for it in items]
     where = ", ".join(f"{it['at']:g}" for it in items[:10])
     out = w.commit(ctx, ops, f"set_junction: {style} at {where}s"
-                   + (f" (replaced {', '.join(removed)})" if removed else ""))
+                   + (f" (replaced {', '.join(removed)})" if removed else "")
+                   + note)
     if out.startswith("REJECTED"):
         return out
-    return f"{out}\nids: {', '.join(it['id'] for it in items)}"
+    return f"{out}\nids: {', '.join(it['id'] for it in items)}{note}"
 
 
 def _scene_cuts(ctx, edl, all_cuts):

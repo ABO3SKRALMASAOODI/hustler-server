@@ -22,8 +22,10 @@ kick in a track the user supplied). It marks structure; it never decorates.
 - Junctions only at real scene changes. A jump cut inside one continuous
   take stays bare (set_junction's default cuts='scene' already skips them).
 - Flash safety is on: automatic placements keep at most 3 full-frame
-  flashes a second. More needs the user's explicit ask (they asked for
-  strobing or flashing), and the export is then flagged contains_flashing.
+  flashes a second, counted together with every flash the edit already
+  plays (accents, hit flashes, box steps, matte cuts, strobes). More needs
+  the user's explicit ask (they asked for strobing or flashing), and the
+  export is then flagged contains_flashing.
 - No device adds a sound or a zoom. Never add music to get a beat grid:
   beats, downbeats and onsets exist only on a track the user supplied;
   otherwise the clock is the speaker (on='stress').
@@ -50,7 +52,8 @@ kick in a track the user supplied). It marks structure; it never decorates.
   unless the user asked for strobing.
 - Card-clipped white hits (ref 02): add_accent kind=white_hit on stresses
   with region {shape: card}: a 1-frame white peak inside the rounded card
-  that falls off over 3-5 frames (tau 2 frames); the backdrop never moves.
+  whose light lingers, then drains to 0 over 3-5 frames (decay_f, default
+  5: ref 02's own fall-off); the backdrop never moves.
 - The outgoing colour as light (ref 01@3.833): kind=colour_hit on the cut
   frame, colour omitted: the outgoing shot's dominant hue screened over two
   frames of the incoming one.
@@ -60,7 +63,10 @@ kick in a track the user supplied). It marks structure; it never decorates.
   region whose box is the subject's product.
 - A product strobe with negatives (ref 01@0.04-0.96): add_strobe frames
   (project stills or a registered variant set), hold 2, negate alternate,
-  fit register — every image exactly 2 frames, the sound untouched.
+  fit register — every image exactly 2 frames, the sound untouched. A
+  'src:<s>' clip frame is the raw source frame filled to the frame (no
+  grade, crop focus or picture card of the edit); for frames of the edit
+  itself use 'program' (the live picture, as graded and framed).
 - Iris from an element (ref 03@7.93): set_junction style=iris with origin a
   face or a point on the element; the iris blooms with a soft ring ahead of
   its edge.
@@ -70,7 +76,7 @@ kick in a track the user supplied). It marks structure; it never decorates.
   montage; one family per section.
 - Matte cut (ref 20@7.40): style=matte_cut — the next shot through the
   outgoing speaker's silhouette; without a person matte it degrades to a
-  white flash on the cut and says so.
+  white flash on the cut and says so (flash safety counts it as a flash).
 - Zoom blur / radial blur / whip: energy changes at a real turn, 0.4-0.5 s.
 
 ## Common failure modes

@@ -9,7 +9,8 @@ Kinds (each a YUV-native chain; nothing converts the program to RGB):
   negative    ``negate`` — limited-range exact (Y -> 251-Y), the RGB
               negative of ref 04@1.93–12.6
   white_hit   the picture mixed to white: a 1-frame peak and ``decay_f``
-              frames of exponential fall-off (tau ≈ 2 frames, ref
+              frames of fall-off that lingers, then drains to exactly 0
+              (fx_schemas.accents.decay_strengths, measured on ref
               02@13.667 inside its rounded card)
   colour_hit  a colour flood (screen-like on luma, chroma pushed to the
               colour; ref 01@3.833): ``colour`` or, when None, the
@@ -26,13 +27,15 @@ Kinds (each a YUV-native chain; nothing converts the program to RGB):
 
 Graph size is flat in the number of accents (ROADMAP 1D "graph size"):
 items of one stage are grouped by (kind, colour, region) and every group is
-ONE chain whatever its count — a single timeline filter gated by the union
-``enable`` when every hit is a full-strength full-frame op, else one
+ONE chain up to CHAIN_HITS hits — a single timeline filter gated by the
+union ``enable`` when every hit is a full-strength full-frame op, else one
 processed copy over the group's window hull composited through one alpha
-stream: the per-frame strength (an expression evaluated on a 2x2 frame and
-scaled up: no per-pixel expression, no file), times the region's mask,
-times (box_invert) a per-hit box sprite cropped per frame. Outside the
-accents' frames and outside the region the picture is bit-exact.
+stream: the per-frame strength (a 1-pixel-high strip read one pixel a
+frame and scaled up: data, not an expression), times the region's mask,
+times (box_invert) a per-hit box sprite cropped per frame. Past CHAIN_HITS
+a group adds one chain per CHAIN_HITS hits (ffmpeg caps an expression at
+~99 terms). Outside the accents' frames and outside the region the picture
+is bit-exact.
 
 Scope is the stage: ``pre_captions`` changes the picture only (after the
 picture cards, below the captions), ``over_type`` inverts the type too
@@ -42,13 +45,13 @@ bit-exact).
 """
 
 import json
-import math
 import random
 
 import fxprims
 import regions
 import wipe_masks
-from fx_schemas.accents import DECAY_TAU_F, DEFAULT_BOXES, DEFAULT_SLICES
+from fx_schemas.accents import (DEFAULT_BOXES, DEFAULT_SLICES,
+                                decay_strengths)
 
 # Ops that are timeline filters at full strength over the full frame: one
 # filter with the union ``enable``.
@@ -98,8 +101,8 @@ def _even(v):
 class _Accent:
     FILTERS = ("split", "trim", "setpts", "tpad", "overlay", "format",
                "negate", "lutyuv", "lutrgb", "hue", "hflip", "swaprect",
-               "chromashift", "alphamerge", "color", "geq", "scale", "blend",
-               "loop", "crop", "nullsink")
+               "chromashift", "alphamerge", "scale", "blend",
+               "loop", "crop", "settb", "nullsink")
     # composites lay a processed copy over the untouched stream (overlay
     # keeps the main frame and its metadata) or gate timeline filters
     KEEPS_FRAME_TAGS = True
@@ -114,8 +117,10 @@ class _Accent:
         if kind == "colour_hit":
             state["colour"][item["id"]] = self._colour(plan, item, env)
         got = self._prepare_region(plan, item, env, state)
-        if got is None and kind == "box_invert":
-            self._register_boxes(plan, item, state)
+        if got is None:
+            self._register_strip(plan, item, state)
+            if kind == "box_invert":
+                self._register_boxes(plan, item, state)
         return got
 
     def _prepare_region(self, plan, item, env, state):
@@ -162,6 +167,29 @@ class _Accent:
         return None                    # glyph / face: masks at emit
 
     @staticmethod
+    def _strip_path(plan, gkey):
+        import hashlib
+        import os
+        return os.path.join(plan.workdir or ".", "w1d_strength_" +
+                            hashlib.sha256(gkey.encode()).hexdigest()[:16]
+                            + ".png")
+
+    def _register_strip(self, plan, item, state):
+        """The group's per-frame strength is DATA, not an expression: a
+        1-pixel-high gray strip (pixel k = the strength of hull frame k),
+        written at emit once the group's hits are known and read one pixel
+        per frame (crop x=n). ffmpeg refuses an expression of more than
+        ~99 terms (measured: 24 white hits with a 5-frame decay failed the
+        whole fx graph), so a strength never rides in one; and the graph
+        stays the same size however many hits a group holds."""
+        import numpy as np
+        gkey = _group_key(item, state)
+        path = self._strip_path(plan, gkey)
+        if not __import__("os").path.exists(path):
+            wipe_masks.write_still(path, np.zeros((1, 1), np.uint8))
+        plan.add_input(f"w1d_str:{gkey}", wipe_masks.still_input(path))
+
+    @staticmethod
     def _boxes_path(plan, gkey):
         import hashlib
         import os
@@ -192,7 +220,8 @@ class _Accent:
             return accent.lower()
         hue = None
         src, tl = env.get("src_path"), getattr(plan, "tl", None)
-        if col is None and src and tl is not None:
+        if col is None and src and tl is not None \
+                and not env.get("audio_only"):
             try:
                 t = max(0.0, float(item["start"]) - 1.0 / plan.fps3)
                 st = tl.out_to_src(t)
@@ -242,8 +271,9 @@ class _Accent:
             f0, f1 = fxprims.frame_span(it["start"], it["end"], ctx.fps)
             inten = float(it.get("intensity", 1.0) or 0.0)
             frames = {f: inten for f in range(f0, f1)}
-            for k in range(1, int(it.get("decay_f") or 0) + 1):
-                frames[f1 - 1 + k] = inten * math.exp(-k / DECAY_TAU_F)
+            for k, v in enumerate(decay_strengths(
+                    inten, int(it.get("decay_f") or 0)), 1):
+                frames[f1 - 1 + k] = v
             frames = {f: v for f, v in frames.items() if 0 <= f < n_prog}
             if not frames:
                 ctx.note(it, "omit", "its frames are outside this program")
@@ -253,45 +283,67 @@ class _Accent:
             hits.append((it, min(frames), max(frames) + 1))
         if not hits:
             return label
+        hits.sort(key=lambda h: (h[1], h[2], str(h[0].get("id"))))
+        # per-hit data (hue angles, slice offsets, box tiles) keeps the
+        # group's own hit order whatever the chunking
+        order = {id(h[0]): k for k, h in enumerate(hits)}
         region = group[0].get("region")
-        F0 = min(a for _i, a, _b in hits)
-        F1 = max(b for _i, _a, b in hits)
-        spans = fxprims.merge_frame_spans((a, b) for _i, a, b in hits)
+        G0 = min(a for _i, a, _b in hits)
+        G1 = max(b for _i, _a, b in hits)
         full = all(abs(v - 1.0) < 1e-9 for v in strength.values())
         colour = state["colour"].get(group[0]["id"])
         rgb = wipe_masks.hex_rgb(colour) if kind == "colour_hit" else None
-        # the simplest graph: one timeline filter, union enable
+        # the simplest graph: one timeline filter, union enable (the union
+        # of every hit's frames, in runs of CHAIN_HITS spans: disjoint, so
+        # no frame is processed twice)
         if full and not region and kind in TIMELINE_KINDS:
-            out = ctx.uid("ac")
-            ctx.parts.append(f"[{label}]"
-                             f"{fxprims.with_enable(op_for(kind, colour_rgb=rgb), fxprims.enable_expr(spans))}"
-                             f"[{out}]")
-            return out
-        K = F1 - F0
-        op = self._op(ctx, kind, hits, F0, rgb, group)
-        alpha = self._alpha(ctx, strength, F0, K)
+            op = op_for(kind, colour_rgb=rgb)
+            spans = fxprims.merge_frame_spans((a, b) for _i, a, b in hits)
+            for i in range(0, len(spans), CHAIN_HITS):
+                out = ctx.uid("ac")
+                ctx.parts.append(
+                    f"[{label}]"
+                    f"{fxprims.with_enable(op, fxprims.enable_expr(spans[i:i + CHAIN_HITS]))}"
+                    f"[{out}]")
+                label = out
+            return label
+        # one composite per run of CHAIN_HITS hits, each owning the frames
+        # from its first hit's start to the next run's: every frame is
+        # composited once (a decay or a long hit reaching into the next run
+        # is drawn by that run, from the same strength strip)
+        parts = _runs(hits, G1)
+        alphas = self._alpha(ctx, strength, G0, gkey, parts)
+        if alphas is None:
+            for it, _a, _b in hits:
+                ctx.note(it, "omit", "its strength input was never bound")
+            return label
         if region:
-            m = self._region_mask(ctx, group, gkey, region, state, F0, K)
-            if m is None:
+            masks = self._region_mask(ctx, group, gkey, region, state, parts)
+            if masks is None:
                 for it, _a, _b in hits:
                     ctx.note(it, "omit", f"its {region.get('shape')} "
                              "region is not available on this render")
                 return label
-            alpha = _multiply(ctx, alpha, m)
+            alphas = [_multiply(ctx, a, m) for a, m in zip(alphas, masks)]
         if kind == "box_invert":
-            boxes = self._box_sprite(ctx, hits, F0, K, region, gkey)
+            boxes = self._box_sprite(ctx, hits, region, gkey, parts, order)
             if boxes is None:
                 for it, _a, _b in hits:
                     ctx.note(it, "omit", "its box mask was never bound")
                 return label
-            alpha = _multiply(ctx, alpha, boxes)
-        return _composite(ctx, label, op, alpha, spans, F0, F1)
+            alphas = [_multiply(ctx, a, b) for a, b in zip(alphas, boxes)]
+        for (R0, R1, part), alpha in zip(parts, alphas):
+            spans = fxprims.merge_frame_spans((a, b) for _i, a, b in part)
+            op = self._op(ctx, kind, part, R0, rgb, group, order)
+            label = _composite(ctx, label, op, alpha, spans, R0, R1)
+        return label
 
     # -- pieces ------------------------------------------------------------
-    def _op(self, ctx, kind, hits, F0, rgb, group):
+    def _op(self, ctx, kind, hits, F0, rgb, group, order):
         if kind == "hue_step":
             vals = {}
-            for k, (it, a, b) in enumerate(hits):
+            for it, a, b in hits:
+                k = order[id(it)]
                 ang = ((k + 1 + int(it.get("seed") or 0)) * 137.508) % 360
                 ang = ang * float(it.get("intensity", 1.0) or 0.0)
                 for f in range(a, b):
@@ -299,10 +351,10 @@ class _Accent:
             expr = wipe_masks.piecewise_expr(vals, var="n", scale=360.0)
             return f"hue=h='{expr}':s=1.25"
         if kind == "rgb_slice":
-            return self._slices(ctx, hits, F0, group)
+            return self._slices(ctx, hits, F0, group, order)
         return op_for(kind, colour_rgb=rgb)
 
-    def _slices(self, ctx, hits, F0, group):
+    def _slices(self, ctx, hits, F0, group, order):
         W, H = int(ctx.W), int(ctx.H)
         n_b = int(group[0].get("bands") or DEFAULT_SLICES)
         n_b = max(2, n_b - n_b % 2)
@@ -312,7 +364,8 @@ class _Accent:
         chains = []
         per_pair = [dict(y1={}, y2={}, x1={}, x2={}, w={})
                     for _ in range(pairs)]
-        for k, (it, a, b) in enumerate(hits):
+        for it, a, b in hits:
+            k = order[id(it)]
             rnd = random.Random((int(it.get("seed") or 0) + 1) * 7919 + k)
             for p in range(pairs):
                 ya = rnd.randrange(0, rows - 1) * bh
@@ -340,54 +393,79 @@ class _Accent:
         chains.append(f"chromashift=cbh={shift}:crh=-{shift}")
         return ",".join(chains)
 
-    def _alpha(self, ctx, strength, F0, K):
-        vals = {f - F0: v for f, v in strength.items() if F0 <= f < F0 + K}
-        out = ctx.uid("aca")
-        ctx.parts.append(wipe_masks.strength_chain(vals, ctx.W, ctx.H,
-                                                   ctx.fps3, K) + f"[{out}]")
-        return out
+    def _alpha(self, ctx, strength, G0, gkey, parts):
+        """One W x H gray strength stream per run (over the frames it owns),
+        read from the group's strip (see _register_strip)."""
+        import numpy as np
+        lab = ctx.input_label(f"w1d_str:{gkey}")
+        if lab is None:
+            return None
+        G1 = parts[-1][1]
+        strip = np.zeros((1, G1 - G0), np.uint8)
+        for f, v in strength.items():
+            if G0 <= f < G1:
+                strip[0, f - G0] = int(round(min(1.0, max(0.0, v)) * 255))
+        wipe_masks.write_still(self._strip_path(ctx.plan, gkey), strip)
+        outs = []
+        for src, (R0, R1, _part) in zip(_fan(ctx, lab, len(parts)), parts):
+            out = ctx.uid("aca")
+            ctx.parts.append(
+                f"{wipe_masks.still_chain(src, ctx.fps3, R1 - R0)},"
+                f"crop=1:1:x='n+{R0 - G0}':y=0,"
+                f"scale={int(ctx.W)}:{int(ctx.H)}:flags=neighbor,"
+                f"{wipe_masks.pts(ctx.fps3)}[{out}]")
+            outs.append(out)
+        return outs
 
-    def _region_mask(self, ctx, group, gkey, region, state, F0, K):
+    def _region_mask(self, ctx, group, gkey, region, state, parts):
+        """The region's gray mask per run (over the frames it owns), or
+        None when the region is not available on this render."""
         shape = region.get("shape")
-        trim = (f"trim=start_frame={F0}:end_frame={F0 + K},"
-                f"setpts=PTS-STARTPTS")
+        outs = []
         if shape == "card" or regions.is_static(region):
             lab = ctx.input_label(f"w1d_acc:{gkey}")
             if lab is None:
                 return None
-            out = ctx.uid("acm")
-            ctx.parts.append(f"[{lab}]format=gray,loop=loop=-1:size=1,"
-                             f"{wipe_masks.pts(ctx.fps3)},trim=end_frame={K}"
-                             f"[{out}]")
             ops = state["mask_ops"].get(gkey)
-            if ops:
-                inv, feather = ops
-                o2 = ctx.uid("acm")
-                out = fxprims.mask_ops(
-                    ctx.parts, out, o2, uid=o2, invert=inv,
-                    feather_px=feather * float(ctx.H) / 1080.0)
-            return out
-        if shape in ("rect", "ellipse", "polygon"):     # keyed (1C)
-            pad = regions.pad(ctx, group[0], region)
-        else:
-            pad = regions.pad(ctx, group[0], region)    # glyph / face
+            for src, (R0, R1, _p) in zip(_fan(ctx, lab, len(parts)), parts):
+                out = ctx.uid("acm")
+                ctx.parts.append(
+                    f"{wipe_masks.still_chain(src, ctx.fps3, R1 - R0)}"
+                    f"[{out}]")
+                if ops:
+                    inv, feather = ops
+                    o2 = ctx.uid("acm")
+                    out = fxprims.mask_ops(
+                        ctx.parts, out, o2, uid=o2, invert=inv,
+                        feather_px=feather * float(ctx.H) / 1080.0)
+                outs.append(out)
+            return outs
+        # keyed boxes (1C), glyph and face: one program-long pad
+        pad = regions.pad(ctx, group[0], region)
         if pad is None:
             return None
-        out = ctx.uid("acm")
-        ctx.parts.append(f"[{pad}]format=gray,{trim}[{out}]")
-        return out
+        for src, (R0, R1, _p) in zip(_fan(ctx, pad, len(parts)), parts):
+            out = ctx.uid("acm")
+            ctx.parts.append(f"[{src}]format=gray,trim=start_frame={R0}:"
+                             f"end_frame={R1},setpts=PTS-STARTPTS,"
+                             f"{wipe_masks.pts(ctx.fps3)}[{out}]")
+            outs.append(out)
+        return outs
 
-    def _box_sprite(self, ctx, hits, F0, K, region, gkey):
-        """A per-hit box mask: tiles of seeded boxes (or the region's own
-        box) at quarter resolution on a 4-px grid, laid out in a sprite and
-        cropped per frame, scaled up 4x nearest (exact box edges)."""
+    def _box_sprite(self, ctx, hits, region, gkey, parts, order):
+        """A per-hit box mask per chunk: tiles of seeded boxes (or the
+        region's own box) at quarter resolution on a 4-px grid, laid out in
+        one sprite for the group and cropped per frame (each chunk's crop
+        names only its own hits' tiles), scaled up 4x nearest (exact box
+        edges)."""
         import numpy as np
         W, H = int(ctx.W), int(ctx.H)
         TW, TH = (W + 3) // 4, (H + 3) // 4
         cols = 8
         tiles = [np.zeros((TH, TW), np.uint8)]
-        index = {}
-        for k, (it, a, b) in enumerate(hits):
+        tile_of = {}
+        for it, _a, _b in hits:
+            k = order[id(it)]
             t = np.zeros((TH, TW), np.uint8)
             if region:
                 t[:] = 255                     # the region IS the box
@@ -398,8 +476,7 @@ class _Accent:
                     t[int(y0 * TH):max(int(y0 * TH) + 1, int(y1 * TH)),
                       int(x0 * TW):max(int(x0 * TW) + 1, int(x1 * TW))] = 255
             tiles.append(t)
-            for f in range(a, b):
-                index[f - F0] = len(tiles) - 1
+            tile_of[id(it)] = len(tiles) - 1
         rows = (len(tiles) + cols - 1) // cols
         sheet = np.zeros((rows * TH, cols * TW), np.uint8)
         for i, t in enumerate(tiles):
@@ -409,19 +486,26 @@ class _Accent:
         if lab is None:
             return None
         wipe_masks.write_still(self._boxes_path(ctx.plan, gkey), sheet)
-        ix = wipe_masks.piecewise_expr(
-            {f: (v % cols) for f, v in index.items()}, var="n", scale=1.0,
-            clamp=False)
-        iy = wipe_masks.piecewise_expr(
-            {f: (v // cols) for f, v in index.items()}, var="n", scale=1.0,
-            clamp=False)
-        out = ctx.uid("acb")
-        ctx.parts.append(
-            f"{wipe_masks.still_chain(lab, ctx.fps3, K)},"
-            f"crop={TW}:{TH}:x='({ix})*{TW}':y='({iy})*{TH}',"
-            f"scale={TW * 4}:{TH * 4}:flags=neighbor,crop={W}:{H}:0:0,"
-            f"{wipe_masks.pts(ctx.fps3)}[{out}]")
-        return out
+        outs = []
+        for src, (C0, C1, part) in zip(_fan(ctx, lab, len(parts)), parts):
+            index = {}
+            for it, a, b in part:
+                for f in range(a, b):
+                    index[f - C0] = tile_of[id(it)]
+            ix = wipe_masks.piecewise_expr(
+                {f: (v % cols) for f, v in index.items()}, var="n",
+                scale=1.0, clamp=False)
+            iy = wipe_masks.piecewise_expr(
+                {f: (v // cols) for f, v in index.items()}, var="n",
+                scale=1.0, clamp=False)
+            out = ctx.uid("acb")
+            ctx.parts.append(
+                f"{wipe_masks.still_chain(src, ctx.fps3, C1 - C0)},"
+                f"crop={TW}:{TH}:x='({ix})*{TW}':y='({iy})*{TH}',"
+                f"scale={TW * 4}:{TH * 4}:flags=neighbor,crop={W}:{H}:0:0,"
+                f"{wipe_masks.pts(ctx.fps3)}[{out}]")
+            outs.append(out)
+        return outs
 
 
 def seeded_boxes(seed, n):
@@ -467,7 +551,49 @@ def _group_key(item, state):
         extra = state["colour"].get(item["id"])
     elif kind == "rgb_slice":
         extra = item.get("bands")
-    return json.dumps([kind, extra, rsig], default=str)
+    # the stage too: a group's inputs (strip, box sprite) are written at
+    # emit, and a picture-scope and an all-scope group of the same kind must
+    # not share (and overwrite) one file
+    return json.dumps([item.get("stage"), kind, extra, rsig], default=str)
+
+
+# Hits per composite chain. Per-frame filter parameters (a hue angle, slice
+# offsets, a box tile, the overlay's enable) carry about one expression term
+# per hit, and ffmpeg refuses an expression past ~99 terms (measured on 8.x
+# and 9.0: "Cannot allocate memory" while initializing the graph — the whole
+# fx graph then falls back to no fx). A group of more hits compiles to one
+# chain per CHAIN_HITS: the graph stays flat up to that count and grows by
+# one chain per CHAIN_HITS beyond it.
+CHAIN_HITS = 48
+
+
+def _runs(hits, end):
+    """[(R0, R1, hits clipped to [R0, R1))]: ``hits`` (sorted by start) in
+    runs of CHAIN_HITS, each run owning the frames from its first hit's
+    start to the next run's (the last to ``end``). The ranges tile the
+    group's hull without overlap; a hit reaching past its run's range is
+    drawn, clipped, by the run that owns those frames."""
+    starts = [hits[i][1] for i in range(0, len(hits), CHAIN_HITS)]
+    bounds = starts + [int(end)]
+    out = []
+    for R0, R1 in zip(bounds, bounds[1:]):
+        if R1 <= R0:
+            continue
+        part = [(it, max(a, R0), min(b, R1)) for it, a, b in hits
+                if a < R1 and b > R0]
+        if part:
+            out.append((R0, R1, part))
+    return out
+
+
+def _fan(ctx, label, n):
+    """``n`` copies of a stream (the label itself when n == 1)."""
+    if n <= 1:
+        return [label]
+    u = ctx.uid("acs")
+    ctx.parts.append(f"[{label}]split={n}" +
+                     "".join(f"[{u}{i}]" for i in range(n)))
+    return [f"{u}{i}" for i in range(n)]
 
 
 def _multiply(ctx, a, b):
@@ -487,8 +613,14 @@ def _composite(ctx, label, op, alpha, spans, F0, F1):
     ov = fxprims.composite_overlay(ctx.parts, label)
     alpha_fmt = ",format=yuva420p" if ov == fxprims.OVERLAY else ""
     ctx.parts.append(f"[{label}]split[{u}a][{u}b]")
+    # re-stamped on the window clock: PTS-STARTPTS keeps the program's own
+    # rounding (frame F0 + k - frame F0 is 1 us short of k frames for about
+    # a third of k at 29.97), and alphamerge then paired picture k with the
+    # alpha of frame k - 1 — a decay's first step read as a second peak, a
+    # 1-frame hit vanished (measured).
     ctx.parts.append(f"[{u}b]trim=start_frame={F0}:end_frame={F1},"
-                     f"setpts=PTS-STARTPTS,{op}{alpha_fmt}[{u}p]")
+                     f"setpts=PTS-STARTPTS,{wipe_masks.pts(ctx.fps3)},"
+                     f"{op}{alpha_fmt}[{u}p]")
     ctx.parts.append(f"[{u}p][{alpha}]alphamerge"
                      f"{wipe_masks.repad(F0, ctx.fps, alpha=True)}[{u}w]")
     out = ctx.uid("ac")

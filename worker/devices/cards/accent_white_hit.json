@@ -9,9 +9,9 @@
       "white_hit"
     ],
     "decay_f": [
+      5,
       4,
-      3,
-      5
+      3
     ],
     "stage": [
       "pre_captions"
@@ -79,6 +79,6 @@
     "flash_risk<=3"
   ],
   "status": "live",
-  "description": "A 1-frame white peak with an exponential 3-5-frame fall-off (tau 2 frames); inside the picture card with region card (ref 02).",
+  "description": "A 1-frame white peak whose light lingers, then drains to 0 over 3-5 frames (measured on ref 02); inside the picture card with region card.",
   "skill": "punctuation"
 }

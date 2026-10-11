@@ -222,7 +222,7 @@ def measure_at2(out_dir, monkeypatch):
     from tools_ext import punctuation_tools as P
     ctx = ToolCtx(edl, dict(idx, words=words), dur)
     res = P.add_accent(ctx, "white_hit", on="stress", density="pulse",
-                       region="card", decay_f=4, count=9)
+                       region="card", count=9)
     assert res.startswith("EDL"), res
     fx = [i for i in ctx.edl["fx"] if i["type"] == "accent"]
     lossless(monkeypatch)
@@ -247,25 +247,34 @@ def measure_at2(out_dir, monkeypatch):
         from timeline import Timeline
         tl = Timeline(ctx.edl["keep"])
         targets.append(fxprims.frame_at(tl.src_to_out(w["t0"]), fps))
-    peaks, decays = [], []
-    for f in planned:
-        full = inside == 255
+    peaks, decays, curves = [], [], []
+    full = inside == 255
+
+    def strength(f):
         bb = y0[f].astype(float)
         m = full & ((235 - bb) > 30)
-        peaks.append(float(np.median((y1[f][m] - bb[m]) / (235 - bb[m]))))
-        dec = 0
+        return float(np.median((y1[f][m] - bb[m]) / (235 - bb[m])))
+    for f in planned:
+        peaks.append(strength(f))
+        # the measured fall-off after the peak, frame by frame (a 2-frame
+        # peak or a missing decay step shows here, not in a changed-frame
+        # count): every frame that still differs, and its strength
+        dec, curve = 0, []
         for k in range(1, 8):
             if f + k < len(y1) and np.abs(y1[f + k].astype(int)
                                           - y0[f + k])[full].max() > 2:
                 dec += 1
+                curve.append(round(strength(f + k), 3))
         decays.append(dec)
+        curves.append(curve)
     import qa_metrics
     land = qa_metrics.land_err_f(events=[r[0] for r in _runs(got)],
                                  targets=targets)
     return {"result": res.splitlines()[0][:160], "hits": len(fx),
             "outside_card_max_abs_diff": outside,
             "peak_strength": [round(p, 3) for p in peaks],
-            "decay_frames": decays, "land_err_f": land["value"],
+            "decay_frames": decays, "decay_curves": curves,
+            "land_err_f": land["value"],
             "rungs": sorted({r["rung"] for r in rep})}
 
 
@@ -276,6 +285,11 @@ def test_at_1d_2_card_clipped_white_hits(tmp_path, monkeypatch):
     assert m["outside_card_max_abs_diff"] == 0, m
     assert all(p >= 0.97 for p in m["peak_strength"]), m
     assert all(3 <= d <= 5 for d in m["decay_frames"]), m
+    # a 1-frame peak, then the ref-02 fall-off itself, step by step
+    from fx_schemas.accents import decay_strengths
+    want = [round(v, 3) for v in decay_strengths(1.0, 5)]   # the default
+    for curve in m["decay_curves"]:
+        assert np.allclose(curve, want, atol=0.04), (curve, want)
     assert m["land_err_f"] <= 1, m
     assert m["rungs"] == ["full"]
 
@@ -464,6 +478,9 @@ def test_at_1d_4_columns_box_steps_and_an_element_iris(tmp_path,
     d = [p for p in glob.glob(os.path.join(m["out"] + ".wd",
                                            "w1d_jn_*_m"))
          if os.path.exists(os.path.join(p, "f_00009.png"))]
+    # (soft masks are stored at half size: the centroid is read in the
+    # mask's pixels and judged in the frame's, +-1 frame pixel)
+    fw = probe(m["out"])["width"]
     centres = []
     for dd in d:
         seq = [np.asarray(Image.open(os.path.join(dd, f"f_{k:05d}.png")))
@@ -471,8 +488,9 @@ def test_at_1d_4_columns_box_steps_and_an_element_iris(tmp_path,
         lit = next((s for s in seq if 0 < (s == 255).sum() < 2000), None)
         if lit is not None:
             ys, xs = np.nonzero(lit == 255)
-            centres.append((xs.mean() + 0.5, ys.mean() + 0.5,
-                            lit.shape[1], lit.shape[0]))
+            k = fw / float(lit.shape[1])
+            centres.append(((xs.mean() + 0.5) * k, (ys.mean() + 0.5) * k,
+                            lit.shape[1] * k, lit.shape[0] * k))
     assert any(abs(cx - 0.62 * W) <= 1.0 and abs(cy - 0.38 * H) <= 1.0
                for cx, cy, W, H in centres), centres
 
@@ -583,24 +601,47 @@ def measure_perf(out_dir, monkeypatch):
             ("negative", "white_hit", "box_invert")}
 
     def cpu():
-        r = resource.getrusage(resource.RUSAGE_CHILDREN)
-        return r.ru_utime + r.ru_stime
+        # ffmpeg (children) AND this process: the masks are computed here,
+        # in numpy, before ffmpeg runs, and are part of the wipe's cost
+        c = resource.getrusage(resource.RUSAGE_CHILDREN)
+        s = resource.getrusage(resource.RUSAGE_SELF)
+        return c.ru_utime + c.ru_stime + s.ru_utime + s.ru_stime
+
+    def cost(name, fx):
+        best = None
+        for _ in range(2):                    # the quieter of two runs
+            t0 = cpu()
+            render(dict(edl, fx=fx), src, os.path.join(
+                out_dir, f"perf_{name}.mp4"), idx=MONTAGE_IDX, duration=12.0,
+                preview=False)
+            got = cpu() - t0
+            best = got if best is None else min(best, got)
+        return best
     lossless(monkeypatch)
-    t0 = cpu()
-    render(edl, src, os.path.join(out_dir, "perf_ctrl.mp4"),
-           idx=MONTAGE_IDX, duration=12.0, preview=False)
-    base = cpu() - t0
-    t0 = cpu()
+    base = cost("ctrl", [])
     fx = [{"id": f"j{k}", "type": "junction", "stage": "junction", "at": a,
            "style": "columns", "duration_s": 1.0}
           for k, a in enumerate(montage_cuts())]
-    render(dict(edl, fx=fx), src, os.path.join(out_dir, "perf_wipe.mp4"),
-           idx=MONTAGE_IDX, duration=12.0, preview=False)
-    wipe = cpu() - t0
+    # the Wave 0 junction seam on its own (source handles, the window's
+    # overlay): a window that is the plain cut rebuilt
+    import junctions_v2
+
+    def plain(self, ctx, items):
+        h = int(ctx.h)
+        return self._settle(ctx, self._concat(ctx, ctx.a_label, ctx.b_label,
+                                              h, 2 * h), 2 * h)
+    monkeypatch.setattr(junctions_v2._Junction, "junction", plain)
+    seam = cost("seam", fx)
+    monkeypatch.undo()
+    lossless(monkeypatch)
+    wipe = cost("wipe", fx)
+    n = len(fx) * 1.0
     return {"graph_parts_24_minus_1": flat,
-            "wipe_cpu_s_per_window_s": round(max(0.0, wipe - base)
-                                             / (len(fx) * 1.0), 3),
-            "control_cpu_s": round(base, 2), "wipe_cpu_s": round(wipe, 2)}
+            # the device's own cost: the column wipe over the plain cut
+            "wipe_cpu_s_per_window_s": round(max(0.0, wipe - seam) / n, 3),
+            "seam_cpu_s_per_window_s": round(max(0.0, seam - base) / n, 3),
+            "control_cpu_s": round(base, 2), "seam_cpu_s": round(seam, 2),
+            "wipe_cpu_s": round(wipe, 2)}
 
 
 @local_only(*V13, V12)

@@ -190,6 +190,8 @@ def test_flash_times_by_kind_region_and_stage():
     j = A.JunctionFx.model_validate({"id": "j", "stage": "junction",
                                      "at": 5.0, "style": "dissolve"})
     assert j.flash_times() == []
+    # a matte cut's substitute rung is a white flash on the cut: counted
+    assert j.model_copy(update={"style": "matte_cut"}).flash_times() == [5.0]
 
 
 def test_strobe_order_and_schedule_are_deterministic_and_exact():
@@ -214,9 +216,40 @@ def test_box_steps_land_inside_the_window():
     assert lands == sorted(lands) and 0 < lands[0] and lands[-1] < 24
 
 
-def test_decay_curve_is_tau_two_frames():
-    vals = A.decay_strengths(1.0, 4)
-    assert [round(v, 3) for v in vals] == [0.607, 0.368, 0.223, 0.135]
+@pytest.mark.parametrize("count", [None, 2, 5])
+def test_box_steps_flash_reading_is_the_rendered_white_fills(count):
+    """flash_times names every white fill the compiler draws on a box of a
+    quarter of the frame or more — the last, full-frame step included — on
+    the frame the mask sequence lands it (at the nominal 30 fps)."""
+    import wipe_masks
+    item = {"id": "j", "stage": "junction", "at": 10.0, "style": "box_steps",
+            "duration_s": 0.8}
+    if count:
+        item["count"] = count
+    times = A.JunctionFx.model_validate(item).flash_times()
+    n = 24                                       # 0.8 s at 30 fps
+    _reveal, flash, lands = wipe_masks.box_steps(60, 108, n, count or 3,
+                                                 (30, 54))
+    shares = A.box_step_shares(count)
+    peaks = [f for f, s in zip(lands, shares) if s >= A.LOCAL_FLASH_SHARE]
+    assert all(flash[f].max() == 255 for f in lands)
+    assert times == [round(10.0 - 0.4 + f / 30.0, 4) for f in peaks]
+    assert shares[-1] == 1.0 and times[-1] == round(9.6 + lands[-1] / 30, 4)
+
+
+def test_decay_curve_is_ref_02s_measured_shoulder_and_ends_at_zero():
+    # ref 02@13.667 inside its card, measured: .87, .66, .375, .16, .05
+    vals = A.decay_strengths(1.0, 5)
+    assert [round(v, 2) for v in vals] == [0.89, 0.63, 0.36, 0.15, 0.04]
+    for d in range(1, 13):
+        v = A.decay_strengths(0.8, d)
+        assert len(v) == d and all(0 < x < 0.8 for x in v)
+        assert all(b < a for a, b in zip(v, v[1:]))       # monotone
+        # the frame after the last decay frame is 0: no closing step
+        # larger than the step before it
+        if d >= 2:
+            assert v[-1] <= v[-2] - v[-1] + 1e-9, v
+    assert A.decay_strengths(1.0, 0) == []
 
 
 def test_the_member_module_imports_only_pydantic_and_the_stdlib():

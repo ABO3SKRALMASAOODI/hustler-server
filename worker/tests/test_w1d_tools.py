@@ -116,7 +116,7 @@ def test_on_stress_lands_on_word_onsets_with_their_binding():
         assert fxprims.frame_at(it["start"], 25.0) == \
             fxprims.frame_at(w["t0"], 25.0)
         assert round(w["t0"], 2) in onsets
-        assert it["decay_f"] == 4 and it["kind"] == "white_hit"
+        assert it["decay_f"] == 5 and it["kind"] == "white_hit"
     gaps = [b["start"] - a["start"] for a, b in zip(items, items[1:])]
     assert all(g >= P.SPARSE_GAP_S - 1e-6 for g in gaps)
 
@@ -158,6 +158,20 @@ def test_local_hits_are_not_flashes():
     region = {"shape": "rect", "box": [0.4, 0.4, 0.6, 0.6]}
     P.add_accent(ctx, "negative", at=hits, region=region)
     assert len(_fx(ctx, "accent")) == 6
+
+
+@pytest.mark.parametrize("region", [
+    {"shape": "face"}, {"shape": "rect", "box": [0.1, 0.1, 0.9, 0.7]}])
+def test_hits_the_export_counts_as_flashes_are_thinned_like_them(region):
+    """A face (solved at render) or a large box: the export gate counts
+    those hits as full-frame flashes (AccentFx.flash_times), so the verb
+    thins them by the same reading — never writes what the gate flags."""
+    ctx = Ctx(TALK)
+    hits = [5.0, 5.12, 5.24, 5.36, 5.48, 5.6]
+    out = P.add_accent(ctx, "negative", at=hits, region=region)
+    assert "flash safety held 3 back" in out, out
+    import flash_safety
+    assert flash_safety.assess(ctx.edl)["over_limit"] is False
 
 
 def test_beats_need_a_track_the_user_supplied():
@@ -293,6 +307,30 @@ def test_hit_flash_junctions_pass_flash_safety():
     assert out.startswith("EDL"), out
     import flash_safety
     assert flash_safety.assess(ctx.edl)["over_limit"] is False
+
+
+def test_a_second_write_is_thinned_against_the_flashes_already_there():
+    """The export gate counts every flash the edit plays; a later write is
+    thinned against the ones already written, not only against itself."""
+    import flash_safety
+    ctx = Ctx(TALK)
+    assert P.add_accent(ctx, "negative", at=[5.0, 5.2, 5.4]).startswith(
+        "EDL")
+    out = P.add_accent(ctx, "white_hit", at=[5.6, 5.8])
+    assert out.startswith("REJECTED") and "flash safety" in out, out
+    out = P.add_accent(ctx, "white_hit", at=[5.6, 6.5])
+    assert "flash safety held 1 back" in out, out
+    assert flash_safety.assess(ctx.edl)["over_limit"] is False
+    # box steps flash on each large step; with a hit trio right at the cut
+    # the junction is held back and says so
+    ctx = Ctx(CUTS)
+    P.add_accent(ctx, "negative", at=[4.7, 4.85])
+    out = P.set_junction(ctx, "box_steps", at=5.0)
+    assert out.startswith("REJECTED") and "flash" in out, out
+    assert flash_safety.assess(ctx.edl)["over_limit"] is False
+    # the user's ask keeps it (the export is flagged)
+    ctx.user_message = "flash it hard on the cut, strobe it"
+    assert P.set_junction(ctx, "box_steps", at=5.0).startswith("EDL")
 
 
 def test_remove_punctuation():

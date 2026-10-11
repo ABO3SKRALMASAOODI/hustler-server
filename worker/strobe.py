@@ -38,8 +38,8 @@ MAX_PROGRAM_OFFSET_S = 2.0
 
 
 class _Strobe:
-    FILTERS = ("split", "trim", "setpts", "tpad", "overlay", "format",
-               "negate", "scale", "nullsink")
+    FILTERS = ("split", "trim", "setpts", "settb", "tpad", "overlay",
+               "format", "negate", "scale", "nullsink")
     KEEPS_FRAME_TAGS = True
 
     def prepare(self, plan, item):
@@ -56,6 +56,8 @@ class _Strobe:
         sched = strobe_schedule(frames, item.get("pattern") or "sequence",
                                 item.get("seed"), n)
         W, H = int(plan.W), int(plan.H)
+        if env.get("audio_only"):
+            return self._placeholder(plan, item, f0, n)
         used = sorted({i for i, _a, _n in sched})
         stills, missing, live, cache = {}, [], {}, {}
         ref_size = None
@@ -124,6 +126,23 @@ class _Strobe:
         return None
 
     @staticmethod
+    def _placeholder(plan, item, f0, n):
+        """An audio-only render prunes the picture: the strobe's input only
+        has to open (one clear frame), and no still is decoded for it."""
+        from PIL import Image
+        d = os.path.join(plan.workdir,
+                         f"w1d_strobe_{wipe_masks._safe_id(item['id'])}")
+        os.makedirs(d, exist_ok=True)
+        first = os.path.join(d, "f_00000.png")
+        if not os.path.exists(first):
+            Image.new("RGBA", (int(plan.W), int(plan.H)),
+                      (0, 0, 0, 0)).save(first, compress_level=1)
+        plan.add_input(f"w1d_strobe:{item['id']}", wipe_masks.sequence_input(
+            os.path.join(d, "f_%05d.png"), plan.fps3))
+        _state(plan)[item["id"]] = {"f0": f0, "n": n, "live": {}}
+        return None
+
+    @staticmethod
     def _image(plan, env, src, accent):
         from PIL import Image
         kind = src.get("kind")
@@ -177,13 +196,20 @@ class _Strobe:
             spans = fxprims.merge_frame_spans((f, f + 1) for f in frames)
             if off == 0 and not neg:
                 continue
-            if off == 0:
-                out = ctx.uid("stn")
-                ctx.parts.append(f"[{label}]negate=enable="
-                                 f"'{fxprims.enable_expr(spans)}'[{out}]")
-                label = out
-                continue
-            label = self._shifted(ctx, label, spans, off, neg)
+            # one filter per MAX_TERMS holds: ffmpeg refuses an enable
+            # expression past ~99 terms (a long strobe alternating stills
+            # with the live picture has one span per hold)
+            step = wipe_masks.MAX_TERMS
+            for part in (spans[i:i + step]
+                         for i in range(0, len(spans), step)):
+                if off == 0:
+                    out = ctx.uid("stn")
+                    ctx.parts.append(f"[{label}]negate=enable="
+                                     f"'{fxprims.enable_expr(part)}'"
+                                     f"[{out}]")
+                    label = out
+                else:
+                    label = self._shifted(ctx, label, part, off, neg)
         u = ctx.uid("st")
         ov = fxprims.composite_overlay(ctx.parts, label)
         fmt = "yuva420p"

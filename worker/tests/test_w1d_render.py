@@ -127,6 +127,130 @@ def test_a_one_frame_accent_lands_on_its_frame_at_every_rate(
     assert changed(a, b) == [120]
 
 
+@pytest.mark.parametrize("rate", ["30000/1001", "24", "60000/1001"])
+def test_composited_accents_keep_every_frame_at_every_rate(
+        rate, monkeypatch, tmp_path):
+    """Accents that lay a processed copy over the picture (a decay, a region,
+    every kind without a timeline filter) pair that copy with its per-frame
+    strength by timestamp. At 29.97 a copy cut from the program kept the
+    program's own rounding and paired frame k with the strength of k - 1 for
+    about a third of the offsets (measured: a 2-frame hit lost its first
+    frame, a white hit's first decay step read as a second peak). Twelve
+    2-frame mirrors 5 frames apart cover those offsets; a white hit's
+    fall-off is read step by step."""
+    src = make_source(str(tmp_path / "src.mp4"), rate=rate, dur=8.0)
+    fps = eval(rate) if "/" in rate else float(rate)  # noqa: S307
+    edl = {"keep": [[0.0, 7.0]], "captions": {"enabled": False}}
+    idx = dict(IDX, video=dict(IDX["video"], fps=fps, duration=8.0))
+    lossless(monkeypatch)
+    o0, o1 = str(tmp_path / "a.mp4"), str(tmp_path / "b.mp4")
+    render(edl, src, o0, idx=idx, preview=False, duration=8.0)
+    starts = list(range(41, 101, 5))
+    fx = [accent(f"m{k}", f, fps, kind="mirror", n=2)
+          for k, f in enumerate(starts)]
+    fx.append(accent("w", 110, fps, kind="white_hit", decay_f=4))
+    boxes = list(range(120, 160, 5))       # seeded boxes: a sprite per hit
+    fx += [accent(f"b{k}", f, fps, kind="box_invert", n=2, seed=k,
+                  bands=4) for k, f in enumerate(boxes)]
+    _, rep = render(dict(edl, fx=fx), src, o1, idx=idx, preview=False,
+                    duration=8.0)
+    assert all(r["rung"] == "full" for r in rep), rep
+    y0, a = frames(o0)
+    y1, b = frames(o1)
+    want = sorted([f for s in starts + boxes for f in (s, s + 1)]
+                  + list(range(110, 115)))
+    assert changed(a, b) == want
+    masks = [np.abs(y1[f].astype(int) - y0[f]) > 8 for f in range(len(y1))]
+    for f, g in zip(boxes, boxes[1:]):
+        assert (masks[f] == masks[f + 1]).mean() > 0.99    # one box set
+        assert (masks[f] != masks[g]).mean() > 0.01        # per hit
+    from fx_schemas.accents import decay_strengths
+    got = []
+    for f in range(110, 115):
+        bb, w = y0[f].astype(float), y1[f].astype(float)
+        m = (235 - bb) > 40
+        got.append(float(np.median((w[m] - bb[m]) / (235 - bb[m]))))
+    assert np.allclose(got, [1.0] + decay_strengths(1.0, 4), atol=0.03), got
+
+
+def test_a_hundred_hits_compile_and_land_whole(work, base25, monkeypatch):
+    """ffmpeg refuses an expression past ~99 terms ("Cannot allocate
+    memory" while initializing the graph), and the whole fx graph then falls
+    back to no fx. A strength rode in one geq expression (24 white hits with
+    a 5-frame decay failed, measured) and every overlay's enable named one
+    span per hit. The strength is a strip now and a group past CHAIN_HITS
+    compiles to more chains: 64 white hits (128 strength frames) and 100
+    one-frame negatives all render on exactly their frames."""
+    from fx_schemas.accents import decay_strengths
+    hits = list(range(3, 195, 3))                         # 64 hits
+    fx = [accent(f"w{k}", f, 25.0, kind="white_hit", decay_f=1)
+          for k, f in enumerate(hits)]
+    out, _d, rep = _run(work, "hundred_w", dict(BASE, fx=fx), monkeypatch)
+    assert all(r["rung"] == "full" for r in rep), rep[:2]
+    y0, a = frames(base25)
+    y1, b = frames(out)
+    assert changed(a, b) == sorted(hits + [f + 1 for f in hits])
+    tail = decay_strengths(1.0, 1)[0]
+    for f in (hits[0], hits[50], hits[-1]):
+        for k, want in ((0, 1.0), (1, tail)):
+            bb, w = y0[f + k].astype(float), y1[f + k].astype(float)
+            m = (235 - bb) > 40
+            got = float(np.median((w[m] - bb[m]) / (235 - bb[m])))
+            assert got == pytest.approx(want, abs=0.03), (f, k, got)
+    every = list(range(1, 200, 2))                        # 100 hits
+    negs = [accent(f"n{k}", f, 25.0) for k, f in enumerate(every)]
+    out, _d, rep = _run(work, "hundred_n", dict(BASE, fx=negs), monkeypatch)
+    assert all(r["rung"] == "full" for r in rep), rep[:2]
+    _, b = frames(out)
+    assert changed(a, b) == every
+
+
+@pytest.mark.parametrize("region", [None, {"shape": "rect",
+                                            "box": [0.1, 0.2, 0.9, 0.7]}])
+def test_overlapping_hits_across_chains_draw_each_frame_once(
+        region, work, monkeypatch):
+    """60 two-frame negatives one frame apart overlap each other and cross
+    a chain boundary (CHAIN_HITS): every frame they cover is negated
+    exactly once — the render equals one long negative over the same
+    frames (a frame negated twice would read as untouched)."""
+    import accents
+    assert 60 > accents.CHAIN_HITS
+    kw = {"region": region} if region else {}
+    many = [accent(f"n{k}", 10 + k, 25.0, n=2, **kw) for k in range(60)]
+    one = [accent("all", 10, 25.0, n=61, **kw)]
+    o1, *_ = _run(work, f"overlap_many_{bool(region)}",
+                  dict(BASE, fx=many), monkeypatch)
+    o2, *_ = _run(work, f"overlap_one_{bool(region)}",
+                  dict(BASE, fx=one), monkeypatch)
+    assert frame_md5s(o1) == frame_md5s(o2)
+
+
+def test_a_two_second_junction_at_59_94_compiles(monkeypatch, tmp_path):
+    """A 2 s dissolve at 59.94 fps is 120 window frames, each its own
+    strength: 120 expression terms, past ffmpeg's limit, failed the fx
+    graph. The strength chain splits into passes under the limit."""
+    src = make_montage(str(tmp_path / "m60.mp4"), rate="60000/1001")
+    edl = {"keep": [[0.4, 2.9], [3.1, 5.6]], "captions": {"enabled": False},
+           "frame": {"ratio": "9:16"}}
+    idx = dict(IDX, video=dict(IDX["video"], fps=59.94))
+    lossless(monkeypatch)
+    o0, o1 = str(tmp_path / "a.mp4"), str(tmp_path / "b.mp4")
+    render(edl, src, o0, idx=idx, preview=False)
+    for style in ("dissolve", "hit_flash"):
+        it = {"id": "j", "type": "junction", "stage": "junction", "at": 2.5,
+              "style": style, "duration_s": 2.0}
+        _, rep = render(dict(edl, fx=[it]), src, o1, idx=idx, preview=False)
+        assert rep[0]["rung"] == "full", rep
+        y0, a = frames(o0)
+        _, b = frames(o1)
+        cut = round(2.5 * 59.94)
+        ch = changed(a, b)
+        assert len(a) == len(b) and ch, style
+        assert set(ch) <= set(range(cut - 60, cut + 60)), (style, ch[:3])
+        if style == "dissolve":
+            assert len(ch) > 100
+
+
 def test_white_hit_peaks_white_and_decays_with_tau_two(work, base25,
                                                        monkeypatch):
     it = accent("w", 40, 25.0, kind="white_hit", decay_f=5)
@@ -139,7 +263,8 @@ def test_white_hit_peaks_white_and_decays_with_tau_two(work, base25,
         m = (235 - b) > 40
         got.append(float(np.median((w[m] - b[m]) / (235 - b[m]))))
     assert got[0] == pytest.approx(1.0, abs=0.02)
-    want = [np.exp(-k / 2.0) for k in range(1, 6)]
+    from fx_schemas.accents import decay_strengths
+    want = decay_strengths(1.0, 5)
     assert np.allclose(got[1:], want, atol=0.03), got
     assert y1[46].tolist() == y0[46].tolist()
 
@@ -375,8 +500,10 @@ def test_iris_origin_from_a_face_box_peer(work, monkeypatch):
             first = m
             break
     ys, xs = np.nonzero(first == first.max())
-    H, W = first.shape
-    assert abs(xs.mean() - 0.7 * W) <= 1.5 and abs(ys.mean() - 0.3 * H) <= 1.5
+    H, W = first.shape                   # a soft mask: stored at half size
+    k = probe(out)["width"] / float(W)
+    assert abs((xs.mean() + 0.5) * k - 0.7 * W * k) <= 1.5
+    assert abs((ys.mean() + 0.5) * k - 0.3 * H * k) <= 1.5
 
 
 def test_matte_cut_uses_the_handle_matte_when_1a_provides_it(work,
@@ -419,6 +546,44 @@ def test_seeded_and_precomputed_devices_are_deterministic(style, work,
                        monkeypatch, src=work["montage"])
         md5s.append(frame_md5s(out))
     assert md5s[0] == md5s[1]
+
+
+def test_an_audio_only_render_skips_the_picture_precomputes(work,
+                                                            monkeypatch):
+    """render_edl(audio_only=True) builds the same graph and prunes every
+    picture chain (picture reuse, timeline stitches): the strobe decodes no
+    still and no mask sequence is computed (the full render does both)."""
+    import json as _json
+    import renderer
+    import schemas
+    import wipe_masks
+    fx = [{"id": "st", "type": "strobe", "stage": "pre_captions",
+           "start": 1.0, "end": 1.4, "frames": [
+               {"source": {"kind": "source", "src_t": 3.0}},
+               {"source": {"kind": "colour", "colour": "white"}}]},
+          {"id": "j", "type": "junction", "stage": "junction", "at": 2.2,
+           "style": "iris", "duration_s": 0.48}]
+    edl = schemas.validate_edl(_json.loads(_json.dumps(dict(JBASE, fx=fx))),
+                               12.0).model_dump()
+    grabs = []
+    real = wipe_masks.grab_frame
+    monkeypatch.setattr(wipe_masks, "grab_frame",
+                        lambda *a, **k: grabs.append(a) or real(*a, **k))
+    made = []
+    real_iris = wipe_masks.iris
+    monkeypatch.setattr(wipe_masks, "iris",
+                        lambda *a, **k: made.append(a) or real_iris(*a, **k))
+    out = os.path.join(work["dir"], "audio_only.m4a")
+    wd = out + ".wd"
+    os.makedirs(wd, exist_ok=True)
+    dur = renderer.render_edl(edl, IDX, work["montage"], out, wd, True,
+                              suppress_outro=True, audio_only=True)
+    assert dur == pytest.approx(4.4, abs=0.1)
+    assert grabs == [] and made == []
+    assert audio_md5(out)
+    _run(work, "audio_full", dict(JBASE, fx=fx), monkeypatch,
+         src=work["montage"])
+    assert grabs and made                  # the full render drew them
 
 
 # ── brand integrity (owner rule 4) ──────────────────────────────────────

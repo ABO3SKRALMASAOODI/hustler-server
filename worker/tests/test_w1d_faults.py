@@ -106,6 +106,11 @@ def test_every_fault_times_every_1d_spec_renders(spec, fault, media,
     assert ids <= {r["id"] for r in rep}, rep
     assert all(r["rung"] in ("full", "reduced", "substitute", "omit")
                for r in rep)
+    # a device degrades on its own row: the whole fx graph never falls
+    # back to a render without fx (that drops every device on the edit)
+    assert not any("graph failed" in str(r.get("reason")) for r in rep), rep
+    if fault == "none":
+        assert all(r["rung"] != "omit" for r in rep), rep
     if fault == "ffmpeg_filter_missing":
         assert all(r["rung"] == "omit" for r in rep), rep
     if fault == "oom" and spec in ("strobe", "jn_columns"):

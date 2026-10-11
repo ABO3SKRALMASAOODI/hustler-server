@@ -81,6 +81,14 @@ def progress(j, n):
 
 
 # ── analytic shapes (coverage 0..1, float32 H x W) ──────────────────────
+#
+# Every shape below is separable or cell-wise: its coverage depends on x
+# alone, y alone, a column / band / cell index, or the distance to one
+# centre. Each is computed on the 1-D axes (or per column, band or cell)
+# and spread over the frame with numpy indexing, never evaluated per pixel
+# per frame: the same float32 / float64 arithmetic on the same values, so
+# the masks are byte-identical to a per-pixel evaluation (tests pin it),
+# at a fraction of the cost (a 1080x1920 column wipe: ~13x faster).
 
 def _grid(W, H):
     ys, xs = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -99,10 +107,31 @@ def grid(W, H):
     return _GRIDS[key]
 
 
-def disc(W, H, cx, cy, r, edge=1.0):
-    """Coverage of a disc of radius ``r`` px centred at (cx, cy) px."""
-    xs, ys = grid(W, H)
-    d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
+def axes(W, H):
+    """Pixel-centre coordinates as 1-D float32 axes (x: W, y: H) — the
+    values of ``grid`` without the H x W arrays."""
+    return (np.arange(int(W), dtype=np.float32) + 0.5,
+            np.arange(int(H), dtype=np.float32) + 0.5)
+
+
+def _full(H, W, row=None, col=None):
+    """A contiguous H x W uint8 frame from a 1-D row (W,) or column (H,)."""
+    if row is not None:
+        return np.ascontiguousarray(np.broadcast_to(row[None, :], (H, W)))
+    return np.ascontiguousarray(np.broadcast_to(col[:, None], (H, W)))
+
+
+def distance(W, H, cx, cy):
+    """float32 distance of every pixel centre to (cx, cy) px."""
+    x, y = axes(W, H)
+    return np.sqrt(((x - cx) ** 2)[None, :] + ((y - cy) ** 2)[:, None])
+
+
+def disc(W, H, cx, cy, r, edge=1.0, d=None):
+    """Coverage of a disc of radius ``r`` px centred at (cx, cy) px (``d``:
+    a precomputed ``distance`` to that centre)."""
+    if d is None:
+        d = distance(W, H, cx, cy)
     return clamp01((r - d) / max(edge, 1e-3) + 0.5)
 
 
@@ -113,12 +142,17 @@ def half_plane(coord, edge_at, edge=1.0, below=True):
     return clamp01((coord - edge_at) / max(edge, 1e-3) + 0.5)
 
 
+def _box_axes(W, H, x0, y0, x1, y1, edge=1.0):
+    x, y = axes(W, H)
+    cx = clamp01(np.minimum((x - x0), (x1 - x)) / max(edge, 1e-3) + 0.5)
+    cy = clamp01(np.minimum((y - y0), (y1 - y)) / max(edge, 1e-3) + 0.5)
+    return cx, cy
+
+
 def box(W, H, x0, y0, x1, y1, edge=1.0):
     """Coverage of an axis-aligned box [x0, x1) x [y0, y1) in px."""
-    xs, ys = grid(W, H)
-    cx = clamp01(np.minimum((xs - x0), (x1 - xs)) / max(edge, 1e-3) + 0.5)
-    cy = clamp01(np.minimum((ys - y0), (y1 - ys)) / max(edge, 1e-3) + 0.5)
-    return cx * cy
+    cx, cy = _box_axes(W, H, x0, y0, x1, y1, edge)
+    return cy[:, None] * cx[None, :]
 
 
 def to_u8(cov):
@@ -134,20 +168,26 @@ def edge_px(W, H, share=EDGE_SHARE):
 def wipe(W, H, n, direction):
     """A straight soft-edged wipe; ``direction`` is where the edge travels
     (``left``: the incoming shot enters from the right)."""
-    xs, ys = grid(W, H)
+    W, H = int(W), int(H)
+    x, y = axes(W, H)
     e = edge_px(W, H)
     out = []
     for j in range(n):
         p = ease_in_out_cubic(progress(j, n))
         if direction == "left":
-            cov = half_plane(xs, W + e - p * (W + 2 * e), e, below=False)
+            row = to_u8(half_plane(x, W + e - p * (W + 2 * e), e,
+                                   below=False))
         elif direction == "right":
-            cov = half_plane(xs, -e + p * (W + 2 * e), e)
+            row = to_u8(half_plane(x, -e + p * (W + 2 * e), e))
         elif direction == "up":
-            cov = half_plane(ys, H + e - p * (H + 2 * e), e, below=False)
+            out.append(_full(H, W, col=to_u8(half_plane(
+                y, H + e - p * (H + 2 * e), e, below=False))))
+            continue
         else:
-            cov = half_plane(ys, -e + p * (H + 2 * e), e)
-        out.append(to_u8(cov))
+            out.append(_full(H, W, col=to_u8(half_plane(
+                y, -e + p * (H + 2 * e), e))))
+            continue
+        out.append(_full(H, W, row=row))
     return out
 
 
@@ -160,31 +200,43 @@ def iris(W, H, n, centre, halo=0.42):
     far = max(math.hypot(cx - x, cy - y) for x in (0, W) for y in (0, H))
     e = max(1.5, edge_px(W, H, 0.004))
     ring = 0.24
+    W, H = int(W), int(H)
+    d = distance(W, H, cx, cy)
     out = []
     for j in range(n):
         p = progress(j, n)
         # mostly ease-in, landing exactly on the far corner (plus the ring)
         r = (far * (1 + ring) + e) * (0.65 * ease_in_cubic(p)
                                       + 0.35 * ease_in_out_cubic(p))
-        core = disc(W, H, cx, cy, r / (1 + ring), e)
-        if halo and r > 0:
-            xs, ys = grid(W, H)
-            d = np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2)
-            outer = clamp01((r - d) / max(e, r * 0.06))
-            core = np.maximum(core, halo * outer)
-        out.append(to_u8(core))
+        # every pixel farther than r + e from the centre is 0 in both the
+        # core and the ring: only the bounding square is evaluated
+        reach = r + e + 2.0
+        x0, x1 = max(0, int(cx - reach)), min(W, int(cx + reach) + 1)
+        y0, y1 = max(0, int(cy - reach)), min(H, int(cy + reach) + 1)
+        frame = np.zeros((H, W), np.uint8)
+        if x1 > x0 and y1 > y0:
+            sub = d[y0:y1, x0:x1]
+            core = disc(W, H, cx, cy, r / (1 + ring), e, d=sub)
+            if halo and r > 0:
+                outer = clamp01((r - sub) / max(e, r * 0.06))
+                core = np.maximum(core, halo * outer)
+            frame[y0:y1, x0:x1] = to_u8(core)
+        out.append(frame)
     return out
 
 
 def columns(W, H, n, count, direction):
     """``count`` vertical columns, each filling top to bottom (bottom to
     top for ``up``), staggered across the frame in the travel direction."""
+    W, H = int(W), int(H)
     count = max(2, int(count or 6))
-    xs, ys = grid(W, H)
+    x, y = axes(W, H)
     e = edge_px(W, H)
-    col = np.minimum((xs / W * count).astype(np.int32), count - 1)
-    order = col if direction in ("right", "down", "up", None) else \
-        (count - 1 - col)
+    col = np.minimum((x / W * count).astype(np.int32), count - 1)
+    reps = np.bincount(col, minlength=count)     # col is monotone: runs
+    cols = np.arange(count, dtype=np.int32)
+    order = cols if direction in ("right", "down", "up", None) else \
+        (count - 1 - cols)
     stagger = 0.45
     span = 1.0 - stagger
     out = []
@@ -195,22 +247,26 @@ def columns(W, H, n, count, direction):
         local = local * local * (3 - 2 * local)          # smoothstep
         if direction == "up":
             edge_at = H + e - local * (H + 2 * e)
-            cov = half_plane(ys, edge_at, e, below=False)
+            cov = half_plane(y[:, None], edge_at[None, :], e, below=False)
         else:
             edge_at = -e + local * (H + 2 * e)
-            cov = half_plane(ys, edge_at, e)
-        out.append(to_u8(cov))
+            cov = half_plane(y[:, None], edge_at[None, :], e)
+        out.append(np.repeat(to_u8(cov), reps, axis=1))
     return out
 
 
 def bands(W, H, n, count, direction):
     """``count`` horizontal bands, alternate bands wiping in from opposite
     sides, staggered top to bottom (bottom to top for ``up``)."""
+    W, H = int(W), int(H)
     count = max(2, int(count or 8))
-    xs, ys = grid(W, H)
+    x, y = axes(W, H)
     e = edge_px(W, H)
-    band = np.minimum((ys / H * count).astype(np.int32), count - 1)
-    order = (count - 1 - band) if direction == "up" else band
+    band = np.minimum((y / H * count).astype(np.int32), count - 1)
+    reps = np.bincount(band, minlength=count)    # band is monotone: runs
+    idx = np.arange(count, dtype=np.int32)
+    order = (count - 1 - idx) if direction == "up" else idx
+    from_left = (idx % 2 == 0) if direction != "left" else (idx % 2 == 1)
     stagger = 0.4
     span = 1.0 - stagger
     out = []
@@ -219,33 +275,41 @@ def bands(W, H, n, count, direction):
         local = np.clip((p - order * (stagger / max(1, count - 1))) / span,
                         0.0, 1.0)
         local = local * local * (3 - 2 * local)
-        from_left = (band % 2 == 0) if direction != "left" else \
-            (band % 2 == 1)
-        a = half_plane(xs, -e + local * (W + 2 * e), e)
-        b = half_plane(xs, W + e - local * (W + 2 * e), e, below=False)
-        out.append(to_u8(np.where(from_left, a, b)))
+        a = half_plane(x[None, :], (-e + local * (W + 2 * e))[:, None], e)
+        b = half_plane(x[None, :], (W + e - local * (W + 2 * e))[:, None], e,
+                       below=False)
+        rows = to_u8(np.where(from_left[:, None], a, b))
+        out.append(np.repeat(rows, reps, axis=0))
     return out
 
 
 def staircase(W, H, n, direction):
     """A diagonal wipe in square steps: a grid of cells revealed corner to
     corner, each cell easing in (a stepped staircase edge)."""
+    W, H = int(W), int(H)
     cols = 8
     rows = max(2, int(round(cols * H / float(W))))
-    xs, ys = grid(W, H)
-    ci = np.minimum((xs / W * cols).astype(np.int32), cols - 1)
-    ri = np.minimum((ys / H * rows).astype(np.int32), rows - 1)
+    x, y = axes(W, H)
+    ci = np.minimum((x / W * cols).astype(np.int32), cols - 1)
+    ri = np.minimum((y / H * rows).astype(np.int32), rows - 1)
+    creps = np.bincount(ci, minlength=cols)      # monotone runs
+    rreps = np.bincount(ri, minlength=rows)
+    cc = np.arange(cols, dtype=np.int32)
+    rr = np.arange(rows, dtype=np.int32)
     if direction == "left":
-        ci = cols - 1 - ci
+        cc = cols - 1 - cc
     elif direction == "up":
-        ri = rows - 1 - ri
-    rank = (ci + ri).astype(np.float32) / float(cols + rows - 2)
+        rr = rows - 1 - rr
+    rank = (cc[None, :] + rr[:, None]).astype(np.float32) / \
+        float(cols + rows - 2)
     spread = 0.62
     out = []
     for j in range(n):
         p = progress(j, n)
         local = np.clip((p - rank * spread) / (1.0 - spread), 0.0, 1.0)
-        out.append(to_u8(local * local * (3 - 2 * local)))
+        cells = to_u8(local * local * (3 - 2 * local))
+        out.append(np.repeat(np.repeat(cells, rreps, axis=0), creps,
+                             axis=1))
     return out
 
 
@@ -255,6 +319,7 @@ def box_steps(W, H, n, count, centre):
     (ref 14@15.30–16.07); each step lands with its new box filled white for
     a frame, decaying over two (the flash masks)."""
     from fx_schemas.accents import box_step_frames, box_step_shares
+    W, H = int(W), int(H)
     shares = box_step_shares(count)
     lands = box_step_frames(len(shares), n)
     cx, cy = centre
@@ -266,16 +331,25 @@ def box_steps(W, H, n, count, centre):
         boxes.append((x0, y0, x0 + bw, y0 + bh))
     reveal, flash = [], []
     decay = (1.0, 0.55, 0.22)
+    zero = np.zeros((H, W), np.uint8)
+    covs, cache = {}, {}
+
+    def cov(k):
+        if k not in covs:
+            covs[k] = box(W, H, *boxes[k], edge=1.0)
+        return covs[k]
+
+    def u8(k, s):
+        if (k, s) not in cache:
+            cache[(k, s)] = to_u8(cov(k) if s == 1.0 else cov(k) * s)
+        return cache[(k, s)]
     for j in range(n):
         k = max([i for i, f in enumerate(lands) if f <= j], default=-1)
-        if k < 0:
-            reveal.append(np.zeros((H, W), np.uint8))
-        else:
-            reveal.append(to_u8(box(W, H, *boxes[k], edge=1.0)))
-        fl = np.zeros((H, W), np.float32)
+        reveal.append(zero if k < 0 else u8(k, 1.0))
         if k >= 0 and j - lands[k] < len(decay):
-            fl = box(W, H, *boxes[k], edge=1.0) * decay[j - lands[k]]
-        flash.append(to_u8(fl))
+            flash.append(u8(k, decay[j - lands[k]]))
+        else:
+            flash.append(zero)
     return reveal, flash, lands
 
 
@@ -283,8 +357,9 @@ def stretch_band(W, H, n, h, line, vertical=True):
     """Pixel stretch: the share of the frame covered by the streak of one
     line (row ``line`` px for vertical streaks), growing from the line to
     the whole frame on the cut (frames < h), receding after it."""
-    xs, ys = grid(W, H)
-    coord = ys if vertical else xs
+    W, H = int(W), int(H)
+    x, y = axes(W, H)
+    coord = y if vertical else x
     size = H if vertical else W
     e = edge_px(W, H, 0.006)
     out = []
@@ -295,9 +370,10 @@ def stretch_band(W, H, n, h, line, vertical=True):
             s = 1.0 - ease_out_cubic((j - h + 1) / float(max(1, n - h)))
         lo = line - s * (line + e)
         hi = line + s * (size - line + e)
-        cov = np.minimum(half_plane(coord, lo, e, below=False),
-                         half_plane(coord, hi, e))
-        out.append(to_u8(cov))
+        cov = to_u8(np.minimum(half_plane(coord, lo, e, below=False),
+                               half_plane(coord, hi, e)))
+        out.append(_full(H, W, col=cov) if vertical else
+                   _full(H, W, row=cov))
     return out
 
 
@@ -315,22 +391,44 @@ def precompute_guard():
 # ── frame clocks ────────────────────────────────────────────────────────
 
 def pts(fps3):
-    """``setpts`` that stamps frame N on the program grid. ROUNDED: setpts
-    truncates its result, and N / fps / TB in floating point lands a hair
-    under N when the stream's time base is exactly 1/fps (an image input
-    read with -framerate): measured, frames 57-59 at 25 fps took the pts of
-    their predecessors and an overlay showed every later frame one early."""
-    return f"setpts=round(N/{float(fps3):.3f}/TB)"
+    """``setpts`` that stamps frame N on the program grid, on the
+    microsecond time base (AVTB) the concatenated program itself runs on.
+
+    ROUNDED: setpts truncates its result, and N / fps / TB in floating point
+    lands a hair under N when the stream's time base is exactly 1/fps (an
+    image input read with -framerate): measured, frames 57-59 at 25 fps took
+    the pts of their predecessors and an overlay showed every later frame
+    one early.
+
+    AVTB: a still input arrives on 1/25, where no other rate's grid is
+    representable (at 29.97 frames 3 and 4 shared a stamp), and every
+    window-local stream a compiler pairs (a processed copy, its strength,
+    its region, its box sprite) must carry the SAME stamp for the same
+    frame or the filters that sync them (alphamerge, blend) pair frame k
+    with k - 1. On AVTB every such stream reads round(N * 1e6 / fps), the
+    exact value framesync rescales any 1/fps stream to."""
+    return f"settb=AVTB,setpts=round(N/{float(fps3):.3f}/TB)"
+
+
+# How far ahead of its program frame a re-padded window frame is stamped
+# (microseconds). A concatenated program's stamps carry the rounding of
+# each block's start (measured: +1 us on later blocks at 29.97); a branch
+# stamped exactly would then sometimes sit 1 us AFTER its program frame and
+# overlay would show the previous branch frame there. A few microseconds
+# early can never reach the previous frame (>= 16 ms away at 60 fps).
+EARLY_US = 2
 
 
 def repad(f0, fps, alpha=False):
-    """fxprims.repad with the rounded stamp (see ``pts``): a window branch
-    re-padded to the program clock from frame ``f0``."""
+    """fxprims.repad with the rounded stamp (see ``pts``), a hair early (see
+    ``EARLY_US``): a window branch re-padded to the program clock from frame
+    ``f0``."""
     import fxprims
     color = "black@0" if alpha else "black"
     lead = f"start={int(f0)}:" if f0 > 0 else ""
+    f3 = float(fxprims.fps3(fps))
     return (f",tpad={lead}stop=1:start_mode=add:stop_mode=add:color={color},"
-            f"{pts(fxprims.fps3(fps))}")
+            f"settb=AVTB,setpts='round(N/{f3:.3f}/TB)-{EARLY_US}*gt(N,0)'")
 
 
 # ── files ───────────────────────────────────────────────────────────────
@@ -412,11 +510,15 @@ def still_chain(label, fps3, n, fmt="gray"):
 
 # ── per-frame strength (no file: an expression on a 2x2 frame) ──────────
 
-def piecewise_expr(values, var="N", scale=255.0, clamp=True):
-    """A compact expression over frame index ``var``: ``values`` maps a
-    frame to a value (0..1 strengths scaled by ``scale``, or with
-    ``clamp=False`` any non-negative number; missing frames are 0). Runs of
-    equal value collapse to one ``between`` term."""
+# ffmpeg refuses an expression of more than ~99 additive terms (measured on
+# 8.x and 9.0: "Cannot allocate memory" while initializing the graph, and
+# the whole fx graph then falls back to no fx). No expression built here
+# carries more than this many terms.
+MAX_TERMS = 64
+
+
+def piecewise_terms(values, var="N", scale=255.0, clamp=True):
+    """The terms of ``piecewise_expr`` (each ``eq`` / ``between`` * q)."""
     items = sorted((int(k), float(v)) for k, v in values.items() if v > 0)
     terms, run = [], None
     for k, v in items:
@@ -431,22 +533,33 @@ def piecewise_expr(values, var="N", scale=255.0, clamp=True):
             run = [k, k, q]
     if run:
         terms.append(run)
-    if not terms:
-        return "0"
-    out = []
-    for a, b, q in terms:
-        out.append(f"eq({var},{a})*{q}" if a == b else
-                   f"between({var},{a},{b})*{q}")
-    return "+".join(out)
+    return [f"eq({var},{a})*{q}" if a == b else f"between({var},{a},{b})*{q}"
+            for a, b, q in terms]
+
+
+def piecewise_expr(values, var="N", scale=255.0, clamp=True):
+    """A compact expression over frame index ``var``: ``values`` maps a
+    frame to a value (0..1 strengths scaled by ``scale``, or with
+    ``clamp=False`` any non-negative number; missing frames are 0). Runs of
+    equal value collapse to one ``between`` term. Callers keep it under
+    MAX_TERMS terms (one per hit or per run); a per-frame curve longer
+    than that goes through ``strength_chain``."""
+    return "+".join(piecewise_terms(values, var, scale, clamp)) or "0"
 
 
 def strength_chain(values, W, H, fps3, n):
     """A W x H gray stream of ``n`` frames whose every pixel is the
     frame's strength (0..255): a 2 x 2 frame evaluated per frame (four
-    pixels: free) and scaled up."""
-    expr = piecewise_expr(values)
+    pixels: free) and scaled up. A curve of more than MAX_TERMS runs (a 2 s
+    dissolve at 59.94 has 120) is summed over several 2 x 2 passes, each
+    under ffmpeg's expression limit."""
+    terms = piecewise_terms(values)
+    passes = [terms[i:i + MAX_TERMS]
+              for i in range(0, len(terms), MAX_TERMS)] or [[]]
+    geq = [f"geq=lum='{'+'.join(passes[0]) or '0'}'"]
+    geq += [f"geq=lum='lum(X,Y)+{'+'.join(p)}'" for p in passes[1:]]
     return (f"color=c=black:s=2x2:r={fps3:.3f},trim=end_frame={int(n)},"
-            f"format=gray,geq=lum='{expr}',"
+            f"format=gray,{','.join(geq)},"
             f"scale={int(W)}:{int(H)}:flags=neighbor,{pts(fps3)}")
 
 
@@ -456,22 +569,26 @@ _ENV = "_w1d_env"
 
 
 def render_env(plan):
-    """{"edl", "src_path", "asset_locals", "index"} for this render, each
-    possibly None. From the plan when it carries them (``plan.edl``,
-    ``plan.media`` = {src_path, asset_locals, index, fetch_asset}), else
-    from the calling render (see the module doc). Cached per plan."""
+    """{"edl", "src_path", "asset_locals", "index", "fetch_asset",
+    "audio_only"} for this render, each possibly None (audio_only False).
+    From the plan when it carries them (``plan.edl``, ``plan.media`` =
+    {src_path, asset_locals, index, fetch_asset, audio_only}), else from
+    the calling render (see the module doc). Cached per plan."""
     if plan is None:
         return {"edl": None, "src_path": None, "asset_locals": None,
-                "index": None, "fetch_asset": None}
+                "index": None, "fetch_asset": None, "audio_only": False}
     hit = plan.__dict__.get(_ENV)
     if hit is not None:
         return hit
     env = {"edl": getattr(plan, "edl", None), "src_path": None,
-           "asset_locals": None, "index": None, "fetch_asset": None}
+           "asset_locals": None, "index": None, "fetch_asset": None,
+           "audio_only": False}
     media = getattr(plan, "media", None)
     if isinstance(media, dict):
-        for k in ("src_path", "asset_locals", "index", "fetch_asset"):
-            env[k] = media.get(k)
+        for k in ("src_path", "asset_locals", "index", "fetch_asset",
+                  "audio_only"):
+            if k in media:
+                env[k] = media.get(k)
     if env["edl"] is None or env["src_path"] is None:
         try:
             _from_stack(env)
@@ -509,6 +626,10 @@ def _from_stack(env):
                 env["asset_locals"] = loc.get("asset_locals") or {}
             if env["index"] is None:
                 env["index"] = loc.get("index")
+            # an audio-only render builds the same graph and prunes every
+            # picture chain: its devices draw nothing, so the precomputes
+            # (stills decoded, mask sequences) are skipped
+            env["audio_only"] = bool(loc.get("audio_only"))
             break
         f = f.f_back
         depth += 1

@@ -11,9 +11,9 @@ kind or style is a round-lead change.
   ``over_type`` inverts the type too (ref 04). Never below the aspect bars,
   the screen-frame plate, the watermark or the end card. The accent plays
   at ``intensity`` over [start, end) (its peak), then — white_hit and
-  colour_hit only — falls off over the next ``decay_f`` frames
-  (exponential, tau ≈ 2 frames: ref 02@13.667's 1-frame peak and 3–5-frame
-  decay).
+  colour_hit only — falls off over the next ``decay_f`` frames to exactly
+  0 (``decay_strengths``: ref 02@13.667's 1-frame peak and 3–5-frame
+  decay, measured).
 * ``strobe``: a timeline-neutral full-frame cover cycling stills, clip
   frames or 1E variants with 1–8-frame holds; audio and the timeline are
   untouched.
@@ -68,8 +68,15 @@ LOCAL_FLASH_SHARE = 0.25
 # box steps) are read at this nominal rate. Within a frame of the truth at
 # 24–60 fps, which is all a one-second flash count needs.
 NOMINAL_FPS = 30.0
-# white_hit / colour_hit fall-off: strength k frames after the peak is
-# exp(-k / DECAY_TAU_F) (ref 02@13.667: 1.0, .61, .37, .22, .14).
+# white_hit / colour_hit fall-off. Measured on ref 02@13.667 inside its card
+# (strength after the 1-frame peak .87, .66, .375, .16, .05, then 0): the
+# light lingers a frame and then drains — a gaussian shoulder, not an
+# exponential (exp(-k/2) gave .61, .37, .22, .14 and then a visible step to
+# 0). decay_strengths is that shoulder for any ``decay_f`` = D, normalised to
+# land exactly on 0 the frame after the last decay frame, so a hit never ends
+# on a step: frame k (1..D) reads (g(k) - g(D+1)) / (1 - g(D+1)) with
+# g(k) = exp(-(2k / (D+1))^2). D = 5 gives .89, .63, .36, .15, .04 (ref 02);
+# the ~2-frame half-life the roadmap names ("tau ≈ 2") at every D.
 DECAY_TAU_F = 2.0
 # Default boxes for box_invert, bands for rgb_slice.
 DEFAULT_BOXES = 3
@@ -106,17 +113,25 @@ def region_share(region):
     return 1.0 - area if region.invert else area
 
 
-def decay_strengths(intensity, decay_f, tau=DECAY_TAU_F):
-    """Strength of each decay frame after the peak (frames 1..decay_f)."""
-    return [float(intensity) * math.exp(-k / tau)
-            for k in range(1, int(decay_f or 0) + 1)]
+def decay_strengths(intensity, decay_f):
+    """Strength of each decay frame after the peak (frames 1..decay_f): the
+    measured ref-02 shoulder above, reaching 0 on frame decay_f + 1."""
+    d = int(decay_f or 0)
+    if d <= 0:
+        return []
+
+    def g(k):
+        return math.exp(-(2.0 * k / (d + 1)) ** 2)
+    end = g(d + 1)
+    return [float(intensity) * (g(k) - end) / (1.0 - end)
+            for k in range(1, d + 1)]
 
 
 class AccentFx(FxItemBase):
     """One punctuation accent over [start, end) (usually 1–2 frames).
 
     kind      negative | white_hit (1-frame peak, ``decay_f`` frames of
-              exponential fall-off, tau ≈ 2) | colour_hit (``colour``; None
+              fall-off, ``decay_strengths``) | colour_hit (``colour``; None
               = the outgoing shot's dominant hue) | threshold | posterize |
               mono | mirror | hue_step | rgb_slice (``bands`` swaprect
               bands) | box_invert (``bands`` seeded boxes, ``seed``)
@@ -383,17 +398,24 @@ class JunctionFx(FxItemBase):
                                  "this edit")
 
     def flash_times(self):
-        """hit_flash: one full-frame flash on the cut. box_steps: every
+        """hit_flash: one full-frame flash on the cut. matte_cut: counted
+        as one too — without a person matte on the render its rung is the
+        built-in flash_junction substitute, a white flash on the cut, and
+        the export gate reads the EDL, not the render. box_steps: every
         step whose box covers a quarter of the frame or more lands with a
-        white fill (junctions_v2 times them over the window's second half).
+        white fill, the last one full-frame (junctions_v2 times them over
+        the window's middle 70%).
         Every other style is a transition, not a flash."""
         if self.at is None:
             return []
         at = float(self.at)
-        if self.style == "hit_flash":
+        if self.style in ("hit_flash", "matte_cut"):
             return [at]
         if self.style == "box_steps":
-            shares = box_step_shares(self.count)[:-1]
+            # every step lands with its box filled white — the last one is
+            # the whole frame — on the frames junctions_v2 lands them
+            # (wipe_masks.box_steps: box_step_frames over ALL the shares)
+            shares = box_step_shares(self.count)
             n = max(2, int(round(self.duration_s * NOMINAL_FPS)))
             out = []
             for k, frame in enumerate(box_step_frames(len(shares), n)):

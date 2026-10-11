@@ -51,7 +51,7 @@ import os
 import fxgraph
 import fxprims
 import wipe_masks
-from fx_schemas.accents import DEFAULT_BOX_STEPS
+from fx_schemas.accents import DEFAULT_BOX_STEPS, decay_strengths
 
 XFADE_NAMES = {"fadegrays": "fadegrays", "pixelize": "pixelize",
                "radial": "radial"}
@@ -243,7 +243,8 @@ class _Junction:
         out = ctx.uid("jo")
         ctx.parts.append(f"[{label}]trim=end_frame={N},"
                          f"{wipe_masks.pts(ctx.fps3)},settb=1/{WINDOW_TB_DEN},"
-                         f"{wipe_masks.pts(ctx.fps3)},format=yuv420p[{out}]")
+                         f"setpts=round(N/{float(ctx.fps3):.3f}/TB),"
+                         f"format=yuv420p[{out}]")
         return out
 
     def _concat(self, ctx, a, b, h, N):
@@ -273,14 +274,49 @@ class _Junction:
                                                    ctx.fps3, N) + f"[{u}]")
         return u
 
-    def _seq(self, ctx, item, name, frames, N):
-        """Write the mask sequence registered in prepare and read it."""
+    def _seq(self, ctx, item, name, make, N, key, soft=False):
+        """Write the mask sequence registered in prepare and read it.
+
+        ``make(W, H)`` computes the frames at that size; ``key`` names
+        everything they depend on. A render builds its graph more than once
+        (the loudness pass, the real pass, a fallback), and a sequence
+        already written for the same key in this workdir is reused instead
+        of recomputed and rewritten.
+
+        ``soft``: the mask has no hard edge (wipes, columns, bands, the
+        staircase, irises: every edge is several pixels of anti-aliased
+        ramp), so it is computed and stored at half size and scaled up
+        bilinearly in the graph — a quarter of the numpy, PNG and decode
+        work for the same ramps (ROADMAP 1D perf: <= 0.5 CPU-s per 1080p
+        window second, the precompute included)."""
         lab = ctx.input_label(_seq_key(item, name))
         if lab is None:
             raise RuntimeError(f"mask input {name} was never bound")
-        wipe_masks.write_sequence_at(_seq_dir(ctx.plan, item, name), frames)
+        W, H = int(ctx.W), int(ctx.H)
+        mw, mh = ((W + 1) // 2, (H + 1) // 2) if soft else (W, H)
+        d = _seq_dir(ctx.plan, item, name)
+        stamp = os.path.join(d, ".key")
+        digest = _safe(repr([name, key, mw, mh, W, H, int(N)]))
+        try:
+            with open(stamp, encoding="utf-8") as f:
+                fresh = f.read() == digest and os.path.exists(
+                    os.path.join(d, f"f_{int(N) - 1:05d}.png"))
+        except OSError:
+            fresh = False
+        if not fresh and wipe_masks.render_env(ctx.plan).get("audio_only") \
+                and os.path.exists(os.path.join(d, "f_00000.png")):
+            # an audio-only render prunes the picture: the input only has
+            # to open (prepare wrote its first frame)
+            fresh = True
+        if not fresh:
+            wipe_masks.write_sequence_at(d, make(mw, mh))
+            with open(stamp, "w", encoding="utf-8") as f:
+                f.write(digest)
         u = ctx.uid("jq")
-        ctx.parts.append(wipe_masks.seq_chain(lab, ctx.fps3, N) + f"[{u}]")
+        up = (f",scale={W}:{H}:flags=bilinear" if (mw, mh) != (W, H)
+              else "")
+        ctx.parts.append(wipe_masks.seq_chain(lab, ctx.fps3, N) + up +
+                         f"[{u}]")
         return u
 
     def _colour_layer(self, ctx, rgb, N):
@@ -313,32 +349,52 @@ class _Junction:
         style = item["style"]
         W, H = int(ctx.W), int(ctx.H)
         extra = None
+        count, direction = item.get("count"), item.get("direction")
         if style.startswith("wipe_"):
-            frames = wipe_masks.wipe(W, H, N, style.split("_", 1)[1])
+            key = (style,)
+
+            def make(w, h):
+                return wipe_masks.wipe(w, h, N, style.split("_", 1)[1])
         elif style == "columns":
-            frames = wipe_masks.columns(W, H, N, item.get("count") or 6,
-                                        item.get("direction"))
+            key = (style, count, direction)
+
+            def make(w, h):
+                return wipe_masks.columns(w, h, N, count or 6, direction)
         elif style == "bands":
-            frames = wipe_masks.bands(W, H, N, item.get("count") or 8,
-                                      item.get("direction"))
+            key = (style, count, direction)
+
+            def make(w, h):
+                return wipe_masks.bands(w, h, N, count or 8, direction)
         elif style == "staircase":
-            frames = wipe_masks.staircase(W, H, N, item.get("direction"))
+            key = (style, direction)
+
+            def make(w, h):
+                return wipe_masks.staircase(w, h, N, direction)
         else:                                   # iris
             centre, why = self._origin(ctx.plan, item)
-            frames = wipe_masks.iris(W, H, N, centre)
+            key = (style, round(centre[0], 3), round(centre[1], 3))
+
+            def make(w, h):
+                return wipe_masks.iris(w, h, N, _scaled(centre, w, W))
             if why:
                 extra = ("reduced", why)
-        m = self._seq(ctx, item, "m", frames, N)
+        m = self._seq(ctx, item, "m", make, N, key, soft=True)
         return self._settle(ctx, self._over(ctx, ctx.a_label, ctx.b_label,
                                             m), N), extra
 
     def _box_steps(self, ctx, item, h, N):
         W, H = int(ctx.W), int(ctx.H)
         centre, why = self._origin(ctx.plan, item)
-        reveal, flash, _lands = wipe_masks.box_steps(
-            W, H, N, item.get("count") or DEFAULT_BOX_STEPS, centre)
-        m = self._seq(ctx, item, "m", reveal, N)
-        f = self._seq(ctx, item, "f", flash, N)
+        count = item.get("count") or DEFAULT_BOX_STEPS
+        key = ("box_steps", count, round(centre[0], 3), round(centre[1], 3))
+        got = {}
+
+        def make(i):
+            if not got:
+                got["v"] = wipe_masks.box_steps(W, H, N, count, centre)
+            return got["v"][i]
+        m = self._seq(ctx, item, "m", lambda w, h: make(0), N, key)
+        f = self._seq(ctx, item, "f", lambda w, h: make(1), N, key)
         x = self._over(ctx, ctx.a_label, ctx.b_label, m)
         c = self._colour_layer(ctx, BOX_FLASH_RGB, N)
         out = self._over(ctx, x, c, f)
@@ -349,8 +405,12 @@ class _Junction:
         rise = {h - 2: 0.22, h - 1: 0.58}
         vals = {k: v for k, v in rise.items() if k >= 0}
         vals[h] = 1.0
-        for k in range(1, N - h):
-            vals[h + k] = math.exp(-k / 2.0)
+        # the accents' measured fall-off, stretched over the rest of the
+        # window so it reaches 0 exactly where the window ends (exp(-k/2)
+        # was cut off at 8-14% white: a visible pop on the window's last
+        # frame, measured)
+        for k, v in enumerate(decay_strengths(1.0, N - h - 1), 1):
+            vals[h + k] = v
         accent = wipe_masks.look_accent(
             wipe_masks.render_env(ctx.plan).get("edl"))
         rgb = wipe_masks.hex_rgb(item.get("colour") or "white", accent)
@@ -386,8 +446,9 @@ class _Junction:
         vertical = item.get("direction") not in ("left", "right")
         line = int(min(max(2, centre[1] if vertical else centre[0]),
                        (H if vertical else W) - 3)) // 2 * 2
-        band = wipe_masks.stretch_band(W, H, N, h, line, vertical)
-        m = self._seq(ctx, item, "m", band, N)
+        m = self._seq(ctx, item, "m", lambda w, hh: wipe_masks.stretch_band(
+            W, H, N, h, line, vertical), N, ("pixel_stretch", h, line,
+                                             vertical))
         u = ctx.uid("jp")
         ctx.parts.append(f"[{ctx.a_label}]split[{u}a1][{u}a2]")
         ctx.parts.append(f"[{ctx.b_label}]split[{u}b1][{u}b2]")
@@ -514,8 +575,11 @@ class _Junction:
         if g is None:
             # no glyph mask on this render: an iris from the letters' box
             # (or the centre) carries the reveal
-            m = self._seq(ctx, item, "m", wipe_masks.iris(W, H, N, centre),
-                          N)
+            m = self._seq(ctx, item, "m",
+                          lambda w, hh: wipe_masks.iris(
+                              w, hh, N, _scaled(centre, w, W)), N,
+                          ("iris", round(centre[0], 3), round(centre[1], 3)),
+                          soft=True)
             out = self._over(ctx, ctx.a_label, ctx.b_label, m)
             reason = f"no glyph mask for {ref} on this render" + \
                 (f"; {why}" if why else "")
@@ -538,9 +602,13 @@ class _Junction:
             f"y='{cy:.5f}*ih-ih/zoom*{cy:.5f}':d=1:s={W}x{H}:"
             f"fps={ctx.fps3:.3f},{wipe_masks.pts(ctx.fps3)},"
             f"format=gray[{u}g]")
-        fill = [np.zeros((H, W), np.uint8)] * h + \
-            wipe_masks.iris(W, H, N - h, centre, halo=0.0)
-        i = self._seq(ctx, item, "i", fill, N)
+        def fill(w, hh):
+            return [np.zeros((hh, w), np.uint8)] * h + \
+                wipe_masks.iris(w, hh, N - h, _scaled(centre, w, W),
+                                halo=0.0)
+        i = self._seq(ctx, item, "i", fill, N,
+                      ("letter_fill", h, round(centre[0], 3),
+                       round(centre[1], 3)), soft=True)
         ctx.parts.append(f"[{u}g][{i}]blend=all_mode=lighten[{u}m]")
         out = self._over(ctx, ctx.a_label, ctx.b_label, f"{u}m")
         return self._settle(ctx, out, N), (("reduced", why) if why else None)
@@ -627,6 +695,12 @@ class _Junction:
         if not getattr(ctx.plan, "junction_prepass", None):
             extra = ("reduced", DATAMOSH_REDUCED)
         return self._settle(ctx, u, N), extra
+
+
+def _scaled(centre, w, W):
+    """A frame-pixel point on a mask ``w`` pixels wide (the frame is W)."""
+    k = float(w) / float(W)
+    return (centre[0] * k, centre[1] * k)
 
 
 # Polar maps: the angle runs on x over POLAR_ANGLE_PX columns plus a wrap

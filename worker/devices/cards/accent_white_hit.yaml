@@ -4,7 +4,7 @@ family: "punctuation"
 verb: "add_accent"
 fx_type: "accent"
 stage: "pre_captions"
-params: {kind: ["white_hit"], decay_f: [4, 3, 5], stage: ["pre_captions"]}
+params: {kind: ["white_hit"], decay_f: [5, 4, 3], stage: ["pre_captions"]}
 needs: {sidecars: [], lane_features: ["ffmpeg:overlay", "ffmpeg:alphamerge"], footage: "any picture"}
 binds_to: ["stress", "cut", "word.payoff", "beat.kick", "downbeat", "onset"]
 budget: {calm: {per_short: 1, min_gap_s: 6}, designed: {per_short: 2, min_gap_s: 2}, charged: {per_short: 9, min_gap_s: 0.25}}
@@ -15,5 +15,5 @@ cost: {ms_per_frame: {interactive: 2.0, batch: 1.5, local: 1.2}, fixed_ms: 40}
 exemplars: ["02@13.667"]
 verify: ["land_err_f<=1", "region_locality<=0", "flash_risk<=3"]
 status: "live"
-description: "A 1-frame white peak with an exponential 3-5-frame fall-off (tau 2 frames); inside the picture card with region card (ref 02)."
+description: "A 1-frame white peak whose light lingers, then drains to 0 over 3-5 frames (measured on ref 02); inside the picture card with region card."
 skill: "punctuation"
