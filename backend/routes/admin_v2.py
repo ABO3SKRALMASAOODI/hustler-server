@@ -593,15 +593,16 @@ def trend():
         wide = ranges.make_period("custom", period.from_day - timedelta(days=6),
                                   period.to_day)
         days = wide.day_list()
+        # A series the page didn't ask for is null ("not computed"), never 0.
         people = s.run("people", lambda: visitors.classify_by_day(cur, wide),
                        {}) if ("people" in wanted or "link_previews" in wanted) \
             else {}
         signups = s.run("signups", lambda: signups_by_day(cur, wide), None) \
-            if "signups" in wanted else {}
+            if "signups" in wanted else None
         paying = s.run("new_paying", lambda: money.new_paying_by_day(cur, wide),
-                       None) if "new_paying" in wanted else {}
+                       None) if "new_paying" in wanted else None
         cash = s.run("cash", lambda: money.cash_by_day(cur, wide), None) \
-            if "cash" in wanted else {}
+            if "cash" in wanted else None
         rows = []
         for d in days:
             pd = people.get(d) if people is not None else None

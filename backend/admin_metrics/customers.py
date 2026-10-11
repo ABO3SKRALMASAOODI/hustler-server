@@ -64,12 +64,13 @@ def _filters(cur, period, args, params):
             where.append(FIRST_PAID_IN_RANGE.format(u="u"))
     q = (args.get("q") or "").strip()
     if q:
-        if q.isdigit():
-            where.append("u.id = %(q_id)s")
+        params["q_like"] = f"%{q[:120]}%"
+        if q.isdigit() and len(q) <= 18:
+            # Digits are a customer id or part of an email ("jo1987@…").
+            where.append("(u.id = %(q_id)s OR u.email ILIKE %(q_like)s)")
             params["q_id"] = int(q)
         else:
             where.append("u.email ILIKE %(q_like)s")
-            params["q_like"] = f"%{q[:120]}%"
     for name, negate in (("reached", False), ("not_reached", True)):
         stage = (args.get(name) or "").strip()
         if not stage:

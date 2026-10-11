@@ -230,12 +230,14 @@ def _common_where(period, args, params):
             where.append("p.id IN (SELECT id FROM range_parents)")
     q = (args.get("q") or "").strip()
     if q:
-        if q.isdigit():
-            where.append("p.id = %(q_id)s")
+        params["q_like"] = f"%{q[:120]}%"
+        if q.isdigit() and len(q) <= 18:
+            # Digits are a project id, or part of a title or an email.
+            where.append("(p.id = %(q_id)s OR p.title ILIKE %(q_like)s "
+                         "OR u.email ILIKE %(q_like)s)")
             params["q_id"] = int(q)
         else:
             where.append("(p.title ILIKE %(q_like)s OR u.email ILIKE %(q_like)s)")
-            params["q_like"] = f"%{q[:120]}%"
     cid = args.get("customer_id")
     if cid not in (None, ""):
         try:

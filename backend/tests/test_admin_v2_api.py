@@ -1008,3 +1008,35 @@ def test_a_shortened_body_keeps_the_whole_response_under_1_mb():
     assert len(sent) < MB
     small, cut_small = projects._capped({"a": 1})
     assert small == {"a": 1} and not cut_small
+
+
+def test_trend_series_the_page_did_not_ask_for_are_null_not_zero(
+        app, monkeypatch):
+    monkeypatch.setattr(visitors, "classify_by_day",
+                        lambda cur, p: {d: dict(CLASSES) for d in p.day_list()})
+    monkeypatch.setattr(admin_v2, "signups_by_day",
+                        lambda cur, p: {d: 2 for d in p.day_list()})
+    r = get(app, "/admin/v2/trend?range=7d&metrics=people,signups")
+    rows = r.json["data"]["rows"]
+    assert rows and all(row["signups"] == 2 for row in rows)
+    assert all(row["new_paying"] is None and row["cash_usd"] is None
+               for row in rows)
+    assert all(v is None for v in r.json["data"]["averages"]["cash_7d"])
+
+
+def test_digits_search_ids_and_emails(app):
+    """"1987" finds customer 1987 and jo1987@…; it used to find only the id."""
+    app.fake.routes = customer_routes()
+    assert get(app, "/admin/v2/customers?q=1987").status_code == 200
+    sql = next(s for s in app.fake.sql if ", agg AS (" in s)
+    assert "(u.id = %(q_id)s OR u.email ILIKE %(q_like)s)" in sql
+    app.fake.sql.clear()
+    app.fake.routes = project_list_routes()
+    assert get(app, "/admin/v2/projects?q=1987").status_code == 200
+    assert any("(p.id = %(q_id)s OR p.title ILIKE %(q_like)s OR u.email "
+               "ILIKE %(q_like)s)" in s for s in app.fake.sql)
+    # A very long number is text, never an id that overflows.
+    app.fake.sql.clear()
+    app.fake.routes = customer_routes()
+    assert get(app, "/admin/v2/customers?q=" + "9" * 30).status_code == 200
+    assert not any("q_id" in s for s in app.fake.sql)
