@@ -426,6 +426,30 @@ def mask_upsample(parts, mask_label, out_label, *, W, H, uid, preview,
     return out_label
 
 
+def mask_ops(parts, in_label, out_label, *, uid, invert=False, grow_px=0,
+             feather_px=0.0):
+    """A gray program mask reshaped: grown (``grow_px`` > 0, 3x3 dilation
+    passes) or shrunk (< 0, erosion), feathered (``feather_px``: gaussian
+    sigma = px / 2) and/or inverted. Wave 1 (INTERFACES_W1.md §1.3):
+    inversion and morphology are consumer parameters, never mask labels.
+    ``in_label`` is consumed; returns ``out_label`` (a straight copy when
+    nothing is asked)."""
+    chain = ["format=gray"]
+    grow = int(round(float(grow_px or 0)))
+    if grow:
+        chain += ["dilation" if grow > 0 else "erosion"] * min(abs(grow), 32)
+    if feather_px and float(feather_px) > 0:
+        chain.append(f"gblur=sigma={float(feather_px) / 2.0:.3f}")
+    if invert:
+        chain.append("negate")
+    parts.append(f"[{in_label}]{','.join(chain)}[{out_label}]")
+    return out_label
+
+
+# Filters mask_ops may emit (a compiler that calls it lists them in FILTERS).
+MASK_OP_FILTERS = ("format", "dilation", "erosion", "gblur", "negate")
+
+
 # Filters the primitives themselves emit (fxgraph checks the lane has them
 # before any device that uses a primitive is compiled).
 PRIMITIVE_FILTERS = ("split", "trim", "setpts", "tpad", "overlay", "format",

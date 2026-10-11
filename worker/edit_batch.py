@@ -5,6 +5,8 @@ contract prevents an implicit remap from moving captions/music twice.
 """
 import copy
 import json
+import os
+import sys
 
 try:
     from schemas import FX_AUTHORABLE_TYPES, FX_TYPES, validate_edl
@@ -20,6 +22,79 @@ LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "effects", "overlays", "canvas", "motion", "fx"))
 ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
     "motion", "fx"))
+
+
+# Device cards (worker/devices/cards/<id>.json), read as plain JSON so this
+# module stays pure: the backend loads it by path for MCP and Studio batches.
+_CARDS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "devices", "cards")
+_CARD_CACHE = {}
+
+
+def _device_cards():
+    """{card id: card} from the compiled JSON cards; {} when unreadable."""
+    try:
+        names = sorted(n for n in os.listdir(_CARDS_DIR)
+                       if n.endswith(".json") and not n.startswith((".", "_")))
+        stamp = tuple((n, os.path.getmtime(os.path.join(_CARDS_DIR, n)))
+                      for n in names)
+    except OSError:
+        return {}
+    hit = _CARD_CACHE.get(stamp)
+    if hit is None:
+        hit = {}
+        for n in names:
+            try:
+                with open(os.path.join(_CARDS_DIR, n), encoding="utf-8") as f:
+                    card = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if isinstance(card, dict) and card.get("id") == n[:-5]:
+                hit[card["id"]] = card
+        _CARD_CACHE.clear()
+        _CARD_CACHE[stamp] = hit
+    return hit
+
+
+def _flag_on(name):
+    """A dark card's flag, read the way devices.flag_on reads it: the worker
+    config attribute when the worker's config is loaded, else the
+    environment variable of the same name."""
+    config = sys.modules.get("config")     # never imported from here
+    if config is not None and hasattr(config, name):
+        return bool(getattr(config, name))
+    return os.getenv(name, "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def check_fx_devices(before, after):
+    """Wave 1 write gate (worker/devices/INTERFACES_W1.md §5): every fx item a
+    batch adds or changes that names a ``device`` must name an existing card
+    whose ``fx_type`` is the item's type, and a ``dark`` card only while its
+    flag is on. Items the batch leaves as they were are not re-judged (a card
+    that goes dark later never blocks an unrelated edit). Department verbs
+    write through apply_batch, so a verb and a stale client's batch pass the
+    very same gate. Raises ValueError."""
+    old = {i.get("id"): i for i in (before or {}).get("fx") or []
+           if isinstance(i, dict)}
+    cards = None
+    for item in (after or {}).get("fx") or []:
+        if not isinstance(item, dict) or not item.get("device"):
+            continue
+        if old.get(item.get("id")) == item:
+            continue
+        cards = _device_cards() if cards is None else cards
+        card = cards.get(item["device"])
+        if card is None:
+            raise ValueError(f"fx '{item.get('id')}': device "
+                             f"{item['device']!r} is not a known device card.")
+        if card.get("fx_type") and card["fx_type"] != item.get("type"):
+            raise ValueError(f"fx '{item.get('id')}': device {card['id']} "
+                             f"writes fx type {card['fx_type']}, not "
+                             f"{item.get('type')}.")
+        if card.get("status") == "dark" and not (
+                card.get("flag") and _flag_on(card["flag"])):
+            raise ValueError(f"fx '{item.get('id')}': device {card['id']} is "
+                             "not available yet (dark).")
 
 
 def project_media_keys(conn, project_id):
@@ -197,6 +272,7 @@ def apply_batch(before, operations, duration, allowed_keys):
             raise ValueError("A behind_subject motion graphic needs its subject mask; "
                              "place it with add_motion_graphic(layer='behind_subject').")
     normalized = validate_edl(edl, duration).model_dump()
+    check_fx_devices(before, normalized)
     if isinstance(allowed_keys, dict):
         for item in normalized.get("inserts") or []:
             asset_duration = (allowed_keys.get(item["asset_key"]) or {}).get("duration_s")

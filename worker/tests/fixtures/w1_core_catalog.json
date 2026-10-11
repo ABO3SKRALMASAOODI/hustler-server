@@ -1,0 +1,5 @@
+{
+ "bytes": 81688,
+ "sha256": "c3d5e31b6ee75e4ac15243cfd84b03c2dbe8532251b9f05952bccb438cba779b",
+ "_doc": "Core compact catalog at the Wave 1 base (e8a775f + interface pass), Wave 1's automatic growth set aside (tests/test_w1_seams.py). Round-lead owned; only 1F re-pins it (look_at overlay), reporting the byte delta."
+}

@@ -1,0 +1,1308 @@
+{
+ "_doc": "Wave 1 stale-client shapes (worker/devices/INTERFACES_W1.md \u00a75): every Wave 1 device written and removed through apply_edit_batch exactly as an MCP client that cached tools/list before Wave 1 would send it. Round-lead owned; a track adds its own examples in tests/test_w1<x>_*.py, never here.",
+ "duration": 30.0,
+ "base": {
+  "keep": [
+   [
+    0.0,
+    10.0
+   ],
+   [
+    12.0,
+    30.0
+   ]
+  ],
+  "motion": [
+   {
+    "id": "m1",
+    "template": "word_slam",
+    "start": 6.0,
+    "end": 9.0,
+    "params": {
+     "text": "FLYING"
+    }
+   }
+  ]
+ },
+ "allowed_keys": [
+  "media/p1/starship.mp4",
+  "media/p1/variant_thermal.png",
+  "media/p1/look.cube"
+ ],
+ "ok": [
+  {
+   "name": "subject fill flash on a stress (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "sx_fill",
+     "value": {
+      "id": "sx_fill",
+      "type": "subject",
+      "stage": "world",
+      "start": 4.0,
+      "end": 4.04,
+      "kind": "fill",
+      "colour": "white",
+      "decay_f": 2,
+      "bind": {
+       "on": "stress",
+       "ref": 12,
+       "rhythm": "speech"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "sx_fill"
+    }
+   ]
+  },
+  {
+   "name": "poster silhouette on the accent field (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "sx_poster",
+     "value": {
+      "id": "sx_poster",
+      "type": "subject",
+      "stage": "world",
+      "start": 5.0,
+      "end": 7.0,
+      "kind": "poster",
+      "field": "accent",
+      "keep_footage": false,
+      "colour": "black"
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "sx_poster"
+    }
+   ]
+  },
+  {
+   "name": "glowing silhouette, screen-locked (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "sx_glow",
+     "value": {
+      "id": "sx_glow",
+      "type": "subject",
+      "stage": "screen",
+      "start": 7.0,
+      "end": 9.0,
+      "kind": "glow",
+      "colour": "#ffd400",
+      "radius": 0.03,
+      "intensity": 0.8
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "sx_glow"
+    }
+   ]
+  },
+  {
+   "name": "sticker outline (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "sx_outline",
+     "value": {
+      "id": "sx_outline",
+      "type": "subject",
+      "stage": "world",
+      "start": 2.0,
+      "end": 3.0,
+      "kind": "outline",
+      "colour": "white",
+      "width_px": 3
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "sx_outline"
+    }
+   ]
+  },
+  {
+   "name": "background-only negative (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "sx_neg",
+     "value": {
+      "id": "sx_neg",
+      "type": "subject",
+      "stage": "world",
+      "start": 1.0,
+      "end": 1.08,
+      "kind": "negate",
+      "scope": "background"
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "sx_neg"
+    }
+   ]
+  },
+  {
+   "name": "background mono, darker (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "sx_expo",
+     "value": {
+      "id": "sx_expo",
+      "type": "subject",
+      "stage": "world",
+      "start": 12.0,
+      "end": 14.0,
+      "kind": "exposure",
+      "scope": "background",
+      "ev": -1.5,
+      "saturation": 0.0
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "sx_expo"
+    }
+   ]
+  },
+  {
+   "name": "subject keeps its red, world mono (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "sx_iso",
+     "value": {
+      "id": "sx_iso",
+      "type": "subject",
+      "stage": "world",
+      "start": 14.0,
+      "end": 20.0,
+      "kind": "isolate",
+      "hue": "#c0392b",
+      "hue_op": "intersect"
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "sx_iso"
+    }
+   ]
+  },
+  {
+   "name": "red ghost clones 4 and 8 frames back (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "sx_echo",
+     "value": {
+      "id": "sx_echo",
+      "type": "subject",
+      "stage": "world",
+      "start": 20.0,
+      "end": 21.0,
+      "kind": "echo",
+      "echo": {
+       "mode": "clone",
+       "offsets_f": [
+        4,
+        8
+       ],
+       "opacity": 0.5,
+       "tint": "#ff0000"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "sx_echo"
+    }
+   ]
+  },
+  {
+   "name": "gradient background (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "bg_grad",
+     "value": {
+      "id": "bg_grad",
+      "type": "background",
+      "stage": "world",
+      "start": 3.0,
+      "end": 5.0,
+      "kind": "gradient",
+      "colour": "accent",
+      "colour2": "#112233",
+      "angle": 90
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "bg_grad"
+    }
+   ]
+  },
+  {
+   "name": "footage background from a project video (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "bg_src",
+     "value": {
+      "id": "bg_src",
+      "type": "background",
+      "stage": "world",
+      "start": 21.0,
+      "end": 23.0,
+      "kind": "source",
+      "source": {
+       "kind": "asset",
+       "asset_key": "media/p1/starship.mp4",
+       "offset_s": 1.5,
+       "loop": true
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "bg_src"
+    }
+   ]
+  },
+  {
+   "name": "subject held while three plates strobe behind (1B)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "bg_hold",
+     "value": {
+      "id": "bg_hold",
+      "type": "background",
+      "stage": "world",
+      "start": 15.0,
+      "end": 15.6,
+      "kind": "strobe",
+      "sources": [
+       {
+        "kind": "source",
+        "src_t": 2.0
+       },
+       {
+        "kind": "asset",
+        "asset_key": "media/p1/variant_thermal.png"
+       },
+       {
+        "kind": "program",
+        "offset_s": -2.0
+       }
+      ],
+      "hold_f": 2,
+      "hold_subject": true,
+      "hold_t": 15.0
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "bg_hold"
+    }
+   ]
+  },
+  {
+   "name": "ribbed glass over the face (1C)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "rg_glass",
+     "value": {
+      "id": "rg_glass",
+      "type": "region",
+      "stage": "pre_captions",
+      "start": 1.0,
+      "end": 3.0,
+      "effect": "ribbed_glass",
+      "region": {
+       "shape": "face"
+      },
+      "scale": 1.5
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "rg_glass"
+    }
+   ]
+  },
+  {
+   "name": "negative inside a feathered box (1C)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "rg_box",
+     "value": {
+      "id": "rg_box",
+      "type": "region",
+      "stage": "world",
+      "start": 3.0,
+      "end": 3.5,
+      "effect": "negate",
+      "region": {
+       "shape": "rect",
+       "box": [
+        0.1,
+        0.6,
+        0.9,
+        0.9
+       ],
+       "feather_px": 6
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "rg_box"
+    }
+   ]
+  },
+  {
+   "name": "solarise inside the word's letters (1C)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "rg_glyph",
+     "value": {
+      "id": "rg_glyph",
+      "type": "region",
+      "stage": "over_type",
+      "start": 6.0,
+      "end": 9.0,
+      "effect": "solarise",
+      "colour": "#ff00ff",
+      "region": {
+       "shape": "glyph",
+       "ref": "m1"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "rg_glyph"
+    }
+   ]
+  },
+  {
+   "name": "1-frame negative, type inverts too (1D)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "ac_neg",
+     "value": {
+      "id": "ac_neg",
+      "type": "accent",
+      "stage": "over_type",
+      "start": 6.0,
+      "end": 6.04,
+      "kind": "negative"
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "ac_neg"
+    }
+   ]
+  },
+  {
+   "name": "white hit inside the picture card (1D)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "ac_hit",
+     "value": {
+      "id": "ac_hit",
+      "type": "accent",
+      "stage": "pre_captions",
+      "start": 16.0,
+      "end": 16.04,
+      "kind": "white_hit",
+      "decay_f": 3,
+      "region": {
+       "shape": "card"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "ac_hit"
+    }
+   ]
+  },
+  {
+   "name": "seeded inverted boxes (1D)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "ac_box",
+     "value": {
+      "id": "ac_box",
+      "type": "accent",
+      "stage": "pre_captions",
+      "start": 17.0,
+      "end": 17.08,
+      "kind": "box_invert",
+      "bands": 6,
+      "seed": 7
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "ac_box"
+    }
+   ]
+  },
+  {
+   "name": "2-frame strobe of stills and clip frames (1D)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "st_lab",
+     "value": {
+      "id": "st_lab",
+      "type": "strobe",
+      "stage": "pre_captions",
+      "start": 22.0,
+      "end": 22.4,
+      "frames": [
+       {
+        "source": {
+         "kind": "asset",
+         "asset_key": "media/p1/variant_thermal.png"
+        },
+        "hold_f": 2
+       },
+       {
+        "source": {
+         "kind": "source",
+         "src_t": 25.0
+        },
+        "hold_f": 2
+       },
+       {
+        "source": {
+         "kind": "colour",
+         "colour": "white"
+        },
+        "hold_f": 1,
+        "negate": true
+       }
+      ],
+      "pattern": "pingpong"
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "st_lab"
+    }
+   ]
+  },
+  {
+   "name": "iris from the face at the cut (1D)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "jn_iris",
+     "value": {
+      "id": "jn_iris",
+      "type": "junction",
+      "stage": "junction",
+      "at": 10.0,
+      "style": "iris",
+      "duration_s": 0.4,
+      "origin": {
+       "kind": "face"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "jn_iris"
+    }
+   ]
+  },
+  {
+   "name": "column wipe (1D)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "jn_cols",
+     "value": {
+      "id": "jn_cols",
+      "type": "junction",
+      "stage": "junction",
+      "at": 10.0,
+      "style": "columns",
+      "count": 6,
+      "direction": "left"
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "jn_cols"
+    }
+   ]
+  },
+  {
+   "name": "next shot through the word's letters (1D + 1C glyph mask)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "jn_letters",
+     "value": {
+      "id": "jn_letters",
+      "type": "junction",
+      "stage": "junction",
+      "at": 10.0,
+      "style": "letter_window",
+      "duration_s": 0.8,
+      "origin": {
+       "kind": "glyph",
+       "ref": "m1"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "jn_letters"
+    }
+   ]
+  },
+  {
+   "name": "matte cut (1D + 1A handle matte)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "jn_matte",
+     "value": {
+      "id": "jn_matte",
+      "type": "junction",
+      "stage": "junction",
+      "at": 10.0,
+      "style": "matte_cut"
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "jn_matte"
+    }
+   ]
+  },
+  {
+   "name": "real datamosh (1D)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "jn_mosh",
+     "value": {
+      "id": "jn_mosh",
+      "type": "junction",
+      "stage": "junction",
+      "at": 10.0,
+      "style": "datamosh",
+      "duration_s": 0.5,
+      "seed": 3
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "jn_mosh"
+    }
+   ]
+  },
+  {
+   "name": "mono to colour on the drop, 3-frame ramp (1E)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "gw_mono",
+     "value": {
+      "id": "gw_mono",
+      "type": "grade_window",
+      "stage": "world",
+      "start": 0.0,
+      "end": 9.9,
+      "saturation": 0.0,
+      "ramp_out_f": 3
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "gw_mono"
+    }
+   ]
+  },
+  {
+   "name": "keep the red by hue, world mono (1E)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "gw_iso",
+     "value": {
+      "id": "gw_iso",
+      "type": "grade_window",
+      "stage": "world",
+      "start": 12.0,
+      "end": 18.0,
+      "isolate": {
+       "hue": "#c0392b",
+       "tolerance": 0.1
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "gw_iso"
+    }
+   ]
+  },
+  {
+   "name": "imported .cube LUT (1E)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "gw_lut",
+     "value": {
+      "id": "gw_lut",
+      "type": "grade_window",
+      "stage": "world",
+      "start": 18.0,
+      "end": 28.0,
+      "lut": {
+       "asset_key": "media/p1/look.cube",
+       "strength": 0.8
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "gw_lut"
+    }
+   ]
+  },
+  {
+   "name": "thermal flip weighted by the person matte (1E)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "fi_thermal",
+     "value": {
+      "id": "fi_thermal",
+      "type": "finish",
+      "stage": "world",
+      "start": 24.0,
+      "end": 25.0,
+      "kind": "thermal",
+      "matte_weighted": true
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "fi_thermal"
+    }
+   ]
+  },
+  {
+   "name": "CRT re-photography over the type too (1E)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "fi_crt",
+     "value": {
+      "id": "fi_crt",
+      "type": "finish",
+      "stage": "over_type",
+      "start": 25.0,
+      "end": 28.0,
+      "kind": "crt",
+      "scale": 1.5
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "remove",
+     "layer": "fx",
+     "id": "fi_crt"
+    }
+   ]
+  },
+  {
+   "name": "difference-blend word (1C, MotionItem.composite)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": {
+       "blend": "difference"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "footage inside the letters, ghost pass, screen stage, clipped (1C)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": {
+       "blend": "screen",
+       "opacity": 0.9,
+       "fill": {
+        "kind": "asset",
+        "asset_key": "media/p1/starship.mp4",
+        "loop": true
+       },
+       "ghost": "auto",
+       "stage": "screen",
+       "region": {
+        "shape": "rect",
+        "box": [
+         0.0,
+         0.0,
+         1.0,
+         0.5
+        ]
+       }
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": null
+     }
+    }
+   ]
+  },
+  {
+   "name": "letters as windows onto the next shot (1C cross-cut reveal)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": {
+       "fill": {
+        "kind": "next"
+       },
+       "fill_mode": "outside",
+       "ghost": {
+        "opacity": 0.5,
+        "width_px": 2
+       }
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": null
+     }
+    }
+   ]
+  }
+ ],
+ "bad": [
+  {
+   "name": "poster without its field",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b1",
+     "value": {
+      "id": "b1",
+      "type": "subject",
+      "stage": "world",
+      "start": 1,
+      "end": 2,
+      "kind": "poster"
+     }
+    }
+   ],
+   "match": "names its field colour"
+  },
+  {
+   "name": "subject effect at a type stage",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b2",
+     "value": {
+      "id": "b2",
+      "type": "subject",
+      "stage": "over_type",
+      "start": 1,
+      "end": 2,
+      "kind": "glow"
+     }
+    }
+   ],
+   "match": "runs at world, screen"
+  },
+  {
+   "name": "glyph region naming a missing graphic",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b3",
+     "value": {
+      "id": "b3",
+      "type": "region",
+      "stage": "world",
+      "start": 1,
+      "end": 2,
+      "effect": "negate",
+      "region": {
+       "shape": "glyph",
+       "ref": "nope"
+      }
+     }
+    }
+   ],
+   "match": "not in this edit"
+  },
+  {
+   "name": "rect region with no box",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b4",
+     "value": {
+      "id": "b4",
+      "type": "region",
+      "stage": "world",
+      "start": 1,
+      "end": 2,
+      "effect": "negate",
+      "region": {
+       "shape": "rect"
+      }
+     }
+    }
+   ],
+   "match": "takes box or keys"
+  },
+  {
+   "name": "colour on a negative",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b5",
+     "value": {
+      "id": "b5",
+      "type": "accent",
+      "stage": "pre_captions",
+      "start": 1,
+      "end": 1.04,
+      "kind": "negative",
+      "colour": "white"
+     }
+    }
+   ],
+   "match": "colour belongs to colour_hit"
+  },
+  {
+   "name": "letter window with no letters",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b6",
+     "value": {
+      "id": "b6",
+      "type": "junction",
+      "stage": "junction",
+      "at": 10.0,
+      "style": "letter_window"
+     }
+    }
+   ],
+   "match": "names its letters"
+  },
+  {
+   "name": "strobe frame from the next shot",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b7",
+     "value": {
+      "id": "b7",
+      "type": "strobe",
+      "stage": "pre_captions",
+      "start": 1,
+      "end": 1.2,
+      "frames": [
+       {
+        "source": {
+         "kind": "next"
+        }
+       }
+      ]
+     }
+    }
+   ],
+   "match": "a strobe frame is a still"
+  },
+  {
+   "name": "grade window that changes nothing",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b8",
+     "value": {
+      "id": "b8",
+      "type": "grade_window",
+      "stage": "world",
+      "start": 1,
+      "end": 2
+     }
+    }
+   ],
+   "match": "changes at least one"
+  },
+  {
+   "name": "matte weighting on a CRT",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b9",
+     "value": {
+      "id": "b9",
+      "type": "finish",
+      "stage": "world",
+      "start": 1,
+      "end": 2,
+      "kind": "crt",
+      "matte_weighted": true
+     }
+    }
+   ],
+   "match": "matte_weighted belongs"
+  },
+  {
+   "name": "source fill past the end of the main video",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b10",
+     "value": {
+      "id": "b10",
+      "type": "background",
+      "stage": "world",
+      "start": 1,
+      "end": 2,
+      "kind": "source",
+      "source": {
+       "kind": "source",
+       "src_t": 99.0
+      }
+     }
+    }
+   ],
+   "match": "past the end"
+  },
+  {
+   "name": "window past the program end",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b11",
+     "value": {
+      "id": "b11",
+      "type": "accent",
+      "stage": "pre_captions",
+      "start": 27.9,
+      "end": 29.0,
+      "kind": "negative"
+     }
+    }
+   ],
+   "match": "exceeds the limit"
+  },
+  {
+   "name": "a misspelled field",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b12",
+     "value": {
+      "id": "b12",
+      "type": "accent",
+      "stage": "pre_captions",
+      "start": 1,
+      "end": 1.04,
+      "kind": "negative",
+      "colur": "white"
+     }
+    }
+   ],
+   "match": "Unknown field|Extra inputs"
+  },
+  {
+   "name": "media not attached to the project",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b13",
+     "value": {
+      "id": "b13",
+      "type": "background",
+      "stage": "world",
+      "start": 1,
+      "end": 2,
+      "kind": "source",
+      "source": {
+       "kind": "asset",
+       "asset_key": "media/other/x.mp4"
+      }
+     }
+    }
+   ],
+   "match": "Use media attached to this project"
+  },
+  {
+   "name": "a device card that does not exist",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b14",
+     "value": {
+      "id": "b14",
+      "type": "subject",
+      "stage": "world",
+      "start": 1,
+      "end": 1.04,
+      "kind": "fill",
+      "colour": "white",
+      "device": "no_such_device"
+     }
+    }
+   ],
+   "match": "not a known device card"
+  },
+  {
+   "name": "hue on a fill",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "fx",
+     "id": "b15",
+     "value": {
+      "id": "b15",
+      "type": "subject",
+      "stage": "world",
+      "start": 1,
+      "end": 2,
+      "kind": "fill",
+      "colour": "white",
+      "hue": "#ff0000"
+     }
+    }
+   ],
+   "match": "hue belongs to kind isolate"
+  },
+  {
+   "name": "composite fill outside with no fill",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": {
+       "fill_mode": "outside"
+      }
+     }
+    }
+   ],
+   "match": "needs a fill"
+  },
+  {
+   "name": "composite with an unknown blend",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": {
+       "blend": "dodge"
+      }
+     }
+    }
+   ],
+   "match": "blend"
+  }
+ ]
+}

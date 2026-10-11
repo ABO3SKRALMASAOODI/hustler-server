@@ -150,6 +150,34 @@ def _flash_card(device):
     return card
 
 
+def _schemas():
+    try:
+        import schemas
+        return schemas
+    except ImportError:
+        # The backend loads worker/schemas.py by path as worker_schemas.
+        return sys.modules.get("worker_schemas")
+
+
+def member_flash_times(item):
+    """The fx member's own reading of its full-frame flashes
+    (``FxItemBase.flash_times``; INTERFACES_W1.md §3): a list of program
+    seconds, or None when the type does not override the hook (then the
+    Wave 0 reading applies: one flash at ``start`` for a flash-flagged
+    device). Never raises."""
+    try:
+        s = _schemas()
+        cls = {c.model_fields["type"].default: c
+               for c in (getattr(s, "FX_MEMBERS", ()) or ())}.get(
+                   item.get("type"))
+        if cls is None or cls.flash_times is s.FxItemBase.flash_times:
+            return None
+        times = cls.model_validate(item).flash_times()
+        return None if times is None else [float(t) for t in times]
+    except Exception:  # noqa: BLE001 — a reading never fails a gate
+        return None
+
+
 def flash_events(edl, index=None):
     """Every full-frame flash an EDL plays, as ``{t, source, id}``: flash
     transitions at the junctions they fire on, flash stylize items, flash
@@ -172,6 +200,11 @@ def flash_events(edl, index=None):
                         "source": "motion", "id": m.get("id")})
     for it in edl.get("fx") or []:
         if not isinstance(it, dict):
+            continue
+        times = member_flash_times(it)
+        if times is not None:
+            out.extend({"t": t, "source": "fx", "id": it.get("id")}
+                       for t in times)
             continue
         card = _flash_card(it.get("device"))
         flag = ((card or {}).get("owner_flags") or {}).get("flash")

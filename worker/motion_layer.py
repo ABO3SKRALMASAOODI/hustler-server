@@ -403,9 +403,11 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
     return inputs, next_idx
 
 
-def overlay_clip(parts, vlabel, idx, item, clip, fps, tag):
+def overlay_clip(parts, vlabel, idx, item, clip, fps, tag, plan=None):
     """Overlay one rendered clip on [vlabel] inside its program window;
-    returns the new label."""
+    returns the new label. ``plan`` (the render's fxgraph plan, or None) is
+    the Wave 1 seam track 1C reads for ``MotionItem.composite``
+    (INTERFACES_W1.md §3.3); unused until then."""
     s, e = float(item["start"]), float(item["end"])
     # Hold the clip's last frame for a couple of frames: framesync can
     # quantize a fractional program clock a frame past the clip's EOF.
@@ -417,8 +419,9 @@ def overlay_clip(parts, vlabel, idx, item, clip, fps, tag):
     return f"{tag}o"
 
 
-def append_graph(parts, vlabel, inputs, layer, fps):
-    """Composite this layer's clips over [vlabel]; returns the new label."""
+def append_graph(parts, vlabel, inputs, layer, fps, plan=None):
+    """Composite this layer's clips over [vlabel]; returns the new label.
+    ``plan``: see overlay_clip (Wave 1 seam; unused until 1C)."""
     j = 0
     for idx, item, clip in inputs or []:
         if (item.get("layer") or "above_captions") != layer:
@@ -427,6 +430,35 @@ def append_graph(parts, vlabel, inputs, layer, fps):
                               f"mg{layer[0]}{j}")
         j += 1
     return vlabel
+
+
+def composite_behind(parts, vlabel, mask_label, j, *, fps, motion=None,
+                     ass_path=None, fonts_dir=None, plan=None):
+    """One behind-the-subject composite (round 60), exactly the filters
+    renderer.build_filtergraph emits inline today: the words (an ASS file)
+    or a motion graphic (``motion`` = (input idx, item, clip)) drawn on one
+    copy of the picture, the subject lifted off the other copy by the gray
+    ``mask_label`` and laid back over them. Returns the new label.
+
+    Wave 1 seam (INTERFACES_W1.md §3.3 and §6): track 1A switches the
+    renderer's behind loop to call this (its mask chain becomes the program
+    matte; a ``composite.stage == "screen"`` item is composited after the
+    camera with the screen-space matte); track 1C owns this body for items
+    whose ``composite`` is set (blend, ghost pass, fill). For an item with
+    ``composite`` None it must stay byte-identical to these strings."""
+    parts.append(f"[{vlabel}]split[bhb{j}][bhf{j}]")
+    if motion:
+        m_idx, m_item, m_clip = motion
+        bht = overlay_clip(parts, f"bhb{j}", m_idx, m_item, m_clip, fps,
+                           f"mgs{j}")
+    else:
+        parts.append(f"[bhb{j}]subtitles=filename='{ass_path}'"
+                     f":fontsdir='{fonts_dir}'[bht{j}]")
+        bht = f"bht{j}"
+    parts.append(f"[bhf{j}][{mask_label}]alphamerge[bhfa{j}]")
+    parts.append(f"[{bht}][bhfa{j}]overlay=0:0:format=auto"
+                 f":eof_action=pass[vbh{j}]")
+    return f"vbh{j}"
 
 
 def demote(item, why):

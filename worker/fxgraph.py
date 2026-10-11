@@ -338,6 +338,11 @@ class FxPlan:
         # CPU-ms the render's devices may still add (devices.render_budget_ms,
         # spent in program order); None: no cap (cost model unreadable).
         self.budget_ms = None
+        # Wave 1 (INTERFACES_W1.md §1): {(label, space): [item ids]} — the
+        # program mattes this render's compilers asked for in prepare
+        # (request_matte). The renderer builds a matte chain only when
+        # asked: no request, no mask filters (md5 identity).
+        self.matte_requests = {}
         self._uid = 0
         self._compilers = {}
 
@@ -872,6 +877,8 @@ def mask(plan, label, space=None, ctx=None):
     space = at or space or "screen"
     prefix = name.split(":", 1)[0]
     provider = _MASK_PROVIDERS.get(prefix)
+    if provider is None and prefix in MASK_PEERS:
+        provider = peer_fn(MASK_PEERS[prefix])
     if provider is None:
         return None
     try:
@@ -886,11 +893,67 @@ def _close_masks(ctx):
     ctx._mask_tails = []
 
 
+# ── Wave 1: the program matte API (INTERFACES_W1.md §1) ─────────────────
+# Function-level owner: track 1A (request_matte, matte_info, program_matte,
+# handle_matte, _person_mask). The stubs below are the pinned signatures;
+# every consumer treats an absent matte as its substitute rung.
+
+MATTE_STATUSES = ("ready", "partial", "absent")
+
+
+def matte_info(plan, label="person"):
+    """What the program matte for ``label`` will be on this render, without
+    building it. A dict (shape pinned):
+
+      label    "person" (or "face")
+      status   ready (every window measured) | partial (some windows black,
+               inert) | absent
+      source   "rvm" | "u2net" | "photometric" | None
+      reason   one human line (the report's reason for a degrade)
+      windows  [{"t0", "t1", "status", "source", "flicker", "edge_chatter",
+                 "ok"}] in PROGRAM seconds; ``ok`` False = chunk QA over the
+               bar: crisp devices (fill, outline, poster) demote to soft
+               ones (glow) there
+      qa       {"flicker", "edge_chatter"} program-wide maxima, or {}
+
+    STUB until 1A: always absent."""
+    return {"label": label, "status": "absent", "source": None,
+            "reason": "no program matte on this render (fxgraph."
+                      "program_matte is a stub until track 1A)",
+            "windows": [], "qa": {}}
+
+
+def request_matte(plan, item, label="person", space="world"):
+    """A compiler's ``prepare`` asks for the program matte (``label`` in
+    ``space``: world = the picture's geometry before the camera, screen =
+    after it). Records the request so the renderer builds the chain, and
+    returns ``matte_info`` for the rung decision. Never raises."""
+    try:
+        if plan is not None:
+            key = (str(label), "screen" if space == "screen" else "world")
+            plan.matte_requests.setdefault(key, []).append(
+                (item or {}).get("id"))
+        return matte_info(plan, label)
+    except Exception:  # noqa: BLE001 — a matte question never fails a render
+        return {"label": label, "status": "absent", "source": None,
+                "reason": "matte request failed", "windows": [], "qa": {}}
+
+
 def program_matte(plan, space="world"):
     """The person matte in program space (``space`` world: the picture's
-    geometry before the camera; screen: after it). STUB — returns None until
-    track 1A builds it from source-space ``matte.person`` sidecars. 1B, 1C
-    and 1D treat None as "matte absent": their substitute rung."""
+    geometry before the camera; screen: after it), as a FRESH gray pad the
+    caller consumes, or None. STUB — returns None until track 1A builds it
+    from source-space ``matte.person`` sidecars. 1B, 1C and 1D treat None as
+    "matte absent": their substitute rung."""
+    return None
+
+
+def handle_matte(ctx, side):
+    """At the ``junction`` stage: the person matte of one side's 2h-frame
+    handle stream (``side`` "a" = outgoing, "b" = incoming), measured on the
+    handle's own SOURCE frames (frames past an out-point are not in the
+    program matte), as a fresh gray pad, or None. STUB until 1A; 1D's
+    ``matte_cut`` takes its substitute rung on None."""
     return None
 
 
@@ -899,6 +962,68 @@ def _person_mask(plan, name, space, ctx):
 
 
 register_mask("person", _person_mask)
+
+# Mask providers that live in track modules, resolved on first use so a
+# render that never asks never imports them (and a module that does not
+# exist yet reads as "absent"). INTERFACES_W1.md §1.3.
+MASK_PEERS = {
+    "face": "matte_track:face_mask",       # 1A: faces.yunet soft ellipses
+    "glyph": "compositor:glyph_mask",      # 1C: a motion item's clip alpha
+    "region": "regions:region_mask",       # 1C: an fx item's FxRegion
+    "hue": "gradewin:hue_mask",            # 1E: hue key (hue_key())
+}
+
+
+def peer(spec, *args, default=None, **kwargs):
+    """Call a function another track owns, by ``"module:function"``.
+    Returns ``default`` when the module or function does not exist (yet) or
+    the call raises: a cross-track call can degrade a device, never fail a
+    render. The pinned peer functions are listed in INTERFACES_W1.md §1."""
+    fn = peer_fn(spec)
+    if fn is None:
+        return default
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        print(f"[fx] peer {spec} failed: {type(e).__name__}: "
+              f"{str(e)[:160]}", flush=True)
+        return default
+
+
+def peer_fn(spec):
+    """The callable named by ``"module:function"``, or None."""
+    mod_name, _, attr = str(spec or "").partition(":")
+    if not mod_name or not attr:
+        return None
+    try:
+        mod = importlib.import_module(mod_name)
+    except Exception:  # noqa: BLE001
+        return None
+    fn = getattr(mod, attr, None)
+    return fn if callable(fn) else None
+
+
+def landing_frames(plan, item):
+    """The program frames a device LANDS on (proof strips, land_err_f):
+    the compiler's optional ``landing(plan, item) -> [frame]`` hook, else the
+    item's first frame (picture stages) or its cut frame (junction).
+    [] when it lands nowhere (music_bus). Never raises."""
+    comp = compiler_for((item or {}).get("type"))
+    fn = getattr(comp, "landing", None)
+    if fn is not None:
+        try:
+            return [int(f) for f in fn(plan, item)]
+        except Exception:  # noqa: BLE001
+            pass
+    fps = getattr(plan, "fps", None) or 30.0
+    try:
+        if item.get("stage") == "junction" and item.get("at") is not None:
+            return [fxprims.frame_at(float(item["at"]), fps)]
+        if item.get("start") is not None:
+            return [fxprims.frame_at(float(item["start"]), fps)]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
 
 
 # ------------------------------------------------------------------ fallback

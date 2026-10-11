@@ -514,6 +514,28 @@ WEB_SFX_ENABLED = os.getenv("WEB_SFX_ENABLED", "0") == "1"
 # at most this many full-frame flashes in any one second; an export the
 # user opted into past it is flagged contains_flashing (flash_safety.py).
 FLASH_SAFE_MAX_PER_S = 3
+# Wave 1 (worker/devices/INTERFACES_W1.md §6): one block per track. A track
+# adds its flags BETWEEN its own begin/end lines and nowhere else in this
+# file, so six parallel branches merge without touching each other's lines.
+# Every flag defaults to the inert value (a dark device stays dark).
+# ---- W1 1A (matte stack v2) begin
+# ---- W1 1A end
+
+# ---- W1 1B (subject FX) begin
+# ---- W1 1B end
+
+# ---- W1 1C (compositor) begin
+# ---- W1 1C end
+
+# ---- W1 1D (punctuation, strobes, junctions) begin
+# ---- W1 1D end
+
+# ---- W1 1E (finishing and variants) begin
+# ---- W1 1E end
+
+# ---- W1 1F (agent layer v1) begin
+# ---- W1 1F end
+
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via
 # Openverse (Wikimedia/Flickr — real people, companies, events); video
 # stock needs PEXELS_API_KEY/PIXABAY_API_KEY. Topical web VIDEO is

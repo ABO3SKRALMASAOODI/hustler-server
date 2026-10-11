@@ -10,6 +10,8 @@ Round lead's interface pass (ROADMAP §3 rule A8). It covers Wave 0 (tracks
   codes against the pinned version until the round lead re-pins it.
 - **Precedence.** ROADMAP.md (`/Users/masaoodi/Documents/Valmera/.valmera/refbench/ROADMAP.md`)
   wins on intent. This file wins on names, shapes and file ownership.
+- **Wave 1.** The Wave 1 contracts are in `INTERFACES_W1.md`, which extends
+  this file and re-pins its §9 pre-pin.
 
 ---
 
