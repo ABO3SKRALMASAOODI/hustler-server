@@ -154,6 +154,11 @@ def r25(work):
                                 {"kind": "asset",
                                  "asset_key": "media/p1/plate.png"}])],
         "screen": [_sx("sc", kind="negate", stage="screen")],
+        # copies from before the program's first frame: the first frame
+        # stands in for them (no frame is read before 0)
+        "echo0": [_sx("c0", kind="echo", start=0.0, end=0.6,
+                      echo={"mode": "trail", "offsets_f": [2, 4, 6, 8],
+                            "opacity": 0.6, "decay": 0.3})],
         "region": [_sx("rg", kind="negate", region={
             "shape": "rect", "box": [0.0, 0.0, 1.0, 0.5]})],
     }
@@ -219,6 +224,14 @@ def test_region_locality_is_zero_on_the_untouched_side(r25, work, name):
         changed = (np.abs(y1 - y0) > 6) | np.repeat(np.repeat(
             (np.abs(u1 - u0) > 6) | (np.abs(v1 - v0) > 6), 2, 0), 2, 1)
         assert changed.sum() > 200, (name, k)        # it did something
+
+
+def test_echo_copies_from_before_the_first_frame(r25):
+    _ok(r25["echo0"])
+    diff = [i for i, (a, b) in enumerate(zip(r25["base"]["frames"],
+                                             r25["echo0"]["frames"]))
+            if a != b]
+    assert diff and max(diff) < 15 and len(r25["echo0"]["frames"]) == 150
 
 
 def test_a_fill_is_the_colour_on_the_subject_and_decays(r25, work):

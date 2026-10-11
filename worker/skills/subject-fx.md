@@ -62,16 +62,19 @@ camera move with it, and none is added to "support" it. Flashing is held to
   on="stress", count=3, start=<line start>, end=<line end>)` — the three
   strongest stresses of that line, at least 1 s apart, each 1 frame plus a
   2-frame decay. With a user track: `on="beat"` or `on="downbeat"`.
-- **The same treatment on every shot of a montage**: one call with
-  `on="cut"` and a `count` equal to the number of shots — one hit per cut,
-  each bound to its cut.
+- **The same treatment on every shot of a montage**: one call,
+  `add_subject_effect(kind="fill", on="stress", count=1, per="shot")` — the
+  strongest stress of EVERY shot (a shot with none takes its strongest
+  word), each bound to its word; or `on="cut"` for a hit on every cut.
 - **Poster opener**: `add_subject_effect(kind="poster", start=0,
   end=2.5)` puts the speaker on the accent field while the hook title
   lands; `style={"silhouette": "black"}` for the flat graphic version
   behind big type.
 - **Glowing figure**: `add_subject_effect(kind="glow", colour="white",
-  start=…, end=…, intensity=0.9)`; `style.radius` 0.03–0.07 of frame
-  height.
+  start=…, end=…, intensity=0.9)`; `style.radius` 0.03–0.06 of frame
+  height (the halo reaches about 0.9 of it). For a figure that BECOMES
+  light, stack a long fill at intensity 0.6–0.8 in the same colour under
+  the glow, and the world mono with an isolate.
 - **Subject-only negative on the turn**: `add_subject_effect(kind="negate",
   start=<turn word>, frames=2)`.
 - **Mono world, subject in colour**: `add_subject_effect(kind="isolate",

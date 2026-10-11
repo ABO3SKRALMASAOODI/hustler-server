@@ -289,10 +289,13 @@ def _ensure_matte(ctx, edl, tl, windows):
             return ""
         video = (ctx.index or {}).get("video") or {}
         meta = proxy.get("meta") or {}
-        info = {"duration": video.get("duration"),
-                "fps": meta.get("fps") or video.get("fps"),
-                "width": meta.get("width") or proxy.get("width"),
-                "height": meta.get("height") or proxy.get("height")}
+        # as sidecars.prefetch_top_shorts builds it: the index's duration
+        # (the chunk grid), the proxy's own geometry
+        info = {"duration": video.get("duration") or proxy.get("duration_s"),
+                "fps": proxy.get("fps") or meta.get("fps")
+                or video.get("fps"),
+                "width": proxy.get("width") or meta.get("width"),
+                "height": proxy.get("height") or meta.get("height")}
         src = sidecars.source_from(original["sha256"], proxy["storage_key"],
                                    info, ctx.project_id,
                                    (ctx.index or {}).get("shots"))

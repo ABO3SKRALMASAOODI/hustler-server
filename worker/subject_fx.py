@@ -83,7 +83,7 @@ RADIAL_RADIUS = 0.08
 # wrap (WRAP x 1 - the tightest tail) on a faint CORE wash.
 GLOW_TAIL = ((0.10, 0.30), (0.25, 0.35), (0.38, 0.35))
 GLOW_WRAP = 0.9
-GLOW_CORE = 0.18
+GLOW_CORE = 0.09
 # Glow and blurs are soft by nature: they are computed at a working height
 # of about SOFT_LINES (a 1920-line final works at 1/4 resolution, a 480-line
 # preview at full), so a preview and its final show the same light and the
