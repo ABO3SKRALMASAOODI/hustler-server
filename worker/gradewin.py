@@ -81,12 +81,38 @@ def hue_key(colour, tolerance=lutlib.DEFAULT_TOLERANCE,
     return lutlib.HueKey(colour, tolerance, softness)
 
 
+def emit_skin(parts, u_label, v_label, y_label, out, *, uid):
+    """Gray skin weight at CHROMA resolution from two chroma planes and the
+    luma at chroma size (all consumed): the Cb/Cr skin box, gated by
+    brightness (a dark red curtain shares skin's chroma, never its
+    luma)."""
+    parts.append(f"[{u_label}][{v_label}]lut2=c0='{lutlib.skin_expr()}'"
+                 f"[{uid}skc]")
+    parts.append(f"[{y_label}][{uid}skc]lut2=c0='{lutlib.skin_luma_expr()}'"
+                 f"[{out}]")
+    return out
+
+
 def emit_hue_weight(parts, u_label, v_label, out, key, *, uid,
-                    smooth=0.7):
-    """Gray weight map at CHROMA resolution from two chroma planes
-    (consumed): 255 where the picture is the key's colour."""
-    parts.append(f"[{u_label}][{v_label}]lut2=c0='{lutlib.hue_expr(key)}'"
-                 f"{f',gblur=sigma={smooth:.2f}' if smooth else ''}[{out}]")
+                    y_label=None, smooth=0.7):
+    """Gray weight map at CHROMA resolution: 255 where the picture is the
+    key's colour. Consumes the two chroma planes and, when given, the luma
+    at chroma size: then skin is excluded as the key asks (lutlib.HueKey.
+    exclude_skin), exactly as lutlib.hue_weight(..., y) computes it."""
+    blur = f",gblur=sigma={smooth:.2f}" if smooth else ""
+    if not (key.exclude_skin and y_label):
+        if y_label:
+            parts.append(f"[{y_label}]nullsink")
+        parts.append(f"[{u_label}][{v_label}]lut2=c0='"
+                     f"{lutlib.hue_expr(key)}'{blur}[{out}]")
+        return out
+    parts.append(f"[{u_label}]split[{uid}hu1][{uid}hu2]")
+    parts.append(f"[{v_label}]split[{uid}hv1][{uid}hv2]")
+    parts.append(f"[{uid}hu1][{uid}hv1]lut2=c0='{lutlib.hue_expr(key)}'"
+                 f"[{uid}hw]")
+    emit_skin(parts, f"{uid}hu2", f"{uid}hv2", y_label, f"{uid}hs",
+              uid=f"{uid}h")
+    parts.append(f"[{uid}hw][{uid}hs]lut2=c0='x*(255-y)/255'{blur}[{out}]")
     return out
 
 
@@ -104,10 +130,14 @@ def hue_mask(plan, name, space, ctx):
         return None
     u = ctx.uid("hm")
     p = ctx.parts
+    cw, ch = (int(ctx.W) + 1) // 2, (int(ctx.H) + 1) // 2
     p.append(f"[{ctx.label}]split[{u}k][{u}h]")
     ctx.label = f"{u}k"
-    p.append(f"[{u}h]scale,format=yuv420p,extractplanes=u+v[{u}u][{u}v]")
-    emit_hue_weight(p, f"{u}u", f"{u}v", f"{u}w", key, uid=u)
+    p.append(f"[{u}h]scale,format=yuv420p,extractplanes=y+u+v"
+             f"[{u}y][{u}u][{u}v]")
+    p.append(f"[{u}y]scale={cw}:{ch}:flags=area[{u}ys]")
+    emit_hue_weight(p, f"{u}u", f"{u}v", f"{u}w", key, uid=u,
+                    y_label=f"{u}ys")
     p.append(f"[{u}w]scale={int(ctx.W)}:{int(ctx.H)}:flags=bilinear,"
              f"format=gray[{u}m]")
     return f"{u}m"
@@ -213,25 +243,19 @@ def chroma_value(item, plane, x, y, accent=DEFAULT_ACCENT):
     return min(240.0, max(16.0, v))
 
 
-def protect_expr(item, brand=None):
-    """lut2 over source (Cb, Cr): 255 where the grade must not touch the
-    colour (skin, the brand hue), or None."""
+def _brand_key(item):
     want = set(item.get("protect") or ())
-    bits = []
-    if "skin" in want:
-        bits.append(lutlib.skin_expr(1))
-    if "brand" in want and brand:
-        try:
-            key = hue_key(brand, BRAND_TOLERANCE, BRAND_SOFTNESS)
-            bits.append(lutlib.hue_expr(key, 1))
-        except ValueError:
-            pass
-    if not bits:
+    if "brand" not in want or not item.get("brand_hue"):
         return None
-    e = bits[0]
-    for b in bits[1:]:
-        e = f"max({e},{b})"
-    return f"255*{e}"
+    try:
+        return hue_key(item["brand_hue"], BRAND_TOLERANCE, BRAND_SOFTNESS)
+    except ValueError:
+        return None
+
+
+def protect_kinds(item):
+    """('skin'?, brand HueKey or None) the grade must leave untouched."""
+    return ("skin" in set(item.get("protect") or ())), _brand_key(item)
 
 
 # ── what a render does with one item ─────────────────────────────────────
@@ -239,7 +263,8 @@ def protect_expr(item, brand=None):
 def _needs(item, brand=None):
     """Which parts of the planar graph an item needs."""
     iso = item.get("isolate") is not None
-    prot = protect_expr(item, brand) is not None
+    skin, bkey = protect_kinds(item)
+    prot = bool(skin or bkey)
     tone = any(item.get(k) for k in ("temperature", "tint", "split_tone"))
     sat = item.get("saturation") is not None and \
         abs(float(item["saturation"]) - 1.0) > 1e-9
@@ -394,8 +419,9 @@ class _Grade:
 
 
 def _fan(parts, label, n, tag):
+    """``n`` labels carrying ``label`` (a split when n > 1)."""
     if n <= 1:
-        return [label] * max(1, n)
+        return [label]
     outs = [f"{tag}{i}" for i in range(n)]
     parts.append(f"[{label}]split={n}" + "".join(f"[{o}]" for o in outs))
     return outs
@@ -403,10 +429,13 @@ def _fan(parts, label, n, tag):
 
 def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
                 accent=DEFAULT_ACCENT):
-    """The graded picture of ``src`` (yuv420p, W x H, consumed) -> label."""
+    """The graded picture of ``src`` (yuv420p, W x H, consumed) -> label.
+
+    Planes: the BASE (the picture, through the LUT when there is one) is
+    graded; weights (the hue key, skin, the brand hue) are read from the
+    SOURCE planes, so a LUT never moves what a key selects."""
     import finish
-    brand = item.get("brand_hue")
-    need = _needs(item, brand)
+    need = _needs(item, item.get("brand_hue"))
     if lut_path is None:
         need["lut"] = False
     planar = need["iso"] or need["protect"] or need["tone"]
@@ -418,9 +447,20 @@ def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
         parts.append(f"[{src}]lutyuv=y='{yt}':u='{ct}':v='{ct}'[{u}g]")
         return f"{u}g"
     cw, ch = (int(W) + 1) // 2, (int(H) + 1) // 2
-    need_src_chroma = need["iso"] or need["protect"]
+    key = None
+    if need["iso"]:
+        iso = item["isolate"]
+        key = hue_key(iso["hue"], iso.get("tolerance", 0.12),
+                      iso.get("softness", 0.1))
+    skin_p, bkey = protect_kinds(item)
+    # consumers of the SOURCE planes
+    n_su = (1 if key else 0) + (1 if skin_p else 0) + (1 if bkey else 0) \
+        + (1 if need["protect"] else 0)
+    n_sy = (1 if key is not None and key.exclude_skin else 0) + \
+        (1 if skin_p else 0)
+    need_src = n_su > 0
     if need["lut"]:
-        if need_src_chroma:
+        if need_src:
             parts.append(f"[{src}]split[{u}s0][{u}s1]")
             orig, base = f"{u}s0", f"{u}s1"
         else:
@@ -429,25 +469,32 @@ def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
                      f":interp=tetrahedral,scale,format=yuv420p[{u}L]")
         parts.append(f"[{u}L]extractplanes=y+u+v[{u}y][{u}u][{u}v]")
         if orig is not None:
-            parts.append(f"[{orig}]extractplanes=u+v[{u}su][{u}sv]")
+            parts.append(f"[{orig}]extractplanes=y+u+v"
+                         f"[{u}sy0][{u}su0][{u}sv0]")
+            if n_sy:
+                parts.append(f"[{u}sy0]scale={cw}:{ch}:flags=area[{u}sy]")
+            else:
+                parts.append(f"[{u}sy0]nullsink")
     else:
-        if need_src_chroma:
-            parts.append(f"[{src}]extractplanes=y+u+v[{u}y][{u}u0][{u}v0]")
+        parts.append(f"[{src}]extractplanes=y+u+v[{u}y0][{u}u0][{u}v0]")
+        if need_src:
+            yy = _fan(parts, f"{u}y0", 2 if n_sy else 1, f"{u}yf")
+            parts.append(f"[{yy[0]}]null[{u}y]")
+            if n_sy:
+                parts.append(f"[{yy[1]}]scale={cw}:{ch}:flags=area[{u}sy]")
             uu = _fan(parts, f"{u}u0", 2, f"{u}uf")
             vv = _fan(parts, f"{u}v0", 2, f"{u}vf")
             parts.append(f"[{uu[0]}]null[{u}u]")
             parts.append(f"[{vv[0]}]null[{u}v]")
-            parts.append(f"[{uu[1]}]null[{u}su]")
-            parts.append(f"[{vv[1]}]null[{u}sv]")
+            parts.append(f"[{uu[1]}]null[{u}su0]")
+            parts.append(f"[{vv[1]}]null[{u}sv0]")
         else:
-            parts.append(f"[{src}]extractplanes=y+u+v[{u}y][{u}u][{u}v]")
-    # source chroma consumers: isolate weight, protect weight, protect
-    # merge (one per plane)
-    su_n = (1 if need["iso"] else 0) + (2 if need["protect"] else 0)
-    if need_src_chroma:
-        sus = _fan(parts, f"{u}su", su_n, f"{u}sU")
-        svs = _fan(parts, f"{u}sv", (1 if need["iso"] else 0)
-                   + (2 if need["protect"] else 0), f"{u}sV")
+            parts.append(f"[{u}y0]null[{u}y]")
+            parts.append(f"[{u}u0]null[{u}u]")
+            parts.append(f"[{u}v0]null[{u}v]")
+    sus = _fan(parts, f"{u}su0", n_su, f"{u}sU") if need_src else []
+    svs = _fan(parts, f"{u}sv0", n_su, f"{u}sV") if need_src else []
+    sys_ = _fan(parts, f"{u}sy", n_sy, f"{u}sY") if n_sy else []
     # luma
     yl = f"{u}y"
     if need["lum"]:
@@ -456,18 +503,16 @@ def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
         yl = f"{u}y1"
     ys = None
     if need["tone"]:
-        yy = _fan(parts, yl, 3, f"{u}yf")
+        yy = _fan(parts, yl, 3, f"{u}yt")
         yl = yy[0]
         parts.append(f"[{yy[1]}]scale={cw}:{ch}:flags=area[{u}ysu]")
         parts.append(f"[{yy[2]}]scale={cw}:{ch}:flags=area[{u}ysv]")
         ys = (f"{u}ysu", f"{u}ysv")
     cu, cv = f"{u}u", f"{u}v"
-    if need["iso"]:
-        iso = item["isolate"]
-        key = hue_key(iso["hue"], iso.get("tolerance", 0.12),
-                      iso.get("softness", 0.1))
+    if key is not None:
         emit_hue_weight(parts, sus.pop(0), svs.pop(0), f"{u}wi", key,
-                        uid=u)
+                        uid=f"{u}i",
+                        y_label=sys_.pop(0) if key.exclude_skin else None)
         wi = _fan(parts, f"{u}wi", 2, f"{u}wf")
         parts.append(f"[{cu}][{wi[0]}]lut2=c0='128+(x-128)*y/255'[{u}ui]")
         parts.append(f"[{cv}][{wi[1]}]lut2=c0='128+(x-128)*y/255'[{u}vi]")
@@ -484,13 +529,26 @@ def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
         parts.append(f"[{cv}]lut=c0='{ct}'[{u}vs]")
         cu, cv = f"{u}us", f"{u}vs"
     if need["protect"]:
-        pe = protect_expr(item, brand)
-        parts.append(f"[{sus.pop(0)}][{svs.pop(0)}]lut2=c0='{pe}',"
-                     f"gblur=sigma=0.7[{u}pw]")
+        ws = []
+        if skin_p:
+            emit_skin(parts, sus.pop(0), svs.pop(0), sys_.pop(0),
+                      f"{u}pk", uid=f"{u}p")
+            ws.append(f"{u}pk")
+        if bkey is not None:
+            parts.append(f"[{sus.pop(0)}][{svs.pop(0)}]lut2=c0='"
+                         f"{lutlib.hue_expr(bkey)}'[{u}pb]")
+            ws.append(f"{u}pb")
+        if len(ws) == 2:
+            parts.append(f"[{ws[0]}][{ws[1]}]lut2=c0='max(x,y)'[{u}pm]")
+            pw0 = f"{u}pm"
+        else:
+            pw0 = ws[0]
+        parts.append(f"[{pw0}]gblur=sigma=0.7[{u}pw]")
         pw = _fan(parts, f"{u}pw", 2, f"{u}pf")
         parts.append(f"[{cu}][{sus.pop(0)}][{pw[0]}]maskedmerge[{u}up]")
         parts.append(f"[{cv}][{svs.pop(0)}][{pw[1]}]maskedmerge[{u}vp]")
         cu, cv = f"{u}up", f"{u}vp"
+    assert not sus and not svs and not sys_, (sus, svs, sys_)
     parts.append(f"[{yl}][{cu}][{cv}]mergeplanes=0x001020:yuv420p[{u}g]")
     return f"{u}g"
 
@@ -500,32 +558,89 @@ GRADE = _Grade()
 
 # ── auto hue (write time, browserless) ───────────────────────────────────
 
-def auto_hue(tool_ctx, start, end):
-    """The dominant saturated hue of the SUBJECT region over program
-    [start, end), as '#rrggbb', or None. Solved at write time from proxy
-    frames (no model): the subject region is the person matte when its
-    sidecar is ready, else the centre-weighted frame below the face line;
-    skin never counts. When the subject holds no clear colour, the whole
-    frame's dominant hue is used (the red curtain behind a speaker)."""
-    try:
-        frames = _sample_frames(tool_ctx, float(start), float(end), n=3)
-    except Exception:  # noqa: BLE001
-        return None
-    if not frames:
-        return None
+def _subject_ellipse(h, w):
     import numpy as np
+    yy, xx = np.mgrid[0:h, 0:w]
+    return (((xx / w - 0.5) / 0.32) ** 2 +
+            ((yy / h - 0.72) / 0.42) ** 2) <= 1.0
+
+
+def hue_from_frames(frames):
+    """(hex, share) of the subject's dominant colour over RGB frames (the
+    centre-weighted region below the face line; skin never counts), or the
+    whole frame's when the subject holds none."""
     best = None
     for rgb in frames:
         h, w = rgb.shape[:2]
-        yy, xx = np.mgrid[0:h, 0:w]
-        subj = (((xx / w - 0.5) / 0.32) ** 2 +
-                ((yy / h - 0.72) / 0.42) ** 2) <= 1.0
-        hexv, share = lutlib.dominant_hue(rgb, subj, min_share=0.03)
+        hexv, share = lutlib.dominant_hue(rgb, _subject_ellipse(h, w),
+                                          min_share=0.03)
         if hexv is None:
             hexv, share = lutlib.dominant_hue(rgb, None, min_share=0.01)
         if hexv and (best is None or share > best[1]):
             best = (hexv, share)
-    return best[0] if best else None
+    return best or (None, 0.0)
+
+
+def key_from_frames(frames, colour):
+    """(tolerance, softness) that hold ``colour`` as it actually spreads in
+    the shot. The colour's own pixels are found with a narrow key first
+    (+-15 deg) and then within their measured spread, so neighbours that
+    merely lean the same way (shadowed skin next to a deep red curtain, a
+    brown wall) never widen it; the half-width covers the 5-95 % spread
+    + 3 deg, never under 7 deg or over 32 deg."""
+    import numpy as np
+    base = hue_key(colour, 0.1, 0.0)
+    rows = []
+    for rgb in frames:
+        c = lutlib.rgb_to_ycc8(rgb.reshape(-1, 3) / 255.0)
+        rad = np.hypot(c[:, 1] - 128.0, c[:, 2] - 128.0)
+        keep = (rad >= base.sat_lo) & \
+            (lutlib.skin_weight(c[:, 1], c[:, 2], c[:, 0]) < 0.5)
+        a = np.arctan2(c[keep, 2] - 128.0, c[keep, 1] - 128.0)
+        rows.append(np.degrees((a - base.angle + np.pi) % (2 * np.pi)
+                               - np.pi))
+    d = np.concatenate(rows) if rows else np.zeros(0)
+    win = 15.0
+    for _pass in range(2):
+        sel = d[np.abs(d) <= win]
+        if sel.size < 200:
+            return lutlib.DEFAULT_TOLERANCE, lutlib.DEFAULT_SOFTNESS
+        lo, hi = np.percentile(sel, [5, 95])
+        win = max(abs(lo), abs(hi)) + 6.0
+    half = min(32.0, max(7.0, max(abs(lo), abs(hi)) + 3.0))
+    return round(half / 180.0, 3), 0.06
+
+
+def auto_hue(tool_ctx, start, end):
+    """The dominant saturated hue of the SUBJECT region over program
+    [start, end), as '#rrggbb', or None. Solved at write time from proxy
+    frames (no model): the subject region is the centre-weighted frame
+    below the face line; skin never counts. When the subject holds no clear
+    colour, the whole frame's dominant hue is used (the red curtain behind a
+    speaker)."""
+    try:
+        frames = _sample_frames(tool_ctx, float(start), float(end), n=3)
+    except Exception:  # noqa: BLE001
+        return None
+    return hue_from_frames(frames)[0] if frames else None
+
+
+def auto_key(tool_ctx, start, end, colour=None):
+    """(hex, tolerance, softness) for isolate_colour: the hue (solved when
+    ``colour`` is None) and the key width that colour needs in this
+    window. (None, None, None) when nothing can be solved."""
+    try:
+        frames = _sample_frames(tool_ctx, float(start), float(end), n=3)
+    except Exception:  # noqa: BLE001
+        return None, None, None
+    if not frames:
+        return colour, None, None
+    if colour is None:
+        colour = hue_from_frames(frames)[0]
+        if colour is None:
+            return None, None, None
+    tol, soft = key_from_frames(frames, colour)
+    return colour, tol, soft
 
 
 def _sample_frames(tool_ctx, start, end, n=3):

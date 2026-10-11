@@ -175,17 +175,22 @@ def test_brand_protection_takes_the_look_accent(tmp_path):
 
 def test_isolate_colour(tmp_path, monkeypatch):
     ctx = Ctx(tmp_path)
-    out = ft.isolate_colour(ctx, hue="#C8202A", start=2, end=8)
+    out = ft.isolate_colour(ctx, hue="#C8202A", start=2, end=8,
+                            tolerance=0.1)
     assert out.startswith("EDL"), out
     item = ctx.writes[-1][0]["fx"][0]
     assert item["isolate"]["hue"] == "#c8202a"
     assert item["device"] == "grade_isolate_hue"
-    monkeypatch.setattr(gradewin, "auto_hue", lambda c, s, e: "#b03030")
+    monkeypatch.setattr(gradewin, "auto_key",
+                        lambda c, s, e, col=None: (col or "#b03030", 0.05,
+                                                   0.06))
     out = ft.isolate_colour(ctx, start=2, end=8, keep_skin=True)
-    assert "(auto: #b03030)" in out
+    assert "(auto: #b03030, key +-9 deg)" in out
     it2 = ctx.writes[-1][0]["fx"][1]
     assert it2["protect"] == ["skin"]
-    monkeypatch.setattr(gradewin, "auto_hue", lambda c, s, e: None)
+    assert it2["isolate"]["tolerance"] == 0.05
+    monkeypatch.setattr(gradewin, "auto_key",
+                        lambda c, s, e, col=None: (None, None, None))
     assert ft.isolate_colour(ctx).startswith("REJECTED")
     if "subject" not in schemas.FX_TYPES:
         assert ft.isolate_colour(ctx, keep="subject").startswith(

@@ -372,7 +372,7 @@ class HueKey:
     def __init__(self, colour, tolerance=DEFAULT_TOLERANCE,
                  softness=DEFAULT_SOFTNESS):
         r, g, b = hex_rgb(colour)
-        _, cb, cr = rgb_to_ycc8(np.array([r, g, b]) / 255.0)
+        _y, cb, cr = rgb_to_ycc8(np.array([r, g, b]) / 255.0)
         self.colour = rgb_hex((r, g, b))
         self.angle = math.atan2(cr - 128.0, cb - 128.0)
         self.radius = math.hypot(cb - 128.0, cr - 128.0)
@@ -382,8 +382,9 @@ class HueKey:
         self.sat_lo = max(4.0, 0.33 * r_t)
         self.sat_hi = max(self.sat_lo + 4.0, 0.55 * r_t)
         # Skin never counts as a kept colour unless the colour IS skin:
-        # ruddy skin sits 20-30 degrees from red, inside a red key.
-        self.exclude_skin = float(skin_weight(cb, cr)) < 0.5
+        # ruddy skin sits 20-30 degrees from red, inside a red key. (The
+        # render gates skin by luma too, so a dark red is never "skin".)
+        self.exclude_skin = float(skin_weight(cb, cr, _y)) < 0.5
 
     def as_dict(self):
         return {"colour": self.colour, "angle": round(self.angle, 6),
@@ -399,16 +400,18 @@ def _smooth(lo, hi, x):
     return t * t * (3 - 2 * t)
 
 
-def hue_weight(key, cb, cr):
-    """0..1 membership of chroma (cb, cr) (8-bit, any shape) in the key."""
+def hue_weight(key, cb, cr, y=None):
+    """0..1 membership of chroma (cb, cr) (8-bit, any shape) in the key.
+    With luma ``y`` the key's skin exclusion applies (as the render does);
+    without it this is the chroma-only weight (``hue_expr``)."""
     du, dv = np.asarray(cb, np.float64) - 128.0, \
         np.asarray(cr, np.float64) - 128.0
     ang = np.arctan2(dv, du)
     d = np.abs((ang - key.angle + 3 * np.pi) % (2 * np.pi) - np.pi)
     wh = 1.0 - _smooth(key.half, key.half + key.soft, d)
     ws = _smooth(key.sat_lo, key.sat_hi, np.hypot(du, dv))
-    if key.exclude_skin:
-        ws = ws * (1.0 - skin_weight(cb, cr))
+    if key.exclude_skin and y is not None:
+        ws = ws * (1.0 - skin_weight(cb, cr, y))
     return wh * ws
 
 
@@ -422,8 +425,7 @@ def hue_expr(key, scale=255):
     d = (f"abs(mod(atan2(y-128,x-128)-({key.angle:.6f})+3*PI,2*PI)-PI)")
     wh = f"(1-{sm(key.half, key.half + key.soft, d)})"
     ws = sm(key.sat_lo, key.sat_hi, "hypot(x-128,y-128)")
-    skin = f"*(1-{skin_expr(1)})" if key.exclude_skin else ""
-    return f"{scale}*{wh}*{ws}{skin}"
+    return f"{scale}*{wh}*{ws}"
 
 
 # Skin: the classic Cb/Cr cluster (Chai & Ngan), softened by 6 levels.
@@ -434,9 +436,20 @@ SKIN_SOFT = 6.0
 SKIN_MIN_RADIUS = (6.0, 12.0)
 
 
-def skin_weight(cb, cr):
+# Skin is never dark: a deep red curtain shares skin's chroma but not its
+# brightness (8-bit video luma).
+SKIN_MIN_LUMA = (48.0, 72.0)
+
+
+def skin_weight(cb, cr, y=None):
+    """0..1 skin membership from chroma (the Cb/Cr box), times the luma
+    gate when ``y`` is given (dark reds are not skin)."""
     cb = np.asarray(cb, np.float64)
     cr = np.asarray(cr, np.float64)
+    if y is not None:
+        return skin_weight(cb, cr) * _smooth(SKIN_MIN_LUMA[0],
+                                             SKIN_MIN_LUMA[1],
+                                             np.asarray(y, np.float64))
     w = (_smooth(SKIN_CB[0] - SKIN_SOFT, SKIN_CB[0], cb)
          * (1 - _smooth(SKIN_CB[1], SKIN_CB[1] + SKIN_SOFT, cb))
          * _smooth(SKIN_CR[0] - SKIN_SOFT, SKIN_CR[0], cr)
@@ -458,10 +471,18 @@ def skin_expr(scale=255):
             f"*{sm(SKIN_MIN_RADIUS[0], SKIN_MIN_RADIUS[1], 'hypot(x-128,y-128)')}")
 
 
+def skin_luma_expr():
+    """lut2 over x = luma (8-bit, at chroma size), y = a chroma-only skin
+    weight: the weight gated by brightness."""
+    lo, hi = SKIN_MIN_LUMA
+    t = f"clip((x-({lo:.3f}))/{hi - lo:.3f},0,1)"
+    return f"y*({t}*{t}*(3-2*{t}))"
+
+
 def is_skin_hue(colour):
     r, g, b = hex_rgb(colour)
-    _, cb, cr = rgb_to_ycc8(np.array([r, g, b]) / 255.0)
-    return float(skin_weight(cb, cr)) > 0.5
+    y, cb, cr = rgb_to_ycc8(np.array([r, g, b]) / 255.0)
+    return float(skin_weight(cb, cr, y)) > 0.5
 
 
 # ── dominant hue (auto) ──────────────────────────────────────────────────
@@ -482,9 +503,13 @@ def dominant_hue(rgb, mask=None, min_radius=18.0, exclude_skin=True,
     ycc = rgb_to_ycc8(f)
     du, dv = ycc[..., 1] - 128.0, ycc[..., 2] - 128.0
     rad = np.hypot(du, dv)
-    sel = rad >= min_radius
+    # "saturated" relative to brightness: a deep red curtain (luma 30,
+    # chroma 11) is as coloured as a neon sign
+    floor = np.maximum(min_radius * np.clip((ycc[..., 0] - 16) / 120.0,
+                                            0.3, 1.0), 6.0)
+    sel = rad >= floor
     if exclude_skin:
-        sel &= skin_weight(ycc[..., 1], ycc[..., 2]) < 0.5
+        sel &= skin_weight(ycc[..., 1], ycc[..., 2], ycc[..., 0]) < 0.5
     if mask is not None:
         sel &= np.asarray(mask).astype(bool)
     total = float(np.asarray(mask).astype(bool).sum()) if mask is not None \

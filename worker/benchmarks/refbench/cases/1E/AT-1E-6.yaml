@@ -1,0 +1,39 @@
+# Track 1E. Run: cd worker && python -m benchmarks.refbench.at1e AT-1E-6
+id: AT-1E-6
+track: 1E
+title: shot match across two days on the same JRE set
+local_only: true
+interim: false
+reference:
+  - {ref: "11", t: [0.8, 1.2], approx: false, board_t: 0.867}
+footage:
+  - {vfl: V14, window: thiel_jre}
+music: null
+aspect: "source"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[2195.0, 2203.0]]
+  ops:
+    - {action: upsert, layer: fx, id: gw_match, value: {id: gw_match,
+       type: grade_window, stage: world, start: 0.0, end: 8.0,
+       lut: {asset_key: "generated/at1e6/match.cube", strength: 1.0,
+             origin: match, match_t: 0.0}, device: grade_shot_match}}
+hero: {vfl: V04, window: rogan_gamers, t: [127.5, 129.0, 130.5, 132.0]}
+method: mkl
+patches:
+  neutral: {class: neutral}
+  skin: {class: skin}
+  set: {class: hue, hue: "#361113", tolerance: 0.08}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: determinism, op: "<=", value: 0}
+device_metrics:
+  - {name: neutral_delta_e, op: "<=", value: 3}
+  - {name: skin_delta_e, op: "<=", value: 3}
+  - {name: set_delta_e, op: "<=", value: 3}
+beyond: "two days of the same set brought to one look from one sentence, with the neutral, skin and set colours measured in CIEDE2000 before and after; the reference was matched by eye"
+board: {stills: [], clip: null}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

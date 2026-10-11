@@ -118,17 +118,33 @@ def test_hue_key_keeps_its_colour_and_drops_greys_skin_and_neighbours():
     for col, want in (("#c8202a", 1.0), ("#d42a20", 1.0),    # red, red
                       ("#808080", 0.0), ("#202020", 0.0),    # greys
                       ("#2050c8", 0.0), ("#20c840", 0.0),    # blue, green
-                      ("#e8b090", 0.0),                      # light skin
+                      ("#e8b090", 0.0), ("#d09070", 0.0),    # skin, ruddy
                       ("#e8d020", 0.0)):                     # yellow
-        _y, cb, cr = _ycc(col)
-        w = float(lutlib.hue_weight(key, cb, cr))
+        y, cb, cr = _ycc(col)
+        w = float(lutlib.hue_weight(key, cb, cr, y))
         assert w == pytest.approx(want, abs=0.02), (col, w)
+
+
+def test_a_dark_red_key_keeps_the_curtain_but_never_the_faces():
+    """The JRE curtain (median RGB 35,11,13) has skin's CHROMA; luma tells
+    them apart, so the key keeps it while ruddy faces go grey."""
+    key = gradewin.hue_key("#361113", 0.08)
+    assert key.exclude_skin is True
+    for col, want in (("#361113", 1.0), ("#2a0c0e", 1.0),    # curtain
+                      ("#c8202a", 1.0),                      # neon red
+                      ("#d09070", 0.0), ("#b05040", 0.0)):   # faces
+        y, cb, cr = _ycc(col)
+        w = float(lutlib.hue_weight(key, cb, cr, y))
+        assert w == pytest.approx(want, abs=0.05), (col, w)
 
 
 def test_skin_cluster():
     for col in ("#e0ac8c", "#c68642", "#8d5524", "#f1c27d"):
-        _y, cb, cr = _ycc(col)
-        assert float(lutlib.skin_weight(cb, cr)) > 0.9, col
+        y, cb, cr = _ycc(col)
+        assert float(lutlib.skin_weight(cb, cr, y)) > 0.9, col
+    y, cb, cr = _ycc("#361113")                      # dark red: not skin
+    assert float(lutlib.skin_weight(cb, cr)) > 0.5
+    assert float(lutlib.skin_weight(cb, cr, y)) < 0.05
     for col in ("#2050c8", "#20c840", "#808080"):
         _y, cb, cr = _ycc(col)
         assert float(lutlib.skin_weight(cb, cr)) < 0.05, col
@@ -177,6 +193,12 @@ def test_hue_key_formula_is_one_formula_in_numpy_and_ffmpeg():
     ff = _lut2(lutlib.skin_expr(), cb, cr)
     sk = np.round(lutlib.skin_weight(cb, cr) * 255)
     assert np.abs(ff - sk).max() <= 1
+    # the luma gate on top of a chroma-only weight
+    yy, ss = np.meshgrid(np.arange(256), np.arange(256))
+    ff = _lut2(lutlib.skin_luma_expr(), yy, ss)
+    gate = np.clip((yy - 48.0) / 24.0, 0, 1)
+    assert np.abs(ff - np.floor(ss * gate * gate * (3 - 2 * gate) + 0.5)
+                  ).max() <= 1
 
 
 @needs_ffmpeg
@@ -240,3 +262,25 @@ def test_match_limit_caps_the_move():
     d = lutlib.delta_e2000(lutlib.rgb_to_lab(grid),
                            lutlib.rgb_to_lab(lut.table))
     assert d.max() < 12
+
+
+# ── gradelut's cube extension ────────────────────────────────────────────
+
+@needs_ffmpeg
+def test_bake_cube_runs_the_real_chain(tmp_path):
+    import gradelut
+    ident = gradelut.bake_cube("null", size=9)
+    assert np.abs(ident.table - lutlib.identity(9).table).max() <= 1 / 255
+    mono = gradelut.bake_cube("hue=s=0", size=9)
+    flat = mono.table.reshape(-1, 3)
+    assert np.abs(flat[:, 0] - flat[:, 1]).max() <= 2 / 255
+    neg = gradelut.bake_cube("negate", size=5)
+    assert np.allclose(neg.table, 1.0 - lutlib.identity(5).table,
+                       atol=1 / 255)
+    p = gradelut.write_cube(neg, str(tmp_path / "neg.cube"), title="neg")
+    back = gradelut.read_cube(p)
+    assert back.size == 5 and np.allclose(back.table, neg.table, atol=1e-6)
+    big = lutlib.cube_text(lutlib.identity(9))
+    (tmp_path / "big.cube").write_text(big)
+    with pytest.raises(lutlib.LutError, match="outside 2..8"):
+        gradelut.read_cube(str(tmp_path / "big.cube"), max_size=8)

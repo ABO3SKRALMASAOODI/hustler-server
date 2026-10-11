@@ -235,3 +235,50 @@ def fast_chain(chain):
         print(f"[gradelut] fast path unavailable for '{chain[:80]}': {e} "
               "— using the original filters", flush=True)
         return chain
+
+
+# ── 3D cubes (track 1E, Wave 1): bake a grade chain into a .cube, read one ──
+#
+# The per-value tables above cover the global grade. A 3D cube is the form
+# every other grade takes in Wave 1: an imported .cube (validated, <= 65^3),
+# a shot-match cube (lutlib.match_lut, 33^3), and any grade chain baked here
+# the same way the tables are — by running the REAL filters on an identity
+# lattice, so the cube is this ffmpeg build's own math.
+
+CUBE_SIZE = 33
+
+
+def bake_cube(chain, size=CUBE_SIZE):
+    """A lutlib.Lut holding what ``chain`` (an ffmpeg filter chain over RGB)
+    does to every lattice colour. Raises RuntimeError when ffmpeg fails."""
+    import numpy as np
+    import lutlib
+    n = int(size)
+    lattice = (lutlib.identity(n).table.reshape(-1, 3) * 255.0 + 0.5) \
+        .astype(np.uint8)
+    w = n * n
+    frame = lattice.reshape(n, w, 3).tobytes()
+    out = _run_ffmpeg(["-f", "rawvideo", "-pix_fmt", "rgb24", "-s",
+                       f"{w}x{n}", "-i", "-", "-vf",
+                       f"format=rgb24,{chain},format=rgb24", "-frames:v",
+                       "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                      frame)
+    if len(out) != n * w * 3:
+        raise RuntimeError(f"cube bake returned {len(out)} bytes")
+    table = np.frombuffer(out, np.uint8).reshape(n, n, n, 3) / 255.0
+    return lutlib.Lut(table.astype(np.float32), title=f"baked {chain[:60]}")
+
+
+def read_cube(path, max_size=65):
+    """A validated lutlib.Lut from a .cube file (<= ``max_size``^3)."""
+    import lutlib
+    with open(path, "rb") as f:
+        return lutlib.parse_cube(f.read(lutlib.CUBE_MAX_BYTES + 1),
+                                 max_size=max_size)
+
+
+def write_cube(lut, path, title=None):
+    import lutlib
+    with open(path, "w") as f:
+        f.write(lutlib.cube_text(lut, title=title))
+    return path

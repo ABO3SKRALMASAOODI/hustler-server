@@ -181,13 +181,23 @@ def isolate_colour(ctx, hue="auto", keep="hue", start=None, end=None,
         return _rejected("keep is hue, subject or both")
     h = str(hue or "auto").strip().lower()
     solved = ""
-    if h == "auto" and keep in ("hue", "both"):
+    if keep in ("hue", "both") and (h == "auto" or tolerance is None):
+        # the hue (when auto) and the key's width, solved from this window
         import gradewin
-        h = gradewin.auto_hue(ctx, s, e)
-        if not h:
-            return _rejected("no clear colour to keep in that window; "
-                             "name the hue as #rrggbb")
-        solved = f" (auto: {h})"
+        got, tol, soft = gradewin.auto_key(ctx, s, e,
+                                           None if h == "auto" else h)
+        if h == "auto":
+            if not got:
+                return _rejected("no clear colour to keep in that window; "
+                                 "name the hue as #rrggbb")
+            h = got
+            solved = f" (auto: {h}"
+        if tolerance is None and tol is not None:
+            tolerance, softness = tol, (softness if softness is not None
+                                        else soft)
+            solved += (", " if solved else " (") + \
+                f"key +-{tolerance * 180:.0f} deg"
+        solved += ")" if solved else ""
     import schemas
     if keep in ("subject", "both"):
         # keeping the SUBJECT is track 1B's subject isolate

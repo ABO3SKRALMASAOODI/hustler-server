@@ -1,0 +1,44 @@
+# Track 1E. Run: cd worker && python -m benchmarks.refbench.at1e AT-1E-2
+id: AT-1E-2
+track: 1E
+title: B&W intro opening to colour exactly on the drop (owner's track)
+local_only: true
+interim: false
+reference:
+  - {ref: "18", t: [0.0, 3.64], approx: false, board_t: 3.64}
+footage:
+  - {vfl: V13, window: dragon_unveil}
+music: {fixture: HM1}
+aspect: "source"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[228.0, 236.0]]
+  ops:
+    # the owner-picked track (Drake, internal only): drop D1 (22.199 s)
+    # placed on program frame 109 (3.637 s at 29.97)
+    - {action: upsert, layer: music, id: m1, value: {id: m1,
+       storage_key: "fixtures/hm1/national-treasures.wav", start: 0.0,
+       end: 8.0, offset_s: 18.562, gain_db: -10.0,
+       provenance: user_picked_library}}
+    - {action: upsert, layer: fx, id: gw_intro, value: {id: gw_intro,
+       type: grade_window, stage: world, start: 0.0, end: 3.64,
+       saturation: 0.0, contrast: 1.12, ramp_out_f: 3,
+       device: grade_section, bind: {"on": drop, ref: 0, rhythm: m1}}}
+music_asset:
+  key: "fixtures/hm1/national-treasures.wav"
+  path: "music/drake-national-treasures/national-treasures.48k.f32.wav"
+chat: null
+render: {variant: final}
+allow: [music]
+metrics:
+  - {name: region_locality, op: "<=", value: 0}
+  - {name: determinism, op: "<=", value: 0}
+device_metrics:
+  - {name: mono_before_drop, op: "<=", value: 2}
+  - {name: ramp_monotone, op: ">=", value: 1}
+  - {name: drop_frame_exact, op: "<=", value: 0}
+  - {name: audio_drop_err_f, op: "<=", value: 1}
+beyond: "the colour lands on the measured drop of the user's own track (audio and picture checked to the frame), with an eased whole-frame ramp and the drop stored as a binding; the reference was keyframed by hand"
+board: {stills: [1.0, 3.64], clip: [0.0, 8.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

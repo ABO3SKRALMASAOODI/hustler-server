@@ -328,7 +328,8 @@ def test_hue_key_keeps_red_exactly_and_greys_the_rest(chart):
     import gradewin
     import lutlib
     top = H // 3
-    w_all = lutlib.hue_weight(gradewin.hue_key("#c8202a"), ua, va)
+    ys = ya.reshape(H // 2, 2, W // 2, 2).mean(axis=(1, 3))
+    w_all = lutlib.hue_weight(gradewin.hue_key("#c8202a"), ua, va, ys)
     near = w_all > 0.02
     for _ in range(2):
         near = (near | np.roll(near, 1, 0) | np.roll(near, -1, 0)

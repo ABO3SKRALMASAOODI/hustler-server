@@ -1,0 +1,44 @@
+# Track 1E. Run: cd worker && python -m benchmarks.refbench.at1e AT-1E-5
+id: AT-1E-5
+track: 1E
+title: screen re-photography (LCD over a UI capture; CRT and LED over archival)
+local_only: true
+interim: false
+reference:
+  - {ref: "07", t: [1.2, 3.0], approx: false, board_t: 1.5}
+  - {ref: "14", t: [0.6, 1.2], approx: false, board_t: 0.6}
+footage:
+  - {vfl: V03, window: jobs_fonts}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[1700.0, 1712.0]]
+  ops:
+    - {action: upsert, layer: fx, id: fi_crt, value: {id: fi_crt,
+       type: finish, stage: over_type, start: 1.0, end: 4.0, kind: crt,
+       device: finish_crt}}
+    - {action: upsert, layer: fx, id: fi_led, value: {id: fi_led,
+       type: finish, stage: pre_captions, start: 6.0, end: 9.0, kind: led,
+       device: finish_led}}
+# FX-UI: a capture of valmera.io (owned UI), recorded by the harness into
+# <fixtures>/FX-UI/ when absent (internal only, never committed)
+ui_capture: "FX-UI/valmera_io.mp4"
+ui_url: "https://valmera.io"
+ui_ops:
+  - {action: upsert, layer: fx, id: fi_lcd, value: {id: fi_lcd, type: finish,
+     stage: pre_captions, start: 0.5, end: 3.5, kind: lcd,
+     device: finish_lcd}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: region_locality, op: "<=", value: 0}
+  - {name: determinism, op: "<=", value: 0}
+device_metrics:
+  - {name: subpixel_contrast, op: ">=", value: 3}
+  - {name: barrel_pct, op: "<=", value: 3}
+beyond: "any capture or archival window is re-photographed off a screen from one sentence, subpixel grid and barrel measured, at every aspect; the reference was shot off a real monitor by hand"
+board: {stills: [], clip: null}
+judges: {lenses: [motion, craft, owner_rules], pass: owner}
