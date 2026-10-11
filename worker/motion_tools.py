@@ -2182,7 +2182,7 @@ HEADLINE_TYPE_KEYS = frozenset(("text", "kicker", "kicker_y", "size", "width", "
                                 "style", "accent_style", "y", "x", "align"))
 # A claim under this many times the captions' cap height reads as the same
 # size as them (reviewers flag "no bigger than the captions").
-HEADLINE_OWNS_RATIO = 1.2
+HEADLINE_OWNS_RATIO = band_type.OWNS_RATIO
 # The picture-area floor the card advice is checked against (looks: a card
 # covers at least 0.54 of the canvas).
 CARD_FLOOR = 0.54

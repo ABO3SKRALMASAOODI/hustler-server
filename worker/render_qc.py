@@ -1592,11 +1592,31 @@ def _claim_cap(m, kicker=False):
     line's — past a headline's kicker, the small who-and-when line drawn
     ABOVE the claim (headline.html), which a squeezed band can leave larger
     than the claim itself (s06 of the Oct 10 run: kicker 2.5%, claim 1.8%
-    of the frame height, read as a 2.4% hook)."""
+    of the frame height, read as a 2.4% hook). ``kicker``: how many lines
+    the kicker takes (True: one) — a kicker too long for its column wraps
+    (band_type measures how many lines), above the claim or, set beside
+    the corner mark, above the band: either way its lines come first."""
     lines = (m or {}).get("lines") or []
-    if kicker and len(lines) >= 2:
-        return max(ln["cap"] for ln in lines[1:])
+    k = int(kicker or 0)
+    if k and len(lines) >= 2:
+        return max(ln["cap"] for ln in lines[min(k, len(lines) - 1):])
     return (m or {}).get("cap")
+
+
+def _kicker_rows(it, W, H):
+    """Lines of kicker drawn above an item's main type (0: none): a
+    headline's from band_type's layout pass of headline.html, any other
+    template's lead-in one."""
+    prm = ((it or {}).get("item") or {}).get("params") or {}
+    if not str(prm.get("kicker") or "").strip():
+        return 0
+    if (it or {}).get("template") != "headline":
+        return 1
+    try:
+        import band_type
+        return max(1, int(band_type.headline_layout(prm, W, H).get("kicker_lines") or 1))
+    except Exception:  # noqa: BLE001 — no font files: a one-line kicker
+        return 1
 
 
 def type_pass(tplan, deadline):
@@ -1612,9 +1632,7 @@ def type_pass(tplan, deadline):
     dw = 1080
     dh = max(2, int(round(dw * float(H) / max(float(W), 1.0))))
     jobs, times, keys = [], [], []
-    kickers = {it["id"]: bool(str(((it.get("item") or {}).get("params") or {})
-                                  .get("kicker") or "").strip())
-               for it in tplan.get("items") or []}
+    kickers = {it["id"]: _kicker_rows(it, dw, dh) for it in tplan.get("items") or []}
     for it in tplan.get("items") or []:
         span = it["end"] - it["start"]
         if span < .1:
@@ -1692,6 +1710,8 @@ def type_findings(tres, tplan, cards):
     hook = (tplan or {}).get("hook")
     if hook in meas:
         caps["hook"] = (hook, meas[hook]["cap"])
+        if (items.get(hook) or {}).get("persistent"):
+            caps["hook_band"] = True       # a band headline: held to OWNS_RATIO
     lock = {i: m["cap"] for i, m in meas.items() if m.get("cap")
             and i in items and not items[i]["persistent"]
             and items[i]["layer"] != "behind_subject" and i != hook}
@@ -2311,6 +2331,16 @@ def advice(res):
             f"{100 * cap_c:.1f}% — the viewer's eye goes to the captions "
             "first. Give the hook more room (a taller band: a lower card top) "
             "or fewer words, or set the captions smaller")
+    elif caps.get("hook_band") and cap_c and caps["hook"][1] and \
+            caps["hook"][1] < _owns_ratio() * cap_c - 1e-4:
+        hid, hc = caps["hook"]
+        out.append(
+            f"HOOK NO LARGER THAN THE CAPTIONS: the band headline '{hid}' sets "
+            f"its claim at a cap height of {100 * hc:.1f}% of the frame height, "
+            f"{hc / cap_c:.2f}x the captions' {100 * cap_c:.1f}% — under "
+            f"{_owns_ratio():g}x it reads as the captions' size, not the hook. "
+            "The headline write names the fix (a lower card top, the kicker "
+            "beside the corner mark, a shorter claim)")
     if caps.get("payoff"):
         pid, pc, big, bc = caps["payoff"]
         if big != pid and bc > pc + 1e-4:
@@ -2320,6 +2350,14 @@ def advice(res):
                 f"{100 * bc:.1f}% — the payoff is the short's largest lockup. "
                 f"Enlarge '{pid}' (width, fewer words) or bring '{big}' down")
     return out
+
+
+def _owns_ratio():
+    try:
+        import band_type
+        return float(band_type.OWNS_RATIO)
+    except Exception:  # noqa: BLE001
+        return 1.2
 
 
 def unshown_line(res):

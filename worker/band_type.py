@@ -63,6 +63,11 @@ SIZE_MAX = 1.4                # the template's size knob
 MIN_CAP = 0.022               # MG.MIN_CAP: secondary type's cap-height floor
 FIT_STEP = 0.97
 LONG_CLAIM = 50               # more characters than this may take 3 lines
+# A hook claim under this many times the captions' cap height reads as the
+# same size as them (reviewers flag "no bigger than the captions"): the
+# headline write (motion_tools) and the render's measured advice
+# (render_qc) hold a band headline to it.
+OWNS_RATIO = 1.2
 # A claim with no captions to beat is held to the cap height a clean
 # caption track would have (motion look 'clean', size m: 70 px Inter).
 NO_CAPTION_CAP = 0.026
@@ -521,7 +526,8 @@ def ass_text_cap(font_size, W=1080, H=1920, family=EDITORIAL_FONT):
     return px * _ass_cap_ratio(family) / float(H)
 
 
-def editorial_headline_note(edl, font_size, W=1080, H=1920, max_size=0.085, owns=1.2):
+def editorial_headline_note(edl, font_size, W=1080, H=1920, max_size=0.085,
+                            owns=OWNS_RATIO):
     """The editorial headline's measured cap height against the captions,
     with the font_size that reaches them (or that none up to ``max_size``
     does); '' with no transcript captions or nothing to measure."""
