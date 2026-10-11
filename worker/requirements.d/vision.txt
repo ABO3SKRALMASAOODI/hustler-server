@@ -1,0 +1,5 @@
+# Extra Python packages for the DARK ValmeraVision image only (Dockerfile.vision,
+# worker/models/bake.py --image vision). Every line must be pinned with ==.
+# Wave 0 needs nothing beyond requirements.txt: RVM runs on onnxruntime and
+# YuNet on opencv-python-headless, both already pinned there. Later waves add
+# their model runtimes here (one pinned line each), never to requirements.txt.

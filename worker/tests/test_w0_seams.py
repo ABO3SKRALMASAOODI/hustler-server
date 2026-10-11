@@ -217,9 +217,12 @@ def test_no_department_tool_and_no_extension_job_kind_exist():
     assert not set(agent_tools.TOOL_DOMAINS) & set(tools_ext.DEPARTMENTS)
     assert tools_ext.core_names(agent_tools.TOOLS) == list(agent_tools.TOOLS)
     import http_server
-    assert jobs_ext.REGISTRY == {}
-    assert not any(getattr(fn, "__name__", "").startswith("lazy_")
-                   for fn in http_server.COMPUTE_RUNNERS.values())
+    # Re-pinned for track 0A (INTERFACES.md §2.5 requires jobs_ext/sidecar.py
+    # to register the one `sidecar` kind); still no other extension kind.
+    assert set(jobs_ext.REGISTRY) <= {"sidecar"}
+    assert {name for name, fn in http_server.COMPUTE_RUNNERS.items()
+            if getattr(fn, "__name__", "").startswith("lazy_")} \
+        <= {"sidecar"}
 
 
 # ── 3. The core compact catalog ──────────────────────────────────────────

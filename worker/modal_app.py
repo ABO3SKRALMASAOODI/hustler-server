@@ -29,6 +29,13 @@ SECRET_NAME = "valmera-executor-production"
 # one-line Python change invalidates Chromium, Whisper and Demucs and turns
 # every release into a multi-minute full image rebuild.
 DEPENDENCY_CONTEXT_IGNORE = ["**", "!requirements.txt"]
+# Dockerfile.agent-base also COPYs the model baker's inputs (Wave 0 track 0A:
+# models.lock, models/*.json, models/bake.py, requirements.d/*.txt) before
+# its pinned-model step. They are small, change only with a model pin, and
+# without them that COPY finds nothing and the agent image cannot build.
+AGENT_CONTEXT_IGNORE = DEPENDENCY_CONTEXT_IGNORE + [
+    "!models.lock", "!models/*.json", "!models/bake.py",
+    "!requirements.d/*.txt"]
 image = modal.Image.from_dockerfile(
     ROOT / "Dockerfile",
     context_dir=ROOT,
@@ -39,7 +46,7 @@ image = modal.Image.from_dockerfile(
 agent_image = modal.Image.from_dockerfile(
     ROOT / "Dockerfile.agent-base",
     context_dir=ROOT,
-    ignore=DEPENDENCY_CONTEXT_IGNORE,
+    ignore=AGENT_CONTEXT_IGNORE,
 ).add_local_dir(ROOT, "/app", copy=True)
 
 secret = modal.Secret.from_name(SECRET_NAME)
