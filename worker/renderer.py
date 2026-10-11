@@ -2238,7 +2238,8 @@ def carry_current(meta, edl):
     graphic in a different text from the phrase it showed (v2), and words a
     graphic did not show were muted or set as micro bridge rows, and a
     card layout's captions sat on its seams (v3: transcript captions over
-    picture cards are stamped too). Same
+    picture cards are stamped too), and captions anchored inside a card
+    left their anchor for the mouth or ran past its sides (v5). Same
     grandfathering discipline as legibility_current: everything else keeps
     its cache, and a missing stamp on such an EDL means the render predates
     the plan.

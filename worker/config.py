@@ -2148,7 +2148,17 @@ LEGIBILITY_VERSION = 5
 # (its words appear as it exits), and a page before a muting graphic clears
 # as it lands even when the next page's first word is said a frame before
 # its exit (that word belongs to the layout after it).
-CAPTION_CARRY_VERSION = 4
+# v5 (Diamandis run, Oct 2026 — captions inside picture cards): a caption
+# whose anchor lies inside a card stays on that anchor in the card's inner
+# column, its block measured as the caption track lays it out (first line
+# on the anchor, growing down) and moved at most 1.5 lines to clear the
+# card's edges, a face with its chin, a graphic or the watermark — pages of
+# one line where the card's foot under the chin holds one. An explicit
+# anchor_y is never moved for an unmeasured (prior) face nor sent over the
+# head by a measured one (it stays, and the plan names it); a shot's
+# measured face speaks for the shot; words are muted only where a graphic
+# that replaces speech covers their block; lines keep to the card's column.
+CAPTION_CARRY_VERSION = 5
 
 # Crops and picture cards that follow the speaker's face inside a shot
 # (worker/follow.py, Frame.follow / PictureCard.follow). Stamped as

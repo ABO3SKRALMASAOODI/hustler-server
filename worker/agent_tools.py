@@ -21588,6 +21588,7 @@ def audit_captions(ctx, offset=0, limit=80):
     sound_off = []
     unshown = []
     graphic_text, under_graphics = [], []
+    unplaced = []
     first_late = None
     declared_max_words = None
     single_line_contract = False
@@ -21617,6 +21618,12 @@ def audit_captions(ctx, offset=0, limit=80):
                 + "): no clear band was left, so the graphic covers or touches them "
                 "(captions_under_graphics) — move or shrink it, or let it show "
                 "those words")
+        unplaced = [{"start": u["start"], "end": u["end"], "why": u.get("why"),
+                     "anchor_y": u.get("y"), "face_to": u.get("face_to"),
+                     "under": u.get("on") or [],
+                     "words": caption_carry._said(u["words"])[:160]}
+                    for u in plan.unplaced]
+        warnings += caption_carry.unplaced_lines(plan)
         for word in words:
             mid = (float(word["t0"]) + float(word["t1"])) / 2.0
             if not any(state["start"] - 0.011 <= mid <= state["end"] + 0.011
@@ -21747,6 +21754,7 @@ def audit_captions(ctx, offset=0, limit=80):
         "heard_unshown": unshown[:20],
         "graphic_text": graphic_text[:20],
         "captions_under_graphics": under_graphics[:10],
+        "captions_unplaced": unplaced[:10],
         "overlaps": overlaps[:20],
         "warnings": warnings,
         "short_phrase_states": fragment_states,

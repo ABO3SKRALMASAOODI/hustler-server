@@ -44,6 +44,7 @@ one segment, not the whole track.
 import bisect
 
 import caption_carry
+import caption_place
 import captions as caplib
 import motion_engine
 
@@ -132,6 +133,48 @@ def _out_words(edl, index, tl, carry=None):
     return caplib._mark_shot_ends(carry.caption_words(), tl)
 
 
+def _runs_by_room(words, chars, canvas, edl, index):
+    """[(run of words, page character budget)]: the whole track at the
+    look's budget, except where the plan set captions in a spot that holds
+    ONE line (a place's ``l``: a card's foot under the speaker's chin,
+    worker/caption_carry.py) — there pages are cut to what one line of
+    that column holds (caption_place.line_chars), so they read at full size
+    instead of shrinking two lines into it."""
+    if not any((w.get("place") or {}).get("l") for w in words):
+        return [(words, chars)]
+    W, H = caption_carry.frame_wh(edl, index, canvas)
+    tc = caption_place.template_column(W, H)
+    out = []
+    for w in words:
+        pl = w.get("place") or {}
+        budget = chars
+        if pl.get("l"):
+            budget = min(chars, caption_place.line_chars(edl, W, H, pl.get("x") or tc))
+        if out and out[-1][1] == budget and \
+                ((out[-1][0][-1].get("place") or {}).get("l") == pl.get("l")):
+            out[-1][0].append(w)
+        else:
+            out.append(([w], budget))
+    return out
+
+
+def _card_column(edl, cue, W, H, col):
+    """The inner column (x0, x1) of the picture card a cue in its usual
+    place is set inside — the card live over the whole cue whose window
+    holds its anchor (caption_place.home_rect) — or None. A line never runs
+    past the card's sides (Diamandis run: 'in being actually remarkably'
+    spanned x 0.09-0.905 over a card 0.14-0.86 wide). Hero ladders
+    (caption_place.HERO_LOOKS) are poster lockups across the card: None."""
+    if caption_place.look_of(edl) in caption_place.HERO_LOOKS:
+        return None
+    s, e = float(cue["s"]), float(cue["e"])
+    cards = [c for c in caption_place.live_cards(edl, s + 1e-4, e - 1e-4)
+             if float(c["start"]) <= s + 1e-3 and float(c["end"]) >= e - 1e-3]
+    home = caption_place.home_rect(caption_place.card_rects(cards), float(cue["y"]), col) \
+        if cards else None
+    return list(caption_place.card_column(home, W, H)) if home else None
+
+
 def _placement_for(style, placement_track, src_mid):
     """(anchor_y, band) for a cue: the measured placement span wins, then the
     style's anchor_y/position, then the look-neutral bottom default."""
@@ -186,10 +229,14 @@ def cues(edl, index, tl, canvas=None):
     without a pause, or the line ends on a program cut; ``l`` (optional) is
     the nearest spatial sample's mean plate luma; ``z`` (optional) an
     explicit [y0, y1] zone that keeps the block off an on-screen graphic and
-    the face (see the module doc); ``f`` = 1 when the line starts ON a
-    layout change its place flips at (rendered without the one-frame
-    lead). ``canvas`` is the output (W, H), derived from the EDL when
-    omitted.
+    the face (see the module doc); ``h`` = 1 when that zone is the
+    caption's own anchor inside a picture card (the template keeps it
+    however tight) and ``n`` = 1 when it holds one line (a page of one
+    line); ``x`` (optional) the [x0, x1] column its lines keep to
+    — the inner column of the card it is set in (caption_place
+    .card_column); ``f`` = 1 when the line starts ON a layout change its
+    place flips at (rendered without the one-frame lead). ``canvas`` is the
+    output (W, H), derived from the EDL when omitted.
     """
     look = look_of(edl)
     if not look:
@@ -213,7 +260,10 @@ def cues(edl, index, tl, canvas=None):
          "max_chunk_s": cfg["max_chunk_s"]}
     if caps.get("min_words_per_caption"):
         p["min_words"] = min(int(caps["min_words_per_caption"]), max_w)
-    chunks = [ch for ch in caplib._premium_chunks_v2(words, max_w, cfg["chars"], p) if ch]
+    W, H = caption_carry.frame_wh(edl, index, canvas)
+    col = caption_place.column(W, H, caption_carry.COLUMN)
+    chunks = [ch for run, chars in _runs_by_room(words, cfg["chars"], canvas, edl, index)
+              for ch in caplib._premium_chunks_v2(run, max_w, chars, p) if ch]
     emph = {caplib._norm_word(w) for w in (caps.get("emphasis_words") or []) if w}
     upper = bool(style.get("uppercase"))
     lumas = _luma_samples(index)
@@ -288,6 +338,13 @@ def cues(edl, index, tl, canvas=None):
                "w": ws}
         if place:
             cue["z"] = list(place["z"])
+            if place.get("h"):
+                cue["h"] = 1        # its own anchor in a card: the zone holds however tight
+            if place.get("l"):
+                cue["n"] = 1        # ...one line: a page of one line, its serif word inline
+        x = (place or {}).get("x") or _card_column(edl, cue, W, H, col)
+        if x:
+            cue["x"] = list(x)      # the card's column its lines keep to
         if any(abs(s - f) < 1e-3 for f in flips):
             cue["f"] = 1
         luma = _luma_at(lumas, src_mid) if lumas else None
@@ -394,7 +451,10 @@ def items(edl, index, tl, canvas=None):
                          "k": c.get("k", 0),
                          "w": [dict(w, s=rb(w["s"], s0), e=rb(w["e"], s0)) for w in c["w"]]},
                         **({"l": c["l"]} if "l" in c else {}),
-                        **({"z": c["z"]} if "z" in c else {}))
+                        **({"z": c["z"]} if "z" in c else {}),
+                        **({"h": c["h"]} if "h" in c else {}),
+                        **({"n": c["n"]} if "n" in c else {}),
+                        **({"x": c["x"]} if "x" in c else {}))
                    for c in seg]
         out.append({"id": f"__captions_{k}", "template": TEMPLATE, "start": round(s0, 3),
                     "end": round(s1, 3), "params": dict(sp, cues=rebased),

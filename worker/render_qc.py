@@ -603,7 +603,14 @@ def _type_plan(edl, index, tl, W, H, fps, program_s):
         unshown = caption_carry.heard_unshown(e, index, tl)
     except Exception:  # noqa: BLE001
         unshown = None
+    try:
+        import captions as caplib
+        unplaced = caption_carry.unplaced_lines(
+            caplib.caption_plan(e, index, tl, canvas=(W, H)))
+    except Exception:  # noqa: BLE001 — the report says what it can
+        unplaced = []
     return {"items": items, "captions": segs, "unshown": unshown,
+            "unplaced": unplaced,
             "look": motion_captions.look_of(e), "hook": hook,
             "payoff": _payoff_id([it for it in lockups if it["id"] != hook],
                                  program_s),
@@ -2083,6 +2090,8 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
     tplan = plan_.get("type") or {}
     if tplan.get("unshown"):
         res["unshown"] = list(tplan["unshown"][:12])
+    if tplan.get("unplaced"):
+        res["unplaced"] = list(tplan["unplaced"][:2])
     measurable = tplan.get("items") or tplan.get("captions")
     if measurable and prog > MAX_FULL_PASS_S:
         res["skipped"].append(f"type: a {prog:.0f}s programme is past the "
@@ -2349,6 +2358,8 @@ def advice(res):
                 f"{100 * pc:.1f}% of the frame height and '{big}' at "
                 f"{100 * bc:.1f}% — the payoff is the short's largest lockup. "
                 f"Enlarge '{pid}' (width, fewer words) or bring '{big}' down")
+    # captions the plan could place nowhere clear (caption_carry.unplaced_lines)
+    out += list(res.get("unplaced") or [])
     return out
 
 

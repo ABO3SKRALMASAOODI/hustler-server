@@ -269,7 +269,7 @@ Tools change; the live server schema wins over any doc. A client caches
 `tools/list` when it connects, so a long-lived session can miss parameters
 the server added since (Oct 2026: `set_picture_card` `source`/`panels`/
 `follow`, `add_freeze_frame` audio_mode 'hold'); start a fresh session to
-refresh it. Real limits as of Oct 2026 (captions inside cards, write-time
+refresh it. Real limits as of Oct 2026 (a face filling its card, write-time
 size estimates for lockups) are in editing.md **Known Valmera limits** with
 the working path. Read it before the pilot and before editing; never spend
 more than two calls rediscovering one. The render result measures what

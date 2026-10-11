@@ -133,6 +133,14 @@ there, and a word said within two frames before the change appears with
 the new layout (never later) — so does a word said less than a page's
 minimum (0.12 s) before it, rather than flash or be lost. Pages of one
 connector word ("and", "that", "on") join their line.
+INSIDE A PICTURE CARD an `anchor_y` that lies in the card is kept: the
+captions sit on it in the card's own column (never past its sides), moved
+at most ~1.5 lines to clear the card's foot, the chin or a graphic — pages
+of one line where the foot under the chin holds one. A graphic over them
+moves them to a free band (mutes only where it replaces speech and none is
+left). A face filling the card is never solved by jumping over the head:
+they keep the anchor and `audit_captions` / the render name it (CAPTIONS ON
+THE MEASURED FACE) — give the face less of the card.
 
 LEGACY PRESET FAMILIES (`style.preset`) remain available and are the right
 choice for subtitles and specific grammars:
