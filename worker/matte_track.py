@@ -91,7 +91,7 @@ LABELS = ("person", "face")
 # every one before it builds it; fxgraph.filter_missing, the
 # ffmpeg_filter_missing fault). The picture's own geometry filters (crop,
 # scale, pad, perspective, zoompan, overlay, dblur) are the picture's.
-FILTERS = ("interleave", "lut", "alphamerge", "erosion", "overlay", "trim",
+FILTERS = ("interleave", "lut", "alphamerge", "gblur", "overlay", "trim",
            "setpts", "tpad", "concat", "color", "split", "format", "scale",
            "nullsink", "null", "fps")
 SPACES = ("world", "screen")
@@ -306,21 +306,44 @@ def curve_expr(lo, hi):
 
 EDGE_DEFAULT = "0.2,0.8"
 # Behind-subject composites pull the matte's edge this far inside the
-# subject (3x3 erosion passes per 1080 px of frame height, config
-# MATTE_BEHIND_SHRINK): a 540p matte enlarged 3-4x carries a pixel or two
-# of the wall beyond the subject's edge, and laid over the type that reads
-# as a light rim round the head.
-BEHIND_SHRINK_PER_1080 = 1.5
+# subject (px per 1080 px of frame height, config MATTE_BEHIND_SHRINK): a
+# 540p matte enlarged 3-4x carries a pixel or two of the wall beyond the
+# subject's edge, and laid over the type that reads as a light rim round
+# the head. Measured on AT-1A-1's final (tools/at1a_matte.py; mean
+# |render - glyph| on the type within 3 px outside the subject, and the
+# composite edge's static flicker): no inset 20.1 / 0.026; 1.0 px soft
+# 5.0 / 0.027; 1.5 px soft 4.3 / 0.037; three 3x3 erosions 3.9 / 0.050 —
+# a min filter amplifies the edge's frame-to-frame noise, a blurred
+# threshold averages it.
+BEHIND_SHRINK_PER_1080 = 1.0
 
 
-def behind_shrink_px(height):
+def _shrink_per_1080():
     cfg = _config()
     per = getattr(cfg, "MATTE_BEHIND_SHRINK", BEHIND_SHRINK_PER_1080) \
         if cfg else BEHIND_SHRINK_PER_1080
     try:
-        return max(0, min(4, int(round(float(per) * float(height) / 1080.0))))
+        return min(4.0, max(0.0, float(per)))
     except (TypeError, ValueError):
-        return 0
+        return 0.0
+
+
+def behind_inset_px(height):
+    """How far (px, fractional) a behind composite at ``height`` rows pulls
+    the matte inside the subject; 0 below half a pixel."""
+    d = _shrink_per_1080() * float(height or 0) / 1080.0
+    return d if d >= 0.5 else 0.0
+
+
+def behind_inset(height):
+    """The filter suffix that insets the matte for a behind composite
+    ("" = none): a soft inset — blurred by sigma = d, then a smoothstep
+    over 0.76-0.92, whose middle sits one sigma inside a hard edge
+    (Phi(1) = 0.84) — the contour moves in by ~d and stays a ~0.7 d ramp."""
+    d = behind_inset_px(height)
+    if not d:
+        return ""
+    return f",gblur=sigma={d:.2f},lut=c0='{curve_expr(0.76, 0.92)}'"
 
 
 def edge_lut():

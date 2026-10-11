@@ -257,7 +257,11 @@ def matte_quality(matte_path, rec, fps, render_path=None):
     subject"): the same mean |delta alpha| in the same 6 px band, counted
     only where the picture itself did not change between the two frames
     (|delta luma| < 6) and never across a picture cut — the matte changing
-    where the footage did not."""
+    where the footage did not; ``render_path`` is the program WITHOUT the
+    graphics (type over a subject's edge is not footage). In program space
+    a follow crop's pan still reads as flicker (a dark shirt sliding over a
+    dark wall changes no picture pixel while its matte rightly moves):
+    source_flicker is the matte's own number."""
     import qa_metrics
     f0 = int(np.ceil(rec["start"] * fps)) + 1
     f1 = int(np.floor(rec["end"] * fps)) - 1
@@ -288,6 +292,7 @@ def matte_quality(matte_path, rec, fps, render_path=None):
                 vals.append(float(np.abs(ma - mb)[sel].mean()))
         out["matte_flicker_static"] = round(float(np.mean(vals)), 5) \
             if vals else None
+        out["static_pairs"] = len(vals)
     return out
 
 
@@ -565,6 +570,81 @@ def label_iou(S, vfl_id, name):
             if r.get("detail") else None, "frames": len(pred)}
 
 
+def _chunk_files(S):
+    """The window's matte.person chunks, fetched: [{t0, t1, path, meta}]."""
+    import matte_track
+    import sidecars
+    src = sidecars.source_from(S["index"]["video"]["sha256"], S["path"],
+                               S["info"], 0, S["shots"])
+    rows = sidecars.ready_chunks("matte.person", src.sha256, src.shots,
+                                 src.duration_s, [(0.0, src.duration_s)],
+                                 params=matte_track.sidecar_params())
+    h = matte_track.read_handle("matte.person", src,
+                                [(c.t0, c.t1) for c, _m in rows],
+                                matte_track.sidecar_params())
+    return sidecars.fetch(h, os.path.join(os.path.dirname(S["path"]),
+                                          "lbl_chunks"))
+
+
+def source_flicker(S, edl, rec):
+    """The matte's own flicker under the item, measured where it lives: in
+    SOURCE space (the sidecar chunks, firmed as the renderer firms them)
+    over the source spans the item's window plays, by the static protocol
+    (mean |delta alpha| in the 6 px edge band where the source picture did
+    not change, |delta luma| < 6; never across a shot cut). The program's
+    framing only resamples this matte (a follow crop's pan moves every edge
+    over a flat dark wall without a pixel of picture changing, so the
+    program-space number reads framing as flicker)."""
+    import qa_metrics
+    import matte_track
+    from timeline import Timeline
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed"))
+    spans = matte_track.program_to_source(tl, float(rec["start"]),
+                                          float(rec["end"]))
+    files = _chunk_files(S)
+    lut = np.clip(((np.arange(256) / 255.0) - matte_track.FIRM_LO)
+                  / (matte_track.FIRM_HI - matte_track.FIRM_LO), 0, 1)
+    lut = (lut * lut * (3 - 2 * lut)).astype(np.float32)
+    cuts = [float(c) for c in S["shots"]]
+    vals = []
+    for a, b in spans:
+        for f in files:
+            lo, hi = max(a, f["t0"]), min(b, f["t1"])
+            if hi - lo < 0.1:
+                continue
+            fm = float(f["meta"]["fps"])
+            j0 = int(np.ceil((lo - f["t0"]) * fm - 1e-6))
+            j1 = int(np.floor((hi - f["t0"]) * fm + 1e-6))
+            _i, mk = qa_metrics.read_frames(f["path"], gray=True,
+                                            start_frame=j0,
+                                            count=j1 - j0)
+            if len(mk) < 2:
+                continue
+            mh, mw = mk[0].shape[:2]
+            _k, pic = qa_metrics.read_frames(
+                S["path"], gray=True, size=(mw, mh),
+                ss=f["t0"] + j0 / fm, count=len(mk))
+            n = min(len(mk), len(pic))
+            for k in range(n - 1):
+                t = f["t0"] + (j0 + k + 1) / fm
+                if any(abs(t - c) < 1.0 / fm for c in cuts):
+                    continue
+                ma = lut[mk[k][..., 0] if mk[k].ndim == 3 else mk[k]]
+                mb = lut[mk[k + 1][..., 0] if mk[k + 1].ndim == 3
+                         else mk[k + 1]]
+                ra = (pic[k][..., 0] if pic[k].ndim == 3
+                      else pic[k]).astype(np.int16)
+                rb = (pic[k + 1][..., 0] if pic[k + 1].ndim == 3
+                      else pic[k + 1]).astype(np.int16)
+                band = (qa_metrics._dilate(ma >= .5, 3)
+                        & ~qa_metrics._erode(ma >= .5, 3))
+                sel = band & (np.abs(ra - rb) < 6)
+                if sel.sum() > 50:
+                    vals.append(float(np.abs(ma - mb)[sel].mean()))
+    return {"matte_flicker_source_static": round(float(np.mean(vals)), 5)
+            if vals else None, "source_pairs": len(vals)}
+
+
 def cut_switch(render_path, matte_path, cut_prog, fps, reach=6):
     """The frame the picture cuts on (largest frame difference near the
     cut) and the frame the matte switches on (largest 1 - IoU change)."""
@@ -592,6 +672,42 @@ def cut_switch(render_path, matte_path, cut_prog, fps, reach=6):
             "picture_diff_at_cut": round(dp.get(fp, 0.0), 2)}
 
 
+def _best_shift(img, ys, xs, want, reach):
+    """(err, dx, dy) of the shift within +-reach that best maps img at
+    (ys + dy, xs + dx) onto ``want``: coarse (4 px) then fine (1 px) when
+    the reach is wide; ties go to the smaller shift. At most 20 000
+    pixels (a fixed sample)."""
+    H, W = img.shape[:2]
+    if len(xs) > 20000:
+        k = np.random.default_rng(0).choice(len(xs), 20000, replace=False)
+        ys, xs, want = ys[k], xs[k], want[k]
+
+    def err(dx, dy):
+        yy = np.clip(ys + dy, 0, H - 1)
+        xx = np.clip(xs + dx, 0, W - 1)
+        return float(np.abs(img[yy, xx].astype(np.int16) - want).mean())
+
+    def search(cands):
+        best = None
+        for dx, dy in cands:
+            e = err(dx, dy)
+            if best is None or e < best[0] - 1e-9 or (
+                    abs(e - best[0]) <= 1e-9
+                    and abs(dx) + abs(dy) < abs(best[1]) + abs(best[2])):
+                best = (e, dx, dy)
+        return best
+    if reach <= 6:
+        return search([(dx, dy) for dy in range(-reach, reach + 1)
+                       for dx in range(-reach, reach + 1)])
+    c = search([(dx, dy) for dy in range(-reach, reach + 1, 4)
+                for dx in range(-reach, reach + 1, 4)])
+    return search([(dx, dy)
+                   for dy in range(max(-reach, c[2] - 4),
+                                   min(reach, c[2] + 4) + 1)
+                   for dx in range(max(-reach, c[1] - 4),
+                                   min(reach, c[1] + 4) + 1)])
+
+
 def glyph_drift(render_path, matte_path, rec, fps, step=3, reach=4):
     """Per frame, the (dx, dy) that best re-registers the item's unhidden
     glyph pixels on the render (0, 0 = the type has not moved from where
@@ -617,15 +733,7 @@ def glyph_drift(render_path, matte_path, rec, fps, step=3, reach=4):
         if len(xs) < 300:
             continue
         col = g["rgb"][ys, xs].astype(np.int16)
-        best = None
-        for dy in range(-reach, reach + 1):
-            for dx in range(-reach, reach + 1):
-                yy = np.clip(ys + dy, 0, H - 1)
-                xx = np.clip(xs + dx, 0, W - 1)
-                e = float(np.abs(R[f][yy, xx].astype(np.int16) - col)
-                          .mean())
-                if best is None or e < best[0]:
-                    best = (e, dx, dy)
+        best = _best_shift(R[f], ys, xs, col, reach)
         offs.append((f, best[1], best[2]))
         worst = max(worst, abs(best[1]), abs(best[2]))
     return {"max_px": worst, "frames": len(offs),
@@ -663,17 +771,7 @@ def glyph_drift_vs(render_path, control_path, matte_path, rec, fps, step=3,
         if len(xs) < 300:
             continue
         want = C[f][ys, xs].astype(np.int16)
-        best = None
-        for dy in range(-reach, reach + 1):
-            for dx in range(-reach, reach + 1):
-                yy = np.clip(ys + dy, 0, H - 1)
-                xx = np.clip(xs + dx, 0, W - 1)
-                e = float(np.abs(R[f][yy, xx].astype(np.int16) - want)
-                          .mean())
-                if best is None or e < best[0] - 1e-9 or (
-                        abs(e - best[0]) <= 1e-9
-                        and abs(dx) + abs(dy) < abs(best[1]) + abs(best[2])):
-                    best = (e, dx, dy)
+        best = _best_shift(R[f], ys, xs, want, reach)
         offs.append((f, best[1], best[2]))
         worst = max(worst, abs(best[1]), abs(best[2]))
     return {"max_px": worst, "frames": len(offs),
@@ -730,7 +828,8 @@ def run(case_id, out, preview):
             res["items"][iid] = {"error": "not overlaid"}
             continue
         r = occlusion(rp, mp, rec, fps, base_path=bp)
-        r.update(matte_quality(mp, rec, fps, rp))
+        r.update(matte_quality(mp, rec, fps, bp))
+        r.update(source_flicker(S, edl, rec))
         res["items"][iid] = r
     if spec.get("drift_item"):
         iid = spec["drift_item"]

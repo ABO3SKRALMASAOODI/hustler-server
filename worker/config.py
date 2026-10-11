@@ -531,9 +531,10 @@ MATTE_DOWNSAMPLE_RATIO = float(os.getenv("MATTE_DOWNSAMPLE_RATIO", "0")
                                or 0) or None
 # The matte's edge at render resolution ("lo,hi" smoothstep, or "off") and
 # how far behind-subject composites pull it inside the subject (px per
-# 1080 px of frame height): matte_track.edge_lut / behind_shrink_px.
+# 1080 px of frame height, a soft inset): matte_track.edge_lut /
+# behind_inset.
 MATTE_EDGE = os.getenv("MATTE_EDGE", "0.2,0.8")
-MATTE_BEHIND_SHRINK = float(os.getenv("MATTE_BEHIND_SHRINK", "1.5"))
+MATTE_BEHIND_SHRINK = float(os.getenv("MATTE_BEHIND_SHRINK", "1.0"))
 # ---- W1 1A end
 
 # ---- W1 1B (subject FX) begin

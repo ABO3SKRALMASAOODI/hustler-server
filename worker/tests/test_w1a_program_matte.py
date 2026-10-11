@@ -210,10 +210,11 @@ def test_a_stitched_window_carries_its_own_matte(tmp_path, monkeypatch,
 
 def test_the_composite_insets_the_matte_by_its_shrink(tmp_path, monkeypatch,
                                                      store, synth):
-    """matte_track.behind_shrink_px: the behind composite pulls the program
+    """matte_track.behind_inset: the behind composite pulls the program
     matte inside the subject's contour (no rim of the wall behind the
-    subject laid over the type) by exactly round(1.5 px per 1080 rows)
-    erosions — 1 px at the 480-row preview — and nothing else moves."""
+    subject laid over the type) by ~d px (MATTE_BEHIND_SHRINK px per 1080
+    rows, a soft inset) — here 3.0 per 1080 at the 480-row preview,
+    d = 1.33 — and nothing else moves; below half a pixel there is none."""
     import matte_track
     from timeline import Timeline
     src, ref, root, info = synth
@@ -224,11 +225,11 @@ def test_the_composite_insets_the_matte_by_its_shrink(tmp_path, monkeypatch,
     edl["texts"] = [_behind_text(tl, 0.4, 5.6)]
     index = _index(ref, info)
     boxes = {}
-    for shrink in (0, 1.5):
+    for shrink in (0, 3.0):
         mat = _render(tmp_path, src, index, edl, f"inset{shrink}",
                       show=True, monkeypatch=monkeypatch, shrink=shrink)
         if shrink:
-            assert matte_track.behind_shrink_px(480) == 1
+            assert abs(matte_track.behind_inset_px(480) - 1.333) < 0.01
         m = sup.frames(mat)
         got = []
         for k in range(20, 130, 10):
@@ -236,11 +237,14 @@ def test_the_composite_insets_the_matte_by_its_shrink(tmp_path, monkeypatch,
             got.append((xs.min(), xs.max(), ys.min(), ys.max()))
         boxes[shrink] = got
     W, H = 270, 480
-    for (a0, a1, b0, b1), (c0, c1, d0, d1) in zip(boxes[0], boxes[1.5]):
+    for (a0, a1, b0, b1), (c0, c1, d0, d1) in zip(boxes[0], boxes[3.0]):
         # (a side on the frame's edge has nothing outside it to inset from)
-        want = (0 if a0 == 0 else 1, 0 if a1 == W - 1 else 1,
-                0 if b0 == 0 else 1, 0 if b1 == H - 1 else 1)
-        assert (c0 - a0, a1 - c1, d0 - b0, b1 - d1) == want
+        for got, edge in ((c0 - a0, a0 == 0), (a1 - c1, a1 == W - 1),
+                          (d0 - b0, b0 == 0), (b1 - d1, b1 == H - 1)):
+            assert got == 0 if edge else 1 <= got <= 2, (got, edge)
+    monkeypatch.setattr(__import__("config"), "MATTE_BEHIND_SHRINK", 1.0)
+    assert matte_track.behind_inset(480) == ""         # 0.44 px: none
+    assert "gblur=sigma=1.78" in matte_track.behind_inset(1920)
 
 
 def test_speed_ramp_insert_and_payoff_hold(tmp_path, monkeypatch, store,

@@ -4799,11 +4799,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             return None
         f0, f1 = fxgraph.fxprims.frame_span(win[0], win[1], fps)
         stop = max(0, n_prog - f1) + int(round(fps)) + 2
-        # the composite's own edge: a pixel inside the subject's contour,
-        # so no sliver of the wall behind the subject is laid over the
-        # type (matte_track.behind_shrink_px)
-        shrink = "".join(",erosion" for _k in range(
-            matte_track.behind_shrink_px(H)))
+        # the composite's own edge: a pixel or two inside the subject's
+        # contour, so no sliver of the wall behind the subject is laid
+        # over the type (matte_track.behind_inset)
+        shrink = matte_track.behind_inset(H)
         parts.append(f"[{pad}]trim=start_frame={f0}:end_frame={f1},"
                      f"setpts=PTS-STARTPTS{shrink},"
                      f"tpad=start={f0}:stop={stop}:"
