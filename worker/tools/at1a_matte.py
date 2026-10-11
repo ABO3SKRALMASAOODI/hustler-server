@@ -167,18 +167,35 @@ def _frames(path, frames, gray=False):
     return dict(zip(idx, fr))
 
 
-def occlusion(render_path, matte_path, rec, fps, step=2):
+def occlusion(render_path, matte_path, rec, fps, step=2, base_path=None):
     """Per-item: IoU of the glyph pixels the render hides and the glyph
     pixels under the program matte (> 0.5), pooled over the window's
-    frames; plus the per-frame values and the item's visible share."""
+    frames; plus the per-frame values and the item's visible share.
+
+    With ``base_path`` (the same program with the graphics removed) the
+    IoU counts only DECIDABLE glyph pixels: where the picture under a glyph
+    is itself the glyph's colour (black type over black hair or a black
+    shirt) a hidden pixel and a shown one look the same, so neither side
+    can be scored (decidable: the picture there differs from the glyph's
+    colour by more than twice the match tolerance); ``iou_raw`` keeps
+    every pixel."""
     from benchmarks.refbench import ink
     f0 = int(np.ceil(rec["start"] * fps)) + 2
     f1 = int(np.floor(rec["end"] * fps)) - 2
+    # scored from the frame the type LANDS (a slam's scale-and-blur
+    # entrance is not yet the glyphs the clip settles on)
+    try:
+        lf, _d = ink.landing_frame(render_path, rec, fps)
+    except Exception:  # noqa: BLE001
+        lf = None
+    if lf is not None:
+        f0 = max(f0, int(lf) + 3)
     frames = list(range(f0, f1, step))
     R = _frames(render_path, frames)
     M = _frames(matte_path, frames, gray=True)
-    inter = union = 0
-    per, vis = [], []
+    B = _frames(base_path, frames) if base_path else {}
+    inter = union = inter_raw = union_raw = 0
+    per, vis, dec = [], [], []
     for f in frames:
         if f not in R or f not in M:
             continue
@@ -193,13 +210,26 @@ def occlusion(render_path, matte_path, rec, fps, step=2):
         m = M[f]
         m = (m[:, :, 0] if m.ndim == 3 else m) > 127
         expect = glyph & m
-        i = int((hidden & expect).sum())
-        u = int((hidden | expect).sum())
+        inter_raw += int((hidden & expect).sum())
+        union_raw += int((hidden | expect).sum())
+        ok = glyph
+        if f in B:
+            # clearly unlike the glyph: beyond twice the match tolerance
+            # (two lossy encodes of the same picture differ by about one)
+            same = (np.abs(np.asarray(B[f], np.int16)
+                           - g["rgb"].astype(np.int16)).max(axis=2)
+                    <= 2 * ink.MATCH_TOL)
+            ok = glyph & ~same
+            dec.append(float(ok.sum()) / float(glyph.sum()))
+        i = int((hidden & expect & ok).sum())
+        u = int(((hidden | expect) & ok).sum())
         inter += i
         union += u
         per.append(round(i / u, 4) if u else 1.0)
         vis.append(round(float(shown.sum()) / float(glyph.sum()), 4))
     return {"iou": round(inter / union, 4) if union else None,
+            "iou_raw": round(inter_raw / union_raw, 4) if union_raw else None,
+            "decidable_share": round(float(np.mean(dec)), 4) if dec else None,
             "frames": len(per), "per_frame_min": min(per) if per else None,
             "visible_share_mean": round(float(np.mean(vis)), 4)
             if vis else None}
@@ -316,13 +346,35 @@ def case_1a1(out, preview):
     base = base.get("edl", base)
     src_edl = {"keep": base["keep"], "frame": base["frame"]}
     S = setup("V02", "thiel_flying_cars", src_edl, out)
-    ops = [_hero("h1", "TECHNOLOGY", 1.0, 4.2, y=0.27),
-           _hero("h2", "BITS", 19.5, 22.4, y=0.27),
-           _hero("h3", "FLYING CARS", 30.0, 32.6, y=0.27)]
+    # high on the projection screen: the head's crown crosses the type's
+    # lower half (05's lockups), the face stays clear
+    # ...in one dark ink over the lit screen (a series)
+    ink_ = "#111114"
+    ops = [_hero("h1", "TECHNOLOGY", 1.0, 4.2, y=0.17, color=ink_),
+           _hero("h2", "BITS", 19.5, 22.4, y=0.17, color=ink_),
+           _hero("h3", "FLYING CARS", 30.0, 32.6, y=0.17, color=ink_)]
     dur = float(S["info"]["duration"])
     edl = apply_ops(S["edl"], ops, dur)
     return S, edl, {"items": ["h1", "h2", "h3"], "ref": "05",
                     "ref_pairs": [(2.6, 0.5), (20.8, 4.0), (31.6, 9.0)]}
+
+
+def _frame_pts(path, t0, t1):
+    """The video frames' pts (s) in [t0, t1] of a file."""
+    import subprocess
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "frame=pts_time", "-read_intervals",
+                        f"{max(0.0, t0):.3f}%{t1:.3f}", "-of", "csv=p=0",
+                        path], capture_output=True, text=True, timeout=120)
+    out = []
+    for tok in r.stdout.split():
+        try:
+            t = float(tok.strip(","))
+        except ValueError:
+            continue
+        if t0 <= t <= t1:
+            out.append(t)
+    return out
 
 
 def case_1a2(out, preview):
@@ -338,7 +390,28 @@ def case_1a2(out, preview):
     cuts = [c for c in S["shots"] if k0 + 1.5 < c < k1 - 2.0]
     cut_prog = round(cuts[0] - k0, 2) if cuts else 6.0
     ops = [_hero("h1", "FREEDOM", round(cut_prog - 1.6, 2),
-                 round(cut_prog + 1.8, 2), y=0.3, entrance="pop")]
+                 round(cut_prog + 1.8, 2), y=0.3, x=0.36, width=0.62,
+                 entrance="pop")]
+    if cuts:
+        # an editor's reframe ON the camera cut (one follow span, a
+        # one-frame move): each speaker right of centre, the word on the
+        # wall at his left — the mask must follow the crop's jump too.
+        # The follow path is read on the block clock (keep start + n/fps);
+        # the move goes between the last old-shot frame and the first
+        # new-shot one (the cut's real pts: the frame nearest the detected
+        # time; program frame n shows the source frame nearest
+        # keep start + n/fps).
+        fps_ = float(S["info"]["fps"])
+        pts = _frame_pts(S["path"], cuts[0] - 1.0, cuts[0] + 1.0)
+        p_cut = min(pts, key=lambda t: abs(t - cuts[0]))
+        n_cut = int(round((p_cut - k0) * fps_))
+        a_, b_ = k0 + (n_cut - 0.75) / fps_, k0 + (n_cut - 0.25) / fps_
+        ops.insert(0, {"action": "set", "layer": "frame", "value": {
+            "ratio": "9:16", "mode": "crop", "focus_x": 0.5,
+            "focus_y": 0.4, "follow": [{
+                "t0": k0, "t1": k1,
+                "k": [[k0, 0.57, 0.4], [round(a_, 4), 0.57, 0.4],
+                      [round(b_, 4), 0.25, 0.4], [k1, 0.25, 0.4]]}]}})
     edl = apply_ops(S["edl"], ops, float(S["info"]["duration"]))
     return S, edl, {"items": ["h1"], "ref": "12",
                     "ref_pairs": [(cut_prog - 0.3, 12.8),
@@ -381,10 +454,13 @@ def case_1a4(out, preview):
                "frame": {"ratio": "9:16", "mode": "crop", "focus_x": 0.5,
                          "focus_y": 0.4}}
     S = setup("V08", "garry_closeup", src_edl, out)
-    # a close-up leaves the frame's top corners as the only wall: the
-    # words sit high, the hair crossing their lower half (05's lockups)
-    ops = [_hero("h1", "FOUNDERS", 0.6, 4.8, y=0.13, entrance="pop"),
-           _hero("h2", "BUILD", 5.4, 9.6, y=0.13, entrance="pop")]
+    # a close-up leaves the band over the hair and the wall at the head's
+    # side as the only wall: tall condensed type high and right, tucking
+    # behind the head's edge (09's lockups)
+    ops = [_hero("h1", "FOUNDERS", 0.6, 4.8, y=0.12, x=0.56, width=0.78,
+                 entrance="pop", role="condensed"),
+           _hero("h2", "BUILD", 5.4, 9.6, y=0.13, x=0.66, width=0.55,
+                 entrance="pop", role="condensed")]
     edl = apply_ops(S["edl"], ops, float(S["info"]["duration"]))
     return S, edl, {"items": ["h1", "h2"], "ref": "09",
                     "ref_pairs": [(2.0, 2.0), (7.0, 8.0)],
@@ -601,6 +677,8 @@ def run(case_id, out, preview):
            "sidecar_wall_s": S["sidecar_wall_s"], "chunks": S["chunks"]}
     rp, wall, warns, placed = render(S, edl, os.path.join(cdir, "render.mp4"),
                                      preview=preview)
+    from benchmarks.refbench import ink
+    ink.save_placements(placed, os.path.join(cdir, "placements.json"))
     mp, wall_m, _w, _p = render(S, edl, os.path.join(cdir, "matte.mp4"),
                                 preview=preview, matte_view=True)
     w0, wall0, warns0, _p0 = render(S, edl,
@@ -616,6 +694,14 @@ def run(case_id, out, preview):
             m.pop("composite", None)
     cp, wall_c, _wc, _pc = render(S, ctrl, os.path.join(cdir, "control.mp4"),
                                   preview=preview)
+    # the picture without the graphics (the occlusion IoU's decidable mask)
+    base = copy.deepcopy(edl)
+    base["motion"] = [m for m in base.get("motion") or []
+                      if m.get("id") not in spec["items"]]
+    base["texts"] = [t for t in base.get("texts") or []
+                     if t.get("id") not in spec["items"]]
+    bp, _wb, _xb, _pb = render(S, base, os.path.join(cdir, "base.mp4"),
+                               preview=preview)
     fps = float(qa_metrics.probe(rp)["fps"])
     res.update(render_wall_s=wall, control_wall_s=wall_c,
                cost_ratio=round(wall / wall_c, 3) if wall_c else None,
@@ -627,7 +713,7 @@ def run(case_id, out, preview):
         if rec is None:
             res["items"][iid] = {"error": "not overlaid"}
             continue
-        r = occlusion(rp, mp, rec, fps)
+        r = occlusion(rp, mp, rec, fps, base_path=bp)
         r.update(matte_quality(mp, rec, fps, rp))
         res["items"][iid] = r
     if spec.get("drift_item"):
