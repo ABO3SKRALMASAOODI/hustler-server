@@ -189,8 +189,8 @@ glitch (`glitch_1`, `glitch_2`), cash (`cash_register_1`), heartbeat
 (`heartbeat_1`). Place one with `add_sfx(storage_key='sound:<id>', at=...)`
 as a typed call, not inside `apply_edit_batch`, and leave gain_db unset: the
 tool levels each recording against the measured voice at its hit and
-reports where it sits (see Timing and level). Never
-`search_sfx`, `add_web_sfx` or any other online sound in these shorts. There
+reports where it sits (see Timing and level). Never an online sound in
+these shorts. There
 is no paper sound, no sub drop and no hard whoosh: whips take `swish_1`,
 hits take `impact_1`.
 

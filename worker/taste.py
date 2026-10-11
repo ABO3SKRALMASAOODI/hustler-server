@@ -1421,3 +1421,184 @@ def audit_line(findings, limit=4):
         line += f"; (+{more} more)"
     return line + (" Change one only if you agree it hurts THIS edit. "
                    "Re-render only if you change something.")
+
+
+# ════════════════════════════════════════════════════════════════════════
+#  Device ledger and budget governor (Wave 0, track 0C)
+# ════════════════════════════════════════════════════════════════════════
+#
+# ROADMAP §3 "Default device budgets" as code: every creative device counts
+# against its family's budget for the piece's format pack and intensity
+# (calm / designed / charged), and every write that touches a device layer
+# returns one ledger line, e.g.
+#   punctuation 1/2 · matte 1/2 · depth 1/1 · zoom 0 · sfx 0
+# Budgets are ADVISORY like everything else in this module: over_budget()
+# names what to thin, never what to add. Zooms and sounds are optional,
+# never defaults (owner rule 3): their counts are reported, and a budget is
+# shown only where a ceiling exists (sfx in a talking head: at most 2); a
+# missing zoom or sound is never a shortfall.
+
+# Format packs (2F refines these): C talking head with no track, A speech /
+# quote, B trend desk on a user track, F essay / sizzle on a user track.
+FORMAT_PACKS = ("C", "A", "B", "F")
+LEDGER_FAMILIES = ("punctuation", "matte", "depth", "zoom", "sfx")
+# Card family -> ledger family.
+_CARD_LEDGER = {"punctuation": "punctuation", "matte_fx": "matte",
+                "type_depth": "depth", "camera": "zoom", "sfx": "sfx",
+                "transition": "transition", "composite": "composite",
+                "finish": "finish", "rhythm": "rhythm", "layout": "layout",
+                "world": "world"}
+# fx type -> ledger family, for items written without a device card.
+_FX_TYPE_LEDGER = {"accent": "punctuation", "strobe": "punctuation",
+                   "subject": "matte", "background": "matte",
+                   "type_window": "depth", "region": "composite",
+                   "grade_window": "finish", "finish": "finish",
+                   "junction": "transition"}
+
+# "designed" per-short ceilings (ROADMAP §3). An int is a count; a
+# ("per_s", x) pair scales with the program; ("every_s", s) is one per s
+# seconds (at least 1); None means counted, no ceiling (optional devices
+# and sections the planner governs).
+DEVICE_BUDGETS = {
+    "C": {"punctuation": 2, "matte": 2, "depth": ("every_s", 7.0),
+          "zoom": None, "sfx": 2},
+    "A": {"punctuation": ("per_s", 0.5), "matte": 3,
+          "depth": ("every_s", 7.0), "zoom": None, "sfx": None},
+    "B": {"punctuation": None, "matte": 4, "depth": ("every_s", 4.0),
+          "zoom": None, "sfx": None},
+    "F": {"punctuation": None, "matte": ("every_s", 8.0), "depth": 1,
+          "zoom": None, "sfx": None},
+}
+LEDGER_SEP = " · "
+
+
+def infer_format(edl, index=None):
+    """The format pack when none is set: a user track makes it a trend desk
+    (B); anything else is a talking head (C) — the strictest budgets."""
+    music = [m for m in (edl or {}).get("music") or []
+             if isinstance(m, dict) and not m.get("mute")]
+    return "B" if music else "C"
+
+
+def _budget_value(spec, dur, intensity):
+    if spec is None:
+        return None
+    if isinstance(spec, tuple):
+        kind, x = spec
+        n = (int(dur * x) if kind == "per_s"
+             else max(1, int(dur // x)))
+    else:
+        n = int(spec)
+    if intensity == "calm":
+        return -(-n // 2)
+    if intensity == "charged":
+        return n + (-(-n // 2))
+    return n
+
+
+def _card_family(device):
+    if not device:
+        return None
+    try:
+        import devices
+        card = devices.card(device)
+    except Exception:  # noqa: BLE001 — a bad card set never breaks a write
+        return None
+    return _CARD_LEDGER.get((card or {}).get("family"))
+
+
+def device_counts(edl):
+    """{ledger family: count} for every device an EDL plays."""
+    edl = edl or {}
+    counts = {f: 0 for f in LEDGER_FAMILIES}
+    fx = edl.get("effects") or {}
+    counts["zoom"] += len(fx.get("zooms") or [])
+    counts["sfx"] += len(edl.get("sfx") or [])
+    for s in fx.get("stylize") or []:
+        if isinstance(s, dict) and s.get("kind") == "flash":
+            counts["punctuation"] += 1
+    for t in edl.get("texts") or []:
+        if isinstance(t, dict) and t.get("behind"):
+            counts["depth"] += 1
+    for m in edl.get("motion") or []:
+        if isinstance(m, dict) and m.get("layer") == "behind_subject":
+            counts["depth"] += 1
+    for it in edl.get("fx") or []:
+        if not isinstance(it, dict):
+            continue
+        fam = (_card_family(it.get("device"))
+               or _FX_TYPE_LEDGER.get(it.get("type")))
+        if fam:
+            counts[fam] = counts.get(fam, 0) + 1
+    return counts
+
+
+class Ledger:
+    """One EDL's device counts against its budgets."""
+
+    def __init__(self, counts, budgets, fmt, intensity, dur):
+        self.counts, self.budgets = counts, budgets
+        self.fmt, self.intensity, self.duration_s = fmt, intensity, dur
+
+    def line(self):
+        bits = []
+        for fam in LEDGER_FAMILIES:
+            n, cap = self.counts.get(fam, 0), self.budgets.get(fam)
+            bits.append(f"{fam} {n}/{cap}" if cap is not None
+                        else f"{fam} {n}")
+        for fam, n in sorted(self.counts.items()):
+            if fam not in LEDGER_FAMILIES and n:
+                bits.append(f"{fam} {n}")
+        return LEDGER_SEP.join(bits)
+
+    def over_budget(self):
+        notes = []
+        for fam in LEDGER_FAMILIES:
+            n, cap = self.counts.get(fam, 0), self.budgets.get(fam)
+            if cap is not None and n > cap:
+                notes.append(
+                    f"{fam} {n}/{cap}: over the {self.intensity} budget for "
+                    f"this {self.duration_s:.0f}s piece (format "
+                    f"{self.fmt}) — thin to the moments that earn it")
+        return notes
+
+    def as_dict(self):
+        return {"format": self.fmt, "intensity": self.intensity,
+                "counts": dict(self.counts), "budgets": dict(self.budgets),
+                "line": self.line(), "over_budget": self.over_budget()}
+
+
+def ledger(edl, intensity="designed", fmt=None, index=None):
+    """The device ledger of an EDL (INTERFACES.md §6.3): ``.line()`` and
+    ``.over_budget()``. ``fmt`` is a format pack (C, A, B, F; inferred when
+    None); ``intensity`` one of calm, designed, charged."""
+    if intensity not in ("calm", "designed", "charged"):
+        raise ValueError("intensity is calm, designed or charged")
+    fmt = fmt or infer_format(edl, index)
+    if fmt not in DEVICE_BUDGETS:
+        raise ValueError(f"format pack is one of {FORMAT_PACKS}")
+    try:
+        from schemas import program_duration
+        dur = float(program_duration(edl or {}) or 0.0)
+    except Exception:  # noqa: BLE001
+        dur = 0.0
+    budgets = {fam: _budget_value(spec, dur, intensity)
+               for fam, spec in DEVICE_BUDGETS[fmt].items()}
+    return Ledger(device_counts(edl), budgets, fmt, intensity, dur)
+
+
+def write_ledger_note(prev_edl, new_edl, index=None):
+    """The ledger line a write returns when it added or removed a device
+    (zoom, sound, flash, text behind the subject, fx item) or changed an fx
+    item; '' otherwise, so ordinary writes stay as short as before."""
+    try:
+        if device_counts(prev_edl) == device_counts(new_edl) and \
+                ((prev_edl or {}).get("fx") or []) == \
+                ((new_edl or {}).get("fx") or []):
+            return ""
+        led = ledger(new_edl, index=index)
+    except Exception:  # noqa: BLE001 — a note never fails a write
+        return ""
+    over = led.over_budget()
+    return ("LEDGER (advisory): " + led.line()
+            + ("; " + "; ".join(over) if over else ""))

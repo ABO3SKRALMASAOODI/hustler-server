@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "about": "Device cost model (track 0C; ROADMAP A3, AT-0C-2). Costs are render CPU-ms (wall time = CPU-ms / lane parallel). baseline predicts a render with no devices: fitted on 40 measured local renders by tests/w0c_costbench.py and tested on 20 held-out ones; a card's cost adds per device. Production lanes scale the local fit by ms_scale and stay calibrated=false until production render timings are fitted the same way.",
+  "lanes": {
+    "local": {
+      "ms_scale": 1.0,
+      "calibrated": true,
+      "basis": "measured: render CPU time of 40 + 20 local renders (Apple M5 Pro, ffmpeg 9.0; best of two) at load average ~40; the 20 held-out EDLs re-measured at load 13-23 all stayed within ±25%. On an idle machine (load ~5) previews cost ~25% less CPU than this fit predicts: machine state is a lane scale (ms_scale), not a change in the model's shape. parallel is an estimate",
+      "parallel": 2.0
+    },
+    "interactive": {
+      "ms_scale": 2.0,
+      "calibrated": false,
+      "basis": "estimate: Cloudflare standard-3 vCPUs at about half an M5 Pro core; refit ms_scale and parallel from production preview timings",
+      "parallel": 1.5
+    },
+    "batch": {
+      "ms_scale": 2.0,
+      "calibrated": false,
+      "basis": "estimate: Cloudflare standard-4 (4 vCPU / 12 GiB) at about half an M5 Pro core; refit from production final timings",
+      "parallel": 3.0
+    }
+  },
+  "baseline": {
+    "preview": {
+      "fixed_ms": 371.27,
+      "ms_per_s": 93.78,
+      "ms_per_mpix_s": 296.99,
+      "crop_ms_per_s": 22.55,
+      "captions_ms_per_s": 22.74,
+      "motion_launch_ms": 1875.53,
+      "ms_per_motion_item": 945.81,
+      "ms_per_insert": 215.92
+    },
+    "final": {
+      "fixed_ms": 0.0,
+      "ms_per_s": 340.6,
+      "ms_per_mpix_s": 264.78,
+      "crop_ms_per_s": 0.0,
+      "captions_ms_per_s": 0.0,
+      "motion_launch_ms": 2121.23,
+      "ms_per_motion_item": 2237.84,
+      "ms_per_insert": 1204.31
+    }
+  },
+  "family_ms_per_frame": {
+    "punctuation": 1.0,
+    "matte_fx": 4.0,
+    "type_depth": 6.0,
+    "transition": 3.0,
+    "camera": 1.5,
+    "sfx": 0.0,
+    "composite": 5.0,
+    "finish": 3.0,
+    "rhythm": 0.5,
+    "layout": 2.0,
+    "world": 8.0
+  },
+  "default_fixed_ms": 300.0,
+  "reduced_factor": 0.5,
+  "substitute_fixed_ms": 50.0,
+  "substitute_ms_per_frame": 0.5,
+  "budgets": {
+    "preview_overhead": 0.3,
+    "final_p95_s": 240.0,
+    "final_ref_program_s": 60.0,
+    "final_ref_size": [
+      1080,
+      1920
+    ]
+  }
+}

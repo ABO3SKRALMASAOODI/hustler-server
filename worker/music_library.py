@@ -294,7 +294,9 @@ def list_music_library(ctx, mood=None):
     used = used_by_user(ctx)
     head = (f"{len(hits)} CC0 track(s)" + (f" for mood '{m}'" if m else "")
             + " — licence-verified, free for commercial use, no credit "
-              "required. Place one with add_library_music(slug=...). "
+              "required. Offer 2-4 to the user with ask_user and place the "
+              "one THEY pick with add_library_music(slug=...) — never pick "
+              "for them. "
               "Under a voice it sits as a ducked bed (about -18 to -22 dB); "
               "with no speech it plays as the lead.\n"
               "These moods are ALL the built-in music (no techno/EDM/rock/"
@@ -316,16 +318,26 @@ def list_music_library(ctx, mood=None):
 
 def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
                       duck=None, fade_in_s=None, fade_out_s=None,
-                      offset_s=None, loop=None, purpose=None):
+                      offset_s=None, loop=None, purpose=None, user_pick=None):
     # duck=None lets add_music decide from the program: a bed ducks under
     # speech, while music that IS the audio (no speech) is never pumped by
     # the sidechain on every loud original sound.
     track, err = find(slug)
     if err:
         return err
+    # Owner rule (Wave 0, 0C): agents never choose music. The USER picks a
+    # library track — from the offer ask_user put to them, or by naming it —
+    # and only that pick places it (music_gate.resolve_pick). Checked before
+    # anything is copied into the project.
+    import music_gate
+    _pick, err = music_gate.resolve_pick(ctx, track["slug"],
+                                         user_pick=user_pick)
+    if err:
+        return err
     key, err = ensure_project_asset(ctx, track)
     if err:
         return err
+    music_gate.grant(ctx, key, "user_picked_library")
     purpose_n = " ".join(str(purpose or "").split()) or (
         f"{track['mood']} bed from the Valmera CC0 library "
         f"(\"{track['title']}\")")
@@ -349,8 +361,9 @@ def add_library_music(ctx, slug, start=None, end=None, gain_db=None,
 TOOL_SPECS = {
     "list_music_library": (
         list_music_library,
-        "READ: the built-in CC0 music library by mood, with exact slugs for "
-        "add_library_music. Licence-verified background tracks (upbeat, "
+        "READ: the built-in CC0 music library by mood: exact slugs to offer "
+        "the user with ask_user (add_library_music places the one they "
+        "pick). Licence-verified background tracks (upbeat, "
         "chill, cinematic, corporate, dramatic, hiphop, ambient, inspiring), "
         "free for commercial use with no credit required; marks tracks this "
         "user already used in other projects.",
@@ -358,14 +371,19 @@ TOOL_SPECS = {
                   "description": "Optional mood filter."}}),
     "add_library_music": (
         add_library_music,
-        "Score the edit with a CC0 library track by exact slug (from "
-        "list_music_library). No upload or download needed: the track is "
-        "copied into this project once, registered with its licence, and "
-        "placed like add_music — OUTPUT seconds, whole program by default, "
-        "ducked under speech, looped to fill. Under a voice keep the bed "
-        "around -18 to -22 dB (the default -18 dB is used when gain_db is "
-        "omitted); with no speech it becomes the lead at -4 dB.",
+        "Place the CC0 library track the USER picked, by exact slug (from "
+        "list_music_library). Agents never choose music: offer 2-4 tracks "
+        "with ask_user and place the one they pick (a mood or 'some music' "
+        "is not a pick). The track is copied into this project once, "
+        "registered with its licence, and placed like add_music — OUTPUT "
+        "seconds, whole program by default, ducked under speech, looped to "
+        "fill. Under a voice keep the bed around -18 to -22 dB (the default "
+        "-18 dB is used when gain_db is omitted); with no speech it becomes "
+        "the lead at -4 dB.",
         {"slug": {"type": "string"},
+         "user_pick": {"type": "string",
+                       "description": "MCP: the pick token ask_user returned "
+                                      "plus the user's own words."},
          "start": {"type": "number"}, "end": {"type": "number"},
          "gain_db": {"type": "number"},
          "duck": {"type": "boolean",

@@ -91,6 +91,12 @@ def _pure_worker_module(name):
 
 wplayback = _pure_worker_module("playback_plan")
 wbatch = _pure_worker_module("edit_batch")
+# Flash safety (Wave 0, owner decision): an export past the flash-safe limit
+# is flagged contains_flashing on its final job (worker/flash_safety.py). It
+# reads flash transitions at their junctions through the timeline loaded
+# above (registered under its unique name, so nothing else resolves it).
+sys.modules.setdefault("worker_timeline", wtimeline)
+wflash = _pure_worker_module("flash_safety")
 
 video_bp = Blueprint("video", __name__)
 
@@ -210,10 +216,13 @@ def _image_edit_enabled():
 
 def _sfx_search_enabled():
     """Mirrors the worker's search_sfx availability (worker/sfx_search) —
-    keyless web search for real recorded sounds, on unless the deployment
-    switches it off. AI sound generation is gone (2026-08-08): synthesized
-    one-shots read as uncanny under real footage."""
-    return os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
+    keyless web search for real recorded sounds. Owner rule (Wave 0): sound
+    effects come only from the approved library, so web sounds are off
+    unless the owner sets WEB_SFX_ENABLED=1 (worker/config.py). AI sound
+    generation is gone (2026-08-08): synthesized one-shots read as uncanny
+    under real footage."""
+    return (os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
+            and os.getenv("WEB_SFX_ENABLED", "0") == "1")
 
 
 def _web_record_enabled():
@@ -5552,8 +5561,19 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
     # capacity and the user's export simply disappeared behind a 429.
     # The same-project final guard above prevents duplicate encodes; queue
     # ordering and worker lanes own actual fleet capacity.
+    # Owner decision (Wave 0, flash safety): a program past the flash-safe
+    # limit reached export only through the user's opt-in (the verifier
+    # blocks it otherwise), so its final is flagged contains_flashing. The
+    # key is absent for every other export, so payloads are unchanged.
+    flash_flag = {}
+    try:
+        if wflash.assess(edl_row["json"])["over_limit"]:
+            flash_flag["contains_flashing"] = True
+    except Exception:  # noqa: BLE001 — a reading failure never blocks
+        flash_flag = {}
     job_id = _enqueue(cur, project_id, user_id, "final",
-                      {"edl_version": version, **({"render_group": render_group} if render_group else {})})
+                      {"edl_version": version, **({"render_group": render_group} if render_group else {}),
+                       **flash_flag})
     record_client_event(
         user_id, project_id, "export_job_started",
         detail={"job_id": job_id, "version": version}, origin="server")

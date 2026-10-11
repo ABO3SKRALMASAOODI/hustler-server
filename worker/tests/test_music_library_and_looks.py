@@ -82,6 +82,9 @@ def _words(n=60, step=0.5):
 
 class _Ctx:
     project_id = 7
+    # The turn's own user message: a library track is placed only when the
+    # user picked it (Wave 0 music gate) — tests that place one name it here.
+    user_message = ""
 
     def __init__(self, ratio="9:16", duration=40.0, speech=True, edl=None,
                  shots=None):
@@ -210,6 +213,7 @@ def test_body_start_skips_quiet_intros_only_where_measured():
 
 def test_library_beds_start_on_the_body_unless_told_otherwise(store):
     ctx = _Ctx()
+    ctx.user_message = "use Back In The 80s"
     out = music_library.add_library_music(ctx, "upbeat-back-in-the-80s")
     assert out.startswith("EDL v1"), out
     assert ctx.latest_edl()["json"]["music"][0]["offset_s"] == 7.98
@@ -257,6 +261,7 @@ def test_pick_is_deterministic_rotates_by_project_and_avoids_repeats():
 
 def test_add_library_music_copies_once_registers_licence_and_places(store):
     ctx = _Ctx()
+    ctx.user_message = "go with Canon Event"
     out = music_library.add_library_music(ctx, "chill-canon-event-lofi-sad-reflection")
     assert out.startswith("EDL v1"), out
     assert store.copies == [("legacy-music/chill-canon-event-lofi-sad-reflection.mp3",
@@ -287,6 +292,7 @@ def test_missing_storage_object_is_an_honest_no_op(monkeypatch):
     monkeypatch.setattr(music_library.storage, "exists", s.exists)
     monkeypatch.setattr(music_library.storage, "copy_object", s.copy_object)
     ctx = _Ctx()
+    ctx.user_message = "the track Abducted please"
     out = music_library.add_library_music(ctx, "hiphop-abducted")
     assert out.startswith("UNAVAILABLE") and "Do NOT claim" in out
     assert ctx.writes == [] and ctx.db.inserted == []
@@ -420,7 +426,9 @@ def test_editorial_sets_a_coherent_system_in_one_version(monkeypatch):
     assert "fade in cleared" in out
     assert "HERO MOMENTS" in out and "hook_title" in out
     assert '"treatment": "serif"' in out and '"accent": "#F2C94C"' in out
-    assert "music='auto'" in out                   # offers the bed
+    # Music is the user's pick: the look offers the route, never a bed.
+    assert "offer library tracks with ask_user" in out
+    assert not edl.get("music")
 
 
 def test_switching_systems_replaces_texture_grade_and_owned_sounds(kit):
@@ -490,36 +498,46 @@ def test_dense_scene_changes_get_a_time_spaced_subset(kit):
     assert not _sound_or_cadence_findings(ctx, edl)
 
 
-def test_music_auto_lays_a_ducked_library_bed_in_the_same_version(store):
+def test_a_picked_library_track_lays_a_ducked_bed_in_the_same_version(store):
+    # Owner rule (Wave 0): the look never picks — 'auto' and moods are
+    # refused before anything changes; the user's pick is placed.
     ctx = _Ctx(ratio="9:16")
     out = agent_tools.apply_look(ctx, "editorial", music="auto")
+    assert out.startswith("REJECTED") and "ask_user" in out
+    assert ctx.writes == [] and store.copies == []
+    ctx.user_message = "the Calm Currents one"
+    slug = "chill-calm-currents-lofi-relax-calm"
+    out = agent_tools.apply_look(ctx, "editorial", music=slug)
     assert out.startswith("EDL v1") and len(ctx.writes) == 1, out
     edl = ctx.latest_edl()["json"]
     m = edl["music"][0]
-    assert m["storage_key"].startswith("music/7/library-")
-    slug = m["storage_key"][len("music/7/library-"):-4]
-    assert music_library.find(slug)[0]["mood"] in ("chill", "ambient",
-                                                   "inspiring")
+    assert m["storage_key"] == f"music/7/library-{slug}.mp3"
+    assert m["provenance"] == "user_picked_library"
     assert m["gain_db"] == -18.0 and m["duck"] and m["duck_mode"] == "smooth"
     track = music_library.find(slug)[0]
     assert m["offset_s"] == (music_library.body_start(track) or None)
     assert "'editorial' look" in m["purpose"]
     assert "CC0" in out
     # a second application never stacks a second bed
-    out = agent_tools.apply_look(ctx, "creator_punch", music="auto")
+    out = agent_tools.apply_look(ctx, "creator_punch", music=slug)
     assert len(ctx.latest_edl()["json"]["music"]) == 1
     assert "music left as is" in out
 
 
-def test_music_choice_by_mood_slug_and_lead_without_speech(store):
+def test_music_choice_by_picked_slug_and_lead_without_speech(store):
     ctx = _Ctx(ratio="9:16", speech=False)
+    ctx.user_message = "Dance Of The Dead"
     out = agent_tools.apply_look(ctx, "mono_noir", music="hiphop-dance-of-the-dead")
     assert out.startswith("EDL v1"), out
     m = ctx.latest_edl()["json"]["music"][0]
     assert m["storage_key"] == "music/7/library-hiphop-dance-of-the-dead.mp3"
     assert m["gain_db"] == -4.0                    # no speech: music leads
     ctx = _Ctx(ratio="9:16")
-    agent_tools.apply_look(ctx, "clean_minimal", music="cinematic")
+    out = agent_tools.apply_look(ctx, "clean_minimal", music="cinematic")
+    assert out.startswith("REJECTED") and not ctx.writes   # a mood never picks
+    ctx.user_message = "use After midnight"
+    agent_tools.apply_look(ctx, "clean_minimal",
+                           music="cinematic-after-midnight")
     m = ctx.latest_edl()["json"]["music"][0]
     assert "library-cinematic-" in m["storage_key"] and m["gain_db"] == -20.0
 
@@ -527,7 +545,7 @@ def test_music_choice_by_mood_slug_and_lead_without_speech(store):
 def test_bad_music_choice_is_rejected_before_anything_changes(store):
     ctx = _Ctx()
     out = agent_tools.apply_look(ctx, "editorial", music="techno")
-    assert out.startswith("REJECTED") and "auto" in out
+    assert out.startswith("REJECTED") and "exact slug" in out
     assert ctx.writes == [] and store.copies == []
     out = agent_tools.apply_look(ctx, "editorial", music="none")
     assert out.startswith("EDL v1") and not ctx.latest_edl()["json"]["music"]
@@ -538,7 +556,9 @@ def test_missing_library_object_still_applies_the_look(monkeypatch):
     monkeypatch.setattr(music_library.storage, "exists", s.exists)
     monkeypatch.setattr(music_library.storage, "copy_object", s.copy_object)
     ctx = _Ctx()
-    out = agent_tools.apply_look(ctx, "cinematic_doc", music="auto")
+    ctx.user_message = "Across the border"
+    out = agent_tools.apply_look(ctx, "cinematic_doc",
+                                 music="cinematic-across-the-border")
     assert out.startswith("EDL v1"), out
     assert not ctx.latest_edl()["json"]["music"]
     assert "music NOT added" in out and "UNAVAILABLE" in out
@@ -712,6 +732,7 @@ def test_a_classic_look_after_a_system_clears_its_motion_captions():
 
 def test_library_music_without_speech_leads_undiminished(store):
     ctx = _Ctx(speech=False)
+    ctx.user_message = "hiphop-abducted"
     out = music_library.add_library_music(ctx, "hiphop-abducted")
     assert out.startswith("EDL v1"), out
     m = ctx.latest_edl()["json"]["music"][0]

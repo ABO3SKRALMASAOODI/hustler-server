@@ -11,6 +11,16 @@ zoom/SFX purpose metadata, mechanical-pattern and reframe-coverage checks —
 are recorded with severity ``advisory``: durable evidence the editor can act
 on ("advisory: keep if intentional"), never a reason a premium, dense edit
 cannot complete or export.
+
+Wave 0 (track 0C) adds two owner gates here. The DEGRADED gate: a render
+whose ``devices`` report lists a creative device at any rung other than
+``full`` (a substitute, a reduced rung or an omit) records one blocking
+``device_degraded`` finding per device, so the export stays blocked until
+the degradation is acknowledged (justify_verification_findings) or fixed —
+never shipped silently. Flash safety: more than
+``config.FLASH_SAFE_MAX_PER_S`` full-frame flashes in any second is a
+blocking ``flash_rate_exceeded`` finding unless the user opted in, and an
+opted-in program is flagged ``contains_flashing`` on the record.
 """
 
 from __future__ import annotations
@@ -47,6 +57,8 @@ ADVISORY_FINDINGS = {
     "earn_its_place",
 }
 ADVISORY_LABEL = "advisory: keep if intentional"
+DEGRADED_FINDING = "device_degraded"
+FLASH_FINDING = "flash_rate_exceeded"
 
 
 _DEPARTMENTS = {
@@ -710,6 +722,85 @@ def _earn_its_place_findings(edl, index, request_text=None):
         "act on the notes that hurt this short; " + ADVISORY_LABEL)]
 
 
+def device_findings(preview):
+    """The DEGRADED gate (INTERFACES.md §6.3): one blocking finding per
+    device the render did not draw at full quality, from the render's own
+    ``devices`` report (attached by the renderer from the fxgraph plan)."""
+    findings = []
+    for row in (preview or {}).get("devices") or []:
+        if not isinstance(row, dict) or row.get("rung") == "full":
+            continue
+        name = row.get("device") or row.get("id") or "device"
+        rung = row.get("rung") or "omit"
+        what = {"omit": "was left out", "substitute": "rendered as a "
+                "substitute", "reduced": "rendered at a reduced rung"}.get(
+                    rung, f"rendered at rung {rung}")
+        findings.append(_finding(
+            DEGRADED_FINDING, "devices",
+            (f"Device {name} ({row.get('id')}, {row.get('family') or '?'}) "
+             f"{what}: {row.get('reason') or 'no reason given'}."),
+            {"device": row.get("device"), "item_id": row.get("id"),
+             "family": row.get("family"), "stage": row.get("stage"),
+             "rung": rung, "reason": row.get("reason")},
+            ("fix the cause (warm the sidecar, re-render) or acknowledge it: "
+             "justify_verification_findings naming what degraded and why "
+             "that is acceptable — an export never ships a degraded device "
+             "silently")))
+    return findings
+
+
+def unacknowledged_degradations(record, rows):
+    """The DEGRADED gate at export: the rows of a FINAL render's ``devices``
+    report that the version's verification record has not acknowledged.
+
+    An acknowledgement (justify_verification_findings on a device_degraded
+    finding) covers that device instance at that rung only: a final that
+    degrades further (substitute -> omit) or degrades a device the preview
+    drew in full is not covered, so the final path holds it instead of
+    shipping it silently. Empty when nothing degraded."""
+    record = record or {}
+    if isinstance(record.get("record"), dict):
+        record = record["record"]
+    by_id = {f.get("finding_id"): f for f in record.get("findings") or []
+             if isinstance(f, dict)}
+    acked = set()
+    for j in record.get("justifications") or []:
+        if not isinstance(j, dict) or j.get("code") != DEGRADED_FINDING:
+            continue
+        ev = (by_id.get(j.get("finding_id")) or {}).get("evidence") or {}
+        acked.add((ev.get("item_id"), ev.get("device"), ev.get("rung")))
+    out = []
+    for row in rows or ():
+        if not isinstance(row, dict) or row.get("rung") == "full":
+            continue
+        if (row.get("id"), row.get("device"), row.get("rung")) not in acked:
+            out.append(row)
+    return out
+
+
+def flash_assessment(edl, index=None, request_text=None):
+    """flash_safety.assess for the record; None when it cannot be read."""
+    try:
+        import flash_safety
+        return flash_safety.assess(edl, index, request_text)
+    except Exception:  # noqa: BLE001 — a reading failure never blocks
+        return None
+
+
+def _flash_findings(edl, index=None, request_text=None):
+    a = flash_assessment(edl, index, request_text)
+    if not a or not a["over_limit"] or a["opted_in"]:
+        return []
+    return [_finding(
+        FLASH_FINDING, "motion_color",
+        (f"Up to {a['peak_per_s']} full-frame flashes fall inside one second "
+         f"(the flash-safe limit is {a['max_per_s']}) and the user did not "
+         "ask for flashing."),
+        a, ("thin the flashes to at most "
+            f"{a['max_per_s']} per second (flash_safety.plan) — only the "
+            "user's own request for a strobe opts in"))]
+
+
 def deterministic_findings(edl, index=None, request_text=None):
     return (_text_corruption_findings(edl)
             + _caption_findings(edl)
@@ -721,6 +812,7 @@ def deterministic_findings(edl, index=None, request_text=None):
             + _cleanup_findings(edl)
             + _audio_findings(edl)
             + _request_findings(edl, request_text)
+            + _flash_findings(edl, index or {}, request_text)
             + _earn_its_place_findings(edl, index or {}, request_text))
 
 
@@ -747,6 +839,7 @@ def build_verification_record(project_id, version, manifest, edl, index,
             "taste_advisory", "craft", str(row)[:1000],
             severity="advisory", repair=ADVISORY_LABEL))
     preview = preview or {}
+    findings += device_findings(preview)
     complete_preview = (int(preview.get("edl_version") or -1) == int(version)
                         and not preview.get("scope") == "changes"
                         and bool(preview.get("storage_key")
@@ -805,8 +898,10 @@ def build_verification_record(project_id, version, manifest, edl, index,
         "render_evidence": {key: preview.get(key) for key in (
             "asset_id", "storage_key", "edl_version", "duration_s", "audio_qc",
             "picture_qc", "audio_model_review", "verify_frames", "sheet_key",
-            "caption_sheet_key", "caption_pages")
+            "caption_sheet_key", "caption_pages", "devices")
             if preview.get(key) is not None},
+        "contains_flashing": bool((flash_assessment(
+            edl, index or {}, request_text) or {}).get("contains_flashing")),
         "findings": findings,
         "unresolved_findings": unresolved,
         "advisories": [row for row in findings if not is_blocking(row)],

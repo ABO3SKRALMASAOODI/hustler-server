@@ -37,16 +37,17 @@ SOUND — the approved library first:
   `add_sfx(storage_key='sound:<id>', at=...)`, gain_db unset so the tool
   levels it against the voice at its hit. Use it for all ordinary sound
   design, sparingly — zero by default in a podcast short (read audio).
-- Found sounds (the search → audition → fetch chain, or `add_web_sfx` for one
-  exact named sound) only when the user explicitly asks for a specific sound
-  the library lacks: a crowd cheer, a specific door, rain, an engine. Relay
-  the licence line when it carries an obligation.
+- There is no web sound. A specific sound the library lacks (a crowd cheer,
+  a specific door, rain, an engine): `list_sound_library(role='<the
+  sound>')` files it for the owner to audition; place none and say so in
+  one clause. A sound the user uploads places with `add_sfx`.
 
 MUSIC — only when the user asks for it or supplies a track (read music):
 their upload or pasted link first, a song they name next (`find_song`, then
 `fetch_url`; a found song is not a usage licence), generic CC0 background
-music only when they explicitly ask for generic background music. Never
-fetch or place music on your own initiative.
+music only when they explicitly ask for generic background music — offer
+2-4 library tracks with `ask_user` and place the one they pick, never your
+own choice. Never fetch or place music on your own initiative.
 
 LINKS (`fetch_url`): when the user pastes a URL for something they want in
 the edit — a song, a clip, a photo — DOWNLOAD IT instead of asking for an

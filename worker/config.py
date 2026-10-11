@@ -504,6 +504,16 @@ FIND_SONG_USER_IDS = os.getenv("FIND_SONG_USER_IDS", "").strip()
 # deleted bundled pack and AI sound generation.
 SFX_SEARCH_ENABLED = os.getenv("SFX_SEARCH_ENABLED", "1") == "1"
 SFX_FETCH_MAX_MB = int(os.getenv("SFX_FETCH_MAX_MB", "20"))
+# Wave 0 owner rules in code (track 0C; worker/devices/INTERFACES.md §6.1).
+# Sound effects come only from the owner-approved library: the web-SFX chain
+# (search_sfx, audition_sfx_candidates, fetch_sfx, add_web_sfx) is OFF and
+# out of the live catalog unless the owner sets WEB_SFX_ENABLED=1. A sound
+# the library lacks becomes a sound_requests row the owner auditions by ear.
+WEB_SFX_ENABLED = os.getenv("WEB_SFX_ENABLED", "0") == "1"
+# Flash safety (owner decision, roadmap default): automatic proposals keep
+# at most this many full-frame flashes in any one second; an export the
+# user opted into past it is flagged contains_flashing (flash_safety.py).
+FLASH_SAFE_MAX_PER_S = 3
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via
 # Openverse (Wikimedia/Flickr — real people, companies, events); video
 # stock needs PEXELS_API_KEY/PIXABAY_API_KEY. Topical web VIDEO is

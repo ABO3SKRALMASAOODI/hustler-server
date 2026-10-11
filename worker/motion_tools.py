@@ -147,8 +147,19 @@ SOUND_POLICY = (
 
 def list_sound_library(ctx, role=None):
     rows = sound_library.catalog(role or None)
+    if not rows and role:
+        # A described sound ("crowd cheer") is matched against the library's
+        # uses; one it lacks is filed for the owner to audition by ear
+        # (owner rule, Wave 0: sounds come only from the approved library;
+        # nothing is fetched from the web).
+        rows = sound_library.search(role)
+        if not rows:
+            import sound_requests
+            rid = sound_requests.file(ctx, role, purpose="no approved sound matched")
+            return (f"No approved sound matches '{role}'. Place none and tell the user in "
+                    "one clause: " + sound_requests.decline_clause(role, rid))
     if not rows:
-        return "No approved sounds match." if role else "The sound library is empty on this deployment."
+        return "The sound library is empty on this deployment."
     return ("Valmera sound library — real recordings approved by ear (CC0, no attribution). "
             "Place with add_sfx(storage_key='sound:<id>', at=<program second it should HIT>) "
             "and gain_db unset: the tool starts each recording early by its measured peak "

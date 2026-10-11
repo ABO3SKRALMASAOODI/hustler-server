@@ -70,7 +70,12 @@ def test_transient_analyzer_accepts_sub_two_second_one_shot(tmp_path):
     assert measured["strong_event_count"] >= 1
 
 
-def test_audition_tool_ranks_cached_waveforms_and_denies_hearing_claim():
+def test_audition_tool_ranks_cached_waveforms_and_denies_hearing_claim(
+        monkeypatch):
+    # The web-SFX chain is off by default (owner rule, Wave 0); this pins
+    # the audition tool itself, so the owner flag is switched on here.
+    import config
+    monkeypatch.setattr(config, "WEB_SFX_ENABLED", True)
     ctx = SimpleNamespace(
         _sfx_hits={
             "openverse:a": {"id": "openverse:a", "title": "Impact Hit"},

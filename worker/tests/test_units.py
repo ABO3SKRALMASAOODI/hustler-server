@@ -2031,16 +2031,26 @@ cfg.IMAGE_GEN_MODEL = "qwen-image-plus"
 # agent never advertises something that would only answer 'unavailable'.
 import videogen as _videogen                                   # noqa: E402
 _saved_sfx_search = cfg.SFX_SEARCH_ENABLED
+_saved_web_sfx = cfg.WEB_SFX_ENABLED
+cfg.SFX_SEARCH_ENABLED = True
+cfg.WEB_SFX_ENABLED = False
+check("search_sfx hidden by default (owner rule: web sounds off)",
+      all(t["function"]["name"] not in ("search_sfx", "fetch_sfx",
+                                        "audition_sfx_candidates",
+                                        "add_web_sfx")
+          for t in at.openai_tools()))
+cfg.WEB_SFX_ENABLED = True
 cfg.SFX_SEARCH_ENABLED = False
 check("search_sfx hidden when sfx search is off",
       all(t["function"]["name"] not in ("search_sfx", "fetch_sfx")
           for t in at.openai_tools()))
 cfg.SFX_SEARCH_ENABLED = True
-check("search_sfx appears when the capability is on",
+check("search_sfx appears when the owner turns web sounds on",
       any(t["function"]["name"] == "search_sfx" for t in at.openai_tools())
       and any(t["function"]["name"] == "fetch_sfx"
               for t in at.openai_tools()))
 cfg.SFX_SEARCH_ENABLED = _saved_sfx_search
+cfg.WEB_SFX_ENABLED = _saved_web_sfx
 
 check("generate_video is retired from the agent catalog",
       all(t["function"]["name"] != "generate_video"
@@ -4691,8 +4701,10 @@ check("sfx: the prompt is capability-neutral",
 # The gated claim lives in the state block: found sounds advertised exactly
 # when sfx search is on (the pack and its browse tool are deleted).
 _saved_sfx_state = cfg.SFX_SEARCH_ENABLED
+_saved_web_state = cfg.WEB_SFX_ENABLED
 try:
     cfg.SFX_SEARCH_ENABLED = True
+    cfg.WEB_SFX_ENABLED = True
     _sb_on2 = agent_prompt.project_state_block("v", "i", "e", [], [])
     check("sfx: found sounds claimed in state when search is on",
           "search_sfx" in _sb_on2)
@@ -4708,6 +4720,7 @@ try:
           agent_loop._nearest_alternative("add a whoosh please"))
 finally:
     cfg.SFX_SEARCH_ENABLED = _saved_sfx_state
+    cfg.WEB_SFX_ENABLED = _saved_web_state
 print("== Round-26: sfx through the real tool path ==")
 # The layer the schema tests do not reach: tools -> _write_keep -> validate_edl.
 # The resolver is stubbed (its own rejections have their own checks); the
