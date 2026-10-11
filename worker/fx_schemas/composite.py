@@ -187,21 +187,33 @@ class RegionFx(FxItemBase):
     def check(self, ctx):
         region_check(self.region, ctx, f"fx {self.id}")
 
+    @staticmethod
+    def _shape_area(shape, pts):
+        """Frame share of one rect/ellipse ([[x0, y0], [x1, y1]]) or
+        polygon, clipped to the frame."""
+        c = [(min(1.0, max(0.0, float(x))), min(1.0, max(0.0, float(y))))
+             for x, y in pts]
+        if shape in ("rect", "ellipse"):
+            (x0, y0), (x1, y1) = c[0], c[1]
+            a = abs(x1 - x0) * abs(y1 - y0)
+            return a * 0.785398 if shape == "ellipse" else a
+        return abs(sum(c[i][0] * c[i - 1][1] - c[i - 1][0] * c[i][1]
+                       for i in range(len(c)))) / 2.0
+
     def _area(self):
         """The share of the frame the region covers when that is known
-        statically (rect / ellipse / polygon boxes, invert included); None
-        for anchored shapes (glyph, face, card) and keyed shapes."""
+        statically (rect / ellipse / polygon, invert included; a keyframed
+        shape at its LARGEST key); None for anchored shapes (glyph, face,
+        card)."""
         r = self.region
         if r.shape in ("rect", "ellipse") and r.box is not None:
-            x0, y0, x1, y1 = (min(1.0, max(0.0, float(v))) for v in r.box)
-            a = max(0.0, x1 - x0) * max(0.0, y1 - y0)
-            if r.shape == "ellipse":
-                a *= 0.785398
+            a = self._shape_area(r.shape, [r.box[:2], r.box[2:]])
         elif r.shape == "polygon" and r.points:
-            pts = [(min(1.0, max(0.0, float(x))), min(1.0, max(0.0, float(y))))
-                   for x, y in r.points]
-            a = abs(sum(pts[i][0] * pts[i - 1][1] - pts[i - 1][0] * pts[i][1]
-                        for i in range(len(pts)))) / 2.0
+            a = self._shape_area("polygon", r.points)
+        elif r.shape in ("rect", "ellipse", "polygon") and r.keys:
+            areas = [self._shape_area(r.shape, k.points) for k in r.keys]
+            # inverted, the largest uncovered share is at the smallest key
+            a = min(areas) if r.invert else max(areas)
         else:
             return None
         return 1.0 - a if r.invert else a
@@ -209,9 +221,11 @@ class RegionFx(FxItemBase):
     def flash_times(self):
         """A luminance effect (negate, solarise, threshold, a +-1 EV or
         stronger exposure) over at least a quarter of the frame for at most
-        half a second reads as one full-frame flash at ``start``. Anything
-        smaller, softer, longer, or bounded by an anchor that is at most a
-        glyph, a face or a card, is no flash (flash_safety reads this)."""
+        half a second reads as one full-frame flash at ``start`` (a
+        keyframed shape is judged at its largest key; a card region counts:
+        the card is most of the frame on a card program). Anything smaller,
+        softer, longer, or bounded by a glyph or a face, is no flash
+        (flash_safety reads this)."""
         if self.effect not in FLASHY_EFFECTS or self.start is None:
             return []
         if self.effect == "exposure" and abs(float(self.ev or 0.0)) < 1.0:

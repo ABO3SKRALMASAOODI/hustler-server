@@ -350,6 +350,8 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
     video, for a ``source`` fill. Without composites or glyph references
     nothing here changes: the inputs are exactly today's."""
     LAST_WARNINGS.clear()
+    import compositor
+    compositor.forget(workdir)
     items = list(extra_items or []) + program_items(edl, out_duration)
     if behind_why is not None:
         swapped = []
@@ -412,12 +414,18 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
         args += ["-i", clip.path]
         inputs.append((next_idx, item, clip))
         next_idx += 1
-    import compositor
     if compositor.needed(edl, [it for _i, it, _c in inputs]):
-        inputs, next_idx = compositor.prepare_composites(
-            edl, inputs, workdir=workdir, W=W, H=H, fps=fps, args=args,
-            next_idx=next_idx, fetch_asset=fetch_asset, plates=piece_plates,
-            source_path=source_path)
+        n_args = len(args)
+        try:
+            inputs, next_idx = compositor.prepare_composites(
+                edl, inputs, workdir=workdir, W=W, H=H, fps=fps, args=args,
+                next_idx=next_idx, fetch_asset=fetch_asset,
+                plates=piece_plates, source_path=source_path)
+        except Exception as e:  # noqa: BLE001 — degrade, never fail
+            # the inputs it may have opened go with it: indices stay aligned
+            del args[n_args:]
+            print(f"[render] composites not prepared ({str(e)[:200]}); "
+                  "graphics drawn plain", flush=True)
     return inputs, next_idx
 
 
@@ -432,8 +440,14 @@ def overlay_clip(parts, vlabel, idx, item, clip, fps, tag, plan=None):
     region). An item without one takes the filters below, byte for byte."""
     if isinstance(item.get("composite"), dict):
         import compositor
-        return compositor.emit(parts, vlabel, idx, item, clip, fps, tag,
-                               plan=plan)
+        try:
+            return compositor.emit(parts, vlabel, idx, item, clip, fps, tag,
+                                   plan=plan)
+        except Exception as err:  # noqa: BLE001 — degrade, never fail
+            # emit appended nothing: the plain graphic below instead
+            print(f"[render] motion '{item.get('id')}': composite not "
+                  f"built ({str(err)[:200]}); drawn as the plain graphic",
+                  flush=True)
     s, e = float(item["start"]), float(item["end"])
     # Hold the clip's last frame for a couple of frames: framesync can
     # quantize a fractional program clock a frame past the clip's EOF.

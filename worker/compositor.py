@@ -40,9 +40,15 @@ buffer the program up to the item (fxprims' re-pad rule), and the composite
 lands on exactly the frames the plain graphic would.
 
 Degrade, never fail. Anything a composite cannot build (a fill whose media
-is missing, a region the render cannot see, an auto blend with no plate)
-drops that ingredient with a logged note and keeps the graphic; a region
-effect whose region cannot be built is omitted with its reason.
+is missing or has no picture, an auto blend with no plate) drops that
+ingredient with a logged note and keeps the graphic; a graphic whose CLIP
+region the render cannot build is left out and named (motion_layer.warn),
+never drawn unclipped; a composite whose filters cannot be built falls
+back to the plain graphic (motion_layer.overlay_clip); a region effect
+whose region cannot be built is omitted with its reason. Nothing a
+composite opens can fail the render: fill files are probed first
+(media_kind), so an audio upload or an animated GIF never reaches ffmpeg
+as a still.
 """
 
 import dataclasses
@@ -59,11 +65,12 @@ import fxprims
 # ── constants ────────────────────────────────────────────────────────────
 
 # Filters this module's compilers emit (fxgraph checks the lane has them).
-FILTERS = ("split", "trim", "setpts", "settb", "tpad", "overlay", "format",
-           "crop",
-           "alphamerge", "alphaextract", "negate", "hue", "lutrgb", "lutyuv",
-           "lut", "colorchannelmixer", "gblur", "scale", "pad", "nullsink",
-           "null")
+FILTERS = tuple(dict.fromkeys(
+    ("split", "trim", "setpts", "settb", "tpad", "overlay", "format",
+     "crop", "fps",
+     "alphamerge", "alphaextract", "negate", "hue", "lutrgb", "lutyuv",
+     "lut", "colorchannelmixer", "gblur", "scale", "pad", "nullsink",
+     "null") + tuple(fxprims.MASK_OP_FILTERS)))
 # Only the displacement materials need these: a lane without them draws a
 # material as its substitute (the region_soften blur), never omits every
 # region effect (fxgraph omits a whole compiler whose FILTERS are missing).
@@ -190,10 +197,21 @@ def register_glyphs(workdir, entries):
     """``entries``: {motion id: {"inputs": [input idx, ...], "x", "y",
     "w", "h", "start", "end", "W", "H", "fps"}} for this render."""
     with _REG_LOCK:
-        if len(_REGISTRY) >= _REG_MAX:
-            _REGISTRY.clear()
+        _REGISTRY.pop(_rkey(workdir), None)
+        while len(_REGISTRY) >= _REG_MAX:
+            # the oldest render's entry; a render still building in another
+            # thread keeps its own
+            _REGISTRY.pop(next(iter(_REGISTRY)))
         _REGISTRY[_rkey(workdir)] = {k: dict(v, spent=0)
                                      for k, v in (entries or {}).items()}
+
+
+def forget(workdir):
+    """Drop a render's glyph entries (motion_layer.prepare_inputs, before
+    it renders anything): a render that registers none must never read the
+    input indices of an earlier render in the same workdir."""
+    with _REG_LOCK:
+        _REGISTRY.pop(_rkey(workdir), None)
 
 
 def _glyph(plan, motion_id):
@@ -834,12 +852,67 @@ def _ffmpeg():
     return os.environ.get("FFMPEG_BIN") or "ffmpeg"
 
 
-IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif",
-              ".tiff")
+# Stills opened with the image demuxer's ``-loop 1``. An animated GIF is a
+# VIDEO here: its own demuxer refuses ``-loop`` ("Option loop not found"),
+# which would fail the whole render, not just the fill.
+IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+_STILL_FORMATS = ("image2", "png_pipe", "jpeg_pipe", "webp_pipe",
+                  "bmp_pipe", "tiff_pipe", "jpegls_pipe", "jpegxl_pipe")
+_KIND_CACHE = {}
 
 
 def _is_image(path):
     return os.path.splitext(str(path or ""))[1].lower() in IMAGE_EXTS
+
+
+def _ffprobe():
+    exe = os.environ.get("FFMPEG_BIN")
+    if exe and os.path.basename(exe).startswith("ffmpeg"):
+        cand = os.path.join(os.path.dirname(exe), "ffprobe")
+        if os.path.exists(cand):
+            return cand
+    return "ffprobe"
+
+
+def media_kind(path):
+    """'image' | 'video' | None for a fill's file. None: no picture at all
+    (an audio file, a document, an unreadable file) — opening ``[n:v]`` on
+    it would fail the WHOLE render, so the fill is dropped instead. One
+    ffprobe per file (cached by path, size and mtime); when ffprobe itself
+    cannot run, the extension decides."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (os.path.abspath(path), st.st_size, int(st.st_mtime))
+    if key in _KIND_CACHE:
+        return _KIND_CACHE[key]
+    try:
+        r = subprocess.run(
+            [_ffprobe(), "-v", "error", "-show_entries",
+             "stream=codec_type:format=format_name", "-of", "json", path],
+            capture_output=True, timeout=30, check=False)
+    except Exception:  # noqa: BLE001 — no ffprobe: trust the extension
+        return "image" if _is_image(path) else "video"
+    if r.returncode != 0:
+        kind = None
+    else:
+        try:
+            data = json.loads(r.stdout or b"{}")
+        except ValueError:
+            data = {}
+        streams = data.get("streams") or []
+        fmt = str((data.get("format") or {}).get("format_name") or "")
+        if not any(s.get("codec_type") == "video" for s in streams):
+            kind = None
+        elif any(f in _STILL_FORMATS for f in fmt.split(",")):
+            kind = "image"
+        else:
+            kind = "video"
+    if len(_KIND_CACHE) > 256:
+        _KIND_CACHE.clear()
+    _KIND_CACHE[key] = kind
+    return kind
 
 
 def _timeline(edl):
@@ -923,10 +996,12 @@ def _cover_chain(W, H, crop=None, fit=None):
     return ",".join(chain)
 
 
-def _media_input(args, next_idx, path, *, start, dur, fps, loop=False):
+def _media_input(args, next_idx, path, *, start, dur, fps, loop=False,
+                 kind=None):
     """Append one fill input (an image looped as frames, or a video from
-    ``start`` seconds); returns its index and the next free one."""
-    if _is_image(path):
+    ``start`` seconds); returns its index and the next free one. ``kind``:
+    media_kind(path), when the caller has it."""
+    if (kind or ("image" if _is_image(path) else "video")) == "image":
         args += ["-loop", "1", "-framerate", f"{fps3(fps):.3f}",
                  "-t", f"{dur + 0.5:.3f}", "-i", path]
     else:
@@ -968,17 +1043,23 @@ def _resolve_fill(fill, item, edl, W, H, fps, args, next_idx, fetch_asset,
         if not local:
             notes.append(f"fill {key} could not be fetched")
             return None
+        mk = media_kind(local)
+        if mk is None:
+            notes.append(f"fill {key} has no picture (audio, or not a "
+                         "readable image or video); drawn in its own colour")
+            return None
         start = float(fill.get("offset_s") or 0.0) + phase
         idx, next_idx = _media_input(args, next_idx, local, start=start,
                                      dur=span, fps=fps,
-                                     loop=bool(fill.get("loop")))
+                                     loop=bool(fill.get("loop")), kind=mk)
         return {"kind": "media", "idx": idx, "lead": 0.0, "rate": 1.0,
                 "chain": _cover_chain(W, H), "_next": next_idx}
     if kind == "source":
         src_t = float(fill.get("src_t") or 0.0) + phase
         if source_path:
             idx, next_idx = _media_input(args, next_idx, source_path,
-                                         start=src_t, dur=span, fps=fps)
+                                         start=src_t, dur=span, fps=fps,
+                                         kind="video")
             return {"kind": "media", "idx": idx, "lead": 0.0, "rate": 1.0,
                     "chain": _cover_chain(W, H), "_next": next_idx}
         try:
@@ -999,6 +1080,7 @@ def _resolve_fill(fill, item, edl, W, H, fps, args, next_idx, fetch_asset,
             notes.append(f"no cut for its {kind} fill; drawn in its own "
                          "colour")
             return None
+        mk = None
         if blk.get("kind") == "insert" and blk.get("asset_key") and \
                 blk.get("media") != "image":
             key = blk["asset_key"]
@@ -1006,7 +1088,10 @@ def _resolve_fill(fill, item, edl, W, H, fps, args, next_idx, fetch_asset,
                 local = fetch_asset(key) if fetch_asset else None
             except Exception:  # noqa: BLE001
                 local = None
-            if local:
+            mk = media_kind(local) if local else None
+            if local and mk is None:
+                notes.append(f"{kind} fill: insert {key} has no picture")
+            if mk == "video":
                 rate = float(blk.get("rate") or 1.0)
                 clip0 = float(blk.get("clip_start_s") or 0.0)
                 if kind == "next":
@@ -1018,7 +1103,7 @@ def _resolve_fill(fill, item, edl, W, H, fps, args, next_idx, fetch_asset,
                 lead = max(0.0, -m0) / rate
                 idx, next_idx = _media_input(
                     args, next_idx, local, start=max(0.0, m0),
-                    dur=span * rate, fps=fps)
+                    dur=span * rate, fps=fps, kind="video")
                 if lead > 1e-3:
                     notes.append(f"{kind} fill: {lead:.2f}s before the clip "
                                  "starts is its first frame held")
@@ -1028,15 +1113,17 @@ def _resolve_fill(fill, item, edl, W, H, fps, args, next_idx, fetch_asset,
                         "chain": _cover_chain(W, H, item_ins.get("crop"),
                                               item_ins.get("fit")),
                         "_next": next_idx}
-        if blk.get("kind") == "insert" and blk.get("media") == "image":
+        if blk.get("kind") == "insert" and blk.get("asset_key") and (
+                blk.get("media") == "image" or mk == "image"):
             key = blk["asset_key"]
             try:
                 local = fetch_asset(key) if fetch_asset else None
             except Exception:  # noqa: BLE001
                 local = None
-            if local:
+            mk = media_kind(local) if local else None
+            if mk is not None:
                 idx, next_idx = _media_input(args, next_idx, local, start=0,
-                                             dur=span, fps=fps)
+                                             dur=span, fps=fps, kind=mk)
                 item_ins = blk.get("item") or {}
                 return {"kind": "media", "idx": idx, "lead": 0.0,
                         "rate": 1.0,
@@ -1430,8 +1517,59 @@ def _plan_mask(plan, label, space="screen"):
         return None
 
 
+class CompositeError(RuntimeError):
+    """A composite whose filters could not be built: motion_layer.
+    overlay_clip draws the plain graphic instead (degrade, never fail)."""
+
+
+def _omit_warning(item, why):
+    """Name a graphic this render does not draw (motion_layer.warn: it
+    reaches the render result as MOTION NOT DRAWN), once per render."""
+    import motion_layer
+    msg = f"motion '{item.get('id')}' not drawn: {why}"
+    if msg not in motion_layer.LAST_WARNINGS:
+        motion_layer.warn(msg)
+
+
 def emit(parts, vlabel, idx, item, clip, fps, tag, plan=None):
     """Lay one composite graphic over [vlabel]; returns the new label.
+
+    A clip region the render cannot serve (a face or card mask with no
+    provider or no plan) omits the graphic and says so: drawing it
+    unclipped would put it where the user said it must not be. A composite
+    whose filters cannot be built raises CompositeError with nothing
+    appended, and the caller draws the plain graphic."""
+    side = getattr(clip, "composite", None) or CompositeSide(
+        W=0, H=0, fps=float(fps))
+    pm = None
+    want = (item.get("composite") or {}).get("region")
+    if want:
+        shape = _get(want, "shape")
+        if not side.region:
+            _omit_warning(item, f"its {shape} clip region could not be "
+                          "built on this render")
+            return vlabel
+        if "idx" not in side.region:
+            if plan is not None and side.W and side.H:
+                pm = _plan_mask(plan, side.region.get("mask"))
+            if pm is None:
+                _omit_warning(item, f"its {shape} clip region is not "
+                              "available on this render")
+                return vlabel
+    body = []
+    try:
+        out = _emit(body, vlabel, idx, item, clip, fps, tag, side, pm)
+    except Exception as e:  # noqa: BLE001 — degrade to the plain graphic
+        if pm is not None:
+            parts.append(f"[{pm}]nullsink")
+        raise CompositeError(f"{type(e).__name__}: {str(e)[:160]}") from e
+    parts.extend(body)
+    return out
+
+
+def _emit(parts, vlabel, idx, item, clip, fps, tag, side, pm):
+    """emit's filters (``pm``: the clip region's program mask, when the
+    region is a face or card mask).
 
     In order, window-local (frame k = the item's k-th frame):
       1. the glyph layer: the clip's own pixels (rgba, its box);
@@ -1445,8 +1583,6 @@ def emit(parts, vlabel, idx, item, clip, fps, tag, plan=None):
       6. stamped on the legacy clip clock and overlaid on the item's frames
          (``gte(t,start)*lt(t,end)``), padded from t = 0."""
     comp = item.get("composite") or {}
-    side = getattr(clip, "composite", None) or CompositeSide(
-        W=0, H=0, fps=float(fps))
     s, e = float(item["start"]), float(item["end"])
     W, H = int(side.W), int(side.H)
     u = tag
@@ -1490,24 +1626,20 @@ def emit(parts, vlabel, idx, item, clip, fps, tag, plan=None):
                          f"trim=end_frame={n},setpts=N/{fr:.6f}/TB,"
                          f"crop={bw}:{bh}:{bx}:{by}[{u}rm]")
             rm = f"{u}rm"
-        elif plan is not None and W and H:
-            pm = _plan_mask(plan, side.region["mask"])
-            if pm is not None:
-                parts.append(f"[{pm}]format=gray,trim=start={s:.4f},"
-                             f"setpts=PTS-STARTPTS,crop={bw}:{bh}:{bx}:{by},"
-                             f"tpad=stop_mode=clone:stop={n},"
-                             f"trim=end_frame={n},setpts=N/{fr:.6f}/TB"
-                             f"[{u}rm]")
-                rm = f"{u}rm"
-        if rm is not None:
-            parts.append(f"[{layer}]split[{u}r1][{u}r2]")
-            parts.append(f"[{u}r2]alphaextract[{u}ra]")
-            parts.append(f"[{u}ra][{rm}]blend=all_mode=multiply[{u}rb]")
-            parts.append(f"[{u}r1][{u}rb]alphamerge[{u}gr]")
-            layer = f"{u}gr"
-        else:
-            _log(f"motion '{item.get('id')}': its clip region is not "
-                 "available on this render; drawn unclipped")
+        elif pm is not None:
+            parts.append(f"[{pm}]format=gray,trim=start={s:.4f},"
+                         f"setpts=PTS-STARTPTS,crop={bw}:{bh}:{bx}:{by},"
+                         f"tpad=stop_mode=clone:stop={n},"
+                         f"trim=end_frame={n},setpts=N/{fr:.6f}/TB"
+                         f"[{u}rm]")
+            rm = f"{u}rm"
+        if rm is None:
+            raise CompositeError("its clip region has no mask")
+        parts.append(f"[{layer}]split[{u}r1][{u}r2]")
+        parts.append(f"[{u}r2]alphaextract[{u}ra]")
+        parts.append(f"[{u}ra][{rm}]blend=all_mode=multiply[{u}rb]")
+        parts.append(f"[{u}r1][{u}rb]alphamerge[{u}gr]")
+        layer = f"{u}gr"
     # 4. the opacity
     op = comp.get("opacity")
     if op is not None and float(op) < 0.999:
@@ -1586,7 +1718,7 @@ def _fill_stream(parts, main, fill, item, fps, W, H, n, u):
         # the shot before the cut plays to its second-to-last frame (robust
         # to a cut a frame either side), which is then held: from the
         # item's start when that is before the cut, else that frame alone
-        b = cut - 1.5 * one
+        b = max(one, cut - 1.5 * one)
         a = s if s < b - one else b - one
         parts.append(f"[{u}pf]trim=start={max(0.0, a):.4f}:end={b:.4f},"
                      f"setpts=PTS-STARTPTS,format=rgba,{tail}[{u}f]")

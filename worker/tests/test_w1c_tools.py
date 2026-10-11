@@ -377,3 +377,48 @@ def test_region_flash_times():
     assert item(strength=0.3).flash_times() == []
     assert item(region={"shape": "glyph", "ref": "m1"}).flash_times() == []
     assert item(region={"shape": "card"}).flash_times() == [1.0]
+
+
+def test_keyed_region_flashes_are_counted_at_their_largest_key():
+    """A keyframed shape is no loophole: a 1-frame negate in a keyed
+    full-frame rect is the same flash as a static one."""
+    def item(keys, **kw):
+        d = dict(id="r", type="region", stage="world", start=1.0, end=1.04,
+                 effect="negate", region={"shape": "rect", "keys": keys})
+        d["region"].update(kw)
+        return member.RegionFx.model_validate(d)
+    full = [{"t": 0, "points": [[0, 0], [1, 1]]},
+            {"t": 0.02, "points": [[0, 0], [1, 1]]}]
+    small = [{"t": 0, "points": [[0.4, 0.4], [0.5, 0.5]]},
+             {"t": 0.02, "points": [[0.45, 0.45], [0.55, 0.55]]}]
+    grows = [small[0], {"t": 0.02, "points": [[0, 0], [0.9, 0.9]]}]
+    assert item(full).flash_times() == [1.0]
+    assert item(small).flash_times() == []
+    assert item(grows).flash_times() == [1.0]
+    assert item(small, invert=True).flash_times() == [1.0]
+    poly = member.RegionFx.model_validate(dict(
+        id="p", type="region", stage="world", start=1.0, end=1.04,
+        effect="threshold", region={"shape": "polygon", "keys": [
+            {"t": 0, "points": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+            {"t": 0.02, "points": [[0, 0], [1, 0], [1, 1], [0, 1]]}]}))
+    assert poly.flash_times() == [1.0]
+    import flash_safety
+    edl = {"fx": [dict(id=f"k{i}", type="region", stage="world",
+                       start=1.0 + 0.2 * i, end=1.04 + 0.2 * i,
+                       effect="negate", region={"shape": "rect",
+                                                "keys": full})
+                  for i in range(4)]}
+    assert flash_safety.assess(edl)["over_limit"]
+
+
+def test_a_face_clip_region_on_a_graphic_says_it_is_not_drawn_yet():
+    ctx = Ctx(_base())
+    out = ct.set_composite(ctx, "m1", region="face")
+    assert out.startswith("EDL"), out
+    assert "face clip region on a graphic is not drawn yet" in out
+    # the write line names what is set, not every empty field
+    out = ct.set_composite(ctx, "m1", blend="difference")
+    assert "opacity=None" not in out and "blend=difference" in out
+    # a region EFFECT on the face is another thing: no such note
+    out = ct.add_region_effect(ctx, "blur", "face", 2.0, 3.0)
+    assert "clip region on a graphic" not in out

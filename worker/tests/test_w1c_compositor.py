@@ -227,7 +227,8 @@ def _edl_with_insert(clip_start=2.0):
                          "duration_s": 2.0, "source_start_s": clip_start}]}
 
 
-def test_next_fill_reads_the_insert_with_its_handles():
+def test_next_fill_reads_the_insert_with_its_handles(monkeypatch):
+    monkeypatch.setattr(compositor, "media_kind", lambda p: "video")
     args, notes = [], []
     item = {"id": "t", "start": 3.0, "end": 4.0}
     f = compositor._resolve_fill({"kind": "next"}, item, _edl_with_insert(),
@@ -397,3 +398,123 @@ def test_a_face_region_draws_through_the_face_mask_provider(
     assert abs(f[16, 16] - ref) > 60              # negated inside the face
     assert f[0:6, :].max() == ref and f[26:, :].max() == ref
     assert regions.bbox({"shape": "face"}, 32, 32) is None
+
+
+# ── degrade, never fail (review fixes) ──────────────────────────────────
+
+def _media(tmp, name, *lavfi):
+    path = os.path.join(tmp, name)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", *lavfi, path],
+                   check=True, capture_output=True)
+    return path
+
+
+@needs_ffmpeg
+def test_fill_media_without_a_picture_is_dropped_and_gifs_are_video(
+        tmp_path):
+    """A fill whose file has no video stream (an audio upload) or an
+    animated GIF (whose demuxer refuses -loop) would fail the WHOLE render
+    if opened as before: the first is dropped, the second plays as video."""
+    tmp = str(tmp_path)
+    gif = _media(tmp, "a.gif", "-f", "lavfi", "-i",
+                 "testsrc=s=64x48:r=10:d=0.5")
+    mp3 = _media(tmp, "a.m4a", "-f", "lavfi", "-i", "sine=d=0.5",
+                 "-c:a", "aac")
+    png = _media(tmp, "a.png", "-f", "lavfi", "-i",
+                 "color=c=red:s=16x16:d=0.04", "-frames:v", "1")
+    noext = os.path.join(tmp, "still")
+    shutil.copy(png, noext)
+    assert compositor.media_kind(gif) == "video"
+    assert compositor.media_kind(mp3) is None
+    assert compositor.media_kind(png) == "image"
+    assert compositor.media_kind(noext) == "image"
+    assert compositor.media_kind(os.path.join(tmp, "missing.mp4")) is None
+    item = {"id": "t", "start": 0.0, "end": 1.0}
+    keys = {"media/p/a.gif": gif, "media/p/a.m4a": mp3}
+    args, notes = [], []
+    f = compositor._resolve_fill({"kind": "asset",
+                                  "asset_key": "media/p/a.m4a"}, item, {},
+                                 64, 48, 25.0, args, 3, keys.get, None,
+                                 notes)
+    assert f is None and args == [] and "no picture" in notes[-1]
+    f = compositor._resolve_fill({"kind": "asset", "asset_key":
+                                  "media/p/a.gif", "loop": True}, item, {},
+                                 64, 48, 25.0, args, 3, keys.get, None,
+                                 notes)
+    assert f["kind"] == "media" and "-loop" not in args
+    # the input as opened, through the fill chain: ffmpeg accepts it
+    parts = [f"[0:v]{f['chain']},format=rgba,trim=end_frame=5[o]"]
+    subprocess.run(["ffmpeg", "-v", "error", *args, "-filter_complex",
+                    ";".join(parts), "-map", "[o]", "-f", "null", "-"],
+                   check=True, capture_output=True)
+
+
+def test_an_unserved_clip_region_leaves_the_graphic_out(monkeypatch):
+    """A face / card clip region the render cannot serve (no plan, no
+    provider) omits the graphic and names it once — never draws it
+    unclipped over the face — and appends nothing to the graph."""
+    clip = _Clip("/x/c.mov", 10, 20, 40, 20)
+    clip.composite = compositor.CompositeSide(
+        W=270, H=480, fps=25.0, region={"mask": "face"})
+    item = {"id": "mf", "start": 1.0, "end": 2.0,
+            "composite": {"region": {"shape": "face"}}}
+    motion_layer.LAST_WARNINGS.clear()
+    parts = []
+    for _ in range(2):                      # two builds, one warning
+        assert motion_layer.overlay_clip(parts, "v0", 4, item, clip, 25.0,
+                                         "mga0") == "v0"
+    assert parts == []
+    assert len(motion_layer.LAST_WARNINGS) == 1
+    assert "'mf' not drawn" in motion_layer.LAST_WARNINGS[0]
+    # a region that could not be built at prepare: likewise
+    clip.composite = compositor.CompositeSide(W=270, H=480, fps=25.0)
+    item2 = dict(item, id="mr", composite={"region": {
+        "shape": "rect", "box": [0.1, 0.1, 0.2, 0.2]}})
+    assert motion_layer.overlay_clip(parts, "v0", 4, item2, clip, 25.0,
+                                     "mga0") == "v0" and parts == []
+    motion_layer.LAST_WARNINGS.clear()
+
+
+def test_a_composite_that_cannot_be_built_draws_the_plain_graphic(
+        monkeypatch):
+    def boom(*a, **k):
+        raise KeyError("idx")
+    monkeypatch.setattr(compositor, "_fill_stream", boom)
+    clip = _Clip("/x/c.mov", 10, 20, 40, 20)
+    clip.composite = compositor.CompositeSide(
+        W=270, H=480, fps=25.0, fill={"kind": "colour", "hex": "#ff0000"})
+    item = {"id": "mb", "start": 1.0, "end": 2.0,
+            "composite": {"fill": {"kind": "colour", "colour": "#ff0000"}}}
+    parts = []
+    out = motion_layer.overlay_clip(parts, "v0", 7, item, clip, 30.0, "mga0")
+    # exactly the legacy overlay, nothing of the failed composite
+    assert out == "mga0o" and len(parts) == 2
+    assert parts[0].startswith("[7:v]setpts=PTS-STARTPTS,format=rgba,tpad")
+
+
+def test_prepare_inputs_survives_a_composite_prepare_failure(
+        monkeypatch, tmp_path):
+    """prepare_composites raising drops what it opened: the input indices
+    the render goes on to use stay aligned."""
+    import motion_engine
+    import motion_templates
+
+    class Clip:
+        path, x, y, w, h, frames, empty = "/x/c.mov", 0, 0, 10, 10, 5, False
+    monkeypatch.setattr(motion_engine, "render_jobs",
+                        lambda jobs, out: [Clip() for _ in jobs])
+    monkeypatch.setattr(motion_templates, "build_job",
+                        lambda part, *a, **k: object())
+
+    def bad(edl, inputs, *, args, next_idx, **kw):
+        args += ["-i", "/x/fill.mp4"]
+        raise RuntimeError("boom")
+    monkeypatch.setattr(compositor, "prepare_composites", bad)
+    edl = {"motion": [{"id": "m1", "template": "word_slam", "start": 0.0,
+                       "end": 1.0, "params": {"text": "HI"},
+                       "composite": {"blend": "difference"}}]}
+    args = ["-i", "src.mp4"]
+    inputs, nxt = motion_layer.prepare_inputs(
+        edl, str(tmp_path), 270, 480, 25.0, 5.0, args, 1)
+    assert args == ["-i", "src.mp4", "-i", "/x/c.mov"]
+    assert nxt == 2 and [i for i, _it, _c in inputs] == [1]

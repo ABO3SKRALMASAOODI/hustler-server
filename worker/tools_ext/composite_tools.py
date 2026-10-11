@@ -167,7 +167,13 @@ def _notes(edl, motion=None, region=None):
     if comp.get("stage") and layer != "behind_subject":
         out.append("stage applies only to a behind_subject graphic")
     shape = (region or comp.get("region") or {}).get("shape")
-    if shape in ("face", "card"):
+    if region is None and shape in ("face", "card"):
+        # a graphic's clip region: the render resolves face and card masks
+        # only for fx items (their stage hands the compiler the masks)
+        out.append(f"a {shape} clip region on a graphic is not drawn yet: "
+                   "the render leaves the graphic out and says so — clip "
+                   "it to a rect, ellipse or polygon instead")
+    elif shape in ("face", "card"):
         import fxgraph
         peer = {"face": "matte_track:face_mask",
                 "card": "regions:card_pad"}[shape]
@@ -236,7 +242,8 @@ def set_composite(ctx, motion_id, blend=None, opacity=None, fill=None,
         if not isinstance(v, dict):
             return v
         return v.get("kind") or v.get("shape") or "set"
-    what = ", ".join(f"{k}={brief(v)}" for k, v in comp.items())
+    what = ", ".join(f"{k}={brief(v)}" for k, v in comp.items()
+                     if v is not None)
     res = _write.commit(ctx, [_write.set_composite(motion_id, comp)],
                         f"composite on motion [{motion_id}]: {what}")
     return _done(res, _notes(edl, dict(hit, composite=comp)))

@@ -565,6 +565,60 @@ def test_glyph_region_draws_inside_the_letters_only(comp):
     assert np.abs(p - g)[~_touched(comp, 14)].max() == 0
 
 
+# ── degrade, never fail: fills and clip regions the render cannot use ──
+
+GIF_KEY, MP3_KEY = "media/w1c/loop.gif", "media/w1c/voice.m4a"
+
+
+@pytest.fixture(scope="module")
+def degrade(work):
+    """Real renders of composites whose ingredients the render cannot use:
+    an audio upload as a fill (no picture: dropped), an animated GIF fill
+    (a video: its demuxer refuses -loop) and a face clip region nothing
+    serves (the graphic is left out, never drawn unclipped)."""
+    if not _chromium():
+        pytest.skip("needs the motion engine")
+    gif = os.path.join(work["dir"], "loop.gif")
+    mp3 = os.path.join(work["dir"], "voice.m4a")
+    for path, src in ((gif, "testsrc=s=96x54:r=10:d=1"),
+                      (mp3, "sine=d=2")):
+        if not os.path.exists(path):
+            subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+                            "-i", src, path], check=True,
+                           capture_output=True)
+    locals_ = {FILL_KEY: work["fill"], GIF_KEY: gif, MP3_KEY: mp3}
+    base = _base()
+    cases = [
+        _case(work, "d_base", base, dump_frames=[50]),
+        _case(work, "d_plain", dict(base, motion=[_word()]),
+              dump_frames=[50]),
+        _case(work, "d_gif", dict(base, motion=[_word(composite={
+            "fill": {"kind": "asset", "asset_key": GIF_KEY, "loop": True}})]),
+            asset_locals=locals_, dump_frames=[50]),
+        _case(work, "d_mp3", dict(base, motion=[_word(composite={
+            "fill": {"kind": "asset", "asset_key": MP3_KEY}})]),
+            asset_locals=locals_, dump_frames=[50]),
+        _case(work, "d_face", dict(base, motion=[_word(composite={
+            "region": {"shape": "face"}})]), dump_frames=[50])]
+    return w0b_probe.run(cases, os.path.join(work["dir"], "degrade"))
+
+
+@needs_browser
+def test_unusable_fill_media_never_fails_the_render(degrade):
+    for k in ("d_base", "d_plain", "d_gif", "d_mp3", "d_face"):
+        assert degrade[k]["error"] is None, (k, degrade[k]["error"])
+    # an audio fill: dropped, the graphic in its own colour (the plain one)
+    assert degrade["d_mp3"]["frames"] == degrade["d_plain"]["frames"]
+    # a GIF fill: its picture inside the letters (not the white ink)
+    plain = _rgb(degrade["d_plain"]["dumps"]["50"])
+    gif = _rgb(degrade["d_gif"]["dumps"]["50"])
+    ink = plain.min(-1) > 235
+    assert ink.sum() > 200
+    assert np.abs(gif - plain)[ink].mean() > 40
+    # a face clip region nothing serves: the graphic is left out
+    assert degrade["d_face"]["frames"] == degrade["d_base"]["frames"]
+
+
 # ── the ghost pass (composite_behind, 1A's renderer seam) ────────────────
 
 @needs_browser

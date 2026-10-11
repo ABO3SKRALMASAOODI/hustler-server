@@ -86,6 +86,10 @@ change — never a filter on every graphic.
 - A composite on every graphic: the device stops meaning anything.
 - Ghost on a graphic that is not behind the subject: nothing is hidden, so
   nothing draws (the write says so).
+- A face or card CLIP region on a graphic (set_composite region='face'):
+  not drawn yet — the render leaves the graphic out and names it. Clip a
+  graphic to a rect, ellipse or polygon; face and card regions work for
+  region effects.
 - A region effect bigger than a quarter of the frame for a moment (negate,
   solarise, threshold, strong exposure) counts as a full-frame flash; more
   than 3 in a second are refused.
@@ -120,7 +124,9 @@ Every device here is an ordinary EDL write; an MCP client that does not see
 these verbs reaches every one with apply_edit_batch (validated exactly like
 the verbs):
 
-- Blend, fill, field, ghost, stage, region on a motion graphic (merge):
+- Blend, fill, field, ghost, stage, region on a motion graphic. The
+  upsert merges into the graphic but REPLACES its whole composite object:
+  send every composite field to keep (get_edl shows the current one):
   {"action": "upsert", "layer": "motion", "id": "m1", "value": {"id":
   "m1", "composite": {"blend": "difference", "ghost": "auto"}}}
 - Clear it: {"action": "upsert", "layer": "motion", "id": "m1", "value":
