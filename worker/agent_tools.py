@@ -3608,9 +3608,18 @@ def _layout_card(ctx, edl, spans, box, canvas, chosen=True):
             f"call's picture {fmt(rect)} — its status bar and buttons cropped "
             "off, the guest's measured face inside")
     if chosen and any(abs(a - b) > 1e-3 for a, b in zip(nbox, box)):
-        note += (f"; the box narrowed to {fmt(nbox)} so the picture stays at "
-                 f"{k:.2f}x (filling the box would enlarge it past "
-                 f"{source_layout.UPSCALE_CAP:g}x)")
+        def aspect(b):
+            return (b[2] - b[0]) * W / max(1e-6, (b[3] - b[1]) * H)
+        why = []
+        if abs(aspect(nbox) - aspect(box)) > 1e-2:
+            why.append("the guest's measured face stays whole (a box this "
+                       "wide cuts it)")
+        if k >= source_layout.UPSCALE_CAP - 1e-3:
+            why.append(f"the picture stays at {k:.2f}x (filling the box "
+                       "would enlarge it past "
+                       f"{source_layout.UPSCALE_CAP:g}x)")
+        note += (f"; the box narrowed to {fmt(nbox)} so "
+                 + (" and ".join(why) or f"the picture stays at {k:.2f}x"))
     elif not chosen:
         note += (f"; no box given: the largest card at <= "
                  f"{source_layout.UPSCALE_CAP:g}x, {fmt(nbox)}")

@@ -3,8 +3,9 @@
 One job scouts a long indexed video for genuinely complete, worthwhile
 micro-stories. Each selected story becomes a LOCKED child project that shares
 the parent's original + proxy BY STORAGE KEY and starts with exactly one
-editorial decision: the parent scout's story cut. It is deliberately not
-styled, reframed, captioned, scored, or rendered here.
+editorial decision: the parent scout's story cut, plus the 9:16 frame the
+source's measured layout gives it (source_layout.py; never none). It is
+deliberately not styled, captioned, scored, or rendered here.
 
 The user explicitly presses Edit on a card to boot a fresh full-tool editing
 agent inside that child. This separation is the product contract: the parent
@@ -1025,7 +1026,8 @@ def _same_story_cut(keep, candidates, fps=None):
 
 def _seed_story_child(worker_db, job, child_id, index, clip, workdir,
                       materialization_key=None):
-    """Cut the parent's chosen story and nothing else.
+    """Cut the parent's chosen story and nothing else (plus its 9:16
+    frame from the measured source layout: _seed_frame).
 
     This is intentionally small. The fresh agent started by the card's Edit
     button must make every creative decision after it has watched this exact
@@ -1089,10 +1091,18 @@ def _seed_frame(ctx):
     if edl.get("frame"):
         return None
     video = (ctx.index or {}).get("video") or {}
-    frame, why = source_layout.frame_for(
-        (ctx.index or {}).get("source_layout"), edl.get("keep") or [],
-        "9:16", video.get("width"), video.get("height"))
-    edl["frame"] = Frame.model_validate(frame).model_dump()
+    try:
+        frame, why = source_layout.frame_for(
+            (ctx.index or {}).get("source_layout"), edl.get("keep") or [],
+            "9:16", video.get("width"), video.get("height"))
+        edl["frame"] = Frame.model_validate(frame).model_dump()
+    except Exception as exc:
+        # a malformed or unreadable layout never costs the board a child:
+        # the whole frame fitted is always a valid 9:16 start
+        frame = {"ratio": "9:16", "mode": "pad_blur"}
+        why = f"source layout unusable ({str(exc)[:80]}): the whole frame " \
+              "is fitted until auto_reframe measures it"
+        edl["frame"] = Frame.model_validate(frame).model_dump()
     res = ctx.write_edl(edl, f"output frame set to 9:16 ({frame['mode']}) "
                              f"from the source layout: {why}")
     if not str(res).startswith("EDL v"):

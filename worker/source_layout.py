@@ -845,6 +845,21 @@ def card_for_box(win, sw, sh, box, W=1080, H=1920, cap=UPSCALE_CAP):
     past ``cap``. (box, rect, k, face_ok, pip)."""
     bw, bh = (box[2] - box[0]) * W, (box[3] - box[1]) * H
     rect, ok, _whole = _source_in(win, sw, sh, bw / bh)
+    face, head = win.get("face") or win.get("head"), win.get("head")
+    if ok is False and face and head:
+        # A box wider than the call's picture can fill at the face's height
+        # (a 1:1 or landscape card on a portrait call) would cut the face: a
+        # face never leaves a card, so the box narrows (centred) to the
+        # aspect that holds it — forehead to chin margin, the crown trimmed.
+        U = usable(win)
+        need = min(U[3] - U[1], (head[3] - face[1]) * 1.02) * sh
+        aspect = min(bw / bh, (U[2] - U[0]) * sw / max(1.0, need))
+        rect, ok, _whole = _source_in(win, sw, sh, aspect)
+        nw = bh * aspect / W
+        cx = (box[0] + box[2]) / 2.0
+        box = [round(cx - nw / 2.0, 4), box[1], round(cx + nw / 2.0, 4),
+               box[3]]
+        bw = nw * W
     rw = (rect[2] - rect[0]) * sw
     k = bw / max(1.0, rw)
     if k > cap + 1e-6:
@@ -931,6 +946,33 @@ def _span_aim(layout, span, cw):
     return None, "pad_blur"
 
 
+def _unmeasured_rows(track, keep):
+    """Fitted rows for the kept seconds no sampled shot covers in a call
+    layout's track (a long source samples about every other shot): left to
+    the frame's base aim they would be cropped on the call window, and a
+    stage wide there can cut a host in half. Only a gap with the call
+    cropped on BOTH sides keeps that aim (most likely more of the call)."""
+    rows = sorted(track, key=lambda r: r["t0"])
+    out = []
+    for a, b in _merge(keep):
+        cur = a
+        for r in rows + [None]:
+            g1 = b if r is None else min(b, r["t0"])
+            if g1 - cur > .05:
+                left = next((p for p in reversed(rows)
+                             if abs(p["t1"] - cur) <= .05), None)
+                right = r if r is not None and abs(r["t0"] - g1) <= .05 \
+                    else None
+                if not (left and right and left["mode"] == "crop"
+                        and right["mode"] == "crop"):
+                    out.append({"t0": round(max(0.0, cur), 3),
+                                "t1": round(g1, 3), "mode": "pad_blur"})
+            if r is None or r["t0"] >= b:
+                break
+            cur = max(cur, r["t1"])
+    return out
+
+
 def frame_for(layout, keep, ratio="9:16", sw=None, sh=None):
     """The frame a short over SOURCE ``keep`` starts with (a Frame dict,
     never None), and why: (frame, note).
@@ -981,6 +1023,8 @@ def frame_for(layout, keep, ratio="9:16", sw=None, sh=None):
             if x is not None:
                 row.update(x=x, y=0.5)
             track.append(row)
+        track += _unmeasured_rows(track, keep)
+        track.sort(key=lambda r: r["t0"])
         base = plain_crop(win, sw, sh, *_canvas(rw, rh))
         frame = {"ratio": ratio, "mode": "crop", "focus_x": base["x"],
                  "focus_y": 0.5, "focus_track": track or None}
@@ -1007,10 +1051,10 @@ def frame_for(layout, keep, ratio="9:16", sw=None, sh=None):
         fs = [f for f in s.get("faces") or [] if f[2] - f[0] >= .02]
         if fs:
             m = max(fs, key=lambda f: (f[2] - f[0]) * (f[3] - f[1]))
-            main.append(((m[0] + m[2]) / 2.0, (m[1] + m[3]) / 2.0, got))
-    main.sort()
-    half, acc, cx, cy = sum(g for _x, _y, g in main) / 2.0, 0.0, .5, .5
-    for x, y, g in main:
+            main.append(((m[0] + m[2]) / 2.0, (m[1] + m[3]) / 2.0, got, m))
+    main.sort(key=lambda row: row[:3])
+    half, acc, cx, cy = sum(r[2] for r in main) / 2.0, 0.0, .5, .5
+    for x, y, g, _m in main:
         acc += g
         if acc >= half:
             cx, cy = x, y
@@ -1020,6 +1064,17 @@ def frame_for(layout, keep, ratio="9:16", sw=None, sh=None):
         return ({"ratio": ratio, "mode": "pad_blur"},
                 "no single crop keeps every face whole: the whole frame is "
                 "fitted until auto_reframe aims it shot by shot")
+    # One still aim must also hold each shot's own speaker: a two-camera
+    # podcast frames host and guest at different places in their close-ups,
+    # and an aim on one leaves the other's shots with nobody in the crop
+    # (1 in 5 single-aim seeds on 21 real podcast sources, Oct 2026).
+    if any(g >= MIN_SHOT_S and not (m[0] >= x - cw / 2.0 - 1e-3 and
+                                    m[2] <= x + cw / 2.0 + 1e-3)
+           for _x, _y, g, m in main):
+        return ({"ratio": ratio, "mode": "pad_blur"},
+                "the speakers sit at different places across these shots, "
+                "so no one still crop holds each shot's speaker: the whole "
+                "frame is fitted until auto_reframe aims it shot by shot")
     return ({"ratio": ratio, "mode": "crop", "focus_x": x,
              "focus_y": round(min(max(cy, 0.0), 1.0), 3)},
             "one crop aim on the speaker that cuts no face")

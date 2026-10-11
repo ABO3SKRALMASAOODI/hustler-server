@@ -446,3 +446,74 @@ def test_a_low_resolution_short_starts_as_a_window_not_a_smeared_crop():
     frame, _ = sl.frame_for(dict(CAMERA, w=1280, h=720), [[10.0, 40.0]],
                             "9:16", 1280, 720)
     assert frame["mode"] == "crop"
+
+
+# ── review fixes (Oct 11 2026) ────────────────────────────────────────────
+
+def test_one_aim_that_leaves_a_shots_speaker_out_is_fitted_instead():
+    # a two-camera podcast: the host's close-up frames him left, the
+    # guest's frames her right; an aim on either leaves the other's shots
+    # with nobody in the crop (palantir-karp 560-584 s, a real seed)
+    lay = dict(CAMERA, spans=[
+        {"t0": 0.0, "t1": 14.0, "kind": "camera", "win": None,
+         "faces": [[.45, .09, .62, .38]]},
+        {"t0": 14.0, "t1": 20.0, "kind": "camera", "win": None,
+         "faces": [[.79, .32, .89, .50]]},
+        {"t0": 20.0, "t1": 29.0, "kind": "camera", "win": None,
+         "faces": [[.49, .19, .62, .42]]}])
+    frame, why = sl.frame_for(lay, [[0.0, 29.0]], "9:16")
+    assert frame == {"ratio": "9:16", "mode": "pad_blur"}
+    assert "each shot's speaker" in why
+    # a shot the short only grazes (under a second) does not decide it
+    frame, _ = sl.frame_for(lay, [[0.0, 14.5]], "9:16")
+    assert frame["mode"] == "crop"
+
+
+def test_a_call_shorts_unsampled_shot_beside_a_stage_shot_is_fitted():
+    # a long source samples about every other shot: the seconds no sample
+    # covers would take the frame's base aim (cropped on the call), and a
+    # stage wide there can cut the host in half
+    spans = [dict(s) for s in SPANS]
+    spans[3] = dict(spans[3], t0=50.0)          # 43.41-50 unsampled
+    lay = dict(LAYOUT, spans=spans)
+    frame, _why = sl.frame_for(lay, [[30.0, 90.0]], "9:16")
+    Frame.model_validate(frame)
+    gap = [r for r in frame["focus_track"]
+           if r["t0"] <= 45.0 < r["t1"]]
+    assert gap and gap[0]["mode"] == "pad_blur"
+    # an unsampled shot with the call cropped on both sides stays the call
+    spans = [dict(s) for s in SPANS[:1]] + [
+        {"t0": 40.0, "t1": 121.75, "kind": "call", "win": "call1",
+         "faces": [[0.43, 0.37, 0.63, 0.72]]}]
+    frame, _ = sl.frame_for(dict(LAYOUT, spans=spans), [[10.0, 60.0]])
+    Frame.model_validate(frame)
+    assert all(r["mode"] == "crop" for r in frame["focus_track"])
+    assert not any(r["t0"] <= 35.0 < r["t1"] for r in frame["focus_track"])
+
+
+def test_a_square_or_landscape_call_card_never_cuts_the_guests_face():
+    # the Looks' 1:1 cards on the measured call cut the forehead; a
+    # landscape card cut half the face — the box narrows until it is whole
+    for box in ([0, 0.21, 1, 0.773], [0.04, 0.12, 0.96, 0.637],
+                [0.04, 0.3, 0.96, 0.6]):
+        nbox, rect, k, ok, _pip = sl.card_for_box(CALL, 1920, 1080, box)
+        assert ok is True and sl._inside(CALL["face"], rect, .002), box
+        assert k <= sl.UPSCALE_CAP + 1e-6
+        assert nbox[1] >= box[1] - 1e-3 and nbox[3] <= box[3] + 1e-3
+        assert nbox[2] - nbox[0] < box[2] - box[0]
+        a_box = (nbox[2] - nbox[0]) * 1080 / ((nbox[3] - nbox[1]) * 1920)
+        a_rect = (rect[2] - rect[0]) * 1920 / ((rect[3] - rect[1]) * 1080)
+        assert abs(a_box - a_rect) < .02
+    ctx = _Ctx(LAYOUT)
+    res = agent_tools.set_picture_card(ctx, "c", 0, 9,
+                                       box=[0.04, 0.3, 0.96, 0.6])
+    assert "face stays whole" in res
+
+
+def test_an_unusable_layout_still_seeds_a_fitted_frame():
+    import shorts
+    broken = dict(LAYOUT, windows=[dict(CALL, rect=None)])
+    ctx = _Ctx(broken, keep=((50.0, 90.0),), frame=False)
+    version, note = shorts._seed_frame(ctx)
+    assert ctx._edl["frame"]["ratio"] == "9:16"
+    assert ctx._edl["frame"]["mode"] == "pad_blur" and "unusable" in note
