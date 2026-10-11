@@ -554,8 +554,10 @@ def _child_matte(spec, ch):
     else:
         sess = personseg.rvm_session_at(engine["path"],
                                         engine.get("threads") or 0)
-        stream = personseg.rvm_stream_on(
-            sess, w, h, downsample_ratio=params.get("downsample_ratio"))
+        ds = params.get("downsample_ratio")
+        # (no param: Wave 0's exact call and operating point)
+        stream = (personseg.rvm_stream_on(sess, w, h, downsample_ratio=ds)
+                  if ds else personseg.rvm_stream_on(sess, w, h))
 
         def alpha_of(frame):
             return stream.step(frame, cv2)
