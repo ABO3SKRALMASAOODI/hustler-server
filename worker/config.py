@@ -528,6 +528,13 @@ FLASH_SAFE_MAX_PER_S = 3
 # ---- W1 1C end
 
 # ---- W1 1D (punctuation, strobes, junctions) begin
+# The junction_datamosh device card's flag. The real datamosh re-encodes the
+# junction window with the incoming keyframe dropped, which needs a renderer
+# prepass (asked of 1A); until it lands the card stays dark and only a
+# datamosh junction written without a device renders (as the in-graph smear,
+# reported "reduced"). Off by default.
+W1D_DATAMOSH = os.getenv("W1D_DATAMOSH", "0").strip().lower() in (
+    "1", "true", "yes", "on")
 # ---- W1 1D end
 
 # ---- W1 1E (finishing and variants) begin

@@ -1,0 +1,76 @@
+{
+  "id": "accent_hue_step",
+  "family": "punctuation",
+  "verb": "add_accent",
+  "fx_type": "accent",
+  "stage": "pre_captions",
+  "params": {
+    "kind": [
+      "hue_step"
+    ],
+    "stage": [
+      "pre_captions"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:overlay",
+      "ffmpeg:alphamerge"
+    ],
+    "footage": "any picture"
+  },
+  "binds_to": [
+    "stress",
+    "cut",
+    "word.payoff",
+    "beat.kick",
+    "downbeat",
+    "onset"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 0,
+      "min_gap_s": 6
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 2
+    },
+    "charged": {
+      "per_short": 6,
+      "min_gap_s": 0.25
+    }
+  },
+  "never": [
+    "mid-word on a payoff word",
+    "inside a payoff hold",
+    "a second punctuation family in the same section",
+    "on consecutive shots except a deliberate callback"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 3.0,
+      "batch": 2.2,
+      "local": 1.8
+    },
+    "fixed_ms": 40
+  },
+  "exemplars": [],
+  "verify": [
+    "land_err_f<=1",
+    "region_locality<=0"
+  ],
+  "status": "live",
+  "description": "The hue rotates a golden-angle step per hit: colour punctuation on a beat train without a luminance flash.",
+  "skill": "punctuation"
+}

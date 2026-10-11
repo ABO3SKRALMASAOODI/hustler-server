@@ -1,0 +1,32 @@
+# AT-1D-3: a 2-frame strobe of clip frames and negatives over live sound.
+# The registered 1E variant set is the final version (make_variant_set is
+# 1E's; tests/test_w1d_local.py uses stand-in variant stills as assets);
+# refbench cannot attach media, so this case strobes clip frames of the
+# window itself (source kind), alternate ones negated.
+id: AT-1D-3
+track: 1D
+title: 2-frame product strobe with negatives (Optimus), timeline-neutral
+local_only: true
+interim: true
+reference:
+  - {ref: "01", t: [0.04, 0.96], approx: false, board_t: 0.375}
+footage:
+  - {vfl: V13, window: optimus_walk}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[3.0, 9.0]]
+  ops:
+    - {action: upsert, layer: fx, id: st_lab, value: {id: st_lab, type: strobe, stage: pre_captions, start: 1.0, end: 2.0, fit: register, device: strobe_frames, frames: [{source: {kind: source, src_t: 4.0}, hold_f: 2}, {source: {kind: source, src_t: 4.0}, hold_f: 2, negate: true}, {source: {kind: source, src_t: 11.0}, hold_f: 2}, {source: {kind: source, src_t: 11.0}, hold_f: 2, negate: true}, {source: {kind: source, src_t: 16.0}, hold_f: 2}, {source: {kind: source, src_t: 16.0}, hold_f: 2, negate: true}]}}
+chat: null
+render: {variant: final}
+allow: [flash_optin]
+metrics:
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: determinism, op: "<=", value: 0}
+  - {name: flash_risk}
+beyond: "every image exactly 2 frames over the untouched sound (no insert, no re-timing), registered by construction, from one call; the reference needed hand-made assets cut frame by frame"
+board: {stills: [1.0, 1.08, 1.17], clip: [0.5, 2.5]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

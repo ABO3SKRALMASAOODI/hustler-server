@@ -212,12 +212,56 @@ def keyed_pad(ctx, item, region, key):
 
 # ── the picture card's region (track 1D) ────────────────────────────────
 
+def _card_key(item, key):
+    return f"region:{(item or {}).get('id')}:{key}:card"
+
+
 def card_prepare(plan, item, region, key):
-    """1D: precompute the picture card's inner rect (rounded corners) over
-    the item's window, from picture_cards geometry. STUB until 1D."""
-    return ("omit", "card regions arrive with track 1D")
+    """1D: the picture card's rounded window as a gray still, drawn exactly
+    as the card's own plate draws its hole (wipe_masks.card_mask), for the
+    card on screen over the item's window. Registered as a one-frame input
+    (decoded once, held by ``loop`` in card_pad). Degrades to ``omit`` when
+    no card is on screen then, or the render's EDL is out of reach."""
+    import wipe_masks
+    if not plan.workdir or not plan.W or not plan.H:
+        return ("omit", "no workdir/geometry for the card mask")
+    edl = wipe_masks.render_env(plan).get("edl")
+    if edl is None:
+        return ("omit", "the render's picture cards are out of reach here")
+    t0 = (item or {}).get("start")
+    t1 = (item or {}).get("end")
+    if t0 is None:
+        t0 = (item or {}).get("at")
+    if t0 is None:
+        return ("omit", "a card region needs the item's window")
+    spec = wipe_masks.card_spec_at(edl, t0, t1)
+    if spec is None:
+        return ("omit", f"no picture card is on screen at {float(t0):g}s")
+    path = wipe_masks.card_mask_path(plan.workdir, plan.W, plan.H, spec)
+    plan.add_input(_card_key(item, key), ["-i", path])
+    return None
 
 
 def card_pad(ctx, item, region, key):
-    """1D: the card region's fresh gray program mask. STUB."""
-    return None
+    """1D: the card region's fresh gray program mask (255 inside the
+    card's window, the whole program long), or None."""
+    import wipe_masks
+    k = _card_key(item, key)
+    spent = ctx.plan.__dict__.setdefault(_SPENT, set())
+    label = ctx.input_label(k)
+    if label is None or k in spent:
+        return None
+    spent.add(k)
+    out = ctx.uid("rgc")
+    n = int(ctx.plan.n_frames) + 2
+    ctx.parts.append(f"[{label}]format=gray,loop=loop=-1:size=1,"
+                     f"{wipe_masks.pts(ctx.fps3)},trim=end_frame={n}"
+                     f"[{out}]")
+    if _get(region, "invert") or float(_get(region, "feather_px") or 0.0):
+        feather = float(_get(region, "feather_px") or 0.0) * \
+            float(ctx.H or FEATHER_REF_H) / FEATHER_REF_H
+        o2 = ctx.uid("rgc")
+        return fxprims.mask_ops(ctx.parts, out, o2, uid=o2,
+                                invert=bool(_get(region, "invert")),
+                                feather_px=feather)
+    return out
