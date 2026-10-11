@@ -526,7 +526,12 @@ FLASH_SAFE_MAX_PER_S = 3
 PROGRAM_MATTE_OFF = os.getenv("PROGRAM_MATTE_OFF", "0") == "1"
 # matte.person's RVM coarse pass for every program-matte request (the
 # sidecar param ``downsample_ratio``; 0 = Wave 0's default operating point
-# and keys). Measured in tools/at1a_matte.py --perf.
+# and keys, so warm sidecars stay warm). Measured (tools/at1a_matte.py
+# --perf and the AT cases): 0.375 halves the model's CPU (318 vs 612
+# CPU-ms/frame locally; a 60 s sidecar projects 90 s vs 156 s on
+# standard-4) and holds wide and medium shots (person label IoU 0.997 /
+# 0.970 vs 0.998 / 0.975) but breaks the close-up (AT-1A-4: IoU 0.965,
+# min 0.866, edge chatter 0.008, flicker 0.041) — so it stays off.
 MATTE_DOWNSAMPLE_RATIO = float(os.getenv("MATTE_DOWNSAMPLE_RATIO", "0")
                                or 0) or None
 # The matte's edge at render resolution ("lo,hi" smoothstep, or "off") and
