@@ -79,11 +79,11 @@ def _index(ref, info, shots=()):
 
 
 def _render(tmp_path, src, index, edl, name, preview=True, show=False,
-            monkeypatch=None, asset_locals=None):
+            monkeypatch=None, asset_locals=None, shrink=0):
     import renderer
     from schemas import validate_edl
     if show:
-        sup.show_matte(monkeypatch)
+        sup.show_matte(monkeypatch, shrink=shrink)
     out = str(tmp_path / f"{name}.mp4")
     work = str(tmp_path / f"work_{name}")
     os.makedirs(work, exist_ok=True)
@@ -175,6 +175,72 @@ def test_static_crop_and_follow_through_cuts(tmp_path, monkeypatch, store,
     assert len(ious) > 100
     assert min(ious) >= 0.98, min(ious)
     assert float(np.mean(ious)) >= 0.995, float(np.mean(ious))
+
+
+def test_a_stitched_window_carries_its_own_matte(tmp_path, monkeypatch,
+                                                 store, synth):
+    """INTERFACES_W1.md §1.6 (6): a stitched preview re-renders one window
+    of the program standalone (stitch.window_edl: the window's own keep,
+    its graphics re-timed). The program matte is solved for THAT EDL — the
+    window's frames carry the subject exactly as the full program did."""
+    import stitch
+    from timeline import Timeline
+    src, ref, root, info = synth
+    store(root)
+    edl = {"keep": [[0.4, 2.4], [2.8, 4.8], [5.2, 7.6]],
+           "frame": {"ratio": "9:16", "mode": "crop",
+                     "follow": [{"t0": 0.0, "t1": 8.0,
+                                 "k": [[0.0, 0.2, 0.5], [3.0, 0.5, 0.5],
+                                       [7.6, 0.8, 0.5]]}]}}
+    tl = Timeline(edl["keep"])
+    edl["texts"] = [_behind_text(tl, 0.2, 5.8)]
+    win = stitch.window_edl(edl, tl, 1.6, 4.4, fps=25.0)
+    assert win["texts"] and win["texts"][0].get("behind")
+    index = _index(ref, info)
+    plain = copy.deepcopy(win)
+    plain["texts"] = []
+    pic = _render(tmp_path, src, index, plain, "win_pic")
+    mat = _render(tmp_path, src, index, win, "win_mat", show=True,
+                  monkeypatch=monkeypatch)
+    ious = _compare(pic, mat, 0, int(round(2.8 * 25)))
+    assert len(ious) > 60
+    assert min(ious) >= 0.98, min(ious)
+    assert float(np.mean(ious)) >= 0.995, float(np.mean(ious))
+
+
+def test_the_composite_insets_the_matte_by_its_shrink(tmp_path, monkeypatch,
+                                                     store, synth):
+    """matte_track.behind_shrink_px: the behind composite pulls the program
+    matte inside the subject's contour (no rim of the wall behind the
+    subject laid over the type) by exactly round(1.5 px per 1080 rows)
+    erosions — 1 px at the 480-row preview — and nothing else moves."""
+    import matte_track
+    from timeline import Timeline
+    src, ref, root, info = synth
+    store(root)
+    edl = {"keep": [[0.4, 6.4]], "frame": {"ratio": "9:16", "mode": "crop",
+                                           "focus_x": 0.45}}
+    tl = Timeline(edl["keep"])
+    edl["texts"] = [_behind_text(tl, 0.4, 5.6)]
+    index = _index(ref, info)
+    boxes = {}
+    for shrink in (0, 1.5):
+        mat = _render(tmp_path, src, index, edl, f"inset{shrink}",
+                      show=True, monkeypatch=monkeypatch, shrink=shrink)
+        if shrink:
+            assert matte_track.behind_shrink_px(480) == 1
+        m = sup.frames(mat)
+        got = []
+        for k in range(20, 130, 10):
+            ys, xs = np.nonzero(m[k] > 127)
+            got.append((xs.min(), xs.max(), ys.min(), ys.max()))
+        boxes[shrink] = got
+    W, H = 270, 480
+    for (a0, a1, b0, b1), (c0, c1, d0, d1) in zip(boxes[0], boxes[1.5]):
+        # (a side on the frame's edge has nothing outside it to inset from)
+        want = (0 if a0 == 0 else 1, 0 if a1 == W - 1 else 1,
+                0 if b0 == 0 else 1, 0 if b1 == H - 1 else 1)
+        assert (c0 - a0, a1 - c1, d0 - b0, b1 - d1) == want
 
 
 def test_speed_ramp_insert_and_payoff_hold(tmp_path, monkeypatch, store,

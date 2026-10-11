@@ -14,12 +14,15 @@ import json
 import os
 import sys
 
+import numpy as np
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 
 
 def main(work):
+    import config
     import media
     import motion_layer
     import renderer
@@ -57,6 +60,8 @@ def main(work):
         paths = {}
         for name, edl, show in (("pic", pic, False), ("mat", e, True)):
             saved = motion_layer.composite_behind
+            # the program matte's own geometry (the composite's inset off)
+            config.MATTE_BEHIND_SHRINK = 0
             if show:
                 def _show(parts, vlabel, mask_label, j, **kw):
                     parts.append(f"[{mask_label}]format=yuv420p[sh{j}m]")
@@ -75,7 +80,21 @@ def main(work):
         b = sup.frames(paths["mat"])
         ious = []
         for k in range(15, 140):
-            ious.append(sup.iou(a[k] > 175, b[k] > 127))
+            pa, pb = a[k] > 175, b[k] > 127
+            ys, xs = np.nonzero(pa | pb)
+            Hh, Ww = pa.shape
+            if len(xs) and (xs.min() == 0 or ys.min() == 0
+                            or xs.max() == Ww - 1 or ys.max() == Hh - 1):
+                # a sliver entering or leaving the frame: a pixel of edge
+                # is most of its IoU; judged by its edges instead
+                ea = np.nonzero(pa.any(axis=0))[0]
+                eb = np.nonzero(pb.any(axis=0))[0]
+                ok = (len(ea) and len(eb)
+                      and abs(int(ea.min()) - int(eb.min())) <= 2
+                      and abs(int(ea.max()) - int(eb.max())) <= 2)
+                ious.append(1.0 if ok else sup.iou(pa, pb))
+                continue
+            ious.append(sup.iou(pa, pb))
         out[stage] = ious
     print(json.dumps(out))
 

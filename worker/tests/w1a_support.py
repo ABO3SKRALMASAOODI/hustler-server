@@ -108,10 +108,15 @@ def write_chunks(store_root, src, *, rw=80, rh=160, y=100, cut_at=None,
     return keys
 
 
-def show_matte(monkeypatch):
+def show_matte(monkeypatch, shrink=0):
     """Make every behind-subject composite output its MASK as the picture
-    (the program matte the composite would use, full frame, gray)."""
+    (the program matte the composite would use, full frame, gray).
+    ``shrink``: the composite's inset (config.MATTE_BEHIND_SHRINK, px per
+    1080) — off by default, so the view is the program matte's own
+    geometry; the inset has its own test."""
+    import config
     import motion_layer
+    monkeypatch.setattr(config, "MATTE_BEHIND_SHRINK", shrink)
 
     def _show(parts, vlabel, mask_label, j, **kw):
         # the mask's pixels laid opaque over the picture: every frame keeps

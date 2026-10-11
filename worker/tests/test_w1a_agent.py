@@ -133,10 +133,15 @@ def test_a_window_over_a_speed_ramp_goes_behind(project, live_store,
 
 
 def test_a_follow_crop_keeps_its_clip_and_names_the_program_matte(
-        project, live_store, tmp_path):
+        project, live_store, tmp_path, monkeypatch):
     """A crop that follows the speaker across the window: the clip is
     measured (the numbers in the reply) and the program matte draws it."""
     import agent_tools
+    import config
+    # the clip's numbers from the photometric engine (a white rectangle is
+    # no person to RVM or u2net, wherever their model files are installed)
+    monkeypatch.setattr(config, "MATTE_RVM_MODEL", "")
+    monkeypatch.setattr(config, "MATTE_SEG_MODEL", "")
     edl = {"keep": [[0.0, 3.8]],
            "frame": {"ratio": "9:16", "mode": "crop",
                      "follow": [{"t0": 0.0, "t1": 4.0,

@@ -98,6 +98,16 @@ def apply_ops(edl, ops, duration):
 
 # ── renders ──────────────────────────────────────────────────────────────
 
+CPU_S = {}          # render path -> CPU seconds (this process + children)
+
+
+def _cpu_s():
+    import resource
+    a = resource.getrusage(resource.RUSAGE_SELF)
+    b = resource.getrusage(resource.RUSAGE_CHILDREN)
+    return a.ru_utime + a.ru_stime + b.ru_utime + b.ru_stime
+
+
 def render(S, edl, out, *, preview=False, matte_view=False, live=True):
     """(render path, wall s, motion warnings, placements)."""
     import matte_track
@@ -140,11 +150,13 @@ def render(S, edl, out, *, preview=False, matte_view=False, live=True):
             return saved_run(cmd, **kw)
         renderer._render_media_run = _lossless
     t0 = time.time()
+    c0 = _cpu_s()
     try:
         with ink.capture_overlays() as placed:
             e = validate_edl(edl, float(S["info"]["duration"])).model_dump()
             renderer.render_edl(e, S["index"], S["path"], out, work,
                                 preview)
+        CPU_S[out] = round(_cpu_s() - c0, 2)
     finally:
         renderer._render_media_run = saved_run
         motion_layer.stop_collecting(tok)
@@ -703,8 +715,12 @@ def run(case_id, out, preview):
     bp, _wb, _xb, _pb = render(S, base, os.path.join(cdir, "base.mp4"),
                                preview=preview)
     fps = float(qa_metrics.probe(rp)["fps"])
+    cpu_r, cpu_c = CPU_S.get(rp), CPU_S.get(cp)
     res.update(render_wall_s=wall, control_wall_s=wall_c,
                cost_ratio=round(wall / wall_c, 3) if wall_c else None,
+               render_cpu_s=cpu_r, control_cpu_s=cpu_c,
+               cpu_ratio=round(cpu_r / cpu_c, 3) if cpu_r and cpu_c
+               else None,
                wave0_wall_s=wall0,
                fallbacks=fallbacks(warns), wave0_fallbacks=fallbacks(warns0),
                items={})
@@ -887,14 +903,52 @@ def perf_preview(out, reps=3):
         m["layer"] = "above_captions"
         m.pop("behind", None)
     walls = {"behind": [], "front": []}
+    cpus = {"behind": [], "front": []}
     for k in range(reps):
         for name, e in (("front", front), ("behind", edl)):
-            _p, w, _x, _y = render(S, e, os.path.join(out, f"pp_{name}_{k}"
+            p_, w, _x, _y = render(S, e, os.path.join(out, f"pp_{name}_{k}"
                                                       ".mp4"), preview=True)
             walls[name].append(w)
+            cpus[name].append(CPU_S.get(p_))
     med = {k: float(np.median(v)) for k, v in walls.items()}
+    cmed = {k: float(np.median([x for x in v if x is not None]))
+            for k, v in cpus.items()}
+    import qa_metrics
+    fps = float(qa_metrics.probe(p_)["fps"])
+    n_item = int(round(11.0 * fps))           # the word's 0.5-11.5 s window
     return {"walls": walls, "median_s": med,
-            "added_s": round(med["behind"] - med["front"], 2)}
+            "added_s": round(med["behind"] - med["front"], 2),
+            "cpu_s": cpus, "median_cpu_s": cmed,
+            "added_cpu_ms_per_item_frame": round(
+                1000.0 * (cmed["behind"] - cmed["front"]) / n_item, 2)}
+
+
+def perf_final(out, reps=2):
+    """AT-1A-perf (3): the final's cost ratio — AT-1A-1's short (the 9:16
+    follow crop, 7 spans, three words behind the head) rendered final with
+    the words behind the subject vs the same words in front, alternated,
+    wall and CPU (medians)."""
+    S, edl, spec = case_1a1(out, False)
+    front = copy.deepcopy(edl)
+    for m in front.get("motion") or []:
+        if m.get("layer") == "behind_subject":
+            m["layer"] = "above_captions"
+            m.pop("behind", None)
+            m.pop("composite", None)
+    walls = {"behind": [], "front": []}
+    cpus = {"behind": [], "front": []}
+    for k in range(reps):
+        for name, e in (("front", front), ("behind", edl)):
+            p_, w, _x, _y = render(S, e, os.path.join(out, f"pf_{name}_{k}"
+                                                      ".mp4"))
+            walls[name].append(w)
+            cpus[name].append(CPU_S.get(p_))
+    med = {k: float(np.median(v)) for k, v in walls.items()}
+    cmed = {k: float(np.median(v)) for k, v in cpus.items()}
+    return {"walls": walls, "cpu_s": cpus, "median_s": med,
+            "median_cpu_s": cmed,
+            "cost_ratio_wall": round(med["behind"] / med["front"], 3),
+            "cost_ratio_cpu": round(cmed["behind"] / cmed["front"], 3)}
 
 
 def main(argv=None):
@@ -912,6 +966,7 @@ def main(argv=None):
         pdir = os.path.join(a.out, "AT-1A-perf")
         os.makedirs(pdir, exist_ok=True)
         r = {"preview": perf_preview(pdir),
+             "final": perf_final(pdir),
              "sidecars": perf_sidecars(pdir, a.trial)}
         with open(os.path.join(pdir, "result.json"), "w") as fh:
             json.dump(r, fh, indent=1)
