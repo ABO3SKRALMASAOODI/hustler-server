@@ -296,6 +296,71 @@ def matte_quality(matte_path, rec, fps, render_path=None):
     return out
 
 
+def program_alignment(base_path, matte_path, rec, fps, size=None,
+                      offsets=(-2, -1, 0, 1, 2)):
+    """The program matte against an INDEPENDENT person matte of the
+    program's own frames (review). The occlusion IoU above compares the
+    render with the very matte it composited, so a matte a frame early or
+    late on a whole kept span scores ~1.0 there; this runs a fresh RVM
+    stream over the program WITHOUT the graphics (``base_path``) and scores
+    the item's program-matte frames (``matte_path``, the matte view) in a
+    6 px band around that matte's edge, frame f against picture frame
+    f + k. An aligned matte peaks at k = 0; ``best_offset`` is the
+    criterion, ``edge_iou`` the k = 0 score (it also reads the RVM-vs-RVM
+    edge agreement, ~0.92 on a clean talking head)."""
+    import cv2
+    import personseg
+    import qa_metrics
+    if size is None:
+        info = qa_metrics.probe(base_path)
+        size = (int(info["width"]) // 4 * 2, int(info["height"]) // 4 * 2)
+    w, h = size
+    f0 = int(np.ceil(rec["start"] * fps)) + 3
+    f1 = int(np.floor(rec["end"] * fps)) - 3
+    if f1 - f0 < 8:
+        return None
+    reach = max(abs(k) for k in offsets)
+    warm = int(round(fps))
+    pi, pic = qa_read(base_path, max(0, f0 - reach - warm), f1 + reach,
+                      (w, h), gray=False)
+    mi, mat = qa_read(matte_path, f0, f1, (w, h), gray=True)
+    try:
+        sess = personseg.rvm_session_at(personseg.rvm_model_path(), 4)
+    except Exception:  # noqa: BLE001 — no model here: not measured
+        return None
+    st = personseg.rvm_stream_on(sess, w, h)
+    seg = {int(f): st.step(np.ascontiguousarray(fr), cv2) > 0.5
+           for f, fr in zip(pi, pic)}
+    kern = np.ones((7, 7), np.uint8)
+    scores = {}
+    for k in offsets:
+        vals = []
+        for f, m in zip(mi, mat):
+            sg = seg.get(int(f) + k)
+            if sg is None:
+                continue
+            mm = (m[..., 0] if m.ndim == 3 else m) > 127
+            m8 = mm.astype(np.uint8)
+            band = (cv2.dilate(m8, kern) > 0) & ~(cv2.erode(m8, kern) > 0)
+            u = ((mm | sg) & band).sum()
+            if u:
+                vals.append(float((mm & sg & band).sum()) / float(u))
+        if vals:
+            scores[k] = round(float(np.mean(vals)), 4)
+    if not scores:
+        return None
+    best = max(scores, key=scores.get)
+    return {"best_offset": best, "edge_iou": scores.get(0),
+            "by_offset": scores, "frames": len(mat)}
+
+
+def qa_read(path, f0, f1, size, gray):
+    """Frames [f0, f1) of ``path`` scaled to ``size`` (one decode)."""
+    import qa_metrics
+    return qa_metrics.read_frames(path, size=size, gray=gray,
+                                  start_frame=f0, count=f1 - f0, seek=True)
+
+
 # ── boards ───────────────────────────────────────────────────────────────
 
 def board(cdir, name, ours, ref_id, pairs, title, footer=()):
@@ -406,8 +471,11 @@ def case_1a2(out, preview):
     k0, k1 = S["edl"]["keep"][0]
     cuts = [c for c in S["shots"] if k0 + 1.5 < c < k1 - 2.0]
     cut_prog = round(cuts[0] - k0, 2) if cuts else 6.0
+    # the word on the wall at the speakers' left, its tail tucking behind
+    # each head (review: wider type set across the head read "FREE" /
+    # "FREED", 55% visible; this keeps ~80% and every letter but the last)
     ops = [_hero("h1", "FREEDOM", round(cut_prog - 1.6, 2),
-                 round(cut_prog + 1.8, 2), y=0.3, x=0.36, width=0.62,
+                 round(cut_prog + 1.8, 2), y=0.2, x=0.31, width=0.5,
                  entrance="pop")]
     if cuts:
         # an editor's reframe ON the camera cut (one follow span, a
@@ -428,7 +496,7 @@ def case_1a2(out, preview):
             "focus_y": 0.4, "follow": [{
                 "t0": k0, "t1": k1,
                 "k": [[k0, 0.57, 0.4], [round(a_, 4), 0.57, 0.4],
-                      [round(b_, 4), 0.25, 0.4], [k1, 0.25, 0.4]]}]}})
+                      [round(b_, 4), 0.2, 0.4], [k1, 0.2, 0.4]]}]}})
     edl = apply_ops(S["edl"], ops, float(S["info"]["duration"]))
     return S, edl, {"items": ["h1"], "ref": "12",
                     "ref_pairs": [(cut_prog - 0.3, 12.8),
@@ -452,11 +520,13 @@ def case_1a3(out, preview):
     zoom = {"action": "set", "layer": "effects", "value": {
         "zooms": [{"id": "z1", "start": 1.0, "end": 9.3, "mode": "push_in",
                    "strength": 0.26}]}}
-    hero = _hero("h1", "BIGGER", 1.0, 9.3, y=0.13, entrance="pop",
-                 role="condensed")
+    # (review: set left of the head so the push only ever takes the last
+    # letters — "BIGG..." for most of the window read as "BIG")
+    hero = _hero("h1", "BIGGER", 1.0, 9.3, y=0.13, x=0.36, width=0.6,
+                 entrance="pop", role="condensed")
     hero["value"]["composite"] = {"stage": "screen"}
-    world = _hero("h2", "BIGGER", 1.0, 9.3, y=0.13, entrance="pop",
-                  role="condensed")
+    world = _hero("h2", "BIGGER", 1.0, 9.3, y=0.13, x=0.36, width=0.6,
+                  entrance="pop", role="condensed")
     edl = apply_ops(S["edl"], [zoom, hero], dur)
     edl_world = apply_ops(S["edl"], [zoom, world], dur)
     return S, edl, {"items": ["h1"], "ref": "05",
@@ -468,15 +538,18 @@ def case_1a4(out, preview):
     """AT-1A-4: V08 840-870, a close-up whose subject fills 60-70% of the
     frame — refused by Wave 0's coverage cap; 09's continuous lockups."""
     src_edl = {"keep": [[842.0, 856.0]],
-               "frame": {"ratio": "9:16", "mode": "crop", "focus_x": 0.5,
+               "frame": {"ratio": "9:16", "mode": "crop", "focus_x": 0.55,
                          "focus_y": 0.4}}
     S = setup("V08", "garry_closeup", src_edl, out)
     # a close-up leaves the band over the hair and the wall at the head's
     # side as the only wall: tall condensed type high and right, tucking
     # behind the head's edge (09's lockups)
-    ops = [_hero("h1", "FOUNDERS", 0.6, 4.8, y=0.12, x=0.56, width=0.78,
+    # (review: the words' first letters had been under the head — "DERS",
+    # "LD", under half visible; now the head takes the first letter at
+    # most, the 09 lockup, ~78% visible)
+    ops = [_hero("h1", "FOUNDERS", 0.6, 4.8, y=0.2, x=0.68, width=0.56,
                  entrance="pop", role="condensed"),
-           _hero("h2", "BUILD", 5.4, 9.6, y=0.13, x=0.66, width=0.55,
+           _hero("h2", "BUILD", 5.4, 9.6, y=0.2, x=0.66, width=0.5,
                  entrance="pop", role="condensed")]
     edl = apply_ops(S["edl"], ops, float(S["info"]["duration"]))
     return S, edl, {"items": ["h1", "h2"], "ref": "09",
@@ -830,6 +903,7 @@ def run(case_id, out, preview):
         r = occlusion(rp, mp, rec, fps, base_path=bp)
         r.update(matte_quality(mp, rec, fps, bp))
         r.update(source_flicker(S, edl, rec))
+        r["program_alignment"] = program_alignment(bp, mp, rec, fps)
         res["items"][iid] = r
     if spec.get("drift_item"):
         iid = spec["drift_item"]

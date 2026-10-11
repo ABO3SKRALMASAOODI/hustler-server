@@ -19,14 +19,15 @@ edl:
   # an editor's reframe ON the camera cut (one follow span; the runner
   # places its one-frame move between the last old-shot frame and the
   # first new-shot one): each speaker right of centre, the word on the
-  # wall at his left, tucking behind his head
-  frame_follow: {x_before_cut: 0.57, x_after_cut: 0.25, y: 0.4}
+  # wall at his left, only its tail tucking behind his head (~80% of the
+  # word visible on both cameras)
+  frame_follow: {x_before_cut: 0.57, x_after_cut: 0.2, y: 0.4}
   ops:
     - {action: upsert, layer: motion, id: h1,
        value: {id: h1, template: word_slam, start: 10.82, end: 14.22,
                layer: behind_subject,
-               params: {text: FREEDOM, tier: hero, y: 0.3, x: 0.36,
-                        width: 0.62, entrance: pop}}}
+               params: {text: FREEDOM, tier: hero, y: 0.2, x: 0.31,
+                        width: 0.5, entrance: pop}}}
 chat: null
 render: {variant: final}
 allow: []

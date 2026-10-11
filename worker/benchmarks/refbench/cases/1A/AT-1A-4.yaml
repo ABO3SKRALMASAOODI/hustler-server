@@ -15,21 +15,21 @@ mode: engine
 edl:
   base: vfl_default
   keep: [[842.0, 856.0]]
-  focus: [0.5, 0.4]
+  focus: [0.55, 0.4]
   # the band over the hair and the wall at the head's side are the only
-  # wall: tall condensed type high and right, tucking behind the head's
-  # edge (09's lockups)
+  # wall: condensed type on the wall at the head's side, its first letter
+  # at most tucking behind the head's edge (09's lockups; ~78% visible)
   ops:
     - {action: upsert, layer: motion, id: h1,
        value: {id: h1, template: word_slam, start: 0.6, end: 4.8,
                layer: behind_subject,
-               params: {text: FOUNDERS, tier: hero, y: 0.12, x: 0.56,
-                        width: 0.78, role: condensed, entrance: pop}}}
+               params: {text: FOUNDERS, tier: hero, y: 0.2, x: 0.68,
+                        width: 0.56, role: condensed, entrance: pop}}}
     - {action: upsert, layer: motion, id: h2,
        value: {id: h2, template: word_slam, start: 5.4, end: 9.6,
                layer: behind_subject,
-               params: {text: BUILD, tier: hero, y: 0.13, x: 0.66,
-                        width: 0.55, role: condensed, entrance: pop}}}
+               params: {text: BUILD, tier: hero, y: 0.2, x: 0.66,
+                        width: 0.5, role: condensed, entrance: pop}}}
 chat: null
 render: {variant: final}
 allow: []
