@@ -81,8 +81,11 @@ def _target_time(edl, words, it, tgt):
         return _program_time_of_source(edl, _word_onset(words, tgt["word"],
                                                        near))
     if "cut" in tgt:
-        k = int(tgt["cut"])
-        return sum(b - a for a, b in edl["keep"][:k])
+        # the program start of keep k (speed spans and inserts included)
+        from timeline import Timeline
+        tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        return float(tl.offsets[int(tgt["cut"])])
     return float(tgt["t"])
 
 
@@ -217,12 +220,16 @@ def measure(case, ctx):
                                           without_s=ctx["wall_control_s"],
                                           bar=bar)
             else:
+                # the case asked for it: a bar nobody measured fails the
+                # case (verdict.unmeasured_metrics), a bare name is reported
                 r = {"value": None, "pass": None,
                      "detail": {"why": f"refbench has no measurer for {name} "
                                        "in engine cases yet"}}
         except Exception as ex:
             r = {"value": None, "pass": False,
                  "detail": {"error": f"{ex.__class__.__name__}: {ex}"[:300]}}
+        if bar is not None and r.get("bar") is None:
+            r["bar"] = qa_metrics.bar_text(bar)
         res[name if name not in res else f"{name}#{len(res)}"] = r
     return res
 
@@ -375,8 +382,8 @@ def cmd_run(argv):
     ap.add_argument("--determinism", action="store_true")
     ap.add_argument("--lossy", action="store_true",
                     help="keep the production CRF (comparisons then carry "
-                         "codec drift: brand/locality checks become "
-                         "tolerance-based)")
+                         "codec drift: brand_integrity reports None and "
+                         "region_locality needs its own tolerance)")
     a = ap.parse_args(argv)
     if not a.lossy:
         # Exact comparisons (watermark ROI |d| = 0, region locality, end-card

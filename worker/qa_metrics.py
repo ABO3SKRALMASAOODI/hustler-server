@@ -215,6 +215,12 @@ def read_frames(path, *, size=None, gray=False, rect=None, start_frame=0,
     vf = []
     if rect:
         x, y, w, h = [int(v) for v in rect]
+        if (x | y | w | h) & 1:
+            # crop on a 4:2:0 / 4:2:2 stream rounds an odd offset or size
+            # DOWN to the chroma grid (607 px wide comes out 606), and every
+            # frame read after that is a skewed slice of the stream: crop
+            # odd rects on full-resolution pixels instead
+            vf.append(f"format={'gray' if gray else 'rgb24'}")
         vf.append(f"crop={w}:{h}:{x}:{y}")
         W, H = w, h
     if size:
@@ -411,37 +417,58 @@ def land_err_f(*, events=None, targets=None, fps=None, event_times=None,
 
 
 @register("matte_iou")
-def matte_iou(*, pred, truth, thr=0.5, kind="person", bar=None):
+def matte_iou(*, pred, truth, thr=0.5, kind="person", void=None, bar=None):
     """Rendered/measured mask vs labelled keyframes (person >=0.92, object
     >=0.85). pred / truth: {frame: mask} (only shared frames are scored) or
-    equal-length lists. Value: mean IoU; detail has min and the per-frame
-    IoUs. A frame where both masks are empty scores 1."""
+    equal-length lists. ``void``: the label's don't-care pixels in the same
+    form (``labels.read_void``: motion-blurred hands, a soft hair band),
+    excluded from both intersection and union. Value: mean IoU; detail has
+    min and the per-frame IoUs. A frame where both masks are empty scores 1."""
     if isinstance(pred, dict) and isinstance(truth, dict):
         keys = sorted(set(pred) & set(truth))
         pairs = [(k, pred[k], truth[k]) for k in keys]
+        vget = (void or {}).get if isinstance(void, dict) else \
+            (lambda k: None)
     else:
         pairs = list(zip(range(len(truth)), pred, truth))
-    per = {}
+        vl = list(void) if void is not None else []
+        vget = (lambda k: vl[k] if k < len(vl) else None)
+    if bar is None and kind == "object":
+        bar = (">=", 0.85)
+
+    def iou(a, b):
+        union = np.logical_or(a, b).sum()
+        return 1.0 if union == 0 else \
+            float(np.logical_and(a, b).sum()) / float(union)
+    per, strict = {}, {}
     for k, p, t in pairs:
         pb, tb = _bin(p, thr), _bin(t, thr)
         if pb.shape != tb.shape:
             raise ValueError(f"frame {k}: mask shapes differ {pb.shape} vs "
                              f"{tb.shape}")
-        inter = np.logical_and(pb, tb).sum()
-        union = np.logical_or(pb, tb).sum()
-        per[k] = 1.0 if union == 0 else float(inter) / float(union)
+        v = vget(k)
+        if v is not None:
+            care = ~_bin(v)
+            if care.shape != tb.shape:
+                raise ValueError(f"frame {k}: void shape {care.shape} vs "
+                                 f"{tb.shape}")
+            strict[k] = iou(pb, tb)
+            pb, tb = pb & care, tb & care
+        per[k] = iou(pb, tb)
     if not per:
         return _result("matte_iou", None, bar, {"frames": 0}, None)
     vals = list(per.values())
-    if bar is None and kind == "object":
-        bar = (">=", 0.85)
     worst = sorted(per.items(), key=lambda kv: kv[1])[:5]
-    return _result("matte_iou", float(np.mean(vals)), bar,
-                   {"frames": len(vals), "min": float(min(vals)),
-                    "worst": [{"frame": k, "iou": round(v, 4)}
-                              for k, v in worst],
-                    "per_frame": {str(k): round(v, 4)
-                                  for k, v in per.items()}})
+    detail = {"frames": len(vals), "min": float(min(vals)),
+              "worst": [{"frame": k, "iou": round(v, 4)} for k, v in worst],
+              "per_frame": {str(k): round(v, 4) for k, v in per.items()}}
+    if strict:
+        # every pixel counted: the void band of the shipped labels is RVM's
+        # own soft edge, so this is the number that does not favour RVM
+        detail["void_frames"] = len(strict)
+        detail["mean_without_void_exclusion"] = round(float(np.mean(
+            [strict.get(k, per[k]) for k in per])), 4)
+    return _result("matte_iou", float(np.mean(vals)), bar, detail)
 
 
 @register("matte_flicker")

@@ -39,7 +39,7 @@ def test_at0d2_occluded_text_meets_the_bar():
     lab = os.path.join(LABELS, "22", at0d2.LABELS["22"])
     if not (os.path.exists(lab) and os.path.exists(reference("22_"))):
         pytest.skip("local-only: needs reference 22 and its hand labels")
-    if not refsig.ocr_status()[0] or not refsig.rvm_model_path():
+    if not refsig.ocr_status()[0] or not refsig.rvm_status()[0]:
         pytest.skip("local-only: needs RapidOCR (dev requirements) and the "
                     "RVM model")
     res = at0d2.evaluate("22")

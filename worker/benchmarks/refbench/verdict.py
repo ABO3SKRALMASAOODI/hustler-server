@@ -37,15 +37,26 @@ def sha256(path):
     return h.hexdigest()
 
 
+def unmeasured_metrics(metrics):
+    """Metrics that carry a bar but produced no value (no glyphs found, no
+    target in reach, no shared label frames, no measurer): a bar nobody
+    measured is a failure, never a silent pass."""
+    return [k for k, v in (metrics or {}).items()
+            if v.get("bar") is not None and v.get("value") is None
+            and v.get("pass") is not True]
+
+
 def decide(case, metrics, standing, judges):
-    """The case's pass: False when any metric with a bar fails, a measured
-    standing check fails or the judges fail; None while judges are pending;
-    True otherwise. A metric without a bar (pass None, e.g. cost_ratio) is
-    reported, not judged."""
+    """The case's pass: False when any metric with a bar fails or was not
+    measured, a measured standing check fails or the judges fail; None while
+    judges are pending; True otherwise. A metric without a bar (pass None,
+    e.g. cost_ratio) is reported, not judged; ``flash_risk`` with an opt-in
+    has a value and pass None (flagged, not failed)."""
     metrics = metrics or {}
     standing = standing or {}
     m_ok = bool(metrics) and all(v.get("pass") is not False
-                                 for v in metrics.values())
+                                 for v in metrics.values()) and \
+        not unmeasured_metrics(metrics)
     s_fail = [k for k, v in standing.items() if v is False]
     lenses = case.get("judges", {}).get("lenses", [])
     j_pass = combine(judges or [], lenses,
@@ -80,6 +91,9 @@ def build(case, *, render_path, variant, wall_s=None, lane="local",
            "board": board or {}}
     if unmeasured:
         out["unmeasured"] = unmeasured
+    m_unmeasured = unmeasured_metrics(metrics)
+    if m_unmeasured:
+        out["metrics_unmeasured"] = m_unmeasured
     if s_fail:
         out["standing_failed"] = s_fail
     if standing_detail:

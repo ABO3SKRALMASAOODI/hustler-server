@@ -60,4 +60,5 @@ jobs:
         run: |
           python -m pytest -q worker/tests/test_w0d_qa_metrics.py \
             worker/tests/test_w0d_refsig.py worker/tests/test_w0d_refbench.py \
-            worker/tests/test_w0d_tools.py worker/tests/test_w0d_local.py
+            worker/tests/test_w0d_tools.py worker/tests/test_w0d_review.py \
+            worker/tests/test_w0d_local.py

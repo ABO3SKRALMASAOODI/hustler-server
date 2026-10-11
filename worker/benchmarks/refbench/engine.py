@@ -168,13 +168,17 @@ def build(case, win, workdir):
     return base, edl, locals_, notes
 
 
-def render(edl, win, out, workdir, *, preview=True, want_wm=True,
+def render(edl, win, out, workdir, *, preview=True, want_wm=None,
            locals_=None, suppress_outro=False, placements=None):
     """renderer.render_edl on the fixture; returns (seconds, wall_s). With
     ``placements`` (a dict), the motion clips the renderer overlays are
-    recorded into it (``ink.capture_overlays``)."""
+    recorded into it (``ink.capture_overlays``). The free-tier mark is drawn
+    as production draws it (``renderer.wants_watermark``: finals only)
+    unless ``want_wm`` says otherwise."""
     import renderer
     from . import ink
+    if want_wm is None:
+        want_wm = not preview
     os.makedirs(workdir, exist_ok=True)
     t = time.time()
     with ink.capture_overlays() as placed:

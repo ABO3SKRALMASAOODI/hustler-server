@@ -84,6 +84,15 @@ def read_masks(vfl, window, label="person"):
             for f in mask_frames(vfl, window, label)}
 
 
+def read_void(vfl, window, label="person"):
+    """{frame: bool mask} of the label's don't-care pixels
+    (``<label>_void/``), for ``qa_metrics.matte_iou(void=...)``: IoU against
+    these labels is defined WITHOUT them. Frames without a void file are
+    absent (every pixel counts)."""
+    return {f: read_mask(vfl, window, f, label + "_void")
+            for f in mask_frames(vfl, window, label + "_void")}
+
+
 def read_points(vfl, window, label="fingertips"):
     p = os.path.join(label_dir(vfl, window, label), "points.json")
     if not os.path.exists(p):

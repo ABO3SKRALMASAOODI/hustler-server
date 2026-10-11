@@ -39,8 +39,9 @@ import numpy as np
 
 import qa_metrics
 
-# 2: take-level cut checks; 3: stroke-edge ink in occluded_text
-SIG_VERSION = 3
+# 2: take-level cut checks; 3: stroke-edge ink in occluded_text;
+# 4: flash rate from qa_metrics.flash_risk over every 1 s window
+SIG_VERSION = 4
 
 # RapidOCR (github.com/RapidAI/RapidOCR, Apache-2.0) rapidocr-onnxruntime
 # 1.4.4: the PaddleOCR PP-OCRv4 detector/recogniser (Apache-2.0) it bundles.
@@ -693,13 +694,38 @@ def rvm_model_path():
     return None
 
 
+_RVM_CHECKED = {}
+
+
+def rvm_status(path=None):
+    """(ok, why): the RVM file exists and matches ``RVM_SHA256``, so a
+    swapped or truncated model cannot silently change the masks (and every
+    occluded-text number) a benchmark reports. Checked once per file."""
+    mp = path or rvm_model_path()
+    if not mp or not os.path.exists(mp):
+        return False, "no RVM model (set VALMERA_RVM_MODEL)"
+    key = (mp, os.path.getsize(mp), os.path.getmtime(mp))
+    if key not in _RVM_CHECKED:
+        import hashlib
+        h = hashlib.sha256()
+        with open(mp, "rb") as fh:
+            for b in iter(lambda: fh.read(1 << 20), b""):
+                h.update(b)
+        _RVM_CHECKED[key] = h.hexdigest() == RVM_SHA256
+    if not _RVM_CHECKED[key]:
+        return False, f"RVM model {mp} does not match its pinned sha256"
+    return True, "ok"
+
+
 def person_masks(path, frames, *, width=512, rect=None):
     """{frame: soft mask (h, w) float32} for the requested frames, measured
     with RVM over every frame from min(frames) to max(frames) in order (the
-    recurrent state needs the sequence). Raises when no model is present."""
+    recurrent state needs the sequence). Raises when no model is present or
+    the model is not the pinned file."""
+    ok, why = rvm_status()
+    if not ok:
+        raise RuntimeError(why)
     mp = rvm_model_path()
-    if not mp or not os.path.exists(mp):
-        raise RuntimeError("no RVM model (set VALMERA_RVM_MODEL)")
     import onnxruntime as ort
     so = ort.SessionOptions()
     so.log_severity_level = 3
@@ -876,15 +902,12 @@ def analyze(path, *, rect=None, ocr=False, ocr_every_s=0.5, person=False,
     tob, dens = type_on_black(F)
     sig["type_on_black"] = {"f": tob, "density": round(dens, 4)}
     try:
-        sel = list(range(0, F.n, max(1, int(round(F.fps * 0.5)))))
-        thumbs = [F.frames[i] for i in range(F.n)]
-        tr = qa_metrics.flash_transitions(thumbs)
-        win = max(1, int(round(F.fps)))
-        worst = 0
-        for s in sel:
-            worst = max(worst, len([x for x in tr if s <= x[0] < s + win])
-                        // 2)
-        sig["flash_rate_max_per_s"] = worst
+        # the SAME counter as the flash_risk metric (every 1 s window, not
+        # a sample of them): a strobing reference must read as strobing,
+        # since "make it like this" treats that as the flash opt-in
+        fr = qa_metrics.flash_risk(frames=F.frames, fps=F.fps, opted_in=True)
+        sig["flash_rate_max_per_s"] = int(fr["value"] or 0)
+        sig["contains_flashing"] = bool(fr["detail"]["contains_flashing"])
     except Exception as e:                                     # pragma: no cover
         sig["flash_rate_max_per_s"] = None
         sig["flash_rate_error"] = str(e)[:120]

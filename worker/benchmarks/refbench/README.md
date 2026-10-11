@@ -53,10 +53,10 @@ These run on every case and a spec cannot switch them off.
 | Check | What it requires |
 |---|---|
 | `render_ok` | The render decodes and has a program. |
-| `brand_integrity` | End-card frames are md5-identical to the control. The watermark ROI is unchanged outside device windows. Both renders are lossless. |
+| `brand_integrity` | End-card frames are md5-identical to the control. The robot's opaque pixels are identical to the control's on every sampled program frame, device windows included (the mark is composited after every creative stage, so a device can change what lies under it, never the mark), and the control must show the robot there. The whole watermark ROI is unchanged outside device windows. Both renders are lossless finals: a preview carries neither the mark nor the end card (refbench renders previews without the mark, as production does), and a `--lossy` final cannot be compared bit-exactly, so both report `None`. A check that compared no watermark pixel reports `None`, never `True`. |
 | `no_collisions` | No OCR text box over a face core. With a control, the graphic's *ink* in the face core counts, not the box: type behind a head is not a collision. Faces are found on the control frame. |
 | `loudness` | The program (not the end card) measures −14 LUFS ±0.5. |
-| `owner_rules` | No music, SFX or zoom unless the case's `allow` lists it, and ≤ 3 flashes/s unless `flash_optin`. |
+| `owner_rules` | No music, SFX or zoom unless the case's `allow` lists it, and ≤ 3 flashes/s unless `flash_optin`. A zoom is any push-in the EDL asks for: `effects.zooms` (cut-step zooms included and named), a `zoom_punch` transition, a zooming frame shift. |
 | `ledger` | Within `taste.ledger` budget. Reports `None` until 0C's ledger lands. |
 
 ## Judges
@@ -80,9 +80,10 @@ The layout is `<fixtures>/labels/<vfl>/<window>/<label>/` (INTERFACES §8.4).
 
 - **Person masks.** Each window has 30 frames (33 on the 60p stage window).
   - **Bootstrap:** RVM with a cut-aware warm-up, then a u2net second opinion.
-  - **Hand review:** every frame was reviewed on overlay sheets, and every frame where the two models disagree by ≥ 1 % of the frame was viewed at native resolution with a pixel grid.
-  - **Corrections:** made with polygons, colour-seeded GrabCut and u2net-gated additions. Examples are lecterns, armchairs and hands that RVM got wrong.
-  - **Void masks:** `person_void/` marks pixels excluded from IoU, such as motion-blurred hands, shadowed chair lips and crowds at the frame edge.
+  - **Review:** by the 0D agent (Claude), not a human annotator. Every frame was reviewed on overlay sheets, and every frame where the two models disagree by ≥ 1 % of the frame was viewed at native resolution with a pixel grid.
+  - **Corrections:** made with polygons, colour-seeded GrabCut and u2net-gated additions (81 of 363 frames carry at least one correction in their `history`). Examples are lecterns, armchairs and hands that RVM got wrong.
+  - **Void masks:** `person_void/` marks pixels excluded from IoU: RVM's own soft band (alpha 0.15–0.85: hair, motion blur), plus hand-marked regions such as motion-blurred hands, shadowed chair lips and crowds at the frame edge. Read them with `labels.read_void` and pass them as `qa_metrics.matte_iou(void=...)`.
+  - **Bias warning.** The masks start from RVM and the void band is RVM's own uncertainty, so RVM scored against them is optimistic. `matte_iou` also reports `mean_without_void_exclusion`; a 1A acceptance that scores RVM should quote both, and a human CVAT pass (`export-cvat` / `import-cvat`) is the way to remove the bias.
   - **Record:** every operation is in `manifest.json` (`history`).
   - **Round trip:** `export-cvat` / `import-cvat` exchange the masks with CVAT for later corrections.
 - **Syllable onsets** (`onsets.json`) are a listener's job.

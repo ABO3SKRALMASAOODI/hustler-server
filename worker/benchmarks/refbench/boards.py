@@ -6,6 +6,7 @@ build is needed.
 """
 
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -148,7 +149,10 @@ def clip_2up(left, right, out, *, height=720, audio="left", crf=23):
     cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
             "-movflags", "+faststart", out]
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     return out
 
 

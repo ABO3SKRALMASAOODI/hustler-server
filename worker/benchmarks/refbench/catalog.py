@@ -71,8 +71,8 @@ def best(role, data=None):
 
 
 def verify(data=None):
-    """{item id: "ok" | "missing" | "sha mismatch"} over every primary and
-    variant file."""
+    """{item id: "ok" | "missing" | "unhashed" | "sha mismatch"} over every
+    primary and variant file."""
     from .vfl import sha256_file
     data = data or load() or {}
     root = os.path.expanduser(data.get("root") or fixtures_dir())
@@ -85,7 +85,10 @@ def verify(data=None):
             if not os.path.exists(p):
                 res = "missing"
                 break
-            if f.get("sha256") and sha256_file(p) != f["sha256"]:
+            if not f.get("sha256"):
+                res = "unhashed"          # nothing pinned: never "ok"
+                break
+            if sha256_file(p) != f["sha256"]:
                 res = "sha mismatch"
                 break
         out[it["id"]] = res
