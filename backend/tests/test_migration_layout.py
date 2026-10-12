@@ -33,7 +33,7 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
 
 def test_admin_rebuild_migrations_are_additive_and_lock_bounded():
     for name in ("031_admin_visitor_quality.sql", "032_billing_daily_status.sql",
-                 "033_estimated_early_signup_sources.sql"):
+                 "033_estimated_early_signup_sources.sql", "034_customer_display_name.sql"):
         source = (MIGRATIONS / name).read_text(encoding="utf-8")
         assert "SET LOCAL lock_timeout" in source
         assert "BEGIN;" in source and "COMMIT;" in source
