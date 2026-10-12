@@ -27,7 +27,7 @@ from routes.admin import admin_required
 admin_v2_bp = Blueprint("admin_v2", __name__, url_prefix="/admin/v2")
 log = logging.getLogger(__name__)
 
-TTL = {"meta": 3600, "summary": 60, "trend": 300, "acquisition": 300,
+TTL = {"lifetime": 300, "meta": 3600, "summary": 60, "trend": 300, "acquisition": 300,
        "outreach": 300, "pages": 300, "funnel": 300, "cohorts": 300,
        "revenue": 300, "health": 60, "waits": 300, "attention": 60,
        "billing_problems": 60, "engagement": 300, "audience": 300,
@@ -610,6 +610,41 @@ def summary():
                 "errors": s.errors}
 
     value, computed_at, age = _cached("summary", dict(_args()), compute)
+    return _respond(value["data"], period, errors=value["errors"],
+                    computed_at=computed_at, cache_age=age)
+
+
+# Lifetime totals stay independent of the dashboard's selected day.
+@admin_v2_bp.route("/lifetime", methods=["GET"])
+@admin_required
+def lifetime():
+    period = ranges.make_period("all", datetime.fromisoformat(defs.METRICS_EPOCH).date(), ranges.local_today())
+
+    def compute():
+        sections = Sections()
+        sections.parallel([
+            ("signups", lambda cur: signups_by_day(cur, period)),
+            ("visitors", lambda cur: visitors.classify(cur, period)),
+            ("visitors_daily", lambda cur: visitors.classify_by_day(cur, period)),
+        ])
+        signups = sections.get("signups")
+        people = sections.get("visitors")
+        daily = sections.get("visitors_daily")
+        running = 0
+        rows = []
+        for day in period.day_list():
+            n = signups.get(day, 0) if signups is not None else None
+            if n is not None:
+                running += n
+            v = daily.get(day) if daily is not None else None
+            rows.append({"date": day.isoformat(), "signups": n,
+                         "signups_total": running if n is not None else None,
+                         "people": v["person"] if v else None})
+        return {"data": {"signups": running if signups is not None else None,
+                         "unique_visitors": people["person"] if people else None,
+                         "rows": rows}, "errors": sections.errors}
+
+    value, computed_at, age = _cached("lifetime", {}, compute)
     return _respond(value["data"], period, errors=value["errors"],
                     computed_at=computed_at, cache_age=age)
 
