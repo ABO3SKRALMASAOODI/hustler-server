@@ -559,7 +559,7 @@ def test_customers_list_contract_and_true_total(app):
                         "joined_at", "last_active_at", "device", "came_from",
                         "told_us", "projects", "exports", "paid_usd",
                         "credits_left", "credits_used", "edit_requests",
-                        "uploads", "country", "browser", "auth_provider"}
+                        "uploads", "country", "browser", "auth_provider", "name", "latest_project_id"}
     # The full email, never shortened: the admin is the owner's own tool.
     assert row["email"] == "customer1@example.com"
     assert row["credits_left"] == 980.0 and row["edit_requests"] == 6
@@ -967,7 +967,7 @@ def test_every_v2_route_is_read_only_and_admin_gated():
     app.register_blueprint(admin_v2.admin_v2_bp)
     rules = [r for r in app.url_map.iter_rules()
              if r.rule.startswith("/admin/v2")]
-    assert len(rules) == 33
+    assert len(rules) == 34
     for r in rules:
         assert r.methods - {"HEAD", "OPTIONS"} == {"GET"}, r.rule
         view = app.view_functions[r.endpoint]
@@ -1109,7 +1109,7 @@ def test_digits_search_ids_and_emails(app):
     app.fake.routes = customer_routes()
     assert get(app, "/admin/v2/customers?q=1987").status_code == 200
     sql = next(s for s in app.fake.sql if ", agg AS (" in s)
-    assert "(u.id = %(q_id)s OR u.email ILIKE %(q_like)s)" in sql
+    assert "(u.id = %(q_id)s OR (u.email ILIKE %(q_like)s OR u.display_name ILIKE %(q_like)s))" in sql
     app.fake.sql.clear()
     app.fake.routes = project_list_routes()
     assert get(app, "/admin/v2/projects?q=1987").status_code == 200
@@ -1120,3 +1120,28 @@ def test_digits_search_ids_and_emails(app):
     app.fake.routes = customer_routes()
     assert get(app, "/admin/v2/customers?q=" + "9" * 30).status_code == 200
     assert not any("q_id" in s for s in app.fake.sql)
+
+
+def test_lifetime_counts_unique_browsers_once_and_keeps_untracked_days_unknown(app, monkeypatch):
+    monkeypatch.setattr(admin_v2, "signups_by_day", lambda cur, p: {p.from_day: 4, p.to_day: 2})
+    monkeypatch.setattr(visitors, "classify", lambda cur, p: {"person": 7})
+    monkeypatch.setattr(visitors, "classify_by_day", lambda cur, p: {p.to_day: {"person": 3}})
+    r = get(app, "/admin/v2/lifetime")
+    assert r.status_code == 200
+    d = r.json["data"]
+    assert d["signups"] == 6 and d["unique_visitors"] == 7
+    assert d["rows"][0]["signups_total"] == 4
+    assert d["rows"][-1]["signups_total"] == 6
+    assert d["rows"][0]["people"] is None
+    assert d["rows"][-1]["people"] == 3
+
+
+def test_lifetime_failure_does_not_become_zero(app, monkeypatch):
+    monkeypatch.setattr(admin_v2, "signups_by_day", lambda *args: (_ for _ in ()).throw(RuntimeError("test")))
+    monkeypatch.setattr(visitors, "classify", lambda cur, p: {"person": 5})
+    monkeypatch.setattr(visitors, "classify_by_day", lambda cur, p: {})
+    r = get(app, "/admin/v2/lifetime")
+    assert r.status_code == 200
+    assert r.json["data"]["signups"] is None
+    assert r.json["data"]["unique_visitors"] == 5
+    assert r.json["meta"]["section_errors"][0]["section"] == "signups"

@@ -397,3 +397,21 @@ def admin_plan_intents():
                         "days": days, "scope": "customers"}), 200
     finally:
         conn.close()
+
+
+@onboarding_bp.route("/onboarding/name", methods=["PUT"])
+@token_required
+def save_name(user_id, email):
+    data = request.get_json(silent=True)
+    name = data.get("name") if isinstance(data, dict) else None
+    if not isinstance(name, str) or not name.strip() or len(name) > 120:
+        return jsonify({"error": "Enter a name of 1–120 characters."}), 400
+    name = " ".join(name.split())
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET display_name=%s WHERE id=%s", (name, user_id))
+        conn.commit()
+        return jsonify({"name": name}), 200
+    finally:
+        conn.close()

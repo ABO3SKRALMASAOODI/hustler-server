@@ -90,10 +90,10 @@ def _filters(cur, period, args, params):
         params["q_like"] = f"%{q[:120]}%"
         if q.isdigit() and len(q) <= 18:
             # Digits are a customer id or part of an email ("jo1987@…").
-            where.append("(u.id = %(q_id)s OR u.email ILIKE %(q_like)s)")
+            where.append("(u.id = %(q_id)s OR (u.email ILIKE %(q_like)s OR u.display_name ILIKE %(q_like)s))")
             params["q_id"] = int(q)
         else:
-            where.append("u.email ILIKE %(q_like)s")
+            where.append("(u.email ILIKE %(q_like)s OR u.display_name ILIKE %(q_like)s)")
     for name, negate in (("reached", False), ("not_reached", True)):
         stage = (args.get(name) or "").strip()
         if not stage:
@@ -143,7 +143,7 @@ def list_customers(cur, period, args, page, per_page):
     params = period.params()
     where = " AND ".join(_filters(cur, period, args, params))
     base = f"""WITH base AS MATERIALIZED (
-        SELECT u.id, u.email, u.plan, u.billing_plan, u.billing_period,
+        SELECT u.id, u.email, u.display_name, u.plan, u.billing_plan, u.billing_period,
                u.created_at, u.last_seen_at, u.device_type,
                {money.STATUS_SQL} AS status
           FROM users u WHERE {where})"""
@@ -168,6 +168,9 @@ def list_customers(cur, period, args, page, per_page):
     cur.execute(base + f"""
         , agg AS (
           SELECT b.*,
+                 (SELECT p.id FROM projects p WHERE p.user_id = b.id
+                   AND p.parent_project_id IS NULL
+                   ORDER BY p.created_at DESC, p.id DESC LIMIT 1) AS latest_project_id,
                  (SELECT count(*) FROM projects p WHERE p.user_id = b.id
                      AND p.parent_project_id IS NULL) AS projects,
                  (SELECT count(*) FROM video_jobs vj WHERE vj.user_id = b.id
@@ -201,6 +204,7 @@ def list_customers(cur, period, args, page, per_page):
         x = extra.get(r["id"], {})
         out.append({
             "id": r["id"], "email": r["email"],
+            "name": r.get("display_name"), "latest_project_id": r.get("latest_project_id"),
             "plan": r["billing_plan"] or r["plan"],
             "billing_period": r["billing_period"],
             "status": r["status"], "joined_at": defs.iso(r["created_at"]),
@@ -307,7 +311,7 @@ def customer_ref(row, prefix=""):
 
 def customer_detail(cur, user_id, presign=None):
     cur.execute(f"""
-        SELECT u.id, u.email, u.created_at, u.is_verified, u.auth_provider,
+        SELECT u.id, u.email, u.display_name, u.created_at, u.is_verified, u.auth_provider,
                u.device_type, u.device_browser, u.plan, u.billing_plan,
                u.billing_status, u.billing_period, u.last_seen_at,
                u.credits_balance, u.credits_monthly, u.credits_daily,
@@ -390,7 +394,7 @@ def customer_detail(cur, user_id, presign=None):
 
     return {
         "customer": {
-            "id": u["id"], "email": u["email"],
+            "id": u["id"], "email": u["email"], "name": u.get("display_name"),
             "joined_at": defs.iso(u["created_at"]),
             "verified": bool(u["is_verified"]),
             "auth_provider": u["auth_provider"], "device": u["device_type"],
