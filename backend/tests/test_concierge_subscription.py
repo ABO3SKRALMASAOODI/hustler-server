@@ -66,7 +66,7 @@ def test_new_account_gets_offer_before_any_canvas_work(respond, balance):
     assert meta["subscribe_required"] is True
     assert meta["request_message_id"] == 20
     assert meta["subscription_offer"]["code"] == "subscribe_required"
-    assert {p["id"] for p in meta["subscription_offer"]["plans"]} == {"mcp_connect", "advanced"}
+    assert {p["id"] for p in meta["subscription_offer"]["plans"]} == {"plus_2026", "pro_2026", "max_2026"}
     assert jobs == []
     assert events[0][0] == (12, 7, "trial_gate_shown")
     assert events[0][1]["detail"]["surface"] == "blank_canvas"

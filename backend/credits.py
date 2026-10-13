@@ -124,10 +124,14 @@ INITIAL_BONUS       = FREE_GRANT_CREDITS   # legacy name, same number
 def subscribe_offer_body():
     """402 / credits payload for the Studio upgrade cards."""
     import billing
+    names = {"plus_2026": "Plus", "pro_2026": "Pro", "max_2026": "Max"}
+    from catalog_rollout import shopfront_held
     from plan_catalog import COMPARISON_ONLY_PLANS
-    names = {"mcp_connect": "MCP Connect", "advanced": "Advanced Editor"}
+    held = shopfront_held()
+    if held:
+        names = {"mcp_connect": "MCP Connect", "advanced": "Advanced Editor"}
     plans = []
-    for pid in ("mcp_connect", "advanced"):
+    for pid in names:
         prices = billing.PLAN_PRICES_USD.get(pid) or {}
         plans.append({
             "id": pid, "name": names[pid],
@@ -139,7 +143,7 @@ def subscribe_offer_body():
         "code": "subscribe_required", "trial_offer": True,
         "subscribe_offer": True, "trial_days": 0, "plans": plans,
         # Old clients only read plans and must never offer unavailable checkout.
-        "comparison_plans": [dict(plan) for plan in COMPARISON_ONLY_PLANS]}
+        "comparison_plans": [dict(p) for p in COMPARISON_ONLY_PLANS] if held else []}
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 
@@ -299,14 +303,15 @@ def get_balance(conn, user_id: int) -> dict:
 
     is_subscribed = bool(row["is_subscribed"])
     plan = row.get("plan") or "free"
-    if is_subscribed and plan in {"mcp_connect", "advanced"}:
+    from plan_catalog import MONTHLY_CYCLE_PLANS, daily_credits_for_plan
+    if is_subscribed and plan in MONTHLY_CYCLE_PLANS:
         import contract_credits
         contract_credits.refresh(conn, user_id)
     trialing = is_subscribed and _trial_status(conn, user_id) == "trialing"
     # A trial gets no daily top-up — otherwise three days of 20 lands 30% on
     # top of the 10% cap the paywall quotes.
     balance = refresh_daily_credits(conn, user_id, is_subscribed,
-                                    daily_top_up=is_subscribed and not trialing)
+                                    daily_top_up=is_subscribed and not trialing and daily_credits_for_plan(plan) > 0)
 
     monthly = PLAN_MONTHLY_LIMITS.get(plan, 0)
     try:
@@ -323,7 +328,7 @@ def get_balance(conn, user_id: int) -> dict:
         # number that reads as a bug the moment the wall arrives.
         plan_limit = stored_limit or trial_allowance(plan)
     elif is_subscribed:
-        plan_limit = SUB_DAILY_CREDITS + monthly
+        plan_limit = daily_credits_for_plan(plan) + monthly
     else:
         plan_limit = FREE_GRANT_CREDITS
 

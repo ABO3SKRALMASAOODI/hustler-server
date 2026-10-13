@@ -14,7 +14,7 @@ import credits as credits_mod
 import offers
 import paid_subscription_alert
 import trial_state
-from plan_catalog import PLAN_MONTHLY_CREDITS
+from plan_catalog import PLAN_MONTHLY_CREDITS, MONTHLY_CYCLE_PLANS, daily_credits_for_plan
 
 paddle_webhook = Blueprint('paddle_webhook', __name__)
 
@@ -63,7 +63,7 @@ def _trial_aware_grant(user_id, plan, subscription_id, event_type, data,
         # A specific transaction crossed into paid/completed for the first
         # time. This, not subscription status, is the one event that refreshes
         # the pool for a purchase or renewal.
-        return full, SUB_DAILY_CREDITS, False, 'paid'
+        return full, daily_credits_for_plan(plan), False, 'paid'
     try:
         already = trial_state.is_recorded_trial(get_db(), user_id,
                                                 subscription_id)
@@ -79,7 +79,7 @@ def _trial_aware_grant(user_id, plan, subscription_id, event_type, data,
     # completes, and can repeat those events throughout a billing period.
     # Update entitlement facts and limits but never refill spent credits until
     # a concrete transaction crosses into a paid state.
-    return full, SUB_DAILY_CREDITS, True, 'subscription facts (credits unchanged)'
+    return full, daily_credits_for_plan(plan), True, 'subscription facts (credits unchanged)'
 
 # Compatibility name used throughout the webhook and existing tests. The
 # values themselves live in plan_catalog beside the Paddle prices that buy them.
@@ -115,7 +115,7 @@ for _name, _cfg in (_PADDLE_PLANS or {}).items():
 def _record_new_annual_period(user_id, plan, subscription_id, data):
     """A verified paid annual price funds a calendar-month refill schedule."""
     cfg = _PADDLE_PLANS.get(plan) or {}
-    if plan not in {'mcp_connect', 'advanced'} or \
+    if plan not in MONTHLY_CYCLE_PLANS or \
             _price_id_from_data(data) != cfg.get('yearly_price_id'):
         return
     period = data.get('billing_period') or {}
@@ -566,7 +566,7 @@ def handle_webhook():
         # NB: a local named `billing` lived here (the monthly/yearly label) and
         # would now shadow the billing module imported at the top of the file.
         period = custom_data.get('billing', 'monthly')
-        if plan in {'mcp_connect', 'advanced'}:
+        if plan in MONTHLY_CYCLE_PLANS:
             period = ('yearly' if _price_id_from_data(data) ==
                       _PADDLE_PLANS[plan].get('yearly_price_id') else 'monthly')
         # Transactions carry the paid term in billing_period, not

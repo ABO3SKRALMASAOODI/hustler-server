@@ -13,7 +13,7 @@ from plan_catalog import (
     PLAN_PRICES_USD,
     PLANS_LIVE,
     PLANS_SANDBOX,
-    PURCHASABLE_PLANS, NEW_PLANS, available_plans,
+    PURCHASABLE_PLANS, MONTHLY_CYCLE_PLANS, available_plans,
 )
 
 paddle_bp = Blueprint('paddle', __name__)
@@ -86,7 +86,7 @@ def decode_token(auth_header):
 
 
 def _new_plan_readiness(plan):
-    if plan != "advanced":
+    if plan not in {"advanced", "pro_2026", "max_2026"}:
         return None
     from provider_readiness import advanced_readiness
     if not advanced_readiness()["ready"]:
@@ -119,7 +119,7 @@ def checkout_config():
         return jsonify({"error": "Missing token"}), 401
 
     data = request.json or {}
-    plan = data.get('plan', 'advanced')
+    plan = data.get('plan', 'pro_2026')
     billing = 'yearly' if data.get('billing') == 'yearly' else 'monthly'
     if plan not in PLANS:
         return jsonify({"error": "Invalid plan"}), 400
@@ -181,7 +181,7 @@ def create_checkout_session():
         return jsonify({"error": "Missing token"}), 401
 
     data = request.json or {}
-    plan = data.get('plan', 'advanced')
+    plan = data.get('plan', 'pro_2026')
     billing = 'yearly' if data.get('billing') == 'yearly' else 'monthly'
 
     if plan not in PLANS:
@@ -492,7 +492,7 @@ def _annual_contract_change_error(snapshot, subscription):
     """Keep prepaid new contracts intact until a term-aware switch exists."""
     price_id = ((_subscription_item(subscription).get("price") or {}).get("id"))
     plan = _plan_from_price(price_id) or snapshot.get("plan")
-    if plan in NEW_PLANS and _subscription_period(subscription) == "yearly":
+    if plan in MONTHLY_CYCLE_PLANS and _subscription_period(subscription) == "yearly":
         return {
             "error": "Your annual plan and monthly credits stay active for the "
                      "full paid year. To choose a different plan or billing "

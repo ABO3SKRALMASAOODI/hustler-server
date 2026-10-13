@@ -37,6 +37,7 @@ STALE_CLAIM_MINUTES = 20
 MAX_BATCH = 20
 
 PLAN_LABELS = {
+    "plus_2026": "Plus", "pro_2026": "Pro", "max_2026": "Max",
     "mcp_connect": "MCP Connect",
     "advanced": "Advanced Editor",
     "ai": "Creator",

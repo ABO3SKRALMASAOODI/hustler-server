@@ -178,7 +178,7 @@ def account_has_mcp_access(user):
     return ((user.get("email") or "").strip().lower() in ALLOWED_EMAILS
             or (user.get("is_verified") in (True, 1)
                 and user.get("is_subscribed") in (True, 1)
-                and user.get("plan") in {"ai_pro", "ai_max", "mcp_connect", "advanced"}))
+                and user.get("plan") in {"ai_pro", "ai_max", "mcp_connect", "advanced", "plus_2026", "pro_2026", "max_2026"}))
 
 
 def _authenticate():

@@ -251,6 +251,7 @@ def test_billing_problems_and_money_use_the_customer_population():
     assert "u.is_verified = 1" in cur.sql[0] and "{CUSTOMER}" not in cur.sql[0]
     # Paying and MRR are the same population by construction.
     assert defs.paying("u") in money.STATUS_SQL
-    assert money.plan_tier("mcp_connect") == "current"
+    assert money.plan_tier("mcp_connect") == "grandfathered"
+    assert money.plan_tier("pro_2026") == "current"
     assert money.plan_tier("ai") == "grandfathered"
     assert money.plan_tier("ultra") == "retired"
