@@ -45,6 +45,7 @@ from video_services.project_state import (
 )
 from video_services.upload import (
     clean_dimension as _clean_dim,
+    completed_upload_index as _completed_upload_index,
     serialize_asset as _asset_out,
 )
 from video_services.chat_jobs import parse_client_event as _event_request_args
@@ -1683,6 +1684,24 @@ def relay_upload(user_id, project_id):
 _ORIGINAL_DRIFT_TOLERANCE_S = 5.0
 
 
+def _duplicate_upload_result(cur, project_id, user_id, project, asset):
+    """Called under the project lock shared with index self-healing."""
+    gated = _subscribe_gate_applies(cur, user_id)
+    can_retry = not gated
+    if asset["kind"] == "original":
+        active = _active_original(cur, project_id)
+        can_retry = can_retry and bool(active and active["id"] == asset["id"])
+    result = {"asset_id": asset["id"], "kind": asset["kind"],
+              "duplicate": True,
+              **_completed_upload_index(cur, project_id, user_id, asset["id"],
+                                        can_retry=can_retry)}
+    if asset["kind"] == "original" and gated:
+        message_id = _record_upload_subscription_lock(
+            cur, project["chat_session_id"], asset["id"])
+        result.update(_upload_subscription_payload(asset["id"], message_id))
+    return result, 200
+
+
 def _register_deferred_original(user_id, project_id, key, filename, declared,
                                 client_proxy_key, proxy_bytes, data):
     """Create the original asset for a proxy-first upload.
@@ -1714,14 +1733,8 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
                        ORDER BY id DESC LIMIT 1""", (project_id, key))
         dup = cur.fetchone()
         if dup:
-            cur.execute("""SELECT id FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                             AND (payload->>'asset_id')::int = %s
-                           ORDER BY id DESC LIMIT 1""", (project_id, dup["id"]))
-            ij = cur.fetchone()
-            return {"asset_id": dup["id"],
-                    "index_job_id": ij["id"] if ij else None,
-                    "kind": dup["kind"], "duplicate": True}, 200
+            return _duplicate_upload_result(
+                cur, project_id, user_id, project, dup)
         cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
                                            bytes, duration_s, width, height,
                                            meta)
@@ -1844,22 +1857,8 @@ def complete_upload_core(user_id, project_id, data):
                        ORDER BY id DESC LIMIT 1""", (project_id, key))
         dup = cur.fetchone()
         if dup:
-            cur.execute("""SELECT id FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                             AND (payload->>'asset_id')::int = %s
-                           ORDER BY id DESC LIMIT 1""",
-                        (project_id, dup["id"]))
-            ij = cur.fetchone()
-            result = {"asset_id": dup["id"],
-                      "index_job_id": ij["id"] if ij else None,
-                      "kind": dup["kind"], "duplicate": True}
-            if (dup["kind"] == "original"
-                    and _subscribe_gate_applies(cur, user_id)):
-                message_id = _record_upload_subscription_lock(
-                    cur, project["chat_session_id"], dup["id"])
-                result.update(_upload_subscription_payload(
-                    dup["id"], message_id))
-            return result, 200
+            return _duplicate_upload_result(
+                cur, project_id, user_id, project, dup)
 
         if kind == "original" and not _subscribe_gate_applies(cur, user_id) and \
                 _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
@@ -1986,22 +1985,8 @@ def complete_upload_core(user_id, project_id, data):
                        ORDER BY id DESC LIMIT 1""", (project_id, key))
         dup = cur.fetchone()
         if dup:
-            cur.execute("""SELECT id FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                             AND (payload->>'asset_id')::int = %s
-                           ORDER BY id DESC LIMIT 1""",
-                        (project_id, dup["id"]))
-            ij = cur.fetchone()
-            result = {"asset_id": dup["id"],
-                      "index_job_id": ij["id"] if ij else None,
-                      "kind": dup["kind"], "duplicate": True}
-            if (dup["kind"] == "original"
-                    and _subscribe_gate_applies(cur, user_id)):
-                message_id = _record_upload_subscription_lock(
-                    cur, project["chat_session_id"], dup["id"])
-                result.update(_upload_subscription_payload(
-                    dup["id"], message_id))
-            return result, 200
+            return _duplicate_upload_result(
+                cur, project_id, user_id, project, dup)
         meta = {"filename": filename}
         if staged:
             meta["staged"] = True

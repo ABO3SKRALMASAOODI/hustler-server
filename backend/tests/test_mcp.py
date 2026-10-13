@@ -2236,9 +2236,12 @@ def test_index_status_says_where_a_queued_analysis_stands(client, monkeypatch):
     class Cur(FakeCur):
         def execute(self, sql, params=()):
             s = " ".join(sql.split())
-            if "type = 'index' ORDER BY id DESC LIMIT 1" in s:
+            if "SELECT id, state, progress, error, result FROM video_jobs" in s:
+                assert "payload->>'asset_id' = %s" in s
+                assert params == (3, "81")
                 self.rows = [{"id": 41, "state": DB["index_state"], "progress": 0,
-                              "error": None}]
+                              "error": "version mismatch", "result": {
+                                  "failure": {"kind": "provider_rollout_pending"}}}]
             elif "AS sub FROM users" in s:
                 self.rows = [{"sub": 0}]
             elif "AS ahead" in s:
@@ -2254,7 +2257,7 @@ def test_index_status_says_where_a_queued_analysis_stands(client, monkeypatch):
 
     monkeypatch.setattr(mcpmod, "vdb", vdb)
     monkeypatch.setattr(mcpmod, "_active_original",
-                        lambda cur, pid: {"sha256": "abc", "storage_key": "o/3.mp4"})
+                        lambda cur, pid: {"id": 81, "sha256": "abc", "storage_key": "o/3.mp4"})
     monkeypatch.setattr(mcpmod, "_index_row", lambda cur, sha: None)
     DB["index_state"] = "queued"
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
@@ -2265,3 +2268,30 @@ def test_index_status_says_where_a_queued_analysis_stands(client, monkeypatch):
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "index_status", "arguments": {"project_id": 3}}))
     assert "running — 0% (job 41)" in body and "ahead" not in body
+    DB["index_state"] = "failed"
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "index_status", "arguments": {"project_id": 3}}))
+    assert "Analysis paused by a deployment (job 41)" in body
+    assert "retry upload_finish" in body and "same project_id and storage_key" in body
+    assert "do not upload the video again" in body
+
+
+@pytest.mark.parametrize("state,restarted,expected,is_error", [
+    ("failed", False, "still failed; no new analysis was started", True),
+    ("queued", True, "Analysis restarted as job 82", False),
+    ("queued", False, "Analysis queued as job 82", False),
+    ("running", False, "Analysis already running as job 82", False),
+    ("done", False, "No duplicate analysis was started", False),
+])
+def test_duplicate_upload_reports_actual_analysis_state(
+        client, monkeypatch, state, restarted, expected, is_error):
+    monkeypatch.setattr(mcpmod, "complete_upload_core", lambda *args: ({
+        "asset_id": 81, "kind": "original", "duplicate": True,
+        "index_job_id": 82, "index_job_state": state,
+        "index_restarted": restarted, "index_error": "version mismatch",
+    }, 200))
+    response = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_finish", "arguments": {
+            "project_id": 3, "storage_key": "originals/3/video.mp4"}})
+    assert expected in text_of(response)
+    assert response.get_json()["result"].get("isError", False) is is_error
