@@ -10,7 +10,8 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Media tests take about 22 minutes; leave room for setup and cleanup.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

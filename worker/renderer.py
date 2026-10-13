@@ -3039,6 +3039,22 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 src_t = tl.out_to_src(t)
                 if src_t is not None:
                     near = [x for x in handoff_of if abs(x - src_t) <= reach]
+                    # Explicit source cards need the same measured-frame
+                    # handoff even when no focus/follow track was authored.
+                    # Splitting on a rounded shot timestamp can otherwise
+                    # put the new camera's first frame in the old card.
+                    if not near:
+                        cut = _indexed_cut_near(index, src_t, reach)
+                        if cut is not None:
+                            h = focus_handoff(cut, src_fps or fps,
+                                              focus_origin, fps)
+                            if any(s + .01 < src_t < e - .01
+                                   and s + .01 < h < e - .01
+                                   for s, e in keep):
+                                handoff_of[h] = cut
+                                cam_edges.update((h, cut))
+                                card_edges.add(h)
+                                near = [h]
                     if near:
                         x = min(near, key=lambda v: abs(v - src_t))
                         x_out = tl.src_to_out(x)
