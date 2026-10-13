@@ -663,8 +663,8 @@ def _concierge_reply(stage, history, attachments, index_error=None,
 
 
 @contextmanager
-def vdb():
-    conn = psycopg2.connect(current_app.config["DATABASE_URL"],
+def vdb(db_url=None):
+    conn = psycopg2.connect(db_url or current_app.config["DATABASE_URL"],
                             cursor_factory=RealDictCursor)
     try:
         yield conn
@@ -3891,7 +3891,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                 record_client_event(ctx["user_id"], project_id, "trial_gate_shown",
                                     detail={"subscribe_offer": True,
                                             "surface": "blank_canvas"},
-                                    origin="server")
+                                    origin="server", db_url=db_url)
         finally:
             conn.close()
     except Exception as e:
@@ -6027,7 +6027,7 @@ def _clean_event_detail(detail):
 
 
 def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
-                        origin="client"):
+                        origin="client", db_url=None):
     """Write one forensics row. NEVER raises and never blocks a caller.
 
     Shared by the two beacon routes and by the server's OWN upload rejections,
@@ -6040,7 +6040,8 @@ def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
     clean = _clean_event_detail(detail)
     clean["origin"] = origin
     try:
-        with vdb() as conn:
+        # Concierge replies run outside Flask's request/app context.
+        with (vdb(db_url) if db_url else vdb()) as conn:
             cur = conn.cursor()
             if project_id is not None and \
                     not _project_for_user(cur, project_id, user_id):

@@ -70,6 +70,7 @@ def test_new_account_gets_offer_before_any_canvas_work(respond, balance):
     assert jobs == []
     assert events[0][0] == (12, 7, "trial_gate_shown")
     assert events[0][1]["detail"]["surface"] == "blank_canvas"
+    assert events[0][1]["db_url"] == "unused"
 
 
 def test_paid_account_still_starts_its_edit(respond):
@@ -100,3 +101,44 @@ def test_a_pre_upload_question_does_not_open_plans(respond):
     replies, jobs, events = respond({"balance": 0, "subscribe_gated": True}, act=False)
     assert replies == [("I can help with that.", {"kind": "concierge"})]
     assert jobs == events == []
+
+
+def test_background_gate_event_does_not_need_flask_context(monkeypatch):
+    from flask import has_app_context
+
+    assert not has_app_context()
+    inserts = []
+
+    class Connection:
+        committed = False
+
+        def cursor(self):
+            return self
+
+        def execute(self, sql, params=None):
+            if "INSERT INTO client_events" in sql:
+                inserts.append(params)
+
+        def fetchone(self):
+            return {"n": 0}
+
+        def commit(self):
+            self.committed = True
+
+        def close(self):
+            pass
+
+    conn = Connection()
+
+    def connect(url, **kwargs):
+        assert url == "background-connection"
+        return conn
+
+    monkeypatch.setattr(video.psycopg2, "connect", connect)
+    monkeypatch.setattr(video, "_project_for_user", lambda *a: {"id": 7})
+    assert video.record_client_event(12, 7, "trial_gate_shown",
+                                    detail={"surface": "blank_canvas"},
+                                    origin="server", db_url="background-connection")
+    assert conn.committed
+    assert len(inserts) == 1
+    assert inserts[0][:3] == (12, 7, "trial_gate_shown")
