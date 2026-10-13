@@ -16,6 +16,39 @@ import llm  # noqa: E402
 import renderer  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def explicitly_enable_mock_audio_reviewer(monkeypatch):
+    # Legacy reviewer behavior is exercised only with an explicit test opt-in.
+    monkeypatch.setattr(config, "AUDIO_REVIEW_ENABLED", True)
+
+
+def test_paid_audio_review_defaults_off_even_with_shared_api_key(monkeypatch):
+    import runpy
+    monkeypatch.delenv("AUDIO_REVIEW_ENABLED", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "configured-shared-key")
+    loaded = runpy.run_path(config.__file__)
+    assert loaded["AUDIO_REVIEW_ENABLED"] is False
+
+
+def test_disabled_audio_reviewer_has_no_tool_or_provider_side_effects(monkeypatch):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Disabled paid audio reviewer touched media/provider")
+
+    monkeypatch.setattr(config, "AUDIO_REVIEW_ENABLED", False)
+    monkeypatch.setattr(config, "AUDIO_REVIEW_API_KEY", "configured-key")
+    monkeypatch.setattr(config, "AUDIO_REVIEW_MODEL", "gpt-audio-1.5")
+    monkeypatch.setattr(llm, "_audio_review_dead", False)
+    monkeypatch.setattr(llm.requests, "post", forbidden)
+    monkeypatch.setattr(llm, "audio_part", forbidden)
+    assert not llm.audio_review_available()
+    assert "review_audio" not in {
+        tool["function"]["name"] for tool in agent_tools.openai_tools()}
+    assert llm.ask_audio("Review", ["must-not-open.mp3"]) is None
+    assert "disabled" in agent_tools.review_audio(SimpleNamespace(), times=[0])
+    assert agent_tools._review_render_audio(
+        SimpleNamespace(), {}, {"listen_keys": ["must-not-open"]}) is None
+
+
 def test_dedicated_reviewer_sends_audio_and_records_modality_tokens(
         monkeypatch, tmp_path):
     clip = tmp_path / "clip.mp3"

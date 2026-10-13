@@ -44,8 +44,10 @@ AGENT_MULTIMODAL = os.getenv("AGENT_MULTIMODAL", "1") == "1"
 # Bounded subjective audio review is deliberately a separate lane.  The
 # editing model keeps its strong tool/vision context; an audio-capable model
 # hears only the small candidate or rendered-mix excerpts it is asked to
-# assess, then returns text evidence to the editor.  Empty model/key disables
-# the lane honestly and deterministic waveform/QC measurements remain.
+# assess, then returns text evidence to the editor. Paid listening is disabled
+# by default (owner request); a configured shared key must not opt into it.
+# Deterministic waveform/QC measurements remain available without this lane.
+AUDIO_REVIEW_ENABLED = os.getenv("AUDIO_REVIEW_ENABLED", "0") == "1"
 AUDIO_REVIEW_BASE_URL = os.getenv(
     "AUDIO_REVIEW_BASE_URL", "https://api.openai.com/v1").strip()
 AUDIO_REVIEW_MODEL = os.getenv(
