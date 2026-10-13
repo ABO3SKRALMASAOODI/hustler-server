@@ -417,7 +417,9 @@ def test_static_frame_reuse_never_drops_a_caption_change(anim, dynamic, tmp_path
     visual change must sit inside a window: the windowed render has to be
     pixel-identical to rendering every frame."""
     monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
-    style = {"animation": anim, "dynamic": dynamic}
+    style = {"dynamic": dynamic}
+    if anim == "none":
+        style["animation"] = "none"
     jobs = []
     for look in motion_captions.LOOKS:
         edl, index, tl = _setup(look, style=style)

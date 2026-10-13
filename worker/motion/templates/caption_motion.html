@@ -107,10 +107,7 @@
     : ar >= 0.95 ? { x0: 80, x1: W - 80, y0: 0.06 * H, y1: 0.92 * H }
     : { x0: 0.13 * W, x1: 0.87 * W, y0: 0.07 * H, y1: 0.92 * H };
   const COLW = SAFE.x1 - SAFE.x0;
-  // The column a cue's lines keep to: the template's own, or — for a cue
-  // the caption plan set inside a picture card — the card's inner column
-  // (x, frame fractions; worker/caption_place.card_column), so no line
-  // runs past the card's sides.
+  // Keep cue lines inside the card's supplied x column, or the safe area.
   function colOf(src) {
     if (Array.isArray(src.x) && src.x.length === 2) {
       const x0 = Math.max(SAFE.x0, +src.x[0] * W), x1 = Math.min(SAFE.x1, +src.x[1] * W);
@@ -132,15 +129,10 @@
     mono:      { fs: 46, lines: 2, fade: 0.10, accent: '#7CFFB2' },
   }[look];
   if (ar < 0.95 && CFG.heroMax) { CFG.heroMax *= 0.78; CFG.heroMin = Math.min(CFG.heroMin, CFG.heroMax * 0.6); }
-  // The capture box's reach past the glyphs for the premium looks' soft
-  // shadows and a glyph scrim (x, in units of the cue font size).
   const SCRIM_PAD = [0.6, 0.4];
   // A cue whose plate luma hint (l, from the spatial index) is at least
   // this sets its soft shadows firmer (the 'lit' class).
   const LIT = 0.55;
-  // Pocket (a box: only past what a glyph scrim carries, MG.GLYPH_MAX):
-  // pads, feather and corner radius in units of the cue font size.
-  // Box/pop/mono carry their own plate or outline and never need one.
   const POCKET_PAD = [0.3, 0.12], POCKET_FEATHER = 0.3, POCKET_R = 0.32;
   // Legibility, in order (round 7): 1 the run slides inside its zone to a
   // darker, calmer spot; 2 dark ink on a plate bright under every glyph;
@@ -600,13 +592,7 @@
       run.forEach(c => { c.el.style.top = Math.round(parseFloat(c.el.style.top) + best[1]) + 'px'; });
   }
 
-  // ── legibility, steps 2-4 (round 7): ink, a glyph scrim, then a box ────
-  // From the plate under the cue's GLYPHS: dark ink where it is bright
-  // under all of them (a white shirt), the accent kept in its hue and
-  // deepened until it reads; else a glyph scrim that follows the
-  // letterforms; a box (the pocket) only past what a glyph scrim carries,
-  // sized to the FINAL block from its first word. No rectangle scrim, no
-  // blurred halo, no accent paled toward white over a lit plate.
+  // Guard measured glyphs with dark ink, a glyph scrim, or a final-size pocket.
   function guard(c) {
     const blk = c.blk, r = blk.getBoundingClientRect();
     // word geometry relative to the block's border box (box highlight, mono
@@ -774,9 +760,7 @@
     cues.forEach(c => c.el.classList.remove('on'));
     // timing: reveal time + entrance per word, then the motion windows
     const Wn = [];
-    // A window covers the first frame at/after every change; frames outside
-    // all windows re-use the last capture. Each spans MORE than one frame
-    // period, so a sub-frame event can never fall between two frames.
+    // Cover each change for over one frame; outside windows, reuse captures.
     const G = F + 2e-4;
     const win = (a, b) => Wn.push([a - 1e-4, b]);
     cues.forEach((c, i) => {
@@ -810,9 +794,7 @@
           o.d = Math.max(0.05, Math.min(n / 32, Math.max(0.05, (o.w.e - o.w.s) * 0.9), 0.4));
         }
         if (o.R >= c.e) o.R = Math.max(c.s, c.e - F);
-        // An entrance whose pre-roll was clamped to the cue start begins
-        // where it would have been by then (a word that 'rises' from 0 on
-        // the cue's first frame would leave that frame empty).
+        // Start a clamped pre-roll part-way through its entrance.
         o.p0 = 0;
         if (o.d > 0 && (kind === 'rise' || kind === 'slam')) {
           o.p0 = MG.clamp((o.R - (o.w.s - en.early)) / o.d, 0, 0.6);
