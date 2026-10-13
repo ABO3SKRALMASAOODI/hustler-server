@@ -11,11 +11,11 @@ def test_stress_test_lists_current_plans_before_grandfathered_ones():
     for r in rows:
         if r["plan"] not in plans:
             plans.append(r["plan"])
-    assert plans == ["mcp_connect", "advanced", "ai", "ai_pro", "ai_max"]
-    assert {r["tier"] for r in rows if r["plan"] in ("mcp_connect", "advanced")} == {"current"}
-    assert {r["tier"] for r in rows if r["plan"] in ("ai", "ai_pro", "ai_max")} == {"grandfathered"}
+    assert plans == ["plus_2026", "pro_2026", "max_2026", "mcp_connect", "advanced", "ai", "ai_pro", "ai_max"]
+    assert {r["tier"] for r in rows if r["plan"] in ("plus_2026", "pro_2026", "max_2026")} == {"current"}
+    assert {r["tier"] for r in rows if r["plan"] in ("ai", "ai_pro", "ai_max", "mcp_connect", "advanced")} == {"grandfathered"}
     # Two rows per plan: monthly, and the yearly price spread over 12 months.
-    assert len(rows) == 10
+    assert len(rows) == 16
 
 
 def test_stress_test_margin_is_price_minus_full_allowance_and_storage():

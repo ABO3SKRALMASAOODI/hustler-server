@@ -2,7 +2,7 @@ from types import SimpleNamespace
 import pytest
 import mcp_exec, db, llm
 
-@pytest.mark.parametrize('plan',['mcp_connect','advanced'])
+@pytest.mark.parametrize('plan',['mcp_connect','advanced','plus_2026','pro_2026','max_2026'])
 def test_new_mcp_call_uses_fresh_balance_not_previous_calls_usage(plan):
     ctx=SimpleNamespace(plan=plan,model_usage={'old':{}},tokens_in=1000,tokens_out=200,
         tokens_cached_in=500,images_generated=['old'],gen_extra_cost_usd=3,credit_budget=500)

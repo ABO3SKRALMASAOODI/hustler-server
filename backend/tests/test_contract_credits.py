@@ -84,3 +84,20 @@ def test_webhook_uses_paid_price_not_client_billing_label(monkeypatch):
 def test_backend_and_worker_contract_accounting_stay_identical():
     root=Path(__file__).resolve().parents[2]
     assert (root/'backend/contract_credits.py').read_bytes()==(root/'worker/contract_credits.py').read_bytes()
+
+
+@pytest.mark.parametrize('plan,allowance', [('plus_2026',500),('pro_2026',1500),('max_2026',4000)])
+def test_october_annual_contract_refreshes_monthly_without_extra_daily_grants(plan,allowance):
+    db=DB()
+    db.user.update(plan=plan,credits_daily=0,credits_daily_reset=date('2026-09-28').date())
+    db.cycle.update(plan=plan,monthly_credits=allowance)
+    assert credits.refresh(db,1,date('2026-10-28'))
+    assert db.user['credits_monthly']==allowance
+    assert db.user['credits_daily']==0
+    db.user['credits_monthly']=allowance-100
+    assert not credits.refresh(db,1,date('2026-10-29'))
+    assert db.user['credits_monthly']==allowance-100
+    assert db.user['credits_daily']==0
+    db.user['is_subscribed']=0
+    assert not credits.refresh(db,1,date('2026-11-28'))
+    assert db.user['credits_monthly']==allowance-100

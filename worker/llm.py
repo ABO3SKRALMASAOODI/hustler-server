@@ -233,14 +233,14 @@ def paid_editor_lanes(plan=None):
     """New Advanced contracts use Sol; all grandfathered routes stay unchanged."""
     if not config.OPENAI_API_KEY:
         return []
-    return [dict(name="standard", client=client(), model=("gpt-6.1-sol" if plan == "advanced" else config.EDITOR_MODEL),
+    return [dict(name="standard", client=client(), model=("gpt-6.1-sol" if plan in {"advanced", "pro_2026", "max_2026"} else config.EDITOR_MODEL),
                  base_url=config.OPENAI_BASE_URL,
                  api_key=config.OPENAI_API_KEY)]
 
 
 def editor_reasoning_effort(plan, iteration=0):
     """New Advanced contracts reason at high; preserve legacy configuration."""
-    if plan == "advanced":
+    if plan in {"advanced", "pro_2026", "max_2026"}:
         return "high"
     return (config.AGENT_REASONING_EFFORT if iteration == 0 else
             (config.AGENT_REASONING_EFFORT_DISPATCH or config.AGENT_REASONING_EFFORT))

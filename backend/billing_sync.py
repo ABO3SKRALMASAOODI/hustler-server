@@ -382,7 +382,8 @@ def _activate(conn, user_id, plan, subscription_id, expiry, price_id=None):
     """Restore a paid plan in full. Mirrors the `is_subscribed and not
     preserve` branch of models.update_user_subscription_status, including the
     20-a-day subscriber top-up."""
-    from routes.paddle_webhook import credits_for_price, SUB_DAILY_CREDITS
+    from routes.paddle_webhook import credits_for_price
+    from plan_catalog import daily_credits_for_plan
     monthly = credits_for_price(price_id, plan)
     cur = conn.cursor()
     cur.execute("""UPDATE users
@@ -396,7 +397,7 @@ def _activate(conn, user_id, plan, subscription_id, expiry, price_id=None):
                           credits_balance       = %s + COALESCE(credits_bonus, 0) + %s
                     WHERE id = %s""",
                 (expiry, subscription_id, plan, monthly, monthly,
-                 SUB_DAILY_CREDITS, SUB_DAILY_CREDITS, monthly, user_id))
+                 daily_credits_for_plan(plan), daily_credits_for_plan(plan), monthly, user_id))
     conn.commit()
     cur.close()
 

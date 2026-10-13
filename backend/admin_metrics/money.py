@@ -9,21 +9,21 @@ only the admin and test accounts.
 from datetime import timedelta
 
 import billing
-from plan_catalog import LEGACY_SHOPFRONT_PLANS, NEW_PLANS, PLAN_PRICES_USD
+from plan_catalog import LEGACY_SHOPFRONT_PLANS, SEPTEMBER_PLANS, NEW_PLANS, PLAN_PRICES_USD
 from admin_metrics import db, defs, ranges
 
-PLAN_NAMES = {"mcp_connect": "MCP Connect", "advanced": "Advanced",
+PLAN_NAMES = {"plus_2026": "Plus", "pro_2026": "Pro", "max_2026": "Max", "mcp_connect": "MCP Connect", "advanced": "Advanced",
               "ultimate": "Ultimate", "ai": "Creator", "ai_pro": "Pro",
               "ai_max": "Frontier", "mcp": "MCP (legacy)", "plus": "Plus",
               "pro": "Pro (legacy)", "ultra": "Ultra", "titan": "Titan",
               "ace": "Ace", "free": "Free"}
-CURRENT_PLANS = set(NEW_PLANS) | {"ultimate"}
+CURRENT_PLANS = set(NEW_PLANS)
 
 
 def plan_tier(plan):
     if plan in CURRENT_PLANS:
         return "current"
-    if plan in LEGACY_SHOPFRONT_PLANS:
+    if plan in LEGACY_SHOPFRONT_PLANS | SEPTEMBER_PLANS:
         return "grandfathered"
     return "retired"
 

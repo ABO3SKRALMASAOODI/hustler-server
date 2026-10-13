@@ -679,7 +679,7 @@ def vdb(db_url=None):
 def _studio_ai_gate(cur, user_id):
     cur.execute("SELECT plan, is_subscribed FROM users WHERE id = %s", (user_id,))
     account = cur.fetchone() or {}
-    if account.get("plan") == "mcp_connect" and account.get("is_subscribed"):
+    if account.get("plan") in {"mcp_connect", "plus_2026"} and account.get("is_subscribed"):
         return jsonify({"error": "You’re on the MCP plan. Upgrade to use the Valmera AI editor.",
                         "code": "mcp_only", "connect_url": "/mcp/connect",
                         "upgrade_url": "/subscribe"}), 403

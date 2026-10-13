@@ -31,8 +31,8 @@ def test_every_plan_has_one_credit_limit_and_one_reporting_price():
 
 
 def test_shopfront_plans_are_complete_and_annual_is_ten_months():
-    assert plan_catalog.NEW_PLANS == {"mcp_connect", "advanced"}
-    assert plan_catalog.PURCHASABLE_PLANS == plan_catalog.NEW_PLANS | plan_catalog.LEGACY_SHOPFRONT_PLANS
+    assert plan_catalog.NEW_PLANS == {"plus_2026", "pro_2026", "max_2026"}
+    assert plan_catalog.PURCHASABLE_PLANS == plan_catalog.NEW_PLANS | plan_catalog.SEPTEMBER_PLANS | plan_catalog.LEGACY_SHOPFRONT_PLANS
     for name in plan_catalog.PURCHASABLE_PLANS:
         plan = plan_catalog.PLANS_LIVE[name]
         price = plan_catalog.PLAN_PRICES_USD[name]

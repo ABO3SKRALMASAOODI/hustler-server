@@ -120,15 +120,13 @@ def test_offer_body_is_subscribe_not_trial():
     assert body["trial_days"] == 0
     assert body["code"] == "subscribe_required"
     by_id = {p["id"]: p for p in body["plans"]}
-    assert set(by_id) == {"mcp_connect", "advanced"}
-    assert by_id["mcp_connect"]["monthly"] == 25
-    assert by_id["mcp_connect"]["credits"] == 1500
-    assert by_id["advanced"]["monthly"] == 100
-    assert by_id["advanced"]["credits"] == 8000
+    assert set(by_id) == {"plus_2026", "pro_2026", "max_2026"}
+    assert by_id["plus_2026"]["monthly"] == 25
+    assert by_id["plus_2026"]["credits"] == 500
+    assert by_id["max_2026"]["monthly"] == 100
+    assert by_id["max_2026"]["credits"] == 4000
     comparison = body["comparison_plans"]
-    assert comparison == [{"id": "ultimate", "name": "Ultimate Editor",
-                           "monthly": 200, "yearly": 2000,
-                           "credits": 16000, "sold_out": True}]
+    assert comparison == []
     from plan_catalog import PLANS_LIVE, PURCHASABLE_PLANS, available_plans
     assert "ultimate" not in PLANS_LIVE
     assert "ultimate" not in PURCHASABLE_PLANS

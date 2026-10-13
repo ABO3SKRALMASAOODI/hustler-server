@@ -8,6 +8,10 @@ wrong allowance.
 """
 
 PLANS_LIVE = {
+    # October 2026 offers are separate contracts, never renamed legacy IDs.
+    "plus_2026": {"monthly_credits": 500, "price_id": "pri_01m4tq08e68mg9t3n4f86qwhb3", "yearly_price_id": "pri_01m4tq08na6vh0x92pfk573f9e"},
+    "pro_2026": {"monthly_credits": 1500, "price_id": "pri_01m4tq09etphbn3b0btrtj1sad", "yearly_price_id": "pri_01m4tq09nz5axz948yjdh6jk72"},
+    "max_2026": {"monthly_credits": 4000, "price_id": "pri_01m4tq0afzgw5t3h0k8m362fyw", "yearly_price_id": "pri_01m4tq0ar7xt1hkm3a60m9rvts"},
     # September 2026 contracts: never reuse a grandfathered price/plan ID.
     "mcp_connect": {'monthly_credits': 1500, 'price_id': 'pri_01m3krftttqgfsfzeyepww17c5', 'yearly_price_id': 'pri_01m3krfv2zr89215s1k6dbac2z'},
     "advanced": {'monthly_credits': 8000, 'price_id': 'pri_01m3krfvxd8fq4397hwzr071g7', 'yearly_price_id': 'pri_01m3krfw57nk3y15pv083aesw0'},
@@ -104,18 +108,26 @@ PLANS_SANDBOX = {
 
 # Only these tiers can be newly purchased or switched to. Retired and MCP
 # definitions above are present solely to keep existing contracts resolvable.
-NEW_PLANS = frozenset({"mcp_connect", "advanced"})
+NEW_PLANS = frozenset({"plus_2026", "pro_2026", "max_2026"})
+SEPTEMBER_PLANS = frozenset({"mcp_connect", "advanced"})
+MONTHLY_CYCLE_PLANS = NEW_PLANS | SEPTEMBER_PLANS
 # Display-only comparisons never enter the checkout or entitlement catalogs.
 COMPARISON_ONLY_PLANS = ({
     "id": "ultimate", "name": "Ultimate Editor", "monthly": 200,
     "yearly": 2000, "credits": 16000, "sold_out": True,
 },)
 LEGACY_SHOPFRONT_PLANS = frozenset({"ai", "ai_pro", "ai_max"})
-PURCHASABLE_PLANS = NEW_PLANS | LEGACY_SHOPFRONT_PLANS
+PURCHASABLE_PLANS = NEW_PLANS | SEPTEMBER_PLANS | LEGACY_SHOPFRONT_PLANS
+
+def daily_credits_for_plan(plan):
+    """New offers sell a fixed monthly allowance; legacy daily grants persist."""
+    return 0 if plan in NEW_PLANS else 20
 
 def available_plans(snapshot):
     """Grandfather until access ends, including scheduled cancellation/grace."""
     if snapshot.get("is_subscribed") and snapshot.get("plan") not in NEW_PLANS:
+        if snapshot.get("plan") in SEPTEMBER_PLANS:
+            return SEPTEMBER_PLANS
         return LEGACY_SHOPFRONT_PLANS | {snapshot.get("plan")}
     return NEW_PLANS
 
@@ -127,6 +139,9 @@ PLAN_MONTHLY_CREDITS = {
 }
 
 PLAN_PRICES_USD = {
+    "plus_2026": {"monthly": 25, "yearly": 250},
+    "pro_2026": {"monthly": 50, "yearly": 500},
+    "max_2026": {"monthly": 100, "yearly": 1000},
     "mcp_connect": {"monthly": 25, "yearly": 250},
     "advanced": {"monthly": 100, "yearly": 1000},
     "ai": {"monthly": 15, "yearly": 150},
