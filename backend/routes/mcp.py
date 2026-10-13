@@ -1742,10 +1742,27 @@ def _t_upload_finish(tok, args):
     if status >= 400:
         return _session_error(
             f"Upload could not be finished: {payload.get('error')}")
+    if payload.get("index_job_state") == "failed":
+        return _session_error(
+            f"Upload is saved (asset {payload['asset_id']}), but analysis "
+            f"job {payload['index_job_id']} is still failed; no new analysis "
+            f"was started. {payload.get('index_error') or ''} "
+            "The existing upload is preserved.")
+    if payload.get("index_job_state") == "done" and role != "shorts_reference":
+        return (f"Already uploaded (asset {payload['asset_id']}) and analyzed "
+                f"by job {payload['index_job_id']}. No duplicate analysis "
+                "was started.")
     if role == "shorts_reference":
         analysis = ""
         if payload.get("index_job_id"):
-            analysis = (f" Reference analysis started as job "
+            action = "restarted" if payload.get("index_restarted") else "queued"
+            if payload.get("index_job_state") == "done":
+                action = "completed by"
+            elif payload.get("index_job_state") == "running":
+                action = "running as"
+            else:
+                action += " as"
+            analysis = (f" Reference analysis {action} job "
                         f"{payload['index_job_id']}; use "
                         f"wait_for_job(job_id={payload['index_job_id']}) "
                         "to follow it.")
@@ -1754,7 +1771,10 @@ def _t_upload_finish(tok, args):
                 "reference-only analysis input: it is not added to the "
                 "timeline or offered as placeable media.")
     if payload.get("index_job_id"):
-        return (f"Uploaded (asset {payload['asset_id']}). Analysis started as "
+        action = "restarted" if payload.get("index_restarted") else "queued"
+        if payload.get("index_job_state") == "running":
+            action = "already running"
+        return (f"Uploaded (asset {payload['asset_id']}). Analysis {action} as "
                 f"job {payload['index_job_id']} — the transcript, shots and "
                 "silences do not exist until it finishes. Poll index_status; "
                 "on a long video this takes several minutes.")
@@ -1779,9 +1799,10 @@ def _t_index_status(tok, args):
                     "Nothing to analyze.")
         if original["sha256"] and _index_row(cur, original["sha256"]):
             return "done — the video is analyzed and ready to edit."
-        cur.execute("""SELECT id, state, progress, error FROM video_jobs
+        cur.execute("""SELECT id, state, progress, error, result FROM video_jobs
                        WHERE project_id = %s AND type = 'index'
-                       ORDER BY id DESC LIMIT 1""", (project_id,))
+                         AND payload->>'asset_id' = %s
+                       ORDER BY id DESC LIMIT 1""", (project_id, str(original["id"])))
         job = cur.fetchone()
         queue = (_index_queue(cur, job["id"], tok["user_id"])
                  if job and job["state"] == "queued" else None)
@@ -1789,6 +1810,13 @@ def _t_index_status(tok, args):
         return ("The video is uploaded but no analysis job exists — call "
                 "upload_finish, or re-open the project in the studio.")
     if job["state"] == "failed":
+        failure = (job.get("result") or {}).get("failure") or {}
+        if failure.get("kind") == "provider_rollout_pending":
+            return (f"Analysis paused by a deployment (job {job['id']}). "
+                    "The uploaded video is preserved and no analysis ran. "
+                    "After the deployment finishes, retry upload_finish "
+                    "with the same project_id and storage_key to restart "
+                    "analysis; do not upload the video again.")
         return (f"Analysis FAILED: {job['error']}. The video cannot be "
                 "edited until it is re-uploaded and analyzed.")
     if job["state"] == "queued":
