@@ -75,3 +75,49 @@ def test_snapshot_writer_is_ordered_reporting_only_and_clears_cancel():
     assert params[6:8] == (None, None)
     assert all("UPDATE users" not in sql and "COMMIT" not in sql for sql, _ in conn.sql)
     assert not record_snapshot(conn, {"id": "txn_1", "status": "completed"})
+
+
+def test_postgres_reporting_keeps_lifetime_dates_and_rejects_old_webhooks(monkeypatch):
+    import os
+    from pathlib import Path
+    from urllib.parse import urlparse
+    import pytest
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from admin_metrics import subscriptions
+
+    url = os.getenv('QUEUE_TEST_DATABASE_URL')
+    if not url:
+        pytest.skip('requires isolated CI PostgreSQL')
+    assert urlparse(url).hostname in {'localhost', '127.0.0.1', 'postgres'}
+    conn = psycopg2.connect(url, cursor_factory=RealDictCursor)
+    try:
+        with conn.cursor() as cur:
+            cur.execute('''CREATE TEMP TABLE payments(user_id int, subscription_id text,
+                occurred_at timestamp, created_at timestamp, status text,
+                amount_cents int, currency text)''')
+            migration = Path(__file__).parents[1] / 'migrations/035_admin_subscription_snapshots.sql'
+            cur.execute(migration.read_text().replace('BEGIN;', '').replace('COMMIT;', '')
+                        .replace('CREATE TABLE IF NOT EXISTS', 'CREATE TEMP TABLE'))
+            cur.execute('''INSERT INTO payments
+                SELECT 1,'sub_1',date '2025-01-01' + n,date '2025-01-01' + n,
+                       'completed',100,'USD' FROM generate_series(0,220) n''')
+            cur.execute('''INSERT INTO payments VALUES
+                (1,'sub_1','2024-01-01','2024-01-01','completed',0,'USD'),
+                (1,'sub_1','2026-12-01','2026-12-01','past_due',5000,'USD')''')
+            current = dict(id='sub_1', status='active', updated_at='2026-10-13T12:00:00Z',
+                           scheduled_change=dict(action='cancel', effective_at='2026-11-13T12:00:00Z'))
+            assert record_snapshot(conn, current)
+            assert record_snapshot(conn, dict(current, updated_at='2026-10-12T12:00:00Z', scheduled_change=None))
+            monkeypatch.setattr(subscriptions.db, 'has_table', lambda c, name: True)
+            result = subscriptions.for_customers(cur, [{'id': 1, 'subscription_id': 'sub_1'}])[1]
+            assert result['first_paid_at'] == '2025-01-01T00:00:00Z'
+            assert result['last_paid_at'] == '2025-08-09T00:00:00Z'
+            assert result['payment_count'] == 221 and result['paid_usd'] == 221
+            assert result['renewal_state'] == 'cancelled'
+            assert record_snapshot(conn, dict(current, updated_at='2026-10-14T12:00:00Z',
+                scheduled_change=None, next_billed_at='2026-11-13T12:00:00Z'))
+            assert subscriptions.for_customers(cur, [{'id': 1, 'subscription_id': 'sub_1'}])[1]['renewal_state'] == 'renews'
+    finally:
+        conn.rollback()
+        conn.close()
