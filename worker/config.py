@@ -2266,7 +2266,7 @@ HANDOFF_VERSION = 1
 # headline left its band empty for up to a second between graphics where
 # today's swaps on the frame. Everything else keeps its cache. Bump when what
 # a card or the band looks like changes.
-CARD_LAYOUT_VERSION = 1
+CARD_LAYOUT_VERSION = 2
 
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so

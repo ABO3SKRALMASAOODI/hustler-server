@@ -21,6 +21,7 @@ Run:  python -m pytest tests/test_cut_hygiene_r7.py -q     (from worker/)
 """
 
 import math
+import json
 import os
 import shutil
 import subprocess
@@ -332,7 +333,8 @@ def test_a_hold_keeps_every_finish_that_ran_to_the_end():
                      {"id": "tb", "start": 8.0, "end": 9.2,
                       "anchor_insert": "ins9"}],
            "vectors": [{"id": "v", "start": 8.5, "end": 9.2}],
-           "effects": {"zooms": [{"id": "z", "start": 8.0, "end": 9.18}],
+           "effects": {"picture_cards": [{"id": "pc", "start": 0, "end": 9.2}],
+                       "zooms": [{"id": "z", "start": 8.0, "end": 9.18}],
                        "stylize": [{"id": "g", "kind": "grain",
                                     "start": 2.0, "end": 9.2},
                                    {"id": "f", "kind": "flash",
@@ -341,7 +343,8 @@ def test_a_hold_keeps_every_finish_that_ran_to_the_end():
                                     "start": None, "end": None}],
                        "custom": [{"id": "c", "start": 5.0, "end": 9.21}]}}
     moved = agent_tools._extend_to_end(edl, 9.2, 10.2)
-    assert sorted(moved) == ["c", "g", "m", "t", "v", "z"]
+    assert sorted(moved) == ["c", "g", "m", "pc", "t", "v", "z"]
+    assert edl["effects"]["picture_cards"][0]["end"] == 10.2
     assert edl["vectors"][0]["end"] == 10.2
     assert edl["effects"]["stylize"][0]["end"] == 10.2
     # a flash is a moment, not a finish; a whole-programme look needs none
@@ -445,7 +448,8 @@ def test_a_hold_insert_validates_and_old_inserts_are_untouched():
 
 
 @FFMPEG
-def test_the_render_holds_the_last_frame_with_room_tone(tmp_path):
+@pytest.mark.parametrize("card_end", [None, 2.05, 3.05])
+def test_the_render_holds_the_last_frame_with_room_tone(tmp_path, card_end):
     src = str(tmp_path / "src.mp4")
     subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
@@ -466,6 +470,15 @@ def test_the_render_holds_the_last_frame_with_room_tone(tmp_path):
                        "kind": "image", "at_output_s": 2.05,
                        "duration_s": 1.0, "fit": "crop",
                        "hold": {"room_tone": [2.65, 2.95]}}]
+    if card_end is not None:
+        edl["frame"] = {"ratio": "9:16", "mode": "crop"}
+        edl["effects"] = {"picture_cards": [{
+            "id": "speaker-card", "start": 0, "end": card_end,
+            "box": [0, .24, 1, .794], "source": [.28, 0, .73, .8],
+            "fit": "crop", "radius": 0, "entrance": "none", "exit": "none",
+            "background_style": "vertical_gradient",
+            "background": "#182329", "background_color2": "#080D12",
+            "grain": .15, "vignette": .25}]}
     idx = {"video": {"duration": 6.0, "width": 320, "height": 180,
                      "fps": 30.0}, "words": [], "sentences": [],
            "silences": []}
@@ -474,12 +487,20 @@ def test_the_render_holds_the_last_frame_with_room_tone(tmp_path):
                               suppress_outro=True,
                               asset_locals={"k/still.png": png})
     assert dur == pytest.approx(3.05, abs=0.05)
+    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0",
+                            "-show_entries", "stream=duration,nb_frames", "-of", "json", out],
+                           check=True, capture_output=True, text=True)
+    stream = json.loads(probe.stdout)["streams"][0]
+    assert float(stream["duration"]) == pytest.approx(3.05, abs=1 / 30)
+    assert int(stream["nb_frames"]) >= 91
 
     def gray(t):
         r = subprocess.run(["ffmpeg", "-v", "error", "-ss", f"{t:.3f}", "-i",
                             out, "-frames:v", "1", "-vf",
-                            "scale=64:36,format=gray", "-f", "rawvideo", "-"],
+                            "scale=64:36,format=gray", "-threads", "1", "-f", "rawvideo", "-"],
                            capture_output=True)
+        assert r.returncode == 0, r.stderr.decode(errors="replace")
+        assert len(r.stdout) == 64 * 36, f"No complete video frame at {t}s"
         return np.frombuffer(r.stdout, np.uint8).astype(np.float32)
     last, held, later = gray(2.02), gray(2.4), gray(2.95)
     # the held frame is the programme's last frame (testsrc moves every
@@ -655,3 +676,41 @@ def test_a_card_window_a_frame_off_a_cut_moves_onto_it():
     assert agent_tools._snap_window_to_cuts(ctx, edl, 10.2, 15.0)[2] == []
     # never collapses a window
     assert agent_tools._snap_window_to_cuts(ctx, edl, 9.95, 10.05)[2] == []
+
+
+@pytest.mark.parametrize("card_end", [2.05, 3.05])
+def test_hold_inherits_source_card_run_at_render_time(monkeypatch, card_end):
+    """A card authored before or after the hold keeps its backdrop on it."""
+    from timeline import Timeline
+    card = {"id": "speaker-card", "start": 0, "end": card_end,
+            "box": [0, .24, 1, .794], "source": [.28, 0, .73, .8],
+            "fit": "crop", "entrance": "none", "exit": "none",
+            "background_style": "vertical_gradient", "background": "#182329",
+            "background_color2": "#080D12"}
+    hold = {"id": "ins1", "asset_key": "old-raw-still.png", "kind": "image",
+            "at_output_s": 2.05, "duration_s": 1, "fit": "crop", "hold": {}}
+    edl = default_edl(6)
+    edl.update(keep=[[0, 1.5], [2, 2.55]], inserts=[hold],
+               frame={"ratio": "9:16", "mode": "crop"},
+               effects={"picture_cards": [card]})
+    captured = {}
+    def append(parts, label, *args, **kwargs):
+        captured.update(kwargs)
+        return label
+    monkeypatch.setattr(renderer.picture_cards, "append_graph", append)
+    graph = renderer.build_filtergraph(
+        edl, 6, True, Timeline(edl["keep"], [hold]), None, [], {}, True,
+        W=180, H=320, fps=30, src_w=320, src_h=180,
+        insert_inputs=[(2, hold, False)], silence_idx=1,
+        picture_card_inputs=[(3, card)], loudness=None)
+    # The existing fallback still is irrelevant: the renderer uses the
+    # preceding source-card block, including a card written after add_hold.
+    assert captured["runs"]["speaker-card"] == [["c0r0", 0, 3.05]]
+    assert "[v_ins0raw]metadata=mode=add:key=valmera_card:value=c0r0[v_ins0]" in str(graph)
+
+
+def test_old_card_hold_cache_is_invalidated():
+    edl = {"effects": {"picture_cards": [{"id": "speaker-card"}]}}
+    assert not renderer.cards_current({"card_v": 1}, edl)
+    assert renderer.cards_current({"card_v": renderer.config.CARD_LAYOUT_VERSION}, edl)
+    assert renderer.cards_current({"card_v": 1}, {"effects": {}})
