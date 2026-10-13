@@ -101,3 +101,42 @@ def test_october_annual_contract_refreshes_monthly_without_extra_daily_grants(pl
     db.user['is_subscribed']=0
     assert not credits.refresh(db,1,date('2026-11-28'))
     assert db.user['credits_monthly']==allowance-100
+
+
+def test_postgres_annual_migration_and_refresh_preserve_both_contract_generations():
+    import os
+    from urllib.parse import urlparse
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    url=os.getenv('QUEUE_TEST_DATABASE_URL')
+    if not url:
+        pytest.skip('requires isolated CI PostgreSQL')
+    assert urlparse(url).hostname in {'localhost','127.0.0.1','postgres'}
+    conn=psycopg2.connect(url,cursor_factory=RealDictCursor)
+    try:
+        with conn.cursor() as cur:
+            cur.execute('''CREATE TEMP TABLE users(id integer PRIMARY KEY, plan text,
+                is_subscribed boolean,billing_status text,billing_period text,
+                subscription_id text,credits_daily_reset date,credits_monthly numeric,
+                credits_daily numeric,credits_bonus numeric,credits_balance numeric)''')
+            migrations=Path(__file__).parents[1]/'migrations'
+            cur.execute((migrations/'027_annual_credit_cycles.sql').read_text()
+                .replace('BEGIN;','').replace('COMMIT;','').replace('CREATE TABLE IF NOT EXISTS','CREATE TEMP TABLE'))
+            cur.execute((migrations/'036_october_annual_credit_plans.sql').read_text()
+                .replace('BEGIN;','').replace('COMMIT;',''))
+            for uid,(plan,allowance,daily) in enumerate([
+                ('mcp_connect',1500,20),('advanced',8000,20),
+                ('plus_2026',500,0),('pro_2026',1500,0),('max_2026',4000,0)],1):
+                sid=f'sub_{uid}'
+                cur.execute('INSERT INTO users VALUES (%s,%s,true,\'active\',\'yearly\',%s,\'2026-01-31\',10,0,0,10)',(uid,plan,sid))
+                credits.record_paid_year(conn,uid,sid,f'txn_{uid}',plan,date('2026-01-31'),date('2027-01-31'),allowance)
+                assert credits.refresh(conn,uid,date('2026-02-28'))
+                cur.execute('SELECT * FROM users WHERE id=%s',(uid,));user=cur.fetchone()
+                assert user['credits_monthly']==allowance and user['credits_daily']==daily
+                cur.execute('UPDATE users SET credits_monthly=10 WHERE id=%s',(uid,))
+                credits.record_paid_year(conn,uid,sid,f'txn_{uid}',plan,date('2026-01-31'),date('2027-01-31'),allowance)
+                assert not credits.refresh(conn,uid,date('2026-02-28'))
+                cur.execute('SELECT credits_monthly FROM users WHERE id=%s',(uid,))
+                assert cur.fetchone()['credits_monthly']==10
+    finally:
+        conn.rollback();conn.close()
