@@ -3779,6 +3779,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
         conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
         try:
             cur = conn.cursor()
+            subscription_blocked = False
 
             def _say(content, meta):
                 cur.execute("""INSERT INTO chat_messages (session_id, role,
@@ -3803,8 +3804,20 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                 # canvas — run a real agent turn (no main video required). It
                 # charges credits per turn exactly like any edit, so reserve
                 # first and fail honestly if they're tapped out or already busy.
-                if not check_and_reserve(conn, ctx["user_id"], min_credits=1.0):
-                    info = get_balance(conn, ctx["user_id"])
+                info = get_balance(conn, ctx["user_id"])
+                if info.get("subscribe_gated") and not info.get("payment_failed"):
+                    # A website recording or blank-canvas build is an edit
+                    # attempt too. New accounts have no free grant to exhaust;
+                    # send the same offer as the uploaded-video path.
+                    _say("Choose a plan so I can start your edit.", {
+                        "kind": "subscription_required",
+                        "credits_exhausted": True,
+                        "subscribe_required": True,
+                        "subscription_offer": _subscribe_offer_body(),
+                        "request_message_id": ctx["message_id"],
+                    })
+                    subscription_blocked = True
+                elif float(info.get("balance") or 0) < 1.0:
                     spent = info.get("free_trial_exhausted")
                     # A trialling account reaches here too, and neither of the
                     # other two sentences is addressed to it: they have already
@@ -3874,6 +3887,11 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                              llm_rec["prompt_tokens"],
                              llm_rec["completion_tokens"]))
             conn.commit()
+            if subscription_blocked:
+                record_client_event(ctx["user_id"], project_id, "trial_gate_shown",
+                                    detail={"subscribe_offer": True,
+                                            "surface": "blank_canvas"},
+                                    origin="server")
         finally:
             conn.close()
     except Exception as e:
