@@ -665,6 +665,7 @@ def test_review_audio_hears_six_windows_in_batches_anchored_where_asked(monkeypa
 
 def test_the_listener_numbers_a_later_calls_clips_on(monkeypatch, tmp_path):
     import config
+    monkeypatch.setattr(config, "AUDIO_REVIEW_ENABLED", True)
     clips = []
     for i in range(2):
         c = tmp_path / f"c{i}.mp3"

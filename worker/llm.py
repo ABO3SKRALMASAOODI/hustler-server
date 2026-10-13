@@ -587,7 +587,8 @@ _audio_review_dead = False
 
 def audio_review_available():
     """Whether the bounded actual-audio reviewer is configured and live."""
-    return bool(config.AUDIO_REVIEW_MODEL and config.AUDIO_REVIEW_API_KEY
+    return bool(config.AUDIO_REVIEW_ENABLED
+                and config.AUDIO_REVIEW_MODEL and config.AUDIO_REVIEW_API_KEY
                 and not _audio_review_dead)
 
 

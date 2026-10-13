@@ -25688,7 +25688,7 @@ def review_audio(ctx, asset_key=None, times=None, output_times=None,
     its time (a join), starts at it (what a cut keeps after it) or ends at it.
     """
     if not llm.audio_review_available():
-        return ("REJECTED: actual-audio review is not configured on this "
+        return ("REJECTED: paid actual-audio review is disabled or not configured on this "
                 "deployment. Use get_audio_analysis plus the preview AUDIO "
                 "CHECK measurements; do not claim subjective listening.")
     try:
