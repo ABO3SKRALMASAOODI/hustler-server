@@ -1,11 +1,12 @@
 """Customers list and customer page (plan §2.6, endpoints 11–12)."""
-from admin_metrics import channels_report, db, defs, funnel, money, registry
+from admin_metrics import channels_report, db, defs, funnel, money, registry, subscriptions
 from admin_metrics.ranges import RangeError
 
 FILTERS = ("all", "paying", "payment_failing", "canceled", "ever_paid", "free")
 SORTS = {"joined": "created_at", "last_active": "last_active_at",
          "paid": "paid_cents", "projects": "projects", "exports": "exports",
-         "credits_used": "credits_used"}
+         "credits_used": "credits_used", "first_paid": "first_paid_at",
+         "last_paid": "last_paid_at"}
 DATE_FIELDS = ("joined", "active", "first_paid", "first_upload",
                "first_edit", "first_export")
 STAGE_KEYS = ("uploaded", "asked_edit", "exported", "paid")
@@ -137,14 +138,14 @@ def list_customers(cur, period, args, page, per_page):
     sort = (args.get("sort") or "joined").strip()
     if sort not in SORTS:
         raise RangeError("sort must be joined, last_active, paid, projects, "
-                         "exports or credits_used.")
+                         "exports, credits_used, first_paid or last_paid.")
     direction = "ASC" if (args.get("dir") or "desc").lower() == "asc" \
         else "DESC"
     params = period.params()
     where = " AND ".join(_filters(cur, period, args, params))
     base = f"""WITH base AS MATERIALIZED (
         SELECT u.id, u.email, u.display_name, u.plan, u.billing_plan, u.billing_period,
-               u.created_at, u.last_seen_at, u.device_type,
+               u.created_at, u.last_seen_at, u.device_type, u.subscription_id,
                {money.STATUS_SQL} AS status
           FROM users u WHERE {where})"""
 
@@ -163,7 +164,7 @@ def list_customers(cur, period, args, page, per_page):
     total = counts.get(f, 0) if f != "all" else counts["all"]
 
     order = SORTS[sort]
-    nulls = "NULLS LAST" if direction == "DESC" else "NULLS FIRST"
+    nulls = "NULLS LAST" if sort in ("first_paid", "last_paid") or direction == "DESC" else "NULLS FIRST"
     params.update(limit=per_page, offset=(page - 1) * per_page)
     cur.execute(base + f"""
         , agg AS (
@@ -179,6 +180,10 @@ def list_customers(cur, period, args, page, per_page):
                              WHERE p.currency = 'USD'), 0)
                     FROM payments p WHERE p.user_id = b.id
                      AND {defs.success('p')}) AS paid_cents,
+                 (SELECT min(COALESCE(p.occurred_at, p.created_at)) FROM payments p
+                   WHERE p.user_id = b.id AND {defs.success('p')}) AS first_paid_at,
+                 (SELECT max(COALESCE(p.occurred_at, p.created_at)) FROM payments p
+                   WHERE p.user_id = b.id AND {defs.success('p')}) AS last_paid_at,
                  (SELECT COALESCE(sum(jc.credits_used), 0) FROM job_credits jc
                    WHERE jc.user_id = b.id) AS credits_used,
                  {last_active_sql('b')} AS last_active_at
@@ -192,6 +197,7 @@ def list_customers(cur, period, args, page, per_page):
         ("touches", lambda c: channels_report.customer_touches(c, ids)),
         ("told", lambda c: survey_answers(c, ids)),
         ("extra", lambda c: row_extras(c, ids)),
+        ("subscriptions", lambda c: subscriptions.for_customers(c, rows)),
         ("problems", billing_problem_ids),
         ("signed_in", lambda c: signed_in_metric(c, period, where, params)),
     ])
@@ -203,6 +209,7 @@ def list_customers(cur, period, args, page, per_page):
         t = told.get(r["id"])
         x = extra.get(r["id"], {})
         out.append({
+            **_take(got, "subscriptions").get(r["id"], {}),
             "id": r["id"], "email": r["email"],
             "name": r.get("display_name"), "latest_project_id": r.get("latest_project_id"),
             "plan": r["billing_plan"] or r["plan"],
@@ -313,7 +320,7 @@ def customer_detail(cur, user_id, presign=None):
     cur.execute(f"""
         SELECT u.id, u.email, u.display_name, u.created_at, u.is_verified, u.auth_provider,
                u.device_type, u.device_browser, u.plan, u.billing_plan,
-               u.billing_status, u.billing_period, u.last_seen_at,
+               u.billing_status, u.billing_period, u.last_seen_at, u.subscription_id,
                u.credits_balance, u.credits_monthly, u.credits_daily,
                u.credits_bonus, u.credits_monthly_limit,
                u.payment_recovered_at, u.payment_failed_at,
@@ -335,6 +342,7 @@ def customer_detail(cur, user_id, presign=None):
         ("touches", lambda c: channels_report.customer_touches(c, [user_id])),
         ("survey", lambda c: _survey_row(c, user_id)),
         ("payments", lambda c: _payment_rows(c, user_id)),
+        ("subscriptions", lambda c: subscriptions.for_customers(c, [u])),
         ("usage", lambda c: _usage_row(c, user_id)),
         ("projects", lambda c: projects_mod.customer_projects(
             c, user_id, limit=100, presign=presign)),
@@ -361,11 +369,11 @@ def customer_detail(cur, user_id, presign=None):
                   "skipped": bool(s["skipped"])}
 
     payments = _take(got, "payments")
-    ok = [p for p in payments if p["ok"] and p["currency"] == "USD"]
-    first_paid = min((p["at"] for p in payments if p["ok"]), default=None)
+    subscription = _take(got, "subscriptions")[user_id]
+    first_paid = subscription["first_paid_at"]
     events = []
     if first_paid:
-        events.append({"at": defs.iso(first_paid), "kind": "started_paying",
+        events.append({"at": first_paid, "kind": "started_paying",
                        "label": "Started paying"})
     for p in payments:
         if p["failed"]:
@@ -419,8 +427,7 @@ def customer_detail(cur, user_id, presign=None):
         "acquisition": {"first": first, "last": last, "tracking": tracking},
         "survey": survey,
         "billing": {
-            "paid_usd": round(sum(defs.usd(p["amount_cents"]) for p in ok), 2),
-            "first_paid_at": defs.iso(first_paid),
+            **subscription,
             "payments": [{
                 "id": p["id"], "at": defs.iso(p["at"]),
                 "amount_usd": defs.usd(p["amount_cents"]),

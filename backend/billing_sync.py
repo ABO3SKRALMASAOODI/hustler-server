@@ -232,6 +232,10 @@ def reconcile_user(conn, row, fetch_all_transactions=False):
                 "flagged: Paddle does not recognise this subscription id")
         return report
 
+    from subscription_reporting import record_snapshot
+    if record_snapshot(conn, data):
+        conn.commit()
+
     status = (data.get("status") or "").lower()
     price_plan = _plan_from_items(data)
     plan = price_plan or row.get("plan")

@@ -475,6 +475,13 @@ def handle_webhook():
               "browser custom_data was ignored")
         return 'Payer identity could not be verified', 503
 
+    # Keep reporting separate from access: an active contract may already
+    # have renewal cancelled. Capture old contract cancellations too.
+    if event_type.startswith('subscription.'):
+        from subscription_reporting import record_snapshot
+        if record_snapshot(get_db(), data):
+            get_db().commit()
+
     # A completed one-time charge is revenue but not a subscription grant.
     # Record it without trying to invent recurring entitlement. Conversely, a
     # recurring price that somehow reaches completed without a subscription id

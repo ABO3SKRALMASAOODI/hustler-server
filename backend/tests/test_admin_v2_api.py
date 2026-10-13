@@ -559,7 +559,9 @@ def test_customers_list_contract_and_true_total(app):
                         "joined_at", "last_active_at", "device", "came_from",
                         "told_us", "projects", "exports", "paid_usd",
                         "credits_left", "credits_used", "edit_requests",
-                        "uploads", "country", "browser", "auth_provider", "name", "latest_project_id"}
+                        "uploads", "country", "browser", "auth_provider", "name", "latest_project_id",
+                        "first_paid_at", "last_paid_at", "payment_count", "subscriber_kind",
+                        "returned_at", "renewal_state", "renewal_at", "subscription_checked_at"}
     # The full email, never shortened: the admin is the owner's own tool.
     assert row["email"] == "customer1@example.com"
     assert row["credits_left"] == 980.0 and row["edit_requests"] == 6
@@ -613,6 +615,9 @@ def test_customer_page_contract(app, monkeypatch):
         ("FROM job_credits", [{"used": 12.5}]),
         ("fp ON TRUE WHERE u.id = ANY", []),
         ("FROM onboarding_responses WHERE user_id = %s", []),
+        ("GROUP BY p.user_id, p.subscription_id", [{"user_id": 7, "subscription_id": "sub_first",
+            "first_paid_at": datetime(2026, 10, 9, 9), "last_paid_at": datetime(2026, 10, 9, 9),
+            "paid_cents": 1500, "payment_count": 1}]),
         ("FROM payments p WHERE p.user_id = %s", [
             {"id": 1, "at": datetime(2026, 10, 9, 9), "amount_cents": 1500,
              "currency": "USD", "status": "completed", "plan": "ai",
@@ -655,6 +660,8 @@ def test_customer_page_contract(app, monkeypatch):
     assert d["customer"]["is_internal"] is False
     assert d["customer"]["credits"]["used_30d"] == 12.5
     assert d["acquisition"]["tracking"] == "unknown"
+    assert d["billing"]["first_paid_at"] == "2026-10-09T09:00:00Z"
+    assert d["billing"]["last_paid_at"] == "2026-10-09T09:00:00Z"
     assert d["billing"]["paid_usd"] == 15.0
     assert [p["status_label"] for p in d["billing"]["payments"]] == [
         "Successful", "Free trial start ($0)"]
