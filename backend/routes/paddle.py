@@ -9,6 +9,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 import offers
+from database_config import preferred_database_url
 from plan_catalog import (
     PLAN_PRICES_USD,
     PLANS_LIVE,
@@ -43,7 +44,7 @@ def get_offers_db():
     work. A private connection makes the offer path unable to affect anything
     around it.
     """
-    return psycopg2.connect(os.environ['DATABASE_URL'],
+    return psycopg2.connect(preferred_database_url(), connect_timeout=3,
                             cursor_factory=RealDictCursor)
 
 PLANS = PLANS_SANDBOX if os.environ.get('PADDLE_MODE') == 'sandbox' else PLANS_LIVE

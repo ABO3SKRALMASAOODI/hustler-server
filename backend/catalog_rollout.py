@@ -5,11 +5,11 @@ keeps September offers usable by the previous frontend until the operator has
 verified the new editor lanes and published the new frontend. No entitlements
 or existing subscriptions are changed by this switch.
 """
-import os
 import time
 import threading
 import psycopg2
 from flask import has_app_context
+from database_config import preferred_database_url
 
 _lock = threading.Lock()
 _cache = {"hold": False, "expires": 0.0}
@@ -25,7 +25,7 @@ def shopfront_held():
         conn = None
         try:
             # A private read cannot commit or roll back a caller's billing work.
-            conn = psycopg2.connect(os.environ['DATABASE_URL'], connect_timeout=3,
+            conn = psycopg2.connect(preferred_database_url(), connect_timeout=3,
                 options='-c default_transaction_read_only=on -c statement_timeout=1500')
             with conn.cursor() as cur:
                 cur.execute('SELECT value FROM app_kv WHERE key=%s', (KEY,))
