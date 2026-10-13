@@ -53,3 +53,14 @@ def test_existing_subscribers_cannot_accidentally_buy_new_contract(monkeypatch,c
     app=Flask(__name__);app.register_blueprint(paddle.paddle_bp)
     result=app.test_client().post('/paddle/checkout-config',json={'plan':target})
     assert result.status_code==409 and result.json['code']=='plan_not_available'
+
+
+def test_staged_rollout_keeps_previous_frontend_offers_usable(monkeypatch):
+    import catalog_rollout
+    monkeypatch.setattr(catalog_rollout,'shopfront_held',lambda: True)
+    assert available_plans({'is_subscribed':False})==NEW_PLANS | {'mcp_connect','advanced'}
+    assert [p['id'] for p in credits.subscribe_offer_body()['plans']]==['mcp_connect','advanced']
+    assert available_plans({'is_subscribed':True,'plan':'advanced'})=={'mcp_connect','advanced'}
+    monkeypatch.setattr(catalog_rollout,'shopfront_held',lambda: False)
+    assert available_plans({'is_subscribed':False})==NEW_PLANS
+    assert [p['id'] for p in credits.subscribe_offer_body()['plans']]==['plus_2026','pro_2026','max_2026']

@@ -125,8 +125,13 @@ def subscribe_offer_body():
     """402 / credits payload for the Studio upgrade cards."""
     import billing
     names = {"plus_2026": "Plus", "pro_2026": "Pro", "max_2026": "Max"}
+    from catalog_rollout import shopfront_held
+    from plan_catalog import COMPARISON_ONLY_PLANS
+    held = shopfront_held()
+    if held:
+        names = {"mcp_connect": "MCP Connect", "advanced": "Advanced Editor"}
     plans = []
-    for pid in ("plus_2026", "pro_2026", "max_2026"):
+    for pid in names:
         prices = billing.PLAN_PRICES_USD.get(pid) or {}
         plans.append({
             "id": pid, "name": names[pid],
@@ -138,7 +143,7 @@ def subscribe_offer_body():
         "code": "subscribe_required", "trial_offer": True,
         "subscribe_offer": True, "trial_days": 0, "plans": plans,
         # Old clients only read plans and must never offer unavailable checkout.
-        "comparison_plans": []}
+        "comparison_plans": [dict(p) for p in COMPARISON_ONLY_PLANS] if held else []}
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 

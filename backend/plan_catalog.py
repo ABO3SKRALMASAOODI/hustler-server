@@ -129,6 +129,9 @@ def available_plans(snapshot):
         if snapshot.get("plan") in SEPTEMBER_PLANS:
             return SEPTEMBER_PLANS
         return LEGACY_SHOPFRONT_PLANS | {snapshot.get("plan")}
+    from catalog_rollout import shopfront_held
+    if shopfront_held():
+        return NEW_PLANS | SEPTEMBER_PLANS
     return NEW_PLANS
 
 
