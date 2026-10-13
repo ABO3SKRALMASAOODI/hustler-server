@@ -411,6 +411,7 @@ def style_params(edl):
         "font_weight": weight,
         "size": float(st.get("size_scale") or {"s": 0.82, "m": 1.0, "l": 1.2, "xl": 1.45}.get(st.get("size") or "m", 1.0)),
         "uppercase": bool(st.get("uppercase")),
+        "dynamic": st.get("dynamic") is True,
         "align": st.get("text_align") or "center",
         "anim": "none" if st.get("animation") == "none" else "auto",
     }

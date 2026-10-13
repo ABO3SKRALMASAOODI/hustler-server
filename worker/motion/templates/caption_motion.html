@@ -7,6 +7,7 @@
   "accent": {"type": "color", "default": null, "hint": "null = the look's own accent"},
   "size": {"type": "float", "min": 0.5, "max": 2.5, "default": 1.0},
   "uppercase": {"type": "bool", "default": false},
+  "dynamic": {"type": "bool", "default": false},
   "align": {"type": "enum", "values": ["center", "left", "right"], "default": "center"},
   "font": {"type": "str", "default": null, "max": 40, "hint": "bundled CSS family for the base role"},
   "font_weight": {"type": "int", "min": 100, "max": 900, "default": null},
@@ -95,6 +96,7 @@
   const look = LOOKS.includes(P.look) ? P.look : 'clean';
   const fps = MG.fps || 30, F = 1 / fps;
   const HARD = P.anim === 'none';
+  const DYNAMIC = P.dynamic === true;
   const W = MG.W, H = MG.H, ar = H / W;
   // Type scales with the frame: 9:16 is the design space; square and
   // landscape frames are shorter, so the same px would read huge.
@@ -154,7 +156,7 @@
   // Premium looks sit on near-white, never stark #FFF (reads printed, not screen).
   const color = CFG.premium && baseColor === '#FFFFFF' ? '#F8F7F4' : baseColor;
   const accentSet = isHex(P.accent);
-  const accent = accentSet ? P.accent : (CFG.accent || color);
+  const accent = accentSet ? P.accent : (CFG.accent || (DYNAMIC ? '#F3CF8B' : color));
   const size = Math.max(0.5, Math.min(2.5, +P.size || 1));
   const upperAll = !!P.uppercase || look === 'pop' || look === 'lockup';
   const align = ['left', 'right'].includes(P.align) ? P.align : 'center';
@@ -639,13 +641,22 @@
     c.rect = [r.left, r.top, r.right, r.bottom];
     c.need = 0; c.dim = false;
     if (!POCKET_LOOKS.includes(look) || !MG.plate) return;
-    const els = c.words.map(o => o.el), accs = c.words.filter(o => o.acc && isHex(o.acc));
-    const plain = c.words.filter(o => !(o.acc && isHex(o.acc))).map(o => o.el);
+    const els = c.words.map(o => o.el);
+    // Measure the spoken accent at every word, including otherwise plain words.
+    // These samples adjust the active ink without changing the resting ink.
+    const accs = DYNAMIC
+      ? c.words.map(o => ({ el: o.el, role: o.role, acc: accent, spoken: o }))
+      : c.words.filter(o => o.acc && isHex(o.acc));
+    const setAccent = (o, col) => {
+      o.acc = col;
+      if (o.spoken) o.spoken.spokenColor = col; else o.el.style.color = col;
+    };
+    const plain = DYNAMIC ? els : c.words.filter(o => !(o.acc && isHex(o.acc))).map(o => o.el);
     // an accent over a plate too dark for it brightens in its own hue
     // (MG.accentInk: never over a lit plate, where it would only wash out)
     accs.forEach(o => {
       const res = MG.accentInk(MG.inkRect(o.el), o.acc, { lc: o.role === 'hero' || o.role === 'em' ? 45 : 35, t0: c.s, t1: c.e });
-      if (res.color !== o.acc) { o.el.style.color = res.color; o.acc = res.color; }
+      if (res.color !== o.acc) setAccent(o, res.color);
     });
     const need = plain.length ? MG.glyphNeed(plain, { ink: color, ratio: 4.5, t0: c.s, t1: c.e }) : 0;
     const accNeed = accs.length ? Math.max(...accs.map(o => MG.glyphNeed(o.el, { ink: o.acc, ratio: ACCENT_RATIO, t0: c.s, t1: c.e }))) : 0;
@@ -665,7 +676,7 @@
         // a word that carries the base ink inline (an editorial serif hero
         // with no accent set) goes dark with the rest
         c.words.forEach(o => { if (!(o.acc && isHex(o.acc)) && o.el.style.color) o.el.style.color = MG.DARK_INK; });
-        deep.forEach(([o, col]) => { o.el.style.color = col; o.acc = col; });
+        deep.forEach(([o, col]) => setAccent(o, col));
         return;
       }
     }
@@ -755,7 +766,11 @@
     });
     cues.sort((a, b) => a.s - b.s);
     placeRuns(cues, CFG.fs * size * K);
-    cues.forEach(c => guard(c));
+    cues.forEach(c => {
+      c.words.forEach(o => { o.spokenColor = accent; });
+      guard(c);
+      c.words.forEach(o => { o.restingColor = DYNAMIC ? getComputedStyle(c.blk).color : o.el.style.color; });
+    });
     cues.forEach(c => c.el.classList.remove('on'));
     // timing: reveal time + entrance per word, then the motion windows
     const Wn = [];
@@ -809,6 +824,10 @@
         // punch / slam overshoot never pushes a word past the frame edge
         o.smax = o.hw > 0 ? Math.max(1, Math.min(o.cx - 24, W - 24 - o.cx) / o.hw) : 1;
         win(o.R, o.R + o.d + G);
+        if (DYNAMIC) {
+          win(o.w.s, o.w.s + G);
+          win(o.w.e, o.w.e + G);
+        }
       });
       win(c.s, c.s + (look === 'box' || look === 'mono' ? 0.14 : 0) + G);
       if (c.hardOut) win(c.e, c.e + G); else win(c.e - c.fadeD, c.e + G);
@@ -916,6 +935,11 @@
       c.pocket.style.opacity = first ? (look === 'glow' ? 1 : first.op).toFixed(3) : 0;
     }
 
+    // Speech uses the transcript interval, never the animation's early reveal.
+    // A gap and the cue's trailing hold have no spoken word.
+    const spoken = DYNAMIC ? c.words.findIndex(o => t >= o.w.s && t < o.w.e) : -1;
+    if (DYNAMIC && look === 'box') active = spoken;
+
     if (look === 'pop') {
       c.words.forEach((o, i) => { o.el.style.color = (i === active || (o.w.x && i <= active)) ? accent : color; });
     } else if (look === 'glow') {
@@ -986,6 +1010,11 @@
       const ph = Math.min(c.blkH, caretAt[1] + c.charH + 0.3 * c.fs);
       c.plate.style.width = pw.toFixed(1) + 'px';
       c.plate.style.height = ph.toFixed(1) + 'px';
+    }
+    if (DYNAMIC && look !== 'box') {
+      c.words.forEach((o, i) => {
+        o.el.style.color = i === spoken ? o.spokenColor : o.restingColor;
+      });
     }
   });
 })();
