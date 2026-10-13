@@ -3429,6 +3429,19 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 and blk_frames.get(("seg", i_prev)) \
                 and blk_frames.get(("ins", idx)):
             hold_prev[idx] = i_prev
+            # Source-fed cards finish their backdrop/rounded treatment only
+            # after concat. The hold clones the panel layout below, so it must
+            # remain in that same card run through the held block; otherwise
+            # append_graph drops the backdrop and exposes the layout's black
+            # intermediate canvas. This is derived at render time, including
+            # cards authored after the hold and old saved fallback assets.
+            if i_prev in card_layout:
+                card_tag = card_layout[i_prev][1]
+                hold_end = sum(float(x[2]) for x in order[:k + 1])
+                for runs in card_runs.values():
+                    for run in runs:
+                        if run[0] == card_tag:
+                            run[2] = hold_end
             if has_audio or stem_inputs:
                 L_prev = a_spans[i_prev][1] - a_spans[i_prev][0]
                 jf_r[i_prev] = max(jf_r[i_prev], math.floor(
@@ -3839,10 +3852,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             i_prev = hold_prev[j]
             parts.append(f"[v_seg{i_prev}]split[v_seg{i_prev}h][vhold{j}]")
             seg_vlab[i_prev] = f"v_seg{i_prev}h"
+            hold_label = f"v_ins{j}raw" if i_prev in card_layout else f"v_ins{j}"
             parts.extend(hold_video_parts(
-                f"vhold{j}", f"v_ins{j}", blk_frames[("seg", i_prev)],
+                f"vhold{j}", hold_label, blk_frames[("seg", i_prev)],
                 blk_frames[("ins", j)], (item.get("hold") or {}).get("dim"),
                 tag=f"hd{j}"))
+            if i_prev in card_layout:
+                # Explicitly retain the panel identity on tpad-created frames.
+                parts.append(f"[{hold_label}]metadata=mode=add:"
+                             f"key={picture_cards.LAYOUT_TAG_KEY}:"
+                             f"value={card_layout[i_prev][1]}[v_ins{j}]")
             V = blk_len.get(("ins", j))
             if j in rt_js:
                 parts.append(f"[art{j}]" + hold_audio_chain(

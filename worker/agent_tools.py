@@ -18721,7 +18721,7 @@ def _extend_to_end(edl, old_ends, new_end):
             item["end"] = round(new_end, 3)
             moved.append(str(item.get("id")))
     fx = edl.get("effects") or {}
-    for z in fx.get("zooms") or []:
+    for z in (fx.get("zooms") or []) + (fx.get("picture_cards") or []):
         if ended(z):
             z["end"] = round(new_end, 2)
             moved.append(str(z.get("id")))
