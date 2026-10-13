@@ -3195,7 +3195,9 @@ def _snap_keep_to_shots(keep, index, words=None):
     far before a cut (or less than a frame after it) moves to one frame past
     it, the first frame that is surely the new shot. Edges where two spans
     touch are one continuous source run, not a cut, and are left alone.
-    notes is empty when nothing moved."""
+    Speech takes priority: never remove an indexed word or part of one to
+    hide a visual sliver. Retain that edge and report the visual tradeoff.
+    notes is empty when no edge moved or needed speech protection."""
     cuts = _shot_cuts(index)
     if not cuts or not keep:
         return keep, []
@@ -3204,6 +3206,14 @@ def _snap_keep_to_shots(keep, index, words=None):
     src = [[float(s), float(e)] for s, e in keep]
     out = [list(span) for span in src]
     moved = []
+    protected = []
+    speech = words if words is not None else (index or {}).get("words", [])
+
+    def trimmed_words(lo, hi):
+        return [str(w.get("w") or "").strip() for w in speech or []
+                if float(w.get("t0", 0)) < hi - 1e-6
+                and float(w.get("t1", 0)) > lo + 1e-6]
+
     for i, span in enumerate(out):
         s, e = span
         # Past the LAST cut in reach for a start, before the FIRST for an
@@ -3217,19 +3227,38 @@ def _snap_keep_to_shots(keep, index, words=None):
                 if b is not None else None
             if b is not None and first - s > 0.004 and \
                     e - first >= SHOT_SNAP_MIN_SPAN_S:
-                moved.append(("start", s, first, b))
-                s = first
+                clipped = trimmed_words(s, first)
+                if clipped:
+                    protected.append(("start", s, b, clipped))
+                else:
+                    moved.append(("start", s, first, b))
+                    s = first
         if not (i + 1 < len(src) and abs(src[i + 1][0] - e) <= 0.011):
             b = min((c for c in cuts if c - step / 2.0 < e <= c + reach),
                     default=None)
             last = round(b - step / 2.0, 2) if b is not None else None
             if b is not None and last < e - 0.004 and \
                     last - s >= SHOT_SNAP_MIN_SPAN_S:
-                moved.append(("end", e, last, b))
-                e = last
+                clipped = trimmed_words(last, e)
+                if clipped:
+                    protected.append(("end", e, b, clipped))
+                else:
+                    moved.append(("end", e, last, b))
+                    e = last
         span[0], span[1] = s, e
-    if not moved:
+    if not moved and not protected:
         return keep, []
+    notes = []
+    if protected:
+        notes.append("SHOT-CUT HYGIENE: retained speech-safe keep edges: "
+                     + "; ".join(
+                         f"{side} {edge:g} (cut at {cut:g}; protects "
+                         f"'{(' '.join(clipped))[:40]}')"
+                         for side, edge, cut, clipped in protected)
+                     + ". A brief neighbouring shot remains; inspect its "
+                     "picture without shortening the spoken word.")
+    if not moved:
+        return keep, notes
     bits = []
     for side, old, new, cut in moved:
         frames = int(round((old - cut if side == "end" else cut - old)
@@ -3245,7 +3274,7 @@ def _snap_keep_to_shots(keep, index, words=None):
             f"{side} {old:g}->{new:g} ({what}, cut at {cut:g})"
             + (f" — trims '{' '.join(x for x in clipped if x)[:40]}'"
                if any(clipped) else ""))
-    return out, [
+    return out, notes + [
         f"SHOT-CUT HYGIENE: moved {len(moved)} keep edge"
         f"{'s' if len(moved) != 1 else ''} off source camera cuts so no "
         "span starts or ends with a flash of the neighbouring shot: "
