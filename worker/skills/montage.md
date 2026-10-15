@@ -24,8 +24,10 @@ is nothing of the user's to shape.
   on a bar line; `hold_s` puts the held breath before it; `intro_filter`
   muffles the intro until the drop frame. Only on a confident bar grid.
 - `set_speed_ramp` is a swing, not a crawl: 1.0 -> low -> 1.0 eased, the
-  low held where the source still shows a fresh frame (60p: 0.5x). Never
-  under speech the viewer must follow.
+  low held where the source still shows a fresh frame (60p: 0.5x). It is
+  refused over 2+ spoken words (the voice drags, the joins are audible)
+  unless the user asks (`allow_speech`): ramp B-roll, a gesture, a walk, a
+  pause.
 - A photo never sits dead on screen: `animate_still` moves it (toward a
   face it finds, a pan across a panorama, a rise up a scan); montage stills
   move by themselves, each a different move.

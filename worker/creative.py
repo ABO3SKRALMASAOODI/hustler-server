@@ -169,14 +169,16 @@ def ledger_of(edls):
     return {"voices": voices, "devices": devs}
 
 
-def batch_ledger(ctx, limit=12):
-    """ledger_of the other shorts of this batch (same parent project,
-    newest version each), cached on the context; empty outside a batch or
-    without a database (freshness is advice, never a gate)."""
-    got = getattr(ctx, "_w2_batch_ledger", None)
+def sibling_edls(ctx, limit=12):
+    """The motion, fx and inserts layers of the other shorts of this batch
+    (same parent project, newest version each), read ONCE per tool context
+    and shared by every freshness judge (Wave 1 recipes and devices, Wave 2
+    voices and packs, later planners). [] outside a batch or without a
+    database: freshness is advice, never a gate."""
+    got = getattr(ctx, "_sibling_edls", None)
     if got is not None:
         return got
-    out = {"voices": [], "devices": []}
+    out = []
     parent = (getattr(ctx, "project", None) or {}).get("parent_project_id")
     if parent and getattr(ctx, "db", None) is not None:
         def q(conn):
@@ -196,9 +198,24 @@ def batch_ledger(ctx, limit=12):
         try:
             rows = ctx.db.run(q)
             if isinstance(rows, list):
-                out = ledger_of(rows)
+                out = rows
         except Exception:  # noqa: BLE001 — freshness is advice
             pass
+    try:
+        ctx._sibling_edls = out
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def batch_ledger(ctx, limit=12):
+    """ledger_of the other shorts of this batch (sibling_edls), cached on
+    the context; empty outside a batch or without a database (freshness is
+    advice, never a gate)."""
+    got = getattr(ctx, "_w2_batch_ledger", None)
+    if got is not None:
+        return got
+    out = ledger_of(sibling_edls(ctx, limit))
     try:
         ctx._w2_batch_ledger = out
     except Exception:  # noqa: BLE001

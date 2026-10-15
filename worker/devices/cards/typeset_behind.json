@@ -81,7 +81,7 @@
     "glyph_visible>=0.65",
     "matte_flicker<=0.035"
   ],
-  "status": "live",
+  "status": "beta",
   "description": "a solved lockup set behind the speaker, ghost outlines where letters hide",
   "skill": "typesetting"
 }

@@ -16,7 +16,9 @@ Never invent a beat over speech.
   hears the hit); a payoff lands on a DROP; a gap before the drop is
   silence the picture holds too.
 - `get_syllables` splits the words said in a window into timed syllables
-  ("try / ing.") for type that builds syllable by syllable.
+  ("try / ing.") for type that builds syllable by syllable. BETA: about
+  two in three onsets land within 2 frames; proof the landing on a preview
+  before a whole staircase rides on it.
 - `check_speech` LISTENS deterministically: which transcript words are
   audible, what sound no word covers (an "um" the transcript dropped, the
   tail of a word a cut left, a breath), clipping, clicks. Use it instead of

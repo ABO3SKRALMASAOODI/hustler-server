@@ -28,6 +28,6 @@ cost:
   fixed_ms: 1200
 exemplars: ["09@1.27–21.6", "05@0.23", "40@≈5–14.3"]
 verify: ["glyph_visible>=0.65", "matte_flicker<=0.035"]
-status: live
+status: beta
 description: "a solved lockup set behind the speaker, ghost outlines where letters hide"
 skill: typesetting

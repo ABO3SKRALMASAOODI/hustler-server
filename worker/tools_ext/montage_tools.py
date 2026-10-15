@@ -840,7 +840,7 @@ def _ramp_insert(ctx, ins_id, low_f, hold, curve, allow_duplicates):
 
 def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
                    curve="ease_in_out", allow_duplicates=False, id=None,
-                   insert=None):
+                   insert=None, allow_speech=False):
     """An eased speed swing over a program window as contiguous spans (or
     over a whole b-roll insert as constant-rate pieces)."""
     import ramps
@@ -864,6 +864,18 @@ def set_speed_ramp(ctx, start=None, end=None, low=0.5, hold=0.3,
         return "REJECTED: start, end and low are numbers."
     if curve not in ramps.CURVES:
         return f"REJECTED: curve is one of {ramps.CURVES}."
+    if not allow_speech:
+        # A speed span retimes the sound with the picture: under speech the
+        # voice drags and the pitch-kept pieces join audibly (W2 review).
+        # The same rule as Wave 4's time ramp (add_time_effect).
+        talk = [w for w in _program_words(ctx, edl)
+                if w["t1"] > s + 0.02 and w["t0"] < e - 0.02]
+        if len(talk) >= 2:
+            return (f"REJECTED: the ramp covers {len(talk)} spoken words; a "
+                    "speed ramp slows the voice with the picture and its "
+                    "joins are audible. Ramp B-roll (insert=id), a gesture, "
+                    "a walk or a pause — or pass allow_speech true if the "
+                    "user wants it there.")
     a, b = tl.out_to_src(s), tl.out_to_src(max(s, e - 1e-3))
     if a is None or b is None:
         return "REJECTED: that window is not on kept footage."
@@ -1056,14 +1068,15 @@ TOOL_SPECS = {
         "contiguous speed spans; or over a whole video insert (insert=id) "
         "as constant-rate pieces. The low is held where the source still "
         "shows a fresh frame each output frame (a 60p clip in a 30p program "
-        "reaches 0.5x) unless allow_duplicates. Speech under it is "
-        "stretched (pitch kept).",
+        "reaches 0.5x) unless allow_duplicates. Refused over speech "
+        "unless allow_speech.",
         {"start": {"type": "number"}, "end": {"type": "number"},
          "low": {"type": "number", "minimum": 0.25, "maximum": 0.95},
          "hold": {"type": "number", "minimum": 0, "maximum": 0.8},
          "curve": {"type": "string", "enum": list(("ease_in_out", "ease_in",
                                                    "ease_out", "linear"))},
          "allow_duplicates": {"type": "boolean"},
+         "allow_speech": {"type": "boolean"},
          "id": {"type": "string"}, "insert": {"type": "string"}}),
     "animate_still": (
         animate_still,

@@ -200,7 +200,9 @@ def get_syllables(ctx, start, end):
             f"{x['text']}@{x['t0'] + shift:.2f}" for x in syl))
     head = ("Syllables (program seconds; split by hyphenation, timed on the "
             "sound" + ("" if got is not None else
-                       " — NO sound readable here: spaced evenly") + "):\n")
+                       " — NO sound readable here: spaced evenly") + "; BETA: "
+            "about two in three onsets land within 2 frames, so proof the "
+            "landing on a preview before building on it):\n")
     return head + "\n".join(rows[:60])
 
 

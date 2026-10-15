@@ -42,25 +42,11 @@ def _accent(edl):
 
 
 def sibling_edls(ctx, limit=12):
-    """The fx layers of the other shorts of this batch (same parent
-    project), newest version each — what freshness is judged against."""
-    parent = (getattr(ctx, "project", None) or {}).get("parent_project_id")
-    if not parent:
-        return []
-
-    def q(conn):
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT DISTINCT ON (e.project_id) e.json->'fx' AS fx
-                   FROM edls e JOIN projects p ON p.id = e.project_id
-                   WHERE p.parent_project_id = %s AND p.id <> %s
-                   ORDER BY e.project_id, e.version DESC LIMIT %s""",
-                (parent, ctx.project_id, int(limit)))
-            return [{"fx": r.get("fx") or []} for r in cur.fetchall()]
-    try:
-        return ctx.db.run(q) or []
-    except Exception:  # noqa: BLE001 — freshness is advice
-        return []
+    """The other shorts of this batch (same parent project), newest
+    version each — what freshness is judged against. One reader for every
+    wave: ``creative.sibling_edls`` (cached per tool context)."""
+    import creative
+    return creative.sibling_edls(ctx, limit)
 
 
 def _used_here(edl):
