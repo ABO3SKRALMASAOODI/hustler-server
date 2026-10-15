@@ -359,9 +359,19 @@ def solve_item(item, out_w, out_h, fps=30.0, faces=None):
     return doc
 
 
+# solver_report fields that describe the solve, not the layout (a timing):
+# they never reach the page, so its document — and the motion clip's cache
+# key — is the same on every lane and every render
+_VOLATILE = ("ms", "budget_hit", "tried", "rejected")
+
+
 def page_params(item, out_w, out_h, fps):
     """motion_templates.build_job's derived params for a typeset item."""
-    return {"_layout": solve_item(item, out_w, out_h, fps)}
+    doc = dict(solve_item(item, out_w, out_h, fps))
+    doc["solver_report"] = {k: v for k, v in (doc.get("solver_report")
+                                              or {}).items()
+                            if k not in _VOLATILE}
+    return {"_layout": doc}
 
 
 def refresh_faces(edl, index, W, H, fps=30.0):

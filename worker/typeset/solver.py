@@ -38,6 +38,10 @@ VISIBLE_MIN = 0.65              # glyph_visible floor for hero words
 WHISPER_VISIBLE = 0.92          # small words set behind must stay readable
 SCAN = 14
 BISECT = 7
+# Candidates tried per phrase before the best so far is kept (the
+# deterministic budget; 273 phrases x voices x aspects needed at most 613).
+MAX_TRIES = 900
+SAFETY_X = 6.0
 
 
 def cap_ceiling(family, W, H):
@@ -314,7 +318,14 @@ def _solve(words, *, W, H, voice_name="auto", family="auto", depth="front",
 
     def search(order, best=None):
         for fam, reg, opts, fixed_C in order:
-            if time.monotonic() - t0 > budget_s and best is not None:
+            # a WORK budget, not a clock: the write (a 0.5 vCPU MCP lane)
+            # and the render (a batch lane) must solve the same layout, or
+            # the footprint the captions avoid is not what is drawn and a
+            # preview differs from its final. The clock is only a guard
+            # against a pathological phrase (several times the budget).
+            if best is not None and (
+                    report["tried"] >= MAX_TRIES or
+                    time.monotonic() - t0 > SAFETY_X * budget_s):
                 report["budget_hit"] = True
                 break
             lmode = opts.get("lines", "kicker")

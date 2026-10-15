@@ -360,3 +360,35 @@ def test_a_lockup_that_fits_nowhere_on_this_canvas_gives_its_words_back():
     assert not [m for m in e["motion"] if m["id"] == "ts1"]
     tl = Timeline(e["keep"], [], [])
     assert not caption_carry.heard_unshown(e, index(), tl)
+
+
+def test_the_layout_is_the_same_on_a_slow_lane_and_the_page_is_stable(
+        monkeypatch):
+    """The solver stopped on a CLOCK (2 s): a 0.5 vCPU MCP lane writing the
+    item and a batch lane rendering it solved different layouts (the
+    footprint the captions avoid was not what was drawn), and the solve's
+    timing in the page made every render's motion cache key new."""
+    import copy as _copy
+    import motion_templates
+    from typeset import solver
+    p = {"text": "perhaps AI is *bigger* than the internet",
+         "voice": "magazine"}
+    kw = dict(W=1080, H=1920, duration=4.0, faces=[(0.3, 0.2, 0.75, 0.6)],
+              watermark=(0.0, 0.0, 0.42, 0.13))
+    fast = layoutdoc.build_doc(p, **kw)
+    ticks = {"n": 0}
+
+    def slow():
+        ticks["n"] += 1
+        return ticks["n"] * 0.02           # a lane several times slower
+    monkeypatch.setattr(solver.time, "monotonic", slow)
+    slowdoc = layoutdoc.build_doc(p, **kw)
+    monkeypatch.undo()
+    assert [(r["text"], r["ink"]) for r in fast["runs"]] == \
+        [(r["text"], r["ink"]) for r in slowdoc["runs"]]
+    item = {"id": "ts1", "template": "typeset", "start": 1.0, "end": 4.0,
+            "params": motion_templates.normalize_params("typeset", p)}
+    j1 = motion_templates.build_job(_copy.deepcopy(item), 1080, 1920, 30.0)
+    layoutdoc._CACHE.clear()
+    j2 = motion_templates.build_job(_copy.deepcopy(item), 1080, 1920, 30.0)
+    assert j1.key() == j2.key()

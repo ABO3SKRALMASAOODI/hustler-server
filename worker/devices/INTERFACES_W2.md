@@ -328,3 +328,48 @@ the payoff (never >= 60% of the program).
   apply_edit_batch ops).
 - Boards: `.valmera/refbench/boards/wave2/`. Release:
   `.valmera/refbench/WAVE2_RELEASE.md`.
+
+## 11. Independent review additions (15 Oct, branch claude/w2-engine)
+
+Seams and contracts the review added; everything else above stands.
+
+- **Render faces** (`typeset.layoutdoc.refresh_faces`, called by
+  `motion_layer.fill_footprints` with the program's index on every render
+  lane): a typeset item whose stored face zones do not speak for the
+  canvas (another aspect, another picture geometry, an apply_edit_batch
+  item with no footprint) is solved against the faces the index shows at
+  that canvas; zones measured at write time for this canvas stay. A lockup
+  no layout fits on the canvas is LEFT OUT of that render with a render
+  warning, so the captions carry its words (never drawn-nothing-but-muted).
+- **`over`** (typeset param, intent): `picture` (default) | `card`. On a
+  card or black there is no face; the solver drops the talking-head prior.
+  `build_item(faces=[])` writes `card`.
+- **Holds and lead-ins**: a lockup's hold ends where the next words are
+  said; its lead-in never covers the middle of the word before it.
+- **Full-frame cutaways in motion**: `motion_layer.FULL_FRAME_CUTAWAYS`
+  (`still_motion`) take `renderer.cutaway_look_chain` on the clip's own
+  clock (the grade, grain, vignette and B&W grade windows reach a moving
+  still, as W1 gave them to cutaway overlays).
+- **Music bus**: `arrangement` sets the bus to stereo (`aformat`) before
+  any per-sample gain: `aeval` on a mono track then mixed with the stereo
+  program segfaults ffmpeg 8.0/9.0.
+- **Freshness across a batch**: `creative.batch_ledger(ctx)` (sibling
+  shorts' voices, fx devices, loop reprises); `pick_voice(batch=)`,
+  `story_planner.suggest(batch=)`. The B&W colour turn is proposed only
+  when the story turns into its payoff (or the pack's colour world is
+  built on it) and not for a third sibling.
+- **apply_format_pack** solves every typeset op through
+  `typeset_tools.solve_planned` (the add_typeset core, `_compose`).
+- **Typesetting**: detached transcript signs join their word
+  (`roles.clean_text` / `spans`; '26 %' prints '26%'); a short hero line
+  in a justified column grows to the measure instead of being letterspaced
+  past `layouts.TRACK_SOFT`; variable-font axes are read through HarfBuzz
+  (fontTools only as a fallback; `fonttools` is now a worker requirement).
+- **Review heuristic**: `edit_review.REPLACES_CAPTIONS` (`typeset`) is not
+  a 're-typeset of the words being heard' (it prints them INSTEAD of their
+  captions); the graphics budget still counts it.
+- **Shorts (defect 27, MCP path)**: `_direct_short_clips` snaps a start
+  inside a sentence back to its first word (an end on to its last); a
+  caller edge on a word after a full stop or a breath stands.
+- Tests: `tests/test_w2_brand.py` (end card, watermark, music under the
+  card, arrange rungs, B&W still), `tests/test_w2_review.py`.
