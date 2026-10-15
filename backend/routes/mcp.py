@@ -2255,6 +2255,9 @@ def _t_wait_for_job(tok, args):
         if picture:
             receipt["picture_check"] = [str(f) for f in picture[:6]]
         if row["type"] == "final":
+            # Run report C12: finals rendered before Oct 15 stored the
+            # preview default "draft"; a final export is full quality.
+            receipt["quality"] = "final"
             # Run report C13: the final's picture check measures the end card
             # and the corner mark but never said so. State both, every time.
             receipt["brand_check"] = _brand_check(result.get("picture_qc"))

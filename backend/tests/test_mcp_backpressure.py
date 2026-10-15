@@ -164,3 +164,13 @@ def test_brand_thresholds_match_the_worker_check():
         == mcpmod._ENDCARD_MIN_NCC
     assert float(re.search(r"ROBOT_MIN_NCC = ([0-9.]+)", src).group(1)) \
         == mcpmod._ROBOT_MIN_NCC
+
+
+def test_final_wait_receipt_says_final_quality_and_brand(monkeypatch):
+    """C12/C13 on the wait_for_job path, including finals whose stored result
+    predates the label fix (quality 'draft')."""
+    import routes.mcp as m
+    import inspect
+    src = inspect.getsource(m._t_wait_for_job)
+    assert 'receipt["quality"] = "final"' in src
+    assert 'receipt["brand_check"] = _brand_check' in src
