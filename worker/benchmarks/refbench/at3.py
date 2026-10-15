@@ -792,6 +792,22 @@ def _segmenter():
     return sam.Segmenter(path)
 
 
+def _measured(w, d, tl=None):
+    """Measure a definition on its fixture (the batch-lane child, here)
+    when its sidecar is not in the store yet, and wait for it — the cases
+    reproduce from an empty store."""
+    import sidecars
+    import world_defs
+    from timeline import Timeline
+    src = w3.source_ref(w)
+    if tl is None:
+        tl = Timeline([[0.0, round(src.duration_s - 0.05, 3)]], [], [])
+    st, _e = world_defs.ensure(d, tl, src)
+    if st not in (None, "ready", "static"):
+        sidecars._launcher().join(1800)
+        sidecars._reset_caches()
+
+
 def _object_eval(w, d, n=10):
     """IoU of the carried mask vs a per-frame re-segmentation from the SAME
     prompt (an independent estimate; the object and camera are static), and
@@ -799,6 +815,7 @@ def _object_eval(w, d, n=10):
     import cv2
     import world_layer
     from objseg import sam
+    _measured(w, d)
     c, e = _identity_ctx(w, fx=[d])
     r = world_layer._mask_reader(c, "object", e["fx"][0])
     if r is None:
@@ -1017,6 +1034,7 @@ def _plane_eval(w, d):
     from timeline import Timeline
     src = w3.source_ref(w)
     tl = Timeline([[0.0, src.duration_s]], [], [])
+    _measured(w, d, tl)
     req = world_defs.request(d, tl)
     if req is None:
         return None

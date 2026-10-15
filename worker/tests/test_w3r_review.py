@@ -447,3 +447,33 @@ def test_an_orbit_is_proposed_only_where_the_ring_fits(store):
         return world_planner._ring_fits(wctx, src, tl, 3.0)
     assert fits("c", 0.45, 0.12)        # a medium shot with headroom
     assert not fits("d", 0.3, 0.3)      # a tight close-up near the top
+
+
+# ── a stitched preview keeps the measurement keys (stitch._window_fx
+#    rebases world definitions exactly: they draw nothing, their window only
+#    keys the measurement) ─────────────────────────────────────────────────
+
+@pytest.mark.parametrize("w0,w1", [(4.1, 6.95), (4.0, 7.0), (3.5, 6.9),
+                                   (4.2, 6.9)])
+def test_definition_keys_survive_a_stitch_window(w0, w1):
+    import stitch
+    import world_defs
+    from timeline import Timeline
+    e = schemas.validate_edl({
+        "keep": [[27.8, 31.9], [42.5, 45.3]],
+        "fx": [{"id": "ob1", "type": "object", "stage": "world",
+                "start": 4.25, "end": 6.85, "prompt": {
+                    "src_t": 43.1, "box": [0.4, 0.775, 0.66, 1.0]}},
+               {"id": "pl1", "type": "plane", "stage": "world",
+                "start": 4.25, "end": 6.85, "src_t": 43.0,
+                "surface": "wall", "quad": [[0.3, 0.0], [0.7, 0.0],
+                                            [0.7, 0.5], [0.3, 0.55]]}]},
+        47.5).model_dump()
+    tl = Timeline(e["keep"])
+    we = schemas.validate_edl(stitch.window_edl(e, tl, w0, w1, fps=30.0),
+                              47.5, render_fragment=True).model_dump()
+    tl2 = Timeline(we["keep"], we.get("inserts") or [], we.get("speed") or [])
+    for fid in ("ob1", "pl1"):
+        full = world_defs.request(world_defs.definitions(e)[fid], tl, 0.0)
+        part = world_defs.request(world_defs.definitions(we)[fid], tl2, 0.0)
+        assert full == part, fid
