@@ -1,0 +1,22 @@
+id: composite_blend
+family: composite
+verb: set_composite
+stage: motion
+params: {blend: [difference, auto, exclusion, screen, multiply, overlay]}
+needs:
+  lane_features: ["ffmpeg:overlay"]
+  footage: "any plate; difference reads best over a busy or high-contrast one"
+binds_to: [word.payoff, word, section]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 2, min_gap_s: 4}
+  charged: {per_short: 4, min_gap_s: 2}
+never: ["on every graphic of a short (one blended hero word reads; a page of them is noise)", "on body text or captions"]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost: {ms_per_frame: {interactive: 3.0, batch: 3.0, local: 1.5}, fixed_ms: 150}
+exemplars: ["12@2.542", "19@6.63"]
+verify: ["legibility>=45", "region_locality<=0", "land_err_f<=1"]
+status: live
+description: "a hero word blended into the plate (difference over busy plates, auto measures) so it reads as part of the picture"
+skill: compositing

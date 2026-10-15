@@ -200,14 +200,18 @@ def region_mask(plan, name, space, ctx):
 # ── keyframed shapes (track 1C) ─────────────────────────────────────────
 
 def keyed_prepare(plan, item, region, key):
-    """1C: precompute a keyframed rect/ellipse/polygon (a gray mask clip
-    over the item's window, eased between keys). STUB until 1C."""
-    return ("omit", "keyframed regions arrive with track 1C")
+    """1C: precompute a keyframed rect/ellipse/polygon: a gray mask clip
+    over the item's window, eased between keys, feather and invert baked in
+    (compositor.raster_keyed), registered as an input."""
+    import compositor
+    return compositor.keyed_prepare(plan, item, region, key)
 
 
 def keyed_pad(ctx, item, region, key):
-    """1C: the keyframed region's fresh gray program mask. STUB."""
-    return None
+    """1C: the keyframed region's fresh gray program mask (black outside
+    the item's window), or None."""
+    import compositor
+    return compositor.keyed_pad(ctx, item, region, key)
 
 
 # ── the picture card's region (track 1D) ────────────────────────────────

@@ -1,0 +1,68 @@
+{
+  "id": "composite_light",
+  "family": "composite",
+  "verb": "set_composite",
+  "stage": "motion",
+  "params": {
+    "blend": [
+      "screen",
+      "add"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "ffmpeg:overlay"
+    ],
+    "footage": "a light leak, flash or film burn graphic"
+  },
+  "binds_to": [
+    "cut",
+    "section",
+    "downbeat"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 2
+    }
+  },
+  "never": [
+    "on type (light is for leaks, flashes and burns)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 3.0,
+      "batch": 3.0,
+      "local": 1.5
+    },
+    "fixed_ms": 150
+  },
+  "exemplars": [
+    "14@11.67",
+    "41@≈32.7"
+  ],
+  "verify": [
+    "flash_risk",
+    "region_locality<=0"
+  ],
+  "status": "live",
+  "description": "a leak, flash or burn added as light (screen/add) so it brightens the picture and never darkens it",
+  "skill": "compositing"
+}

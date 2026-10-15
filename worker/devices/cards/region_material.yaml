@@ -1,0 +1,23 @@
+id: region_material
+family: composite
+verb: add_region_effect
+fx_type: region
+stage: pre_captions
+params: {effect: [ribbed_glass, refraction, heat], scale: [1.0, 1.5]}
+needs:
+  lane_features: ["ffmpeg:displace"]
+  footage: "a face, a product or a word's letters behind glass"
+binds_to: [word.payoff, section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 1, min_gap_s: 6}
+  charged: {per_short: 2, min_gap_s: 3}
+never: ["on every shot (a material is a moment, not a filter)"]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, {substitute: region_soften}, omit]
+cost: {ms_per_frame: {interactive: 14.0, batch: 14.0, local: 7.0}, fixed_ms: 400}
+exemplars: ["05@0.23", "02@0.03–3.07"]
+verify: ["region_locality<=0", "determinism"]
+status: live
+description: "a glass material over a region (ribbed glass, refraction with bevelled edges, heat haze) from maps built once; outside untouched"
+skill: compositing

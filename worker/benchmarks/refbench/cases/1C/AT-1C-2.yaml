@@ -1,0 +1,34 @@
+# AT-1C-2: a difference-blend hero word over a busy plate (12@2.542, 19@6.63).
+id: AT-1C-2
+track: 1C
+title: difference-blend EVERYTHING over the bookshelf two-shot
+local_only: true
+interim: false
+reference:
+  - {ref: "12", t: [2.4, 2.7], board_t: 2.542}
+  - {ref: "19", t: [6.5, 6.8], board_t: 6.63}
+footage:
+  - {vfl: V10, window: twoshot}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[595.16, 600.16]]
+  focus: [0.2, 0.4]
+  ops:
+    - {action: upsert, layer: motion, id: w1,
+       value: {id: w1, template: word_slam, start: 0.5, end: 4.0,
+               layer: above_captions,
+               params: {text: EVERYTHING, entrance: pop, exit: cut,
+                        role: grotesk, y: 0.56, color: "#FFFFFF"},
+               composite: {blend: difference}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: legibility, item: w1, op: ">=", value: 45}
+  - {name: duration_exact, op: "<=", value: 0}
+beyond: "the blend is chosen and its legibility measured on the plate under the word (blend auto does it for every graphic of a short); the reference was eyeballed"
+board: {stills: [1.5], clip: [0.0, 4.5]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

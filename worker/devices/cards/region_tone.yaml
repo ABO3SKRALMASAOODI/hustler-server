@@ -1,0 +1,23 @@
+id: region_tone
+family: composite
+verb: add_region_effect
+fx_type: region
+stage: pre_captions
+params: {effect: [solarise, negate, mono, tint, posterize, threshold, exposure], strength: [1.0, 0.6]}
+needs:
+  lane_features: ["ffmpeg:alphamerge"]
+  footage: "a region worth singling out: hands framing the face, a screen, a word's letters, the picture card"
+binds_to: [word.payoff, stress, section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 6}
+  designed: {per_short: 2, min_gap_s: 3}
+  charged: {per_short: 4, min_gap_s: 1.5}
+never: ["more than 3 full-frame flashes in a second", "on a face-dependent payoff word without the face in the region"]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: true}
+rungs: [full, omit]
+cost: {ms_per_frame: {interactive: 4.0, batch: 4.0, local: 2.0}, fixed_ms: 200}
+exemplars: ["25@≈0.33–12.7"]
+verify: ["region_locality<=0", "flash_risk", "land_err_f<=1"]
+status: live
+description: "a tone effect (solarise duotone, negative, mono, tint) inside a region only; the rest of the picture untouched"
+skill: compositing

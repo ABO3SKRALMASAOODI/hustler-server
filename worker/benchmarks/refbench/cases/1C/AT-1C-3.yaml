@@ -1,0 +1,37 @@
+# AT-1C-3: ghost outlines where a behind-the-subject word hides its letters
+# (05@0.23, 20@4.47). Needs motion_layer.composite_behind on the renderer's
+# behind loop (track 1A's seam, INTERFACES_W1.md §1.6.2); until 1A merges,
+# tests/test_w1c_acceptance.py patches the graph to exactly that call.
+id: AT-1C-3
+track: 1C
+title: BIGGER behind the head with the hidden letters as outlines
+local_only: true
+interim: false
+reference:
+  - {ref: "05", t: [0.23, 1.5], board_t: 0.23}
+  - {ref: "20", t: [4.3, 4.7], board_t: 4.47}
+footage:
+  - {vfl: V01, window: thiel_ai_bigger}
+music: null
+aspect: "16:9"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[150.96, 156.96]]
+  ops:
+    - {action: upsert, layer: motion, id: hero,
+       value: {id: hero, template: word_slam, start: 0.6, end: 4.6,
+               params: {text: BIGGER, tier: hero, entrance: pop, exit: cut,
+                        role: condensed, color: "#F2F0EA", y: 0.3},
+               composite: {ghost: {opacity: 0.45, width_px: 2.5,
+                                   threshold: 0.25}}}}
+    - {harness: behind_matte, layer: motion, id: hero}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: glyph_visible, item: hero, ghosted: true, op: ">=", value: 0.65}
+  - {name: duration_exact, op: "<=", value: 0}
+beyond: "the outline is drawn only where the measured subject hides each letter, on every frame (XOR <= 1 px), switching itself off when no glyph is hidden; the references stroked by hand"
+board: {stills: [1.6, 3.2], clip: [0.4, 4.8]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

@@ -1,0 +1,72 @@
+{
+  "id": "composite_window",
+  "family": "composite",
+  "verb": "add_type_window",
+  "stage": "motion",
+  "params": {
+    "fill_mode": [
+      "inside"
+    ],
+    "field": [
+      "accent",
+      "black"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "chromium",
+      "ffmpeg:alphamerge"
+    ],
+    "footage": "a real scene change after the letters: the next shot fills them"
+  },
+  "binds_to": [
+    "cut",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 12
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "charged": {
+      "per_short": 2,
+      "min_gap_s": 4
+    }
+  },
+  "never": [
+    "on a jump cut inside one take",
+    "when the next shot has nothing to read in the letters"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 12.0,
+      "batch": 12.0,
+      "local": 6.0
+    },
+    "fixed_ms": 900
+  },
+  "exemplars": [
+    "38@≈11.3",
+    "21@20.5–21.75"
+  ],
+  "verify": [
+    "duration_exact",
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "the cross-cut reveal: the next shot seen only through the letters, which open into it on the cut",
+  "skill": "compositing"
+}
