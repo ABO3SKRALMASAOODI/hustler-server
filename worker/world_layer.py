@@ -186,7 +186,10 @@ def series_for(anchor, ctx, lo, hi):
         if not samples:
             return None, "face landmarks not measured yet"
         part = "head" if kind == "head" else (ref or "face")
-        return query.face_series(samples, part, which, meta), None
+        series = query.face_series(samples, part, which, meta)
+        if kind == "head":
+            series = _refine_head(series, ctx)
+        return series, None
     if kind == "hand":
         samples, share, meta = query.load("landmarks.hand", src, rng)
         if not samples:
@@ -234,6 +237,59 @@ def series_for(anchor, ctx, lo, hi):
     if kind == "object":
         return _object_series(d, ctx, lo, hi)
     return None, f"unknown anchor {anchor['to']}"
+
+
+def _refine_head(series, ctx):
+    """The head as the person matte draws it: the face mesh knows the face,
+    not the skull (in a three-quarter view its ellipse sits forward of the
+    head). Where the matte is measured, the head's centre x is the middle
+    of the matte's run through the face on the rows between the crown and
+    the eyes, and its height runs from the crown to the chin."""
+    reader = _mask_reader(ctx, "person")
+    if reader is None:
+        return series
+    xy, size = series.xy.copy(), series.size.copy()
+    for k, t in enumerate(series.t):
+        if not np.all(np.isfinite(xy[k])) or not np.isfinite(size[k]):
+            continue
+        m = reader.at(float(t))
+        if m is None:
+            continue
+        mh, mw = m.shape
+        cx, cy, hh = xy[k][0] * mw, xy[k][1] * mh, size[k] * mh
+        col = int(min(mw - 1, max(0, round(cx))))
+        top_lim = int(max(0, cy - hh * 0.75))
+        colv = m[top_lim:int(min(mh, cy)), col] > 127
+        if not colv.any():
+            continue
+        top = top_lim + int(np.argmax(colv))
+        chin = cy + hh * 0.5
+        rows = range(top + int(0.15 * (chin - top)),
+                     int(top + 0.45 * (chin - top)))
+        mids = []
+        for y in rows:
+            line = m[int(y)] > 127
+            if not line[col]:
+                continue
+            a = col
+            while a > 0 and line[a - 1]:
+                a -= 1
+            b = col
+            while b < mw - 1 and line[b + 1]:
+                b += 1
+            if b - a < hh * 1.6:          # a head, not the shoulders
+                mids.append((a + b) / 2.0)
+        if len(mids) >= 3:
+            xy[k][0] = float(np.median(mids)) / mw
+        xy[k][1] = ((top + chin) / 2.0) / mh
+        size[k] = (chin - top) / mh
+    return query_series(series, xy, size)
+
+
+def query_series(series, xy, size):
+    from anchors import query
+    return query.Series(series.t, xy, size, series.angle, series.quad,
+                        None, series.kind)
 
 
 def _object_series(d, ctx, lo, hi):
@@ -319,10 +375,12 @@ def _decode_gray(path, w, h, n):
             .reshape(h, w) for i in range(k)]
 
 
-def _mask_reader(ctx, what, d=None, lo=None, hi=None):
+def _mask_reader(ctx, what, d=None, lo=None, hi=None, windows=None):
     """A MaskReader for the person matte or one object definition, over the
-    READY chunks (fetched into the workdir), or None."""
-    key = (what, (d or {}).get("id"))
+    READY chunks (fetched into the workdir), or None. The person matte is
+    read over every anchored item's window, plus ``windows`` (program
+    seconds) when a caller names its own."""
+    key = (what, (d or {}).get("id"), tuple(windows or ()))
     if key in ctx._masks:
         return ctx._masks[key]
     reader = None
@@ -340,6 +398,9 @@ def _mask_reader(ctx, what, d=None, lo=None, hi=None):
                 if anchored(m):
                     s, e = float(m["start"]), float(m["end"])
                     spans += matte_track.program_to_source(ctx.tl, s, e)
+            for s, e in windows or ():
+                spans += matte_track.program_to_source(ctx.tl, float(s),
+                                                       float(e))
             ranges = [(max(0.0, a - ctx.clock_offset - 0.5),
                        b - ctx.clock_offset + 0.5) for a, b in spans]
             if not ranges:
@@ -505,6 +566,7 @@ def compose(item, clip, ctx):
     ref_size = size[first] if np.isfinite(size[first]) else None
     ref_ang = ang[first] if np.isfinite(ang[first]) else 0.0
     plane_like = kind == "plane" or (kind == "hand" and ref == "frame")
+    fit = _anchor_fit(item)
     if plane_like and quad is None:
         return None, ["pinned static: no quad for this anchor"]
     lost = anchor.get("lost") or "hold"
@@ -557,7 +619,11 @@ def compose(item, clip, ctx):
         P = np.array([Akx[0, 0] * p[0] + Akx[0, 2],
                       Akx[1, 1] * p[1] + Akx[1, 2]])
         scl = 1.0
-        if "scale" in follow and ref_size and np.isfinite(size[idx]):
+        if "scale" in follow and fit and np.isfinite(size[idx]):
+            # the template asks its box to be ``fit`` x the anchor's size
+            # (el_orbit: a ring just outside the head)
+            scl = float(size[idx]) * A[1, 1] * H * fit / max(1.0, ch)
+        elif "scale" in follow and ref_size and np.isfinite(size[idx]):
             scl = float(size[idx]) / float(ref_size)
         rot = 0.0
         if "rotation" in follow and np.isfinite(ang[idx]):
@@ -685,6 +751,17 @@ def _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi):
     return newclip, notes
 
 
+
+
+def _anchor_fit(item):
+    """The template's ``anchor_fit`` (its MG-SPEC): the box height it wants
+    as a multiple of the anchor's own size when it follows scale."""
+    try:
+        import motion_templates
+        v = motion_templates.spec(item.get("template")).get("anchor_fit")
+        return float(v) if v else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _empty(clip, n):

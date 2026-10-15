@@ -1,0 +1,46 @@
+<!--MG-SPEC {"title": "Doodle", "category": "element", "also": ["callout"],
+ "description": "A hand-drawn mark that draws itself on and keeps a hand-animated boil: arrow, underline, circle, scribble, burst, star, check, cross, bracket, spiral. Attach it (world verbs) to a tracked point, a fingertip or a face and it rides the footage. Use one to point at the thing the line is about, or to underline a word; marker colour, never more than one at a time.",
+ "duration": 2.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "kind": {"type": "enum", "values": ["arrow", "underline", "circle", "scribble", "burst", "star", "check", "cross", "bracket", "spiral"], "default": "arrow"},
+  "box": {"type": "list", "max_items": 4, "hint": "[x0, y0, x1, y1] frame fractions the mark fills (an arrow runs from (x0, y0) to its head at (x1, y1))"},
+  "colour": {"type": "color", "default": "#FFE14D"},
+  "width": {"type": "float", "min": 0.4, "max": 3.0, "default": 1.0},
+  "draw_s": {"type": "float", "min": 0.1, "max": 2.0, "default": 0.45, "hint": "seconds to draw on"},
+  "boil": {"type": "bool", "default": true, "hint": "the line re-jitters every 3 frames, like hand animation"},
+  "exit": {"type": "enum", "values": ["cut", "fade", "undraw"], "default": "fade"},
+  "seed": {"type": "int", "min": 1, "max": 9999, "default": 5}
+ },
+ "example": {"kind": "circle", "box": ["0.3", "0.3", "0.7", "0.5"]},
+ "sfx": []} -->
+<style>#dd{position:absolute;left:0;top:0;width:100%;height:100%}</style>
+<div class="mg-root"><canvas id="dd"></canvas></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fps = MG.fps;
+  const cv = MG.$('#dd'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const b = (P.box && P.box.length === 4) ? P.box.map(Number) : [0.3, 0.4, 0.7, 0.55];
+  const box = [b[0] * W, b[1] * H, b[2] * W, b[3] * H];
+  const pad = 30 * W / 1080;
+  MG.box = [Math.min(box[0], box[2]) - pad * 3, Math.min(box[1], box[3]) - pad * 3, Math.max(box[0], box[2]) + pad * 3, Math.max(box[1], box[3]) + pad * 3];
+  const width = 9 * Math.min(W, H) / 1080 * (P.width ?? 1);
+  const drawS = Math.max(0.1, P.draw_s ?? 0.45);
+  MG.frame(t => {
+    ctx.clearRect(0, 0, W, H);
+    const boil = P.boil === false ? 0 : Math.floor(t * fps / 3);
+    let prog = MG.ease.outCubic ? MG.ease.outCubic(MG.clamp(t / drawS)) : MG.clamp(t / drawS);
+    let alpha = 1;
+    const out = Math.min(0.35, D * 0.25);
+    if (t > D - out) {
+      const k = (t - (D - out)) / out;
+      if (P.exit === 'fade') alpha = 1 - k;
+      else if (P.exit === 'undraw') prog = 1 - k;
+    }
+    ctx.globalAlpha = MG.clamp(alpha);
+    MG.doodle.stroke(ctx, MG.doodle.path(P.kind || 'arrow', box, P.seed || 5, boil),
+      { colour: P.colour || '#FFE14D', width, progress: prog, shadow: 'rgba(0,0,0,0.35)' });
+    ctx.globalAlpha = 1;
+  });
+})();
+</script>

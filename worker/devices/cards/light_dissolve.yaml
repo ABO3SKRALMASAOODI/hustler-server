@@ -1,0 +1,33 @@
+# Track 3D (fx_light.py). EDL.fx ``light`` kind dissolve on the person matte,
+# written by add_element; never a full-frame flash.
+id: light_dissolve
+family: matte_fx
+verb: add_element
+fx_type: light
+stage: world
+params:
+  kind: [dissolve]
+  colour: [white, accent]
+  intensity: [0.8, 0.6, 1.0]
+needs:
+  sidecars: [matte.person]
+  lane_features: ["ffmpeg:lagfun", "ffmpeg:gblur", "ffmpeg:alphamerge"]
+  footage: "a person in the shot; a dark plate makes light read best"
+binds_to: [word.payoff, section, drop, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 10}
+  designed: {per_short: 1, min_gap_s: 6}
+  charged: {per_short: 2, min_gap_s: 4}
+never:
+  - "on an ordinary sentence: light is a transformation or an ending"
+  - "within 0.5 s of another matte_fx"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, {substitute: halation}, omit]
+cost:
+  ms_per_frame: {interactive: 40.0, batch: 64.0, local: 20.0}
+  fixed_ms: 300
+exemplars: ["41@≈25–32"]
+verify: ["matte_flicker<=0.035", "determinism"]
+status: live
+description: "the figure becomes light, then is gone into the room (embers off its edge)"
+skill: elements

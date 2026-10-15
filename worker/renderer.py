@@ -7184,7 +7184,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                frame_mode, frame_focus, insert_locals,
                                bool(caption_motion_items)),
             behind_why=_hero_behind_why,
-            world=_world_ctx(edl, W, H, fps, tl, index, preview, fx_box[0],
+            world=_world_ctx(edl, W, H, fps, tl, index, preview, None,
                              (float(info.get("format_start") or 0.0)
                               if seek_main_source else 0.0), workdir,
                              src_path))

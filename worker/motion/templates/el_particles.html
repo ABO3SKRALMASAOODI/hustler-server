@@ -1,0 +1,92 @@
+<!--MG-SPEC {"title": "Particles", "category": "element", "also": ["fx"],
+ "description": "Light made of particles: embers rising off a figure, sparks, drifting dust, confetti, snow or firework bursts. emit='edge' throws them off the speaker's own outline (the figure turning to embers, paired with a light dissolve); 'point' / 'box' from a place; 'frame' over the whole picture. Burst times in 'at' (item seconds) land them on a beat or a word. Composite it as light (blend screen). Earns its place on a transformation or a release, once; never as wallpaper.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "kind": {"type": "enum", "values": ["embers", "sparks", "dust", "confetti", "snow", "fireworks"], "default": "embers"},
+  "emit": {"type": "enum", "values": ["edge", "point", "box", "frame"], "default": "point", "hint": "edge = the subject's outline (needs the person matte); point = x, y; box = box; frame = everywhere"},
+  "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "y": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "box": {"type": "list", "max_items": 4, "hint": "[x0, y0, x1, y1] frame fractions (emit=box)"},
+  "count": {"type": "int", "min": 10, "max": 1500, "default": 260},
+  "palette": {"type": "enum", "values": ["warm", "gold", "cool", "white", "accent", "fire", "rainbow"], "default": "warm"},
+  "accent": {"type": "color", "default": "#FF5A1F"},
+  "intensity": {"type": "float", "min": 0.2, "max": 1.0, "default": 0.85},
+  "at": {"type": "list", "max_items": 16, "hint": "burst times in item seconds (fireworks, sparks); empty = a steady stream"},
+  "rise": {"type": "float", "min": -1.0, "max": 1.0, "default": 0.6, "hint": "upward drift (negative falls)"},
+  "spread": {"type": "float", "min": 0.0, "max": 1.0, "default": 0.5},
+  "seed": {"type": "int", "min": 1, "max": 9999, "default": 7}
+ },
+ "example": {"kind": "embers", "emit": "edge", "count": 420},
+ "sfx": []} -->
+<style>#pc{position:absolute;left:0;top:0;width:100%;height:100%}</style>
+<div class="mg-root"><canvas id="pc"></canvas></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const cv = MG.$('#pc'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const kind = P.kind || 'embers', I = MG.clamp(P.intensity ?? 0.85, 0.2, 1);
+  const seed = Math.max(1, Math.round(P.seed || 7));
+  const hexrgb = h => { const v = parseInt(String(h || '#ff5a1f').slice(1), 16); return `${v >> 16 & 255},${v >> 8 & 255},${v & 255}`; };
+  const PAL = {
+    warm: ['255,214,140', '255,170,80', '255,120,40', '255,240,200'],
+    fire: ['255,90,20', '255,160,40', '255,220,120', '255,60,10'],
+    gold: ['255,215,120', '255,236,170', '230,180,80'],
+    cool: ['150,210,255', '200,235,255', '120,170,255'],
+    white: ['255,255,255', '235,240,255'],
+    accent: [hexrgb(P.accent), '255,255,255'],
+    rainbow: ['255,80,80', '255,200,60', '80,220,120', '80,160,255', '200,100,255'],
+  };
+  const pal = PAL[P.palette] || PAL.warm;
+  const n = Math.max(10, Math.min(1500, P.count || 260));
+  const edge = P._edge || null;
+  const bx = (P.box && P.box.length === 4) ? P.box.map(Number) : null;
+  const rise = P.rise ?? 0.6, spread = MG.clamp(P.spread ?? 0.5);
+  const bursts = (P.at || []).map(Number).filter(v => isFinite(v) && v >= 0 && v < D);
+  const scale = (H / 1920 * 1.6 + W / 1080 * 0.4) * 1.35;
+  function origin(i, r, t0) {
+    if (P.emit === 'edge' && edge && edge.length) {
+      const e = MG.particles.edge(edge, t0, r);
+      if (e) return e;
+    }
+    if (P.emit === 'box' && bx) return { x: (bx[0] + r() * (bx[2] - bx[0])) * W, y: (bx[1] + r() * (bx[3] - bx[1])) * H, nx: 0, ny: -1 };
+    if (P.emit === 'frame') return { x: r() * W, y: r() * H, nx: 0, ny: -1 };
+    return { x: (P.x ?? 0.5) * W, y: (P.y ?? 0.5) * H, nx: 0, ny: -1 };
+  }
+  const F = MG.particles.field({
+    seed, count: n,
+    gravity: kind === 'sparks' ? [0, 900 * scale] : kind === 'confetti' ? [0, 260 * scale] : kind === 'snow' ? [0, 40 * scale] : kind === 'fireworks' ? [0, 120 * scale] : [0, -60 * rise * scale],
+    drag: kind === 'fireworks' ? 1.6 : kind === 'sparks' ? 0.8 : 0.4,
+    swirl: kind === 'embers' ? 70 * scale : kind === 'dust' ? 40 * scale : kind === 'confetti' ? 60 * scale : 20 * scale,
+    emit: (i, r) => {
+      const b = bursts.length ? bursts[i % bursts.length] : null;
+      const t0 = b != null ? b + r() * 0.06 : r() * Math.max(0.05, D * 0.85);
+      const o = origin(i, r, t0);
+      const ang = (b != null || kind === 'sparks' || kind === 'fireworks') ? r() * Math.PI * 2 : Math.atan2(o.ny, o.nx) + (r() - 0.5) * Math.PI * spread;
+      const sp = (kind === 'fireworks' ? 520 : kind === 'sparks' ? 700 : kind === 'embers' ? 70 : kind === 'confetti' ? 180 : 25) * scale * (0.4 + r());
+      const life = kind === 'dust' || kind === 'snow' ? 2 + r() * 2 : kind === 'embers' ? 0.9 + r() * 1.6 : kind === 'confetti' ? 1.6 + r() : 0.5 + r() * 0.8;
+      return { x: o.x, y: o.y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - (kind === 'embers' ? 60 * rise * scale : 0),
+        t0, life, size: (kind === 'confetti' ? 9 : kind === 'dust' ? 2.2 : kind === 'snow' ? 4 : kind === 'sparks' ? 2.4 : 4.4) * scale * (0.5 + r()),
+        col: pal[Math.floor(r() * pal.length) % pal.length], alpha: I * (0.55 + 0.45 * r()), rot: r() * 6.28 };
+    }
+  });
+  MG.frame(t => {
+    ctx.clearRect(0, 0, W, H);
+    if (kind === 'confetti') {
+      for (const p of F.parts) {
+        const s = F.state(p, t);
+        if (!s) continue;
+        const a = p.alpha * Math.pow(1 - s.life, 0.7);
+        ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(p.rot + s.a * 6 * (p.r1 - 0.5));
+        ctx.scale(1, Math.cos(s.a * 9 + p.r2 * 6));
+        ctx.fillStyle = `rgba(${p.col},${a.toFixed(3)})`;
+        ctx.fillRect(-p.size / 2, -p.size / 3, p.size, p.size * 0.66);
+        ctx.restore();
+      }
+      return;
+    }
+    F.draw(ctx, t, { glow: kind === 'dust' || kind === 'snow' ? 2.4 : 4.2, streak: kind === 'sparks' || kind === 'fireworks' ? 26 * scale : 0,
+      shrink: kind === 'embers', fadePow: kind === 'embers' ? 1.1 : 1.6, blend: kind === 'snow' ? 'source-over' : 'lighter' });
+  });
+})();
+</script>

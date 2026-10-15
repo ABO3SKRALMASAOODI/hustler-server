@@ -1,0 +1,74 @@
+{
+  "id": "element_shapes",
+  "family": "composite",
+  "verb": "add_element",
+  "stage": "motion",
+  "params": {
+    "template": [
+      "el_shapes"
+    ],
+    "kind": [
+      "bounce",
+      "spiral",
+      "rings"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "any"
+  },
+  "binds_to": [
+    "beat",
+    "downbeat",
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 5
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "under talking"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 10.0,
+      "batch": 10.0,
+      "local": 5.0
+    },
+    "fixed_ms": 400
+  },
+  "exemplars": [
+    "32@≈25–30",
+    "33@≈6.7–7.3"
+  ],
+  "verify": [
+    "land_err_f<=1",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "abstract geometry: bouncing shapes with echoes, a golden spiral, rings",
+  "skill": "elements"
+}

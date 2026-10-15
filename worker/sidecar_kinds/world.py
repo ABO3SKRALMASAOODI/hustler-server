@@ -16,6 +16,7 @@ _HAND = identity(("mediapipe_hand_landmarker",), "w3a1")
 _POSE = identity(("yunet", "mediapipe_face_landmarker",
                   "mediapipe_pose_landmarker"), "w3a1")
 _OBJ = identity(("efficientsam_ti",), "w3b1")
+_CAM = identity(("yunet",), "w3a1")
 
 
 def _json(fmt, ext):
@@ -56,7 +57,7 @@ KIND_SPECS = {
         child="anchors.jobs:child_points"),
     "camera.motion": dict(
         _json("camera.motion.v1", "camera.json"), model=None,
-        model_id="opencv_lk_ransac", model_version="w3a1",
+        model_id="opencv_lk_ransac+" + _CAM[0], model_version=_CAM[1],
         models=("yunet",),
         defaults={"fps": 15.0, "max_w": 640},
         rate="fps", ms_per_frame=8.0, group_s=60.0,

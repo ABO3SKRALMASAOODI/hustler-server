@@ -1,0 +1,68 @@
+<!--MG-SPEC {"title": "Pictogram", "category": "element",
+ "description": "A flat pictogram figure (round head, rounded limbs, one colour) — the stadium-sign runner. mode='pose' drives it from the speaker's own measured body (it mirrors their gesture); run/walk/jump/point play a clean library cycle. Use as the abstract double of a person in a visual essay or an explainer.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "mode": {"type": "enum", "values": ["pose", "run", "walk", "jump", "point"], "default": "run"},
+  "colour": {"type": "color", "default": "#F4F4F2"},
+  "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "y": {"type": "float", "min": 0, "max": 1, "default": 0.55},
+  "size": {"type": "float", "min": 0.1, "max": 0.9, "default": 0.35, "hint": "figure height, share of the frame height (library cycles)"},
+  "speed": {"type": "float", "min": 0.3, "max": 3.0, "default": 1.0},
+  "travel": {"type": "float", "min": -1.0, "max": 1.0, "default": 0.0, "hint": "screen widths per second the figure crosses (library cycles)"}
+ },
+ "example": {"mode": "run", "travel": 0.3},
+ "sfx": []} -->
+<style>#pg{position:absolute;left:0;top:0;width:100%;height:100%}</style>
+<div class="mg-root"><canvas id="pg"></canvas></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H;
+  const cv = MG.$('#pg'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const col = P.colour || '#F4F4F2';
+  const pose = P._pose || null;
+  // library cycles: joint angles (deg) over a phase, for [hipL, kneeL, hipR, kneeR, shL, elL, shR, elR]
+  const CYC = {
+    run: ph => { const s = Math.sin(ph), c = Math.cos(ph); return [40 * s, 10 + 55 * Math.max(0, -c), -40 * s, 10 + 55 * Math.max(0, c), -55 * s, -80, 55 * s, -80, 12]; },
+    walk: ph => { const s = Math.sin(ph); return [25 * s, 8 + 20 * Math.max(0, -s), -25 * s, 8 + 20 * Math.max(0, s), -22 * s, -15, 22 * s, -15, 4]; },
+    jump: ph => { const k = Math.abs(Math.sin(ph / 2)); return [-30 * k, 70 * k, -30 * k, 70 * k, -150 + 40 * k, -10, 150 - 40 * k, 10, 0]; },
+    point: ph => [3, 4, -3, 4, -10, -10, 95 + 3 * Math.sin(ph), -5, 0],
+  };
+  function limb(x0, y0, a1, a2, L, w) {
+    const r1 = a1 * Math.PI / 180, r2 = (a1 + a2) * Math.PI / 180;
+    const x1 = x0 + Math.sin(r1) * L, y1 = y0 + Math.cos(r1) * L;
+    const x2 = x1 + Math.sin(r2) * L, y2 = y1 + Math.cos(r2) * L;
+    seg(x0, y0, x1, y1, w); seg(x1, y1, x2, y2, w * 0.92);
+  }
+  function seg(x0, y0, x1, y1, w) { ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke(); }
+  MG.frame(t => {
+    ctx.clearRect(0, 0, W, H);
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    if (P.mode === 'pose' && pose && pose.length) {
+      let best = pose[0];
+      for (const s of pose) if (Math.abs(s.t - t) < Math.abs(best.t - t)) best = s;
+      const j = best.j, v = i => j[i] && j[i][2] > 0.4;
+      const sw = Math.hypot(j[11][0] - j[12][0], j[11][1] - j[12][1]) || 60;
+      const w = sw * 0.32;
+      const pairs = [[11, 13], [13, 15], [12, 14], [14, 16], [23, 25], [25, 27], [24, 26], [26, 28]];
+      for (const [a, b] of pairs) if (v(a) && v(b)) seg(j[a][0], j[a][1], j[b][0], j[b][1], w);
+      if (v(11) && v(12) && v(23) && v(24)) {
+        ctx.beginPath(); ctx.moveTo(j[11][0], j[11][1]); ctx.lineTo(j[12][0], j[12][1]); ctx.lineTo(j[24][0], j[24][1]); ctx.lineTo(j[23][0], j[23][1]); ctx.closePath(); ctx.fill();
+      } else if (v(11) && v(12)) seg(j[11][0], j[11][1], j[12][0], j[12][1], w * 1.6);
+      if (v(0)) { ctx.beginPath(); ctx.arc(j[0][0], j[0][1] - sw * 0.05, sw * 0.32, 0, 6.2832); ctx.fill(); }
+      return;
+    }
+    const Hf = (P.size ?? 0.35) * H, L = Hf * 0.24, w = Hf * 0.075;
+    const ph = t * 6.2 * (P.speed ?? 1);
+    const a = (CYC[P.mode] || CYC.run)(ph);
+    const x = ((P.x ?? 0.5) + (P.travel ?? 0) * t) * W, base = (P.y ?? 0.55) * H + Hf * 0.5;
+    const bob = (P.mode === 'run' ? Math.abs(Math.sin(ph)) * L * 0.18 : 0) + (P.mode === 'jump' ? Math.abs(Math.sin(ph / 2)) * L * 1.2 : 0);
+    const hipY = base - L * 2 - bob, shY = hipY - L * 1.55, lean = a[8] * Math.PI / 180;
+    const shX = x + Math.sin(lean) * L * 1.55;
+    limb(x, hipY, a[0], a[1], L, w); limb(x, hipY, a[2], a[3], L, w);
+    seg(x, hipY, shX, shY, w * 1.5);
+    limb(shX, shY, a[4], a[5], L * 0.85, w * 0.85); limb(shX, shY, a[6], a[7], L * 0.85, w * 0.85);
+    ctx.beginPath(); ctx.arc(shX + Math.sin(lean) * L * 0.55, shY - L * 0.55, L * 0.36, 0, 6.2832); ctx.fill();
+  });
+})();
+</script>

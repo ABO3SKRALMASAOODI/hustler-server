@@ -1,0 +1,86 @@
+{
+  "id": "element_particles",
+  "family": "composite",
+  "verb": "add_element",
+  "stage": "motion",
+  "params": {
+    "template": [
+      "el_particles"
+    ],
+    "kind": [
+      "embers",
+      "sparks",
+      "dust",
+      "confetti",
+      "snow",
+      "fireworks"
+    ],
+    "emit": [
+      "edge",
+      "point",
+      "box",
+      "frame"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "any; emit=edge needs a person in the shot"
+  },
+  "binds_to": [
+    "word.payoff",
+    "beat.kick",
+    "drop",
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 5
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "as wallpaper under ordinary talking",
+    "two particle layers at once"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 18.0,
+      "batch": 18.0,
+      "local": 9.0
+    },
+    "fixed_ms": 600
+  },
+  "exemplars": [
+    "41@≈25–32",
+    "06@8.2–13.1",
+    "36@≈16.7"
+  ],
+  "verify": [
+    "land_err_f<=1",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "particles as light: embers off a figure, sparks, dust, confetti, firework bursts on beats",
+  "skill": "elements"
+}

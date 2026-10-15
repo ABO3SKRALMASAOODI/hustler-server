@@ -1,0 +1,31 @@
+# Track 3D (procedural FX and illustration kit). Template el_sprites
+# (motion/templates/el_sprites.html), written by add_element; composited as
+# light where it is light (MotionItem.composite blend screen).
+id: element_sprites
+family: layout
+verb: add_element
+stage: motion
+params:
+  template: [el_sprites]
+  choreo: [ring, row, swarm, pop, implode, collapse]
+needs:
+  sidecars: []
+  lane_features: ["chromium"]
+  footage: "cutout images (subject or product cutouts)"
+binds_to: [beat, downbeat, section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 2, min_gap_s: 5}
+  charged: {per_short: 4, min_gap_s: 3}
+never:
+  - "under talking"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 16.0, batch: 16.0, local: 8.0}
+  fixed_ms: 700
+exemplars: ["01@1.708–3.79", "41@≈9–11.7"]
+verify: ["land_err_f<=1", "determinism"]
+status: live
+description: "cutouts choreographed: ring, row, swarm, pop, implode, collapse"
+skill: elements
