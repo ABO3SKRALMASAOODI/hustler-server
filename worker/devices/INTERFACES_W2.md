@@ -244,11 +244,22 @@ are never loaded (200 KB cap).
 - **Ramps.** `ramps.plan(src0, src1, curve, *, fps_src, fps_out)` →
   contiguous `speed` spans (an eased curve quantised to ≤ 12 constant
   steps, never a factor of exactly 1.0), monotonic by construction.
-- **Moving stills (defect #21).** `still_motion.move(asset, kind, dur,
-  canvas)` pre-renders a Ken Burns / parallax-drift / push clip from a
-  still (ffmpeg `zoompan`-free: exact-subpixel `crop`+`scale` per frame
-  from an eased path) into a project video asset; `animate_still` swaps the
-  insert/overlay to it. No renderer change.
+- **Moving stills (defect #21).** As built: a motion template
+  `still_motion` (full-frame photo, layer below_captions, eased
+  push / pull / pan / rise / fall / drift toward `focus_x/y`, fit cover /
+  contain_blur / contain, optional archive treatment), sub-pixel in
+  Chromium. `animate_still` swaps a cover image overlay for it (one batch:
+  overlay removed, motion item written), gives an image insert a camera
+  `motion`, or re-aims a moving still; montage stills are moving stills,
+  each a different move. No renderer change, no pre-rendered asset.
+- **Insert ramps.** `set_speed_ramp(insert=id)` splits a video insert into
+  constant-rate pieces (`rate`, whole output frames each, `split_parent`
+  keeps it one clip); main-footage ramps are `speed` spans written through
+  agent_tools._write_speed (program items remapped).
+- **Swap.** `montage.on_swap` is registered on hooks `music_swap`; the
+  resolver (tools_ext/montage_tools) downloads and analyses the new track
+  and re-plans b-roll montages from the `montage_intent` record (pool, seed,
+  modes, lead); type montages re-plan with `plan_to_music(replan=...)`.
 
 ## 6. Library recall and story planners (2E)
 
@@ -286,6 +297,14 @@ are never loaded (200 KB cap).
   EDL branches rendered as cheap previews.
 
 ## 8. Looks and B&W (2F close-out)
+
+As merged with Wave 1 (7d0f45be): `mono_policy` is the write gate (a write
+that makes the short flat B&W is refused without the user's ask, every
+path through ToolContext.write_edl) and `mono_noir` is noir colour, not a
+'bw' grade. `creative.mono_allowed` reads `mono_policy.asked` (one
+predicate); the story planner's colour turn is a grade window that ends on
+the payoff (never >= 60% of the program).
+
 
 - `apply_look` stays available; its descriptions and the skills no longer
   present `mono_noir` as a default choice; the agent prompt's look guidance
