@@ -454,3 +454,46 @@ def test_white_light_never_darkens_a_saturated_rim(tmp_path):
              f"color=c=white:s={W}x{H}:r=25:d=0.04,format=yuva420p[w];"
              f"[w][a]alphamerge[wa];[p][wa]overlay,format=rgb24[o]")
     assert (rgb(g_old, "o") - p).min() < -10
+
+
+def test_rgb_reads_and_lut_windows_are_exact_on_every_ffmpeg(tmp_path):
+    """ffmpeg 8.x (the production lanes) converts yuv420p to PACKED rgb24
+    ~2 levels dark when the conversion is left to negotiation: frame reads
+    (qa_metrics.read_frames) and a grade window's lut3d both took that
+    path, so AT-1E-6 read set dE 17.7 on 8.0 and 2.4 on 9.0. Both now
+    convert in the graph with accurate rounding: a read matches the BT.709
+    formula and an identity cube leaves the picture."""
+    import subprocess
+    import numpy as np
+    import gradewin
+    import qa_metrics
+    src = str(tmp_path / "s.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=s=320x180:r=25:d=0.2", "-pix_fmt", "yuv420p",
+                    "-color_range", "tv", "-colorspace", "bt709",
+                    "-color_primaries", "bt709", "-color_trc", "bt709",
+                    "-c:v", "libx264", "-crf", "0", src], check=True)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", src, "-frames:v",
+                          "1", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"],
+                         capture_output=True).stdout
+    W, H = 320, 180
+    b = np.frombuffer(raw, np.uint8)
+    Y = b[:W * H].reshape(H, W).astype(float)
+    U = b[W * H:W * H * 5 // 4].reshape(H // 2, W // 2).astype(float)
+    V = b[W * H * 5 // 4:].reshape(H // 2, W // 2).astype(float)
+    U, V = (c.repeat(2, 0).repeat(2, 1) for c in (U, V))
+    y, u, v = (Y - 16) / 219, (U - 128) / 224, (V - 128) / 224
+    kr, kb = 0.2126, 0.0722
+    R, B = y + 2 * (1 - kr) * v, y + 2 * (1 - kb) * u
+    G = (y - kr * R - kb * B) / (1 - kr - kb)
+    ref = np.clip(np.stack([R, G, B], -1) * 255, 0, 255)
+    _i, frs = qa_metrics.read_frames(src, frames={0})
+    got = frs[0].astype(float)
+    assert abs(float((got - ref).mean())) < 0.5
+    # an identity cube through the grade window's own conversions
+    out = subprocess.run(["ffmpeg", "-v", "error", "-i", src, "-vf",
+                          f"{gradewin.RGB_IN},lut3d,{gradewin.YUV_OUT}",
+                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt",
+                          "yuv420p", "-"], capture_output=True).stdout
+    y2 = np.frombuffer(out, np.uint8)[:W * H].astype(float)
+    assert abs(float((y2 - Y.ravel()).mean())) < 0.5
