@@ -145,17 +145,28 @@ jobs:
           set -o pipefail
           deploy_log=$(mktemp)
           trap 'rm -f "$deploy_log"' EXIT
-          for attempt in 1 2 3; do
+          # A container application whose previous rollout is still replacing
+          # active instances (rollout_active_grace_period) can refuse a new
+          # rollout; the old release keeps serving safely meanwhile (skew
+          # guard), so wait it out instead of failing the release.
+          for attempt in 1 2 3 4 5 6 7 8; do
             if npx wrangler deploy \
                 --var CODE_VERSION:"$GITHUB_SHA" \
                 --var SOURCE_VERSION:"$source_version" 2>&1 | tee "$deploy_log"; then
               break
             fi
-            if ! grep -Fq "Internal Server Error" "$deploy_log" || test "$attempt" = 3; then
+            if test "$attempt" = 8; then
               exit 1
             fi
-            echo "Cloudflare returned an internal error; retrying this revision ($attempt/3)."
-            sleep 30
+            if grep -Fq "Internal Server Error" "$deploy_log"; then
+              echo "Cloudflare returned an internal error; retrying this revision ($attempt/8)."
+              sleep 30
+            elif grep -Eiq "rolling out application|rollout" "$deploy_log"; then
+              echo "A container rollout is still in progress; retrying this revision in 120 s ($attempt/8)."
+              sleep 120
+            else
+              exit 1
+            fi
           done
 
       - name: install runtime secrets

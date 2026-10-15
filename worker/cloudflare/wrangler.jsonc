@@ -24,7 +24,7 @@
       "max_instances": 8,
       "instance_type": "standard-4",
       "constraints": {"regions": ["WNAM"]},
-      "rollout_active_grace_period": 1800,
+      "rollout_active_grace_period": 900,
       "rollout_step_percentage": [100]
     },
     {

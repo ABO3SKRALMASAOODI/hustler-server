@@ -226,3 +226,27 @@ def test_media_children_volunteer_for_the_oom_killer(monkeypatch, tmp_path):
     class Missing:
         pid = 999999999
     media._prefer_child_for_oom(Missing())
+
+
+def test_index_greeting_leaves_a_reasoning_model_room(monkeypatch):
+    """147 of 204 greetings in two weeks came back empty at max_tokens=220."""
+    import indexer
+    import llm
+    seen = {}
+
+    def ask_text(system, user, **kw):
+        seen.update(kw)
+        return {"text": "Your video is ready to edit.", "prompt_tokens": 1,
+                "completion_tokens": 1}
+
+    class Db:
+        def run(self, *_a, **_k):
+            return None
+
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(llm, "ask_text", ask_text)
+    out = indexer._greet_via_llm(Db(), 1, "12 shots", False, False,
+                                 {"words": [{"w": "Hello"}]})
+    assert out
+    assert seen["max_tokens"] >= 1000
+    assert seen["reasoning_effort"] == "low" and seen["retry_empty"] is True
