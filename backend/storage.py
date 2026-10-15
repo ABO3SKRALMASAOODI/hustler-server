@@ -15,7 +15,9 @@ Key layout:
                                                            worker/renderer.py)
 """
 
+import hashlib
 import os
+import threading
 import uuid
 
 import boto3
@@ -137,22 +139,62 @@ def bucket():
     return os.environ["S3_BUCKET"]
 
 
-def client(public=False):
+# One client per process and configuration, reused by every request thread.
+# Botocore clients are thread-safe to USE; creating one per call (the old
+# behaviour) cost ~50-100 ms of CPU under the GIL on every presign, HEAD and
+# frame fetch, and creating them concurrently from the shared default session
+# is not thread-safe. Bounded timeouts and standard retries replace botocore's
+# legacy defaults (60 s connect + 60 s read, 5 attempts), under which one
+# stalled R2 read could hold a gunicorn thread for ten minutes: on Oct 11 the
+# MCP endpoint answered nothing for 40 minutes while every job it had queued
+# finished in under 225 s.
+S3_CONNECT_TIMEOUT_S = float(os.getenv("S3_CONNECT_TIMEOUT_S", "10"))
+S3_READ_TIMEOUT_S = float(os.getenv("S3_READ_TIMEOUT_S", "60"))
+S3_MAX_ATTEMPTS = int(os.getenv("S3_MAX_ATTEMPTS", "3"))
+_clients = {}
+_clients_lock = threading.Lock()
+
+
+def client(public=False, fast=False):
     """public=True mints URLs the BROWSER will hit. On R2 the two endpoints
     are the same; in docker-compose dev the browser reaches MinIO on
     localhost while containers use the internal hostname, so presigning uses
-    S3_PUBLIC_ENDPOINT when set."""
+    S3_PUBLIC_ENDPOINT when set.
+
+    fast=True is for small reads on a request thread that has a better
+    answer than waiting (an MCP reply embeds a frame, or links it): 5 s to
+    connect, 15 s to read, two attempts."""
     endpoint = os.environ["S3_ENDPOINT"]
     if public:
         endpoint = os.getenv("S3_PUBLIC_ENDPOINT") or endpoint
-    return boto3.client(
-        "s3",
-        endpoint_url=endpoint,
-        aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
-        region_name=os.getenv("S3_REGION", "auto"),
-        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
-    )
+    key = (endpoint, os.environ["S3_ACCESS_KEY_ID"],
+           hashlib.sha256(os.environ["S3_SECRET_ACCESS_KEY"].encode())
+           .hexdigest(), os.getenv("S3_REGION", "auto"), boto3.client,
+           bool(fast))
+    with _clients_lock:
+        cached = _clients.get(key)
+        if cached is None:
+            cached = boto3.client(
+                "s3",
+                endpoint_url=endpoint,
+                aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
+                aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
+                region_name=os.getenv("S3_REGION", "auto"),
+                config=Config(signature_version="s3v4",
+                              s3={"addressing_style": "path"},
+                              connect_timeout=(5.0 if fast else
+                                               S3_CONNECT_TIMEOUT_S),
+                              read_timeout=(15.0 if fast else
+                                            S3_READ_TIMEOUT_S),
+                              retries={"max_attempts": (
+                                           2 if fast else S3_MAX_ATTEMPTS),
+                                       "mode": "standard"},
+                              max_pool_connections=32),
+            )
+            if len(_clients) >= 8:
+                _clients.clear()
+            _clients[key] = cached
+        return cached
 
 
 # THE MAIN VIDEO'S CAP IS AN ABUSE GUARD, NOT THE PRODUCT LIMIT.
@@ -344,10 +386,27 @@ def relay_upload(key, stream, content_type, declared_bytes=None):
         ExtraArgs={"ContentType": content_type or "application/octet-stream"})
 
 
-def presign_upload(key, nbytes, content_type):
+# An agent's upload plan travels inside one tool reply. 125 presigned part
+# URLs for a 1.43 GB file made a 103,332-character reply the connector could
+# not carry (Oct 11 run, B11), so MCP plans use fewer, larger parts: a script
+# on a workstation, not a browser on a phone uplink, PUTs them.
+MCP_MAX_PARTS = int(os.getenv("MCP_UPLOAD_MAX_PARTS", "16"))
+MAX_S3_PART_SIZE = 5 * 1024 ** 3
+
+
+def part_size_for_parts(nbytes, max_parts):
+    """Smallest whole-MiB part size that fits ``nbytes`` in ``max_parts``."""
+    mib = 1024 * 1024
+    need = (int(nbytes) + max(1, int(max_parts)) - 1) // max(1, int(max_parts))
+    size = ((need + mib - 1) // mib) * mib
+    return max(part_size_for(nbytes), min(MAX_S3_PART_SIZE, size))
+
+
+def presign_upload(key, nbytes, content_type, max_parts=None):
     """Single presigned PUT for small files, presigned multipart for large.
 
-    Returns a dict the browser can act on directly.
+    Returns a dict the browser can act on directly. ``max_parts`` caps the
+    number of parts (larger parts) for a plan that travels in a tool reply.
     """
     c = client(public=True)
     if nbytes <= SINGLE_PUT_LIMIT:
@@ -362,7 +421,8 @@ def presign_upload(key, nbytes, content_type):
     mpu = c.create_multipart_upload(
         Bucket=bucket(), Key=key, ContentType=content_type)
     upload_id = mpu["UploadId"]
-    part_size = part_size_for(nbytes)
+    part_size = (part_size_for_parts(nbytes, max_parts) if max_parts
+                 else part_size_for(nbytes))
     n_parts = (nbytes + part_size - 1) // part_size
     urls = [
         {
@@ -401,10 +461,11 @@ def abort_multipart(key, upload_id):
         pass
 
 
-def head_bytes(key):
+def head_bytes(key, fast=False):
     """Size of an object, or None if it doesn't exist."""
     try:
-        return client().head_object(Bucket=bucket(), Key=key)["ContentLength"]
+        return client(fast=fast).head_object(
+            Bucket=bucket(), Key=key)["ContentLength"]
     except Exception:
         return None
 
@@ -438,19 +499,24 @@ def get_range_at(key, offset, length):
         return None
 
 
-def get_object_whole(key, max_bytes):
+def get_object_whole(key, max_bytes, fast=True):
     """A WHOLE object in memory, or None if it is bigger than max_bytes.
 
     The only caller is the MCP surface embedding a small video in a tool reply
     (routes/mcp.watch_video), and the cap is what keeps that honest: this
     service runs 3 SYNC gunicorn workers, so a body held here is a third of
     the API holding it. Size is checked with a HEAD first — reading and then
-    discarding would already have paid for the download."""
-    n = head_bytes(key)
+    discarding would already have paid for the download.
+
+    Every caller embeds bytes in a reply that also carries a link, so the
+    fast client is the default: a slow read degrades to the link instead of
+    holding the request thread."""
+    n = head_bytes(key, fast=fast)
     if n is None or n > int(max_bytes):
         return None
     try:
-        return client().get_object(Bucket=bucket(), Key=key)["Body"].read()
+        return client(fast=fast).get_object(
+            Bucket=bucket(), Key=key)["Body"].read()
     except Exception:
         return None
 

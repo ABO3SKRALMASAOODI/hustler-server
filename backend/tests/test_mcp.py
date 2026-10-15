@@ -543,7 +543,7 @@ def test_upload_start_preserves_reference_metadata_in_finish_instructions(
     monkeypatch.setattr(mcpmod.storage, "new_original_key",
                         lambda project_id, ext, kind: "clips/3/ref.mp4")
     monkeypatch.setattr(mcpmod.storage, "presign_upload",
-                        lambda key, size, content_type: upload_plan)
+                        lambda key, size, content_type, **_k: upload_plan)
 
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "upload_start",
@@ -1826,6 +1826,11 @@ def test_download_exact_historical_changed_section_asset(client, monkeypatch, ki
     assert receipt["asset_id"] == 44
     assert receipt["render_type"] == ("changed_section_preview" if kind == "preview_check" else "final_export")
     assert receipt["sha256"] == "a" * 64
+    if kind == "final":
+        # The exact final can be inspected (run report C16).
+        assert receipt["asset_key"] == "p/44.mp4"
+        text = result["content"][0]["text"]
+        assert "watch_video(project_id=3, kind='asset', asset_key=\"p/44.mp4\")" in text
 
 
 @pytest.mark.parametrize("plan", ["ai_pro", "ai_max"])
@@ -2207,7 +2212,7 @@ def test_upload_start_returns_its_plan_as_structured_content(
     monkeypatch.setattr(mcpmod.storage, "new_original_key",
                         lambda project_id, ext, kind: "originals/3/talk.mp4")
     monkeypatch.setattr(mcpmod.storage, "presign_upload",
-                        lambda key, size, content_type: upload_plan)
+                        lambda key, size, content_type, **_k: upload_plan)
     result = rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "upload_start",
         "arguments": {"project_id": 3, "filename": "talk.mp4",

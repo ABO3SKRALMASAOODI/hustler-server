@@ -200,6 +200,13 @@ def create_app():
                        or "unknown")[:12],
             "checks": checks,
         }
+        # This worker process's MCP request load (Oct 2026): a stall is
+        # visible from outside as a growing oldest_s with slots exhausted.
+        try:
+            from routes.mcp import inflight_report
+            payload["mcp"] = inflight_report()
+        except Exception:
+            pass
         # Release certification must observe this process and this database,
         # not a stale edge/proxy response from before a deploy or outage.
         return (
@@ -255,6 +262,13 @@ def create_app():
     # Existing connections on the Render origin retain their original issuer.
     app.register_blueprint(mcp_bp, url_prefix='/public-mcp', name='mcp_public')
     app.register_blueprint(mcp_oauth_bp, url_prefix='/public-mcp', name='mcp_oauth_public')
+    # End in-flight MCP waits as soon as this worker is told to stop, so a
+    # deploy delivers their replies instead of cutting the connections.
+    try:
+        from routes.mcp import install_shutdown_hook
+        install_shutdown_hook()
+    except Exception as e:
+        app.logger.error("could not install MCP shutdown hook: %s", e)
     # Founder-only read-only metrics for the signed Valmera iPhone widgets.
     app.register_blueprint(phone_status_bp)
 

@@ -50,6 +50,8 @@ import math
 import os
 import re
 import secrets
+import signal
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -91,6 +93,9 @@ POLL_MAX_S = 1.0
 # PREREQUISITE naming the analysis job. Taken out of the same SYNC budget.
 INDEX_WAIT_S = float(os.getenv("MCP_INDEX_WAIT_S", "90"))
 INDEX_POLL_S = 2.0
+
+# Seconds a reply may spend fetching frame bytes to embed (see _image_blocks).
+IMAGE_EMBED_BUDGET_S = float(os.getenv("MCP_IMAGE_EMBED_BUDGET_S", "20"))
 
 # How big a video watch_video may EMBED in a tool reply (round 83). It leaves
 # here base64'd, so the JSON-RPC body is ~4/3 of this, and it is read whole
@@ -963,22 +968,75 @@ def _job_row(job_id, user_id):
         return cur.fetchone()
 
 
+# ── Backpressure (Oct 2026) ─────────────────────────────────────────────────
+# A tool call holds one gunicorn thread while it waits for its job. Waits are
+# capped per process so a burst of long renders can never take every thread:
+# past the cap a call waits only briefly and answers with its job id (the
+# model picks the result up with wait_for_job), and Studio, uploads and quick
+# tools keep their threads. A worker told to stop (a deploy) ends its waits at
+# once, so every reply is delivered before the process exits instead of being
+# cut off with the connection.
+LONG_WAIT_SLOTS = max(1, int(os.getenv("MCP_LONG_WAIT_SLOTS", "5")))
+SHORT_WAIT_S = float(os.getenv("MCP_SHORT_WAIT_S", "3"))
+_long_waits = threading.BoundedSemaphore(LONG_WAIT_SLOTS)
+SHUTTING_DOWN = threading.Event()
+_inflight = {}
+_inflight_lock = threading.Lock()
+
+
+def install_shutdown_hook():
+    """Chain onto the gunicorn worker's SIGTERM handler (main thread only)."""
+    try:
+        previous = signal.getsignal(signal.SIGTERM)
+
+        def _term(signum, frame):
+            SHUTTING_DOWN.set()
+            if callable(previous):
+                previous(signum, frame)
+
+        signal.signal(signal.SIGTERM, _term)
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def inflight_report():
+    """{"inflight": n, "oldest_s": s, "long_wait_slots_free": k}."""
+    now = time.monotonic()
+    with _inflight_lock:
+        starts = list(_inflight.values())
+    free = getattr(_long_waits, "_value", None)
+    return {"inflight": len(starts),
+            "oldest_s": round(max((now - t for t, _ in starts), default=0.0),
+                              1),
+            "long_wait_slots_free": free,
+            "long_wait_slots": LONG_WAIT_SLOTS}
+
+
 def _wait(job_id, user_id, seconds=None):
     """Poll the job row until it settles or the budget runs out. A fresh
     connection per read: the alternative holds one open across the whole wait,
     which on 3 sync gunicorn workers is a connection idle-in-transaction for
     as long as a render takes."""
     started = time.time()
-    deadline = started + (SYNC_WAIT_S if seconds is None else seconds)
-    row = _job_row(job_id, user_id)
-    while row and row["state"] in ("queued", "running") \
-            and time.time() < deadline:
-        elapsed = time.time() - started
-        interval = POLL_S if elapsed < 3 else (0.5 if elapsed < 10
-                                                else POLL_MAX_S)
-        time.sleep(max(0.0, min(interval, deadline - time.time())))
+    budget = SYNC_WAIT_S if seconds is None else seconds
+    long_wait = _long_waits.acquire(blocking=False)
+    if not long_wait:
+        budget = min(budget, SHORT_WAIT_S)
+    try:
+        deadline = started + budget
         row = _job_row(job_id, user_id)
-    return row
+        while row and row["state"] in ("queued", "running") \
+                and time.time() < deadline and not SHUTTING_DOWN.is_set():
+            elapsed = time.time() - started
+            interval = POLL_S if elapsed < 3 else (0.5 if elapsed < 10
+                                                    else POLL_MAX_S)
+            time.sleep(max(0.0, min(interval, deadline - time.time())))
+            row = _job_row(job_id, user_id)
+        return row
+    finally:
+        if long_wait:
+            _long_waits.release()
 
 
 def _still_running(row, what):
@@ -1651,7 +1709,8 @@ def _t_upload_start(tok, args):
                 f"Project {project_id} does not exist on this account.")
     key = storage.new_original_key(project_id, ext, kind)
     try:
-        out = storage.presign_upload(key, nbytes, content_type)
+        out = storage.presign_upload(key, nbytes, content_type,
+                                     max_parts=storage.MCP_MAX_PARTS)
     except Exception as e:
         return _session_error(f"Could not prepare the upload: {e}")
 
@@ -2055,6 +2114,35 @@ def _t_shorts_status(tok, args):
         "\n\n" + tail
 
 
+# worker/render_qc.py ENDCARD_MIN_NCC / ROBOT_MIN_NCC (pinned by a test).
+_ENDCARD_MIN_NCC = 0.80
+_ROBOT_MIN_NCC = 0.60
+
+
+def _brand_check(picture_qc):
+    """The final's measured brand stages, in words: confirmed or not."""
+    pq = picture_qc if isinstance(picture_qc, dict) else {}
+    skipped = " ".join(str(x) for x in (pq.get("skipped") or []))
+    endcard = pq.get("endcard")
+    mark = pq.get("watermark")
+    out = {}
+    if isinstance(endcard, (int, float)):
+        out["end_card"] = ("confirmed" if endcard >= _ENDCARD_MIN_NCC
+                           else "MISSING OR ALTERED")
+        out["end_card_match"] = round(float(endcard), 3)
+    else:
+        out["end_card"] = "not measured"
+    if isinstance(mark, (int, float)):
+        out["corner_mark"] = ("confirmed" if mark >= _ROBOT_MIN_NCC
+                              else "MISSING OR ALTERED")
+        out["corner_mark_match"] = round(float(mark), 3)
+    elif "watermark" in skipped:
+        out["corner_mark"] = "not measured"
+    else:
+        out["corner_mark"] = "not on this plan (no free-tier mark)"
+    return out
+
+
 def _t_wait_for_job(tok, args):
     try:
         job_id = int(args.get("job_id"))
@@ -2132,6 +2220,10 @@ def _t_wait_for_job(tok, args):
         picture = (result.get("picture_qc") or {}).get("findings") or []
         if picture:
             receipt["picture_check"] = [str(f) for f in picture[:6]]
+        if row["type"] == "final":
+            # Run report C13: the final's picture check measures the end card
+            # and the corner mark but never said so. State both, every time.
+            receipt["brand_check"] = _brand_check(result.get("picture_qc"))
         return {"content": [{"type": "text", "text": identity + json.dumps(receipt)}],
                 "structuredContent": {"job": job_status, "render": receipt}, "isError": False}
     if row["type"] == "index":
@@ -2277,7 +2369,13 @@ def _t_download_url(tok, args):
                 "structuredContent": {"preview_receipt": receipt},
                 "isError": False}
     receipt["url"] = url
-    return {"content": [{"type": "text", "text": f"{kind} of EDL v{ver}:\n{url}"}],
+    # Run report C16: a final could not be inspected inside Valmera. Its
+    # storage key is what watch_video(kind='asset') opens (renders allowed).
+    receipt["asset_key"] = row["storage_key"]
+    inspect = (f"\nInspect this exact file: watch_video(project_id={project_id}, "
+               f"kind='asset', asset_key={json.dumps(row['storage_key'])})")
+    return {"content": [{"type": "text",
+                         "text": f"{kind} of EDL v{ver}:\n{url}{inspect}"}],
             "structuredContent": {"download_receipt": receipt}, "isError": False}
 
 
@@ -2578,6 +2676,11 @@ def _image_blocks(images, delivered_indexes=None):
     rather than four million characters. A client that drops them still has
     the text and the link, so the downside is the behaviour we had before."""
     out = []
+    # A reply must come back while the caller still waits for it. Frames are
+    # fetched from object storage on this request thread; past this budget
+    # the remaining frames are delivered as links only (Oct 11: replies that
+    # never arrived while every job behind them had finished).
+    embed_deadline = time.monotonic() + IMAGE_EMBED_BUDGET_S
     for index, img in enumerate(images or []):
         key = (img or {}).get("storage_key")
         if not key:
@@ -2590,11 +2693,17 @@ def _image_blocks(images, delivered_indexes=None):
             text += "\nImage URL (use if your client hides image content): " + storage.presign_get(key)
         except Exception:
             text += "\nFRAME LINK FAILED: a fresh image link could not be created."
-        try:
-            raw = storage.get_object_whole(key, IMAGE_MAX_BYTES)
-        except Exception:
-            raw = None
-        if not raw:
+        raw = None
+        over_budget = time.monotonic() >= embed_deadline
+        if not over_budget:
+            try:
+                raw = storage.get_object_whole(key, IMAGE_MAX_BYTES)
+            except Exception:
+                raw = None
+        if not raw and over_budget:
+            text += ("\nFRAME EMBED SKIPPED: storage was slow, so this frame "
+                     "is delivered as the image URL above instead.")
+        elif not raw:
             text += "\nFRAME EMBED FAILED: image bytes are unavailable or exceed the transport limit; use the image URL."
         out.append({"type": "text", "text": text})
         if raw:
@@ -2943,6 +3052,38 @@ def _group_of(name):
 
 @mcp_bp.route("/mcp", methods=["POST"])
 def mcp_endpoint():
+    started = time.monotonic()
+    marker = object()
+    with _inflight_lock:
+        _inflight[id(marker)] = (started, "")
+    try:
+        return _mcp_endpoint()
+    finally:
+        with _inflight_lock:
+            _inflight.pop(id(marker), None)
+        elapsed = time.monotonic() - started
+        if elapsed >= 30:
+            current_app.logger.warning(
+                "[mcp] slow request %.1fs (%s)", elapsed,
+                ",".join(_tool_names()) or "-")
+
+
+def _tool_names():
+    try:
+        body = request.get_json(silent=True)
+    except Exception:
+        return []
+    msgs = body if isinstance(body, list) else [body]
+    names = []
+    for msg in msgs:
+        if isinstance(msg, dict) and msg.get("method") == "tools/call":
+            name = (msg.get("params") or {}).get("name")
+            if isinstance(name, str):
+                names.append(name[:40])
+    return names
+
+
+def _mcp_endpoint():
     tok, err = _authenticate()
     if err:
         return _unauthorized(err)

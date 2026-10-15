@@ -43,6 +43,9 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
 
     response = app.test_client().get("/healthz")
     body = response.get_json()
+    # This worker's MCP load rides beside the checks (Oct 2026).
+    mcp = body.pop("mcp")
+    assert mcp["inflight"] == 0 and mcp["long_wait_slots"] >= 1
 
     assert response.status_code == 503
     assert response.headers["Cache-Control"] == "no-store, max-age=0"

@@ -663,10 +663,21 @@ def _concierge_reply(stage, history, attachments, index_error=None,
             "prompt_tokens": None, "completion_tokens": None}, False
 
 
+# A request thread must never wait on the operating system's TCP timeout
+# (about two minutes per attempt) for a database that is not answering:
+# bounded connect, and keepalives that notice a dead peer in about a minute.
+_VDB_CONNECT_ARGS = {
+    "connect_timeout": int(os.getenv("VDB_CONNECT_TIMEOUT_S", "10")),
+    "keepalives": 1, "keepalives_idle": 30, "keepalives_interval": 10,
+    "keepalives_count": 3,
+}
+
+
 @contextmanager
 def vdb(db_url=None):
     conn = psycopg2.connect(db_url or current_app.config["DATABASE_URL"],
-                            cursor_factory=RealDictCursor)
+                            cursor_factory=RealDictCursor,
+                            **_VDB_CONNECT_ARGS)
     try:
         yield conn
         conn.commit()
