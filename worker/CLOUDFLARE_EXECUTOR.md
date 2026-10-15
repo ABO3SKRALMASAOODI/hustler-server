@@ -44,7 +44,10 @@ the two is normal and is not a reason to refuse work:
   type, MCP tools and Studio turns included.
 - SIGTERM drains a container: in-flight calls finish, `/health` reports
   `draining`, a late `/run` is a rollout wait. `rollout_active_grace_period`
-  is 1800 s on batch (index/final) and 900 s on the agent lane.
+  is 900 s on batch (index/final) and the agent lane; with the drain and
+  Cloudflare's 15 minutes between SIGTERM and SIGKILL an in-flight index or
+  final has about 30 minutes to finish. The deploy workflow retries a publish
+  that a still-running rollout refuses (8 x 120 s).
 - A launch that never reached its Durable Object is fenced
   (`/calls/<lane>/<id>/fence`) after `CLOUDFLARE_MISSING_FENCE_S` (60 s) and
   relaunched; a `submitted` record whose handler was lost fails as an
