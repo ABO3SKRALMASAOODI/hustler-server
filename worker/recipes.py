@@ -61,6 +61,7 @@ STILLS_PLACEHOLDER = ("stills:photo", "stills:negative", "stills:line",
 # A recipe the batch already used ranks this much lower per use.
 FRESH_DECAY = 0.45
 MIN_HIT_GAP_S = 0.36           # negatives: <= 3 full-frame flashes a second
+HOOK_FLASH_FREE_S = 1.0        # no flash recipe in the hook's first second
 MAX_MONO_SHARE = 0.4           # a mono section never takes more than this
 THERMAL_WORDS = frozenset("""
 heat hot warm warmer warming burn burning burned fire fires flame flames
@@ -381,10 +382,13 @@ def build(name, plan, *, ids=(), accent=None, variant_keys=None,
             + (" (black: the lockup on screen is light and would wash out "
                "on white)" if col == "black" else ""))
     if name == "lab_scan":
-        m = _strongest(plan, lambda x: _word(x) in MECHANISM_WORDS
-                       or "number" in _tags(x))
+        # never in the hook's first second (a strobe there buries the hook
+        # line; device_planner.HOOK_FLASH_FREE_S)
+        m = _strongest(plan, lambda x: (_word(x) in MECHANISM_WORDS
+                                        or "number" in _tags(x))
+                       and x["t"] >= HOOK_FLASH_FREE_S)
         if m is None:
-            return None, None, "no mechanism or number word"
+            return None, None, "no mechanism or number word after the hook"
         # flash safety (owner rule): unless the user opted in to flashing,
         # three images, each held the schema's longest hold (8 frames:
         # ~0.27 s at 30 fps, 0.32 s at 25 — three image changes, counted by
@@ -491,7 +495,8 @@ def build(name, plan, *, ids=(), accent=None, variant_keys=None,
     if name == "world_negative":
         pay = _payoff(plan)
         m = _strongest(plan, lambda x: _word(x) in NEGATION_WORDS
-                       and "negation" in _tags(x) and x["t"] >= 1.0)
+                       and "negation" in _tags(x)
+                       and x["t"] >= HOOK_FLASH_FREE_S)
         if m is None:
             return None, None, "no hard negation ('never', 'nothing') to land on"
         if pay is not None and abs(float(pay["t"]) - float(m["t"])) < 0.3:
