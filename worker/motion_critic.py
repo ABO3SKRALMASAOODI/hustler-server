@@ -248,8 +248,14 @@ def lens_colour(view, edl, index, request_text, payoff=None):
                "colour_kept_frames": len(kept)}
     if share >= BW_LOOK_SHARE and not _asked_bw(request_text):
         cause, ops = _bw_cause(edl, payoff)
+        # a grade the edit applied is a fix; footage that is itself near
+        # monochrome (a grey factory, a white robot) is advice
+        sev = "fix" if cause else "advisory"
+        if not cause:
+            cause = (" (the footage itself is near-monochrome — no grade "
+                     "made it so)")
         out.append(_f(
-            "fix", "colour", "bw_as_look",
+            sev, "colour", "bw_as_look",
             f"{100 * share:.0f}% of the picture is black and white{cause}: "
             "in the references B&W is a device (a section that lands IN "
             "colour on the drop, one colour kept, a silhouette hold, a "
