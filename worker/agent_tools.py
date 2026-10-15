@@ -27903,6 +27903,17 @@ SHORT_SNAP_TOLERANCE_S = 1.5
 SHORT_SNAP_MODES = ("sentence", "none")
 
 
+def _skips_closed_thought(cont, row, edge):
+    """Moving a start forward from sentence ``cont`` into ``row`` (or an
+    end back) is safe only when the words left out finish their own
+    thought: ``cont`` ends with terminal punctuation (a start), or ``row``
+    does (an end)."""
+    if row is cont:
+        return True
+    text = str((cont if edge == "t0" else row).get("text") or "").strip()
+    return text.rstrip("\"'”’)").endswith((".", "?", "!", "…"))
+
+
 def _sentence_snippet(text, words=6):
     words_ = str(text or "").split()
     return " ".join(words_[:words]) + ("…" if len(words_) > words else "")
@@ -27947,9 +27958,50 @@ def _direct_short_clips(ctx, clips, snap="none"):
     boundary_epsilon_s = audit.EPS
 
     def boundary(value, edge):
-        """(nearest boundary time, its sentence) for 't0' or 't1'."""
+        """(nearest boundary time, its sentence) for 't0' or 't1'.
+
+        Wave 2 (run report defect 27: s01's start at 1363.44 moved FORWARD
+        to 1364.01, the middle of a question, because the sentence index
+        splits a long or paused question). A start inside a sentence moves
+        BACK to that sentence's first word, an end inside one moves ON to
+        its last; the other direction only when the containing edge is
+        beyond the tolerance and the words skipped close their own
+        thought."""
         row = min(sentences, key=lambda r: abs(float(r[edge]) - value))
+        inside = [r for r in sentences
+                  if float(r["t0"]) < value < float(r["t1"])]
+        if inside:
+            cont = inside[0]
+            c = float(cont[edge])
+            if abs(c - value) <= SHORT_SNAP_TOLERANCE_S or \
+                    not _skips_closed_thought(cont, row, edge):
+                return c, cont
         return float(row[edge]), row
+
+    words_ = [w for w in (getattr(ctx, "index", {}) or {}).get("words")
+              or [] if w.get("t0") is not None and w.get("t1") is not None]
+
+    def natural(value, edge):
+        """Does ``value`` already sit on a thought's edge in the WORDS — a
+        word's onset after a full stop, a question mark or a breath (start),
+        or a word's end before one (end)? The sentence index also splits a
+        thought at caps and pauses; the caller's own word edge stands."""
+        eps = max(boundary_epsilon_s, 0.02)
+        for k, w in enumerate(words_):
+            t0, t1 = float(w["t0"]), float(w["t1"])
+            if edge == "t0" and abs(t0 - value) <= eps:
+                if k == 0:
+                    return True
+                p = words_[k - 1]
+                return str(p.get("w") or "").rstrip("\"'”’)").endswith(
+                    (".", "?", "!", "…")) or t0 - float(p["t1"]) >= 0.3
+            if edge == "t1" and abs(t1 - value) <= eps:
+                if k == len(words_) - 1:
+                    return True
+                n = words_[k + 1]
+                return str(w.get("w") or "").rstrip("\"'”’)").endswith(
+                    (".", "?", "!", "…")) or float(n["t0"]) - t1 >= 0.3
+        return False
 
     planned, problems, moves = [], [], []
     for i, raw in enumerate(clips, 1):
@@ -27975,7 +28027,7 @@ def _direct_short_clips(ctx, clips, snap="none"):
                 value = start if edge == "t0" else end
                 nearest, row = boundary(value, edge)
                 distance = abs(nearest - value)
-                if distance <= boundary_epsilon_s:
+                if distance <= boundary_epsilon_s or natural(value, edge):
                     continue
                 if snap == "sentence" and distance <= SHORT_SNAP_TOLERANCE_S:
                     shift = nearest - value

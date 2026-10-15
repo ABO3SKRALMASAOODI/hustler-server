@@ -244,3 +244,57 @@ def test_the_edit_review_does_not_tell_the_agent_to_drop_a_typeset_line():
     e2 = schemas.validate_edl(e2, 60.0).model_dump()
     notes2 = edit_review.review(e2, index(), force=True)
     assert [n for n in notes2 if n["code"] == "restates_captions"], notes2
+
+
+def _shorts_ctx(words, sentences):
+    from types import SimpleNamespace
+    import db as dbx
+    seen = {}
+
+    class FakeDb:
+        def run(self, fn, *args):
+            if fn is dbx.has_active_job:
+                return False
+            if fn is dbx.enqueue_job:
+                seen["payload"] = args[3]
+                return 990
+            raise AssertionError(fn)
+    return SimpleNamespace(
+        project={}, has_main_video=True, duration=2000.0,
+        index={"words": words, "sentences": sentences}, db=FakeDb(),
+        project_id=7, job={"user_id": 60, "type": "mcp_tool"}), seen
+
+
+def _q_words(pause_before=0.0):
+    toks = [("and", 1362.9), ("the", 1363.1), ("question", 1363.2),
+            ("is", 1363.3), ("what", 1363.44 + pause_before),
+            ("are", 1363.7), ("the", 1363.8), ("odds", 1363.9),
+            ("Tesla", 1364.01), ("survives?", 1364.4)]
+    return [{"w": w, "t0": t, "t1": round(t + 0.09, 2)} for w, t in toks]
+
+
+def test_make_shorts_never_snaps_a_start_forward_into_a_question():
+    """Run report defect 27 on the MCP path it happened on (caller clips,
+    snap='sentence'): the sentence index split a question at a cap, and
+    the start moved FORWARD from 1363.44 to 1364.01 — mid-question."""
+    import agent_tools
+    sents = [{"t0": 1355.0, "t1": 1363.99, "speaker": 0,
+              "text": "and the question is what are the odds"},
+             {"t0": 1364.01, "t1": 1380.0, "speaker": 0,
+              "text": "Tesla survives? I'd say under ten percent."}]
+    ctx, seen = _shorts_ctx(_q_words(), sents)
+    out = agent_tools.make_shorts(ctx, clips=[{
+        "start": 1363.44, "end": 1380.0, "title": "Under ten percent"}],
+        snap="sentence")
+    assert "1364.01" not in out.split("REJECTED")[-1] or \
+        out.startswith("REJECTED"), out
+    assert "payload" not in seen or \
+        seen["payload"]["clips"][0]["start"] != 1364.01, out
+    # a start on a word after a breath is the thought's own edge: kept
+    ctx2, seen2 = _shorts_ctx(_q_words(pause_before=0.4), [
+        dict(sents[0], t1=1363.39), dict(sents[1], t0=1364.41)])
+    out2 = agent_tools.make_shorts(ctx2, clips=[{
+        "start": 1363.84, "end": 1380.0, "title": "Under ten percent"}],
+        snap="sentence")
+    assert "job 990" in out2, out2
+    assert seen2["payload"]["clips"][0]["start"] == 1363.84
