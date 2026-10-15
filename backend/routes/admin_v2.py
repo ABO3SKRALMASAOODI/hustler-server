@@ -22,9 +22,10 @@ from admin_metrics import (attention as attention_mod, cache,
                            live as live_mod, money, outreach, projects,
                            ranges, registry, visitors)
 from admin_metrics.ranges import RangeError
-from routes.admin import admin_required
+from routes.admin import admin_required, gzip_large_json
 
 admin_v2_bp = Blueprint("admin_v2", __name__, url_prefix="/admin/v2")
+admin_v2_bp.after_request(gzip_large_json)
 log = logging.getLogger(__name__)
 
 TTL = {"lifetime": 300, "meta": 3600, "summary": 60, "trend": 300, "acquisition": 300,

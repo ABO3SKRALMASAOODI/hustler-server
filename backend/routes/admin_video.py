@@ -12,6 +12,7 @@ llm_calls payloads are capped + key-redacted by the worker before storage.
 
 import json
 import os
+import re
 from contextlib import contextmanager
 
 import psycopg2
@@ -19,7 +20,7 @@ from psycopg2.extras import RealDictCursor
 from flask import Blueprint, request, jsonify, current_app
 
 from routes.admin import (admin_required, _scope, METRICS_EPOCH,
-                          legacy_error_response)
+                          legacy_error_response, gzip_large_json)
 from video_services.jobs import enqueue as _enqueue
 from admin_metrics import cache as admin_cache
 from admin_metrics.projects import (PROJECT_TIMINGS as _PROJECT_TIMINGS,
@@ -33,6 +34,7 @@ import storage
 admin_video_bp = Blueprint("admin_video", __name__)
 # R5: a slow or failed query answers JSON 503/500, never Flask's HTML page.
 admin_video_bp.register_error_handler(Exception, legacy_error_response)
+admin_video_bp.after_request(gzip_large_json)
 
 # FALLBACK $ per 1M tokens, for a model model_prices.py does not list (default =
 # GPT-6 Luna, $0.10 in / $0.50 out). Every listed model is priced from its
@@ -1163,6 +1165,7 @@ SUBSCRIBERS_SQL = """
                  GROUP BY cs.user_id
             ), subscribers AS MATERIALIZED (
                 SELECT u.id, u.email, u.created_at, u.is_subscribed, u.plan,
+                       u.subscription_id,
                        u.subscription_expiry, u.billing_status, u.billing_plan,
                        u.billing_period, u.billing_synced_at,
                        u.payment_failed_at, u.payment_failed_reason,
@@ -1266,6 +1269,18 @@ def video_subscribers():
         """)
         summary = cur.fetchone() or {}
 
+        # What each subscriber chose: renews (next payment date), cancelled
+        # (access ends on), ended, paused or overdue, from the stored Paddle
+        # snapshots (never a live Paddle call from a page view).
+        journeys = {}
+        try:
+            from admin_metrics import subscriptions as subs
+            journeys = subs.for_customers(cur, [
+                {"id": r["id"], "subscription_id": r.get("subscription_id")}
+                for r in rows])
+        except Exception:
+            current_app.logger.warning("subscriber renewal lookup failed")
+
     total = matched
     return jsonify({
         "page": page, "per_page": per_page, "total": total,
@@ -1308,6 +1323,9 @@ def video_subscribers():
             "feedback_down": int(r["feedback_down"] or 0),
             "last_activity": (r["last_activity"].isoformat()
                               if r["last_activity"] else None),
+            **{k: (journeys.get(r["id"]) or {}).get(k) for k in (
+                "renewal_state", "renewal_at", "subscriber_kind",
+                "returned_at", "subscription_checked_at")},
         } for r in rows],
     })
 
@@ -1495,7 +1513,7 @@ def video_projects():
                  "NULL::bigint AS tool_rejected" if light else
                  "tool_activity.tool_calls, tool_activity.tool_failed, "
                  "tool_activity.tool_rejected")
-    with adb() as conn:
+    def compute(conn):
         cur = conn.cursor()
         # PARENTS ONLY. A shorts run can create many child projects, each with a
         # chat that opens on an assistant greeting and an EDL seeded by the
@@ -1604,34 +1622,40 @@ def video_projects():
             ORDER BY p.id DESC
         """, (f"%{search}%", f"%{search}%"))
         rows = cur.fetchall()
-    return jsonify({"projects": [
-        {"id": r["id"], "title": r["title"], "email": r["email"],
-         "kind": r["kind"],
-         "messages": r["messages"], "versions": r["versions"],
-         "exports": r["exports"],
-         "tool_calls": None if light else int(r["tool_calls"] or 0),
-         "tool_failed": None if light else int(r["tool_failed"] or 0),
-         "tool_non_success": None if light else int(r["tool_failed"] or 0),
-         "tool_rejected": None if light else int(r["tool_rejected"] or 0),
-         "customer_paid": bool(r["customer_paid"]),
-         "converted_project": bool(r["converted_project"]),
-         "paid_at": (r["paid_at"].isoformat() if r["paid_at"] else None),
-         "shorts_count": r["shorts_count"],
-         "shorts_messages": r["shorts_messages"],
-         "trial_walls": r["trial_walls"],
-         "last_trial_wall": (r["last_trial_wall"].isoformat()
-                             if r["last_trial_wall"] else None),
-         "trial_started_after_wall": bool(r["trial_started_after_wall"]),
-         "trial_started_at": (r["trial_started_at"].isoformat()
-                              if r["trial_started_at"] else None),
-         "trial_status": r["trial_status"],
-         "trial_plan": r["trial_plan"],
-         "created_at": r["created_at"].isoformat(),
-         "last_job": r["last_job"].isoformat() if r["last_job"] else None,
-         "last_export": (r["last_export"].isoformat()
-                         if r["last_export"] else None),
-         **_timing_out(r)}
-        for r in rows]})
+        return {"projects": [
+            {"id": r["id"], "title": r["title"], "email": r["email"],
+             "kind": r["kind"],
+             "messages": r["messages"], "versions": r["versions"],
+             "exports": r["exports"],
+             "tool_calls": None if light else int(r["tool_calls"] or 0),
+             "tool_failed": None if light else int(r["tool_failed"] or 0),
+             "tool_non_success": None if light else int(r["tool_failed"] or 0),
+             "tool_rejected": None if light else int(r["tool_rejected"] or 0),
+             "customer_paid": bool(r["customer_paid"]),
+             "converted_project": bool(r["converted_project"]),
+             "paid_at": (r["paid_at"].isoformat() if r["paid_at"] else None),
+             "shorts_count": r["shorts_count"],
+             "shorts_messages": r["shorts_messages"],
+             "trial_walls": r["trial_walls"],
+             "last_trial_wall": (r["last_trial_wall"].isoformat()
+                                 if r["last_trial_wall"] else None),
+             "trial_started_after_wall": bool(r["trial_started_after_wall"]),
+             "trial_started_at": (r["trial_started_at"].isoformat()
+                                  if r["trial_started_at"] else None),
+             "trial_status": r["trial_status"],
+             "trial_plan": r["trial_plan"],
+             "created_at": r["created_at"].isoformat(),
+             "last_job": r["last_job"].isoformat() if r["last_job"] else None,
+             "last_export": (r["last_export"].isoformat()
+                             if r["last_export"] else None),
+             **_timing_out(r)}
+            for r in rows]}
+
+    # Cached a minute per search and refreshed in the background, so the tab
+    # opens at once on a repeat visit and never waits on a cold scan twice.
+    value = _classic_view("projects", {"search": search, "light": light},
+                          60, compute)
+    return jsonify(value)
 
 
 @admin_video_bp.route("/admin/video/timings", methods=["GET"])
@@ -1672,15 +1696,88 @@ PREVIEWABLE = ("thumb", "sheet", "render", "proxy", "image_ref", "original",
                       methods=["GET"])
 @admin_required
 def video_project_detail(project_id):
-    """The legacy project inspector (old admin, kept for one release).
+    """The project inspector (classic admin): the whole conversation as the
+    user saw it, every agent turn, and every render playable in place.
 
-    One connection for the whole page (was three), and a 4 MB safety net:
-    the same chat activity used to be copied into every agent slice of a
-    request, so one long session built a 108 MB response and grew a worker
-    by 0.4 GB. /admin/v2/projects/<id> is the bounded replacement.
+    One connection for the whole page, and a 4 MB safety net. `?lean=1` (the
+    classic page always asks for it) sends what the Chat view needs and
+    nothing twice: turns name their activity and replies by message id
+    instead of carrying copies, versions arrive without their EDL bodies and
+    jobs without payloads/results. Those load on demand from
+    /admin/video/projects/<id>/edls/<v> and /jobs/<job_id>, so a 200-version
+    subscriber project opens as fast as a small one.
     """
+    lean = request.args.get("lean") in ("1", "true")
     with adb() as conn:
-        return _video_project_detail(conn, project_id)
+        return _video_project_detail(conn, project_id, lean=lean)
+
+
+@admin_video_bp.route("/admin/video/projects/<int:project_id>/edls/<int:version>",
+                      methods=["GET"])
+@admin_required
+def video_project_edl(project_id, version):
+    """One EDL version's body, for the inspector's side-by-side diff."""
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT version, json, created_by, created_at
+                         FROM edls WHERE project_id = %s AND version = %s""",
+                    (project_id, version))
+        e = cur.fetchone()
+    if not e:
+        return jsonify({"error": "No such version in this project"}), 404
+    return jsonify({"version": e["version"], "json": e["json"],
+                    "created_by": e["created_by"],
+                    "created_at": _iso(e["created_at"])})
+
+
+@admin_video_bp.route("/admin/video/projects/<int:project_id>/jobs/<int:job_id>",
+                      methods=["GET"])
+@admin_required
+def video_project_job(project_id, job_id):
+    """One job's full payload and result, loaded when it is expanded."""
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT id, type, state, progress, error, payload, result,
+                              attempts, created_at, updated_at
+                         FROM video_jobs WHERE project_id = %s AND id = %s""",
+                    (project_id, job_id))
+        j = cur.fetchone()
+    if not j:
+        return jsonify({"error": "No such job in this project"}), 404
+    return jsonify({"id": j["id"], "type": j["type"], "state": j["state"],
+                    "progress": j["progress"], "error": j["error"],
+                    "payload": j["payload"], "result": j["result"],
+                    "attempts": j["attempts"],
+                    "created_at": _iso(j["created_at"]),
+                    "updated_at": _iso(j["updated_at"])})
+
+
+def _iso(value):
+    """ISO 8601 in UTC with a Z, microseconds kept (naive columns are UTC)."""
+    if value is None:
+        return None
+    if getattr(value, "tzinfo", None) is None:
+        return value.isoformat() + "Z"
+    from datetime import timezone as _tz
+    return value.astimezone(_tz.utc).isoformat().replace("+00:00", "Z")
+
+
+def _classic_view(name, params, ttl_s, compute):
+    """compute(conn) on its own read-only connection through the admin cache
+    (stale-while-revalidate, so it can refresh after the request ended)."""
+    from routes.admin import get_db as _admin_db
+
+    def run():
+        conn = _admin_db(readonly=True)
+        try:
+            return compute(conn)
+        finally:
+            conn.close()
+
+    value, _at, _age = admin_cache.get_or_compute(
+        "classic:" + name, params, ttl_s, run,
+        fresh=request.args.get("fresh") in ("1", "true"), stale_s=30 * 60)
+    return value
 
 
 @contextmanager
@@ -1688,7 +1785,8 @@ def _same(conn):
     yield conn
 
 
-def _video_project_detail(shared_conn, project_id):
+def _video_project_detail(shared_conn, project_id, lean=False):
+    iso = _iso if lean else (lambda v: v.isoformat() if v else None)
     with _same(shared_conn) as conn:
         cur = conn.cursor()
         cur.execute("""SELECT p.*, u.email, u.trial_status,
@@ -1715,15 +1813,40 @@ def _video_project_detail(shared_conn, project_id):
                        ORDER BY id ASC LIMIT 2000""", (p["chat_session_id"],))
         messages = cur.fetchall()
 
-        cur.execute("""SELECT version, json, created_by, created_at
-                       FROM edls WHERE project_id = %s
-                       ORDER BY version DESC LIMIT 200""", (project_id,))
+        if lean:
+            # Bodies load per version on demand (…/edls/<v>).
+            cur.execute("""SELECT version, created_by, created_at
+                           FROM edls WHERE project_id = %s
+                           ORDER BY version DESC LIMIT 500""", (project_id,))
+        else:
+            cur.execute("""SELECT version, json, created_by, created_at
+                           FROM edls WHERE project_id = %s
+                           ORDER BY version DESC LIMIT 200""", (project_id,))
         edls = cur.fetchall()
 
-        cur.execute("""SELECT id, type, state, progress, error, payload,
-                              result, attempts, created_at, updated_at
-                       FROM video_jobs WHERE project_id = %s
-                       ORDER BY id DESC LIMIT 300""", (project_id,))
+        if lean:
+            # The few fields the page shows; the rest loads per job.
+            cur.execute("""SELECT id, type, state, progress, error, attempts,
+                                  created_at, updated_at,
+                                  jsonb_build_object(
+                                      'source', payload->'source',
+                                      'force', payload->'force',
+                                      'message_id', payload->'message_id')
+                                      AS payload,
+                                  jsonb_strip_nulls(jsonb_build_object(
+                                      'timings', result->'timings',
+                                      'honesty', result->'honesty',
+                                      'edl_version', result->'edl_version',
+                                      'render_asset_id',
+                                          result->'render_asset_id'))
+                                      AS result
+                           FROM video_jobs WHERE project_id = %s
+                           ORDER BY id DESC LIMIT 300""", (project_id,))
+        else:
+            cur.execute("""SELECT id, type, state, progress, error, payload,
+                                  result, attempts, created_at, updated_at
+                           FROM video_jobs WHERE project_id = %s
+                           ORDER BY id DESC LIMIT 300""", (project_id,))
         jobs = cur.fetchall()
 
         cur.execute("""SELECT * FROM assets WHERE project_id = %s
@@ -1734,11 +1857,27 @@ def _video_project_detail(shared_conn, project_id):
                        WHERE project_id = %s""", (project_id,))
         llm_count = cur.fetchone()["n"]
 
-        cur.execute("""SELECT id, state, error, payload, result,
-                              created_at, updated_at
-                       FROM video_jobs
-                       WHERE project_id = %s AND type = 'agent_turn'
-                       ORDER BY id ASC""", (project_id,))
+        if lean:
+            cur.execute("""SELECT id, state, error,
+                                  jsonb_build_object('message_id',
+                                      payload->'message_id') AS payload,
+                                  jsonb_strip_nulls(jsonb_build_object(
+                                      'honesty', result->'honesty',
+                                      'timings', result->'timings',
+                                      'credits_charged',
+                                          result->'credits_charged',
+                                      'edl_version', result->'edl_version'))
+                                      AS result,
+                                  created_at, updated_at
+                           FROM video_jobs
+                           WHERE project_id = %s AND type = 'agent_turn'
+                           ORDER BY id ASC""", (project_id,))
+        else:
+            cur.execute("""SELECT id, state, error, payload, result,
+                                  created_at, updated_at
+                           FROM video_jobs
+                           WHERE project_id = %s AND type = 'agent_turn'
+                           ORDER BY id ASC""", (project_id,))
         turn_jobs = cur.fetchall()
 
         cur.execute("""SELECT id, job_id, purpose, model, prompt_tokens,
@@ -1770,11 +1909,53 @@ def _video_project_detail(shared_conn, project_id):
         # Thumbnails + contact sheets have no asset rows — their keys live
         # in the index JSON and in render results. Surface them here so the
         # admin grid can show everything.
-        cur.execute("""SELECT i.json FROM indexes i
-                       WHERE i.video_sha256 = (
-                           SELECT sha256 FROM assets
-                           WHERE project_id = %s AND kind='original'
-                           ORDER BY id DESC LIMIT 1)""", (project_id,))
+        mcp_calls = []
+        if lean:
+            # A connected AI (Claude, ChatGPT…) edits through MCP tool calls,
+            # not chat messages: without these its projects read as empty.
+            cur.execute("""SELECT id, state, error, created_at, updated_at,
+                                  payload->>'tool' AS tool,
+                                  LEFT((payload->'args')::text, 1500) AS args,
+                                  LEFT(result->>'text', 1500) AS text,
+                                  COALESCE((result->>'is_error')::boolean, FALSE)
+                                      AS is_error,
+                                  result->>'edl_changed' AS edl_changed
+                           FROM video_jobs
+                           WHERE project_id = %s AND type = 'mcp_tool'
+                           ORDER BY id ASC LIMIT 1500""", (project_id,))
+            mcp_calls = [{"id": r["id"], "state": r["state"],
+                          "error": r["error"], "tool": r["tool"],
+                          "args": r["args"], "text": r["text"],
+                          "is_error": bool(r["is_error"]),
+                          "edl_changed": r["edl_changed"] in ("true", "1"),
+                          "created_at": _iso(r["created_at"]),
+                          "updated_at": _iso(r["updated_at"])}
+                         for r in cur.fetchall()]
+
+        if lean:
+            # Only the image keys, not the whole index (words, shots, …).
+            cur.execute("""SELECT jsonb_build_object(
+                                  'sheet_keys', i.json->'sheet_keys',
+                                  'tile_keys', i.json->'tile_keys',
+                                  'shots', (SELECT jsonb_agg(jsonb_build_object(
+                                                'id', s->'id',
+                                                'thumb_key', s->'thumb_key'))
+                                              FROM jsonb_array_elements(
+                                                  CASE WHEN jsonb_typeof(i.json->'shots') = 'array'
+                                                       THEN i.json->'shots'
+                                                       ELSE '[]'::jsonb END) s))
+                                  AS json
+                           FROM indexes i
+                           WHERE i.video_sha256 = (
+                               SELECT sha256 FROM assets
+                               WHERE project_id = %s AND kind='original'
+                               ORDER BY id DESC LIMIT 1)""", (project_id,))
+        else:
+            cur.execute("""SELECT i.json FROM indexes i
+                           WHERE i.video_sha256 = (
+                               SELECT sha256 FROM assets
+                               WHERE project_id = %s AND kind='original'
+                               ORDER BY id DESC LIMIT 1)""", (project_id,))
         idx_row = cur.fetchone()
 
     # Who triggered each render? A render asset carries no trigger of its own —
@@ -1805,7 +1986,7 @@ def _video_project_detail(shared_conn, project_id):
                "storage_key": a["storage_key"], "bytes": a["bytes"],
                "duration_s": a["duration_s"], "width": a["width"],
                "height": a["height"], "meta": a.get("meta") or {},
-               "created_at": a["created_at"].isoformat()}
+               "created_at": iso(a["created_at"])}
         if a["id"] in render_trigger:
             row["trigger"] = render_trigger[a["id"]]
         if a["kind"] in PREVIEWABLE:
@@ -1852,7 +2033,7 @@ def _video_project_detail(shared_conn, project_id):
             {"id": r["id"], "purpose": r["purpose"], "model": r["model"],
              "prompt_tokens": r["prompt_tokens"],
              "completion_tokens": r["completion_tokens"],
-             "created_at": r["created_at"].isoformat()})
+             "created_at": iso(r["created_at"])})
 
     msg_by_id = {m["id"]: m for m in messages}
     user_msg_ids = sorted(m["id"] for m in messages if m["role"] == "user")
@@ -1890,20 +2071,29 @@ def _video_project_detail(shared_conn, project_id):
                 if res.get("edl_version") is not None else None
         except (TypeError, ValueError):
             edl_version = None
-        turns.append({
+        turn = {
             "job_id": t["id"], "state": t["state"],
-            "created_at": t["created_at"].isoformat(),
-            "updated_at": t["updated_at"].isoformat(),
-            "user_message": _msg_brief(um) if um else None,
-            "activity": activity,
-            "assistant_messages": assistant_msgs,
+            "created_at": iso(t["created_at"]),
+            "updated_at": iso(t["updated_at"]),
+            "user_message": ({"id": um["id"], "content": um["content"],
+                              "meta": um["meta"],
+                              "created_at": iso(um["created_at"])}
+                             if um else None),
             "llm_calls": llm_by_job.get(t["id"], []),
             "honesty": res.get("honesty"),
             "timings": res.get("timings"),
             "credits_charged": res.get("credits_charged"),
             "edl_version": edl_version,
             "error": t["error"],
-        })
+        }
+        if lean:
+            # The page already has every message: name them, don't copy them.
+            turn["activity_ids"] = [m["id"] for m in activity]
+            turn["assistant_ids"] = [m["id"] for m in assistant_msgs]
+        else:
+            turn["activity"] = activity
+            turn["assistant_messages"] = assistant_msgs
+        turns.append(turn)
 
     # Export signal for THIS conversation: successful exports = 'final' jobs
     # that reached 'done'; also surface attempts (incl. failed) to spot a
@@ -1916,7 +2106,7 @@ def _video_project_detail(shared_conn, project_id):
         "count": len(final_done),
         "attempts": len(final_all),
         "failed": len([j for j in final_all if j["state"] == "failed"]),
-        "last_at": last_export.isoformat() if last_export else None,
+        "last_at": iso(last_export) if last_export else None,
     }
 
     # Uploads that never became an asset, in the project they were aimed at.
@@ -1939,8 +2129,8 @@ def _video_project_detail(shared_conn, project_id):
                           AND kind = 'trial_gate_shown'""", (project_id,))
         tw = cur2.fetchone()
         trial_wall = ({"count": tw["n"],
-                       "first_at": tw["first_at"].isoformat(),
-                       "last_at": tw["last_at"].isoformat()}
+                       "first_at": iso(tw["first_at"]),
+                       "last_at": iso(tw["last_at"])}
                       if tw and tw["n"] else None)
 
     # Family: a shorts parent lists its children; a child names its parent.
@@ -1961,7 +2151,7 @@ def _video_project_detail(shared_conn, project_id):
                         ORDER BY c.id""", (project_id,))
         children = [{"id": c["id"], "title": c["title"], "kind": c["kind"],
                      "messages": c["messages"], "exports": c["exports"],
-                     "created_at": c["created_at"].isoformat()}
+                     "created_at": iso(c["created_at"])}
                     for c in cur3.fetchall()]
         parent = None
         if p.get("parent_project_id"):
@@ -2036,16 +2226,18 @@ def _video_project_detail(shared_conn, project_id):
                 })
 
     return jsonify(_cap_legacy_detail({
+        "lean": lean,
         "project": {"id": p["id"], "title": p["title"], "email": p["email"],
+                    "user_id": p["user_id"],
                     "kind": p.get("kind"),
-                    "created_at": p["created_at"].isoformat()},
+                    "created_at": iso(p["created_at"])},
         "children": children,
         "parent": parent,
         "shorts_board": shorts_board,
         "exports": exports,
         "trial_wall": trial_wall,
         "trial_conversion": ({
-            "started_at": p["trial_started_at"].isoformat(),
+            "started_at": iso(p["trial_started_at"]),
             "status": p["trial_status"],
             "plan": p["trial_plan"],
         } if p.get("trial_started_after_wall") and p.get("trial_started_at")
@@ -2055,19 +2247,19 @@ def _video_project_detail(shared_conn, project_id):
                                 if e["kind"] in UPLOAD_FAILURE_KINDS]),
         "messages": [
             {"id": m["id"], "role": m["role"], "content": m["content"],
-             "meta": m["meta"], "created_at": m["created_at"].isoformat()}
+             "meta": m["meta"], "created_at": iso(m["created_at"])}
             for m in messages],
         "edls": [
-            {"version": e["version"], "json": e["json"],
+            {"version": e["version"], "json": e.get("json"),
              "created_by": e["created_by"],
-             "created_at": e["created_at"].isoformat()} for e in edls],
+             "created_at": iso(e["created_at"])} for e in edls],
         "jobs": [
             {"id": j["id"], "type": j["type"], "state": j["state"],
              "progress": j["progress"], "error": j["error"],
              "payload": j["payload"], "result": j["result"],
-             "attempts": j["attempts"],
-             "created_at": j["created_at"].isoformat(),
-             "updated_at": j["updated_at"].isoformat()} for j in jobs],
+             "attempts": j["attempts"], "body_on_demand": lean,
+             "created_at": iso(j["created_at"]),
+             "updated_at": iso(j["updated_at"])} for j in jobs],
         "assets": out_assets,
         "llm_call_count": llm_count,
         "turns": turns,
@@ -2079,6 +2271,7 @@ def _video_project_detail(shared_conn, project_id):
         # then answered fine. Name the in-flight turn so the two are never
         # confused again.
         "live_turn": live_turn,
+        "mcp_calls": mcp_calls,
     }))
 
 
@@ -2107,7 +2300,7 @@ def _cap_legacy_detail(out, cap=LEGACY_DETAIL_CAP):
         for t in out["turns"]:
             rest = {k: v for k, v in t.items() if k not in shared}
             total += len(json.dumps(rest, default=str, separators=(",", ":")))
-            total += sum(_json_size(t[k], memo) for k in shared) + 40
+            total += sum(_json_size(t.get(k, []), memo) for k in shared) + 40
         return total
 
     def other_size():
@@ -2118,6 +2311,8 @@ def _cap_legacy_detail(out, cap=LEGACY_DETAIL_CAP):
     if turns_size() + other_size() > cap:
         seen = set()
         for t in out["turns"]:
+            if "activity" not in t:
+                continue        # lean turns carry ids, not copies
             key = id(t["activity"])
             if key in seen:
                 t["activity"], t["assistant_messages"] = [], []
@@ -2140,6 +2335,91 @@ def _cap_legacy_detail(out, cap=LEGACY_DETAIL_CAP):
         out["truncated_reason"] = ("Left out to keep this page under 4 MB: "
                                    + "; ".join(reasons) + ".")
     return out
+
+
+# ── Exports: every finished video, playable and downloadable ─────────────
+@admin_video_bp.route("/admin/video/exports", methods=["GET"])
+@admin_required
+def video_exports():
+    """Finished exports (final renders) by customers, newest first.
+
+    Each row carries a 15-minute presigned link to play the file and a
+    second one that downloads it with a readable file name. Totals cover the
+    last `days` admin-timezone days; the list pages through the same window.
+    """
+    from datetime import timedelta
+    from admin_metrics import defs, insights, ranges
+    days = max(1, min(400, request.args.get("days", type=int) or 30))
+    page = max(1, request.args.get("page", type=int) or 1)
+    per_page = max(10, min(100, request.args.get("per_page", type=int) or 50))
+    search = (request.args.get("search") or "").strip()
+    today = ranges.local_today()
+    period = ranges.make_period("custom", today - timedelta(days=days - 1),
+                                today)
+    params = dict(period.params(), q=f"%{search}%", limit=per_page,
+                  offset=(page - 1) * per_page)
+    scope = defs.customer("u")
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT count(*) FILTER (WHERE vj.state = 'done') AS done,
+                   count(*) FILTER (WHERE vj.state = 'failed') AS failed,
+                   count(DISTINCT vj.user_id) FILTER (WHERE vj.state = 'done')
+                       AS people,
+                   count(DISTINCT vj.project_id) FILTER (WHERE vj.state = 'done')
+                       AS projects
+              FROM video_jobs vj JOIN users u ON u.id = vj.user_id
+             WHERE vj.type = 'final' AND vj.state IN ('done', 'failed')
+               AND vj.updated_at >= %(start_tz)s AND vj.updated_at < %(end_tz)s
+               AND {scope}""", params)
+        t = dict(cur.fetchone() or {})
+        cur.execute(f"""
+            SELECT count(*) AS n
+              FROM video_jobs vj JOIN users u ON u.id = vj.user_id
+              LEFT JOIN projects p ON p.id = vj.project_id
+             WHERE vj.type = 'final' AND vj.state = 'done'
+               AND vj.updated_at >= %(start_tz)s AND vj.updated_at < %(end_tz)s
+               AND {scope}
+               AND (u.email ILIKE %(q)s OR COALESCE(p.title, '') ILIKE %(q)s)""",
+                    params)
+        matched = int((cur.fetchone() or {}).get("n") or 0)
+        cur.execute(insights.EXPORT_SELECT + f"""
+             WHERE vj.type = 'final' AND vj.state = 'done'
+               AND vj.updated_at >= %(start_tz)s AND vj.updated_at < %(end_tz)s
+               AND {scope}
+               AND (u.email ILIKE %(q)s OR COALESCE(p.title, '') ILIKE %(q)s)
+             ORDER BY vj.updated_at DESC, vj.id DESC
+             LIMIT %(limit)s OFFSET %(offset)s""", params)
+        rows = [dict(r) for r in cur.fetchall()]
+
+    def download(r):
+        if not r.get("storage_key") or not storage.is_configured():
+            return None
+        title = re.sub(r"[^A-Za-z0-9 _.-]+", "", r.get("title") or "")
+        name = (title.strip() or f"project-{r['project_id']}")[:60]
+        try:
+            return storage.presign_get(r["storage_key"],
+                                       expires=storage.PRESIGN_EXPIRY,
+                                       download_name=f"{name}.mp4")
+        except Exception:
+            return None
+
+    out = []
+    for r in rows:
+        row = insights.export_row(r, _presign)
+        row["download_url"] = download(r)
+        out.append(row)
+    done, failed = int(t.get("done") or 0), int(t.get("failed") or 0)
+    return jsonify({
+        "days": days, "from": period.from_day.isoformat(),
+        "timezone": ranges.TZ_NAME,
+        "totals": {"exports": done, "failed": failed,
+                   "people": int(t.get("people") or 0),
+                   "projects": int(t.get("projects") or 0),
+                   "success_rate": defs.pct(done, done + failed)},
+        "page": page, "per_page": per_page, "total": matched,
+        "exports": out,
+    })
 
 
 # ── Upload failures (round 57) ───────────────────────────────────────────
@@ -2486,10 +2766,21 @@ def _asset_row(a):
 @admin_video_bp.route("/admin/video/users", methods=["GET"])
 @admin_required
 def video_users():
+    """People who made a project, most recently active first, a page at a
+    time (the list used to stop silently at 100)."""
     search = (request.args.get("search") or "").strip()
-    limit = max(10, min(100, request.args.get("limit", type=int) or 100))
+    limit = max(10, min(100, request.args.get("per_page", type=int)
+                        or request.args.get("limit", type=int) or 100))
+    page = max(1, request.args.get("page", type=int) or 1)
+    offset = (page - 1) * limit
     with adb() as conn:
         cur = conn.cursor()
+        cur.execute("""SELECT COUNT(*) AS n FROM users u
+                        WHERE u.email ILIKE %s
+                          AND EXISTS (SELECT 1 FROM projects p
+                                      WHERE p.user_id = u.id)""",
+                    (f"%{search}%",))
+        total = int((cur.fetchone() or {}).get("n") or 0)
         cur.execute(f"""
             WITH active_users AS MATERIALIZED (
                 SELECT u.id, u.email, u.created_at, u.plan,
@@ -2500,8 +2791,9 @@ def video_users():
                   AND EXISTS (SELECT 1 FROM projects p
                               WHERE p.user_id = u.id)
                 ORDER BY COALESCE(u.last_seen_at,
-                                  u.created_at AT TIME ZONE 'UTC') DESC
-                LIMIT %s
+                                  u.created_at AT TIME ZONE 'UTC') DESC,
+                         u.id DESC
+                LIMIT %s OFFSET %s
             ), project_agg AS (
                 SELECT p.user_id, COUNT(*) AS n
                 FROM projects p JOIN active_users au ON au.id = p.user_id
@@ -2551,9 +2843,10 @@ def video_users():
             LEFT JOIN job_agg j ON j.user_id = u.id
             LEFT JOIN asset_agg a ON a.user_id = u.id
             ORDER BY last_active DESC NULLS LAST
-        """, (f"%{search}%", limit, UPLOAD_KINDS))
+        """, (f"%{search}%", limit, offset, UPLOAD_KINDS))
         rows = cur.fetchall()
-    return jsonify({"users": [
+    return jsonify({"total": total, "page": page, "per_page": limit,
+                    "users": [
         {"id": r["id"], "email": r["email"],
          "created_at": r["created_at"].isoformat(),
          "plan": r["plan"],
@@ -2871,6 +3164,9 @@ def video_user_detail(user_id):
                    (SELECT COUNT(*) FROM video_jobs v
                     WHERE v.project_id = p.id
                       AND v.type='agent_turn') AS turns,
+                   (SELECT COUNT(*) FROM video_jobs vm
+                    WHERE vm.project_id = p.id
+                      AND vm.type='mcp_tool') AS mcp_calls,
                    (SELECT COUNT(*) FROM video_jobs vf
                     WHERE vf.project_id = p.id AND vf.type='final'
                       AND vf.state='done') AS exports,
@@ -2932,6 +3228,7 @@ def video_user_detail(user_id):
             {"id": p["id"], "title": p["title"],
              "created_at": p["created_at"].isoformat(),
              "messages": p["messages"], "turns": p["turns"],
+             "mcp_calls": p.get("mcp_calls") or 0,
              "exports": p["exports"],
              "versions": p["versions"], "unserved": p["unserved"],
              "last_activity": p["last_activity"].isoformat()

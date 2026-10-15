@@ -172,11 +172,14 @@ def test_overview_no_longer_reads_the_app_builder(monkeypatch):
                ("information_schema.columns", {"n": 3}),
                ("FROM users u WHERE", []),
                ("is_subscribed = 1 AND", {"total": 2}),
-               ("FROM analytics_page_visits", {
-                    "today": 1, "unique_today": 1, "week": 2,
-                    "unique_week": 2, "month": 3, "unique_month": 3,
-                    "prev_week": 1})])
-    monkeypatch.setattr(admin, "get_db", lambda: Conn(cur))
+               ])
+    from admin_metrics import classic
+    monkeypatch.setattr(classic, "overview_visits", lambda c: {
+        "today": 9, "unique_today": 4, "week": 30, "unique_week": 20,
+        "excluded_today": {"robots": 1, "link_checks": 5, "internal": 0,
+                           "no_signal": 2, "total": 8}})
+    monkeypatch.setattr(admin, "get_db", lambda readonly=None: Conn(cur))
+    cache.clear()
     app = app_with((admin.admin_bp, "/admin"))
     r = app.test_client().get("/admin/overview", headers=H())
     assert r.status_code == 200
@@ -185,6 +188,11 @@ def test_overview_no_longer_reads_the_app_builder(monkeypatch):
     assert " jobs " not in joined and "job_credits" not in joined
     assert "::date = CURRENT_DATE" not in joined
     assert r.json["users"]["new_today"] == 1
+    # Visitors are people; what was left out is reported beside them.
+    assert r.json["visits"]["unique_today"] == 4
+    assert r.json["visits"]["excluded_today"]["link_checks"] == 5
+    # "Today" starts at the admin timezone's midnight, not the server's.
+    assert "CURRENT_DATE" not in joined
 
 
 def test_subscribers_pager_reports_the_true_total_past_the_last_page(monkeypatch):
@@ -225,6 +233,9 @@ def test_subscriber_projects_pager_reports_the_true_total(monkeypatch):
 def test_light_project_list_skips_the_tool_outcome_scan(monkeypatch):
     cur = Cur([("base_projects", [])])
     fake_adb(monkeypatch, cur)
+    # The list is cached per search; it reads on its own read-only connection.
+    monkeypatch.setattr(admin, "get_db", lambda readonly=None: Conn(cur))
+    cache.clear()
     app = app_with((admin_video.admin_video_bp, None))
     client = app.test_client()
     assert client.get("/admin/video/projects?fields=list",

@@ -63,6 +63,40 @@ def get_db(readonly=None):
     return conn
 
 
+def _classic_cached(name, ttl_s, compute, params=None):
+    """Serve a classic-admin report from the in-process admin cache.
+
+    `compute(cur)` runs on its own read-only connection, so a stale answer can
+    be refreshed in the background (stale-while-revalidate) after the request
+    that asked for it has already been answered. `?fresh=1` recomputes."""
+    from admin_metrics import cache
+
+    def run():
+        conn = get_db(readonly=True)
+        try:
+            with conn.cursor() as cur:
+                return compute(cur)
+        finally:
+            conn.close()
+
+    try:
+        fresh = request.args.get('fresh') in ('1', 'true')
+    except RuntimeError:
+        fresh = False
+    value, _computed_at, _age = cache.get_or_compute(
+        'classic:' + name, params or {}, ttl_s, run, fresh=fresh,
+        stale_s=30 * 60)
+    return value
+
+
+def _local_day_bounds():
+    """Today and the last 7 days as naive-UTC instants on admin-timezone days."""
+    from admin_metrics import ranges
+    today = ranges.parse({'range': 'today'})
+    week = ranges.parse({'range': '7d'})
+    return ranges.naive(today.start), ranges.naive(week.start)
+
+
 def legacy_error_response(e):
     """JSON errors for the admin blueprints (R5): never Flask's HTML 500."""
     from werkzeug.exceptions import HTTPException
@@ -84,6 +118,36 @@ def legacy_error_response(e):
 
 
 admin_bp.register_error_handler(Exception, legacy_error_response)
+
+
+GZIP_MIN_BYTES = 32 * 1024
+
+
+def gzip_large_json(resp):
+    """Compress big admin JSON (a long conversation is mostly repeated text:
+    2 MB becomes about 200 KB), when the browser accepts gzip."""
+    try:
+        if (resp.status_code != 200 or resp.direct_passthrough
+                or resp.mimetype != 'application/json'
+                or 'Content-Encoding' in resp.headers
+                or 'gzip' not in (request.headers.get('Accept-Encoding')
+                                  or '').lower()):
+            return resp
+        data = resp.get_data()
+        if len(data) < GZIP_MIN_BYTES:
+            return resp
+        import gzip
+        body = gzip.compress(data, compresslevel=5)
+        resp.set_data(body)
+        resp.headers['Content-Encoding'] = 'gzip'
+        resp.headers['Content-Length'] = str(len(body))
+        resp.vary.add('Accept-Encoding')
+    except Exception:
+        pass
+    return resp
+
+
+admin_bp.after_request(gzip_large_json)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,105 +304,72 @@ def track_visit():
 @admin_bp.route('/overview', methods=['GET'])
 @admin_required
 def overview():
-    """Legacy business overview (the old admin, kept for one release).
+    """Business overview (the classic admin's top cards).
 
-    The retired app builder's `jobs.*` and `credits.*` blocks (13 queries on
-    every 30-second poll, never displayed) are gone. "Today" uses an index
-    range instead of `::date = CURRENT_DATE`, which forced a full scan.
-    """
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            scope = _scope('')
-            today = ("created_at >= CURRENT_DATE "
-                     "AND created_at < CURRENT_DATE + 1")
-            cur.execute(f"""
-                SELECT COUNT(*) AS total,
-                       COUNT(*) FILTER (WHERE {today}) AS today,
-                       COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS week,
-                       COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days') AS month,
-                       COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '14 days'
-                                          AND created_at < NOW() - INTERVAL '7 days') AS prev_week
-                  FROM users WHERE is_verified = 1 AND {scope}""")
-            u = cur.fetchone()
-            total_users, new_users_today = u['total'], u['today']
-            new_users_week, new_users_month = u['week'], u['month']
-            prev_week_users = u['prev_week']
+    "Today" and "this week" are admin-timezone (Dubai) days like every other
+    admin count. Visits are PEOPLE (admin_metrics.visitors): robots, the
+    owner's browsers, Meta link previews and outreach link checks are left
+    out and reported beside the count. Cached for a minute and refreshed in
+    the background, so the page never waits on a report it has seen."""
+    return jsonify(_classic_cached('overview', 60, _overview)), 200
 
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND {scope}")
-            total_subscribed = cur.fetchone()['total']
 
-            cur.execute(f"""
-                SELECT plan, COUNT(*) AS count FROM users
-                WHERE is_verified = 1 AND {scope}
-                GROUP BY plan
-            """)
-            plan_breakdown = {r['plan']: r['count'] for r in cur.fetchall()}
+def _overview(cur):
+    from admin_metrics import classic
+    scope = _scope('')
+    day0, week0 = _local_day_bounds()
+    cur.execute(f"""
+        SELECT COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE created_at >= %(day0)s) AS today,
+               COUNT(*) FILTER (WHERE created_at >= %(week0)s) AS week,
+               COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days') AS month,
+               COUNT(*) FILTER (WHERE created_at >= %(week0)s - INTERVAL '7 days'
+                                  AND created_at < %(week0)s) AS prev_week
+          FROM users WHERE is_verified = 1 AND {scope}""",
+                {'day0': day0, 'week0': week0})
+    u = cur.fetchone()
+    total_users = u['total']
 
-            # MRR from billing.PLAN_PRICES_USD over PAYING subscriptions only
-            # (a trial is not revenue). See _live_mrr.
-            mrr = _live_mrr(cur, scope)
-            conversion_rate = round((total_subscribed / max(1, total_users)) * 100, 1)
+    cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND {scope}")
+    total_subscribed = cur.fetchone()['total']
 
-            # ── Visits (consistent unique = device_id, fallback ip) ──
-            cur.execute(f"""
-                SELECT COUNT(*) FILTER (WHERE visited_at >= CURRENT_DATE) AS today,
-                       COUNT(DISTINCT {UNIQUE_VISITOR}) FILTER (
-                           WHERE visited_at >= CURRENT_DATE) AS unique_today,
-                       COUNT(*) FILTER (WHERE visited_at >= NOW() - INTERVAL '7 days') AS week,
-                       COUNT(DISTINCT {UNIQUE_VISITOR}) FILTER (
-                           WHERE visited_at >= NOW() - INTERVAL '7 days') AS unique_week,
-                       COUNT(*) AS month,
-                       COUNT(DISTINCT {UNIQUE_VISITOR}) AS unique_month,
-                       COUNT(*) FILTER (WHERE visited_at < NOW() - INTERVAL '7 days'
-                                          AND visited_at >= NOW() - INTERVAL '14 days') AS prev_week
-                  FROM analytics_page_visits
-                 WHERE visited_at >= NOW() - INTERVAL '30 days'
-            """)
-            v = cur.fetchone()
-            visits_today, unique_today = v['today'], v['unique_today']
-            visits_week, unique_week = v['week'], v['unique_week']
-            visits_month, unique_month = v['month'], v['unique_month']
-            prev_week_visits = v['prev_week']
+    cur.execute(f"""
+        SELECT plan, COUNT(*) AS count FROM users
+         WHERE is_verified = 1 AND {scope}
+         GROUP BY plan
+    """)
+    plan_breakdown = {r['plan']: r['count'] for r in cur.fetchall()}
 
-            def trend(current, previous):
-                if previous == 0:
-                    return 100 if current > 0 else 0
-                return round(((current - previous) / previous) * 100, 1)
+    # MRR over PAYING subscriptions only (a trial is not revenue).
+    mrr = _live_mrr(cur, scope)
+    conversion_rate = round((total_subscribed / max(1, total_users)) * 100, 1)
 
-            users_trend = trend(new_users_week, prev_week_users)
-            visits_trend = trend(visits_week, prev_week_visits)
+    def trend(current, previous):
+        if previous == 0:
+            return 100 if current > 0 else 0
+        return round(((current - previous) / previous) * 100, 1)
 
-        return jsonify({
-            'meta': {
-                'metrics_epoch': METRICS_EPOCH,
-                'excluded_emails': len(EXCLUDE_EMAILS),
-            },
-            'users': {
-                'total': total_users,
-                'new_today': new_users_today,
-                'new_week': new_users_week,
-                'new_month': new_users_month,
-                'trend_week': users_trend,
-            },
-            'subscriptions': {
-                'total': total_subscribed,
-                'plan_breakdown': plan_breakdown,
-                'mrr': mrr,
-                'conversion_rate': conversion_rate,
-            },
-            'visits': {
-                'today': visits_today,
-                'unique_today': unique_today,
-                'week': visits_week,
-                'unique_week': unique_week,
-                'month': visits_month,
-                'unique_month': unique_month,
-                'trend_week': visits_trend,
-            },
-        }), 200
-    finally:
-        conn.close()
+    return {
+        'meta': {
+            'metrics_epoch': METRICS_EPOCH,
+            'excluded_emails': len(EXCLUDE_EMAILS),
+            'timezone': 'Asia/Dubai',
+        },
+        'users': {
+            'total': total_users,
+            'new_today': u['today'],
+            'new_week': u['week'],
+            'new_month': u['month'],
+            'trend_week': trend(u['week'], u['prev_week']),
+        },
+        'subscriptions': {
+            'total': total_subscribed,
+            'plan_breakdown': plan_breakdown,
+            'mrr': mrr,
+            'conversion_rate': conversion_rate,
+        },
+        'visits': classic.overview_visits(cur),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -384,26 +415,31 @@ def chart_registrations():
 @admin_bp.route('/charts/growth', methods=['GET'])
 @admin_required
 def chart_growth():
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT
-                    TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
-                    COALESCE(c.count, 0) AS added,
-                    SUM(COALESCE(c.count, 0)) OVER (ORDER BY d::date) AS total
-                FROM generate_series(DATE '{epoch}', NOW(), '1 day') AS d
-                LEFT JOIN (
-                    SELECT created_at::date AS dt, COUNT(*) AS count
-                    FROM users WHERE is_verified = 1 AND {scope}
-                    GROUP BY created_at::date
-                ) c ON c.dt = d::date
-                ORDER BY d
-            """.format(epoch=METRICS_EPOCH, scope=_scope('')))
-            rows = cur.fetchall()
-        return jsonify({'data': [dict(r) for r in rows]}), 200
-    finally:
-        conn.close()
+    """Daily verified signups and the running total since the metrics epoch,
+    one point per admin-timezone (Dubai) day, zero days included."""
+    return jsonify(_classic_cached('growth', 300, _growth)), 200
+
+
+def _growth(cur):
+    from admin_metrics import ranges
+    cur.execute("""
+        SELECT
+            TO_CHAR(d::date, 'YYYY-MM-DD') AS day,
+            COALESCE(c.count, 0) AS added,
+            SUM(COALESCE(c.count, 0)) OVER (ORDER BY d::date) AS total
+        FROM generate_series(DATE '{epoch}', %(today)s::date, '1 day') AS d
+        LEFT JOIN (
+            SELECT (created_at AT TIME ZONE 'UTC' AT TIME ZONE %(tz)s)::date AS dt,
+                   COUNT(*) AS count
+            FROM users WHERE is_verified = 1 AND {scope}
+            GROUP BY 1
+        ) c ON c.dt = d::date
+        ORDER BY d
+    """.format(epoch=METRICS_EPOCH, scope=_scope('')),
+                {'today': ranges.local_today(), 'tz': ranges.TZ_NAME})
+    return {'data': [{'day': r['day'], 'added': int(r['added']),
+                      'total': int(r['total'])} for r in cur.fetchall()],
+            'timezone': ranges.TZ_NAME}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,14 +450,11 @@ def chart_growth():
 @admin_bp.route('/charts/visits', methods=['GET'])
 @admin_required
 def chart_visits():
-    from website_reports import visits_report
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SET TIME ZONE 'UTC'")
-            return jsonify(visits_report(cur, _scope(), METRICS_EPOCH)), 200
-    finally:
-        conn.close()
+    """"Page visits & signups": people per admin day (robots, own browsers,
+    link previews and outreach link checks left out and counted beside),
+    page views, verified signups and the signup rate per 100 people."""
+    from admin_metrics import classic
+    return jsonify(_classic_cached('visits', 300, classic.visits_report)), 200
 
 
 @admin_bp.route('/journeys', methods=['GET'])
@@ -498,7 +531,12 @@ def chart_mrr():
                 ORDER BY d
             """)
             rows = cur.fetchall()
-        return jsonify({'data': [dict(r) for r in rows]}), 200
+        # NUMERIC arrives as Decimal and was serialised as a string ("40"),
+        # which the chart cannot plot: the card drew an empty frame.
+        return jsonify({'data': [{'day': r['day'],
+                                  'mrr': float(r['mrr'] or 0),
+                                  'subscribers': int(r['subscribers'] or 0)}
+                                 for r in rows]}), 200
     finally:
         conn.close()
 
@@ -510,124 +548,196 @@ def chart_mrr():
 @admin_bp.route('/revenue', methods=['GET'])
 @admin_required
 def revenue_analytics():
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            scope = _scope('')  # real post-relaunch customers only
-            ready = _billing_ready(cur)
+    return jsonify(_classic_cached('revenue', 120, _revenue)), 200
 
-            # Everyone the app treats as subscribed, INCLUDING trials — this
-            # is the population breakdown, not the revenue.
-            cur.execute(f"SELECT plan, COUNT(*) AS count FROM users WHERE is_subscribed = 1 AND {scope} GROUP BY plan")
-            plan_counts = {r['plan']: r['count'] for r in cur.fetchall()}
 
-            # ── The revenue ────────────────────────────────────────────────
-            # `plan_prices` used to be {'plus': 20, 'pro': 50, 'ultra': 100} —
-            # three plans nobody can buy and nobody live is on — so MRR was
-            # structurally 0, and it counted every trialling account as though
-            # it were paying. Both halves are fixed: real prices from
-            # billing.PLAN_PRICES_USD, and only genuinely-active subscriptions.
-            mrr = _live_mrr(cur, scope)
-            arr = round(mrr * 12, 2)
+def _revenue(cur):
+    scope = _scope('')  # real post-relaunch customers only
+    ready = _billing_ready(cur)
 
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope}")
-            total_verified = cur.fetchone()['total']
-            arpu = round(mrr / max(1, total_verified), 2)
+    # Everyone the app treats as subscribed, INCLUDING trials — this
+    # is the population breakdown, not the revenue.
+    cur.execute(f"SELECT plan, COUNT(*) AS count FROM users WHERE is_subscribed = 1 AND {scope} GROUP BY plan")
+    plan_counts = {r['plan']: r['count'] for r in cur.fetchall()}
 
-            # The paying head-count has to be the SAME population the MRR came
-            # from, or ARPPU is one plan's revenue divided by another plan's
-            # customers.
-            if ready:
-                cur.execute(f"""SELECT COUNT(*) AS n FROM users u
-                                 WHERE {_paying_predicate('u')} AND {scope}""")
-                total_paying = cur.fetchone()['n']
-            else:
-                total_paying = sum(plan_counts.values())
-            arppu = round(mrr / max(1, total_paying), 2)
-            ltv = round(arppu * 6, 2)
+    # ── The revenue ────────────────────────────────────────────────
+    # `plan_prices` used to be {'plus': 20, 'pro': 50, 'ultra': 100} —
+    # three plans nobody can buy and nobody live is on — so MRR was
+    # structurally 0, and it counted every trialling account as though
+    # it were paying. Both halves are fixed: real prices from
+    # billing.PLAN_PRICES_USD, and only genuinely-active subscriptions.
+    mrr = _live_mrr(cur, scope)
+    arr = round(mrr * 12, 2)
 
-            # Trials and declines, counted separately and never as revenue.
-            trialing = past_due = 0
-            if ready:
-                cur.execute(f"""
-                    SELECT COALESCE(billing_status, 'unknown') AS s,
-                           COUNT(*) AS n
-                      FROM users u
-                     WHERE u.is_subscribed = 1 AND {scope}
-                     GROUP BY 1""")
-                by_status = {r['s']: r['n'] for r in cur.fetchall()}
-                trialing = by_status.get('trialing', 0)
-                past_due = by_status.get('past_due', 0) + by_status.get('paused', 0)
-            collected = _collected(cur)
-            collected_30d = _collected(cur, since_days=30)
+    cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope}")
+    total_verified = cur.fetchone()['total']
+    arpu = round(mrr / max(1, total_verified), 2)
 
-            cur.execute(f"SELECT COUNT(DISTINCT ip) AS total FROM analytics_page_visits WHERE visited_at >= NOW() - INTERVAL '30 days'")
-            unique_visitors_30d = cur.fetchone()['total']
+    # The paying head-count has to be the SAME population the MRR came
+    # from, or ARPPU is one plan's revenue divided by another plan's
+    # customers.
+    if ready:
+        cur.execute(f"""SELECT COUNT(*) AS n FROM users u
+                         WHERE {_paying_predicate('u')} AND {scope}""")
+        total_paying = cur.fetchone()['n']
+    else:
+        total_paying = sum(plan_counts.values())
+    arppu = round(mrr / max(1, total_paying), 2)
+    ltv = round(arppu * 6, 2)
 
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= NOW() - INTERVAL '30 days'")
-            registered_30d = cur.fetchone()['total']
+    # Trials and declines, counted separately and never as revenue.
+    trialing = past_due = 0
+    if ready:
+        cur.execute(f"""
+            SELECT COALESCE(billing_status, 'unknown') AS s,
+                   COUNT(*) AS n
+              FROM users u
+             WHERE u.is_subscribed = 1 AND {scope}
+             GROUP BY 1""")
+        by_status = {r['s']: r['n'] for r in cur.fetchall()}
+        trialing = by_status.get('trialing', 0)
+        past_due = by_status.get('past_due', 0) + by_status.get('paused', 0)
+    collected = _collected(cur)
+    collected_30d = _collected(cur, since_days=30)
 
-            cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND {scope} AND created_at >= NOW() - INTERVAL '30 days'")
-            subscribed_30d = cur.fetchone()['total']
+    # Visitors are people (robots, own browsers, link previews and outreach
+    # link checks left out). People are counted from 3 Oct 2026, so a 30-day
+    # window that starts earlier says where its count begins.
+    from admin_metrics import classic, defs as mdefs, ranges as mranges
+    unique_visitors_30d, visitors_from = classic.people_count(cur, 30)
 
-            # Per plan: how many hold it, how many of those are actually
-            # PAYING, and what that is worth. The `count`/`paying` split is the
-            # thing the old panel could not show — a plan with four holders and
-            # zero payers looked identical to one with four payers.
-            revenue_by_plan = {}
-            if ready:
-                cur.execute(f"""
-                    SELECT COALESCE(billing_plan, plan) AS plan,
-                           COALESCE(billing_period, 'monthly') AS period,
-                           COUNT(*) AS n
-                      FROM users u
-                     WHERE {_paying_predicate('u')} AND {scope}
-                     GROUP BY 1, 2""")
-                paying_rows = cur.fetchall()
-            else:
-                paying_rows = [{'plan': p, 'period': 'monthly', 'n': c}
-                               for p, c in plan_counts.items()]
-            paying_by_plan = {}
-            for r in paying_rows:
-                b = paying_by_plan.setdefault(r['plan'], {'paying': 0, 'revenue': 0.0})
-                b['paying'] += r['n']
-                b['revenue'] += billing.monthly_value(r['plan'], r['period']) * r['n']
-            for plan, count in plan_counts.items():
-                b = paying_by_plan.get(plan, {'paying': 0, 'revenue': 0.0})
-                revenue_by_plan[plan] = {
-                    'count': count,
-                    'paying': b['paying'],
-                    'revenue': round(b['revenue'], 2),
-                    'price': billing.monthly_value(plan),
-                }
+    # Registered and subscribed are counted over the SAME window as the
+    # visitors, so each step's rate compares one population with the next.
+    funnel_start = (mranges.naive(visitors_from) if visitors_from
+                    else datetime.utcnow() - timedelta(days=30))
+    cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_verified = 1 AND {scope} AND created_at >= %s", (funnel_start,))
+    registered_30d = cur.fetchone()['total']
 
-        return jsonify({
-            'mrr': mrr,
-            'arr': arr,
-            'arpu': arpu,
-            'arppu': arppu,
-            'ltv_estimate': ltv,
-            'total_paying': total_paying,
-            'total_verified': total_verified,
-            'revenue_by_plan': revenue_by_plan,
-            # Subscribed but NOT revenue. Broken out so "6 subscribers, $0
-            # collected" reads as the sentence it is instead of a contradiction.
-            'trialing': trialing,
-            'past_due': past_due,
-            # What actually landed in the account, from the payments ledger.
-            'collected': collected,
-            'collected_30d': collected_30d,
-            'billing_ready': ready,
-            'funnel': {
-                'visitors_30d': unique_visitors_30d,
-                'registered_30d': registered_30d,
-                'subscribed_30d': subscribed_30d,
-                'visitor_to_register': round((registered_30d / max(1, unique_visitors_30d)) * 100, 1),
-                'register_to_subscribe': round((subscribed_30d / max(1, registered_30d)) * 100, 1),
-            }
-        }), 200
-    finally:
-        conn.close()
+    cur.execute(f"SELECT COUNT(*) AS total FROM users WHERE is_subscribed = 1 AND {scope} AND created_at >= %s", (funnel_start,))
+    subscribed_30d = cur.fetchone()['total']
+
+    # Per plan: how many hold it, how many of those are actually
+    # PAYING, and what that is worth. The `count`/`paying` split is the
+    # thing the old panel could not show — a plan with four holders and
+    # zero payers looked identical to one with four payers.
+    revenue_by_plan = {}
+    if ready:
+        cur.execute(f"""
+            SELECT COALESCE(billing_plan, plan) AS plan,
+                   COALESCE(billing_period, 'monthly') AS period,
+                   COUNT(*) AS n
+              FROM users u
+             WHERE {_paying_predicate('u')} AND {scope}
+             GROUP BY 1, 2""")
+        paying_rows = cur.fetchall()
+    else:
+        paying_rows = [{'plan': p, 'period': 'monthly', 'n': c}
+                       for p, c in plan_counts.items()]
+    paying_by_plan = {}
+    for r in paying_rows:
+        b = paying_by_plan.setdefault(r['plan'], {'paying': 0, 'revenue': 0.0})
+        b['paying'] += r['n']
+        b['revenue'] += billing.monthly_value(r['plan'], r['period']) * r['n']
+    for plan, count in plan_counts.items():
+        b = paying_by_plan.get(plan, {'paying': 0, 'revenue': 0.0})
+        revenue_by_plan[plan] = {
+            'count': count,
+            'paying': b['paying'],
+            'revenue': round(b['revenue'], 2),
+            'price': billing.monthly_value(plan),
+        }
+
+    return {
+        'mrr': mrr,
+        'arr': arr,
+        'arpu': arpu,
+        'arppu': arppu,
+        'ltv_estimate': ltv,
+        'total_paying': total_paying,
+        'total_verified': total_verified,
+        'revenue_by_plan': revenue_by_plan,
+        # Subscribed but NOT revenue. Broken out so "6 subscribers, $0
+        # collected" reads as the sentence it is instead of a contradiction.
+        'trialing': trialing,
+        'past_due': past_due,
+        # What actually landed in the account, from the payments ledger.
+        'collected': collected,
+        'collected_30d': collected_30d,
+        'billing_ready': ready,
+        'funnel': {
+            'visitors_30d': unique_visitors_30d,
+            'registered_30d': registered_30d,
+            'subscribed_30d': subscribed_30d,
+            'visitor_to_register': (round((registered_30d / max(1, unique_visitors_30d)) * 100, 1)
+                                    if unique_visitors_30d else None),
+            'register_to_subscribe': round((subscribed_30d / max(1, registered_30d)) * 100, 1),
+            'visitors_measure': 'people',
+            'from': mdefs.iso(visitors_from) if visitors_from else None,
+            'from_day': (mranges.local_day(visitors_from).isoformat()
+                         if visitors_from else None),
+        },
+        # Lifetime payments by plan launch (July / September / October).
+        'plan_cohorts': _plan_cohorts(cur, scope),
+    }
+
+
+# Plan launches, newest first: each launch's subscribers stay one cohort.
+PLAN_COHORTS = (
+    ('October 2026 plans', ('plus_2026', 'pro_2026', 'max_2026')),
+    ('September 2026 plans', ('mcp_connect', 'advanced', 'ultimate')),
+    ('July 2026 plans', ('ai', 'ai_pro', 'ai_max')),
+)
+
+
+def _plan_cohorts(cur, scope):
+    """Customers who ever paid, by the plan they paid for, per plan launch.
+
+    A customer's plan is the plan on their latest successful payment (else
+    their billing plan). Lifetime USD and payment counts come from the
+    payments ledger; paying / payment failing / cancelled is their state now.
+    """
+    from admin_metrics import defs, money
+    cur.execute(f"""
+        WITH paid AS (
+            SELECT p.user_id, COUNT(*) AS payments,
+                   COALESCE(SUM(p.amount_cents) FILTER (
+                       WHERE p.currency = 'USD'), 0) AS cents,
+                   (ARRAY_AGG(p.plan ORDER BY COALESCE(p.occurred_at,
+                                                       p.created_at) DESC)
+                        FILTER (WHERE p.plan IS NOT NULL))[1] AS paid_plan
+              FROM payments p
+             WHERE {defs.success('p')}
+             GROUP BY p.user_id
+        )
+        SELECT COALESCE(paid.paid_plan, u.billing_plan, u.plan) AS plan,
+               {money.STATUS_SQL} AS status,
+               COUNT(*) AS customers, SUM(paid.payments) AS payments,
+               SUM(paid.cents) AS cents
+          FROM paid JOIN users u ON u.id = paid.user_id
+         WHERE {_scope('u')}
+         GROUP BY 1, 2""")
+    empty = {'customers': 0, 'paying': 0, 'payment_failing': 0,
+             'canceled': 0, 'payments': 0, 'collected_usd': 0.0}
+    by_plan = {}
+    for r in cur.fetchall():
+        plan = r['plan'] or 'free'
+        b = by_plan.setdefault(plan, dict(empty, plan=plan))
+        n = int(r['customers'] or 0)
+        b['customers'] += n
+        b['payments'] += int(r['payments'] or 0)
+        b['collected_usd'] = round(
+            b['collected_usd'] + float(r['cents'] or 0) / 100.0, 2)
+        if r['status'] in ('paying', 'payment_failing', 'canceled'):
+            b[r['status']] += n
+    cohorts, seen = [], set()
+    for label, plans in PLAN_COHORTS:
+        seen.update(plans)
+        cohorts.append({'label': label, 'plans': [
+            by_plan.get(p, dict(empty, plan=p)) for p in plans]})
+    older = [b for p, b in by_plan.items() if p not in seen]
+    if older:
+        cohorts.append({'label': 'Older plans', 'plans': older})
+    return cohorts
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -985,13 +1095,19 @@ def realtime():
             """)
             active_15m = cur.fetchone()['active_15m']
 
+            # Live video-editor work (the retired app builder's `jobs`
+            # table is no longer read).
             cur.execute("""
-                SELECT j.job_id, j.title, j.created_at,
-                       u.email AS user_email, u.plan
-                FROM jobs j
-                LEFT JOIN users u ON u.id = j.user_id
-                WHERE j.state = 'running'
-                ORDER BY j.created_at DESC
+                SELECT vj.id AS job_id,
+                       COALESCE(p.title, 'project ' || vj.project_id)
+                           || ' · ' || vj.type AS title,
+                       vj.created_at, u.email AS user_email, u.plan
+                FROM video_jobs vj
+                LEFT JOIN users u ON u.id = vj.user_id
+                LEFT JOIN projects p ON p.id = vj.project_id
+                WHERE vj.state = 'running'
+                ORDER BY vj.created_at DESC
+                LIMIT 50
             """)
             running_jobs = [dict(r) for r in cur.fetchall()]
 
@@ -1018,33 +1134,58 @@ def realtime():
 #  USERS TABLE
 # ─────────────────────────────────────────────────────────────────────────────
 
+# The Users list's filters. Each is one plain question about a customer.
+USER_FILTERS = {
+    'all': 'TRUE',
+    # Paying now, or a renewal payment is being retried.
+    'subscribed': "u_status IN ('paying', 'payment_failing')",
+    # Completed at least one positive payment, ever.
+    'paid': "u_status IN ('paying', 'payment_failing', 'canceled')",
+    # Paid before and no longer subscribed.
+    'canceled': "u_status = 'canceled'",
+    # Finished at least one export.
+    'exported': 'u_exports > 0',
+    # Never paid.
+    'free': "u_status = 'free'",
+}
+
+
 @admin_bp.route('/users', methods=['GET'])
 @admin_required
 def list_users():
-    page     = int(request.args.get('page', 1))
-    per_page = int(request.args.get('per_page', 20))
-    search   = request.args.get('search', '').strip()
-    plan_filter = request.args.get('plan', '').strip()
-    sort     = request.args.get('sort', 'created_at').strip()
-    order    = request.args.get('order', 'desc').strip()
-    offset   = (page - 1) * per_page
+    """Every verified customer, newest first, with what happened to them.
 
-    allowed_sorts = {'created_at', 'email', 'plan', 'credits_balance', 'job_count'}
-    if sort not in allowed_sorts:
-        sort = 'created_at'
-    if order not in ('asc', 'desc'):
-        order = 'desc'
+    One row says: how they signed up, where they came from (tracked source
+    with campaign and outreach code, and what they told us), whether they
+    edited, exported and paid, and their subscription state today. The
+    retired app builder's `jobs` table is no longer read: "Edits" are video
+    edit requests. Filters answer the owner's questions directly: who
+    subscribed, who paid, who cancelled, who exported, who never paid."""
+    from admin_metrics import money
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+        per_page = max(10, min(200, int(request.args.get('per_page', 50))))
+    except (TypeError, ValueError):
+        page, per_page = 1, 50
+    search = request.args.get('search', '').strip()
+    plan_filter = request.args.get('plan', '').strip()
+    flt = request.args.get('filter', 'all').strip().lower()
+    if flt not in USER_FILTERS:
+        flt = 'all'
+    sort = request.args.get('sort', 'created_at').strip()
+    order = 'asc' if request.args.get('order', 'desc').strip() == 'asc' \
+        else 'desc'
+    sorts = {'created_at': 'u.created_at', 'email': 'u.email',
+             'plan': 'u.plan', 'credits_balance': 'u.credits_balance',
+             'last_active': 'last_active', 'paid': 'paid_cents',
+             'exports': 'u_exports', 'job_count': 'job_count'}
+    sort_col = sorts.get(sort, 'u.created_at')
+    offset = (page - 1) * per_page
 
     conn = get_db()
     try:
         trial_ready = trial_state.columns_ready(conn)
         with conn.cursor() as cur:
-            # ONE population, everywhere: real post-relaunch customers, the
-            # same _scope every other dashboard already uses (it drops
-            # pre-epoch old-idea signups and the excluded test/admin
-            # accounts). This list used to show a raw "everyone" total beside
-            # a scoped one, so the Users tab disagreed with every other number
-            # in the admin and the rows did not match either count.
             where = f"WHERE u.is_verified = 1 AND {_scope('u')}"
             params = []
             if search:
@@ -1053,84 +1194,112 @@ def list_users():
             if plan_filter:
                 where += " AND u.plan = %s"
                 params.append(plan_filter)
-
-            cur.execute(f"SELECT COUNT(*) AS total FROM users u {where}", params)
-            total = cur.fetchone()['total']
-            # Kept in the payload so an older cached bundle keeps rendering,
-            # but it is now the same number rather than a second population.
-            real_total = total
-
-            sort_col = f"u.{sort}" if sort != 'job_count' else 'job_count'
-
-            # Trial state (round 46). Selected only once the columns exist —
-            # they are added by hand in the Render shell, so the deploy can
-            # land first and this page must not 500 in the window between.
             trial_cols = ("""
                     u.trial_status, u.trial_started_at, u.trial_ends_at,
                     u.trial_canceled_at, u.trial_plan,
             """ if trial_ready else "")
+            base = f"""
+                SELECT u.*, {money.STATUS_SQL} AS u_status,
+                       (SELECT COUNT(*) FROM video_jobs vf
+                         WHERE vf.user_id = u.id AND vf.type = 'final'
+                           AND vf.state = 'done') AS u_exports
+                  FROM users u {where}"""
+            # Counts for the filter buttons and the header, over the same
+            # search (the filter itself never changes them).
+            cur.execute(f"""
+                WITH b AS ({base})
+                SELECT COUNT(*) AS all_,
+                       COUNT(*) FILTER (WHERE {USER_FILTERS['subscribed']}) AS subscribed,
+                       COUNT(*) FILTER (WHERE {USER_FILTERS['paid']}) AS paid,
+                       COUNT(*) FILTER (WHERE {USER_FILTERS['canceled']}) AS canceled,
+                       COUNT(*) FILTER (WHERE {USER_FILTERS['exported']}) AS exported,
+                       COUNT(*) FILTER (WHERE {USER_FILTERS['free']}) AS free
+                  FROM b""", params)
+            c = cur.fetchone() or {}
+            counts = {'all': c.get('all_') or 0}
+            counts.update({k: c.get(k) or 0 for k in
+                           ('subscribed', 'paid', 'canceled', 'exported',
+                            'free')})
+            total = counts.get(flt, counts['all'])
+
+            day0, week0 = _local_day_bounds()
+            cur.execute(f"""SELECT COUNT(*) FILTER (WHERE u.created_at >= %s) AS today,
+                                   COUNT(*) FILTER (WHERE u.created_at >= %s) AS week
+                              FROM users u WHERE u.is_verified = 1 AND {_scope('u')}""",
+                        (day0, week0))
+            fresh = cur.fetchone() or {}
 
             cur.execute(f"""
+                WITH b AS ({base})
                 SELECT
                     u.id, u.email, u.plan, u.is_subscribed,
                     to_jsonb(u)->>'billing_period' AS billing_period,
+                    to_jsonb(u)->>'billing_plan' AS billing_plan,
+                    to_jsonb(u)->>'billing_status' AS billing_status,
                     u.is_verified, u.auth_provider,
                     {trial_cols}
                     u.credits_balance, u.credits_daily, u.credits_monthly,
                     u.created_at, u.subscription_expiry,
-                    -- Detected from the User-Agent at each auth event, never
-                    -- asked. NULL for accounts that have not signed in since
-                    -- this shipped, and shown as "unknown" rather than
-                    -- guessed — the same honesty rule auth_provider follows.
                     u.device_type, u.device_browser, u.last_seen_at,
+                    u.u_status AS status, u.u_exports AS exports,
                     (SELECT ws.attribution FROM website_signups ws
                       WHERE ws.user_id = u.id) AS acquisition,
                     (SELECT o.channel FROM onboarding_responses o
                       WHERE o.user_id = u.id) AS channel,
+                    (SELECT o.channel_other FROM onboarding_responses o
+                      WHERE o.user_id = u.id) AS channel_other,
                     (SELECT o.use_case FROM onboarding_responses o
                       WHERE o.user_id = u.id) AS use_case,
-                    -- Jobs and activity span BOTH lanes: the retired app
-                    -- builder (jobs) and the live video studio (video_jobs).
-                    ((SELECT COUNT(*) FROM jobs WHERE jobs.user_id = u.id)
-                     + (SELECT COUNT(*) FROM video_jobs vj
-                        WHERE vj.user_id = u.id
-                          AND vj.type = 'agent_turn')) AS job_count,
-                    -- Credits come STRAIGHT off the ledger by user_id.
-                    -- This used to INNER JOIN jobs, which silently dropped
-                    -- every video-lane row (job_id 'video:<n>' has no `jobs`
-                    -- row) -- over half of all credits ever spent, and the
-                    -- only credits 63 of the 85 real users have. Those users
-                    -- all showed 0. job_credits.user_id is set on every row
-                    -- and indexed, so no join is needed at all.
-                    --
-                    -- NB: never write a literal percent sign anywhere in this
-                    -- string, comments included. psycopg2 scans the WHOLE
-                    -- query for placeholders whenever vars are passed, so a
-                    -- percent sign in a COMMENT is read as one and the call
-                    -- dies with "IndexError: list index out of range" before
-                    -- Postgres ever sees the SQL. That is exactly how this
-                    -- endpoint got emptied once already.
+                    (SELECT COUNT(*) FROM projects p
+                      WHERE p.user_id = u.id
+                        AND p.parent_project_id IS NULL) AS projects,
+                    -- Edit requests in the video editor (the retired app
+                    -- builder is not read any more).
+                    (SELECT COUNT(*) FROM video_jobs vj
+                      WHERE vj.user_id = u.id
+                        AND vj.type = 'agent_turn') AS job_count,
+                    -- Credits straight off the ledger by user_id. Never write
+                    -- a literal percent sign in this string (psycopg2 reads
+                    -- it as a placeholder).
                     (SELECT COALESCE(SUM(jc.credits_used), 0)
-                     FROM job_credits jc WHERE jc.user_id = u.id)
+                       FROM job_credits jc WHERE jc.user_id = u.id)
                         AS total_credits_used,
-                    GREATEST(
-                        (SELECT MAX(j3.created_at) FROM jobs j3
-                         WHERE j3.user_id = u.id),
-                        (SELECT MAX(vj.created_at) FROM video_jobs vj
-                         WHERE vj.user_id = u.id)
-                    ) AS last_active
-                FROM users u {where}
-                ORDER BY {sort_col} {order}
+                    pay.first_paid_at, pay.last_paid_at, pay.payments,
+                    COALESCE(pay.cents, 0) AS paid_cents,
+                    GREATEST(u.last_seen_at,
+                             (SELECT MAX(vj.created_at) FROM video_jobs vj
+                               WHERE vj.user_id = u.id)) AS last_active
+                FROM b u
+                LEFT JOIN LATERAL (
+                    SELECT MIN(COALESCE(p.occurred_at, p.created_at)) AS first_paid_at,
+                           MAX(COALESCE(p.occurred_at, p.created_at)) AS last_paid_at,
+                           COUNT(*) AS payments,
+                           SUM(p.amount_cents) FILTER (WHERE p.currency = 'USD') AS cents
+                      FROM payments p
+                     WHERE p.user_id = u.id AND p.status IN ('completed', 'paid')
+                       AND p.amount_cents > 0) pay ON TRUE
+                WHERE {USER_FILTERS[flt].replace('u_status', 'u.u_status').replace('u_exports', 'u.u_exports')}
+                ORDER BY {sort_col} {order} NULLS LAST, u.id DESC
                 LIMIT %s OFFSET %s
             """, params + [per_page, offset])
             rows = cur.fetchall()
 
+        users = []
+        for r in rows:
+            row = dict(r)
+            row['paid_usd'] = round(float(row.pop('paid_cents') or 0) / 100.0, 2)
+            users.append(row)
         return jsonify({
-            'users': [dict(r) for r in rows],
+            'users': users,
             'total': total,
-            'real_total': real_total,
+            'real_total': counts['all'],
+            'counts': counts,
+            'new_today': fresh.get('today') or 0,
+            'new_week': fresh.get('week') or 0,
+            'filter': flt,
             'page': page,
             'per_page': per_page,
+            'timezone': 'Asia/Dubai',
         }), 200
     finally:
         conn.close()
@@ -1144,42 +1313,30 @@ def list_users():
 @admin_bp.route('/top-users', methods=['GET'])
 @admin_required
 def top_users():
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            # Ranked straight off the credit ledger by user_id. The old query
-            # walked users -> jobs -> job_credits, so a user whose spend is all
-            # in the video lane (no `jobs` row) contributed 0 and could never
-            # chart: the leaderboard was ranking the RETIRED app builder.
-            # Job counts come from both lanes, as their own subqueries, so the
-            # multi-lane join can't multiply the credit sum.
-            cur.execute("""
-                SELECT
-                    u.email, u.plan,
-                    ((SELECT COUNT(*) FROM jobs j WHERE j.user_id = u.id)
-                     + (SELECT COUNT(*) FROM video_jobs vj
-                        WHERE vj.user_id = u.id
-                          AND vj.type = 'agent_turn')) AS jobs,
-                    ROUND(COALESCE(SUM(jc.credits_used), 0)::numeric, 2)
-                        AS credits_used,
-                    COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
-                    GREATEST(
-                        (SELECT MAX(j.created_at) FROM jobs j
-                         WHERE j.user_id = u.id),
-                        (SELECT MAX(vj.created_at) FROM video_jobs vj
-                         WHERE vj.user_id = u.id)
-                    ) AS last_active
-                FROM users u
-                LEFT JOIN job_credits jc ON jc.user_id = u.id
-                WHERE u.is_verified = 1 AND """ + _scope('u') + """
-                GROUP BY u.id, u.email, u.plan
-                ORDER BY credits_used DESC
-                LIMIT 15
-            """)
-            rows = cur.fetchall()
-        return jsonify({'users': [dict(r) for r in rows]}), 200
-    finally:
-        conn.close()
+    """Customers ranked by credits used, with their video edit requests.
+    Only the video editor is read (the retired app builder is not)."""
+    def compute(cur):
+        cur.execute("""
+            SELECT u.id, u.email, u.plan,
+                   (SELECT COUNT(*) FROM video_jobs vj
+                     WHERE vj.user_id = u.id
+                       AND vj.type = 'agent_turn') AS jobs,
+                   ROUND(COALESCE(SUM(jc.credits_used), 0)::numeric, 2)
+                       AS credits_used,
+                   COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
+                   (SELECT MAX(vj.created_at) FROM video_jobs vj
+                     WHERE vj.user_id = u.id) AS last_active
+              FROM users u
+              LEFT JOIN job_credits jc ON jc.user_id = u.id
+             WHERE u.is_verified = 1 AND """ + _scope('u') + """
+             GROUP BY u.id, u.email, u.plan
+             ORDER BY credits_used DESC
+             LIMIT 15
+        """)
+        return {'users': [dict(r, credits_used=float(r['credits_used'] or 0),
+                               tokens_used=int(r['tokens_used'] or 0))
+                          for r in cur.fetchall()]}
+    return jsonify(_classic_cached('top_users', 120, compute)), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1189,46 +1346,66 @@ def top_users():
 @admin_bp.route('/activity', methods=['GET'])
 @admin_required
 def recent_activity():
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT 'register' AS type, email AS label, created_at AS ts
-                FROM users WHERE is_verified = 1 AND """ + _scope('') + """
-                ORDER BY created_at DESC LIMIT 10
-            """)
-            regs = cur.fetchall()
-
-            cur.execute("""
-                SELECT
-                    CASE WHEN state = 'completed' THEN 'job_done'
-                         WHEN state = 'failed'    THEN 'job_fail'
-                         ELSE 'job_start' END AS type,
-                    CONCAT(u.email, ' → ', j.title) AS label,
-                    j.created_at AS ts
-                FROM jobs j
-                LEFT JOIN users u ON u.id = j.user_id
-                ORDER BY j.created_at DESC LIMIT 15
-            """)
-            job_rows = cur.fetchall()
-
-            cur.execute("""
-                SELECT 'subscribe' AS type,
-                       CONCAT(email, ' (', plan, ')') AS label,
-                       subscription_expiry AS ts
-                FROM users
-                WHERE is_subscribed = 1 AND subscription_expiry IS NOT NULL
-                  AND """ + _scope('') + """
-                ORDER BY subscription_expiry DESC LIMIT 10
-            """)
-            subs = cur.fetchall()
-
-        all_events = [dict(r) for r in list(regs) + list(job_rows) + list(subs)]
-        all_events.sort(key=lambda x: str(x.get('ts', '')), reverse=True)
-
-        return jsonify({'events': all_events[:40]}), 200
-    finally:
-        conn.close()
+    """What just happened, from the live product only: signups, payments
+    (first payment = subscribed, later ones = renewals), cancellations,
+    exports and failed edit requests. The retired app builder's jobs are
+    gone, and a subscription is dated by its payment, not by its expiry."""
+    def compute(cur):
+        from admin_metrics import defs
+        scope_u = _scope('u')
+        cur.execute(f"""
+            SELECT 'register' AS type, u.email AS label, u.created_at AS ts
+              FROM users u WHERE u.is_verified = 1 AND {scope_u}
+             ORDER BY u.created_at DESC LIMIT 12""")
+        events = [dict(r) for r in cur.fetchall()]
+        cur.execute(f"""
+            SELECT CASE WHEN NOT EXISTS (
+                        SELECT 1 FROM payments e WHERE e.user_id = p.user_id
+                           AND {defs.success('e')}
+                           AND COALESCE(e.occurred_at, e.created_at)
+                               < COALESCE(p.occurred_at, p.created_at))
+                        THEN 'subscribe' ELSE 'renewal' END AS type,
+                   u.email || ' paid $' || TO_CHAR(p.amount_cents / 100.0, 'FM999990.00')
+                       || ' (' || COALESCE(p.plan, u.billing_plan, u.plan) || ')' AS label,
+                   COALESCE(p.occurred_at, p.created_at) AS ts
+              FROM payments p JOIN users u ON u.id = p.user_id
+             WHERE {defs.success('p')}
+             ORDER BY COALESCE(p.occurred_at, p.created_at) DESC LIMIT 12""")
+        events += [dict(r) for r in cur.fetchall()]
+        from admin_metrics import db as mdb
+        snap = mdb.has_table(cur, 'admin_subscription_snapshots')
+        canceled_at = ("COALESCE(s.canceled_at, u.billing_synced_at)" if snap
+                       else "u.billing_synced_at")
+        join = ("LEFT JOIN admin_subscription_snapshots s "
+                "ON s.subscription_id = u.subscription_id" if snap else "")
+        cur.execute(f"""
+            SELECT 'cancel' AS type,
+                   u.email || ' cancelled (' || COALESCE(u.billing_plan, u.plan) || ')' AS label,
+                   {canceled_at} AS ts
+              FROM users u {join}
+             WHERE u.billing_status = 'canceled' AND {canceled_at} IS NOT NULL
+             ORDER BY 3 DESC LIMIT 8""")
+        events += [dict(r) for r in cur.fetchall()]
+        cur.execute(f"""
+            SELECT CASE WHEN vj.state = 'done' THEN 'export' ELSE 'job_fail' END AS type,
+                   u.email || ' → ' || COALESCE(p.title, 'project ' || vj.project_id)
+                       || CASE WHEN vj.state = 'done' THEN '' ELSE ' (export failed)' END AS label,
+                   vj.updated_at AS ts
+              FROM video_jobs vj JOIN users u ON u.id = vj.user_id
+              LEFT JOIN projects p ON p.id = vj.project_id
+             WHERE vj.type = 'final' AND vj.state IN ('done', 'failed')
+               AND {scope_u}
+             ORDER BY vj.updated_at DESC LIMIT 12""")
+        events += [dict(r) for r in cur.fetchall()]
+        for e in events:
+            ts = e.get('ts')
+            if ts is not None and getattr(ts, 'tzinfo', None) is None:
+                e['ts'] = defs.iso(ts)
+            elif ts is not None:
+                e['ts'] = defs.iso(ts)
+        events.sort(key=lambda x: str(x.get('ts') or ''), reverse=True)
+        return {'events': events[:40]}
+    return jsonify(_classic_cached('activity', 30, compute)), 200
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1423,3 +1600,24 @@ def outreach_conversions():
                                   with_people=True))
     finally:
         conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  OUTREACH CODES — the CRM's links traced to people and signups
+# ─────────────────────────────────────────────────────────────────────────────
+
+@admin_bp.route('/outreach-codes', methods=['GET'])
+@admin_required
+def outreach_codes():
+    """One row per outreach code (`valmera.io/?r=<code>`) opened or signed up
+    with in the last `days` admin days: people vs link checks, pages read and
+    the accounts that came through it. Read-only; the CRM is never called."""
+    from admin_metrics import classic
+    try:
+        days = max(1, min(400, int(request.args.get('days', 30))))
+    except (TypeError, ValueError):
+        days = 30
+    return jsonify(_classic_cached(
+        'outreach_codes', 300, lambda cur: classic.outreach_codes(cur, days),
+        params={'days': days})), 200
+
