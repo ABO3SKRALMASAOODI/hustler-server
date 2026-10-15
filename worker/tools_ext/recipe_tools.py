@@ -265,7 +265,10 @@ TOOL_SPECS = {
         "silhouette_hold, negative_hits (1-frame negatives into the "
         "payoff), white_silhouette (the speaker flashes white on the "
         "payoff), lab_scan (registered variant strobe), thermal_flip, "
-        "light_figure (the speaker as light on black), echo_trail. Ranked "
+        "light_figure (the speaker as light on black), echo_trail, "
+        "room_dims (the room dims round him on the turn), world_negative "
+        "(the world inverts round him on a hard negation), colour_drain "
+        "(a build drains to grey, colour snaps back on the payoff). Ranked "
         "by story fit x freshness: a move the other "
         "shorts of the same batch used ranks lower. Each comes with the "
         "word it lands on, why, a reference exemplar and the exact "
@@ -281,7 +284,8 @@ TOOL_SPECS = {
         {"name": {"type": "string", "enum": [
             "mono_until_turn", "colour_kept_payoff", "silhouette_hold",
             "negative_hits", "white_silhouette", "lab_scan", "thermal_flip",
-            "light_figure", "echo_trail"]},
+            "light_figure", "echo_trail", "room_dims", "world_negative",
+            "colour_drain"]},
          "at": {"type": "number"}}),
 }
 

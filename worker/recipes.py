@@ -25,6 +25,16 @@ from the cut, never a house style:
                       accent for one phrase (01@1.708, 33, 36, 41)
   echo_trail          the speaker leaves a fading trail of copies on a word
                       of speed or motion (40@18.3-19.3)
+  room_dims           the room drops two stops and greys around the speaker
+                      as the argument turns, the speaker untouched: a
+                      spotlight made from the cut-out (review w1r: wider
+                      range, the 18@10.80 exposure move as a story beat)
+  world_negative      the world inverts around the speaker for two frames
+                      on a hard negation ("never", "nothing"), the speaker
+                      stays himself (13@6.92 turned inside out)
+  colour_drain        a build drains the colour step by step (each item
+                      greyer) and the colour SNAPS back on the payoff (the
+                      18@0-3.64 drop, told as a countdown)
 
 Freshness, not a house style (owner, 15 Oct: "more and better every time,
 not the same"): a recipe the sibling shorts of the same batch already used
@@ -137,8 +147,23 @@ RECIPES = {
                "momentum: the word is about moving", ["40@18.3-19.3",
                                                       "22@6.0-7.3"],
                ("matte_fx",), matte=True),
+        Recipe("room_dims", "the room dims around the speaker as the "
+               "argument turns", "a turn, a confession, a 'but here is the "
+               "thing': the world falls away and only he is lit",
+               ["18@10.80", "23@1.3-4.7"], ("matte_fx",), matte=True),
+        Recipe("world_negative", "the world inverts around the speaker on a "
+               "hard negation", "'never', 'nothing', 'no one': the world "
+               "flips for two frames, he stays himself", ["13@6.92",
+                                                          "04@1.93"],
+               ("matte_fx",), matte=True, flash=True),
+        Recipe("colour_drain", "a build drains to grey, colour snaps back on "
+               "the payoff", "a list, a countdown, rising stakes before the "
+               "payoff: each item greyer, then full colour ON the payoff "
+               "word", ["18@0-3.64", "24@10.7-12"], ("finish",)),
     )
 }
+NEGATION_WORDS = frozenset("""never nothing nobody none no not cannot can't
+won't don't impossible zero nowhere neither""".split())
 
 
 # ── where each recipe lands ──────────────────────────────────────────────
@@ -449,6 +474,73 @@ def build(name, plan, *, ids=(), accent=None, variant_keys=None,
                  "device": "subject_echo", "bind": _bind(m)}], m, (
             f"a trail of 3 fading copies on "
             f"'{m.get('word_raw') or m.get('word')}' at {m['t']:.2f}s")
+    if name == "room_dims":
+        m = _turn(plan) or _strongest(plan, lambda x: "emotion" in _tags(x))
+        if m is None:
+            return None, None, "no turn or emotional word for the room to dim on"
+        end = _phrase_end(m, plan, 2.4)
+        end = min(prog - 0.05, max(end, m["t"] + 1.2))
+        return [{"id": nid(), "type": "subject", "stage": "world",
+                 "start": _fmt_t(m["t"]), "end": _fmt_t(end),
+                 "kind": "exposure", "scope": "background", "ev": -1.8,
+                 "saturation": 0.45, "device": "subject_exposure",
+                 "bind": _bind(m)}], m, (
+            f"the room drops ~2 stops and greys around him on "
+            f"'{m.get('word_raw') or m.get('word')}' ({m['t']:.2f}-"
+            f"{end:.2f}s); he stays lit")
+    if name == "world_negative":
+        pay = _payoff(plan)
+        m = _strongest(plan, lambda x: _word(x) in NEGATION_WORDS
+                       and "negation" in _tags(x) and x["t"] >= 1.0)
+        if m is None:
+            return None, None, "no hard negation ('never', 'nothing') to land on"
+        if pay is not None and abs(float(pay["t"]) - float(m["t"])) < 0.3:
+            return None, None, "the negation is the payoff word: it keeps its own device"
+        return [{"id": nid(), "type": "subject", "stage": "world",
+                 "start": _fmt_t(m["t"]),
+                 "end": _fmt_t(m["t"] + _frames(2, fps) + 0.004),
+                 "kind": "negate", "scope": "background",
+                 "device": "subject_negate", "bind": _bind(m)}], m, (
+            f"the world inverts around him for 2 frames on "
+            f"'{m.get('word_raw') or m.get('word')}' at {m['t']:.2f}s")
+    if name == "colour_drain":
+        pay = _payoff(plan)
+        if pay is None:
+            return None, None, "no payoff for the colour to snap back on"
+        pt = float(pay["t"])
+        steps = sorted((x for x in plan["moments"]
+                        if x["kind"] in ("stress", "word")
+                        and _tags(x) & {"payload", "number"}
+                        and max(1.0, pt - 9.0) <= x["t"] < pt - 0.4),
+                       key=lambda x: x["t"])
+        picked = []
+        for x in reversed(steps):
+            if not picked or picked[-1]["t"] - x["t"] >= 0.6:
+                picked.append(x)
+            if len(picked) == 3:
+                break
+        picked.reverse()
+        if len(picked) < 3:
+            return None, None, "no build of three loaded words before the payoff"
+        edges = [float(x["t"]) for x in picked] + [pt]
+        if (pt - edges[0]) > MAX_MONO_SHARE * prog:
+            return None, None, "the build is too long a share of the short"
+        sats = (0.7, 0.42, 0.14)
+        items = []
+        for k, (a, b) in enumerate(zip(edges, edges[1:])):
+            it = {"id": nid(), "type": "grade_window", "stage": "world",
+                  "start": _fmt_t(a), "end": _fmt_t(b),
+                  "saturation": sats[k], "contrast": round(1.0 + 0.05 * k, 2),
+                  "device": "grade_section", "bind": _bind(picked[k])}
+            if k == len(sats) - 1:
+                it["ramp_out_f"] = 2         # colour lands ON the payoff
+            items.append(it)
+        return items, pay, (
+            "the colour drains in three steps on "
+            + ", ".join(f"'{x.get('word_raw') or x.get('word')}'"
+                        for x in picked)
+            + f" and snaps back ON '{pay.get('word_raw') or pay.get('word')}' "
+            f"at {pt:.2f}s")
     return None, None, f"recipe {name!r} has no builder"
 
 
@@ -479,6 +571,10 @@ def fit(name, plan, landing):
         "echo_trail": 0.3 if w in SPEED_WORDS else 0.0,
         "light_figure": 0.3 if w in LIGHT_WORDS or w in THERMAL_WORDS else
         0.1 if "emotion" in tags else 0.0,
+        "room_dims": 0.3 if tags & {"contrast"} else
+        0.2 if tags & {"negation", "emotion"} else 0.0,
+        "world_negative": 0.3 if w in NEGATION_WORDS else 0.0,
+        "colour_drain": 0.3 if _is_payoff(landing) else 0.1,
     }.get(name, 0.0)
     return round(min(1.0, 0.55 * base + bonus + 0.1), 3)
 

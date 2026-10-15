@@ -52,7 +52,10 @@ shorts must not wear one house style.
   mechanism or a number; `thermal_flip` — a breath of thermal on heat,
   energy, the body; `light_figure` — the world drops to black and the
   speaker glows in the accent; `echo_trail` — a trail of copies on a
-  speed word.
+  speed word; `room_dims` — the room drops two stops round the speaker on
+  the turn, he stays lit; `world_negative` — the world inverts round him
+  for two frames on a hard negation; `colour_drain` — a build drains to
+  grey step by step and the colour snaps back ON the payoff.
   Each names the word it
   lands on, why, a reference exemplar and the exact ops; moves the other
   shorts of the batch used rank lower (freshness).
@@ -60,10 +63,20 @@ shorts must not wear one house style.
   prefer a fresh one. `apply_recipe(name)` writes it; it is once per short,
   flash-safe unless the user asked for flashing, silent and zoom-free.
 - Recipes are a floor, not a ceiling. When the story calls for something no
-  recipe names, compose it from the devices below (a poster field in the
-  accent the captions use, a grade window that closes as the claim lands, a
-  type window onto the next shot) — invented, bound to a word, proved with
-  `proof_device`. Never re-apply last short's move because it worked there.
+  recipe names, compose it from the devices below — invented, bound to a
+  word, proved with `proof_device`. The same engines make moves nobody
+  has shown yet: the speaker's cut-out as a window onto the B-roll he is
+  describing (background kind source); the world stepping one stop darker
+  on each item of a list (subject exposure scope background, one window per
+  item); a poster field that takes the colour of the object he names; one
+  hue of the set kept while he says its name (isolate with a hue); his
+  clones appearing one per count ("one, two, three": echo offsets that
+  grow). Pick the one THIS story asks for. Never re-apply last short's
+  move because it worked there.
+- A flat colour laid under type (a silhouette fill, a poster field, a
+  solid background) must leave the lockup on it readable: white type on a
+  white silhouette washes out the payoff — make the silhouette black (the
+  planner and the recipes choose it for you).
 - Black and white is a device on a moment, never the whole short's look.
 
 ## Evidence to inspect

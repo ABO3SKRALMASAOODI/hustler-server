@@ -847,7 +847,8 @@ where the six tracks met; each item names its test.
 
 Recipes (`worker/recipes.py`): `mono_until_turn`, `colour_kept_payoff`,
 `silhouette_hold`, `negative_hits`, `white_silhouette`, `lab_scan`,
-`thermal_flip`, `light_figure`, `echo_trail`. Items are ordinary fx items with ids
+`thermal_flip`, `light_figure`, `echo_trail`, `room_dims`,
+`world_negative`, `colour_drain`. Items are ordinary fx items with ids
 `rc_<recipe>_<n>` (the freshness key), cards from the five tracks, written
 and removed through apply_edit_batch like any device. Once per short;
 flash-safe unless the user opted in; matte recipes warm the person matte.

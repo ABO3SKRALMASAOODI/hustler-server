@@ -220,3 +220,57 @@ def test_apply_recipe_at_moves_a_payoff_recipe_to_that_moment():
     agent_tools.TOOLS["apply_recipe"][0](ctx2, name="colour_kept_payoff")
     free = fake2.rows[-1]["json"]["fx"][0]
     assert abs(free["start"] + 0.5 - 6.3) > 1.5   # the planner's own payoff
+
+
+def _synthetic_plan(moments, payoff_t=None, program_s=20.0):
+    ms = [dict({"kind": "stress", "strength": 0.8, "tags": [],
+                "bind": {"on": "time", "ref": m["t"]}, "section": 0}, **m)
+          for m in moments]
+    pay = None
+    if payoff_t is not None:
+        pm = next(m for m in ms if m["t"] == payoff_t)
+        pm["payoff"] = True
+        pay = {"t": payoff_t, "moment": pm, "hold_end": payoff_t + 1.2}
+    return {"program_s": program_s, "fps": 30.0, "moments": ms,
+            "payoff": pay, "sections": [(0.0, program_s)]}
+
+
+def test_the_wider_range_recipes_land_on_their_words():
+    """Review (w1r): three more moves from the same engines, each on the
+    word that earns it — the room dims round the speaker on the turn, the
+    world inverts round him on a hard negation, a build drains to grey and
+    the colour snaps back ON the payoff."""
+    plan = _synthetic_plan([
+        {"t": 2.0, "word": "but", "tags": ["contrast"]},
+        {"t": 5.0, "word": "never", "tags": ["negation"]},
+        {"t": 8.0, "word": "ten", "tags": ["number", "payload"]},
+        {"t": 9.2, "word": "twenty", "tags": ["number", "payload"]},
+        {"t": 10.4, "word": "forty", "tags": ["number", "payload"]},
+        {"t": 12.0, "word": "free", "tags": ["payload"], "strength": 1.0}],
+        payoff_t=12.0)
+    edl = validate_edl(default_edl(30.0), 30.0).model_dump()
+    edl["keep"] = [[0.0, 20.0]]
+    items, m, why = recipes.build("room_dims", plan)
+    assert m["word"] == "but" and items[0]["scope"] == "background"
+    assert items[0]["kind"] == "exposure" and items[0]["ev"] < -1
+    assert items[0]["end"] - items[0]["start"] >= 1.2
+    items, m, why = recipes.build("world_negative", plan)
+    assert m["word"] == "never" and items[0]["scope"] == "background"
+    out = edit_batch.apply_batch(edl, [{"action": "upsert", "layer": "fx",
+                                        "id": i["id"], "value": i}
+                                       for i in items], 30.0, set())
+    assert flash_safety.assess(out)["peak_per_s"] <= 3
+    items, m, why = recipes.build("colour_drain", plan)
+    assert [round(i["saturation"], 2) for i in items] == [0.7, 0.42, 0.14]
+    assert items[-1]["end"] == 12.0 and m["word"] == "free"
+    assert [i["start"] for i in items] == [8.0, 9.2, 10.4]
+    out = edit_batch.apply_batch(edl, [{"action": "upsert", "layer": "fx",
+                                        "id": i["id"], "value": i}
+                                       for i in items], 30.0, set())
+    assert mono_policy.whole_mono(out) is None
+    # no build: no drain; the negation that IS the payoff keeps its device
+    plan2 = _synthetic_plan([{"t": 6.0, "word": "never",
+                              "tags": ["negation"], "strength": 1.0}],
+                            payoff_t=6.0)
+    assert recipes.build("colour_drain", plan2)[0] is None
+    assert recipes.build("world_negative", plan2)[0] is None
