@@ -152,7 +152,8 @@ def test_stills_pillow_cannot_convert_faithfully_are_left_to_ffmpeg(tmp_path):
     Image.new("CMYK", (5000, 4000), (0, 50, 100, 0)).save(cmyk)
     assert renderer._insert_still(cmyk, {"kind": "image"}, 1080, 1920,
                                   str(tmp_path)) == cmyk
-    anim = str(tmp_path / "loop.webp")
+    # APNG: written by Pillow without optional codec libraries (CI).
+    anim = str(tmp_path / "loop.png")
     frames = [Image.new("RGB", (4000, 4000), (i * 60, 0, 0))
               for i in range(3)]
     frames[0].save(anim, save_all=True, append_images=frames[1:],
