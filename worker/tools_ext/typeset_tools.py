@@ -126,15 +126,17 @@ def _composite_live():
         return False
 
 
-def solve_into(ctx, edl, item):
+def solve_into(ctx, edl, item, faces=None):
     """Solve ``item`` for this edit's canvas: returns (item with layer and
-    footprint, doc, notes) or (None, doc, reason)."""
+    footprint, doc, notes) or (None, doc, reason). ``faces`` ([] over a
+    black card) overrides the faces measured on the footage."""
     import caption_carry
     import motion_tools
     from typeset import layoutdoc
     W, H = motion_tools._canvas_size(ctx, edl)
     s, e = float(item["start"]), float(item["end"])
-    faces = _faces(ctx, edl, W, H, s, e)
+    if faces is None:
+        faces = _faces(ctx, edl, W, H, s, e)
     # the reading the render will use (caption_carry: reads_onsets)
     try:
         trial = dict(edl, motion=[m for m in edl.get("motion") or []
@@ -179,6 +181,44 @@ def solve_into(ctx, edl, item):
         item["footprint"] = caption_carry.make_footprint(box, W, H, faces,
                                                          geo=geo)
     return item, doc, notes
+
+
+def build_item(ctx, edl, text, s, e, mid, voice="auto", depth="front",
+               position="auto", faces=None, avoid=(), verb="auto"):
+    """(typeset item solved for this canvas, None) or (None, reason): the
+    write-free core of add_typeset for planners that fill type slots
+    (plan_to_music's call-and-response, 2F formats)."""
+    import creative
+    import motion_templates
+    text = " ".join(str(text).split())
+    if not text:
+        return None, "no words"
+    words = text.replace("*", " ").split()
+    if len(words) > MAX_WORDS:
+        text = " ".join(text.split()[:MAX_WORDS])
+    prog = float(_tl(edl).out_duration or 0.0)
+    if voice in (None, "", "auto"):
+        pos = position if position in POSITIONS[1:] else _position(
+            edl, s, e, prog)
+        voice, _why = creative.pick_voice(
+            text, position=pos, ledger=creative.variety_ledger(edl, upto=s),
+            seed=_seed(ctx, text), avoid=tuple(avoid or ()))
+    params = _params(text, voice, "auto", depth, verb or "auto", None, None,
+                     None,
+                     None, None, None, None, None, _seed(ctx, text) % 997,
+                     None, None)
+    try:
+        params = motion_templates.check_params("typeset", params)
+    except ValueError as err:
+        return None, str(err)
+    item = {"id": mid, "template": "typeset", "start": round(float(s), 2),
+            "end": round(float(e), 2), "params": params,
+            "layer": "above_captions",
+            "purpose": "typeset lockup (replaces the captions for its words)"}
+    item, doc, notes = solve_into(ctx, edl, item, faces=faces)
+    if item is None:
+        return None, notes
+    return item, None
 
 
 def _summary(item, doc):

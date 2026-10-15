@@ -105,7 +105,9 @@ ENTRANCE_S = 0.25           # probe samples before this are entrance motion
 # is to point AT something (they may target the face on purpose).
 EXEMPT_CATEGORIES = frozenset(("transition", "texture"))
 EXEMPT_TEMPLATES = frozenset(("arrow_callout", "circle_highlight",
-                              "focus_spotlight", "caption_motion"))
+                              "focus_spotlight", "caption_motion",
+                              # W2 2D: full-frame b-roll (covers by design)
+                              "still_motion"))
 HORIZONTAL_KEYS = ("align", "side")
 
 # ── captions ──────────────────────────────────────────────────────────────

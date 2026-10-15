@@ -89,6 +89,7 @@ CARD_PREFIXES = {"type": "1A", "subject": "1B", "background": "1B",
 # Sidecar kinds a card may need (INTERFACES.md §2.1; reserved names only).
 SIDECAR_KINDS = ("matte.person", "faces.yunet", "rhythm.music",
                  "rhythm.speech", "embed.siglip2", "embed.dinov2",
+                 "embed.classic",
                  "landmarks.face", "landmarks.hand", "landmarks.pose",
                  "track.points", "camera.motion", "objects.sam2",
                  "depth.small", "planes.h", "plate.clean", "ocr.text")
