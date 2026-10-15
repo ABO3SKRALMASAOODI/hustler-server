@@ -38,6 +38,7 @@ import follow
 import fxgraph
 import gradelut
 import graphics
+import matte_track
 import media
 import render_plan
 import screenframe
@@ -3088,6 +3089,35 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     vo_inputs = vo_inputs or []
     n = len(keep)
     parts = []
+    # The program matte (Wave 1, track 1A): built only when this render's
+    # fx compilers or behind-subject items asked for it and something under
+    # their windows is measured (worker/matte_track.py). None: not one mask
+    # filter is added (md5 identity).
+    pm = getattr(fx_plan, "pm", None) if fx_plan is not None else None
+    if pm is not None and not (pm.active and pm.wants):
+        pm = None
+    if pm is not None:
+        pm.begin_graph()
+    pm_cur = {}                     # label -> the matte's current label
+
+    def _mask_kernels(parts_, mark):
+        """A program-matte block's chain (parts_[mark:]) resampled as a
+        MASK: the picture's enlarging kernel (lanczos) and its luma
+        sharpen give a matte ringing and cost the most per frame; the
+        geometry — every crop, size and offset — is untouched."""
+        sharp = f",unsharp=3:3:{UPSCALE_SHARPEN:.2f}:3:3:0"
+        for k_ in range(mark, len(parts_)):
+            p_ = parts_[k_].replace(sharp, "")
+            if UPSCALE_SCALER and UPSCALE_SCALER != "bilinear":
+                p_ = p_.replace(f":flags={UPSCALE_SCALER}", ":flags=bilinear")
+            parts_[k_] = p_
+
+    def _pm_chain(chain, tag):
+        """The picture's post-concat geometry, on the matte too."""
+        for lab in list(pm_cur):
+            out = f"pm{lab[0]}{tag}"
+            parts.append(f"[{pm_cur[lab]}]{chain},format=gray[{out}]")
+            pm_cur[lab] = out
 
     if n > 0:
         if stem_inputs:
@@ -3801,9 +3831,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             return (tmap, None if tmap is None else (0.0, e_ - s_),
                     [t - s_ for t in ts_], xs_, ys_)
 
-        def _full_frame(i, in_label, out_label, uid):
-            """Block i composed as the program shows it full-frame."""
+        def _full_frame(i, in_label, out_label, uid, mask=False):
+            """Block i composed as the program shows it full-frame.
+            ``mask``: the same geometry for a program-matte block (no grade;
+            a blurred-backdrop pad is a black one — the backdrop is not the
+            subject)."""
             seg_focus, seg_mode = _frame_for(*keep[i])
+            grade = None if mask else block_grade
+            if mask and seg_mode == "pad_blur":
+                seg_mode = "pad"
             fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
                      if _fspans and seg_mode == "crop" else None)
             if fspan and main_src_size and follow.moves(fspan):
@@ -3811,7 +3847,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                               uid, _follow_of(i, fspan), seg_out_len[i],
                               blk_frames.get(("seg", i)), main_src_size,
                               (edl.get("frame") or {}).get("picture"),
-                              block_grade, follow_interp)
+                              grade, follow_interp)
                 return
             if fspan:
                 # one held position: the static crop, aimed there
@@ -3821,7 +3857,33 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                              seg_dur=seg_out_len[i],
                              frames=blk_frames.get(("seg", i)),
                              picture=(edl.get("frame") or {}).get("picture"),
-                             grade=block_grade, src_size=main_src_size)
+                             grade=grade, src_size=main_src_size)
+
+        def _card_block(i, seg_in, out_label, uid, under=None, mask=False):
+            """Block i composed for its source-fed card (``mask``: the same
+            panels for a program-matte block — no grade, grain, tag or
+            conceal: geometry only)."""
+            cspan = card_layout[i][2] if len(card_layout[i]) > 2 else None
+            pspans = card_layout[i][4] if len(card_layout[i]) > 4 else None
+            picture_cards.layout_filter(
+                parts, seg_in, out_label, W, H, fps,
+                card_layout[i][0], uid, src_size=main_src_size,
+                seg_dur=seg_out_len[i],
+                grade=None if mask else block_grade,
+                tag=None if mask else card_layout[i][1],
+                frames=blk_frames.get(("seg", i)),
+                follow_block=(_follow_of(i, cspan) + (follow_interp,)
+                              if cspan and follow.moves(cspan) else None),
+                bounded=bool(len(card_layout[i]) > 3
+                             and card_layout[i][3]),
+                under=under, dissolve=card_dissolve.get(i) if under else None,
+                panel_follow=[_follow_of(i, sp) + (follow_interp,)
+                              if sp and follow.moves(sp) else None
+                              for sp in pspans] if pspans else None,
+                grain=(None if mask else card_layout[i][5]
+                       if len(card_layout[i]) > 5 else None),
+                panel_conceal=(None if mask else card_layout[i][6]
+                               if len(card_layout[i]) > 6 else None))
 
         for i in range(n):
             # frame_focus reaches ONLY the main footage: the focus point was
@@ -3977,6 +4039,139 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                          f"asetpts=PTS-STARTPTS,{AUDIO_NORM}[a_ins{j}]")
             sil_i += 1
 
+    # ---- the program matte's blocks (Wave 1, track 1A) -------------------
+    # Every render block again, on the matte (worker/matte_track.py): the
+    # source-clock mask trimmed exactly like the picture's block (same span,
+    # same speed pieces), then the same normalize / follow / card geometry
+    # and the same block tail — so each mask frame lands on the picture
+    # frame it was measured on, cut for cut, reframe for reframe. Inserts
+    # are black (no main-footage subject); a payoff hold holds the matte's
+    # last frame like the picture's.
+    pm_blk = {}                     # (label, kind, idx) -> mask block label
+    pm_up = {}                      # label -> its upscale to the source size
+    pm_grid = pm_cover = None
+    if pm is not None and do_norm and n > 0:
+        grid = pm_grid = (focus_origin if focus_origin is not None else 0.0,
+                          float(src_fps or fps))
+        # Only the blocks under a window someone asked for carry the
+        # matte; every other block is black (inert) and costs nothing —
+        # one text behind the subject in a minute-long program decodes and
+        # reframes the matte of its own seconds, not the minute's.
+        seg_win, acc_ = {}, 0.0
+        for kind_, idx_, L_ in order:
+            Lb = blk_len.get((kind_, idx_), L_)
+            if kind_ == "seg":
+                seg_win[idx_] = (acc_, acc_ + Lb)
+            elif idx_ in hold_prev:
+                a_, b_ = seg_win[hold_prev[idx_]]
+                seg_win[hold_prev[idx_]] = (a_, acc_ + Lb)   # it holds on
+            acc_ += Lb
+        f3k = round(float(fps), 3)
+        pm_need = {i for i in range(n)
+                   if not blk_frames.get(("seg", i))
+                   or any(t1 > seg_win[i][0] - 2.0 / f3k
+                          and t0 < seg_win[i][1] + 2.0 / f3k
+                          for t0, t1, *_r in pm.wants)}
+        cover = pm_cover = [(float(s), float(_video_end(i, e)))
+                            for i, (s, e) in enumerate(keep)
+                            if i in pm_need] or [(float(keep[0][0]),
+                                                  float(keep[0][1]))]
+        f3j = round(float(fps), 3)
+        for sp_ in fx_juncs:
+            # junction handles read past an out-point / before an in-point
+            for key_ in ("a_src", "b_src"):
+                hs = sp_.get(key_)
+                if not hs:
+                    continue
+                s0 = float(keep[hs["seg"]][0])
+                if key_ == "a_src":
+                    cover.append((s0, s0 + (hs["frames"] + sp_["h"] + 2)
+                                  / f3j))
+                else:
+                    cover.append((float(hs["start"]), s0 + 2.0 / f3j))
+        for lab in pm.streams():
+            x = lab[0]
+            dims = pm.dims(lab)
+            up = ""
+            if main_src_size and tuple(dims) != tuple(main_src_size):
+                up = (f",scale={main_src_size[0]}:{main_src_size[1]}"
+                      ":flags=bilinear,format=gray")
+            pm_up[lab] = up
+            for i, (s, e) in enumerate(keep):
+                if i not in pm_need:
+                    nf = blk_frames[("seg", i)]
+                    parts.append(f"color=c=black:s={W}x{H}:r={f3k:.3f}:"
+                                 f"d={(nf + 2) / f3k:.6f},format=gray,"
+                                 f"trim=end_frame={nf},setpts=PTS-STARTPTS"
+                                 f"[pm{x}b{i}]")
+                    pm_blk[(lab, "seg", i)] = f"pm{x}b{i}"
+                    continue
+                tap = pm.source_tap(parts, lab, cover, grid)
+                raw = f"pm{x}r{i}"
+                if speed:
+                    pcs = seg_pcs[i]
+                    qs = [f"pm{x}q{i}_{j}" for j in range(len(pcs))]
+                    parts.append(f"[{tap}]split={len(qs)}"
+                                 + "".join(f"[{q}]" for q in qs)
+                                 if len(qs) > 1 else f"[{tap}]null[{qs[0]}]")
+                    zs = []
+                    for j, (ps, pe, f) in enumerate(pcs):
+                        spts = "" if abs(f - 1.0) < 1e-9 else f"/{f:.4f}"
+                        parts.append(f"[{qs[j]}]trim=start={ps:.3f}:"
+                                     f"end={pe:.3f},setpts=(PTS-STARTPTS)"
+                                     f"{spts}[pm{x}z{i}_{j}]")
+                        zs.append(f"pm{x}z{i}_{j}")
+                    parts.append(f"[{zs[0]}]null{up}[{raw}]" if len(zs) == 1
+                                 else "".join(f"[{z}]" for z in zs)
+                                 + f"concat=n={len(zs)}:v=1:a=0{up}[{raw}]")
+                else:
+                    ev = _video_end(i, e)
+                    parts.append(f"[{tap}]trim=start={s:.3f}:end={ev:.3f},"
+                                 f"setpts=PTS-STARTPTS{up}[{raw}]")
+                out = f"pm{x}b{i}"
+                mark = len(parts)
+                if i in card_layout:
+                    under = None
+                    if i in card_dissolve:
+                        parts.append(f"[{raw}]split[{raw}u][{raw}l]")
+                        _full_frame(i, f"{raw}u", f"{out}u", f"m{x}{i}u",
+                                    mask=True)
+                        under, raw = f"{out}u", f"{raw}l"
+                    _card_block(i, raw, f"{out}y", f"m{x}{i}", under=under,
+                                mask=True)
+                else:
+                    _full_frame(i, raw, f"{out}y", f"m{x}{i}", mask=True)
+                _mask_kernels(parts, mark)
+                parts.append(f"[{out}y]format=gray[{out}]")
+                pm_blk[(lab, "seg", i)] = out
+            f3 = round(float(fps), 3)
+            for j, (_idx, item, _ha) in enumerate(insert_inputs):
+                nf = blk_frames.get(("ins", j))
+                out = f"pm{x}i{j}"
+                if j in hold_prev:
+                    i_prev = hold_prev[j]
+                    prev = pm_blk[(lab, "seg", i_prev)]
+                    parts.append(f"[{prev}]split[{prev}h][{out}s]")
+                    pm_blk[(lab, "seg", i_prev)] = f"{prev}h"
+                    parts.extend(hold_video_parts(
+                        f"{out}s", f"{out}y", blk_frames[("seg", i_prev)],
+                        nf, None, tag=f"pm{x}h{j}"))
+                    parts.append(f"[{out}y]format=gray[{out}]")
+                elif nf:
+                    parts.append(f"color=c=black:s={W}x{H}:r={f3:.3f}:"
+                                 f"d={(nf + 2) / f3:.6f},format=gray,"
+                                 f"trim=end_frame={nf},setpts=PTS-STARTPTS"
+                                 f"[{out}]")
+                else:
+                    dur = float(item["duration_s"])
+                    parts.append(f"color=c=black:s={W}x{H}:r={f3:.3f}:"
+                                 f"d={dur + 0.5:.6f},format=gray,"
+                                 f"trim=end={dur:.3f},setpts=PTS-STARTPTS"
+                                 f"[{out}]")
+                pm_blk[(lab, "ins", j)] = out
+    elif pm is not None:
+        pm = None                   # no block chain to mirror: no matte
+
     # program order: inserts splice at their keep boundary, before the
     # segment that starts there (mirrors Timeline)
     blocks, ins_j, pre = [], 0, 0.0
@@ -4107,6 +4302,75 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # compiled window replaces program frames [cut-h, cut+h) after concat.
     # No junction items: nothing here runs.
     fx_windows = []
+    pm_blk_taps = {}
+
+    def pm_blk_tap(lab, kind, idx):
+        """A program-matte block, shared by the matte's concat and any
+        junction handle that asks for it (matte_track.Tap)."""
+        key = (lab, kind, idx)
+        if key not in pm_blk_taps:
+            pm_blk_taps[key] = matte_track.Tap(pm_blk[key])
+            pm.extra_taps.append(pm_blk_taps[key])
+        return pm_blk_taps[key]
+
+    def _pm_handle(spec, side):
+        """fxgraph.handle_matte for one junction side (INTERFACES_W1.md
+        §1.2): the person matte of the side's 2h-frame handle stream — the
+        block's own last (first) h matte frames and h frames of the matte
+        measured past its out-point (before its in-point), normalized like
+        the picture's handle; frozen where the picture's edge frame is."""
+        if pm is None or "person" not in pm.streams():
+            return None
+        lab, h, ka = "person", spec["h"], spec["k"]
+        k = ka if side == "a" else ka + 1
+        kind, idx, _L = order[k]
+        f3 = round(float(fps), 3)
+        uu = f"pmpj{ka}{side}"
+        own = pm_blk_tap(lab, kind, idx).take()
+        nb = blk_frames[(kind, idx)]
+        sel = (f"trim=start_frame={max(0, nb - h)}" if side == "a"
+               else f"trim=end_frame={h}")
+        parts.append(f"[{own}]{sel},setpts=PTS-STARTPTS[{uu}o]")
+        src = spec.get(f"{side}_src")
+        tail = f"fps={f3:.3f},setpts=PTS-STARTPTS,setsar=1,format=yuv420p"
+        if not src:
+            pad = (f"tpad=stop_mode=clone:stop={h}" if side == "a"
+                   else f"tpad=start_mode=clone:start={h}")
+            parts.append(f"[{uu}o]{pad},{tail},format=gray[{uu}m]")
+            return f"{uu}m"
+        i = src["seg"]
+        if side == "a":
+            a0 = float(keep[i][0])
+            a1 = a0 + (src["frames"] + h + 2) / f3
+            pick = (f"trim=start_frame={src['frames']}:"
+                    f"end_frame={src['frames'] + h}")
+        else:
+            a0 = float(src["start"])
+            a1 = float(keep[i][0]) + 2.0 / f3
+            pick = f"trim=end_frame={h}"
+        tap = pm.source_tap(parts, lab, pm_cover, pm_grid)
+        parts.append(f"[{tap}]trim=start={a0:.3f}:end={a1:.3f},"
+                     f"setpts=PTS-STARTPTS,fps={f3:.3f},{pick},"
+                     f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop={h},"
+                     f"trim=end_frame={h}{pm_up[lab]}[{uu}r]")
+        seg_focus, seg_mode = _frame_for(*keep[i])
+        if seg_mode == "pad_blur":
+            seg_mode = "pad"
+        fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
+                 if _fspans and seg_mode == "crop" else None)
+        if fspan:
+            edge = float(keep[i][1]) if side == "a" else float(keep[i][0])
+            seg_focus = follow.centre_at(fspan, edge)
+        mark = len(parts)
+        _normalize_video(parts, f"{uu}r", f"{uu}h", W, H, fps, seg_mode,
+                         f"{uu}n", focus=seg_focus, seg_dur=h / f3, frames=h,
+                         picture=(edl.get("frame") or {}).get("picture"),
+                         grade=None, src_size=main_src_size)
+        _mask_kernels(parts, mark)
+        pair = (f"[{uu}o][{uu}h]" if side == "a" else f"[{uu}h][{uu}o]")
+        parts.append(f"{pair}concat=n=2:v=1:a=0,{tail},format=gray[{uu}m]")
+        return f"{uu}m"
+
     for spec in fx_juncs:
         h, ka, kb = spec["h"], spec["k"], spec["k"] + 1
         u = f"fxj{ka}"
@@ -4176,13 +4440,31 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             {"k": ka, "frame": spec["frame"], "h": h, "items": spec["items"],
              "at": spec["frame"] / f3,
              "a_handle": "source" if spec.get("a_src") else "freeze",
-             "b_handle": "source" if spec.get("b_src") else "freeze"},
+             "b_handle": "source" if spec.get("b_src") else "freeze",
+             # fxgraph.handle_matte (Wave 1, 1A): the sides' person matte
+             **({"matte": (lambda side, _sp=spec: _pm_handle(_sp, side))}
+                if pm is not None and pm_blk else {})},
             fx_plan)
         if jw:
             fx_windows.append((spec["frame"], h, jw))
 
     pairs = "".join(f"[{v}][{a}]" for v, a, _d in blocks)
     parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
+    if pm is not None:
+        # the matte's blocks in the very order the picture's were joined
+        for lab in pm.streams():
+            labs = [pm_blk_tap(lab, kind, idx).take()
+                    for kind, idx, _L in order]
+            out = f"pm{lab[0]}w0"
+            parts.append(f"[{labs[0]}]null[{out}]" if len(labs) == 1 else
+                         "".join(f"[{x}]" for x in labs)
+                         + f"concat=n={len(labs)}:v=1:a=0[{out}]")
+            edge = matte_track.edge_lut() if lab == "person" else None
+            if edge:
+                # the edge at render resolution (matte_track.edge_lut)
+                parts.append(f"[{out}]lut=c0='{edge}'[{out}e]")
+                out = f"{out}e"
+            pm_cur[lab] = out
 
     vlabel = "vc"
     if fx_windows:
@@ -4283,6 +4565,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 parts.append(f"[wov]dblur=angle=0:radius={blur_r}:"
                              f"enable='{en}'[vwhip]")
                 vlabel = "vwhip"
+                for lab in list(pm_cur):
+                    # the matte whips off and in with the picture, over black
+                    x = lab[0]
+                    parts.append(f"color=c=black:s={W}x{H}:r={fps:.3f}:"
+                                 f"d={total_bd:.3f},format=gray[pm{x}wbg]")
+                    parts.append(f"[pm{x}wbg][{pm_cur[lab]}]overlay="
+                                 f"x='{'+'.join(xterms)}':y=0:"
+                                 f"eof_action=pass,dblur=angle=0:"
+                                 f"radius={blur_r}:enable='{en}',"
+                                 f"format=gray[pm{x}wh]")
+                    pm_cur[lab] = f"pm{x}wh"
         else:                          # zoom_punch
             # Accelerating push INTO the cut; the next block lands from an
             # over-zoom and settles. zoompan needs CFR (do_norm forced), so
@@ -4318,9 +4611,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                         f"/{td_i:.3f}),2)*{_win(T, c, c + td_i)}")
             if zterms:
                 mark = len(parts)
-                parts.append(f"[{vlabel}]zoompan=z='1+{'+'.join(zterms)}'"
-                             f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                             f":d=1:s={W}x{H}:fps={fps:.3f}[vpunch]")
+                zp = (f"zoompan=z='1+{'+'.join(zterms)}'"
+                      f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                      f":d=1:s={W}x{H}:fps={fps:.3f}")
+                parts.append(f"[{vlabel}]{zp}[vpunch]")
+                _pm_chain(zp, "zp")
                 vlabel = (_keep_layout_tags(parts, mark, vlabel, "vpunch",
                                             "tp", fps)
                           if card_runs else "vpunch")
@@ -4451,13 +4746,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             winT = win.replace("t,", f"{T},") if win != "1" else "1"
             amp = (W or 1280) * 0.006 * (0.5 + i_)
             z_amt = 0.04 + 0.06 * i_
-            parts.append(
-                f"[{vlabel}]zoompan=z='1+{z_amt:.3f}*({winT})'"
-                f":x='iw/2-(iw/zoom/2)+{amp:.1f}*sin({T}*{13 + 8 * i_:.1f})"
-                f"*({winT})'"
-                f":y='ih/2-(ih/zoom/2)+{amp * 0.7:.1f}*cos({T}*{11 + 6 * i_:.1f})"
-                f"*({winT})'"
-                f":d=1:s={W}x{H}:fps={fps:.3f}[{out_lab}]")
+            zp = (f"zoompan=z='1+{z_amt:.3f}*({winT})'"
+                  f":x='iw/2-(iw/zoom/2)+{amp:.1f}*sin({T}*{13 + 8 * i_:.1f})"
+                  f"*({winT})'"
+                  f":y='ih/2-(ih/zoom/2)+{amp * 0.7:.1f}*cos({T}*{11 + 6 * i_:.1f})"
+                  f"*({winT})'"
+                  f":d=1:s={W}x{H}:fps={fps:.3f}")
+            parts.append(f"[{vlabel}]{zp}[{out_lab}]")
+            _pm_chain(zp, f"sk{si}")
         elif kind == "stabilize":
             # deshake performs temporal block matching and has no timeline
             # `enable`; schema/tool validation therefore make it whole-video
@@ -4509,6 +4805,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                                         f"c{ci}", fps)
         vlabel = out_lab
 
+    # ---- the program matte in WORLD space: the picture's geometry before
+    # the camera (Wave 1, track 1A). Its consumers each take a fresh copy.
+    if pm is not None:
+        for lab in pm.streams():
+            pm.set_world(lab, pm_cur[lab])
+
     # ---- fx: world stage (Wave 0 seams) — on the footage, before the
     # behind-subject composite and the camera, so it rides every zoom.
     vlabel = _fx_picture_stage("world", parts, vlabel, fx_plan, card_runs,
@@ -4537,7 +4839,87 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # Motion graphics on layer='behind_subject' use the very same composite:
     # their entry carries {"motion": (clip_input, item, clip)} instead of an
     # ASS file, and the clip is overlaid on the copy where the words burn.
+    def _pm_window(j, win, space, seg):
+        """The program matte (``space``) over one item's window, black
+        (inert) on the rest of ``seg`` = [a, b) program frames — the frames
+        the item's composite runs on, stamped where they sit in the
+        program. None: no matte on this render."""
+        pad = pm.pad(space, "person") if pm is not None else None
+        if pad is None:
+            return None
+        f0, f1 = fxgraph.fxprims.frame_span(win[0], win[1], fps)
+        a, b = seg
+        # the composite's own edge: a pixel or two inside the subject's
+        # contour, so no sliver of the wall behind the subject is laid
+        # over the type (matte_track.behind_inset)
+        shrink = matte_track.behind_inset(H)
+        parts.append(f"[{pad}]trim=start_frame={f0}:end_frame={f1},"
+                     f"setpts=PTS-STARTPTS{shrink},"
+                     f"tpad=start={f0 - a}:stop={max(0, b - f1) + 2}:"
+                     "start_mode=add:stop_mode=add:color=black,"
+                     # rounded, never truncated: N/fps/TB on a 1/fps
+                     # link is 56.999... for N = 57 at 25 fps, and a
+                     # truncated stamp pairs the frame one early
+                     f"setpts='floor((N+{a})/{fxgraph.fxprims.fps3(fps):.3f}"
+                     f"/TB+0.5)',format=gray[bhm{j}]")
+        return f"bhm{j}"
+
+    def _pm_composite(j, vlabel, item, win, space):
+        """One program-matte item composited behind the subject ON ITS OWN
+        FRAMES: the picture's window (two frames either side) is split off
+        with its timestamps, composited there (motion_layer.composite_behind,
+        the seam 1C extends) and laid back over the untouched picture — the
+        rest of the programme passes through without a mask, an alphamerge
+        or an overlay pass of its own. None: no matte on this render."""
+        f0, f1 = fxgraph.fxprims.frame_span(win[0], win[1], fps)
+        seg = (max(0, f0 - 2), f1 + 2)
+        mask = _pm_window(j, win, space, seg)
+        if mask is None:
+            return None
+        parts.append(f"[{vlabel}]split[pcf{j}][pcs{j}]")
+        parts.append(f"[pcs{j}]trim=start_frame={seg[0]}:"
+                     f"end_frame={seg[1]}[pcw{j}]")
+        comp = motion_layer.composite_behind(
+            parts, f"pcw{j}", mask, j, fps=fps, motion=item.get("motion"),
+            ass_path=item.get("ass"), fonts_dir=caplib.FONTS_DIR,
+            plan=fx_plan)
+        parts.append(f"[pcf{j}][{comp}]overlay=0:0:eof_action=pass[pco{j}]")
+        return f"pco{j}"
+
+    def _in_front(j, vlabel, item):
+        """A program-matte item this render cannot set behind (the fx
+        graph fell back, the matte was dropped): drawn in front, as Wave 0
+        demoted it — a hero word is not drawn over the face."""
+        if item.get("motion"):
+            m_idx, m_item, m_clip = item["motion"]
+            if motion_layer.is_hero(m_item):
+                motion_layer.warn(f"hero word '{m_item.get('id')}' not "
+                                  "drawn: its person matte is unavailable")
+                return vlabel
+            motion_layer.warn(f"motion '{m_item.get('id')}' rendered above "
+                              "the picture instead of behind the subject: "
+                              "its person matte is unavailable on this "
+                              "render")
+            return motion_layer.overlay_clip(parts, vlabel, m_idx, m_item,
+                                             m_clip, fps, f"mgs{j}")
+        print(f"[render] behind-text {(item.get('item') or {}).get('id')}: "
+              "its person matte is unavailable on this render — burning it "
+              "as a plain title", flush=True)
+        parts.append(f"[{vlabel}]subtitles=filename='{item['ass']}'"
+                     f":fontsdir='{caplib.FONTS_DIR}'[bht{j}]")
+        return f"bht{j}"
+
+    screen_behind = []
     for j, (idx, item, win) in enumerate(behind_inputs or []):
+        if item.get("program"):
+            # through the program matte (Wave 1): a screen-locked item
+            # (composite.stage 'screen') after the camera, the rest here
+            if item.get("stage") == "screen":
+                screen_behind.append((j, item, win))
+                continue
+            out = _pm_composite(j, vlabel, item, win, "world")
+            vlabel = out if out is not None else _in_front(j, vlabel, item)
+            continue
         b_start, b_end = win
         b_dur = max(0.05, b_end - b_start)
         tail_pad = max(0.0, tl.out_duration - b_end)
@@ -4570,24 +4952,15 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             chain.append(f"tpad=stop_duration={tail_pad + 1.0:.3f}"
                          f":stop_mode=add:color=black")
         parts.append(f"[{idx}:v]{','.join(chain)}[bhm{j}]")
-        parts.append(f"[{vlabel}]split[bhb{j}][bhf{j}]")
-        if item.get("motion"):
-            # A browser-rendered motion graphic (layer='behind_subject'),
-            # composited on a copy of the picture in its program window...
-            m_idx, m_item, m_clip = item["motion"]
-            bht = motion_layer.overlay_clip(parts, f"bhb{j}", m_idx, m_item,
-                                            m_clip, fps, f"mgs{j}")
-        else:
-            # The words, burned on a copy of the picture...
-            parts.append(f"[bhb{j}]subtitles=filename='{item['ass']}'"
-                         f":fontsdir='{caplib.FONTS_DIR}'[bht{j}]")
-            bht = f"bht{j}"
-        # ...and the subject, lifted off the OTHER copy by the mask and laid
-        # back over them.
-        parts.append(f"[bhf{j}][bhm{j}]alphamerge[bhfa{j}]")
-        parts.append(f"[{bht}][bhfa{j}]overlay=0:0:format=auto"
-                     f":eof_action=pass[vbh{j}]")
-        vlabel = f"vbh{j}"
+        # The words (an ASS file) or a browser-rendered motion graphic
+        # (layer='behind_subject') drawn on one copy of the picture in its
+        # program window, and the subject, lifted off the OTHER copy by the
+        # mask, laid back over them (motion_layer.composite_behind: exactly
+        # the filters this loop emitted inline before Wave 1).
+        vlabel = motion_layer.composite_behind(
+            parts, vlabel, f"bhm{j}", j, fps=fps, motion=item.get("motion"),
+            ass_path=item.get("ass"), fonts_dir=caplib.FONTS_DIR,
+            plan=fx_plan)
 
     # A takeover always aims (at the screen), so it forces the targeted branch
     # for the whole camera. It must be decided BEFORE the zoom loop: that loop
@@ -4697,6 +5070,18 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             vlabel, "vzoom", W, H, fps, shots, targeted=zoom_targeted,
             interpolation=cam_interp))
         vlabel = "vzoom"
+    if pm is not None and shots and ("screen" in pm.spaces or screen_behind):
+        # the program matte in SCREEN space: the same camera on the matte
+        pm.build_screen(parts, lambda a, b: camera.camera_chain(
+            a, b, W, H, fps, shots, targeted=zoom_targeted,
+            interpolation=cam_interp), force=bool(screen_behind))
+    # ---- screen-locked words / graphics BEHIND the subject (Wave 1, 1A) --
+    # composite.stage 'screen': composited after the camera through the
+    # screen-space matte, so a push the user asked for moves the picture
+    # and the subject while the type holds still (ROADMAP AT-1A-3).
+    for j, item, win in screen_behind:
+        out = _pm_composite(j, vlabel, item, win, "screen")
+        vlabel = out if out is not None else _in_front(j, vlabel, item)
     # ---- screen takeovers (round 55): content pinned INTO the footage ----
     # Emitted after the zoom because the corner path is written in POST-push
     # screen space, and before the PIP overlays because a takeover is the
@@ -4931,6 +5316,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # aspect bars, the screen-frame plate, the watermark and the end card
     # (owner rule 4; tests/test_w0b_render.py pins it bit-exact).
     vlabel = fxgraph.apply_stage("over_type", parts, vlabel, fx_plan)
+    if pm is not None:
+        # every program-matte branch nobody took ends here, before the
+        # bars, the plate, the watermark and the end card
+        pm.close(parts)
     # ---- mid-video aspect change (round 51) -----------------------------
     # The bars go on ABOVE the captions on purpose: when the frame narrows to
     # 9:16, anything outside the new window is outside the FRAME, and a caption
@@ -6051,12 +6440,22 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
         return _render_media_run(cmd, cancelled_cb=cancelled_cb, **run_kw)
     except media.MediaError as e:
         plan = fx_box[0]
-        if plan is None or plan.empty or (cancelled_cb and cancelled_cb()) \
+        # a program matte (Wave 1, 1A) is fx plumbing too: an EDL whose only
+        # device is a word behind the subject retries without it as well —
+        # but only when the graph carried one (every render with an indexed
+        # source holds a ProgramMatte; one nothing asked for emits nothing,
+        # and its failure is the legacy graph's, raised as before)
+        pm = getattr(plan, "pm", None)
+        pm_on = pm is not None and bool(pm.active and pm.wants)
+        if plan is None or (plan.empty and not pm_on) \
+                or (cancelled_cb and cancelled_cb()) \
                 or "timed out" in str(e) or "cancelled" in str(e):
             raise
         print(f"[render] fx graph failed ({str(e).splitlines()[-1][:200] if str(e) else e!r})"
               " — re-rendering without fx", flush=True)
         fx_box[0] = fxgraph.without_fx(plan, e)
+        if getattr(fx_box[0], "pm", None) is not None:
+            fx_box[0].pm = None        # the behind items are drawn in front
         return _render_media_run(rebuild(), cancelled_cb=cancelled_cb,
                                  **run_kw)
 
@@ -6467,8 +6866,108 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # framing it composites into: after a set_frame the mask would cut the
     # subject out of the old crop's coordinates.
     geom_now = subject_matte_geom(edl.get("frame"))
+    # ---- the program matte (Wave 1, track 1A; worker/matte_track.py) ----
+    # One person matte for the whole program, measured once in SOURCE space
+    # (matte.person sidecars) and carried through the picture's own block
+    # chain. It serves every behind-subject item whose stored mask no longer
+    # fits (a follow crop, a cut, a ramp, a card, a new framing — the ones
+    # Wave 0 drew in front) and every fx compiler that asks
+    # (fxgraph.request_matte). An item whose stored mask fits keeps its
+    # Wave 0 path byte for byte, and so does an item the program matte
+    # cannot serve on this render (not measured yet: the next render has it).
+    fx_source = _fx_source(edl, index)
+    pm = None
+    if not audio_only and matte_track.live():
+        pm_src = matte_track.read_source(index)
+        lacks = fxgraph.missing_filters(matte_track.FILTERS) \
+            if pm_src is not None else []
+        if lacks:
+            print(f"[render] program matte off: this ffmpeg lacks "
+                  f"{', '.join(lacks)}", flush=True)
+            pm_src = None
+        if pm_src is not None:
+            pm = matte_track.ProgramMatte(
+                tl, pm_src, preview=preview, workdir=workdir,
+                launch=matte_track.RENDER_LAUNCH.get(),
+                final_wait_s=(0.0 if preview
+                              else float(getattr(config,
+                                                 "SIDECAR_FINAL_WAIT_S",
+                                                 matte_track.FINAL_WAIT_S))))
+            if fx_source is None and any(isinstance(i, dict)
+                                         for i in edl.get("fx") or []):
+                fx_source = pm_src
+            # -copyts reads the container clock: the sidecars' (proxy-
+            # relative) seconds sit the container's start later on it
+            pm.clock_offset = (float(info.get("format_start") or 0.0)
+                               if seek_main_source else 0.0)
+    # EDL.fx (Wave 0 seams): rungs decided and inputs allocated once; an
+    # EDL without fx gets an empty plan and the exact legacy graph. Prepared
+    # here, before the behind-subject items, so the compilers' matte
+    # requests and the behind items share one program matte; its inputs are
+    # bound after the motion inputs, as before.
+    pm_token = matte_track.CURRENT.set(pm)
+    try:
+        fx_box = [fxgraph.prepare(edl, tl=tl, W=W, H=H, fps=fps,
+                                  preview=preview, workdir=workdir,
+                                  source=fx_source)]
+    finally:
+        matte_track.CURRENT.reset(pm_token)
+    if pm is not None:
+        fx_box[0].pm = pm
+        fx_box[0].edl = edl
+    pm_items = {}               # (layer, id) -> serves on the program matte
+
+    def _screen_stage(item):
+        # composite.stage 'screen' (1C's slot): screen-locked under a push
+        return (item.get("composite") or {}).get("stage") == "screen"
+
+    def _program_serves(item, layer="motion"):
+        """The program matte serves this behind item on THIS render: its
+        window is wanted, and every chunk under it is measured. Asked once
+        per item (a hero's clip decision and its composite must agree)."""
+        key = (layer, item.get("id"))
+        if key in pm_items:
+            return pm_items[key]
+        ok = False
+        if pm is not None:
+            s_, e_ = float(item["start"]), float(item["end"])
+            pm.want(s_, e_, item.get("id"), "person",
+                    "screen" if _screen_stage(item) else "world")
+            ok = pm.covers(s_, e_)
+        pm_items[key] = ok
+        return ok
+
+    def _program_entry(item, extra):
+        entry = dict(extra, program=True, item=item)
+        if _screen_stage(item):
+            entry["stage"] = "screen"
+        return (None, entry, (round(float(item["start"]), 3),
+                              round(float(item["end"]), 3)))
+
+    def _program_why(item):
+        if pm is None:
+            return None
+        info = pm.info("person")
+        return f"its person matte is not ready ({info['reason']})"
+
     for bi, item in enumerate(behind_texts):
         b = item["behind"]
+        if pm is not None and matte_track.stored_mask_why(
+                edl, tl, item, geom_now) and _program_serves(item, "texts"):
+            # through the program matte: the text's own program window
+            ass = graphics.build_gfx_ass(
+                dict(edl, texts=[item], vectors=[]), tl.out_duration,
+                os.path.join(workdir, f"behind_{bi}.ass"), play_res=(W, H))
+            if ass:
+                behind_inputs.append(_program_entry(item, {"ass": ass}))
+                continue
+        if matte_track.is_program(b):
+            # names the program matte, which this render does not have
+            print(f"[render] behind-text {item.get('id')}: "
+                  f"{_program_why(item) or 'the program matte is off'} — "
+                  "burning it as a plain title", flush=True)
+            front_texts.append(item)
+            continue
         pieces = tl.span_to_out(float(b["src_start"]), float(b["src_end"]))
         # A speed ramp over the mask's footage (added after it was measured)
         # retimes the picture but not the 1x mask, which would then drift
@@ -6532,7 +7031,12 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         # the clip renders: then the hero becomes its face-safe display slam
         # (motion_layer.hero_front). Found after, it could only be dropped —
         # and the words it carries with it.
-        why = motion_layer.behind_why(edl, tl, m, geom_now)
+        why = matte_track.stored_mask_why(edl, tl, m, geom_now)
+        if (why or _screen_stage(m)) and _program_serves(m):
+            return None                # behind, on the program matte
+        if why and pm is not None:
+            why = _program_why(m) if matte_track.is_program(
+                m.get("behind")) else why
         key = (m.get("behind") or {}).get("asset_key")
         if why or not key:
             return why
@@ -6574,7 +7078,15 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             if m_item.get("layer") != "behind_subject":
                 continue
             b = m_item.get("behind") or {}
-            why, local = motion_layer.behind_why(edl, tl, m_item, geom_now), None
+            why, local = matte_track.stored_mask_why(edl, tl, m_item,
+                                                     geom_now), None
+            if (why or _screen_stage(m_item)) and _program_serves(m_item):
+                # through the program matte: the graphic's own window
+                behind_inputs.append(_program_entry(
+                    m_item, {"motion": (m_idx, m_item, m_clip)}))
+                continue
+            if why and matte_track.is_program(b):
+                why = _program_why(m_item) or why
             if not why:
                 try:
                     local = (hero_masks.get(b.get("asset_key"))
@@ -6600,11 +7112,16 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                    round(pieces[0][1], 3))))
             next_idx += 1
         motion_inputs = [mi for mi in motion_inputs if mi[1] is not None]
-    # EDL.fx (Wave 0 seams): rungs decided and inputs allocated once; an
-    # EDL without fx gets an empty plan and the exact legacy graph.
-    fx_box = [fxgraph.prepare(edl, tl=tl, W=W, H=H, fps=fps,
-                              preview=preview, workdir=workdir,
-                              source=_fx_source(edl, index))]
+    # The program matte's chunk files (and face clip) join the fx plan's
+    # inputs: fetched only when a consumer asked and something is measured.
+    if pm is not None:
+        try:
+            pm.materialize(fx_box[0])
+        except Exception as e:  # noqa: BLE001 — a matte never fails a render
+            print(f"[render] program matte unavailable ({str(e)[:160]})",
+                  flush=True)
+        for note in pm.notes:
+            print(f"[render] program matte: {note}", flush=True)
     next_idx = fx_box[0].bind_inputs(extra_inputs, next_idx)
 
     def _graph(**extra):
@@ -8111,6 +8628,21 @@ def _run_render_job(worker_db, job):
     # result's and the asset's ``devices`` block.
     fx_rows = []
     fx_token = fxgraph.collect(fx_rows)
+    # Wave 1 (1A): a render may REQUEST the person-matte windows its items
+    # need (never waiting on a preview): the project's proxy is what a
+    # sidecar job reads, and only this job knows it.
+    matte_launch = None
+    # (the proxy row is read only where this process may launch at all)
+    if not is_canvas and original and matte_track.live() \
+            and matte_track.can_launch():
+        try:
+            matte_launch = matte_track.launch_source(
+                original.get("sha256"),
+                worker_db.run(dbx.latest_asset, project_id, "proxy"),
+                index, project_id)
+        except Exception:  # noqa: BLE001 — read-only then
+            matte_launch = None
+    launch_token = matte_track.RENDER_LAUNCH.set(matte_launch)
     # A final measures the plate under its graphics from the original; the
     # preview already measured the same picture from the proxy (plate.py).
     plate_token = plate.source_scope(plate_id)
@@ -8813,5 +9345,6 @@ def _run_render_job(worker_db, job):
         _RENDER_DETAIL.reset(detail_token)
         motion_layer.stop_collecting(motion_token)
         fxgraph.stop_collecting(fx_token)
+        matte_track.RENDER_LAUNCH.reset(launch_token)
         plate.end_source_scope(plate_token)
         shutil.rmtree(workdir, ignore_errors=True)

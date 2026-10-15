@@ -861,7 +861,7 @@ def _seg_mask_frames(idxs, masks, n_frames, w, h, cv2):
 
 def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
                       extra_vf=None, width=None, height=None, feather=3,
-                      allow_model=True):
+                      allow_model=True, allow_portrait=False):
     """Build the subject mask for [start, start+dur] of `src`.
 
     src should be the PROXY — see the module docstring: the mask is resolution
@@ -874,6 +874,13 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
 
     Returns a dict of measurements. `ok` False means REFUSE and `why` says what
     to tell the user; nothing is written in that case.
+
+    allow_portrait (Wave 1, track 1A — ROADMAP 1A design 4, "coverage no
+    longer refuses FX"): a PERSON-model mask that fills more than
+    MAX_COVERAGE of the frame (a close-up, 09's continuous lockups) is
+    kept; what the caller judges instead is how much of the words stays
+    visible (``text_visible_mean``). The photometric refusal is unchanged:
+    there, high coverage means the camera moved, not a close subject.
     """
     try:
         import cv2
@@ -949,6 +956,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
     box_px = _box_px(box, w, h)
     box_cov = 0.0
     box_width_cov = 0.0
+    box_cov_sum = 0.0
 
     enc = subprocess.Popen(
         ["ffmpeg", "-y", "-v", "error",
@@ -978,6 +986,7 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
                 a, wd = _box_frame_stats(on, box_px)
                 box_cov = max(box_cov, a)
                 box_width_cov = max(box_width_cov, wd)
+                box_cov_sum += a
             enc.stdin.write(m.tobytes() if m.flags["C_CONTIGUOUS"]
                             else np.ascontiguousarray(m).tobytes())
             n += 1
@@ -1001,6 +1010,10 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
            "moving_frames": hits,
            "text_covered": round(box_cov, 3) if box_px else None,
            "text_width_covered": round(box_width_cov, 3) if box_px else None,
+           # the words' visible share, averaged over the window (Wave 1:
+           # the glyph-visibility check that replaces the coverage cap)
+           "text_visible_mean": (round(1.0 - box_cov_sum / float(n), 3)
+                                 if box_px and n else None),
            "method": "person" if person_led else "plate",
            "engine": ("rvm" if use_rvm
                       else "u2net" if use_model else "plate"),
@@ -1008,7 +1021,9 @@ def measure_and_build(src, out_path, start, dur, *, box=None, fps=None,
            "no_cv2": cv2 is None}
     # THE MEASUREMENT IS THE FEATURE. Both refusal bounds are real footage,
     # not edge cases — but what they MEAN depends on how the mask was made.
-    if mean_cov > MAX_COVERAGE:
+    if mean_cov > MAX_COVERAGE and allow_portrait and person_led:
+        res["portrait"] = True          # a close-up: kept (see docstring)
+    elif mean_cov > MAX_COVERAGE:
         res.update(ok=False, why=(
             f"the subject fills {mean_cov * 100:.0f}% of the frame through "
             "that window, so words behind them would barely ever be visible. "
@@ -1057,7 +1072,7 @@ def box_stats(mask_path, box):
     except Exception:
         return None
     box_px = _box_px(box, w, h)
-    cov_sum = cov_max = box_cov = box_width = 0.0
+    cov_sum = cov_max = box_cov = box_width = box_sum = 0.0
     n = 0
     total = float(w * h)
     for m in _decode(mask_path, 0.0, float(info.get("duration") or
@@ -1070,13 +1085,16 @@ def box_stats(mask_path, box):
             a, wd = _box_frame_stats(on, box_px)
             box_cov = max(box_cov, a)
             box_width = max(box_width, wd)
+            box_sum += a
         n += 1
     if n == 0:
         return None
     return {"coverage": round(cov_sum / n, 4),
             "coverage_max": round(cov_max, 4),
             "text_covered": round(box_cov, 3) if box_px else None,
-            "text_width_covered": round(box_width, 3) if box_px else None}
+            "text_width_covered": round(box_width, 3) if box_px else None,
+            "text_visible_mean": (round(1.0 - box_sum / n, 3)
+                                  if box_px else None)}
 
 
 def run_matte_job(worker_db, job):
@@ -1122,7 +1140,8 @@ def run_matte_job(worker_db, job):
             local, out, start, dur,
             box=tuple(box) if box else None,
             extra_vf=payload.get("extra_vf"),
-            width=payload.get("width"), height=payload.get("height"))
+            width=payload.get("width"), height=payload.get("height"),
+            allow_portrait=bool(payload.get("allow_portrait")))
         if stats.get("ok"):
             storage.upload_file(out, out_key, "video/mp4")
         return stats

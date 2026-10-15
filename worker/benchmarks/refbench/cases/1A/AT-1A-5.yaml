@@ -1,0 +1,30 @@
+# AT-1A-5: archival 480p inside the v5 picture card: the matte maps through
+# the card's source rect. Runner: worker/tools/at1a_matte.py.
+id: AT-1A-5
+track: 1A
+title: a word behind Jobs inside the rounded picture card, the matte through the card source rect
+local_only: true
+interim: false
+reference:
+  - {ref: "35", t: [0.0, 10.7], approx: true, board_t: 2.0}
+footage:
+  - {vfl: V03, window: jobs_fonts}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: "baseline:v5/jobs_final8.json"   # its first four keeps, frame and card only
+  ops:
+    - {action: upsert, layer: motion, id: h1,
+       value: {id: h1, template: word_slam, start: 1.0, end: 5.6,
+               layer: behind_subject,
+               params: {text: FONTS, tier: hero, y: 0.42, width: 0.7, entrance: pop}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: matte_iou, item: h1, op: ">=", value: 0.85}
+  - {name: matte_iou, op: ">=", value: 0.85, labels: V03/jobs_fonts/person}
+beyond: "the card re-frames the archival shot on every render and the depth follows it, at 480p, with the matte measured once"
+board: {stills: [2.0, 4.5], clip: [1.0, 5.6]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

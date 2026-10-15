@@ -40,6 +40,7 @@ import grammar
 import inpaint
 import llm
 import matte
+import matte_track
 import media_cache
 import graphics
 import personseg
@@ -15676,6 +15677,15 @@ def _measure_subject_matte(ctx, edl, s, e, box, words=None):
     """The subject mask for program window [s, e] — shared by add_text_behind
     and add_motion_graphic(layer='behind_subject').
 
+    Wave 1 (track 1A, worker/matte_track.py): with the program matte on,
+    _measure_subject_matte_v2 decides — a window over a cut, a speed ramp
+    or longer than one measurement renders through the program matte (the
+    person matte measured once in source space and carried through the
+    picture's own chain), a close-up is no longer refused for its coverage,
+    and a window whose crop follows the speaker keeps its measured clip for
+    the numbers while the program matte draws it. What follows is the Wave 0
+    path, unchanged while the program matte is off.
+
     Enforces the one-continuous-shot rules (no spliced clip, no cut, no speed
     ramp inside the window), then serves the mask from the content cache or
     measures it (executor person model first, local photometric fallback),
@@ -15688,6 +15698,10 @@ def _measure_subject_matte(ctx, edl, s, e, box, words=None):
     the EDL here either way.
     """
     w = dict(_BEHIND_TEXT_WORDS, **(words or {}))
+    if matte_track.live():
+        src = _matte_source(ctx)
+        if src is not None and _program_matte_possible(ctx, edl, s, e, src):
+            return _measure_subject_matte_v2(ctx, edl, s, e, box, w, src)
     # ── the window has to be ONE continuous piece of ONE shot ──────────────
     tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed") or [])
     a_src = tl.out_to_src(s)
@@ -15718,6 +15732,15 @@ def _measure_subject_matte(ctx, edl, s, e, box, words=None):
         return None, None, ("REJECTED: under 0.2s of source footage is in "
                             "that window.")
 
+    return _matte_clip(ctx, edl, src_start, src_end, box, w)
+
+
+def _matte_clip(ctx, edl, src_start, src_end, box, w, allow_portrait=False):
+    """The measured mask CLIP for source [src_start, src_end] in the
+    current output framing (the Wave 0 measurement, served from the content
+    cache when it exists): (behind, stats, None) or (None, stats-or-None,
+    reply). ``allow_portrait``: a person-model mask over MAX_COVERAGE is
+    kept (Wave 1, matte.measure_and_build)."""
     try:
         fit, mw, mh = _matte_geometry(ctx, edl)
     except Exception as err:
@@ -15781,7 +15804,9 @@ def _measure_subject_matte(ctx, edl, s, e, box, words=None):
                          "box": list(box) if box else None,
                          "extra_vf": fit, "width": mw, "height": mh,
                          "out_key": key,
-                         "matte_version": matte.VERSION},
+                         "matte_version": matte.VERSION,
+                         **({"allow_portrait": True} if allow_portrait
+                            else {})},
                         user_id=ctx.job.get("user_id"))
                 except Exception as err:
                     fell_back = str(err)[:160]
@@ -15818,7 +15843,8 @@ def _measure_subject_matte(ctx, edl, s, e, box, words=None):
                     src, out, src_start, src_end - src_start,
                     box=box, extra_vf=fit,
                     width=mw, height=mh,
-                    allow_model=not remote.matte_available())
+                    allow_model=not remote.matte_available(),
+                    **({"allow_portrait": True} if allow_portrait else {}))
             except Exception as err:
                 return None, None, (
                     f"The subject measurement failed ({str(err)[:180]}). "
@@ -15826,7 +15852,7 @@ def _measure_subject_matte(ctx, edl, s, e, box, words=None):
             if stats.get("ok"):
                 storage.upload_file(out, key, "video/mp4")
         if not stats.get("ok"):
-            return None, None, (
+            return None, stats, (
                 f"REJECTED: {stats.get('why') or 'the subject could not be measured'}. "
                 f"Nothing was changed. {w['refuse_alt']}")
         if fell_back:
@@ -15838,6 +15864,177 @@ def _measure_subject_matte(ctx, edl, s, e, box, words=None):
              "fps": stats.get("fps"),
              "method": stats.get("method"),
              "geom": subject_matte_geom(edl.get("frame"))}, stats, None)
+
+
+# Wave 1 (track 1A): the words' visible share over the window below which
+# text-behind is refused, and below which the reply warns — the measured
+# glyph-visibility check that replaces the coverage cap (ROADMAP 1A design
+# 4; qa_metrics.glyph_visible's word bar is 0.65).
+BEHIND_VISIBLE_MIN = 0.35
+BEHIND_VISIBLE_WARN = 0.65
+
+
+def _matte_source(ctx):
+    """A sidecar SourceRef for this project that may LAUNCH matte.person
+    jobs (the original's sha, the proxy the job reads, the index's grid),
+    or a read-only one, or None."""
+    try:
+        orig = ctx.db.run(dbx.latest_asset, ctx.project_id, "original") \
+            if getattr(ctx, "db", None) else None
+        proxy = ctx.db.run(dbx.latest_asset, ctx.project_id, "proxy") \
+            if getattr(ctx, "db", None) else None
+        sha = (orig or {}).get("sha256") or getattr(ctx, "_orig_sha", "")
+        src = matte_track.launch_source(sha, proxy, ctx.index,
+                                        ctx.project_id)
+        return src or matte_track.read_source(
+            dict(ctx.index or {}, video=dict((ctx.index or {}).get("video")
+                                             or {}, sha256=sha or None)))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _launchable(src):
+    return src is not None and str(src.storage_key or "") not in ("",
+                                                                  "None")
+
+
+def _program_matte_possible(ctx, edl, s, e, src):
+    """Can the program matte serve program [s, e] for this project: its
+    chunks are measured already, or this lane may ask for them (a sidecar
+    job will run). Otherwise the Wave 0 rules (and refusals) apply — never
+    a promise of depth nothing will measure."""
+    if _launchable(src):
+        return True
+    try:
+        tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        pm = matte_track.ProgramMatte(tl, src, preview=True)
+        pm.want(s, e)
+        return pm.info("person")["status"] == "ready"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _program_matte_request(ctx, edl, s, e, src=None):
+    """Ask for the person matte over program [s, e] (matte.person sidecars,
+    interactive priority; never waits). {status, estimate_s, coverage,
+    source} — coverage from the chunks' own QA when they are measured."""
+    tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    out = {"status": "absent", "estimate_s": None, "coverage": None,
+           "source": None}
+    src = src or _matte_source(ctx)
+    if src is None:
+        return out
+    pm = matte_track.ProgramMatte(
+        tl, src, preview=True, launch=src if _launchable(src) else None)
+    pm.want(s, e)
+    info = pm.info("person")
+    out.update(status=info["status"], source=info["source"],
+               estimate_s=round(pm.estimate_s()) if info["status"] != "ready"
+               else 0)
+    covs = []
+    for _k, r in pm.chunk_rows(pm.src_ranges("person")):
+        curve = ((r.get("meta") or {}).get("qa") or {}).get("coverage")
+        if isinstance(curve, list) and curve:
+            covs += [float(c) for c in curve]
+    if covs:
+        out["coverage"] = round(sum(covs) / len(covs), 4)
+    return out
+
+
+def _measure_subject_matte_v2(ctx, edl, s, e, box, w, src=None):
+    """_measure_subject_matte with the program matte on (Wave 1, 1A).
+
+    * No main footage under the window: refused, as before.
+    * One continuous kept piece, no ramp, at most one measurement long:
+      the measured clip (synchronous numbers, served from the cache) — a
+      close-up is kept, judged by the words' visible share instead of the
+      subject's coverage. Where the framing will not let that clip fit (a
+      crop that follows the speaker, a source-fed card) the program matte
+      is asked for too: it draws the item, the clip gives the numbers.
+    * A cut, a ramp or a long window: the program matte alone.
+    Returns what _measure_subject_matte returns; ``stats`` may carry
+    ``program`` ({status, estimate_s, coverage}) for the reply."""
+    tl = Timeline(edl["keep"], edl.get("inserts") or [],
+                  edl.get("speed") or [])
+    spans = matte_track.program_to_source(tl, s, e)
+    if not spans:
+        return None, None, (
+            f"REJECTED: {s}-{e}s of the program is inside a spliced-in "
+            "clip, not the main footage — there is no shot there to cut a "
+            "subject out of. Point it at a moment where your own video is "
+            f"playing, or {w['clip_alt']}.")
+    src_start = round(min(a for a, _b in spans), 2)
+    src_end = round(max(b for _a, b in spans), 2)
+    if sum(b - a for a, b in spans) < 0.2:
+        return None, None, ("REJECTED: under 0.2s of source footage is in "
+                            "that window.")
+    single = (len(spans) == 1 and not tl.ramp_over(src_start, src_end)
+              and src_end - src_start <= matte.MAX_WINDOW_S)
+    stats, clip_err = None, None
+    if single:
+        behind, stats, clip_err = _matte_clip(ctx, edl, src_start, src_end,
+                                              box, w, allow_portrait=True)
+        if clip_err is None:
+            vis = stats.get("text_visible_mean")
+            if vis is not None and vis < BEHIND_VISIBLE_MIN:
+                return None, None, (
+                    f"REJECTED: the subject would hide {(1 - vis) * 100:.0f}% "
+                    f"of {w['subject']} on average across that window — "
+                    "they would barely read. Make the type BIGGER (the "
+                    "subject then crosses the middle of the letters and "
+                    "their tops and bottoms stay), move it beside the head, "
+                    f"or shorten {w['span']}. Nothing was changed.")
+            item = {"start": s, "end": e, "behind": behind}
+            why = matte_track.stored_mask_why(edl, tl, item)
+            if why:
+                # the clip cannot follow this framing: the program matte
+                # draws the item (the stored clip keeps the numbers)
+                stats = dict(stats, program=_program_matte_request(
+                    ctx, edl, s, e, src), program_why=why)
+            return behind, stats, None
+        st = stats or {}
+        person_led = st.get("method") == "person"
+        if person_led or not st:
+            # a person model found nothing to go behind (or the window
+            # could not be read): the program matte would find nothing too
+            return None, stats, clip_err
+    # a cut, a ramp, a long window — or the photometric fallback refused a
+    # moving camera, which the program matte (a person model on the
+    # sidecar lane) does not care about
+    prog = _program_matte_request(ctx, edl, s, e, src)
+    behind = matte_track.program_behind(tl, s, e)
+    return behind, {"ok": True, "program": prog, "method": "person",
+                    "engine": "program", "coverage": prog.get("coverage"),
+                    "cached": prog["status"] == "ready"}, None
+
+
+def _program_matte_note(prog, what, short=False):
+    """One reply line about the program matte for a behind-subject write."""
+    prog = prog or {}
+    st = prog.get("status")
+    if st == "ready":
+        cov = prog.get("coverage")
+        head = ("It is measured already" if short else
+                "MEASURED on the footage: the person matte for that window "
+                "was already measured on the source (once, for every crop, "
+                "cut and aspect)")
+        if cov is not None and not short:
+            head += f"; the subject covers {cov * 100:.1f}% of the frame there"
+        return head + "."
+    est = prog.get("estimate_s")
+    wait = f" (~{int(est)} s)" if est else ""
+    if st in ("pending", "partial", "absent") and prog.get("source") is not \
+            None or est is not None:
+        return (("It is " if short else "MEASURING: the person matte for "
+                 "that window is ") + f"being measured on the source{wait}. "
+                f"Until it is ready a preview draws {what} in front and says "
+                "so; a preview rendered after that, and the final export "
+                "(it waits for the measurement), sets it behind — nothing "
+                "else needs to change.")
+    return (f"The person matte for that window is not measured yet; a "
+            f"render draws {what} in front until it is, and says so.")
 
 
 def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
@@ -15924,7 +16121,12 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
     if not written.startswith("EDL v"):
         return written
     bits = [written + muted_note]
-    if stats.get("cached"):
+    prog = stats.get("program") if isinstance(stats.get("program"),
+                                              dict) else None
+    if stats.get("engine") == "program":
+        # Wave 1 (1A): no clip was measured — the program matte draws it
+        bits.append(_program_matte_note(prog, "the words"))
+    elif stats.get("cached"):
         bits.append("The subject mask for that exact moment was already "
                     "measured, so this cost nothing to add.")
     else:
@@ -15962,6 +16164,25 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
         if stats.get("no_cv2"):
             bits.append("NOTE: OpenCV was unavailable, so the mask edge is "
                         "unsmoothed — it may look slightly cut out.")
+    if prog is not None and stats.get("engine") != "program":
+        bits.append(
+            f"The framing here will not hold one measured clip "
+            f"({stats.get('program_why') or 'it moves'}), so the render "
+            "cuts the subject out of the PROGRAM matte instead — measured "
+            "once on the source and carried through the very crop, cuts "
+            "and ramps the picture gets. "
+            + _program_matte_note(prog, "the words", short=True))
+    if stats.get("portrait"):
+        bits.append("CLOSE-UP: the subject fills most of the frame; the "
+                    "words still read where they clear the head and "
+                    "shoulders (numbers below).")
+    vis = stats.get("text_visible_mean")
+    if vis is not None and vis < BEHIND_VISIBLE_WARN:
+        bits.append(
+            f"LEGIBILITY: on average {vis * 100:.0f}% of the words stays "
+            "visible across the window (below the 65% a word needs to read "
+            "at a glance). Bigger type, or a spot beside the head, fixes "
+            "it; say which you did.")
     # The box numbers are quoted for CACHED masks too — they were re-measured
     # against this text's own box above, because the previous text that built
     # the mask may have been a different size at a different spot.
@@ -15999,6 +16220,16 @@ def add_text_behind(ctx, text, at_output_s, duration_s=None, template="title",
               if stats.get("method") == "person" else
               "The camera must hold still for the window — that is what "
               "makes the background photographable —")
+    if matte_track.live():
+        bits.append(
+            "It is bound to that FOOTAGE, not to a program time: a later cut "
+            "moves it with the shot, and if that footage is cut away "
+            "entirely the words stay as an ordinary title. A crop that "
+            "follows the speaker, a cut, a speed ramp or a zoom over it is "
+            "fine: the subject is cut out through the picture's own framing "
+            "on every render. NEXT: render_preview, and look at whether the "
+            "subject's edge reads cleanly.")
+        return "\n".join(bits)
     bits.append(
         "It is bound to that FOOTAGE, not to a program time: a later cut moves "
         "it with the shot, and if that footage is cut away entirely the words "

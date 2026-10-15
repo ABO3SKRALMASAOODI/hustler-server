@@ -97,6 +97,111 @@ def check_fx_devices(before, after):
                              "not available yet (dark).")
 
 
+# ── Wave 1, track 1A: behind the subject through the PROGRAM matte ──────
+# (worker/devices/INTERFACES_W1.md §6.3, the behind_subject rule). A
+# behind-subject motion graphic (or a text whose ``behind`` names only this
+# key) needs no measured mask clip any more: the renderer carries the
+# person matte, measured once in source space, through the picture's own
+# chain (worker/matte_track.py). A stale MCP client — which cannot measure
+# anything — writes one with a plain upsert; this fills in the SubjectMatte
+# that names the program matte (matte_track.PROGRAM_KEY; a test pins the
+# two literals equal) and the source span under the item's window. Where no
+# matte is measured yet the render draws its face-safe fallback and says so.
+PROGRAM_MATTE_KEY = "sidecar:matte.person"
+PROGRAM_MATTE_LIVE = True           # flipped with matte_track.LIVE
+
+
+def program_matte_live():
+    if os.getenv("PROGRAM_MATTE_OFF", "0").strip().lower() in (
+            "1", "true", "yes", "on"):
+        return False
+    config = sys.modules.get("config")     # never imported from here
+    if config is not None and getattr(config, "PROGRAM_MATTE_OFF", False):
+        return False
+    return PROGRAM_MATTE_LIVE
+
+
+def _program_behind(edl, item):
+    """The SubjectMatte naming the program matte for ``item``'s window, or
+    None (no main footage under it)."""
+    try:
+        try:
+            from timeline import Timeline
+        except ImportError:
+            from worker_timeline import Timeline
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        a, b = float(item["start"]), float(item["end"])
+    except Exception:  # noqa: BLE001 — the item is refused as before
+        return None
+    spans = []
+    for (s, e), pcs, off, L in zip(tl.segs, tl.pieces, tl.offsets,
+                                   tl.seg_out_len):
+        lo, hi = max(a, off), min(b, off + L)
+        if hi - lo <= 1e-4:
+            continue
+        acc = off
+        for ps, pe, f in pcs:
+            plen = (pe - ps) / f
+            x, y = max(lo, acc), min(hi, acc + plen)
+            if y - x > 1e-4:
+                spans.append((ps + (x - acc) * f, ps + (y - acc) * f))
+            acc += plen
+    if not spans:
+        return None
+    lo = round(min(x for x, _y in spans), 2)
+    hi = round(max(y for _x, y in spans), 2)
+    if hi - lo < 0.2:
+        hi = round(lo + 0.2, 2)
+    return {"asset_key": PROGRAM_MATTE_KEY, "src_start": lo, "src_end": hi,
+            "fp": "program-matte", "method": "program"}
+
+
+def _behind_through_program_matte(edl, before=None):
+    """Fill program-matte SubjectMattes in place (see above): a
+    behind_subject motion item without ``behind``, and any text or motion
+    item whose ``behind`` names PROGRAM_MATTE_KEY. Raises ValueError where
+    the window of an item the batch WROTE holds no main footage; an item
+    the batch left untouched keeps its stored mask there (a keep edit or an
+    insert elsewhere in the batch is never refused for it — the render
+    draws it as a plain title until footage plays under it again)."""
+    live = program_matte_live()
+    prev = {}
+    for layer in ("motion", "texts"):
+        for item in (before or {}).get(layer) or []:
+            if isinstance(item, dict) and item.get("id") is not None:
+                prev[(layer, item["id"])] = item
+    for layer in ("motion", "texts"):
+        for item in edl.get(layer) or []:
+            if not isinstance(item, dict):
+                continue
+            b = item.get("behind")
+            named = isinstance(b, dict) and \
+                b.get("asset_key") == PROGRAM_MATTE_KEY
+            bare = (layer == "motion"
+                    and item.get("layer") == "behind_subject" and not b)
+            if not (named or bare):
+                continue
+            if not live:
+                if bare:
+                    raise ValueError(
+                        "A behind_subject motion graphic needs its subject "
+                        "mask; place it with add_motion_graphic("
+                        "layer='behind_subject').")
+                raise ValueError("The program matte is off on this server: "
+                                 "place the item with add_text_behind / "
+                                 "add_motion_graphic(layer='behind_subject').")
+            filled = _program_behind(edl, item)     # the CURRENT window
+            if filled is None and named and \
+                    prev.get((layer, item.get("id"))) == item:
+                continue                    # untouched: as it was
+            if filled is None:
+                raise ValueError(
+                    f"{layer} '{item.get('id')}' cannot go behind the "
+                    "subject: no main footage plays under its window.")
+            item["behind"] = dict(b or {}, **filled) if named else filled
+
+
 def project_media_keys(conn, project_id):
     with conn.cursor() as cur:
         cur.execute("SELECT storage_key,duration_s FROM assets WHERE project_id=%s", (project_id,))
@@ -262,15 +367,15 @@ def apply_batch(before, operations, duration, allowed_keys):
             raise ValueError(f"{layer} ids must be strings.")
         if len(ids) != len(set(ids)):
             raise ValueError(f"Duplicate ids in {layer}.")
+    if program_matte_live():
+        # the program matte is not a project file (track 1A)
+        known.add(PROGRAM_MATTE_KEY)
     if (set(media_keys(edl)) | _motion_refs(edl)) - known - set(allowed_keys):
         raise ValueError("Use media attached to this project. A referenced asset is not available here.")
     _check_new_motion_params(before, edl)
-    for item in edl.get("motion") or []:
-        # A graphic behind the subject needs its measured subject mask, which
-        # only add_motion_graphic builds.
-        if item.get("layer") == "behind_subject" and not item.get("behind"):
-            raise ValueError("A behind_subject motion graphic needs its subject mask; "
-                             "place it with add_motion_graphic(layer='behind_subject').")
+    # A graphic behind the subject needs a subject mask: a measured clip
+    # (add_motion_graphic builds one) or, from Wave 1, the program matte.
+    _behind_through_program_matte(edl, before)
     normalized = validate_edl(edl, duration).model_dump()
     check_fx_devices(before, normalized)
     if isinstance(allowed_keys, dict):

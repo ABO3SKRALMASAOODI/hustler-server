@@ -1,0 +1,40 @@
+# Track 1A (Matte Stack v2). A motion graphic (a hero word, a lockup) set
+# BEHIND the speaker through the program matte. A stale MCP client writes it
+# with a plain apply_edit_batch upsert ({"layer": "behind_subject"}); the
+# render draws its face-safe slam while the matte is still measuring.
+id: type_behind_graphic
+family: type_depth
+verb: add_motion_graphic
+stage: motion
+params:
+  layer: [behind_subject]
+  template: [word_slam, phrase_build]
+needs:
+  sidecars: [matte.person]
+  lane_features: ["chromium", "ffmpeg:alphamerge", "ffmpeg:overlay"]
+  footage: "a person in the shot; any framing (follow crop, cuts, speed ramps and source cards are re-solved)"
+binds_to: [word.payoff, stress, section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 2, min_gap_s: 6}
+  charged: {per_short: 4, min_gap_s: 4}
+never:
+  - "a hero word more than once per short"
+  - "over a face the payoff depends on, drawn in front"
+  - "over footage with no person in it"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, {substitute: face_safe_slam}, omit]
+# cost: CPU-ms per frame of the item's window, measured by
+# tools/at1a_matte.py --perf (AT-1A-perf, behind vs the same graphic in
+# front): a 9:16 preview adds 8.5 (local), AT-1A-1's 1080x1920 final 37.8
+# (the matte's blocks under the window are resampled whole); the
+# Cloudflare lanes at the cost model's ms_scale 2.0 (uncalibrated there).
+# fixed_ms is an estimate (chunk fetch + graph), not measured apart.
+cost:
+  ms_per_frame: {interactive: 17.0, batch: 75.6, local: 8.5}
+  fixed_ms: 900
+exemplars: ["05@0.23–12.23", "09@1.27–21.6", "21@≈19.0"]
+verify: ["glyph_visible>=0.65", "matte_flicker<=0.035", "edge_chatter<=0.002"]
+status: live
+description: "a hero word or lockup behind the speaker through the program matte, its face-safe slam until measured"
+skill: text-graphics
