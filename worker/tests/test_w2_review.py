@@ -420,3 +420,24 @@ def test_render_variants_labels_only_voices_that_fit(monkeypatch):
     labels = out.split(": ", 1)[1].split(". Apply")[0].split("; ")
     assert [l.split(" ")[0] for l in labels] == seen
     assert len(set(seen)) == len(seen) >= 2
+
+
+def test_main_video_is_described_where_the_short_is(tmp_path):
+    """library.analyze_clip read only the FIRST ten minutes of a file: a
+    short cut at 22 min of a 2 h podcast found no described footage under
+    its own frames (plan_loop: 'the program does not open on described
+    footage'; find_shots like=program seconds, pick_still the same)."""
+    import library
+    import w0b_probe
+    from types import SimpleNamespace
+    from tools_ext import structure_tools
+    src = w0b_probe.make_source(str(tmp_path / "s.mp4"), rate="25")
+    doc = library.analyze_clip(src, max_s=4.0, start=5.0)
+    assert doc["shots"] and min(sh["t0"] for sh in doc["shots"]) >= 5.0
+    assert max(sh["t1"] for sh in doc["shots"]) <= 9.05
+    deep = SimpleNamespace(latest_edl=lambda: {"json": {
+        "keep": [[1363.4, 1380.0], [1385.0, 1401.2]]}})
+    assert structure_tools._program_window(deep) == 1333.4
+    early = SimpleNamespace(latest_edl=lambda: {"json": {
+        "keep": [[12.0, 48.0]]}})
+    assert structure_tools._program_window(early) == 0.0

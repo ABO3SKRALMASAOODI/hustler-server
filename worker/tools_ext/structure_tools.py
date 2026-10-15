@@ -44,6 +44,26 @@ def _canvas(ctx, edl):
         return 1080, 1920
 
 
+MAIN_WINDOW_S = 600.0
+MAIN_MARGIN_S = 30.0
+
+
+def _program_window(ctx):
+    """Where in the main video to describe: from a little before the
+    program's first kept second (a podcast short is a window deep inside
+    a two-hour source; describing the file's first ten minutes found
+    nothing there: plan_loop 'does not open on described footage')."""
+    try:
+        keep = (ctx.latest_edl()["json"] or {}).get("keep") or []
+        first = min(float(k[0]) for k in keep)
+        last = max(float(k[1]) for k in keep)
+    except Exception:  # noqa: BLE001 — the file's start, as before
+        return 0.0
+    if last <= MAIN_WINDOW_S - MAIN_MARGIN_S:
+        return 0.0                      # it is all in the first window
+    return round(max(0.0, first - MAIN_MARGIN_S), 1)
+
+
 def _main_doc(ctx):
     """(library doc, source size, main asset key) of the main video."""
     import library
@@ -51,7 +71,8 @@ def _main_doc(ctx):
         return None, (0, 0), None
     path = ctx.proxy_path()
     vid = (getattr(ctx, "index", None) or {}).get("video") or {}
-    doc = library.clip_doc(path, vid.get("sha256") or None)
+    doc = library.clip_doc(path, vid.get("sha256") or None,
+                           start=_program_window(ctx))
     key = None
     try:
         import db as dbx

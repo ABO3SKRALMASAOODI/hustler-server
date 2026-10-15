@@ -60,11 +60,14 @@ def decode(path, fps, w, h, pix="gray", max_s=600.0):
 RGB_FPS = 2.0
 
 
-def decode_once(path, max_s=600.0):
+def decode_once(path, max_s=600.0, start=0.0):
     """ONE decode pass (a 4K60 clip is decode-bound): RGB frames at
-    CUT_FPS and DESC size, streamed; returns (gray [n, CUT_H, CUT_W] at
-    CUT_FPS, rgb [m, DESC_H, DESC_W, 3] at RGB_FPS)."""
-    cmd = [_ffmpeg(), "-v", "error", "-threads", "0", "-i", path, "-t",
+    CUT_FPS and DESC size, streamed, from ``start`` seconds; returns (gray
+    [n, CUT_H, CUT_W] at CUT_FPS, rgb [m, DESC_H, DESC_W, 3] at RGB_FPS)
+    on the window's own clock (0 = ``start``)."""
+    seek = ["-ss", f"{float(start):.3f}"] if start and start > 0 else []
+    cmd = [_ffmpeg(), "-v", "error", "-threads", "0"] + seek + [
+           "-i", path, "-t",
            f"{max_s:.3f}", "-an", "-vf",
            f"fps={CUT_FPS},scale={DESC_W}:{DESC_H}:flags=area", "-f",
            "rawvideo", "-pix_fmt", "rgb24", "-"]
@@ -366,9 +369,10 @@ def score_of(desc, motion):
     return round(max(0.0, min(1.0, s)), 3)
 
 
-def analyze_clip(path, max_s=600.0):
+def analyze_clip(path, max_s=600.0, start=0.0):
     """{format, duration, shots: [{t0, t1, mid, motion, desc}]} of a clip
-    file (or a still image: one shot)."""
+    file (or a still image: one shot); with ``start``, of the ``max_s``
+    window from there, in the file's own seconds."""
     ext = os.path.splitext(path)[1].lower()
     if ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
         cv2 = _cv2()
@@ -383,7 +387,7 @@ def analyze_clip(path, max_s=600.0):
                 "size": [int(img.shape[1]), int(img.shape[0])],
                 "shots": [{"t0": 0.0, "t1": 0.0, "mid": 0.0, "motion": 0.0,
                            "desc": d}]}
-    gray, rgb = decode_once(path, max_s)
+    gray, rgb = decode_once(path, max_s, start)
     dur = len(gray) / CUT_FPS
     cts = cuts(gray)
     sh = []
@@ -402,11 +406,15 @@ def analyze_clip(path, max_s=600.0):
                                       int(b * CUT_FPS))].astype(np.float32)
         motion = float(np.abs(np.diff(g, axis=0)).mean()) if len(g) > 1 \
             else 0.0
-        out.append({"t0": round(a, 3), "t1": round(b, 3),
-                    "mid": round(mid, 3), "motion": round(motion, 3),
+        out.append({"t0": round(a + start, 3), "t1": round(b + start, 3),
+                    "mid": round(mid + start, 3), "motion": round(motion, 3),
                     "desc": d})
-    return {"format": FORMAT, "duration": round(dur, 3), "cuts": cts,
-            "shots": out}
+    doc = {"format": FORMAT, "duration": round(dur, 3),
+           "cuts": [round(c + start, 3) for c in cts] if start else cts,
+           "shots": out}
+    if start:
+        doc["window"] = [round(float(start), 3), round(start + dur, 3)]
+    return doc
 
 
 def _key(sha, params=None):
@@ -415,11 +423,11 @@ def _key(sha, params=None):
                                 (0.0, 0.0))
 
 
-def cached(sha):
+def cached(sha, params=None):
     try:
         import sidecars
         blob = sidecars._store().get_bytes(
-            sidecars.data_key(KIND, sha, _key(sha), "classic.json"))
+            sidecars.data_key(KIND, sha, _key(sha, params), "classic.json"))
         if not blob:
             return None
         d = json.loads(blob if isinstance(blob, str) else blob.decode())
@@ -428,18 +436,20 @@ def cached(sha):
         return None
 
 
-def store(sha, doc):
+def store(sha, doc, params=None):
     try:
         import sidecars
         st = sidecars._store()
-        st.put_bytes(sidecars.data_key(KIND, sha, _key(sha), "classic.json"),
+        k = _key(sha, params)
+        st.put_bytes(sidecars.data_key(KIND, sha, k, "classic.json"),
                      json.dumps(doc, separators=(",", ":")).encode(),
                      "application/json")
-        st.put_bytes(sidecars.manifest_key(KIND, sha, _key(sha)),
-                     json.dumps({"key": _key(sha), "kind": KIND,
+        st.put_bytes(sidecars.manifest_key(KIND, sha, k),
+                     json.dumps({"key": k, "kind": KIND,
                                  "model_id": MODEL_ID,
                                  "model_version": str(VERSION),
-                                 "params": {}, "src_range": [0.0, 0.0],
+                                 "params": params or {},
+                                 "src_range": [0.0, 0.0],
                                  "format": FORMAT}).encode(),
                      "application/json")
         return True
@@ -447,14 +457,20 @@ def store(sha, doc):
         return False
 
 
-def clip_doc(path, sha=None):
+def clip_doc(path, sha=None, start=0.0, max_s=600.0):
+    """The (cached) description of a clip, or of the ``max_s`` window
+    from ``start`` (a short cut from deep inside a long podcast is
+    described where it is, not over the file's first ten minutes)."""
+    start = max(0.0, round(float(start or 0.0), 1))
+    params = {"t0": start, "t1": round(start + float(max_s), 1)} \
+        if start else None
     if sha:
-        hit = cached(sha)
+        hit = cached(sha, params)
         if hit:
             return hit
-    doc = analyze_clip(path)
+    doc = analyze_clip(path, max_s, start)
     if sha:
-        store(sha, doc)
+        store(sha, doc, params)
     return doc
 
 
