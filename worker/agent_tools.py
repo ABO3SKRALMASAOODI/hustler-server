@@ -3508,8 +3508,18 @@ def _audio_safe_keep(ctx, keep, prev_keep, words):
     except Exception:  # noqa: BLE001 — a placement never fails a write
         return keep, [], set()
     quiet = {round(m["old"], 2) for m in moves if m["why"] == "quiet_word"}
-    return ([list(x) for x in new] or keep), cut_audio.report(moves, checked), \
-        quiet
+    notes = cut_audio.report(moves, checked)
+    if level is not None and new:
+        # Wave 2 (run report defect 26): untranscribed sound left on the
+        # kept side of a cut — the tail of the word cut away, an "um" the
+        # transcript dropped — is cut away too (never into a word)
+        try:
+            import audio_checks
+            new, fmoves = audio_checks.trim_fragments(new, words, level)
+            notes = notes + audio_checks.fragment_report(fmoves)
+        except Exception:  # noqa: BLE001 — a placement never fails a write
+            pass
+    return ([list(x) for x in new] or keep), notes, quiet
 
 
 def _write_keep(ctx, new_keep, desc, snap_to_words=None,

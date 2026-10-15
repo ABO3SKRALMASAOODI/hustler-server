@@ -88,7 +88,7 @@ Wave 2 verbs:
 | Module | Department | Verbs |
 |---|---|---|
 | `tools_ext/typeset_tools.py` | type | `add_typeset`, `set_typeset`, `remove_typeset`, `import_font` |
-| `tools_ext/rhythm_tools.py` | rhythm | `analyze_music`, `get_syllables`, `align_lyrics` |
+| `tools_ext/rhythm_tools.py` | rhythm | `analyze_music`, `get_syllables`, `check_speech`, `align_lyrics` |
 | `tools_ext/montage_tools.py` | rhythm | `plan_to_music`, `shape_music`, `set_speed_ramp`, `animate_still` |
 | `tools_ext/structure_tools.py` | direction | `find_shots`, `suggest_match_cuts`, `pick_still`, `plan_loop` |
 | `tools_ext/format_tools.py` | direction | `suggest_story`, `apply_format_pack`, `analyze_reference`, `render_variants` |
@@ -97,7 +97,7 @@ Budgets: department compact schemas ≤ 12,000 B each (rhythm is shared with
 1D: 1D ≤ 6,000, 2C+2D ≤ 6,000); every full description ≤ 900 characters;
 core compact catalog growth from Wave 2 ≤ 150 B (department names + Wave 2
 skill names in `read_skill`'s enum), ceiling 82,700 unchanged. Read-only
-verbs (`analyze_music`, `get_syllables`, `find_shots`, `suggest_match_cuts`,
+verbs (`analyze_music`, `get_syllables`, `check_speech`, `align_lyrics`, `find_shots`, `suggest_match_cuts`,
 `pick_still`, `plan_loop`, `suggest_story`, `analyze_reference`) are added to
 `backend/routes/mcp.py` `_READ_ONLY_EXACT`.
 

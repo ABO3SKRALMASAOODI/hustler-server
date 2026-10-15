@@ -88,7 +88,8 @@ class Ctx:
 
 # ── Wave 2 pins (INTERFACES_W2.md §2, §5, §10) ──────────────────────────
 W2_VERBS = {"add_typeset", "set_typeset", "remove_typeset", "import_font",
-            "analyze_music", "get_syllables", "align_lyrics",
+            "analyze_music", "get_syllables", "check_speech",
+            "align_lyrics",
             "plan_to_music", "shape_music", "set_speed_ramp",
             "animate_still", "find_shots", "suggest_match_cuts",
             "pick_still", "plan_loop", "suggest_story", "apply_format_pack",

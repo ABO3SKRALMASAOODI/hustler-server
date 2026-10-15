@@ -81,7 +81,8 @@ CUTS = {"keep": [[0.0, 5.0], [6.0, 10.0], [10.0, 14.0]]}
 
 
 def test_the_department_is_installed_with_its_pinned_verbs():
-    assert set(tools_ext.EXT_DEPARTMENTS["rhythm"]) == set(P.VERBS)
+    # (Wave 2 adds its rhythm verbs to the same department)
+    assert set(P.VERBS) <= set(tools_ext.EXT_DEPARTMENTS["rhythm"])
     for v in P.VERBS:
         assert v in agent_tools.TOOLS and v in agent_tools.WRITE_TOOLS
         assert len(agent_tools.TOOLS[v][1]) <= 900
