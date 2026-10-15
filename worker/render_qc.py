@@ -159,6 +159,10 @@ EDGE_PAD = .004             # a caption this far past a card edge crosses it
 # design (motion_captions 'stack', 'lockup'): no line to keep inside it
 # (s05 of the Oct 10 run, Kinetic Poster: 'CLEARLY' spans the backdrop).
 HERO_CAPTION_LOOKS = ("stack", "lockup")
+# fx devices whose whole window may change the whole picture (plan());
+# any other fx item is whole-window deliberate only when this short
+FX_WHOLE_TYPES = ("accent", "strobe", "junction")
+FX_WHOLE_S = 1.0
 BAND_EDGE_S = .65           # ...except at the band's very start or end:
                             # a graphic landing (leaving) this close to the
                             # headline's own edge takes the band from (to)
@@ -248,6 +252,35 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
         if timed:
             # a timed flash or shake (a whole-programme look never dips)
             deliberate.append(events[-1])
+    # Effects-graph devices (the EDL's ``fx``: punctuation frames, strobes,
+    # junctions, silhouette flashes, grade sections, finishes) change the
+    # whole picture by design. A short one — or any accent, strobe or
+    # junction — is deliberate over its whole window (plus its decay); a
+    # sustained one only at its edges, so a pop inside a long section is
+    # still caught. Without this a 1-frame negative off a cut read as two
+    # JUMP OFF A CUT findings and held the export (engines release, live
+    # check on project 3419).
+    for item in edl.get("fx") or []:
+        if not isinstance(item, dict) or item.get("stage") == "music_bus":
+            continue
+        a, b = item.get("start"), item.get("end")
+        try:
+            if a is None and item.get("at") is not None:
+                half = max(0.1, float(item.get("duration_s") or 0.5) / 2.0)
+                a, b = float(item["at"]) - half, float(item["at"]) + half
+            a = float(a)
+            b = float(b) if b is not None else a
+        except (TypeError, ValueError):
+            continue
+        fa = renderer.first_frame_at(a, fps)
+        fb = renderer.first_frame_at(max(a, b), fps)
+        tail = 3 + max(0, int(item.get("decay_f") or 0))
+        if item.get("type") in FX_WHOLE_TYPES or b - a <= FX_WHOLE_S:
+            win = [(fa - 1, fb + tail)]
+        else:
+            win = [(fa - 1, fa + 3), (fb - 3, fb + tail)]
+        events += win
+        deliberate += win
     for item in edl.get("motion") or []:
         if not isinstance(item, dict):
             continue
