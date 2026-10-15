@@ -231,7 +231,8 @@ def _strip_w1_growth(catalog):
         elif name in ("load_tools", "expand_toolset"):
             walk(tool, live)
         elif name == "read_skill":
-            walk(tool, W1_SKILLS)
+            from w2_support import W2_SKILLS   # Wave 2's skills, same rule
+            walk(tool, W1_SKILLS | W2_SKILLS)
     return cat
 
 

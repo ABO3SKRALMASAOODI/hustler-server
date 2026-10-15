@@ -79,8 +79,10 @@ Shared-file edits are surgical and listed in the progress file
 
 ## 2. Departments and verbs (`tools_ext`)
 
-Two departments join `tools_ext.DEPARTMENTS`: **`type`** and **`story`**
-(core growth: the names in the `load_tools` / `expand_toolset` enums, 30 B).
+Two departments join `tools_ext.DEPARTMENTS`: **`type`** and **`direction`**
+(core growth: the names in the `load_tools` / `expand_toolset` enums, 38 B).
+`story` is NOT used: it is an existing core domain (cutting tools), and a
+department of that name would merge into it.
 Wave 2 verbs:
 
 | Module | Department | Verbs |
@@ -88,8 +90,8 @@ Wave 2 verbs:
 | `tools_ext/typeset_tools.py` | type | `add_typeset`, `set_typeset`, `remove_typeset`, `import_font` |
 | `tools_ext/rhythm_tools.py` | rhythm | `analyze_music`, `get_syllables`, `align_lyrics` |
 | `tools_ext/montage_tools.py` | rhythm | `plan_to_music`, `shape_music`, `set_speed_ramp`, `animate_still` |
-| `tools_ext/structure_tools.py` | story | `find_shots`, `suggest_match_cuts`, `pick_still`, `plan_loop` |
-| `tools_ext/format_tools.py` | story | `suggest_story`, `apply_format_pack`, `analyze_reference`, `render_variants` |
+| `tools_ext/structure_tools.py` | direction | `find_shots`, `suggest_match_cuts`, `pick_still`, `plan_loop` |
+| `tools_ext/format_tools.py` | direction | `suggest_story`, `apply_format_pack`, `analyze_reference`, `render_variants` |
 
 Budgets: department compact schemas ≤ 12,000 B each (rhythm is shared with
 1D: 1D ≤ 6,000, 2C+2D ≤ 6,000); every full description ≤ 900 characters;

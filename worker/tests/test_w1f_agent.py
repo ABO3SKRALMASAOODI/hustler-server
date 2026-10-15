@@ -67,7 +67,9 @@ def test_core_catalog_growth_is_within_1fs_share():
     core = tools_ext.core_names(agent_tools.TOOLS)
     size = len(json.dumps(agent_tools.openai_tools(
         "any-model", compact=True, names=core), separators=(",", ":")))
-    assert size <= 81688 + 18 + 5 + 250 + 10, size   # base + verify + fx
+    from w2_support import W2_CORE_GROWTH_MAX
+    assert size <= 81688 + 18 + 5 + 250 + 10 + W2_CORE_GROWTH_MAX, size
+    # base + verify + fx (+ Wave 2's department and skill names)
     look = agent_tools.TOOLS["look_at"][2]["overlay"]
     assert look["enum"] == ["matte", "free_space", "beats"]
 

@@ -84,3 +84,19 @@ class Ctx:
 
     def proxy_path(self):
         return None
+
+
+# ── Wave 2 pins (INTERFACES_W2.md §2, §5, §10) ──────────────────────────
+W2_VERBS = {"add_typeset", "set_typeset", "remove_typeset", "import_font",
+            "analyze_music", "get_syllables", "align_lyrics",
+            "plan_to_music", "shape_music", "set_speed_ramp",
+            "animate_still", "find_shots", "suggest_match_cuts",
+            "pick_still", "plan_loop", "suggest_story", "apply_format_pack",
+            "analyze_reference", "render_variants"}
+W2_FX_TAGS = {"arrange"}
+W2_SKILLS = {"typesetting", "type-fx", "rhythm", "montage", "structure",
+             "creative-direction"}
+W2_DEPARTMENTS = {"type", "direction"}
+# Core compact catalog growth Wave 2 may add (department names and skill
+# names in the core enums); the 82,700 ceiling is unchanged.
+W2_CORE_GROWTH_MAX = 150
