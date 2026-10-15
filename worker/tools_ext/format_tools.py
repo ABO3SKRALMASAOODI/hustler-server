@@ -24,6 +24,8 @@ import json
 import os
 
 DEPARTMENT = "direction"
+# Proposals apply_format_pack writes when the agent picks none
+APPLY_N = {"calm": 2, "designed": 4, "charged": 6}
 VERBS = ("suggest_story", "apply_format_pack", "analyze_reference",
          "render_variants")
 
@@ -180,6 +182,7 @@ def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed"):
     cands = (stored or {}).get("cands") if picks else None
     if not cands:
         cands = _plan(ctx, edl, intensity, p)
+    left = []
     if picks:
         try:
             idx = [int(i) - 1 for i in (picks if isinstance(picks, list)
@@ -187,6 +190,12 @@ def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed"):
         except (TypeError, ValueError):
             return "REJECTED: picks are proposal numbers from suggest_story."
         cands = [cands[i] for i in idx if 0 <= i < len(cands)]
+    else:
+        # no picks: restraint by default — the best few for the intensity
+        # (a talking short usually earns one or two devices beside its
+        # lockups); the rest stay proposals the agent can still pick
+        n = APPLY_N.get(intensity, 4)
+        cands, left = cands[:n], cands[n:]
     calls = [c["call"] for c in cands
              if c.get("call") and not (c.get("op") or c.get("ops"))]
     ops, used, notes = _solve_ops(ctx, edl, cands)
@@ -202,6 +211,11 @@ def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed"):
             return res
     if notes:
         res += "\nNOTE: " + "; ".join(notes) + "."
+    if left:
+        res += ("\nNot applied (restraint; pick them by number from "
+                "suggest_story if this story earns them): " + ", ".join(
+                    f"{c['device']}@{float(c.get('at') or 0):.1f}s"
+                    for c in left) + ".")
     if calls:
         res += "\nNext calls (they solve against the footage): " + "; ".join(
             f"{c['verb']}({json.dumps(c.get('args') or {})})" for c in calls)

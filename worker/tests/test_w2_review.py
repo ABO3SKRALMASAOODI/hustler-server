@@ -441,3 +441,26 @@ def test_main_video_is_described_where_the_short_is(tmp_path):
     early = SimpleNamespace(latest_edl=lambda: {"json": {
         "keep": [[12.0, 48.0]]}})
     assert structure_tools._program_window(early) == 0.0
+
+
+def test_apply_format_pack_without_picks_is_restrained(monkeypatch):
+    """With no picks it wrote all eight proposals (three lockups, two split
+    tones, a fill flash, a B&W section on V04): restraint is the default —
+    the best few for the intensity; the rest are named, still pickable."""
+    from tools_ext import format_tools, typeset_tools
+    monkeypatch.setattr(typeset_tools, "_faces",
+                        lambda *a, **k: [(0.3, 0.2, 0.7, 0.46)])
+    ctx = Ctx(edl(keep=((0.0, 14.0),), ratio="9:16"))
+    out = format_tools.apply_format_pack(ctx, pack="none", intensity="calm")
+    written = [m for m in ctx.edl.get("motion") or []] + \
+        [f for f in ctx.edl.get("fx") or []]
+    assert len(written) <= format_tools.APPLY_N["calm"] + 2, out
+    import story_planner
+    got = story_planner.suggest(ctx.edl, index(), base=[
+        {"device": "grade_split_tone", "family": "finish", "at": 1.0,
+         "op": {"action": "upsert", "layer": "fx", "id": "g1",
+                "value": {}}},
+        {"device": "grade_split_tone", "family": "finish", "at": 5.0,
+         "op": {"action": "upsert", "layer": "fx", "id": "g2",
+                "value": {}}}])
+    assert sum(c["device"] == "grade_split_tone" for c in got) <= 1

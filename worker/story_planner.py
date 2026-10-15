@@ -310,7 +310,11 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
     out.sort(key=lambda c: -c["score"])
     seen, final = {}, []
     for c in out:
-        cap = pal.get(c["device"], 3) if pack else 3
+        # one of a kind per short unless a pack budgets more: two split
+        # tones or two grade sections are a look, not two devices (type
+        # lockups are the exception: one per beat)
+        cap = pal.get(c["device"], 3) if pack else (
+            3 if str(c["device"]).startswith("typeset") else 1)
         if seen.get(c["device"], 0) >= cap:
             continue
         seen[c["device"]] = seen.get(c["device"], 0) + 1
