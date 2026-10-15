@@ -94,12 +94,22 @@ def test_negative_hits_are_flash_safe_and_stay_out_of_the_hook():
 
 def test_the_lab_scan_is_flash_safe_unless_the_user_opted_in():
     _edl, plan = _plan()
-    safe, _l, _w = recipes.build("lab_scan", plan)
+    keys = ["media/p1/v_photo.png", "media/p1/v_negative.png",
+            "media/p1/v_line.png", "media/p1/v_blueprint.png",
+            "media/p1/v_thermal.png"]
+    safe, _l, _w = recipes.build("lab_scan", plan, variant_keys=keys)
     hot, _l2, _w2 = recipes.build("lab_scan", plan, flash_ok=True)
     assert safe and hot
     assert all(f["hold_f"] >= 8 and not f.get("negate")
                for f in safe[0]["frames"])
+    assert len({f["source"]["asset_key"] for f in safe[0]["frames"]}) == 3
     assert all(f["hold_f"] == 2 for f in hot[0]["frames"])
+    # flash-safe and without its stills the scan would be three identical
+    # frames of the program (no move at all): it is not offered as ops
+    none, _l3, why = recipes.build("lab_scan", plan)
+    assert none is None and "stills" in why
+    row = next(r for r in recipes.rank(plan) if r["name"] == "lab_scan")
+    assert row["items"] is None
 
 
 def test_a_move_the_batch_already_used_ranks_lower():

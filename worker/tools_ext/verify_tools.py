@@ -303,7 +303,7 @@ def suggest_devices(ctx, start=None, end=None, families=None, intensity=None,
             max_n=max_candidates or device_planner.MAX_CANDIDATES,
             rhetoric=_rhetoric(ctx, edl), maps=music_maps(ctx, edl),
             matte=matte, weights=weights,
-            duration=ctx.duration or None, media_keys=set(keys),
+            duration=ctx.duration or None, media_keys=set(keys or ()),
             request_text=getattr(ctx, "user_message", None))
     except ValueError as e:
         return f"REJECTED: {e}"

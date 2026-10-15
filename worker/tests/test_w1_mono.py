@@ -84,3 +84,40 @@ def test_the_noir_look_is_never_a_flat_bw_grade():
     assert look["grade_custom"]["saturation"] >= 0.4
     for name, lk in agent_tools.LOOKS.items():
         assert lk.get("grade") != "bw", name
+
+
+def test_the_other_roads_to_a_flat_bw_short_are_the_same_look():
+    """Review (w1r): refused 'bw', a mid-tier agent reaches for the custom
+    grade at saturation 0, a 'hue=s=0' filter chain over the program or a
+    xerox finish over the whole short — each is the same flat look and is
+    judged the same way; partial windows stay devices."""
+    edl = default_edl(20.0)
+    edl["effects"] = dict(edl.get("effects") or {},
+                          grade_custom={"saturation": 0.0, "contrast": 1.2})
+    assert "custom grade" in mono_policy.whole_mono(edl)
+    edl["effects"]["grade_custom"]["saturation"] = 0.6
+    assert mono_policy.whole_mono(edl) is None
+    edl = default_edl(20.0)
+    edl["effects"] = dict(edl.get("effects") or {}, custom=[
+        {"id": "c1", "chain": "hue=s=0,eq=contrast=1.15", "label": "noir"}])
+    assert "100%" in mono_policy.whole_mono(edl)
+    edl["effects"]["custom"][0].update(start=2.0, end=5.0)
+    assert mono_policy.whole_mono(edl) is None          # a mono section
+    edl["effects"]["custom"] = [{"id": "c2", "chain": "hue=s=0.4"}]
+    assert mono_policy.whole_mono(edl) is None          # muted, not mono
+    edl = default_edl(20.0)
+    edl["fx"] = [{"id": "fx1", "type": "finish", "kind": "xerox",
+                  "stage": "pre_captions", "start": 0.0, "end": 19.0}]
+    assert mono_policy.whole_mono(edl)
+    edl["fx"][0]["kind"] = "thermal"
+    assert mono_policy.whole_mono(edl) is None
+    # the verb never reaches saturation 0 (a value under 0.5 is a delta);
+    # a batch can write it directly, and the write gate judges it
+    ctx, fake = tool_context(default_edl(20.0),
+                             user_message="make this a premium short")
+    edl = default_edl(20.0)
+    edl["effects"] = dict(edl.get("effects") or {},
+                          grade_custom={"saturation": 0.0})
+    out = ctx.write_edl(edl, "custom grade")
+    assert out.startswith("REJECTED"), out
+    assert "B&W is a device" in out and len(fake.rows) == 1

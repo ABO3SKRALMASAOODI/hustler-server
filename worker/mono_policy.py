@@ -13,8 +13,10 @@ What the owner disliked: agents turned those moments into a constant B&W
 grade over the whole short (the 'mono_noir' look did exactly that: grade
 'bw' from frame 0 to the end card). This module is the rule in code:
 
-  ``whole_mono(edl)``  why the program reads as flat B&W (the 'bw' grade, or
-                       desaturating grade windows over most of it), or None;
+  ``whole_mono(edl)``  why the program reads as flat B&W (the 'bw' grade, a
+                       custom grade at saturation <= 0.15, or desaturating
+                       grade windows, mono filter chains and mono finishes
+                       over most of it), or None;
   ``asked(text)``      True when the user's own words ask for black and white
                        (None when there are no user words: an MCP client or a
                        script, where the reply can only advise);
@@ -80,8 +82,45 @@ def _program_s(edl):
     return total
 
 
+# An agent-written filter chain (effects.custom) that drops the colour.
+_MONO_CHAIN = re.compile(
+    r"(\bhue=(?:[^,;]*:)?s=0(?:\.0+)?(?=$|[:,;\s'])|\bformat=gray|"
+    r"\bmonochrome\b|\beq=(?:[^,;]*:)?saturation=0(?:\.0+)?(?=$|[:,;\s'])"
+    r"|\bhuesaturation=(?:[^,;]*:)?saturation=-1(?:\.0+)?\b|"
+    r"\bcolorchannelmixer=\.?3:\.?59:\.?11)", re.I)
+# Picture finishes that ARE black and white over their window (EDL.fx
+# finish kinds; a palette that stays mono).
+MONO_FINISHES = {"xerox": None, "line_art": None,
+                 "halftone": ("newsprint", "black", None)}
+
+
 def _mono_windows(edl):
     out = []
+    prog = None
+    for c in ((edl or {}).get("effects") or {}).get("custom") or []:
+        if not isinstance(c, dict) or not _MONO_CHAIN.search(
+                str(c.get("chain") or "")):
+            continue
+        try:
+            if c.get("start") is None or c.get("end") is None:
+                prog = _program_s(edl) if prog is None else prog
+                out.append((0.0, prog))
+            else:
+                out.append((float(c["start"]), float(c["end"])))
+        except (TypeError, ValueError):
+            continue
+    for it in (edl or {}).get("fx") or []:
+        if isinstance(it, dict) and it.get("type") == "finish" and \
+                it.get("kind") in MONO_FINISHES and not it.get("region"):
+            pals = MONO_FINISHES[it["kind"]]
+            if pals is not None and it.get("palette") not in pals:
+                continue
+            try:
+                if float(it.get("strength", 1.0)) < 0.8:
+                    continue
+                out.append((float(it["start"]), float(it["end"])))
+            except (KeyError, TypeError, ValueError):
+                continue
     for it in (edl or {}).get("fx") or []:
         if not isinstance(it, dict) or it.get("type") != "grade_window":
             continue
@@ -113,12 +152,21 @@ def whole_mono(edl):
     fx = (edl or {}).get("effects") or {}
     if fx.get("grade") == "bw":
         return "the 'bw' grade turns the whole short black and white"
+    gc = fx.get("grade_custom") or {}
+    try:
+        sat = gc.get("saturation") if isinstance(gc, dict) else None
+        if sat is not None and float(sat) <= MONO_SATURATION:
+            return ("the custom grade's saturation "
+                    f"{float(sat):g} turns the whole short black and white")
+    except (TypeError, ValueError):
+        pass
     prog = _program_s(edl)
     if prog <= 0:
         return None
     share = _covered(_mono_windows(edl)) / prog
     if share >= WHOLE_SHARE:
-        return (f"black-and-white grade windows cover {100 * share:.0f}% of "
+        return (f"black-and-white windows (grade windows, mono filters or "
+                f"mono finishes) cover {100 * share:.0f}% of "
                 "the short")
     return None
 

@@ -44,6 +44,10 @@ through tools_ext._write.commit (apply_edit_batch's own validation).
 import re
 
 PREFIX = "rc_"
+# rank() solves an asset recipe's landing with these stand-in keys; its ops
+# are written by apply_recipe once the real stills exist (never shown).
+STILLS_PLACEHOLDER = ("stills:photo", "stills:negative", "stills:line",
+                      "stills:blueprint", "stills:thermal")
 # A recipe the batch already used ranks this much lower per use.
 FRESH_DECAY = 0.45
 MIN_HIT_GAP_S = 0.36           # negatives: <= 3 full-frame flashes a second
@@ -218,11 +222,25 @@ def _frames(n, fps):
     return n / float(fps)
 
 
+def _ink_safe(edl, t0, t1, choices):
+    """device_planner.ink_safe: a flat colour laid under type keeps every
+    lockup on screen readable (first readable choice), or choices[0]."""
+    if not edl:
+        return choices[0]
+    try:
+        import device_planner
+        return device_planner.ink_safe(edl, t0, t1, choices) or choices[0]
+    except Exception:  # noqa: BLE001 — taste advice never fails a build
+        return choices[0]
+
+
 def build(name, plan, *, ids=(), accent=None, variant_keys=None,
-          flash_ok=False):
+          flash_ok=False, edl=None):
     """(items, landing moment, why) for recipe ``name`` on ``plan`` (a
     device_planner.moments result), or (None, None, reason). Items are
-    complete fx items (ids prefixed rc_<name>_), ready for upsert ops."""
+    complete fx items (ids prefixed rc_<name>_), ready for upsert ops.
+    ``edl`` (optional) lets a flat colour laid under type pick a colour
+    the lockups on screen stay readable on."""
     r = RECIPES.get(name)
     if r is None:
         return None, None, f"unknown recipe {name!r}"
@@ -280,9 +298,11 @@ def build(name, plan, *, ids=(), accent=None, variant_keys=None,
         end = _phrase_end(m, plan, 1.4)
         if end - m["t"] < 0.5:
             end = min(prog - 0.05, m["t"] + 0.8)
+        field = _ink_safe(edl, float(m["t"]), float(end),
+                          [accent or "accent", "#f1ede4"])
         return [{"id": nid(), "type": "subject", "stage": "world",
                  "start": _fmt_t(m["t"]), "end": _fmt_t(end),
-                 "kind": "poster", "field": accent or "accent",
+                 "kind": "poster", "field": field,
                  "keep_footage": False, "colour": "black",
                  "device": "subject_poster", "bind": _bind(m)}], m, (
             f"black silhouette on the accent field for "
@@ -321,24 +341,38 @@ def build(name, plan, *, ids=(), accent=None, variant_keys=None,
             return None, None, "no payoff or stressed word"
         # a fill's decay frames are the LAST decay_f frames of its window:
         # two full frames + three decaying = a five-frame window
+        end = m["t"] + _frames(2 + 3, fps) + 0.004
+        # white unless a lockup on screen is white or pale (the payoff
+        # landing on a white silhouette washes out): then the same hit in
+        # black, and the type pops
+        col = _ink_safe(edl, float(m["t"]), float(end), ["white", "black"])
         return [{"id": nid(), "type": "subject", "stage": "world",
-                 "start": _fmt_t(m["t"]),
-                 "end": _fmt_t(m["t"] + _frames(2 + 3, fps) + 0.004),
-                 "kind": "fill", "colour": "white", "decay_f": 3,
+                 "start": _fmt_t(m["t"]), "end": _fmt_t(end),
+                 "kind": "fill", "colour": col, "decay_f": 3,
                  "device": "subject_fill_flash", "bind": _bind(m)}], m, (
-            f"white silhouette for 2 frames on "
+            f"{col} silhouette for 2 frames on "
             f"'{m.get('word_raw') or m.get('word')}' at {m['t']:.2f}s, "
-            "decaying over 3")
+            "decaying over 3"
+            + (" (black: the lockup on screen is light and would wash out "
+               "on white)" if col == "black" else ""))
     if name == "lab_scan":
         m = _strongest(plan, lambda x: _word(x) in MECHANISM_WORDS
                        or "number" in _tags(x))
         if m is None:
             return None, None, "no mechanism or number word"
         # flash safety (owner rule): unless the user opted in to flashing,
-        # every image holds a third of a second (<= 3 changes a second) and
-        # nothing is negated; opted in, the reference's 2-frame strobe
+        # three images, each held the schema's longest hold (8 frames:
+        # ~0.27 s at 30 fps, 0.32 s at 25 — three image changes, counted by
+        # flash_times, never more in any second) and nothing is negated;
+        # opted in, the reference's 2-frame strobe
         hold = 2 if flash_ok else max(2, int(-(-fps // 3)))
         keys = list(variant_keys or [])
+        if not keys and not flash_ok:
+            # without stills the scan strobes the frame itself, negated
+            # every other hold — a flash; flash-safe, that would be three
+            # identical frames (no move at all)
+            return None, None, ("the lab scan needs its registered stills "
+                                "(apply_recipe makes them from the frame)")
         n_img = (len(keys) or 4) if flash_ok else min(3, len(keys) or 3)
         dur = n_img * hold / fps
         start = float(m["t"])
@@ -466,7 +500,7 @@ def batch_usage(edls):
 
 
 def rank(plan, *, used_here=(), batch=None, matte_ok=True, flash_ok=False,
-         accent=None, ids=()):
+         accent=None, ids=(), edl=None):
     """[{name, title, story, at, word, why, score, fit, fresh, uses,
     exemplars, items, notes}] best first. ``used_here``: recipes already in
     this edit (never twice); ``batch``: batch_usage of the sibling shorts;
@@ -477,10 +511,13 @@ def rank(plan, *, used_here=(), batch=None, matte_ok=True, flash_ok=False,
             continue
         if r.matte and matte_ok is False:
             continue
-        items, landing, why = build(name, plan, ids=ids, accent=accent,
-                                    flash_ok=flash_ok)
+        items, landing, why = build(
+            name, plan, ids=ids, accent=accent, flash_ok=flash_ok, edl=edl,
+            variant_keys=STILLS_PLACEHOLDER if r.assets else None)
         if not items:
             continue
+        if r.assets:
+            items = None        # apply_recipe makes the stills, then writes
         f = fit(name, plan, landing)
         uses = int((batch or {}).get(name, 0))
         fresh = FRESH_DECAY ** uses

@@ -69,8 +69,13 @@ TAG_WEIGHTS = {"payload": 0.25, "number": 0.2, "negation": 0.15,
 PAYOFF_HOLD_S = (0.8, 1.5)
 # Placement keys a card's ``params`` may carry besides item field names
 # (INTERFACES.md §5's own example card carries ``frames``).
-PLANNER_KEYS = ("frames", "duration_s", "span", "offset_f")
-SPANS = ("frames", "phrase", "sentence", "section", "shot", "payoff_hold")
+PLANNER_KEYS = ("frames", "duration_s", "span", "offset_f", "min_s", "max_s")
+SPANS = ("frames", "phrase", "sentence", "section", "shot", "payoff_hold",
+         "setup")
+# span "setup": a window that ENDS on its moment (a mono section opening to
+# colour ON the turn) runs back at least this long, at most this long or
+# this share of the program.
+SETUP_MIN_S, SETUP_MAX_S, SETUP_SHARE = 1.2, 6.0, 0.4
 # Families whose devices are pointlike punctuation (one family per section).
 PUNCTUATION = ("punctuation",)
 # Families that never land inside the payoff hold.
@@ -435,11 +440,28 @@ def program_cuts(edl, index, tl=None):
         blocks = tlmod.program_blocks(edl)
     except Exception:  # noqa: BLE001
         blocks = []
-    for b in blocks[1:]:
+    starts = []
+    for sh in (index or {}).get("shots") or []:
+        try:
+            starts.append(float(sh.get("start", sh.get("t0"))))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    starts.sort()
+    for prev, b in zip(blocks, blocks[1:]):
+        # a join of two footage blocks with no indexed camera change between
+        # the outgoing frame and the incoming one is a JUMP cut inside one
+        # take: a hard cut stays a hard cut (no content-born transition)
+        jump = False
+        if prev.get("kind") == "footage" and b.get("kind") == "footage" \
+                and isinstance((index or {}).get("shots"), list):
+            a_ = float(prev.get("src_end") or 0.0)
+            b_ = float(b.get("src_start") or 0.0)
+            lo_, hi_ = min(a_, b_), max(a_, b_)
+            jump = not any(lo_ - 0.05 < c <= hi_ + 0.05 for c in starts)
         out.append({"t": float(b["out_start"]),
                     "ref": (float(b["src_start"]) if b["kind"] == "footage"
                             else None),
-                    "kind": "join", "shot_change": True})
+                    "kind": "join", "shot_change": not jump})
     for sh in (index or {}).get("shots") or []:
         try:
             s = float(sh.get("start", sh.get("t0")))
@@ -625,7 +647,8 @@ def moments(edl, index, *, rhetoric=None, maps=None, fps=None):
         out.append({"t": c["t"], "kind": "cut",
                     "strength": 0.6 if new_idea else 0.45, "bind": bind,
                     "tags": ["new_idea"] if new_idea else [], "word": None,
-                    "phrase": None, "cut_kind": c["kind"]})
+                    "phrase": None, "cut_kind": c["kind"],
+                    "jump": not c.get("shot_change", True)})
     for k, (a, _b) in enumerate(sections[1:], start=1):
         out.append({"t": a, "kind": "section", "strength": 0.45,
                     "bind": {"on": "time", "ref": round(a, 2)},
@@ -793,6 +816,383 @@ def _payoff(ms, words, program_s, fps, declared=None):
 
 # ── cards → candidates ──────────────────────────────────────────────────
 
+# ── what the track cards cannot say (Wave 1 integration review) ──────────
+# A card says WHAT a device is and the moments it may bind to. The cards of
+# the five device tracks carry no placement, so every sustained device — a
+# grey world, a poster, a finish, a grade section, a word behind the head —
+# was proposed as a 2-frame flicker; and every card scored alike, so on a
+# talking head the alphabet put composites and finishes first (a CRT on a
+# jump cut, a split tone for 0.07 s, a difference blend on the payoff, a
+# ghost stroke on a graphic nothing hides). CARD_TASTE is the planner's
+# half, kept in one place:
+#
+#   place     the window (PLANNER_KEYS) when the card names none
+#   binds_to  the moments the device earns, replacing the card's list
+#   values    item field defaults (first choice) the planner writes
+#   prior     how readily a premium editor reaches for it on speech
+#             (multiplies the moment's score; 0 = never proposed
+#             automatically: it needs the editor's intent — a region, a
+#             file, footage for the letters)
+#   gate      a metaphor the words must carry (METAPHOR_WORDS) — a finish
+#             is "the inside of the machine", "a screen", "the past",
+#             never a texture
+#   host      which motion graphic a composite may modify
+CARD_TASTE = {
+    # a silhouette flash is the payoff's or the turn's (or a real cut's on a
+    # user track), never any stressed word
+    "subject_fill_flash": {"prior": 1.0, "binds_to": [
+        "word.payoff", "word.contrast", "word.negation", "beat.kick",
+        "downbeat", "cut"]},
+    "subject_negate": {"prior": 0.75},
+    "subject_poster": {"place": {"span": "payoff_hold", "min_s": 1.0,
+                                 "max_s": 2.5}, "prior": 0.9},
+    "subject_isolate": {"place": {"span": "payoff_hold", "min_s": 1.5,
+                                  "max_s": 3.5}, "prior": 0.9},
+    "subject_glow": {"place": {"span": "phrase", "min_s": 0.8,
+                               "max_s": 2.0}, "prior": 0.6},
+    "subject_outline": {"place": {"span": "phrase", "min_s": 0.8,
+                                  "max_s": 2.0}, "prior": 0.5},
+    "subject_exposure": {"place": {"span": "phrase", "min_s": 0.8,
+                                   "max_s": 2.5}, "prior": 0.45},
+    "subject_echo": {"place": {"span": "phrase", "min_s": 0.5,
+                               "max_s": 1.2}, "prior": 0.5,
+                     "gate": "speed"},
+    "background_swap": {"place": {"span": "phrase", "min_s": 1.0,
+                                  "max_s": 2.5}, "prior": 0.35},
+    "background_blur": {"place": {"span": "phrase", "min_s": 1.0,
+                                  "max_s": 3.0}, "prior": 0.4},
+    "background_strobe": {"place": {"duration_s": 1.0}, "prior": 0.2},
+    "background_subject_hold": {"place": {"duration_s": 0.8},
+                                "prior": 0.25},
+    # the hero word behind the head is a word worth setting: the payoff, a
+    # payload, a number, an emotion or the turn (never a bare stress)
+    "type_behind_graphic": {"place": {"span": "payoff_hold", "min_s": 1.0,
+                                      "max_s": 2.2}, "prior": 1.0,
+                            "binds_to": ["word.payoff", "word.payload",
+                                         "word.number", "word.emotion",
+                                         "word.contrast"]},
+    "type_behind_text": {"place": {"span": "payoff_hold", "min_s": 1.0,
+                                   "max_s": 2.2}, "prior": 0.85,
+                         "binds_to": ["word.payoff", "word.payload",
+                                      "word.number", "word.emotion"]},
+    # one B&W setup per short (two read as a grade, not a moment)
+    "grade_section": {"place": {"span": "setup"}, "prior": 0.85,
+                      "binds_to": ["word.contrast", "word.negation",
+                                   "section", "drop"],
+                      "budget": {"calm": {"per_short": 1},
+                                 "designed": {"per_short": 1},
+                                 "charged": {"per_short": 2}}},
+    "grade_split_tone": {"place": {"span": "section"}, "prior": 0.25},
+    "grade_isolate_hue": {"place": {"span": "section"}, "prior": 0.0},
+    "grade_lut_import": {"prior": 0.0},
+    "grade_shot_match": {"prior": 0.0},
+    "finish_crt": {"place": {"span": "shot", "min_s": 1.0, "max_s": 4.0},
+                   "prior": 0.5, "gate": "screen"},
+    "finish_lcd": {"place": {"span": "shot", "min_s": 1.0, "max_s": 4.0},
+                   "prior": 0.5, "gate": "screen"},
+    "finish_led": {"place": {"span": "shot", "min_s": 1.0, "max_s": 4.0},
+                   "prior": 0.4, "gate": "screen"},
+    "finish_film": {"place": {"span": "phrase", "min_s": 1.0,
+                              "max_s": 3.0}, "prior": 0.45, "gate": "past"},
+    "finish_halftone": {"place": {"span": "phrase", "min_s": 1.0,
+                                  "max_s": 2.5}, "prior": 0.4,
+                        "gate": "print"},
+    "finish_xerox": {"place": {"span": "phrase", "min_s": 1.0,
+                               "max_s": 2.5}, "prior": 0.35,
+                     "gate": "print"},
+    "finish_thermal": {"place": {"duration_s": 0.6}, "prior": 0.55,
+                       "gate": "heat"},
+    "finish_xray": {"place": {"duration_s": 0.6}, "prior": 0.5,
+                    "gate": "inside"},
+    "finish_night_vision": {"place": {"duration_s": 0.8}, "prior": 0.4,
+                            "gate": "night"},
+    "finish_blueprint": {"place": {"duration_s": 0.6}, "prior": 0.5,
+                         "gate": "mechanism"},
+    "finish_line_art": {"place": {"duration_s": 0.6}, "prior": 0.4,
+                        "gate": "mechanism"},
+    "finish_solarise": {"place": {"duration_s": 0.6}, "prior": 0.3,
+                        "gate": "icon"},
+    "finish_posterise": {"place": {"duration_s": 0.6}, "prior": 0.3,
+                         "gate": "icon"},
+    "finish_kaleidoscope": {"place": {"duration_s": 0.8}, "prior": 0.35,
+                            "gate": "mind"},
+    "finish_band_tear": {"place": {"frames": 3}, "prior": 0.35,
+                         "gate": "glitch"},
+    "finish_pixel_stretch": {"place": {"frames": 4}, "prior": 0.35,
+                             "gate": "glitch"},
+    "composite_ghost": {"prior": 0.9, "host": "behind"},
+    "composite_light": {"prior": 0.6, "host": "light"},
+    "composite_blend": {"prior": 0.45, "host": "type",
+                        "values": {"blend": "auto"}},
+    "composite_fill": {"prior": 0.0},
+    "composite_window": {"prior": 0.0},
+    "region_material": {"prior": 0.0},
+    "region_soften": {"prior": 0.0},
+    "region_tone": {"prior": 0.0},
+    "strobe_frames": {"prior": 0.0},
+    "variant_set": {"prior": 0.0},
+    "accent_negative": {"prior": 0.8},
+    "accent_white_hit": {"prior": 0.7},
+    "accent_colour_hit": {"prior": 0.55},
+    "accent_threshold": {"prior": 0.5},
+    "accent_mono": {"prior": 0.5},
+    "accent_posterize": {"prior": 0.45},
+    "accent_box_invert": {"prior": 0.45},
+    "accent_rgb_slice": {"prior": 0.4},
+    "accent_mirror": {"prior": 0.35},
+    "accent_hue_step": {"prior": 0.35},
+}
+# A content-born transition is THE device of a real camera or scene change
+# (jump cuts never take one), so it outranks a punctuation frame there.
+FAMILY_PRIOR = {"type_depth": 0.9, "matte_fx": 0.6, "punctuation": 0.5,
+                "transition": 0.85, "finish": 0.3, "composite": 0.4}
+# The words that carry a finish's metaphor (a moment's own word or one said
+# within METAPHOR_REACH_S after it). "glitch" also takes a hard cut.
+METAPHOR_WORDS = {
+    "heat": frozenset("""heat hot warm warmer warming burn burning burned fire
+        fires flame flames energy power powerful engine engines fuel sun solar
+        body bodies blood temperature thermal infrared radiation nuclear
+        reactor explode explosion rocket rockets launch plasma""".split()),
+    "inside": frozenset("""inside internal body bodies bone bones skeleton
+        brain organ organs hidden beneath underneath under secret truth
+        really scan x-ray xray cancer cell cells""".split()),
+    "mechanism": frozenset("""how works mechanism system systems built build
+        building design designed engineering engineer engineers code
+        software model models machine machines factory factories robot robots
+        architecture structure blueprint plan plans circuit chip chips
+        algorithm network""".split()),
+    "screen": frozenset("""screen screens tv television computer computers
+        monitor display phone phones iphone internet online video videos
+        broadcast pixel pixels digital app apps game games gaming
+        youtube""".split()),
+    "past": frozenset("""past history historical years ago old older back
+        then decade decades century remember memory memories childhood
+        grandfather grandmother vintage nostalgia once""".split()),
+    "print": frozenset("""newspaper newspapers news print printed paper
+        papers magazine headline headlines press propaganda poster
+        posters""".split()),
+    "night": frozenset("""night dark darkness spy spies surveillance
+        military war soldier soldiers hunt hunting watch watching
+        watched""".split()),
+    "icon": frozenset("""icon iconic art artist artists pop culture famous
+        fame celebrity legend legendary""".split()),
+    "mind": frozenset("""dream dreams mind minds psychedelic infinite
+        infinity trip imagine imagination universe consciousness
+        reality""".split()),
+    "speed": frozenset("""fast faster fastest speed speeds rapid rapidly
+        quick quickly accelerate accelerating acceleration velocity move
+        moving moves motion run running rush race racing sprint orbit
+        momentum""".split()),
+    "glitch": frozenset("""glitch broken break breaks crash crashed error
+        errors bug bugs hack hacked chaos chaotic""".split()),
+}
+METAPHOR_REACH_S = 1.5
+# Content-born transitions per short at an intensity (all junction styles
+# together: a short with a different wipe on every cut reads as a template).
+TRANSITION_CAP = {"calm": 1, "designed": 2, "charged": 3}
+# No flash device lands this early: the hook's first second is the frame
+# the viewer decides on (recipes keep negatives out of it too).
+HOOK_FLASH_FREE_S = 1.0
+# How many devices a program earns at an intensity (per second of program;
+# never fewer than 2): a 24 s talking head is offered 6 at "designed", not
+# 8 — "two well-placed devices beat ten" — and a candidate scoring under
+# SCORE_FLOOR of the best one is a filler, not a choice.
+DENSITY_PER_S = {"calm": 1 / 8.0, "designed": 1 / 4.0, "charged": 1 / 2.5}
+SCORE_FLOOR = 0.3
+# Templates a light composite is for (compositor.LIGHT_TEMPLATES).
+LIGHT_HOSTS = ("flash_transition", "light_leak", "film_burn")
+# A blend never touches the lockups the short is built on, or captions.
+BLEND_NEVER_TIERS = ("hook", "payoff")
+
+
+def card_taste(card):
+    """(card with the planner's taste merged, prior, gate, host) —
+    CARD_TASTE over the track's card (its own placement keys win)."""
+    t = CARD_TASTE.get(card.get("id")) or {}
+    prior = t.get("prior")
+    if prior is None:
+        prior = FAMILY_PRIOR.get(card.get("family"), 0.5)
+    if not (t.get("place") or t.get("binds_to") or t.get("values")
+            or t.get("budget")):
+        return card, float(prior), t.get("gate"), t.get("host")
+    out = dict(card)
+    if t.get("budget"):
+        out["budget"] = dict(card.get("budget") or {}, **t["budget"])
+    params = dict(card.get("params") or {})
+    if t.get("place") and not any(k in params for k in PLANNER_KEYS):
+        params.update(t["place"])
+    for k, v in (t.get("values") or {}).items():
+        cur = params.get(k)
+        if isinstance(cur, list):
+            params[k] = [v] + [x for x in cur if x != v]
+        else:
+            params[k] = v
+    out["params"] = params
+    if t.get("binds_to"):
+        out["binds_to"] = list(t["binds_to"])
+    return out, float(prior), t.get("gate"), t.get("host")
+
+
+def metaphor_ok(gate, moment, plan):
+    """Does the moment carry the metaphor ``gate`` names? (a word moment:
+    its own word; a cut or section: a word said within METAPHOR_REACH_S
+    after it; a glitch also takes a hard cut)."""
+    if not gate:
+        return True
+    vocab = METAPHOR_WORDS.get(gate) or frozenset()
+    if gate == "glitch" and moment.get("kind") == "cut":
+        return True
+    if moment.get("word"):
+        # a word moment carries it itself (the device lands ON the word)
+        return norm(moment.get("word")) in vocab
+    t = float(moment["t"])
+    for w in plan.get("words") or ():
+        t0 = float(w.get("t0", -1.0))
+        if t - 0.05 <= t0 <= t + METAPHOR_REACH_S and \
+                norm(w.get("w")) in vocab:
+            return True
+    return False
+
+
+def _type_on_screen(edl, t, payoff=False):
+    """Is a type lockup of the edit already on screen around program
+    second ``t``? (light graphics and the caption track are not type
+    lockups; on the payoff word the payoff's own lockup may be the one the
+    planner moves behind the speaker, so only OTHER lockups count)."""
+    for m in (edl or {}).get("motion") or []:
+        if not isinstance(m, dict) or m.get("template") in LIGHT_HOSTS:
+            continue
+        if m.get("_synthetic") or m.get("template") == "caption_motion" or str(m.get("id") or "") \
+                .startswith("__captions_"):
+            continue
+        params = m.get("params") or {}
+        if payoff and (params.get("tier") == "payoff"
+                       or str(m.get("id") or "").startswith("payoff")):
+            continue
+        try:
+            a, b = float(m["start"]), float(m["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if a - 0.3 < t < b:
+            return True
+    return False
+
+
+# A flat colour the planner lays under type (a silhouette fill, a poster
+# field, a solid background) keeps at least this WCAG contrast ratio with
+# every lockup ink on screen over its window. A white silhouette under a
+# white-and-yellow payoff lockup washed the payoff out on the very frame it
+# landed (W1-S1 Thiel, "140"); a black silhouette makes the same hit and
+# the type pops.
+INK_CONTRAST_MIN = 3.0
+INK_KEYS = ("color", "accent", "left_color", "right_color", "highlight")
+
+
+def _lum(hexv):
+    v = str(hexv or "").strip().lstrip("#")
+    if len(v) != 6:
+        return None
+    try:
+        rgb = [int(v[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+    except ValueError:
+        return None
+    lin = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+           for c in rgb]
+    return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+
+def contrast_ratio(a, b):
+    la, lb = _lum(a), _lum(b)
+    if la is None or lb is None:
+        return 21.0
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _resolve_hex(value, edl):
+    v = str(value or "").strip().lower()
+    if v in ("white", "black"):
+        return "#ffffff" if v == "white" else "#000000"
+    if v == "accent":
+        try:
+            import subject_fx
+            return subject_fx.accent_hex(edl)
+        except Exception:  # noqa: BLE001 — the house accent
+            return "#ffe14d"
+    return v if v.startswith("#") else None
+
+
+def lockup_inks(edl, t0, t1):
+    """#rrggbb inks of the type lockups on screen over [t0, t1) (light
+    graphics and the caption track excluded)."""
+    out = []
+    for m in (edl or {}).get("motion") or []:
+        if not isinstance(m, dict) or m.get("template") in LIGHT_HOSTS:
+            continue
+        if m.get("_synthetic") or m.get("template") == "caption_motion" \
+                or str(m.get("id") or "").startswith("__captions_"):
+            continue
+        try:
+            a, b = float(m["start"]), float(m["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b <= t0 or a >= t1:
+            continue
+        params = m.get("params") or {}
+        for k in INK_KEYS:
+            h = _resolve_hex(params.get(k), edl)
+            if h:
+                out.append(h)
+        if not any(params.get(k) for k in INK_KEYS):
+            out.append("#ffffff")             # templates default to white
+    return out
+
+
+def ink_safe(edl, t0, t1, choices):
+    """The first of ``choices`` (FxColour values, preference order) that
+    every lockup ink over [t0, t1) reads on (INK_CONTRAST_MIN), else the
+    one with the best worst-case contrast; ``choices[0]`` when no lockup is
+    on screen."""
+    choices = [c for c in choices or () if c]
+    if not choices:
+        return None
+    inks = lockup_inks(edl, t0, t1)
+    if not inks:
+        return choices[0]
+    best, best_c = choices[0], -1.0
+    for c in choices:
+        h = _resolve_hex(c, edl)
+        if h is None:
+            continue
+        worst = min(contrast_ratio(h, ink) for ink in inks)
+        if worst >= INK_CONTRAST_MIN:
+            return c
+        if worst > best_c:
+            best, best_c = c, worst
+    return best
+
+
+def host_ok(host, item):
+    """May a composite card of host kind ``host`` modify motion ``item``?"""
+    if not host:
+        return True
+    if host == "behind":
+        return item.get("layer") == "behind_subject"
+    if host == "light":
+        return item.get("template") in LIGHT_HOSTS
+    if host == "type":
+        if item.get("template") in LIGHT_HOSTS or \
+                item.get("layer") == "behind_subject":
+            return False
+        params = item.get("params") or {}
+        ident = " ".join(str(x or "").lower() for x in (
+            item.get("id"), params.get("tier"), params.get("purpose")))
+        if any(t in ident for t in BLEND_NEVER_TIERS + ("caption",)):
+            return False
+        return bool(params.get("text") or params.get("lines"))
+    return True
+
+
 def _matches(card, moment):
     """(ok, fit): does the moment kind fit one of the card's binds_to?
     ``fit`` prefers earlier entries."""
@@ -857,10 +1257,32 @@ def _span(place, moment, plan, fps, card):
     start = time_of(f0, fps)
     span = place.get("span") or ("frames" if place.get("frames") or
                                  not place.get("duration_s") else None)
+    if span == "setup":
+        # the window ENDS on the moment (a mono setup whose colour lands ON
+        # the turn word: the grade's ramp_out_f ends on that frame) and
+        # starts where the setup does: its section's start when that leaves
+        # SETUP_MIN_S, never more than SETUP_MAX_S or SETUP_SHARE of the
+        # program before it (B&W is a device, never most of the short)
+        sec = plan["sections"][moment["section"]] if plan.get(
+            "sections") else (0.0, moment["t"])
+        reach = min(SETUP_MAX_S, SETUP_SHARE * float(plan["program_s"]))
+        a = max(0.0, start - reach)
+        if start - float(sec[0]) >= SETUP_MIN_S:
+            a = max(a, float(sec[0]))
+        pay = plan.get("payoff")
+        if pay and a < float(pay["t"]) < start - 0.05:
+            # never grey over the payoff: the setup starts after its hold
+            a = max(a, float(pay.get("hold_end") or pay["t"]))
+        a = time_of(frame_of(a, fps), fps)
+        if start - a < SETUP_MIN_S:
+            return start, start             # no room: build_op refuses
+        return a, start
+    min_s = float(place.get("min_s") or 0.5)
     if place.get("duration_s"):
         end = start + float(place["duration_s"])
-    elif span == "phrase" and moment.get("phrase"):
-        end = max(moment["phrase"][1], start + 0.5)
+    elif span == "phrase":
+        ph = moment.get("phrase")
+        end = max(ph[1] if ph else start, start + min_s)
     elif span == "sentence" or span == "section":
         a, b = plan["sections"][moment["section"]]
         end = max(b, start + 0.5)
@@ -878,6 +1300,8 @@ def _span(place, moment, plan, fps, card):
         n = int(place.get("frames") or (1 if card.get("family")
                                         in PUNCTUATION else 2))
         return start, time_of(f0 + max(1, n), fps)
+    if place.get("max_s"):
+        end = min(end, start + float(place["max_s"]))
     end = min(float(plan["program_s"]), end)
     end = time_of(max(f0 + 1, frame_of(end, fps)), fps)
     return start, end
@@ -924,21 +1348,34 @@ def build_op(card, moment, plan, *, item_id, fps, edl):
             return None, None, f"stage {stage} is not planned"
         start, end = _span(place, moment, plan, fps, card)
         if end <= start:
-            return None, None, "no room before the program end"
+            return None, None, ("no room for its setup before the moment"
+                                if place.get("span") == "setup" else
+                                "no room before the program end")
         item["start"], item["end"] = start, end
+        # a flat colour under type keeps the type readable (ink_safe)
+        key = ("field" if item.get("kind") == "poster" else "colour"
+               if item.get("kind") in ("fill", "solid") else None)
+        if key and item.get(key) is not None:
+            opts = (card.get("params") or {}).get(key)
+            opts = list(opts) if isinstance(opts, list) else [item[key]]
+            if item[key] not in opts:
+                opts.insert(0, item[key])
+            item[key] = ink_safe(edl, start, end, opts)
         return ({"action": "upsert", "layer": "fx", "id": item_id,
                  "value": item}, item, start)
     if stage == "motion" and card.get("verb") == "set_composite":
         # a composite device on the motion graphic that sits on the moment
+        host = (CARD_TASTE.get(card.get("id")) or {}).get("host")
         hit = None
         for m in edl.get("motion") or []:
             try:
-                if float(m["start"]) - 0.2 <= moment["t"] <= float(m["end"]):
+                if float(m["start"]) - 0.2 <= moment["t"] <= float(m["end"]) \
+                        and not m.get("composite") and host_ok(host, m):
                     hit = m
                     break
             except (KeyError, TypeError, ValueError):
                 continue
-        if hit is None or hit.get("composite"):
+        if hit is None:
             return None, None, "no plain motion graphic on that moment"
         op = {"action": "upsert", "layer": "motion", "id": hit["id"],
               "value": {"id": hit["id"], "composite": dict(vals)}}
@@ -955,6 +1392,37 @@ def build_op(card, moment, plan, *, item_id, fps, edl):
         return ({"action": "upsert", "layer": "motion", "id": item_id,
                  "value": item}, item, start)
     return None, None, f"cards writing {stage} are not planned"
+
+
+# A window this long is a sustained device (a grey world, a poster, a
+# finish, a word behind the head); shorter ones are hits.
+SUSTAINED_S = 0.5
+
+
+def _overlaps_same(item, cid, chosen, existing):
+    """Does ``item`` overlap a window it must not share? Two windows of the
+    same card never overlap (two B&W setups laid over each other read as a
+    mistake), and two SUSTAINED devices never stack (a poster inside a grey
+    setup is two looks at once); a hit (a flash, a negative) may land
+    inside a sustained window — that is the payoff flash in a grey world."""
+    try:
+        a, b = float(item["start"]), float(item["end"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    long_ = b - a >= SUSTAINED_S
+    others = [(c["device"], c["op"]["value"]) for c in chosen
+              if c["op"].get("layer") == "fx"] + [
+        (e["device"], e["item"]) for e in existing]
+    for dev, o in others:
+        try:
+            oa, ob = float(o["start"]), float(o["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (oa < b and a < ob):
+            continue
+        if dev == cid or (long_ and ob - oa >= SUSTAINED_S):
+            return True
+    return False
 
 
 def _existing(edl, cards):
@@ -1023,6 +1491,8 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
     max_n = max(1, min(MAX_CANDIDATES, int(max_n or MAX_CANDIDATES)))
     asked = {str(a).lower() for a in (asked or ())}
     plan = moments(edl, index, rhetoric=rhetoric, maps=maps)
+    max_n = min(max_n, max(2, int(math.ceil(
+        float(plan["program_s"]) * DENSITY_PER_S.get(intensity, 0.25)))))
     fps = plan["fps"]
     lo, hi = (window or (0.0, plan["program_s"]))
     lo, hi = float(lo or 0.0), float(hi if hi is not None
@@ -1058,6 +1528,9 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
         ok, why = devices.proposable(card, asked)
         if not ok:
             continue
+        card, prior, gate, _host = card_taste(card)
+        if prior <= 0.0:
+            continue               # needs the editor's intent (CARD_TASTE)
         if fam_filter and card.get("family") not in fam_filter and \
                 (_family_ledger(card) or "") not in fam_filter:
             continue
@@ -1091,18 +1564,30 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
             weights.get(card.get("family"), 1.0))
         if pref <= 0.0:
             continue
+        pref *= prior
         for m in plan["moments"]:
             if not lo - 1e-6 <= m["t"] < hi:
                 continue
             fits, fit = _matches(card, m)
             if not fits or m["strength"] < floor or \
-                    not format_allows(fmt, card.get("family"), m):
+                    not format_allows(fmt, card.get("family"), m) or \
+                    not metaphor_ok(gate, m, plan):
                 continue
+            if m.get("jump") and card.get("family") == "transition":
+                continue           # a jump cut inside one take stays hard
+            if _flash(card) and m["t"] < HOOK_FLASH_FREE_S:
+                continue           # the hook's first second is never a flash
+            if card.get("family") == "type_depth" and _type_on_screen(
+                    edl, m["t"], m.get("kind") == "word.payoff"):
+                continue           # one lockup at a time: no word on a word
             score = m["strength"] * fit * pref * rung_factor
             pairs.append({"card": card, "moment": m, "score": score,
                           "rung": rung, "notes": notes})
     pairs.sort(key=lambda p: (-p["score"], p["moment"]["t"],
                               p["card"]["id"]))
+    if pairs:
+        top = pairs[0]["score"]
+        pairs = [p for p in pairs if p["score"] >= SCORE_FLOOR * top]
     chosen = []
     per_card = {}
     sec_punct = {}
@@ -1155,6 +1640,12 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
             have = sec_punct.get(m["section"])
             if have is not None and have != cid:
                 continue           # one punctuation family per section
+        if fam == "transition" and len(
+                [c for c in chosen if c["family"] == "transition"]) + len(
+                [e for e in existing if e["family"] == "transition"
+                 or e.get("type") == "junction"]) >= \
+                TRANSITION_CAP.get(intensity, 2):
+            continue               # a wipe on every cut reads as a template
         shots_used = shot_cards.get(cid, set())
         if (m["shot"] - 1) in shots_used or (m["shot"] + 1) in shots_used:
             continue               # no device on consecutive shots
@@ -1194,6 +1685,8 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
         op, item, at = build_op(card, m, plan, item_id=fid, fps=fps, edl=edl)
         if op is None:
             continue
+        if _overlaps_same(item, cid, chosen, existing):
+            continue               # one window of a device at a time
         cand = {"device": cid, "family": fam, "verb": card.get("verb"),
                 "op": op, "at": at, "bind": m["bind"],
                 "candidate_id": fid, "score": p["score"],

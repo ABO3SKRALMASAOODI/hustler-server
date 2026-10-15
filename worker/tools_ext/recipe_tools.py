@@ -96,7 +96,7 @@ def suggest_recipes(ctx, start=None, end=None, max_results=None):
     ranked = recipes.rank(plan, used_here=_used_here(edl), batch=batch,
                           matte_ok=_matte_ok(ctx, edl),
                           flash_ok=_flash_ok(ctx), accent=_accent(edl),
-                          ids=ids)
+                          ids=ids, edl=edl)
     if start is not None or end is not None:
         lo = float(start or 0.0)
         hi = float(end) if end is not None else plan["program_s"]
@@ -121,8 +121,12 @@ def suggest_recipes(ctx, start=None, end=None, max_results=None):
                f"used by {r['uses']} other short(s) of this batch")
             + f"). Like {', '.join(r['exemplars'])}."
             + (" " + " ".join(r["notes"]) if r["notes"] else "")
-            + "\n   ops: " + json.dumps(_ops(r["items"]),
-                                        separators=(",", ":")))
+            + ("\n   ops: " + json.dumps(_ops(r["items"]),
+                                         separators=(",", ":"))
+               if r["items"] else
+               f"\n   write it with apply_recipe(name='{r['name']}'"
+               f", at={r['at']:g}): it makes the registered stills of that "
+               "frame first, then the strobe"))
     lines.append("Each is silent and zoom-free; flashes stay <= 3 a second "
                  "unless the user asked for flashing.")
     return "\n".join(lines)
@@ -177,16 +181,16 @@ def apply_recipe(ctx, name, at=None):
     keys = None
     flash_ok = _flash_ok(ctx)
     if r.assets:
-        items, landing, why = recipes.build(name, plan, ids=ids,
-                                            accent=_accent(edl),
-                                            flash_ok=flash_ok)
+        items, landing, why = recipes.build(
+            name, plan, ids=ids, accent=_accent(edl), flash_ok=flash_ok,
+            edl=edl, variant_keys=recipes.STILLS_PLACEHOLDER)
         if not items:
             return f"NO CHANGE: {name} does not fit here ({why})."
         keys = _variant_keys(ctx, edl, landing["t"])
     items, landing, why = recipes.build(name, plan, ids=ids,
                                         accent=_accent(edl),
                                         variant_keys=keys,
-                                        flash_ok=flash_ok)
+                                        flash_ok=flash_ok, edl=edl)
     if not items:
         return f"NO CHANGE: {name} does not fit here ({why})."
     ops = _ops(items)
