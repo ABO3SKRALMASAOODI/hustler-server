@@ -436,7 +436,7 @@ def at_4a_4():
     moves = [{"path": "push_in", "amount": 0.4, "ease": "in_out"},
              {"path": "drift_left", "amount": 0.35, "ease": "in_out"},
              {"path": "orbit_left", "amount": 0.4, "ease": "in_out"}]
-    vis, rows = [], []
+    vis, rows, tears = [], [], []
     import sidecars
     sidecars.use_store(sidecars.LocalStore(STORE))
     for t, mv in zip(stills, moves):
@@ -452,18 +452,21 @@ def at_4a_4():
         pic = depth_fx.cover_crop(img, W, H)
         dep = depth_fx.cover_crop(np.dstack([d] * 3).astype(np.float32), W,
                                   H)[..., 0]
-        layers, hole = depth_fx.build_layers(pic, np.clip(dep, 0, 1))
+        planes = depth_fx.two_planes(pic, np.clip(dep, 0, 1))
         n = 60
-        v = depth_fx.visible_inpaint(layers, hole, W, H, mv, n)
+        v = depth_fx.visible_inpaint_planes(planes, W, H, mv, n)
         vis.append(v)
         out = os.path.join(od, f"poster_{int(t)}.mkv")
         w = depth_fx.ClipWriter(out, W, H, 25.0, "rgb24")
-        depth_fx.render_parallax(layers, W, H, n, mv, w)
+        depth_fx.render_parallax_planes(pic, planes, W, H, n, mv, w)
         w.close()
         fr = frames(out, idx=[0, 30, 59])
+        tr = max(tear_share(fr[k], pic, planes, mv, k / 59.0, W, H)
+                 for k in sorted(fr))
+        tears.append(tr)
         rows.append((f"V01 frame {t:g}s, {mv['path']} — visible inpaint "
-                     f"{100 * v:.2f}%", [(f"f{k}", _h(fr[k], 320))
-                                         for k in sorted(fr)]))
+                     f"{100 * v:.2f}%, longest seam {100 * tr:.1f}% of the short side",
+                     [(f"f{k}", _h(fr[k], 320)) for k in sorted(fr)]))
     rs = ref_still("13", 5.0, 320)
     if rs is not None:
         rows.append(("reference 13@5.0 (internal)", [("ref", rs)]))
@@ -472,7 +475,56 @@ def at_4a_4():
     return verdict("AT-4A-4", {
         "visible_inpaint_max": _m(max(good) if good else None, "<=", 0.02,
                                   {"per_still": vis}),
+        "edge_tearing_max": _m(max(tears) if tears else None, "<=", 0.02,
+                               {"per_still": tears}),
     }, {"board": bd, "sidecars": st})
+
+
+def tear_share(frame, pic, planes, move, p, W, H):
+    """Edge tearing of a 2.5D frame: the longest thin dark line inside the
+    near planes that the source picture has nowhere near (within 4 px,
+    after the near planes' own median move) — a seam through a face, a
+    doubled eyebrow — as a share of the frame's short side. <= 0.01 for
+    the two-plane move; the old depth slices measured 0.015-0.1 (a seam
+    down a forehead), Wave 4 review."""
+    import cv2
+    import depth_fx
+    ez = (move or {}).get("ease") or "in_out"
+    pp = depth_fx.ease(p, ez)
+    # the reference: the source moved by a SMOOTH version of its own depth
+    # (a layer-free 2.5D move): close to any honest render, while a seam
+    # or a doubled feature is not in it
+    d_ref = cv2.GaussianBlur(planes["d_fg"], (0, 0), 0.05 * min(W, H))
+    grid = np.meshgrid(np.arange(W, dtype=np.float32),
+                       np.arange(H, dtype=np.float32))
+    mx, my = depth_fx._remap_frame(move["path"], move.get("amount", 0.35),
+                                   d_ref, pp, W, H, grid)
+    ref = cv2.remap(pic, mx, my, cv2.INTER_LINEAR,
+                    borderMode=cv2.BORDER_REFLECT)
+    al = cv2.remap(planes["alpha"], mx, my, cv2.INTER_LINEAR,
+                   borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    inner = cv2.erode((al > 0.5).astype(np.uint8), np.ones((15, 15),
+                                                           np.uint8)) > 0
+    def valleys(rgb):
+        # thin dark lines: a seam is a valley the picture never had
+        gy = cv2.cvtColor(np.asarray(rgb, np.uint8),
+                          cv2.COLOR_RGB2GRAY).astype(np.float32)
+        dog = cv2.GaussianBlur(gy, (0, 0), 1.5) - cv2.GaussianBlur(
+            gy, (0, 0), 4.0)
+        return np.maximum(0.0, -dog)
+    v_out = valleys(frame)
+    v_ref = cv2.dilate(valleys(ref), np.ones((9, 9), np.uint8))
+    new = ((v_out - v_ref) > 3.0) & inner
+    # a seam is a LONG line; speckle from the warp is not: the longest
+    # connected new valley, as a share of the frame's short side
+    new = cv2.morphologyEx(new.astype(np.uint8), cv2.MORPH_CLOSE,
+                           np.ones((5, 5), np.uint8))
+    n, _lab, stats, _c = cv2.connectedComponentsWithStats(new, 8)
+    if n <= 1:
+        return 0.0
+    longest = max(float(np.hypot(stats[k, 2], stats[k, 3]))
+                  for k in range(1, n))
+    return longest / float(min(W, H))
 
 
 # ── AT-4A-5: interpolation and the eased ramp ───────────────────────────

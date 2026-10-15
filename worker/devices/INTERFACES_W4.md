@@ -131,7 +131,7 @@ Department compact budgets (12,000 B each, tested): Wave 4's share of
 
 | kind | What it draws | Needs | Rungs |
 |---|---|---|---|
-| `parallax` | a 2.5D camera move through a still or a frozen frame: layered by depth, disocclusion edges inpainted | `source` (main-video frame `src_t`, an asset still, or None = the program frame at `start`); `move` | full (depth) → reduced (two layers from the person matte) → substitute `depth_ken_burns` → omit |
+| `parallax` | a 2.5D camera move through a still or a frozen frame: the far plane inpainted and moved rigidly, everything nearer warped continuously by its own depth (no slice seams), disocclusion edges inpainted | `source` (main-video frame `src_t`, an asset still, or None = the program frame at `start`); `move` | full (depth) → reduced (two layers from the person matte) → substitute `depth_ken_burns` → omit |
 | `dof` | depth of field: what is `focus` stays sharp, blur grows with depth distance | `focus` | full (depth) → reduced (matte: subject sharp, world blurred) → omit |
 | `rack_focus` | focus pulls from `focus_from` to `focus` over `rack_f` frames, landing on `rack_at` (a word onset) | `focus_from`, `focus`, `rack_at` | full (depth) → reduced (matte two-plane) → omit |
 | `fog` | atmosphere by depth (far = more `colour`) | — | full → omit |

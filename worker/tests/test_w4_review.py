@@ -291,3 +291,57 @@ def test_slot_footage_streams_frame_by_frame(tmp_path):
     last = fr.at(39)                            # past the end: held
     assert last is not None and last.shape == (90, 160, 3)
     fr.close()
+
+
+# ── catalog shares (INTERFACES_W4.md §1: tested) ─────────────────────────
+
+def test_wave4_department_shares_stay_within_their_pins():
+    import json
+    import agent_tools
+    from tools_ext import broll_tools, critic_tools, depth_tools, ui_tools
+
+    def size(names):
+        return len(json.dumps(agent_tools.openai_tools(
+            "x", compact=True, names=list(names)), separators=(",", ":")))
+    world = list(depth_tools.VERBS) + list(ui_tools.VERBS) + \
+        list(broll_tools.VERBS)
+    assert size(world) <= 5_000          # Wave 3 owns the rest of world
+    assert size(critic_tools.VERBS) <= 1_200
+    for name in world + list(critic_tools.VERBS):
+        assert len(agent_tools.TOOLS[name][1]) <= 900, name
+
+
+# ── parallax: no seam through a continuous surface ───────────────────────
+
+def test_a_2_5d_move_never_tears_a_continuous_surface():
+    """A face is a continuous depth ramp: depth slices split it along a
+    line (Wave 4 review: a seam down the speaker's forehead on the payoff
+    hold). The two-plane move warps everything nearer continuously: a
+    luma ramp on a depth ramp stays a monotonic ramp (the slices folded
+    it: steps of -3 to -8 levels, the far wall showing between slices)."""
+    import numpy as np
+    import depth_fx
+    W, H = 480, 640
+    xs = np.linspace(0, 1, W, dtype=np.float32)
+    img = np.dstack([np.tile((60 + 180 * xs)[None], (H, 1))] * 3).astype(
+        np.uint8)
+    depth = np.tile((0.35 + 0.6 * xs)[None], (H, 1)).astype(np.float32)
+    depth[:, : W // 5] = 0.05                      # a far, dark wall
+    img[:, : W // 5] = 20
+
+    class Grab:
+        def __init__(self):
+            self.f = []
+
+        def write(self, x):
+            self.f.append(np.asarray(x, np.float32))
+    for path in ("drift_left", "orbit_left", "push_in"):
+        move = {"path": path, "amount": 1.0, "ease": "linear"}
+        planes = depth_fx.two_planes(img, depth)
+        g = Grab()
+        depth_fx.render_parallax_planes(img, planes, W, H, 3, move, g)
+        row = g.f[2][H // 2, :, 0]
+        steps = np.diff(row[W // 3: W - 12])
+        assert steps.min() >= -0.5 and steps.max() <= 2.0, (path, steps.min(),
+                                                           steps.max())
+        assert depth_fx.visible_inpaint_planes(planes, W, H, move, 3) < 0.2

@@ -221,10 +221,10 @@ class _Broll:
         pic = depth_fx.cover_crop(crop, W, H)
         dep = depth_fx.cover_crop(np.dstack([depth] * 3).astype(np.float32),
                                   W, H)[..., 0]
-        layers, hole = depth_fx.build_layers(pic, np.clip(dep, 0, 1))
-        depth_fx.render_parallax(layers, W, H, n, move, w)
+        planes = depth_fx.two_planes(pic, np.clip(dep, 0, 1))
+        depth_fx.render_parallax_planes(pic, planes, W, H, n, move, w)
         w.close()
-        vis = depth_fx.visible_inpaint(layers, hole, W, H, move, n)
+        vis = depth_fx.visible_inpaint_planes(planes, W, H, move, n)
         return {"clip": out, "rung": rung, "reason": reason,
                 "visible_inpaint": round(vis, 4)}
 

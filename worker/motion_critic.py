@@ -1000,7 +1000,8 @@ MATTE_KINDS_FLICKER = ("glow", "outline", "poster", "isolate", "echo",
                        "exposure", "negate")
 
 
-def toggle_share(frames, thr=12.0, block=24, span=6, min_toggles=2):
+def toggle_share(frames, thr=12.0, block=24, span=6, min_toggles=2,
+                 ignore=None):
     """Per window of ``span`` frames, the share of pixels that toggle
     (an up-down or down-up step pair, both steps past ``thr``) at least
     ``min_toggles`` times, in the WORST block of ``block`` px. An edge or a
@@ -1016,6 +1017,10 @@ def toggle_share(frames, thr=12.0, block=24, span=6, min_toggles=2):
     d = np.diff(st, axis=0)
     tog = ((d[:-1] * d[1:] < 0) & (np.abs(d[:-1]) > thr)
            & (np.abs(d[1:]) > thr))
+    if ignore is not None:
+        # a talking face toggles its own pixels (lips, eyes, a nod): that
+        # is the speaker, not the device's edge
+        tog &= ~np.asarray(ignore, bool)[None]
     out = []
     n = span - 2
     for i in range(0, tog.shape[0] - n + 1):
@@ -1025,6 +1030,31 @@ def toggle_share(frames, thr=12.0, block=24, span=6, min_toggles=2):
         t = cnt[:hb * block, :wb * block].reshape(hb, block, wb, block)
         out.append(float(t.mean(axis=(1, 3)).max()))
     return out
+
+
+def _face_ignore(path, f_in, f_ref, w, h):
+    """A (h, w) bool mask of the speaker's face boxes (expanded) on two
+    frames of the render, or None: the face's own motion is set aside
+    when edges are judged for flicker (a matte or depth edge flickers on
+    the outline, not on the lips)."""
+    import numpy as np
+    import qa_metrics
+    try:
+        idx, frames = qa_metrics.read_frames(path, size=(w, h),
+                                             frames={int(f_in), int(f_ref)})
+    except Exception:  # noqa: BLE001
+        return None
+    m = np.zeros((h, w), bool)
+    for f in frames:
+        for x0, y0, x1, y1, _k in faces_on(np.asarray(f)):
+            if x1 - x0 < 0.06:
+                continue
+            cx, bw, bh = (x0 + x1) / 2.0, (x1 - x0) * 0.6, (y1 - y0)
+            a0, a1 = int(max(0.0, cx - bw) * w), int(min(1.0, cx + bw) * w)
+            b0 = int(max(0.0, y0 - 0.15 * bh) * h)
+            b1 = int(min(1.0, y1 + 0.35 * bh) * h)
+            m[b0:b1, a0:a1] = True
+    return m if m.any() else None
 
 
 def lens_flicker(path, info, edl, budget_s=20.0, width=540):
@@ -1055,21 +1085,31 @@ def lens_flicker(path, info, edl, budget_s=20.0, width=540):
             continue
         if b - a < 0.5:
             continue
-        ref = (max(0.0, a - min(1.5, b - a)), a) if a >= 0.6 else \
-            (b, min(prog, b + min(1.5, b - a)))
-        if ref[1] - ref[0] < 0.4:
+        # the same shot on BOTH sides of the window: a speaker who
+        # gestures more inside the window than in the calm second before
+        # it is not a flickering device (measured: a dof window toggled
+        # less than the same window rendered without it)
+        span = min(1.5, b - a)
+        refs = [r for r in ((max(0.0, a - span), a),
+                            (b, min(prog, b + span))) if r[1] - r[0] >= 0.4]
+        if not refs:
             continue
         rng = set(range(int(round(a * fps)) + 1, int(round(b * fps)) - 1))
-        rng_ref = set(range(int(round(ref[0] * fps)),
-                            int(round(ref[1] * fps))))
-        idx, frames = qa_metrics.read_frames(path, size=(width, h),
-                                             gray=True, frames=rng | rng_ref)
+        rngs = [set(range(int(round(x * fps)), int(round(y * fps))))
+                for x, y in refs]
+        idx, frames = qa_metrics.read_frames(
+            path, size=(width, h), gray=True,
+            frames=rng.union(*rngs))
         fin = [f for i, f in zip(idx, frames) if i in rng]
-        fref = [f for i, f in zip(idx, frames) if i in rng_ref]
-        if len(fin) < 4 or len(fref) < 4:
+        frefs = [[f for i, f in zip(idx, frames) if i in r] for r in rngs]
+        frefs = [x for x in frefs if len(x) >= 4]
+        if len(fin) < 4 or not frefs:
             continue
-        inside = float(np.median(toggle_share(fin)))
-        base = float(np.median(toggle_share(fref)))
+        ign = _face_ignore(path, sorted(rng)[len(rng) // 2],
+                           sorted(rngs[0])[len(rngs[0]) // 2], width, h)
+        inside = float(np.median(toggle_share(fin, ignore=ign)))
+        base = max(float(np.median(toggle_share(x, ignore=ign)))
+                   for x in frefs)
         if inside >= FLICKER_ABS and inside >= FLICKER_RATIO * max(base,
                                                                    1e-4):
             out.append(_f(
@@ -1282,6 +1322,8 @@ def lens_range(edl, plan, previous=None, max_ideas=3):
         t = float(m["t"])
         if any(a <= t <= b for a, b in busy):
             continue
+        if any(abs(t - i["t"]) < 0.4 for i in ideas):
+            continue                  # one idea per moment
         tags = set(m.get("tags") or [])
         if payoff and abs(t - float(payoff.get("t") or -9)) < 0.05:
             tags.add("payoff")

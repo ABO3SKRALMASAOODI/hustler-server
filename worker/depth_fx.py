@@ -9,10 +9,11 @@ and nothing here runs a model (depth comes from the ``depth.small``
 sidecar; the person matte from ``matte.person``).
 
   parallax      a still (an asset, a main-video frame, or the program's
-                frame at ``start``) split into depth layers (feathered at
-                depth quantiles), the background behind every nearer layer
-                inpainted once, then each layer moved by its own depth along
-                ``move``: a 2.5D camera move. Rungs: depth -> two layers from
+                frame at ``start``) as two planes: the far plane (Otsu on
+                the depth), inpainted behind everything nearer and moved
+                rigidly, and everything nearer warped CONTINUOUSLY by its
+                own smoothed depth along ``move`` (no slice seams through a
+                face): a 2.5D camera move. Rungs: depth -> two planes from
                 the person matte (reduced) -> ken_burns (substitute)
   ken_burns     the classic 2D move over the still (cover-fit, eased)
   dof           depth of field: varblur with a radius map |depth - focus|
@@ -54,9 +55,8 @@ FILTERS = ("split", "trim", "setpts", "settb", "format", "scale", "overlay",
            "mergeplanes", "blend", "color", "crop", "fps")
 KEEPS_FRAME_TAGS = True
 
-# Parallax layering: depth slices, edge feather (share of the frame's short
-# side) and the inpaint working size (long side, px).
-LAYERS = 5
+# Parallax: the edge feather of the near planes (share of the frame's
+# short side) and the inpaint working size (long side, px).
 FEATHER = 0.006
 INPAINT_SIDE = 640
 # Maximum blur radius at blur=1 (share of the frame height).
@@ -369,129 +369,151 @@ def _matte_at(plan, src_t, dest):
     return None
 
 
-# ── parallax: layered 2.5D ───────────────────────────────────────────────
+# ── parallax: the move through a still ──────────────────────────────────
 
-def build_layers(img, depth, n_layers=LAYERS):
-    """[(rgb, alpha, centre_depth)] far -> near. The farthest layer is
-    opaque everywhere, with everything nearer inpainted out of it (so a
-    move never uncovers a hole); nearer layers carry their own feathered
-    slice. Returns (layers, inpaint_mask) — the share of the frame that is
-    inpainted content (what a move may reveal)."""
-    import cv2
-    h, w = depth.shape
-    qs = np.quantile(depth, np.linspace(0, 1, n_layers + 1)[1:-1])
-    edges = [0.0] + [float(q) for q in qs] + [1.01]
-    feather = max(1.0, FEATHER * min(h, w))
-    layers = []
-    inpaint_mask = np.zeros((h, w), bool)
-    k = INPAINT_SIDE / float(max(h, w))
-    sw, sh = max(8, int(w * k)), max(8, int(h * k))
-    small = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
-    for i in range(n_layers):
-        lo, hi = edges[i], edges[i + 1]
-        own = (depth >= lo) & (depth < hi)
-        nearer = depth >= hi
-        if i == 0:
-            hole = nearer
-            if hole.any():
-                hs = cv2.resize(hole.astype(np.uint8) * 255, (sw, sh),
-                                interpolation=cv2.INTER_NEAREST)
-                hs = cv2.dilate(hs, np.ones((5, 5), np.uint8))
-                filled = cv2.inpaint(small, hs, 7, cv2.INPAINT_TELEA)
-                up = cv2.resize(filled, (w, h), interpolation=cv2.INTER_CUBIC)
-                soft = cv2.GaussianBlur(hole.astype(np.float32), (0, 0),
-                                        feather)[..., None]
-                rgb = (img * (1 - soft) + up * soft).astype(np.uint8)
-                inpaint_mask = hole
-            else:
-                rgb = img
-            alpha = np.ones((h, w), np.float32)
-        else:
-            m = own | nearer if i == n_layers - 1 else own
-            # a nearer slice keeps a little of itself past its edge, so
-            # neighbouring slices overlap instead of tearing
-            grow = cv2.dilate(m.astype(np.uint8),
-                              np.ones((3, 3), np.uint8)).astype(np.float32)
-            alpha = np.clip(cv2.GaussianBlur(grow, (0, 0), feather), 0, 1)
-            rgb = img
-        centre = float(np.median(depth[own])) if own.any() else (lo + hi) / 2
-        layers.append((rgb, alpha, centre))
-    return layers, inpaint_mask
+def move_params(path, amount, d, p, W, H):
+    """(scale, tx, ty) of the move at depth ``d`` (0 far .. 1 near; a
+    scalar or an array) at progress ``p`` of ``path``: nearer moves more
+    (parallax). Scale is about the frame centre."""
+    a = float(amount)
+    d = np.asarray(d, np.float32) if not np.isscalar(d) else float(d)
+    par = 0.25 + 0.75 * d                  # near layers move the most
+    zero = par * 0.0
+    if path in ("push_in", "pull_out"):
+        z = a * 0.22 * par
+        s = 1.0 + (z * p if path == "push_in" else z * (1 - p))
+        s = s * (1.0 + 0.04 * a)            # never reveal an edge
+        return s, zero, zero
+    if path in ("drift_left", "drift_right"):
+        sign = -1.0 if path == "drift_left" else 1.0
+        return (1.0 + 0.06 * a + 0.04 * a * par,
+                sign * (p - 0.5) * a * 0.10 * W * par, zero)
+    if path in ("rise", "fall"):
+        sign = -1.0 if path == "rise" else 1.0
+        return (1.0 + 0.06 * a + 0.04 * a * par, zero,
+                sign * (p - 0.5) * a * 0.08 * H * par)
+    sign = -1.0 if path == "orbit_left" else 1.0   # an arc with depth
+    ang = sign * (p - 0.5) * math.pi * 0.5
+    return (1.0 + 0.07 * a + 0.03 * a * par * math.cos(ang),
+            math.sin(ang) * a * 0.09 * W * (par - 0.45), zero)
 
 
 def layer_affine(path, amount, d, p, W, H):
     """The 2x3 affine moving a layer at depth ``d`` (0 far .. 1 near) at
     progress ``p`` of ``path``: nearer moves more (parallax)."""
-    a = float(amount)
-    par = 0.25 + 0.75 * d                  # near layers move the most
+    s, tx, ty = (float(v) for v in move_params(path, amount, float(d), p,
+                                               W, H))
     cx, cy = W / 2.0, H / 2.0
-    s, tx, ty = 1.0, 0.0, 0.0
-    if path in ("push_in", "pull_out"):
-        z = a * 0.22 * par
-        s = 1.0 + (z * p if path == "push_in" else z * (1 - p))
-        s *= 1.0 + 0.04 * a                 # never reveal an edge
-    elif path in ("drift_left", "drift_right"):
-        sign = -1.0 if path == "drift_left" else 1.0
-        tx = sign * (p - 0.5) * a * 0.10 * W * par
-        s = 1.0 + 0.06 * a + 0.04 * a * par
-    elif path in ("rise", "fall"):
-        sign = -1.0 if path == "rise" else 1.0
-        ty = sign * (p - 0.5) * a * 0.08 * H * par
-        s = 1.0 + 0.06 * a + 0.04 * a * par
-    else:                                   # orbit: an arc with depth
-        sign = -1.0 if path == "orbit_left" else 1.0
-        ang = sign * (p - 0.5) * math.pi * 0.5
-        tx = math.sin(ang) * a * 0.09 * W * (par - 0.45)
-        s = 1.0 + 0.07 * a + 0.03 * a * par * math.cos(ang)
     return np.float32([[s, 0, (1 - s) * cx + tx],
                        [0, s, (1 - s) * cy + ty]])
 
 
-def render_parallax(layers, W, H, n, move, writer):
-    """Composite the layers for n frames along ``move`` into ``writer``
-    (RGB). Returns the share of frames' pixels showing inpainted
-    background (measured on frame 0 and the last)."""
+# ── parallax without seams: one background plane + a continuous warp ────
+# Depth slices (Wave 4 build) tore a continuous surface wherever a slice
+# boundary crosses it: on a held frame of a face the forehead, an eye and a
+# cheek split along a line (Wave 4 review, V01 payoff hold). The picture is
+# instead TWO planes: the background (the far mode of the depth, Otsu),
+# inpainted behind everything nearer and moved rigidly, and everything
+# nearer warped CONTINUOUSLY by its own smoothed depth (cv2.remap) — the
+# nose travels a little more than the ears, nothing splits — over it.
+
+def two_planes(img, depth):
+    """{bg, alpha, d_bg, d_fg, hole} for a still: the inpainted far plane,
+    the feathered alpha of everything nearer, the far plane's depth, the
+    near planes' depth smoothed inside themselves (so the subject's
+    silhouette moves with the subject), and the inpainted share."""
+    import cv2
+    h, w = depth.shape
+    depth = np.clip(depth.astype(np.float32), 0.0, 1.0)
+    thr, _near, far = otsu_split(depth)
+    nearer = depth >= thr
+    feather = max(1.0, FEATHER * min(h, w))
+    k = INPAINT_SIDE / float(max(h, w))
+    sw, sh = max(8, int(w * k)), max(8, int(h * k))
+    if nearer.any() and not nearer.all():
+        small = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
+        hs = cv2.resize(nearer.astype(np.uint8) * 255, (sw, sh),
+                        interpolation=cv2.INTER_NEAREST)
+        hs = cv2.dilate(hs, np.ones((5, 5), np.uint8))
+        filled = cv2.inpaint(small, hs, 7, cv2.INPAINT_TELEA)
+        up = cv2.resize(filled, (w, h), interpolation=cv2.INTER_CUBIC)
+        soft = cv2.GaussianBlur(cv2.dilate(
+            nearer.astype(np.uint8), np.ones((7, 7), np.uint8))
+            .astype(np.float32), (0, 0), feather)[..., None]
+        bg = (img * (1 - soft) + up * soft).astype(np.uint8)
+    else:
+        bg = img
+    grow = cv2.dilate(nearer.astype(np.uint8), np.ones((3, 3), np.uint8))
+    alpha = np.clip(cv2.GaussianBlur(grow.astype(np.float32), (0, 0),
+                                     feather), 0.0, 1.0)
+    # the near planes' depth, smoothed only among themselves (normalised
+    # convolution): a silhouette moves with its subject, not half-way to
+    # the wall behind it
+    sig = max(2.0, 0.012 * min(h, w))
+    m = nearer.astype(np.float32)
+    num = cv2.GaussianBlur(depth * m, (0, 0), sig)
+    den = cv2.GaussianBlur(m, (0, 0), sig)
+    d_fg = np.where(den > 1e-3, num / np.maximum(den, 1e-3), depth)
+    d_bg = float(np.median(depth[~nearer])) if (~nearer).any() else far
+    return {"bg": bg, "alpha": alpha, "d_bg": d_bg,
+            "d_fg": d_fg.astype(np.float32), "hole": nearer}
+
+
+def _remap_frame(path, amount, d_fg, p, W, H, grid):
+    """Backward maps (map_x, map_y) of the continuous warp at progress p."""
+    s, tx, ty = move_params(path, amount, d_fg, p, W, H)
+    xs, ys = grid
+    cx, cy = W / 2.0, H / 2.0
+    mx = (xs - (1.0 - s) * cx - tx) / s
+    my = (ys - (1.0 - s) * cy - ty) / s
+    return mx.astype(np.float32), my.astype(np.float32)
+
+
+def render_parallax_planes(pic, planes, W, H, n, move, writer):
+    """The seamless 2.5D move: the far plane rigid, everything nearer
+    warped continuously by its own depth, composited per frame (RGB)."""
     import cv2
     path = (move or {}).get("path") or "push_in"
     amount = float((move or {}).get("amount") or 0.35)
     ez = (move or {}).get("ease") or "in_out"
+    grid = np.meshgrid(np.arange(W, dtype=np.float32),
+                       np.arange(H, dtype=np.float32))
+    bg, alpha = planes["bg"], planes["alpha"]
     for i in range(n):
         p = ease(i / max(1, n - 1), ez)
-        acc = None
-        for rgb, alpha, d in layers:
-            m = layer_affine(path, amount, d, p, W, H)
-            lay = cv2.warpAffine(rgb, m, (W, H), flags=cv2.INTER_LINEAR,
-                                 borderMode=cv2.BORDER_REFLECT)
-            if acc is None:
-                acc = lay.astype(np.float32)
-                continue
-            al = cv2.warpAffine(alpha, m, (W, H), flags=cv2.INTER_LINEAR,
-                                borderMode=cv2.BORDER_CONSTANT,
-                                borderValue=0)[..., None]
-            acc = acc * (1 - al) + lay.astype(np.float32) * al
-        writer.write(np.clip(acc + 0.5, 0, 255).astype(np.uint8))
+        b = cv2.warpAffine(bg, layer_affine(path, amount, planes["d_bg"], p,
+                                            W, H), (W, H),
+                           flags=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_REFLECT).astype(np.float32)
+        mx, my = _remap_frame(path, amount, planes["d_fg"], p, W, H, grid)
+        f = cv2.remap(pic, mx, my, cv2.INTER_LINEAR,
+                      borderMode=cv2.BORDER_REFLECT).astype(np.float32)
+        a = cv2.remap(alpha, mx, my, cv2.INTER_LINEAR,
+                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)[..., None]
+        writer.write(np.clip(b * (1 - a) + f * a + 0.5, 0, 255)
+                     .astype(np.uint8))
 
 
-def visible_inpaint(layers, inpaint_mask, W, H, move, n):
-    """The largest share of the frame (over first / middle / last frames)
-    where inpainted background shows through the nearer layers."""
+def visible_inpaint_planes(planes, W, H, move, n):
+    """The largest share of the frame (first / middle / last) where the
+    inpainted background shows through the moved near planes."""
     import cv2
     path = (move or {}).get("path") or "push_in"
     amount = float((move or {}).get("amount") or 0.35)
     ez = (move or {}).get("ease") or "in_out"
+    grid = np.meshgrid(np.arange(W, dtype=np.float32),
+                       np.arange(H, dtype=np.float32))
     worst = 0.0
     for i in (0, n // 2, n - 1):
         p = ease(i / max(1, n - 1), ez)
-        bg = cv2.warpAffine(inpaint_mask.astype(np.float32),
-                            layer_affine(path, amount, layers[0][2], p, W, H),
-                            (W, H), flags=cv2.INTER_LINEAR)
-        cover = np.zeros((H, W), np.float32)
-        for rgb, alpha, d in layers[1:]:
-            al = cv2.warpAffine(alpha, layer_affine(path, amount, d, p, W, H),
-                                (W, H), flags=cv2.INTER_LINEAR)
-            cover = cover + (1 - cover) * al
-        shown = bg * (1 - cover)
-        worst = max(worst, float((shown > 0.5).mean()))
+        hole = cv2.warpAffine(planes["hole"].astype(np.float32),
+                              layer_affine(path, amount, planes["d_bg"], p,
+                                           W, H), (W, H),
+                              flags=cv2.INTER_LINEAR)
+        mx, my = _remap_frame(path, amount, planes["d_fg"], p, W, H, grid)
+        a = cv2.remap(planes["alpha"], mx, my, cv2.INTER_LINEAR,
+                      borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        worst = max(worst, float((hole * (1 - a) > 0.5).mean()))
     return worst
 
 
@@ -1029,11 +1051,11 @@ class _Depth:
         pic = cover_crop(img, W, H, margin=1.0)
         dep = cover_crop(np.dstack([depth] * 3).astype(np.float32), W, H,
                          margin=1.0)[..., 0]
-        layers, hole = build_layers(pic, np.clip(dep, 0, 1))
+        planes = two_planes(pic, np.clip(dep, 0, 1))
         w = ClipWriter(out, W, H, plan.fps3, "rgb24")
-        render_parallax(layers, W, H, n, move, w)
+        render_parallax_planes(pic, planes, W, H, n, move, w)
         w.close()
-        vis = visible_inpaint(layers, hole, W, H, move, n)
+        vis = visible_inpaint_planes(planes, W, H, move, n)
         del margin
         return {"clip": out, "replace": True, "rung": rung,
                 "reason": reason if rung != "full" else "ok",
