@@ -39,8 +39,38 @@ def _jit(seed, key):
 
 
 def _phrase_at(words, t0, t1, max_words=6):
+    """The words said in [t0, t1) as a lockup would print them: detached
+    signs joined ("26 %" -> "26%"), the function words at either end
+    trimmed ("and scored 26%" -> "scored 26%")."""
+    from typeset import roles
     ws = [w for w in words if t0 - 0.05 <= float(w["t0"]) < t1]
-    return " ".join(str(w["w"]) for w in ws[:max_words]).strip(" ,.;:")
+    text = roles.clean_text(" ".join(str(w["w"]) for w in ws))
+    toks = [{"w": t} for t in text.split()]
+    try:
+        from tools_ext import montage_tools
+        core = montage_tools.slot_text(toks, max_words=max_words)
+    except Exception:  # noqa: BLE001
+        core = ""
+    return (core or " ".join(text.split()[:max_words])).strip(" ,.;:")
+
+
+def _span_of(words, text, t0, t1):
+    """(first word onset, last word end) of ``text`` among the words said
+    in [t0 - 0.5, t1 + 0.5], or None."""
+    from typeset import roles
+    want = [roles.norm(t) for t in str(text or "").split()]
+    ws = [w for w in words if t0 - 0.5 <= float(w["t0"]) <= t1 + 0.5]
+    got = [w for w in ws if roles.norm(roles.clean_text(w["w"])) in want or
+           any(roles.norm(w["w"]) and want_t.startswith(roles.norm(w["w"]))
+               for want_t in want)]
+    if not got:
+        return None
+    return float(got[0]["t0"]), float(got[-1].get("t1", got[-1]["t0"]))
+
+
+# a device the sibling shorts of the batch already used ranks this much
+# lower per use (W1 recipes' freshness, on Wave 2's proposals)
+BATCH_DECAY = 0.22
 
 
 def _typeset_op(mid, text, s, e, voice, depth="front"):
@@ -54,7 +84,7 @@ def _typeset_op(mid, text, s, e, voice, depth="front"):
                       "purpose": "typeset lockup (story planner)"}}
 
 
-def _pick_voice(text, position, ledger, seed, pack, taken):
+def _pick_voice(text, position, ledger, seed, pack, taken, batch=()):
     import creative
     from typeset import voices as V
     allowed = set(pack["voices"]) if pack else set(V.VOICES)
@@ -62,13 +92,16 @@ def _pick_voice(text, position, ledger, seed, pack, taken):
     if len(avoid) >= len(V.VOICES):
         avoid = tuple(taken)
     return creative.pick_voice(text, position=position, ledger=ledger,
-                               seed=seed, avoid=avoid)
+                               seed=seed, avoid=avoid, batch=batch)
 
 
 def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
-            pack=None, user_text="", maps=None, base=None, max_n=MAX):
+            pack=None, user_text="", maps=None, base=None, max_n=MAX,
+            batch=None):
     """<= max_n candidates [{device, family, beat, at, op | ops | call,
-    reason, invention, exemplar, cost_ms, score}] for this story."""
+    reason, invention, exemplar, cost_ms, score}] for this story.
+    ``batch``: creative.ledger_of the sibling shorts (voices and devices
+    the batch already used rank lower, so ten shorts get ten plans)."""
     import callbacks
     import creative
     import device_planner
@@ -82,6 +115,13 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
     sd = _seed(words, seed)
     ledger = creative.variety_ledger(edl)
     used_dev = set(ledger.get("devices") or [])
+    batch = batch or {}
+    batch_voices = list(batch.get("voices") or [])
+    batch_dev = list(batch.get("devices") or [])
+
+    def stale(dev):
+        """The batch freshness penalty of a device (0 when unused)."""
+        return min(0.66, BATCH_DECAY * batch_dev.count(dev))
     out = []
     taken_voices = set(ledger.get("voices") or [])
     ids = {str(m.get("id")) for m in edl.get("motion") or []}
@@ -103,9 +143,14 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
                       device_planner_text(words, h)))
     if pay.get("t") is not None:
         pt = float(pay["t"])
-        beats.append(("payoff", max(0.0, pt - 0.15),
-                      min(prog, float(pay.get("hold_end") or pt + 1.6)),
-                      _phrase_at(words, pt - 0.6, pt + 1.2)))
+        ptext = _phrase_at(words, pt - 0.6, pt + 1.2)
+        span = _span_of(words, ptext, pt - 0.6, pt + 1.2)
+        ps = max(0.0, (span[0] if span else pt) - 0.15)
+        # held through the payoff hold, never a 6 s poster over the next
+        # line: at most 1.2 s after its last word
+        pe = min(prog, float(pay.get("hold_end") or pt + 1.6),
+                 (span[1] if span else pt + 0.4) + 1.2)
+        beats.append(("payoff", ps, max(pe, ps + 0.8), ptext))
     for s in sents[1:-1]:
         if "contrast" in s["meanings"] or "number" in s["meanings"]:
             beats.append(("turn", s["t0"], s["t1"],
@@ -115,7 +160,8 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
         if not text or n_type <= 0:
             continue
         voice, why = _pick_voice(text, beat if beat != "turn" else "turn",
-                                 ledger, sd, pack, taken_voices)
+                                 ledger, sd, pack, taken_voices,
+                                 batch=batch_voices)
         taken_voices.add(voice)
         depth = "behind" if pack and pack["id"] == "C" and beat == \
             "payoff" else "front"
@@ -126,9 +172,12 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
                     "at": round(s, 2),
                     "op": _typeset_op(mid, text, s, e, voice, depth),
                     "reason": f"the {beat} line set as type: {why}",
-                    "invention": (f"{voice} is new to this project"
-                                  if new_voice else
-                                  f"{voice} returns, on a different beat"),
+                    "invention": (f"'{text}' in {voice}, "
+                                  + ("a voice this batch has not used"
+                                     if new_voice and voice not in
+                                     batch_voices else
+                                     "new to this short" if new_voice else
+                                     "returning on a different beat")),
                     "exemplar": "09@1.27" if beat != "payoff" else "13@3.44",
                     "cost_ms": 4500,
                     "score": 1.0 + (0.3 if beat in ("hook", "payoff")
@@ -154,9 +203,16 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
                     "score": 1.25 + _jit(sd, "callback")})
         break
     # ── colour turn: B&W as a device, never a look ──
-    if pay.get("t") is not None and (not pack or set(
-            (pack.get("colour_world") or {}).get("devices") or ()) &
-            {"bw_section_to_colour"}):
+    pack_bw = bool(pack and set((pack.get("colour_world") or {}).get(
+        "devices") or ()) & {"bw_section_to_colour"})
+    # earned, never a default: the story turns INTO its payoff (a contrast
+    # or a reversal in the last sentences), or the pack's colour world is
+    # built on it; and it is fresh in the batch (two siblings with a grey
+    # build are a house style, not a device)
+    turn_in = any("contrast" in (x.get("meanings") or [])
+                  for x in sents[-2:]) if sents else False
+    if pay.get("t") is not None and (pack_bw or (not pack and turn_in)) \
+            and (pack_bw or batch_dev.count("grade_section") < 2):
         pt = float(pay["t"])
         a = max(0.0, pt - min(4.0, pt * 0.4))
         if pt - a >= 1.0 and "grade_section" not in used_dev:
@@ -174,7 +230,8 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
                         "invention": "B&W as a device that resolves into "
                                      "this story's turn",
                         "exemplar": "18@3.64", "cost_ms": 1200,
-                        "score": 0.95 + _jit(sd, "bw")})
+                        "score": 0.95 + _jit(sd, "bw")
+                        - stale("grade_section")})
     # ── music: the user's track only ──
     users = [m for m in edl.get("music") or []
              if str(m.get("provenance") or "") in ("user_upload",
@@ -211,7 +268,8 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
                           "first, so the feed loops",
                 "invention": "a loop built from this footage's own opening",
                 "exemplar": "08@13.37", "cost_ms": 3000,
-                "score": 0.7 + _jit(sd, "loop")})
+                "score": 0.7 + _jit(sd, "loop")
+                - stale("recall_loop_rhyme")})
     # ── Wave 1 punctuation (the same cards, budgets and safety) ──
     if base is None:
         try:
@@ -241,7 +299,8 @@ def suggest(edl, index, *, intensity="designed", seed=None, asked=(),
                     "exemplar": c.get("exemplar"),
                     "cost_ms": c.get("est_ms"),
                     "score": 0.8 + _jit(sd, dev) - (0.3 if dev in used_dev
-                                                     else 0.0)})
+                                                     else 0.0)
+                    - stale(dev)})
     # pack budgets and the used-device penalty
     for c in out:
         if pack and c["device"] in pal:

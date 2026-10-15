@@ -36,6 +36,12 @@ WORD_GAP = 0.27            # x the larger neighbour's font size
 LINE_GAP = {"tight": 0.16, "normal": 0.32, "airy": 0.55}   # x the cap
 MAX_LINE_SCALE = 2.2       # a fitted hero line grows at most this much
 TRACK_RANGE = (-0.04, 0.9)  # em, force-justification by tracking
+# Beyond this much added tracking a line is no longer justified by
+# letterspacing: a short HERO line (a figure, one word) is justified by its
+# SIZE instead, a short connector line stays ragged — a numeral spaced
+# apart ("2   6   %") or a word blown into separate letters is not
+# typesetting (seen on V04: 'scored 26%' in a side column).
+TRACK_SOFT = 0.32
 
 
 class Tok:
@@ -294,8 +300,15 @@ def _stack(lines, C, region, opts, order=1):
                 return None
         m = measure_line(ln, C, scale)
         if fit == "tracking" and len(lines) > 1:
-            tr = _justify_track(ln, C, scale, W * opts.get("fill", 1.0))
-            if tr is not None:
+            target = W * opts.get("fill", 1.0)
+            tr = _justify_track(ln, C, scale, target)
+            if (tr is None or tr > TRACK_SOFT) and hero:
+                grow = min(MAX_LINE_SCALE, _fit_scale(m, target))
+                if grow > 1.0:
+                    scale *= grow
+                    tr = _justify_track(ln, C, scale, target)
+                    m = measure_line(ln, C, scale)
+            if tr is not None and tr <= TRACK_SOFT:
                 extra = tr
                 m = measure_line(ln, C, scale, extra)
         if m["w"] > W + 0.5:

@@ -717,6 +717,13 @@ def fill_footprints(edl, W, H, fps=30.0, index=None, tl=None):
                     and not m["footprint"].get("estimated"):
                 # the lockup grew or shrank: its box is measured again
                 m["footprint"] = dict(m["footprint"], estimated=True)
+        # Wave 2 (typeset): lockups solved per canvas see the faces of THIS
+        # canvas (another aspect, a reframe, a batch-written item)
+        try:
+            from typeset import layoutdoc
+            layoutdoc.refresh_faces(edl, index, W, H, fps)
+        except Exception:  # noqa: BLE001 — stored zones (or the prior) stand
+            pass
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
         return edl

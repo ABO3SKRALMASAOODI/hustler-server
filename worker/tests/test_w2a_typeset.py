@@ -43,7 +43,10 @@ def _check(doc, W, H, faces, depth):
     for r in runs:
         ink = r["ink"]
         assert space.in_safe(ink, tol=1.5), (r["text"], ink, space.safe)
-        hits = space.hard_hits(ink, depth=depth)
+        # the doc rounds ink to 0.1 px; the solver may hug a clearance
+        # edge exactly, so judge the box half a pixel in
+        inner = (ink[0] + 0.5, ink[1] + 0.5, ink[2] - 0.5, ink[3] - 0.5)
+        hits = space.hard_hits(inner, depth=depth)
         assert not hits, (r["text"], hits)
     for a in range(len(runs)):
         for b in range(a + 1, len(runs)):

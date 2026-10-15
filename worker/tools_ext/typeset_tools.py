@@ -36,6 +36,13 @@ HOLD_S = 0.8                  # and holds after the last (the payoff hold)
 POSITIONS = ("auto", "hook", "build", "turn", "payoff", "mid")
 
 
+def _clean(text):
+    """The phrase as printed: one space between words, a transcript's
+    detached sign or suffix joined to its word ("26 %" -> "26%")."""
+    from typeset import roles
+    return roles.clean_text(" ".join(str(text or "").split()))
+
+
 def _norm(w):
     return _TOK.sub("", str(w or "").lower().replace("’", "'"))
 
@@ -197,7 +204,7 @@ def build_item(ctx, edl, text, s, e, mid, voice="auto", depth="front",
     (plan_to_music's call-and-response, 2F formats)."""
     import creative
     import motion_templates
-    text = " ".join(str(text).split())
+    text = _clean(text)
     if not text:
         return None, "no words"
     words = text.replace("*", " ").split()
@@ -332,6 +339,125 @@ def _params(text, voice, layout, depth, verb, exit, material, accent, ink,
     return p
 
 
+def _compose(ctx, edl, mid, text, s, e, prog, pw, voice="auto",
+             layout="auto", depth="front", verb="auto", exit=None,
+             material=None, accent=None, ink=None, region=None,
+             emphasis=None, flip_at=None, orbit=None, position="auto",
+             callback_of=None, mirror=None, faces=None):
+    """The write-free core of add_typeset (and of the planners that write
+    lockups: apply_format_pack): (trim ops, solved item, doc, notes, voice
+    reason) or a REJECTED line. The previous lockup still on screen ends
+    where this one starts (never before its own last word); the voice is
+    picked for the beat when 'auto'; a callback rhymes with its first
+    telling; the item is solved for this canvas with the measured faces."""
+    items = edl.get("motion") or []
+    # no two lockups on screen at once: the previous one ends here (never
+    # before its own last word), solved before this one is
+    prov = {"id": mid, "start": s, "end": e}
+    trims = trim_previous(edl, prov, pw)
+    s = float(prov["start"])
+    import creative
+    reason = None
+    cb = None
+    if callback_of:
+        cb = next((m for m in items if m.get("id") == callback_of and
+                   m.get("template") == "typeset"), None)
+        if cb is None:
+            return f"REJECTED: callback_of names no typeset item '{callback_of}'."
+    if voice in (None, "", "auto"):
+        pos = position if position in POSITIONS[1:] else _position(
+            edl, s, e, prog)
+        voice, reason = creative.pick_voice(
+            text, position=pos, ledger=creative.variety_ledger(edl, upto=s),
+            seed=_seed(ctx, text),
+            callback_voice=((cb or {}).get("params") or {}).get("voice"),
+            batch=_batch_voices(ctx))
+    seed = _seed(ctx, text) % 997
+    if cb is not None:
+        cp = cb.get("params") or {}
+        layout = cp.get("layout") if layout in (None, "", "auto") else layout
+        seed = int(cp.get("seed") or seed)
+        region = region or cp.get("region")
+    params = _params(text, voice, layout, depth, verb, exit, material, accent,
+                     ink, region, emphasis, flip_at, orbit, seed, callback_of,
+                     mirror)
+    try:
+        import motion_templates
+        params = motion_templates.check_params("typeset", params)
+    except ValueError as err:
+        return f"REJECTED: {err}"
+    if cb is not None:
+        try:
+            import motion_tools
+            from typeset import layoutdoc, memory
+            W, H = motion_tools._canvas_size(ctx, edl)
+            first = layoutdoc.solve_item(cb, W, H)
+            params = memory.callback_params(params, first, bool(mirror))
+        except Exception:  # noqa: BLE001 — solved fresh instead
+            pass
+    item = {"id": mid, "template": "typeset", "start": s, "end": e,
+            "params": params, "layer": "above_captions",
+            "purpose": "typeset lockup (replaces the captions for its words)"}
+    item, doc, notes = solve_varied(ctx, edl, item, faces=faces)
+    if item is None:
+        return (f"REJECTED: {notes} — try fewer words, another voice "
+                "(e.g. editorial_serif for a long line), layout "
+                "side_column, or depth front.")
+    return trims, item, doc, notes, reason
+
+
+def _batch_voices(ctx):
+    """Type voices the sibling shorts of this batch set (freshness across a
+    batch, not only inside one short; [] outside a batch)."""
+    try:
+        import creative
+        return creative.batch_ledger(ctx).get("voices") or []
+    except Exception:  # noqa: BLE001 — freshness is advice
+        return []
+
+
+def solve_planned(ctx, edl, op, pw=None):
+    """A planner's typeset upsert (story_planner / format packs) solved the
+    way add_typeset solves one: (ops, None) or ([], why it was not set).
+    The planner proposes intent (words, window, voice, depth); this
+    measures the faces, picks an 'auto' voice, varies the family, ends the
+    lockup before it, and drops a line no layout fits rather than writing
+    a lockup that would mute its captions and draw nothing."""
+    import device_planner
+    v = dict(op.get("value") or {})
+    p = dict(v.get("params") or {})
+    text = _clean(p.get("text"))
+    if not text:
+        return [], "no words"
+    tl = _tl(edl)
+    prog = float(tl.out_duration or 0.0)
+    if pw is None:
+        pw = device_planner.program_words(edl, getattr(ctx, "index", None)
+                                          or {}, tl)
+    try:
+        s = round(min(max(0.0, float(v["start"])), max(0.0, prog - 0.4)), 2)
+        e = round(min(max(float(v["end"]), s + 0.4), prog), 2)
+    except (KeyError, TypeError, ValueError):
+        return [], "no window"
+    mid = str(v.get("id") or _next_id(edl.get("motion") or []))
+    if any(m.get("id") == mid for m in edl.get("motion") or []):
+        mid = _next_id(edl.get("motion") or [])
+    got = _compose(ctx, edl, mid, text, s, e, prog, pw,
+                   voice=p.get("voice") or "auto",
+                   layout=p.get("layout") or "auto",
+                   depth=p.get("depth") or "front",
+                   verb=p.get("verb") or "auto",
+                   position=p.get("position") or "auto",
+                   callback_of=p.get("callback_of"))
+    if isinstance(got, str):
+        return [], got.replace("REJECTED: ", "")
+    trims, item, _doc, _notes, _reason = got
+    if v.get("purpose"):
+        item["purpose"] = str(v["purpose"])[:300]
+    return trims + [{"action": "upsert", "layer": "motion", "id": mid,
+                     "value": item}], None
+
+
 def add_typeset(ctx, text=None, start=None, end=None, voice="auto",
                 layout="auto", depth="front", verb="auto", exit=None,
                 material=None, accent=None, ink=None, region=None,
@@ -359,7 +485,7 @@ def add_typeset(ctx, text=None, start=None, end=None, voice="auto",
         if not text:
             return (f"REJECTED: nothing is said between {s:g}s and {e:g}s; "
                     "give the words as text.")
-    text = " ".join(str(text).split())
+    text = _clean(text)
     n = len(text.replace("*", " ").split())
     if n > MAX_WORDS:
         return (f"REJECTED: {n} words is a paragraph, not a lockup — set "
@@ -382,57 +508,14 @@ def add_typeset(ctx, text=None, start=None, end=None, voice="auto",
     if any(m.get("id") == mid for m in items):
         return (f"REJECTED: '{mid}' already exists — use set_typeset to "
                 "change it.")
-    # no two lockups on screen at once: the previous one ends here (never
-    # before its own last word), solved before this one is
-    prov = {"id": mid, "start": s, "end": e}
-    trims = trim_previous(edl, prov, pw)
-    s = float(prov["start"])
-    import creative
-    reason = None
-    cb = None
-    if callback_of:
-        cb = next((m for m in items if m.get("id") == callback_of and
-                   m.get("template") == "typeset"), None)
-        if cb is None:
-            return f"REJECTED: callback_of names no typeset item '{callback_of}'."
-    if voice in (None, "", "auto"):
-        pos = position if position in POSITIONS[1:] else _position(
-            edl, s, e, prog)
-        voice, reason = creative.pick_voice(
-            text, position=pos, ledger=creative.variety_ledger(edl, upto=s),
-            seed=_seed(ctx, text),
-            callback_voice=((cb or {}).get("params") or {}).get("voice"))
-    seed = _seed(ctx, text) % 997
-    if cb is not None:
-        cp = cb.get("params") or {}
-        layout = cp.get("layout") if layout in (None, "", "auto") else layout
-        seed = int(cp.get("seed") or seed)
-        region = region or cp.get("region")
-    params = _params(text, voice, layout, depth, verb, exit, material, accent,
-                     ink, region, emphasis, flip_at, orbit, seed, callback_of,
-                     mirror)
-    try:
-        import motion_templates
-        params = motion_templates.check_params("typeset", params)
-    except ValueError as err:
-        return f"REJECTED: {err}"
-    if cb is not None:
-        try:
-            import motion_tools
-            from typeset import layoutdoc, memory
-            W, H = motion_tools._canvas_size(ctx, edl)
-            first = layoutdoc.solve_item(cb, W, H)
-            params = memory.callback_params(params, first, bool(mirror))
-        except Exception:  # noqa: BLE001 — solved fresh instead
-            pass
-    item = {"id": mid, "template": "typeset", "start": s, "end": e,
-            "params": params, "layer": "above_captions",
-            "purpose": "typeset lockup (replaces the captions for its words)"}
-    item, doc, notes = solve_varied(ctx, edl, item)
-    if item is None:
-        return (f"REJECTED: {notes} — try fewer words, another voice "
-                "(e.g. editorial_serif for a long line), layout "
-                "side_column, or depth front.")
+    got = _compose(ctx, edl, mid, text, s, e, prog, pw, voice=voice,
+                   layout=layout, depth=depth, verb=verb, exit=exit,
+                   material=material, accent=accent, ink=ink, region=region,
+                   emphasis=emphasis, flip_at=flip_at, orbit=orbit,
+                   position=position, callback_of=callback_of, mirror=mirror)
+    if isinstance(got, str):
+        return got
+    trims, item, doc, notes, reason = got
     op = {"action": "upsert", "layer": "motion", "id": mid, "value": item}
     res = _write.commit(ctx, trims + [op], _summary(item, doc))
     if res.startswith("REJECTED") or res.startswith("NO CHANGE"):
@@ -464,6 +547,8 @@ def set_typeset(ctx, id, text=None, start=None, end=None, voice=None,
         return f"REJECTED: '{id}' is not a typeset item (typeset: {have})."
     item = json.loads(json.dumps(cur))
     p = dict(item.get("params") or {})
+    if text is not None:
+        text = _clean(text)
     for k, v in (("text", text), ("voice", voice), ("layout", layout),
                  ("depth", depth), ("verb", verb), ("exit", exit),
                  ("material", material), ("accent", accent), ("ink", ink),

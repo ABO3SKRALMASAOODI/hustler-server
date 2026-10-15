@@ -18,7 +18,8 @@ re-applied everywhere. So:
   negative on a hit — never a whole-short look unless the user's own words
   ask for one. Every pack, preset and planner consults this predicate.
 
-Pure functions: no database, no network, no model.
+Pure functions (no network, no model); ``batch_ledger`` reads the sibling
+shorts of a batch through the context's database, read-only.
 """
 
 import hashlib
@@ -88,6 +89,11 @@ def variety_ledger(edl, upto=None):
     for it in (edl or {}).get("fx") or []:
         if isinstance(it, dict) and it.get("device"):
             devs.append(it["device"])
+    for it in (edl or {}).get("inserts") or []:
+        # plan_loop's reprise (loops.reprise_insert: id 'loop')
+        if isinstance(it, dict) and str(it.get("id") or "").startswith(
+                "loop"):
+            devs.append("recall_loop_rhyme")
     return {"voices": voices, "families": fams, "devices": devs,
             "last_voice": voices[-1] if voices else None}
 
@@ -151,11 +157,62 @@ def _jitter(seed, name):
     return (h[0] / 255.0 - 0.5) * 0.12
 
 
+def ledger_of(edls):
+    """{"voices": [...], "devices": [...]} every EDL of ``edls`` used —
+    the sibling shorts of a batch (variety across the batch, not only
+    inside one short). Each short counts a voice or a device once."""
+    voices, devs = [], []
+    for e in edls or []:
+        led = variety_ledger(e or {})
+        voices += sorted(set(led["voices"]))
+        devs += sorted(set(led["devices"]))
+    return {"voices": voices, "devices": devs}
+
+
+def batch_ledger(ctx, limit=12):
+    """ledger_of the other shorts of this batch (same parent project,
+    newest version each), cached on the context; empty outside a batch or
+    without a database (freshness is advice, never a gate)."""
+    got = getattr(ctx, "_w2_batch_ledger", None)
+    if got is not None:
+        return got
+    out = {"voices": [], "devices": []}
+    parent = (getattr(ctx, "project", None) or {}).get("parent_project_id")
+    if parent and getattr(ctx, "db", None) is not None:
+        def q(conn):
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT DISTINCT ON (e.project_id)
+                              e.json->'motion' AS motion, e.json->'fx' AS fx,
+                              e.json->'inserts' AS inserts
+                       FROM edls e JOIN projects p ON p.id = e.project_id
+                       WHERE p.parent_project_id = %s AND p.id <> %s
+                       ORDER BY e.project_id, e.version DESC LIMIT %s""",
+                    (parent, ctx.project_id, int(limit)))
+                return [{"motion": r.get("motion") or [],
+                         "fx": r.get("fx") or [],
+                         "inserts": r.get("inserts") or []}
+                        for r in cur.fetchall()]
+        try:
+            rows = ctx.db.run(q)
+            if isinstance(rows, list):
+                out = ledger_of(rows)
+        except Exception:  # noqa: BLE001 — freshness is advice
+            pass
+    try:
+        ctx._w2_batch_ledger = out
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def pick_voice(text, *, position="mid", intensity="designed", ledger=None,
-               seed=0, avoid=(), callback_voice=None):
+               seed=0, avoid=(), callback_voice=None, batch=()):
     """(voice, reason) for a phrase. ``position``: hook | build | turn |
-    payoff | mid. ``ledger``: variety_ledger(edl). A callback keeps its
-    original voice (the rhyme is the point)."""
+    payoff | mid. ``ledger``: variety_ledger(edl). ``batch``: the voices
+    the sibling shorts of this batch set (ledger_of; each use ranks a
+    voice lower, so ten shorts do not open on one voice). A callback keeps
+    its original voice (the rhyme is the point)."""
     from typeset import voices as V
     if callback_voice and callback_voice in V.VOICES:
         return callback_voice, "a callback keeps the voice it first had"
@@ -180,6 +237,7 @@ def pick_voice(text, *, position="mid", intensity="designed", ledger=None,
         if name == last:
             s -= 0.6                      # never the same voice twice running
         s -= 0.2 * used.count(name)
+        s -= min(0.45, 0.15 * list(batch or ()).count(name))
         if best is None or s > best[0]:
             best = (s, name, sorted(k for k in feats if k in tags))
     _s, name, why = best

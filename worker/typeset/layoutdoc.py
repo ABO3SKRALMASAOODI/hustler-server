@@ -57,13 +57,20 @@ def _hexcol(v, default):
     return default
 
 
-def onsets_of(item, n_words):
+def onsets_of(item, n_words, groups=None):
     """Per printed word, its spoken onset in item seconds (None: unsaid),
     from the item's ``reading`` (caption_carry: reads_onsets templates get
-    one row of the printed words in reading order)."""
+    one row of the printed words in reading order, one entry per
+    whitespace word). ``groups`` (roles.spans): the whitespace words each
+    printed word joins — its onset is the first said one."""
     rows = ((item or {}).get("reading") or {}).get("rows") or []
     flat = [v for row in rows for v in row]
     out = [None] * n_words
+    if groups and len(groups) == n_words:
+        for i, g in enumerate(groups):
+            said = [flat[k] for k in g if k < len(flat) and flat[k] is not None]
+            out[i] = min(said) if said else None
+        return out
     for i in range(min(n_words, len(flat))):
         out[i] = flat[i]
     return out
@@ -317,7 +324,7 @@ def solve_item(item, out_w, out_h, fps=30.0, faces=None):
     full = float(item.get("full_duration_s") or (
         float(item["end"]) - float(item["start"])))
     words = R.tokens(params.get("text"))
-    on = onsets_of(item, len(words))
+    on = onsets_of(item, len(words), R.spans(params.get("text")))
     if faces is None:
         faces = _fresh_faces(item, out_w, out_h)
     wm = _watermark(out_w, out_h)
@@ -352,6 +359,58 @@ def solve_item(item, out_w, out_h, fps=30.0, faces=None):
 def page_params(item, out_w, out_h, fps):
     """motion_templates.build_job's derived params for a typeset item."""
     return {"_layout": solve_item(item, out_w, out_h, fps)}
+
+
+def refresh_faces(edl, index, W, H, fps=30.0):
+    """Before a render solves its typeset items on THIS canvas (in place;
+    called by motion_layer.fill_footprints, which every render lane runs
+    with the program's index). An item whose stored face zones do not speak
+    for this canvas — measured at another frame shape (the 4:5 or 16:9
+    master of a 9:16 edit), under another picture geometry (a reframe, a
+    zoom, a card), or never measured (an item a stale MCP client wrote
+    through apply_edit_batch) — gets the face zones the index shows at
+    this canvas (keepout.face_track, index evidence, no decode) and the
+    box its layout solves to, so the render never falls back to the
+    centred talking-head prior over a real face that sits elsewhere (the
+    chin line of the run report, defect 2). Zones measured at write time
+    for this canvas and geometry are kept. Fails open: an item that cannot
+    be refreshed keeps what it had."""
+    items = [m for m in (edl or {}).get("motion") or []
+             if isinstance(m, dict) and m.get("template") == "typeset"
+             and not m.get("full_duration_s")]
+    if not items or not (index or {}).get("video"):
+        return edl
+    try:
+        import caption_carry
+        import keepout
+        ar = caption_carry.frame_ar(W, H)
+        geo = caption_carry.face_geometry(edl)
+    except Exception:  # noqa: BLE001
+        return edl
+    for m in items:
+        fp = m.get("footprint") if isinstance(m.get("footprint"), dict) \
+            else {}
+        stamp = fp.get("geo")
+        if caption_carry.footprint_fresh(m, ar) and fp.get("faces") and \
+                (not stamp or stamp == geo):
+            continue                    # measured for this canvas: kept
+        try:
+            track = keepout.face_track(edl, index, W, H, float(m["start"]),
+                                       float(m["end"]))
+            zones = [tuple(z[:4]) for z in keepout.zones_of(track)]
+        except Exception:  # noqa: BLE001
+            continue
+        if not zones:
+            continue                    # the index has no face here either
+        try:
+            doc = solve_item(m, W, H, fps, faces=zones)
+            box = bbox_fraction(doc)
+        except Exception:  # noqa: BLE001
+            box = None
+        if box:
+            m["footprint"] = caption_carry.make_footprint(box, W, H, zones,
+                                                          geo=geo)
+    return edl
 
 
 def bbox_fraction(doc):

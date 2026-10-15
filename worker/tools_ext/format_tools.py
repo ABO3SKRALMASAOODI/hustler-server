@@ -70,11 +70,69 @@ def _music_maps(ctx, edl):
 
 
 def _plan(ctx, edl, intensity, pack, max_n=8):
+    import creative
     import story_planner
     return story_planner.suggest(
         edl, getattr(ctx, "index", None) or {}, intensity=intensity,
         pack=pack, user_text=getattr(ctx, "user_message", "") or "",
-        maps=_music_maps(ctx, edl), max_n=max_n)
+        maps=_music_maps(ctx, edl), max_n=max_n,
+        batch=creative.batch_ledger(ctx))
+
+
+def _solve_ops(ctx, edl, cands):
+    """The candidates' operations, typeset lockups SOLVED the way
+    add_typeset solves one (faces measured, an 'auto' voice picked, the
+    family varied, the lockup before it ended, a line no layout fits
+    dropped) in program order on a working copy, so each sees the ones
+    before it: (ops, applied candidates, notes)."""
+    import copy
+    import device_planner
+    from tools_ext import typeset_tools
+    work = copy.deepcopy(edl)
+    pw = device_planner.program_words(work, getattr(ctx, "index", None)
+                                      or {}, _tl(work))
+    ops, used, notes = [], [], []
+    order = sorted((c for c in cands if c.get("op") or c.get("ops")),
+                   key=lambda c: float(c.get("at") or 0.0))
+    for c in order:
+        cops = list(c.get("ops") or []) or [c["op"]]
+        out = []
+        for op in cops:
+            val = op.get("value") or {}
+            if op.get("layer") == "motion" and op.get("action") == "upsert" \
+                    and val.get("template") == "typeset":
+                solved, why = typeset_tools.solve_planned(ctx, work, op, pw)
+                if not solved:
+                    notes.append(f"{c['device']}@{float(c.get('at') or 0):.1f}s "
+                                 f"not set: {why}")
+                    out = None
+                    break
+                out += solved
+            else:
+                out.append(op)
+        if not out:
+            continue
+        for op in out:
+            _apply_local(work, op)
+        ops += out
+        used.append(c)
+    return ops, used, notes
+
+
+def _apply_local(edl, op):
+    """A working copy's view of an item upsert (what the batch will do)."""
+    layer = op.get("layer")
+    if op.get("action") != "upsert" or not isinstance(edl.get(layer, []),
+                                                      list):
+        return
+    items = edl.setdefault(layer, [])
+    at = next((i for i, it in enumerate(items)
+               if it.get("id") == op.get("id")), None)
+    val = dict(items[at] if at is not None else {}, **(op.get("value") or {}))
+    if at is None:
+        items.append(val)
+    else:
+        items[at] = val
 
 
 def _line(k, c):
@@ -100,10 +158,14 @@ def suggest_story(ctx, intensity="designed", pack="auto", max_n=8):
     ctx._w2_story = {"cands": cands, "pack": (p or {}).get("id")}
     head = (f"Pack {p['id']} ({p['name']}): {why}." if p else
             f"No pack: {why}.")
+    pk = (p or {}).get("id") or "none"
     return "\n".join([head] + [_line(k + 1, c) for k, c in
                                enumerate(cands)] +
-                     ["apply_format_pack(picks=[...]) writes the chosen "
-                      "ones in one batch; 'via <verb>' ones are calls."])
+                     [f"apply_format_pack(pack='{pk}', intensity="
+                      f"'{intensity}', picks=[...]) writes the chosen ones "
+                      "in one batch (pass the same pack and intensity: the "
+                      "numbers are this list's); 'via <verb>' ones are "
+                      "calls. Pick what serves THIS story — fewer is fine."])
 
 
 def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed"):
@@ -125,24 +187,21 @@ def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed"):
         except (TypeError, ValueError):
             return "REJECTED: picks are proposal numbers from suggest_story."
         cands = [cands[i] for i in idx if 0 <= i < len(cands)]
-    ops, calls = [], []
-    for c in cands:
-        if c.get("op"):
-            ops.append(c["op"])
-        elif c.get("ops"):
-            ops += c["ops"]
-        elif c.get("call"):
-            calls.append(c["call"])
+    calls = [c["call"] for c in cands
+             if c.get("call") and not (c.get("op") or c.get("ops"))]
+    ops, used, notes = _solve_ops(ctx, edl, cands)
     if not ops and not calls:
-        return "NO CHANGE — nothing to apply."
+        return "NO CHANGE — nothing to apply." + (
+            " " + "; ".join(notes) + "." if notes else "")
     res = "NO CHANGE — every pick is a call."
     if ops:
         name = (p or {}).get("name", "story")
         res = _write.commit(ctx, ops, f"{name} plan: " + ", ".join(
-            f"{c['device']}@{float(c.get('at') or 0):.1f}s" for c in cands
-            if c.get("op") or c.get("ops")))
+            f"{c['device']}@{float(c.get('at') or 0):.1f}s" for c in used))
         if res.startswith("REJECTED"):
             return res
+    if notes:
+        res += "\nNOTE: " + "; ".join(notes) + "."
     if calls:
         res += "\nNext calls (they solve against the footage): " + "; ".join(
             f"{c['verb']}({json.dumps(c.get('args') or {})})" for c in calls)

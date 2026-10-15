@@ -28,21 +28,70 @@ _STAR = re.compile(r"\*([^*]+)\*")
 _STRIP = "\"'“”‘’.,!?;:…()[]"
 
 
+_GLUE_PREV = re.compile(r"^(?:[%‰°!?.,;:…)\]”’»]+|-[^\W\d_][\w'’-]*)$")
+_GLUE_NEXT = re.compile(r"^[$€£¥(\[“‘«#]+$")
+
+
+def _spans(raws):
+    """Groups of whitespace-word indices printed as ONE word: a transcript's
+    detached sign or suffix ("26 %", "non -player", "$ 5") joins its
+    neighbour, the way it was said and the way a designer sets it."""
+    groups = []
+    pending = []
+    for k, raw in enumerate(raws):
+        bare = raw.strip("*")
+        if not bare:
+            continue
+        if _GLUE_NEXT.match(bare):
+            pending.append(k)
+            continue
+        if groups and not pending and _GLUE_PREV.match(bare):
+            groups[-1].append(k)
+            continue
+        groups.append(pending + [k])
+        pending = []
+    if pending:
+        if groups:
+            groups[-1].extend(pending)
+        else:
+            groups.append(pending)
+    return groups
+
+
+def clean_text(text):
+    """A typeset text with detached signs and suffixes joined to their word
+    ("scored 26 % better" -> "scored 26% better"): the printed words and
+    the words the captions' reading maps are then the same split."""
+    raws = str(text or "").replace("\n", " ").split()
+    return " ".join("".join(raws[k] for k in g) for g in _spans(raws))
+
+
+def spans(text):
+    """Per printed word of ``tokens(text)``, the whitespace-word indices it
+    joins (a reading row is timed per whitespace word)."""
+    return _spans(str(text or "").replace("\n", " ").split())
+
+
 def tokens(text):
     """[(printed word, starred)] for a typeset text: whitespace-split,
-    ``*accent*`` stars removed (a star pair may wrap several words)."""
+    ``*accent*`` stars removed (a star pair may wrap several words), a
+    detached sign or suffix joined to its word (``spans``)."""
+    raws = str(text or "").replace("\n", " ").split()
     out, starred = [], False
-    for raw in str(text or "").replace("\n", " ").split():
-        open_ = raw.startswith("*")
-        close = raw.endswith("*") and len(raw) > 1
-        word = raw.strip("*")
-        if not word:
-            continue
-        if open_:
-            starred = True
-        out.append((word, starred or (open_ and close)))
-        if close or (open_ and close):
-            starred = False
+    for g in _spans(raws):
+        word, star_any = "", False
+        for k in g:
+            raw = raws[k]
+            open_ = raw.startswith("*")
+            close = raw.endswith("*") and len(raw) > 1
+            if open_:
+                starred = True
+            star_any = star_any or starred or (open_ and close)
+            word += raw.strip("*")
+            if close or (open_ and close):
+                starred = False
+        if word:
+            out.append((word, star_any))
     return out
 
 
