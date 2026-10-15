@@ -22,6 +22,22 @@ def norm(w):
     return _STRIP.sub("", str(w or "").lower())
 
 
+def _function_words():
+    try:
+        import caption_carry
+        return STOP | caption_carry.FUNCTION_WORDS
+    except Exception:  # noqa: BLE001
+        return STOP
+
+
+def _carries(gram):
+    """A repeat worth a rhyme says something: a content word of three
+    letters or more ('we have a', 'it is the' are speech habits, not a
+    callback)."""
+    fw = _function_words()
+    return any(g not in fw and len(g) >= 3 for g in gram)
+
+
 def find(words, min_len=2, max_len=6, min_gap_s=3.0):
     """[{text, first: (i0, i1), again: [(i0, i1), ...], t_first, t_again}]
     longest runs first; a run inside a longer reported run is dropped."""
@@ -32,7 +48,7 @@ def find(words, min_len=2, max_len=6, min_gap_s=3.0):
         seen = {}
         for i in range(0, n - L + 1):
             gram = tuple(toks[i:i + L])
-            if not all(gram) or all(g in STOP for g in gram):
+            if not all(gram) or not _carries(gram):
                 continue
             seen.setdefault(gram, []).append(i)
         for gram, starts in seen.items():

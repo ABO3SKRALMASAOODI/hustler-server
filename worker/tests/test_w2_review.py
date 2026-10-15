@@ -329,3 +329,13 @@ def test_fonttools_is_a_worker_requirement():
     req = open(os.path.join(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__))), "requirements.txt")).read()
     assert "\nfonttools==" in req and "\nuharfbuzz==" in req
+
+
+def test_a_speech_habit_is_not_a_callback():
+    """suggest_story proposed 'we have a' (said twice on V02) as a callback
+    rhyme: a repeat must say something."""
+    import callbacks
+    ws = [{"w": w, "t0": i * 0.5} for i, w in enumerate(
+        "we have a tagline we have a site the rowing joke is great and "
+        "then the rowing joke again".split())]
+    assert [c["text"] for c in callbacks.find(ws)] == ["the rowing joke"]
