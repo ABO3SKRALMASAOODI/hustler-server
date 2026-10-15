@@ -54,10 +54,13 @@ a section change — never as a filter on everything.
 
 ## Strong treatment patterns
 
-- Payoff hold: `add_depth_effect(kind='parallax', word='<payoff word>')`
-  holds the payoff frame and drifts through it in 2.5D during the hold —
-  the moment lands and breathes. Vary `move` (push_in, drift_left,
-  orbit_left) between shorts.
+- Payoff hold: `add_depth_effect(kind='parallax', word='<LAST word of
+  the payoff>')` holds the frame from the moment that word ENDS and drifts
+  through it in 2.5D during the pause — the line lands, then breathes. The
+  verb refuses a hold that would freeze his lips over words still being
+  said; if there is no pause after the payoff, extend the final keep into
+  it first. With no `move` each hold in an edit travels a different path
+  (drift, rise, orbit — never a push, which is a zoom).
 - Archive photo or product still as B-roll: `add_depth_effect(kind=
   'parallax', asset_key=..., start=..., end=...)` (screen stage: above the
   camera, like a cutaway). Two photos in a row: different paths.
@@ -69,15 +72,21 @@ a section change — never as a filter on everything.
 - How-it-works beat: `add_depth_effect(kind='point_cloud', start=...,
   end=..., backdrop='black')` — a red LiDAR scan of the subject, orbiting
   slowly; follow it with the real shot.
-- Smooth slow motion: `add_time_effect(kind='ramp', start=..., end=...,
-  factor=0.4)` writes an eased ramp and interpolates the slowed part.
+- Smooth slow motion on ACTION (B-roll, a walk, a launch, a gesture in a
+  pause): `add_time_effect(kind='ramp', start=..., end=..., factor=0.4)`
+  writes an eased ramp, re-anchors everything after it and interpolates
+  the slowed part. A ramp is a real speed change — the sound slows too —
+  so it is refused over speech.
 - A gesture that carries feeling: `add_time_effect(kind='echo', ...)` on
   the movement, 0.6-1.2 s.
 
 ## Common failure modes
 
 - A frozen frame over speech: the lips stop while the words go on. Freeze
-  only on a pause, the payoff hold, or use a cutaway still.
+  only on a pause, the payoff hold, or use a cutaway still (the verb
+  refuses a hold over words unless the user asked for it).
+- A ramp over a sentence: the voice drags at 0.4x. Ramp action, not
+  talk.
 - The same device on every short of a run (a house style): the critic
   flags it; choose the device this story earns.
 - A rack focus with no turn in the words: decoration.
@@ -97,7 +106,10 @@ a section change — never as a filter on everything.
 3. `critique_short`: no dead stretches, no repeated device, B&W only as a
    device, the depth effect not on a face mid-word.
 4. The report row's rung: `full` (depth), `reduced` (two planes from the
-   person matte), `substitute` (Ken Burns). Say so when a final degraded.
+   person matte; or `interp: minterpolate` on a slowed window — the
+   honest flag that the in-betweens are synthesised), `substitute` (Ken
+   Burns). A final holds a degraded device until you fix it or
+   acknowledge it (justify_verification_findings) — say so to the user.
 
 ## Repair ladder
 

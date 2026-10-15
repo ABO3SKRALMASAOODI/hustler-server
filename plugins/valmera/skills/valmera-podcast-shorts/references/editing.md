@@ -258,7 +258,16 @@ unacknowledged one).
    (list each with its time, on-screen partner and level; `audit_audio_mix`
    reports each sound's level against the voice and its placement checks),
    no digital silence, payoff held 0.8-1.5 s after the last word.
-6. Read the render's VERIFICATION ADVISORIES (quote the ones you keep in the
+6. `critique_short` once (read-only; the verify department, when your
+   client lists it): the render judged against the reference craft —
+   cuts through words, flashes, type on a face, late words, dead
+   stretches, B&W used as a whole-short look (a device only: a section
+   that lands in colour, one colour kept), a payoff that does not hold —
+   each with its exact apply_edit_batch op, plus up to three moments
+   nothing marks and an idea this run has NOT used yet. Fix its blocking
+   findings; when it says "house style", change the idea, not the
+   parameter.
+7. Read the render's VERIFICATION ADVISORIES (quote the ones you keep in the
    handback: reviewers cannot re-read them without re-rendering): the EARN ITS PLACE note lists
    a generic or spent hook, a fragment or jump-cut opening, graphics past
    the budget or restating the captions, extra type roles or accents, a

@@ -181,7 +181,10 @@ class _Time:
                     st["unique"], st["times"] = pat
             _state(plan)[item.get("id")] = st
             if st.get("skip"):
-                return ("reduced", st["skip"])
+                # nothing to synthesise (real frames, or no repeats): the
+                # picture is already the best it can be — not a degrade
+                # the final-export gate should hold
+                return ("full", st["skip"])
             return ("reduced", "interp: minterpolate (motion-compensated "
                     "in-betweens; RIFE is not on this lane)")
         _state(plan)[item.get("id")] = st

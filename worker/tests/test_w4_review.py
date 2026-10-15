@@ -1,0 +1,293 @@
+"""Wave 4 independent review: the verbs' solving logic (ramp, held frames),
+the aspect verifier's faces lens, cutaway windows, the critic's B&W fix and
+fresh ideas, the interpolate rung and the streamed slot footage.
+
+Pure python + ffmpeg (one tiny lavfi clip); CI-safe.
+"""
+
+import copy
+import os
+import shutil
+import subprocess
+import sys
+
+import pytest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(HERE))
+
+# speech 0.5-5.5 s, a pause 5.5-9.0 s, speech 9.0-11.5 s (source = program)
+_WORDS = []
+for k in range(10):
+    _WORDS.append({"w": f"w{k}", "t0": 0.5 + 0.5 * k,
+                   "t1": 0.5 + 0.5 * k + 0.4})
+_WORDS[4]["w"] = "growth"
+_WORDS[9]["w"] = "decades."
+for k in range(5):
+    _WORDS.append({"w": f"v{k}", "t0": 9.0 + 0.5 * k,
+                   "t1": 9.0 + 0.5 * k + 0.4})
+_WORDS[-1]["w"] = "end."
+IDX = {"words": _WORDS, "silences": [], "sentences": [],
+       "video": {"width": 1920, "height": 1080, "fps": 25.0,
+                 "duration": 14.0}}
+
+
+def _edl():
+    from schemas import validate_edl
+    return validate_edl({"keep": [[0.0, 12.0]],
+                         "frame": {"ratio": "9:16", "mode": "crop"}},
+                        14.0).model_dump()
+
+
+class FakeDB:
+    def run(self, fn, *a, **kw):
+        import edit_batch
+        if fn is edit_batch.project_media_keys:
+            return {}
+        raise AssertionError(f"unexpected db call {fn}")
+
+
+class Ctx:
+    def __init__(self, edl):
+        self.db = FakeDB()
+        self.project_id = 7
+        self.duration = 14.0
+        self.has_main_video = True
+        self._edl = edl
+        self.version = 1
+        self.index = IDX
+        self.user_message = None
+
+    def latest_edl(self):
+        return {"version": self.version, "json": copy.deepcopy(self._edl)}
+
+    def write_edl(self, edl, desc):
+        self._edl = edl
+        self.version += 1
+        return f"EDL v{self.version - 1} -> v{self.version}: {desc}"
+
+
+@pytest.fixture
+def ctx(monkeypatch):
+    import remote
+    monkeypatch.setattr(remote, "executor_supports", lambda f, **k: True)
+    from tools_ext import depth_tools
+    monkeypatch.setattr(depth_tools, "_ensure_depth", lambda *a, **k: "")
+    return Ctx(_edl())
+
+
+# ── the ramp ─────────────────────────────────────────────────────────────
+
+def test_a_ramp_over_speech_is_refused_it_would_slow_the_voice(ctx):
+    from tools_ext import depth_tools
+    out = depth_tools.add_time_effect(ctx, "ramp", start=1.0, end=3.0,
+                                      factor=0.4)
+    assert out.startswith("REJECTED") and "voice" in out
+    assert not ctx._edl.get("speed")
+    ok = depth_tools.add_time_effect(ctx, "ramp", start=1.0, end=3.0,
+                                     factor=0.4, allow_speech=True)
+    assert ok.startswith("EDL "), ok
+
+
+def test_a_ramp_in_a_pause_writes_valid_spans_and_reanchors_later_items(ctx):
+    from tools_ext import depth_tools
+    ctx._edl["fx"] = [{"id": "late", "type": "time", "stage": "world",
+                       "start": 10.0, "end": 11.0, "kind": "echo",
+                       "device": "time_echo"}]
+    out = depth_tools.add_time_effect(ctx, "ramp", start=6.0, end=8.6,
+                                      factor=0.4)
+    assert out.startswith("EDL "), out
+    sp = ctx._edl["speed"]
+    assert sp and all(s["end"] - s["start"] >= 0.2 for s in sp)
+    assert all(0.25 <= s["factor"] < 0.98 for s in sp)
+    late = next(i for i in ctx._edl["fx"] if i["id"] == "late")
+    # the slowed pause adds program time: the later echo moved with its
+    # footage instead of drifting onto other frames
+    assert late["start"] > 10.5, late
+    interp = [i for i in ctx._edl["fx"] if i.get("kind") == "interpolate"]
+    assert len(interp) == 1
+    # a second ramp gets its own ids (the first used ramp1_*)
+    out = depth_tools.add_time_effect(ctx, "ramp", start=0.0, end=0.3,
+                                      factor=0.5)
+    assert out.startswith("REJECTED")          # < 0.4 s of footage
+    ids = [s["id"] for s in ctx._edl["speed"]]
+    assert len(ids) == len(set(ids))
+
+
+def test_ramp_factors_outside_the_core_range_are_refused(ctx):
+    from tools_ext import depth_tools
+    for f in (0.1, 0.95):
+        out = depth_tools.add_time_effect(ctx, "ramp", start=6.0, end=8.6,
+                                          factor=f)
+        assert out.startswith("REJECTED") and "0.25" in out, out
+
+
+def test_two_ramps_never_collide_on_ids(ctx):
+    from tools_ext import depth_tools
+    a = depth_tools.add_time_effect(ctx, "ramp", start=5.6, end=6.8,
+                                    factor=0.5)
+    assert a.startswith("EDL "), a
+    prog = depth_tools._program_s(ctx._edl)
+    b = depth_tools.add_time_effect(ctx, "ramp", start=prog - 1.4,
+                                    end=prog - 0.2, factor=0.5,
+                                    allow_speech=True)
+    assert b.startswith("EDL "), b
+    ids = [s["id"] for s in ctx._edl["speed"]]
+    assert len(ids) == len(set(ids)) and len(ids) >= 2
+    fx_ids = [i["id"] for i in ctx._edl["fx"]]
+    assert len(fx_ids) == len(set(fx_ids))
+    assert sum(1 for i in ctx._edl["fx"] if i["kind"] == "interpolate") == 2
+
+
+# ── held frames (payoff holds) ─────────────────────────────────────────────
+
+def test_a_payoff_hold_starts_as_the_word_ends_and_never_over_speech(ctx):
+    from tools_ext import depth_tools
+    # 'growth' is followed by more words: a hold there freezes the lips
+    out = depth_tools.add_depth_effect(ctx, "parallax", word="growth")
+    assert out.startswith("REJECTED") and "lips" in out, out
+    # 'decades.' ends the thought; a 3.5 s pause follows
+    out = depth_tools.add_depth_effect(ctx, "parallax", word="decades")
+    assert out.startswith("EDL "), out
+    it = ctx._edl["fx"][-1]
+    assert it["start"] >= 5.4 - 1e-6           # 'decades.' ends at 5.4 s
+    assert it["end"] <= 9.0 - 0.03             # stops before the next word
+    assert it["bind"]["on"] == "phrase_end"
+    # a push is a zoom: a held frame of the speaker travels sideways/up
+    assert it["move"]["path"] in depth_tools.HOLD_MOVES
+    assert it["move"]["path"] != "push_in"
+
+
+def test_an_explicit_hold_over_words_needs_allow_speech(ctx):
+    from tools_ext import depth_tools
+    out = depth_tools.add_depth_effect(ctx, "ken_burns", start=1.0, end=3.0)
+    assert out.startswith("REJECTED")
+    out = depth_tools.add_depth_effect(ctx, "ken_burns", start=1.0, end=3.0,
+                                       allow_speech=True)
+    assert out.startswith("EDL "), out
+
+
+def test_consecutive_holds_take_different_paths(ctx):
+    from tools_ext import depth_tools
+    a = depth_tools.add_depth_effect(ctx, "parallax", start=5.6, end=6.8)
+    b = depth_tools.add_depth_effect(ctx, "parallax", start=7.2, end=8.6)
+    assert a.startswith("EDL ") and b.startswith("EDL "), (a, b)
+    paths = [i["move"]["path"] for i in ctx._edl["fx"]]
+    assert len(set(paths)) == 2
+
+
+def test_a_cutaway_still_may_sit_over_speech(ctx, monkeypatch):
+    from tools_ext import depth_tools
+    import edit_batch
+    monkeypatch.setattr(ctx.db, "run", lambda fn, *a, **k: (
+        {"media/7/p.jpg": {"storage_key": "media/7/p.jpg"}}
+        if fn is edit_batch.project_media_keys else None))
+    out = depth_tools.add_depth_effect(ctx, "parallax", start=1.0, end=3.0,
+                                       asset_key="media/7/p.jpg")
+    assert out.startswith("EDL "), out
+    assert ctx._edl["fx"][-1]["move"]["path"] == "push_in"
+
+
+# ── delivery: the faces lens really runs on a master ─────────────────────
+
+def test_aspect_verify_counts_type_on_faces(monkeypatch, tmp_path):
+    import aspects
+    import motion_critic
+    import qa_metrics
+    monkeypatch.setattr(motion_critic, "critique",
+                        lambda *a, **k: {"findings": [], "score": 9.0,
+                                         "measures": {}})
+    monkeypatch.setattr(motion_critic, "lens_faces", lambda p, e, i: [
+        {"code": "type_on_face", "lens": "faces", "t": 1.0,
+         "severity": "fix", "message": "m1 on the face"}])
+    monkeypatch.setattr(qa_metrics, "probe", lambda p: {
+        "width": 1080, "height": 1920, "fps": 30.0, "duration": 4.0})
+    monkeypatch.setattr(aspects, "safe_area_violations",
+                        lambda *a, **k: [])
+    got = aspects.verify(str(tmp_path / "x.mp4"), {}, {}, "9:16")
+    assert got["faces"] == 1
+
+
+# ── cutaways: windows already taken ──────────────────────────────────────
+
+def test_cover_overlays_block_a_new_cutaway_by_their_duration():
+    from tools_ext import broll_tools
+    edl = {"keep": [[0.0, 12.0]], "fx": [],
+           "overlays": [{"id": "o1", "start": 4.0, "duration_s": 2.5,
+                         "fit": "cover"}]}
+    taken = broll_tools._windows_taken(edl)
+    assert (4.0, 6.5) in taken
+
+
+# ── the critic ───────────────────────────────────────────────────────────
+
+def test_the_bw_fix_is_a_section_not_another_look():
+    import motion_critic
+    edl = {"keep": [[0.0, 30.0]], "effects": {"grade": "bw"}}
+    _why, ops = motion_critic._bw_cause(edl, {"t": 27.0})
+    gw = next(o for o in ops if o.get("layer") == "fx")["value"]
+    share = (gw["end"] - gw["start"]) / 30.0
+    assert gw["end"] == 27.0 and share < motion_critic.BW_LOOK_SHARE
+    edl = {"keep": [[0.0, 30.0]], "fx": [{
+        "id": "g1", "type": "grade_window", "stage": "world", "start": 0.0,
+        "end": 27.0, "saturation": 0.0}]}
+    _why, ops = motion_critic._bw_cause(edl, {"t": 27.0})
+    v = ops[0]["value"]
+    assert (v["end"] - v["start"]) / 30.0 < motion_critic.BW_LOOK_SHARE
+
+
+def test_fresh_ideas_skip_devices_the_run_already_used():
+    import motion_critic
+    plan = {"moments": [{"t": 3.0, "kind": "stress", "strength": 0.9,
+                         "tags": ["contrast"], "word": "but",
+                         "word_raw": "but"}], "payoff": None}
+    edl = {"keep": [[0.0, 10.0]]}
+    _o, first = motion_critic.lens_range(edl, plan, [])
+    assert first["ideas"][0]["verb"] == "add_depth_effect"
+    prev = [{"keep": [[0.0, 10.0]], "fx": [{
+        "id": "r", "type": "depth", "stage": "world", "start": 1.0,
+        "end": 2.0, "kind": "rack_focus", "device": "depth_rack_focus"}]}]
+    _o, again = motion_critic.lens_range(edl, plan, prev)
+    assert again["ideas"][0]["verb"] != "add_depth_effect"
+    assert again["ideas"][0]["fresh_for_run"]
+
+
+# ── time: native frames are not a degrade ───────────────────────────────
+
+def test_interpolate_on_native_frames_is_full_not_reduced():
+    import timewarp
+
+    class Src:
+        fps = 60.0
+
+    from timeline import Timeline
+
+    class Plan:
+        fps = 30.0
+        fps3 = 30.0
+        source = Src()
+        tl = Timeline([[0.0, 4.0]], [], [{"id": "s", "start": 0.0,
+                                          "end": 2.0, "factor": 0.5}])
+
+    got = timewarp.TIME.prepare(Plan(), {"id": "i1", "kind": "interpolate",
+                                         "start": 0.5, "end": 3.0})
+    assert got[0] == "full" and "native" in got[1]
+
+
+# ── slot footage is streamed ─────────────────────────────────────────────
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+def test_slot_footage_streams_frame_by_frame(tmp_path):
+    import ui_media
+    clip = str(tmp_path / "c.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=s=320x180:r=25:d=1", "-pix_fmt", "yuv420p",
+                    clip], check=True)
+    fr = ui_media._Frames(clip, 0.0, 40, 25.0, w=160)
+    assert fr.frames                            # readable
+    a = fr.at(0).copy()
+    b = fr.at(10).copy()
+    assert a.shape == (90, 160, 3) and (a != b).any()
+    last = fr.at(39)                            # past the end: held
+    assert last is not None and last.shape == (90, 160, 3)
+    fr.close()

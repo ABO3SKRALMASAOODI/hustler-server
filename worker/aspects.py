@@ -225,10 +225,18 @@ def verify(path, edl, index, ratio, final=False, want_wm=False,
            src_path=None):
     """{faces, brand, safe_area, findings} for one rendered master."""
     import motion_critic
+    import qa_metrics
     res = motion_critic.critique(path, edl, index or {}, final=final,
                                  want_wm=want_wm, deep=False)
-    faces = [f for f in res.get("findings") or []
-             if f.get("code") == "type_on_face"]
+    # the faces lens is one of the critic's deep passes: run it on its own
+    # here (a master's whole point is that type stays off the face)
+    try:
+        faces = [f for f in motion_critic.lens_faces(
+            path, edl, qa_metrics.probe(path)) or []
+            if f.get("code") == "type_on_face"]
+    except Exception as e:  # noqa: BLE001 — reported, never silent
+        faces = []
+        res.setdefault("errors", []).append(f"faces: {str(e)[:120]}")
     brand = [f for f in res.get("findings") or []
              if f.get("lens") == "brand"]
     ignore = source_text_boxes(src_path, edl, index, ratio) if src_path \
@@ -237,7 +245,7 @@ def verify(path, edl, index, ratio, final=False, want_wm=False,
     safe = safe_area_violations(path, ratio, ignore=ignore, wm_box=wm)
     return {"faces": len(faces), "brand": len(brand),
             "safe_area": len(safe), "safe_detail": safe[:6],
-            "score": res.get("score"),
+            "score": res.get("score"), "errors": res.get("errors") or [],
             "brand_measure": (res.get("measures") or {}).get("brand"),
             "findings": [{k: f.get(k) for k in ("code", "lens", "t",
                                                  "severity", "message")}

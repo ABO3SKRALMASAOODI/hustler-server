@@ -47,37 +47,70 @@ def _round_mask(w, h, r):
 
 class _Frames:
     """Footage frames on the program clock: the asset (video or still) or
-    the main video from ``src_t``; decoded once at the window's rate."""
+    the main video from ``src_t``, decoded at the window's rate and
+    STREAMED — one frame in memory at a time (a 12 s portrait recording
+    held whole is ~2 GB; the lanes are small). ``at(i)`` is called with
+    i = 0, 1, 2, ...; past the clip's end it holds the last frame."""
 
     def __init__(self, path, start_s, n, fps, still=False, w=960):
         import subprocess
         self.frames = []
+        self._proc = None
+        self._last = None
+        self._i = -1
         if still:
             import depth_fx
             img = depth_fx._decode_frame(path, 0.0)
             self.frames = [img] if img is not None else []
             return
-        cmd = ["ffmpeg", "-v", "error", "-nostdin"]
-        if start_s > 0:
-            cmd += ["-ss", f"{start_s:.3f}"]
-        cmd += ["-i", path, "-frames:v", str(n), "-vf",
-                f"fps={fps:.4f},scale={w}:-2", "-f", "rawvideo", "-pix_fmt",
-                "rgb24", "-"]
-        raw = subprocess.run(cmd, capture_output=True, timeout=300).stdout
         import qa_metrics
         info = qa_metrics.probe(path)
         sw, sh = int(info.get("width") or 0), int(info.get("height") or 0)
         if not sw or not sh:
             return
-        h = int(round(w * sh / float(sw) / 2.0)) * 2
-        fs = w * h * 3
-        self.frames = [np.frombuffer(raw[i * fs:(i + 1) * fs], np.uint8)
-                       .reshape(h, w, 3) for i in range(len(raw) // fs)]
+        self._w = int(w)
+        self._h = int(round(w * sh / float(sw) / 2.0)) * 2
+        cmd = ["ffmpeg", "-v", "error", "-nostdin"]
+        if start_s > 0:
+            cmd += ["-ss", f"{start_s:.3f}"]
+        cmd += ["-i", path, "-frames:v", str(n), "-vf",
+                f"fps={fps:.4f},scale={self._w}:{self._h}", "-f", "rawvideo",
+                "-pix_fmt", "rgb24", "-"]
+        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL)
+        if self._read() is not None:
+            self.frames = [self._last]       # non-empty: the clip is readable
+
+    def _read(self):
+        if self._proc is None:
+            return None
+        fs = self._w * self._h * 3
+        raw = self._proc.stdout.read(fs)
+        if len(raw) < fs:
+            self.close()
+            return None
+        self._last = np.frombuffer(raw, np.uint8).reshape(self._h, self._w,
+                                                          3)
+        self._i += 1
+        return self._last
 
     def at(self, i):
-        if not self.frames:
-            return None
-        return self.frames[min(i, len(self.frames) - 1)]
+        if self._proc is None and self._last is None:
+            return self.frames[0] if self.frames else None
+        while self._i < i and self._proc is not None:
+            if self._read() is None:
+                break
+        return self._last
+
+    def close(self):
+        p, self._proc = self._proc, None
+        if p is not None:
+            try:
+                p.stdout.close()
+                p.kill()
+                p.wait(timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class _UiMedia:
@@ -170,6 +203,7 @@ class _UiMedia:
                                                       0, 255)
             w.write(canvas)
         w.close()
+        frames.close()
         _state(plan)[item["id"]] = {"clip": out}
         plan.add_input(f"w4u:{item['id']}", ["-i", out])
         return None

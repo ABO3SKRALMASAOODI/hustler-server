@@ -37,6 +37,19 @@ DEFAULT_SPAN = {"parallax": 2.6, "ken_burns": 2.6, "dof": 3.0,
                 "point_cloud": 1.6, "push_through": 1.4}
 _ZOOM_ASK = re.compile(r"\b(push|zoom|punch|dolly|camera move|fly through|"
                        r"through the (word|text|type))", re.I)
+# A held frame (parallax / ken_burns on the program's own picture) stops the
+# lips: it sits after the words it holds, never over speech, and needs at
+# least this long to read as a move.
+HOLD_MIN_S = 0.5
+# The camera paths a held frame of the speaker cycles through when the
+# agent names none: lateral and vertical travels (a push is a zoom — owner
+# rule: zooms only when asked), each new hold in an edit the next one.
+HOLD_MOVES = ("drift_left", "rise", "drift_right", "orbit_left", "fall",
+              "orbit_right")
+# Speed spans retime picture AND sound; the core floor (schemas
+# SPEED_FACTOR_MIN) and the smallest span the EDL accepts.
+RAMP_MIN_FACTOR, RAMP_MAX_FACTOR = 0.25, 0.9
+RAMP_SPAN_MIN_S = 0.21
 
 
 def _edl(ctx):
@@ -143,6 +156,21 @@ def find_word(edl, index, word, near=None, window=None):
     return cands[0]["t0"], cands[0]["i"], cands[0]["w"]
 
 
+def spoken_in(edl, index, s, e, pad=0.02):
+    """Kept words whose onset falls strictly inside program [s, e)."""
+    import device_planner
+    return [w for w in device_planner.program_words(edl, index or {})
+            if s + pad < w["t0"] < e - pad]
+
+
+def _word_end(edl, index, src_i):
+    import device_planner
+    for w in device_planner.program_words(edl, index or {}):
+        if w["i"] == src_i:
+            return w["t1"]
+    return None
+
+
 def _ensure_depth(ctx, edl, windows, asset=None):
     """Ask for depth.small over the items' source windows (the main video)
     or on an asset still; never waits. Returns a short note, or ''."""
@@ -206,7 +234,8 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
                      asset_key=None, src_t=None, move=None, amount=None,
                      focus=None, focus_from=None, rack_at=None, text=None,
                      colour=None, blur=None, strength=None, backdrop=None,
-                     density=None, stage=None, user_asked=False, id=None):
+                     density=None, stage=None, user_asked=False, id=None,
+                     allow_speech=False):
     edl, _v = _edl(ctx)
     kind = str(kind or "").strip().lower()
     if kind not in DEPTH_KINDS:
@@ -223,6 +252,8 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
     prog = _program_s(edl)
     index = getattr(ctx, "index", None) or {}
     bind = None
+    # parallax / ken_burns on the main video's own picture: a freeze
+    held = kind in ("parallax", "ken_burns") and not asset_key
     try:
         move = _obj(move, "move")
         focus = _obj(focus, "focus")
@@ -254,9 +285,16 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
                 bind = {"on": "word", "ref": hit[1], "rhythm": "speech"}
         else:
             if start is None and hit is not None:
-                s = hit[0] - (0.0 if kind in ("parallax", "ken_burns",
-                                              "point_cloud") else 0.3)
-                bind = {"on": "word", "ref": hit[1], "rhythm": "speech"}
+                if held:
+                    # a held frame breathes AFTER the word it holds: from
+                    # the word's last frame, never over its syllables
+                    we = _word_end(edl, index, hit[1])
+                    s = (we if we is not None else hit[0]) + 0.02
+                    bind = {"on": "phrase_end", "ref": hit[1],
+                            "rhythm": "speech"}
+                else:
+                    s = hit[0] - (0.0 if kind == "point_cloud" else 0.3)
+                    bind = {"on": "word", "ref": hit[1], "rhythm": "speech"}
             else:
                 s = float(start) if start is not None else None
             if s is None:
@@ -264,6 +302,30 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
                                  "word")
             e = float(end) if end is not None else s + span
         s, e = round(max(0.0, s), 2), round(min(prog, e), 2)
+        if held and not allow_speech:
+            talk = spoken_in(edl, index, s, e)
+            nxt = talk[0] if talk else None
+            if talk and end is None:
+                # the default span runs into the next words: stop before
+                e = round(min(e, talk[0]["t0"] - 0.04), 2)
+                talk = spoken_in(edl, index, s, e)
+            if talk or e - s < HOLD_MIN_S:
+                said = " ".join(str(w["w"]) for w in talk[:4]) if talk \
+                    else ""
+                return _rejected(
+                    (f"a held frame at {s:g}-{e:g}s would freeze his lips "
+                     f"while he says '{said}' (the sound keeps playing). "
+                     if talk else
+                     f"only {max(0.0, e - s):.2f}s of pause before "
+                     + (f"he goes on ('{nxt['w']}' at {nxt['t0']:.2f}s)"
+                        if nxt else "the end") +
+                     ": a held frame would freeze his lips or needs >= "
+                     "0.5 s. ") +
+                    "Hold after the LAST word of the thought (a real "
+                    "pause), give the payoff room (extend the final keep "
+                    "into the pause), use a cutaway still (asset_key), or "
+                    "pass allow_speech true if the user wants the freeze "
+                    "over the words.")
         if e - s < 0.2:
             return _rejected(f"the window {s:g}-{e:g}s is too short for a "
                              "depth effect (>= 0.2 s)")
@@ -285,8 +347,19 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
         source = {"kind": "source", "src_t": round(float(st), 3)}
     if move is None and kind in ("parallax", "ken_burns", "point_cloud",
                                  "push_through", "light"):
-        move = {"path": "orbit_left" if kind == "point_cloud" else
-                "push_in", "amount": float(amount) if amount is not None
+        if kind == "point_cloud":
+            path = "orbit_left"
+        elif held:
+            # a held frame of the speaker travels sideways or up, never a
+            # push (a zoom: owner rule); each hold in the edit the next path
+            n_held = sum(1 for i in edl.get("fx") or []
+                         if isinstance(i, dict) and i.get("type") == "depth"
+                         and i.get("kind") in ("parallax", "ken_burns")
+                         and not (i.get("source") or {}).get("asset_key"))
+            path = HOLD_MOVES[n_held % len(HOLD_MOVES)]
+        else:
+            path = "push_in"
+        move = {"path": path, "amount": float(amount) if amount is not None
                 else (0.35 if kind != "point_cloud" else 0.4),
                 "ease": "in_out"}
     elif move is not None and amount is not None:
@@ -331,22 +404,34 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
 
 # ── add_time_effect ─────────────────────────────────────────────────────
 
-def _speed_ramp_ops(edl, s, e, factor, steps=5):
-    """An eased speed ramp over program [s, e]: ``steps`` speed spans
-    easing 1.0 -> factor -> 1.0 over the window's SOURCE seconds."""
+def _speed_ramp_ops(edl, s, e, factor, steps=5, prefix="ramp"):
+    """An eased speed ramp over program [s, e]: up to ``steps`` speed spans
+    easing 1.0 -> factor -> 1.0 over the window's SOURCE seconds (each
+    span >= RAMP_SPAN_MIN_S; a span that would play within 2 % of normal
+    speed is left at normal speed). Span ids are unique in the edit."""
     tl = _tl(edl)
     a, b = tl.out_to_src(s), tl.out_to_src(max(s, e - 0.01))
     if a is None or b is None or b - a < 0.4:
         raise ValueError("a ramp needs at least 0.4 s of main footage")
-    edges = [a + (b - a) * k / steps for k in range(steps + 1)]
+    steps = max(1, min(int(steps), int((b - a) / RAMP_SPAN_MIN_S)))
+    edges = [round(a + (b - a) * k / steps, 3) for k in range(steps + 1)]
+    used = {str(sp.get("id")) for sp in edl.get("speed") or []
+            if isinstance(sp, dict)}
+    n = 1
+    while any(u.startswith(f"{prefix}{n}_") for u in used):
+        n += 1
     spans = []
     for k in range(steps):
         x = (k + 0.5) / steps
         w = 1 - abs(2 * x - 1)               # 0 at the ends, 1 mid-window
         f = round(1.0 + (float(factor) - 1.0) * (w * w * (3 - 2 * w)), 3)
-        spans.append({"id": f"rp{k}", "start": round(edges[k], 3),
-                      "end": round(edges[k + 1], 3),
-                      "factor": max(0.1, f)})
+        f = max(RAMP_MIN_FACTOR, f)
+        if steps > 1 and abs(f - 1.0) < 0.02:
+            continue
+        spans.append({"id": f"{prefix}{n}_rp{k}", "start": edges[k],
+                      "end": edges[k + 1], "factor": f})
+    if not spans:
+        raise ValueError("that ramp would play at normal speed")
     return spans
 
 
@@ -376,41 +461,27 @@ def add_time_effect(ctx, kind, start=None, end=None, word=None,
             return _rejected("the window is too short (>= 0.2 s)")
     except (TypeError, ValueError) as x:
         return _rejected(str(x))
-    if kind in ("reverse", "remap", "stutter") and not allow_speech:
-        import device_planner
-        talk = [w for w in device_planner.program_words(edl, index)
-                if s < w["t0"] < e]
+    if kind in ("reverse", "remap", "stutter", "ramp") and not allow_speech:
+        talk = spoken_in(edl, index, s, e, pad=0.0)
         if len(talk) >= 2:
-            return _rejected(f"{kind} on {len(talk)} spoken words breaks lip "
-                             "sync (the audio keeps playing forward). Use it "
-                             "on B-roll, a gesture or a pause — or pass "
-                             "allow_speech true if the user wants it there.")
+            why = ("a ramp slows the SOUND with the picture (speed spans "
+                   "retime both): his voice would drag" if kind == "ramp"
+                   else "the audio keeps playing forward")
+            return _rejected(f"{kind} on {len(talk)} spoken words breaks the "
+                             f"speech ({why}). Use it on B-roll, a gesture, "
+                             "a walk or a pause — or pass allow_speech true "
+                             "if the user wants it there.")
     if kind == "ramp":
         f = float(factor) if factor is not None else 0.5
-        if not 0.1 <= f < 1.0:
-            return _rejected("a ramp's factor is the slowest speed, 0.1-0.95")
+        if not RAMP_MIN_FACTOR <= f <= RAMP_MAX_FACTOR:
+            return _rejected(f"a ramp's factor is its slowest speed, "
+                             f"{RAMP_MIN_FACTOR:g}-{RAMP_MAX_FACTOR:g} "
+                             "(0.5 = half speed)")
         try:
-            spans = _speed_ramp_ops(edl, s, e, f)
+            spans = _speed_ramp_ops(edl, s, e, f, prefix=str(id or "ramp"))
         except ValueError as x:
             return _rejected(str(x))
-        speed = [sp for sp in edl.get("speed") or []
-                 if not any(sp["end"] > x["start"] and sp["start"] < x["end"]
-                            for x in spans)]
-        for sp in spans:
-            sp["id"] = f"{id or 'ramp'}_{sp['id']}"
-        ops = [{"action": "set", "layer": "speed", "value": speed + spans}]
-        # the slowed window grows on the program clock: interpolate it there
-        edl2 = dict(edl, speed=speed + spans)
-        tl2 = _tl(edl2)
-        ps = tl2.src_to_out(spans[0]["start"] + 0.001)
-        pe = tl2.src_to_out(spans[-1]["end"] - 0.001)
-        if ps is not None and pe is not None and pe - ps > 0.3:
-            ops.append(_upsert({"id": f"{id or 'ramp'}_interp",
-                                "type": "time", "stage": "world",
-                                "start": round(ps, 2), "end": round(pe, 2),
-                                "kind": "interpolate",
-                                "device": "time_interpolate", "bind": bind}))
-        return _commit(ctx, ops, f"eased speed ramp to {f:g}x {s:g}-{e:g}s")
+        return _write_ramp(ctx, edl, spans, f, s, e, bind)
     item = {"id": id or _new_id(edl, f"tm_{kind}_"), "type": "time",
             "stage": "world", "start": s, "end": e, "kind": kind,
             "frames": frames if kind in ("posterize", "stutter") else None,
@@ -423,6 +494,51 @@ def add_time_effect(ctx, kind, start=None, end=None, word=None,
         return gone
     return _commit(ctx, [_upsert(item)], f"{kind} time effect {item['id']} "
                    f"{s:g}-{e:g}s")
+
+
+def _write_ramp(ctx, edl, spans, f, s, e, bind):
+    """Write a ramp like set_speed does: the speed spans, every
+    program-time item re-anchored through the new clock (graphics, cutaways
+    and devices after the ramp stay on their footage), and an
+    ``interpolate`` item over the slowed part — all as ONE batch."""
+    import copy
+    import agent_tools
+    from tools_ext import _write
+    from timeline import Timeline
+    speed = [sp for sp in edl.get("speed") or []
+             if not any(sp["end"] > x["start"] and sp["start"] < x["end"]
+                        for x in spans)]
+    new = copy.deepcopy(edl)
+    new["speed"] = sorted(speed + spans, key=lambda x: float(x["start"]))
+    old_tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+    new_tl = Timeline(new.get("keep") or [], new.get("inserts") or [],
+                      new["speed"])
+    notes = agent_tools._remap_program_items(new, old_tl, new_tl)
+    ps = new_tl.src_to_out(spans[0]["start"] + 0.001)
+    pe = new_tl.src_to_out(spans[-1]["end"] - 0.001)
+    import edit_batch
+    ops = []
+    for layer in sorted(edit_batch.LAYERS):
+        if json.dumps(edl.get(layer), sort_keys=True, default=str) != \
+                json.dumps(new.get(layer), sort_keys=True, default=str):
+            ops.append({"action": "set", "layer": layer,
+                        "value": new.get(layer)})
+    if ps is not None and pe is not None and pe - ps > 0.3:
+        iid = _new_id(new, f"{spans[0]['id'].rsplit('_rp', 1)[0]}_interp")
+        ops.append(_write.upsert_fx({
+            "id": iid, "type": "time", "stage": "world",
+            "start": round(ps, 2), "end": round(pe, 2),
+            "kind": "interpolate", "device": "time_interpolate",
+            "bind": bind}))
+    out = _commit(ctx, ops, f"eased speed ramp to {f:g}x {s:g}-{e:g}s")
+    if out.startswith("EDL "):
+        out += (f"\nProgram length: {round(old_tl.out_duration, 2)}s -> "
+                f"{round(new_tl.out_duration, 2)}s (the slowed footage now "
+                f"plays {round(ps or s, 2)}-{round(pe or e, 2)}s).")
+        if notes:
+            out += "\n" + "\n".join(str(n) for n in notes[:8])
+    return out
 
 
 # ── remove ──────────────────────────────────────────────────────────────
@@ -463,7 +579,9 @@ TOOL_SPECS = {
         "focus_from to focus, landing ON word), fog / light (through "
         "depth), point_cloud (LiDAR-style cloud of the person or scene), "
         "push_through (a camera push through text; only when the user "
-        "asked for a push). word binds it to a spoken word. Ideas, not "
+        "asked for a push). word binds it to a spoken word; a held frame "
+        "(parallax/ken_burns on the main video) starts as the word ENDS "
+        "and never sits over speech (allow_speech overrides). Ideas, not "
         "decoration: one per moment that earns it.",
         {"kind": {"type": "string", "enum": list(DEPTH_KINDS)},
          "start": _S, "end": _S, "word": {"type": "string"},
@@ -477,16 +595,18 @@ TOOL_SPECS = {
                                                  "program"]},
          "density": {"type": "number"},
          "stage": {"type": "string", "enum": ["world", "screen"]},
-         "user_asked": {"type": "boolean"}, "id": {"type": "string"}}),
+         "user_asked": {"type": "boolean"},
+         "allow_speech": {"type": "boolean"}, "id": {"type": "string"}}),
     "add_time_effect": (
         add_time_effect,
         "Picture-only time devices (audio and program length never move): "
         "reverse, echo (trails), posterize (step-print, frames 2-8), "
         "stutter (loop frames x repeats), interpolate (smooth slow motion "
         "in a slowed window), remap (curve ease_in|ease_out|ease_in_out|"
-        "hold_then_catch). ramp writes an eased speed ramp to factor plus "
-        "its interpolation. Reverse/remap/stutter refuse spoken words "
-        "(lip sync) unless allow_speech.",
+        "hold_then_catch). ramp (factor 0.25-0.9) is a real speed change: "
+        "an eased ramp that slows picture AND sound, every later item "
+        "re-anchored, plus its interpolation. Reverse/remap/stutter/ramp "
+        "refuse spoken words unless allow_speech.",
         {"kind": {"type": "string", "enum": list(TIME_KINDS)},
          "start": _S, "end": _S, "word": {"type": "string"},
          "frames": {"type": "integer"}, "repeats": {"type": "integer"},

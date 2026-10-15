@@ -268,6 +268,21 @@ def lens_colour(view, edl, index, request_text, payoff=None):
     return out, measure
 
 
+# A B&W section the critic proposes: the build into the payoff, never
+# more than this share of the program (or this many seconds) — a section,
+# well under BW_LOOK_SHARE, so the fix is a device and is never flagged
+# again as a look.
+BW_SECTION_SHARE = 0.35
+BW_SECTION_MAX_S = 8.0
+
+
+def _bw_section(end, prog, floor=0.0):
+    """(start, end) of a mono section that lands colour ON ``end``."""
+    span = min(BW_SECTION_SHARE * prog, BW_SECTION_MAX_S)
+    return round(max(float(floor), float(end) - span), 2), \
+        round(float(end), 2)
+
+
 def _bw_cause(edl, payoff):
     """(' (from …)', ops that turn the look into a device)."""
     fx = (edl or {}).get("effects") or {}
@@ -278,14 +293,14 @@ def _bw_cause(edl, payoff):
         ops = [{"action": "set", "layer": "effects", "value": new}]
         end = (payoff or {}).get("t")
         if end and 1.0 < end < prog:
+            a, b = _bw_section(end, prog)
             ops.append({"action": "upsert", "layer": "fx", "id": "gw_mono_turn",
                         "value": {"id": "gw_mono_turn", "type": "grade_window",
-                                  "stage": "world", "start": 0.0,
-                                  "end": round(float(end), 2),
+                                  "stage": "world", "start": a, "end": b,
                                   "saturation": 0.0, "ramp_out_f": 3,
                                   "device": "grade_section",
-                                  "purpose": "B&W until the payoff, colour "
-                                             "lands on it"}})
+                                  "purpose": "a B&W build into the payoff; "
+                                             "colour lands on it"}})
         return " (the whole-program 'bw' grade preset)", ops
     for it in (edl or {}).get("fx") or []:
         if not isinstance(it, dict) or it.get("type") != "grade_window":
@@ -298,9 +313,10 @@ def _bw_cause(edl, payoff):
                 <= 0.15 and not it.get("isolate") and span >= 0.5 * prog):
             end = (payoff or {}).get("t")
             op = None
-            if end and float(it["start"]) + 1.0 < end < float(it["end"]):
+            if end and float(it["start"]) + 1.0 < end <= float(it["end"]):
+                a, b = _bw_section(end, prog, floor=float(it["start"]))
                 op = {"action": "upsert", "layer": "fx", "id": it["id"],
-                      "value": {"id": it["id"], "end": round(float(end), 2),
+                      "value": {"id": it["id"], "start": a, "end": b,
                                 "ramp_out_f": 3}}
             return (f" (grade window {it['id']} desaturates "
                     f"{float(it['start']):g}-{float(it['end']):g}s)",
@@ -1159,28 +1175,53 @@ def device_signature(edl):
     return sig
 
 
-# Devices that widen the range, keyed by the moment tags that earn them.
-# Each is a starting idea bound to the moment, not a recipe.
+# Devices that widen the range, keyed by the moment tags that earn them:
+# (tag, verb, the device signature it writes, the idea). Each is a starting
+# idea bound to the moment, never a recipe: an idea whose device this short
+# or one of the project's earlier shorts already uses is passed over, so a
+# run of shorts is pushed toward fresh vocabulary, not one house style.
 FRESH_IDEAS = (
-    ("number", "add_ui_scene", "a UI proof of the number (a counter that "
-     "lands on the spoken figure, the data card it comes from)"),
-    ("number", "add_motion_graphic", "the number as the picture: a to-scale "
-     "comparison or a fill that grows to the figure"),
-    ("contrast", "add_depth_effect", "a rack focus that pulls from him to "
-     "the world on the turn word (kind='rack_focus')"),
-    ("negation", "set_grade_window", "the world drains to mono and colour "
-     "lands back on the answer (a grade window ending on the payoff)"),
-    ("payoff", "add_subject_effect", "the speaker becomes the graphic on "
-     "the payoff: a poster on the accent field, held through the hold"),
-    ("payoff", "add_depth_effect", "freeze the payoff frame and drift "
-     "through it in 2.5D (kind='parallax' on the payoff frame)"),
-    ("name", "source_broll", "a moving archive still or a cinematic "
-     "cutaway on the named thing (graded to his shot)"),
-    ("emotion", "add_time_effect", "an echo trail on the gesture that "
-     "carries the feeling (kind='echo', on a real movement only)"),
-    (None, "add_type_window", "the hero word as a window onto the next "
-     "shot (letters cut into the picture)"),
+    ("number", "add_ui_scene", "mg:ui_scene", "a UI proof of the number (a "
+     "counter that lands on the spoken figure, the data card it comes "
+     "from)"),
+    ("number", "add_motion_graphic", "mg:", "the number as the picture: a "
+     "to-scale comparison or a fill that grows to the figure"),
+    ("contrast", "add_depth_effect", "depth_rack_focus", "a rack focus that "
+     "pulls from him to the world on the turn word (kind='rack_focus')"),
+    ("contrast", "add_subject_effect", "subject_isolate", "the world drops "
+     "away on the turn: he stays in colour, the room goes mono for the "
+     "phrase (kind='isolate')"),
+    ("negation", "set_grade_window", "grade_section", "the world drains to "
+     "mono and colour lands back on the answer (a grade window ending on "
+     "the payoff)"),
+    ("negation", "add_accent", "accent_negative", "one negative frame ON the "
+     "'not' — a hit, not a strobe (kind='negative')"),
+    ("payoff", "add_subject_effect", "subject_poster", "the speaker becomes "
+     "the graphic on the payoff: a poster on the accent field, held "
+     "through the hold"),
+    ("payoff", "add_depth_effect", "depth_parallax", "freeze the frame after "
+     "the payoff's last word and drift through it in 2.5D during the pause "
+     "(kind='parallax')"),
+    ("payload", "add_type_window", "composite_window", "the hero word as a "
+     "window onto the next shot (letters cut into the picture)"),
+    ("payload", "source_broll", "broll_", "a cutaway that PROVES the line: "
+     "the named thing on film or an archive still that moves (graded to "
+     "his shot)"),
+    ("emotion", "add_time_effect", "time_echo", "an echo trail on the "
+     "gesture that carries the feeling (kind='echo', on a real movement "
+     "only)"),
+    ("emotion", "add_subject_effect", "subject_glow", "he glows against a "
+     "darkened room for the line that costs him something (kind='glow')"),
+    (None, "add_type_window", "composite_window", "the hero word as a window "
+     "onto the next shot (letters cut into the picture)"),
+    (None, "add_depth_effect", "depth_point_cloud", "the figure as data for "
+     "one beat: a LiDAR-style scan of him, then the real shot "
+     "(kind='point_cloud', 1-1.5 s, in a pause)"),
 )
+
+
+def _uses(sigs, prefix):
+    return any(str(x).startswith(prefix) for x in sigs or ())
 
 
 def lens_range(edl, plan, previous=None, max_ideas=3):
@@ -1189,6 +1230,7 @@ def lens_range(edl, plan, previous=None, max_ideas=3):
     out = []
     mine = device_signature(edl)
     prev = [device_signature(p) for p in previous or [] if p]
+    seen = set().union(*prev) if prev else set()
     same = []
     for k, s in enumerate(prev):
         if mine and s:
@@ -1220,10 +1262,20 @@ def lens_range(edl, plan, previous=None, max_ideas=3):
         if isinstance(o, dict) and o.get("start") is not None:
             busy.append((float(o["start"]) - 0.3,
                          float(o["start"]) + float(o.get("duration_s") or 0)))
-    ideas, used_verbs = [], set()
+    ideas, used, used_verbs = [], set(), set()
     moments = sorted(plan.get("moments") or [],
                      key=lambda m: -float(m.get("strength") or 0))
     payoff = plan.get("payoff") or {}
+
+    def pick(tags, allow_seen):
+        for tag, verb, sig, idea in FRESH_IDEAS:
+            if sig in used or verb in used_verbs or (tag and tag not in
+                                                         tags):
+                continue
+            if _uses(mine, sig) or (not allow_seen and _uses(seen, sig)):
+                continue
+            return verb, sig, idea
+        return None
     for m in moments:
         if len(ideas) >= max_ideas:
             break
@@ -1235,16 +1287,17 @@ def lens_range(edl, plan, previous=None, max_ideas=3):
             tags.add("payoff")
         if m.get("kind") not in ("stress", "word") and "payoff" not in tags:
             continue
-        for tag, verb, idea in FRESH_IDEAS:
-            if verb in used_verbs or (tag and tag not in tags):
-                continue
-            if any(v.split(":")[0] == verb for v in mine):
-                continue
-            word = m.get("word_raw") or m.get("word") or ""
-            ideas.append({"t": round(t, 2), "word": word, "verb": verb,
-                          "idea": idea, "bind": m.get("bind")})
-            used_verbs.add(verb)
-            break
+        # fresh first: a device neither this short nor the run has used
+        got = pick(tags, False) or pick(tags, True)
+        if got is None:
+            continue
+        verb, sig, idea = got
+        word = m.get("word_raw") or m.get("word") or ""
+        ideas.append({"t": round(t, 2), "word": word, "verb": verb,
+                      "idea": idea, "bind": m.get("bind"),
+                      "fresh_for_run": not _uses(seen, sig)})
+        used.add(sig)
+        used_verbs.add(verb)
     for k, idea in enumerate(ideas):
         out.append(_f(
             "advisory", "range", "untapped_moment",
@@ -1472,6 +1525,10 @@ def critique_text(res, limit=10):
         lines.append(f"(+{len(fs) - limit} more)")
     if res.get("strengths"):
         lines.append("WORKING: " + ", ".join(res["strengths"]) + ".")
+    if res.get("errors"):
+        # a lens that could not run is not a pass: say which
+        lines.append("NOT CHECKED (a lens failed; judge these by eye): "
+                     + "; ".join(str(e)[:80] for e in res["errors"][:4]))
     if res.get("board"):
         lines.append(f"BOARD: {res['board']}")
     return "\n".join(lines)

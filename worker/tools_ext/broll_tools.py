@@ -110,7 +110,22 @@ def _windows_taken(edl):
     for o in edl.get("overlays") or []:
         if isinstance(o, dict) and (o.get("fit") == "cover" or o.get(
                 "full_frame")) and o.get("start") is not None:
-            out.append((float(o["start"]), float(o.get("end") or 0)))
+            # overlays carry start + duration_s (no end): a cover cutaway
+            # already there blocks a new one over the same seconds
+            try:
+                a = float(o["start"])
+                b = a + float(o.get("duration_s") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            out.append((a, b))
+    # spliced inserts are footage the program already cuts away to
+    try:
+        import timeline as tl_mod
+        for blk in tl_mod.program_blocks(edl):
+            if blk.get("kind") == "insert":
+                out.append((float(blk["out_start"]), float(blk["out_end"])))
+    except Exception:  # noqa: BLE001
+        pass
     return out
 
 
