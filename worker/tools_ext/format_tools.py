@@ -262,13 +262,30 @@ def render_variants(ctx, id=None, n=3, axis="voice"):
     except Exception:  # noqa: BLE001 — solved without a face then
         faces = []
     images, labels = [], []
-    for voice, e in br:
-        it = next(m for m in e["motion"] if m["id"] == item["id"])
+    # more candidates than asked: a voice whose faces do not fit this frame
+    # falls back to the plainest one, and a sheet that labels that as the
+    # voice asked for misleads the pick (W2 review: 'techno_crt' showed
+    # whisper_shout)
+    want = max(2, min(4, int(n or 3)))
+    from typeset import voices as V
+    cands = [v for v, _e in br] + [
+        v for v in variants_edit.distinct_voices(
+            str((item.get("params") or {}).get("text", "")),
+            min(len(V.VOICES), want + 6))
+        if v not in [x for x, _e in br]]
+    for voice in cands:
+        it = json.loads(json.dumps(item))
+        it["params"] = dict(it.get("params") or {}, voice=voice,
+                            layout="auto")
         doc = layoutdoc.solve_item(it, W, H, faces=faces)
-        if not doc.get("runs"):
+        rep = doc.get("solver_report") or {}
+        if not doc.get("runs") or rep.get("voice_fallback") or \
+                doc.get("voice") != voice:
             continue
         images.append(variants_edit.raster(doc, frame))
         labels.append(f"{voice} ({doc.get('family')})")
+        if len(images) >= want:
+            break
     if not images:
         return "No voice fits this frame for that line."
     out = os.path.join(getattr(ctx, "workdir", None) or "/tmp",
@@ -277,8 +294,9 @@ def render_variants(ctx, id=None, n=3, axis="voice"):
     if hasattr(ctx, "pending_images"):
         ctx.pending_images.append((f"TYPE VOICES for '{item['params']['text']}'"
                                    f" — {', '.join(labels)}", out))
-    return ("Three voices on the real frame (stills; materials and motion "
-            "render with the pick): " + "; ".join(labels) +
+    return (f"{len(labels)} voices that fit this frame, on the real frame "
+            "(stills; materials and motion render with the pick): "
+            + "; ".join(labels) +
             f". Apply one with set_typeset(id='{item['id']}', voice=...).")
 
 

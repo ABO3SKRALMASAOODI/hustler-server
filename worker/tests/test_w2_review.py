@@ -392,3 +392,31 @@ def test_the_layout_is_the_same_on_a_slow_lane_and_the_page_is_stable(
     layoutdoc._CACHE.clear()
     j2 = motion_templates.build_job(_copy.deepcopy(item), 1080, 1920, 30.0)
     assert j1.key() == j2.key()
+
+
+def test_render_variants_labels_only_voices_that_fit(monkeypatch):
+    """A voice whose faces do not fit the frame falls back to the plainest
+    one; the sheet labelled it as the voice asked for ('techno_crt' showed
+    whisper_shout on V01), misleading the pick."""
+    from tools_ext import format_tools
+    import variants_edit
+    ctx = Ctx(edl(keep=((0.0, 14.0),), ratio="9:16"))
+    ctx.edl["motion"] = [_item("bigger than the *internet*", start=4.5,
+                               end=6.4)]
+    ctx.workdir = None
+    import numpy as np
+    monkeypatch.setattr(format_tools, "_program_frame",
+                        lambda *a, **k: np.full((1920, 1080, 3), 40,
+                                                np.uint8))
+    seen = []
+    real = variants_edit.raster
+
+    def raster(doc, frame):
+        seen.append(doc.get("voice"))
+        return real(doc, frame)
+    monkeypatch.setattr(variants_edit, "raster", raster)
+    monkeypatch.setattr(variants_edit, "sheet", lambda *a, **k: None)
+    out = format_tools.render_variants(ctx, id="ts1")
+    labels = out.split(": ", 1)[1].split(". Apply")[0].split("; ")
+    assert [l.split(" ")[0] for l in labels] == seen
+    assert len(set(seen)) == len(seen) >= 2
