@@ -1,0 +1,81 @@
+{
+  "id": "subject_outline",
+  "family": "matte_fx",
+  "verb": "add_subject_effect",
+  "fx_type": "subject",
+  "stage": "world",
+  "params": {
+    "kind": "outline",
+    "colour": [
+      "white",
+      "accent",
+      "black"
+    ],
+    "width_px": [
+      4,
+      6,
+      8
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ],
+    "lane_features": [
+      "ffmpeg:alphamerge",
+      "ffmpeg:overlay"
+    ],
+    "footage": "a person in shot (matte coverage >= 0.4% of the frame)"
+  },
+  "binds_to": [
+    "section",
+    "word.payoff",
+    "cut"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 6
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 2
+    }
+  },
+  "never": [
+    "with a crisp-edge QA failure (it demotes to a glow)",
+    "on a busy plate where the stroke reads as noise"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 8.4,
+      "batch": 60.0,
+      "local": 4.2
+    },
+    "fixed_ms": 60
+  },
+  "exemplars": [
+    "13@2.28",
+    "27@≈14.0"
+  ],
+  "verify": [
+    "edge_chatter<=0.002",
+    "region_locality"
+  ],
+  "status": "live",
+  "description": "a sticker stroke around the subject's silhouette",
+  "skill": "subject-fx"
+}

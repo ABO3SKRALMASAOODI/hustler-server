@@ -1,0 +1,78 @@
+# AT-1B-5 (track 1B). Devices are apply_edit_batch operations (the stale-client path).
+# Until track 1A's program matte is live, refbench renders these on their substitute rungs;
+# tests/test_w1b_acceptance.py runs them with the 1A stand-in and measures every bar.
+id: AT-1B-5
+track: 1B
+title: 'glowing silhouette: screen light with a bounded halo (V12)'
+local_only: true
+interim: false
+reference:
+- ref: '01'
+  t:
+  - 1.708
+  - 3.79
+  approx: false
+  board_t: 1.708
+- ref: '36'
+  t:
+  - 4.0
+  - 6.0
+  approx: true
+  board_t: 5.0
+footage:
+- vfl: V12
+  window: walkon
+music: null
+aspect: '9:16'
+mode: engine
+edl:
+  base: vfl_default
+  keep:
+  - - 6.6
+    - 9.9
+  - - 15.2
+    - 22.2
+  focus:
+  - 0.52
+  - 0.5
+  ops:
+  - action: upsert
+    layer: fx
+    id: sx1
+    value:
+      id: sx1
+      type: subject
+      stage: world
+      start: 4.5
+      end: 5.5
+      kind: glow
+      colour: white
+      radius: 0.04
+      intensity: 1.0
+      device: subject_glow
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: region_locality
+  item: sx1
+  op: <=
+  value: 2
+- name: matte_flicker
+  op: <=
+  value: 0.035
+beyond: the light is the screen formula exactly (white is a lerp to white, no colour round trip), its
+  halo measured at 2-4 % of frame height and nothing beyond the radius, on any shot the matte holds
+board:
+  stills:
+  - 5.0
+  clip:
+  - 4.5
+  - 5.5
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

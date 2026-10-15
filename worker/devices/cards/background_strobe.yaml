@@ -1,0 +1,63 @@
+# Track 1B device card (background_strobe). Authoring source; compile with
+#   cd worker && python -m devices.compiler
+id: background_strobe
+family: matte_fx
+verb: set_background
+fx_type: background
+stage: world
+params:
+  kind:
+  - strobe
+  sources:
+  - - kind: next
+    - kind: previous
+  hold_f:
+  - 3
+  - 4
+  - 2
+needs:
+  sidecars:
+  - matte.person
+  lane_features:
+  - ffmpeg:alphamerge
+  - ffmpeg:overlay
+  footage: a person in shot (matte coverage >= 0.4% of the frame)
+binds_to:
+- drop
+- section
+- beat
+budget:
+  calm:
+    per_short: 0
+    min_gap_s: 10
+  designed:
+    per_short: 1
+    min_gap_s: 8
+  charged:
+    per_short: 2
+    min_gap_s: 4
+never:
+- past 3 image changes a second without the user's opt-in (flash safety)
+owner_flags:
+  adds_sound: false
+  adds_zoom: false
+  flash: true
+rungs:
+- full
+- omit
+cost:
+  ms_per_frame:
+    interactive: 10.0
+    batch: 60.0
+    local: 5.0
+  fixed_ms: 80
+exemplars:
+- 22@≈8.1–8.43
+- 40@≈5.0–14.3
+verify:
+- land_err_f<=1
+- flash_risk
+- duration_exact
+status: live
+description: plates strobe behind the subject every few frames
+skill: subject-fx

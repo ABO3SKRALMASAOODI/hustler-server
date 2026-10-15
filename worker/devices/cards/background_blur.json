@@ -1,0 +1,79 @@
+{
+  "id": "background_blur",
+  "family": "matte_fx",
+  "verb": "set_background",
+  "fx_type": "background",
+  "stage": "world",
+  "params": {
+    "kind": [
+      "blur",
+      "radial_blur"
+    ],
+    "radius": [
+      0.025,
+      0.08
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ],
+    "lane_features": [
+      "ffmpeg:alphamerge",
+      "ffmpeg:overlay"
+    ],
+    "footage": "a person in shot (matte coverage >= 0.4% of the frame)"
+  },
+  "binds_to": [
+    "section",
+    "word.payoff",
+    "cut"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 6
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 2
+    }
+  },
+  "never": [
+    "behind a subject the matte loses (fast hands, crowds)",
+    "on a plate that is already soft"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "reduced",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 44.0,
+      "batch": 278.0,
+      "local": 22.0
+    },
+    "fixed_ms": 80
+  },
+  "exemplars": [
+    "01@5.875–7.21",
+    "18@10.72"
+  ],
+  "verify": [
+    "region_locality",
+    "matte_flicker<=0.035"
+  ],
+  "status": "live",
+  "description": "the world behind the subject defocused (a clean blur, the subject never bleeding into it) or zoom-blurred",
+  "skill": "subject-fx"
+}

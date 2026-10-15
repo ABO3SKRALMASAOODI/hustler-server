@@ -1,0 +1,96 @@
+{
+  "id": "subject_fill_flash",
+  "family": "matte_fx",
+  "verb": "add_subject_effect",
+  "fx_type": "subject",
+  "stage": "world",
+  "params": {
+    "kind": "fill",
+    "colour": [
+      "white",
+      "accent",
+      "black"
+    ],
+    "decay_f": [
+      2,
+      0,
+      3
+    ],
+    "intensity": [
+      1.0,
+      0.85
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ],
+    "lane_features": [
+      "ffmpeg:alphamerge",
+      "ffmpeg:overlay"
+    ],
+    "footage": "a person in shot (matte coverage >= 0.4% of the frame)"
+  },
+  "binds_to": [
+    "stress",
+    "word.payoff",
+    "cut",
+    "beat.kick",
+    "downbeat"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 4
+    },
+    "designed": {
+      "per_short": 3,
+      "min_gap_s": 2
+    },
+    "charged": {
+      "per_short": 5,
+      "min_gap_s": 1
+    }
+  },
+  "never": [
+    "inside a payoff hold",
+    "within 1 s of another subject fill",
+    "on more than 3 flashes in a second without the user's opt-in"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": true
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "full_frame_flash",
+      "intensity": 0.6
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 6.0,
+      "batch": 16.0,
+      "local": 3.0
+    },
+    "fixed_ms": 30
+  },
+  "exemplars": [
+    "22@≈8.43",
+    "22@≈12.33",
+    "19@6.47",
+    "40@≈4.67",
+    "20@9.10"
+  ],
+  "verify": [
+    "land_err_f<=1",
+    "region_locality",
+    "flash_risk"
+  ],
+  "status": "live",
+  "description": "the subject flashes a flat colour (white by default) for 1-2 frames on a hit, with a short decay",
+  "skill": "subject-fx"
+}
