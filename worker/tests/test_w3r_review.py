@@ -491,3 +491,12 @@ def test_world_graphics_never_join_a_screen_series():
     d = dict(a, id="d", anchor=None)
     assert motion_look.series_runs([a, b]) == []
     assert len(motion_look.series_runs([d, c])) == 1
+
+
+def test_the_w1_card_loop_leaves_wave3_cards_to_the_world_planner():
+    import device_planner
+    assert device_planner._world_card("anchor_track")
+    assert device_planner._world_card("layout_mosaic")
+    assert device_planner._world_card("light_dissolve")
+    assert not device_planner._world_card("subject_fill_flash")
+    assert not device_planner._world_card("grade_section")

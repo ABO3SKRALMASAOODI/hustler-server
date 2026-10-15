@@ -335,8 +335,9 @@ def candidates(edl, index, plan, *, intensity="designed", max_n=MAX_WORLD,
                       [{"action": "upsert", "layer": "motion", "id": mid,
                         "value": item}], s,
                       m.get("bind"),
-                      f"'{text}' tucked behind the {d.get('label') or 'object'}"
-                      " it names — the room carries the word",
+                      f"'{text}' rises from behind the "
+                      f"{d.get('label') or 'object'} — the room carries the "
+                      "word",
                       "08@1.03")
         else:
             item = {"id": mid, "template": "word_slam", "start": s, "end": e,

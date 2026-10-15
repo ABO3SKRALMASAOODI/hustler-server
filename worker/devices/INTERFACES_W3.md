@@ -230,7 +230,10 @@ MotionAnchor {
 | `plane:<fx id>` | `world_defs:plane_mask` | the plane quad, filled, per frame |
 | `hands`, `hands:<left\|right>` | `world_defs:hands_mask` | convex hulls of the hand landmarks, feathered |
 
-Registered in `fxgraph.MASK_PEERS` (one line each). Absent = black (inert).
+Not registered in `fxgraph.MASK_PEERS` in Wave 3: no fx compiler consumes
+these labels yet (the world compositor reads objects, planes and hands
+directly), so the providers exist for Wave 4 and a label reads absent =
+black (inert) today. Registering them is one `MASK_PEERS` line each.
 
 ---
 
@@ -315,12 +318,19 @@ anchored motion item counts as `world`, an occluded one as `depth` too.
 
 ## 10. Shared-file edits Wave 3 makes (surgical, listed in the progress file)
 
-`sidecars.py` (merge `sidecar_kinds`), `analysis_jobs.py` (dispatch their
+As built (the progress file lists each): `sidecars.py` (merge
+`sidecar_kinds`; the upload warm-up hook), `analysis_jobs.py` (dispatch their
 children), `schemas.py` (one anchor check in `validate_edl`),
 `motion_layer.py` (`prepare_inputs` calls `world_layer.augment` /
-`world_layer.finish`), `renderer.py` (passes the render context to
-`prepare_inputs`), `motion_engine.py` (slot capture), `fxgraph.py`
-(`MASK_PEERS` rows), `device_planner.py` (the peer call), `agent_tools.py`
-(`look_at` overlay value), `devices/__init__.py` (card prefixes, sidecar
-features), `tests/test_w1_seams.py` (strips the `world` department growth
-like the Wave 1 growth). Nothing else.
+`world_layer.finish`), `renderer.py` (`_world_ctx`: the render context, on
+the main and the canvas `prepare_inputs` calls; it launches the world
+measurements through the render's launch source), `motion_engine.py` (slot
+capture), `motion_qa.py` (the `anchors` overlay), `device_planner.py` (the
+peer call; Wave 3 cards left to world_planner), `keepout.py` (element
+exemptions, the glass card's ink), `webrecord.py` (element boxes,
+`-fps_mode`), `agent_prompt.py` (one paragraph), `devices/__init__.py`
+(card prefixes), `motion_look.py` (world slams never join a screen series),
+`stitch.py` (world definitions rebased exactly), `backend/routes/mcp.py`
+(`plan_footage` read-only) and the seam tests that set Wave 3 growth aside.
+No `fxgraph.py` or `agent_tools.py` edit was needed (§5; `look_at_world`
+carries the overlay).

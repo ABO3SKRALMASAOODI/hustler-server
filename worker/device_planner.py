@@ -1055,6 +1055,11 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
         fam_budget, fam_count, fmt = {}, {}, "C"
     pairs = []
     for cid, card in sorted(cards.items()):
+        if _world_card(cid):
+            # Wave 3 cards need what only measurements and the footage know
+            # (a seed, an object, tiles, a hand that is up): world_planner
+            # proposes them below; built from card params they are refused
+            continue
         ok, why = devices.proposable(card, asked)
         if not ok:
             continue
@@ -1261,6 +1266,16 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
         for rank, c in enumerate(out, start=1):
             c["rank"] = rank
     return out
+
+
+def _world_card(cid):
+    """A Wave 3 card (devices.CARD_PREFIXES track 3x)?"""
+    try:
+        import devices
+        return str(devices.CARD_PREFIXES.get(str(cid).split("_", 1)[0],
+                                             "")).startswith("3")
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _world_candidates(edl, index, plan, intensity, max_n, asked,
