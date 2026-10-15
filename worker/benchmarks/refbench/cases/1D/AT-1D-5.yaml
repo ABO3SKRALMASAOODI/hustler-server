@@ -1,0 +1,33 @@
+# AT-1D-5: datamosh smear at a real cut, plus seeded inverted boxes.
+# The datamosh device card is dark (the real codec path needs the
+# renderer's junction prepass); an item written without the device renders
+# the in-graph smear, reported "reduced".
+id: AT-1D-5
+track: 1D
+title: datamosh smear across a cut and seeded inverted boxes, deterministic
+local_only: true
+interim: false
+reference:
+  - {ref: "39", t: [12.4, 14.0], approx: true, board_t: 13.0}
+  - {ref: "15", t: [2.33, 2.4], approx: false, board_t: 2.33}
+footage:
+  - {vfl: V13, window: dragon_stage_walk}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[471.0, 475.0], [482.0, 486.0]]
+  ops:
+    - {action: upsert, layer: fx, id: jn_mosh, value: {id: jn_mosh, type: junction, stage: junction, at: 4.0, style: datamosh, duration_s: 1.0, seed: 3}}
+    - {action: upsert, layer: fx, id: ac_box, value: {id: ac_box, type: accent, stage: pre_captions, start: 2.0, end: 2.08, kind: box_invert, bands: 4, seed: 7, device: accent_box_invert}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: determinism, op: "<=", value: 0}
+  - {name: flash_risk, op: "<=", value: 3}
+beyond: "deterministic frame for frame across renders, length and sound untouched, from two operations"
+board: {stills: [4.12, 4.28], clip: [3.0, 5.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

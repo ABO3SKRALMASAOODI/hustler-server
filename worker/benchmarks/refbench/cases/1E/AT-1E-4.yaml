@@ -1,0 +1,34 @@
+# Track 1E. Run: cd worker && python -m benchmarks.refbench.at1e AT-1E-4
+id: AT-1E-4
+track: 1E
+title: registered variant set of one Optimus frame (photo, negative, line, blueprint, thermal)
+local_only: true
+interim: false
+reference:
+  - {ref: "01", t: [0.29, 0.96], approx: false, board_t: 0.46}
+footage:
+  - {vfl: V13, window: optimus_walk}
+music: null
+aspect: "source"
+mode: engine
+edl: {base: vfl_default, ops: []}
+variant_t: 4.0
+variant_kinds: [photo, negative, line, blueprint, thermal]
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: determinism, op: "<=", value: 0}
+device_metrics:
+  - {name: variant_cpu_s, op: "<=", value: 10}
+  # registration: every edge a variant draws sits on a real photo edge
+  # (precision, all variants) and the gradient maps align (shift); the
+  # exact-edge variant (negative) also matches the photo's edges (IoU).
+  # Drawings and thermal simplify by design, so their recall is reported,
+  # not barred.
+  - {name: edge_precision, op: ">=", value: 0.9}
+  - {name: edge_iou, op: ">=", value: 0.9}
+  - {name: edge_shift_px, op: "<=", value: 1}
+beyond: "five registered variants from one frame of the user's own footage in seconds on a CPU lane, no model; the reference needed hand-made or AI-generated assets"
+board: {stills: [], clip: null}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

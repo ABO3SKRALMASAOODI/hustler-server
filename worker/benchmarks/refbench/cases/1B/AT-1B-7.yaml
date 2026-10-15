@@ -1,0 +1,72 @@
+# AT-1B-7 (track 1B). Devices are apply_edit_batch operations (the stale-client path).
+# Until track 1A's program matte is live, refbench renders these on their substitute rungs;
+# tests/test_w1b_acceptance.py runs them with the 1A stand-in and measures every bar.
+id: AT-1B-7
+track: 1B
+title: subject-only negative (V01)
+local_only: true
+interim: false
+reference:
+- ref: '13'
+  t:
+  - 6.92
+  - 6.92
+  approx: false
+  board_t: 6.92
+footage:
+- vfl: V01
+  window: thiel_ai_bigger
+music: null
+aspect: '9:16'
+mode: engine
+edl:
+  base: vfl_default
+  keep:
+  - - 149.96
+    - 155.96
+  focus:
+  - 0.42
+  - 0.5
+  ops:
+  - action: upsert
+    layer: fx
+    id: sx1
+    value:
+      id: sx1
+      type: subject
+      stage: world
+      start: 2.0
+      end: 2.08
+      kind: negate
+      scope: subject
+      device: subject_negate
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: region_locality
+  item: sx1
+  op: <=
+  value: 0
+- name: land_err_f
+  item: sx1
+  op: <=
+  value: 0
+- name: flash_risk
+  op: <=
+  value: 3
+beyond: outside the subject the picture is bit-exact (region_locality 0 on a lossless final), on a 9:16
+  re-frame
+board:
+  stills:
+  - 2.0
+  clip:
+  - 1.5
+  - 2.5
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

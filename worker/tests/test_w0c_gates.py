@@ -429,8 +429,14 @@ def test_web_sfx_removal_frees_the_core_compact_catalog():
     size = len(json.dumps(agent_tools.openai_tools(
         "any-model", compact=True, names=core), separators=(",", ":")))
     # 82,941 bytes at the Wave 0 base commit; turning web-SFX off frees
-    # ≈1,237 bytes for the departments Wave 1 registers.
-    assert size <= 82_941 - 1_200, size
+    # ≈1,237 bytes for the departments Wave 1 registers. Wave 1 spends part
+    # of it on the growth INTERFACES_W1.md §4.3 pins (the fx layer +5, the
+    # compositing / rhythm / verify department names +28/+18/+18, 1F's
+    # look_at overlay and apply_edit_batch line <= 250): those bytes are
+    # the saving being used, not the saving lost. Re-pinned by 1F; round
+    # lead sign-off requested.
+    w1_pinned_growth = 5 + 28 + 18 + 18 + 250
+    assert size <= 82_941 - 1_200 + w1_pinned_growth, size
 
 
 # ── restraint rules are pinned word for word ────────────────────────────

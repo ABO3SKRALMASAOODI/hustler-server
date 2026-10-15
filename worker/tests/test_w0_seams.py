@@ -15,6 +15,12 @@ on. This file proves the skeleton changes nothing a customer can observe:
 
 The golden corpus (fixtures/w0_inert_corpus.json) was produced by the
 pre-seam schemas.py at the production release this wave branched from.
+
+Re-pinned at the Wave 1 interface pass (INTERFACES_W1.md §7): the assertions
+that read "nothing is registered" now read "nothing outside the pinned
+Wave 1 table is registered", so a Wave 1 track that switches its member
+module LIVE keeps this file green; the registration mechanisms are exercised
+on the bare Wave 0 package (``__init__.py`` + ``core.py``).
 """
 
 import copy
@@ -131,14 +137,30 @@ def test_describe_edl_is_unchanged_without_fx():
 
 # ── 2. Empty registries reject everything but the empty default ─────────
 
-def test_no_fx_type_is_registered_and_fx_items_are_rejected():
-    assert schemas.FX_TYPES == () and schemas.FX_MEMBERS == ()
+# Every tag a Wave 1 member module may register (INTERFACES_W1.md §3), plus
+# 0B's engine-only probe on probe lanes.
+W1_FX_TAGS = {"subject", "background", "region", "accent", "strobe",
+              "junction", "grade_window", "finish"}
+W1_VERBS = {"add_subject_effect", "set_background", "remove_subject_effect",
+            "set_composite", "add_type_window", "add_region_effect",
+            "remove_region_effect", "add_accent", "add_strobe",
+            "set_junction", "remove_punctuation", "set_grade_window",
+            "isolate_colour", "import_lut", "match_grade", "add_finish",
+            "make_variant_set", "remove_finish", "suggest_devices",
+            "set_intensity", "proof_device", "audit_motion",
+            # Wave 1 integration: recipes (INTERFACES_W1.md §10)
+            "suggest_recipes", "apply_recipe"}
+
+
+def test_only_pinned_fx_types_are_registered_and_others_are_rejected():
+    assert set(schemas.FX_TYPES) <= W1_FX_TAGS | {"fx_probe"}
     assert schemas.FX_STAGES == ("world", "screen", "pre_captions",
                                  "over_type", "junction", "music_bus")
     edl = schemas.default_edl(30)
-    edl["fx"] = [{"id": "a", "type": "accent", "stage": "pre_captions",
+    edl["fx"] = [{"id": "a", "type": "no_such_fx", "stage": "pre_captions",
                   "start": 1.0, "end": 1.04}]
-    with pytest.raises(EDLValidationError, match="no fx type is registered"):
+    match = None if schemas.FX_TYPES else "no fx type is registered"
+    with pytest.raises(EDLValidationError, match=match):
         validate_edl(edl, 30)
 
 
@@ -149,6 +171,11 @@ def test_no_fx_type_is_registered_and_fx_items_are_rejected():
     (("effects", "transition", "per_junction"), [{"at": 2.0}]),
 ])
 def test_unowned_slots_accept_only_none(path, value):
+    slot = {"composite": "MotionItem.composite", "anchor": "MotionItem.anchor",
+            "automation": "MusicItem.automation",
+            "per_junction": "TransitionSpec.per_junction"}[path[-1]]
+    if slot in schemas._FX_SLOT_TYPES:
+        pytest.skip(f"{slot} is owned by a live Wave 1 module")
     edl = copy.deepcopy(CORPUS["legacy_v2"]["old_dump"])
     edl["motion"] = copy.deepcopy(
         CORPUS["motion_texts_vectors"]["old_dump"]["motion"])
@@ -182,16 +209,17 @@ def test_render_path_can_strip_fx_types_it_does_not_know():
     assert none == [] and same == {"keep": [[0.0, 5.0]]}
 
 
-def test_edit_batch_accepts_the_fx_layer_but_not_items_yet():
+def test_edit_batch_accepts_the_fx_layer_but_not_unknown_items():
     assert "fx" in edit_batch.LAYERS and "fx" in edit_batch.ITEM_LAYERS
     base = schemas.default_edl(30)
     out = edit_batch.apply_batch(
         base, [{"action": "set", "layer": "fx", "value": []}], 30, set())
     assert out["fx"] == [] and edl_signature(out) == edl_signature(base)
-    with pytest.raises(EDLValidationError, match="not available"):
+    match = None if schemas.FX_TYPES else "not available"
+    with pytest.raises(EDLValidationError, match=match):
         edit_batch.apply_batch(base, [{
             "action": "upsert", "layer": "fx", "id": "a",
-            "value": {"id": "a", "type": "accent", "stage": "world",
+            "value": {"id": "a", "type": "no_such_fx", "stage": "world",
                       "start": 1.0, "end": 2.0}}], 30, set())
 
 
@@ -205,17 +233,19 @@ def test_engine_only_fx_types_are_never_authored(monkeypatch):
                        "start": 1.0, "end": 2.0}]}], 30, set())
 
 
-def test_fx_layer_is_not_advertised_until_a_type_exists():
+def test_fx_layer_is_advertised_exactly_when_a_type_is_authorable():
     props = agent_tools.TOOLS["apply_edit_batch"][2]
     enum = props["operations"]["items"]["properties"]["layer"]["enum"]
-    assert "fx" not in enum
-    assert set(enum) == edit_batch.LAYERS - {"fx"}
+    assert ("fx" in enum) == bool(schemas.FX_AUTHORABLE_TYPES)
+    assert set(enum) - {"fx"} == edit_batch.LAYERS - {"fx"}
 
 
-def test_no_department_tool_and_no_extension_job_kind_exist():
-    assert tools_ext.EXT_TOOL_NAMES == set()
-    assert not set(agent_tools.TOOL_DOMAINS) & set(tools_ext.DEPARTMENTS)
-    assert tools_ext.core_names(agent_tools.TOOLS) == list(agent_tools.TOOLS)
+def test_only_pinned_department_tools_and_no_extension_job_kind_exist():
+    assert tools_ext.EXT_TOOL_NAMES <= W1_VERBS
+    live = set(agent_tools.TOOL_DOMAINS) & set(tools_ext.DEPARTMENTS)
+    assert live == set(tools_ext.EXT_DEPARTMENTS)
+    assert tools_ext.core_names(agent_tools.TOOLS) == [
+        n for n in agent_tools.TOOLS if n not in tools_ext.EXT_TOOL_NAMES]
     import http_server
     # Re-pinned for track 0A (INTERFACES.md §2.5 requires jobs_ext/sidecar.py
     # to register the one `sidecar` kind); still no other extension kind.
@@ -265,9 +295,14 @@ def _isolated_agent_tools(monkeypatch):
                         set(agent_tools.WRITE_TOOLS))
     monkeypatch.setattr(agent_tools, "_COMPACT_CONTRACTS",
                         dict(agent_tools._COMPACT_CONTRACTS))
-    monkeypatch.setattr(tools_ext, "EXT_TOOL_NAMES", set())
-    monkeypatch.setattr(tools_ext, "EXT_DEPARTMENTS", {})
-    monkeypatch.setattr(tools_ext, "DISABLED", {})
+    # copies, not empties: departments a Wave 1 track has made live stay
+    # department tools (out of the core catalog) inside the isolation
+    monkeypatch.setattr(tools_ext, "EXT_TOOL_NAMES",
+                        set(tools_ext.EXT_TOOL_NAMES))
+    monkeypatch.setattr(tools_ext, "EXT_DEPARTMENTS",
+                        {k: set(v) for k, v in
+                         tools_ext.EXT_DEPARTMENTS.items()})
+    monkeypatch.setattr(tools_ext, "DISABLED", dict(tools_ext.DISABLED))
 
 
 def _probe_department(dept="compositing", hidden=False):
@@ -295,25 +330,34 @@ def _probe_department(dept="compositing", hidden=False):
     return mod
 
 
+def _free_department():
+    """A department no live module has registered yet (the probe's)."""
+    for dept in tools_ext.DEPARTMENTS:
+        if dept not in agent_tools.TOOL_DOMAINS:
+            return dept
+    pytest.skip("every department is live")
+
+
 def test_department_tools_stay_out_of_the_core_compact_catalog(monkeypatch):
+    dname = _free_department()
     baseline = _compact_bytes()
     _isolated_agent_tools(monkeypatch)
-    tools_ext.install(agent_tools, modules=[_probe_department()])
+    tools_ext.install(agent_tools, modules=[_probe_department(dname)])
     assert {"add_probe_effect", "probe_status"} <= set(agent_tools.TOOLS)
-    assert agent_tools.TOOL_DOMAINS["compositing"] == {
+    assert agent_tools.TOOL_DOMAINS[dname] == {
         "add_probe_effect", "probe_status"}
     assert "add_probe_effect" in agent_tools.WRITE_TOOLS
     core = tools_ext.core_names(agent_tools.TOOLS)
     assert "add_probe_effect" not in core
     # The only core growth is the department name in the two domain enums.
-    enum_cost = 2 * len(',"compositing"')
+    enum_cost = 2 * len(f',"{dname}"')
     assert _compact_bytes(core) == baseline + enum_cost
     for tool in ("load_tools", "expand_toolset"):
         enum = agent_tools.TOOLS[tool][2]["domains"]["items"]["enum"]
-        assert enum[-1] == "compositing"
+        assert enum[-1] == dname
     # The department pages in on request, compact, within its own budget.
     dept = agent_tools.openai_tools("any-model", compact=True,
-                                    names=agent_tools.TOOL_DOMAINS["compositing"])
+                                    names=agent_tools.TOOL_DOMAINS[dname])
     assert {t["function"]["name"] for t in dept} == {"add_probe_effect",
                                                      "probe_status"}
     by_name = {t["function"]["name"]: t["function"] for t in dept}
@@ -326,16 +370,18 @@ def test_department_tools_stay_out_of_the_core_compact_catalog(monkeypatch):
     class Ctx:
         pass
     ctx = Ctx()
-    assert agent_tools.load_tools(ctx, domains=["compositing"]).startswith(
+    assert agent_tools.load_tools(ctx, domains=[dname]).startswith(
         "Capabilities loaded")
     assert "add_probe_effect" in agent_tools.compact_tool_names(ctx)
-    assert "compositing: add_probe_effect" in \
+    assert f"{dname}: add_probe_effect" in \
         agent_tools.capability_directory()
 
 
 def test_department_honest_off_and_bad_modules(monkeypatch):
+    dname = _free_department()
     _isolated_agent_tools(monkeypatch)
-    tools_ext.install(agent_tools, modules=[_probe_department(hidden=True)])
+    tools_ext.install(agent_tools, modules=[_probe_department(dname,
+                                                              hidden=True)])
     assert agent_tools._tool_disabled("probe_status") is True
     assert agent_tools._tool_disabled("add_probe_effect") is False
     names = {t["function"]["name"] for t in agent_tools.openai_tools()}
@@ -344,7 +390,7 @@ def test_department_honest_off_and_bad_modules(monkeypatch):
     bad = _probe_department(dept="effects")
     with pytest.raises(ValueError, match="DEPARTMENT"):
         tools_ext.install(agent_tools, modules=[bad])
-    clash = _probe_department()
+    clash = _probe_department(dname)
     clash.TOOL_SPECS = {"add_zoom": clash.TOOL_SPECS["add_probe_effect"]}
     clash.COMPACT = {}
     with pytest.raises(ValueError, match="collides"):
@@ -420,13 +466,22 @@ FIELD_TYPES = {"MotionItem.composite": Composite}
 '''
 
 
-def _load_schemas_copy(tmp_path, name, extra=None):
+W0_PACKAGE = ("__init__.py", "core.py")
+
+
+def _load_schemas_copy(tmp_path, name, extra=None, full=False):
     """schemas.py + fx_schemas/ copied beside a member file and loaded BY
-    PATH under a foreign module name: exactly how the backend loads it."""
+    PATH under a foreign module name: exactly how the backend loads it.
+    Without ``full`` only the bare Wave 0 package is copied, so the
+    registration mechanisms are exercised whatever Wave 1 has switched on."""
     shutil.copy(os.path.join(WORKER, "schemas.py"), tmp_path / "schemas.py")
+    keep = None if full else set(W0_PACKAGE)
     shutil.copytree(os.path.join(WORKER, "fx_schemas"),
                     tmp_path / "fx_schemas",
-                    ignore=shutil.ignore_patterns("__pycache__"))
+                    ignore=lambda d, names: [
+                        n for n in names if n == "__pycache__" or (
+                            keep is not None and n.endswith(".py")
+                            and n not in keep)])
     for fname, text in (extra or {}).items():
         (tmp_path / "fx_schemas" / fname).write_text(text)
     spec = importlib.util.spec_from_file_location(
@@ -455,10 +510,11 @@ def probe_name():
             sys.modules.pop(key, None)
 
 
-def test_backend_style_load_has_the_same_empty_registry(tmp_path, probe_name):
-    mod = _load_schemas_copy(tmp_path, probe_name("w0_backend_schemas"))
-    assert mod.FX_TYPES == () and "w0_backend_schemas__fx_schemas" in \
-        sys.modules
+def test_backend_style_load_has_the_same_registry(tmp_path, probe_name):
+    mod = _load_schemas_copy(tmp_path, probe_name("w0_backend_schemas"),
+                             full=True)
+    assert mod.FX_TYPES == schemas.FX_TYPES and \
+        "w0_backend_schemas__fx_schemas" in sys.modules
     assert mod.edl_signature(mod.default_edl(12)) == \
         edl_signature(schemas.default_edl(12))
 

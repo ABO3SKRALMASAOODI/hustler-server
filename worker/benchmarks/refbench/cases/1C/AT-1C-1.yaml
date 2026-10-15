@@ -1,0 +1,47 @@
+# AT-1C-1: footage inside the letters on black, word by word, then the I
+# widens into a window onto the incoming shot (31@≈0.3-7.7).
+# Asset fills: the engine harness passes no project media yet (0D's
+# engine.build allows none); tests/test_w1c_acceptance.py runs this case
+# with the same operations and the fill as a local asset.
+id: AT-1C-1
+track: 1C
+title: footage-filled YOU SHOULD KNOW, then the I widens into a window onto V01
+local_only: true
+interim: false
+reference:
+  - {ref: "31", t: [0.3, 7.7], approx: true, board_t: 1.3}
+footage:
+  - {vfl: V01, window: thiel_ai_bigger}
+  - {vfl: V13, window: starship_launch_4k60}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[149.96, 157.96]]
+  focus: [0.58, 0.3]
+  assets: {"media/w1c/starship.mp4": {vfl: V13, window: starship_launch_4k60}}
+  ops:
+    - {action: upsert, layer: motion, id: tw1,
+       value: {id: tw1, template: type_window, start: 0.3, end: 2.6,
+               layer: above_captions,
+               params: {text: "YOU SHOULD KNOW", reveal: words},
+               composite: {fill: {kind: asset, asset_key: "media/w1c/starship.mp4",
+                                  offset_s: 7.0, loop: true},
+                           field: black}}}
+    - {action: upsert, layer: motion, id: tw2,
+       value: {id: tw2, template: type_window, start: 2.6, end: 4.6,
+               layer: above_captions,
+               params: {text: "I", reveal: open, open_at: 0.25},
+               composite: {fill: {kind: colour, colour: black},
+                           fill_mode: outside}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: region_locality, op: "<=", value: 2}
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: flash_risk, op: "<=", value: 3}
+beyond: "the title is made of real footage and the window opens onto the next shot from one write, eased and measured (inside-glyph PSNR against a direct crop); the reference was masked by hand"
+board: {stills: [1.3, 3.4, 4.2], clip: [0.0, 5.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

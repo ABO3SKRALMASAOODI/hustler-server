@@ -1,0 +1,107 @@
+# AT-1B-1b (track 1B). Devices are apply_edit_batch operations (the stale-client path).
+# Until track 1A's program matte is live, refbench renders these on their substitute rungs;
+# tests/test_w1b_acceptance.py runs them with the 1A stand-in and measures every bar.
+id: AT-1B-1b
+track: 1B
+title: white silhouette flashes on a 60p stage two-shot (V11)
+local_only: true
+interim: false
+reference:
+- ref: '22'
+  t:
+  - 8.43
+  - 12.33
+  approx: true
+  board_t: 9.33
+footage:
+- vfl: V11
+  window: karp_stage_60p
+music: null
+aspect: source
+mode: engine
+edl:
+  base: vfl_default
+  keep:
+  - - 627.71
+    - 639.71
+  ops:
+  - action: upsert
+    layer: fx
+    id: sx1
+    value:
+      id: sx1
+      type: subject
+      stage: world
+      start: 3.85
+      end: 3.9
+      kind: fill
+      colour: white
+      decay_f: 2
+      device: subject_fill_flash
+      bind:
+        'on': stress
+        ref: 17
+        rhythm: speech
+  - action: upsert
+    layer: fx
+    id: sx2
+    value:
+      id: sx2
+      type: subject
+      stage: world
+      start: 6.54
+      end: 6.59
+      kind: fill
+      colour: white
+      decay_f: 2
+      device: subject_fill_flash
+      bind:
+        'on': stress
+        ref: 27
+        rhythm: speech
+  - action: upsert
+    layer: fx
+    id: sx3
+    value:
+      id: sx3
+      type: subject
+      stage: world
+      start: 8.17
+      end: 8.22
+      kind: fill
+      colour: white
+      decay_f: 2
+      device: subject_fill_flash
+      bind:
+        'on': stress
+        ref: 31
+        rhythm: speech
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: land_err_f
+  item: sx1
+  op: <=
+  value: 1
+- name: flash_risk
+  op: <=
+  value: 3
+- name: duration_exact
+  op: <=
+  value: 0
+beyond: both figures flash from one matte at 59.94 fps, each hit 1 frame plus a 2-frame decay, measured
+  per frame
+board:
+  stills:
+  - 3.85
+  clip:
+  - 3.0
+  - 9.0
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

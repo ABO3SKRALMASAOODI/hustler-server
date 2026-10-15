@@ -1,0 +1,29 @@
+# AT-1D-6: the matte cut. With no person matte on this lane (1A's handle
+# matte) it degrades to its substitute, a white flash on the cut, and says
+# so; once 1A lands the same operation renders the silhouette reveal.
+id: AT-1D-6
+track: 1D
+title: matte cut from the walk-on, degrading to a flash junction without a matte
+local_only: true
+interim: true
+reference:
+  - {ref: "20", t: [7.40, 7.60], approx: false, board_t: 7.47}
+footage:
+  - {vfl: V12, window: walkon}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[8.0, 12.0], [20.0, 24.0]]
+  ops:
+    - {action: upsert, layer: fx, id: jn_matte, value: {id: jn_matte, type: junction, stage: junction, at: 4.0, style: matte_cut, duration_s: 0.5, device: junction_matte_cut}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: flash_risk, op: "<=", value: 3}
+beyond: "the same operation reveals through the measured silhouette when the matte exists and degrades to a reported flash when it does not; never a black frame, never a re-timed cut"
+board: {stills: [3.92, 4.0], clip: [3.0, 5.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

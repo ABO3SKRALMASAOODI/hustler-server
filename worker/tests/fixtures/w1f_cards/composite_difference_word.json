@@ -1,0 +1,52 @@
+{
+  "id": "composite_difference_word",
+  "family": "composite",
+  "verb": "set_composite",
+  "stage": "motion",
+  "params": {
+    "blend": [
+      "difference"
+    ]
+  },
+  "needs": {},
+  "binds_to": [
+    "stress",
+    "word.payoff"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 1
+    },
+    "charged": {
+      "per_short": 2
+    }
+  },
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 2.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "12@2.542",
+    "19@6.63"
+  ],
+  "verify": [
+    "legibility>=45"
+  ],
+  "status": "live",
+  "description": "difference blend on the hero word over a busy plate"
+}

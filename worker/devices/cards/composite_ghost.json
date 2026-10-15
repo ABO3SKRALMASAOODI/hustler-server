@@ -1,0 +1,67 @@
+{
+  "id": "composite_ghost",
+  "family": "composite",
+  "verb": "set_composite",
+  "stage": "motion",
+  "params": {
+    "ghost": [
+      "auto"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "chromium",
+      "ffmpeg:alphamerge"
+    ],
+    "footage": "a behind_subject graphic whose letters the subject hides"
+  },
+  "binds_to": [
+    "word.payoff",
+    "word"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 6
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "on a graphic that is not behind the subject"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 6.0,
+      "batch": 6.0,
+      "local": 3.0
+    },
+    "fixed_ms": 1200
+  },
+  "exemplars": [
+    "05@0.23",
+    "05@9.17",
+    "20@4.47"
+  ],
+  "verify": [
+    "glyph_visible>=0.65"
+  ],
+  "status": "live",
+  "description": "the letters a behind-the-subject word hides drawn as thin outlines over the subject, so the word still reads",
+  "skill": "compositing"
+}

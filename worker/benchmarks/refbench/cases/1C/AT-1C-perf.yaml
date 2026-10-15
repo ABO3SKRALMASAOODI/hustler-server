@@ -1,0 +1,49 @@
+# AT-1C-perf: 20 s at 1080x1920 with four composites (and a region effect)
+# against the same edit with the same graphics plain.
+id: AT-1C-perf
+track: 1C
+title: four composites on a 20 s final cost at most 1.3x the plain render
+local_only: true
+interim: false
+reference:
+  - {ref: "12", t: [2.4, 2.7]}
+footage:
+  - {vfl: V01, window: thiel_ai_bigger}
+  - {vfl: V13, window: dragon_unveil}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[148.96, 168.96]]
+  focus: [0.58, 0.3]
+  assets: {"media/w1c/dragon.mp4": {vfl: V13, window: dragon_unveil}}
+  ops:
+    - {action: upsert, layer: motion, id: w1,
+       value: {id: w1, template: word_slam, start: 1.0, end: 4.0, layer: above_captions,
+               params: {text: BIGGER, y: 0.7, entrance: pop, exit: cut},
+               composite: {blend: difference}}}
+    - {action: upsert, layer: motion, id: tw,
+       value: {id: tw, template: type_window, start: 6.0, end: 9.0, layer: above_captions,
+               params: {text: "THE INTERNET", reveal: open},
+               composite: {fill: {kind: asset, asset_key: "media/w1c/dragon.mp4", loop: true},
+                           field: black}}}
+    - {action: upsert, layer: motion, id: lk,
+       value: {id: lk, template: light_leak, start: 11.0, end: 12.2, layer: above_captions,
+               params: {palette: warm}, composite: {blend: screen}}}
+    - {action: upsert, layer: motion, id: w2,
+       value: {id: w2, template: word_slam, start: 14.0, end: 17.0, layer: above_captions,
+               params: {text: AI, y: 0.7, entrance: pop, exit: cut},
+               composite: {blend: auto}}}
+    - {action: upsert, layer: fx, id: rg,
+       value: {id: rg, type: region, stage: world, start: 14.0, end: 17.0,
+               effect: solarise, colour: "#ff00ff", device: region_tone,
+               region: {shape: ellipse, box: [0.15, 0.1, 0.85, 0.5], feather_px: 6}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: cost_ratio, op: "<=", value: 1.3}
+beyond: "four composites and a region effect cost what one graphic does, every pixel compiled to ffmpeg (no per-pixel expressions)"
+board: {stills: [2.0, 7.5, 11.5, 15.0], clip: [0.0, 20.0]}
+judges: {lenses: [craft], pass: owner}

@@ -331,6 +331,48 @@ get an invented music choice. With music off, in this order:
 5. Check with `audit_audio_mix` and the render's audio check: no digital
    silence over 0.3 s outside a deliberate stop-down or a flagged passage.
 
+### Devices (compositing, punctuation, finishing)
+
+Valmera's creative devices cut the speaker out once and reuse it, punctuate
+transients, and carry content-born junctions. In a podcast short they are
+punctuation for the story, never decoration, and every one is bound to a
+moment. Per short, on top of the graphics:
+
+| Device | Earns its place when | Podcast-short budget |
+| --- | --- | --- |
+| Silhouette flash (the speaker filled white or in the accent, 1-2 frames) | the payoff word, or the turn into the payoff | 0-1, at most 2 |
+| Poster (the speaker on a flat accent field) | through the payoff hold, or one section intro | 0-1 |
+| Hero word behind the speaker | the payoff word (follow crops, cuts and ramps are fine) | 1 per 6-8 s at most |
+| Punctuation frame (negative, white hit, threshold) | a real cut or the turn word (a contrast, a negation); never mid-word on the payoff | 0-2, one family per short section |
+| Junction (iris, matte cut, column wipe) | a real scene change; a jump cut inside one take stays a hard cut | 0-1 |
+| Grade window, colour isolation | a then-versus-now, a flashback, the subject against their world | 0-1 |
+| Finish (CRT or LCD re-photography, film) | archival footage or a screen the speaker talks about | 0-1, archival talks only |
+| Strobe, background swap, echo or clone | montage and sizzle on a song the user supplied; in a talking short only as its one recipe on the word that earns it (lab_scan on a mechanism or number, echo_trail on a speed word) | 0, or the recipe |
+| Recipe: ONE signature move (`suggest_recipes`, then `apply_recipe`) | the story's own moment, which suggest_recipes names: the turn, the payoff, an identity word, a number, a mechanism, heat, speed | exactly 1 per short, fitted to THIS story and different from the batch's other shorts (it ranks fresh moves first) |
+
+Creativity is the bar (owner, 15 Oct): each short gets one signature move
+that surprises and fits its story, never the move the previous short used
+(last week's lamp-lit captions are an example of the bar, not a style to
+repeat). Recipes are a floor: compose a fresh device when the story asks.
+
+Nothing punctuates the payoff hold (0.8-1.5 s after the payoff word); one
+device per moment; never the same device on consecutive shots; never more
+than 3 full-frame flashes in any second. Devices are silent and zoom-free:
+they never bring a sound or a camera move with them. Plan them with
+`suggest_devices` (it applies these budgets and returns each candidate's
+exact `apply_edit_batch` op), write the ones you keep in ONE batch, then
+`proof_device` them (editing.md step 5). If your tool list has no
+`suggest_devices` (the session connected before the device release), the
+devices are still reachable: `read_skill('devices')` gives the exact
+`apply_edit_batch` shapes; write at most the payoff device that way, on
+the payoff word's first frame in program seconds (`get_kept_transcript`),
+with `"bind": {"on": "time", "ref": <that second>}`. Look affinities: Headline Pro and
+Clean Data at most one device (the payoff); Kinetic Poster the poster or a
+silhouette flash on the payoff plus a punctuation frame on the turn; Mono
+Noir a colour-isolation window; Cinematic Doc a film finish on archival
+footage; Creator Glow a soft glow, never a negative; Editorial Serif none or
+one.
+
 ### Never
 
 A picture band on a flat black void; a fade from black on frame 1 (if an old
@@ -555,10 +597,19 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   gum-10 (monochrome cuts decelerating on ticks), gum-07 (invert flashes).
 - **Base:** `apply_look('mono_noir')`, captions `motion_look` `stack`, or
   `mono` for technical stories.
-- **Canvas:** full-bleed black and white; red type behind the subject.
+- **Canvas:** full-bleed noir colour (contrast up, colour pushed down, never
+  removed); red type behind the subject.
+- **Black and white is a device, never the grade** (owner, 15 Oct): one B&W
+  moment per short, on the beat that earns it — a mono hook that opens to
+  colour ON the turn word (`set_grade_window` saturation 0, `ramp_out_f` 3),
+  the speaker kept in colour in a grey world for the payoff
+  (`isolate_colour` keep='subject'), a silhouette hold for one thought
+  (`add_subject_effect` kind='poster'), or 1-frame negatives on the 2-4
+  strongest hits (`add_accent` kind='negative'). A whole-short B&W grade only
+  when the user asked for black and white.
 - **Type:** condensed caps (Anton, Bebas, Archivo condensed) for heroes in
   red #ED080D; white Inter Bold for 1-3-word captions; mono for code and numbers.
-- **Grade:** high-contrast monochrome with one red accent, heavier grain, vignette.
+- **Grade:** high contrast, colour pushed down (apply_look sets it), one red accent, heavier grain, vignette.
 - **Camera (optional, only where earned):** a `punch` on the few real hits
   (shake on the biggest at most); a `pulse` on a real beat. Never a landing
   after every cut.

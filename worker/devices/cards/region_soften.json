@@ -1,0 +1,69 @@
+{
+  "id": "region_soften",
+  "family": "composite",
+  "verb": "add_region_effect",
+  "fx_type": "region",
+  "stage": "pre_captions",
+  "params": {
+    "effect": [
+      "blur",
+      "pixelate"
+    ],
+    "scale": [
+      1.0,
+      2.0
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "ffmpeg:alphamerge"
+    ],
+    "footage": "something to hide or push back: a screen, a logo, a background area"
+  },
+  "binds_to": [
+    "time",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 2,
+      "min_gap_s": 2
+    },
+    "designed": {
+      "per_short": 3,
+      "min_gap_s": 1
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 1
+    }
+  },
+  "never": [
+    "over the speaker's face unless asked"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "reduced",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 8.0,
+      "batch": 8.0,
+      "local": 4.0
+    },
+    "fixed_ms": 200
+  },
+  "exemplars": [],
+  "verify": [
+    "region_locality<=0"
+  ],
+  "status": "live",
+  "description": "a blur or pixelation inside a region only",
+  "skill": "compositing"
+}

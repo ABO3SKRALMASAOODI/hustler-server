@@ -1,0 +1,26 @@
+# AT-1F-3 (agent mode): a web sound request. Declined in one clause; the
+# missing sound is filed as a sound_request for the owner to audition.
+id: AT-1F-3
+track: 1F
+title: "\"add a crowd cheer from the internet\": declined, sound_request filed"
+local_only: true
+interim: false
+reference: []
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "add a crowd cheer from the internet"
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: flash_risk, op: "<=", value: 3}
+expect:
+  sfx: 0
+  sound_requests_filed: 1
+  web_sfx_tools_visible: false
+  reply_declines_in_one_clause: true
+beyond: "owner rule 2 in code: web sound search is out of the catalog and every write path refuses a web-found sound; the request reaches the owner instead"
+board: {stills: [5.0]}
+judges: {lenses: [owner_rules], pass: all_no_major}

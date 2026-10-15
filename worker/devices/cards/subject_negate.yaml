@@ -1,0 +1,60 @@
+# Track 1B device card (subject_negate). Authoring source; compile with
+#   cd worker && python -m devices.compiler
+id: subject_negate
+family: matte_fx
+verb: add_subject_effect
+fx_type: subject
+stage: world
+params:
+  kind: negate
+  scope:
+  - subject
+  - background
+needs:
+  sidecars:
+  - matte.person
+  lane_features:
+  - ffmpeg:alphamerge
+  - ffmpeg:overlay
+  footage: a person in shot (matte coverage >= 0.4% of the frame)
+binds_to:
+- stress
+- cut
+- beat.kick
+- downbeat
+- word.payoff
+budget:
+  calm:
+    per_short: 1
+    min_gap_s: 4
+  designed:
+    per_short: 2
+    min_gap_s: 2
+  charged:
+    per_short: 4
+    min_gap_s: 1
+never:
+- inside a payoff hold
+- on consecutive hits (one family per section)
+owner_flags:
+  adds_sound: false
+  adds_zoom: false
+  flash: true
+rungs:
+- full
+- omit
+cost:
+  ms_per_frame:
+    interactive: 5.2
+    batch: 34.0
+    local: 2.6
+  fixed_ms: 60
+exemplars:
+- 13@6.92
+verify:
+- land_err_f<=1
+- region_locality
+- flash_risk
+status: live
+description: only the subject (or only the world) turns negative for a beat
+skill: subject-fx

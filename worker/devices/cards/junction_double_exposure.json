@@ -1,0 +1,71 @@
+{
+  "id": "junction_double_exposure",
+  "family": "transition",
+  "verb": "set_junction",
+  "fx_type": "junction",
+  "stage": "junction",
+  "params": {
+    "style": [
+      "double_exposure"
+    ],
+    "duration_s": [
+      0.6,
+      0.8
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:overlay"
+    ],
+    "footage": "a real cut (a shot change or an insert)"
+  },
+  "binds_to": [
+    "cut",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "designed": {
+      "per_short": 4,
+      "min_gap_s": 2
+    },
+    "charged": {
+      "per_short": 10,
+      "min_gap_s": 1
+    }
+  },
+  "never": [
+    "on a jump cut inside one continuous take",
+    "two junction families in one section",
+    "the same style on consecutive cuts except a deliberate callback"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 14.0,
+      "batch": 10.5,
+      "local": 8.4
+    },
+    "fixed_ms": 150
+  },
+  "exemplars": [],
+  "verify": [
+    "duration_exact<=0",
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "A screen-blended double exposure dissolve: both shots as light at the cut.",
+  "skill": "punctuation"
+}

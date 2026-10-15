@@ -1,0 +1,70 @@
+{
+  "id": "type_hero_behind",
+  "family": "type_depth",
+  "verb": "add_motion_graphic",
+  "stage": "motion",
+  "params": {
+    "template": [
+      "word_slam"
+    ],
+    "layer": [
+      "behind_subject"
+    ],
+    "params": [
+      {
+        "tier": "hero"
+      }
+    ],
+    "duration_s": [
+      1.4
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ]
+  },
+  "binds_to": [
+    "word.payoff"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 1
+    },
+    "charged": {
+      "per_short": 2
+    }
+  },
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "face_safe_slam"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 2.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "05@0.23",
+    "09@1.27"
+  ],
+  "verify": [
+    "glyph_visible>=0.65",
+    "legibility>=60"
+  ],
+  "status": "live",
+  "description": "hero word behind the speaker on the payoff"
+}

@@ -1,0 +1,64 @@
+# Track 1B device card (subject_exposure). Authoring source; compile with
+#   cd worker && python -m devices.compiler
+id: subject_exposure
+family: matte_fx
+verb: add_subject_effect
+fx_type: subject
+stage: world
+params:
+  kind: exposure
+  scope:
+  - background
+  - subject
+  ev:
+  - -1.5
+  - -1.0
+  - 1.0
+  saturation:
+  - 0.0
+  - 0.6
+  - 1.0
+needs:
+  sidecars:
+  - matte.person
+  lane_features:
+  - ffmpeg:alphamerge
+  - ffmpeg:overlay
+  footage: a person in shot (matte coverage >= 0.4% of the frame)
+binds_to:
+- section
+- word.payoff
+- stress
+budget:
+  calm:
+    per_short: 1
+    min_gap_s: 6
+  designed:
+    per_short: 2
+    min_gap_s: 4
+  charged:
+    per_short: 3
+    min_gap_s: 2
+never:
+- as a permanent grade (that is a grade window)
+owner_flags:
+  adds_sound: false
+  adds_zoom: false
+  flash: false
+rungs:
+- full
+- omit
+cost:
+  ms_per_frame:
+    interactive: 5.2
+    batch: 34.0
+    local: 2.6
+  fixed_ms: 60
+exemplars:
+- 18@10.80
+verify:
+- region_locality
+status: live
+description: the world (or the subject) darkened, brightened or desaturated, bounded by the
+  subject
+skill: subject-fx

@@ -516,6 +516,72 @@ WEB_SFX_ENABLED = os.getenv("WEB_SFX_ENABLED", "0") == "1"
 # at most this many full-frame flashes in any one second; an export the
 # user opted into past it is flagged contains_flashing (flash_safety.py).
 FLASH_SAFE_MAX_PER_S = 3
+# Wave 1 (worker/devices/INTERFACES_W1.md §6): one block per track. A track
+# adds its flags BETWEEN its own begin/end lines and nowhere else in this
+# file, so six parallel branches merge without touching each other's lines.
+# Every flag defaults to the inert value (a dark device stays dark).
+# ---- W1 1A (matte stack v2) begin
+# The program matte (worker/matte_track.py): the person matte measured once
+# in source space and carried through the picture's own chain. A kill
+# switch only (the track ships it live, matte_track.LIVE); "1" restores the
+# Wave 0 behind-subject rules everywhere (renders, verbs, apply_edit_batch).
+PROGRAM_MATTE_OFF = os.getenv("PROGRAM_MATTE_OFF", "0") == "1"
+# matte.person's RVM coarse pass for every program-matte request (the
+# sidecar param ``downsample_ratio``; 0 = Wave 0's default operating point
+# and keys, so warm sidecars stay warm). Measured (tools/at1a_matte.py
+# --perf and the AT cases): 0.375 halves the model's CPU (318 vs 612
+# CPU-ms/frame locally; a 60 s sidecar projects 90 s vs 156 s on
+# standard-4) and holds wide and medium shots (person label IoU 0.997 /
+# 0.970 vs 0.998 / 0.975) but breaks the close-up (AT-1A-4: IoU 0.965,
+# min 0.866, edge chatter 0.008, flicker 0.041) — so it stays off.
+MATTE_DOWNSAMPLE_RATIO = float(os.getenv("MATTE_DOWNSAMPLE_RATIO", "0")
+                               or 0) or None
+# The matte's edge at render resolution ("lo,hi" smoothstep, or "off") and
+# how far behind-subject composites pull it inside the subject (px per
+# 1080 px of frame height, a soft inset): matte_track.edge_lut /
+# behind_inset.
+MATTE_EDGE = os.getenv("MATTE_EDGE", "0.2,0.8")
+MATTE_BEHIND_SHRINK = float(os.getenv("MATTE_BEHIND_SHRINK", "1.0"))
+# ---- W1 1A end
+
+# ---- W1 1B (subject FX) begin
+# ---- W1 1B end
+
+# ---- W1 1C (compositor) begin
+# ---- W1 1C end
+
+# ---- W1 1D (punctuation, strobes, junctions) begin
+# The junction_datamosh device card's flag. The real datamosh re-encodes the
+# junction window with the incoming keyframe dropped, which needs a renderer
+# prepass (asked of 1A); until it lands the card stays dark and only a
+# datamosh junction written without a device renders (as the in-graph smear,
+# reported "reduced"). Off by default.
+W1D_DATAMOSH = os.getenv("W1D_DATAMOSH", "0").strip().lower() in (
+    "1", "true", "yes", "on")
+# ---- W1 1D end
+
+# ---- W1 1E (finishing and variants) begin
+# .cube LUTs are accepted up to this edge (INTERFACES_W1 §3.5; lutlib).
+LUT_MAX_SIZE = 65
+# make_variant_set: kinds per call (6 stay under 10 CPU-s on the agent lane).
+VARIANT_MAX_KINDS = int(os.getenv("VARIANT_MAX_KINDS", "6"))
+# Gate for a 1E card that ships dark (status: dark, flag: FINISH_LAB_DEVICES).
+FINISH_LAB_DEVICES = os.getenv("FINISH_LAB_DEVICES", "0").strip().lower() in (
+    "1", "true", "yes", "on")
+# ---- W1 1E end
+
+# ---- W1 1F (agent layer v1) begin
+# suggest_devices' model pass over the kept transcript (payload, negation,
+# number, contrast, emotion, profanity), cached per transcript in app_kv; the
+# lexical tagger and the prosody grid run either way. Off until measured on
+# production transcripts: one bounded editor-model call per new transcript,
+# inside the turn that asked.
+W1F_RHETORIC_LLM = os.getenv("W1F_RHETORIC_LLM", "0") == "1"
+# proof_device: how long the verb waits for its preview_check renders before
+# answering "still rendering" (the agent then calls wait_for_job).
+W1F_PROOF_WAIT_S = float(os.getenv("W1F_PROOF_WAIT_S", "240"))
+# ---- W1 1F end
+
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via
 # Openverse (Wikimedia/Flickr — real people, companies, events); video
 # stock needs PEXELS_API_KEY/PIXABAY_API_KEY. Topical web VIDEO is

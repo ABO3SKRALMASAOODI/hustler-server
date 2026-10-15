@@ -1,0 +1,217 @@
+<!--MG-SPEC {"title": "Type window", "category": "transition", "also": ["type"],
+ "description": "Giant condensed letters that are WINDOWS: give the item a composite fill (add_type_window, or set_composite fill=) and the letters show footage (fill_mode inside; field='black' for footage-in-letters on black) or become windows onto the picture with the fill around them (fill_mode outside). reveal 'words' shows one word at a time on hard cuts; 'open' grows one letter's thickest stroke until the whole frame is window (letter -> window, eased); 'words_open' does both (the last word's letter opens). Without a composite it draws plain letters in its colour.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "text": {"type": "str", "required": true, "max": 48, "hint": "1-6 short words; ' / ' forces a line break when reveal is hold or open"},
+  "reveal": {"type": "enum", "values": ["hold", "words", "open", "words_open"], "default": "hold", "hint": "hold = all words at once; words = one word at a time; open = one letter grows into a full-frame window over the last part; words_open = words, then the last word's letter opens"},
+  "font": {"type": "enum", "values": ["Anton", "Bebas Neue", "Archivo Black", "Inter Display"], "default": "Anton"},
+  "size": {"type": "float", "min": 0.4, "max": 0.98, "default": 0.88, "hint": "the widest line's width as a frame fraction"},
+  "y": {"type": "float", "min": 0.15, "max": 0.85, "default": 0.5, "hint": "vertical centre as a frame fraction"},
+  "open_char": {"type": "int", "min": -1, "max": 47, "default": -1, "hint": "letter (index in the opening word) that becomes the window; -1 = the letter with the thickest stroke nearest the centre"},
+  "open_at": {"type": "float", "min": 0.2, "max": 0.95, "default": 0.62, "hint": "when the opening starts, as a share of the item's duration"},
+  "color": {"type": "color", "default": "#FFFFFF"},
+  "uppercase": {"type": "bool", "default": true}
+ },
+ "composite": {"fill_mode": "inside"},
+ "example": {"text": "YOU SHOULD KNOW I", "reveal": "words_open"},
+ "sfx": []} -->
+<style>
+  #tw{position:absolute;left:0;top:0;width:100%;height:100%;transform-origin:0 0}
+  .row{position:absolute;left:0;width:100%;text-align:center;white-space:nowrap;line-height:1;opacity:0}
+  .row .mg-c{display:inline-block}
+</style>
+<div class="mg-root"><div id="tw"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration, fd = 1 / (MG.fps || 30);
+  const tw = MG.$('#tw');
+  const fam = `'${P.font || 'Anton'}', 'Anton', 'Inter Display', sans-serif`;
+  const condensed = P.font === 'Anton' || P.font === 'Bebas Neue';
+  const up = s => (P.uppercase === false ? s : s.toUpperCase());
+  const mode = P.reveal || 'hold';
+  const words = String(P.text || '').replace(/\s*\/\s*/g, ' / ').split(/\s+/).filter(Boolean);
+  const plain = words.filter(w => w !== '/');
+  const byWords = mode === 'words' || mode === 'words_open';
+  const opens = mode === 'open' || mode === 'words_open';
+  // rows: one per word (words modes), the ' / ' lines when the text names
+  // them, else the 1-3 line split that sets the type largest (chosen once
+  // the fonts are in, by measuring)
+  const explicit = words.includes('/');
+  let rows;
+  if (byWords) rows = plain.map(w => [w]);
+  else if (explicit) {
+    rows = [[]];
+    words.forEach(w => { if (w === '/') rows.push([]); else rows[rows.length - 1].push(w); });
+    rows = rows.filter(r => r.length).slice(0, 3);
+  } else rows = [plain];
+  let els = [];
+  const makeRows = rs => {
+    els.forEach(el => el.remove());
+    els = rs.map(r => {
+      const el = MG.el('div', 'row', null, tw);
+      el.style.fontFamily = fam;
+      el.style.color = P.color || '#FFFFFF';
+      el.style.fontWeight = condensed ? '400' : '900';
+      el.style.letterSpacing = condensed ? '0.01em' : '-0.02em';
+      r.join(' ').split('').forEach(ch => {
+        const c = MG.el('span', 'mg-c', null, el);
+        c.textContent = up(ch);
+      });
+      return el;
+    });
+  };
+  makeRows(rows);
+  // balanced splits of the words into n lines (n = 1..3)
+  const splits = n => {
+    const out = [];
+    const rec = (start, left, acc) => {
+      if (left === 1) { out.push(acc.concat([plain.slice(start)])); return; }
+      for (let i = start + 1; i <= plain.length - left + 1; i++) rec(i, left - 1, acc.concat([plain.slice(start, i)]));
+    };
+    if (n <= plain.length) rec(0, n, []);
+    return out;
+  };
+  const chooseRows = (maxW, capBlock) => {
+    if (byWords || explicit || plain.length < 2) return rows;
+    const probe = MG.el('div', 'row', null, tw);
+    probe.style.fontFamily = fam; probe.style.fontSize = '200px'; probe.style.opacity = '0';
+    probe.style.fontWeight = condensed ? '400' : '900';
+    probe.style.letterSpacing = condensed ? '0.01em' : '-0.02em';
+    const widthOf = txt => { probe.textContent = up(txt); return inkW(probe); };
+    let best = null;
+    for (let n = 1; n <= Math.min(3, plain.length); n++) {
+      for (const sp of splits(n)) {
+        const wmax = Math.max(...sp.map(r => widthOf(r.join(' '))));
+        const f = Math.min(200 * maxW / wmax, capBlock / (n * 0.74 * 1.06));
+        if (!best || f > best.f + 1e-6) best = { f, sp };
+      }
+    }
+    probe.remove();
+    return best ? best.sp : rows;
+  };
+  const tOpen = opens ? MG.clamp(P.open_at ?? 0.62, 0.2, 0.95) * D : D;
+  // words: hard cuts, evenly over the time before the opening (the last word
+  // stays through it)
+  const spans = byWords ? rows.map((_, i) => {
+    const each = (opens ? tOpen : D) / rows.length;
+    return [i * each, (opens && i === rows.length - 1) ? D : (i + 1) * each];
+  }) : null;
+  const spanOf = i => spans ? spans[i] : [0, D];
+
+  let G = null;              // layout + the opening's focal point
+  // the ink width of a row's text (its content box, not the row's 100%)
+  const inkW = el => {
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    return Math.max(1, r.getBoundingClientRect().width);
+  };
+  const layout = () => {
+    const maxW = W * MG.clamp(P.size ?? 0.88, 0.4, 0.98);
+    if (!byWords && !explicit) {
+      rows = chooseRows(maxW, H * 0.56);
+      makeRows(rows);
+    }
+    // cap height: a condensed cap is ~0.74 em tall
+    const maxH = H * (byWords ? 0.30 : 0.56 / rows.length);
+    els.forEach(el => { el.style.fontSize = '200px'; });
+    const fit = el => Math.max(40, Math.min(200 * maxW / inkW(el), maxH / 0.74));
+    // one type size for every word / row (the longest fills the width), so
+    // a sequence of single words reads as one line set in one voice
+    const shared = Math.min(...els.map(fit));
+    els.forEach(el => { el.style.fontSize = shared + 'px'; });
+    const cy = H * MG.clamp(P.y ?? 0.5, 0.15, 0.85);
+    if (byWords) els.forEach(el => { el.style.top = (cy - el.offsetHeight / 2) + 'px'; });
+    else {
+      const gap = 0.02 * shared, hs = els.map(el => el.offsetHeight);
+      let y0 = cy - (hs.reduce((a, b) => a + b, 0) + gap * (hs.length - 1)) / 2;
+      els.forEach((el, i) => { el.style.top = y0 + 'px'; y0 += hs[i] + gap; });
+    }
+    if (!opens) return { focal: null };
+    // the opening letter: in the last row, the chosen index or the letter
+    // whose thickest stroke is nearest the frame centre
+    const row = els[els.length - 1];
+    const chars = Array.from(row.querySelectorAll('.mg-c')).filter(c => c.textContent.trim());
+    if (!chars.length) return { focal: null };
+    const pick = (P.open_char ?? -1) >= 0 ? [chars[Math.min(chars.length - 1, P.open_char)]] : chars;
+    let best = null;
+    pick.forEach(c => {
+      const fp = thickest(c);
+      if (!fp) return;
+      const d = Math.hypot(fp.x - W / 2, fp.y - H / 2) / Math.max(1, fp.r);
+      const score = fp.r * 4 - d;
+      if (!best || score > best.score) best = Object.assign(fp, { score });
+    });
+    if (!best) return { focal: null };
+    // the stroke's inscribed circle must outgrow the half-diagonal
+    const S = 1.18 * Math.hypot(W, H) / 2 / Math.max(2, best.r);
+    return { focal: best, S };
+  };
+  // the centre (page px) and radius of the thickest part of one glyph's ink:
+  // the maximum of a chamfer distance transform of its rasterised alpha
+  const thickest = c => {
+    const cs = getComputedStyle(c);
+    const fs = parseFloat(cs.fontSize);
+    const k = Math.min(1, 360 / fs);             // raster at <= 360 px
+    const cv = document.createElement('canvas');
+    const cw = Math.ceil(fs * k * 1.6) + 8, chh = Math.ceil(fs * k * 1.6) + 8;
+    cv.width = cw; cv.height = chh;
+    const x = cv.getContext('2d');
+    x.font = `${cs.fontStyle} ${cs.fontWeight} ${fs * k}px ${cs.fontFamily}`;
+    const m = x.measureText(c.textContent);
+    const ox = 4 + (m.actualBoundingBoxLeft || 0), by = 4 + (m.fontBoundingBoxAscent || fs * k * 0.9);
+    x.fillStyle = '#fff';
+    x.fillText(c.textContent, ox, by);
+    const a = x.getImageData(0, 0, cw, chh).data;
+    const D2 = new Float32Array(cw * chh), BIG = 1e6;
+    for (let i = 0; i < cw * chh; i++) D2[i] = a[i * 4 + 3] >= 128 ? BIG : 0;
+    const s1 = 1, s2 = 1.4142;
+    for (let yy = 0; yy < chh; yy++) for (let xx = 0; xx < cw; xx++) {
+      const i = yy * cw + xx; if (!D2[i]) continue;
+      let v = D2[i];
+      if (xx > 0) v = Math.min(v, D2[i - 1] + s1);
+      if (yy > 0) { v = Math.min(v, D2[i - cw] + s1); if (xx > 0) v = Math.min(v, D2[i - cw - 1] + s2); if (xx < cw - 1) v = Math.min(v, D2[i - cw + 1] + s2); }
+      D2[i] = v;
+    }
+    let bi = -1, bv = 0;
+    for (let yy = chh - 1; yy >= 0; yy--) for (let xx = cw - 1; xx >= 0; xx--) {
+      const i = yy * cw + xx; if (!D2[i]) continue;
+      let v = D2[i];
+      if (xx < cw - 1) v = Math.min(v, D2[i + 1] + s1);
+      if (yy < chh - 1) { v = Math.min(v, D2[i + cw] + s1); if (xx < cw - 1) v = Math.min(v, D2[i + cw + 1] + s2); if (xx > 0) v = Math.min(v, D2[i + cw - 1] + s2); }
+      D2[i] = v;
+      if (v > bv + 1e-6) { bv = v; bi = i; }
+    }
+    if (bi < 0) return null;
+    const gx = bi % cw, gy = Math.floor(bi / cw);
+    // pen origin and baseline in page px from the text's own content box
+    // (the way MG.glyphBoxes reads them): its top is the font ascent above
+    // the baseline
+    const rg = document.createRange();
+    rg.selectNodeContents(c);
+    const rc = rg.getClientRects()[0] || c.getBoundingClientRect();
+    const fa = (m.fontBoundingBoxAscent || fs * k * 0.9) / k;
+    return { x: rc.left + (gx - ox) / k, y: rc.top + fa + (gy - by) / k, r: bv / k };
+  };
+  const draw = t => {
+    els.forEach((el, i) => {
+      const [a, b] = spanOf(i);
+      el.style.opacity = (t >= a - 1e-6 && t < b - 1e-6) || (i === els.length - 1 && t >= D - 1e-6 && b >= D) ? '1' : '0';
+    });
+    if (!G || !G.focal || t <= tOpen) { tw.style.transform = ''; return; }
+    const p = MG.clamp((t - tOpen) / Math.max(fd, D - tOpen - fd));
+    const e = MG.ease.inOutCubic(p);
+    const s = Math.exp(Math.log(G.S) * e);
+    const F = G.focal;
+    const cx = F.x + (W / 2 - F.x) * e, cy = F.y + (H / 2 - F.y) * e;
+    // the focal point moves to (cx, cy) while the type scales about it
+    tw.style.transform = `translate(${(cx - F.x * s).toFixed(3)}px,${(cy - F.y * s).toFixed(3)}px) scale(${s.toFixed(5)})`;
+  };
+  MG.frame(draw);
+  const wins = [];
+  (spans || [[0, D]]).forEach(([a, b]) => { wins.push([Math.max(0, a - fd), a + fd]); wins.push([Math.max(0, b - fd), b + fd]); });
+  if (opens) wins.push([tOpen - fd, D]);
+  MG.active(wins);
+  MG.ready = document.fonts.ready.then(() => { G = layout(); draw(MG.t || 0); });
+  G = layout();
+})();
+</script>

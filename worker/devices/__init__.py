@@ -69,7 +69,18 @@ LANE_FEATURES = ("chromium", "onnx.rvm", "onnx.u2net", "onnx.yunet",
 # front). A substitute rung names one of these or another card id.
 BUILTIN_SUBSTITUTES = ("full_frame_flash", "colour_field_card", "halation",
                        "face_safe_slam", "phrase_build", "libass_text",
-                       "static_placement", "type_in_front")
+                       "static_placement", "type_in_front",
+                       # Wave 1 (INTERFACES_W1.md §3.6): subject_hold and
+                       # matte_cut -> a white flash at the cut; subject
+                       # isolate -> the hue key alone (no matte)
+                       "flash_junction", "hue_key_only")
+
+# Wave 1 card-id prefixes, one owner each (INTERFACES_W1.md §3.6): a track
+# names its cards <prefix>_<what>, so parallel tracks never collide.
+CARD_PREFIXES = {"type": "1A", "subject": "1B", "background": "1B",
+                 "composite": "1C", "region": "1C", "accent": "1D",
+                 "strobe": "1D", "junction": "1D", "grade": "1E",
+                 "finish": "1E", "variant": "1E"}
 
 # Sidecar kinds a card may need (INTERFACES.md §2.1; reserved names only).
 SIDECAR_KINDS = ("matte.person", "faces.yunet", "rhythm.music",

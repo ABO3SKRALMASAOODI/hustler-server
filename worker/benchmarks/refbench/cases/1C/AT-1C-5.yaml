@@ -1,0 +1,44 @@
+# AT-1C-5: LOOKS LIKE as windows onto the next shot on a red field, opening
+# into it on the cut (38@≈11.3, 21@20.5-21.75). The next shot is an insert
+# of V13 dragon (asset; see AT-1C-1's note on the harness).
+id: AT-1C-5
+track: 1C
+title: the cross-cut reveal from V05 into the V13 dragon through LOOKS LIKE
+local_only: true
+interim: false
+reference:
+  - {ref: "38", t: [10.9, 12.0], approx: true, board_t: 11.3}
+  - {ref: "21", t: [20.5, 21.75], board_t: 21.0}
+footage:
+  - {vfl: V05, window: welt_cut}
+  - {vfl: V13, window: dragon_unveil}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[49.15, 53.15]]
+  focus: [0.55, 0.3]
+  assets: {"media/w1c/dragon.mp4": {vfl: V13, window: dragon_unveil}}
+  inserts: [{id: dragon, kind: video, asset_key: "media/w1c/dragon.mp4",
+             at_output_s: 4.0, duration_s: 3.0, source_start_s: 7.0}]
+  ops:
+    - {action: upsert, layer: motion, id: tw,
+       value: {id: tw, template: type_window, start: 2.4, end: 4.0,
+               layer: above_captions,
+               params: {text: "LOOKS LIKE", reveal: open, open_at: 0.5,
+                        size: 0.9},
+               composite: {fill: {kind: next}, field: "#b3121f"}}}
+    - {action: upsert, layer: fx, id: bw,
+       value: {id: bw, type: region, stage: over_type, start: 2.4, end: 3.2,
+               effect: mono, device: region_tone,
+               region: {shape: glyph, ref: tw}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: land_err_f, op: "<=", value: 1}
+beyond: "the next shot plays inside the letters on its own clock (real handles) and the window lands full-frame exactly on the cut, from one write; the reference was keyed by hand"
+board: {stills: [2.9, 3.6], clip: [2.0, 5.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

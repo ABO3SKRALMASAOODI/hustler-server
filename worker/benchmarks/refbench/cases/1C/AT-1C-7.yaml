@@ -1,0 +1,43 @@
+# AT-1C-7: leak, white hit and burn added as light (14@11.67, 41@≈32.7).
+id: AT-1C-7
+track: 1C
+title: light leak, white hit and film burn composited as light
+local_only: true
+interim: false
+reference:
+  - {ref: "14", t: [11.5, 11.85], board_t: 11.67}
+  - {ref: "41", t: [32.5, 32.9], approx: true, board_t: 32.7}
+footage:
+  - {vfl: V01, window: thiel_ai_bigger}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[150.96, 156.96]]
+  focus: [0.58, 0.3]
+  ops:
+    - {action: upsert, layer: motion, id: leak,
+       value: {id: leak, template: light_leak, start: 0.8, end: 2.0,
+               layer: above_captions,
+               params: {palette: warm, mode: sweep, intensity: 0.95},
+               composite: {blend: screen}}}
+    - {action: upsert, layer: motion, id: hit,
+       value: {id: hit, template: flash_transition, start: 2.8, end: 3.2,
+               layer: above_captions,
+               params: {tone: white, strength: 1.0, bloom: true},
+               composite: {blend: add}}}
+    - {action: upsert, layer: motion, id: burn,
+       value: {id: burn, template: film_burn, start: 4.2, end: 5.0,
+               layer: above_captions,
+               params: {from: right, tone: fire, coverage: 0.85},
+               composite: {blend: screen}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: flash_risk, op: "<=", value: 3}
+  - {name: duration_exact, op: "<=", value: 0}
+beyond: "every pixel is asserted no darker than the picture (light adds, it never paints over), measured on the render"
+board: {stills: [1.4, 3.0, 4.6], clip: [0.5, 5.5]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

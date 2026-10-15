@@ -108,6 +108,16 @@ all nine inside 30 seconds is an effect every 3.3 s. Mix hard cuts on the
 beat with a few designed junctions at the real turns. Read the cadence the
 tool reports.
 
+DEVICE JUNCTIONS (the fx layer; `suggest_devices` proposes them on real
+cuts): a per-cut device for a real scene change — an iris from the face or
+a glyph, a column wipe, box steps, a matte cut through the speaker's
+silhouette, a datamosh smear, a whip, a hit flash. They are
+duration-preserving (each side lends half the window from its own handles;
+the audio is untouched) and silent. One junction family per section, never
+on a jump cut inside one take, never inside the payoff hold. Prove each
+with `proof_device` (junction integrity: the same frame count, identical
+audio); read_skill devices says when each earns its place.
+
 ## Common failure modes
 
 - Effects on jump cuts inside one take.

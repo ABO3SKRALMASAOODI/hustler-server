@@ -1,0 +1,81 @@
+{
+  "id": "grade_section",
+  "family": "finish",
+  "verb": "set_grade_window",
+  "fx_type": "grade_window",
+  "stage": "world",
+  "params": {
+    "saturation": [
+      0.0,
+      0.55,
+      1.15
+    ],
+    "ramp_out_f": [
+      3,
+      0,
+      6
+    ],
+    "ramp_in_f": [
+      0,
+      3
+    ],
+    "contrast": [
+      1.0,
+      1.12
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": []
+  },
+  "binds_to": [
+    "section",
+    "drop",
+    "cut",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 2
+    },
+    "charged": {
+      "per_short": 3
+    }
+  },
+  "never": [
+    "decoration with no metaphor behind it",
+    "two finish families in one section"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 3.2,
+      "batch": 3.2,
+      "local": 1.6
+    },
+    "fixed_ms": 150
+  },
+  "exemplars": [
+    "18@0–3.64",
+    "24@≈10.7–12",
+    "03@8.0"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "A section grade: B&W or tinted sections, mono until the drop with colour landing on it",
+  "skill": "finishing"
+}

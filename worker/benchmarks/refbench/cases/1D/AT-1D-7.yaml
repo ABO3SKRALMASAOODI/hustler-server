@@ -1,0 +1,35 @@
+# AT-1D-7: flash safety. Six full-frame negatives inside one second, written
+# as a stale client would (no verb thinning): the export reads over the
+# limit and, with the user's opt-in, is flagged contains_flashing. The verb
+# path (add_accent thins to 3 and reports it) is tests/test_w1d_local.py.
+id: AT-1D-7
+track: 1D
+title: six negatives in one second, opt-in flagged
+local_only: true
+interim: false
+reference:
+  - {ref: "04", t: [13.1, 13.9], approx: false, board_t: 13.3}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[875.0, 881.0]]
+  ops:
+    - {action: upsert, layer: fx, id: f1, value: {id: f1, type: accent, stage: pre_captions, start: 2.0, end: 2.04, kind: negative}}
+    - {action: upsert, layer: fx, id: f2, value: {id: f2, type: accent, stage: pre_captions, start: 2.17, end: 2.2, kind: negative}}
+    - {action: upsert, layer: fx, id: f3, value: {id: f3, type: accent, stage: pre_captions, start: 2.34, end: 2.37, kind: negative}}
+    - {action: upsert, layer: fx, id: f4, value: {id: f4, type: accent, stage: pre_captions, start: 2.5, end: 2.54, kind: negative}}
+    - {action: upsert, layer: fx, id: f5, value: {id: f5, type: accent, stage: pre_captions, start: 2.67, end: 2.7, kind: negative}}
+    - {action: upsert, layer: fx, id: f6, value: {id: f6, type: accent, stage: pre_captions, start: 2.84, end: 2.87, kind: negative}}
+chat: null
+render: {variant: final}
+allow: [flash_optin]
+metrics:
+  - {name: flash_risk}
+  - {name: duration_exact, op: "<=", value: 0}
+beyond: "flashing is planned, counted and flagged in code (the verb thins to 3 a second unless the user asked; an opted-in export carries contains_flashing); the reference shipped unmeasured"
+board: {stills: [2.0, 2.17], clip: [1.5, 3.2]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

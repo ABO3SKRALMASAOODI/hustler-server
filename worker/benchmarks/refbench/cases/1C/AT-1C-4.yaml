@@ -1,0 +1,48 @@
+# AT-1C-4: ribbed glass over the face; refracted plate in the letters
+# (05@0.23, 02@0.03-3.07).
+id: AT-1C-4
+track: 1C
+title: fluted glass over the face, then PRESSURE in refracting glass letters
+local_only: true
+interim: false
+reference:
+  - {ref: "05", t: [0.0, 0.5], board_t: 0.23}
+  - {ref: "02", t: [0.03, 3.07], board_t: 1.0}
+footage:
+  - {vfl: V01, window: thiel_ai_bigger}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[150.96, 156.96]]
+  focus: [0.58, 0.3]
+  ops:
+    - {action: upsert, layer: fx, id: glass,
+       value: {id: glass, type: region, stage: world, start: 0.4, end: 2.6,
+               effect: ribbed_glass, device: region_material,
+               region: {shape: rect, box: [0.0, 0.06, 1.0, 0.6],
+                        feather_px: 3}}}
+    - {action: upsert, layer: motion, id: pw,
+       value: {id: pw, template: type_window, start: 3.0, end: 5.6,
+               layer: above_captions,
+               params: {text: PRESSURE, reveal: hold, y: 0.34, size: 0.86},
+               composite: {opacity: 0.2}}}
+    - {action: upsert, layer: fx, id: refr,
+       value: {id: refr, type: region, stage: over_type, start: 3.0,
+               end: 5.6, effect: refraction, device: region_material,
+               region: {shape: glyph, ref: pw}}}
+    - {action: upsert, layer: fx, id: lift,
+       value: {id: lift, type: region, stage: over_type, start: 3.0,
+               end: 5.6, effect: exposure, ev: 0.9, device: region_tone,
+               region: {shape: glyph, ref: pw}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: region_locality, op: "<=", value: 0}
+  - {name: determinism}
+  - {name: duration_exact, op: "<=", value: 0}
+beyond: "the glass is a map built once and applied inside any region, a word's own letters included, on every frame; the references were composited by hand"
+board: {stills: [1.0, 4.0], clip: [0.0, 6.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

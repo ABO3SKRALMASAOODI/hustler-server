@@ -188,6 +188,10 @@ def probe(path):
     return info
 
 
+RGB_READ = "neighbor+full_chroma_int+accurate_rnd"
+RGB_RESIZE = "area+full_chroma_int+accurate_rnd"
+
+
 def read_frames(path, *, size=None, gray=False, rect=None, start_frame=0,
                 count=None, frames=None, ss=None, seek=False):
     """Decode frames as uint8 arrays.
@@ -220,12 +224,22 @@ def read_frames(path, *, size=None, gray=False, rect=None, start_frame=0,
             # DOWN to the chroma grid (607 px wide comes out 606), and every
             # frame read after that is a skewed slice of the stream: crop
             # odd rects on full-resolution pixels instead
-            vf.append(f"format={'gray' if gray else 'rgb24'}")
+            vf.append("format=gray" if gray else
+                      f"scale=flags={RGB_READ},format=rgb24")
         vf.append(f"crop={w}:{h}:{x}:{y}")
         W, H = w, h
     if size:
         W, H = int(size[0]), int(size[1])
-        vf.append(f"scale={W}:{H}:flags=area")
+        vf.append(f"scale={W}:{H}:flags={'area' if gray else RGB_RESIZE}")
+    elif not gray:
+        # the RGB conversion in the graph, with accurate rounding: left to
+        # the output's own converter, ffmpeg 8.x (the production lanes)
+        # read every frame ~2 levels dark (BT.709 reference: -2.2 / 9.0:
+        # -0.2), which moved colour metrics (AT-1E-6) between versions.
+        # Chroma is taken per sample (neighbor), as the stream holds it:
+        # an interpolated read smears 4:2:0 chroma over edges that a
+        # fringe metric then counts (AT-1E-1)
+        vf.append(f"scale=flags={RGB_READ}")
     pix = "gray" if gray else "rgb24"
     ch = 1 if gray else 3
     cmd = ["ffmpeg", "-v", "error", "-nostdin"]

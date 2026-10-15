@@ -1,0 +1,80 @@
+{
+  "id": "junction_zoom_blur",
+  "family": "transition",
+  "verb": "set_junction",
+  "fx_type": "junction",
+  "stage": "junction",
+  "params": {
+    "style": [
+      "zoom_blur",
+      "radial_blur"
+    ],
+    "duration_s": [
+      0.5,
+      0.4
+    ],
+    "origin": [
+      {
+        "kind": "centre"
+      },
+      {
+        "kind": "face"
+      }
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:remap"
+    ],
+    "footage": "a real cut (a shot change or an insert)"
+  },
+  "binds_to": [
+    "cut",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "designed": {
+      "per_short": 4,
+      "min_gap_s": 2
+    },
+    "charged": {
+      "per_short": 10,
+      "min_gap_s": 1
+    }
+  },
+  "never": [
+    "on a jump cut inside one continuous take",
+    "two junction families in one section",
+    "the same style on consecutive cuts except a deliberate callback"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 40.0,
+      "batch": 30.0,
+      "local": 24.0
+    },
+    "fixed_ms": 150
+  },
+  "exemplars": [],
+  "verify": [
+    "duration_exact<=0",
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "A radial zoom (or spin) blur swelling to the cut and settling into the next shot.",
+  "skill": "punctuation"
+}

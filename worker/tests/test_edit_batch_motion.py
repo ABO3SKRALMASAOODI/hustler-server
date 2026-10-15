@@ -29,12 +29,21 @@ def test_motion_items_upsert_by_id_and_validate():
     assert gone["motion"] == []
 
 
-def test_motion_batches_refuse_foreign_media_unknown_params_and_unmasked_behind():
+def test_motion_batches_refuse_foreign_media_unknown_params_and_unmasked_behind(
+        monkeypatch):
     photo = {"id": "card", "template": "image_card", "start": 1.0, "end": 4.0,
              "params": {"image": "media/2/someone-elses.jpg"}}
     with pytest.raises(ValueError, match="media attached to this project"):
         edit_batch.apply_batch(default_edl(20), [
             {"action": "upsert", "layer": "motion", "id": "card", "value": photo}], 20, KEYS)
+    # Wave 1 (1A): an unmasked behind_subject graphic renders through the
+    # program matte; with the program matte off it is refused as before
+    out = edit_batch.apply_batch(default_edl(20), [
+        {"action": "upsert", "layer": "motion", "id": "hook",
+         "value": _hook(layer="behind_subject")}], 20, KEYS)
+    assert out["motion"][0]["behind"]["asset_key"] == \
+        edit_batch.PROGRAM_MATTE_KEY
+    monkeypatch.setenv("PROGRAM_MATTE_OFF", "1")
     with pytest.raises(ValueError, match="subject mask"):
         edit_batch.apply_batch(default_edl(20), [
             {"action": "upsert", "layer": "motion", "id": "hook",

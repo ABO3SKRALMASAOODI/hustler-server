@@ -1,0 +1,47 @@
+# Track 1E. Run: cd worker && python -m benchmarks.refbench.at1e AT-1E-1
+# (device_metrics are measured by the 1E harness; the 0D runner has no
+# measurer for them).
+id: AT-1E-1
+track: 1E
+title: B&W world with one colour kept (the JRE red curtain and neon, keep by hue)
+local_only: true
+interim: true
+reference:
+  - {ref: "40", t: [0.0, 23.0], approx: true, board_t: 3.0}
+footage:
+  - {vfl: V04, window: rogan_gamers}
+music: null
+aspect: "source"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[122.0, 134.0]]
+  ops:
+    - {action: upsert, layer: fx, id: gw_keep_red, value: {id: gw_keep_red,
+       type: grade_window, stage: world, start: 0.0, end: 11.0,
+       isolate: {hue: "#361113", tolerance: 0.04, softness: 0.06},
+       device: grade_isolate_hue}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: region_locality, op: "<=", value: 0}
+  - {name: determinism, op: "<=", value: 0}
+device_metrics:
+  - {name: bg_saturation, op: "<=", value: 0.03}
+  - {name: kept_delta_e, op: "<=", value: 3.0}
+  # "no chroma fringe": the render's mean CIELAB chroma C* 2-4 px outside
+  # the kept colour, on pixels that are not the colour, on the dE scale
+  - {name: fringe_chroma, op: "<=", value: 3.0}
+# The roadmap's final footage (HC-D): a red coat crossing a grey square,
+# its hue AND key width solved from the shot by the verb's own solver
+# (gradewin.hue_from_frames / key_from_frames, as isolate_colour does).
+final_standin:
+  id: d2-red-coat-close-to-wide-square
+  path: footage/HC-D/d2-red-coat-close-to-wide-square/pexels-3839483-3839483-hd_1920_1080_25fps.mp4
+  keep: [[6.0, 18.0]]
+  solve_t: [6.0, 10.0, 14.0]
+  stills: [2.0, 8.0]
+beyond: "one sentence keeps one colour across every shot and both speakers, the hue solved from the footage, faces kept out by a luma-aware skin gate, and the background saturation, kept-colour dE2000 and fringe measured on every sampled frame; the reference was keyed and graded by hand"
+board: {stills: [2.0, 7.0], clip: [0.0, 12.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

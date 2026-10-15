@@ -1,0 +1,22 @@
+id: composite_fill
+family: composite
+verb: add_type_window
+stage: motion
+params: {fill_mode: [inside, outside], field: [black, accent]}
+needs:
+  lane_features: ["chromium", "ffmpeg:alphamerge"]
+  footage: "a fill with motion and texture (b-roll, a launch, a crowd); flat footage reads as plain letters"
+binds_to: [section, word.payoff, cut]
+budget:
+  calm: {per_short: 1, min_gap_s: 10}
+  designed: {per_short: 1, min_gap_s: 6}
+  charged: {per_short: 2, min_gap_s: 4}
+never: ["as decoration over a talking head that has nothing to show", "two type windows back to back"]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost: {ms_per_frame: {interactive: 12.0, batch: 12.0, local: 6.0}, fixed_ms: 900}
+exemplars: ["31@≈0.3–7.7", "02@0.03–3.07"]
+verify: ["region_locality<=2", "land_err_f<=1"]
+status: live
+description: "giant letters full of footage (on black, or as windows onto the picture), optionally one letter opening into the full frame"
+skill: compositing

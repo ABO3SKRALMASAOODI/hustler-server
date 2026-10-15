@@ -338,6 +338,18 @@ class FxPlan:
         # CPU-ms the render's devices may still add (devices.render_budget_ms,
         # spent in program order); None: no cap (cost model unreadable).
         self.budget_ms = None
+        # Wave 1 (INTERFACES_W1.md §1): {(label, space): [item ids]} — the
+        # program mattes this render's compilers asked for in prepare
+        # (request_matte). The renderer builds a matte chain only when
+        # asked: no request, no mask filters (md5 identity).
+        self.matte_requests = {}
+        # Wave 1 integration: the render's EDL and media (prepare), whether
+        # any motion item carries a composite (1C), and the retry switch
+        # that draws every composite item as its plain graphic.
+        self.edl = {}
+        self.media = {}
+        self.has_composites = False
+        self.no_composites = False
         self._uid = 0
         self._compilers = {}
 
@@ -522,18 +534,34 @@ def _sidecar_status(item, source, plan):
 
 
 def _source_ranges(item, plan):
+    """The SOURCE spans an item's program window plays (speed pieces
+    mapped, inserts skipped, every kept span on its own).
+
+    Wave 1 review (w1r): this read the window's two ENDPOINTS through
+    ``out_to_src``. A window ending in an insert — the payoff hold every
+    podcast short carries — read None and asked for no range at all, so the
+    resolver saw the matte "absent" and the device took its substitute
+    (colour_kept_payoff, the top recipe, rendered as nothing on a short
+    whose matte was measured); a window across reordered keeps read b < a
+    the same way, and one across a cut asked for the source the cut
+    removed."""
     tl = plan.tl
     if tl is None:
         return []
-    a = b = None
     if item.get("start") is not None and item.get("end") is not None:
-        a, b = tl.out_to_src(item["start"]), tl.out_to_src(item["end"])
+        t0, t1 = float(item["start"]), float(item["end"])
     elif item.get("at") is not None:
         t = float(item["at"])
-        a, b = tl.out_to_src(max(0.0, t - 1.0)), tl.out_to_src(t + 1.0)
-    if a is not None and b is not None and b > a:
-        return [(a, b)]
-    return []
+        t0, t1 = max(0.0, t - 1.0), t + 1.0
+    else:
+        return []
+    try:
+        import matte_track
+        return [(a, b) for a, b in matte_track.program_to_source(tl, t0, t1)
+                if b > a]
+    except Exception:  # noqa: BLE001 — the Wave 0 reading
+        a, b = tl.out_to_src(t0), tl.out_to_src(t1)
+        return [(a, b)] if a is not None and b is not None and b > a else []
 
 
 def _est_ms(comp, plan, item):
@@ -553,16 +581,28 @@ def _est_ms(comp, plan, item):
     return 0.0
 
 
-def prepare(edl, *, tl, W, H, fps, preview, workdir, source=None):
+def prepare(edl, *, tl, W, H, fps, preview, workdir, source=None,
+            media=None):
     """Resolve rungs and allocate inputs for this render's fx items.
 
     ``edl`` is the validated dump the renderer draws (already through
     ``schemas.strip_unknown_fx``). Returns an FxPlan — empty when there are
     no items, and then every hook is a no-op. Never raises for an item: a
-    problem becomes that item's ``omit`` row."""
+    problem becomes that item's ``omit`` row.
+
+    Wave 1 integration: the plan carries ``plan.edl`` (this dump) and
+    ``plan.media`` = {src_path, asset_locals, index, audio_only} so
+    compilers read the render's context from the plan, not from the call
+    stack (card regions, the Look accent, strobe and plate frames, the
+    colour hit's hue)."""
     plan = FxPlan(W=W, H=H, fps=fps, preview=preview, workdir=workdir,
                   program_s=(getattr(tl, "out_duration", None) or 0.0),
                   tl=tl, source=source)
+    plan.edl = edl if isinstance(edl, dict) else {}
+    plan.media = dict(media) if isinstance(media, dict) else {}
+    plan.has_composites = any(
+        isinstance(m, dict) and isinstance(m.get("composite"), dict)
+        for m in plan.edl.get("motion") or [])
     items = [i for i in (edl or {}).get("fx") or [] if isinstance(i, dict)]
     if any(i.get("device") for i in items):
         plan.budget_ms = _device_budget(plan, edl)
@@ -872,6 +912,8 @@ def mask(plan, label, space=None, ctx=None):
     space = at or space or "screen"
     prefix = name.split(":", 1)[0]
     provider = _MASK_PROVIDERS.get(prefix)
+    if provider is None and prefix in MASK_PEERS:
+        provider = peer_fn(MASK_PEERS[prefix])
     if provider is None:
         return None
     try:
@@ -886,12 +928,100 @@ def _close_masks(ctx):
     ctx._mask_tails = []
 
 
+# ── Wave 1: the program matte API (INTERFACES_W1.md §1) ─────────────────
+# Function-level owner: track 1A (request_matte, matte_info, program_matte,
+# handle_matte, _person_mask). The stubs below are the pinned signatures;
+# every consumer treats an absent matte as its substitute rung.
+
+MATTE_STATUSES = ("ready", "partial", "absent")
+
+
+def matte_info(plan, label="person"):
+    """What the program matte for ``label`` will be on this render, without
+    building it. A dict (shape pinned):
+
+      label    "person" (or "face")
+      status   ready (every window measured) | partial (some windows black,
+               inert) | absent
+      source   "rvm" | "u2net" | "photometric" | None
+      reason   one human line (the report's reason for a degrade)
+      windows  [{"t0", "t1", "status", "source", "flicker", "edge_chatter",
+                 "ok"}] in PROGRAM seconds; ``ok`` False = chunk QA over the
+               bar: crisp devices (fill, outline, poster) demote to soft
+               ones (glow) there
+      qa       {"flicker", "edge_chatter"} program-wide maxima, or {}
+
+    Track 1A (worker/matte_track.py): the ``matte.person`` sidecar chunks
+    under the windows this render's consumers asked for, read (and, on a
+    render that may launch, requested) through sidecars.py. A plan with no
+    timeline or source identity — and every plan while the program matte is
+    off — reads absent."""
+    try:
+        import matte_track
+        pm = matte_track.for_plan(plan)
+        if pm is not None:
+            return pm.info(label)
+        return matte_track.absent_info(label)
+    except Exception:  # noqa: BLE001 — a matte question never fails a render
+        return {"label": label, "status": "absent", "source": None,
+                "reason": "no program matte on this render",
+                "windows": [], "qa": {}}
+
+
+def request_matte(plan, item, label="person", space="world"):
+    """A compiler's ``prepare`` asks for the program matte (``label`` in
+    ``space``: world = the picture's geometry before the camera, screen =
+    after it). Records the request so the renderer builds the chain, and
+    returns ``matte_info`` for the rung decision. Never raises."""
+    try:
+        if plan is not None:
+            key = (str(label), "screen" if space == "screen" else "world")
+            plan.matte_requests.setdefault(key, []).append(
+                (item or {}).get("id"))
+            import matte_track
+            pm = matte_track.for_plan(plan)
+            if pm is not None:
+                pm.want_item(item, str(label).split(":", 1)[0],
+                             "screen" if space == "screen" else "world")
+        return matte_info(plan, label)
+    except Exception:  # noqa: BLE001 — a matte question never fails a render
+        return {"label": label, "status": "absent", "source": None,
+                "reason": "matte request failed", "windows": [], "qa": {}}
+
+
 def program_matte(plan, space="world"):
     """The person matte in program space (``space`` world: the picture's
-    geometry before the camera; screen: after it). STUB — returns None until
-    track 1A builds it from source-space ``matte.person`` sidecars. 1B, 1C
-    and 1D treat None as "matte absent": their substitute rung."""
-    return None
+    geometry before the camera; screen: after it), as a FRESH gray pad the
+    caller consumes, or None (absent: 1B, 1C and 1D take their substitute
+    rung). Built by the renderer from source-space ``matte.person`` sidecars
+    through the picture's own per-block chain (worker/matte_track.py) — only
+    on a render whose consumers asked in prepare (``request_matte``)."""
+    try:
+        import matte_track
+        pm = matte_track.for_plan(plan, create=False)
+        if pm is None or not pm.active:
+            return None
+        return pm.pad("screen" if space == "screen" else "world", "person")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def handle_matte(ctx, side):
+    """At the ``junction`` stage: the person matte of one side's 2h-frame
+    handle stream (``side`` "a" = outgoing, "b" = incoming), measured on the
+    handle's own SOURCE frames (frames past an out-point are not in the
+    program matte), as a fresh gray pad, or None (1D's ``matte_cut`` takes
+    its substitute rung). The renderer hands each junction a builder
+    (``ctx.junction["matte"]``) that carries the sidecar frames under the
+    handle through the handle's own normalize chain."""
+    try:
+        build = ((getattr(ctx, "junction", None) or {}).get("matte")
+                 if ctx is not None else None)
+        if build is None or side not in ("a", "b"):
+            return None
+        return build(side)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _person_mask(plan, name, space, ctx):
@@ -900,13 +1030,75 @@ def _person_mask(plan, name, space, ctx):
 
 register_mask("person", _person_mask)
 
+# Mask providers that live in track modules, resolved on first use so a
+# render that never asks never imports them (and a module that does not
+# exist yet reads as "absent"). INTERFACES_W1.md §1.3.
+MASK_PEERS = {
+    "face": "matte_track:face_mask",       # 1A: faces.yunet soft ellipses
+    "glyph": "compositor:glyph_mask",      # 1C: a motion item's clip alpha
+    "region": "regions:region_mask",       # 1C: an fx item's FxRegion
+    "hue": "gradewin:hue_mask",            # 1E: hue key (hue_key())
+}
+
+
+def peer(spec, *args, default=None, **kwargs):
+    """Call a function another track owns, by ``"module:function"``.
+    Returns ``default`` when the module or function does not exist (yet) or
+    the call raises: a cross-track call can degrade a device, never fail a
+    render. The pinned peer functions are listed in INTERFACES_W1.md §1."""
+    fn = peer_fn(spec)
+    if fn is None:
+        return default
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        print(f"[fx] peer {spec} failed: {type(e).__name__}: "
+              f"{str(e)[:160]}", flush=True)
+        return default
+
+
+def peer_fn(spec):
+    """The callable named by ``"module:function"``, or None."""
+    mod_name, _, attr = str(spec or "").partition(":")
+    if not mod_name or not attr:
+        return None
+    try:
+        mod = importlib.import_module(mod_name)
+    except Exception:  # noqa: BLE001
+        return None
+    fn = getattr(mod, attr, None)
+    return fn if callable(fn) else None
+
+
+def landing_frames(plan, item):
+    """The program frames a device LANDS on (proof strips, land_err_f):
+    the compiler's optional ``landing(plan, item) -> [frame]`` hook, else the
+    item's first frame (picture stages) or its cut frame (junction).
+    [] when it lands nowhere (music_bus). Never raises."""
+    comp = compiler_for((item or {}).get("type"))
+    fn = getattr(comp, "landing", None)
+    if fn is not None:
+        try:
+            return [int(f) for f in fn(plan, item)]
+        except Exception:  # noqa: BLE001
+            pass
+    fps = getattr(plan, "fps", None) or 30.0
+    try:
+        if item.get("stage") == "junction" and item.get("at") is not None:
+            return [fxprims.frame_at(float(item["at"]), fps)]
+        if item.get("start") is not None:
+            return [fxprims.frame_at(float(item["start"]), fps)]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
 
 # ------------------------------------------------------------------ fallback
 def without_fx(plan, err):
     """The plan to re-render with after an encode failed with fx in it: an
     empty plan, every item reported ``omit`` with the failure. The renderer
     re-runs once with it — a device can degrade, never fail a render."""
-    if plan is None or plan.empty:
+    if plan is None or (plan.empty and not plan.has_composites):
         return plan
     first = (str(err).strip().splitlines() or [""])[-1][:160]
     items = ([it for its in plan.by_stage.values() for it in its]
@@ -915,9 +1107,18 @@ def without_fx(plan, err):
     fresh = FxPlan(W=plan.W, H=plan.H, fps=plan.fps, preview=plan.preview,
                    workdir=plan.workdir, program_s=plan.program_s,
                    tl=plan.tl, source=plan.source)
+    fresh.edl, fresh.media = plan.edl, plan.media
     for it in items:
         fresh.note(it, "omit", f"the fx graph failed on this lane "
                    f"({first}); rendered without it")
+    if plan.has_composites:
+        # 1C's composites (blend, fill, ghost, clip region) are fx plumbing
+        # too: the retry draws each such graphic plain, and says so
+        fresh.no_composites = True
+        for m in plan.edl.get("motion") or []:
+            if isinstance(m, dict) and isinstance(m.get("composite"), dict):
+                fresh.note(m, "substitute", f"the fx graph failed on this "
+                           f"lane ({first}); drawn as the plain graphic")
     return fresh
 
 

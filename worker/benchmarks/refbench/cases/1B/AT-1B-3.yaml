@@ -1,0 +1,123 @@
+# AT-1B-3 (track 1B). Devices are apply_edit_batch operations (the stale-client path).
+# Until track 1A's program matte is live, refbench renders these on their substitute rungs;
+# tests/test_w1b_acceptance.py runs them with the 1A stand-in and measures every bar.
+id: AT-1B-3
+track: 1B
+title: subject held while the world swaps to three plates (V12 + V13)
+local_only: true
+interim: false
+reference:
+- ref: '20'
+  t:
+  - 7.36
+  - 7.4
+  approx: false
+  board_t: 7.4
+- ref: '22'
+  t:
+  - 8.1
+  - 8.43
+  approx: true
+footage:
+- vfl: V12
+  window: walkon
+- vfl: V13
+  window: starship_launch_4k60
+- vfl: V13
+  window: colossus_aisle
+- vfl: V13
+  window: dragon_unveil
+music: null
+aspect: '9:16'
+mode: engine
+edl:
+  base: vfl_default
+  window: 0
+  keep:
+  - - 15.2
+    - 21.2
+  focus:
+  - 0.52
+  - 0.5
+  ops:
+  - action: upsert
+    layer: fx
+    id: bg1
+    value:
+      id: bg1
+      type: background
+      stage: world
+      start: 2.0
+      end: 2.34
+      kind: source
+      source:
+        kind: asset
+        asset_key: media/w1b/starship.mp4
+        offset_s: 4.0
+      hold_subject: true
+      hold_t: 1.97
+      device: background_subject_hold
+  - action: upsert
+    layer: fx
+    id: bg2
+    value:
+      id: bg2
+      type: background
+      stage: world
+      start: 2.34
+      end: 2.67
+      kind: source
+      source:
+        kind: asset
+        asset_key: media/w1b/colossus.mp4
+        offset_s: 6.0
+      hold_subject: true
+      hold_t: 1.97
+      device: background_subject_hold
+  - action: upsert
+    layer: fx
+    id: bg3
+    value:
+      id: bg3
+      type: background
+      stage: world
+      start: 2.67
+      end: 3.0
+      kind: source
+      source:
+        kind: asset
+        asset_key: media/w1b/dragon.mp4
+        offset_s: 6.0
+      hold_subject: true
+      hold_t: 1.97
+      device: background_subject_hold
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: land_err_f
+  item: bg1
+  op: <=
+  value: 0
+- name: duration_exact
+  op: <=
+  value: 0
+- name: flash_risk
+  op: <=
+  value: 3
+beyond: three plates from three other films swap on their target frames with the speaker frozen to 0 px,
+  the cut-out decontaminated against each new world, from apply_edit_batch operations
+board:
+  stills:
+  - 2.0
+  - 2.34
+  clip:
+  - 1.5
+  - 3.5
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

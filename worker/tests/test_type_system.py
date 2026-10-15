@@ -566,10 +566,13 @@ def test_a_hero_behind_the_speaker_stores_its_face_safe_display_placement(probe,
 
 
 def test_a_hero_the_render_could_not_set_behind_falls_back_at_write(probe, monkeypatch):
+    import config
     import follow
     _fake_matte(monkeypatch)
-    # a crop that follows the speaker across the window: the renderer would
-    # drop the depth, so the write draws the face-safe display slam instead
+    # Wave 0's rule (the program matte switched off): a crop that follows
+    # the speaker across the window — the renderer would drop the depth, so
+    # the write draws the face-safe display slam instead
+    monkeypatch.setattr(config, "PROGRAM_MATTE_OFF", True)
     monkeypatch.setattr(follow, "moves_during", lambda edl, spans: True)
     ctx = _Ctx(_edl())
     out = motion_tools.add_motion_graphic(ctx, "word_slam", 20.0, 21.5, id="h",
@@ -577,6 +580,22 @@ def test_a_hero_the_render_could_not_set_behind_falls_back_at_write(probe, monke
     it = ctx.item("h")
     assert it["layer"] == "above_captions" and it["params"]["tier"] == "display"
     assert "HERO FALLBACK" in out and "follows the speaker" in out, out
+
+
+def test_a_hero_under_a_follow_crop_stays_behind_through_the_program_matte(
+        probe, monkeypatch):
+    """Wave 1 (track 1A): the person matte is carried through the picture's
+    own framing, a crop that follows the speaker included — the hero stays
+    behind the speaker (worker/matte_track.py)."""
+    import follow
+    _fake_matte(monkeypatch)
+    monkeypatch.setattr(follow, "moves_during", lambda edl, spans: True)
+    ctx = _Ctx(_edl())
+    out = motion_tools.add_motion_graphic(ctx, "word_slam", 20.0, 21.5, id="h",
+                                          params={"text": "*more*", "tier": "hero"})
+    it = ctx.item("h")
+    assert it["layer"] == "behind_subject" and it["params"]["tier"] == "hero"
+    assert "HERO FALLBACK" not in out, out
 
 
 def test_the_render_never_draws_a_hero_over_the_face(monkeypatch):

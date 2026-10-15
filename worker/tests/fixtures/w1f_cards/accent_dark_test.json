@@ -1,0 +1,53 @@
+{
+  "id": "accent_dark_test",
+  "family": "punctuation",
+  "verb": "add_accent",
+  "stage": "pre_captions",
+  "params": {
+    "kind": "mirror",
+    "frames": [
+      1
+    ]
+  },
+  "needs": {},
+  "binds_to": [
+    "stress"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 1
+    },
+    "charged": {
+      "per_short": 1
+    }
+  },
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 2.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "04@1.93"
+  ],
+  "verify": [
+    "land_err_f<=1"
+  ],
+  "status": "dark",
+  "fx_type": "accent",
+  "description": "dark test card",
+  "flag": "W1F_TEST_DARK"
+}

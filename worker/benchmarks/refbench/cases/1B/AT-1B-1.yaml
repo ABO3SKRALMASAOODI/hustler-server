@@ -1,0 +1,115 @@
+# AT-1B-1 (track 1B). Devices are apply_edit_batch operations (the stale-client path).
+# Until track 1A's program matte is live, refbench renders these on their substitute rungs;
+# tests/test_w1b_acceptance.py runs them with the 1A stand-in and measures every bar.
+id: AT-1B-1
+track: 1B
+title: white silhouette flashes on the three strongest stresses (V12 walk-on)
+local_only: true
+interim: false
+reference:
+- ref: '22'
+  t:
+  - 8.43
+  - 12.33
+  approx: true
+  board_t: 8.43
+footage:
+- vfl: V12
+  window: walkon
+music: null
+aspect: '9:16'
+mode: engine
+edl:
+  base: vfl_default
+  keep:
+  - - 15.2
+    - 22.2
+  focus:
+  - 0.52
+  - 0.5
+  ops:
+  - action: upsert
+    layer: fx
+    id: sx1
+    value:
+      id: sx1
+      type: subject
+      stage: world
+      start: 3.57
+      end: 3.67
+      kind: fill
+      colour: white
+      decay_f: 2
+      device: subject_fill_flash
+      bind:
+        'on': stress
+        ref: 34
+        rhythm: speech
+  - action: upsert
+    layer: fx
+    id: sx2
+    value:
+      id: sx2
+      type: subject
+      stage: world
+      start: 5.41
+      end: 5.51
+      kind: fill
+      colour: white
+      decay_f: 2
+      device: subject_fill_flash
+      bind:
+        'on': stress
+        ref: 41
+        rhythm: speech
+  - action: upsert
+    layer: fx
+    id: sx3
+    value:
+      id: sx3
+      type: subject
+      stage: world
+      start: 6.77
+      end: 6.87
+      kind: fill
+      colour: white
+      decay_f: 2
+      device: subject_fill_flash
+      bind:
+        'on': stress
+        ref: 45
+        rhythm: speech
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: land_err_f
+  item: sx1
+  op: <=
+  value: 1
+- name: region_locality
+  item: sx1
+  op: <=
+  value: 2
+- name: flash_risk
+  op: <=
+  value: 3
+- name: duration_exact
+  op: <=
+  value: 0
+beyond: the same sentence lands on all six shots of a montage in one call (on=stress, per=shot), each
+  flash bound to its word and re-solved on a keep change; fill IoU, subject Y and background delta measured
+board:
+  stills:
+  - 3.57
+  - 3.6
+  clip:
+  - 2.5
+  - 7.5
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

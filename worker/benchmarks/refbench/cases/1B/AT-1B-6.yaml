@@ -1,0 +1,66 @@
+# AT-1B-6 (track 1B). Devices are apply_edit_batch operations (the stale-client path).
+# Until track 1A's program matte is live, refbench renders these on their substitute rungs;
+# tests/test_w1b_acceptance.py runs them with the 1A stand-in and measures every bar.
+id: AT-1B-6
+track: 1B
+title: background replaced by a UI recording of valmera.io (V02)
+local_only: true
+interim: false
+reference:
+- ref: '18'
+  t:
+  - 10.72
+  - 10.8
+  approx: false
+  board_t: 10.72
+footage:
+- vfl: V02
+  window: thiel_flying_cars
+music: null
+aspect: '9:16'
+mode: engine
+edl:
+  base: vfl_default
+  keep:
+  - - 841.01
+    - 861.01
+  focus:
+  - 0.41
+  - 0.31
+  ops:
+  - action: upsert
+    layer: fx
+    id: bg1
+    value:
+      id: bg1
+      type: background
+      stage: world
+      start: 2.0
+      end: 4.0
+      kind: source
+      device: background_swap
+      source:
+        kind: asset
+        asset_key: media/w1b/ui.mp4
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+beyond: the speaker stands in front of the product's own UI recording (record_website), cut out on a 9:16
+  re-frame; the subject core is untouched to 0 levels
+board:
+  stills:
+  - 3.0
+  clip:
+  - 2.0
+  - 4.0
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

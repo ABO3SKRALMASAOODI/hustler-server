@@ -143,10 +143,12 @@ def _spec_inserts_flash(m):
 
 def _spec_future_fx(m):
     """A writer one version ahead (executor skew): an fx type this lane
-    does not register. The render path strips it (rung omit)."""
+    does not register. The render path strips it (rung omit). (Re-pinned at
+    the Wave 1 interface pass: ``subject`` becomes a real type when 1B goes
+    live, so the future type is one no wave will register.)"""
     edl = default_edl(SRC_S)
     edl["keep"] = [[1.0, 6.0]]
-    edl["fx"] = [{"id": "fx1", "type": "subject", "stage": "world",
+    edl["fx"] = [{"id": "fx1", "type": "zz_future_fx", "stage": "world",
                   "start": 1.0, "end": 1.5, "device": "subject_fill_flash"}]
     return edl, _index(), {}
 

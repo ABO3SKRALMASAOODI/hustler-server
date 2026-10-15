@@ -1,0 +1,41 @@
+# AT-1D-1: accelerating 1-frame negatives into the payoff on the prosody grid.
+# The ops are exactly what add_accent(kind=negative, on=word,
+# density=accelerate, start=1.5, end=10.15, count=9) writes on this window
+# with the user's ask for flashing (tests/test_w1d_local.py measures the
+# verb path; this case proves the stale-client path renders the same items).
+id: AT-1D-1
+track: 1D
+title: accelerating 1-frame negatives into "140 characters", 9:16 crop
+local_only: true
+interim: false
+reference:
+  - {ref: "04", t: [1.93, 12.6], approx: false, board_t: 13.233}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[869.01, 881.51]]
+  focus: [0.41, 0.31]
+  ops:
+    - {action: upsert, layer: fx, id: ac_neg1, value: {id: ac_neg1, type: accent, stage: pre_captions, start: 3.24, end: 3.27, kind: negative, device: accent_negative, bind: {on: word, ref: 107, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_neg2, value: {id: ac_neg2, type: accent, stage: pre_captions, start: 5.04, end: 5.07, kind: negative, device: accent_negative, bind: {on: word, ref: 115, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_neg3, value: {id: ac_neg3, type: accent, stage: pre_captions, start: 6.54, end: 6.57, kind: negative, device: accent_negative, bind: {on: word, ref: 122, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_neg4, value: {id: ac_neg4, type: accent, stage: pre_captions, start: 7.84, end: 7.87, kind: negative, device: accent_negative, bind: {on: word, ref: 126, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_neg5, value: {id: ac_neg5, type: accent, stage: pre_captions, start: 8.74, end: 8.78, kind: negative, device: accent_negative, bind: {on: word, ref: 131, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_neg6, value: {id: ac_neg6, type: accent, stage: pre_captions, start: 9.38, end: 9.41, kind: negative, device: accent_negative, bind: {on: word, ref: 134, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_neg7, value: {id: ac_neg7, type: accent, stage: pre_captions, start: 9.78, end: 9.81, kind: negative, device: accent_negative, bind: {on: word, ref: 136, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_neg8, value: {id: ac_neg8, type: accent, stage: pre_captions, start: 9.94, end: 9.98, kind: negative, device: accent_negative, bind: {on: word, ref: 138, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_neg9, value: {id: ac_neg9, type: accent, stage: pre_captions, start: 10.04, end: 10.08, kind: negative, device: accent_negative, bind: {on: word, ref: 139, rhythm: speech}}}
+chat: null
+render: {variant: final}
+allow: [flash_optin]
+metrics:
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: flash_risk}
+  - {name: cost_ratio}
+beyond: "placed from one sentence on the speaker's own word onsets (no music), every hit exactly one frame on its planned frame, spacing measured monotone-decreasing, flash safety thinning the tail unless the user asked; the reference was keyed by hand"
+board: {stills: [9.78, 9.94], clip: [7.5, 10.6]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

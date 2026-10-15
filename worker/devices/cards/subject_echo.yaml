@@ -1,0 +1,76 @@
+# Track 1B device card (subject_echo). Authoring source; compile with
+#   cd worker && python -m devices.compiler
+id: subject_echo
+family: matte_fx
+verb: add_subject_effect
+fx_type: subject
+stage: world
+params:
+  kind: echo
+  echo:
+  - mode: clone
+    offsets_f:
+    - 4
+    - 8
+    opacity: 0.75
+    tint: '#ff2a2a'
+  - mode: trail
+    offsets_f:
+    - 2
+    - 4
+    - 6
+    - 8
+    opacity: 0.5
+    decay: 0.3
+  - mode: twin
+    offsets_f:
+    - 24
+needs:
+  sidecars:
+  - matte.person
+  lane_features:
+  - ffmpeg:alphamerge
+  - ffmpeg:overlay
+  footage: a person in shot (matte coverage >= 0.4% of the frame)
+binds_to:
+- section
+- beat
+- drop
+- stress
+budget:
+  calm:
+    per_short: 1
+    min_gap_s: 8
+  designed:
+    per_short: 1
+    min_gap_s: 6
+  charged:
+    per_short: 2
+    min_gap_s: 4
+never:
+- on a static subject (the copies stack invisibly)
+- with offsets past the shot's start
+owner_flags:
+  adds_sound: false
+  adds_zoom: false
+  flash: false
+rungs:
+- full
+- reduced
+- omit
+cost:
+  ms_per_frame:
+    interactive: 15.2
+    batch: 110.0
+    local: 7.6
+  fixed_ms: 80
+exemplars:
+- 40@≈18.3–19.3
+- 22@≈6.0–7.3
+verify:
+- region_locality
+- matte_flicker<=0.035
+status: live
+description: copies of the subject from a few frames earlier (clones, trails, a twin) under
+  the subject
+skill: subject-fx

@@ -1,0 +1,79 @@
+{
+  "id": "subject_fill_flash",
+  "family": "matte_fx",
+  "verb": "add_subject_effect",
+  "stage": "world",
+  "params": {
+    "kind": "fill",
+    "colour": [
+      "white",
+      "accent"
+    ],
+    "decay_f": [
+      2
+    ],
+    "frames": [
+      2
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ],
+    "lane_features": [
+      "ffmpeg:maskedmerge"
+    ],
+    "footage": "person, coverage >= 0.4%"
+  },
+  "binds_to": [
+    "word.payoff",
+    "stress",
+    "downbeat",
+    "beat.kick"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 4
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 2.5
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 1
+    }
+  },
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": true
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "full_frame_flash",
+      "intensity": 0.6
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 2.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "22@\u22488.43",
+    "40@\u22484.67"
+  ],
+  "verify": [
+    "land_err_f<=1",
+    "flash_risk"
+  ],
+  "status": "live",
+  "fx_type": "subject",
+  "description": "white silhouette flash: the subject filled white for two frames"
+}

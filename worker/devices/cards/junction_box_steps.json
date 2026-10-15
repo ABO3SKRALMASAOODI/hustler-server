@@ -1,0 +1,83 @@
+{
+  "id": "junction_box_steps",
+  "family": "transition",
+  "verb": "set_junction",
+  "fx_type": "junction",
+  "stage": "junction",
+  "params": {
+    "style": [
+      "box_steps"
+    ],
+    "duration_s": [
+      0.8,
+      0.6,
+      1.0
+    ],
+    "origin": [
+      {
+        "kind": "centre"
+      },
+      {
+        "kind": "face"
+      }
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:alphamerge"
+    ],
+    "footage": "a real cut (a shot change or an insert)"
+  },
+  "binds_to": [
+    "cut",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "designed": {
+      "per_short": 4,
+      "min_gap_s": 2
+    },
+    "charged": {
+      "per_short": 10,
+      "min_gap_s": 1
+    }
+  },
+  "never": [
+    "on a jump cut inside one continuous take",
+    "two junction families in one section",
+    "the same style on consecutive cuts except a deliberate callback"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": true
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 8.0,
+      "batch": 6.0,
+      "local": 4.8
+    },
+    "fixed_ms": 150
+  },
+  "exemplars": [
+    "14@15.30–16.07"
+  ],
+  "verify": [
+    "duration_exact<=0",
+    "land_err_f<=1",
+    "flash_risk<=3"
+  ],
+  "status": "live",
+  "description": "The next shot opens in a box that grows in steps, each landing with a paper-white fill (ref 14@15.30).",
+  "skill": "punctuation"
+}

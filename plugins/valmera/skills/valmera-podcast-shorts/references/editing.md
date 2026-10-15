@@ -124,6 +124,8 @@ recheck every output-timed item and the card's end.
 | Frame | 1-2: the pilot's layout (`set_picture_card`), or `auto_reframe`/`set_frame` for full-bleed | full-bleed with a per-shot `focus_track` (source seconds), or the card from `framing.json` / looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette. On a call source (SOURCE LAYOUT in `get_video_info`) `auto_reframe` and `source='auto'` frame the call's picture at <= 2x (an 'auto' card narrows rather than cut the face) and name the `erase_region` for the host's self-view: run that erase first. `auto_reframe` and an `'auto'` card follow a speaker who leans or steps inside a shot (still while they sway, a glide only when a still frame would cut the head; a turned close-up keeps its nose side clear) — a hand-written `set_frame` aim is still and drops that. A burned-in screenshot or screen share the host reads from is never cropped through and never shown without the speaker for more than a second while they talk: act on SCREEN INSET / NO FACE IN THE CROP notes with the call they name (a speaker + screen stack per camera shot, `panels=[{..., source:'auto'}, {..., source:'inset'}]`, so the speaker stays on screen while they talk — the speaker panel is solved from the face track: whole head, chin and hair margins, lead room, the screen box kept out where any framing can, and a gutter between the panels that captions never sit on (they take a free band, usually above the speaker panel); `set_picture_card(source='inset')` alone only for a beat — over speech it reports NO FACE ON SCREEN), and keep captions and graphics clear of the card. A card's fade/lift entrance and exit dissolve the whole card with the full-frame shot (never a frame of bare canvas); on a cut use `'none'` |
 | Headline | 0-1 `set_editorial_graphic(kind="headline", speaker, text)`, or with a card 0-1 `add_motion_graphic(template='headline', start=0, params={text, kicker})` | the editorial headline for headline-conversation (verified speaker first; it never moves); on a card layout whose band also carries hero lockups, the persistent `headline` template instead: end and y omitted, it sits in the band above the card and yields to every motion-graphic lockup there by itself (not to add_text or typography scenes, so band lockups are motion templates), so the band is never empty for seconds |
 | Designed beats | 2-5 `add_motion_graphic` | one per beat that EARNS ITS PLACE: about one hero graphic per 6-8 s at most, under ~50% of the runtime, at most 3 type roles and one accent; never a lockup or typewriter of the words being heard, never a spoken list as rows of text (insert the items instead); silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
+| Signature move | 1 `suggest_recipes`, then 1 `apply_recipe(name)` | after the designed beats: ONE recipe that fits THIS story (it names the word), preferring a fresh one over what the batch's other shorts used; or compose your own device when no recipe fits; never repeat last short's move by habit |
+| Devices | 0-1 `suggest_devices`, then the kept candidates' `op`s in ONE `apply_edit_batch` | at most what looks.md **Devices** allows beside the signature move (usually nothing more, maybe one punctuation frame on the turn); copy each op exactly; zero is fine |
 | Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas, a genuinely jarring jump cut); zero is fine; never on every cut, take, sentence or hero moment. Modes per the Look (schema names) |
 | Cut hygiene | none in MCP | `conceal_jump_cuts` is not in the MCP tool list (Oct 2026): leave a same-shot jump cut bare, land a graphic change or B-roll on it, or re-cut at a breath; none in the first 1.5 s, at most one in the first 3 s |
 | Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
@@ -167,7 +169,9 @@ after a short pause, then report it.
 - Every thesis line, list, triad, name and number gets a beat that adds
   information; no body stretch past ~6-8 s without one (the review's
   dead_stretch note names the line and a beat for it).
-- `layer='behind_subject'` only inside one continuous shot (no cut in the window).
+- `layer='behind_subject'` needs a person in frame; the program matte holds it
+  under a follow crop, across cuts and over ramps (a window it cannot measure
+  renders as a face-safe slam and the reply says so).
 - B-roll that shows the exact noun or action, licensed, with provenance in the
   handback; every still pushes or pans.
 - A sound only where something meaningful happens on screen (a hero
@@ -221,6 +225,12 @@ Render 1 is the complete edit, not a framing test: the framing was proven
 in the pilot.
 
 ## 5. Self-check, then fix only the weakest moment
+
+If you wrote devices, `proof_device` (no arguments: the devices of the last
+write) first: each must land within 1 frame of its word or cut, keep type
+legible and leave no face collision; remove or move one that does not, and
+say in the handback if one rendered as a substitute (the export holds an
+unacknowledged one).
 
 1. Read the render result: its PICTURE CHECK, CAPTION CHECK, MEASURES
    line and advisories (`render_preview(report=true)` re-reads them for the

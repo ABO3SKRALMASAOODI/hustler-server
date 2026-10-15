@@ -1,0 +1,19 @@
+# Track 1D strobe (worker/strobe.py).
+id: "strobe_frames"
+family: "punctuation"
+verb: "add_strobe"
+fx_type: "strobe"
+stage: "pre_captions"
+params: {pattern: ["sequence", "pingpong", "random"], fit: ["register", "cover", "contain"]}
+needs: {sidecars: [], lane_features: ["ffmpeg:overlay"], footage: "stills, clip frames or a variant set"}
+binds_to: ["section", "drop", "beat", "time"]
+budget: {calm: {per_short: 0, min_gap_s: 8}, designed: {per_short: 1, min_gap_s: 4}, charged: {per_short: 3, min_gap_s: 2}}
+never: ["without the user's ask when it changes the frame more than 3 times a second", "under a payoff word"]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: true}
+rungs: ["full", "reduced", "omit"]
+cost: {ms_per_frame: {interactive: 18.0, batch: 14.0, local: 10.0}, fixed_ms: 300}
+exemplars: ["01@0.04–0.96"]
+verify: ["land_err_f<=1", "duration_exact<=0", "flash_risk"]
+status: "live"
+description: "A frame-exact image train (stills, clip frames, a registered variant set) held 1-8 frames each over the live sound: ref 01's product strobe."
+skill: "punctuation"

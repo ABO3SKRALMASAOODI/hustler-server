@@ -1,0 +1,32 @@
+# Track 1E device card (finish_xray). Contract: devices/INTERFACES.md §5.
+id: finish_xray
+family: finish
+verb: add_finish
+fx_type: finish
+stage: pre_captions
+params:
+  kind: [xray]
+  strength: [1.0, 0.75]
+  matte_weighted: [true, false]
+needs:
+  sidecars: []
+  lane_features: []
+binds_to: [cut, section, beat, drop, word.payoff, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 6}
+  designed: {per_short: 2, min_gap_s: 3}
+  charged: {per_short: 4, min_gap_s: 1.5}
+never: [decoration with no metaphor behind it, two finish families in one section]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: true}
+rungs:
+- full
+- {reduced: unweighted (no person matte)}
+- omit
+cost:
+  ms_per_frame: {interactive: 8.8, batch: 8.8, local: 4.4}
+  fixed_ms: 150
+exemplars: [15@1.13, 27@≈19.7, 36@≈11.3–12.7]
+verify: [region_locality, determinism, flash_risk]
+status: live
+description: 'X-ray: negative, local contrast, cyan glow; clipped to the person when weighted'
+skill: finishing

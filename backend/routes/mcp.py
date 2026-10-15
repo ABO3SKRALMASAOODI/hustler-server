@@ -62,7 +62,7 @@ import storage
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
-from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core, _request_final, _final_gate
+from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core, _request_final, _final_gate, final_degraded_hold, final_hold_message
 from video_services.mcp_reads import read_metadata
 from video_services.jobs import enqueue as _enqueue
 from video_services.project_state import (
@@ -298,6 +298,8 @@ _READ_ONLY_EXACT = {
     "project_state", "index_status", "watch_video", "read_skill",
     "suggest_emphasis", "download_url", "wait_for_job", "get_edl",
     "shorts_status",
+    # Wave 1 verify department (1F): plan, prove and audit; none writes
+    "suggest_devices", "suggest_recipes", "proof_device", "audit_motion",
 }
 # Reaches something outside this project's own files: a stock library, a URL,
 # a generation provider, a live web page.
@@ -2471,6 +2473,13 @@ def _t_download_url(tok, args):
         row = cur.fetchone()
         if row and kind == "final" and not _final_gate(cur, project_id, tok["user_id"])(
                 row["id"], row.get("meta") or {}, (row.get("meta") or {}).get("edl_version")):
+            held = final_degraded_hold(row.get("meta") or {})
+            if held:
+                return _session_error(
+                    final_hold_message(held) + " Fix the cause in a new edit, "
+                    "or justify_verification_findings(['device_degraded'], "
+                    "...) saying why it is acceptable, then export_final "
+                    "again.")
             return _session_error("This export needs refreshing. Call export_final with this project_id and reviewed edl_version.")
     if not row:
         return _session_error(

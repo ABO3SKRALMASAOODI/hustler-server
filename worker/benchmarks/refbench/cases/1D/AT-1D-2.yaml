@@ -1,0 +1,36 @@
+# AT-1D-2: white hits clipped to the rounded picture card, on stresses.
+# Ops = add_accent(kind=white_hit, on=stress, density=pulse, region=card,
+# decay_f=4) on this window (tests/test_w1d_local.py).
+id: AT-1D-2
+track: 1D
+title: card-clipped white hits on stressed syllables, archival talk in a card
+local_only: true
+interim: false
+reference:
+  - {ref: "02", t: [13.667, 14.0], approx: false, board_t: 13.833}
+footage:
+  - {vfl: V03, window: jobs_fonts}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[1706.94, 1714.84]]
+  ops:
+    - {action: set, layer: effects, value: {picture_cards: [{id: pc, start: 0.0, end: 7.9, entrance: none, exit: none}]}}
+    - {action: upsert, layer: fx, id: ac_whi1, value: {id: ac_whi1, type: accent, stage: pre_captions, start: 1.47, end: 1.5, kind: white_hit, decay_f: 4, region: {shape: card}, device: accent_white_hit, bind: {on: stress, ref: 56, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_whi2, value: {id: ac_whi2, type: accent, stage: pre_captions, start: 2.7, end: 2.74, kind: white_hit, decay_f: 4, region: {shape: card}, device: accent_white_hit, bind: {on: stress, ref: 60, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_whi3, value: {id: ac_whi3, type: accent, stage: pre_captions, start: 4.24, end: 4.27, kind: white_hit, decay_f: 4, region: {shape: card}, device: accent_white_hit, bind: {on: stress, ref: 67, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_whi4, value: {id: ac_whi4, type: accent, stage: pre_captions, start: 5.01, end: 5.04, kind: white_hit, decay_f: 4, region: {shape: card}, device: accent_white_hit, bind: {on: stress, ref: 70, rhythm: speech}}}
+    - {action: upsert, layer: fx, id: ac_whi5, value: {id: ac_whi5, type: accent, stage: pre_captions, start: 5.87, end: 5.91, kind: white_hit, decay_f: 4, region: {shape: card}, device: accent_white_hit, bind: {on: stress, ref: 76, rhythm: speech}}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: flash_risk, op: "<=", value: 3}
+  - {name: region_locality}
+  - {name: cost_ratio}
+beyond: "the hits land on the speaker's measured stresses with no music, are clipped to the card's own rounded window by construction (the backdrop measured untouched), and re-solve with the card; the reference's hits were keyed per frame"
+board: {stills: [2.7, 2.74], clip: [1.0, 6.4]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

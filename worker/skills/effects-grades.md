@@ -3,10 +3,11 @@
 ## Editorial decision principles
 
 Coherence is the look. Premium reels commit to ONE grade for the whole piece
-— high-key warm, low-key teal/orange, matte filmic, or desaturated B&W with
-one accent colour — finished with fine grain over everything, a vignette or
+— high-key warm, low-key teal/orange, matte filmic, a muted noir with one
+accent colour — finished with fine grain over everything, a vignette or
 highlight bloom when the look calls for it, and a consistent transition and
-typography language. Effects are punctuation inside that look: flashes,
+typography language. Black and white is never that whole-piece grade unless
+the user asks for it: in the references it is a MOMENT (below). Effects are punctuation inside that look: flashes,
 shakes, glitches and light leaks mark real beats.
 
 - Commit to one look per edit, from the first write.
@@ -22,6 +23,23 @@ exposure, palette, source defects (dropouts, noise, compression), motion
 energy, the user's reference and the rendered result at every effect
 boundary.
 
+## Black and white is a device, never a flat look
+
+The owner's references use B&W as a MOMENT with a reason, never as the
+whole short's grade: a mono section that opens to colour on the drop or the
+turn, the speaker (or one colour) kept in a grey world, a silhouette held
+on a flat field for one thought, 1-frame negatives on the strongest hits.
+A whole-short `bw` grade is refused unless the user's own words ask for
+black and white (the write says so). To use B&W:
+- mono until the turn: `set_grade_window(start, end=<turn word>,
+  saturation=0, ramp_out_f=3)` — colour lands ON the word;
+- one colour kept: `isolate_colour(keep='subject')` (the speaker) or
+  `keep='hue'` (a red jacket), for the section the colour means something;
+- silhouette hold: `add_subject_effect(kind='poster')` for one thought;
+- negatives on hits: `add_accent(kind='negative', on='stress')`, 2-4 of them.
+`suggest_devices` proposes these bound to the right words. One per short,
+and a different one from the shorts before it.
+
 ## Strong treatment patterns
 
 LOOKS (`apply_look`) — one call composes caption look, grade, grain and
@@ -33,7 +51,9 @@ set:
   fast whips/flashes.
 - `cinematic_doc` — story and documentary: filmic contrast, matte blacks,
   grain, light-leak/burn junctions.
-- `mono_noir` — desaturated B&W with one accent colour on type.
+- `mono_noir` — noir: deep contrast, colour pushed down (not removed), one
+  red accent on type. Black and white is NOT its grade: it is a device on
+  one moment (see "Black and white is a device" below).
 - `clean_minimal` — quiet product and education: clean captions, neutral
   grade, minimal texture.
 - Legacy looks `hype`, `clean`, `cinematic`, `luxury`, `meme` remain.
@@ -54,7 +74,8 @@ GRADES (`set_color_grade`: vibrant, warm, cool, bw, vintage, cinematic) —
 choose FOR the footage: 'cinematic' crushes and desaturates (night, drama,
 moody interiors; wrong for a bright kitchen or a colourful product);
 'vibrant' for things that should look alive; 'warm' for skin and interiors;
-'cool' for tech and rain; 'bw' for a mono look with an accent in the type.
+'cool' for tech and rain; 'bw' ONLY when the user asked for black and white
+(the write is refused otherwise — a B&W moment is a grade window, below).
 `set_grade_custom` adds continuous control after the preset: exposure,
 temperature, tint, shadows and highlights use 0 as neutral; contrast and
 saturation accept small signed deltas (`contrast=0.08` → 1.08x,
@@ -101,6 +122,18 @@ pitch; everything re-anchors. Below 0.6x frames are duplicated, so prefer
 FADES (`set_fades`): a closing fade belongs on long-form and cinematic
 pieces. On a reel it plays into the loop, and a fade-in spends the only
 second where retention is decided on black.
+
+GRADE WINDOWS, ISOLATION AND FINISHES (compositing devices): a grade
+window changes one stretch — mono to colour landing on a drop (the ramp
+ends ON the frame), a black-and-white then-versus-now; isolate_colour keeps
+the subject or one hue in colour while the world goes mono; import_lut and
+match_grade carry a supplied look or match two shots of the same set;
+add_finish — CRT or LCD re-photography, film, halftone, thermal, X-ray,
+blueprint — is a metaphor or an archival treatment, never a default look;
+make_variant_set builds registered stills from one frame for a strobe. The
+one committed look still rules: these are moments inside it.
+`suggest_devices` proposes them where a section earns one, `proof_device`
+proves them; read_skill devices.
 
 ## Common failure modes
 

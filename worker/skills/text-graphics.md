@@ -62,13 +62,24 @@ the subject out per frame and the words pass genuinely behind them.
 - PEOPLE occlude the words (including what they carry); static objects do
   not. Say exactly that if asked.
 - Arguments are add_text's plus at_output_s + duration_s (2–4 s reads well).
-- It refuses with no person in the window, a subject filling most of the
-  frame, a window crossing a cut, or a speed ramp; relay the reason. It
-  reports how much of the text the subject crosses — near zero means an
-  ordinary title.
+- It refuses with no person in the window; relay the reason. The program
+  matte keeps the words behind the speaker under a follow crop, across cuts,
+  over speed ramps and on a close-up; where a window cannot be measured the
+  words render as a face-safe slam and the report says so. It reports how
+  much of the text the subject crosses — near zero means an ordinary title.
 - Behind-subject type is LARGE: the person crosses the middle of tall glyphs
   while tops and bottoms stay readable. Never shrink it to reduce hidden
   letters. No zoom, stabilize or speed ramp over the window.
+
+TYPE IN DEPTH AND COMPOSITES (devices): a motion graphic can carry a
+composite — a difference blend for an interruption over a busy plate,
+screen or add for light, footage inside its letters (a section title filled
+with another shot, or letters that open onto the next shot: add_type_window),
+a ghost stroke where the subject hides letters, and screen-locked type under
+a push the user asked for. One hero behind the subject every 6–8 s, on the
+payoff. Plan them with `suggest_devices` and prove legibility and glyph
+visibility with `proof_device`; when each earns its place:
+read_skill devices.
 
 STANDALONE TITLE CARDS (`add_title_card`): a term on its own screen —
 `add_title_card(text, at_output_s, duration_s)` splices a card in (captions
@@ -121,7 +132,9 @@ and exit on every distinct background with
 `look_at(rendered=true, output_times=[...])` (rendered looks need a
 complete preview of the current version);
 check reading time, geometry, hierarchy, caption suppression and that each
-graphic lands on its word.
+graphic lands on its word. For type behind the subject or with a
+composite, `proof_device(ids=[...])` measures the landing, legibility (Lc
+60 for payload) and face collisions on frames -3..+6 around the landing.
 
 ## Repair ladder
 

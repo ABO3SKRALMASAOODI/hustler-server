@@ -1,0 +1,79 @@
+{
+  "id": "junction_matte_cut",
+  "family": "transition",
+  "verb": "set_junction",
+  "fx_type": "junction",
+  "stage": "junction",
+  "params": {
+    "style": [
+      "matte_cut"
+    ],
+    "duration_s": [
+      0.5,
+      0.4
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ],
+    "lane_features": [
+      "ffmpeg:alphamerge"
+    ],
+    "footage": "a real cut (a shot change or an insert)"
+  },
+  "binds_to": [
+    "cut",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 2,
+      "min_gap_s": 4
+    },
+    "designed": {
+      "per_short": 4,
+      "min_gap_s": 2
+    },
+    "charged": {
+      "per_short": 10,
+      "min_gap_s": 1
+    }
+  },
+  "never": [
+    "on a jump cut inside one continuous take",
+    "two junction families in one section",
+    "the same style on consecutive cuts except a deliberate callback"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": true
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "flash_junction"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 10.0,
+      "batch": 7.5,
+      "local": 6.0
+    },
+    "fixed_ms": 150
+  },
+  "exemplars": [
+    "20@7.40"
+  ],
+  "verify": [
+    "duration_exact<=0",
+    "land_err_f<=1",
+    "flash_risk<=3"
+  ],
+  "status": "live",
+  "description": "The next shot through the outgoing speaker's silhouette, which grows to the frame (1A's handle matte).",
+  "skill": "punctuation"
+}
