@@ -1,0 +1,70 @@
+{
+  "id": "layout_breakdown",
+  "family": "layout",
+  "verb": "add_breakdown",
+  "stage": "motion",
+  "params": {
+    "template": [
+      "breakdown"
+    ],
+    "position": [
+      "bottom",
+      "top"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "any edit with devices worth showing"
+  },
+  "binds_to": [
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 10
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 6
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 4
+    }
+  },
+  "never": [
+    "over the speaker while the line is about the speaker",
+    "two layout devices at the same time"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 8.0,
+      "batch": 8.0,
+      "local": 4.0
+    },
+    "fixed_ms": 800
+  },
+  "exemplars": [
+    "19@0–17.5"
+  ],
+  "verify": [
+    "determinism"
+  ],
+  "status": "live",
+  "description": "the edit's own live-playhead timeline, truthful by construction",
+  "skill": "layouts"
+}

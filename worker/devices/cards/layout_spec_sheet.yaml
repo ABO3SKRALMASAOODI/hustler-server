@@ -1,0 +1,31 @@
+# Track 3E (layout stage). Template spec_sheet (motion/templates/spec_sheet.html),
+# written by add_motion_graphic; video slots filled by slots.py.
+id: layout_spec_sheet
+family: layout
+verb: add_motion_graphic
+stage: motion
+params:
+  template: [spec_sheet]
+  grid: [true, false]
+needs:
+  sidecars: []
+  lane_features: ["chromium"]
+  footage: "a product or a person; labels from the user's own facts"
+binds_to: [word, section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 10}
+  designed: {per_short: 2, min_gap_s: 6}
+  charged: {per_short: 3, min_gap_s: 4}
+never:
+  - "over the speaker while the line is about the speaker"
+  - "two layout devices at the same time"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 8.0, batch: 8.0, local: 4.0}
+  fixed_ms: 800
+exemplars: ["01@0.29–0.96"]
+verify: ["determinism"]
+status: live
+description: "leader lines from parts to labels on a blueprint grid"
+skill: layouts

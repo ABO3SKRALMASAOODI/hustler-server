@@ -1,0 +1,72 @@
+{
+  "id": "layout_scroll_wall",
+  "family": "layout",
+  "verb": "add_collage",
+  "stage": "motion",
+  "params": {
+    "template": [
+      "scroll_wall"
+    ],
+    "rows": [
+      5,
+      4,
+      6
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "many thumbnails (a body of work)"
+  },
+  "binds_to": [
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 10
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 6
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 4
+    }
+  },
+  "never": [
+    "over the speaker while the line is about the speaker",
+    "two layout devices at the same time"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 20.0,
+      "batch": 20.0,
+      "local": 10.0
+    },
+    "fixed_ms": 800
+  },
+  "exemplars": [
+    "07@45.2",
+    "16@18.46"
+  ],
+  "verify": [
+    "determinism"
+  ],
+  "status": "live",
+  "description": "a wall of thumbnails scrolling at constant speed",
+  "skill": "layouts"
+}

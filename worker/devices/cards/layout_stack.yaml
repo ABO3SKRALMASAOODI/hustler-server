@@ -1,0 +1,31 @@
+# Track 3E (layout stage). Template stack (motion/templates/stack.html),
+# written by set_stack; video slots filled by slots.py.
+id: layout_stack
+family: layout
+verb: set_stack
+stage: motion
+params:
+  template: [stack]
+  direction: [auto, vertical, horizontal]
+needs:
+  sidecars: []
+  lane_features: ["chromium"]
+  footage: "2-4 independent sources"
+binds_to: [section, cut, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 10}
+  designed: {per_short: 2, min_gap_s: 6}
+  charged: {per_short: 3, min_gap_s: 4}
+never:
+  - "over the speaker while the line is about the speaker"
+  - "two layout devices at the same time"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 18.0, batch: 18.0, local: 9.0}
+  fixed_ms: 800
+exemplars: ["19@0–17.5", "39@≈0–20"]
+verify: ["determinism"]
+status: live
+description: "2-4 panels of independent footage, one can grow"
+skill: layouts

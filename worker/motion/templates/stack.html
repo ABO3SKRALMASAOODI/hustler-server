@@ -1,0 +1,46 @@
+<!--MG-SPEC {"title": "Stack", "category": "layout", "also": ["media"],
+ "description": "2-4 panels of INDEPENDENT footage (panels: asset keys or source:<seconds>) stacked (vertical for 9:16, side by side for 16:9), rounded, with optional labels; one panel can grow to fill the frame at grow_at. For comparisons, before/after, the same moment from several sources, or an edit beside its source (ref 19). Flashes and accents can be clipped to one panel (add_region_effect with its rect).",
+ "duration": 4.0, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "panels": {"type": "list", "required": true, "max_items": 4, "max": 300},
+  "labels": {"type": "list", "max_items": 4, "max": 30},
+  "direction": {"type": "enum", "values": ["auto", "vertical", "horizontal"], "default": "auto"},
+  "gap": {"type": "float", "min": 0, "max": 0.06, "default": 0.012},
+  "radius": {"type": "float", "min": 0, "max": 0.06, "default": 0.02},
+  "grow": {"type": "int", "min": -1, "max": 3, "default": -1, "hint": "panel that grows to full frame (-1 none)"},
+  "grow_at": {"type": "float", "min": 0, "max": 60, "default": 0},
+  "backdrop": {"type": "color", "default": "#08080A"},
+  "accent": {"type": "color", "default": "#FF3B30"}
+ },
+ "example": {"panels": ["source:2.0", "source:30.0"], "labels": ["THEN", "NOW"]},
+ "sfx": []} -->
+<style>.lb{position:absolute;left:0;top:0;padding:.35em .7em;border-radius:999px;font:800 30px/1 'Inter',sans-serif;letter-spacing:.12em;color:#fff;background:rgba(10,10,12,.62);backdrop-filter:blur(6px)}</style>
+<div class="mg-root" id="st"></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  MG.always(); MG.box = [0, 0, W, H];
+  const root = MG.$('#st');
+  const n = Math.max(1, Math.min(4, (P.panels || []).length || 1));
+  const vert = P.direction === 'vertical' || (P.direction !== 'horizontal' && H >= W);
+  const g = (P.gap ?? 0.012) * W, rad = (P.radius ?? 0.02) * W;
+  const rects = [...Array(n)].map((_, k) => vert
+    ? [g, g + k * (H - g) / n, W - 2 * g, (H - g) / n - g]
+    : [g + k * (W - g) / n, g, (W - g) / n - g, H - 2 * g]);
+  window.__stackRects = rects.map(r => [r[0] / W, r[1] / H, (r[0] + r[2]) / W, (r[1] + r[3]) / H]);
+  const labels = (P.labels || []).map((t, k) => { const el = MG.el('div', 'lb', String(t).toUpperCase(), root); return el; });
+  MG.frame(t => {
+    const gi = P.grow ?? -1, ga = P.grow_at || D * 0.6;
+    const e = gi >= 0 ? (MG.ease.inOutCubic ? MG.ease.inOutCubic(MG.clamp((t - ga) / 0.5)) : MG.clamp((t - ga) / 0.5)) : 0;
+    for (let k = 0; k < n; k++) {
+      let [x, y, w, h] = rects[k], op = 1;
+      if (gi === k) { x = MG.lerp(x, 0, e); y = MG.lerp(y, 0, e); w = MG.lerp(w, W, e); h = MG.lerp(h, H, e); }
+      else if (gi >= 0) op = 1 - e;
+      const enter = MG.clamp((t - k * 0.12) / 0.3);
+      MG.slot('t' + k, x, y + (1 - enter) * 30, w, h, { r: rad * (gi === k ? 1 - e : 1), z: gi === k ? 1 : 0, opacity: op * enter });
+      const lb = labels[k];
+      if (lb) { lb.style.opacity = (op * enter).toFixed(3); lb.style.transform = `translate(${(x + g * 1.5).toFixed(1)}px, ${(y + g * 1.5).toFixed(1)}px)`; }
+    }
+  });
+})();
+</script>

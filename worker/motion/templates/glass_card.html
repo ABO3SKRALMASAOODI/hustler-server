@@ -1,0 +1,50 @@
+<!--MG-SPEC {"title": "Glass card", "category": "layout", "also": ["callout", "type"],
+ "description": "A small frosted-glass card — a label, a number, a one-line idea — sized to ride a fingertip or sit beside a face (attach it with the world verbs: pin [0.5, 1.12] puts it just above the finger). Springs in, holds, fades. Optional image slot. One fact per card.",
+ "duration": 2.5, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "title": {"type": "str", "required": true, "max": 28},
+  "body": {"type": "str", "default": "", "max": 48},
+  "value": {"type": "str", "default": "", "max": 12, "hint": "a big number or symbol above the title"},
+  "image": {"type": "str", "default": "", "max": 300, "hint": "asset key or source:<s> for a small picture slot"},
+  "tint": {"type": "color", "default": "#FFFFFF"},
+  "accent": {"type": "color", "default": "#FF5A1F"},
+  "width": {"type": "float", "min": 0.12, "max": 0.6, "default": 0.3, "hint": "card width, share of the frame width"},
+  "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "y": {"type": "float", "min": 0, "max": 1, "default": 0.5}
+ },
+ "example": {"value": "10x", "title": "faster", "body": "than last year"},
+ "sfx": []} -->
+<style>
+  .gc{position:absolute;left:0;top:0;border-radius:var(--rr);padding:var(--pd);background:linear-gradient(160deg,rgba(255,255,255,.34),rgba(255,255,255,.12));
+      border:2px solid rgba(255,255,255,.55);box-shadow:0 24px 60px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.6);color:#fff;transform-origin:50% 100%}
+  .gv{font:900 var(--vs)/0.95 'Inter Display','Inter',sans-serif;letter-spacing:-.03em}
+  .gt{font:800 var(--ts)/1.05 'Inter Display','Inter',sans-serif;letter-spacing:-.01em;margin-top:.12em}
+  .gb{font:600 var(--bs)/1.2 'Inter',sans-serif;opacity:.82;margin-top:.35em}
+  .gi{width:100%;aspect-ratio:16/10;border-radius:calc(var(--rr) * .6);margin-bottom:.5em}
+</style>
+<div class="mg-root"><div class="gc" id="gc"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const cw = (P.width ?? 0.3) * W;
+  const gc = MG.$('#gc');
+  gc.style.width = cw + 'px';
+  gc.style.setProperty('--rr', (cw * 0.09) + 'px'); gc.style.setProperty('--pd', (cw * 0.08) + 'px');
+  gc.style.setProperty('--vs', (cw * 0.3) + 'px'); gc.style.setProperty('--ts', (cw * 0.12) + 'px'); gc.style.setProperty('--bs', (cw * 0.075) + 'px');
+  if (P.image) { MG.always(); MG.el('div', 'gi', '', gc).id = 'gi'; }
+  if (P.value) { const v = MG.el('div', 'gv', P.value, gc); v.style.color = P.accent || '#FF5A1F'; }
+  MG.el('div', 'gt', P.title || '', gc);
+  if (P.body) MG.el('div', 'gb', P.body, gc);
+  const r = gc.getBoundingClientRect();
+  const x = (P.x ?? 0.5) * W - r.width / 2, y = (P.y ?? 0.5) * H - r.height / 2;
+  MG.box = [x - 40, y - 40, x + r.width + 40, y + r.height + 70];
+  MG.frame(t => {
+    const k = MG.spring ? MG.clamp(MG.spring(t, 0, { k: 240, d: 15 }), 0, 1.2) : MG.clamp(t / 0.25);
+    const out = MG.clamp((D - t) / 0.3);
+    gc.style.opacity = (MG.clamp(k * 2) * out).toFixed(3);
+    gc.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) scale(${(0.82 + 0.18 * k).toFixed(4)})`;
+    const gi = document.getElementById('gi');
+    if (gi) { const b = gi.getBoundingClientRect(); MG.slot('image', b.left, b.top, b.width, b.height, { r: cw * 0.054, opacity: out }); }
+  });
+})();
+</script>

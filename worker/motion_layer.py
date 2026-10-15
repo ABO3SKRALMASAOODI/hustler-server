@@ -359,6 +359,8 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
     LAST_WARNINGS.clear()
     import compositor
     compositor.forget(workdir)
+    if world is not None and fetch_asset is not None:
+        world.fetch_asset = fetch_asset        # slot sources (Wave 3, 3E)
     items = list(extra_items or []) + program_items(edl, out_duration)
     if behind_why is not None:
         swapped = []
