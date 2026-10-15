@@ -61,7 +61,11 @@ def test_unknown_kinds_raise_and_reserved_kinds_are_inert():
         sidecars.ensure("matte.persons", src, [(0, 1)])
     with pytest.raises(ValueError):
         sidecars.ensure("faces.yunet", src, [(0, 1)], priority="urgent")
-    h = sidecars.ensure("depth.small", src, [(0, 4)])
+    # a reserved kind no track ships yet (Wave 4 ships depth.small; a
+    # later wave's kind leaves this list as it ships)
+    unshipped = next(k for k in sidecars.RESERVED_KINDS
+                     if k not in sidecars._KIND_SPECS)
+    h = sidecars.ensure(unshipped, src, [(0, 4)])
     assert sidecars.status(h) == "absent" and sidecars.fetch(h, "/x") == []
     assert sidecars.estimate_s(h) == 0.0
 

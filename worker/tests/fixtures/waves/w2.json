@@ -1,0 +1,60 @@
+{
+  "wave": 2,
+  "doc": "worker/devices/INTERFACES_W2.md \u00a72, \u00a75, \u00a710: Wave 2's growth, set aside by the Wave 0/1 seam tests (mirrors tests/w2_support.py)",
+  "fx_tags": [
+    "arrange"
+  ],
+  "verbs": [
+    "add_typeset",
+    "align_lyrics",
+    "analyze_music",
+    "analyze_reference",
+    "animate_still",
+    "apply_format_pack",
+    "check_speech",
+    "find_shots",
+    "get_syllables",
+    "import_font",
+    "pick_still",
+    "plan_loop",
+    "plan_to_music",
+    "remove_typeset",
+    "render_variants",
+    "set_speed_ramp",
+    "set_typeset",
+    "shape_music",
+    "suggest_match_cuts",
+    "suggest_story"
+  ],
+  "skills": [
+    "creative-direction",
+    "montage",
+    "rhythm",
+    "structure",
+    "type-fx",
+    "typesetting"
+  ],
+  "departments": [
+    "direction",
+    "type"
+  ],
+  "card_prefixes": [
+    "typeset",
+    "typefx",
+    "rhythm",
+    "montage",
+    "arrange",
+    "ramp",
+    "still",
+    "recall",
+    "story"
+  ],
+  "sidecar_kinds": [],
+  "templates": [
+    "typeset",
+    "still_motion"
+  ],
+  "models": [],
+  "slots": [],
+  "core_growth_bytes": 150
+}

@@ -949,7 +949,9 @@ class Frame(BaseModel):
     answer a single point cannot give (see FocusSpan). None/[] keeps the
     single-point behaviour byte-identically, and _sig_canon drops the None so
     every stored EDL's signature is unchanged."""
-    ratio: Literal["source", "16:9", "9:16", "1:1", "4:5"] = "source"
+    # "4:3" (Wave 4, 4E delivery): one more aspect master; old EDLs never
+    # carry it, so every stored signature is unchanged
+    ratio: Literal["source", "16:9", "9:16", "1:1", "4:5", "4:3"] = "source"
     mode: Literal["crop", "pad", "pad_blur"] = "crop"
     focus_x: Optional[float] = None
     focus_y: Optional[float] = None

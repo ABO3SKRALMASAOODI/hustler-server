@@ -1,0 +1,79 @@
+{
+  "id": "broll_archival",
+  "family": "world",
+  "verb": "source_broll",
+  "fx_type": "broll",
+  "stage": "screen",
+  "params": {
+    "fit": "frame",
+    "grain": 0.35,
+    "duration_s": [
+      2.0,
+      3.0
+    ],
+    "span": [
+      "phrase"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:overlay"
+    ],
+    "footage": "public-domain archival film (NASA, the Internet Archive) shown whole on a soft copy of itself, with grain"
+  },
+  "binds_to": [
+    "word",
+    "phrase_end",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 2,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 3,
+      "min_gap_s": 5
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "stretched or cropped to fill (archival is shown whole)",
+    "without its public-domain or CC licence line"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "reduced": "cut in without its match grade"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 8,
+      "batch": 8,
+      "local": 4
+    },
+    "fixed_ms": 200
+  },
+  "exemplars": [
+    "33@2.9–3.37",
+    "36@6.33–8.27"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "Public-domain archival film shown whole on a soft copy of itself, with grain, its licence on the ledger",
+  "skill": "broll-director"
+}

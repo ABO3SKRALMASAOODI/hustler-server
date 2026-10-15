@@ -1,0 +1,79 @@
+{
+  "id": "ui_scene_explainer",
+  "family": "layout",
+  "verb": "add_ui_scene",
+  "stage": "motion",
+  "params": {
+    "layout": [
+      "stack",
+      "grid",
+      "focus",
+      "thread",
+      "row"
+    ],
+    "backdrop": [
+      "solid",
+      "dim"
+    ],
+    "span": [
+      "section"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "an explanation with structure (steps, parts, numbers, a product's screens); the user's data for any figure on screen"
+  },
+  "binds_to": [
+    "section",
+    "word",
+    "phrase_end"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 12
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 8
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 5
+    }
+  },
+  "never": [
+    "a figure that is not the user's data, said, or in the request",
+    "over the payoff line when the face carries it"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 30,
+      "batch": 30,
+      "local": 15
+    },
+    "fixed_ms": 1200
+  },
+  "exemplars": [
+    "03@0–27.7",
+    "30@41.7–44.7"
+  ],
+  "verify": [
+    "determinism"
+  ],
+  "status": "live",
+  "description": "An explainer told through interface - persistent cards, a karaoke pill, comments, counters and bars that morph between scenes and open as irises from what caused them",
+  "skill": "explainers"
+}

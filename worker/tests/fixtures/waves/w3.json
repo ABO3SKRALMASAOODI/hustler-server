@@ -1,0 +1,68 @@
+{
+  "wave": 3,
+  "doc": "worker/devices/INTERFACES_W3.md: Wave 3's growth, set aside by the Wave 0/1 seam tests (mirrors tests/w3_pins.py)",
+  "fx_tags": [
+    "light",
+    "object",
+    "plane",
+    "track"
+  ],
+  "verbs": [
+    "add_breakdown",
+    "add_collage",
+    "add_device_stage",
+    "add_element",
+    "add_hud",
+    "attach",
+    "look_at_world",
+    "pin_to_plane",
+    "place_in_world",
+    "plan_footage",
+    "remove_world",
+    "select_object",
+    "set_brand_kit",
+    "set_stack",
+    "track_point"
+  ],
+  "skills": [
+    "acquisition",
+    "elements",
+    "layouts",
+    "occlusion",
+    "tracking",
+    "type-in-world",
+    "world"
+  ],
+  "departments": [
+    "world"
+  ],
+  "card_prefixes": [
+    "anchor",
+    "object",
+    "plane",
+    "element",
+    "light",
+    "layout"
+  ],
+  "sidecar_kinds": [
+    "camera.motion",
+    "landmarks.face",
+    "landmarks.hand",
+    "landmarks.pose",
+    "objects.sam2",
+    "planes.h",
+    "plate.clean",
+    "track.points"
+  ],
+  "templates": [],
+  "models": [
+    "efficientsam_ti",
+    "mediapipe_face_landmarker",
+    "mediapipe_hand_landmarker",
+    "mediapipe_pose_landmarker"
+  ],
+  "slots": [
+    "MotionItem.anchor"
+  ],
+  "core_growth_bytes": 0
+}

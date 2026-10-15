@@ -436,14 +436,36 @@ def test_web_sfx_removal_frees_the_core_compact_catalog():
     # the saving being used, not the saving lost. Re-pinned by 1F; round
     # lead sign-off requested.
     w1_pinned_growth = 5 + 28 + 18 + 18 + 250
-    # Wave 2's pinned core growth (INTERFACES_W2.md §2: department and
-    # skill names in the core enums, the B&W look line); Wave 3's growth is
-    # only names joining enums (tests/w3_pins.py). The Wave 1 ceiling
-    # (82,700, test_w1_seams) still binds the sum.
-    from w2_support import W2_CORE_GROWTH_MAX
-    from w3_pins import w3_core_catalog_growth
-    assert size <= 82_941 - 1_200 + w1_pinned_growth + W2_CORE_GROWTH_MAX \
-        + w3_core_catalog_growth(), size
+    # Later waves' automatic growth is set aside exactly (INTERFACES_W4.md
+    # §8.2): a department going live joins the load_tools / expand_toolset
+    # enums, a declared track skill joins read_skill's. Their absolute
+    # ceiling stays Wave 1's 82,700 (tests/test_w1_seams.py).
+    import later_waves
+    later = later_waves.growth()
+    depts = ((set(tools_ext.DEPARTMENTS) | later["departments"])
+             - {"compositing", "rhythm", "verify"})
+    cat = agent_tools.openai_tools("any-model", compact=True, names=core)
+
+    def drop(node, names):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == "enum" and isinstance(v, list):
+                    node[k] = [e for e in v if e not in names]
+                else:
+                    drop(v, names)
+        elif isinstance(node, list):
+            for v in node:
+                drop(v, names)
+    for tool in cat:
+        name = tool["function"]["name"]
+        if name in ("load_tools", "expand_toolset"):
+            drop(tool, depts)
+        elif name == "read_skill":
+            drop(tool, later["skills"])
+    w1_size = len(json.dumps(cat, separators=(",", ":")))
+    assert w1_size <= 82_941 - 1_200 + w1_pinned_growth + \
+        later_waves.core_growth_bytes(), w1_size
+    assert size <= 82_700, size
 
 
 # ── restraint rules are pinned word for word ────────────────────────────

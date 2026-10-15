@@ -96,11 +96,15 @@ print(json.dumps({"types": sorted(s.FX_TYPES), "slots": sorted(s._FX_SLOT_TYPES)
 
 
 def _later_wave_types():
-    """(fx types, fx slots) the waves after Wave 1 register: Wave 2's
-    W2_TYPES and the Wave 3 world fixture's types and slots."""
-    w3 = json.loads((BACKEND.parent / "worker" / "tests" / "fixtures" /
-                     "w3_stale_client_ops.json").read_text())
-    return set(W2_TYPES) | set(w3["types"]), set(w3["slots"])
+    """(fx types, fx slots) the waves after Wave 1 register, as each
+    declares them in worker/tests/fixtures/waves/w<N>.json."""
+    tags, slots = set(), set()
+    wd = BACKEND.parent / "worker" / "tests" / "fixtures" / "waves"
+    for f in sorted(wd.glob("w*.json")) if wd.is_dir() else []:
+        pin = json.loads(f.read_text())
+        tags |= set(pin.get("fx_tags") or [])
+        slots |= set(pin.get("slots") or [])
+    return tags, slots
 
 
 def test_w1_devices_validate_batch_and_remove_in_the_backend_process():
@@ -274,3 +278,79 @@ def test_w3_world_items_validate_batch_and_remove_in_the_backend_process():
     assert got["slots"] == ["MotionItem.anchor"]
     assert got["anchors"] == ["plane:pl1", "hand.index_tip"]
     assert got["refused"] == got["bad"] >= 4
+
+
+# ── Wave 4 (worker/devices/INTERFACES_W4.md): depth, time, B-roll and UI
+# media items validate, batch and are removed IN THE BACKEND PROCESS; a
+# non-commercial B-roll licence and an unknown UI slot are refused there.
+W4_SNIPPET = r'''
+import json, os, sys
+sys.path = [p for p in sys.path if not p.rstrip("/").endswith("worker")]
+sys.path.insert(0, os.getcwd())
+from routes import video
+s, b = video.wschemas, video.wbatch
+dur = 30.0
+base = s.validate_edl({"keep": [[0.0, 30.0]], "frame": {"ratio": "4:3"}},
+                      dur).model_dump()
+sig = s.edl_signature(base)
+graph = {"v": 1, "W": 1080, "H": 1920, "dur": 4.0, "scenes": [0.0],
+         "objects": [{"id": "screen", "kind": "media",
+                      "design": [70, 600, 940, 528],
+                      "segs": [[0.0, 4.0, 70, 600, 940, 528, 70, 600, 940,
+                                528, 1, 1, "linear"]],
+                      "iris": None, "enter": 0.0}], "irises": [], "u": 3.0}
+credit = {"provider": "nasa", "license": "Public domain (NASA media "
+          "guidelines)", "author": "NASA", "page_url": "https://images.nasa.gov/"}
+ops = [
+    {"action": "upsert", "layer": "fx", "id": "dp1", "value": {
+        "id": "dp1", "type": "depth", "stage": "world", "start": 2.0,
+        "end": 4.0, "kind": "dof", "device": "depth_dof"}},
+    {"action": "upsert", "layer": "fx", "id": "tm1", "value": {
+        "id": "tm1", "type": "time", "stage": "world", "start": 5.0,
+        "end": 6.0, "kind": "echo", "device": "time_echo"}},
+    {"action": "upsert", "layer": "fx", "id": "br1", "value": {
+        "id": "br1", "type": "broll", "stage": "screen", "start": 8.0,
+        "end": 10.0, "source": {"kind": "asset", "asset_key": "media/1/b.mp4"},
+        "credit": credit, "device": "broll_cutaway"}},
+    {"action": "upsert", "layer": "motion", "id": "ui1", "value": {
+        "id": "ui1", "template": "ui_scene", "start": 12.0, "end": 16.0,
+        "params": {"graph": graph, "shown": [], "backdrop": "solid"}}},
+    {"action": "upsert", "layer": "fx", "id": "um1", "value": {
+        "id": "um1", "type": "ui_media", "stage": "screen",
+        "start": 12.0, "end": 16.0, "motion_id": "ui1", "slot": "screen",
+        "source": {"kind": "asset", "asset_key": "media/1/b.mp4"},
+        "device": "ui_media_slot"}},
+]
+allowed = {"media/1/b.mp4"}
+out = b.apply_batch(base, ops, dur, allowed)
+undo = [{"action": "remove", "layer": "fx", "id": i}
+        for i in ("um1", "dp1", "tm1", "br1")] + [
+        {"action": "remove", "layer": "motion", "id": "ui1"}]
+back = b.apply_batch(out, undo, dur, allowed)
+assert s.edl_signature(back) == sig
+refused = 0
+for bad in (dict(ops[2]["value"], credit=dict(credit, license="CC BY-NC 4.0")),
+            dict(ops[4]["value"], slot="nope")):
+    try:
+        b.apply_batch(out if bad.get("slot") else base,
+                      [{"action": "upsert", "layer": "fx", "id": bad["id"],
+                        "value": bad}], dur, allowed)
+    except Exception:
+        refused += 1
+print(json.dumps({"types": sorted(s.FX_TYPES), "fx": sorted(
+    i["id"] for i in out["fx"]), "refused": refused,
+    "ratio": out["frame"]["ratio"]}))
+'''
+
+
+def test_w4_types_validate_batch_and_remove_in_the_backend_process():
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env.update(SKIP_DB_INIT="1", DATABASE_URL="postgresql://stub/stub",
+               PYTHONPATH=str(BACKEND))
+    r = subprocess.run([sys.executable, "-c", W4_SNIPPET], cwd=str(BACKEND),
+                       env=env, capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stderr[-3000:]
+    got = json.loads(r.stdout.strip().splitlines()[-1])
+    assert {"depth", "time", "broll", "ui_media"} <= set(got["types"])
+    assert got["fx"] == ["br1", "dp1", "tm1", "um1"]
+    assert got["refused"] == 2 and got["ratio"] == "4:3"

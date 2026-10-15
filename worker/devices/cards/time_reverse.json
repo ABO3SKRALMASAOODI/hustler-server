@@ -1,0 +1,61 @@
+{
+  "id": "time_reverse",
+  "family": "rhythm",
+  "verb": "add_time_effect",
+  "fx_type": "time",
+  "stage": "world",
+  "params": {
+    "kind": "reverse"
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [],
+    "footage": "movement worth re-timing (B-roll, a gesture, a walk)"
+  },
+  "binds_to": [
+    "section",
+    "drop",
+    "cut"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 0
+    },
+    "designed": {
+      "per_short": 0
+    },
+    "charged": {
+      "per_short": 0
+    }
+  },
+  "never": [
+    "on spoken words (the audio keeps playing forward)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 3,
+      "batch": 3,
+      "local": 1.5
+    },
+    "fixed_ms": 100
+  },
+  "exemplars": [
+    "39@≈6–8"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "The window plays backwards - a gesture undone, a fall reversed (B-roll, never lip-sync speech)",
+  "skill": "depth-time"
+}

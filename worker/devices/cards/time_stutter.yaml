@@ -1,0 +1,29 @@
+# Track 4A device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (time_stutter). INTERFACES_W4.md §3.3.
+id: time_stutter
+family: rhythm
+verb: add_time_effect
+fx_type: time
+stage: world
+params:
+  kind: stutter
+needs:
+  sidecars: []
+  lane_features: []
+  footage: movement worth re-timing (B-roll, a gesture, a walk)
+binds_to: [beat, drop, cut]
+budget:
+  calm: {per_short: 0}
+  designed: {per_short: 0}
+  charged: {per_short: 0}
+never: [on spoken words (the audio keeps playing forward)]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 2, batch: 2, local: 1}
+  fixed_ms: 100
+exemplars: ["15@0.37"]
+verify: [region_locality, determinism]
+status: live
+description: A few frames looped then caught up - a stutter on the beat (B-roll, never lip-sync speech)
+skill: depth-time

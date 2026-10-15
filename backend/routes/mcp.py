@@ -305,6 +305,8 @@ _READ_ONLY_EXACT = {
     "suggest_story", "analyze_reference",
     # Wave 3 pre-production (3F): a shot list, nothing written
     "plan_footage",
+    # Wave 4 (4F): the motion critic judges a render, writes nothing
+    "critique_short",
 }
 # Reaches something outside this project's own files: a stock library, a URL,
 # a generation provider, a live web page.
@@ -312,6 +314,8 @@ _OPEN_WORLD = {
     "search_stock", "add_stock_media", "fetch_url", "download_url",
     "generate_image", "generate_video", "generate_sfx",
     "record_website", "record_website_demo", "showcase_demo",
+    # Wave 4 (4C): the B-roll director searches public libraries
+    "source_broll",
 }
 # Titles that read badly when derived mechanically from the snake_case name.
 _TITLE_OVERRIDES = {

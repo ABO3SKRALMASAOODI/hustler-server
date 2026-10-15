@@ -1,0 +1,65 @@
+{
+ "code": "G",
+ "name": "Event or brand sizzle / recap",
+ "genre": "G",
+ "intensity": "charged",
+ "budgets": {
+  "punctuation": null,
+  "matte": {
+   "every_s": 6.0
+  },
+  "depth": {
+   "every_s": 5.0
+  },
+  "world": null,
+  "rhythm": null
+ },
+ "look": {
+  "grade": "event light kept, contrast lifted",
+  "palette": "the event's brand colours"
+ },
+ "captions": {
+  "mode": "none or key lines",
+  "position": "lower third",
+  "density": "sparse"
+ },
+ "type_voice": "bold grotesk, the event's name as a lockup",
+ "structure": [
+  {
+   "section": "arrival",
+   "share": 0.2,
+   "what": "the place, wide, the date"
+  },
+  {
+   "section": "energy",
+   "share": 0.5,
+   "what": "faces, hands, stage moments on the user's track beats"
+  },
+  {
+   "section": "peak",
+   "share": 0.2,
+   "what": "the moment everyone remembers, slowed (interpolated, never stuttering)"
+  },
+  {
+   "section": "sign-off",
+   "share": 0.1,
+   "what": "the brand mark, still"
+  }
+ ],
+ "devices_prefer": [
+  "time_interpolate",
+  "depth_point_cloud",
+  "broll_still",
+  "depth_parallax"
+ ],
+ "devices_avoid": [
+  "ui_scene_explainer"
+ ],
+ "never": [
+  "a guest's face cut mid-word in a quote",
+  "picking the music",
+  "a repeated device on consecutive shots"
+ ],
+ "aspect": "9:16",
+ "notes": "Score the library: the best 30 seconds of a hundred clips, never the first 30."
+}

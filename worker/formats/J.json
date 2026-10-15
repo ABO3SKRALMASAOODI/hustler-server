@@ -1,0 +1,54 @@
+{
+ "code": "J",
+ "name": "Edit about the edit (tool-love)",
+ "genre": "J",
+ "intensity": "designed",
+ "budgets": {
+  "punctuation": 2,
+  "matte": 2,
+  "depth": {
+   "every_s": 8.0
+  },
+  "layout": 3,
+  "world": 2
+ },
+ "look": {
+  "grade": "desk light, screen glow kept",
+  "palette": "the editor's UI colours"
+ },
+ "captions": {
+  "mode": "words",
+  "position": "below the interface",
+  "density": "phrase"
+ },
+ "type_voice": "monospace for the tool, a display sans for the claim",
+ "structure": [
+  {
+   "section": "before",
+   "share": 0.2,
+   "what": "the raw clip, honest"
+  },
+  {
+   "section": "the edit",
+   "share": 0.5,
+   "what": "the edit's own EDL as an editor window and pills (idle, live, done)"
+  },
+  {
+   "section": "after",
+   "share": 0.3,
+   "what": "the finished moment, full frame"
+  }
+ ],
+ "devices_prefer": [
+  "ui_scene_explainer",
+  "ui_media_slot",
+  "depth_point_cloud"
+ ],
+ "devices_avoid": [],
+ "never": [
+  "showing another creator's marks",
+  "claims the edit cannot back"
+ ],
+ "aspect": "9:16",
+ "notes": "Valmera's own EDL is the material nobody else has."
+}

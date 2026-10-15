@@ -12,7 +12,9 @@ A Tier-0 defect goes straight back to the editor as a fix; it is not a matter
 of taste. The render result's VERIFICATION ADVISORIES also carry an EARN
 ITS PLACE note (a generic or spent hook, a fragment or jump-cut opening,
 graphics past the budget or restating the captions, a short payoff hold):
-advisory, but read it before answering questions 1, 2 and 5.
+advisory, but read it before answering questions 1, 2 and 5. The editor's
+`critique_short` result (score, blocking findings, ideas) rides in the
+handback: a blocking finding left unfixed is a fix verdict.
 
 ## Tier 1: editor self-check
 

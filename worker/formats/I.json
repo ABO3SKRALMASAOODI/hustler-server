@@ -1,0 +1,67 @@
+{
+ "code": "I",
+ "name": "Story-led documentary case study",
+ "genre": "I",
+ "intensity": "designed",
+ "budgets": {
+  "punctuation": 1,
+  "matte": 2,
+  "depth": {
+   "every_s": 8.0
+  },
+  "world": {
+   "every_s": 6.0
+  },
+  "layout": 2
+ },
+ "look": {
+  "grade": "naturalistic, matched across sources (the B-roll de-stocked to the interview)",
+  "palette": "warm practical light"
+ },
+ "captions": {
+  "mode": "words",
+  "position": "clear of faces",
+  "density": "phrase"
+ },
+ "type_voice": "a quiet serif for chapter titles, the interview captions plain",
+ "structure": [
+  {
+   "section": "cold open",
+   "share": 0.12,
+   "what": "the outcome, then the question"
+  },
+  {
+   "section": "context",
+   "share": 0.3,
+   "what": "archival and sourced B-roll that proves each claim, licence ledger kept"
+  },
+  {
+   "section": "turn",
+   "share": 0.33,
+   "what": "the decision, a rack focus on the word that turns it"
+  },
+  {
+   "section": "result",
+   "share": 0.25,
+   "what": "the user's real numbers, then the human beat"
+  }
+ ],
+ "devices_prefer": [
+  "broll_cutaway",
+  "broll_archival",
+  "depth_rack_focus",
+  "depth_dof",
+  "ui_scene_explainer"
+ ],
+ "devices_avoid": [
+  "finish_crt",
+  "time_stutter"
+ ],
+ "never": [
+  "B-roll that illustrates the topic instead of proving the line",
+  "an unlicensed or NC/ND clip",
+  "invented figures"
+ ],
+ "aspect": "9:16",
+ "notes": "Every cutaway answers 'show me': the archive is evidence."
+}

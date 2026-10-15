@@ -1,0 +1,29 @@
+# Track 4A device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (time_posterize). INTERFACES_W4.md §3.3.
+id: time_posterize
+family: rhythm
+verb: add_time_effect
+fx_type: time
+stage: world
+params:
+  kind: posterize
+needs:
+  sidecars: []
+  lane_features: []
+  footage: movement worth re-timing (B-roll, a gesture, a walk)
+binds_to: [section, drop, beat]
+budget:
+  calm: {per_short: 0}
+  designed: {per_short: 0}
+  charged: {per_short: 1, min_gap_s: 8}
+never: [on spoken words (the audio keeps playing forward)]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 2, batch: 2, local: 1}
+  fixed_ms: 100
+exemplars: ["15@0.37", "24@≈10.7–12"]
+verify: [region_locality, determinism]
+status: live
+description: Step-printing - each picture held a few frames, a staccato rhythm
+skill: depth-time

@@ -1581,7 +1581,15 @@ def ledger(edl, intensity="designed", fmt=None, index=None):
     if intensity not in ("calm", "designed", "charged"):
         raise ValueError("intensity is calm, designed or charged")
     fmt = fmt or infer_format(edl, index)
-    if fmt not in DEVICE_BUDGETS:
+    table = DEVICE_BUDGETS.get(fmt)
+    if table is None:
+        # Wave 4 (4E): packs E, F, G, I, J from formats/<code>.json
+        try:
+            import format_packs
+            table = format_packs.budgets(fmt)
+        except Exception:  # noqa: BLE001
+            table = None
+    if table is None:
         raise ValueError(f"format pack is one of {FORMAT_PACKS}")
     try:
         from schemas import program_duration
@@ -1589,7 +1597,7 @@ def ledger(edl, intensity="designed", fmt=None, index=None):
     except Exception:  # noqa: BLE001
         dur = 0.0
     budgets = {fam: _budget_value(spec, dur, intensity)
-               for fam, spec in DEVICE_BUDGETS[fmt].items()}
+               for fam, spec in table.items()}
     return Ledger(device_counts(edl), budgets, fmt, intensity, dur)
 
 

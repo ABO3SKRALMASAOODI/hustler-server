@@ -1,0 +1,31 @@
+# Track 4A device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (depth_push_through). INTERFACES_W4.md §3.2. A camera
+# move: adds_zoom, so it is never proposed unless the user asked.
+id: depth_push_through
+family: camera
+verb: add_depth_effect
+fx_type: depth
+stage: world
+params:
+  kind: push_through
+  duration_s: [1.4]
+needs:
+  sidecars: []
+  lane_features: [ffmpeg:overlay, ffmpeg:scale]
+  footage: any shot; the user asked for a push
+binds_to: [word.payoff, section]
+budget:
+  calm: {per_short: 0}
+  designed: {per_short: 1, min_gap_s: 10}
+  charged: {per_short: 1, min_gap_s: 8}
+never: [unless the user asked for a push or a zoom]
+owner_flags: {adds_sound: false, adds_zoom: true, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 8, batch: 8, local: 4}
+  fixed_ms: 150
+exemplars: ["16@9.2–10.1"]
+verify: [region_locality]
+status: live
+description: The camera pushes through a word set in Z; it defocuses as it passes the lens (opt-in)
+skill: depth-time

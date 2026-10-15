@@ -47,7 +47,6 @@ import motion_layer                                    # noqa: E402
 import regions                                         # noqa: E402
 import schemas                                         # noqa: E402
 import tools_ext                                       # noqa: E402
-from w2_support import W2_FX_TAGS                      # noqa: E402
 
 FIX = os.path.join(HERE, "fixtures")
 
@@ -91,6 +90,11 @@ PEERS = {"face": "matte_track:face_mask", "glyph": "compositor:glyph_mask",
 # Core compact catalog at the end of Wave 1 (budget 83,000; the cap is
 # never raised). INTERFACES_W1.md §4.3.
 W1_CORE_CEILING = 82_700
+# Growth later waves declare in tests/fixtures/waves/w<N>.json
+# (INTERFACES_W4.md §8.2): their fx tags, skills and departments are set
+# aside exactly; nothing else may differ from the Wave 1 pins.
+import later_waves                                     # noqa: E402
+LATER = later_waves.growth()
 
 
 def _fx_module(name):
@@ -144,15 +148,12 @@ def preview_report():
 
 
 def test_preview_lane_registers_exactly_the_pinned_table(preview_report):
-    from w3_pins import W3_FX_TAGS, W3_SLOTS
     reg = preview_report["registry"]
-    # Wave 2 members (INTERFACES_W2.md §5: ``arrange``) and Wave 3's
-    # (tests/w3_pins.py) register beside the pinned Wave 1 table, which
-    # stays exactly as it was
-    later = W2_FX_TAGS | W3_FX_TAGS
-    assert set(reg["types"]) - later == set(CLASSES)
-    assert set(reg["authorable"]) - later == set(CLASSES)
-    assert [s for s in reg["slots"] if s not in W3_SLOTS] == \
+    # later waves (tests/fixtures/waves/w<N>.json) register beside the
+    # pinned Wave 1 table, which stays exactly as it was
+    assert set(reg["types"]) - LATER["fx_tags"] == set(CLASSES)
+    assert set(reg["authorable"]) - LATER["fx_tags"] == set(CLASSES)
+    assert [s for s in reg["slots"] if s not in LATER["slots"]] == \
         ["MotionItem.composite"]
     for tag, (stages, compiler, module) in CLASSES.items():
         got = reg["classes"][tag]
@@ -188,12 +189,11 @@ def test_bad_stale_client_shapes_are_refused_with_their_reason(
 
 def test_preview_by_track_registers_only_that_track():
     """VALMERA_FX_PREVIEW=1b adds 1B's module to whatever is live already."""
-    from w3_pins import W3_FX_TAGS, W3_SLOTS
     report = _child("1b")
     live = {n for n in MEMBER_MODULES if _fx_module(n).LIVE} | {"subject"}
-    assert set(report["registry"]["types"]) - W2_FX_TAGS - W3_FX_TAGS == \
+    assert set(report["registry"]["types"]) - LATER["fx_tags"] == \
         set().union(*(MEMBER_MODULES[n][1] for n in live))
-    assert set(report["registry"]["slots"]) - W3_SLOTS == set().union(
+    assert set(report["registry"]["slots"]) - LATER["slots"] == set().union(
         *(MEMBER_MODULES[n][2] for n in live))
     # the 1B shapes are written there; a track that is not live is refused
     failed = {f.split(":", 1)[0] for f in report["ok_failures"]}
@@ -240,9 +240,7 @@ def _strip_w1_growth(catalog):
         elif name in ("load_tools", "expand_toolset"):
             walk(tool, live)
         elif name == "read_skill":
-            from w2_support import W2_SKILLS   # Wave 2's skills, same rule
-            from w3_pins import W3_SKILLS
-            walk(tool, W1_SKILLS | W2_SKILLS | W3_SKILLS)
+            walk(tool, W1_SKILLS | LATER["skills"])
     return cat
 
 

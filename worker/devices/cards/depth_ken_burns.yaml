@@ -1,0 +1,33 @@
+# Track 4A device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (depth_ken_burns). INTERFACES_W4.md §3.2.
+id: depth_ken_burns
+family: world
+verb: add_depth_effect
+fx_type: depth
+stage: screen
+params:
+  kind: ken_burns
+  move:
+  - {path: push_in, amount: 0.3, ease: in_out}
+  - {path: drift_right, amount: 0.3, ease: in_out}
+  duration_s: [2.4]
+needs:
+  sidecars: []
+  lane_features: [ffmpeg:overlay]
+  footage: a still (a project image or a main-video frame)
+binds_to: [section, word, time]
+budget:
+  calm: {per_short: 0}
+  designed: {per_short: 0}
+  charged: {per_short: 0}
+never: [the same direction on consecutive stills]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 4, batch: 4, local: 2}
+  fixed_ms: 100
+exemplars: ["07@9.0–17.9"]
+verify: [region_locality, determinism]
+status: live
+description: The classic eased 2D move over a still; the honest substitute when no depth is measured
+skill: depth-time

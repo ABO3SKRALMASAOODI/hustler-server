@@ -614,6 +614,28 @@ LIBRARY_SAMPLE_FPS = float(os.getenv("LIBRARY_SAMPLE_FPS", "1.0"))
 # ---- W2 2F (agent layer v2) begin
 # ---- W2 2F end
 
+# ---- W4 (beyond footage) begin
+# Wave 4 (worker/devices/INTERFACES_W4.md). Every flag defaults to the inert
+# value; a device whose acceptance is not met ships dark behind its flag.
+# depth.small sidecar (Depth Anything V2 Small, batch lane, torch-CPU):
+# keyframe rate and long edge of the depth maps; DEPTH_MODEL overrides the
+# baked weights path (models/depth_anything_v2_small.json).
+DEPTH_MODEL = os.getenv(
+    "DEPTH_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "models", "depth_anything_v2_vits.pth"))
+DEPTH_KEYFRAME_FPS = float(os.getenv("DEPTH_KEYFRAME_FPS", "8"))
+DEPTH_MAX_SIDE = int(os.getenv("DEPTH_MAX_SIDE", "518"))
+DEPTH_TORCH_THREADS = int(os.getenv("DEPTH_TORCH_THREADS", "4"))
+# The motion critic's rendered-frame sampling rate (frames per second it
+# decodes from a render; flash analysis always reads every frame).
+CRITIC_SAMPLE_FPS = float(os.getenv("CRITIC_SAMPLE_FPS", "6"))
+# Track 4C: the B-roll libraries source_broll may search (comma list of
+# pexels, pixabay, openverse, wikimedia, nasa, archive); empty = all that
+# are configured (keyed ones need their keys).
+BROLL_PROVIDERS = os.getenv("BROLL_PROVIDERS", "").strip()
+# ---- W4 end
+
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via
 # Openverse (Wikimedia/Flickr — real people, companies, events); video
 # stock needs PEXELS_API_KEY/PIXABAY_API_KEY. Topical web VIDEO is

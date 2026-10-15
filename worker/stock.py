@@ -396,6 +396,12 @@ def download(item, out_path, want_w, want_h):
     url, cap = resolve(item, want_w, want_h)
     net_fetch.download(url, out_path, max_bytes=cap,
                        timeout_s=DOWNLOAD_TIMEOUT_S)
+    if item.get("kind") == KIND_PHOTO:
+        # Wave 4 (4C, JRE defect 29): a "photo" link can serve a web page
+        # (a login wall, a landing page); judge the bytes, never the name
+        import broll_source
+        if broll_source.image_kind(out_path) is None:
+            raise StockError("that result served a web page, not an image")
     item["source_url"] = url
     return item
 

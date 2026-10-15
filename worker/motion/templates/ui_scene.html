@@ -1,0 +1,251 @@
+<!--MG-SPEC {"title": "UI scene", "category": "layout", "also": ["data"], "internal": true,
+ "description": "An explainer told through interface: glass cards, a three-state karaoke pill, comment threads, dashboards with counters and bars, editor windows and media slots, as PERSISTENT objects that morph between scenes and open as irises from the element that caused them. Written by add_ui_scene (the scene graph is solved in Python: layout, morphs, iris origins, counters landing on the spoken number); not authored by hand.",
+ "duration": 8.0, "layer": "below_captions", "mutes_captions": false,
+ "params": {
+  "graph": {"type": "json", "required": true, "max": 48000, "hint": "the solved scene graph (ui_scene.solve)"},
+  "shown": {"type": "list", "default": [], "max_items": 40, "max": 120, "hint": "every string the scene prints (written by add_ui_scene)"},
+  "spec": {"type": "json", "default": {}, "max": 40000, "hint": "the scenes the graph was solved from (re-solved for another aspect by deliver_aspects)"},
+  "backdrop": {"type": "enum", "values": ["none", "dim", "solid"], "default": "solid", "hint": "solid = the interface owns the frame (media slots stay open); dim = over the darkened picture; none = floating UI"}
+ },
+ "sfx": []} -->
+<style>
+  .mg-root{font-family:'Inter','Inter Display',system-ui,sans-serif;color:#F4F4F6}
+  #bd{position:absolute;left:0;top:0;width:100%;height:100%}
+  .obj{position:absolute;left:0;top:0;will-change:transform,opacity,clip-path}
+  .plate{position:absolute;left:0;top:0;border-radius:calc(18 * var(--u));
+    background:linear-gradient(160deg,rgba(58,58,70,.92) 0%,rgba(20,20,27,.95) 72%);
+    border:1px solid rgba(255,255,255,.14);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.14),0 calc(10 * var(--u)) calc(26 * var(--u)) rgba(0,0,0,.42)}
+  .light .plate{background:linear-gradient(175deg,#fff 0%,#f3f2f0 100%);border-color:rgba(0,0,0,.06);
+    box-shadow:0 calc(10 * var(--u)) calc(26 * var(--u)) rgba(0,0,0,.28)}
+  .light .ct{color:#111}
+  .media .plate{background:none;border:calc(1.4 * var(--u)) solid rgba(255,255,255,.34);
+    box-shadow:0 0 0 calc(5 * var(--u)) rgba(0,0,0,.18)}
+  .ct{position:absolute;left:0;top:0;transform-origin:0 0;padding:calc(18 * var(--u));box-sizing:border-box}
+  .ti{font-weight:650;font-size:calc(17 * var(--u));letter-spacing:-0.012em;line-height:1.2}
+  .va{font-family:'Inter Display','Inter',sans-serif;font-weight:800;font-size:calc(30 * var(--u));
+    letter-spacing:-0.035em;line-height:1.1;font-variant-numeric:tabular-nums;margin-top:calc(4 * var(--u))}
+  .bo{font-size:calc(13.5 * var(--u));line-height:1.35;opacity:.86;margin-top:calc(6 * var(--u))}
+  .lab{font-size:calc(11.5 * var(--u));letter-spacing:.06em;text-transform:uppercase;opacity:.62;font-weight:600}
+  .dl{display:inline-block;margin-left:calc(8 * var(--u));font-size:calc(13 * var(--u));font-weight:700;
+    padding:calc(2 * var(--u)) calc(7 * var(--u));border-radius:999px;vertical-align:middle}
+  .pill .plate{border-radius:999px}
+  .pill .ct{display:flex;align-items:center;gap:calc(9 * var(--u));padding:0 calc(16 * var(--u));
+    font-weight:600;font-size:calc(15 * var(--u));white-space:nowrap}
+  .pill .ic{width:calc(16 * var(--u));height:calc(16 * var(--u));position:relative;flex:none}
+  .pill .w{opacity:.45}
+  .cm .ct{display:flex;gap:calc(12 * var(--u));align-items:flex-start}
+  .av{flex:none;width:calc(38 * var(--u));height:calc(38 * var(--u));border-radius:50%;display:flex;
+    align-items:center;justify-content:center;font-weight:800;font-size:calc(16 * var(--u));color:#fff}
+  .nm{font-weight:700;font-size:calc(13 * var(--u));opacity:.9}
+  .bars .row{display:flex;align-items:center;gap:calc(9 * var(--u));height:calc(30 * var(--u))}
+  .bars .rl{width:32%;font-size:calc(12.5 * var(--u));opacity:.82;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bars .tr{flex:1;height:calc(11 * var(--u));border-radius:999px;background:rgba(255,255,255,.08);position:relative;overflow:hidden}
+  .bars .fl{position:absolute;left:0;top:0;bottom:0;border-radius:999px}
+  .bars .rv{width:20%;text-align:right;font-weight:700;font-size:calc(13 * var(--u));font-variant-numeric:tabular-nums}
+  .win .tb{display:flex;align-items:center;gap:calc(6 * var(--u));height:calc(30 * var(--u));margin:calc(-18 * var(--u)) calc(-18 * var(--u)) calc(12 * var(--u));
+    padding:0 calc(12 * var(--u));border-bottom:1px solid rgba(255,255,255,.08);font-size:calc(11.5 * var(--u));opacity:.85}
+  .win .dot{width:calc(9 * var(--u));height:calc(9 * var(--u));border-radius:50%}
+  .win .ln{font-family:'JetBrains Mono',monospace;font-size:calc(12 * var(--u));line-height:1.55;white-space:pre;overflow:hidden}
+  .tx .plate{display:none}
+  .tx .ct{padding:0;font-family:'Inter Display','Inter',sans-serif;font-weight:800;font-size:calc(30 * var(--u));
+    letter-spacing:-0.03em;line-height:1.12}
+  .mlab{position:absolute;left:calc(10 * var(--u));bottom:calc(10 * var(--u));font-size:calc(11 * var(--u));font-weight:600;
+    padding:calc(3 * var(--u)) calc(8 * var(--u));border-radius:999px;background:rgba(0,0,0,.55)}
+</style>
+<div class="mg-root"><svg id="bd" xmlns="http://www.w3.org/2000/svg"><path id="bdp" fill-rule="evenodd"/></svg><div id="stage"></div></div>
+<script>
+(() => {
+  const P = MG.params, G = P.graph || {objects: []}, root = document.documentElement;
+  const u = G.u || MG.W / 360, accent = G.accent || '#8C7CFF';
+  root.style.setProperty('--u', u + 'px');
+  const stage = MG.$('#stage');
+  const light = G.theme === 'light';
+  if (light) stage.classList.add('light');
+  const E = {linear: x => x, inCubic: x => x * x * x, outCubic: x => 1 - Math.pow(1 - x, 3),
+             snap: x => 1 - Math.pow(1 - x, 6),
+             morph: x => x < .5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2};
+  // ── the reading of the graph (mirrors ui_scene.state_at) ──
+  const stateAt = (o, t) => {
+    let cur = null;
+    for (const s of o.segs) { if (s[0] <= t + 1e-9) cur = s; else break; }
+    if (!cur) return [null, 0];
+    const p = cur[1] <= cur[0] ? 1 : MG.clamp((t - cur[0]) / (cur[1] - cur[0]));
+    const e = (E[cur[12]] || E.linear)(p);
+    const r = [0, 1, 2, 3].map(i => cur[2 + i] + (cur[6 + i] - cur[2 + i]) * e);
+    const op = cur[10] + (cur[11] - cur[10]) * e;
+    if (t > cur[1] && cur[11] <= 0) return [null, 0];
+    return [r, op];
+  };
+  const hue = s => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
+  const nodes = (G.objects || []).map(o => {
+    const el = MG.el('div', 'obj ' + ({card: 'card', pill: 'pill', comment: 'cm', metric: 'card', bars: 'card bars',
+      window: 'card win', media: 'media', text: 'tx'}[o.kind] || 'card'), null, stage);
+    const plate = MG.el('div', 'plate', null, el);
+    const ct = MG.el('div', 'ct', null, el);
+    const d = o.design;
+    ct.style.width = d[2] + 'px'; ct.style.height = d[3] + 'px';
+    const n = {o, el, plate, ct, d};
+    if (o.kind === 'card' || o.kind === 'metric') {
+      if (o.kind === 'metric' && o.label) MG.el('div', 'lab', o.label, ct);
+      if (o.title) n.ti = MG.el('div', 'ti', o.title, ct);
+      if (o.value != null) {
+        n.va = MG.el('div', 'va', String(o.value), ct);
+        if (o.delta) {
+          const up = !/^-/.test(String(o.delta));
+          const dl = MG.el('span', 'dl', String(o.delta), n.va);
+          dl.style.color = up ? '#3BD671' : '#FF6B6B';
+          dl.style.background = up ? 'rgba(59,214,113,.14)' : 'rgba(255,107,107,.14)';
+        }
+      }
+      if (o.body) n.bo = MG.el('div', 'bo', o.body, ct);
+    } else if (o.kind === 'pill') {
+      n.ic = MG.el('div', 'ic', null, ct);
+      n.ic.innerHTML = `<svg viewBox="0 0 16 16" width="100%" height="100%">
+        <circle class="i0" cx="8" cy="8" r="4" fill="rgba(255,255,255,.55)"/>
+        <g class="i1">${[0,1,2,3].map(i => `<rect x="${1.5 + i * 3.6}" y="4" width="2.2" height="8" rx="1.1" fill="#fff"/>`).join('')}</g>
+        <path class="i2" d="M3.5 8.4 L6.6 11.2 L12.6 4.8" stroke="#fff" stroke-width="2.1" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+      const lab = MG.el('div', null, null, ct);
+      n.words = String(o.label || '').split(/\s+/).filter(Boolean).map((w, i) => {
+        const s = MG.el('span', 'w', w, lab); lab.appendChild(document.createTextNode(' ')); return s; });
+      ct.style.height = d[3] + 'px';
+    } else if (o.kind === 'comment') {
+      const av = MG.el('div', 'av', String(o.name || '?').trim().charAt(0).toUpperCase(), ct);
+      av.style.background = `hsl(${hue(o.name || 'x')},55%,46%)`;
+      const tx = MG.el('div', null, null, ct);
+      MG.el('div', 'nm', o.name || '', tx);
+      n.bo = MG.el('div', 'bo', o.text || o.body || '', tx);
+      n.bo.style.marginTop = (3 * u) + 'px';
+    } else if (o.kind === 'bars') {
+      if (o.title) MG.el('div', 'ti', o.title, ct).style.marginBottom = (8 * u) + 'px';
+      const num = r => { const v = (r.value_num != null) ? r.value_num : parseFloat(String(r.value).replace(/,/g, '')); return isFinite(v) ? Math.abs(v) : 0; };
+      const rows = o.rows || [], mx = Math.max(1e-9, ...rows.map(num));
+      n.bars = rows.map((r, i) => {
+        const row = MG.el('div', 'row', null, ct);
+        MG.el('div', 'rl', r.label || '', row);
+        const tr = MG.el('div', 'tr', null, row);
+        const fl = MG.el('div', 'fl', null, tr);
+        fl.style.background = `linear-gradient(90deg, ${accent}, ${accent}cc)`;
+        const rv = MG.el('div', 'rv', String(r.value ?? ''), row);
+        const v = num(r);
+        return {fl, frac: v / mx, i};
+      });
+    } else if (o.kind === 'window') {
+      const tb = MG.el('div', 'tb', null, ct);
+      ['#FF5F57', '#FEBC2E', '#28C840'].forEach(c => { MG.el('div', 'dot', null, tb).style.background = c; });
+      MG.el('span', null, o.title || '', tb).style.marginLeft = (8 * u) + 'px';
+      n.lines = (o.lines || []).map(l => MG.el('div', 'ln', '', ct));
+    } else if (o.kind === 'media') {
+      if (o.title || o.label) MG.el('div', 'mlab', o.title || o.label, el);
+    } else if (o.kind === 'text') {
+      n.ti = MG.el('div', null, o.text || '', ct);
+      ct.style.width = d[2] + 'px';
+    }
+    return n;
+  });
+  // where the scene draws (capture bounds and the caption plan)
+  const back = P.backdrop || 'solid';
+  // a backdrop is drawn over the whole frame, so the capture is the whole
+  // frame (the scene sits under the captions: they stay on top of it);
+  // floating UI captures only its content's bounds
+  if (back !== 'none') MG.box = [0, 0, MG.W, MG.H];
+  else {
+    let b = null;
+    nodes.forEach(n => n.o.segs.forEach(s => {
+      const xs = [s[2], s[6]], ys = [s[3], s[7]];
+      const r = [Math.min(...xs), Math.min(...ys), Math.max(s[2] + s[4], s[6] + s[8]), Math.max(s[3] + s[5], s[7] + s[9])];
+      b = b ? [Math.min(b[0], r[0]), Math.min(b[1], r[1]), Math.max(b[2], r[2]), Math.max(b[3], r[3])] : r;
+    }));
+    MG.box = b ? [b[0] - 30 * u, b[1] - 30 * u, b[2] + 30 * u, b[3] + 30 * u] : [0, 0, MG.W, MG.H];
+  }
+  MG.always();
+  const bdp = MG.$('#bdp');
+  const rr = (x, y, w, h, r) => `M${x + r},${y}H${x + w - r}A${r},${r} 0 0 1 ${x + w},${y + r}V${y + h - r}` +
+    `A${r},${r} 0 0 1 ${x + w - r},${y + h}H${x + r}A${r},${r} 0 0 1 ${x},${y + h - r}V${y + r}A${r},${r} 0 0 1 ${x + r},${y}Z`;
+
+  MG.frame(t => {
+    const holes = [];
+    nodes.forEach(n => {
+      const o = n.o;
+      const [r, op] = stateAt(o, t);
+      if (!r || op <= 0.001) { n.el.style.opacity = 0; return; }
+      n.el.style.opacity = op;
+      n.el.style.transform = `translate(${r[0]}px,${r[1]}px)`;
+      n.el.style.width = r[2] + 'px'; n.el.style.height = r[3] + 'px';
+      n.plate.style.width = r[2] + 'px'; n.plate.style.height = r[3] + 'px';
+      // FLIP: the content keeps the layout it was set in and scales
+      const s = Math.min(r[2] / n.d[2], r[3] / n.d[3]);
+      const ox = (r[2] - n.d[2] * s) / 2, oy = (r[3] - n.d[3] * s) / 2;
+      n.ct.style.transform = `translate(${ox}px,${oy}px) scale(${s})`;
+      // the iris: a circle growing from the element that caused it
+      const ir = o.iris;
+      if (ir && t >= ir.t && t < ir.t + ir.dur) {
+        const p = E.outCubic((t - ir.t) / ir.dur);
+        const far = Math.max(...[[r[0], r[1]], [r[0] + r[2], r[1]], [r[0], r[1] + r[3]], [r[0] + r[2], r[1] + r[3]]]
+          .map(([x, y]) => Math.hypot(x - ir.ox, y - ir.oy)));
+        n.el.style.clipPath = `circle(${(p * far).toFixed(2)}px at ${(ir.ox - r[0]).toFixed(2)}px ${(ir.oy - r[1]).toFixed(2)}px)`;
+      } else if (ir && t < ir.t) {
+        n.el.style.clipPath = 'circle(0px at 0px 0px)';
+      } else n.el.style.clipPath = 'none';
+      // content updates by scene
+      if (o.updates) {
+        let cur = null;
+        Object.keys(o.updates).map(Number).sort((a, b) => a - b).forEach(k => { if (k <= t) cur = o.updates[k.toFixed(3)] || o.updates[String(k)]; });
+        if (cur) {
+          if (cur.value != null && n.va && !o.count) n.va.firstChild.textContent = String(cur.value);
+          if (cur.body != null && n.bo) n.bo.textContent = cur.body;
+          if (cur.title != null && n.ti) n.ti.textContent = cur.title;
+        }
+      }
+      if (o.count && n.va) {
+        const c = o.count, like = String(o.value);
+        const pre = (like.match(/^[^\d\-+]*/) || [''])[0], post = (like.match(/[^\d.,]*$/) || [''])[0];
+        const dec = like.includes('.') ? like.split('.')[1].replace(/[^\d]/g, '').length : 0;
+        const p = c.t1 <= c.t0 ? 1 : MG.clamp((t - c.t0) / (c.t1 - c.t0));
+        const v = c.to * (t >= c.t1 ? 1 : E.outCubic(p));
+        let txt = v.toFixed(dec);
+        if (like.includes(',')) txt = txt.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        n.va.firstChild.textContent = pre + txt + post;
+      }
+      if (o.kind === 'pill') {
+        let st = 'idle';
+        (o.states || []).forEach(([ts, s]) => { if (ts <= t) st = s; });
+        const fill = st === 'live' ? accent : st === 'done' ? '#2FBF71' : null;
+        n.plate.style.background = fill ? fill : '';
+        n.plate.style.borderColor = fill ? 'rgba(255,255,255,.25)' : '';
+        const ic = n.ic;
+        ic.querySelector('.i0').style.opacity = st === 'idle' ? 1 : 0;
+        ic.querySelector('.i1').style.opacity = st === 'live' ? 1 : 0;
+        ic.querySelector('.i2').style.opacity = st === 'done' ? 1 : 0;
+        if (st === 'live') ic.querySelectorAll('.i1 rect').forEach((b, i) => {
+          const h = 3 + 5 * (0.5 + 0.5 * Math.sin(t * 9 + i * 1.7)); b.setAttribute('y', 8 - h / 2); b.setAttribute('height', h); });
+        const kar = o.karaoke;
+        n.words.forEach((w, i) => {
+          const on = kar ? (kar[i] != null && kar[i] <= t) || (kar[i] == null && st !== 'idle') : st !== 'idle';
+          w.style.opacity = on ? 1 : 0.45;
+        });
+      }
+      if (n.bars) {
+        const t0 = (o.enter != null ? o.enter : (o.iris ? o.iris.t : 0));
+        n.bars.forEach(b => { b.fl.style.width = (100 * b.frac * E.outCubic(MG.clamp((t - t0 - 0.1 - b.i * 0.08) / 0.7))) + '%'; });
+      }
+      if (n.lines) {
+        const t0 = (o.enter != null ? o.enter : (o.iris ? o.iris.t : 0)) + 0.2;
+        let budget = Math.max(0, (t - t0) * 42);
+        (o.lines || []).forEach((l, i) => {
+          const s = String(l), k = Math.min(s.length, Math.floor(budget)); budget -= s.length;
+          n.lines[i].textContent = s.slice(0, Math.max(0, k));
+        });
+      }
+      if (o.kind === 'media' && op > 0.5) holes.push(rr(r[0], r[1], r[2], r[3], 18 * u * Math.min(1, s)));
+    });
+    // the interface takes the frame over and hands it back (0.25 s)
+    MG.$('#bd').style.opacity = Math.min(1, t / 0.25, Math.max(0, MG.duration - t) / 0.25);
+    if (back === 'none') bdp.setAttribute('d', '');
+    else {
+      bdp.setAttribute('fill', back === 'dim' ? 'rgba(6,6,10,.62)' : (light ? '#ECEBE8' : '#0B0B10'));
+      bdp.setAttribute('d', `M0,0H${MG.W}V${MG.H}H0Z` + holes.join(''));
+    }
+  });
+})();
+</script>
