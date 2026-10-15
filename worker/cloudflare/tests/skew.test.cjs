@@ -261,3 +261,34 @@ test('the fence route is reachable through the Worker for every lane', async () 
   assert.equal(response.status, 200);
   assert.deepEqual(seen, [[`https://container.internal/fence/${callId}`, 'POST']]);
 });
+
+test('a retirement orphaned before /run ends as a retryable abandoned start', async () => {
+  const now = Date.now();
+  const { adapter, values } = fixture('ValmeraMcp', [
+    [`call:${callId}`, { status: 'stopping', preRun: true, jobType: 'mcp_tool',
+      updatedAt: new Date(now - 5_000).toISOString(), activeUntil: now + 600_000 }],
+    ['active', { callId: `reset:${callId}`, expiresAt: now + 60_000 }],
+  ]);
+  let destroyed = 0;
+  adapter.destroy = async () => { destroyed += 1; };
+  adapter.getState = async () => ({ status: 'running' });
+  const body = await (await status(adapter)).json();
+  assert.equal(body.status, 'failed');
+  assert.equal(body.envelope.retryable, true);
+  assert.equal(body.envelope.failure.kind, 'provider_start_abandoned');
+  assert.equal(destroyed, 1);
+  assert.equal(values.has('active'), false);
+});
+
+test('an unready container retirement marks its record as pre-run', async () => {
+  const { adapter, values } = fixture();
+  const runs = [];
+  container(adapter, { status: 'ok', role: 'mcp_executor', code_version: 'old-source',
+    features: [] }, runs);
+  let seen = null;
+  adapter.destroy = async () => { seen = values.get(`call:${callId}`); };
+  await execute(adapter);
+  assert.equal(seen.status, 'stopping');
+  assert.equal(seen.preRun, true);
+  assert.equal(runs.length, 0);
+});

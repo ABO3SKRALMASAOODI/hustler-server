@@ -35,6 +35,12 @@ interface CallState {
   // Set while a dead-call abandonment is fencing the container, so a retry
   // after a failed destroy keeps the abandonment outcome.
   abandonReason?: string;
+  // Set when an unready container is being retired BEFORE any /run. If the
+  // handler is lost mid-retirement (a Worker deploy), the orphaned
+  // `stopping` record still proves nothing ran: it must end as a retryable
+  // abandoned start, never as "exceeded its executor lease" (Oct 15, three
+  // read-only MCP calls failed that way during a rollout).
+  preRun?: boolean;
   // Queue identity of the claim that owns this call. A dispatcher refused
   // with "shard is busy" reads it to check whether the owner is still alive.
   job?: JobIdentity;
@@ -490,7 +496,7 @@ abstract class ValmeraContainer extends Container<Env> {
       const state = await txn.get<CallState>(this.stateKey(callId));
       const active = await txn.get<ActiveCall>("active");
       if (!state || state.status !== "starting" || active?.callId !== callId) return null;
-      const stopping: CallState = { ...state, status: "stopping" };
+      const stopping: CallState = { ...state, status: "stopping", preRun: true };
       await txn.put({
         [this.stateKey(callId)]: stopping,
         active: { callId: resetId, expiresAt: Date.now() + 120_000 },
@@ -583,6 +589,13 @@ abstract class ValmeraContainer extends Container<Env> {
   ): Promise<CallState | null> {
     const observed = await this.callState(callId);
     if (!observed || ["done", "failed", "refused"].includes(observed.status)) return observed;
+    if (observed.status === "stopping" && observed.preRun && !observed.abandonReason) {
+      // An unready container's retirement lost its handler before /run.
+      const message = "Cloudflare container startup was abandoned before /run";
+      return this.fenceAndFail(callId, observed, now, () => message,
+        () => ({ error: message, retryable: true,
+          failure: { kind: "provider_start_abandoned", retryable: true } }));
+    }
     if (observed.status === "stopping" && observed.abandonReason) {
       // A dead-call fence whose destroy failed: finish it with its own outcome.
       return this.fenceAndFail(callId, observed, now,
