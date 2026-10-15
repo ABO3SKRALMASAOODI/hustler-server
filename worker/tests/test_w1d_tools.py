@@ -348,7 +348,8 @@ def test_remove_punctuation():
 
 def test_a_keep_change_drops_junctions_whose_cut_is_gone():
     import hooks
-    assert P._drop_orphan_junctions in hooks.registered("keep_change")
+    # built into hooks.on_keep_change (the backend's keep path runs it too)
+    assert P._drop_orphan_junctions is hooks._drop_orphan_junctions
     old = schemas.validate_edl(dict(CUTS, fx=[
         {"id": "j1", "type": "junction", "stage": "junction", "at": 5.0,
          "style": "iris"}]), 20.0).model_dump()

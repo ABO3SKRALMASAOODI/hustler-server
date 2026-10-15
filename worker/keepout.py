@@ -77,6 +77,9 @@ EDGE_TOL = 0.006            # measurement slack on a safe-area edge
 # forehead and chin a box can clip. The mouth band is its lower middle.
 FACE_PAD = (0.06, 0.15, 0.06, 0.03)       # left, top, right, bottom x box size
 MOUTH = (0.22, 0.58, 0.22, 0.08)          # insets: left, top, right, bottom
+CHIN = (0.2, 0.14, 0.2, 0.03)             # inset left/right; reach above and
+                                          # below the box bottom (x box size)
+CHIN_HIT = 0.25             # share of the chin band a graphic may not cover
 # A cascade box's lower edge lands anywhere from the lower lip to the neck,
 # so a graphic must cover a real share of the zone (about the lower 15% of
 # the face across its width) or of the mouth band before it counts as on the
@@ -186,6 +189,16 @@ def mouth_zone(f):
                   f[2] - MOUTH[2] * w, f[3] - MOUTH[3] * h), f)
 
 
+def chin_zone(f):
+    """The chin: the lower middle of the face box down to its padded
+    bottom. Type there reads as 'on his chin' (the Oct 11 run: a grid over
+    the chin for 3.8 s, a payoff '1' grazing it through the hold) although
+    it covers too little of the whole face zone to count as on the face."""
+    w, h = f[2] - f[0], f[3] - f[1]
+    return _clip((f[0] + CHIN[0] * w, f[3] - CHIN[1] * h,
+                  f[2] - CHIN[2] * w, f[3] + CHIN[3] * h), f)
+
+
 def portrait(W, H):
     return float(H) / max(1.0, float(W)) >= PORTRAIT_MIN
 
@@ -240,7 +253,34 @@ def watermark_zone(W=1080, H=1920, anchor_y=None, pad=0.01):
             round(min(1.0, x1 / W + pad), 4), round(min(1.0, y1 / H + pad), 4)]
 
 
+# A graphic may not lay ink on the free-tier corner mark's reserved box
+# (top-left): the mark is burned over the program on a free-tier final and
+# stays exactly as it is, so type there collides with it (Oct 11 run, s06: a
+# band lockup at y 0.178 rendered over the mark from y 0.076, no warning).
+# Persistent band headlines are laid out around it by band_type and are not
+# judged here. MARK_HIT: share of the reserved box a graphic may cover.
+MARK_HIT = 0.03
+_MARK = {}
+
+
+def mark_zone(W, H):
+    """The corner mark's reserved box at W x H (watermark_zone), cached."""
+    key = (int(W), int(H))
+    if key not in _MARK:
+        try:
+            _MARK[key] = tuple(watermark_zone(int(W), int(H)))
+        except Exception:  # noqa: BLE001 — no geometry: nothing reserved
+            _MARK[key] = None
+    return _MARK[key]
+
+
+def on_mark(box, zone):
+    return bool(box and zone) and inter(box, zone) > MARK_HIT * area(zone)
+
+
 ISSUE_TEXT = {
+    "mark": "lay on the free-tier corner mark's reserved box (top-left, "
+            "above y 0.13)",
     "side": "reached into the 6% side margins",
     "rail": "ran into the platform's right button rail (x > 0.88 between y 0.5 and 0.85)",
     "bottom": "sat in the bottom UI band (below y 0.80)",
@@ -320,8 +360,80 @@ def filter_faces(found):
     return sorted(kept, key=lambda b: -area(b))[:2]
 
 
+# ── YuNet on the exact frame (Wave 1 integration, "measured on frames") ──
+# The cascades' "tightest detector" box stops anywhere from the lower lip to
+# the neck: on twelve frames of the Oct 11 run's source and the footage
+# library its bottom ran 0.026-0.07 of the frame ABOVE the real chin on
+# profile and three-quarter views (the run's "chin missed by 0.03"; type
+# landed on the chin in five of ten shorts). YuNet's box bottom sat within
+# 0.01 of the chin on the same frames, and its landmarks give the chin
+# directly: the chin's underside lies YUNET_CHIN_K of the eye-to-mouth
+# distance below the mouth (0.59-0.70 measured; 0.72 keeps a margin). The
+# model (0.23 MB, MIT) is baked into every lane that writes graphics.
+YUNET_CHIN_K = 0.72
+YUNET_SCORE = 0.6
+_YUNET = threading.local()
+
+
+def _yunet_detector(cv2, w, h):
+    """A FaceDetectorYN for w x h frames (one per thread and size), or
+    None when this lane has no YuNet model."""
+    try:
+        import config
+        path = getattr(config, "YUNET_MODEL", "")
+    except Exception:  # noqa: BLE001
+        path = ""
+    if not path or not os.path.exists(path) or \
+            not hasattr(cv2, "FaceDetectorYN"):
+        return None
+    cache = getattr(_YUNET, "d", None)
+    if cache is None:
+        _YUNET.d = cache = {}
+    key = (path, int(w), int(h))
+    if key not in cache:
+        try:
+            cache[key] = cv2.FaceDetectorYN.create(
+                path, "", (int(w), int(h)), YUNET_SCORE, 0.3, 50)
+        except Exception:  # noqa: BLE001
+            cache[key] = None
+    return cache[key]
+
+
+def yunet_detect(img):
+    """[(box, score)] of the faces YuNet finds on a BGR image (fractions
+    of the frame; the box's bottom pushed down to the landmark chin when
+    the box stops above it), or None when YuNet cannot run here."""
+    cv2 = _cv()
+    if cv2 is None or img is None:
+        return None
+    h, w = img.shape[:2]
+    det = _yunet_detector(cv2, w, h)
+    if det is None:
+        return None
+    try:
+        _ok, faces = det.detect(img)
+    except Exception:  # noqa: BLE001
+        return None
+    out = []
+    for f in faces if faces is not None else ():
+        x, y, bw, bh = (float(v) for v in f[:4])
+        eye_y = (float(f[5]) + float(f[7])) / 2.0
+        mouth_y = (float(f[11]) + float(f[13])) / 2.0
+        chin = mouth_y + YUNET_CHIN_K * max(0.0, mouth_y - eye_y)
+        y1 = max(y + bh, chin)
+        out.append(((min(1.0, max(0.0, x / w)), min(1.0, max(0.0, y / h)),
+                     min(1.0, max(0.0, (x + bw) / w)),
+                     min(1.0, max(0.0, y1 / h))), float(f[14])))
+    return out
+
+
 def detect_faces(path, width=480):
     """High-recall face boxes (fractions of the frame) on one image.
+
+    YuNet first (yunet_detect: the chin measured, not guessed), where the
+    lane has the model; the cascades below when it has not, or when YuNet
+    sees no face (a keep-out that misses a face is the failure it exists to
+    prevent).
 
     The index's sidecar runs one frontal cascade at 360 px (the profile
     cascade only when that finds nothing) and misses most three-quarter
@@ -335,7 +447,7 @@ def detect_faces(path, width=480):
     unreadable frame — so the caller asks the index instead of reading the
     failure as "no face here"."""
     cv2 = _cv()
-    if cv2 is None or not _cascades(cv2):
+    if cv2 is None:
         return None
     img = cv2.imread(path)
     if img is None:
@@ -344,6 +456,12 @@ def detect_faces(path, width=480):
     if w != width:
         img = cv2.resize(img, (width, max(1, int(round(h * width / float(w))))))
         h, w = img.shape[:2]
+    yun = yunet_detect(img)
+    if yun:
+        return [rounded(b, 4) for b in filter_faces(
+            [(b, 2 if sc >= 0.8 else 1) for b, sc in yun])]
+    if not _cascades(cv2):
+        return [] if yun is not None else None
     gray = cv2.equalizeHist(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
     flipped = cv2.flip(gray, 1)
     ms = (max(24, w // 20), max(24, w // 20))
@@ -768,12 +886,13 @@ def zones_of(track, kind=None):
     return out
 
 
-def on_face(box, zones, mouths=()):
+def on_face(box, zones, mouths=(), chins=()):
     """The solver's fast version of assess() over merged zones: does a box
-    cover a real share of a face zone or a mouth band?"""
+    cover a real share of a face zone, a mouth band or a chin band?"""
     return any(inter(box, z) >= min(FACE_HIT * area(z), BOX_ON_FACE * area(box))
                for z in zones) or \
-        any(inter(box, m) >= MOUTH_HIT * area(m) for m in mouths)
+        any(inter(box, m) >= MOUTH_HIT * area(m) for m in mouths) or \
+        any(inter(box, c) >= CHIN_HIT * area(c) for c in chins)
 
 
 def assess(box, track):
@@ -783,7 +902,7 @@ def assess(box, track):
     the mouth band (or lies BOX_ON_FACE inside a face zone) in HIT_SHARE of
     the seconds that show a face."""
     faced = hits = 0
-    mouth = False
+    mouth = chin = False
     when, zs = [], []
     for t, faces in track:
         if not faces:
@@ -791,13 +910,15 @@ def assess(box, track):
         faced += 1
         hit = False
         for f in faces:
-            fz, mz = face_zone(f), mouth_zone(f)
+            fz, mz, cz = face_zone(f), mouth_zone(f), chin_zone(f)
             a = inter(box, fz) / max(1e-9, area(fz))
             m = inter(box, mz) / max(1e-9, area(mz))
-            if a >= FACE_HIT or m >= MOUTH_HIT or \
+            c = inter(box, cz) / max(1e-9, area(cz))
+            if a >= FACE_HIT or m >= MOUTH_HIT or c >= CHIN_HIT or \
                     inter(box, fz) >= BOX_ON_FACE * max(1e-9, area(box)):
                 hit = True
                 mouth = mouth or m >= MOUTH_HIT
+                chin = chin or c >= CHIN_HIT
                 zs.append(fz)
         if hit:
             hits += 1
@@ -807,6 +928,7 @@ def assess(box, track):
     else:
         collide = hits > 0
     return {"hit": bool(collide), "mouth": bool(collide and mouth),
+            "chin": bool(collide and chin and not mouth),
             "when": (min(when), max(when)) if when else None,
             "face": union(zs) if zs else None}
 
@@ -1323,7 +1445,8 @@ def patch_cost(patch, params, spec):
 def candidates(template, spec, params, box, variants, zones, W, H,
                captions=(), predict=True, mouths=(), clear_penalty=CLEAR_PENALTY,
                near_captions=(), room=None,
-               require_clear=False, scene=()):
+               require_clear=False, scene=(), chins=(), mark=None,
+               pin_size=False):
     """Ranked placements [(cost, patch, predicted box)] off every face (no real
     share of a zone or mouth band, on_face; grazing a zone's CLEARANCE costs
     CLEAR_PENALTY) and inside the safe area. ``variants`` are measured alternatives at the
@@ -1352,7 +1475,7 @@ def candidates(template, spec, params, box, variants, zones, W, H,
                   if (pspec.get(k) or {}).get("type") == "float"), None)
     if template in LAYOUT_WIDTH:
         sizer = None        # a narrower layout is taller, not a smaller box
-    if sizer and predict:
+    if sizer and predict and not pin_size:
         # an unset size knob reads as its maximum (word_slam's width: 0.85)
         sp = pspec[sizer]
         cur = num(params, sizer, sp.get("default", sp.get("max", 1.0)))
@@ -1402,7 +1525,9 @@ def candidates(template, spec, params, box, variants, zones, W, H,
             if nb[1] < y_lo - EDGE_TOL or nb[3] > y_hi + EDGE_TOL or nb[0] < -EDGE_TOL \
                     or nb[2] > 1 + EDGE_TOL:
                 continue
-            if safe_issues(nb, W, H) or on_face(nb, zones, mouths):
+            if safe_issues(nb, W, H) or on_face(nb, zones, mouths, chins):
+                continue
+            if mark is not None and on_mark(nb, mark):
                 continue
             cost = c + abs(dy)
             if (clear_penalty or require_clear) and not clear_of_faces(nb, zones):

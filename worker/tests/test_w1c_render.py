@@ -554,7 +554,8 @@ def test_glyph_region_draws_inside_the_letters_only(comp):
     p = _yuv(comp["plain"]["dumps"]["50"])[0]
     g = _yuv(comp["glyph"]["dumps"]["50"])[0]
     assert comp["glyph"]["error"] is None
-    assert comp["glyph"]["report"][0]["rung"] == "full"
+    assert comp["glyph"]["report"][0]["rung"] == "full", \
+        comp["glyph"]["report"][0].get("reason")
     ink, core = _ink(comp)
     assert np.abs(p - g)[core].mean() > 100       # white letters negated
     t = _touched(comp)

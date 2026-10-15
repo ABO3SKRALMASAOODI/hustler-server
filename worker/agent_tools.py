@@ -2481,19 +2481,19 @@ def project_state(ctx, edl=None):
         return {}
     out = {}
     try:
-        import devices
-        live_cards = bool(devices.load_cards())
-    except Exception:  # noqa: BLE001
-        live_cards = False
-    try:
         if edl is None:
             edl = ctx.latest_edl()["json"]
-        has_fx = bool(edl.get("fx"))
+        has_fx = bool(edl.get("fx")) or any(
+            isinstance(m, dict) and m.get("layer") == "behind_subject"
+            for m in edl.get("motion") or []) or any(
+            isinstance(t, dict) and t.get("behind")
+            for t in edl.get("texts") or [])
     except Exception:  # noqa: BLE001
         has_fx = False
-    if not (live_cards or has_fx):
-        # no device can use analysis yet: the state stays as it was, and
-        # no store listing is paid for on every turn
+    if not has_fx:
+        # nothing in this edit reads analysis: the state stays as it was,
+        # and no store listing is paid for on every turn (Wave 1 merge: the
+        # cards are live everywhere, so "cards exist" no longer says it)
         return {}
     try:
         import sidecars

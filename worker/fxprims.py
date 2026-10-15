@@ -205,21 +205,44 @@ def composite_overlay(parts, main_label):
     return OVERLAY_ALPHA if alpha_chain(parts, main_label) else OVERLAY
 
 
+# How far ahead of its program frame a re-padded window frame is stamped,
+# in microseconds. A concatenated program's stamps carry the rounding of
+# each block's start (measured +1 us on later blocks at 29.97), so a branch
+# stamped exactly would sometimes sit 1 us AFTER its program frame and the
+# overlay would show the previous branch frame there. Two microseconds early
+# can never reach the previous frame (>= 8 ms away at 120 fps).
+EARLY_US = 2
+
+
+def restamp(fps):
+    """``settb`` + ``setpts`` that stamp frame N exactly on the program grid
+    (N / fps3) on the microsecond time base the concatenated program runs on.
+    ROUNDED: setpts truncates, and N / 25.000 / TB on a 1/25 link evaluates
+    to 56.999... for N = 57, which stacked two frames on one stamp (Wave 1
+    integration; every track had found it on its own)."""
+    return f"settb=AVTB,setpts=round(N/{fps3(fps):.3f}/TB)"
+
+
 def repad(f0, fps, alpha=False):
     """The tail of a window branch: re-pad its frames to the program clock
     and RE-STAMP them on the program's own grid (frame n at n / fps3).
 
     ``tpad`` stamps its padding by accumulating a ROUNDED frame duration in
-    the link's time base (microseconds after a concat), so at 59.94 fps the
-    window frame arrived 42 us before the program frame it belonged to and
-    overlay's frame sync matched it to nothing (measured; 25 fps hid it).
-    ``setpts=N/fps/TB`` makes branch frame n carry exactly the timestamp of
-    program frame n. One trailing pad frame keeps the branch alive past the
-    window so its last frame is never taken for end-of-stream."""
+    the link's time base, so a window frame could arrive before or after the
+    program frame it belongs to and overlay's frame sync matched it to the
+    wrong one. The branch is re-stamped on the microsecond time base,
+    rounded (``restamp``), ``EARLY_US`` ahead of its program frame. Measured
+    with a null window over every frame (Wave 1 integration): the truncating
+    ``setpts=N/fps/TB`` it replaces showed the previous frame on 8 of 300
+    frames at 25 and 50 fps and 2 at 30 fps on a 1/fps link; this stamp is
+    frame-exact at 23.976, 25, 29.97, 30, 50 and 59.94, concatenated or not.
+    One trailing pad frame keeps the branch alive past the window so its
+    last frame is never taken for end-of-stream."""
     color = "black@0" if alpha else "black"
     lead = f"start={int(f0)}:" if f0 > 0 else ""
     return (f",tpad={lead}stop=1:start_mode=add:stop_mode=add:color={color},"
-            f"setpts=N/{fps3(fps):.3f}/TB")
+            f"settb=AVTB,setpts='round(N/{fps3(fps):.3f}/TB)"
+            f"-{EARLY_US}*gt(N,0)'")
 
 
 def window(parts, in_label, out_label, spans, op, *, uid, timeline=True,
@@ -452,6 +475,7 @@ MASK_OP_FILTERS = ("format", "dilation", "erosion", "gblur", "negate")
 
 # Filters the primitives themselves emit (fxgraph checks the lane has them
 # before any device that uses a primitive is compiled).
-PRIMITIVE_FILTERS = ("split", "trim", "setpts", "tpad", "overlay", "format",
+PRIMITIVE_FILTERS = ("split", "trim", "setpts", "settb", "tpad", "overlay",
+                     "format",
                      "crop", "scale", "blend", "alphamerge", "alphaextract",
                      "guided", "extractplanes", "nullsink", "null", "negate")

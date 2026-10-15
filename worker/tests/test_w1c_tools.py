@@ -171,7 +171,12 @@ def test_add_region_effect_and_remove():
     g = [i for i in ctx.edl["fx"] if i["effect"] == "refraction"][0]
     assert g["stage"] == "over_type" and g["device"] == "region_material"
     out = ct.add_region_effect(ctx, "blur", "face", 5.0, 6.0)
-    assert out.startswith("EDL") and "face region draws once" in out
+    # merged with 1A: matte_track serves face masks, so the face region
+    # draws and no "draws once" note is owed
+    import fxgraph
+    assert out.startswith("EDL")
+    assert ("face region draws once" in out) == (
+        fxgraph.peer_fn("matte_track:face_mask") is None)
     # a glyph region naming a graphic that is not there: the member's check
     out = ct.add_region_effect(ctx, "negate", "glyph:zz", 1.0, 2.0)
     assert out.startswith("REJECTED") and "not in this edit" in out

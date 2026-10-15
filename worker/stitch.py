@@ -92,7 +92,12 @@ def _fx_window(item):
                   2.0 * float(item.get("frames") or 0) / 24.0 + 0.1,
                   float(item.get("duration_s") or 0.0) + 0.1)
         return max(0.0, at - pad), at + pad
-    return float(item["start"]), float(item["end"])
+    end = float(item["end"])
+    if item.get("type") == "accent" and item.get("decay_f"):
+        # a white or colour hit decays past its end (1D: up to 12 frames);
+        # the piece holds the whole tail, counted at the slowest rate
+        end += (int(item.get("decay_f") or 0) + 2) / 23.976
+    return float(item["start"]), end
 
 
 def _strip(edl):
@@ -124,6 +129,23 @@ def _behind_motion(edl):
     text would, so both force a full render."""
     return any(m.get("layer") == "behind_subject"
                for m in (edl.get("motion") or []))
+
+
+# A composite whose letters are filled with program footage from ANOTHER
+# moment (the shot after or before the cut, a time offset, the raw source)
+# reads frames outside its own window, which a piece clipped to that window
+# does not hold: the piece showed plain letters where the final shows the
+# footage (1C review). Such an edit renders in full.
+_FOOTAGE_FILLS = ("next", "previous", "program", "source")
+
+
+def _footage_composite(edl):
+    for m in edl.get("motion") or []:
+        comp = m.get("composite") if isinstance(m, dict) else None
+        fill = comp.get("fill") if isinstance(comp, dict) else None
+        if isinstance(fill, dict) and fill.get("kind") in _FOOTAGE_FILLS:
+            return True
+    return False
 
 
 def _item_windows(edl, tl, duration):
@@ -197,6 +219,8 @@ def plan(prev_edl, new_edl, tl_prev, tl_new, duration, out_duration):
         return None, "behind-subject text present"
     if _behind_motion(new_edl) or _behind_motion(prev_edl):
         return None, "behind-subject motion graphic present"
+    if _footage_composite(new_edl) or _footage_composite(prev_edl):
+        return None, "footage-filled letters read another moment"
     if any(o.get("screen") for o in (new_edl.get("overlays") or [])) or \
             any(o.get("screen") for o in (prev_edl.get("overlays") or [])):
         return None, "screen takeover present"

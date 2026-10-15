@@ -80,7 +80,7 @@ def test_window_generic_path_trims_repads_restamps_and_gates_on_n():
         "[v]split[ua][ub]",
         "[ub]trim=start_frame=120:end_frame=121,setpts=PTS-STARTPTS,hflip,"
         "format=yuv420p,tpad=start=120:stop=1:start_mode=add:stop_mode=add:"
-        "color=black,setpts=N/59.940/TB[uw]",
+        "color=black,settb=AVTB,setpts='round(N/59.940/TB)-2*gt(N,0)'[uw]",
         "[ua][uw]overlay=eof_action=pass:enable='between(n,120,120)'[o]"]
     parts = []
     fxprims.window(parts, "v", "o", [(0, 3)], "hflip", uid="u",
