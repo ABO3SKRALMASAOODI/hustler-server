@@ -1,0 +1,33 @@
+# Track 2A. The same solved lockup set BEHIND the subject (program matte),
+# with ghost outlines where letters hide; it falls back to the front when no
+# layout keeps the words readable behind this subject.
+id: typeset_behind
+family: type_depth
+verb: add_typeset
+stage: motion
+params:
+  depth: [behind]
+  voice: [magazine, condensed_poster, hairline_wide, slot_blackletter]
+  layout: [magazine, stack, spread]
+needs:
+  sidecars: [matte.person]
+  lane_features: [chromium, "ffmpeg:alphamerge"]
+  footage: "a person with headroom or negative space beside the head"
+binds_to: [word.payoff, section, phrase_end]
+budget:
+  calm: {per_short: 1, min_gap_s: 10}
+  designed: {per_short: 2, min_gap_s: 7}
+  charged: {per_short: 3, min_gap_s: 5}
+never:
+  - "small type the head hides: bigger type, never smaller"
+  - "across the eyes or mouth (the solver keeps the face core clear even behind)"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, {substitute: type_in_front}, omit]
+cost:
+  ms_per_frame: {interactive: 75.0, batch: 90.0, local: 40.0}
+  fixed_ms: 1200
+exemplars: ["09@1.27–21.6", "05@0.23", "40@≈5–14.3"]
+verify: ["glyph_visible>=0.65", "matte_flicker<=0.035"]
+status: live
+description: "a solved lockup set behind the speaker, ghost outlines where letters hide"
+skill: typesetting

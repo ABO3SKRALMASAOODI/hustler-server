@@ -1,0 +1,112 @@
+{
+  "id": "typeset_lockup",
+  "family": "layout",
+  "verb": "add_typeset",
+  "stage": "motion",
+  "params": {
+    "voice": [
+      "auto",
+      "magazine",
+      "whisper_shout",
+      "staircase_red",
+      "slot_blackletter",
+      "neon_script",
+      "editorial_serif",
+      "quote_window",
+      "condensed_poster",
+      "lamp_karaoke",
+      "hairline_wide",
+      "marker_note",
+      "swiss_grid",
+      "techno_crt"
+    ],
+    "layout": [
+      "auto",
+      "stack",
+      "magazine",
+      "staircase",
+      "stack_up",
+      "justified",
+      "side_column",
+      "slots",
+      "flank",
+      "constellation",
+      "spread",
+      "tilt",
+      "quote_window",
+      "arc"
+    ],
+    "depth": [
+      "front",
+      "behind",
+      "auto"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "any program; a face is kept clear (eyes-to-mouth never covered, even behind the subject)"
+  },
+  "binds_to": [
+    "word.payoff",
+    "phrase_end",
+    "section",
+    "stress",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 10
+    },
+    "designed": {
+      "per_short": 3,
+      "min_gap_s": 6
+    },
+    "charged": {
+      "per_short": 5,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "over a dense explanation: poster type is for a hook, a turn or a payoff",
+    "the same voice as the previous typeset, unless it is a callback",
+    "words the captions also show (it replaces them; it never duplicates them)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "phrase_build"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 60.0,
+      "batch": 45.0,
+      "local": 33.0
+    },
+    "fixed_ms": 700
+  },
+  "exemplars": [
+    "04@0.5",
+    "09@1.27",
+    "10@0.47",
+    "13@0.2",
+    "15@2.67",
+    "20@3.0"
+  ],
+  "verify": [
+    "land_err_f<=1",
+    "legibility>=60"
+  ],
+  "status": "live",
+  "description": "a spoken phrase set as poster-scale type in a voice fitted to the beat, each word on its onset",
+  "skill": "typesetting"
+}

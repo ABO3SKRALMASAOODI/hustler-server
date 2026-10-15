@@ -109,6 +109,24 @@ MOTION_FONT_FACES = [
     ("Poppins", "Poppins-ExtraBold.ttf", 800, "normal", None),
     ("Archivo", "Archivo-Variable.ttf", "100 900", "normal", "62% 125%"),
 ]
+
+
+def _manifest_faces():
+    """Wave 2 (track 2B, INTERFACES_W2.md §3.3): the faces listed in
+    motion/fonts/manifest.json join MOTION_FONT_FACES (the typesetter
+    measures the same files). A missing or unreadable manifest adds none."""
+    try:
+        with open(os.path.join(MOTION_FONTS_DIR, "manifest.json"),
+                  encoding="utf-8") as f:
+            faces = json.load(f).get("faces") or []
+        return [(str(x["family"]), str(x["file"]), x["weight"],
+                 str(x.get("style") or "normal"), x.get("stretch"))
+                for x in faces if isinstance(x, dict) and x.get("file")]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+MOTION_FONT_FACES = MOTION_FONT_FACES + _manifest_faces()
 OPTIONAL_FONT_FACES = []
 
 
