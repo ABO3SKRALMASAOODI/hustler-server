@@ -39,7 +39,11 @@ The references never had these; build the one that fits THIS story.
   or lighter than them (the light must read); embers off the edge need the
   person matte (the write says "measuring" until it is ready).
 - For a doodle or an orbit that rides the footage:
-  `look_at_world(times=[t])` shows what can be attached to.
+  `look_at_world(times=[t])` shows what can be attached to. A ring round
+  the head is about 1.35 head-heights across: it needs a medium shot with
+  headroom and the head away from the frame's side — on a tight close-up
+  it leaves the frame (the render reports "leaves the frame"); choose
+  another device there.
 - Lightning and bursts need their `at` times: the hit in the user's track
   or the stressed syllable.
 

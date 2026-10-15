@@ -1148,12 +1148,21 @@ def _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi):
     last = None
     k = 0
     ink = ctx._ink.get(item.get("id"))
+    k_check = min(n - 1, max(0, n // 2))
     try:
         for rgba in _decode_rgba(clip.path, int(clip.w), int(clip.h)):
             if k >= n:
                 break
             if ink is not None:
                 rgba = _to_ink(rgba, ink)
+            if k == k_check and plan.M[k] is not None and \
+                    abs(plan.M[k][2, 0]) + abs(plan.M[k][2, 1]) < 1e-12:
+                share = _inside_share(cv2, rgba, plan.M[k], W, H)
+                if share is not None and share < 0.85:
+                    notes.append(
+                        f"leaves the frame: {100 * (1 - share):.0f}% of it "
+                        "is outside at mid-window (no room round the "
+                        "anchor; a wider shot or another device)")
             last = rgba
             enc.write(_frame(cv2, rgba, plan, k, T, bw, bh, ctx,
                              occ_readers, hands, shadow, off, sw, sh))
@@ -1349,6 +1358,20 @@ def _frame(cv2, rgba, plan, k, T, bw, bh, ctx, occ_readers, hands, shadow,
     out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
     out[..., 3] = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
     return out
+
+
+def _inside_share(cv2, rgba, M, W, H):
+    """The share of the graphic's ink an affine ``M`` (clip px -> output
+    px) keeps inside the W x H frame, or None (no ink)."""
+    a = rgba[..., 3].astype(np.float32)
+    tot = float(a.sum())
+    det = abs(M[0, 0] * M[1, 1] - M[0, 1] * M[1, 0])
+    if tot <= 0 or det <= 1e-9:
+        return None
+    w = cv2.warpAffine(a, M[:2].astype(np.float64), (int(W), int(H)),
+                       flags=cv2.INTER_LINEAR,
+                       borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return min(1.0, float(w.sum()) / (tot * det))
 
 
 def _hands_mask(cv2, samples, t, A, T, bw, bh, ctx):
@@ -1645,7 +1668,8 @@ def rung_of(new, notes):
     text = "; ".join(n for n in notes or [] if n)
     if new is None or any(k in text for k in _SUBSTITUTE):
         return "substitute", text or "pinned static"
-    if YUNET_NOTE in text or "plane tracking not measured yet" in text:
+    if YUNET_NOTE in text or "plane tracking not measured yet" in text \
+            or "leaves the frame" in text:
         return "reduced", text
     return "full", text or None
 

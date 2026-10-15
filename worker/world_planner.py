@@ -157,6 +157,34 @@ def _face_ok(src, tl, t):
                for s in samples for f in s.get("faces") or [])
 
 
+RING_FIT = 1.35            # el_orbit's anchor_fit: box = 1.35 x the head
+
+
+def _ring_fits(wctx, src, tl, t):
+    """Does a ring round the head (el_orbit attached to the head) stay in
+    the program frame at program second ``t``?"""
+    from anchors import query
+    import world_layer
+    a = tl.out_to_src(t)
+    if wctx is None or a is None:
+        return False
+    samples, _sh, _m = query.load("landmarks.face", src, [(a - 0.3, a + 0.3)])
+    faces = [f for s_ in samples for f in s_.get("faces") or []
+             if f.get("he")]
+    if not faces:
+        return False
+    f = max(faces, key=lambda f: f["he"][3])
+    cx, cy, _rx, ry, _d = (float(v) for v in f["he"])
+    A = world_layer.program_affine(wctx.geometry("world"), t, a)
+    if A is None:
+        return False
+    half_h = RING_FIT * ry * A[1, 1]                # program height units
+    half_w = half_h * wctx.H / float(wctx.W)        # a round ring
+    px, py = A[0, 0] * cx + A[0, 2], A[1, 1] * cy + A[1, 2]
+    return (px - half_w >= -0.03 and px + half_w <= 1.03
+            and py - half_h >= -0.02)
+
+
 def _matte_ready(src, tl, t0, t1):
     try:
         import matte_track
@@ -363,6 +391,9 @@ def candidates(edl, index, plan, *, intensity="designed", max_n=MAX_WORLD,
         if not (tags & {"emotion", "payload"}):
             continue
         if not _face_ok(src, tl, m["t"]):
+            continue
+        if not _ring_fits(_wctx(edl, index, src), src, tl, m["t"]):
+            # a close-up without headroom: the ring would leave the frame
             continue
         mid = _uid("orb", used)
         s, e = round(m["t"] - 0.2, 2), round(min(prog, m["t"] + 2.6), 2)

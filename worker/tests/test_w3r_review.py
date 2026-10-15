@@ -411,3 +411,39 @@ def test_every_plane_puts_the_person_in_front_by_default():
             {"to": "plane:pl1"}, {}, defs) == ["person"]
         assert world_layer._default_occluders(
             {"to": "plane:pl1", "occluders": []}, {}, defs) == []
+
+
+# ── a graphic that leaves the frame is reported; orbits need headroom ───
+
+def test_a_graphic_mostly_outside_the_frame_is_a_reduced_rung():
+    import cv2
+    rgba = np.zeros((100, 100, 4), np.uint8)
+    rgba[20:80, 20:80, 3] = 255
+    inside = np.array([[1.0, 0, 50], [0, 1.0, 50], [0, 0, 1]])
+    half_out = np.array([[1.0, 0, -50], [0, 1.0, 50], [0, 0, 1]])
+    assert world_layer._inside_share(cv2, rgba, inside, 640, 360) > 0.99
+    assert world_layer._inside_share(cv2, rgba, half_out, 640, 360) < 0.6
+    assert world_layer.rung_of(object(), ["leaves the frame: 50% of it is "
+                                          "outside"])[0] == "reduced"
+
+
+def test_an_orbit_is_proposed_only_where_the_ring_fits(store):
+    from timeline import Timeline
+    edl = schemas.validate_edl(dict(BASE), 20.0).model_dump()
+    index = {"video": {"width": 1920, "height": 1080, "fps": 25.0,
+                       "duration": 20.0}}
+    tl = Timeline(edl["keep"])
+
+    def fits(sha, cy, ry):
+        src = w3s.source(sha=sha * 64, w=1920, h=1080, dur=20.0)
+        rows = [{"t": round(k * 0.1, 2), "faces": [{
+            "b": [0.4, cy - ry, 0.6, cy + ry], "s": 0.9, "p": [],
+            "he": [0.5, cy, ry * 0.8, ry, 0.0]}]} for k in range(200)]
+        for a, b in sidecars.chunk_ranges((), src.duration_s):
+            w3s.put_chunk(store, src, "landmarks.face", (a, b), data={
+                "version": 1, "samples": [r for r in rows
+                                          if a <= r["t"] < b]})
+        wctx = world_planner._wctx(edl, index, src)
+        return world_planner._ring_fits(wctx, src, tl, 3.0)
+    assert fits("c", 0.45, 0.12)        # a medium shot with headroom
+    assert not fits("d", 0.3, 0.3)      # a tight close-up near the top
