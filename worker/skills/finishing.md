@@ -9,6 +9,9 @@ meaning the words alone do not:
 - A B&W section says "memory", "then", "before". Colour arriving ON the
   drop frame says "now". Mono that fades out over three frames that end on
   the drop beats a cut to colour a frame late.
+- B&W is a device on a moment, never the whole short's look: a write that
+  turns most of the short mono is refused unless the user asked for black
+  and white. One B&W device per short, and not the one the last short used.
 - Keeping one colour (the red jacket in a grey world) points at the one
   thing that matters. Keep the colour the story is about, never a colour
   that happens to be loud.

@@ -591,10 +591,19 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   gum-10 (monochrome cuts decelerating on ticks), gum-07 (invert flashes).
 - **Base:** `apply_look('mono_noir')`, captions `motion_look` `stack`, or
   `mono` for technical stories.
-- **Canvas:** full-bleed black and white; red type behind the subject.
+- **Canvas:** full-bleed noir colour (contrast up, colour pushed down, never
+  removed); red type behind the subject.
+- **Black and white is a device, never the grade** (owner, 15 Oct): one B&W
+  moment per short, on the beat that earns it — a mono hook that opens to
+  colour ON the turn word (`set_grade_window` saturation 0, `ramp_out_f` 3),
+  the speaker kept in colour in a grey world for the payoff
+  (`isolate_colour` keep='subject'), a silhouette hold for one thought
+  (`add_subject_effect` kind='poster'), or 1-frame negatives on the 2-4
+  strongest hits (`add_accent` kind='negative'). A whole-short B&W grade only
+  when the user asked for black and white.
 - **Type:** condensed caps (Anton, Bebas, Archivo condensed) for heroes in
   red #ED080D; white Inter Bold for 1-3-word captions; mono for code and numbers.
-- **Grade:** high-contrast monochrome with one red accent, heavier grain, vignette.
+- **Grade:** high contrast, colour pushed down (apply_look sets it), one red accent, heavier grain, vignette.
 - **Camera (optional, only where earned):** a `punch` on the few real hits
   (shake on the biggest at most); a `pulse` on a real beat. Never a landing
   after every cut.
