@@ -253,7 +253,12 @@ def test_core_catalog_stays_under_the_wave1_ceiling():
 
 def test_render_version_stamps_are_unchanged():
     """Cached renders are keyed by these. A Wave 1 rendering change that
-    must reach cached renders is a round-lead decision (report it)."""
+    must reach cached renders is a round-lead decision (report it).
+
+    The pin follows production main, never a track: CARD_LAYOUT_VERSION went
+    1 -> 2 -> 3 in production (8b0322c composed holds keep source-fed cards;
+    56b8736 cards align to indexed camera cuts) after the Wave 1 base was
+    cut, so the integration re-pinned it to 3. No Wave 1 track moves a stamp."""
     import config
     with open(os.path.join(FIX, "w1_render_stamps.json")) as f:
         pin = json.load(f)
