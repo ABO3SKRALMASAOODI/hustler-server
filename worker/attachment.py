@@ -119,6 +119,28 @@ def parse(phrase):
     return None
 
 
+def behind_params(box, W=1080, H=1920):
+    """word_slam placement for a word hidden BEHIND an object whose box is
+    ``box`` [x0, y0, x1, y1] (PROGRAM fractions): {x, y, width}. A wide
+    object (a laptop, a desk edge, a car) hides the word's lower part — the
+    word rises from behind its top edge; a tall one (a mic, a bottle, a
+    door jamb) crosses the word at its middle. Without this the word sits
+    where the template puts it and the object hides nothing."""
+    x0, y0, x1, y1 = (float(v) for v in box)
+    bw, bh = max(1e-3, x1 - x0), max(1e-3, y1 - y0)
+    cx = (x0 + x1) / 2.0
+
+    def clamp(v, lo, hi):
+        return round(min(hi, max(lo, v)), 3)
+    if bw * W >= 1.2 * bh * H:
+        # the word's centre a little above the top edge: its lower third
+        # or so goes behind the object
+        return {"x": clamp(cx, 0.3, 0.7), "y": clamp(y0 - 0.02, 0.12, 0.8),
+                "width": clamp(1.15 * bw, 0.45, 0.85)}
+    return {"x": clamp(cx, 0.3, 0.7), "y": clamp((y0 + y1) / 2.0, 0.12, 0.8),
+            "width": 0.8}
+
+
 def anchor_for(parsed, which=None):
     """The anchor fields for a parsed landmark target (face, head, hand,
     pose, person-behind), or None for object / plane targets (they need a

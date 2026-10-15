@@ -380,12 +380,20 @@ def test_the_genre_d_pack_names_real_devices_verbs_and_skills():
     cards = set(devices.load_cards()) if hasattr(devices, "load_cards") \
         else {os.path.splitext(f)[0] for f in os.listdir(
             os.path.join(WORKER, "devices", "cards"))}
-    for fam in pack["palette"].values():
-        for d in fam:
-            assert d in cards, d
+    # the Wave 2 format-pack shape (formats.validate on claude/w2-engine):
+    # required fields, every device a card, B&W never a whole-short look
+    for k in ("id", "name", "structure", "palette", "voices", "punctuation",
+              "junctions", "colour_world", "footage_quotas"):
+        assert k in pack, k
+    assert pack["id"] == "D"
+    for d in pack["palette"]:
+        assert d in cards, d
     for sec in pack["structure"]:
+        assert sec["beat"] and sec["at"]
         for d in sec["devices"]:
             assert d in cards, d
+    for d in pack["punctuation"] + pack["junctions"]:
+        assert d in cards, d
     import agent_tools
     for v in pack["verbs"]:
         assert v in agent_tools.TOOLS, v
@@ -393,7 +401,8 @@ def test_the_genre_d_pack_names_real_devices_verbs_and_skills():
         assert s in agent_prompt.skill_names(), s
     assert pack["budgets"]["per_line_no_repeat"] is True
     assert pack["budgets"]["music"].startswith("never")
-    assert "unless the user asks" in pack["colour_world"]["never"]
+    assert "whole_short_mono" in pack["colour_world"]["never"]
+    assert pack["budgets"]["light_dissolve_max"] == 1
     assert sum(s["share"][0] for s in pack["structure"]) <= 1.0 <= sum(
         s["share"][1] for s in pack["structure"])
     assert tools_ext.EXT_DEPARTMENTS

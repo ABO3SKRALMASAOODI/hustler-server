@@ -73,6 +73,31 @@ def _src(index):
         return None
 
 
+def _wctx(edl, index, src):
+    """A world_layer.Ctx for program geometry (no render), or None."""
+    try:
+        import renderer
+        import world_layer
+        v = (index or {}).get("video") or {}
+        W, H = renderer.frame_dims(float(v.get("width") or 1920),
+                                   float(v.get("height") or 1080),
+                                   (edl.get("frame") or {}).get("ratio"))
+        tl = _tl(edl)
+        return world_layer.Ctx(edl, W, H, float(v.get("fps") or 30.0),
+                               tl=tl, source=src, index=index,
+                               out_duration=tl.out_duration)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def world_layer_box(wctx, box, t):
+    try:
+        import world_layer
+        return world_layer.program_box(wctx, box, t)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _tl(edl):
     from timeline import Timeline
     return Timeline(edl.get("keep") or [], edl.get("inserts") or [],
@@ -147,6 +172,32 @@ def _matte_ready(src, tl, t0, t1):
         return bool(chunks) and len(ready) == len(chunks)
     except Exception:  # noqa: BLE001
         return False
+
+
+# words of a last line that a figure turning to light answers (it is the
+# line's own image, never a default ending)
+ENDING_WORDS = frozenset((
+    "gone", "disappear", "disappears", "disappeared", "vanish", "vanishes",
+    "vanished", "fade", "fades", "faded", "fading", "light", "glow", "burn",
+    "burns", "burned", "burnt", "ash", "ashes", "dust", "forever", "goodbye",
+    "die", "dies", "died", "dead", "death", "dissolve", "dissolves",
+    "evaporate", "evaporates", "erase", "erased", "ghost", "spirit", "soul",
+    "stars", "energy", "transcend", "transcends", "immortal", "eternity"))
+
+
+def _ending_earned(plan, starts):
+    """Does the last sentence speak of vanishing, light or an end?"""
+    words = plan.get("words") or []
+    if not words:
+        return False
+    last = starts[-1] if starts else 0.0
+    for w in words:
+        if float(w.get("t0", 0.0)) + 1e-6 < last:
+            continue
+        t = str(w.get("w") or "").strip(" .,!?;:\"'“”‘’…()").lower()
+        if t in ENDING_WORDS:
+            return True
+    return False
 
 
 def _word_text(m):
@@ -235,9 +286,18 @@ def candidates(edl, index, plan, *, intensity="designed", max_n=MAX_WORLD,
         mid = _uid("ww", used)
         s, e = round(max(a, m["t"] - 0.2), 2), round(min(b, m["t"] + 2.2), 2)
         if d["type"] == "object":
+            # the word where the object hides part of it (a wide object's
+            # top edge, a tall one's middle), from the object's own box
+            where = {"width": 0.8, "y": 0.72}
+            pb = (d.get("prompt") or {}).get("box")
+            wctx = _wctx(edl, index, src)
+            prog_box = world_layer_box(wctx, pb, m["t"]) if pb else None
+            if prog_box:
+                import attachment
+                where = attachment.behind_params(prog_box, wctx.W, wctx.H)
             item = {"id": mid, "template": "word_slam", "start": s, "end": e,
-                    "params": {"text": text, "entrance": "rise",
-                               "role": "condensed", "width": 0.8, "y": 0.72},
+                    "params": dict({"text": text, "entrance": "rise",
+                                    "role": "condensed"}, **where),
                     "layer": "above_captions",
                     "anchor": {"to": "screen", "occluders": [
                         f"object:{fid}"]}}
@@ -316,9 +376,16 @@ def candidates(edl, index, plan, *, intensity="designed", max_n=MAX_WORLD,
         break
     if len(out) >= max_n:
         return out
-    # 4. an ending: the figure turns to light on the last phrase end
+    # 4. an ending: the figure turns to light on the last phrase end —
+    #    only where the last line earns it (it speaks of vanishing, light,
+    #    an end) or the user asked: a dissolve closing every short of a
+    #    batch would be a house style, not a device
     ends = [m for m in plan.get("moments") or []
             if m.get("kind") == "phrase_end"]
+    if ends and not (_ending_earned(plan, starts) or set(
+            str(a).lower() for a in asked or ()) & {"light", "dissolve",
+                                                   "ending", "embers"}):
+        ends = []
     if ends:
         last = max(ends, key=lambda m: m["t"])
         s = round(max(0.0, last["t"] - 0.3), 2)

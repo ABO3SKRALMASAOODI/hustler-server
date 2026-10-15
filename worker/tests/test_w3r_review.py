@@ -1,0 +1,322 @@
+"""Wave 3 independent review (w3r): regressions for what the review found.
+
+  * a stale client (apply_edit_batch, no world verb) gets its world items
+    measured from their first render: world_layer.requests / warm launch
+    exactly the keys the readers read; previews never wait, finals wait
+    within the render's sidecar budget;
+  * an anchored graphic reports a device row (full / reduced / substitute),
+    so a final that pinned it static is held like any degraded device;
+  * the face detector's box is the rung between the face mesh and a static
+    placement (ROADMAP 3A degrade ladder);
+  * "behind the <object>" sets the word where the object can hide it (the
+    verb and the planner), not at the template's default height;
+  * the planner proposes the light dissolve only where the last line earns
+    it (or the user asked): an ending on every short is a house style;
+  * a canvas program hands the world context to its layout pages (slots).
+
+CI-safe: local sidecar store, synthetic clips, no Chromium, no model.
+"""
+
+import copy
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+import numpy as np
+import pytest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+WORKER = os.path.dirname(HERE)
+sys.path.insert(0, WORKER)
+sys.path.insert(0, HERE)
+
+import attachment                                      # noqa: E402
+import fxgraph                                         # noqa: E402
+import schemas                                         # noqa: E402
+import sidecars                                        # noqa: E402
+import world_layer                                     # noqa: E402
+import world_planner                                   # noqa: E402
+import w3_support as w3s                               # noqa: E402
+from test_w3f_agent import BASE, Ctx, WORDS            # noqa: E402
+from tools_ext import world_tools as WT                # noqa: E402
+
+
+@pytest.fixture
+def store(tmp_path):
+    root = str(tmp_path / "store")
+    os.makedirs(root)
+    prev = sidecars.use_store(sidecars.LocalStore(root))
+    yield root
+    sidecars.use_store(prev)
+
+
+@pytest.fixture(autouse=True)
+def _no_executor_check(monkeypatch):
+    monkeypatch.setattr(WT, "_executor_refusal", lambda: None)
+    monkeypatch.setattr(WT, "_launch_source", lambda ctx: None)
+
+
+WORLD_EDL = {
+    "keep": [[0.0, 5.0]],
+    "fx": [{"id": "ob1", "type": "object", "stage": "world", "start": 0.5,
+            "end": 3.5, "prompt": {"src_t": 1.0,
+                                   "box": [0.4, 0.75, 0.66, 1.0]}},
+           {"id": "pl1", "type": "plane", "stage": "world", "start": 0.5,
+            "end": 3.5, "src_t": 1.0, "surface": "desk",
+            "quad": [[0.2, 0.55], [0.8, 0.55], [0.9, 0.95], [0.1, 0.95]]}],
+    "motion": [
+        {"id": "m1", "template": "word_slam", "start": 1.0, "end": 2.0,
+         "params": {"text": "A"}, "anchor": {"to": "hand.index_tip"}},
+        {"id": "m2", "template": "word_slam", "start": 1.0, "end": 2.0,
+         "params": {"text": "B"}, "anchor": {"to": "head"}},
+        {"id": "m3", "template": "word_slam", "start": 1.0, "end": 2.0,
+         "params": {"text": "C"},
+         "anchor": {"to": "screen", "occluders": ["object:ob1"]}},
+        {"id": "m4", "template": "word_slam", "start": 1.0, "end": 2.0,
+         "params": {"text": "D"},
+         "anchor": {"to": "plane:pl1", "shadow": True}},
+        {"id": "m5", "template": "el_particles", "start": 3.0, "end": 4.0,
+         "params": {"kind": "embers", "emit": "edge"}}]}
+
+
+# ── the stale-client path: render-time measurement ─────────────────────
+
+def test_requests_name_every_sidecar_the_world_items_read():
+    src = w3s.source()
+    c, e = w3s.ctx(WORLD_EDL, src)
+    kinds = {k for k, _r, _p in world_layer.requests(c)}
+    assert kinds == {"landmarks.hand", "landmarks.face", "faces.yunet",
+                     "objects.sam2", "planes.h", "plate.clean",
+                     "matte.person"}
+    # a definition is requested exactly as the readers read it
+    import world_defs
+    reqs = world_layer.requests(c)
+    ob = world_defs.request(world_defs.definitions(e)["ob1"], c.tl, 0.0)
+    assert ob in reqs
+
+
+def test_warm_launches_on_renders_and_waits_only_on_finals(monkeypatch):
+    src = w3s.source()
+    c, _e = w3s.ctx(WORLD_EDL, src)
+    launched, waited = [], []
+
+    def ensure(kind, source, ranges, priority="interactive", params=None):
+        launched.append((kind, priority))
+        return sidecars.Handle(kind=kind, source_sha=source.sha256,
+                               chunks=(), priority=priority, params={})
+    monkeypatch.setattr(sidecars, "ensure", ensure)
+    monkeypatch.setattr(sidecars, "wait",
+                        lambda hs, b: waited.append(b) or {})
+    monkeypatch.setattr(sidecars, "status", lambda h: "pending")
+    # a read-only lane launches nothing
+    assert world_layer.warm(c, None, 30.0) == {}
+    assert not launched
+    # a preview launches and never waits
+    res = world_layer.warm(c, src, 0.0)
+    assert {k for k, _p in launched} >= {"landmarks.hand", "objects.sam2",
+                                          "matte.person"}
+    assert all(p == "interactive" for _k, p in launched)
+    assert not waited and set(res.values()) == {"pending"}
+    # a final waits within its budget
+    world_layer.warm(c, src, 30.0)
+    assert waited and 0 < waited[0] <= 30.0
+
+
+def test_renders_warm_the_world_through_the_render_launch(monkeypatch):
+    import matte_track
+    import renderer
+    src = w3s.source()
+    _c, e = w3s.ctx(WORLD_EDL, src)
+    seen = []
+    monkeypatch.setattr(world_layer, "warm",
+                        lambda ctx, launch, wait_s: seen.append(
+                            (launch, wait_s)) or {})
+    tok = matte_track.RENDER_LAUNCH.set(src)
+    try:
+        from timeline import Timeline
+        tl = Timeline(e["keep"])
+        assert renderer._world_ctx(e, 640, 360, 25.0, tl, w3s.index_for(src),
+                                   True, None, 0.0, "/tmp", None)
+        assert renderer._world_ctx(e, 640, 360, 25.0, tl, w3s.index_for(src),
+                                   False, None, 0.0, "/tmp", None)
+    finally:
+        matte_track.RENDER_LAUNCH.reset(tok)
+    assert seen[0] == (src, 0.0)
+    assert seen[1][0] is src and 0 < seen[1][1] <= sidecars.FINAL_WAIT_MAX_S
+
+
+# ── device rows: an anchored graphic that degrades holds the final ──────
+
+def _fake_clip(tmp_path):
+    return w3s.square_clip(str(tmp_path / "sq.mov"), n=10)
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg")
+@pytest.mark.parametrize("composed,notes,rung", [
+    (False, ["pinned static: face landmarks not measured yet"],
+     "substitute"),
+    (True, ["the person matte is not measured yet: drawn in front of the "
+            "person"], "substitute"),
+    (True, [world_layer.YUNET_NOTE], "reduced"),
+    (True, [], "full")])
+def test_anchored_items_report_their_rung(tmp_path, monkeypatch, composed,
+                                          notes, rung):
+    src = w3s.source()
+    c, e = w3s.ctx(WORLD_EDL, src)
+    clip = _fake_clip(tmp_path)
+    monkeypatch.setattr(world_layer, "compose", lambda item, cl, ctx: (
+        cl if composed else None, list(notes)))
+    rows = []
+    tok = fxgraph.collect(rows)
+    try:
+        world_layer.finish([e["motion"][1]], [clip], c)
+    finally:
+        fxgraph.stop_collecting(tok)
+    (row,) = fxgraph.merge_report(rows)
+    assert row["id"] == "m2" and row["device"] == "anchor_face"
+    assert row["rung"] == rung
+
+
+def test_a_degraded_anchor_is_held_at_export():
+    import quality_verifier
+    rows = [{"id": "m2", "device": "anchor_face", "family": "world",
+             "stage": "world", "rung": "substitute",
+             "reason": "pinned static: face landmarks not measured yet"}]
+    assert quality_verifier.unacknowledged_degradations({}, rows) == rows
+
+
+# ── the face detector's box: the rung under the face mesh ──────────────
+
+def test_a_face_anchor_rides_the_detector_box_while_the_mesh_measures(store):
+    src = w3s.source()
+    rows = []
+    for k in range(40):
+        t = round(k * 0.1, 3)
+        x = 0.4 + 0.002 * k
+        rows.append({"t": t, "faces": [[x, 0.2, x + 0.2, 0.6, 0.95,
+                                        x + 0.06, 0.33, x + 0.14, 0.33,
+                                        x + 0.1, 0.42, x + 0.07, 0.5,
+                                        x + 0.13, 0.5]]})
+    w3s.put_chunk(store, src, "faces.yunet", (0.0, 6.0),
+                  data={"version": 1, "fps": 10.0, "samples": rows})
+    c, _e = w3s.ctx({"keep": [[0.0, 4.0]]}, src)
+    for anchor, want in (({"to": "head"}, None),
+                         ({"to": "face.eye_l"}, (0.46, 0.33)),
+                         ({"to": "face.mouth"}, (0.5, 0.5))):
+        series, why = world_layer.series_for(anchor, c, 1.0, 2.0)
+        assert series is not None and why == world_layer.YUNET_NOTE
+        xy, size, _a, _q, ok = series.at(np.array([1.0]))
+        assert ok[0]
+        if want:
+            assert abs(xy[0][0] - (want[0] + 0.02)) < 0.01, anchor
+            assert abs(xy[0][1] - want[1]) < 0.01, anchor
+        else:
+            # the head: centred on the face, taller than the face box
+            assert abs(xy[0][0] - 0.52) < 0.01 and size[0] > 0.4
+    # the mesh, once measured, wins (no detector note)
+    assert world_layer.rung_of(object(), [world_layer.YUNET_NOTE])[0] == \
+        "reduced"
+
+
+# ── "behind the <object>": the word where the object can hide it ───────
+
+def test_behind_a_wide_object_the_word_rises_from_its_top_edge():
+    p = attachment.behind_params([0.2, 0.78, 0.85, 1.0], 1080, 1920)
+    assert abs(p["y"] - 0.76) < 0.01 and 0.45 <= p["width"] <= 0.85
+    # a tall one (a mic) crosses the word at its middle
+    q = attachment.behind_params([0.45, 0.4, 0.55, 0.7], 1080, 1920)
+    assert abs(q["y"] - 0.55) < 0.01 and abs(q["x"] - 0.5) < 0.01
+
+
+def test_place_in_world_behind_sets_the_word_over_the_object():
+    ctx = Ctx(BASE)
+    res = WT.place_in_world(ctx, "hide it behind the laptop",
+                            text="FLYING CARS", t=4.0,
+                            box=[0.15, 0.8, 0.85, 1.0])
+    assert res.startswith("EDL v3 -> v4"), res
+    (m,) = [x for x in ctx.edl["motion"] if x["template"] == "word_slam"]
+    assert m["anchor"]["occluders"] == ["object:ob1"]
+    # the word's centre just above the laptop's top edge (0.8): its lower
+    # part is hidden; without the fix it sat at the template's 0.56
+    assert 0.74 <= m["params"]["y"] <= 0.8
+
+
+def test_the_planner_puts_an_object_word_where_the_object_is(monkeypatch):
+    src = w3s.source(w=1920, h=1080, dur=20.0)
+    monkeypatch.setattr(world_planner, "_src", lambda index: src)
+    monkeypatch.setattr(world_planner, "_valid", lambda e, ops, d: True)
+    edl = schemas.validate_edl(dict(BASE, fx=[{
+        "id": "ob1", "type": "object", "stage": "world", "start": 1.0,
+        "end": 6.0, "label": "mic",
+        "prompt": {"src_t": 2.0, "box": [0.45, 0.3, 0.55, 0.6]}}]),
+        20.0).model_dump()
+    plan = {"words": WORDS, "moments": [
+        {"t": 2.0, "word": "FLYING", "kind": "stress", "strength": 0.9}]}
+    index = {"video": {"width": 1920, "height": 1080, "fps": 25.0,
+                       "duration": 20.0}}
+    cands = world_planner.candidates(edl, index, plan)
+    (c,) = [x for x in cands if x["device"] == "object_occluder"]
+    p = c["op"]["value"]["params"]
+    # the mic crosses the word: its vertical middle (0.45), not 0.72
+    assert abs(p["y"] - 0.45) < 0.02
+
+
+# ── the dissolve ending is earned, never a default ─────────────────────
+
+def _ending_plan(last_words):
+    words = [{"w": w, "t0": 0.5 + 0.4 * i, "t1": 0.8 + 0.4 * i}
+             for i, w in enumerate(("We built it. " + last_words).split())]
+    return {"words": words, "moments": [
+        {"t": words[-1]["t1"], "kind": "phrase_end"}]}
+
+
+def test_the_dissolve_needs_a_line_that_earns_it(monkeypatch):
+    src = w3s.source(w=1920, h=1080, dur=20.0)
+    monkeypatch.setattr(world_planner, "_src", lambda index: src)
+    monkeypatch.setattr(world_planner, "_valid", lambda e, ops, d: True)
+    monkeypatch.setattr(world_planner, "_matte_ready", lambda *a: True)
+    edl = schemas.validate_edl(dict(BASE), 20.0).model_dump()
+    index = {"video": {"width": 1920, "height": 1080, "fps": 25.0,
+                       "duration": 20.0}}
+
+    def devs(plan, asked=()):
+        return [c["device"] for c in world_planner.candidates(
+            edl, index, plan, asked=asked)]
+    assert "light_dissolve" not in devs(_ending_plan("And then we ship."))
+    assert "light_dissolve" in devs(_ending_plan("And then it was gone."))
+    assert "light_dissolve" in devs(_ending_plan("We ship."),
+                                    asked=("dissolve",))
+
+
+# ── the canvas lane hands layout pages their world context ─────────────
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg")
+def test_a_canvas_program_gives_layout_pages_the_world(tmp_path,
+                                                       monkeypatch):
+    import motion_layer
+    import renderer
+    png = str(tmp_path / "a.png")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "color=c=red:s=64x64", "-frames:v", "1", png],
+                   check=True)
+    edl = {"keep": [], "canvas": {"width": 320, "height": 568, "fps": 25,
+                                  "bg_color": "#000000"},
+           "inserts": [{"id": "c", "asset_key": "local/a.png",
+                        "kind": "image", "at_output_s": 0.0,
+                        "duration_s": 1.0}],
+           "motion": [{"id": "mz", "template": "mosaic", "start": 0.0,
+                       "end": 1.0, "params": {"tiles": ["asset:local/a.png"]}}]}
+    seen = []
+
+    def prep(*a, **kw):
+        seen.append(kw.get("world"))
+        return [], a[7]
+    monkeypatch.setattr(motion_layer, "prepare_inputs", prep)
+    out = str(tmp_path / "o.mp4")
+    renderer.render_edl(edl, None, None, out, str(tmp_path), True,
+                        suppress_outro=True,
+                        asset_locals={"local/a.png": png})
+    assert seen and isinstance(seen[0], world_layer.Ctx)
+    assert seen[0].source is None

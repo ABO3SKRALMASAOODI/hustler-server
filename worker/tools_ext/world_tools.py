@@ -485,6 +485,7 @@ def place_in_world(ctx, where, motion_id=None, text=None, t=None, box=None,
     else:
         return "REJECTED: give motion_id (a graphic) or text (new words)."
     defs = []
+    extra_note = None
     if tgt == "object":
         if box is None or t is None:
             return (f"REJECTED: to hide it behind the {parsed.get('name')}, "
@@ -508,6 +509,25 @@ def place_in_world(ctx, where, motion_id=None, text=None, t=None, box=None,
         defs.append(d)
         if parsed["relation"] == "behind":
             anchor = {"to": "screen", "occluders": [f"object:{oid}"]}
+            try:
+                bx = _num_list(box, 4)
+                W, H = _frame_size(edl, ctx)
+                where_p = attachment.behind_params(bx, W, H)
+            except (TypeError, ValueError):
+                where_p = None
+            if where_p and not motion_id and \
+                    m.get("template") == "word_slam":
+                # the word where the object can hide it (its lower part
+                # behind a wide object's top edge; a tall one crossing it)
+                m["params"].update(where_p)
+            elif where_p and motion_id:
+                p = (m.get("params") or {})
+                y = p.get("y")
+                if y is None or abs(float(y) - where_p["y"]) > 0.08:
+                    extra_note = (
+                        f"'{motion_id}' sits at y={y if y is not None else 'its default'}: "
+                        f"for the {parsed.get('name')} to hide part of it, "
+                        f"set its params y≈{where_p['y']}, x≈{where_p['x']}.")
         else:
             anchor = {"to": f"object:{oid}", "follow": ["position"]}
     else:
@@ -521,7 +541,8 @@ def place_in_world(ctx, where, motion_id=None, text=None, t=None, box=None,
         return res
     item = dict(m, anchor=anchor)
     lm = [item] if str(anchor["to"]).split(".")[0] in _LANDMARK_KIND else []
-    return _done(res, [_measuring(ctx, edl, defs=defs, landmark_items=lm)])
+    return _done(res, [extra_note,
+                       _measuring(ctx, edl, defs=defs, landmark_items=lm)])
 
 
 def remove_world(ctx, ids):

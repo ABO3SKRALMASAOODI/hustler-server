@@ -9,12 +9,12 @@ Say where in plain words and the verbs do the measuring:
 | The user (or you) says | Verb | What it writes |
 |---|---|---|
 | "put the price on the desk" | `place_in_world(where='on the desk', text=..., t, quad)` | a plane definition + type pinned to it (`plane:<id>`) |
-| "hide the word behind the laptop" | `place_in_world(where='behind the laptop', text=..., t, box)` | an object definition + the word occluded by it (`object:<id>`) |
+| "hide the word behind the laptop" | `place_in_world(where='behind the laptop', text=..., t, box)` | an object definition + the word occluded by it (`object:<id>`), set where the object can hide it (rising from behind a wide object's top edge; crossed by a tall one) |
 | "make the label follow his hand" | `place_in_world(where='follow his hand', motion_id=...)` or `attach(to='hand.palm')` | a hand anchor; `lost='hide'` when the hand leaves |
 | "the number on her fingertip" | `attach(to='hand.index_tip', pin=[0.5, 0.72])` | a glass card riding the fingertip |
 | "between his hands" | `place_in_world(where='between his hands')` | the hands' frame quad (`hand.frame`) |
 | "arc it round his head" | `add_element(kind='orbit', attach='round his head')` | words orbiting the head, the far side behind it |
-| "next to her face" | `attach(to='face.cheek', which='left'/'right')` | a label beside the face, following it |
+| "next to her face" | `place_in_world(where='next to her face', motion_id=...)` or `attach(to='face', offset=[0.9, 0], follow=['position', 'scale'])` | a label beside the face, following it (offset in face heights; negative = the other side) |
 | "on the floor under my shadow" | `pin_to_plane(quad, t, shadow=true)` | floor type darkened by the real shadow |
 | "follow that thing" | `track_point(t, x, y)` then `attach(to='track:<id>')` | a tracked point |
 
@@ -53,7 +53,10 @@ asked; never music.
   measurements support them (a hand up for >= 0.8 s, a face >= 7% of the
   frame, an object or plane the edit already defined, the matte ready).
 - A write that needs analysis returns "measuring (≈N s)": the preview
-  shows the graphic where it was authored until the measurement lands.
+  shows the graphic where it was authored until the measurement lands
+  (a face anchor uses the face detector's box meanwhile). Items written
+  straight through apply_edit_batch are measured from their first render;
+  a final waits up to 90 s, then reports the device as degraded.
 
 ## Strong treatment patterns
 
@@ -63,8 +66,10 @@ asked; never music.
   the object behind, the surface under, the hand that shows it.
 - Payoff: the line the piece exists for, once, large, on a surface or
   behind the object it names.
-- Ending: the speaker turns to light (`add_element(kind='dissolve')` with
-  embers) — once a piece.
+- Ending: the speaker turns to light (`add_element(kind='light_dissolve')`,
+  embers off the edge by default) — only when the piece truly ends on a
+  release or a vanishing, at most once, and not on every short of a batch:
+  an ending that recurs becomes a house style.
 
 ## Common failure modes
 
@@ -96,13 +101,20 @@ asked; never music.
 
 ## Through apply_edit_batch
 
+Definitions are stored on the SOURCE clock in SOURCE frame fractions
+(read them off `look_at(times=[<source second>])`, the uncropped frame);
+the graphic's own params (`y`, `x`) are PROGRAM fractions — put a word
+behind an object where the object can hide part of it.
+
 ```json
 {"action": "upsert", "layer": "fx", "id": "ob1", "value": {"id": "ob1",
  "type": "object", "stage": "world", "start": 4.0, "end": 7.5,
- "prompt": {"t": 4.2, "box": [0.18, 0.55, 0.62, 0.95]}, "label": "laptop"}}
+ "prompt": {"src_t": 843.2, "box": [0.40, 0.77, 0.66, 1.0]},
+ "label": "laptop", "device": "object_occluder"}}
 {"action": "upsert", "layer": "motion", "id": "w1", "value": {"id": "w1",
  "template": "word_slam", "start": 4.2, "end": 6.4,
- "params": {"text": "SECRET"}, "layer": "above_captions",
+ "params": {"text": "SECRET", "y": 0.75, "width": 0.8},
+ "layer": "above_captions",
  "anchor": {"to": "screen", "occluders": ["object:ob1"]}}}
 {"action": "upsert", "layer": "motion", "id": "gc1", "value": {"id": "gc1",
  "template": "glass_card", "start": 9.0, "end": 11.0,

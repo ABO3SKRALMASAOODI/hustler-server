@@ -151,6 +151,27 @@ def program_affine(geo, prog_t, trim_t):
     return np.array([[sx, 0.0, b[0]], [0.0, sy, b[1]]], np.float64)
 
 
+def program_box(ctx, box, t):
+    """A SOURCE-fraction box [x0, y0, x1, y1] as PROGRAM fractions at
+    program second ``t`` (clipped to the frame), or None where the
+    footage is not on screen."""
+    if ctx is None or ctx.tl is None:
+        return None
+    tr = ctx.tl.out_to_src(float(t))
+    if tr is None:
+        return None
+    A = program_affine(ctx.geometry("world"), float(t), tr)
+    if A is None:
+        return None
+    x0, y0 = _apply(A, (float(box[0]), float(box[1])))
+    x1, y1 = _apply(A, (float(box[2]), float(box[3])))
+    x0, x1 = max(0.0, min(x0, x1)), min(1.0, max(x0, x1))
+    y0, y1 = max(0.0, min(y0, y1)), min(1.0, max(y0, y1))
+    if x1 - x0 <= 1e-3 or y1 - y0 <= 1e-3:
+        return None
+    return [x0, y0, x1, y1]
+
+
 def _apply(A, xy):
     return np.array([A[0, 0] * xy[0] + A[0, 2], A[1, 1] * xy[1] + A[1, 2]])
 
@@ -183,13 +204,19 @@ def series_for(anchor, ctx, lo, hi):
         return None, "no source footage on this render"
     if kind in ("face", "head"):
         samples, share, meta = query.load("landmarks.face", src, rng)
+        why = None
         if not samples:
-            return None, "face landmarks not measured yet"
+            # the ladder's next rung (ROADMAP 3A): the face detector's box
+            # and five points, prefetched for every upload at index time
+            samples, meta = _yunet_faces(src, rng)
+            if not samples:
+                return None, "face landmarks not measured yet"
+            why = YUNET_NOTE
         part = "head" if kind == "head" else (ref or "face")
         series = query.face_series(samples, part, which, meta)
         if kind == "head":
             series = _refine_head(series, ctx)
-        return series, None
+        return series, why
     if kind == "hand":
         samples, share, meta = query.load("landmarks.hand", src, rng)
         if not samples:
@@ -287,6 +314,64 @@ def _refine_head(series, ctx):
         xy[k][1] = ((top + chin) / 2.0) / mh
         size[k] = (chin - top) / mh
     return query_series(series, xy, size)
+
+
+YUNET_NOTE = ("face from the detector's box and five points (the face mesh "
+              "is still measuring): position and size, no mesh shape")
+
+
+def _yunet_faces(src, rng):
+    """(samples, meta) in the landmarks.face sample shape, built from the
+    ``faces.yunet`` sidecar (box + eyes, nose, mouth corners), or ([], {}):
+    the degrade rung between the face mesh and a static placement. Parts
+    the detector does not see (ears, the mesh oval) read as not seen."""
+    from anchors import query
+    rows, _share, _meta = query.load("faces.yunet", src, rng)
+    if not rows:
+        return [], {}
+    names = query.FACE_NAMES
+    nan = float("nan")
+    out = []
+    for s in rows:
+        faces = []
+        for r in s.get("faces") or []:
+            if len(r) < 15:
+                continue
+            x0, y0, x1, y1 = (float(v) for v in r[:4])
+            w, h = x1 - x0, y1 - y0
+            if w <= 0 or h <= 0:
+                continue
+            e1, e2 = (float(r[5]), float(r[6])), (float(r[7]), float(r[8]))
+            nose = (float(r[9]), float(r[10]))
+            m1, m2 = (float(r[11]), float(r[12])), (float(r[13]), float(r[14]))
+            mouth = ((m1[0] + m2[0]) / 2.0, (m1[1] + m2[1]) / 2.0)
+            emid = ((e1[0] + e2[0]) / 2.0, (e1[1] + e2[1]) / 2.0)
+            lift = 0.12 * h
+            pts = {"iris_r": e1, "iris_l": e2, "eye_r": e1, "eye_l": e2,
+                   "brow_r": (e1[0], e1[1] - lift),
+                   "brow_l": (e2[0], e2[1] - lift),
+                   "nose": nose, "nose_bridge": emid, "mouth": mouth,
+                   "mouth_r": m1, "mouth_l": m2,
+                   "chin": (mouth[0], y1),
+                   "forehead": (emid[0], max(0.0, y0 - 0.05 * h))}
+            flat = []
+            for n in names:
+                p = pts.get(n, (nan, nan))
+                flat += [float(p[0]), float(p[1])]
+            roll = math.degrees(math.atan2(e2[1] - e1[1], e2[0] - e1[0]))
+            if e2[0] < e1[0]:
+                roll = math.degrees(math.atan2(e1[1] - e2[1],
+                                               e1[0] - e2[0]))
+            # the head as faces.head_ellipse grows the face oval (the box
+            # stands in for the oval): 12% wider, 30% taller, centre raised
+            ry = 0.55 * h * 1.30
+            rx = 0.5 * w * 1.12
+            cy = y0 + 0.45 * h - 0.14 * 2.0 * 0.55 * h
+            faces.append({"b": [x0, y0, x1, y1], "p": flat,
+                          "hp": [0.0, 0.0, roll],
+                          "he": [(x0 + x1) / 2.0, cy, rx, ry, roll]})
+        out.append({"t": float(s["t"]), "faces": faces})
+    return out, {"names": list(names)}
 
 
 def query_series(series, xy, size):
@@ -1151,6 +1236,210 @@ class _ShadowSource:
                               borderValue=1.0)
 
 
+# ── render-time measurement (the stale-client path) ─────────────────────
+
+_LANDMARKS = {"face": "landmarks.face", "head": "landmarks.face",
+              "hand": "landmarks.hand", "pose": "landmarks.pose"}
+
+
+def _src_span(ctx, s, e, step=0.1):
+    """(lo, hi) SIDECAR seconds the program window [s, e] plays, or
+    None (no main footage there)."""
+    tl = ctx.tl
+    if tl is None:
+        return None
+    n = max(2, int(math.ceil((e - s) / step)) + 1)
+    vals = []
+    for k in range(n):
+        t = min(e - 1e-3, s + (e - s) * k / (n - 1))
+        v = tl.out_to_src(min(t, ctx.out_duration - 1e-3))
+        if v is not None:
+            vals.append(float(v) - ctx.clock_offset)
+    if not vals:
+        return None
+    return min(vals), max(vals)
+
+
+def requests(ctx):
+    """[(kind, ranges, params)]: every sidecar this render's world items
+    read — the anchors' landmarks, the definitions they name (and every
+    definition in the edit), the person matte their occluders, head
+    refinement, edge emitters and behind-subject layers read, the clean
+    plate a shadow transfer reads. Exactly the requests the readers here
+    make, so a launch lands on the keys a render reads."""
+    import world_defs
+    edl = ctx.edl or {}
+    out, person = [], []
+    defs = world_defs.definitions(edl)
+    named = set()
+
+    def add_def(fid):
+        d = defs.get(fid)
+        if d is None or fid in named:
+            return
+        named.add(fid)
+        req = world_defs.request(d, ctx.tl, ctx.clock_offset)
+        if req is not None:
+            out.append(req)
+
+    for m in edl.get("motion") or []:
+        if not isinstance(m, dict) or m.get("start") is None:
+            continue
+        s, e = float(m["start"]), float(m["end"])
+        tpl = m.get("template")
+        p = m.get("params") or {}
+        if tpl == "el_particles" and p.get("emit") == "edge":
+            person.append((s, e))
+        span = _src_span(ctx, s, e)
+        if tpl == "el_pictogram" and p.get("mode", "pose") == "pose" \
+                and span:
+            out.append(("landmarks.pose", [(max(0.0, span[0] - 0.2),
+                                            span[1] + 0.2)], None))
+        if not anchored(m):
+            continue
+        a = m["anchor"]
+        kind, ref = _target(a)
+        if span:
+            rng = [(max(0.0, span[0] - 0.5), span[1] + 0.5)]
+            if kind in _LANDMARKS:
+                out.append((_LANDMARKS[kind], rng, None))
+            if kind in ("face", "head"):
+                out.append(("faces.yunet", rng, None))
+            if "hands" in (a.get("occluders") or []):
+                out.append(("landmarks.hand", [(span[0] - 0.5,
+                                                span[1] + 0.5)], None))
+        if kind in ("track", "object", "plane"):
+            add_def(ref)
+            d = defs.get(ref) or {}
+            if kind == "plane" and a.get("shadow") and d:
+                st = float(d["src_t"]) - ctx.clock_offset
+                out.append(("plate.clean", [(st, st + 0.05)], None))
+        occ = _default_occluders(a, m, defs)
+        for o in occ:
+            if str(o).startswith("object:"):
+                add_def(str(o).split(":", 1)[1])
+        if "person" in occ or kind == "head" or any(
+                str(o).startswith("object:") for o in occ):
+            # an object's depth order reads the person matte too
+            person.append((s, e))
+    for fid in defs:
+        add_def(fid)
+    if person and ctx.tl is not None:
+        import matte_track
+        spans = []
+        for s, e in person:
+            spans += matte_track.program_to_source(ctx.tl, s, e)
+        rng = [(max(0.0, a - ctx.clock_offset - 0.5),
+                b - ctx.clock_offset + 0.5) for a, b in spans]
+        if rng:
+            out.append(("matte.person", rng, matte_track.sidecar_params()))
+    return out
+
+
+def warm(ctx, launch=None, wait_s=0.0):
+    """Ask the batch lane for every sidecar the world items of this render
+    read (``requests``), as the program matte asks for its windows: a
+    stale client that wrote its world items through apply_edit_batch, with
+    no verb to launch the measurements, gets them from its first render.
+    ``launch`` is the render's launching SourceRef (None: a read-only lane,
+    nothing launched). Previews never wait (``wait_s`` 0); a final waits up
+    to ``wait_s`` (the render's sidecar budget), then degrades. Never
+    raises. Returns {kind: status}."""
+    res = {}
+    if ctx is None or ctx.source is None or launch is None:
+        return res
+    try:
+        import sidecars
+    except Exception:  # noqa: BLE001
+        return res
+    handles = []
+    t0 = time.monotonic()
+    try:
+        reqs = requests(ctx)
+    except Exception as e:  # noqa: BLE001
+        print(f"[world] measurement requests not built ({str(e)[:140]})",
+              flush=True)
+        return res
+    for kind, ranges, params in reqs:
+        try:
+            h = sidecars.ensure(kind, launch, ranges, priority="interactive",
+                                params=params)
+            handles.append(h)
+        except Exception as e:  # noqa: BLE001 — never fails a render
+            print(f"[world] {kind} not launched ({str(e)[:140]})",
+                  flush=True)
+    left = float(wait_s or 0.0) - (time.monotonic() - t0)
+    if handles and left > 0:
+        try:
+            sidecars.wait(handles, left)
+        except Exception:  # noqa: BLE001
+            pass
+    for h in handles:
+        try:
+            res[h.kind] = sidecars.status(h)
+        except Exception:  # noqa: BLE001
+            res[h.kind] = "absent"
+    if handles:
+        print(f"[world] measurements: " + ", ".join(
+            f"{k} {v}" for k, v in sorted(res.items())), flush=True)
+    return res
+
+
+# ── device rows (the render's ``devices`` report; INTERFACES.md §6.3) ────
+
+def device_card(item):
+    """The card an anchored motion item is (its own ``device`` first)."""
+    if item.get("device"):
+        return item["device"]
+    a = item.get("anchor") or {}
+    to = str(a.get("to") or "")
+    if item.get("template") == "el_orbit":
+        return "element_orbit"
+    if to.startswith("plane:"):
+        return "plane_type"
+    if any(str(o).startswith("object:") for o in a.get("occluders") or []):
+        return "object_occluder"
+    if to.startswith("object:"):
+        return "object_occluder"
+    fam = to.split(".")[0].split(":")[0]
+    return {"hand": "anchor_hand", "face": "anchor_face",
+            "head": "anchor_face", "pose": "anchor_pose",
+            "track": "anchor_track"}.get(fam)
+
+
+_SUBSTITUTE = ("pinned static", "drawn in front", "not measured yet: drawn",
+               "no quad")
+
+
+def rung_of(new, notes):
+    """(rung, reason) of one anchored item from its compose result: the
+    clip composed with nothing missing is ``full``; the detector-box face
+    is ``reduced``; a static placement or a missing occluder (drawn in
+    front of what should hide it) is ``substitute``."""
+    text = "; ".join(n for n in notes or [] if n)
+    if new is None or any(k in text for k in _SUBSTITUTE):
+        return "substitute", text or "pinned static"
+    if YUNET_NOTE in text or "plane tracking not measured yet" in text:
+        return "reduced", text
+    return "full", text or None
+
+
+def _report(item, rung, reason):
+    try:
+        import fxgraph
+        card = device_card(item)
+        fam = None
+        try:
+            fam = (fxgraph._card(card) or {}).get("family") if card else None
+        except Exception:  # noqa: BLE001
+            fam = None
+        fxgraph._emit([{"id": item.get("id"), "device": card,
+                        "family": fam or "world", "stage": "world",
+                        "rung": rung, "reason": reason, "est_ms": None}])
+    except Exception:  # noqa: BLE001 — a report never fails a render
+        pass
+
+
 # ── the motion_layer hooks ──────────────────────────────────────────────
 
 def augment(item, ctx):
@@ -1172,8 +1461,10 @@ def augment(item, ctx):
 def finish(items, clips, ctx, warn=None):
     """After the motion engine: every anchored item's clip replaced by its
     world-composited clip (and video slots filled). Returns (items, clips),
-    aligned; items without an anchor or slots come back untouched."""
+    aligned; items without an anchor or slots come back untouched. Each
+    anchored item reports one device row (its worst piece's rung)."""
     out_items, out_clips = [], []
+    rows = {}
     for item, clip in zip(items, clips):
         if clip is None or getattr(clip, "empty", False):
             out_items.append(item)
@@ -1193,6 +1484,8 @@ def finish(items, clips, ctx, warn=None):
             try:
                 t0 = time.time()
                 new, notes = compose(item, clip, ctx)
+                rung, why = rung_of(new, notes)
+                _keep_row(rows, item, rung, why)
                 if new is not None:
                     layer = item.get("layer") or "above_captions"
                     if layer == "behind_subject":
@@ -1204,16 +1497,30 @@ def finish(items, clips, ctx, warn=None):
                         warn(f"motion '{item.get('id')}' (world): {note}")
                 print(f"[world] motion '{item.get('id')}' anchored to "
                       f"{item['anchor'].get('to')} in "
-                      f"{time.time() - t0:.1f}s", flush=True)
+                      f"{time.time() - t0:.1f}s ({rung})", flush=True)
             except Exception as e:  # noqa: BLE001 — degrade, never fail
+                why = (f"pinned static ({type(e).__name__}: "
+                       f"{str(e)[:160]})")
+                _keep_row(rows, item, "substitute", why)
                 if warn:
-                    warn(f"motion '{item.get('id')}' (world): pinned static "
-                         f"({type(e).__name__}: {str(e)[:160]})")
+                    warn(f"motion '{item.get('id')}' (world): {why}")
                 if item.get("layer") == "behind_subject":
                     item = dict(item, layer="above_captions", behind=None)
         out_items.append(item)
         out_clips.append(clip)
+    for item, rung, why in rows.values():
+        _report(item, rung, why)
     return out_items, out_clips
+
+
+_RANK = {"full": 0, "reduced": 1, "substitute": 2, "omit": 3}
+
+
+def _keep_row(rows, item, rung, why):
+    key = item.get("id")
+    have = rows.get(key)
+    if have is None or _RANK.get(rung, 3) > _RANK.get(have[1], 3):
+        rows[key] = (item, rung, why)
 
 
 # ── object masks for the fx graph (world_defs.object_mask) ──────────────
