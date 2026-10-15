@@ -5,6 +5,8 @@ autocommit, so one failed statement never poisons the rest of the request
 (R8), and every statement is bounded by statement_timeout. Read-only is
 enforced by the server (default_transaction_read_only), not by convention.
 """
+import os
+import sys
 import threading
 import time
 
@@ -107,3 +109,82 @@ def cached_value(key, ttl_s, compute):
 def reset_features():
     with _features_lock:
         _features.clear()
+
+
+# ── Independent sections in parallel (one connection per worker) ──────────
+# A summary page asks the database a dozen independent questions. Asked one
+# after another, the wall time is their sum plus one round trip each; asked
+# on a few read-only connections at once, it is about the slowest one.
+# Tests (and any caller without a real database) set
+# app.config["ADMIN_PARALLEL_SECTIONS"] = False to run them in order on the
+# request's own connection.
+PARALLEL_WORKERS = 6
+
+
+_TIMING = bool(os.environ.get("ADMIN_SECTION_TIMING"))
+
+
+def _run_one(fn, cur, name=""):
+    t0 = time.perf_counter()
+    try:
+        return True, fn(cur)
+    except Exception as e:          # reported per task, never raised here
+        return False, e
+    finally:
+        if _TIMING:
+            sys.stderr.write(f"SECTION {name} "
+                             f"{(time.perf_counter() - t0) * 1000:.0f}ms\n")
+
+
+def parallel(tasks, workers=PARALLEL_WORKERS, timeout_ms=READ_TIMEOUT_MS):
+    """Run [(name, fn(cur)), ...] and return {name: (ok, value_or_error)}.
+
+    Each worker thread opens its own read-only connection and takes tasks
+    from a shared list until none are left, so a slow task never holds up
+    the others. Order of results does not depend on timing."""
+    import queue
+    app = current_app._get_current_object()
+    tasks = list(tasks)
+    if (not app.config.get("ADMIN_PARALLEL_SECTIONS", True)
+            or len(tasks) < 2 or workers < 2):
+        cur = cursor()
+        return {name: _run_one(fn, cur, name) for name, fn in tasks}
+
+    pending = queue.Queue()
+    for t in tasks:
+        pending.put(t)
+    results = {}
+    lock = threading.Lock()
+
+    def worker():
+        with app.app_context():
+            conn_ = None
+            try:
+                conn_ = open_readonly(timeout_ms)
+                cur = conn_.cursor()
+            except Exception as e:
+                cur, err = None, e
+            while True:
+                try:
+                    name, fn = pending.get_nowait()
+                except queue.Empty:
+                    break
+                outcome = _run_one(fn, cur, name) if cur is not None \
+                    else (False, err)
+                with lock:
+                    results[name] = outcome
+            if conn_ is not None:
+                try:
+                    conn_.close()
+                except Exception:
+                    pass
+            close()      # anything a task opened on this thread's context
+
+    threads = [threading.Thread(target=worker, daemon=True,
+                                name=f"admin-section-{i}")
+               for i in range(min(workers, len(tasks)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results

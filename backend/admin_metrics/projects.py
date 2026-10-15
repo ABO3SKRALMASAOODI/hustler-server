@@ -248,7 +248,8 @@ def _common_where(period, args, params):
     return ",".join(ctes), where
 
 
-def list_projects(cur, period, args, page, per_page):
+def list_projects(cur, period, args, page, per_page, presign=None):
+    from admin_metrics import insights
     f = (args.get("filter") or "customers").strip()
     if f not in FILTERS:
         raise BadRequest("filter must be one of " + ", ".join(FILTERS) + ".")
@@ -326,8 +327,10 @@ def list_projects(cur, period, args, page, per_page):
                                    'subscription_upload_locked'))
                    AS paywall_hits,
                {TIMING_COLS},
-               {led_to_payment_sql('p')} AS led_to_payment
+               {led_to_payment_sql('p')} AS led_to_payment,
+               fs.key AS fs_key, fs.cols AS fs_cols, fs.rows AS fs_rows
           FROM page p {PROJECT_TIMINGS}
+          {insights.FILMSTRIP_OF.format(pid="p.id", alias="fs")}
          ORDER BY {order} {direction} {nulls}, p.id DESC""", params)
     rows = []
     for r in cur.fetchall():
@@ -335,6 +338,7 @@ def list_projects(cur, period, args, page, per_page):
         rows.append({
             "id": r["id"], "title": r["title"], "kind": kind(r["kind"]),
             "created_at": defs.iso(r["created_at"]),
+            "thumb": insights.filmstrip_thumb(r, presign),
             "customer": {"id": r["user_id"], "email": r["email"],
                          "plan": r["plan"], "status": r["status"]},
             "video_length_s": t["duration_s"],
@@ -382,12 +386,17 @@ def led_to_payment_sql(p="p"):
           FROM first_pay WHERE first_pay.at IS NOT NULL), FALSE)"""
 
 
-def customer_projects(cur, user_id, limit=100):
+def customer_projects(cur, user_id, limit=100, presign=None):
     """The newest projects of one customer, for the customer page."""
+    from admin_metrics import insights
     cur.execute(f"""
-        SELECT p.id, p.title, p.created_at,
+        SELECT p.id, p.title, p.created_at, fs.key AS fs_key,
+               fs.cols AS fs_cols, fs.rows AS fs_rows,
                (SELECT o.duration_s FROM assets o WHERE o.project_id = p.id
                    AND o.kind = 'original' ORDER BY o.id LIMIT 1) AS duration_s,
+               (SELECT o.meta->>'filename' FROM assets o
+                 WHERE o.project_id = p.id AND o.kind = 'original'
+                 ORDER BY o.id LIMIT 1) AS filename,
                (SELECT count(*) FROM chat_messages cm
                   JOIN projects fm ON fm.chat_session_id = cm.session_id
                  WHERE fm.id IN {family('p')} AND cm.role = 'user') AS messages,
@@ -401,9 +410,12 @@ def customer_projects(cur, user_id, limit=100):
                    AND (({UNSUPERSEDED_FAILED}) OR ({STUCK}))) AS problems,
                {LAST_ACTIVITY.format(p='p')} AS last_activity_at
           FROM projects p
+          {insights.FILMSTRIP_OF.format(pid="p.id", alias="fs")}
          WHERE p.user_id = %s AND p.parent_project_id IS NULL
          ORDER BY p.id DESC LIMIT %s""", (user_id, limit))
     return [{"id": r["id"], "title": r["title"],
+             "filename": r["filename"],
+             "thumb": insights.filmstrip_thumb(r, presign),
              "created_at": defs.iso(r["created_at"]),
              "video_length_s": round(float(r["duration_s"]), 1)
              if r["duration_s"] else None,

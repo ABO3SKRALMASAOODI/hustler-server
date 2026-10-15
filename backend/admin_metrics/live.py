@@ -77,7 +77,11 @@ def live(cur):
         c = channel(touch, r["page"]) if touch else {"channel": "not_recorded"}
         coded = bool(att and any((att.get(k) or {}).get("code")
                                  for k in ("first", "last")))
-        if r.get("interacted") or r["scroll"] or r["clicked"] or \
+        if r["scroll"] or r["clicked"]:
+            cls = "person"
+        elif coded and r["active_s"] <= defs.LINK_CHECK_SECONDS:
+            cls = "link_preview"
+        elif r.get("interacted") or \
                 r["active_s"] > defs.PERSON_ACTIVE_SECONDS:
             cls = "person"
         elif coded and (r["referrer"] or "") in defs.PREVIEW_REFERRERS:

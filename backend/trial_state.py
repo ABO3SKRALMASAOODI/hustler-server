@@ -54,6 +54,7 @@ TRIAL_COLUMNS = ("trial_status", "trial_started_at", "trial_ends_at",
 # the authoritative plan → credits mapping lives in paddle_webhook.PLAN_CREDITS
 # and is derived from the price the customer actually paid.
 PLAN_LABELS = {
+    "plus_2026": "Plus", "pro_2026": "Pro", "max_2026": "Max",
     'ai': 'Creator', 'ai_pro': 'Pro', 'ai_max': 'Frontier', 'mcp': 'MCP',
     'plus': 'Plus', 'pro': 'Pro (retired)', 'ultra': 'Ultra (retired)',
     'titan': 'Titan (retired)', 'ace': 'Ace (retired)',

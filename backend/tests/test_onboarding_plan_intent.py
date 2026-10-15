@@ -77,3 +77,21 @@ def test_plan_intent_still_rejects_unknown_tiers(monkeypatch):
 
     assert response.status_code == 400
     assert response.get_json() == {"error": "unknown plan"}
+
+
+def test_name_is_authenticated_bounded_and_updates_only_token_account(monkeypatch):
+    import jwt
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = "test-name-secret-that-is-long-enough"
+    app.register_blueprint(onboarding.onboarding_bp)
+    connection = _Connection()
+    monkeypatch.setattr(onboarding, "get_db", lambda: connection)
+    client = app.test_client()
+    assert client.put("/onboarding/name", json={"name": "Test"}).status_code == 401
+    headers = {"Authorization": "Bearer " + jwt.encode({"sub": "17", "email": "test@example.com"}, app.config["SECRET_KEY"], algorithm="HS256")}
+    for bad in [None, 123, "", "x" * 121]:
+        assert client.put("/onboarding/name", headers=headers, json={"name": bad}).status_code == 400
+    r = client.put("/onboarding/name", headers=headers, json={"name": "  Test   Person  ", "user_id": 999})
+    assert r.status_code == 200
+    assert connection.statements[0][1] == ("Test Person", "17")
+    assert connection.committed and connection.closed

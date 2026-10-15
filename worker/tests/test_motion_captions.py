@@ -411,12 +411,15 @@ def _changed_pixels(pa, pb):
 
 @needs_browser
 @pytest.mark.parametrize("anim", ["auto", "none"])
-def test_static_frame_reuse_never_drops_a_caption_change(anim, tmp_path, monkeypatch):
+@pytest.mark.parametrize("dynamic", [False, True])
+def test_static_frame_reuse_never_drops_a_caption_change(anim, dynamic, tmp_path, monkeypatch):
     """Frames outside the declared motion windows are re-used, so every
     visual change must sit inside a window: the windowed render has to be
     pixel-identical to rendering every frame."""
     monkeypatch.setattr(motion_engine, "CACHE_DIR", str(tmp_path / "cache"))
-    style = {"animation": "none"} if anim == "none" else None
+    style = {"dynamic": dynamic}
+    if anim == "none":
+        style["animation"] = "none"
     jobs = []
     for look in motion_captions.LOOKS:
         edl, index, tl = _setup(look, style=style)
@@ -724,3 +727,90 @@ def test_premium_captions_lay_no_box_and_a_pocket_never_grows_per_word(tmp_path,
     assert early["pocket"] and late["pocket"], (early, late)
     assert early["pocket"][4] > 0
     assert all(abs(a - b) < 0.5 for a, b in zip(early["pocket"][:4], late["pocket"][:4]))
+
+
+@pytest.mark.parametrize("value, expected", [(None, False), (False, False), (True, True)])
+def test_spoken_word_dynamic_is_explicit_and_forwarded(value, expected, monkeypatch):
+    monkeypatch.setattr(motion_engine, "available", lambda: True)
+    style = {} if value is None else {"dynamic": value}
+    edl, index, tl = _setup("glow", style=style)
+    assert motion_captions.style_params(edl)["dynamic"] is expected
+    assert all(it["params"]["dynamic"] is expected
+               for it in motion_captions.items(edl, index, tl))
+
+
+@pytest.mark.skipif(not CHROMIUM, reason="headless Chromium required")
+@pytest.mark.parametrize("look", ["clean", "editorial", "lockup", "pop", "serif", "glow", "stack", "mono"])
+@pytest.mark.parametrize("anim", ["auto", "none"])
+def test_dynamic_spoken_ink_tracks_exact_intervals_and_resets_on_seek(look, anim):
+    # A deterministic real-template cue with a silence between words and a
+    # trailing hold. These are speech boundaries, independent of entrances.
+    params = {"look": look, "dynamic": True, "anim": anim, "accent": "#7CC4FF",
+              "cues": [{"s": 0, "e": 2, "w": [
+                  {"t": "alpha", "s": .3, "e": .6, "x": True},
+                  {"t": "beta", "s": .9, "e": 1.2}]}]}
+    # build_job supplies the production runtime, CSS, fonts and template.
+    item = {"template": "caption_motion", "params": params, "start": 0, "end": 2}
+    job = motion_templates.build_job(item, 540, 960, 30)
+    script = """() => Array.from(document.querySelectorAll('.cue.on > .blk .mg-w'))
+        .map(e => getComputedStyle(e).color)"""
+    times = [.299, .3, .599, .6, .899, .9, 1.2, 1.5, .3]
+    states = asyncio.run(_dom(job, times, script))
+    accent = "rgb(124, 196, 255)"
+    assert [[i for i, col in enumerate(row) if col == accent] for row in states] == [
+        [], [0], [0], [], [], [1], [], [], [0]]
+
+
+@pytest.mark.skipif(not CHROMIUM, reason="headless Chromium required")
+def test_dynamic_box_plate_clears_in_silence_and_keeps_dark_ink():
+    item = {"template": "caption_motion", "params": {"look": "box", "dynamic": True,
+        "anim": "none", "accent": "#7CC4FF", "cues": [{"s": 0, "e": 2, "w": [
+            {"t": "alpha", "s": .3, "e": .6, "x": True}, {"t": "beta", "s": .9, "e": 1.2}]}]},
+        "start": 0, "end": 2}
+    job = motion_templates.build_job(item, 540, 960, 30)
+    states = asyncio.run(_dom(job, [.3, .6, .9, 1.2], """() => {
+        const b = document.querySelector('.cue.on .blk');
+        return [getComputedStyle(b.querySelector('.hl')).opacity,
+                getComputedStyle(b.querySelector('.ink .mg-w')).color,
+                getComputedStyle(b.querySelector('.ink')).visibility]; }"""))
+    assert [row[0] for row in states] == ["1", "0", "1", "0"]
+    assert states[0][1] == "rgb(11, 11, 12)"
+    assert [row[2] for row in states] == ["visible", "hidden", "visible", "hidden"]
+
+
+@pytest.mark.skipif(not CHROMIUM, reason="headless Chromium required")
+@pytest.mark.parametrize("look", ["glow", "clean", "serif", "pop", "box"])
+def test_dynamic_false_preserves_missing_dynamic_dom(look):
+    params = {"look": look, "accent": "#7CC4FF", "cues": [{"s": 0, "e": 2, "w": [
+        {"t": "alpha", "s": .3, "e": .6, "x": True},
+        {"t": "beta", "s": .9, "e": 1.2}]}]}
+    script = """() => document.querySelector('.cue.on .blk').outerHTML"""
+    states = []
+    for extra in ({}, {"dynamic": False}):
+        item = {"template": "caption_motion", "params": dict(params, **extra), "start": 0, "end": 2}
+        states.append(asyncio.run(_dom(motion_templates.build_job(item, 540, 960, 30),
+                                      [.2, .4, .7, 1., 1.5], script)))
+    assert states[0] == states[1]
+
+
+@pytest.mark.skipif(not CHROMIUM, reason="headless Chromium required")
+@pytest.mark.parametrize("look", ["glow", "clean", "editorial", "serif"])
+@pytest.mark.parametrize("accent", ["#7CC4FF", "#17456B"])
+def test_dynamic_accent_keeps_contrast_on_a_bright_plate(look, accent):
+    import plate
+    rows = plate.grid_rows(1080, 1920)
+    grid = [238] * (rows * plate.COLS)
+    measured = {"c": plate.COLS, "r": rows, "s": [{"t": .5, "g": grid}, {"t": 1.5, "g": grid}]}
+    item = {"template": "caption_motion", "params": {"look": look, "dynamic": True,
+        "accent": accent, "cues": [{"s": 0, "e": 2, "w": [
+            {"t": "alpha", "s": .3, "e": .6, "x": True},
+            {"t": "beta", "s": .9, "e": 1.2, "x": True}]}]}, "start": 0, "end": 2}
+    job = motion_templates.build_job(item, 540, 960, 30, plate=measured)
+    states = asyncio.run(_dom(job, [.4, .7, 1.], """() => {
+        const b = document.querySelector('.cue.on .blk');
+        return [b.classList.contains('dk'), ...Array.from(b.querySelectorAll('.mg-w'))
+            .map(e => getComputedStyle(e).color)]; }"""))
+    assert all(s[0] for s in states), states
+    assert states[0][1] == states[2][2] and states[0][1] != states[1][1]
+    assert states[1][1] == states[1][2] == states[0][2] == states[2][1]
+    assert states[0][1] != "rgb(124, 196, 255)"  # measured accent was deepened

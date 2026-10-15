@@ -126,13 +126,45 @@ def test_keep_snap_leaves_clean_continuous_and_tiny_spans_alone():
     assert agent_tools._snap_keep_to_shots(late, index)[1] == []
 
 
-def test_keep_segments_reports_the_snap_and_the_words_it_trims():
+@pytest.mark.parametrize("snap_to_words", [None, True, False])
+def test_keep_segments_preserves_speech_across_camera_cut(snap_to_words):
     words = [{"w": "characters", "t0": 152.2, "t1": 152.68}]
     ctx = _Ctx(shots=_shots(152.65), words=words)
-    res = agent_tools.keep_segments(ctx, [[149.6, 152.7]])
+    res = agent_tools.keep_segments(ctx, [[149.6, 152.7]],
+                                   snap_to_words=snap_to_words)
     assert res.startswith("EDL v1"), res
-    assert ctx.latest_edl()["json"]["keep"] == [[149.6, 152.63]]
-    assert "SHOT-CUT HYGIENE" in res and "trims 'characters'" in res
+    assert ctx.latest_edl()["json"]["keep"][0][1] >= 152.68
+    assert "SHOT-CUT HYGIENE" in res and "protects 'characters'" in res
+    assert "trims 'characters'" not in res
+
+
+@pytest.mark.parametrize("fps", [24, 30, 60])
+def test_shot_snap_preserves_last_word_from_wang_pilot(fps):
+    keep = [[7420.90, 7425.58]]
+    index = {"shots": [{"start": 7425.54}], "video": {"fps": fps},
+             "words": [{"w": "back.", "t0": 7425.26, "t1": 7425.58}]}
+    actual, notes = agent_tools._snap_keep_to_shots(keep, index)
+    assert actual == keep
+    assert "protects 'back.'" in notes[0]
+    assert "neighbouring shot remains" in notes[0]
+
+
+def test_shot_snap_protects_word_on_start_edge_and_keeps_quiet_end_snap():
+    words = [{"w": "Opening", "t0": 39.9, "t1": 40.2}]
+    keep, notes = agent_tools._snap_keep_to_shots(
+        [[39.9, 60.05]], {"shots": _shots(40, 60), "video": {"fps": FPS}},
+        words)
+    assert keep == [[39.9, 59.98]]
+    assert "protects 'Opening'" in notes[0]
+    assert "end 60.05->59.98" in notes[1]
+
+
+def test_shot_snap_can_trim_silence_touching_a_word_boundary():
+    words = [{"w": "complete", "t0": 59.0, "t1": 59.98}]
+    keep, notes = agent_tools._snap_keep_to_shots(
+        [[50, 60.05]], {"shots": _shots(60), "video": {"fps": FPS}}, words)
+    assert keep == [[50.0, 59.98]]
+    assert "protects" not in " ".join(notes)
 
 
 def test_cut_range_and_cut_output_range_snap_new_edges():

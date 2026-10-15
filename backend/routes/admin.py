@@ -439,14 +439,15 @@ def website_journeys():
 
 @admin_bp.route('/journey', methods=['POST'])
 def track_journey():
-    from website_analytics import save_visit
+    from website_analytics import edge_country, save_visit
     if request.content_length and request.content_length > 16384:
         return jsonify({'error': 'payload too large'}), 413
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({'error': 'invalid payload'}), 400
     try:
-        stored = save_visit(data, request.headers.get('User-Agent',''))
+        stored = save_visit(data, request.headers.get('User-Agent',''),
+                            edge_country(request.headers))
         return jsonify({'stored': stored}), 200
     except ValueError:
         return jsonify({'error': 'invalid tracking fields'}), 400

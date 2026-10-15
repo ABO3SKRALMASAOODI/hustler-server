@@ -14,8 +14,9 @@ import pytest
 from flask import Flask
 
 from admin_metrics import (attention as attention_mod, cache, channels_report,
-                           db, funnel as funnel_mod, health, money, outreach,
-                           projects, ranges, registry, visitors)
+                           customers as customers_mod, db, funnel as funnel_mod,
+                           health, insights, money, outreach, projects, ranges,
+                           registry, visitors)
 from routes import admin_v2
 
 SECRET = "s" * 40
@@ -68,7 +69,8 @@ def token(email=ADMIN):
 @pytest.fixture
 def app(monkeypatch):
     app = Flask(__name__)
-    app.config.update(SECRET_KEY=SECRET, DATABASE_URL="postgresql://stub/stub")
+    app.config.update(SECRET_KEY=SECRET, DATABASE_URL="postgresql://stub/stub",
+                      ADMIN_PARALLEL_SECTIONS=False)
     app.register_blueprint(admin_v2.admin_v2_bp)
     cache.clear()
     db.reset_features()
@@ -149,6 +151,12 @@ def summary_fixtures(monkeypatch, cash_error=None):
     monkeypatch.setattr(health, "engine", lambda *a, **k: {
         "status": "good", "text": "Working", "queued": 0, "running": 1,
         "last_activity_at": None, "oldest_queued_s": None, "stuck": 0})
+    now = datetime.now(timezone.utc)
+    monkeypatch.setattr(insights, "activation_firsts", lambda cur, since: [
+        ("upload", 1, now - timedelta(minutes=5)),
+        ("upload", 2, now - timedelta(days=1, minutes=5)),
+        ("edit", 1, now - timedelta(minutes=3)),
+        ("export", 3, now - timedelta(days=3))])
     monkeypatch.setattr(channels_report, "summary_channels", lambda cur, p: {
         "model": "first",
         "rows": [{"channel": "search", "label": "Search", "signups": 9,
@@ -223,7 +231,12 @@ def test_meta_carries_the_registry_and_the_fixed_lists(app):
 
 
 # ── 2. summary ───────────────────────────────────────────────────────────
-def test_summary_has_eight_kpis_five_health_items_and_sources(app, monkeypatch):
+def by_key(kpis):
+    return {k["key"]: k for k in kpis}
+
+
+def test_summary_has_twelve_kpis_five_health_items_and_sources(app,
+                                                              monkeypatch):
     summary_fixtures(monkeypatch)
     r = get(app, "/admin/v2/summary")
     assert r.status_code == 200
@@ -232,20 +245,30 @@ def test_summary_has_eight_kpis_five_health_items_and_sources(app, monkeypatch):
     assert meta["range"]["key"] == "today" and meta["range"]["partial"]
     assert meta["compare"]["label"] == "vs yesterday at this time"
     keys = [k["key"] for k in d["kpis"]]
-    assert keys == ["people", "signups", "signup_rate", "new_paying", "cash",
-                    "mrr", "active_customers", "exports"]
+    assert keys == ["people", "signups", "signup_rate", "first_upload",
+                    "first_edit", "first_export", "new_paying", "paying_now",
+                    "mrr", "cash", "exports", "active_customers"]
     for k in d["kpis"]:
         assert_metric(k)
-    people = d["kpis"][0]
+    k = by_key(d["kpis"])
+    people = k["people"]
     assert people["value"] == 81 and people["previous"] == 81
     assert [b["key"] for b in people["breakdown"]] == [
         "link_previews", "robots", "no_signal_loads", "internal",
         "returning_customers"]
     assert len(people["spark"]) == 14
     assert people["href"] == "/admin/growth?range=today"
-    assert d["kpis"][2]["value"] == round(100 * 21 / 81, 1)
-    assert d["kpis"][5]["previous"] is None and d["kpis"][5]["note"]
-    assert d["kpis"][7]["breakdown"][0]["key"] == "exporters"
+    assert k["signup_rate"]["value"] == round(100 * 21 / 81, 1)
+    assert k["mrr"]["previous"] is None and k["mrr"]["note"]
+    assert k["exports"]["breakdown"][0]["key"] == "exporters"
+    assert k["exports"]["href"].startswith("/admin/exports?")
+    assert k["paying_now"]["value"] == 21
+    # Activation: all-time firsts, counted in the period they happened.
+    assert k["first_upload"]["value"] == 1 and k["first_upload"]["previous"] == 1
+    assert k["first_edit"]["value"] == 1
+    assert k["first_export"]["value"] == 0
+    assert len(k["first_upload"]["spark"]) == 14
+    assert k["first_upload"]["href"].endswith("date_field=first_upload")
     assert [h["key"] for h in d["health"]] == [
         "customer_failures", "failed_uploads", "payment_problems",
         "messages_without_edit", "editing_engine"]
@@ -257,7 +280,7 @@ def test_one_failed_section_never_blanks_the_page(app, monkeypatch):
                      cash_error=psycopg2.errors.QueryCanceled("slow"))
     r = get(app, "/admin/v2/summary")
     assert r.status_code == 200
-    cash = r.json["data"]["kpis"][4]
+    cash = by_key(r.json["data"]["kpis"])["cash"]
     assert cash["key"] == "cash" and cash["status"] == "error"
     assert cash["value"] is None                     # never a fake 0
     assert r.json["meta"]["section_errors"][0]["section"] == "cash"
@@ -517,6 +540,10 @@ def customer_routes():
             {"user_id": 7, "channel": "ai_chatbot"}]),
         ("max(billing_synced_at)", [{"t": None}]),
         ("u.last_seen_at >=", [{"n": 25}]),
+        ("AS edit_requests", [
+            {"id": 7, "credits_balance": 980, "device_browser": "Safari",
+             "auth_provider": "google", "edit_requests": 6, "uploads": 2,
+             "country": "AE"}]),
     ]
 
 
@@ -530,7 +557,15 @@ def test_customers_list_contract_and_true_total(app):
     row = d["list"]["rows"][0]
     assert set(row) == {"id", "email", "plan", "billing_period", "status",
                         "joined_at", "last_active_at", "device", "came_from",
-                        "told_us", "projects", "exports", "paid_usd"}
+                        "told_us", "projects", "exports", "paid_usd",
+                        "credits_left", "credits_used", "edit_requests",
+                        "uploads", "country", "browser", "auth_provider", "name", "latest_project_id",
+                        "first_paid_at", "last_paid_at", "payment_count", "subscriber_kind",
+                        "returned_at", "renewal_state", "renewal_at", "subscription_checked_at"}
+    # The full email, never shortened: the admin is the owner's own tool.
+    assert row["email"] == "customer1@example.com"
+    assert row["credits_left"] == 980.0 and row["edit_requests"] == 6
+    assert row["country"] == "AE" and row["uploads"] == 2
     assert row["came_from"]["channel"] == "ai_assistant"
     assert row["told_us"] == {"key": "ai_chatbot", "label": "ChatGPT / AI"}
     assert row["paid_usd"] == 15.0
@@ -547,9 +582,22 @@ def test_customer_filters_validate(app):
     for q in ("filter=rich", "sort=age", "date_field=born",
               "reached=famous", "channel=tv"):
         assert get(app, "/admin/v2/customers?" + q).status_code == 400
+    for q in ("sort=exports", "sort=credits_used",
+              "range=7d&date_field=first_upload",
+              "range=7d&date_field=first_edit",
+              "range=7d&date_field=first_export"):
+        assert get(app, "/admin/v2/customers?" + q).status_code == 200, q
 
 
-def test_customer_page_contract(app):
+def test_first_event_filters_bound_the_all_time_first(app):
+    app.fake.routes = customer_routes()
+    get(app, "/admin/v2/customers?range=7d&date_field=first_export")
+    sql = " ".join(app.fake.sql)
+    assert "min(vj.updated_at) FROM video_jobs vj" in sql
+    assert ">= %(start_tz)s" in sql
+
+
+def test_customer_page_contract(app, monkeypatch):
     app.fake.routes = [
         ("FROM users u WHERE u.id = %s", [{
             "id": 7, "email": "customer1@example.com",
@@ -561,9 +609,15 @@ def test_customer_page_contract(app):
             "payment_recovered_at": None, "payment_failed_at": None,
             "billing_synced_at": T0, "status": "paying",
             "last_active_at": T0}]),
+        ("SELECT jc.job_id, jc.turn", [
+            {"job_id": "video:90", "turn": 2, "credits_used": 3.25,
+             "tokens_used": 12000, "created_at": datetime(2026, 10, 9, 9)}]),
         ("FROM job_credits", [{"used": 12.5}]),
         ("fp ON TRUE WHERE u.id = ANY", []),
         ("FROM onboarding_responses WHERE user_id = %s", []),
+        ("GROUP BY p.user_id, p.subscription_id", [{"user_id": 7, "subscription_id": "sub_first",
+            "first_paid_at": datetime(2026, 10, 9, 9), "last_paid_at": datetime(2026, 10, 9, 9),
+            "paid_cents": 1500, "payment_count": 1}]),
         ("FROM payments p WHERE p.user_id = %s", [
             {"id": 1, "at": datetime(2026, 10, 9, 9), "amount_cents": 1500,
              "currency": "USD", "status": "completed", "plan": "ai",
@@ -575,13 +629,39 @@ def test_customer_page_contract(app):
         ("AS edit_requests", [{"projects": 2, "uploads": 3,
                                "last_upload_at": T0, "edit_requests": 4,
                                "exports": 1}]),
+        ("fs_rows FROM video_jobs vj", [{
+            "id": 90, "user_id": 7, "project_id": 11, "created_at": T0,
+            "updated_at": T0, "result": {"timings": {"total_s": 61.2}},
+            "title": "Real edit", "parent_id": None,
+            "email": "customer1@example.com", "plan": "ai", "status": "paying",
+            "storage_key": "media/11/90-x.mp4", "duration_s": 32.5,
+            "fs_key": "filmstrip/11/a.jpg", "fs_cols": 10, "fs_rows": 18}]),
+        ("AS kind, cm.created_at", [
+            {"kind": "message", "at": T0, "project_id": 11,
+             "title": "Real edit", "text": "make it punchier"}]),
     ]
+    import routes.admin_video as av
+    monkeypatch.setattr(av, "_presign",
+                        lambda key: f"https://r2.example/{key}?sig=1")
     d = get(app, "/admin/v2/customers/7").json["data"]
     assert set(d) == {"customer", "acquisition", "survey", "billing", "usage",
-                      "projects"}
+                      "projects", "exports", "activity", "credits_ledger"}
+    assert d["credits_ledger"][0] == {"job": "video:90", "turn": 2,
+                                      "credits": 3.25, "tokens": 12000,
+                                      "at": "2026-10-09T09:00:00Z"}
+    ex = d["exports"][0]
+    assert ex["url"] == "https://r2.example/media/11/90-x.mp4?sig=1"
+    assert ex["thumb"] == {"url": "https://r2.example/filmstrip/11/a.jpg?sig=1",
+                           "cols": 10, "rows": 18}
+    assert ex["length_s"] == 32.5 and ex["render_s"] == 61.2
+    kinds = [a["kind"] for a in d["activity"]]
+    assert "message" in kinds and "payment" in kinds
+    assert d["customer"]["email"] == "customer1@example.com"
     assert d["customer"]["is_internal"] is False
     assert d["customer"]["credits"]["used_30d"] == 12.5
     assert d["acquisition"]["tracking"] == "unknown"
+    assert d["billing"]["first_paid_at"] == "2026-10-09T09:00:00Z"
+    assert d["billing"]["last_paid_at"] == "2026-10-09T09:00:00Z"
     assert d["billing"]["paid_usd"] == 15.0
     assert [p["status_label"] for p in d["billing"]["payments"]] == [
         "Successful", "Free trial start ($0)"]
@@ -620,7 +700,9 @@ def test_projects_list_contract(app):
                         "upload_wait_estimated", "analysis_wait_s",
                         "analysis_reused", "edit_wait_median_s", "messages",
                         "shorts", "versions", "exports", "problems",
-                        "paywall_hits", "led_to_payment", "last_activity_at"}
+                        "paywall_hits", "led_to_payment", "last_activity_at",
+                        "thumb"}
+    assert row["thumb"] is None       # no filmstrip yet → no picture, no guess
     assert row["upload_wait_estimated"] is True
     # No tool-outcome columns in the list (they cost 95% of the old list).
     assert "tool" not in json.dumps(row)
@@ -776,7 +858,9 @@ def test_revenue_contract(app, monkeypatch):
                   "storage_owner_usd_month": 2.0,
                   "margin_excl_owner_pct": 95.2},
         "computed_at": "2026-10-10T12:00:00Z"})
-    d = get(app, "/admin/v2/revenue?range=30d").json["data"]
+    r = get(app, "/admin/v2/revenue?range=30d")
+    assert r.json["meta"]["section_errors"] == []
+    d = r.json["data"]
     assert [t["key"] for t in d["tiles"]] == [
         "mrr", "paying_now", "cash", "new_paying", "stopped_paying",
         "payment_failing"]
@@ -794,8 +878,11 @@ def test_revenue_contract(app, monkeypatch):
     assert round(ledger["customers_usd"] + ledger["pre_relaunch_usd"]
                  + ledger["unlinked_usd"] + ledger["excluded_usd"], 2) == \
         ledger["total_usd"]
-    assert d["costs"]["model_owner_usd"] == 40.0
-    assert d["costs"]["margin_excl_owner_pct"] == 95.2
+    # Costs load on their own so a cold costs report never holds up revenue.
+    assert d["costs"] is None
+    c = get(app, "/admin/v2/revenue/costs").json["data"]
+    assert c["model_owner_usd"] == 40.0
+    assert c["margin_excl_owner_pct"] == 95.2
 
 
 def test_payments_ledger_pages_and_labels_accounts(app):
@@ -887,7 +974,7 @@ def test_every_v2_route_is_read_only_and_admin_gated():
     app.register_blueprint(admin_v2.admin_v2_bp)
     rules = [r for r in app.url_map.iter_rules()
              if r.rule.startswith("/admin/v2")]
-    assert len(rules) == 28
+    assert len(rules) == 34
     for r in rules:
         assert r.methods - {"HEAD", "OPTIONS"} == {"GET"}, r.rule
         view = app.view_functions[r.endpoint]
@@ -1029,7 +1116,7 @@ def test_digits_search_ids_and_emails(app):
     app.fake.routes = customer_routes()
     assert get(app, "/admin/v2/customers?q=1987").status_code == 200
     sql = next(s for s in app.fake.sql if ", agg AS (" in s)
-    assert "(u.id = %(q_id)s OR u.email ILIKE %(q_like)s)" in sql
+    assert "(u.id = %(q_id)s OR (u.email ILIKE %(q_like)s OR u.display_name ILIKE %(q_like)s))" in sql
     app.fake.sql.clear()
     app.fake.routes = project_list_routes()
     assert get(app, "/admin/v2/projects?q=1987").status_code == 200
@@ -1040,3 +1127,28 @@ def test_digits_search_ids_and_emails(app):
     app.fake.routes = customer_routes()
     assert get(app, "/admin/v2/customers?q=" + "9" * 30).status_code == 200
     assert not any("q_id" in s for s in app.fake.sql)
+
+
+def test_lifetime_counts_unique_browsers_once_and_keeps_untracked_days_unknown(app, monkeypatch):
+    monkeypatch.setattr(admin_v2, "signups_by_day", lambda cur, p: {p.from_day: 4, p.to_day: 2})
+    monkeypatch.setattr(visitors, "classify", lambda cur, p: {"person": 7})
+    monkeypatch.setattr(visitors, "classify_by_day", lambda cur, p: {p.to_day: {"person": 3}})
+    r = get(app, "/admin/v2/lifetime")
+    assert r.status_code == 200
+    d = r.json["data"]
+    assert d["signups"] == 6 and d["unique_visitors"] == 7
+    assert d["rows"][0]["signups_total"] == 4
+    assert d["rows"][-1]["signups_total"] == 6
+    assert d["rows"][0]["people"] is None
+    assert d["rows"][-1]["people"] == 3
+
+
+def test_lifetime_failure_does_not_become_zero(app, monkeypatch):
+    monkeypatch.setattr(admin_v2, "signups_by_day", lambda *args: (_ for _ in ()).throw(RuntimeError("test")))
+    monkeypatch.setattr(visitors, "classify", lambda cur, p: {"person": 5})
+    monkeypatch.setattr(visitors, "classify_by_day", lambda cur, p: {})
+    r = get(app, "/admin/v2/lifetime")
+    assert r.status_code == 200
+    assert r.json["data"]["signups"] is None
+    assert r.json["data"]["unique_visitors"] == 5
+    assert r.json["meta"]["section_errors"][0]["section"] == "signups"

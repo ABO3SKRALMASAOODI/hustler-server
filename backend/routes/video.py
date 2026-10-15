@@ -45,6 +45,7 @@ from video_services.project_state import (
 )
 from video_services.upload import (
     clean_dimension as _clean_dim,
+    completed_upload_index as _completed_upload_index,
     serialize_asset as _asset_out,
 )
 from video_services.chat_jobs import parse_client_event as _event_request_args
@@ -663,8 +664,8 @@ def _concierge_reply(stage, history, attachments, index_error=None,
 
 
 @contextmanager
-def vdb():
-    conn = psycopg2.connect(current_app.config["DATABASE_URL"],
+def vdb(db_url=None):
+    conn = psycopg2.connect(db_url or current_app.config["DATABASE_URL"],
                             cursor_factory=RealDictCursor)
     try:
         yield conn
@@ -679,7 +680,7 @@ def vdb():
 def _studio_ai_gate(cur, user_id):
     cur.execute("SELECT plan, is_subscribed FROM users WHERE id = %s", (user_id,))
     account = cur.fetchone() or {}
-    if account.get("plan") == "mcp_connect" and account.get("is_subscribed"):
+    if account.get("plan") in {"mcp_connect", "plus_2026"} and account.get("is_subscribed"):
         return jsonify({"error": "You’re on the MCP plan. Upgrade to use the Valmera AI editor.",
                         "code": "mcp_only", "connect_url": "/mcp/connect",
                         "upgrade_url": "/subscribe"}), 403
@@ -1683,6 +1684,24 @@ def relay_upload(user_id, project_id):
 _ORIGINAL_DRIFT_TOLERANCE_S = 5.0
 
 
+def _duplicate_upload_result(cur, project_id, user_id, project, asset):
+    """Called under the project lock shared with index self-healing."""
+    gated = _subscribe_gate_applies(cur, user_id)
+    can_retry = not gated
+    if asset["kind"] == "original":
+        active = _active_original(cur, project_id)
+        can_retry = can_retry and bool(active and active["id"] == asset["id"])
+    result = {"asset_id": asset["id"], "kind": asset["kind"],
+              "duplicate": True,
+              **_completed_upload_index(cur, project_id, user_id, asset["id"],
+                                        can_retry=can_retry)}
+    if asset["kind"] == "original" and gated:
+        message_id = _record_upload_subscription_lock(
+            cur, project["chat_session_id"], asset["id"])
+        result.update(_upload_subscription_payload(asset["id"], message_id))
+    return result, 200
+
+
 def _register_deferred_original(user_id, project_id, key, filename, declared,
                                 client_proxy_key, proxy_bytes, data):
     """Create the original asset for a proxy-first upload.
@@ -1714,14 +1733,8 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
                        ORDER BY id DESC LIMIT 1""", (project_id, key))
         dup = cur.fetchone()
         if dup:
-            cur.execute("""SELECT id FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                             AND (payload->>'asset_id')::int = %s
-                           ORDER BY id DESC LIMIT 1""", (project_id, dup["id"]))
-            ij = cur.fetchone()
-            return {"asset_id": dup["id"],
-                    "index_job_id": ij["id"] if ij else None,
-                    "kind": dup["kind"], "duplicate": True}, 200
+            return _duplicate_upload_result(
+                cur, project_id, user_id, project, dup)
         cur.execute("""INSERT INTO assets (project_id, kind, storage_key,
                                            bytes, duration_s, width, height,
                                            meta)
@@ -1844,22 +1857,8 @@ def complete_upload_core(user_id, project_id, data):
                        ORDER BY id DESC LIMIT 1""", (project_id, key))
         dup = cur.fetchone()
         if dup:
-            cur.execute("""SELECT id FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                             AND (payload->>'asset_id')::int = %s
-                           ORDER BY id DESC LIMIT 1""",
-                        (project_id, dup["id"]))
-            ij = cur.fetchone()
-            result = {"asset_id": dup["id"],
-                      "index_job_id": ij["id"] if ij else None,
-                      "kind": dup["kind"], "duplicate": True}
-            if (dup["kind"] == "original"
-                    and _subscribe_gate_applies(cur, user_id)):
-                message_id = _record_upload_subscription_lock(
-                    cur, project["chat_session_id"], dup["id"])
-                result.update(_upload_subscription_payload(
-                    dup["id"], message_id))
-            return result, 200
+            return _duplicate_upload_result(
+                cur, project_id, user_id, project, dup)
 
         if kind == "original" and not _subscribe_gate_applies(cur, user_id) and \
                 _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
@@ -1986,22 +1985,8 @@ def complete_upload_core(user_id, project_id, data):
                        ORDER BY id DESC LIMIT 1""", (project_id, key))
         dup = cur.fetchone()
         if dup:
-            cur.execute("""SELECT id FROM video_jobs
-                           WHERE project_id = %s AND type = 'index'
-                             AND (payload->>'asset_id')::int = %s
-                           ORDER BY id DESC LIMIT 1""",
-                        (project_id, dup["id"]))
-            ij = cur.fetchone()
-            result = {"asset_id": dup["id"],
-                      "index_job_id": ij["id"] if ij else None,
-                      "kind": dup["kind"], "duplicate": True}
-            if (dup["kind"] == "original"
-                    and _subscribe_gate_applies(cur, user_id)):
-                message_id = _record_upload_subscription_lock(
-                    cur, project["chat_session_id"], dup["id"])
-                result.update(_upload_subscription_payload(
-                    dup["id"], message_id))
-            return result, 200
+            return _duplicate_upload_result(
+                cur, project_id, user_id, project, dup)
         meta = {"filename": filename}
         if staged:
             meta["staged"] = True
@@ -3779,6 +3764,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
         conn = psycopg2.connect(db_url, cursor_factory=RealDictCursor)
         try:
             cur = conn.cursor()
+            subscription_blocked = False
 
             def _say(content, meta):
                 cur.execute("""INSERT INTO chat_messages (session_id, role,
@@ -3803,8 +3789,20 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                 # canvas — run a real agent turn (no main video required). It
                 # charges credits per turn exactly like any edit, so reserve
                 # first and fail honestly if they're tapped out or already busy.
-                if not check_and_reserve(conn, ctx["user_id"], min_credits=1.0):
-                    info = get_balance(conn, ctx["user_id"])
+                info = get_balance(conn, ctx["user_id"])
+                if info.get("subscribe_gated") and not info.get("payment_failed"):
+                    # A website recording or blank-canvas build is an edit
+                    # attempt too. New accounts have no free grant to exhaust;
+                    # send the same offer as the uploaded-video path.
+                    _say("Choose a plan so I can start your edit.", {
+                        "kind": "subscription_required",
+                        "credits_exhausted": True,
+                        "subscribe_required": True,
+                        "subscription_offer": _subscribe_offer_body(),
+                        "request_message_id": ctx["message_id"],
+                    })
+                    subscription_blocked = True
+                elif float(info.get("balance") or 0) < 1.0:
                     spent = info.get("free_trial_exhausted")
                     # A trialling account reaches here too, and neither of the
                     # other two sentences is addressed to it: they have already
@@ -3874,6 +3872,11 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                              llm_rec["prompt_tokens"],
                              llm_rec["completion_tokens"]))
             conn.commit()
+            if subscription_blocked:
+                record_client_event(ctx["user_id"], project_id, "trial_gate_shown",
+                                    detail={"subscribe_offer": True,
+                                            "surface": "blank_canvas"},
+                                    origin="server", db_url=db_url)
         finally:
             conn.close()
     except Exception as e:
@@ -6009,7 +6012,7 @@ def _clean_event_detail(detail):
 
 
 def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
-                        origin="client"):
+                        origin="client", db_url=None):
     """Write one forensics row. NEVER raises and never blocks a caller.
 
     Shared by the two beacon routes and by the server's OWN upload rejections,
@@ -6022,7 +6025,8 @@ def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
     clean = _clean_event_detail(detail)
     clean["origin"] = origin
     try:
-        with vdb() as conn:
+        # Concierge replies run outside Flask's request/app context.
+        with (vdb(db_url) if db_url else vdb()) as conn:
             cur = conn.cursor()
             if project_id is not None and \
                     not _project_for_user(cur, project_id, user_id):

@@ -404,10 +404,17 @@ def _range_words(period):
 
 def health_items(cur, period, money_failing=None, failed_payments=None):
     """The five Today health pills, customers only (plan §6.6 thresholds)."""
+    return health_items_from(
+        period, failures(cur, period, recent_limit=0),
+        uploads(cur, period, recent_limit=0), money_failing, failed_payments,
+        messages_without_edit(cur, period, recent_limit=0), engine(cur))
+
+
+def health_items_from(period, f, u, money_failing, failed_payments, m, e):
+    """The pills from parts computed separately (Today runs them at once)."""
     words = _range_words(period)
     r = period.key
     items = []
-    f = failures(cur, period, recent_limit=0)
     n = f["metric"]["value"] or 0
     people = f["metric"]["breakdown"][0]["value"]
     d = registry.definition("customer_failures")
@@ -418,7 +425,6 @@ def health_items(cur, period, money_failing=None, failed_payments=None):
                   "text": (f"{_n(n, 'failure')} ({_n(people, 'person', 'people')}) "
                            f"{words}" if n else f"None {words}"),
                   "href": f"/admin/health?range={r}#failures"})
-    u = uploads(cur, period, recent_limit=0)
     n = u["failed_people"]
     d = registry.definition("failed_uploads")
     items.append({"key": "failed_uploads", "label": d["label"],
@@ -439,7 +445,6 @@ def health_items(cur, period, money_failing=None, failed_payments=None):
                            f"{_n(failed, 'failed charge')} {words}"
                            if n else "None"),
                   "href": f"/admin/revenue?range={r}#payments"})
-    m = messages_without_edit(cur, period, recent_limit=0)
     n = m["paying"] + m["free"]
     d = registry.definition("messages_without_edit")
     items.append({"key": "messages_without_edit", "label": d["label"],
@@ -449,7 +454,6 @@ def health_items(cur, period, money_failing=None, failed_payments=None):
                   "text": (f"{_n(n, 'message')} ({m['paying']} from paying "
                            f"customers) {words}" if n else f"None {words}"),
                   "href": f"/admin/health?range={r}#messages"})
-    e = engine(cur)
     d = registry.definition("editing_engine")
     items.append({"key": "editing_engine", "label": d["label"],
                   "how": d["how"], "value": e["queued"],

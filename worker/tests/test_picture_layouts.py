@@ -211,6 +211,58 @@ def test_split_blocks_get_no_extra_transition(tmp_path):
     assert plain.count("fade=t=in:st=0") == split.count("fade=t=in:st=0") == 2
 
 
+@pytest.mark.parametrize("origin_frames", [0, 1])
+@pytest.mark.parametrize("fps", [24, 24000 / 1001, 30])
+def test_adjacent_source_cards_align_to_indexed_cut_without_focus_track(
+        fps, origin_frames):
+    # The Zuckerberg/Wang run used explicit per-camera cards with no focus
+    # track. A hundredth-rounded cut left one new-shot frame in the old card.
+    cut = round(48 / fps, 2)
+    start = .51
+    cards = [dict(CARD, id="old", start=0, end=cut - start,
+                  source=[0, 0, .5, 1]),
+             dict(CARD, id="new", start=cut - start, end=4 - start,
+                  source=[.5, 0, 1, 1])]
+    e = _edl(cards, keep=((start, 4),))
+    tl = Timeline(e["keep"], [], [])
+    graph = renderer.build_filtergraph(
+        e, SRC, False, tl, None, [],
+        {"shots": [{"start": 0}, {"start": cut}]}, False,
+        W=320, H=568, fps=fps,
+        frame_mode="crop", src_w=320, src_h=180, silence_idx=1,
+        src_fps=fps, focus_origin=origin_frames / fps,
+        picture_card_inputs=[(2 + i, c) for i, c in
+                             enumerate(e["effects"]["picture_cards"])])
+    handoff = (origin_frames + 48 - .5) / fps
+    assert f"trim=start={start:.3f}:end={handoff:.3f}" in graph
+    assert f"[vin1]trim=start={handoff:.3f}:end=" in graph
+    assert "concat=n=2:v=1:a=1" in graph
+    assert graph.count("metadata=mode=add:key=valmera_card:value=c0r0") == 1
+    assert graph.count("metadata=mode=add:key=valmera_card:value=c1r0") == 1
+    assert tl.out_duration == pytest.approx(4 - start)
+
+
+def test_source_card_outer_edges_do_not_invent_camera_sliver_blocks():
+    e = _edl([dict(CARD, start=0, end=2, source=[0, 0, 1, 1])],
+             keep=((2, 4),))
+    tl = Timeline(e["keep"], [], [])
+    graph = renderer.build_filtergraph(
+        e, SRC, False, tl, None, [],
+        {"shots": [{"start": 0}, {"start": 2}, {"start": 4}]}, False,
+        W=320, H=568, fps=30,
+        frame_mode="crop", src_w=320, src_h=180, silence_idx=1,
+        src_fps=30, focus_origin=0,
+        picture_card_inputs=[(2, e["effects"]["picture_cards"][0])])
+    assert "[0:v]trim=start=2.000:end=" in graph
+    assert graph.count("metadata=mode=add") == 1
+
+
+def test_pre_alignment_card_cache_is_invalidated():
+    e = _edl([dict(CARD, source=[0, 0, 1, 1])])
+    assert not renderer.cards_current({"card_v": 2}, e)
+    assert renderer.cards_current({"card_v": renderer.config.CARD_LAYOUT_VERSION}, e)
+
+
 def test_inserts_inside_a_source_card_end_its_run():
     tl = Timeline([[0.5, 2.37], [3.13, 6.0]],
                   [{"id": "b", "asset_key": "k", "kind": "image",

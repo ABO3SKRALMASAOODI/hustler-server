@@ -26,8 +26,11 @@ def _env_float(name, default):
 # grandfathered prices existing subscribers keep. (It used to list only the
 # grandfathered three, so the plans actually sold were never tested.)
 STRESS_PLANS = (
-    ("mcp_connect", "MCP Connect", "current"),
-    ("advanced", "Advanced Editor", "current"),
+    ("plus_2026", "Plus", "current"),
+    ("pro_2026", "Pro", "current"),
+    ("max_2026", "Max", "current"),
+    ("mcp_connect", "MCP Connect", "grandfathered"),
+    ("advanced", "Advanced Editor", "grandfathered"),
     ("ai", "Creator", "grandfathered"),
     ("ai_pro", "Pro", "grandfathered"),
     ("ai_max", "Frontier", "grandfathered"),

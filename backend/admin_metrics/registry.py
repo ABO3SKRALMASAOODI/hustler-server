@@ -161,6 +161,40 @@ REGISTRY = {
     "exporters": _m(
         "People who exported", "Customers with at least one finished export "
         "in the period.", polarity=UP, section="funnel"),
+    "first_upload": _m(
+        "First uploads", "Customers whose first-ever video upload happened "
+        "in the period.", polarity=UP, section="funnel"),
+    "first_edit": _m(
+        "First edit requests", "Customers who asked the editor for their "
+        "first edit in the period (an editor message or an AI-app edit).",
+        polarity=UP, section="funnel"),
+    "first_export": _m(
+        "First exports", "Customers whose first finished export happened in "
+        "the period.", polarity=UP, section="funnel"),
+    "failed_exports": _m(
+        "Failed exports", "Export renders that failed in the period. A retry "
+        "that later finished is still counted here.", polarity=DOWN,
+        section="funnel"),
+    "export_success_rate": _m(
+        "Export success", "Finished exports ÷ (finished + failed exports) in "
+        "the period.", unit="percent", polarity=UP, section="funnel"),
+    "exported_minutes": _m(
+        "Minutes exported", "Total length of the videos customers exported "
+        "in the period, in minutes.", polarity=UP, section="funnel"),
+    "dau": _m(
+        "Active today", "Customers active on the last day of the period: "
+        "uploaded, messaged the editor, made an AI-app edit or exported.",
+        polarity=UP, section="funnel"),
+    "wau": _m(
+        "Active in 7 days", "Customers active in the 7 days ending on the "
+        "last day of the period.", polarity=UP, section="funnel"),
+    "mau": _m(
+        "Active in 30 days", "Customers active in the 30 days ending on the "
+        "last day of the period.", polarity=UP, section="funnel"),
+    "stickiness": _m(
+        "Stickiness", "Average daily active customers over the last 7 days "
+        "÷ customers active in 30 days. Higher means they come back.",
+        unit="percent", polarity=UP, section="funnel"),
 
     # ── D. Money ─────────────────────────────────────────────────────────
     "mrr": _m(
@@ -196,6 +230,9 @@ REGISTRY = {
     "ever_paid": _m(
         "Ever paid", "Customers with at least one successful payment.",
         polarity=UP, section="money"),
+    "arpu": _m(
+        "Revenue per customer", "Monthly recurring revenue ÷ every customer, "
+        "paying or not (ARPU).", unit="usd", polarity=UP, section="money"),
     "avg_plan_value": _m(
         "Average plan value", "Monthly recurring revenue ÷ paying customers.",
         unit="usd", section="money"),

@@ -6,7 +6,8 @@ credit debits, so concurrent polls/worker calls can never regrant spent credits.
 import calendar
 from datetime import datetime, timezone
 
-NEW_CONTRACTS = frozenset({'mcp_connect', 'advanced'})
+FIXED_ALLOWANCE_CONTRACTS = frozenset({'plus_2026', 'pro_2026', 'max_2026'})
+NEW_CONTRACTS = frozenset({'mcp_connect', 'advanced'}) | FIXED_ALLOWANCE_CONTRACTS
 
 
 def utc(value):
@@ -60,7 +61,7 @@ def refresh(conn, user_id, now=None):
     with conn.cursor() as cur:
         cur.execute('''SELECT id, plan, is_subscribed, billing_status, billing_period,
             subscription_id, credits_daily_reset FROM users
-            WHERE id=%s AND plan IN ('mcp_connect','advanced') FOR UPDATE''', (user_id,))
+            WHERE id=%s AND plan = ANY(%s) FOR UPDATE''', (user_id, list(NEW_CONTRACTS)))
         user = cur.fetchone()
         if not user or user.get('plan') not in NEW_CONTRACTS or not user.get('is_subscribed'):
             return False
@@ -70,7 +71,7 @@ def refresh(conn, user_id, now=None):
         if user.get('billing_status') != 'active':
             return False
         daily_date = user.get('credits_daily_reset')
-        if daily_date is None or str(daily_date)[:10] < now.date().isoformat():
+        if user['plan'] not in FIXED_ALLOWANCE_CONTRACTS and (daily_date is None or str(daily_date)[:10] < now.date().isoformat()):
             cur.execute('''UPDATE users SET credits_daily=20, credits_daily_reset=%s,
                 credits_balance=20+COALESCE(credits_bonus,0)+COALESCE(credits_monthly,0)
                 WHERE id=%s''', (now.date(), user_id))

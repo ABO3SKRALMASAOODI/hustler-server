@@ -1,4 +1,4 @@
-"""The 280 routine / 20 critical Brevo reservation is account-wide."""
+"""The 200 routine / 100 critical Brevo reservation is account-wide."""
 
 import os
 import sys
@@ -27,10 +27,10 @@ def _payload():
     return {"subject": "hello", "to": [{"email": "x@example.com"}]}
 
 
-def test_default_budget_reserves_twenty_from_three_hundred():
+def test_default_budget_reserves_one_hundred_from_three_hundred():
     assert brevo_delivery.DAILY_LIMIT == 300
-    assert brevo_delivery.BULK_LIMIT == 280
-    assert brevo_delivery.CRITICAL_RESERVE == 20
+    assert brevo_delivery.BULK_LIMIT == 200
+    assert brevo_delivery.CRITICAL_RESERVE == 100
 
 
 def test_bulk_ceiling_blocks_before_calling_brevo(monkeypatch):
@@ -73,7 +73,7 @@ def test_failed_delivery_returns_its_reserved_slot(monkeypatch):
     assert released == ["bulk"]
 
 
-@pytest.mark.parametrize("category,remaining", [("bulk", 20), ("bulk", 0), ("critical", 0)])
+@pytest.mark.parametrize("category,remaining", [("bulk", 100), ("bulk", 20), ("bulk", 0), ("critical", 0)])
 def test_real_provider_exhaustion_blocks_even_when_local_budget_has_room(monkeypatch, category, remaining):
     monkeypatch.setenv("BREVO_API_KEY", "test")
     monkeypatch.setattr(brevo_delivery, "provider_capacity", lambda: {"remaining": remaining, "error": None})
@@ -102,7 +102,7 @@ def test_capacity_read_returns_no_private_account_fields(monkeypatch):
     assert brevo_delivery.provider_capacity() == {"remaining": 300, "error": None}
 
 
-@pytest.mark.parametrize("remaining,bulk,total", [(0, 0, 0), (20, 0, 20), (100, 80, 100), (None, 0, 297)])
+@pytest.mark.parametrize("remaining,bulk,total", [(0, 0, 0), (20, 0, 20), (100, 0, 100), (150, 50, 150), (None, 0, 297)])
 def test_dashboard_capacity_uses_provider_allowance_not_just_local_counter(monkeypatch, remaining, bulk, total):
     class Cursor:
         def __enter__(self): return self
@@ -120,4 +120,4 @@ def test_dashboard_capacity_uses_provider_allowance_not_just_local_counter(monke
     status = brevo_delivery.budget_status()
     assert status["bulk_remaining"] == bulk
     assert status["total_remaining"] == total
-    assert status["local_bulk_remaining"] == 280
+    assert status["local_bulk_remaining"] == 200

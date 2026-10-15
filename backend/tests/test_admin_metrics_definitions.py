@@ -105,10 +105,15 @@ def test_people_fall_back_to_the_stored_referrer_before_labels_existed():
 
 def test_visitor_classes_follow_the_documented_order():
     sql = visitors.CLASS_SQL
-    order = [sql.index(k) for k in ("'robot'", "'internal'", "d.interacted",
-                                    "'link_preview'", "d.active_s > 30",
+    order = [sql.index(k) for k in ("'robot'", "'internal'", "d.clicked",
+                                    "d.all_coded", "d.interacted",
+                                    "d.preview_shape", "d.active_s > 30",
                                     "'no_signal'")]
     assert order == sorted(order)
+    # A touch alone never makes a quick one-page outreach open a person:
+    # link scanners fake one (11 Oct 2026: 550 such opens in 3 h).
+    assert f"d.active_s <= {defs.LINK_CHECK_SECONDS}" in sql
+    assert defs.LINK_CHECK_SECONDS < defs.PERSON_ACTIVE_SECONDS
     assert "d.scroll > 0" in sql and "d.pages >= 2" in sql and "d.clicked" in sql
     assert defs.ROBOT_UA_RE.search("Mozilla/5.0 (Linux; Android 6.0.1; "
                                    "Nexus 5X Build/MMB29P)")
@@ -246,6 +251,7 @@ def test_billing_problems_and_money_use_the_customer_population():
     assert "u.is_verified = 1" in cur.sql[0] and "{CUSTOMER}" not in cur.sql[0]
     # Paying and MRR are the same population by construction.
     assert defs.paying("u") in money.STATUS_SQL
-    assert money.plan_tier("mcp_connect") == "current"
+    assert money.plan_tier("mcp_connect") == "grandfathered"
+    assert money.plan_tier("pro_2026") == "current"
     assert money.plan_tier("ai") == "grandfathered"
     assert money.plan_tier("ultra") == "retired"
