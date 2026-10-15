@@ -100,7 +100,7 @@ LATE_FRAMES = 2
 # Matte flicker: up-down toggles inside a matte device's window, relative
 # to the same shot without it, and absolute.
 FLICKER_RATIO = 2.5
-FLICKER_ABS = 0.004
+FLICKER_ABS = 0.02
 # Repeated frames inside a slowed window.
 REPEAT_SHARE = 0.3
 
@@ -772,7 +772,19 @@ def _item_box(m, W, H):
     if fp.get("box"):
         return [float(v) for v in fp["box"]]
     b = (m or {}).get("box")
-    return [float(v) for v in b] if b else None
+    if b:
+        return [float(v) for v in b]
+    try:
+        # never measured (a batch-written item): the template's nominal ink
+        import keepout
+        import motion_templates
+        tpl = (m or {}).get("template") or ""
+        est = keepout.nominal_ink(tpl, motion_templates.spec(tpl),
+                                  (m or {}).get("params") or {},
+                                  frame=(W, H))
+        return [float(v) for v in est] if est else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def lens_faces(path, edl, info, sample_fps=4.0, budget_s=20.0):
@@ -917,7 +929,10 @@ def visual_onset(path, info, box, t_expect, *, before=0.4, after=0.9,
     k_exp = int(round(t_expect * fps)) - idx[0]
     base = d[:max(1, k_exp - 2)]
     floor = float(np.median(base)) if base else 0.0
-    thr = max(2.5, 4.0 * floor)
+    peak = max(d) if d else 0.0
+    thr = max(2.5, 4.0 * floor, 0.5 * peak)
+    if peak < max(2.5, 4.0 * floor):
+        return None
     for i, v in enumerate(d):
         if idx[i + 1] / fps < t_expect - before + 1e-6:
             continue
@@ -963,22 +978,34 @@ MATTE_KINDS_FLICKER = ("glow", "outline", "poster", "isolate", "echo",
                        "exposure", "negate")
 
 
-def toggle_share(frames, thr=12.0):
-    """Share of pixels toggling up-down (or down-up) across consecutive
-    frame pairs, per middle frame: the signature of flicker."""
+def toggle_share(frames, thr=12.0, block=24, span=6, min_toggles=2):
+    """Per window of ``span`` frames, the share of pixels that toggle
+    (an up-down or down-up step pair, both steps past ``thr``) at least
+    ``min_toggles`` times, in the WORST block of ``block`` px. An edge or a
+    line passing a pixel toggles it once; a chattering matte toggles it
+    again and again — the ROADMAP's edge_chatter, measured on the render.
+    Flicker lives on edges, so a frame-wide share would drown it in still
+    picture; the comparison with the same shot without the device
+    (lens_flicker) sets grain aside."""
     import numpy as np
+    if len(frames) < span:
+        return []
+    st = np.stack([np.asarray(f, np.float32) for f in frames])
+    d = np.diff(st, axis=0)
+    tog = ((d[:-1] * d[1:] < 0) & (np.abs(d[:-1]) > thr)
+           & (np.abs(d[1:]) > thr))
     out = []
-    for i in range(1, len(frames) - 1):
-        a = np.asarray(frames[i - 1], np.float32)
-        b = np.asarray(frames[i], np.float32)
-        c = np.asarray(frames[i + 1], np.float32)
-        d1, d2 = b - a, c - b
-        tog = (d1 * d2 < 0) & (np.abs(d1) > thr) & (np.abs(d2) > thr)
-        out.append(float(tog.mean()))
+    n = span - 2
+    for i in range(0, tog.shape[0] - n + 1):
+        cnt = tog[i:i + n].sum(axis=0) >= min_toggles
+        h, w = cnt.shape
+        hb, wb = max(1, h // block), max(1, w // block)
+        t = cnt[:hb * block, :wb * block].reshape(hb, block, wb, block)
+        out.append(float(t.mean(axis=(1, 3)).max()))
     return out
 
 
-def lens_flicker(path, info, edl, budget_s=20.0, width=270):
+def lens_flicker(path, info, edl, budget_s=20.0, width=540):
     """Matte devices whose edges flicker: up-down toggles inside the
     device's window against the same shot just before (or after) it."""
     import numpy as np
@@ -986,6 +1013,8 @@ def lens_flicker(path, info, edl, budget_s=20.0, width=270):
     out = []
     fps = float(info.get("fps") or 30.0)
     W, H = info.get("width") or 1080, info.get("height") or 1920
+    width = int(min(width, W))
+    width -= width % 2
     h = int(round(H * width / float(W) / 2)) * 2
     prog = _program_s(edl)
     deadline = time.monotonic() + budget_s
@@ -1024,9 +1053,9 @@ def lens_flicker(path, info, edl, budget_s=20.0, width=270):
             out.append(_f(
                 "fix", "motion", "matte_flicker",
                 f"{it['id']} ({it.get('kind') or it.get('type')}) "
-                f"flickers: {100 * inside:.2f}% of the picture toggles "
-                f"frame to frame against {100 * base:.2f}% in the same shot "
-                "without it.",
+                f"flickers: {100 * inside:.1f}% of its edge pixels toggle "
+                f"again and again frame to frame, against {100 * base:.1f}% "
+                "in the same shot without it.",
                 fix="use a softer device on this shot (glow over outline), "
                     "shorten it to the stable part, or move it to a shot "
                     "with a cleaner matte",
