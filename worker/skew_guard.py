@@ -215,7 +215,11 @@ def check(worker_db, job, runners):
     payload = job.get("payload") or {}
     try:
         problem = None
-        if jtype == "mcp_tool":
+        # A call the dispatcher's own release cannot run either (it says so
+        # in dispatcher_mcp_problem) is invalid everywhere: this release
+        # answers it at once rather than waiting out the rollout for the
+        # same correction.
+        if jtype == "mcp_tool" and not job.get("dispatcher_mcp_problem"):
             problem = _mcp_problem(payload)
         if problem is None and job.get("project_id") is not None:
             if jtype in _VERSIONED_EDL_TYPES \

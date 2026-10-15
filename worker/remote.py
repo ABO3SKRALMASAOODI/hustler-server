@@ -603,7 +603,28 @@ def _job_payload(job):
         # release checks the job against its own code before any work
         # (worker/skew_guard.py) instead of every deploy refusing all work.
         "dispatcher_source": version.code_version(),
+        **_dispatcher_mcp_verdict(job),
     }
+
+
+def _dispatcher_mcp_verdict(job):
+    """{"dispatcher_mcp_problem": why} when THIS release cannot run an MCP
+    tool call either (an unknown tool or argument here too), else {}.
+
+    An executor on another release refuses a call whose tool or argument it
+    does not know, to wait for the release rolling out. When the dispatcher's
+    own release does not know it either, no release will run it: waiting
+    would only delay the model's CORRECTION_NEEDED by up to the whole rollout
+    window, so the executor answers it at once instead (skew_guard.check).
+    """
+    if job.get("type") != "mcp_tool":
+        return {}
+    try:
+        import skew_guard
+        problem = skew_guard._mcp_problem(job.get("payload") or {})
+    except Exception:
+        return {}
+    return {"dispatcher_mcp_problem": str(problem)[:200]} if problem else {}
 
 
 def _launch_batch_and_wait(worker_db, job):

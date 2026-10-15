@@ -2156,6 +2156,12 @@ _ROBOT_MIN_NCC = 0.60
 def _brand_check(picture_qc):
     """The final's measured brand stages, in words: confirmed or not."""
     pq = picture_qc if isinstance(picture_qc, dict) else {}
+    if not pq:
+        # No picture check ran (render_qc returns None when nothing could
+        # be measured). Say so; "not on this plan" would tell a free-tier
+        # final's editor that it carries no mark.
+        return {"end_card": "not measured (no picture check ran)",
+                "corner_mark": "not measured (no picture check ran)"}
     skipped = " ".join(str(x) for x in (pq.get("skipped") or []))
     endcard = pq.get("endcard")
     mark = pq.get("watermark")

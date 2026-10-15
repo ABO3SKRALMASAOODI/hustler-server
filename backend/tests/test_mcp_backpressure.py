@@ -149,7 +149,11 @@ def test_final_receipt_states_the_brand_check():
     bad = mcpmod._brand_check({"endcard": 0.41, "watermark": 0.2})
     assert bad["end_card"] == "MISSING OR ALTERED"
     assert bad["corner_mark"] == "MISSING OR ALTERED"
-    assert mcpmod._brand_check(None)["end_card"] == "not measured"
+    # No picture check at all: never "not on this plan" (review fix).
+    for missing in (None, {}):
+        none = mcpmod._brand_check(missing)
+        assert none["end_card"].startswith("not measured")
+        assert none["corner_mark"].startswith("not measured")
     skipped = mcpmod._brand_check({"endcard": None, "watermark": None,
                                    "skipped": ["watermark: budget"]})
     assert skipped["corner_mark"] == "not measured"

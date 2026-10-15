@@ -237,6 +237,31 @@ def test_unknown_mcp_tool_or_argument_waits():
                      _runners())
 
 
+def test_a_call_invalid_on_both_releases_is_answered_not_awaited():
+    """Review fix: an argument the dispatcher's release does not know either
+    can never run anywhere; waiting out the rollout would only delay the
+    model's CORRECTION_NEEDED."""
+    import remote
+    bad = {"id": 1, "type": "mcp_tool", "project_id": 7, "payload": {
+        "tool": "get_edl", "args": {"quantum_mode": True}}}
+    sent = remote._job_payload(dict(bad, total_claims=1))
+    assert "quantum_mode" in sent["dispatcher_mcp_problem"]
+    # The executor on another release then answers it (the tool's own
+    # CORRECTION_NEEDED) instead of refusing it for the rollout.
+    db = _Db({7: {1: _VALID_EDL}})
+    skew_guard.check(db, _skewed(sent), _runners())
+    # A call the dispatcher's release does know carries no verdict and is
+    # still checked against the older release.
+    good = remote._job_payload({"id": 2, "type": "mcp_tool", "project_id": 7,
+                                "payload": {"tool": "get_edl", "args": {}}})
+    assert "dispatcher_mcp_problem" not in good
+    assert "dispatcher_mcp_problem" not in remote._job_payload(
+        {"id": 3, "type": "preview", "project_id": 7, "payload": {}})
+    with pytest.raises(skew_guard.RolloutPending, match="no argument"):
+        skew_guard.check(db, _skewed(dict(good, payload={
+            "tool": "get_edl", "args": {"quantum_mode": True}})), _runners())
+
+
 def test_a_broken_check_never_blocks_a_job(monkeypatch):
     class Boom:
         def run(self, *_a, **_k):
