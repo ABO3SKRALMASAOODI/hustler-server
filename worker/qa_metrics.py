@@ -224,7 +224,8 @@ def read_frames(path, *, size=None, gray=False, rect=None, start_frame=0,
             # DOWN to the chroma grid (607 px wide comes out 606), and every
             # frame read after that is a skewed slice of the stream: crop
             # odd rects on full-resolution pixels instead
-            vf.append(f"format={'gray' if gray else 'rgb24'}")
+            vf.append("format=gray" if gray else
+                      f"scale=flags={RGB_READ},format=rgb24")
         vf.append(f"crop={w}:{h}:{x}:{y}")
         W, H = w, h
     if size:
