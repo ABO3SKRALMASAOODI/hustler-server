@@ -522,7 +522,10 @@ def lens_words(edl, index, plan, program_s, path=None):
              if isinstance(w, dict) and not w.get("filler")]
     keep = (edl or {}).get("keep") or []
     db, fs = audio_rms(path) if path else (None, None)
-    if words and len(keep) > 1:
+    if words and keep:
+        # one span or many: the joins (none for one span), the opening and
+        # the ending are judged (a single-span short skipped the opening
+        # check and never had its ending read)
         try:
             import timeline as tl_mod
             blocks = [b for b in tl_mod.program_blocks(edl)]
@@ -571,6 +574,26 @@ def lens_words(edl, index, plan, program_s, path=None):
                 fix=f"move the {side}-point to the word's "
                     f"{'end' if side == 'out' else 'start'} ({snap:.2f}s)",
                 t=t, op=op))
+        # the last frame: a short that ends inside a word ends on a
+        # fragment ("Ye-" before the end card)
+        last = float(keep[-1][1])
+        w_end = next((w for w in words if float(w["t0"]) + 0.03 < last
+                      < float(w["t1"]) - 0.03), None)
+        if w_end is not None:
+            cut = round(float(w_end["t0"]) - 0.02, 2)
+            op = None
+            if cut - float(keep[-1][0]) >= 0.2:
+                new = [list(x) for x in keep]
+                new[-1][1] = cut
+                op = {"action": "set", "layer": "keep", "value": new}
+            out.append(_f(
+                "fix", "words", "ends_mid_word",
+                f"the short ends inside '{w_end.get('w')}' (source "
+                f"{float(w_end['t0']):.2f}-{float(w_end['t1']):.2f}s): the "
+                "last thing heard before the end card is a fragment.",
+                fix=f"end the last span before the word ({cut:.2f}s) — or "
+                    "after it, if the thought needs it",
+                t=program_s, op=op))
         first = keep[0][0]
         prev = [w for w in words if float(w["t1"]) <= float(first) + 0.02]
         nxt = [w for w in words if float(w["t0"]) >= float(first) - 0.02]

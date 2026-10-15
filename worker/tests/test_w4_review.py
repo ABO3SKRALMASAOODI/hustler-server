@@ -466,3 +466,21 @@ def test_critique_short_takes_the_pack_it_judges_against(monkeypatch):
     ctx.db = type("D", (), {"run": lambda self, fn, *a, **k: []})()
     out = critic_tools.critique_short(ctx, format="e")
     assert "CRITIC" in out and seen.get("fmt") == "E"
+
+
+def test_the_critic_reads_the_ending_and_a_single_span_opening():
+    """lens_words judged the opening only for multi-span edits and never
+    read the ending: a short cut inside its last word ends on a
+    fragment before the end card."""
+    import motion_critic
+    words = [{"w": "so", "t0": 0.0, "t1": 0.3},
+             {"w": "this", "t0": 0.32, "t1": 0.6},
+             {"w": "matters.", "t0": 0.62, "t1": 1.2},
+             {"w": "Yeah,", "t0": 4.0, "t1": 4.6}]
+    edl = {"keep": [[0.31, 4.3]]}
+    got = motion_critic.lens_words(edl, {"words": words}, {"words": []},
+                                   3.9)
+    codes = {f["code"]: f for f in got}
+    assert "ends_mid_word" in codes and "opens_mid_sentence" in codes
+    op = codes["ends_mid_word"]["op"]
+    assert op["value"] == [[0.31, 3.98]]
