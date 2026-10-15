@@ -14,9 +14,7 @@
     ]
   },
   "needs": {
-    "sidecars": [
-      "planes.h"
-    ],
+    "sidecars": [],
     "lane_features": [
       "chromium"
     ],

@@ -9,7 +9,9 @@ stage: world
 params:
   depth: [auto, front, behind]
 needs:
-  sidecars: [objects.sam2]
+  # measured by the definition itself (world_defs: its seed / prompt /
+  # quad key the chunks); a card-level need would ask with default params
+  sidecars: []
   lane_features: []
   footage: "a foreground object with a clear outline in front of the type's place"
 binds_to: [word, word.payoff, time]

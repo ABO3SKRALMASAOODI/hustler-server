@@ -12,9 +12,7 @@
     ]
   },
   "needs": {
-    "sidecars": [
-      "objects.sam2"
-    ],
+    "sidecars": [],
     "lane_features": [],
     "footage": "a foreground object with a clear outline in front of the type's place"
   },

@@ -8,7 +8,9 @@ stage: world
 params:
   radius: [0.012, 0.02, 0.008]
 needs:
-  sidecars: [track.points]
+  # measured by the definition itself (world_defs: its seed / prompt /
+  # quad key the chunks); a card-level need would ask with default params
+  sidecars: []
   lane_features: []
   footage: "a textured point that stays in its shot (a product edge, a sign, a logo)"
 binds_to: [word, word.payoff, time]

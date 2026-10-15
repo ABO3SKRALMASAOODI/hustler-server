@@ -9,7 +9,9 @@ stage: world
 params:
   surface: [desk, table, floor, wall, screen]
 needs:
-  sidecars: [planes.h]
+  # measured by the definition itself (world_defs: its seed / prompt /
+  # quad key the chunks); a card-level need would ask with default params
+  sidecars: []
   lane_features: ["chromium"]
   footage: "a visible flat surface: a desk, a table, the floor, a wall or a screen"
 binds_to: [word, word.payoff, section, time]

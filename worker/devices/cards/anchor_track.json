@@ -12,9 +12,7 @@
     ]
   },
   "needs": {
-    "sidecars": [
-      "track.points"
-    ],
+    "sidecars": [],
     "lane_features": [],
     "footage": "a textured point that stays in its shot (a product edge, a sign, a logo)"
   },
