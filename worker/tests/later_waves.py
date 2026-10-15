@@ -3,7 +3,7 @@
 INTERFACES_W4.md §8.2: each wave after Wave 1 declares what it adds to the
 pinned registries in its own file, ``tests/fixtures/waves/w<N>.json``
 (``fx_tags``, ``verbs``, ``skills``, ``departments``, ``card_prefixes``,
-``sidecar_kinds``, ``templates``). The seam tests that pin "nothing outside
+``sidecar_kinds``, ``templates``, ``models``). The seam tests that pin "nothing outside
 the Wave 1 table" subtract exactly that union, so parallel waves each drop
 their own file and never edit the same pin.
 """
@@ -15,7 +15,7 @@ import os
 _DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures",
                     "waves")
 KEYS = ("fx_tags", "verbs", "skills", "departments", "card_prefixes",
-        "sidecar_kinds", "templates")
+        "sidecar_kinds", "templates", "models")
 
 
 def growth():

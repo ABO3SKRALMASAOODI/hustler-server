@@ -89,9 +89,9 @@ a section change — never as a filter on everything.
 
 ## Verification procedure
 
-1. `render_preview`, then `look_at(rendered=true, output_times=[...])` on
-   the device's window: the subject sharp where it should be, the move
-   smooth, no torn edges around the subject.
+1. `render_preview(complete=true)`, then `look_at(rendered=true,
+   output_times=[...])` on the device's window: the subject sharp where
+   it should be, the move smooth, no torn edges around the subject.
 2. `proof_device(ids=[...])`: a rack focus lands within a frame of its word
    (land_err_f), nothing changes outside the window (region_locality).
 3. `critique_short`: no dead stretches, no repeated device, B&W only as a

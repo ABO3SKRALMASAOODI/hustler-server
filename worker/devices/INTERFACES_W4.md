@@ -327,17 +327,25 @@ downbeat hits and thins the rest to ≤ 3 per second.
 Only these shared files are touched, each at one place: `schemas.py`
 (`Frame.ratio` gains `4:3`), `sidecars.py` / `analysis_jobs.py` (the
 `depth.small` kind spec and child runner), `devices/__init__.py`
-(`CARD_PREFIXES`, `SIDECAR_FEATURE`, lane table rows), `tools_ext/__init__.py`
-(`DEPARTMENTS` gains `delivery`), `taste.py` (format-pack budgets fallback),
-`config.py` (the W4 block), `backend/routes/mcp.py` (`_READ_ONLY_EXACT`),
-`stock.py` (keyless public-domain providers), `models.lock`, the seam tests
-(§8.2) and `backend/tests/test_backend_motion_edl.py` (Wave 4 types loaded by
-path).
+(`CARD_PREFIXES`), `tools_ext/__init__.py` (`DEPARTMENTS` gains `delivery`),
+`taste.py` (format-pack budgets fallback), `motion_templates.py` (param type
+`json`), `stock.py` (a photo whose bytes are not an image is refused; the
+keyless providers live in `broll_source.py`), `config.py` (the W4 block),
+`agent_prompt.py` (one paragraph), `version.py` (fingerprint scope gains
+`depth_anything/` and `formats/`), `backend/routes/mcp.py`
+(`_READ_ONLY_EXACT`, `_OPEN_WORLD`), `models.lock`, the seam tests (§8.2) and
+`backend/tests/test_backend_motion_edl.py` (Wave 4 types loaded by path).
 
 ### 8.2 Later-wave pins
 
 The Wave 0/1 seam tests pin "nothing outside the Wave 1 table". A later wave
 declares its growth in its own file, `tests/fixtures/waves/w<N>.json`
 (`fx_tags`, `verbs`, `skills`, `departments`, `card_prefixes`,
-`sidecar_kinds`), and the seam tests set exactly that growth aside. Each
-wave drops its own file, so parallel waves never edit the same pin.
+`sidecar_kinds`, `templates`, `models`), and the seam tests set exactly that
+growth aside. Each wave drops its own file, so parallel waves never edit the
+same pin. The Wave 0 catalog gate (`test_w0c_gates`) sets aside the
+department names that went live after Wave 1 and the declared skills in
+read_skill's enum, and holds the whole core catalog to Wave 1's 82,700
+ceiling (Wave 4 adds 101 B: `world`, `delivery`, five skill names).
+`test_w0a_lanes` sets aside the declared models (Wave 4:
+`depth_anything_v2_small`, Apache-2.0, pinned in `models.lock`).

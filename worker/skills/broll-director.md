@@ -44,8 +44,8 @@ which moments, which picture idea, how long.
 - The reply: per moment the source, licence, on-topic, crop survival and
   colour distance before -> after the match; "rejected on sight" counts;
   which libraries are off on this deployment.
-- `look_at(rendered=true, output_times=[...])` after a render: the cut in
-  and out, the captions over the cutaway.
+- `look_at(rendered=true, output_times=[...])` after a complete render:
+  the cut in and out, the captions over the cutaway.
 - `critique_short`: rhythm, a house style, the same device too often.
 
 ## Strong treatment patterns
@@ -77,8 +77,8 @@ which moments, which picture idea, how long.
 1. Read the reply: every cutaway has a licence line; the matched colour
    distance is small (the "-> N" after "dE to hero").
 2. Look at the director's board: proof, tone, one world.
-3. `render_preview`, then `look_at(rendered=true, ...)` at each cut in:
-   captions readable over it, no logo anywhere.
+3. `render_preview(complete=true)`, then `look_at(rendered=true, ...)` at
+   each cut in: captions readable over it, no logo anywhere.
 4. `critique_short`: no dead stretch, no house style.
 5. Paste the LICENCE LEDGER lines into the post's description when any
    says CC BY or CC BY-SA.

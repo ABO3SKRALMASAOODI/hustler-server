@@ -41,5 +41,8 @@
   ],
   "templates": [
     "ui_scene"
+  ],
+  "models": [
+    "depth_anything_v2_small"
   ]
 }

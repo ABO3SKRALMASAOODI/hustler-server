@@ -288,7 +288,13 @@ def test_models_lock_is_clean_and_matches_the_specs():
     bake = _bake()
     assert bake.check(str(WORKER / "models")) == []
     specs = bake.load_specs(str(WORKER / "models"))
-    assert set(specs) == {"rvm_mobilenetv3", "yunet"}
+    # later waves declare their models in tests/fixtures/waves/w<N>.json
+    # (INTERFACES_W4.md §8.2); check() above already holds them to the
+    # licence and checksum rules
+    import later_waves
+    later = later_waves.get("models")
+    assert later <= set(specs)
+    assert set(specs) - later == {"rvm_mobilenetv3", "yunet"}
     y = specs["yunet"]
     assert y["licence"] == "MIT" and y["bytes"] == 232589
     assert set(y["images"]) >= {"interactive", "batch", "agent", "vision"}

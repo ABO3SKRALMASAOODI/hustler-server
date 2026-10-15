@@ -51,7 +51,10 @@ _PROVIDER_ADAPTERS = frozenset({"modal_app.py", "setup_modal_executor.py"})
 # job registry, so a lane missing one is exactly the round-55 skew; and the
 # Cloudflare deploy keys its source-layer rebuild on this fingerprint, so a
 # file outside it could ship stale. Device cards are data the resolver obeys.
-_RUNTIME_PACKAGES = ("fx_schemas", "tools_ext", "jobs_ext", "devices")
+_RUNTIME_PACKAGES = ("fx_schemas", "tools_ext", "jobs_ext", "devices",
+                     # Wave 4: the vendored depth network (batch lane) and
+                     # the format packs / trend grammars agents read
+                     "depth_anything", "formats")
 _RUNTIME_DATA = (".py", ".yaml", ".yml", ".json")
 # Wave 0 runtime data the shared program obeys, outside any package: the
 # device cost model the resolver spends against, the model pins whose

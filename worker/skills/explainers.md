@@ -33,8 +33,9 @@ so the viewer never loses the thread. That continuity is the craft.
   figures not spoken.
 - The write's reply: which objects persist, where the irises open from,
   which counters land on a word.
-- `render_preview` + `look_at(rendered=true)` on each scene change: the
-  morph reads as one object moving, the iris opens from the right element.
+- `render_preview(complete=true)` + `look_at(rendered=true)` on each scene
+  change: the morph reads as one object moving, the iris opens from the
+  right element.
 - `critique_short`: type scale, dead stretches, graphics share.
 
 ## Strong treatment patterns
@@ -61,8 +62,9 @@ so the viewer never loses the thread. That continuity is the craft.
 ## Verification procedure
 
 1. Read the reply: persistent objects, iris origins, counters landing.
-2. `render_preview`, then `look_at(rendered=true, output_times=[...])` at
-   every scene start: nothing cuts that should morph.
+2. `render_preview(complete=true)`, then `look_at(rendered=true,
+   output_times=[...])` at every scene start: nothing cuts that should
+   morph.
 3. Check every figure against the user's data.
 4. `critique_short`: no dead stretch, no type below the ladder.
 

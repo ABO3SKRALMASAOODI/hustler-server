@@ -141,6 +141,15 @@ def add_ui_scene(ctx, scenes, start=None, end=None, data=None, theme="dark",
     except ValueError as x:
         return _rejected(str(x))
     slots = ui_scene.media_slots(graph)
+    if slots:
+        try:
+            import remote
+            if remote.executor_supports("fx:ui_media") is False:
+                return ("UNAVAILABLE: the render service does not draw "
+                        "footage in UI slots yet (a deploy is rolling "
+                        "out); nothing was written.")
+        except Exception:  # noqa: BLE001
+            pass
     missing = [sl for sl in slots if sl not in media]
     if missing:
         return _rejected("media slot(s) " + ", ".join(missing) + " need "
