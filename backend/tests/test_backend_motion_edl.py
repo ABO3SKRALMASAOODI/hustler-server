@@ -109,3 +109,33 @@ def test_w1_devices_validate_batch_and_remove_in_the_backend_process():
     assert got["slots"] == ["MotionItem.composite"]
     assert got["ok"] >= 31 and got["refused"] == got["bad"]
     assert got["events"] >= 1
+
+
+def test_w1_devices_are_live_in_the_backend_process_as_production_runs():
+    """The same, WITHOUT the preview switch (production never sets
+    VALMERA_FX_PREVIEW): the tracks' LIVE flags alone register every Wave 1
+    type in the backend, and the pure rules the backend loads by path for
+    the MCP batch (mono_policy, hooks, flash_safety) import with backend/
+    alone on sys.path (review w1r)."""
+    snippet = W1_SNIPPET + r'''
+assert video.wmono.whole_mono({"keep": [[0, 20]], "effects": {"grade": "bw"}})
+assert video.wmono.whole_mono({"keep": [[0, 20]], "effects": {
+    "grade_custom": {"saturation": 0.0}}})
+edl, notes = video.whooks.on_keep_change({"keep": [[0.0, 10.0]]},
+                                         {"keep": [[0.0, 8.0]]})
+print(json.dumps({"mono": True, "hooks": True}))
+'''
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "VALMERA_FX_PREVIEW")}
+    env.update(SKIP_DB_INIT="1", DATABASE_URL="postgresql://stub/stub",
+               PYTHONPATH=str(BACKEND))
+    r = subprocess.run([sys.executable, "-c", snippet], cwd=str(BACKEND),
+                       env=env, capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stderr[-3000:]
+    lines = r.stdout.strip().splitlines()
+    got = json.loads(lines[-2])
+    assert got["types"] == sorted(["subject", "background", "region",
+                                   "accent", "strobe", "junction",
+                                   "grade_window", "finish"])
+    assert got["ok"] >= 31 and got["refused"] == got["bad"]
+    assert json.loads(lines[-1]) == {"mono": True, "hooks": True}

@@ -28504,7 +28504,7 @@ def apply_edit_batch(ctx, base_version, operations, operation_id):
     if row["version"] != base_version:
         return f"REJECTED: current EDL is v{row['version']}; read it before rebuilding this batch."
     try:
-        keys = ctx.db.run(edit_batch.project_media_keys, ctx.project_id)
+        keys = ctx.db.run(edit_batch.project_media_keys, ctx.project_id) or set()
         updated = edit_batch.apply_batch(row["json"], operations, ctx.duration or None, keys)
     except (ValueError, TypeError) as exc:
         return f"REJECTED: no batch changes were saved: {exc}"

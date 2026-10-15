@@ -534,18 +534,34 @@ def _sidecar_status(item, source, plan):
 
 
 def _source_ranges(item, plan):
+    """The SOURCE spans an item's program window plays (speed pieces
+    mapped, inserts skipped, every kept span on its own).
+
+    Wave 1 review (w1r): this read the window's two ENDPOINTS through
+    ``out_to_src``. A window ending in an insert — the payoff hold every
+    podcast short carries — read None and asked for no range at all, so the
+    resolver saw the matte "absent" and the device took its substitute
+    (colour_kept_payoff, the top recipe, rendered as nothing on a short
+    whose matte was measured); a window across reordered keeps read b < a
+    the same way, and one across a cut asked for the source the cut
+    removed."""
     tl = plan.tl
     if tl is None:
         return []
-    a = b = None
     if item.get("start") is not None and item.get("end") is not None:
-        a, b = tl.out_to_src(item["start"]), tl.out_to_src(item["end"])
+        t0, t1 = float(item["start"]), float(item["end"])
     elif item.get("at") is not None:
         t = float(item["at"])
-        a, b = tl.out_to_src(max(0.0, t - 1.0)), tl.out_to_src(t + 1.0)
-    if a is not None and b is not None and b > a:
-        return [(a, b)]
-    return []
+        t0, t1 = max(0.0, t - 1.0), t + 1.0
+    else:
+        return []
+    try:
+        import matte_track
+        return [(a, b) for a, b in matte_track.program_to_source(tl, t0, t1)
+                if b > a]
+    except Exception:  # noqa: BLE001 — the Wave 0 reading
+        a, b = tl.out_to_src(t0), tl.out_to_src(t1)
+        return [(a, b)] if a is not None and b is not None and b > a else []
 
 
 def _est_ms(comp, plan, item):

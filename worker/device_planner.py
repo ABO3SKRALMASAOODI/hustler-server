@@ -1399,6 +1399,15 @@ def build_op(card, moment, plan, *, item_id, fps, edl):
 SUSTAINED_S = 0.5
 
 
+def _point_card(card):
+    """Is this card a hit (a punctuation frame, a flash, a junction) rather
+    than a sustained window?"""
+    if card.get("family") in PUNCTUATION + ("transition",):
+        return True
+    _vals, place = card_values(card)
+    return not (place.get("span") or place.get("duration_s"))
+
+
 def _overlaps_same(item, cid, chosen, existing):
     """Does ``item`` overlap a window it must not share? Two windows of the
     same card never overlap (two B&W setups laid over each other read as a
@@ -1433,9 +1442,14 @@ def _existing(edl, cards):
             continue
         card = cards.get(it.get("device")) or {}
         t = it.get("start") if it.get("start") is not None else it.get("at")
+        try:
+            hit = it.get("at") is None and float(it["end"]) - float(
+                it["start"]) < SUSTAINED_S
+        except (KeyError, TypeError, ValueError):
+            hit = False
         out.append({"id": it.get("id"), "device": it.get("device"),
                     "card": card, "family": card.get("family"),
-                    "type": it.get("type"),
+                    "type": it.get("type"), "hit": hit,
                     "t": float(t) if t is not None else None,
                     "flash": _flash(card) if card else it.get("type") in (
                         "accent", "strobe"),
@@ -1649,6 +1663,10 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
         shots_used = shot_cards.get(cid, set())
         if (m["shot"] - 1) in shots_used or (m["shot"] + 1) in shots_used:
             continue               # no device on consecutive shots
+        if any(e["t"] is not None and e.get("hit")
+               and abs(e["t"] - m["t"]) < DEVICE_SPACING_S[intensity]
+               for e in existing) and _point_card(card):
+            continue               # that moment already has its hit
         near = [c for c in chosen if abs(c["moment"]["t"] - m["t"])
                 < DEVICE_SPACING_S[intensity]]
         if near:
