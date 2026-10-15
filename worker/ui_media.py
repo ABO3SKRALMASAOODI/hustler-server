@@ -7,8 +7,8 @@ of the slot exactly. ``prepare`` writes the window as one RGBA intermediate
 (the footage cover/contain-fitted into the slot, its rounded corners
 anti-aliased, transparent elsewhere); the stage overlays it on the program
 inside the window (``finish.window_composite``: bit-exact outside). The
-scene's own chrome, drawn later on the above-captions layer, leaves the
-slot open.
+scene's own chrome, drawn later on the below-captions motion layer, leaves
+the slot open; the captions stay on top of both.
 """
 
 import os

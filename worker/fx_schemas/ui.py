@@ -5,8 +5,9 @@ Real footage inside a UI scene: a recording plays in a ``media`` slot of a
 ``ui_scene`` motion item (the scene graph solved by worker/ui_scene.py).
 The compiler draws the footage into the slot's solved rectangle, frame by
 frame (it follows every morph), with the slot's rounded corners, at the
-``pre_captions`` stage — UNDER the scene's chrome, which leaves the slot
-open. ``check`` refuses an unknown motion item, a motion item that is not a
+``screen`` stage — under the scene (its motion item sits on the
+``below_captions`` layer: the chrome over the footage, the captions over
+both), whose backdrop leaves the slot open. ``check`` refuses an unknown motion item, a motion item that is not a
 UI scene, or a slot its graph does not have.
 
 Like every fx_schemas member this imports pydantic, the standard library and
@@ -26,7 +27,7 @@ LIVE = True
 
 class UiMediaFx(FxItemBase):
     """Footage in a UI scene's media slot over [start, end)."""
-    STAGES: ClassVar[tuple] = ("pre_captions",)
+    STAGES: ClassVar[tuple] = ("screen",)
     COMPILER: ClassVar[str] = "ui_media:UI_MEDIA"
 
     type: Literal["ui_media"] = "ui_media"

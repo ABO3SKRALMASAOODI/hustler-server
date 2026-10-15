@@ -118,6 +118,30 @@ def _swap_texts(edl, mapping):
                                     for r in val]
         for k in ("footprint", "reading", "series"):
             m.pop(k, None)               # measured for the old words
+    for m in edl.get("motion") or []:
+        if not isinstance(m, dict) or m.get("template") != "ui_scene":
+            continue
+        p = m.get("params") or {}
+        objs = list((p.get("graph") or {}).get("objects") or [])
+        for sc in (p.get("spec") or {}).get("scenes") or []:
+            objs += list(sc.get("objects") or [])
+        for o in objs:
+            for k in ("title", "body", "text", "label", "name", "value",
+                      "delta", "caption"):
+                if isinstance(o.get(k), str):
+                    o[k] = tr(o[k])
+            if isinstance(o.get("lines"), list):
+                o["lines"] = [tr(x) for x in o["lines"]]
+            for r in o.get("rows") or []:
+                if isinstance(r, dict) and isinstance(r.get("label"), str):
+                    r["label"] = tr(r["label"])
+            for ch in (o.get("updates") or {}).values():
+                for k in list(ch):
+                    if isinstance(ch[k], str):
+                        ch[k] = tr(ch[k])
+        if p.get("graph"):
+            import ui_scene
+            p["shown"] = ui_scene.shown_texts(p["graph"])
     for t in edl.get("texts") or []:
         if isinstance(t, dict) and isinstance(t.get("text"), str):
             t["text"] = tr(t["text"])

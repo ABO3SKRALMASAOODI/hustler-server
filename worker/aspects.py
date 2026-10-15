@@ -129,9 +129,46 @@ def solve(edl, ratio, index=None):
 
 # ── verification of a rendered master ────────────────────────────────────
 
-def safe_area_violations(path, ratio, samples=12, wm_box=None):
+def source_text_boxes(src_path, edl, index, ratio):
+    """Frame-fraction boxes, in the program frame of ``ratio``, of text
+    burned into the SOURCE (a channel logo, a lower third): the footage's
+    own marks are not this edit's type and never count against it."""
+    try:
+        import inpaint
+        regs = inpaint.detect_text_regions(src_path, samples=8)
+    except Exception:  # noqa: BLE001
+        return []
+    v = (index or {}).get("video") or {}
+    try:
+        sr = float(v.get("width")) / float(v.get("height"))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return []
+    r = ratio_value(ratio)
+    fr = (edl or {}).get("frame") or {}
+    fx = float(fr.get("focus_x") if fr.get("focus_x") is not None else 0.5)
+    fy = float(fr.get("focus_y") if fr.get("focus_y") is not None else 0.5)
+    # the crop window in source fractions
+    if r < sr:
+        cw, ch = r / sr, 1.0
+    else:
+        cw, ch = 1.0, sr / r
+    x0 = min(max(0.0, fx - cw / 2.0), 1.0 - cw)
+    y0 = min(max(0.0, fy - ch / 2.0), 1.0 - ch)
+    out = []
+    for g in regs:
+        bx0, by0 = (g["x"] - x0) / cw, (g["y"] - y0) / ch
+        bx1 = (g["x"] + g["w"] - x0) / cw
+        by1 = (g["y"] + g["h"] - y0) / ch
+        if bx1 > 0 and by1 > 0 and bx0 < 1 and by0 < 1:
+            out.append([bx0 - 0.01, by0 - 0.01, bx1 + 0.01, by1 + 0.01])
+    return out
+
+
+def safe_area_violations(path, ratio, samples=12, wm_box=None,
+                         ignore=()):
     """[(t, box)] of text lines drawn outside the aspect's safe area (the
-    watermark's own corner excepted)."""
+    watermark's own corner and the footage's own burned-in marks
+    (``ignore`` boxes) excepted)."""
     import numpy as np
     import broll_score
     import qa_metrics
@@ -148,9 +185,16 @@ def safe_area_violations(path, ratio, samples=12, wm_box=None):
         for x, y, w, h, _tl in broll_score._text_boxes(f):
             fx0, fy0 = x / W, y / H
             fx1, fy1 = (x + w) / W, (y + h) / H
-            if wm_box and fx0 >= wm_box[0] - 0.01 and fy0 >= wm_box[1] - \
-                    0.01 and fx1 <= wm_box[2] + 0.01 and fy1 <= wm_box[3] \
-                    + 0.01:
+            area = max(1e-9, (fx1 - fx0) * (fy1 - fy0))
+
+            def share(g):
+                ix = max(0.0, min(fx1, g[2]) - max(fx0, g[0]))
+                iy = max(0.0, min(fy1, g[3]) - max(fy0, g[1]))
+                return ix * iy / area
+            # a line the detector merged with Valmera's mark or with the
+            # footage's own burned-in logo is theirs, not the edit's
+            if any(share(g) >= 0.25 for g in list(ignore or ())
+                   + ([wm_box] if wm_box else [])):
                 continue
             if fx0 < l * 0.5 or fy0 < t * 0.5 or fx1 > 1 - r * 0.5 or \
                     fy1 > 1 - b * 0.5:
@@ -160,7 +204,25 @@ def safe_area_violations(path, ratio, samples=12, wm_box=None):
     return out
 
 
-def verify(path, edl, index, ratio, final=False, want_wm=False):
+def _wm_box(path):
+    """The free-tier mark's corner (robot + its two lines) in frame
+    fractions: Valmera's own mark, placed exactly as rendered — never a
+    safe-area violation of the edit's type."""
+    try:
+        import qa_metrics
+        import renderer
+        info = qa_metrics.probe(path)
+        W, H = int(info["width"]), int(info["height"])
+        g = renderer.watermark_geometry(W, H)
+        x1 = g["x_out"] + 24 * g["fontsize"] * 0.62
+        return [g["margin_x"] / W - 0.01, g["margin_y"] / H - 0.01,
+                x1 / W + 0.01, (g["margin_y"] + g["rh"]) / H + 0.02]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def verify(path, edl, index, ratio, final=False, want_wm=False,
+           src_path=None):
     """{faces, brand, safe_area, findings} for one rendered master."""
     import motion_critic
     res = motion_critic.critique(path, edl, index or {}, final=final,
@@ -169,7 +231,10 @@ def verify(path, edl, index, ratio, final=False, want_wm=False):
              if f.get("code") == "type_on_face"]
     brand = [f for f in res.get("findings") or []
              if f.get("lens") == "brand"]
-    safe = safe_area_violations(path, ratio)
+    ignore = source_text_boxes(src_path, edl, index, ratio) if src_path \
+        else []
+    wm = _wm_box(path) if want_wm else None
+    safe = safe_area_violations(path, ratio, ignore=ignore, wm_box=wm)
     return {"faces": len(faces), "brand": len(brand),
             "safe_area": len(safe), "safe_detail": safe[:6],
             "score": res.get("score"),

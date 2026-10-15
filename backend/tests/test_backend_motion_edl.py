@@ -149,7 +149,7 @@ ops = [
         "id": "ui1", "template": "ui_scene", "start": 12.0, "end": 16.0,
         "params": {"graph": graph, "shown": [], "backdrop": "solid"}}},
     {"action": "upsert", "layer": "fx", "id": "um1", "value": {
-        "id": "um1", "type": "ui_media", "stage": "pre_captions",
+        "id": "um1", "type": "ui_media", "stage": "screen",
         "start": 12.0, "end": 16.0, "motion_id": "ui1", "slot": "screen",
         "source": {"kind": "asset", "asset_key": "media/1/b.mp4"},
         "device": "ui_media_slot"}},

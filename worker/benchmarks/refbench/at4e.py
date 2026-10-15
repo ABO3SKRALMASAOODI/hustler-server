@@ -77,7 +77,7 @@ def _short(index):
              {"id": "hook", "template": "hook_title", "start": 0.2,
               "end": 2.4, "params": {"text": "TIME HORIZONS"}},
              {"id": "ui1", "template": "ui_scene", "start": 31.6,
-              "end": 34.8, "params": {
+              "end": 34.8, "layer": "below_captions", "params": {
                   "graph": g, "shown": ui_scene.shown_texts(g),
                   "backdrop": "dim",
                   "spec": {"scenes": g_sc, "words": []}}}],
@@ -182,7 +182,7 @@ def at_4e_1():
         res = _render(e, w["path"], index, out, locs)
         walls[r] = res["wall_s"]
         ver = aspects.verify(out, res["edl"], index, r, final=True,
-                             want_wm=True)
+                             want_wm=True, src_path=w["path"])
         ui = next(m for m in res["edl"]["motion"] if m["id"] == "ui1")
         g = ui["params"]["graph"]
         per[r] = dict(ver, notes=notes, ui_design=[g["W"], g["H"]],

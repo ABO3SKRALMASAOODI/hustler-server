@@ -241,7 +241,7 @@ def _acquire(ctx, cand, W, H):
     if policy == "redesign":
         return _acquire_remote(ctx, cand, W, H)
     work = os.path.join(ctx.workdir, f"broll_{uuid.uuid4().hex[:8]}")
-    return broll_source.acquire_local(cand, work, W, H)
+    return broll_source.fetch_local(cand, work, W, H)
 
 
 def _acquire_remote(ctx, cand, W, H):
@@ -306,15 +306,31 @@ def _offset(got, need_s):
     return round(off, 2), False
 
 
-def _judge(ctx, cand, W, H, hero, need_s, archival):
-    import broll_score
+def _fetch(ctx, cand, W, H):
+    """The network half of judging (parallel threads): the file, or the
+    executor's acquisition with its review frames."""
     import broll_source
     try:
-        got = _acquire(ctx, cand, W, H)
+        return {"cand": cand, "got": _acquire(ctx, cand, W, H)}
     except broll_source.BrollError as e:
         return {"cand": cand, "error": str(e)}
     except Exception as e:  # noqa: BLE001
         return {"cand": cand, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
+def _judge(ctx, fetched, W, H, hero, need_s, archival):
+    """The decoding and scoring half — always in the calling thread."""
+    import broll_score
+    import broll_source
+    cand = fetched["cand"]
+    if fetched.get("error"):
+        return fetched
+    got = fetched["got"]
+    if got.get("path") and "frames" not in got:
+        try:
+            got = broll_source.analyse_local(got)
+        except Exception as e:  # noqa: BLE001
+            return {"cand": cand, "error": f"unreadable ({str(e)[:100]})"}
     still = cand.get("kind") == "photo"
     meta = {"kind": "still" if still else "video",
             "width": got.get("width"), "height": got.get("height"),
@@ -322,8 +338,9 @@ def _judge(ctx, cand, W, H, hero, need_s, archival):
             "bytes": got.get("bytes"),
             "motion_profile": got.get("motion_profile")}
     fit = "frame" if (archival or cand.get("archival")) else "cover"
-    res = broll_score.score(got.get("frames") or [], meta, hero=hero or None,
-                            W=W, H=H, fit=fit, archival=fit == "frame",
+    res = broll_score.score(got.get("frames") or [], meta,
+                            hero=hero or None, W=W, H=H, fit=fit,
+                            archival=fit == "frame",
                             native=bool(got.get("native")))
     rel = float(cand.get("_rel") or 0.0)
     res["final"] = round(0.55 * res["score"] + 0.45 * rel, 4)
@@ -538,10 +555,12 @@ def _source_broll(ctx, moments, limit, providers, place):
             misses.append((spec, "no licensed match" + (
                 f" ({'; '.join(errs)[:120]})" if errs else "")))
             continue
+        # fetch in parallel (network); decode and judge here, one at a
+        # time (numpy's BLAS must not be driven from several threads)
         with ThreadPoolExecutor(max_workers=min(3, len(short))) as pool:
-            judged = list(pool.map(
-                lambda c: _judge(ctx, c, W, H, hero, spec["duration_s"],
-                                 spec["archival"]), short))
+            fetched = list(pool.map(lambda c: _fetch(ctx, c, W, H), short))
+        judged = [_judge(ctx, f, W, H, hero, spec["duration_s"],
+                         spec["archival"]) for f in fetched]
         debug = getattr(ctx, "_broll_debug", None)
         if isinstance(debug, list):
             for j in judged:

@@ -3,7 +3,7 @@
   "family": "layout",
   "verb": "add_ui_scene",
   "fx_type": "ui_media",
-  "stage": "pre_captions",
+  "stage": "screen",
   "params": {
     "fit": [
       "cover",

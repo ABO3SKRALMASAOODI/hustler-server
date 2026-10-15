@@ -396,3 +396,31 @@ def test_backend_style_load_registers_depth_and_time(tmp_path):
     assert r.returncode == 0, r.stderr[-800:]
     assert {"depth", "time"} <= set(r.stdout.strip().split(","))
     del importlib
+
+
+# ── the person matte on the sidecar grid (regression) ───────────────────
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+def test_the_matte_is_read_from_the_grid_chunks_under_an_off_grid_span(
+        tmp_path):
+    """Focus on the subject and the two-plane fallback read the person
+    matte for a window that never starts on a chunk boundary: the read
+    must name the grid chunks that cover it (an off-grid span names no
+    chunk, and the matte silently read as absent)."""
+    import media
+    import sidecars
+    import depth_fx
+    import w1a_support as w1
+    src = w1.make_source(str(tmp_path / "src.mp4"))
+    info = media.probe(src)
+    ref = sidecars.source_from(media.sha256_file(src), src, info, 0, [])
+    store = str(tmp_path / "store")
+    w1.write_chunks(store, ref)
+    prev = sidecars.use_store(sidecars.LocalStore(store))
+    try:
+        class Plan:
+            source = ref
+        m = depth_fx._matte_at(Plan(), 1.37, str(tmp_path / "dest"))
+    finally:
+        sidecars.use_store(prev)
+    assert m is not None and m.max() > 0.5

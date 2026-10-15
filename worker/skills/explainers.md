@@ -86,7 +86,7 @@ the slot.
 ```json
 {"action": "upsert", "layer": "motion", "id": "ui1", "value": {
   "id": "ui1", "template": "ui_scene", "start": 3.0, "end": 11.0,
-  "layer": "above_captions", "params": {"graph": {"v": 1, "W": 1080,
+  "layer": "below_captions", "params": {"graph": {"v": 1, "W": 1080,
   "H": 1920, "dur": 8.0, "scenes": [0.0], "objects": [{"id": "c1",
   "kind": "card", "title": "Front forks", "design": [70, 760, 940, 200],
   "segs": [[0.0, 0.45, 70, 760, 940, 200, 70, 760, 940, 200, 0, 1,
@@ -97,7 +97,7 @@ the slot.
 
 ```json
 {"action": "upsert", "layer": "fx", "id": "um1", "value": {
-  "id": "um1", "type": "ui_media", "stage": "pre_captions", "start": 3.0,
+  "id": "um1", "type": "ui_media", "stage": "screen", "start": 3.0,
   "end": 11.0, "motion_id": "ui1", "slot": "screen", "source": {
   "kind": "asset", "asset_key": "media/12/recording.mp4"},
   "fit": "contain", "device": "ui_media_slot"}}

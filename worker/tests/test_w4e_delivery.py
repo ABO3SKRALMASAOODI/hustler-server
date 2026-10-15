@@ -244,3 +244,15 @@ def test_registration():
     names = list(tools_ext.EXT_DEPARTMENTS["delivery"])
     comp = agent_tools.openai_tools("x", compact=True, names=names)
     assert len(json.dumps(comp, separators=(",", ":"))) <= 3000
+
+
+def test_retypeset_swaps_ui_scene_texts():
+    e0 = _edl()
+    e1, _n = retypeset_lang.retypeset(e0, IDX, "de",
+                                      mapping={"Rocket": "Rakete"})
+    ui = next(m for m in e1["motion"] if m["id"] == "ui1")
+    titles = [o.get("title") for o in ui["params"]["graph"]["objects"]]
+    assert "Rakete" in titles and "Rakete" in ui["params"]["shown"]
+    spec_titles = [o.get("title") for o in
+                   ui["params"]["spec"]["scenes"][0]["objects"]]
+    assert "Rakete" in spec_titles

@@ -122,7 +122,7 @@ Department compact budgets (12,000 B each, tested): Wave 4's share of
 |---|---|---|---|---|---|
 | 4A | `fx_schemas/depth.py` | `depth` | `DepthFx` | world, screen | `depth_fx:DEPTH` |
 | 4A | | `time` | `TimeFx` | world | `timewarp:TIME` |
-| 4B | `fx_schemas/ui.py` | `ui_media` | `UiMediaFx` | pre_captions | `ui_media:UI_MEDIA` |
+| 4B | `fx_schemas/ui.py` | `ui_media` | `UiMediaFx` | screen | `ui_media:UI_MEDIA` |
 | 4C | `fx_schemas/broll.py` | `broll` | `BrollFx` | screen | `broll_fx:BROLL` |
 
 ### 3.2 `depth` (4A)

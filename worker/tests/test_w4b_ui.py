@@ -317,7 +317,7 @@ def test_ui_media_check_refuses_an_unknown_slot(ctx):
     e["motion"] = [{"id": "ui1", "template": "ui_scene", "start": 1.0,
                     "end": 9.0, "params": {"graph": g, "shown": [],
                                            "backdrop": "solid"}}]
-    e["fx"] = [{"id": "u1", "type": "ui_media", "stage": "pre_captions",
+    e["fx"] = [{"id": "u1", "type": "ui_media", "stage": "screen",
                 "start": 1.0, "end": 9.0, "motion_id": "ui1",
                 "slot": "nope", "source": {"kind": "asset",
                                            "asset_key": "media/7/rec.mp4"}}]
@@ -360,7 +360,7 @@ def test_a_slot_plays_inside_its_rect_only(tmp_path):
         {"id": "screen", "kind": "media", "aspect": 16 / 9}]}], 4.0,
         1080, int(round(1080 * 360 / 640)))
     base = {"keep": [[0.0, 10.0]]}
-    fx = [{"id": "u1", "type": "ui_media", "stage": "pre_captions",
+    fx = [{"id": "u1", "type": "ui_media", "stage": "screen",
            "start": 2.0, "end": 6.0, "motion_id": "ui1", "slot": "screen",
            "source": {"kind": "asset", "asset_key": "media/7/rec.mp4"},
            "fit": "cover", "device": "ui_media_slot"}]

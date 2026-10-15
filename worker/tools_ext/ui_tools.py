@@ -148,7 +148,7 @@ def add_ui_scene(ctx, scenes, start=None, end=None, data=None, theme="dark",
                          "offset_s}}")
     mid = str(id or _new_id(edl.get("motion") or [], "ui"))
     item = {"id": mid, "template": "ui_scene", "start": round(s, 2),
-            "end": round(e, 2), "layer": "above_captions",
+            "end": round(e, 2), "layer": "below_captions",
             "params": {"graph": graph, "shown": ui_scene.shown_texts(graph),
                        "backdrop": backdrop,
                        # what the graph was solved from: another aspect
@@ -172,7 +172,7 @@ def add_ui_scene(ctx, scenes, start=None, end=None, data=None, theme="dark",
         else:
             return _rejected(f"media.{sl} needs asset_key or src_t")
         fid = _new_id(taken, "um")
-        fx = {"id": fid, "type": "ui_media", "stage": "pre_captions",
+        fx = {"id": fid, "type": "ui_media", "stage": "screen",
               "start": round(s, 2), "end": round(e, 2), "motion_id": mid,
               "slot": sl, "source": src, "fit": m.get("fit") or "cover",
               "device": "ui_media_slot"}

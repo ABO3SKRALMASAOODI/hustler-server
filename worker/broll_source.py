@@ -569,6 +569,12 @@ def acquire_local(cand, workdir, want_w, want_h):
     """Download (dev / single-box lane) and verify one candidate; returns
     {path, kind, bytes, width, height, duration_s, fps, frames,
     motion_profile, native}. Raises BrollError."""
+    return analyse_local(fetch_local(cand, workdir, want_w, want_h))
+
+
+def fetch_local(cand, workdir, want_w, want_h):
+    """The network half (safe in parallel threads): download and verify;
+    {path, kind, bytes, width, height[, duration_s, fps]}."""
     import stock
     os.makedirs(workdir, exist_ok=True)
     kind = cand.get("kind")
@@ -586,8 +592,16 @@ def acquire_local(cand, workdir, want_w, want_h):
         except Exception as e:  # noqa: BLE001
             raise BrollError(f"download failed ({str(e)[:120]})")
     info = verify_media(path, kind)
-    got = {"path": path, "kind": kind, "bytes": os.path.getsize(path),
-           **info}
+    return {"path": path, "kind": kind, "bytes": os.path.getsize(path),
+            **info}
+
+
+def analyse_local(got):
+    """The decoding half (run in ONE thread: numpy's BLAS is not safe to
+    drive from several Python threads at once — measured as minutes of
+    spinning): review frames and the motion profile."""
+    path, kind = got["path"], got["kind"]
+    info = got
     # capped at 1280 px: a 6000-px archive scan is judged as well at a
     # fifth of its size; blockiness is read only at the file's own size
     got["frames"] = frames_of(path, kind, n=4, width=1280)

@@ -1,6 +1,6 @@
 <!--MG-SPEC {"title": "UI scene", "category": "layout", "also": ["data"], "internal": true,
  "description": "An explainer told through interface: glass cards, a three-state karaoke pill, comment threads, dashboards with counters and bars, editor windows and media slots, as PERSISTENT objects that morph between scenes and open as irises from the element that caused them. Written by add_ui_scene (the scene graph is solved in Python: layout, morphs, iris origins, counters landing on the spoken number); not authored by hand.",
- "duration": 8.0, "layer": "above_captions", "mutes_captions": false,
+ "duration": 8.0, "layer": "below_captions", "mutes_captions": false,
  "params": {
   "graph": {"type": "json", "required": true, "max": 48000, "hint": "the solved scene graph (ui_scene.solve)"},
   "shown": {"type": "list", "default": [], "max_items": 40, "max": 120, "hint": "every string the scene prints (written by add_ui_scene)"},
@@ -145,8 +145,9 @@
   });
   // where the scene draws (capture bounds and the caption plan)
   const back = P.backdrop || 'solid';
-  if (back !== 'none') MG.box = [0, 0, MG.W, MG.H];
-  else {
+  // the content's bounds (the backdrop is a ground, not a graphic the
+  // captions must avoid: they sit in the band under the interface)
+  {
     let b = null;
     nodes.forEach(n => n.o.segs.forEach(s => {
       const xs = [s[2], s[6]], ys = [s[3], s[7]];
