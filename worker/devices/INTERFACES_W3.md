@@ -214,7 +214,19 @@ MotionAnchor {
   overlay (and 1C's `composite`, blend included) composites it. Layer:
   an anchored item draws on its own layer (`below_captions` default for
   world type); `behind_subject` is folded into `occluders: ["person"]`.
-- **Degrade ladder** (A3, ROADMAP §9): landmarks → YuNet box (faces) →
+- **Measured from the first render** (review w3r): `world_layer.warm`
+  launches every sidecar the render's world items read (landmarks, the
+  definitions they name, the person matte, the clean plate) through the
+  render's launch source, exactly as the readers key them — so a stale
+  client's apply_edit_batch items get measured too. Previews never wait;
+  finals wait within the render's sidecar budget (≤ 90 s), then degrade.
+- **Device rows**: every anchored item reports a row in the render's
+  `devices` block (`full`; `reduced` on the face detector's box, an
+  unmeasured plane track or a graphic that leaves the frame; `substitute`
+  when pinned static or drawn in front of an unmeasured occluder), so the
+  DEGRADED gate holds a final that shipped one degraded.
+- **Degrade ladder** (A3, ROADMAP §9): landmarks → YuNet box (faces:
+  `faces.yunet`, prefetched at index, gives the box and five points) →
   last good pose → `static_placement` (where it was written, with "pinned
   static: tracking confidence low"). Occlusion missing → `type_in_front`
   with a note. A plane whose reprojection residual is over the bar → the

@@ -48,7 +48,11 @@ def store(tmp_path):
     root = str(tmp_path / "store")
     os.makedirs(root)
     prev = sidecars.use_store(sidecars.LocalStore(root))
+    # chunk reads are cached by key: another test's chunk for the same
+    # synthetic source must never answer for this store
+    sidecars._reset_caches()
     yield root
+    sidecars._reset_caches()
     sidecars.use_store(prev)
 
 
@@ -190,7 +194,7 @@ def test_a_degraded_anchor_is_held_at_export():
 # ── the face detector's box: the rung under the face mesh ──────────────
 
 def test_a_face_anchor_rides_the_detector_box_while_the_mesh_measures(store):
-    src = w3s.source()
+    src = w3s.source(sha="e" * 64)
     rows = []
     for k in range(40):
         t = round(k * 0.1, 3)
