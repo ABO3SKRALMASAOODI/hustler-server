@@ -513,3 +513,20 @@ def test_an_item_that_fails_to_compile_is_rolled_back_alone(tmp_path,
     assert any(p.endswith("nullsink") and p.startswith("[pm")
                for p in parts)
     assert used.count("v0") == 1
+
+
+def test_a_short_flash_keeps_its_edge_and_a_poster_softens_not_glows(
+        tmp_path, monkeypatch):
+    """Wave 1 integration (the S3 board): on an unsteady chunk a 2-frame
+    fill kept being drawn as a glow, and a poster on an LED wall became a
+    glow too. Flicker cannot read in two frames; a poster stays a poster
+    with a soft edge."""
+    _matte(monkeypatch, "ready", windows=[
+        {"t0": 0.0, "t1": 3.0, "status": "ready", "ok": False}])
+    plan = _plan(tmp_path)
+    assert C.prepare(plan, _sx("f", kind="fill", start=1.0, end=1.08)) is None
+    assert subject_fx._state(plan)["f"]["mode"] == "full"
+    rung, why = C.prepare(plan, _sx("p", kind="poster", field="accent",
+                                    start=0.5, end=2.0))
+    assert rung == "reduced" and "soft edge" in why
+    assert subject_fx._state(plan)["p"]["mode"] == "soft"

@@ -69,6 +69,10 @@ TYPES = ("subject", "background")
 # keep a wider ramp so a grade change never shows a hard seam.
 FIRM_CRISP = (0.30, 0.70)
 FIRM_SOFT = (0.12, 0.88)
+# A crisp device shorter than this keeps its crisp edge on an unsteady
+# chunk (flicker cannot read in a few frames); a poster demotes to a SOFT
+# EDGE, not to a glow (a field with the speaker on it stays that device).
+SOFT_MIN_S = 0.4
 # The poster field encroaches this much (px at a 1080-high frame) into the
 # subject's soft edge: the footage's own background never fringes the field.
 POSTER_CHOKE_PX = 1.5
@@ -83,7 +87,7 @@ RADIAL_RADIUS = 0.08
 # wrap (WRAP x 1 - the tightest tail) on a faint CORE wash.
 GLOW_TAIL = ((0.10, 0.30), (0.25, 0.35), (0.38, 0.35))
 GLOW_WRAP = 0.9
-GLOW_CORE = 0.09
+GLOW_CORE = 0.04
 # Glow and blurs are soft by nature: they are computed at a working height
 # of about SOFT_LINES (a 1920-line final works at 1/4 resolution, a 480-line
 # preview at full), so a preview and its final show the same light and the
@@ -580,12 +584,19 @@ class _Compiler:
         if missing and not rung:
             rung = ("reduced", "the person matte is missing for part of "
                     "this window (that part shows the plain picture)")
-        if item.get("type") == "subject" and item.get("kind") in CRISP_KINDS:
+        if item.get("type") == "subject" and item.get("kind") in CRISP_KINDS \
+                and float(item["end"]) - float(item["start"]) >= SOFT_MIN_S:
+            # an unsteady edge only reads over time: a 2-frame fill flash
+            # keeps its crisp edge whatever the chunk QA says (Wave 1
+            # integration, the S3 board)
             bad = _demote_crisp(info, item)
             if bad:
                 st["mode"] = "soft"
                 rung = ("reduced", "the matte edge is unsteady here (QA "
-                        "over the bar): the crisp effect is drawn as a glow")
+                        "over the bar): " + (
+                            "the poster is drawn with a soft edge"
+                            if item.get("kind") == "poster" else
+                            "the crisp effect is drawn as a glow"))
         return rung
 
     @staticmethod
@@ -881,7 +892,9 @@ class _Emit:
             return getattr(self, "sub_" + st["substitute"])(label)
         if it.get("type") == "background":
             return self.background(label)
-        kind = "glow" if st.get("mode") == "soft" else it.get("kind")
+        kind = it.get("kind")
+        if st.get("mode") == "soft" and kind != "poster":
+            kind = "glow"
         return getattr(self, "k_" + kind)(label)
 
     # -- building blocks -------------------------------------------------
@@ -1032,11 +1045,13 @@ class _Emit:
         field = self.colour_layer(resolve_colour(it.get("field"), self.edl,
                                                  "accent"))
         inten = float(_get(it, "intensity", 1.0))
+        firm = FIRM_SOFT if self.st.get("mode") == "soft" else FIRM_CRISP
         if it.get("keep_footage", True):
             a = self.mask_window(self.raw_mask(), invert=True,
-                                 grow_px=-POSTER_CHOKE_PX, intensity=inten)
+                                 grow_px=-POSTER_CHOKE_PX, intensity=inten,
+                                 firm=firm)
             return self.lay(label, field, a)
-        sil = self.mask_window(self.raw_mask(), region=False)
+        sil = self.mask_window(self.raw_mask(), region=False, firm=firm)
         col = self.colour_layer(self.colour("colour", "black"))
         cf, layer = self.lab("cf"), self.lab("pl")
         self.p.append(f"[{col}]format=yuva420p[{cf}a]")
@@ -1090,9 +1105,16 @@ class _Emit:
         outside, inside, wrap = L("gx"), L("gy"), L("gw")
         self.p.append(f"[{m}3]negate[{m}n]")
         self.p.append(f"[{tail}][{m}n]blend=all_mode=multiply[{outside}]")
-        # light wrap: just inside the edge the subject catches the light
-        self.p.append(f"[{tails[0]}w]negate,lut=c0='clip(val*{GLOW_WRAP:.4f}"
-                      f"+{GLOW_CORE * 255:.1f},0,255)'[{wrap}]")
+        # light wrap: just inside the edge the subject catches the light,
+        # falling to GLOW_CORE deep inside. The first tail is the blurred
+        # matte times 2 x its weight, so it is normalised back before it is
+        # inverted: un-normalised it never fell below ~0.4 inside, and every
+        # glow washed the whole speaker grey (Wave 1 integration, the S3
+        # board: a dark-suited MCU read as fogged)
+        w0 = 2.0 * GLOW_TAIL[0][1]
+        self.p.append(f"[{tails[0]}w]lut=c0='clip((255-min(255,val/{w0:.4f}))"
+                      f"*{GLOW_WRAP:.4f}+{GLOW_CORE * 255:.1f},0,255)'"
+                      f"[{wrap}]")
         self.p.append(f"[{wrap}][{m}4]blend=all_mode=multiply[{inside}]")
         inten = max(0.0, min(1.0, float(intensity)))
         self.p.append(f"[{outside}][{inside}]blend=all_mode=addition,"
