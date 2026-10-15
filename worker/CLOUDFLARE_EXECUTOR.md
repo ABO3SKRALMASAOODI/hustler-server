@@ -39,7 +39,7 @@ the two is normal and is not a reason to refuse work:
   advertises `skew_guard`; the Worker serves a container on another release
   when the container advertises it (role must match; a `draining` container is
   never used). A guard refusal is relaunched inside the claim on fresh
-  `cf-alt1..32` identities for up to `CLOUDFLARE_ROLLOUT_WAIT_S` (600 s), then
+  `cf-alt1..32` identities for up to `CLOUDFLARE_ROLLOUT_WAIT_S` (1200 s), then
   returned to the queue (`CLOUDFLARE_ROLLOUT_MAX_DEFERRALS`, 3) for every job
   type, MCP tools and Studio turns included.
 - SIGTERM drains a container: in-flight calls finish, `/health` reports

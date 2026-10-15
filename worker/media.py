@@ -149,7 +149,7 @@ def _prefer_child_for_oom(proc):
 
 
 def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
-        cancelled_cb=None):
+        cancelled_cb=None, clock_stall_s=None):
     """Run ffmpeg/ffprobe. With progress_cb, parses -progress pipe:1 output
     and reports percent of expected_out_s.
 
@@ -170,6 +170,15 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
     `except MediaError` missed it and the whole agent turn died. It cost a real
     user their edit on 2026-07-25 ("'utf-8' codec can't decode byte 0xf9").
     A log line is diagnostics; it must never be able to fail a job.
+
+    `clock_stall_s` overrides FFMPEG_PROGRESS_STALL_S (the output-clock
+    watchdog) for this encode; 0 disables it. The renderer disables it for
+    finals: a final from a long original legitimately holds its output clock
+    while it decodes through a gap between distant keeps (no seek when the
+    earliest keep is in the first seconds, or more distant clusters than
+    bounded reads), which on a 4K source can take longer than the preview
+    lanes' ten minutes. A final keeps the wall-clock, silence, overrun and
+    cancellation watchdogs.
     """
     timeout = timeout or config.FFMPEG_TIMEOUT_S
     oom_before = _oom_kill_count()
@@ -195,7 +204,8 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         # (Oct 15 preview 69514 sat at 0.0/3.0 s for the full 3000 s
         # wall clock on a 2-vCPU lane). No advance of out_time for this long
         # is a hang, not a slow encode.
-        advance_stall_s = config.FFMPEG_PROGRESS_STALL_S
+        advance_stall_s = (config.FFMPEG_PROGRESS_STALL_S
+                           if clock_stall_s is None else clock_stall_s)
         advanced = [time.monotonic()]
         kill_reason = []
         progress_state = {"out_s": 0.0, "speed": None}

@@ -136,6 +136,11 @@ def _graph_file_flag():
 def _render_media_run(cmd, **kwargs):
     # Includes ranged network reads made inside FFmpeg; never call this
     # "codec time". These detail counters are subsets of the stage walls.
+    if _RENDER_JOB_TYPE.get() == "final":
+        # A final from a long original may hold its output clock while it
+        # decodes through a gap between distant keeps; it keeps the
+        # wall-clock, silence and overrun watchdogs (media.run).
+        kwargs.setdefault("clock_stall_s", 0)
     with _measure_render_detail("ffmpeg_read_and_render_s"):
         return media.run(cmd, **kwargs)
 
@@ -5397,6 +5402,9 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 # normalized W x H program after concat, so more source pixels are never
 # sampled). Only when it saves at least this share of the pixels.
 STILL_PRESCALE_MAX_SCALE = 0.8
+# Pillow modes a prescale may touch (8 bits per channel, no colour model of
+# its own); anything else is left to ffmpeg exactly as before.
+_STILL_PRESCALE_MODES = ("RGB", "RGBA", "L", "LA", "P")
 
 
 def _insert_still(path, item, W, H, workdir, cover=False):
@@ -5429,6 +5437,20 @@ def _insert_still(path, item, W, H, workdir, cover=False):
                        W / (h0 * fh), H / (w0 * fw))
             if need >= STILL_PRESCALE_MAX_SCALE or fmt not in (
                     "JPEG", "PNG", "WEBP"):
+                return path
+            # Only pictures Pillow converts to 8-bit RGB(A) without loss of
+            # meaning. A 16-bit grayscale scan (an archive photo, "I;16")
+            # clips to white in convert("RGB") where ffmpeg reads it as
+            # gray16; CMYK conversion differs from ffmpeg's; an animated
+            # PNG/WebP would freeze on its first frame. Those keep the
+            # original file and the graph's own scale, as before.
+            if im.mode not in _STILL_PRESCALE_MODES \
+                    or getattr(im, "is_animated", False):
+                return path
+            # EXIF is carried only JPEG -> JPEG. A PNG/WebP with an EXIF
+            # block would become a JPEG whose orientation tag ffmpeg may
+            # honour where it ignored the original's.
+            if fmt != "JPEG" and im.info.get("exif"):
                 return path
             tw = max(16, int(math.ceil(w0 * need / 2.0)) * 2)
             th = max(16, int(math.ceil(h0 * need / 2.0)) * 2)

@@ -2369,3 +2369,66 @@ def test_open_findings_query_reads_only_repair_required_without_a_final():
                 "record": {"unresolved_findings": findings}}, {"?column?": 1}])
     assert mcpmod._open_verification_findings(cur, 3, 9) == []   # final exists
     assert mcpmod._open_verification_findings(Cur([{"t": None}]), 3, 9) == []
+
+
+def test_open_findings_ignore_advisory_codes_of_older_records():
+    """Review fix: craft advisories never block export, including records
+    written before a code became advisory (stored with severity error)."""
+    class Cur:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def execute(self, sql, params=()):
+            pass
+
+        def fetchone(self):
+            return self.rows.pop(0) if self.rows else None
+
+    findings = [
+        {"finding_id": "vf_a", "code": "scene_unaware_reframe",
+         "severity": "error", "message": "old advisory"},
+        {"finding_id": "vf_b", "code": "review_finding",
+         "severity": "advisory", "message": "advisory"},
+        {"finding_id": "vf_c", "code": "review_finding",
+         "severity": "error", "message": "real"},
+    ]
+    cur = Cur([{"t": "verification_records"},
+               {"status": "repair_required",
+                "record": {"unresolved_findings": findings}}, None])
+    assert [f["finding_id"] for f in
+            mcpmod._open_verification_findings(cur, 3, 9)] == ["vf_c"]
+
+
+def test_advisory_codes_mirror_the_worker_verifier():
+    import ast
+    import os
+    src = open(os.path.join(os.path.dirname(__file__), "..", "..", "worker",
+                            "quality_verifier.py")).read()
+    tree = ast.parse(src)
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "ADVISORY_FINDINGS"
+                for t in node.targets):
+            worker_codes = set(ast.literal_eval(node.value))
+            break
+    else:
+        raise AssertionError("ADVISORY_FINDINGS not found")
+    assert worker_codes == set(mcpmod._ADVISORY_FINDING_CODES)
+
+
+def test_export_gate_on_an_older_version_does_not_offer_justification(
+        client, monkeypatch):
+    """justify_verification_findings acts on the newest version only."""
+    from flask import jsonify
+    monkeypatch.setattr(mcpmod, "_request_final",
+                        lambda *a, **k: jsonify(job_id=556))
+    monkeypatch.setattr(mcpmod, "_open_verification_findings",
+                        lambda *_a: [{"finding_id": "vf_1", "message": "m"}])
+    monkeypatch.setattr(mcpmod, "_latest_edl_version", lambda *_a: 12)
+    result = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "export_final",
+        "arguments": {"project_id": 3, "edl_version": 9}}).get_json()["result"]
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "not the newest version (v12)" in text
+    assert "justify_verification_findings(project_id=" not in text

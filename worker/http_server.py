@@ -300,11 +300,15 @@ class Handler(BaseHTTPRequestHandler):
         runner = RUNNERS.get(jtype)
         if not runner and skew_guard.skew(job) is None:
             return self._send(400, {"error": f"unsupported job type: {jtype}"})
-        if _DRAINING.is_set():
-            return self._send(200, _draining_envelope(job))
 
+        # Count the call BEFORE looking at the drain flag: the drain thread
+        # exits as soon as it sees no call in flight, so a check-then-count
+        # order could let a SIGTERM land between the two and kill a call
+        # that had just been admitted.
         _inflight(+1)
         try:
+            if _DRAINING.is_set():
+                return self._send(200, _draining_envelope(job))
             data = executor_runtime.execute(job, RUNNERS)
             try:
                 self._send(200, data)

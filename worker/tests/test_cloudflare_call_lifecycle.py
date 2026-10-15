@@ -216,7 +216,7 @@ def test_rollout_wait_ends_with_a_retryable_deploy_in_progress(
     job = {"id": 42, "type": kind, "project_id": 7, "total_claims": 1}
     with pytest.raises(remote.CloudflareRolloutPending) as caught:
         remote._run_cloudflare_with_capacity_wait(job)
-    assert now[0] == config.CLOUDFLARE_ROLLOUT_WAIT_S == 600
+    assert now[0] == config.CLOUDFLARE_ROLLOUT_WAIT_S == 1200
     decision = failure_policy.decision_for(caught.value, kind)
     assert decision.kind == "provider_rollout_pending"
     assert decision.retryable is True

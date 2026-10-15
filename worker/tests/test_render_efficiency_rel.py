@@ -52,6 +52,41 @@ def test_a_slow_but_advancing_encode_is_left_alone(monkeypatch):
     assert seen and max(seen) > 0.9
 
 
+def test_a_final_may_hold_its_output_clock_through_a_source_gap(monkeypatch):
+    """Review fix: a final from a long original decodes through the gap
+    between distant keeps with its output clock standing (no seek when the
+    earliest keep is in the first seconds, or more clusters than bounded
+    reads). That is slow, not hung: finals keep the wall-clock, silence and
+    overrun watchdogs, but not the output-clock one."""
+    monkeypatch.setattr(config, "FFMPEG_PROGRESS_STALL_S", 1)
+    monkeypatch.setattr(config, "FFMPEG_STALL_TIMEOUT_S", 300)
+    script = ("import time\n"
+              "for _ in range(50):\n"
+              "    print('out_time_ms=0', flush=True)\n"
+              "    time.sleep(0.1)\n"
+              "print('out_time_ms=3000000', flush=True)\n"
+              "print('progress=end', flush=True)\n")
+    seen = []
+    token = renderer._RENDER_JOB_TYPE.set("final")
+    try:
+        renderer._render_media_run([sys.executable, "-c", script],
+                                   progress_cb=seen.append,
+                                   expected_out_s=3.0)
+    finally:
+        renderer._RENDER_JOB_TYPE.reset(token)
+    assert seen and max(seen) > 0.9
+    # The same encode on a preview is still a hang.
+    token = renderer._RENDER_JOB_TYPE.set("preview")
+    try:
+        with pytest.raises(media.MediaError) as caught:
+            renderer._render_media_run([sys.executable, "-c", script],
+                                       progress_cb=lambda _f: None,
+                                       expected_out_s=3.0)
+    finally:
+        renderer._RENDER_JOB_TYPE.reset(token)
+    assert "output clock stalled" in str(caught.value)
+
+
 def _photo(path, size, mode="RGB"):
     from PIL import Image
     Image.new(mode, size, (200, 120, 40) if mode == "RGB" else
@@ -98,6 +133,44 @@ def test_small_or_unusual_stills_are_used_as_they_are(tmp_path):
     open(broken, "wb").write(b"not an image")
     assert renderer._insert_still(broken, {"kind": "image"}, 1080, 1920,
                                   str(tmp_path)) == broken
+
+
+def test_stills_pillow_cannot_convert_faithfully_are_left_to_ffmpeg(tmp_path):
+    """Review fix: a 16-bit grayscale scan (an archive photo) clipped to
+    white in Pillow's convert("RGB"); CMYK, animated and EXIF-carrying
+    PNG/WebP pictures must reach ffmpeg exactly as uploaded."""
+    import numpy as np
+    from PIL import Image
+    scan = str(tmp_path / "scan16.png")
+    ramp = np.linspace(0, 65535, 4000 * 3000).reshape(3000, 4000)
+    Image.fromarray(ramp.astype(np.uint16)).save(scan)
+    with Image.open(scan) as im:
+        assert im.mode.startswith("I")
+    assert renderer._insert_still(scan, {"kind": "image"}, 1080, 1920,
+                                  str(tmp_path), cover=True) == scan
+    cmyk = str(tmp_path / "print.jpg")
+    Image.new("CMYK", (5000, 4000), (0, 50, 100, 0)).save(cmyk)
+    assert renderer._insert_still(cmyk, {"kind": "image"}, 1080, 1920,
+                                  str(tmp_path)) == cmyk
+    anim = str(tmp_path / "loop.webp")
+    frames = [Image.new("RGB", (4000, 4000), (i * 60, 0, 0))
+              for i in range(3)]
+    frames[0].save(anim, save_all=True, append_images=frames[1:],
+                   duration=100, loop=0)
+    assert renderer._insert_still(anim, {"kind": "image"}, 1080, 1920,
+                                  str(tmp_path)) == anim
+    tagged = str(tmp_path / "tagged.png")
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    Image.new("RGB", (5000, 4000), (1, 2, 3)).save(tagged,
+                                                   exif=exif.tobytes())
+    assert renderer._insert_still(tagged, {"kind": "image"}, 1080, 1920,
+                                  str(tmp_path)) == tagged
+    # An ordinary 8-bit grayscale photo is still downscaled.
+    gray = str(tmp_path / "gray.jpg")
+    Image.new("L", (6000, 4000), 128).save(gray)
+    assert renderer._insert_still(gray, {"kind": "image"}, 1080, 1920,
+                                  str(tmp_path)) != gray
 
 
 def test_transparency_survives_the_downscale(tmp_path):

@@ -2316,7 +2316,39 @@ def _open_verification_findings(cur, project_id, version):
     if cur.fetchone():
         return []
     return [f for f in (record.get("unresolved_findings") or [])
-            if isinstance(f, dict)]
+            if _blocking_finding(f)]
+
+
+# worker/quality_verifier.py ADVISORY_FINDINGS (pinned by a test). Craft
+# heuristics never block completion or export; records written before a code
+# became advisory still list it among their unresolved findings, with
+# severity "error" (Oct 8 records: scene_unaware_reframe,
+# zoom_crosses_shots_without_targets).
+_ADVISORY_FINDING_CODES = frozenset({
+    "zoom_missing_purpose", "zoom_unmeasured_target",
+    "zoom_crosses_shots_without_targets", "mechanical_zoom_pattern",
+    "scene_unaware_reframe", "duplicate_broll_window",
+    "music_missing_treatment_purpose", "sfx_missing_trigger",
+    "mechanical_sfx_pattern", "taste_advisory", "sound_off_gap",
+    "earn_its_place",
+})
+
+
+def _blocking_finding(row):
+    """quality_verifier.is_blocking for a stored finding row."""
+    return (isinstance(row, dict) and row.get("severity") != "advisory"
+            and row.get("code") not in _ADVISORY_FINDING_CODES)
+
+
+def _latest_edl_version(cur, project_id):
+    """The project's newest EDL version, or None."""
+    try:
+        cur.execute("SELECT MAX(version) AS v FROM edls WHERE project_id = %s",
+                    (int(project_id),))
+        value = (cur.fetchone() or {}).get("v")
+        return int(value) if value is not None else None
+    except Exception:
+        return None
 
 
 def _t_export_final(tok, args):
@@ -2338,15 +2370,30 @@ def _t_export_final(tok, args):
                 lines = "\n".join(
                     f"  {f.get('finding_id')}: {str(f.get('message'))[:220]}"
                     for f in open_findings[:6])
+                latest = _latest_edl_version(cur, project_id)
+                if latest is not None and latest != version:
+                    # justify_verification_findings acts on the project's
+                    # NEWEST version only; naming it here for an older one
+                    # sends the model into a refusal loop.
+                    how = (
+                        f"v{version} is not the newest version (v{latest}), "
+                        "and justify_verification_findings only acts on the "
+                        "newest one: export the newest reviewed version, or "
+                        f"restore v{version} as a new version, review its "
+                        "preview, and repair or justify its findings there.")
+                else:
+                    how = (
+                        "Repair them on a new version and review its "
+                        "preview, or, for a genuine false positive, call "
+                        "justify_verification_findings(project_id="
+                        f"{project_id}, finding_ids={json.dumps(ids[:12])}, "
+                        "justification=...) citing the direct evidence; "
+                        "then export again.")
                 text = (
                     f"PROJECT {project_id}: EDL v{version} still has "
                     f"{len(open_findings)} unresolved verification "
                     f"finding(s), so no export was started:\n{lines}\n"
-                    "Repair them on a new version and review its preview, or, "
-                    "for a genuine false positive, call "
-                    f"justify_verification_findings(project_id={project_id}, "
-                    f"finding_ids={json.dumps(ids[:12])}, justification=...) "
-                    "citing the direct evidence; then export again.")
+                    + how)
                 return {"content": [{"type": "text", "text": text}],
                         "structuredContent": {"export": {
                             "project_id": project_id, "edl_version": version,

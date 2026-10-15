@@ -491,3 +491,46 @@ def test_sigterm_drains_in_flight_calls_then_exits(monkeypatch):
     with pytest.raises(_Stop):
         http_server._exit_when_idle(poll_s=0)
     assert sleeps == [1] and exits == [0]
+
+
+def test_a_run_arriving_during_drain_is_counted_then_refused(monkeypatch):
+    """Review fix: /run counts itself in flight BEFORE reading the drain
+    flag, so the drain thread can never exit between an admitted call's
+    check and its count; a refused call leaves the count balanced."""
+    import json as _json
+    import threading as _threading
+    import urllib.request
+    from http.server import ThreadingHTTPServer
+    import http_server
+    monkeypatch.setattr(http_server, "_DRAINING", _threading.Event())
+    monkeypatch.setattr(http_server, "_INFLIGHT", 0)
+    monkeypatch.setattr(http_server, "_authorized", lambda _h: True)
+    seen = []
+    real_inflight = http_server._inflight
+
+    def counting(delta):
+        value = real_inflight(delta)
+        seen.append((delta, http_server._DRAINING.is_set()))
+        return value
+
+    monkeypatch.setattr(http_server, "_inflight", counting)
+    monkeypatch.setattr(http_server.executor_runtime, "execute",
+                        lambda *_a, **_k: pytest.fail("nothing may run"))
+    http_server._DRAINING.set()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), http_server.Handler)
+    _threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        jtype = next(iter(http_server.RUNNERS))
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.server_address[1]}/run",
+            data=_json.dumps({"job": {"type": jtype, "id": 7}}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = _json.loads(resp.read())
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert body["failure"]["kind"] == "provider_rollout_pending"
+    assert body["skew_refused"] is True
+    assert seen == [(1, True), (-1, True)]
+    assert http_server._INFLIGHT == 0

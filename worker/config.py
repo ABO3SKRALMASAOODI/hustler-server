@@ -1167,10 +1167,13 @@ CLOUDFLARE_CAPACITY_MAX_DEFERRALS = max(0, min(3, int(os.getenv(
 # refuses guarded containers. What remains waits longer and is returned to
 # the queue for every job type (MCP tools and Studio turns included: nothing
 # ran, so a later claim is safe), so a slow rollout is a delay, never a
-# "Deploy in progress" failure: 600 s in-claim x (1 + 3 deferrals) covers
-# the slowest observed Cloudflare deploy (58 min push-to-converged).
+# "Deploy in progress" failure. Review (15 Oct): pushes queue behind each
+# other in the deploy workflow's concurrency group, so push-to-converged
+# reached 62 min (Run 103) and 6 of the last 38 good deploys took over
+# 40 min; 1200 s in-claim x (1 + 3 deferrals) = 80 min covers every one.
+# Only a job the older release cannot run (worker/skew_guard.py) waits.
 CLOUDFLARE_ROLLOUT_WAIT_S = max(0.0, min(1800.0, float(os.getenv(
-    "CLOUDFLARE_ROLLOUT_WAIT_S", "600"))))
+    "CLOUDFLARE_ROLLOUT_WAIT_S", "1200"))))
 CLOUDFLARE_ROLLOUT_MAX_DEFERRALS = max(0, min(3, int(os.getenv(
     "CLOUDFLARE_ROLLOUT_MAX_DEFERRALS", "3"))))
 # A launch whose request ended without an answer and that its Durable Object
