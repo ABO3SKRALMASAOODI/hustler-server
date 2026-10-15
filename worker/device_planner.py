@@ -1512,11 +1512,28 @@ BATCH_DECAY = 0.6
 
 
 def batch_usage(edls):
-    """{device card id: sibling shorts carrying it} over sibling EDLs."""
+    """{device card id: sibling shorts carrying it} over sibling EDLs: fx
+    items by their ``device``, and the world devices anchored motion items
+    are (Wave 3, world_planner._device_of) so a batch does not repeat a
+    world device either."""
     out = {}
+    world_of = None
     for e in edls or []:
         seen = {str(it.get("device")) for it in (e or {}).get("fx") or []
                 if isinstance(it, dict) and it.get("device")}
+        for m in (e or {}).get("motion") or []:
+            if not (isinstance(m, dict) and m.get("anchor")):
+                continue
+            if world_of is None:
+                import fxgraph
+                world_of = fxgraph.peer_fn("world_planner:_device_of") or \
+                    (lambda _m: None)
+            try:
+                d = world_of(m)
+            except Exception:  # noqa: BLE001 — freshness is advice
+                d = None
+            if d and d != "world":
+                seen.add(str(d))
         for d in seen:
             out[d] = out.get(d, 0) + 1
     return out
@@ -1802,7 +1819,7 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
     chosen.sort(key=lambda c: -c["score"])
     out = []
     world = _world_candidates(edl, index, plan, intensity, max_n, asked,
-                              fam_filter)
+                              fam_filter, batch=batch)
     for rank, c in enumerate(chosen, start=1):
         card, m = c["card"], c["moment"]
         frames = _op_frames(c["op"], fps)
@@ -1850,16 +1867,18 @@ def _world_card(cid):
 
 
 def _world_candidates(edl, index, plan, intensity, max_n, asked,
-                      fam_filter):
+                      fam_filter, batch=None):
     """world_planner's candidates through the cross-track peer (a module
-    that is not there, or fails, proposes nothing)."""
+    that is not there, or fails, proposes nothing). ``batch``: batch_usage
+    of the sibling shorts (the same freshness every planner reads)."""
     if fam_filter and not fam_filter & {"world", "layout", "matte_fx"}:
         return []
     try:
         import fxgraph
         return fxgraph.peer("world_planner:candidates", edl, index, plan,
                             intensity=intensity, max_n=max(1, max_n // 3),
-                            asked=asked, default=[]) or []
+                            asked=asked, batch=dict(batch or {}),
+                            default=[]) or []
     except Exception:  # noqa: BLE001
         return []
 

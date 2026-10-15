@@ -262,8 +262,13 @@ def _cand(device, family, verb, ops, at, bind, reason, exemplar):
 
 
 def candidates(edl, index, plan, *, intensity="designed", max_n=MAX_WORLD,
-               asked=(), existing=()):
-    """World / layout candidates (<= max_n), strongest first."""
+               asked=(), existing=(), batch=None):
+    """World / layout candidates (<= max_n), strongest first. ``batch``
+    {device: sibling shorts carrying it} (device_planner.batch_usage): a
+    device the batch's other shorts already use ranks after a fresh one,
+    and the light-dissolve ending is not offered again in the same batch
+    unless asked (one ending device per batch is a device; on every short
+    it is a house style)."""
     edl = edl or {}
     src = _src(index)
     if src is None or not plan:
@@ -439,4 +444,15 @@ def candidates(edl, index, plan, *, intensity="designed", max_n=MAX_WORLD,
                        last.get("bind"),
                        "the last line ends and the speaker becomes light — an "
                        "ending, once", "41@≈25–32"), s)
+    batch = dict(batch or {})
+    if batch:
+        asked_l = {str(a).lower() for a in asked or ()}
+        if batch.get("light_dissolve") and not asked_l & {
+                "light", "dissolve", "ending", "embers"}:
+            out = [c for c in out if c["device"] != "light_dissolve"]
+        # stable: within equal freshness the planner's own order stands
+        out.sort(key=lambda c: int(batch.get(c["device"], 0)))
+        for c in out:
+            if batch.get(c["device"]):
+                c["detail"]["batch_used"] = int(batch[c["device"]])
     return out[:max_n]

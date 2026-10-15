@@ -30,6 +30,20 @@ VERBS = ("suggest_story", "apply_format_pack", "analyze_reference",
          "render_variants")
 
 
+def _pack_enum():
+    """auto, every pack the loader lists (formats.IDS, one list for every
+    wave's packs), none."""
+    try:
+        import formats
+        ids = list(formats.IDS)
+    except Exception:  # noqa: BLE001 — the verbs still load
+        ids = ["A", "B", "C", "D", "H"]
+    return ["auto"] + ids + ["none"]
+
+
+PACK_ENUM = _pack_enum()
+
+
 def _latest(ctx):
     return json.loads(json.dumps(ctx.latest_edl()["json"]))
 
@@ -339,12 +353,11 @@ TOOL_SPECS = {
         "payoff, callback, loop): type lockups in voices new to the project, "
         "a callback rhyme, a colour turn on the payoff (B&W only as a "
         "device), the user's drop on the payoff, a montage, a loop rhyme, "
-        "Wave 1 punctuation; each with what is new about it. pack auto|A|B|"
-        "C|H|none (the user's words win).",
+        "Wave 1 punctuation; each with what is new about it. pack auto, a "
+        "pack letter or none (the user's words win).",
         {"intensity": {"type": "string", "enum": ["calm", "designed",
                                                   "charged"]},
-         "pack": {"type": "string", "enum": ["auto", "A", "B", "C", "H",
-                                             "none"]},
+         "pack": {"type": "string", "enum": PACK_ENUM},
          "max_n": {"type": "integer", "minimum": 1, "maximum": 8}}),
     "apply_format_pack": (
         apply_format_pack,
@@ -352,8 +365,7 @@ TOOL_SPECS = {
         "suggest_story) in ONE batch; devices that must be solved against "
         "the footage (montage, drop on the payoff, loop) come back as the "
         "next calls.",
-        {"pack": {"type": "string", "enum": ["auto", "A", "B", "C", "H",
-                                             "none"]},
+        {"pack": {"type": "string", "enum": PACK_ENUM},
          "picks": {"type": "array", "items": {"type": "integer"}},
          "intensity": {"type": "string", "enum": ["calm", "designed",
                                                   "charged"]}}),
@@ -377,7 +389,7 @@ REQUIRED_ARGS = {"analyze_reference": ["asset_key"]}
 WRITE_TOOLS = {"apply_format_pack"}
 COMPACT = {
     "suggest_story": "READ: <=8 proposals bound to this story's beats with "
-                     "what is new about each; pack auto|A|B|C|H|none.",
+                     "what is new about each; pack auto|letter|none.",
     "apply_format_pack": "WRITE: a genre pack's proposals (or picks) in one "
                          "batch; footage-solved ones returned as calls.",
     "analyze_reference": "READ: a pasted reel's device classes in order, "

@@ -1,4 +1,5 @@
-"""Format packs (Wave 2, track 2F): genres A, B, C and H as data.
+"""Format packs (Wave 2, track 2F; D from Wave 3, 3F): genres A, B, C, D and H
+as data.
 
 A pack is a STRUCTURE (story beats, each with the device cards that can
 carry it), a palette (card id -> budget per short), the type voices it
@@ -18,7 +19,7 @@ import os
 import re
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-IDS = ("A", "B", "C", "H")
+IDS = ("A", "B", "C", "D", "H")
 REQUIRED = ("id", "name", "structure", "palette", "voices", "punctuation",
             "junctions", "colour_world", "footage_quotas")
 _CACHE = {}
