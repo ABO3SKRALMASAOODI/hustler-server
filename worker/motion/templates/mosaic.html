@@ -4,7 +4,7 @@
  "params": {
   "tiles": {"type": "list", "required": true, "max_items": 64, "max": 300, "hint": "each 'asset:<key>' (image or video), 'source:<seconds>' or a bare storage key"},
   "layout": {"type": "enum", "values": ["grid", "justified", "treemap", "overload"], "default": "justified"},
-  "at": {"type": "list", "max_items": 64, "hint": "pop times (item seconds), one per tile: the user's beats"},
+  "at": {"type": "list", "default": [], "max_items": 64, "hint": "pop times (item seconds), one per tile: the user's beats"},
   "collapse_at": {"type": "float", "min": 0.0, "max": 60.0, "default": 0.0, "hint": "item second the collapse starts (0 = at 65% of the item)"},
   "hero": {"type": "int", "min": 0, "max": 63, "default": 0, "hint": "the tile that survives the collapse"},
   "title": {"type": "str", "default": "", "max": 40, "hint": "lands on the hero tile after the collapse"},
@@ -18,7 +18,7 @@
  "example": {"tiles": ["source:12.0", "source:15.5", "source:19.2", "source:23.0"], "title": "DEV DAY"},
  "sfx": []} -->
 <style>
-  .ti{position:absolute;left:0;top:0;border-radius:var(--r);box-shadow:0 0 0 2px rgba(255,255,255,.08);will-change:transform,opacity}
+  .ti{position:absolute;left:0;top:0;border-radius:var(--r);box-shadow:0 0 0 2px rgba(255,255,255,.12);will-change:transform,opacity}
   .tt{position:absolute;left:0;top:0;width:100%;text-align:center;color:#fff;line-height:.9;
       font-family:'Anton','Bebas Neue','Inter',sans-serif;letter-spacing:.01em;text-shadow:0 10px 40px rgba(0,0,0,.55)}
   .tk{position:absolute;left:0;top:0;width:100%;text-align:center;color:#fff;font:700 28px/1 'Inter',sans-serif;letter-spacing:.24em;opacity:.85}
@@ -73,6 +73,9 @@
   const rects = layout();
   const rot = rects.map(() => P.layout === 'overload' ? (r() - 0.5) * 0.22 : 0);
   const order = [...Array(n).keys()].filter(k => k !== hero).sort(() => r() - 0.5);
+  // each tile's own frame: a hairline ring the footage sits inside (and the
+  // placeholder a slot shows when its source cannot be read)
+  const rings = rects.map(() => MG.el('div', 'ti', '', root));
   const title = MG.el('div', 'tt', String(P.title || '').toUpperCase(), root);
   const kick = MG.el('div', 'tk', String(P.kicker || '').toUpperCase(), root);
   title.style.fontSize = (W * 0.16) + 'px';
@@ -97,9 +100,15 @@
           s *= 1 - qq; op *= 1 - qq;
         }
       }
-      if (op <= 0.01 || s <= 0.01) continue;
+      if (op <= 0.01 || s <= 0.01) { rings[k].style.opacity = '0'; continue; }
       const sw = w * s, sh = h * s, sx = x + (w - sw) / 2 + (cx - (x + w / 2)) * (1 - breathe), sy = y + (h - sh) / 2 + (cy - (y + h / 2)) * (1 - breathe);
-      MG.slot('t' + k, sx, sy, sw, sh, { r: rad * (k === hero && t > collapse + outDur ? 0 : 1), z: k === hero ? 1 : 0, opacity: op });
+      const rr = rad * (k === hero && t > collapse + outDur ? 0 : 1);
+      MG.slot('t' + k, sx, sy, sw, sh, { r: rr, z: k === hero ? 1 : 0, opacity: op });
+      const g = rings[k].style;
+      g.width = sw.toFixed(1) + 'px'; g.height = sh.toFixed(1) + 'px'; g.borderRadius = rr.toFixed(1) + 'px';
+      g.transform = `translate(${sx.toFixed(1)}px, ${sy.toFixed(1)}px)`;
+      g.opacity = (op * (k === hero && t > collapse + outDur ? 0 : 1)).toFixed(3);
+      g.zIndex = k === hero ? 1 : 0;
     }
     const tq = MG.clamp((t - collapse - outDur * 1.3) / 0.35);
     title.style.opacity = tq.toFixed(3);

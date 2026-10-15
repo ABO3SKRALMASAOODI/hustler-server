@@ -16,3 +16,18 @@ W3_SKILLS = {"tracking", "occlusion", "type-in-world", "elements",
 W3_SIDECAR_KINDS = {"landmarks.face", "landmarks.hand", "landmarks.pose",
                     "track.points", "camera.motion", "objects.sam2",
                     "planes.h", "plate.clean"}
+# Wave 3 joins the verify department with pre-production, and pins four
+# model records (models/*.json, models.lock).
+W3_VERIFY_VERBS = {"plan_footage"}
+W3_MODELS = {"mediapipe_face_landmarker", "mediapipe_hand_landmarker",
+             "mediapipe_pose_landmarker", "efficientsam_ti"}
+
+
+def w3_core_catalog_growth():
+    """Bytes Wave 3 adds to the always-sent core catalog, all automatic:
+    each skill name joins read_skill's enum, the world department's name
+    joins the load_tools and expand_toolset domain enums."""
+    import json
+    skills = sum(len(json.dumps(n)) + 1 for n in W3_SKILLS)
+    depts = 2 * sum(len(json.dumps(d)) + 1 for d in W3_DEPARTMENTS)
+    return skills + depts

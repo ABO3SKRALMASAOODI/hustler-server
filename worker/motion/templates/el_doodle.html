@@ -3,7 +3,7 @@
  "duration": 2.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
   "kind": {"type": "enum", "values": ["arrow", "underline", "circle", "scribble", "burst", "star", "check", "cross", "bracket", "spiral"], "default": "arrow"},
-  "box": {"type": "list", "max_items": 4, "hint": "[x0, y0, x1, y1] frame fractions the mark fills (an arrow runs from (x0, y0) to its head at (x1, y1))"},
+  "box": {"type": "list", "default": [], "max_items": 4, "hint": "[x0, y0, x1, y1] frame fractions the mark fills (an arrow runs from (x0, y0) to its head at (x1, y1))"},
   "colour": {"type": "color", "default": "#FFE14D"},
   "width": {"type": "float", "min": 0.4, "max": 3.0, "default": 1.0},
   "draw_s": {"type": "float", "min": 0.1, "max": 2.0, "default": 0.45, "hint": "seconds to draw on"},

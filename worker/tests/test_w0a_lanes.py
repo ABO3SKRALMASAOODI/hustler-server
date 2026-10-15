@@ -288,7 +288,8 @@ def test_models_lock_is_clean_and_matches_the_specs():
     bake = _bake()
     assert bake.check(str(WORKER / "models")) == []
     specs = bake.load_specs(str(WORKER / "models"))
-    assert set(specs) == {"rvm_mobilenetv3", "yunet"}
+    from w3_pins import W3_MODELS      # Wave 3's pins: set aside here
+    assert set(specs) - W3_MODELS == {"rvm_mobilenetv3", "yunet"}
     y = specs["yunet"]
     assert y["licence"] == "MIT" and y["bytes"] == 232589
     assert set(y["images"]) >= {"interactive", "batch", "agent", "vision"}

@@ -2,19 +2,19 @@
  "description": "Cutout images (people, products, objects — PNGs with transparency, e.g. subject cutouts) choreographed: a ring that spins, a row that steps in, a swarm, a pop-in burst, an implosion into the centre, a collapse into one. Each sprite lands on its own beat in 'at'. Use for a lab-scan / sizzle moment or a lineup, not under talking.",
  "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
  "params": {
-  "img1": {"type": "asset", "hint": "project image key (a cutout reads best)"},
-  "img2": {"type": "asset", "hint": "project image key (a cutout reads best)"},
-  "img3": {"type": "asset", "hint": "project image key (a cutout reads best)"},
-  "img4": {"type": "asset", "hint": "project image key (a cutout reads best)"},
-  "img5": {"type": "asset", "hint": "project image key (a cutout reads best)"},
-  "img6": {"type": "asset", "hint": "project image key (a cutout reads best)"},
-  "img7": {"type": "asset", "hint": "project image key (a cutout reads best)"},
-  "img8": {"type": "asset", "hint": "project image key (a cutout reads best)"},
+  "img1": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img2": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img3": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img4": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img5": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img6": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img7": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img8": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
   "choreo": {"type": "enum", "values": ["ring", "row", "swarm", "pop", "implode", "collapse"], "default": "ring"},
   "size": {"type": "float", "min": 0.05, "max": 0.6, "default": 0.22, "hint": "sprite height, share of the frame height"},
   "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
   "y": {"type": "float", "min": 0, "max": 1, "default": 0.5},
-  "at": {"type": "list", "max_items": 8, "hint": "landing times per sprite, item seconds"},
+  "at": {"type": "list", "default": [], "max_items": 8, "hint": "landing times per sprite, item seconds"},
   "seed": {"type": "int", "min": 1, "max": 9999, "default": 9}
  },
  "example": {"choreo": "ring"},
@@ -26,10 +26,15 @@
   const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
   const root = MG.$('#sr'), r = MG.rand(P.seed || 9);
   const srcs = [1, 2, 3, 4, 5, 6, 7, 8].map(i => P['img' + i]).filter(Boolean);
-  const n = Math.max(1, srcs.length), h = (P.size ?? 0.22) * H;
+  const n = Math.max(1, srcs.length || 6), h = (P.size ?? 0.22) * H;
   const cx = (P.x ?? 0.5) * W, cy = (P.y ?? 0.5) * H;
   const at = (P.at || []).map(Number);
-  const els = srcs.map(s => { const im = MG.el('img', 'sp', '', root); im.src = s; im.style.height = h + 'px'; return im; });
+  // no images: the choreography still reads, with tokens in the accent
+  // colours standing in (the page's own fallback, never empty)
+  const tones = ['#FF5A1F', '#FFFFFF', '#4FA3FF', '#7CF2C4', '#FFD166', '#FF3B30'];
+  const els = srcs.length ? srcs.map(s => { const im = MG.el('img', 'sp', '', root); im.src = s; im.style.height = h + 'px'; return im; })
+    : [0, 1, 2, 3, 4, 5].map(i => { const d = MG.el('div', 'sp', '', root); d.style.width = h * 0.62 + 'px'; d.style.height = h * 0.62 + 'px';
+        d.style.borderRadius = '50%'; d.style.background = tones[i % tones.length]; return d; });
   const rnd = els.map(() => [r(), r(), r()]);
   MG.frame(t => {
     els.forEach((el, i) => {

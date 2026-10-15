@@ -2,11 +2,11 @@
  "description": "Objects (cutout images with transparency — product or subject cutouts) dropped one per beat onto a flat surface seen from above, each with a soft contact shadow, arranged in a loose scatter or a neat grid; the 'everything in the kit' beat (ref 30). up to 8 objects.",
  "duration": 4.0, "layer": "above_captions", "mutes_captions": true,
  "params": {
-  "img1": {"type": "asset"}, "img2": {"type": "asset"}, "img3": {"type": "asset"}, "img4": {"type": "asset"},
-  "img5": {"type": "asset"}, "img6": {"type": "asset"}, "img7": {"type": "asset"}, "img8": {"type": "asset"},
+  "img1": {"type": "asset", "default": null}, "img2": {"type": "asset", "default": null}, "img3": {"type": "asset", "default": null}, "img4": {"type": "asset", "default": null},
+  "img5": {"type": "asset", "default": null}, "img6": {"type": "asset", "default": null}, "img7": {"type": "asset", "default": null}, "img8": {"type": "asset", "default": null},
   "arrange": {"type": "enum", "values": ["scatter", "grid"], "default": "scatter"},
   "surface": {"type": "color", "default": "#EDE7DD"},
-  "at": {"type": "list", "max_items": 8},
+  "at": {"type": "list", "default": [], "max_items": 8},
   "size": {"type": "float", "min": 0.1, "max": 0.5, "default": 0.26},
   "seed": {"type": "int", "min": 1, "max": 9999, "default": 6}
  },

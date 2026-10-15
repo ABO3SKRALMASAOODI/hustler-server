@@ -7,7 +7,7 @@
   "palette": {"type": "enum", "values": ["mono", "accent", "candy", "gold"], "default": "candy"},
   "accent": {"type": "color", "default": "#FF3B3B"},
   "echo": {"type": "int", "min": 0, "max": 12, "default": 6, "hint": "trail copies (bounce)"},
-  "at": {"type": "list", "max_items": 32, "hint": "beat times, item seconds"},
+  "at": {"type": "list", "default": [], "max_items": 32, "hint": "beat times, item seconds"},
   "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
   "y": {"type": "float", "min": 0, "max": 1, "default": 0.5},
   "seed": {"type": "int", "min": 1, "max": 9999, "default": 3}

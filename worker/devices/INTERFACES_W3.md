@@ -140,12 +140,15 @@ EDL check names it); detach first.
 
 ### 3.2 Depth order (3B)
 
-`object.depth = auto` decides per window, from measurements only: the object
-is IN FRONT of the person where the person matte has a hole shaped like the
-object (the matte is low over the object's mask, high round it), BEHIND it
-where the person matte covers the object's mask, and the vertical-position
-and overlap rule breaks ties. The answer is stored in the render report and
-the write reply; `front` / `behind` force it.
+`object.depth = auto` decides from measurements only (objseg/depthorder.py,
+world_layer.object_depth, three moments of the window): the object's mask is
+its VISIBLE pixels, so it is IN FRONT of the person when most of it sits
+inside the person's closed outline (whether the matte cut a hole for it or
+swallowed it as "person"), BEHIND when it shows only at the outline's edge
+or through a gap the closed outline spans, and undecided (treated as front)
+with no contact. An object behind the person adds the person to the
+occluders of a graphic hidden behind that object. `front` / `behind` force
+it; the decision is in the compose notes.
 
 ### 3.3 `light` (3D)
 
@@ -172,7 +175,10 @@ MotionAnchor {
              (fractions of the graphic box; default [0.5, 0.5])
   offset:    [dx, dy]   in units of the anchor's size (face height, hand
              span) when follow includes "scale", else frame fractions
-  follow:    ["position"] + optional "scale", "rotation"
+  follow:    ["position"] + optional "scale", "rotation"; "shape" on face /
+             head anchors (an affine fitted to the face mesh each frame:
+             a registered plate foreshortens with a turn). Smoothing is
+             zero-phase (forward + backward One-Euro: renders are offline)
   place:     [u0, v0, u1, v1]  planes only: where on the plane (plane
              fractions; default: fitted, centred)
   occluders: ["person" | "hands" | "object:<fx id>", ...]  what passes in
@@ -252,7 +258,7 @@ is drawn as the page's own placeholder (degrade, never fail).
 
 | Module | Department | Track | Verbs |
 |---|---|---|---|
-| `tools_ext/world_tools.py` | world | 3A–3C | `attach`, `track_point`, `select_object`, `pin_to_plane`, `place_in_world`, `remove_world` |
+| `tools_ext/world_tools.py` | world | 3A–3C | `attach`, `track_point`, `select_object`, `pin_to_plane`, `place_in_world`, `remove_world`, `look_at_world` (READ: the anchors overlay; the core `look_at` enum stays fixed) |
 | `tools_ext/element_tools.py` | world | 3D | `add_element` |
 | `tools_ext/layout_tools.py` | world | 3E | `add_collage`, `set_stack`, `add_hud`, `add_breakdown`, `add_device_stage`, `set_brand_kit` |
 | `tools_ext/preprod_tools.py` | verify | 3F | `plan_footage` |

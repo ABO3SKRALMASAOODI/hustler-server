@@ -436,7 +436,10 @@ def test_web_sfx_removal_frees_the_core_compact_catalog():
     # the saving being used, not the saving lost. Re-pinned by 1F; round
     # lead sign-off requested.
     w1_pinned_growth = 5 + 28 + 18 + 18 + 250
-    assert size <= 82_941 - 1_200 + w1_pinned_growth, size
+    # Wave 3's growth is only names joining enums (tests/w3_pins.py)
+    from w3_pins import w3_core_catalog_growth
+    assert size <= 82_941 - 1_200 + w1_pinned_growth + \
+        w3_core_catalog_growth(), size
 
 
 # ── restraint rules are pinned word for word ────────────────────────────

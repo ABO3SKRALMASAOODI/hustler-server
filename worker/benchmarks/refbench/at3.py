@@ -930,8 +930,8 @@ def at_3b_1():
         "bottle_flicker": _m(bot.get("flicker"), 0.035, "<="),
     }
     return {"metrics": metrics, "status": _status(metrics),
-            "board": boards + [os.path.expanduser(
-                "~/Documents/Valmera/.valmera/engines/w3/out/v02_world.mp4")],
+            "board": boards + [os.path.join(BOARDS, "W3-S1",
+                                            "s1a_thiel.mp4")],
             "detail": {"objects": rows,
                        "method": "IoU vs a per-frame re-segmentation of the "
                                  "same frame (at the mask's own resolution) "
