@@ -49,6 +49,41 @@ def _commit_full(ctx, new_edl, summary):
     return _write.commit(ctx, ops, summary)
 
 
+# Graphics that re-solve themselves at render (typeset lockups: layoutdoc.
+# refresh_faces; UI scenes: aspects._resolve_ui) or ride an anchor are left
+# to their own solvers.
+_SELF_SOLVED = ("typeset", "ui_scene")
+
+
+def keep_out_master(ctx, edl):
+    """The write path's face and safe-area keep-out (motion_tools) for every
+    movable graphic of a re-solved master, at ITS canvas: a frame change
+    drops each graphic's measurements, and nothing at render moves a
+    graphic off a face (AT-4E-1: the hook title sat on the speaker's face
+    in every master). Mutates ``edl``; returns [(id, note)] of the moved or
+    flagged graphics. A graphic that cannot be measured stays as placed."""
+    import motion_tools
+    out = []
+    for m in edl.get("motion") or []:
+        if not isinstance(m, dict) or m.get("template") in _SELF_SOLVED \
+                or m.get("anchor") or m.get("allow_face_overlap") \
+                or m.get("layer") == "behind_subject":
+            continue
+        try:
+            note, _where = motion_tools._keep_out_estimated(ctx, edl, m)
+        except Exception as e:  # noqa: BLE001 — a measurement never blocks
+            print(f"[delivery] keep-out skipped for {m.get('id')}: "
+                  f"{str(e)[:160]}", flush=True)
+            continue
+        if note and note.strip():
+            out.append((m.get("id"), note.strip().splitlines()[0]))
+    return out
+
+
+def _keep_out_lines(moved):
+    return [f"  keep-out {mid}: {note[:220]}" for mid, note in moved]
+
+
 def deliver_aspects(ctx, ratios=None, apply=None):
     import aspects
     edl, _v = _edl(ctx)
@@ -68,10 +103,15 @@ def deliver_aspects(ctx, ratios=None, apply=None):
             new, notes = aspects.solve(edl, r, idx)
         except ValueError as e:
             return _rejected(str(e))
+        moved = keep_out_master(ctx, new)
         solved[r] = new
         lines.append(f"  {r}: " + "; ".join(notes))
+        lines += _keep_out_lines(moved)
     if apply:
-        new = solved.get(apply) or aspects.solve(edl, apply, idx)[0]
+        new = solved.get(apply)
+        if new is None:
+            new = aspects.solve(edl, apply, idx)[0]
+            keep_out_master(ctx, new)
         res = _commit_full(ctx, new, f"deliver_aspects: {apply} master")
         return res + "\nRE-SOLVED:\n" + "\n".join(lines)
     return ("ASPECTS (nothing written; apply=<ratio> rewrites the edit to "

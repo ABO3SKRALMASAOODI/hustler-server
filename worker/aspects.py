@@ -118,7 +118,8 @@ def solve(edl, ratio, index=None):
         notes.append(f"{n_ui} UI scene(s) re-solved for {ratio}")
     if n_mo:
         notes.append(f"{n_mo} motion graphic(s): measured again at render "
-                     "(keep-out, caption plan, type fit)")
+                     "(caption plan, type fit); the delivery verbs re-run "
+                     "the face keep-out at this frame")
     caps = e.get("captions")
     if isinstance(caps, dict) and caps.get("placement_track"):
         caps.pop("placement_track", None)

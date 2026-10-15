@@ -204,8 +204,10 @@ def _pack_frame(ctx, edl, p, aspect):
     import aspects
     from tools_ext import delivery_tools
     new, notes = aspects.solve(edl, want, getattr(ctx, "index", None))
+    moved = delivery_tools.keep_out_master(ctx, new)
     res = delivery_tools._commit_full(ctx, new, f"format {p['id']}: {want}")
-    return "; ".join(notes), res
+    return "\n".join(["; ".join(notes)] + delivery_tools._keep_out_lines(
+        moved)), res
 
 
 def _brief_tail(ctx, p, intensity):

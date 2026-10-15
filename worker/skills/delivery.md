@@ -6,11 +6,13 @@ One edit, many deliveries — each one designed for its frame and its
 audience, never a scaled copy.
 
 - Aspects are re-solved: `deliver_aspects` keeps the crop aim (source
-  space), re-lays out UI scenes for the new design space, lets the render
-  measure every graphic and caption again (keep-out, caption plan, type
-  fit) and re-fits overlays with their own proportions. Look at each
-  master: a 16:9 frame has room the 9:16 did not — sometimes a graphic
-  that was a hero in portrait wants to be a side card in landscape.
+  space), re-lays out UI scenes for the new design space, re-runs the face
+  keep-out on every graphic at the new frame (a hook that cleared the face
+  in 9:16 can sit on it in 16:9; the reply names each move), lets the
+  render measure every graphic and caption again (caption plan, type fit)
+  and re-fits overlays with their own proportions. Look at each master: a
+  16:9 frame has room the 9:16 did not — sometimes a graphic that was a
+  hero in portrait wants to be a side card in landscape.
 - Languages come from the USER: their translation (one line per spoken
   phrase), their subtitle file, their on-screen text mapping. Valmera
   never machine-translates. The choreography stays the original's: every

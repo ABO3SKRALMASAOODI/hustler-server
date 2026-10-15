@@ -221,3 +221,57 @@ def test_sped_piece_joins_fade_without_moving_time():
         plain, 10.0, True, Timeline(plain["keep"]), None, [], {}, False,
         W=1080, H=1920, fps=30, frame_mode="crop", src_w=1920, src_h=1080)
     assert "afade=t=in:st=0:d=0.004" not in g2
+
+
+# ── a re-solved master keeps its graphics off the face (AT-4E-1) ────────
+
+def test_every_master_reruns_the_face_keep_out(monkeypatch):
+    import json as _json
+    import remote
+    from tools_ext import delivery_tools as D
+    monkeypatch.setattr(remote, "executor_supports", lambda f, **k: True)
+
+    class Ctx:
+        project_id = 1
+        has_main_video = True
+
+        def __init__(self, edl, index, duration):
+            self.duration, self.index, self.version = duration, index, 1
+            self._edl = schemas.validate_edl(edl, duration).model_dump()
+
+            class DB:
+                def run(self, fn, *a, **k):
+                    return {}
+            self.db = DB()
+
+        def latest_edl(self):
+            return {"version": self.version,
+                    "json": _json.loads(_json.dumps(self._edl))}
+
+        def write_edl(self, edl, desc):
+            self._edl = schemas.validate_edl(edl, self.duration).model_dump()
+            self.version += 1
+            return f"EDL v{self.version - 1} -> v{self.version}: {desc}"
+
+    edl = schemas.default_edl(60.0)
+    edl["keep"] = [[10.0, 30.0]]
+    edl["frame"] = {"ratio": "9:16", "mode": "crop", "focus_x": 0.42}
+    # written raw (a stale client's apply_edit_batch): never kept out
+    edl["motion"] = [{"id": "hook", "template": "hook_title", "start": 0.2,
+                      "end": 2.4, "params": {"text": "TIME HORIZONS"}}]
+    head = [0.36, 0.18, 0.56, 0.52]
+    idx = {"video": {"width": 1920, "height": 1080, "fps": 25.0,
+                     "duration": 60.0},
+           "spatial": {"v": 1, "samples": [{"t": 10.0 + k * 0.5,
+                                            "faces": [head]}
+                                           for k in range(40)]}}
+    ctx = Ctx(edl, idx, 60.0)
+    listed = D.deliver_aspects(ctx, ratios=["16:9"])
+    assert "keep-out hook" in listed and "moved" in listed, listed
+    assert ctx.version == 1                       # listing writes nothing
+    out = D.deliver_aspects(ctx, apply="16:9")
+    assert out.startswith("EDL v1 -> v2"), out
+    m = ctx._edl["motion"][0]
+    assert ctx._edl["frame"]["ratio"] == "16:9"
+    assert float(m["params"]["y"]) > 0.52         # below the chin now
+    assert m["footprint"]["estimated"] is True
