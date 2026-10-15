@@ -158,7 +158,11 @@ def test_timeline_glow_and_image_card_take_size_and_x_and_the_estimate_follows()
     # ...and the keep-out solver never "shrinks" it off a face
     cands = keepout.candidates("timeline_steps", tl, dict(four, size=1.0), full, [],
                                [(0.3, 0.3, 0.7, 0.6)], 1080, 1920)
-    assert cands and all("size" not in patch for _c, patch, _b in cands)
+    # (Wave 2, run report defect 5: the only spots above the face were on
+    # the corner mark's zone, so none is offered now — never a shrink)
+    assert all("size" not in patch for _c, patch, _b in cands)
+    assert all("mark" not in keepout.safe_issues(b, 1080, 1920)
+               for _c, _p, b in cands)
     # glow_title: a type scale below 1 (the template now scales a width-bound
     # title too); above 1 its box stays the width it already fills
     glow = motion_templates.spec("glow_title")

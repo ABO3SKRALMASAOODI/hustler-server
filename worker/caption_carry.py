@@ -277,9 +277,15 @@ def graphic_lines(item):
     text fields included) and, for authored HTML, the markup's text."""
     pspec = _spec(item).get("params") or {}
     out = []
+    html = item.get("template") == "html"
     for key, val in (item.get("params") or {}).items():
         kind = (pspec.get(key) or {}).get("type", "str")
         if kind not in ("str", "text", "list", "rows"):
+            continue
+        if html and not _html_text_param(val):
+            # an authored page's settings (a colour, a count, a duration)
+            # are not words on screen (run report defect 24: '0' read as a
+            # repeated hero word)
             continue
         vals = val if isinstance(val, list) else [val]
         if kind == "list" and vals and all(_series_value(v) for v in vals):
@@ -300,6 +306,27 @@ def graphic_lines(item):
     # and so is a list's lead ("Let's get / proportionally spaced fonts")
     out.sort(key=lambda kv: 0 if kv[0] in ("kicker", "lead") else 1)
     return [(k, v) for k, v in out if tokens(v)]
+
+
+_SETTING_RE = re.compile(r"^(#[0-9a-fA-F]{3,8}|-?[\d.,]+(px|%|s|ms|em|deg)?|"
+                         r"[a-z]+[A-Z_][A-Za-z_]*|[a-z_]+)$")
+
+
+def _html_text_param(val):
+    """Is an authored page's param value text it may print (words), rather
+    than a setting? Lists keep their text items."""
+    vals = val if isinstance(val, list) else [val]
+    for v in vals:
+        if isinstance(v, dict):
+            return True
+        if isinstance(v, bool) or not isinstance(v, (str, int, float)):
+            continue
+        t = str(v).strip()
+        if not t or _SETTING_RE.match(t):
+            continue
+        if sum(c.isalpha() for c in t) >= 2:
+            return True
+    return False
 
 
 def shown_tokens(item):
@@ -769,6 +796,20 @@ def clear_band(boxes, faces, safe, normal_y):
     letter = band_letter(y)
     return {"y": round(y, 4), "b": letter, "z": [round(z0, 4), round(z1, 4)],
             "position": _POSITION[letter]}
+
+
+def _crosses_face(y_from, y_to, faces, col):
+    """Does moving a caption from ``y_from`` to ``y_to`` (frame height)
+    carry it across a face zone in its column (over the head from below
+    the chin, or onto the chest from above the hair)?"""
+    lo, hi = min(y_from, y_to), max(y_from, y_to)
+    for f in faces or ():
+        if f[2] <= col[0] or f[0] >= col[1]:
+            continue
+        mid = (f[1] + f[3]) / 2.0
+        if lo < mid < hi and (y_from - mid) * (y_to - mid) < 0:
+            return True
+    return False
 
 
 def explicit_anchor(edl):
@@ -1512,15 +1553,30 @@ def plan(edl, index, tl, words, canvas=None):
             def passes(zones, rng, c):
                 # a band that clears the hair too wins when one fits; then
                 # the face and chin alone; then (a frame-filling head, a
-                # crowded stack) any band one line still fits
+                # crowded stack) any band one line still fits. No cliff
+                # (Wave 2, run report defect 20: a graphic 5 px taller sent
+                # the captions over the hair): a pick that would carry the
+                # captions ACROSS the face from their usual side loses to a
+                # one-line band on that side, when one is free.
+                got_all = []
                 for fz, need in (([_head(f) for f in chins], min_h), (chins, min_h),
                                  (chins, one_line)):
                     got = caption_place.choose(caption_place.free_bands(zones + fz, rng, c),
                                                normal_y, CAP_HALF_H, need, soft, rects, c,
                                                prev=sticky)
                     if got:
-                        return got
-                return None
+                        got_all.append(got)
+                        if not _crosses_face(normal_y, got[0], chins, c):
+                            return got
+                if not got_all:
+                    return None
+                # every pick crosses the face: a band one line still fits on
+                # the captions' own side wins (pages of one line there)
+                side = [(ba, bb) for ba, bb in caption_place.free_bands(zones + chins, rng, c)
+                        if not _crosses_face(normal_y, (ba + bb) / 2.0, chins, c)]
+                own = caption_place.choose(side, normal_y, CAP_HALF_H, one_line, soft,
+                                           rects, c, prev=sticky)
+                return own or got_all[0]
             pick = passes(hard, safe, col)
             pcol = col
             if not pick and home is not None and not locked and hsafe[1] - hsafe[0] > one:
@@ -2210,6 +2266,20 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
     room = {key(after_mutes[i]): (owner, why) for i, (owner, why) in p.hidden.items()
             if why in ("room", "unmeasured")}
     screen = _on_screen(edl, tl)
+    # Kept in their usual place under a graphic that draws OVER the captions
+    # (no band was clear of it): the plan names them, and a full-frame page
+    # hides them — not "shown" (run report defect 6: an html graphic hid
+    # the captions for 4 s while the audit said every word was shown).
+    over = {m.get("id") for m in edl.get("motion") or [] if isinstance(m, dict)
+            and m.get("layer", "above_captions") == "above_captions"}
+    kept_under = {}
+    for u in getattr(p, "unplaced", None) or []:
+        owners = [o for o in u.get("on") or [] if o in over]
+        if u.get("why") == "room" and owners:
+            for w in u.get("words") or []:
+                kept_under[key(w)] = owners[0]
+    for k_, owner in kept_under.items():
+        room.setdefault(k_, (owner, "under"))
     # the hook-tier title owns its zone by design (captions.hook_owns_zone):
     # what is said under it is the hook's moment, not a lost caption
     hooks = caplib.hook_zone_spans(edl)
@@ -2220,7 +2290,7 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
         mid = _mid(w)
         on = [lab for s, e, tset, lab in screen if s <= mid <= e and tset & set(ts)]
         content = any(is_content(t) for t in ts)
-        if k in shown or k in carried or (on and content) or \
+        if (k in shown and k not in kept_under) or k in carried or (on and content) or \
                 any(s <= mid <= e for s, e in hooks):
             state.append("covered")
         elif not content:
@@ -2262,7 +2332,13 @@ def _gap(edl, spoken, i0, i1, dur, room, key):
     for i in range(i0, i1 + 1):
         if key(spoken[i]) in room:
             owner, why = room[key(spoken[i])]
-            if why == "unmeasured":
+            if why == "under":
+                cause = (f"motion graphic '{owner}' draws over the captions and "
+                         "leaves no band clear of it: they are kept under it, "
+                         "hidden")
+                fix = (f"make '{owner}' leave a caption band (smaller, or "
+                       "layer below_captions), or carry those words on it")
+            elif why == "unmeasured":
                 cause = (f"motion graphic '{owner}' has no box measured at this frame "
                          "shape, so it is assumed to sit on the caption band (a render "
                          "measures it)")

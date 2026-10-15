@@ -1041,6 +1041,8 @@ def _keep_out_estimated(ctx, edl, item):
     face_bad = hit["hit"] and not allow
     issues = ([i for i in keepout.safe_issues(box, W, H) if i in ("side", "rail")]
               if template in keepout.COLUMN_TEMPLATES else [])
+    # the corner mark's floor holds for every template (run report defect 5)
+    issues += [i for i in keepout.safe_issues(box, W, H) if i == "mark"]
     bands = _caption_anchors(ctx, edl, item)
     notes = []
     if face_bad or (issues and not allow):

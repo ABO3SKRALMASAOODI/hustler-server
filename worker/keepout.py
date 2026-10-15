@@ -191,12 +191,24 @@ def portrait(W, H):
 
 
 def safe_issues(box, W, H):
-    """What of the vertical-feed safe area a box leaves ([] = inside, and
-    always [] off a portrait frame)."""
-    if not box or not portrait(W, H):
+    """What of the vertical-feed safe area a box leaves ([] = inside; off a
+    portrait frame only the corner mark counts). Wave 2 (run report defect
+    5): a graphic on the free-tier corner mark's zone is an issue on every
+    frame shape — a slam placed in the headline band is kept below the
+    mark's floor instead of landing on it."""
+    if not box:
         return []
-    x0, y0, x1, y1 = box
     out = []
+    try:
+        mark = _mark_zone(int(W), int(H))
+    except Exception:  # noqa: BLE001 — no mark geometry: nothing reserved
+        mark = None
+    if mark and box[0] < mark[2] - EDGE_TOL and box[2] > mark[0] + EDGE_TOL \
+            and box[1] < mark[3] - EDGE_TOL and box[3] > mark[1] + EDGE_TOL:
+        out.append("mark")
+    if not portrait(W, H):
+        return out
+    x0, y0, x1, y1 = box
     if x0 < SAFE_X0 - EDGE_TOL or x1 > SAFE_X1 + EDGE_TOL:
         out.append("side")
     if x1 > RAIL_X1 + EDGE_TOL and y1 > RAIL_Y0 and y0 < RAIL_Y1:
@@ -240,7 +252,19 @@ def watermark_zone(W=1080, H=1920, anchor_y=None, pad=0.01):
             round(min(1.0, x1 / W + pad), 4), round(min(1.0, y1 / H + pad), 4)]
 
 
+_MARKS = {}
+
+
+def _mark_zone(W, H):
+    """watermark_zone at the normal corner, cached per frame size."""
+    key = (W, H)
+    if key not in _MARKS:
+        _MARKS[key] = tuple(watermark_zone(W, H))
+    return _MARKS[key]
+
+
 ISSUE_TEXT = {
+    "mark": "ran onto the free-tier corner mark's zone (top-left)",
     "side": "reached into the 6% side margins",
     "rail": "ran into the platform's right button rail (x > 0.88 between y 0.5 and 0.85)",
     "bottom": "sat in the bottom UI band (below y 0.80)",
