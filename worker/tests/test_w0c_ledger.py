@@ -129,6 +129,14 @@ def test_write_ledger_note_is_quiet_without_a_device_change():
 
 # ── hooks: devices re-solve on a song swap or a keep change ────────────
 
+def _shipped_swap():
+    import montage
+    return {montage.on_swap}
+
+
+SHIPPED_SWAP = _shipped_swap()
+
+
 def test_music_swap_rebinds_devices_and_runs_registered_resolvers():
     edl = {"music": [{"id": "m2"}],
            "fx": [{"id": "a", "stage": "music_bus", "music_id": "m1"},
@@ -156,7 +164,8 @@ def test_music_swap_rebinds_devices_and_runs_registered_resolvers():
     assert notes[0] == "2 device binding(s) follow the new track"
     assert "re-landed 1 cut" in notes
     assert any("broken skipped" in n for n in notes)
-    assert hooks.registered("music_swap") == ()
+    # only the shipped re-solvers stay (Wave 2: the montage re-cut)
+    assert set(hooks.registered("music_swap")) <= SHIPPED_SWAP
 
 
 def test_keep_change_drops_bus_devices_whose_track_is_gone():
@@ -199,6 +208,6 @@ def test_swap_music_runs_the_registered_re_solvers():
     assert "Devices: re-landed 2 cuts on the new beats" in out
     stored = fake.rows[-1]["json"]["music"][0]
     assert stored["provenance"] == "user_upload"      # the new track's own
-    assert hooks.registered("music_swap") == ()
+    assert set(hooks.registered("music_swap")) <= SHIPPED_SWAP
     out = agent_tools.swap_music(ctx, "mus1", "music/7/a.mp3")
     assert out.startswith("EDL v8 -> v9") and "Devices:" not in out, out

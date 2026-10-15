@@ -126,7 +126,12 @@ def _manifest_faces():
         return []
 
 
-MOTION_FONT_FACES = MOTION_FONT_FACES + _manifest_faces()
+_MANIFEST_FACES = _manifest_faces()
+MOTION_FONT_FACES = MOTION_FONT_FACES + _MANIFEST_FACES
+# Wave 2's faces are declared on a page only when the page names them (a
+# typeset page carries its LayoutDoc's families): every other page keeps its
+# @font-face block as it was, so its document size does not grow.
+_MANIFEST_FAMILIES = {f[0] for f in _MANIFEST_FACES}
 OPTIONAL_FONT_FACES = []
 
 
@@ -311,9 +316,12 @@ def font_families():
     return seen
 
 
-def _font_css():
+def _font_css(page_text=None):
     rules = []
     for fam, path, weight, style, stretch in font_faces():
+        if page_text is not None and fam in _MANIFEST_FAMILIES and \
+                fam not in page_text:
+            continue
         rules.append(
             "@font-face{font-family:'%s';src:url('%s/%s') format('truetype');"
             "font-weight:%s;font-style:%s;%sfont-display:block}" % (
@@ -520,11 +528,12 @@ def build_document(body, *, params=None, theme=None, duration=1.0, fps=30.0,
         init["plate"] = plate
     if yields and yields.get("w"):
         init["yields"] = yields
+    init_json = _json_for_script(init)
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<style>{_font_css()}\n:root{{--W:{int(design_w)}px;--H:{int(design_h)}px}}{BASE_CSS}</style>"
+        f"<style>{_font_css(body + init_json)}\n:root{{--W:{int(design_w)}px;--H:{int(design_h)}px}}{BASE_CSS}</style>"
         f"<script>{_runtime_js(libs_used(body, params))}</script>"
-        f"<script>Object.assign(window.MG,{_json_for_script(init)});</script>"
+        f"<script>Object.assign(window.MG,{init_json});</script>"
         "</head><body>"
         f"{body}"
         "</body></html>")

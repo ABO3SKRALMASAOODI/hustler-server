@@ -203,6 +203,9 @@ def fragments(keep, words, level, step=0.01):
                 while j + 1 < len(loud) and loud[j + 1]:
                     j += 1
                 a, b = float(grid[idx[0]]), float(grid[j]) + step
+                if first is not None and j == len(loud) - 1 and \
+                        float(grid[-1]) >= first - WORD_SLACK_S - 2 * step:
+                    continue     # it runs into the kept word: its attack
             else:
                 if (len(loud) - 1 - idx[-1]) * step > 0.15:
                     continue
@@ -210,6 +213,12 @@ def fragments(keep, words, level, step=0.01):
                 while j - 1 >= 0 and loud[j - 1]:
                     j -= 1
                 a, b = float(grid[j]), float(grid[idx[-1]]) + step
+                if last is not None and j == 0 and \
+                        float(grid[0]) <= last + WORD_SLACK_S + step:
+                    # it runs on from the kept word without a pause: that
+                    # word's own release (a fricative tail the transcript
+                    # ends early), never a fragment to cut away
+                    continue
             if b - a < FRAG_MIN_S or _covered(a, b, words) > 0.25:
                 continue
             out.append({"span": i, "side": side, "edge": round(edge, 3),
