@@ -2349,6 +2349,12 @@ def _gap(edl, spoken, i0, i1, dur, room, key):
                          "the face and the layout")
                 fix = (f"move '{owner}' off the caption band (its y param) or carry "
                        "those words on it")
+            if any(m.get("id") == owner and m.get("template") == "typeset"
+                   for m in edl.get("motion") or [] if isinstance(m, dict)):
+                # a typeset lockup has no y: its window and region move it
+                fix = (f"end '{owner}' where those words are said, or "
+                       f"set_typeset('{owner}', region=...) so a band stays "
+                       "clear, or add those words to it")
             break
     else:
         for t in edl.get("texts") or []:

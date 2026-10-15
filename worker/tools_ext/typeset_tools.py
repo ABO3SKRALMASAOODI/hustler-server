@@ -18,6 +18,7 @@ stored: the render re-solves it on every canvas (INTERFACES_W2.md §3).
 Browserless: shaping is Python (typeset.shaping); nothing opens Chromium.
 """
 
+import copy
 import difflib
 import hashlib
 import json
@@ -260,28 +261,41 @@ def _recent_families(ctx, edl, s, n=2):
 
 def solve_varied(ctx, edl, item, faces=None):
     """solve_into with range: when the layout is 'auto' (and the item is
-    not a callback, whose geometry IS the point), the families of the last
-    two lockups are tried last, so consecutive lockups never share a family
-    when another one fits. A family that fits is written into the params
-    (what renders is what was solved; another aspect falls back to auto)."""
+    not a callback, whose geometry IS the point), the solver's own best
+    family is kept unless one of the last two lockups used it; then the
+    other families are tried (the voice's own first) until one fits, within
+    the solve budget, so consecutive lockups never share a family when
+    another one fits. A family that fits is written into the params (what
+    renders is what was solved; another aspect falls back to auto). One
+    solve in the common case: a write on a 0.5 vCPU lane stays quick."""
+    import time
     p = item.get("params") or {}
     if p.get("layout") not in (None, "", "auto") or p.get("callback_of"):
         return solve_into(ctx, edl, item, faces=faces)
-    from typeset import voices as V
     recent = [f for f in _recent_families(ctx, edl, float(item["start"]))
               if f]
-    if not recent:
-        return solve_into(ctx, edl, item, faces=faces)
+    t0 = time.monotonic()
+    base = solve_into(ctx, edl, copy.deepcopy(item), faces=faces)
+    if not recent or base[0] is None or base[1].get("family") not in recent:
+        return base
+    from typeset import voices as V
+    try:
+        import config
+        budget = 1.5 * float(config.TYPESET_SOLVE_BUDGET_S)
+    except Exception:  # noqa: BLE001
+        budget = 3.0
     own = list((V.VOICES.get(p.get("voice")) or {}).get("layouts") or ())
     order = [f for f in own if f not in recent] + \
         [f for f in GENERAL_FAMILIES if f not in own and f not in recent]
     for fam in order[:VARY_TRIES]:
-        trial = dict(item, params=dict(p, layout=fam))
+        if time.monotonic() - t0 > budget:
+            break
+        trial = copy.deepcopy(dict(item, params=dict(p, layout=fam)))
         it, doc, notes = solve_into(ctx, edl, trial, faces=faces)
         if it is not None and doc.get("family") == fam:
             return it, doc, notes + [f"family {fam} (the last lockups were "
                                      f"{', '.join(recent)})"]
-    return solve_into(ctx, edl, item, faces=faces)
+    return base
 
 
 def trim_previous(edl, item, pw=None, min_s=0.4):
@@ -351,6 +365,31 @@ def _compose(ctx, edl, mid, text, s, e, prog, pw, voice="auto",
     picked for the beat when 'auto'; a callback rhymes with its first
     telling; the item is solved for this canvas with the measured faces."""
     items = edl.get("motion") or []
+    held = None
+    hit = match_words(text, pw) if pw else None
+    if hit:
+        # the hold after the last word ends where the next words are said:
+        # a lockup held over them leaves their captions no band (they were
+        # heard but never shown — AT-2A-1 on V01 with the faces measured)
+        last_t1 = float(hit[1]["t1"])
+        nxt = next((w for w in pw if float(w["t0"]) >= last_t1 - 1e-3
+                    and w is not hit[1] and float(w["t0"]) > float(
+                        hit[1]["t0"])), None)
+        if nxt is not None and float(nxt["t0"]) < e - 1e-3:
+            e2 = round(max(last_t1 + 0.12, float(nxt["t0"])), 2)
+            if s + 0.4 <= e2 < e:
+                held, e = e2, e2
+        # and its lead-in (an entrance resolving onto the onset) never
+        # covers the middle of the word before it: that word's caption is
+        # read there
+        first_t0 = float(hit[0]["t0"])
+        prev = [w for w in pw if float(w.get("t1", w["t0"])) <= first_t0
+                + 1e-3 and float(w["t0"]) < first_t0 - 1e-3]
+        if prev:
+            p_mid = (float(prev[-1]["t0"]) + float(prev[-1].get(
+                "t1", prev[-1]["t0"]))) / 2.0
+            if s < p_mid + 0.03:
+                s = round(min(first_t0, p_mid + 0.03), 2)
     # no two lockups on screen at once: the previous one ends here (never
     # before its own last word), solved before this one is
     prov = {"id": mid, "start": s, "end": e}
@@ -400,9 +439,14 @@ def _compose(ctx, edl, mid, text, s, e, prog, pw, voice="auto",
             "purpose": "typeset lockup (replaces the captions for its words)"}
     item, doc, notes = solve_varied(ctx, edl, item, faces=faces)
     if item is None:
-        return (f"REJECTED: {notes} — try fewer words, another voice "
-                "(e.g. editorial_serif for a long line), layout "
-                "side_column, or depth front.")
+        return (f"REJECTED: {notes} — try fewer words (the face moves "
+                "less in a shorter window), another voice (e.g. "
+                "editorial_serif for a long line), layout side_column, or "
+                "depth front")
+    if held is not None:
+        notes = list(notes) + [f"held until {held:g}s, where the next "
+                               "words are said (their captions need the "
+                               "frame)"]
     return trims, item, doc, notes, reason
 
 

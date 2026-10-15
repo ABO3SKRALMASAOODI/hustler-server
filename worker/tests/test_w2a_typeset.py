@@ -218,7 +218,10 @@ def test_add_typeset_writes_one_item_through_apply_batch(monkeypatch):
     assert m["params"]["voice"] in V.VOICES          # auto resolved
     assert "voice:" in out
     assert m["footprint"]["box"]
-    assert 0.4 <= m["start"] <= 0.8 and m["end"] >= 6.0
+    # held after 'internet' only until the next word ('and', 5.56 s) is
+    # said: its caption needs the frame (W2 review)
+    assert 0.4 <= m["start"] <= 0.8 and 5.56 <= m["end"] <= 5.8
+    assert "held until" in out
     # a second line gets a different voice (variety)
     out2 = tt.add_typeset(ctx, text="they promised us flying cars")
     assert out2.startswith("EDL"), out2
