@@ -14,7 +14,10 @@ a section change — never as a filter on everything.
   device on every short of a run; vary the move, the moment, the material.
 - A still should never sit dead on screen: archive photos, product shots
   and a held frame on the payoff come alive with `parallax` (layered by
-  measured depth). `ken_burns` is the honest 2D move when there is no depth.
+  measured depth). `ken_burns` is the honest 2D move when there is no depth;
+  a photo already placed as an overlay or insert takes `animate_still`
+  (rhythm department) for a 2D move toward a face. One move per photo —
+  never parallax and animate_still on the same one.
 - A rack focus is a sentence with a turn ("not the rocket — the PEOPLE"):
   focus starts on what he is arguing against and lands ON the word that
   turns it (`word`). One per idea; never two in one sentence.

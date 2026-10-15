@@ -30,7 +30,10 @@ is nothing of the user's to shape.
   pause.
 - A photo never sits dead on screen: `animate_still` moves it (toward a
   face it finds, a pan across a panorama, a rise up a scan); montage stills
-  move by themselves, each a different move.
+  move by themselves, each a different move. One move per photo: a 2D move
+  here, or 2.5D depth when the photo has a clear foreground and background
+  (`add_depth_effect(kind='parallax', asset_key=...)`, picture department)
+  — never both on one photo; vary them across a run.
 - B&W stays a device (a section, one colour kept, a silhouette hold), never
   the whole montage's look unless the user asks.
 
