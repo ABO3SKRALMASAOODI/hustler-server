@@ -343,6 +343,13 @@ class FxPlan:
         # (request_matte). The renderer builds a matte chain only when
         # asked: no request, no mask filters (md5 identity).
         self.matte_requests = {}
+        # Wave 1 integration: the render's EDL and media (prepare), whether
+        # any motion item carries a composite (1C), and the retry switch
+        # that draws every composite item as its plain graphic.
+        self.edl = {}
+        self.media = {}
+        self.has_composites = False
+        self.no_composites = False
         self._uid = 0
         self._compilers = {}
 
@@ -558,16 +565,28 @@ def _est_ms(comp, plan, item):
     return 0.0
 
 
-def prepare(edl, *, tl, W, H, fps, preview, workdir, source=None):
+def prepare(edl, *, tl, W, H, fps, preview, workdir, source=None,
+            media=None):
     """Resolve rungs and allocate inputs for this render's fx items.
 
     ``edl`` is the validated dump the renderer draws (already through
     ``schemas.strip_unknown_fx``). Returns an FxPlan — empty when there are
     no items, and then every hook is a no-op. Never raises for an item: a
-    problem becomes that item's ``omit`` row."""
+    problem becomes that item's ``omit`` row.
+
+    Wave 1 integration: the plan carries ``plan.edl`` (this dump) and
+    ``plan.media`` = {src_path, asset_locals, index, audio_only} so
+    compilers read the render's context from the plan, not from the call
+    stack (card regions, the Look accent, strobe and plate frames, the
+    colour hit's hue)."""
     plan = FxPlan(W=W, H=H, fps=fps, preview=preview, workdir=workdir,
                   program_s=(getattr(tl, "out_duration", None) or 0.0),
                   tl=tl, source=source)
+    plan.edl = edl if isinstance(edl, dict) else {}
+    plan.media = dict(media) if isinstance(media, dict) else {}
+    plan.has_composites = any(
+        isinstance(m, dict) and isinstance(m.get("composite"), dict)
+        for m in plan.edl.get("motion") or [])
     items = [i for i in (edl or {}).get("fx") or [] if isinstance(i, dict)]
     if any(i.get("device") for i in items):
         plan.budget_ms = _device_budget(plan, edl)
@@ -1063,7 +1082,7 @@ def without_fx(plan, err):
     """The plan to re-render with after an encode failed with fx in it: an
     empty plan, every item reported ``omit`` with the failure. The renderer
     re-runs once with it — a device can degrade, never fail a render."""
-    if plan is None or plan.empty:
+    if plan is None or (plan.empty and not plan.has_composites):
         return plan
     first = (str(err).strip().splitlines() or [""])[-1][:160]
     items = ([it for its in plan.by_stage.values() for it in its]
@@ -1072,9 +1091,18 @@ def without_fx(plan, err):
     fresh = FxPlan(W=plan.W, H=plan.H, fps=plan.fps, preview=plan.preview,
                    workdir=plan.workdir, program_s=plan.program_s,
                    tl=plan.tl, source=plan.source)
+    fresh.edl, fresh.media = plan.edl, plan.media
     for it in items:
         fresh.note(it, "omit", f"the fx graph failed on this lane "
                    f"({first}); rendered without it")
+    if plan.has_composites:
+        # 1C's composites (blend, fill, ghost, clip region) are fx plumbing
+        # too: the retry draws each such graphic plain, and says so
+        fresh.no_composites = True
+        for m in plan.edl.get("motion") or []:
+            if isinstance(m, dict) and isinstance(m.get("composite"), dict):
+                fresh.note(m, "substitute", f"the fx graph failed on this "
+                           f"lane ({first}); drawn as the plain graphic")
     return fresh
 
 

@@ -143,6 +143,15 @@ PICTURE_FLOOR = .54
 # the check's (BUDGET_S: a render job waits for the whole check).
 TYPE_BUDGET_S = 30.0
 TYPE_INK = 200
+# A single glyph this many times the median letter height is a line of its
+# own (the payoff's giant '1'); a line whose cap is this many times the
+# line with the most letters is kept however few it has (a counter's '50').
+LONE_GLYPH_X = 2.5
+LONE_GLYPH_ASPECT = 3.0     # a lone glyph (or touching digits: '90') is
+                            # no wider than this x its height...
+LONE_GLYPH_FILL = (.2, .9)  # ...and inks this share of its box (a grid's
+                            # frame inks 2%, a solid bar ~100%)
+BIG_LINE_X = 1.6
 CAPTION_SAMPLES = 24
 COLLIDE_SHARE = .15         # a caption this much under a graphic's box
 EDGE_PAD = .004             # a caption this far past a card edge crosses it
@@ -532,17 +541,41 @@ def picture_measures(edl, index, tl, W, H, program_s, others=()):
             "area": min((r["area"] for r in rows), default=None)}
 
 
+# Graphics whose ink is not a line of type (a diagram, a cell grid, a
+# chart drawn in html): their measured "cap" is a cell or a bar, never a
+# lockup's size, so they are neither the payoff nor its rival.
+NON_TYPE_TEMPLATES = ("html",)
+
+
+def is_type_lockup(it):
+    return (it or {}).get("template") not in NON_TYPE_TEMPLATES
+
+
 def _payoff_id(items, program_s):
-    """The payoff lockup's id: the tier='payoff' slam, else the one its id
-    or purpose names the payoff, else the last lockup that lands in the
-    programme's final 40%; None."""
+    """The payoff lockup's id: the tier='payoff' slam; else the item whose
+    ID names it ('payoff', 'payoff_2'); else the one whose purpose STARTS
+    with "payoff"; else the last type lockup that lands in the programme's
+    final 40%; None.
+
+    A purpose that merely MENTIONS the payoff ('sets up the payoff's WAY
+    SMARTER') is not the payoff (Oct 11 run, s05: that hero was read as the
+    payoff and the advice told the editor to shrink the real one), and an
+    html diagram is never the payoff by position (s04: a 0.3% cell grid)."""
     for it in items:
         if it.get("tier") == "payoff":
             return it["id"]
     for it in items:
-        if "payoff" in (str(it.get("id")) + " " + str(it.get("purpose") or "")).lower():
+        if str(it.get("id")).lower() == "payoff":
             return it["id"]
-    late = [it for it in items if it["start"] >= .6 * program_s]
+    for it in items:
+        if str(it.get("id")).lower().startswith("payoff"):
+            return it["id"]
+    for it in items:
+        if str(it.get("purpose") or "").strip().lower().startswith("payoff") \
+                and is_type_lockup(it):
+            return it["id"]
+    late = [it for it in items if it["start"] >= .6 * program_s
+            and is_type_lockup(it)]
     return max(late, key=lambda it: it["start"])["id"] if late else None
 
 
@@ -589,9 +622,16 @@ def _type_plan(edl, index, tl, W, H, fps, program_s):
                       "box": list(box) if box else None, "item": m})
     lockups = [it for it in items if not it["persistent"]
                and it["layer"] != "behind_subject"]
-    hook = next((it["id"] for it in items if it["persistent"]), None) or \
-        next((it["id"] for it in lockups if it.get("tier") == "hook"), None) or \
-        next((it["id"] for it in lockups if it["start"] <= .5), None)
+    # The hook is the lockup that owns the opening: the one the editor
+    # tiered 'hook', else the first lockup on screen by 0.5 s; a persistent
+    # band headline is the hook only when no lockup opens the short. (The
+    # Oct 11 run: the band headline was reported as the hook while a 6.6%
+    # hook slam owned frame 0 — the slam was never measured.) The band is
+    # reported beside it.
+    band = next((it["id"] for it in items if it["persistent"]), None)
+    hook = next((it["id"] for it in lockups if it.get("tier") == "hook"),
+                None) or \
+        next((it["id"] for it in lockups if it["start"] <= .5), None) or band
     segs = []
     if motion_captions.look_of(e) and (index or {}).get("words"):
         try:
@@ -613,6 +653,7 @@ def _type_plan(edl, index, tl, W, H, fps, program_s):
     return {"items": items, "captions": segs, "unshown": unshown,
             "unplaced": unplaced,
             "look": motion_captions.look_of(e), "hook": hook,
+            "band": band if band != hook else None,
             "payoff": _payoff_id([it for it in lockups if it["id"] != hook],
                                  program_s),
             "program_s": program_s, "W": W, "H": H, "fps": fps}
@@ -1562,7 +1603,8 @@ def ink_lines(png_bytes, threshold=TYPE_INK):
            round(float(xs.max() + 1) / W, 4), round(float(ys.max() + 1) / H, 4)]
     import cv2
     n, _lab, st, _c = cv2.connectedComponentsWithStats(m, connectivity=8)
-    comps = [(int(st[k, 0]), int(st[k, 1]), int(st[k, 2]), int(st[k, 3]))
+    comps = [(int(st[k, 0]), int(st[k, 1]), int(st[k, 2]), int(st[k, 3]),
+              int(st[k, 4]))
              for k in range(1, n) if st[k, 4] >= 6 and st[k, 3] >= 3]
     if not comps:
         return {"box": box, "lines": [], "cap": None}
@@ -1580,7 +1622,14 @@ def ink_lines(png_bytes, threshold=TYPE_INK):
     lines = []
     for grp in groups:
         if len(grp) < 2:
-            continue                       # a descender, a dot, a stray mark
+            c = grp[0]
+            fill = c[4] / float(max(1, c[2] * c[3]))
+            if c[3] < LONE_GLYPH_X * med_h \
+                    or c[2] > LONE_GLYPH_ASPECT * c[3] \
+                    or not LONE_GLYPH_FILL[0] <= fill <= LONE_GLYPH_FILL[1]:
+                # a descender, a dot, a stray mark — or a shape that is no
+                # glyph: a chart's solid bar, a grid's thin frame
+                continue
         hs = sorted(c[3] for c in grp)
         tall = [x for x in hs if x >= .82 * hs[int(.9 * (len(hs) - 1))]]
         cap = float(np.median(tall))
@@ -1589,8 +1638,16 @@ def ink_lines(png_bytes, threshold=TYPE_INK):
                       "x0": round(min(c[0] for c in grp) / W, 4),
                       "x1": round(max(c[0] + c[2] for c in grp) / W, 4),
                       "n": len(grp)})
-    lines = [ln for ln in lines if ln["n"] >= max(2, .25 * max(x["n"] for x in lines))] \
-        if lines else []
+    if lines:
+        # a line of few letters among long ones is a stray group — unless
+        # its letters are the BIG ones: a counter's '50' over its label, the
+        # payoff's giant '1' over two lines of words (the Oct 11 run read
+        # those lockups at their small line: 2.8% for a 13.7% counter)
+        most = max(x["n"] for x in lines)
+        body = max((x for x in lines if x["n"] == most),
+                   key=lambda x: x["cap"])["cap"]
+        lines = [ln for ln in lines if ln["n"] >= max(2, .25 * most)
+                 or ln["cap"] >= BIG_LINE_X * body]
     return {"box": box, "lines": lines,
             "cap": max((ln["cap"] for ln in lines), default=None)}
 
@@ -1720,9 +1777,17 @@ def type_findings(tres, tplan, cards):
         caps["hook"] = (hook, meas[hook]["cap"])
         if (items.get(hook) or {}).get("persistent"):
             caps["hook_band"] = True       # a band headline: held to OWNS_RATIO
+    band = (tplan or {}).get("band")
+    if band in meas and meas[band].get("cap"):
+        caps["band"] = (band, meas[band]["cap"])
     lock = {i: m["cap"] for i, m in meas.items() if m.get("cap")
             and i in items and not items[i]["persistent"]
-            and items[i]["layer"] != "behind_subject" and i != hook}
+            and items[i]["layer"] != "behind_subject" and i != hook
+            and is_type_lockup(items[i])}
+    # every type lockup's size, in programme order (MEASURES lists them: a
+    # counter that outgrows the payoff is visible without a hand measure)
+    caps["lockups"] = [(i, round(lock[i], 4)) for i in sorted(
+        lock, key=lambda k: items[k]["start"])]
     pay = (tplan or {}).get("payoff")
     if pay in lock:
         big = max(lock, key=lock.get)
@@ -2042,6 +2107,35 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
         res["softened"] = [list(c) for c in softened_faces(samples, plan_)]
     except Exception as exc:
         res["skipped"].append(f"faces: {str(exc)[:80]}")
+    if plan_.get("picture"):
+        res["picture"] = plan_["picture"]
+    tplan = plan_.get("type") or {}
+    if tplan.get("unshown"):
+        res["unshown"] = list(tplan["unshown"][:12])
+    if tplan.get("unplaced"):
+        res["unplaced"] = list(tplan["unplaced"][:2])
+    measurable = tplan.get("items") or tplan.get("captions")
+    if measurable and prog > MAX_FULL_PASS_S:
+        res["skipped"].append(f"type: a {prog:.0f}s programme is past the "
+                              f"{MAX_FULL_PASS_S:.0f}s type pass")
+    elif measurable:
+        # Measured right after the faces (Oct 11 run, s06: a 39 s short
+        # spent the whole budget on the eye and frame passes and reported
+        # no type size at all): MEASURES is what the editor and the
+        # reviewer read instead of hand-measuring frames.
+        try:
+            # within the check's own budget (it runs before the render job
+            # completes: a preview waits for it), at most TYPE_BUDGET_S
+            type_deadline = min(deadline, time.monotonic() + TYPE_BUDGET_S)
+            tres = type_pass(tplan, type_deadline)
+            if tres:
+                res["type"] = type_findings(tres, tplan, plan_.get("cards"))
+            elif type_deadline - time.monotonic() < 3.0:
+                res["skipped"].append("type: the check's time budget was spent")
+            else:
+                res["skipped"].append("type: no browser to measure it here")
+        except Exception as exc:  # noqa: BLE001
+            res["skipped"].append(f"type: {str(exc)[:80]}")
     res["reframes"] = []
     try:
         res["reframes"] = [list(r) for r in reframes_off_cut(plan_)]
@@ -2086,31 +2180,6 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
     else:
         res["skipped"].append(f"jumps: a {prog:.0f}s programme is past the "
                               f"{MAX_FULL_PASS_S:.0f}s frame pass")
-    if plan_.get("picture"):
-        res["picture"] = plan_["picture"]
-    tplan = plan_.get("type") or {}
-    if tplan.get("unshown"):
-        res["unshown"] = list(tplan["unshown"][:12])
-    if tplan.get("unplaced"):
-        res["unplaced"] = list(tplan["unplaced"][:2])
-    measurable = tplan.get("items") or tplan.get("captions")
-    if measurable and prog > MAX_FULL_PASS_S:
-        res["skipped"].append(f"type: a {prog:.0f}s programme is past the "
-                              f"{MAX_FULL_PASS_S:.0f}s type pass")
-    elif measurable:
-        try:
-            # within the check's own budget (it runs before the render job
-            # completes: a preview waits for it), at most TYPE_BUDGET_S
-            type_deadline = min(deadline, time.monotonic() + TYPE_BUDGET_S)
-            tres = type_pass(tplan, type_deadline)
-            if tres:
-                res["type"] = type_findings(tres, tplan, plan_.get("cards"))
-            elif type_deadline - time.monotonic() < 3.0:
-                res["skipped"].append("type: the check's time budget was spent")
-            else:
-                res["skipped"].append("type: no browser to measure it here")
-        except Exception as exc:  # noqa: BLE001
-            res["skipped"].append(f"type: {str(exc)[:80]}")
     res["findings"] = findings(res, plan_)
     res["advice"] = advice(res)
     return res
@@ -2399,8 +2468,7 @@ def measures_line(res):
         return ""
     bits = []
     pic = res.get("picture") or {}
-    if any(w.get("id") or w.get("area", 1.0) < .999
-           for w in pic.get("windows") or []):
+    if pic.get("windows"):
         parts = []
         for w in pic["windows"][:3]:
             parts.append(f"{w['area']:.2f}"
@@ -2413,6 +2481,9 @@ def measures_line(res):
     tparts = []
     if caps.get("hook"):
         tparts.append(f"hook '{caps['hook'][0]}' {100 * (caps['hook'][1] or 0):.1f}%")
+    if caps.get("band"):
+        tparts.append(f"band headline '{caps['band'][0]}' "
+                      f"{100 * (caps['band'][1] or 0):.1f}%")
     if caps.get("captions"):
         tparts.append(f"captions {100 * caps['captions']:.1f}%")
     if caps.get("payoff"):
@@ -2420,6 +2491,12 @@ def measures_line(res):
         tparts.append(f"payoff '{pid}' {100 * pc:.1f}%"
                       + (" (the largest lockup)" if big == pid or pc >= bc - 1e-4
                          else f" (largest: '{big}' {100 * bc:.1f}%)"))
+    pid = (caps.get("payoff") or (None,))[0]
+    others = [(i, c) for i, c in caps.get("lockups") or [] if i != pid]
+    if others:
+        tparts.append("lockups " + ", ".join(
+            f"'{i}' {100 * c:.1f}%" for i, c in others[:6])
+            + (f" (+{len(others) - 6})" if len(others) > 6 else ""))
     if tparts:
         bits.append("type cap height (share of frame height): "
                     + ", ".join(tparts))

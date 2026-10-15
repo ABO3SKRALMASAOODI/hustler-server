@@ -142,6 +142,21 @@ def _prepare_static(plan, item, region, key):
 
 
 _SPENT = "_regions_spent"
+_SPENT_PARTS = "_regions_spent_parts"
+
+
+def _spent(ctx):
+    """The one-pad-per-input record of THIS filtergraph build. The renderer
+    builds the graph more than once per render from one plan (the dialogue
+    loudness pass, audio-only rebuilds, then the real one), each with a new
+    ``parts`` list; a record kept on the plan for the whole render handed
+    every static or card region to the first build only and the real build
+    drew none (found by 1B, 1C and 1E; each had worked around it)."""
+    d = ctx.plan.__dict__
+    if d.get(_SPENT_PARTS) is not ctx.parts:
+        d[_SPENT_PARTS] = ctx.parts
+        d[_SPENT] = set()
+    return d.setdefault(_SPENT, set())
 
 
 def pad(ctx, item, region, key="region"):
@@ -150,7 +165,7 @@ def pad(ctx, item, region, key="region"):
     try:
         shape = _get(region, "shape")
         if is_static(region):
-            spent = ctx.plan.__dict__.setdefault(_SPENT, set())
+            spent = _spent(ctx)
             k = _input_key(item, key)
             label = ctx.input_label(k)
             if label is None or k in spent:
@@ -251,7 +266,7 @@ def card_pad(ctx, item, region, key):
     card's window, the whole program long), or None."""
     import wipe_masks
     k = _card_key(item, key)
-    spent = ctx.plan.__dict__.setdefault(_SPENT, set())
+    spent = _spent(ctx)
     label = ctx.input_label(k)
     if label is None or k in spent:
         return None

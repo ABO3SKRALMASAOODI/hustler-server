@@ -35,6 +35,35 @@ real-world action shown — and zero is a fine answer. Never a zoom per cut,
 a camera move per hero moment or a sound per landing or transition: used
 where nothing calls for them they make an edit look childish.
 
+## One signature move per short: recipes and invention
+
+The owner's bar is CREATIVITY with taste: last week's best moments were
+devices nobody had shown (captions that lit up like a lamp as the speaker
+reached each word). Those are examples of the bar, not a style to repeat:
+every short should surprise in a way that fits ITS story, and a batch of
+shorts must not wear one house style.
+
+- `suggest_recipes` reads the cut and ranks whole moves (several devices on
+  the right words, with taste built in): `mono_until_turn` — grey until
+  the turn, colour lands ON the word; `colour_kept_payoff` — the world goes
+  grey, the speaker stays in colour; `silhouette_hold` — identity as a flat
+  shape; `negative_hits` — 1-frame negatives into the payoff;
+  `white_silhouette`; `lab_scan` — a registered variant sequence on a
+  mechanism or a number; `thermal_flip` — a breath of thermal on heat,
+  energy, the body; `echo_trail` — a trail of copies on a speed word.
+  Each names the word it
+  lands on, why, a reference exemplar and the exact ops; moves the other
+  shorts of the batch used rank lower (freshness).
+- Take ONE recipe per short as its signature, the one the story earns, and
+  prefer a fresh one. `apply_recipe(name)` writes it; it is once per short,
+  flash-safe unless the user asked for flashing, silent and zoom-free.
+- Recipes are a floor, not a ceiling. When the story calls for something no
+  recipe names, compose it from the devices below (a poster field in the
+  accent the captions use, a grade window that closes as the claim lands, a
+  type window onto the next shot) — invented, bound to a word, proved with
+  `proof_device`. Never re-apply last short's move because it worked there.
+- Black and white is a device on a moment, never the whole short's look.
+
 ## Evidence to inspect
 
 - `suggest_devices` returns up to 8 ranked candidates, each bound to its

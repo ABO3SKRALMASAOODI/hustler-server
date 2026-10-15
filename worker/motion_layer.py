@@ -453,7 +453,8 @@ def overlay_clip(parts, vlabel, idx, item, clip, fps, tag, plan=None):
     ``compositor.emit`` on exactly the frames below; ``plan`` (the render's
     fxgraph plan, or None) lends it the render's masks (a face or card clip
     region). An item without one takes the filters below, byte for byte."""
-    if isinstance(item.get("composite"), dict):
+    if isinstance(item.get("composite"), dict) \
+            and not getattr(plan, "no_composites", False):
         import compositor
         try:
             return compositor.emit(parts, vlabel, idx, item, clip, fps, tag,
@@ -510,7 +511,8 @@ def composite_behind(parts, vlabel, mask_label, j, *, fps, motion=None,
     ghost pass (compositor.emit_ghost: the stroke-only clip kept where the
     subject covers the letters) is laid over the result through a split of
     the same mask."""
-    if motion and isinstance(motion[1].get("composite"), dict):
+    if motion and isinstance(motion[1].get("composite"), dict) \
+            and not getattr(plan, "no_composites", False):
         import compositor
         m_idx, m_item, m_clip = motion
         side = getattr(m_clip, "composite", None)

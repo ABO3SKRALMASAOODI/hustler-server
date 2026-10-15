@@ -845,37 +845,11 @@ def remove_punctuation(ctx, ids):
 
 # ── re-solve on a keep change (hooks.on_keep_change) ────────────────────
 
-def _drop_orphan_junctions(old_edl, new_edl, old_tl=None, new_tl=None):
-    """A junction whose cut a keep change removed (two spans merged, an
-    insert deleted) decorates nothing: drop it with a note rather than
-    leave a device the render can only report ``omit`` (and a final would
-    then ask to acknowledge). Accents and strobes are content-anchored and
-    move with their footage (timeline.remap_program_items)."""
-    items = (new_edl or {}).get("fx") or []
-    juncs = [i for i in items if isinstance(i, dict)
-             and i.get("type") == "junction"]
-    if not juncs:
-        return new_edl, []
-    try:
-        cuts = [c[0] for c in _cut_moments(new_edl, _timeline(new_edl))]
-    except Exception:  # noqa: BLE001
-        return new_edl, []
-    gone = [j["id"] for j in juncs
-            if not any(abs(float(j.get("at") or -9) - c) <= 0.06
-                       for c in cuts)]
-    if not gone:
-        return new_edl, []
-    new_edl["fx"] = [i for i in items if not (isinstance(i, dict)
-                                              and i.get("id") in gone)]
-    return new_edl, [f"junction device(s) {', '.join(gone)} removed: their "
-                     "cut is no longer in the edit"]
+# Built into hooks.on_keep_change at integration, so the backend's Studio
+# keep path drops orphaned junctions too (it never loads tools_ext).
+import hooks as _hooks  # noqa: E402
 
-
-try:
-    import hooks as _hooks
-    _hooks.register("keep_change", _drop_orphan_junctions)
-except Exception:  # noqa: BLE001 — a lane without hooks keeps every item
-    pass
+_drop_orphan_junctions = _hooks._drop_orphan_junctions
 
 
 # ── catalog ──────────────────────────────────────────────────────────────

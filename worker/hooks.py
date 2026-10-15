@@ -10,9 +10,11 @@ Later tracks register a re-solver here without editing this file:
 Each re-solver returns ``(edl, notes)``. Hooks run in registration order,
 each on the previous one's output; a hook that raises is skipped with a
 note naming it (a re-solver can never fail the write it decorates). The
-built-in re-solvers below move only what Wave 0 can move honestly: fx items
-bound to the swapped track follow its id, and music_bus items whose track
-was removed are dropped with a note.
+built-in re-solvers below move only what can be moved honestly: fx items
+bound to the swapped track follow its id; music_bus items whose track was
+removed, junctions whose cut is gone and items anchored to the letters of a
+graphic that is gone are dropped with a note (built in, so the backend's
+Studio keep path runs them too).
 """
 
 import copy
@@ -92,6 +94,131 @@ def _drop_orphan_bus_items(old_edl, new_edl, old_tl=None, new_tl=None):
                      "with their track"]
 
 
+def _timeline_module():
+    """worker/timeline.py as this process loaded it: ``timeline`` on the
+    worker, ``worker_timeline`` in the backend (loaded by file path)."""
+    import sys
+    for name in ("timeline", "worker_timeline"):
+        mod = sys.modules.get(name)
+        if mod is not None and hasattr(mod, "program_blocks"):
+            return mod
+    try:
+        import timeline
+        return timeline
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def program_cuts(edl):
+    """Program seconds of every cut in ``edl`` (a block boundary that is not
+    a split of one continuous take)."""
+    tlm = _timeline_module()
+    if tlm is None:
+        return None
+    blocks = tlm.program_blocks(edl)
+    out = []
+    for a, b in zip(blocks, blocks[1:]):
+        if a.get("kind") == b.get("kind") == "footage" and \
+                abs(float(b["src_start"]) - float(a["src_end"])) < 1e-3:
+            continue                         # a split, not a cut
+        out.append(float(a["out_end"]))
+    return out
+
+
+def _drop_orphan_junctions(old_edl, new_edl, old_tl=None, new_tl=None):
+    """Built-in (Wave 1 track 1D, made built-in at integration so the
+    backend's Studio keep path runs it too): a junction whose cut a keep
+    change removed (two spans merged, an insert deleted) decorates nothing,
+    so it is dropped with a note rather than left for the render to report
+    ``omit`` (and a final to ask to acknowledge). Accents and strobes are
+    content-anchored and move with their footage."""
+    items = (new_edl or {}).get("fx") or []
+    juncs = [i for i in items if isinstance(i, dict)
+             and i.get("type") == "junction"]
+    if not juncs:
+        return new_edl, []
+    try:
+        cuts = program_cuts(new_edl)
+    except Exception:  # noqa: BLE001
+        cuts = None
+    if cuts is None:
+        return new_edl, []
+    gone = [j["id"] for j in juncs
+            if not any(abs(float(j.get("at") or -9) - c) <= 0.06
+                       for c in cuts)]
+    if not gone:
+        return new_edl, []
+    new_edl["fx"] = [i for i in items if not (isinstance(i, dict)
+                                              and i.get("id") in gone)]
+    return new_edl, [f"junction device(s) {', '.join(gone)} removed: their "
+                     "cut is no longer in the edit"]
+
+
+def _glyph_refs(item):
+    """Motion item ids an fx item is anchored to (a glyph region, a glyph
+    origin)."""
+    out = []
+    for key in ("region", "origin"):
+        v = item.get(key)
+        if isinstance(v, dict) and (v.get("shape") == "glyph"
+                                    or v.get("kind") == "glyph") \
+                and v.get("ref") is not None:
+            out.append(str(v.get("ref")))
+    return out
+
+
+def _drop_orphan_glyph_items(old_edl, new_edl, old_tl=None, new_tl=None):
+    """Built-in (Wave 1 integration; found by the 1C review): a keep change
+    that drops a motion graphic left an fx item anchored to its letters (a
+    glyph region, a letter-window origin) naming an item that is gone, and
+    validation then refused the WHOLE cut. Such items go with their
+    graphic, with a note."""
+    items = (new_edl or {}).get("fx") or []
+    if not items:
+        return new_edl, []
+    ids = {str(m.get("id")) for m in (new_edl or {}).get("motion") or []
+           if isinstance(m, dict)}
+    gone = [i.get("id") for i in items if isinstance(i, dict)
+            and any(r not in ids for r in _glyph_refs(i))]
+    if not gone:
+        return new_edl, []
+    new_edl["fx"] = [i for i in items if not (isinstance(i, dict)
+                                              and i.get("id") in gone)]
+    return new_edl, [f"device(s) {', '.join(str(g) for g in gone)} removed "
+                     "with the graphic whose letters they used"]
+
+
+def _follow_hold_times(old_edl, new_edl, old_tl=None, new_tl=None):
+    """Built-in (Wave 1 integration; 1B's open item): a subject-hold
+    background (``hold_t``, the program second the frozen cut-out is taken
+    from) moves with its item. timeline.remap_program_items re-anchors the
+    item's window on its footage but knew nothing of hold_t, so after a
+    trim earlier in the program the frozen subject came from the wrong
+    second (or from outside the item)."""
+    olds = {it.get("id"): it for it in (old_edl or {}).get("fx") or []
+            if isinstance(it, dict)}
+    moved = 0
+    for it in (new_edl or {}).get("fx") or []:
+        if not isinstance(it, dict) or it.get("hold_t") is None:
+            continue
+        before = olds.get(it.get("id"))
+        if not before or before.get("start") is None \
+                or it.get("start") is None:
+            continue
+        try:
+            delta = float(it["start"]) - float(before["start"])
+            if abs(delta) < 1e-6:
+                continue
+            t = float(before.get("hold_t", it["hold_t"])) + delta
+            it["hold_t"] = round(min(max(t, float(it["start"])),
+                                     float(it["end"])), 2)
+            moved += 1
+        except (TypeError, ValueError):
+            continue
+    return new_edl, ([f"{moved} held subject frame(s) moved with their "
+                      "footage"] if moved else [])
+
+
 def on_music_swap(edl, old_music_id, new_music_id):
     """(edl, notes) after the user's track changed under ``old_music_id``
     (same id, new song) or moved to ``new_music_id``. Never mutates the
@@ -107,6 +234,14 @@ def on_keep_change(old_edl, new_edl, old_tl=None, new_tl=None):
     for a keep change: device re-solvers run on the remapped EDL."""
     edl = copy.deepcopy(new_edl or {})
     edl, notes = _drop_orphan_bus_items(old_edl or {}, edl, old_tl, new_tl)
+    for builtin in (_follow_hold_times, _drop_orphan_glyph_items,
+                    _drop_orphan_junctions):
+        try:
+            edl, more = builtin(old_edl or {}, edl, old_tl, new_tl)
+            notes += list(more or [])
+        except Exception as e:  # noqa: BLE001 — never fail the write
+            notes.append(f"re-solver {builtin.__name__} skipped "
+                         f"({type(e).__name__})")
     out_notes = []
     for fn in list(_REGISTRY["keep_change"]):
         try:

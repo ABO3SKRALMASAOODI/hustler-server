@@ -69,8 +69,8 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
 
 1. ONE COMMITTED LOOK. Start with `apply_look` — `editorial` (premium
    default for podcast and interview reels), `creator_punch` (high-energy
-   creator), `cinematic_doc` (story and documentary), `mono_noir` (B&W plus
-   one accent), `clean_minimal` (quiet product or education) — or build a
+   creator), `cinematic_doc` (story and documentary), `mono_noir` (noir colour
+   plus one red accent; B&W only as a device on its moment), `clean_minimal` (quiet product or education) — or build a
    deliberate equivalent: a caption `motion_look`, one grade plus grain and
    a transition vocabulary. Refine components afterwards; do not mix looks.
    A look places no sound unless you pass `transition_sounds=true` (only
