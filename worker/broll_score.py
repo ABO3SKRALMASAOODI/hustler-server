@@ -22,9 +22,10 @@ Measures (0..1 unless noted):
                   over the rest (a shallow-focus shot reads cinematic)
   dyn_range       luma spread P2..P98 with a clipping penalty (flat or
                   burnt pictures lose)
-  de_hero         mean Lab dE2000 to the hero frame before matching, and
-                  ``de_matched`` after the matched LUT (what the de-stocking
-                  grade will land on)
+  de_hero         the look's distance to the hero frame (world_gap:
+                  dE2000 of mean lightness and chroma, hue aside) before
+                  the world grade, and ``de_matched`` after it (what the
+                  de-stocking grade lands on; hues never rotate)
   watermark       a logo or handle burned into the picture: text lines or
                   hard edges that stay put in every frame while the picture
                   changes, or text lines in a corner of a still
@@ -574,10 +575,79 @@ def motion_score(profile, still=False):
     return float(s), f"mean change {m:.1f}, {abrupt:.1f} cuts/10 s"
 
 
+def world_lut(src, ref, size=None):
+    """The de-stocking grade: a Lut that sets a cutaway in the camera's
+    WORLD without repainting it — the colourist's match, not a colour
+    transfer. ``src`` / ``ref``: uint8 RGB pixel arrays (cutaway, hero).
+
+      tone     the black point lands on the hero's; the midtones travel
+               35 % and the white point 50 % of the way (a low-key
+               interview darkens a daylight cutaway, never turns it into
+               night)
+      chroma   saturation scaled toward the hero's (x0.55-1.05): garish
+               stock calms down, nothing is boosted much
+      warmth   the near-neutrals take half the hero's white balance (at
+               most 8 ab units); saturated colours keep their hue
+
+    Hues never rotate. A full colour transfer (MKL over Lab) brought the
+    MEAN colour within dE 2 of a dark interview by repainting the picture:
+    a blue launch sky went mud-brown, an orange sun cyan-white, an ocean
+    sunset pink (Wave 4 review, V13 x V01 and the AT-4C-1 board)."""
+    import lutlib
+    src = np.asarray(src, np.float64).reshape(-1, 3) / 255.0
+    ref = np.asarray(ref, np.float64).reshape(-1, 3) / 255.0
+    ls, lr = lutlib.rgb_to_lab(src), lutlib.rgb_to_lab(ref)
+    ps = np.percentile(ls[:, 0], [2, 50, 98])
+    pr = np.percentile(lr[:, 0], [2, 50, 98])
+    t0 = pr[0]
+    t1 = ps[1] + 0.35 * (pr[1] - ps[1])
+    t2 = ps[2] + 0.50 * (pr[2] - ps[2])
+    # a monotonic tone curve through (0,0), the three anchors, (100, top)
+    t1 = max(t1, t0 + 4.0)
+    t2 = max(t2, t1 + 4.0)
+    xs = [0.0, max(ps[0], 0.5), max(ps[1], ps[0] + 1.0),
+          max(ps[2], ps[1] + 2.0), 100.0]
+    ys = [0.0, t0, t1, t2, min(100.0, t2 + (100.0 - ps[2]))]
+    for k in range(1, len(xs)):
+        xs[k] = max(xs[k], xs[k - 1] + 0.5)
+        ys[k] = max(ys[k], ys[k - 1])
+    cs = float(np.percentile(np.hypot(ls[:, 1], ls[:, 2]), 90))
+    cr = float(np.percentile(np.hypot(lr[:, 1], lr[:, 2]), 90))
+    k = float(np.clip(cr / cs, 0.55, 1.05)) if cs > 2.0 else 1.0
+
+    def neutral_ab(lab):
+        c = np.hypot(lab[:, 1], lab[:, 2])
+        sel = lab[(c < 14.0) & (lab[:, 0] > 8.0)]
+        return sel[:, 1:].mean(axis=0) if len(sel) > 50 else np.zeros(2)
+    shift = np.clip(0.5 * (neutral_ab(lr) - neutral_ab(ls)), -8.0, 8.0)
+    grid = lutlib.identity(size or lutlib.MATCH_SIZE).table.astype(np.float64)
+    lab = lutlib.rgb_to_lab(grid)
+    out = lab.copy()
+    out[..., 0] = np.interp(lab[..., 0], xs, ys)
+    c = np.hypot(lab[..., 1], lab[..., 2])
+    w = np.clip(1.0 - c / 40.0, 0.0, 1.0)
+    out[..., 1] = lab[..., 1] * k + shift[0] * w
+    out[..., 2] = lab[..., 2] * k + shift[1] * w
+    return lutlib.Lut(lutlib.lab_to_rgb(out).astype(np.float32),
+                      title="broll world match")
+
+
+def world_gap(lab_a, lab_b):
+    """How far two pictures' LOOKS sit apart, hue aside: dE2000 between
+    their mean lightness and mean chroma (the hue of a sky against a
+    face is content, not grade)."""
+    import lutlib
+    la, lb = np.asarray(lab_a, np.float64), np.asarray(lab_b, np.float64)
+    ca = float(np.hypot(la[:, 1], la[:, 2]).mean())
+    cb = float(np.hypot(lb[:, 1], lb[:, 2]).mean())
+    return float(lutlib.delta_e2000(np.array([la[:, 0].mean(), ca, 0.0]),
+                                    np.array([lb[:, 0].mean(), cb, 0.0])))
+
+
 def palette_gap(frames, hero):
-    """(dE before, dE after a matched LUT, lut) between the candidate's
-    pixels and the hero's: lutlib's MKL transfer, limited like a shot
-    match."""
+    """(gap before, gap after the world grade, lut) between the
+    candidate's look and the hero's (world_gap: lightness and chroma,
+    hue aside)."""
     import lutlib
     if hero is None or not len(hero):
         return None, None, None
@@ -588,24 +658,14 @@ def palette_gap(frames, hero):
                          ).astype(np.uint8)
     la = lutlib.rgb_to_lab(src.astype(float) / 255.0)
     lb = lutlib.rgb_to_lab(ref.astype(float) / 255.0)
-    before = float(lutlib.delta_e2000(la.mean(axis=0), lb.mean(axis=0)))
+    before = world_gap(la, lb)
     try:
-        # the whole distribution, not the shared colours: a cutaway shares
-        # almost no content with the camera, and the point is the WORLD it
-        # sits in (tonality, white balance, saturation), not one wall
-        lut = lutlib.match_lut(src, ref, method="mkl",
-                               limit=MATCH_LIMIT_LAB, shared=False)
+        lut = world_lut(src, ref)
         after_px = lutlib.apply(lut, src / 255.0)
-        lc = lutlib.rgb_to_lab(np.clip(after_px, 0, 1))
-        after = float(lutlib.delta_e2000(lc.mean(axis=0), lb.mean(axis=0)))
+        after = world_gap(lutlib.rgb_to_lab(np.clip(after_px, 0, 1)), lb)
     except Exception:  # noqa: BLE001
         lut, after = None, before
     return before, after, lut
-
-
-# How far a match may push colour (Lab units). Wider than a shot match
-# (finish_tools 40): a cutaway is pulled into the camera's world.
-MATCH_LIMIT_LAB = 60.0
 
 
 def noise_sigma(gray):

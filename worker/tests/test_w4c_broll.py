@@ -286,7 +286,31 @@ def test_match_lut_pulls_the_cutaway_into_the_hero_world():
                     + rng.normal(0, 12, (90, 160, 3)), 0, 255)
             .astype(np.uint8)]
     before, after, lut = broll_score.palette_gap(bright, hero)
-    assert before > 20 and after < 5 and lut is not None
+    assert lut is not None and before > 15 and after < 0.75 * before
+
+
+def test_the_world_grade_never_rotates_a_hue():
+    """A blue sky stays blue and an orange sun orange: the grade moves
+    tone, saturation and the neutrals' warmth, never hue (a full colour
+    transfer turned a launch sky mud-brown and the sun cyan — Wave 4
+    review)."""
+    import broll_score
+    import lutlib
+    rng = np.random.default_rng(3)
+    hero = [np.clip(np.full((90, 160, 3), (70, 52, 40), np.float32)
+                    + rng.normal(0, 10, (90, 160, 3)), 0, 255)
+            .astype(np.uint8)]
+    for colour in ((90, 130, 210), (240, 150, 30), (60, 160, 90)):
+        pic = [np.clip(np.full((90, 160, 3), colour, np.float32)
+                       + rng.normal(0, 8, (90, 160, 3)), 0, 255)
+               .astype(np.uint8)]
+        _b, _a, lut = broll_score.palette_gap(pic, hero)
+        src = np.asarray(colour, np.float64)[None] / 255.0
+        out = lutlib.apply(lut, src)
+        la, lb = lutlib.rgb_to_lab(src)[0], lutlib.rgb_to_lab(out)[0]
+        ha = np.degrees(np.arctan2(la[2], la[1]))
+        hb = np.degrees(np.arctan2(lb[2], lb[1]))
+        assert abs((ha - hb + 180) % 360 - 180) < 12, (colour, ha, hb)
 
 
 # ── the compiler ─────────────────────────────────────────────────────────

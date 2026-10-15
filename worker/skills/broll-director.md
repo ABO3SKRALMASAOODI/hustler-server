@@ -42,8 +42,10 @@ which moments, which picture idea, how long.
   proof you asked for, does it sit in the same world after the grade, is
   anything in it off-tone for the line?
 - The reply: per moment the source, licence, on-topic, crop survival and
-  colour distance before -> after the match; "rejected on sight" counts;
-  which libraries are off on this deployment.
+  the look's distance to the camera before -> after the world grade
+  (lightness and saturation; a blue sky stays blue — hues are content,
+  never regraded); "rejected on sight" counts; which libraries are off
+  on this deployment.
 - `look_at(rendered=true, output_times=[...])` after a complete render:
   the cut in and out, the captions over the cutaway.
 - `critique_short`: rhythm, a house style, the same device too often.
@@ -74,8 +76,9 @@ which moments, which picture idea, how long.
 
 ## Verification procedure
 
-1. Read the reply: every cutaway has a licence line; the matched colour
-   distance is small (the "-> N" after "dE to hero").
+1. Read the reply: every cutaway has a licence line; the look moved
+   toward the camera's (the "-> N" after "dE to hero" is smaller; ~10-18
+   is a normal daylight cutaway against a low-key interview).
 2. Look at the director's board: proof, tone, one world.
 3. `render_preview(complete=true)`, then `look_at(rendered=true, ...)` at
    each cut in: captions readable over it, no logo anywhere.

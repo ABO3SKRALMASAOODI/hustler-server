@@ -31,9 +31,17 @@ from concurrent.futures import ThreadPoolExecutor
 
 DEPARTMENT = "world"
 VERBS = ("source_broll", "remove_broll")
-# A cutaway whose matched colour stays this far (dE2000 of the means) from
-# the hero is not placed (a night aerial against a lit face).
-UNMATCHABLE_DE = 6.0
+# A cutaway whose LOOK stays this far from the hero after the world grade
+# (broll_score.world_gap: mean lightness and chroma, hue aside) is not
+# placed (a night aerial against a lit face). The grade keeps hues and
+# moves the midtones a third of the way, so a daylight cutaway against a
+# low-key interview sits around 12-18 and is a normal cut (Wave 4 review:
+# the old mean-colour gate at 6 only passed pictures a full colour
+# transfer had repainted).
+UNMATCHABLE_DE = 25.0
+# Past this gap a candidate starts losing to closer looks, other things
+# equal.
+LOOK_PENALTY_FROM = 12.0
 MAX_MOMENTS = 8
 SHORTLIST = 3
 DEFAULT_SPAN = 2.4
@@ -365,8 +373,8 @@ def _judge(ctx, fetched, W, H, hero, need_s, archival):
     # a picture the match cannot bring into the camera's world (a night
     # aerial against a lit face) loses to one it can, other things equal
     dm = (res.get("measures") or {}).get("de_matched")
-    if dm is not None and dm > 5.0:
-        res["final"] -= min(0.2, 0.04 * (dm - 5.0))
+    if dm is not None and dm > LOOK_PENALTY_FROM:
+        res["final"] -= min(0.2, 0.02 * (dm - LOOK_PENALTY_FROM))
     res["final"] = round(res["final"], 4)
     return {"cand": cand, "got": got, "res": res, "fit": fit}
 
