@@ -12,13 +12,16 @@ so the program clock, every cut and the audio stay where they were.
   posterize    step-printing: every picture held ``frames`` frames
   stutter      the window's first ``frames`` frames looped ``repeats``
                times, then the window catches up on a cut
-  interpolate  a slowed window without stuttering slow motion: the repeated
-               frames a speed span leaves are dropped (mpdecimate) and real
-               in-betweens synthesised (minterpolate, motion-compensated;
-               flagged ``interp: minterpolate`` in the report). A source
-               shot faster than the program (60p under a 30p program at
-               0.5x) already has real frames: the item reports "native" and
-               draws nothing
+  interpolate  a slowed window without stuttering slow motion: the frames a
+               speed span repeats are known exactly from the timeline (each
+               program frame's source frame), so the window keeps one frame
+               per source frame, stamped at the program time it SHOULD play
+               (its source second through the timeline), and minterpolate
+               synthesises the in-betweens on that clock (motion-
+               compensated; flagged ``interp: minterpolate``). A source shot
+               faster than the program (60p under a 30p program at 0.5x)
+               already has real frames: the item reports "native" and draws
+               nothing
   remap        an eased time remap inside the window that ends on the same
                frame: input frame g(i) shown at output frame i (g from
                ``curve``), built with setpts + fps on frame indices
@@ -26,11 +29,13 @@ so the program clock, every cut and the audio stay where they were.
 Deterministic: every filter here is a function of the window's frames.
 """
 
+import math
+
 import fxprims
 
 KINDS = ("reverse", "echo", "posterize", "stutter", "interpolate", "remap")
 FILTERS = ("split", "trim", "setpts", "settb", "format", "reverse", "tmix",
-           "fps", "loop", "minterpolate", "mpdecimate", "nullsink", "null",
+           "fps", "loop", "minterpolate", "select", "nullsink", "null",
            "tpad", "overlay", "scale")
 KEEPS_FRAME_TAGS = True
 # Remap curves: g(x), x and g in 0..1 (input progress at output progress x).
@@ -73,6 +78,56 @@ def stutter_frames(n, k, repeats):
 
 def posterize_frames(n, k):
     return [min(n - 1, (i // int(k)) * int(k)) for i in range(n)]
+
+
+def unique_frames(src_frames):
+    """[(window frame k, source frame)] of the FIRST program frame showing
+    each source frame (``src_frames``: the source frame index of every
+    window frame, in order)."""
+    out = []
+    prev = None
+    for k, s in enumerate(src_frames):
+        if s != prev:
+            out.append((k, s))
+            prev = s
+    return out
+
+
+def pts_segments(times, tol=1e-4):
+    """Piecewise-linear runs of ``times`` (program seconds from the window
+    start, one per kept frame): [(n0, t0, dt)] with time(N) = t0 + (N - n0)
+    * dt on each run — a speed ramp has a few, a constant span one."""
+    segs = []
+    for n, t in enumerate(times):
+        if segs:
+            n0, t0, dt = segs[-1]
+            if dt is None:
+                segs[-1] = (n0, t0, t - t0)
+                continue
+            if abs(t0 + (n - n0) * dt - t) <= tol:
+                continue
+        segs.append((n, t, None))
+    return [(n0, t0, dt if dt is not None else 0.0) for n0, t0, dt in segs]
+
+
+def interp_chain(unique, times, rate, n, clock):
+    """The filter chain (after a window's frames) that keeps ``unique``
+    window frames, stamps kept frame N at ``times[N]`` and synthesises the
+    program's frames at ``rate``: exactly n frames out."""
+    # inside single quotes a filtergraph passes commas to the expression
+    sel = "+".join(f"eq(n,{k})" for k in unique)
+    segs = pts_segments(times)
+    # the earliest run is the fallback; each later run takes over from its
+    # own first frame
+    n0, t0, dt = segs[0]
+    expr = f"({t0:.6f}+(N-{n0})*{dt:.9f})"
+    for n0, t0, dt in segs[1:]:
+        piece = f"({t0:.6f}+(N-{n0})*{dt:.9f})"
+        expr = f"if(gte(N,{n0}),{piece},{expr})"
+    return (f"select='{sel}',setpts='{expr}/TB',"
+            f"minterpolate=fps={rate:.6f}:mi_mode=mci:mc_mode=aobmc:"
+            f"me_mode=bidir:vsbmc=1,tpad=stop=-1:stop_mode=clone,"
+            f"trim=end_frame={n},{clock}")
 
 
 def select_expr(index):
@@ -118,6 +173,12 @@ class _Time:
             elif native:
                 st["skip"] = ("the source has real frames for this speed "
                               "(native high frame rate)")
+            if not st.get("skip"):
+                pat = self._pattern(plan, item, f0, f1)
+                if pat is None or len(pat[0]) < 2:
+                    st["skip"] = "the window shows no repeated frames"
+                else:
+                    st["unique"], st["times"] = pat
             _state(plan)[item.get("id")] = st
             if st.get("skip"):
                 return ("reduced", st["skip"])
@@ -125,6 +186,31 @@ class _Time:
                     "in-betweens; RIFE is not on this lane)")
         _state(plan)[item.get("id")] = st
         return None
+
+    def _pattern(self, plan, item, f0, f1):
+        """([window frame of each source frame's first showing], [program
+        seconds from the window start each SHOULD play at]) from the
+        timeline, or None."""
+        tl = plan.tl
+        src_fps = float(getattr(plan.source, "fps", 0) or 0)
+        if tl is None or not src_fps:
+            return None
+        r = plan.fps3
+        sf = []
+        for k in range(f1 - f0):
+            st = tl.out_to_src((f0 + k) / r)
+            if st is None:
+                return None
+            sf.append(int(math.floor(st * src_fps + 1e-6)))
+        uniq = unique_frames(sf)
+        start = f0 / r
+        times = []
+        for _k, s in uniq:
+            o = tl.src_to_out(s / src_fps + 1e-6)
+            if o is None:
+                return None
+            times.append(max(0.0, o - start))
+        return [k for k, _s in uniq], times
 
     def _speed_under(self, plan, item):
         """(the slowest speed factor under the window, the source has real
@@ -231,18 +317,10 @@ class _Time:
             def build(parts, src, uid):
                 return by_index(parts, src, idx)
         elif kind == "interpolate":
-            factor = float(st.get("factor") or 0.5)
-            eff = max(1.0, r * factor)
-
             def build(parts, src, uid):
                 out = ctx.uid("two")
-                parts.append(
-                    f"[{src}]mpdecimate=hi=768:lo=320:frac=0.5,"
-                    f"setpts=N/{eff:.6f}/TB,"
-                    f"minterpolate=fps={r:.6f}:mi_mode=mci:mc_mode=aobmc:"
-                    f"me_mode=bidir:vsbmc=1,"
-                    f"tpad=stop=-1:stop_mode=clone,trim=end_frame={n},"
-                    f"{clock}[{out}]")
+                parts.append(f"[{src}]" + interp_chain(
+                    st["unique"], st["times"], r, n, clock) + f"[{out}]")
                 return out
         else:
             raise ValueError(f"no emitter for time kind {kind}")
