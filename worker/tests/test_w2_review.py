@@ -464,3 +464,28 @@ def test_apply_format_pack_without_picks_is_restrained(monkeypatch):
          "op": {"action": "upsert", "layer": "fx", "id": "g2",
                 "value": {}}}])
     assert sum(c["device"] == "grade_split_tone" for c in got) <= 1
+
+
+def test_a_swap_recut_lands_one_frame_before_every_kick_at_25p(monkeypatch):
+    """The swap resolver re-planned at 30 fps whatever the program's rate:
+    on a 25p program some cuts opened ON the kick frame, not one before."""
+    import json as _json
+    import hooks
+    import montage
+    import test_w2d_montage as T
+    from tools_ext import montage_tools as MT
+    for bpm in (129.0, 141.0, 150.0, 167.0):
+        ctx = T.ctx_with(monkeypatch, T.pool())
+        MT.plan_to_music(ctx, 0, 18, seed=4)
+        e = _json.loads(_json.dumps(ctx.edl))
+        key = f"music/new{int(bpm)}.mp3"
+        e["music"][0]["storage_key"] = key
+        e["music"][0]["offset_s"] = None
+        MT._MAPS[key] = T.rmap(bpm=bpm, n=50, intro=0)
+        e2, notes = hooks.on_music_swap(e, "m1", "m1")
+        e2 = schemas.validate_edl(e2, 60.0).model_dump()
+        new = T.rmap(bpm=bpm, n=50, intro=0)
+        kick_f = {montage.frame(o["t"], 25.0) for o in new["onsets"]}
+        starts = [montage.frame(o["start"] + 0.005, 25.0)
+                  for o in e2["overlays"] if o["start"] > 0]
+        assert starts and all(s + 1 in kick_f for s in starts), (bpm, notes)

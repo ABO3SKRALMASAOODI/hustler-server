@@ -434,6 +434,7 @@ def plan(ctx, edl, start, end, *, music_id=None, shots=None, modes=None,
         ops.append({"action": "upsert", "layer": "fx", "id": prefix + "_in",
                     "value": montage.intent(prefix, item["id"], {
                         "t0": round(s, 3), "t1": round(e, 3),
+                        "fps": round(float(fps), 3),
                         "lead_f": int(lead_f), "on": on, "style": style,
                         "seed": int(seed), "every": int(every or 1),
                         "modes": modes or {},
@@ -574,10 +575,16 @@ def _swap_resolver(edl, intents, new_music_id):
         _remember(key, rmap)
     tl = _tl(edl)
     prog = rhythm_types.to_program(rmap, tl, item, rmap.get("duration"))
-    fps = float(((edl.get("canvas") or {}).get("fps")) or 30.0)
+    fps0 = float(((edl.get("canvas") or {}).get("fps")) or 30.0)
     for it in intents:
         p = it.get("params") or {}
         prefix = p.get("prefix")
+        # the program's own frame rate, recorded by the plan: "one frame
+        # before the kick" on a 25p program is not one frame at 30
+        try:
+            fps = float(p.get("fps") or fps0)
+        except (TypeError, ValueError):
+            fps = fps0
         if p.get("style", "broll") != "broll":
             notes.append(f"montage {prefix}: type slots re-plan with "
                          f"plan_to_music(replan='{prefix}')")
