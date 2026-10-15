@@ -4,6 +4,7 @@
  "params": {
   "graph": {"type": "json", "required": true, "max": 48000, "hint": "the solved scene graph (ui_scene.solve)"},
   "shown": {"type": "list", "default": [], "max_items": 40, "max": 120, "hint": "every string the scene prints (written by add_ui_scene)"},
+  "spec": {"type": "json", "default": {}, "max": 40000, "hint": "the scenes the graph was solved from (re-solved for another aspect by deliver_aspects)"},
   "backdrop": {"type": "enum", "values": ["none", "dim", "solid"], "default": "solid", "hint": "solid = the interface owns the frame (media slots stay open); dim = over the darkened picture; none = floating UI"}
  },
  "sfx": []} -->

@@ -150,7 +150,11 @@ def add_ui_scene(ctx, scenes, start=None, end=None, data=None, theme="dark",
     item = {"id": mid, "template": "ui_scene", "start": round(s, 2),
             "end": round(e, 2), "layer": "above_captions",
             "params": {"graph": graph, "shown": ui_scene.shown_texts(graph),
-                       "backdrop": backdrop},
+                       "backdrop": backdrop,
+                       # what the graph was solved from: another aspect
+                       # re-solves the layout instead of scaling pixels
+                       "spec": {"scenes": solved, "words": words,
+                                "theme": theme, "accent": accent}},
             "purpose": "UI explainer (add_ui_scene)"}
     ops = [{"action": "upsert", "layer": "motion", "id": mid,
             "value": item}]
@@ -260,13 +264,10 @@ TOOL_SPECS = {
         "come only from data (CSV or {name: number}; bind) or the words — "
         "never invented. media={slot: {asset_key|src_t, offset_s}} plays "
         "real recordings in media slots. backdrop solid|dim|none.",
-        {"scenes": {"type": "array", "items": {"type": "object",
-                    "properties": {"at": {"type": "number"},
-                                   "word": {"type": "string"},
-                                   "layout": {"type": "string"},
-                                   "focus": {"type": "string"},
-                                   "objects": {"type": "array",
-                                               "items": _OBJ}}}},
+        {"scenes": {"type": "array", "items": {"type": "object"},
+                    "description": "[{at|word, layout, focus?, objects: "
+                    "[{id, kind, title|body|text|label|name|value|delta|"
+                    "state|from|bind|rows|rows_from|lines|aspect}]}]"},
          "start": {"type": "number"}, "end": {"type": "number"},
          "data": {"description": "CSV text, rows or {name: number}"},
          "theme": {"type": "string", "enum": ["dark", "light"]},

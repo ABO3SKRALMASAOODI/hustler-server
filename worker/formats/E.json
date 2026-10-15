@@ -1,0 +1,64 @@
+{
+ "code": "E",
+ "name": "UI / product explainer",
+ "genre": "E",
+ "intensity": "designed",
+ "budgets": {
+  "punctuation": 1,
+  "matte": 1,
+  "depth": {
+   "every_s": 10.0
+  },
+  "layout": 3,
+  "world": 3
+ },
+ "look": {
+  "grade": "clean neutral",
+  "palette": "the product's own colours on near-black glass"
+ },
+ "captions": {
+  "mode": "words",
+  "position": "below the interface",
+  "density": "phrase"
+ },
+ "type_voice": "Inter Display, tight tracking, numbers tabular; one accent from the brand",
+ "structure": [
+  {
+   "section": "hook",
+   "share": 0.12,
+   "what": "the problem in one line, the product's screen in a media slot"
+  },
+  {
+   "section": "how",
+   "share": 0.58,
+   "what": "persistent UI objects that morph step by step; counters land on spoken numbers"
+  },
+  {
+   "section": "proof",
+   "share": 0.2,
+   "what": "the user's real figures (data-bound), one at a time"
+  },
+  {
+   "section": "close",
+   "share": 0.1,
+   "what": "the product, still, the claim in one card"
+  }
+ ],
+ "devices_prefer": [
+  "ui_scene_explainer",
+  "ui_media_slot",
+  "depth_parallax",
+  "broll_still"
+ ],
+ "devices_avoid": [
+  "finish_crt",
+  "time_stutter"
+ ],
+ "never": [
+  "a figure that is not the user's data or said",
+  "a dashboard that does not change the argument",
+  "type over the product's own UI text"
+ ],
+ "aspect": "9:16",
+ "notes": "Persistence is the craft: the object you met first is the one that resolves the story."
+}

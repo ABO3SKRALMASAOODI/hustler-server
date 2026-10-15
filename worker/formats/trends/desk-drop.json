@@ -1,0 +1,53 @@
+{
+ "id": "desk-drop",
+ "name": "Desk drop (type on black, then the montage on the drop)",
+ "cluster_doc": "structural grammar of one shared trend audio, recognised only on the USER's supplied track (no reference audio or fingerprint stored)",
+ "requires": {
+  "gap_before_drop": false,
+  "bpm_range": [
+   80,
+   115
+  ],
+  "rise_db": 8.0,
+  "quiet_s": 2.5
+ },
+ "sections": [
+  {
+   "name": "hook",
+   "from_beat": -14,
+   "to_beat": -9,
+   "devices": [
+    "type on black, one line per hit"
+   ]
+  },
+  {
+   "name": "build",
+   "from_beat": -9,
+   "to_beat": 0,
+   "devices": [
+    "sparse cuts, a negative on the bar"
+   ]
+  },
+  {
+   "name": "drop",
+   "from_beat": 0,
+   "to_beat": 8,
+   "devices": [
+    "cuts on 8ths",
+    "negatives on the downbeats"
+   ]
+  },
+  {
+   "name": "montage",
+   "from_beat": 8,
+   "to_beat": 24,
+   "devices": [
+    "one shot per beat, type on the payoff"
+   ]
+  }
+ ],
+ "never": [
+  "picking the track (the user supplies it)",
+  "more than 3 full-frame flashes per second without the user's opt-in"
+ ]
+}

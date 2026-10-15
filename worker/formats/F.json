@@ -1,0 +1,69 @@
+{
+ "code": "F",
+ "name": "Music-driven visual essay",
+ "genre": "F",
+ "intensity": "charged",
+ "budgets": {
+  "punctuation": null,
+  "matte": {
+   "every_s": 8.0
+  },
+  "depth": {
+   "every_s": 6.0
+  },
+  "world": {
+   "every_s": 4.0
+  },
+  "rhythm": null
+ },
+ "look": {
+  "grade": "one colour world per section; B&W only as a device (sections with colour on the drop, one colour kept)",
+  "palette": "from the user's footage"
+ },
+ "captions": {
+  "mode": "lockups",
+  "position": "type in the world",
+  "density": "line"
+ },
+ "type_voice": "a serif or condensed display face; lines set as lockups on the cut",
+ "structure": [
+  {
+   "section": "open",
+   "share": 0.15,
+   "what": "a still that drifts in 2.5D, one line of type"
+  },
+  {
+   "section": "build",
+   "share": 0.35,
+   "what": "archival and sourced B-roll on the phrase, cuts on the user's track beats"
+  },
+  {
+   "section": "drop",
+   "share": 0.35,
+   "what": "the montage on 8ths, depth and time devices on the hits"
+  },
+  {
+   "section": "resolve",
+   "share": 0.15,
+   "what": "a held frame, the last line"
+  }
+ ],
+ "devices_prefer": [
+  "broll_cutaway",
+  "broll_archival",
+  "depth_parallax",
+  "depth_dof",
+  "time_echo",
+  "time_interpolate"
+ ],
+ "devices_avoid": [
+  "ui_scene_explainer"
+ ],
+ "never": [
+  "picking the music (the user's track only)",
+  "a whole-short black-and-white look",
+  "more than 3 full-frame flashes per second without the user's opt-in"
+ ],
+ "aspect": "9:16",
+ "notes": "Every section gets its own idea; the essay never repeats a device on consecutive shots."
+}

@@ -84,7 +84,7 @@ Everything in `INTERFACES.md` §0 and `INTERFACES_W1.md` §0 still holds:
 | Later-wave pins | `tests/fixtures/waves/w4.json` (§8.2) |
 
 Department compact budgets (12,000 B each, tested): Wave 4's share of
-`world` ≤ 4,000 B (Wave 3 owns the rest), `verify` +≤ 1,200 B, `delivery`
+`world` ≤ 5,000 B (Wave 3 owns the rest), `verify` +≤ 1,200 B, `delivery`
 ≤ 3,000 B. Every full tool description ≤ 900 characters.
 
 ---

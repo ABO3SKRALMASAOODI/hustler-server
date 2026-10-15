@@ -368,8 +368,9 @@ def at_4a_3():
           ensure("matte.person", ref, [tuple(keep)])]
     od = os.path.join(out_dir(), "AT-4A-3")
     os.makedirs(od, exist_ok=True)
+    # the 9:16 crop on Karp (the left chair), as an editor frames him
     base = {"keep": [keep], "frame": {"ratio": "9:16", "mode": "crop",
-                                      "focus_x": 0.5}}
+                                      "focus_x": 0.3}}
     dof = dict(base, fx=[{"id": "df", "type": "depth", "stage": "world",
                           "start": 1.0, "end": 4.0, "kind": "dof",
                           "focus": {"on": "subject"}, "blur": 0.8,
@@ -665,13 +666,21 @@ def at_4a_6():
         lb = cv2.Laplacian(np.asarray(b[f0 + i], np.float32), cv2.CV_32F)
         ratio.append((float(lb[near].var() / max(1e-6, la[near].var())),
                       float(lb[far].var() / max(1e-6, la[far].var()))))
-    # landing: the first frame where the near plane is fully sharp AND the
-    # rest has gone soft (the pull complete)
+    # landing: the pull is complete when the rest of the frame has made
+    # 90% of its total change in sharpness (start -> end of the window);
+    # a fixed threshold would catch the eased travel half way
+    far = [r[1] if r else None for r in ratio]
+    vals = [v for v in far if v is not None]
     land = None
-    for i, r in enumerate(ratio):
-        if r and r[0] >= 0.9 and r[1] <= 0.5:
-            land = f0 + i
-            break
+    if len(vals) >= 10:
+        v0 = float(np.median(vals[:5]))
+        v1 = float(np.median(vals[-5:]))
+        for i, v in enumerate(far):
+            if v is not None and v <= v1 + 0.1 * (v0 - v1) and \
+                    all(x is None or x <= v1 + 0.1 * (v0 - v1)
+                        for x in far[i:i + 3]):
+                land = f0 + i
+                break
     want = int(round(t_word * fps))
     err = None if land is None else abs(land - want)
     ks = [f0 + 3, want - 6, want, want + 10]

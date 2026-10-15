@@ -31,7 +31,9 @@ bytes per enum) is charged to the core budget.
 import importlib
 import os
 
-DEPARTMENTS = ("compositing", "rhythm", "world", "verify")
+DEPARTMENTS = ("compositing", "rhythm", "world", "verify",
+               # Wave 4 (4E): aspects, languages, format packs
+               "delivery")
 DEPARTMENT_COMPACT_BUDGET = 12_000   # bytes of compact schemas per department
 TOOL_FULL_MAX_BYTES = 6_000          # one tool's full JSON schema + prose
 COMPACT_MAX_CHARS = 600
