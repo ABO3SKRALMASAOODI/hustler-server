@@ -230,7 +230,7 @@ note; pure numpy/OpenCV on review frames, every lane. Acquisition reuses
 | `tools_ext/depth_tools.py` | world | `add_depth_effect(kind, start?, end?, on?, source?, asset_key?, src_t?, move?, focus?, focus_from?, rack_at?, text?, …)`, `add_time_effect(kind, start, end, …)`, `remove_depth_time(ids)` |
 | `tools_ext/ui_tools.py` | world | `add_ui_scene(scenes, start?, end?, data?, theme?, media?, id?)`, `remove_ui_scene(ids)` |
 | `tools_ext/broll_tools.py` | world | `source_broll(moments, max?, providers?, place?)`, `remove_broll(ids)` |
-| `tools_ext/format_tools.py` | delivery | `apply_format(format)`, `deliver_aspects(ratios?, apply?)`, `retypeset_language(lang, translation?, srt?, captions_only?)` |
+| `tools_ext/delivery_tools.py` | delivery | `apply_format(format)`, `deliver_aspects(ratios?, apply?)`, `retypeset_language(lang, translation?, srt?, captions_only?)` |
 | `tools_ext/critic_tools.py` | verify | `critique_short(job_id?, asset_key?, render?, deep?)` (READ) |
 
 Rules (as Wave 1): write verbs SOLVE arguments into apply_edit_batch ops and
@@ -261,8 +261,8 @@ face, watermark and safe-area violations on the rendered frames.
 
 `retypeset_lang.retypeset(edl, index, lang, translation=None, srt=None)`:
 captions from a user SRT (timing kept) or from a user translation aligned to
-the source phrases (each phrase's window kept, words distributed by
-syllable weight); motion-graphic texts swapped by the user's mapping; every
+the source phrases (each phrase's window kept, its words spread evenly
+over it by the captions engine); motion-graphic texts swapped by the user's mapping; every
 layout re-fit (keep-out, lockup widths). Never machine-translates.
 
 ### 5.3 Format packs and trend grammars

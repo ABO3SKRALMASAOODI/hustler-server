@@ -7,8 +7,9 @@ translation:
 
   translation  one translated line per spoken phrase (a list in phrase
                order, or {source phrase: translation}); each phrase keeps
-               its own window, its words are spread over the phrase's
-               spoken span by syllable weight
+               its own window; the captions engine spreads its words
+               evenly over the phrase's spoken span (one correction per
+               phrase: syllable weighting is not applied)
   srt          subtitle cues (the user's timing): each cue's text replaces
                the words spoken inside the cue
   mapping      {on-screen text: translation} for motion graphics and texts
@@ -73,8 +74,8 @@ def _parse_srt(text):
 def _corrections(phr, target):
     """Scoped corrections replacing one phrase's words with ``target``.
     The captions engine spreads unequal word counts evenly over the
-    phrase's span; syllable weight is honoured by splitting the phrase into
-    runs whose spans match the target words' weights."""
+    phrase's span (one correction per phrase keeps the line a single
+    caption unit; syllable weighting is not applied)."""
     src = phr["words"]
     tgt = str(target).split()
     if not src or not tgt:

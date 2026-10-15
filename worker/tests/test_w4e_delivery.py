@@ -198,7 +198,7 @@ def ctx(monkeypatch):
 
 
 def test_deliver_aspects_lists_then_applies(ctx):
-    from tools_ext import format_tools
+    from tools_ext import delivery_tools as format_tools
     out = format_tools.deliver_aspects(ctx)
     assert out.startswith("ASPECTS") and not ctx.writes
     assert "4:3" in out and "16:9" in out
@@ -208,7 +208,7 @@ def test_deliver_aspects_lists_then_applies(ctx):
 
 
 def test_apply_format_sets_the_aspect_and_briefs(ctx):
-    from tools_ext import format_tools
+    from tools_ext import delivery_tools as format_tools
     ctx._edl["frame"]["ratio"] = "1:1"
     out = format_tools.apply_format(ctx, "I")
     assert "FORMAT I" in out and "LEDGER (I)" in out
@@ -221,7 +221,7 @@ def test_apply_format_sets_the_aspect_and_briefs(ctx):
 
 
 def test_retypeset_language_verb(ctx):
-    from tools_ext import format_tools
+    from tools_ext import delivery_tools as format_tools
     out = format_tools.retypeset_language(ctx, "de", list_phrases=True)
     assert "we built the rocket." in out and not ctx.writes
     out = format_tools.retypeset_language(
@@ -237,7 +237,7 @@ def test_retypeset_language_verb(ctx):
 def test_registration():
     import agent_tools
     import tools_ext
-    from tools_ext import format_tools
+    from tools_ext import delivery_tools as format_tools
     for v in format_tools.VERBS:
         assert v in agent_tools.TOOLS
         assert v in agent_tools.TOOL_DOMAINS["delivery"]
