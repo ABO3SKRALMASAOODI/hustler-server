@@ -28,8 +28,9 @@ of the standard, not a recipe to repeat: the next short earns its own.
   consecutive lockups in one voice unless the second is a callback.
 - B&W is a DEVICE: a stretch that opens to colour on the payoff, one
   colour kept, a silhouette hold, a negative on a hit. Never the whole
-  short unless the user asks for black and white (the in-house
-  apply_look refuses mono_noir otherwise).
+  short unless the user asks for black and white (a write that turns
+  the whole short flat B&W is refused without that ask; `mono_noir` is a
+  noir COLOUR look, not a grey one).
 - Never music the user did not supply, name or pick; zooms and sounds are
   optional, never defaults; the end card and the watermark are untouched.
 

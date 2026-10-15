@@ -219,3 +219,28 @@ def test_build_item_marks_type_on_black_as_on_a_card(monkeypatch):
     item, err = typeset_tools.build_item(ctx, ctx.edl, "flying cars", 11.7,
                                          13.0, "ts7", faces=[])
     assert err is None and item["params"]["over"] == "card"
+
+
+def test_the_edit_review_does_not_tell_the_agent_to_drop_a_typeset_line():
+    """A typeset lockup is the line set INSTEAD of its captions (ROADMAP
+    2A); the review's re-typeset finding is for graphics that duplicate
+    running captions, so it must not ask the agent to drop the device."""
+    import edit_review
+    e = edl(keep=((0.0, 14.0),), ratio="9:16")
+    e["captions"] = {"enabled": True}
+    lock = {"id": "ts1", "template": "typeset", "start": 7.2, "end": 9.9,
+            "layer": "above_captions",
+            "params": {"text": "the potential to reaccelerate growth",
+                       "voice": "staircase_red"}}
+    e["motion"] = [lock]
+    e = schemas.validate_edl(e, 60.0).model_dump()
+    notes = edit_review.review(e, index(), force=True)
+    assert not [n for n in notes if n["code"] == "restates_captions"], notes
+    # the same words as a phrase_build beside the captions still are one
+    e2 = copy.deepcopy(e)
+    e2["motion"][0]["template"] = "phrase_build"
+    e2["motion"][0]["params"] = {"rows": [
+        {"text": "the potential"}, {"text": "to reaccelerate growth"}]}
+    e2 = schemas.validate_edl(e2, 60.0).model_dump()
+    notes2 = edit_review.review(e2, index(), force=True)
+    assert [n for n in notes2 if n["code"] == "restates_captions"], notes2
