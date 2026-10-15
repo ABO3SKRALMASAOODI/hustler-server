@@ -80,6 +80,17 @@ def faces():
 
 @functools.lru_cache(maxsize=None)
 def _axes(path):
+    """{tag: (min, default, max)} of a variable face's axes. HarfBuzz reads
+    them itself (the engine every lane has); fontTools when it has not.
+    An empty answer for a variable face would measure its default instance
+    while the page sets the voice's weight and width."""
+    if _hb is not None:
+        try:
+            face = _hb.Face(_hb.Blob.from_file_path(path))
+            return {a.tag: (float(a.min_value), float(a.default_value),
+                            float(a.max_value)) for a in face.axis_infos}
+        except Exception:  # noqa: BLE001 — fontTools below
+            pass
     try:
         from fontTools.ttLib import TTFont
         t = TTFont(path, lazy=True)

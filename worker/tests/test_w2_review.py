@@ -298,3 +298,34 @@ def test_make_shorts_never_snaps_a_start_forward_into_a_question():
         snap="sentence")
     assert "job 990" in out2, out2
     assert seen2["payload"]["clips"][0]["start"] == 1363.84
+
+
+def test_variable_font_axes_never_need_fonttools(monkeypatch):
+    """Production images had no fontTools (only the dev venv did): every
+    variable face was measured at its default instance while the page set
+    the voice's weight and width. HarfBuzz reads the axes itself."""
+    import builtins
+    from typeset import shaping
+    real = builtins.__import__
+
+    def no_fonttools(name, *a, **k):
+        if name.startswith("fontTools"):
+            raise ImportError("no fontTools on this lane")
+        return real(name, *a, **k)
+    shaping._axes.cache_clear()
+    monkeypatch.setattr(builtins, "__import__", no_fonttools)
+    try:
+        path = [f["path"] for f in shaping.faces()
+                if f["path"].endswith("Anybody-Variable.ttf")][0]
+        axes = shaping._axes(path)
+        assert axes.get("wdth") == (50.0, 100.0, 150.0)
+        assert axes.get("wght")[2] == 900.0
+    finally:
+        shaping._axes.cache_clear()
+
+
+def test_fonttools_is_a_worker_requirement():
+    import os
+    req = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "requirements.txt")).read()
+    assert "\nfonttools==" in req and "\nuharfbuzz==" in req
