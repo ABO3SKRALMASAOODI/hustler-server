@@ -167,6 +167,11 @@ def test_apply_recipe_writes_once_per_short_through_the_batch_path():
     assert [i["id"] for i in fx] == ["rc_mono_until_turn_1"]
     again = agent_tools.TOOLS["apply_recipe"][0](ctx, name="mono_until_turn")
     assert again.startswith("REJECTED") and "once per short" in again
+    # a second, different move is written but named for what it is (review
+    # w1r: one signature per short, a second only when they tell one story)
+    second = agent_tools.TOOLS["apply_recipe"][0](ctx, name="room_dims")
+    if second.startswith("EDL v"):
+        assert "signature moves" in second and "mono_until_turn" in second
 
 
 def test_the_white_silhouette_holds_two_frames_then_decays_three():

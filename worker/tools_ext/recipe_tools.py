@@ -231,6 +231,14 @@ def apply_recipe(ctx, name, at=None):
         res += (f"\nRECIPE {name}: {why}. Ids: "
                 + ", ".join(i["id"] for i in items)
                 + ". Look at the frames around it before keeping it.")
+        others = sorted(_used_here(edl) - {name})
+        if others:
+            res += ("\nNOTE (taste): this short now carries "
+                    f"{len(others) + 1} signature moves ({', '.join(others)}"
+                    f", {name}). One move is the signature; keep a second "
+                    "only when the two tell one story (a grey setup and the "
+                    "payoff's silhouette hit), else remove the weaker by its "
+                    "rc_ ids.")
         if measuring:
             res += "\n" + measuring
     return res
