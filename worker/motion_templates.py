@@ -266,6 +266,22 @@ def _coerce(name, key, p, v, strict):
                 _check_row(f"{where}[{j}]", row, clean, fields, p.get("field_types") or {})
             out.append(clean)
         return out
+    if t == "json":
+        # Wave 4 (4B): a solved structure a template draws (the ui_scene
+        # graph) — data, never printed text (caption_carry reads only
+        # str/text/list/rows)
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except ValueError:
+                raise ValueError(f"{where} must be a JSON object")
+        if not isinstance(v, (dict, list)):
+            raise ValueError(f"{where} must be a JSON object")
+        size = len(json.dumps(v, separators=(",", ":")))
+        if size > int(p.get("max", 20000)):
+            raise ValueError(f"{where} is {size} bytes; keep it to "
+                             f"{int(p.get('max', 20000))}")
+        return v
     if t == "asset":
         v = str(v).strip()
         if not v or len(v) > 500:

@@ -74,7 +74,7 @@ Everything in `INTERFACES.md` §0 and `INTERFACES_W1.md` §0 still holds:
 | Seam | Wave 4 adds |
 |---|---|
 | `EDL.fx` tags (`fx_schemas/`) | `depth`, `time` (4A, `fx_schemas/depth.py`, TRACK `4a`); `ui_media` (4B, `fx_schemas/ui.py`, TRACK `4b`); `broll` (4C, `fx_schemas/broll.py`, TRACK `4c`) |
-| fx compilers | `depth_fx:DEPTH`, `timewarp:TIME`, `ui_scene:UI_MEDIA`, `broll_fx:BROLL` |
+| fx compilers | `depth_fx:DEPTH`, `timewarp:TIME`, `ui_media:UI_MEDIA`, `broll_fx:BROLL` |
 | Sidecar kinds | `depth.small` (reserved name; 4A ships the runner unless 3B merged one first — same model id, same key) |
 | Departments (`tools_ext`) | `world`: `add_depth_effect`, `add_time_effect`, `remove_depth_time`, `add_ui_scene`, `remove_ui_scene`, `source_broll`, `remove_broll`; `verify`: `critique_short`; new department `delivery`: `apply_format`, `deliver_aspects`, `retypeset_language` |
 | Card prefixes | `depth` 4A, `time` 4A, `ui` 4B, `broll` 4C |
@@ -122,7 +122,7 @@ Department compact budgets (12,000 B each, tested): Wave 4's share of
 |---|---|---|---|---|---|
 | 4A | `fx_schemas/depth.py` | `depth` | `DepthFx` | world, screen | `depth_fx:DEPTH` |
 | 4A | | `time` | `TimeFx` | world | `timewarp:TIME` |
-| 4B | `fx_schemas/ui.py` | `ui_media` | `UiMediaFx` | pre_captions | `ui_scene:UI_MEDIA` |
+| 4B | `fx_schemas/ui.py` | `ui_media` | `UiMediaFx` | pre_captions | `ui_media:UI_MEDIA` |
 | 4C | `fx_schemas/broll.py` | `broll` | `BrollFx` | screen | `broll_fx:BROLL` |
 
 ### 3.2 `depth` (4A)
@@ -180,6 +180,18 @@ asset video/image or `source`), `fit` cover|contain. The compiler draws the
 footage into the slot's solved rectangle per frame (rounded to the card's
 radius), underneath the scene's chrome; `check` refuses an unknown motion
 item, slot, template or layer.
+
+The scene graph (`ui_scene.solve`, design space 1080 wide): per object
+`segs` [t0, t1, x, y, w, h (from), x, y, w, h (to), opacity from, to,
+ease] — enter (`snap`), morph (`morph`: eased in and out, no first-frame
+jump), hold (`linear`), exit (`inCubic`); `iris` {t, dur, ox, oy, from}
+(an object present in the previous scene opens the new one: the layout
+morphs first, then the iris opens where the cause now rests); `count`
+{t0, t1, to, landed_on_word} (lands on the spoken number said from 0.4 s
+before the tile shows to 3 s after); `karaoke` (the pill's word onsets);
+`updates` (content changes by scene). The template param `graph` is the
+new motion-template param type `json` (motion_templates; never read as
+printed text — `shown` lists what the scene prints for the captions).
 
 ### 3.5 `broll` (4C)
 

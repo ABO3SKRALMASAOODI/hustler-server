@@ -167,7 +167,7 @@ def render(edl, src, index, out, asset_locals, preview=False):
 
 def frames_at(path, idx):
     import qa_metrics
-    got, fr = qa_metrics.read_frames(path, idx=sorted(set(idx)))
+    got, fr = qa_metrics.read_frames(path, frames=set(idx))
     return {k: np.asarray(f) for k, f in zip(got, fr)}
 
 

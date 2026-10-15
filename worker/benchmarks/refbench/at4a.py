@@ -596,7 +596,13 @@ def at_4a_5():
 def _asr(path, t0, t1):
     from faster_whisper import WhisperModel
     m = WhisperModel("small.en", device="cpu", compute_type="int8")
-    seg, _info = m.transcribe(path, word_timestamps=True,
+    # decoded here (16 kHz mono float): the bundled PyAV's open() does not
+    # take faster-whisper's metadata_errors argument
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-ac", "1",
+                          "-ar", "16000", "-f", "f32le", "-"],
+                         capture_output=True).stdout
+    audio = np.frombuffer(raw, np.float32)
+    seg, _info = m.transcribe(audio, word_timestamps=True,
                               clip_timestamps=[t0, t1])
     out = []
     for s in seg:

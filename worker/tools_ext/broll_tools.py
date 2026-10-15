@@ -386,9 +386,14 @@ def _board(ctx, rows, W, H):
             import depth_fx
             return Image.fromarray(depth_fx.cover_crop(
                 np.asarray(img), tw, th))
+        import depth_fx
         for r, row in enumerate(rows):
             y = 8 + r * (th + lab_h + 8)
             frame = row["frame"]
+            if frame is not None:
+                # tile size first: a 6000-px archive photo through the LUT
+                # at full size is gigabytes of float math for a thumbnail
+                frame = depth_fx.cover_crop(np.asarray(frame), tw, th)
             after = frame
             if row.get("lut") is not None:
                 after = (np.clip(lutlib.apply(row["lut"], frame / 255.0),

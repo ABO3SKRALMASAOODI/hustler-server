@@ -529,7 +529,12 @@ def frames_of(path, kind, n=4, width=None, at=None):
     import depth_fx
     if kind == KIND_PHOTO:
         img = depth_fx._decode_frame(path, 0.0)
-        return [img] if img is not None else []
+        if img is not None and width and img.shape[1] > width:
+            import cv2
+            k = width / float(img.shape[1])
+            img = cv2.resize(img, (width, max(2, int(img.shape[0] * k))),
+                             interpolation=cv2.INTER_AREA)
+        return [np.asarray(img)] if img is not None else []
     import media
     info = media.probe(path)
     dur = float(info.get("duration") or 0.0)
@@ -572,8 +577,10 @@ def acquire_local(cand, workdir, want_w, want_h):
     info = verify_media(path, kind)
     got = {"path": path, "kind": kind, "bytes": os.path.getsize(path),
            **info}
-    got["frames"] = frames_of(path, kind, n=4)
-    got["native"] = True
+    # capped at 1280 px: a 6000-px archive scan is judged as well at a
+    # fifth of its size; blockiness is read only at the file's own size
+    got["frames"] = frames_of(path, kind, n=4, width=1280)
+    got["native"] = int(info.get("width") or 0) <= 1280
     got["motion_profile"] = None
     if kind == KIND_VIDEO:
         try:

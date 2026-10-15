@@ -1,0 +1,35 @@
+# Track 4B device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (ui_media_slot). Contract: devices/INTERFACES.md §5,
+# INTERFACES_W4.md §3.4. Authoring source; compile with
+#   cd worker && python -m devices.compiler
+id: ui_media_slot
+family: layout
+verb: add_ui_scene
+fx_type: ui_media
+stage: pre_captions
+params:
+  fit: [cover, contain]
+  span: [section]
+needs:
+  sidecars: []
+  lane_features: [ffmpeg:overlay]
+  footage: a real recording (a screen capture, a product clip) for a UI scene's media slot
+binds_to: [section]
+budget:
+  calm: {per_short: 2, min_gap_s: 0}
+  designed: {per_short: 3, min_gap_s: 0}
+  charged: {per_short: 4, min_gap_s: 0}
+never:
+- footage the slot crops past its subject (use contain for a full screen recording)
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs:
+- full
+- omit
+cost:
+  ms_per_frame: {interactive: 8, batch: 8, local: 4}
+  fixed_ms: 250
+exemplars: ["21@9.875–21.0"]
+verify: [region_locality, determinism]
+status: live
+description: Real footage playing inside a UI scene's media slot, following every morph of the slot
+skill: explainers
