@@ -12,6 +12,7 @@
   "ink": {"type": "str", "default": "", "max": 7, "hint": "#rrggbb; empty = the voice's ink"},
   "accent": {"type": "str", "default": "", "max": 7, "hint": "#rrggbb; empty = the voice's accent"},
   "region": {"type": "enum", "values": ["auto", "above", "below", "left", "right"], "default": "auto"},
+  "over": {"type": "enum", "values": ["picture", "card"], "default": "picture", "hint": "card: set on a plain card or black (no face to keep clear of)"},
   "emphasis": {"type": "list", "default": [], "max_items": 4, "max": 30, "hint": "words that take the accent"},
   "flip_at": {"type": "float", "min": 0, "max": 60, "default": 0, "hint": "item seconds at which ink and accent swap (a colour flip on a hit); 0 = none"},
   "orbit": {"type": "float", "min": -2, "max": 2, "default": 0, "hint": "arc layout only: radians per second the words circle the head"},

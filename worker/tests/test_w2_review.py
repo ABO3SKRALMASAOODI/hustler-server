@@ -195,3 +195,27 @@ def test_the_colour_turn_is_earned_and_fresh_in_the_batch():
         v = c["op"]["value"]
         # a device, never a look: bounded and ending on the payoff
         assert v["end"] - v["start"] <= 4.0 + 1e-6
+
+
+def test_type_on_a_card_ignores_the_talking_head_prior():
+    """A lockup on black (call-and-response) has no face to keep clear of:
+    'over: card' drops the centred prior a face-less picture assumes."""
+    from typeset import freespace
+    p = {"text": "technology changes everything", "voice": "condensed_poster"}
+    wm = layoutdoc._watermark(1080, 1920)
+    pic = layoutdoc.build_doc(p, W=1080, H=1920, duration=2.0, faces=[],
+                              watermark=wm)
+    card = layoutdoc.build_doc(dict(p, over="card"), W=1080, H=1920,
+                               duration=2.0, faces=[], watermark=wm)
+    prior = freespace.Space(1080, 1920).face_zones[0]
+    assert not any(freespace.inter(r["ink"], prior) for r in pic["runs"])
+    assert card["solver_report"]["payload_cap_pct"] >= \
+        pic["solver_report"]["payload_cap_pct"]
+
+
+def test_build_item_marks_type_on_black_as_on_a_card(monkeypatch):
+    from tools_ext import typeset_tools
+    ctx = Ctx(edl(keep=((0.0, 14.0),), ratio="9:16"))
+    item, err = typeset_tools.build_item(ctx, ctx.edl, "flying cars", 11.7,
+                                         13.0, "ts7", faces=[])
+    assert err is None and item["params"]["over"] == "card"

@@ -249,7 +249,7 @@ def solve(words, *, W, H, voice_name="auto", family="auto", depth="front",
 def _solve(words, *, W, H, voice_name="auto", family="auto", depth="front",
           onsets=None, durations=None, faces=(), watermark=None,
           captions=None, graphics=(), emphasis=None, seed=0, region=None,
-          prefer=None, budget_s=2.0, families=None):
+          prefer=None, budget_s=2.0, families=None, prior=True):
     """Solve one typeset phrase.
 
     words: [(printed word, starred)] (roles.tokens). onsets/durations: per
@@ -270,7 +270,7 @@ def _solve(words, *, W, H, voice_name="auto", family="auto", depth="front",
     for t in toks:
         t.floor = CAP_MIN_FRAC * H if t.rung != "hero" else 0.0
     space = FS.Space(W, H, faces=faces, watermark=watermark,
-                     captions=captions, graphics=graphics)
+                     captions=captions, graphics=graphics, prior=prior)
     if depth == "auto":
         depth = v.get("depth", "front")
         if depth == "auto":

@@ -222,6 +222,8 @@ def build_item(ctx, edl, text, s, e, mid, voice="auto", depth="front",
                      None,
                      None, None, None, None, None, _seed(ctx, text) % 997,
                      None, None)
+    if faces is not None and not faces:
+        params["over"] = "card"          # no face here, not an unknown one
     try:
         params = motion_templates.check_params("typeset", params)
     except ValueError as err:

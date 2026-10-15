@@ -161,7 +161,10 @@ def build_doc(params, *, W, H, fps=30.0, duration=3.0, onsets=None,
         seed=int(params.get("seed") or 0),
         region=(params.get("region") if params.get("region") not in
                 (None, "", "auto") else None),
-        prefer=prefer, budget_s=budget_s)
+        prefer=prefer, budget_s=budget_s,
+        # a lockup on a plain card / black has no face to keep clear of:
+        # the talking-head prior would push one word into a corner
+        prior=str(params.get("over") or "picture") != "card")
     doc = {"version": VERSION,
            "canvas": {"w": W, "h": H, "fps": fps,
                       "aspect": round(W / max(1.0, H), 4)},
