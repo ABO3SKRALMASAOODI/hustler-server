@@ -3,10 +3,11 @@
 ## Editorial decision principles
 
 Coherence is the look. Premium reels commit to ONE grade for the whole piece
-— high-key warm, low-key teal/orange, matte filmic, or desaturated B&W with
-one accent colour — finished with fine grain over everything, a vignette or
+— high-key warm, low-key teal/orange, matte filmic, a muted noir with one
+accent colour — finished with fine grain over everything, a vignette or
 highlight bloom when the look calls for it, and a consistent transition and
-typography language. Effects are punctuation inside that look: flashes,
+typography language. Black and white is never that whole-piece grade unless
+the user asks for it: in the references it is a MOMENT (below). Effects are punctuation inside that look: flashes,
 shakes, glitches and light leaks mark real beats.
 
 - Commit to one look per edit, from the first write.
@@ -73,7 +74,8 @@ GRADES (`set_color_grade`: vibrant, warm, cool, bw, vintage, cinematic) —
 choose FOR the footage: 'cinematic' crushes and desaturates (night, drama,
 moody interiors; wrong for a bright kitchen or a colourful product);
 'vibrant' for things that should look alive; 'warm' for skin and interiors;
-'cool' for tech and rain; 'bw' for a mono look with an accent in the type.
+'cool' for tech and rain; 'bw' ONLY when the user asked for black and white
+(the write is refused otherwise — a B&W moment is a grade window, below).
 `set_grade_custom` adds continuous control after the preset: exposure,
 temperature, tint, shadows and highlights use 0 as neutral; contrast and
 saturation accept small signed deltas (`contrast=0.08` → 1.08x,

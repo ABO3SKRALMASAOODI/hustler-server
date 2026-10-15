@@ -30004,7 +30004,8 @@ TOOLS = {
          "click_times": {"type": "array", "items": {"type": "number"}}}),
     "set_color_grade": (set_color_grade, "Apply a color-grade preset to the "
                         "whole video (captions stay unstyled): vibrant, "
-                        "warm, cool, bw, vintage, cinematic — or 'none' to "
+                        "warm, cool, bw (only when the user asks for black "
+                        "and white), vintage, cinematic — or 'none' to "
                         "clear. THE tool when the user asks for a filter / "
                         "look / mood.",
                         {"preset": {"type": "string",
