@@ -1,0 +1,56 @@
+{
+  "pack": "D",
+  "v": 1,
+  "name": "Creator essay — type in the world",
+  "exemplars": ["16@0-32.6", "21", "38"],
+  "identity": "One person thinking out loud in a real place, and the place answers: the argument is written ON the room (a floor under a long shadow, a desk, a wall), BEHIND the things in it (a laptop, a calendar, a mic), and ON the person (a fingertip card, words orbiting the head, type along an outline). Every line gets its own trick; nothing repeats. The invention is per story — these are the bar, not a recipe.",
+  "classify": {
+    "cues": ["one speaker on camera", "a real room with surfaces", "argument or how-to structure", "no music bed required"],
+    "abstain_when": ["podcast with two or more speakers", "a performance or music video", "screen recording dominates (> 50%)"],
+    "user_words": ["essay", "explainer in my room", "like ref 16", "like ref 21", "type in the world", "words on the floor", "behind the laptop"]
+  },
+  "structure": [
+    {"section": "cold open", "share": [0.06, 0.12], "intent": "a line written into the room before we know who speaks", "devices": ["plane_type", "object_occluder", "layout_hud"]},
+    {"section": "claim", "share": [0.12, 0.2], "intent": "the speaker states the idea; the idea gets a body", "devices": ["anchor_face", "element_orbit", "plane_type"]},
+    {"section": "three proofs", "share": [0.4, 0.55], "intent": "one world device per proof, each attached to what the proof is about", "devices": ["object_occluder", "plane_type", "anchor_hand", "element_doodle", "layout_stack"]},
+    {"section": "turn", "share": [0.08, 0.14], "intent": "the room changes: a silhouette hold, a section in black and white, one colour kept", "devices": ["light_rim", "element_lightning"]},
+    {"section": "payoff", "share": [0.1, 0.18], "intent": "the line the piece exists for, written once, large, in the world", "devices": ["plane_type", "object_occluder", "light_dissolve"]}
+  ],
+  "palette": {
+    "world": ["plane_type", "object_occluder", "anchor_face", "anchor_hand", "anchor_pose", "anchor_track"],
+    "elements": ["element_orbit", "element_doodle", "element_particles", "element_lightning", "element_shapes", "element_pictogram"],
+    "light": ["light_dissolve", "light_trail", "light_rim"],
+    "layout": ["layout_hud", "layout_stack", "layout_glass_card"]
+  },
+  "budgets": {
+    "world_devices_min": 3,
+    "devices_per_10s": [0.8, 1.6],
+    "per_line_no_repeat": true,
+    "no_device_on_consecutive_lines": true,
+    "light_dissolve_max": 1,
+    "zooms": "optional, never default",
+    "sfx": "approved library only, where earned, never default",
+    "music": "never chosen by the agent"
+  },
+  "type_voices": [
+    {"name": "room", "role": "condensed", "case": "upper", "use": "type on planes: multiplied into the surface, the room's light on it"},
+    {"name": "note", "role": "hand", "case": "as spoken", "use": "doodles and annotations near what they point at"},
+    {"name": "card", "role": "text", "case": "sentence", "use": "glass cards on a fingertip; one fact"}
+  ],
+  "punctuation": {"family": "world", "rule": "punctuation is the room itself (a word behind an object, light on a silhouette); flashes only on a hit and within flash safety"},
+  "junctions": {"family": "match", "rule": "cut on a word that lands on a surface; the next shot carries the same surface or object"},
+  "colour_world": {
+    "base": "the room's own colour, graded gently",
+    "devices": ["a black-and-white SECTION on the turn (mono_policy), colour returning on the payoff", "one colour kept", "a silhouette hold"],
+    "never": "a whole short in black and white unless the user asks"
+  },
+  "footage_quotas": {
+    "talking_head": [0.45, 0.7],
+    "surfaces": "at least two of floor / desk / wall measured (planes.h)",
+    "objects": "at least one foreground object the speaker can stand behind",
+    "hands": "one raised-hand moment for a fingertip card",
+    "missing": "plan_footage → the acquisition dialogue (<= 3 options with cost and time); never 'not possible'"
+  },
+  "verbs": ["place_in_world", "pin_to_plane", "select_object", "attach", "add_element", "add_hud", "set_stack", "suggest_devices", "plan_footage", "proof_device"],
+  "skills": ["world", "type-in-world", "occlusion", "tracking", "elements", "layouts", "acquisition"]
+}

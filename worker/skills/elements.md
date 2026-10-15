@@ -38,8 +38,8 @@ The references never had these; build the one that fits THIS story.
 - `look_at` the window: a light dissolve needs a person on a plate darker
   or lighter than them (the light must read); embers off the edge need the
   person matte (the write says "measuring" until it is ready).
-- For a doodle or an orbit that rides the footage: `look_at(t,
-  overlay='anchors')` shows what can be attached to.
+- For a doodle or an orbit that rides the footage:
+  `look_at_world(times=[t])` shows what can be attached to.
 - Lightning and bursts need their `at` times: the hit in the user's track
   or the stressed syllable.
 

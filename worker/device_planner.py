@@ -1187,6 +1187,8 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
         shot_cards.setdefault(cid, set()).add(m["shot"])
     chosen.sort(key=lambda c: -c["score"])
     out = []
+    world = _world_candidates(edl, index, plan, intensity, max_n, asked,
+                              fam_filter)
     for rank, c in enumerate(chosen, start=1):
         card, m = c["card"], c["moment"]
         frames = _op_frames(c["op"], fps)
@@ -1211,7 +1213,31 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
                        "substitute": c["rung"].get("substitute"),
                        "notes": c["notes"],
                        "alternatives": c["alternatives"]}})
+    if world:
+        # Wave 3 (devices/INTERFACES_W3.md §9): world candidates take the
+        # free slots, and at most a third of a full list
+        room = max_n - len(out)
+        share = max(1, max_n // 3)
+        keep = max(len(out) - max(0, min(len(world), share) - room), 0)
+        out = out[:keep] + world[:max_n - keep]
+        for rank, c in enumerate(out, start=1):
+            c["rank"] = rank
     return out
+
+
+def _world_candidates(edl, index, plan, intensity, max_n, asked,
+                      fam_filter):
+    """world_planner's candidates through the cross-track peer (a module
+    that is not there, or fails, proposes nothing)."""
+    if fam_filter and not fam_filter & {"world", "layout", "matte_fx"}:
+        return []
+    try:
+        import fxgraph
+        return fxgraph.peer("world_planner:candidates", edl, index, plan,
+                            intensity=intensity, max_n=max(1, max_n // 3),
+                            asked=asked, default=[]) or []
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _dry_run(edl, chosen, op, duration, media_keys):
@@ -1436,8 +1462,9 @@ def format_candidates(cands, *, intensity=DEFAULT_INTENSITY, ledger=None,
                      + (f" — or instead: {', '.join(alts)}" if alts else ""))
     if ledger:
         lines.append(f"Ledger now: {ledger}")
-    lines.append("OPS: " + json.dumps([c["op"] for c in cands],
-                                      separators=(",", ":")))
+    lines.append("OPS: " + json.dumps(
+        [op for c in cands for op in (c.get("ops") or [c["op"]])],
+        separators=(",", ":")))
     alt_ops = {a["device"]: a["op"] for c in cands
                for a in (c.get("detail") or {}).get("alternatives") or []}
     if alt_ops:

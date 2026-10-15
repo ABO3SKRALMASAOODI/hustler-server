@@ -40,7 +40,7 @@ tracked graphic is silent and zoom-free.
 
 ## Evidence to inspect
 
-- `look_at(t, overlay='anchors')` shows the measured faces, hands and body
+- `look_at_world(times=[t])` shows the measured faces, hands and body
   on the frame before you write (and what is not measured yet).
 - The hand must be UP and visible for the whole window: check two or three
   frames. A hand that drops halfway needs `lost: hide`, or a shorter window.

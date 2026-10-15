@@ -1120,8 +1120,14 @@ def prefetch_after_index(project_id, sha, proxy_key, proxy_info, shots,
         src = source_from(sha, proxy_key, info, project_id, shots)
         if src.duration_s <= 0:
             return None
-        return ensure("faces.yunet", src, [(0.0, src.duration_s)],
-                      priority="prefetch")
+        handle = ensure("faces.yunet", src, [(0.0, src.duration_s)],
+                        priority="prefetch")
+        try:  # W3 3F: the upload-time policy (off unless SIDECAR_WARM_UPLOAD)
+            import warmers
+            warmers.warm_upload(src)
+        except Exception as e:  # noqa: BLE001
+            _log(f"upload warm-up skipped ({str(e)[:160]})")
+        return handle
     except Exception as e:  # noqa: BLE001 — an index never fails on this
         _log(f"index prefetch skipped ({str(e)[:160]})")
         return None

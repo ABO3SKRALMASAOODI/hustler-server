@@ -295,6 +295,8 @@ _READ_ONLY_EXACT = {
     "shorts_status",
     # Wave 1 verify department (1F): plan, prove and audit; none writes
     "suggest_devices", "suggest_recipes", "proof_device", "audit_motion",
+    # Wave 3 pre-production (3F): a shot list, nothing written
+    "plan_footage",
 }
 # Reaches something outside this project's own files: a stock library, a URL,
 # a generation provider, a live web page.

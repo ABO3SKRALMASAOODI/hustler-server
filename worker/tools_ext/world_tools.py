@@ -32,7 +32,7 @@ from tools_ext import _write
 DEPARTMENT = "world"
 
 VERBS = ("attach", "track_point", "select_object", "pin_to_plane",
-         "place_in_world", "remove_world")
+         "place_in_world", "remove_world", "look_at_world")
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _LANDMARK_KIND = {"face": "landmarks.face", "head": "landmarks.face",
                   "hand": "landmarks.hand", "pose": "landmarks.pose"}
@@ -557,6 +557,15 @@ def remove_world(ctx, ids):
     return _write.commit(ctx, ops, f"removed/detached {', '.join(done)}")
 
 
+def look_at_world(ctx, times=None, output_times=None, start=None, end=None):
+    """READ: look_at with the measured anchors drawn (faces, hands, pose,
+    every track/object/plane definition) — the world's own eyes. It is
+    look_at(overlay='anchors'), reachable where the core enum is fixed."""
+    import agent_tools
+    return agent_tools.look_at(ctx, times=times, output_times=output_times,
+                               start=start, end=end, overlay="anchors")
+
+
 # ── catalog ──────────────────────────────────────────────────────────────
 
 _TO = ("face, face.<eye_l|eye_r|iris_l|iris_r|nose|mouth|chin|forehead|"
@@ -643,6 +652,15 @@ TOOL_SPECS = {
          "quad": {"type": "array", "items": {"type": "array",
                                              "items": {"type": "number"}}},
          "start": {"type": "number"}, "end": {"type": "number"}}),
+    "look_at_world": (
+        look_at_world,
+        "READ: frames (source times, or output_times of the edit) with the "
+        "measured anchors drawn: face mesh, hands, pose and every track/"
+        "object/plane definition. Check a hand is up, an object's outline, "
+        "a quad, before and after a world write.",
+        {"times": {"type": "array", "items": {"type": "number"}},
+         "output_times": {"type": "array", "items": {"type": "number"}},
+         "start": {"type": "number"}, "end": {"type": "number"}}),
     "remove_world": (
         remove_world,
         "Remove world definitions (track/object/plane/light ids; graphics "
@@ -659,7 +677,7 @@ REQUIRED_ARGS = {
     "remove_world": ["ids"],
 }
 
-WRITE_TOOLS = set(VERBS)
+WRITE_TOOLS = set(VERBS) - {"look_at_world"}
 
 COMPACT = {
     "attach": (
@@ -679,4 +697,7 @@ COMPACT = {
         "floor/screen (quad+t), follow her hand, on his fingertip, between "
         "his hands, round his head, next to his face."),
     "remove_world": "Remove world definitions or detach graphics (ids).",
+    "look_at_world": (
+        "READ: look_at with measured anchors drawn (face mesh, hands, pose, "
+        "tracks, objects, planes)."),
 }
