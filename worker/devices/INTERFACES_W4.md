@@ -73,10 +73,10 @@ Everything in `INTERFACES.md` §0 and `INTERFACES_W1.md` §0 still holds:
 
 | Seam | Wave 4 adds |
 |---|---|
-| `EDL.fx` tags (`fx_schemas/`) | `depth`, `time` (4A, `fx_schemas/depth.py`, TRACK `4a`); `ui_media` (4B, `fx_schemas/ui.py`, TRACK `4b`) |
-| fx compilers | `depth_fx:DEPTH`, `timewarp:TIME`, `ui_scene:UI_MEDIA` |
+| `EDL.fx` tags (`fx_schemas/`) | `depth`, `time` (4A, `fx_schemas/depth.py`, TRACK `4a`); `ui_media` (4B, `fx_schemas/ui.py`, TRACK `4b`); `broll` (4C, `fx_schemas/broll.py`, TRACK `4c`) |
+| fx compilers | `depth_fx:DEPTH`, `timewarp:TIME`, `ui_scene:UI_MEDIA`, `broll_fx:BROLL` |
 | Sidecar kinds | `depth.small` (reserved name; 4A ships the runner unless 3B merged one first — same model id, same key) |
-| Departments (`tools_ext`) | `world`: `add_depth_effect`, `add_time_effect`, `remove_depth_time`, `add_ui_scene`, `remove_ui_scene`, `source_broll`; `verify`: `critique_short`; new department `delivery`: `apply_format`, `deliver_aspects`, `retypeset_language` |
+| Departments (`tools_ext`) | `world`: `add_depth_effect`, `add_time_effect`, `remove_depth_time`, `add_ui_scene`, `remove_ui_scene`, `source_broll`, `remove_broll`; `verify`: `critique_short`; new department `delivery`: `apply_format`, `deliver_aspects`, `retypeset_language` |
 | Card prefixes | `depth` 4A, `time` 4A, `ui` 4B, `broll` 4C |
 | Motion templates | `ui_scene` (4B, file drop `motion/templates/ui_scene.html`) |
 | Skills | `depth-time` (4A), `explainers` (4B), `broll-director` (4C), `delivery` (4E), `critic` (4F) |
@@ -123,6 +123,7 @@ Department compact budgets (12,000 B each, tested): Wave 4's share of
 | 4A | `fx_schemas/depth.py` | `depth` | `DepthFx` | world, screen | `depth_fx:DEPTH` |
 | 4A | | `time` | `TimeFx` | world | `timewarp:TIME` |
 | 4B | `fx_schemas/ui.py` | `ui_media` | `UiMediaFx` | pre_captions | `ui_scene:UI_MEDIA` |
+| 4C | `fx_schemas/broll.py` | `broll` | `BrollFx` | screen | `broll_fx:BROLL` |
 
 ### 3.2 `depth` (4A)
 
@@ -180,6 +181,34 @@ footage into the slot's solved rectangle per frame (rounded to the card's
 radius), underneath the scene's chrome; `check` refuses an unknown motion
 item, slot, template or layer.
 
+### 3.5 `broll` (4C)
+
+A full-frame cutaway over [start, end) at the `screen` stage (after the
+camera, before overlays and captions: speech and captions continue over
+it). Fields: `source` (FxSource kind `asset` only; `offset_s` into a clip,
+`loop`), `media` video|still, `fit` cover|contain|frame (archival: the
+whole picture on a soft, darkened copy of itself), `focus_x`/`focus_y` (the
+cover crop's aim, from the scorer's saliency), `move` (stills only:
+2.5D through the asset's `depth.small` when measured, else Ken Burns —
+rung `substitute`), `depth` (bool), `match` {`asset_key` (.cube matched to
+the hero frame), `strength`, `hero_t`, `de_before`, `de_after`}, `grain`,
+`soften` (the de-stocking finish), `credit` (REQUIRED: the licence ledger
+line — `provider`, `license`, `title`, `author`, `license_url`,
+`page_url`, `source_url`, `attribution_required`, `line`; NC / ND /
+reserved licences are refused by the schema; attribution-required
+licences need `author` or `line`), `moment` (what it proves).
+`broll_fx.ledger(edl)` lists every cutaway's line in program order.
+`flash_times`: a window under 0.5 s is one flash at `start`. Rungs: full;
+reduced (no match grade); substitute (a still without depth); omit.
+
+Sourcing (`broll_source.py`): Pexels, Pixabay (keys), Openverse,
+Wikimedia Commons (video transcodes + photos), NASA Image and Video
+Library, the Internet Archive (archival only); `BROLL_PROVIDERS` (W4
+config) narrows them. Scoring (`broll_score.py`): see §6.1 of the release
+note; pure numpy/OpenCV on review frames, every lane. Acquisition reuses
+`stock.download` / the `stock_acquire` egress job (redesign policy);
+`stock.download` now refuses a "photo" whose bytes are not an image.
+
 ---
 
 ## 4. Verbs (department tools)
@@ -188,7 +217,7 @@ item, slot, template or layer.
 |---|---|---|
 | `tools_ext/depth_tools.py` | world | `add_depth_effect(kind, start?, end?, on?, source?, asset_key?, src_t?, move?, focus?, focus_from?, rack_at?, text?, …)`, `add_time_effect(kind, start, end, …)`, `remove_depth_time(ids)` |
 | `tools_ext/ui_tools.py` | world | `add_ui_scene(scenes, start?, end?, data?, theme?, media?, id?)`, `remove_ui_scene(ids)` |
-| `tools_ext/broll_tools.py` | world | `source_broll(moments?, max?, providers?, place?)` |
+| `tools_ext/broll_tools.py` | world | `source_broll(moments, max?, providers?, place?)`, `remove_broll(ids)` |
 | `tools_ext/format_tools.py` | delivery | `apply_format(format)`, `deliver_aspects(ratios?, apply?)`, `retypeset_language(lang, translation?, srt?, captions_only?)` |
 | `tools_ext/critic_tools.py` | verify | `critique_short(job_id?, asset_key?, render?, deep?)` (READ) |
 

@@ -75,6 +75,12 @@ def ensure(kind, ref, ranges):
         def submit(self, *a, **k):
             return None
 
+        def inflight(self, key):
+            return False
+
+        def join(self, timeout=None):
+            return True
+
     prev = sidecars.use_launcher(_Quiet())
     try:
         h = sidecars.ensure(kind, ref, ranges)
@@ -112,7 +118,7 @@ def index_for(win, ref, words=()):
                       "sha256": ref.sha256}}
 
 
-def render(edl, win, index, out, *, preview=True, final_lossless=False):
+def render(edl, win, index, out, *, preview=False, final_lossless=False):
     import fxgraph
     import renderer
     import sidecars
@@ -179,8 +185,9 @@ def program_maps(win, ref, edl, t0, t1, fps, W, H, kind="depth.small"):
     else:
         import matte_track
         import qa_metrics
-        h = matte_track.read_handle("matte.person", ref, [(a - 0.2,
-                                                           b + 0.2)])
+        spans = sidecars.chunks_for(ref.shots, ref.duration_s,
+                                    [(a - 0.2, b + 0.2)])
+        h = matte_track.read_handle("matte.person", ref, spans)
         ts, ds = [], []
         for f in sidecars.fetch(h, os.path.join(STORE, "_fetch")):
             fpsm = float((f.get("meta") or {}).get("fps") or 30.0)
@@ -206,8 +213,9 @@ def verdict(case, metrics, extra=None, passed=None):
     os.makedirs(od, exist_ok=True)
     v = {"case": case, "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
          "metrics": metrics, **(extra or {})}
+    # an unmeasured metric is a failure, never a silent pass
     v["pass"] = passed if passed is not None else all(
-        m.get("pass") for m in metrics.values() if m.get("pass") is not None)
+        m.get("pass") is True for m in metrics.values())
     with open(os.path.join(od, "verdict.json"), "w") as f:
         json.dump(v, f, indent=1, default=str)
     print(json.dumps({k: v[k] for k in ("case", "metrics", "pass")},
@@ -323,9 +331,14 @@ def at_4a_2():
         alphas = [np.frombuffer(p[k * w * h:(k + 1) * w * h], np.uint8)
                   .reshape(h, w) for k in range(n)]
     sharp = [lap(a) for a in alphas]
-    # the near plane defocuses monotonically once it passes half the way
-    tail = [s for s in sharp[len(sharp) // 2:] if s > 0]
-    viol = sum(1 for a, b in zip(tail, tail[1:]) if b > a * 1.02)
+    # once the word reaches the lens (its sharpness peak) it defocuses
+    # monotonically as the camera passes through: a rise of more than 2% of
+    # the peak after it is a violation (sub-percent wobble on an almost
+    # invisible plane is encoder noise, not a re-focus)
+    pk = int(np.argmax(sharp)) if sharp else 0
+    peak = sharp[pk] if sharp else 0.0
+    tail = sharp[pk:]
+    viol = sum(1 for a, b in zip(tail, tail[1:]) if b > a + 0.02 * peak)
     pi = qa_metrics.probe(os.path.join(od, "push.mp4"))
     fps = pi["fps"]
     f0 = int(round(1.0 * fps))

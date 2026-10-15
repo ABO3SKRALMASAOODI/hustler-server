@@ -1,0 +1,81 @@
+{
+  "id": "broll_cutaway",
+  "family": "world",
+  "verb": "source_broll",
+  "fx_type": "broll",
+  "stage": "screen",
+  "params": {
+    "media": "video",
+    "fit": "cover",
+    "duration_s": [
+      1.8,
+      2.4,
+      3.2
+    ],
+    "span": [
+      "phrase"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:overlay"
+    ],
+    "footage": "a licensed clip in the project that SHOWS what the words claim (source_broll finds, judges and grades it)"
+  },
+  "binds_to": [
+    "word",
+    "phrase_end",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 2,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 3,
+      "min_gap_s": 5
+    },
+    "charged": {
+      "per_short": 5,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "in the first second (the face establishes the speaker first)",
+    "generic wallpaper that proves nothing the words say",
+    "the same library look three times in a row (vary provider, scale and motion)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "reduced": "cut in without its match grade"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 6,
+      "batch": 6,
+      "local": 3
+    },
+    "fixed_ms": 200
+  },
+  "exemplars": [
+    "12@0.417–16.5",
+    "07@9.0–17.9"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "A licensed clip that proves the line, graded to the camera's colour with matched grain; speech and captions continue over it",
+  "skill": "broll-director"
+}

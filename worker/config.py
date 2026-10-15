@@ -598,6 +598,10 @@ DEPTH_TORCH_THREADS = int(os.getenv("DEPTH_TORCH_THREADS", "4"))
 # The motion critic's rendered-frame sampling rate (frames per second it
 # decodes from a render; flash analysis always reads every frame).
 CRITIC_SAMPLE_FPS = float(os.getenv("CRITIC_SAMPLE_FPS", "6"))
+# Track 4C: the B-roll libraries source_broll may search (comma list of
+# pexels, pixabay, openverse, wikimedia, nasa, archive); empty = all that
+# are configured (keyed ones need their keys).
+BROLL_PROVIDERS = os.getenv("BROLL_PROVIDERS", "").strip()
 # ---- W4 end
 
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via

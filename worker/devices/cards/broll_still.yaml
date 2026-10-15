@@ -1,0 +1,44 @@
+# Track 4C device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (broll_still). Contract: devices/INTERFACES.md §5,
+# INTERFACES_W4.md §3.5. Authoring source; compile with
+#   cd worker && python -m devices.compiler
+id: broll_still
+family: world
+verb: source_broll
+fx_type: broll
+stage: screen
+params:
+  media: still
+  fit: cover
+  move:
+  - {path: push_in, amount: 0.3, ease: in_out}
+  - {path: drift_left, amount: 0.3, ease: in_out}
+  - {path: rise, amount: 0.3, ease: in_out}
+  duration_s: [2.0, 2.6]
+  span: [phrase]
+needs:
+  sidecars: []
+  lane_features: [ffmpeg:overlay]
+  footage: a licensed photo in the project (archive, product, place); it moves in 2.5D through its measured depth, Ken Burns until then
+binds_to: [word, phrase_end, section]
+budget:
+  calm: {per_short: 2, min_gap_s: 8}
+  designed: {per_short: 3, min_gap_s: 5}
+  charged: {per_short: 4, min_gap_s: 3}
+never:
+- a photo that sits dead on screen (every still moves)
+- the same move on two photos in a row
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs:
+- full
+- {reduced: cut in without its match grade}
+- {substitute: depth_ken_burns}
+- omit
+cost:
+  ms_per_frame: {interactive: 10, batch: 10, local: 5}
+  fixed_ms: 300
+exemplars: ["33@2.9–3.37", "36@6.33–8.27"]
+verify: [region_locality, determinism]
+status: live
+description: A licensed photo as a cutaway that never sits dead - a 2.5D move through its depth, graded to the camera
+skill: broll-director
