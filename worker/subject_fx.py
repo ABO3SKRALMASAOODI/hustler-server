@@ -798,15 +798,21 @@ class _Compiler:
 
     # -- emit ------------------------------------------------------------
     def stage(self, ctx, items):
-        """Each item is laid over the running program in start order. An
-        item that fails to compile is rolled back ALONE (its filters gone,
-        any mask pad it took from a provider closed with a nullsink, the
-        program label as it was) and reported omit: its siblings in this
-        stage still draw (fxgraph's own rollback drops the whole group)."""
+        """Each item is laid over the running program in layer order, then
+        start order (``_lay_order``): a background swap first, then the
+        tonal moves that re-grade the picture (isolate, negate, exposure),
+        then the drawn subject devices (echo, poster, fill, outline, glow).
+        Where windows overlap a drawn device keeps its colour: red clones
+        over an isolated walk stay red (W1-S3), they are not greyed by the
+        isolate that keeps colour on the live subject. An item that fails
+        to compile is rolled back ALONE (its filters gone, any mask pad it
+        took from a provider closed with a nullsink, the program label as it
+        was) and reported omit: its siblings in this stage still draw
+        (fxgraph's own rollback drops the whole group)."""
         label = ctx.label
         edl_cache = plan_edl(ctx.plan)
         real_mask = ctx.mask
-        for it in sorted(items, key=lambda i: (float(i["start"]), i["id"])):
+        for it in sorted(items, key=_lay_order):
             st = _state(ctx.plan).get(it["id"]) or {"mode": "full"}
             mark, taken = len(ctx.parts), []
 
@@ -831,6 +837,20 @@ class _Compiler:
                 ctx.mask = real_mask
         ctx.label = label
         return label
+
+
+# Lay order within the stage (see _Compiler.stage).
+TONAL_KINDS = ("isolate", "negate", "exposure")
+
+
+def _lay_order(it):
+    if it.get("type") == "background":
+        tier = 0
+    elif it.get("kind") in TONAL_KINDS:
+        tier = 1
+    else:
+        tier = 2
+    return (tier, float(it["start"]), str(it["id"]))
 
 
 def _outputs(parts):

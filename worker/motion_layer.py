@@ -460,12 +460,26 @@ def overlay_clip(parts, vlabel, idx, item, clip, fps, tag, plan=None):
     return f"{tag}o"
 
 
+def _caption_track(item):
+    return bool(item.get("_synthetic")) or str(item.get("id") or "") \
+        .startswith("__captions_") or item.get("template") == "caption_motion"
+
+
 def append_graph(parts, vlabel, inputs, layer, fps, plan=None):
     """Composite this layer's clips over [vlabel]; returns the new label.
     ``plan``: the render's fxgraph plan, handed to overlay_clip for
     composite items (track 1C)."""
     j = 0
-    for idx, item, clip in inputs or []:
+    # The motion caption track lives on the below_captions layer too; it is
+    # laid LAST there, over every other graphic of that layer, as libass
+    # captions burn over them (Oct 11 run, s03: a full-frame photo on
+    # below_captions hid the captions for 4.4 s while every audit said the
+    # words were shown). A layer without the track keeps its order.
+    seq = list(inputs or [])
+    if layer == "below_captions":
+        seq = ([x for x in seq if not _caption_track(x[1])]
+               + [x for x in seq if _caption_track(x[1])])
+    for idx, item, clip in seq:
         if (item.get("layer") or "above_captions") != layer:
             continue
         # the plan only when the renderer passes one: the call keeps its

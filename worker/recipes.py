@@ -21,6 +21,8 @@ from the cut, never a house style:
                       works" or number moment (01@0-3.79)
   thermal_flip        the picture flips to thermal for a breath on a heat /
                       energy / body word (17@1.83, 33@6.0)
+  light_figure        the world drops to black and the speaker glows in the
+                      accent for one phrase (01@1.708, 33, 36, 41)
   echo_trail          the speaker leaves a fading trail of copies on a word
                       of speed or motion (40@18.3-19.3)
 
@@ -61,6 +63,9 @@ how works work working mechanism system systems built build building
 design designed engineering engineer code software model models data
 process machine machines factory factories robot robots architecture
 structure layer layers network""".split())
+LIGHT_WORDS = frozenset("""
+light lit glow glowing bright brilliant spark sparks electric electricity
+lightning idea ideas vision genius alive soul spirit""".split())
 IDENTITY_WORDS = frozenset("""
 i i'm me myself who identity person people human humans man woman character
 founder ceo nobody somebody everyone everybody""".split())
@@ -118,6 +123,12 @@ RECIPES = {
                "heat, energy, the body, what is inside", ["17@1.83",
                                                           "33@6.0"],
                ("finish",)),
+        Recipe("light_figure", "the speaker becomes light on black",
+               "energy, power, an idea that lights up, the moment someone "
+               "becomes the symbol: the world drops to black and the figure "
+               "glows in the accent", ["01@1.708", "33@6.0", "36@4-6",
+                                       "41@9-11.7"], ("matte_fx",),
+               matte=True),
         Recipe("echo_trail", "a fading trail of copies", "speed, motion, "
                "momentum: the word is about moving", ["40@18.3-19.3",
                                                       "22@6.0-7.3"],
@@ -308,9 +319,11 @@ def build(name, plan, *, ids=(), accent=None, variant_keys=None,
         m = _payoff(plan) or _strongest(plan, lambda x: True)
         if m is None:
             return None, None, "no payoff or stressed word"
+        # a fill's decay frames are the LAST decay_f frames of its window:
+        # two full frames + three decaying = a five-frame window
         return [{"id": nid(), "type": "subject", "stage": "world",
                  "start": _fmt_t(m["t"]),
-                 "end": _fmt_t(m["t"] + _frames(2, fps) + 0.004),
+                 "end": _fmt_t(m["t"] + _frames(2 + 3, fps) + 0.004),
                  "kind": "fill", "colour": "white", "decay_f": 3,
                  "device": "subject_fill_flash", "bind": _bind(m)}], m, (
             f"white silhouette for 2 frames on "
@@ -362,6 +375,32 @@ def build(name, plan, *, ids=(), accent=None, variant_keys=None,
                  "bind": _bind(m)}], m, (
             f"thermal for a breath on '{m.get('word_raw') or m.get('word')}' "
             f"({start:.2f}-{end:.2f}s)")
+    if name == "light_figure":
+        m = _strongest(plan, lambda x: _word(x) in THERMAL_WORDS
+                       or _word(x) in LIGHT_WORDS or "emotion" in _tags(x)) \
+            or _payoff(plan)
+        if m is None:
+            return None, None, "no energy, light or payoff word"
+        start = float(m["t"])
+        end = min(prog - 0.05, max(_phrase_end(m, plan, 1.2), start + 0.7))
+        col = accent or "accent"
+        bind = _bind(m)
+        items = [
+            {"id": nid(), "type": "background", "stage": "world",
+             "start": _fmt_t(start), "end": _fmt_t(end), "kind": "solid",
+             "colour": "black", "device": "background_swap", "bind": bind},
+            {"id": nid(), "type": "subject", "stage": "world",
+             "start": _fmt_t(start), "end": _fmt_t(end), "kind": "fill",
+             "colour": col, "intensity": 0.55, "device": "subject_fill_flash",
+             "bind": bind},
+            {"id": nid(), "type": "subject", "stage": "world",
+             "start": _fmt_t(start), "end": _fmt_t(end), "kind": "glow",
+             "colour": col, "radius": 0.035, "intensity": 1.0,
+             "device": "subject_glow", "bind": bind}]
+        return items, m, (
+            f"the world to black, the figure lit in the accent on "
+            f"'{m.get('word_raw') or m.get('word')}' "
+            f"({start:.2f}-{end:.2f}s)")
     if name == "echo_trail":
         m = _strongest(plan, lambda x: _word(x) in SPEED_WORDS)
         if m is None:
@@ -404,6 +443,8 @@ def fit(name, plan, landing):
         0.2 if "number" in tags else 0.0,
         "thermal_flip": 0.35 if w in THERMAL_WORDS else 0.0,
         "echo_trail": 0.3 if w in SPEED_WORDS else 0.0,
+        "light_figure": 0.3 if w in LIGHT_WORDS or w in THERMAL_WORDS else
+        0.1 if "emotion" in tags else 0.0,
     }.get(name, 0.0)
     return round(min(1.0, 0.55 * base + bonus + 0.1), 3)
 

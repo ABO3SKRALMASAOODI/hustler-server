@@ -339,3 +339,41 @@ def test_a_junction_handle_never_reaches_across_a_source_camera_cut():
     assert renderer._fx_handle_src(("seg", 0, 2.9), side="out",
                                    shot_starts=[7.0, 15.0],
                                    **args) is not None
+
+
+def test_the_motion_caption_track_is_laid_over_below_captions_graphics():
+    """Oct 11 run, s03: a full-frame photo on below_captions covered the
+    motion captions for 4.4 s (the track is a below_captions item drawn
+    first) while the audits said every word was shown. The track is laid
+    last on its layer, as libass captions burn over those graphics."""
+    import motion_layer
+    from types import SimpleNamespace
+    clip = SimpleNamespace(x=0, y=0)
+    photo = {"id": "iss_photo", "template": "html", "layer": "below_captions",
+             "start": 8.46, "end": 12.86}
+    caps = {"id": "__captions_0", "template": "caption_motion",
+            "layer": "below_captions", "start": 0.0, "end": 20.0,
+            "_synthetic": True}
+    parts = []
+    motion_layer.append_graph(parts, "v", [(3, caps, clip), (4, photo, clip)],
+                              "below_captions", 30.0)
+    order = [p.split("]")[0].lstrip("[") for p in parts if ":v]" in p]
+    assert order == ["4:v", "3:v"]          # the photo first, captions over it
+
+
+def test_drawn_subject_devices_lay_over_the_tonal_ones():
+    """W1-S3: red clones (s3_clones) and an isolate (s3_mono) on the same
+    window were laid in id order, so the isolate greyed the clones: the
+    'one colour kept' read was lost. Backgrounds lay first, then tonal
+    moves, then drawn devices; start order within each."""
+    import subject_fx
+    items = [{"id": "s3_clones", "type": "subject", "kind": "echo",
+              "start": 0.4},
+             {"id": "s3_mono", "type": "subject", "kind": "isolate",
+              "start": 0.4},
+             {"id": "z_bg", "type": "background", "kind": "solid",
+              "start": 0.9},
+             {"id": "a_fill", "type": "subject", "kind": "fill",
+              "start": 0.1}]
+    order = [i["id"] for i in sorted(items, key=subject_fx._lay_order)]
+    assert order == ["z_bg", "s3_mono", "a_fill", "s3_clones"]

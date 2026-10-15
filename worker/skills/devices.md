@@ -50,7 +50,9 @@ shorts must not wear one house style.
   shape; `negative_hits` — 1-frame negatives into the payoff;
   `white_silhouette`; `lab_scan` — a registered variant sequence on a
   mechanism or a number; `thermal_flip` — a breath of thermal on heat,
-  energy, the body; `echo_trail` — a trail of copies on a speed word.
+  energy, the body; `light_figure` — the world drops to black and the
+  speaker glows in the accent; `echo_trail` — a trail of copies on a
+  speed word.
   Each names the word it
   lands on, why, a reference exemplar and the exact ops; moves the other
   shorts of the batch used rank lower (freshness).

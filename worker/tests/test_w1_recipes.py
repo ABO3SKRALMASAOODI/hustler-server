@@ -157,3 +157,14 @@ def test_apply_recipe_writes_once_per_short_through_the_batch_path():
     assert [i["id"] for i in fx] == ["rc_mono_until_turn_1"]
     again = agent_tools.TOOLS["apply_recipe"][0](ctx, name="mono_until_turn")
     assert again.startswith("REJECTED") and "once per short" in again
+
+
+def test_the_white_silhouette_holds_two_frames_then_decays_three():
+    """A fill's decay frames are the last decay_f frames of its window: a
+    two-frame window with decay_f 3 drew one frame full and one decayed."""
+    _edl, plan = _plan()
+    items, _landing, _why = recipes.build("white_silhouette", plan)
+    it = items[0]
+    fps = plan.get("fps") or 30.0
+    frames = round((it["end"] - it["start"]) * fps)
+    assert frames == 2 + it["decay_f"] == 5

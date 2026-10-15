@@ -249,7 +249,8 @@ TOOL_SPECS = {
         "silhouette_hold, negative_hits (1-frame negatives into the "
         "payoff), white_silhouette (the speaker flashes white on the "
         "payoff), lab_scan (registered variant strobe), thermal_flip, "
-        "echo_trail. Ranked by story fit x freshness: a move the other "
+        "light_figure (the speaker as light on black), echo_trail. Ranked "
+        "by story fit x freshness: a move the other "
         "shorts of the same batch used ranks lower. Each comes with the "
         "word it lands on, why, a reference exemplar and the exact "
         "apply_edit_batch ops. Silent, zoom-free, flash-safe.",
@@ -264,7 +265,7 @@ TOOL_SPECS = {
         {"name": {"type": "string", "enum": [
             "mono_until_turn", "colour_kept_payoff", "silhouette_hold",
             "negative_hits", "white_silhouette", "lab_scan", "thermal_flip",
-            "echo_trail"]},
+            "light_figure", "echo_trail"]},
          "at": {"type": "number"}}),
 }
 

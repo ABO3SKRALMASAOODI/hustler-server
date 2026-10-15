@@ -157,18 +157,25 @@ PLATES = {"media/w1/starship.mp4": fx("V13", "starship_launch_4k60.mp4"),
 def s3_walkon(out_dir):
     path = fx("V12", "walkon.mp4")
     S = setup(path, [(6.5, 10.4), (14.5, 19.0)])
-    keep = [(7.0, 9.9), (15.0, 18.6)]
-    # program: [0, 2.9) the walk, [2.9, 6.5) the MCU
+    # the camera cuts to the MCU at 15.115 s (scenes: 15.12); a keep that
+    # starts before it shows 3 frames of the wide (keep tools snap off it)
+    keep = [(7.0, 9.9), (15.12, 18.62)]
+    # program: [0, 2.9) the walk, [2.9, 6.4) the MCU
     ops = [
         # twin / ghost clones as he walks (40@18.3-19.3 red ghosts; 22@6.0)
+        # the world goes grey while he walks (one colour kept: 40@0-23)...
+        up({"id": "s3_mono", "type": "subject", "stage": "world",
+            "start": 0.4, "end": 1.9, "kind": "isolate", "scope": "subject",
+            "device": "subject_isolate"}),
+        # ...and he leaves solid red clones (40@18.3-19.3)
         up({"id": "s3_clones", "type": "subject", "stage": "world",
             "start": 0.4, "end": 1.9, "kind": "echo",
-            "echo": {"mode": "clone", "offsets_f": [4, 8], "opacity": 0.6,
-                     "decay": 0.25, "tint": "#e8202a"},
+            "echo": {"mode": "clone", "offsets_f": [8, 16],
+                     "opacity": 0.95, "decay": 0.2, "tint": "#e8202a"},
             "device": "subject_echo"}),
-        # white silhouette flash on a stride (22@8.43)
+        # white silhouette flash on a stride (22@8.43): 2 frames + 3 decay
         up({"id": "s3_flash1", "type": "subject", "stage": "world",
-            "start": 2.2, "end": 2.27, "kind": "fill", "colour": "white",
+            "start": 2.2, "end": 2.37, "kind": "fill", "colour": "white",
             "decay_f": 3, "device": "subject_fill_flash"}),
         # column wipe at the cut (22@4.9-5.2)
         up({"id": "s3_cols", "type": "junction", "stage": "junction",
@@ -183,7 +190,7 @@ def s3_walkon(out_dir):
             "device": "background_subject_hold"}),
         # white silhouette flash on the MCU (40@4.67, 20@9.10)
         up({"id": "s3_flash2", "type": "subject", "stage": "world",
-            "start": 5.4, "end": 5.47, "kind": "fill", "colour": "white",
+            "start": 5.4, "end": 5.57, "kind": "fill", "colour": "white",
             "decay_f": 3, "device": "subject_fill_flash"}),
     ]
     return render(S, _base(keep, 0.5), ops,
@@ -205,7 +212,8 @@ def s3_ledwall(out_dir):
             "keep_footage": False, "colour": "black",
             "device": "subject_poster"}),
     ]
-    return render(S, _base(keep, 0.55), ops,
+    # the speaker stands at x 0.41 of the 16:9 frame: centre the 9:16 on him
+    return render(S, _base(keep, 0.42), ops,
                   os.path.join(out_dir, "s3_b_ledwall.mp4"))
 
 
@@ -220,7 +228,7 @@ def s3_stage(out_dir):
             "radius": 0.03, "intensity": 0.9, "device": "subject_glow"}),
         # and the white silhouette hit to close (22@12.33)
         up({"id": "s3_flash3", "type": "subject", "stage": "world",
-            "start": 1.9, "end": 1.98, "kind": "fill", "colour": "white",
+            "start": 1.9, "end": 2.14, "kind": "fill", "colour": "white",
             "decay_f": 4, "device": "subject_fill_flash"}),
     ]
     return render(S, _base(keep, 0.62), ops,
@@ -260,10 +268,17 @@ def s2_lab(out_dir):
                         "hold_f": 2} for k in vkeys],
             "pattern": "sequence", "fit": "cover",
             "device": "strobe_frames"}),
-        # a glowing silhouette on the hold after it (01@1.708)
+        # the robot becomes light on black after it (01@1.708): the
+        # light_figure recipe's three items
+        up({"id": "s2_black", "type": "background", "stage": "world",
+            "start": 1.8, "end": 3.4, "kind": "solid", "colour": "black",
+            "device": "background_swap"}),
+        up({"id": "s2_lit", "type": "subject", "stage": "world",
+            "start": 1.8, "end": 3.4, "kind": "fill", "colour": "#ff2a1a",
+            "intensity": 0.55, "device": "subject_fill_flash"}),
         up({"id": "s2_glow", "type": "subject", "stage": "world",
-            "start": 1.8, "end": 3.4, "kind": "glow", "colour": "#7fd8ff",
-            "radius": 0.035, "intensity": 0.95, "device": "subject_glow"}),
+            "start": 1.8, "end": 3.4, "kind": "glow", "colour": "#ff2a1a",
+            "radius": 0.035, "intensity": 1.0, "device": "subject_glow"}),
         # pixel stretch into the launch (36@0)
         up({"id": "s2_stretch", "type": "junction", "stage": "junction",
             "at": 5.0, "style": "pixel_stretch", "duration_s": 0.5,
@@ -329,6 +344,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--piece", action="append")
+    ap.add_argument("--boards", help="build the boards from --out into this "
+                    "directory (no renders)")
     a = ap.parse_args(argv)
     os.environ.setdefault("VALMERA_SIDECAR_DIR",
                           os.path.join(VALMERA, "engines", "w1", "sidecars"))
@@ -337,8 +354,12 @@ def main(argv=None):
     os.environ.setdefault("YUNET_MODEL", os.path.join(
         VALMERA, "models", "face_detection_yunet_2023mar.onnx"))
     os.makedirs(a.out, exist_ok=True)
+    if a.boards:
+        print(build_boards(a.out, a.boards))
+        return
     pieces = a.piece or ["S2", "S3"]
-    summary = {}
+    spath = os.path.join(a.out, "summary.json")
+    summary = json.load(open(spath)) if os.path.exists(spath) else {}
     if "S3" in pieces:
         r = [s3_walkon(a.out), s3_ledwall(a.out), s3_stage(a.out)]
         summary["S3"] = {os.path.basename(p): {"wall_s": w, "rows": rows}
@@ -347,9 +368,74 @@ def main(argv=None):
     if "S2" in pieces:
         p, w, rows = s2_lab(a.out)
         summary["S2"] = {os.path.basename(p): {"wall_s": w, "rows": rows}}
-    with open(os.path.join(a.out, "summary.json"), "w") as f:
+    with open(spath, "w") as f:
         json.dump(summary, f, indent=1)
     print(json.dumps(summary, indent=1)[:4000])
+
+
+
+# ── the boards: ours against the named reference moments ──────────────────
+
+BOARD_ROWS = {
+    "W1-S3": [
+        ("s3_a_walkon.mp4", 30, "red ghost clones on the walk",
+         "40", 18.8, "40@18.8 red ghost clones"),
+        ("s3_a_walkon.mp4", 66, "white silhouette flash (2 frames + decay)",
+         "22", 8.43, "22@8.43 white silhouette flash"),
+        ("s3_a_walkon.mp4", 120, "the speaker held, the world swaps",
+         "20", 7.40, "20@7.40 subject held, background swaps"),
+        ("s3_b_ledwall.mp4", 30, "poster: the speaker on the accent field",
+         "38", 0.6, "38@0.6 poster field"),
+        ("s3_b_ledwall.mp4", 66, "silhouette on a cream field",
+         "23", 2.5, "23@2.5 head silhouette poster"),
+        ("s3_c_stage.mp4", 20, "a rim of light on black",
+         "01", 1.8, "01@1.8 glowing silhouette"),
+        ("s3_c_stage.mp4", 48, "white silhouette hit",
+         "40", 4.67, "40@4.67 silhouette flash"),
+    ],
+    "W1-S2": [
+        ("s2_lab.mp4", 16, "registered variant strobe: negative",
+         "01", 0.5, "01@0.5 registered strobe"),
+        ("s2_lab.mp4", 20, "registered variant strobe: blueprint",
+         "01", 0.5, "01@0.5 registered strobe"),
+        ("s2_lab.mp4", 22, "registered variant strobe: thermal",
+         "17", 1.83, "17@1.83 thermal flip"),
+        ("s2_lab.mp4", 60, "glowing silhouette (the robot)",
+         "01", 1.8, "01@1.8 glowing silhouette"),
+        ("s2_lab.mp4", 120, "pixel-stretch junction into the launch",
+         "36", 0.6, "36@0.6 pixel stretch"),
+        ("s2_lab.mp4", 166, "thermal on the plume",
+         "17", 1.83, "17@1.83 thermal"),
+    ],
+}
+
+
+def frame_png(path, n, out, w=360):
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path, "-vf",
+                    f"select='eq(n\\,{int(n)})',scale={w}:-2",
+                    "-fps_mode", "passthrough", "-frames:v", "1", out],
+                   check=True)
+    return out
+
+
+def build_boards(out_dir, dest):
+    os.makedirs(dest, exist_ok=True)
+    made = []
+    for name, rows in BOARD_ROWS.items():
+        cells = []
+        for k, (clip, n, label, rid, rt, rlabel) in enumerate(rows):
+            src = os.path.join(out_dir, clip)
+            if not os.path.exists(src):
+                continue
+            ours = frame_png(src, n, os.path.join(dest, f"{name}_{k}_ours.png"))
+            theirs = grab(ref(rid + "_"), rt,
+                          os.path.join(dest, f"{name}_{k}_ref.png"))
+            cells.append((label, ours, theirs, rlabel))
+        if cells:
+            made.append(board(cells, os.path.join(dest, f"{name}_board.jpg"),
+                              f"{name} (internal: references never leave "
+                              "this machine)"))
+    return made
 
 
 if __name__ == "__main__":
