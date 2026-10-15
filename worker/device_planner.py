@@ -1567,10 +1567,20 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
                          "until then this device is left out of previews")
         elif rung["rung"] == "substitute":
             rung_factor = 0.75 if pending else 0.6
-            notes.append(f"renders as {rung.get('substitute')} until "
-                         + (", ".join(pending) + " is measured (≈"
-                            f"{int(matte.get('estimate_s') or 60)} s)"
-                            if pending else rung["reason"]))
+            if rung.get("substitute") == "face_safe_slam" and pending:
+                # written through apply_edit_batch (this op) a word behind
+                # the head stores no face-safe placement: a preview drawn
+                # before the matte is measured leaves it OUT (and says so)
+                notes.append(
+                    f"{', '.join(pending)} is measuring (≈"
+                    f"{int(matte.get('estimate_s') or 60)} s): a preview "
+                    "before then leaves the word out and says so; preview "
+                    "once the ANALYSIS line reads the matte ready")
+            else:
+                notes.append(f"renders as {rung.get('substitute')} until "
+                             + (", ".join(pending) + " is measured (≈"
+                                f"{int(matte.get('estimate_s') or 60)} s)"
+                                if pending else rung["reason"]))
         elif rung["rung"] == "reduced":
             rung_factor = 0.85
             notes.append(f"reduced rung: {rung['reason']}")
