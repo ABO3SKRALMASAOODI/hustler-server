@@ -80,7 +80,10 @@ BUILTIN_SUBSTITUTES = ("full_frame_flash", "colour_field_card", "halation",
 CARD_PREFIXES = {"type": "1A", "subject": "1B", "background": "1B",
                  "composite": "1C", "region": "1C", "accent": "1D",
                  "strobe": "1D", "junction": "1D", "grade": "1E",
-                 "finish": "1E", "variant": "1E"}
+                 "finish": "1E", "variant": "1E",
+                 # Wave 3 (devices/INTERFACES_W3.md §8)
+                 "anchor": "3A", "object": "3B", "plane": "3C",
+                 "element": "3D", "light": "3D", "layout": "3E"}
 
 # Sidecar kinds a card may need (INTERFACES.md §2.1; reserved names only).
 SIDECAR_KINDS = ("matte.person", "faces.yunet", "rhythm.music",

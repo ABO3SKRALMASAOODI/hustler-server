@@ -142,10 +142,13 @@ def preview_report():
 
 
 def test_preview_lane_registers_exactly_the_pinned_table(preview_report):
+    from w3_pins import W3_FX_TAGS, W3_SLOTS
     reg = preview_report["registry"]
-    assert set(reg["types"]) == set(CLASSES)
-    assert set(reg["authorable"]) == set(CLASSES)
-    assert reg["slots"] == ["MotionItem.composite"]
+    # Wave 3 grows the same registry (tests/w3_pins.py): set aside
+    assert set(reg["types"]) - W3_FX_TAGS == set(CLASSES)
+    assert set(reg["authorable"]) - W3_FX_TAGS == set(CLASSES)
+    assert [s for s in reg["slots"] if s not in W3_SLOTS] == \
+        ["MotionItem.composite"]
     for tag, (stages, compiler, module) in CLASSES.items():
         got = reg["classes"][tag]
         assert tuple(got["stages"]) == stages, tag
@@ -180,11 +183,12 @@ def test_bad_stale_client_shapes_are_refused_with_their_reason(
 
 def test_preview_by_track_registers_only_that_track():
     """VALMERA_FX_PREVIEW=1b adds 1B's module to whatever is live already."""
+    from w3_pins import W3_FX_TAGS, W3_SLOTS
     report = _child("1b")
     live = {n for n in MEMBER_MODULES if _fx_module(n).LIVE} | {"subject"}
-    assert set(report["registry"]["types"]) == set().union(
+    assert set(report["registry"]["types"]) - W3_FX_TAGS == set().union(
         *(MEMBER_MODULES[n][1] for n in live))
-    assert set(report["registry"]["slots"]) == set().union(
+    assert set(report["registry"]["slots"]) - W3_SLOTS == set().union(
         *(MEMBER_MODULES[n][2] for n in live))
     # the 1B shapes are written there; a track that is not live is refused
     failed = {f.split(":", 1)[0] for f in report["ok_failures"]}
@@ -231,7 +235,8 @@ def _strip_w1_growth(catalog):
         elif name in ("load_tools", "expand_toolset"):
             walk(tool, live)
         elif name == "read_skill":
-            walk(tool, W1_SKILLS)
+            from w3_pins import W3_SKILLS
+            walk(tool, W1_SKILLS | W3_SKILLS)
     return cat
 
 

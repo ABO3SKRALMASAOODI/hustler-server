@@ -1,0 +1,81 @@
+{
+  "id": "anchor_hand",
+  "family": "world",
+  "verb": "attach",
+  "stage": "motion",
+  "params": {
+    "to": [
+      "hand.index_tip",
+      "hand.palm",
+      "hand.frame",
+      "hand.pinch"
+    ],
+    "lost": [
+      "hide",
+      "hold"
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "landmarks.hand"
+    ],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "a hand held up and visible (gestures, a finger frame, holding a phone)"
+  },
+  "binds_to": [
+    "word",
+    "word.payoff",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 5
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "while the hands are down or out of frame",
+    "a card bigger than the hand that carries it"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "static_placement"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 6.0,
+      "batch": 6.0,
+      "local": 3.0
+    },
+    "fixed_ms": 400
+  },
+  "exemplars": [
+    "21@0.5",
+    "21@9.37",
+    "25@≈0.33–12.7"
+  ],
+  "verify": [
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "a graphic riding a fingertip or framed between both hands",
+  "skill": "tracking"
+}

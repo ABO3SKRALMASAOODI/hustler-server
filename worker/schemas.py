@@ -4162,6 +4162,16 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                                    f.start if f.start is not None
                                    else (f.at or 0.0), f.id))
 
+    # Wave 3 (devices/INTERFACES_W3.md §4): an anchored graphic names
+    # definitions (track / object / plane fx items) that exist.
+    for i, mo in enumerate(edl.motion or []):
+        anchor = getattr(mo, "anchor", None)
+        if anchor is not None and hasattr(anchor, "check"):
+            try:
+                anchor.check(edl, mo)
+            except ValueError as e:
+                raise EDLValidationError(f"motion[{i}].anchor: {e}")
+
     return edl
 
 

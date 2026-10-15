@@ -1,0 +1,32 @@
+# Track 3A. A motion graphic riding the face or head (MotionItem.anchor):
+# a label beside the face, an arc of words round the head, an iris that
+# opens from the pupil, an X-ray plate registered to the skull.
+id: anchor_face
+family: world
+verb: attach
+stage: motion
+params:
+  to: [head, face, face.iris_l, face.eye_l, face.chin, face.forehead]
+  follow: [[position, scale], [position], [position, scale, rotation]]
+needs:
+  sidecars: [landmarks.face]
+  lane_features: ["chromium"]
+  footage: "a face in the shot, at least 6% of the frame high"
+binds_to: [word, word.payoff, stress, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 2, min_gap_s: 5}
+  charged: {per_short: 4, min_gap_s: 3}
+never:
+  - "over the eyes or mouth while the face carries the line"
+  - "on a face smaller than 6% of the frame height"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, {substitute: static_placement}, omit]
+cost:
+  ms_per_frame: {interactive: 6.0, batch: 6.0, local: 3.0}
+  fixed_ms: 400
+exemplars: ["38@≈15.0", "23@≈5.0–6.0", "15@1.13", "27@≈19.7"]
+verify: ["land_err_f<=1"]
+status: live
+description: "a graphic that rides the face or head: an arc round the head, a label beside the face, an iris from the pupil"
+skill: tracking

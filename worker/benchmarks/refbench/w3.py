@@ -36,7 +36,11 @@ def probe(path):
 def source_ref(win, shots=()):
     """A launchable SourceRef for a VFL window's fixture file."""
     import sidecars
+    from . import engine
     info = probe(win["path"])
+    # the chunk grid is keyed on the duration the RENDER's index carries
+    # (engine.index_for: the window's file span), so measure on that one
+    info["duration"] = engine.index_for(win)["video"]["duration"]
     return sidecars.source_from(win["sha256"], win["path"], info, None,
                                 shots)
 

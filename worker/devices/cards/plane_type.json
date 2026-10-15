@@ -1,0 +1,82 @@
+{
+  "id": "plane_type",
+  "family": "world",
+  "verb": "pin_to_plane",
+  "fx_type": "plane",
+  "stage": "world",
+  "params": {
+    "surface": [
+      "desk",
+      "table",
+      "floor",
+      "wall",
+      "screen"
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "planes.h"
+    ],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "a visible flat surface: a desk, a table, the floor, a wall or a screen"
+  },
+  "binds_to": [
+    "word",
+    "word.payoff",
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 5
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "a surface narrower than the words it carries",
+    "type the person's face sits on"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "static_placement"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 8.0,
+      "batch": 8.0,
+      "local": 4.0
+    },
+    "fixed_ms": 400
+  },
+  "exemplars": [
+    "16@0.08–2.79",
+    "21@0.2",
+    "21@1.83",
+    "27@≈0–5",
+    "38@≈17"
+  ],
+  "verify": [
+    "reproj_rms_px<=1.5"
+  ],
+  "status": "live",
+  "description": "type in the world: on a desk, a floor, a wall or a screen",
+  "skill": "type-in-world"
+}

@@ -1,0 +1,29 @@
+# Track 3A. A motion graphic riding a body joint (shoulder, chest, wrist):
+# a tag on the chest, a label on the shoulder, a trail from the wrist.
+id: anchor_pose
+family: world
+verb: attach
+stage: motion
+params:
+  to: [pose.chest, pose.shoulder_l, pose.shoulder_r, pose.wrist_l, pose.wrist_r]
+needs:
+  sidecars: [landmarks.pose]
+  lane_features: ["chromium"]
+  footage: "the upper body in frame"
+binds_to: [word, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 2, min_gap_s: 5}
+  charged: {per_short: 3, min_gap_s: 3}
+never:
+  - "on a joint out of frame"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, {substitute: static_placement}, omit]
+cost:
+  ms_per_frame: {interactive: 6.0, batch: 6.0, local: 3.0}
+  fixed_ms: 400
+exemplars: ["36@≈0.7–1.3", "16@24.9"]
+verify: ["land_err_f<=1"]
+status: live
+description: "a graphic riding a body joint"
+skill: tracking

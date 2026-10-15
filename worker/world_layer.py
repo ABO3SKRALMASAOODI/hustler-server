@@ -1,0 +1,1072 @@
+"""The world compositor: motion graphics attached to the footage (Wave 3).
+
+ROADMAP Wave 3 (3A anchors, 3B occlusion, 3C planes); contract in
+devices/INTERFACES_W3.md §4.
+
+``MotionItem.anchor`` says where a graphic lives in the world: on a face
+part, round the head, on a fingertip, between two hands, on a tracked
+point, on an object, on a plane — and what passes in front of it. The
+graphic is rendered by the motion engine exactly as before (flat, its own
+design); THIS module then turns its clip into the program-space clip the
+renderer overlays, before the filter graph is built:
+
+  per program frame
+    program second -> source second (the Timeline)
+    the anchor's pose on the source clock (anchors/query.py over READY
+      sidecars; One-Euro smoothed in source space, so a reframe never
+      changes the motion)
+    source fractions -> program pixels (keepout.Geometry: crop, follow,
+      picture rect, zoom, cards — the render's own geometry)
+    the clip warped onto it (affine: position, scale, rotation; or the
+      plane / finger-frame homography), premultiplied so edges never fringe
+    occluders cut out of its alpha (the person matte, object masks, the
+      hands), in program space
+    shadow transfer on planes (the surface's real shadow darkens the type)
+  -> one RGBA clip (qtrle) at the union box of everything it covered.
+
+The normal overlay then draws it (1C's ``composite`` — blend, opacity,
+fill — still applies). An item without an anchor is never touched: byte
+for byte the clip it always was.
+
+Degrade, never fail (A3; ROADMAP §9): anchor not measured -> the graphic
+where it was authored, with "pinned static: tracking not measured yet";
+tracking lost for a while -> ``lost`` (hold the last pose / fade out /
+authored place); occluder not measured -> drawn in front, said so; any
+exception -> the original clip. A canvas program (no footage) keeps every
+graphic where it was authored.
+"""
+
+import math
+import os
+import subprocess
+import tempfile
+import time
+
+import numpy as np
+
+LIVE = True
+# Plane decals fill this share of the place rect (a margin inside it).
+PLANE_FILL = 0.92
+# A plane decal never covers more than this share of the frame (a quad
+# misread as the whole floor would paint the frame).
+PLANE_MAX_AREA = 0.7
+# Fade (frames) when tracking is lost with lost="hide".
+HIDE_FADE_F = 4
+# Shadow transfer: blur sigma as a share of the frame height, and limits.
+SHADOW_SIGMA = 0.012
+SHADOW_LO, SHADOW_HI = 0.3, 1.05
+# Person-matte firming (matte_track.FIRM_LO / FIRM_HI: a doubted limb is
+# body, not translucency).
+FIRM_LO, FIRM_HI = 0.15, 0.55
+_MISSING = "pinned static: tracking not measured yet"
+
+
+class Ctx:
+    """What the renderer lends the world compositor (motion_layer passes it
+    through ``prepare_inputs(world=...)``)."""
+
+    def __init__(self, edl, W, H, fps, *, tl=None, source=None, index=None,
+                 preview=True, plan=None, clock_offset=0.0, workdir=None,
+                 src_path=None, out_duration=None):
+        self.edl = edl
+        self.W, self.H, self.fps = int(W), int(H), float(fps or 30.0)
+        self.tl = tl
+        self.source = source
+        self.index = index
+        self.preview = bool(preview)
+        self.plan = plan
+        self.clock_offset = float(clock_offset or 0.0)
+        self.workdir = workdir
+        self.src_path = src_path
+        self.out_duration = float(out_duration or getattr(tl, "out_duration",
+                                                          0.0) or 0.0)
+        self._geo = {}
+        self._masks = {}
+
+    # source frame size (fractions <-> pixels of the measured proxy)
+    @property
+    def src_size(self):
+        v = (self.index or {}).get("video") or {}
+        w = float(getattr(self.source, "width", 0) or v.get("width") or 0)
+        h = float(getattr(self.source, "height", 0) or v.get("height") or 0)
+        return (w or 1920.0, h or 1080.0)
+
+    def geometry(self, lock="world"):
+        g = self._geo.get(lock)
+        if g is None:
+            import keepout
+            w, h = self.src_size
+            g = keepout.Geometry(self.edl, {"width": w, "height": h},
+                                 self.W, self.H, self.out_duration,
+                                 zooms=[] if lock == "screen" else None)
+            self._geo[lock] = g
+        return g
+
+
+def anchored(item):
+    return isinstance(item, dict) and isinstance(item.get("anchor"), dict)
+
+
+# Wave 3 templates whose pages read engine data (augment) or declare
+# video slots (slots.fill): 3D elements and 3E layouts.
+W3_TEMPLATES = frozenset((
+    "el_particles", "el_lightning", "el_doodle", "el_pictogram", "el_shapes",
+    "el_sprites", "el_orbit", "mosaic", "scroll_wall", "flatlay", "stack",
+    "device_stage", "glass_card", "hud", "breakdown", "spec_sheet"))
+
+
+def wants(edl):
+    """Does this EDL anchor any graphic?"""
+    return any(anchored(m) for m in (edl or {}).get("motion") or [])
+
+
+def needed(edl):
+    """Does this render need the world context at all (an anchored graphic
+    or a Wave 3 template)? False: the renderer passes none and nothing
+    here runs."""
+    for m in (edl or {}).get("motion") or []:
+        if not isinstance(m, dict):
+            continue
+        if anchored(m) or m.get("template") in W3_TEMPLATES:
+            return True
+    return False
+
+
+# ── program geometry ────────────────────────────────────────────────────
+
+def program_affine(geo, prog_t, trim_t):
+    """2x3: SOURCE fractions -> OUTPUT fractions at this moment (crop,
+    follow, picture rect, zoom, cards are all axis-aligned scale + offset),
+    or None where the footage is not on screen."""
+    try:
+        outs = geo.to_outputs(prog_t, trim_t, (0.0, 0.0, 1.0, 1.0))
+    except Exception:  # noqa: BLE001
+        return None
+    if not outs:
+        return None
+    b = outs[0]
+    sx, sy = b[2] - b[0], b[3] - b[1]
+    if sx <= 0 or sy <= 0:
+        return None
+    return np.array([[sx, 0.0, b[0]], [0.0, sy, b[1]]], np.float64)
+
+
+def _apply(A, xy):
+    return np.array([A[0, 0] * xy[0] + A[0, 2], A[1, 1] * xy[1] + A[1, 2]])
+
+
+# ── anchor targets ──────────────────────────────────────────────────────
+
+def _target(anchor):
+    to = anchor["to"]
+    if ":" in to:
+        kind, ref = to.split(":", 1)
+        return kind, ref
+    if "." in to:
+        kind, part = to.split(".", 1)
+        return kind, part
+    return to, None
+
+
+def series_for(anchor, ctx, lo, hi):
+    """(Series | None, reason) for the anchor over sidecar seconds
+    [lo, hi]."""
+    from anchors import query
+    import world_defs
+    kind, ref = _target(anchor)
+    src = ctx.source
+    which = anchor.get("which", "any")
+    rng = [(max(0.0, lo - 0.5), hi + 0.5)]
+    if kind == "screen":
+        return None, "screen anchor"
+    if src is None:
+        return None, "no source footage on this render"
+    if kind in ("face", "head"):
+        samples, share, meta = query.load("landmarks.face", src, rng)
+        if not samples:
+            return None, "face landmarks not measured yet"
+        part = "head" if kind == "head" else (ref or "face")
+        return query.face_series(samples, part, which, meta), None
+    if kind == "hand":
+        samples, share, meta = query.load("landmarks.hand", src, rng)
+        if not samples:
+            return None, "hand landmarks not measured yet"
+        return query.hand_series(samples, ref, which), None
+    if kind == "pose":
+        samples, share, meta = query.load("landmarks.pose", src, rng)
+        if not samples:
+            return None, "pose not measured yet"
+        joint = ref
+        if which in ("left", "right") or joint.endswith(("_l", "_r")):
+            pass
+        return query.pose_series(samples, joint, which), None
+    defs = world_defs.definitions(ctx.edl)
+    d = defs.get(ref)
+    if d is None:
+        return None, f"{kind} {ref} is not in this edit"
+    if kind == "track":
+        req = world_defs.request(d, ctx.tl, ctx.clock_offset)
+        if req is None:
+            return None, "track has no source window here"
+        k, ranges, params = req
+        import sidecars
+        rows = []
+        for _c, m in sidecars.ready_chunks(k, src.sha256, src.shots,
+                                           src.duration_s, ranges, params):
+            rows.append(sidecars.read_json_chunk(k, src.sha256, m) or {})
+        if not rows:
+            return None, "point track not measured yet"
+        return query.track_series(rows, d["id"]), None
+    if kind == "plane":
+        st = world_defs.status(d, ctx.tl, src, ctx.clock_offset)
+        quad = d["quad"]
+        if st == "ready":
+            k, ranges, params = world_defs.request(d, ctx.tl,
+                                                   ctx.clock_offset)
+            samples, _sh, meta = query.load(k, src, ranges, params)
+            if samples:
+                return query.plane_series(samples, quad), None
+        # static (written so, or not measured yet): the seed quad holds —
+        # exact on a locked-off camera, the honest fallback otherwise
+        why = None if st == "static" else (
+            "plane tracking not measured yet: pinned to its first frame")
+        return query.static_plane(quad, lo - 0.5, hi + 0.5), why
+    if kind == "object":
+        return _object_series(d, ctx, lo, hi)
+    return None, f"unknown anchor {anchor['to']}"
+
+
+def _object_series(d, ctx, lo, hi):
+    """An object as a target: its mask's centroid, size = its box height."""
+    from anchors import query
+    reader = _mask_reader(ctx, "object", d)
+    if reader is None:
+        return None, "object mask not measured yet"
+    ts = np.arange(lo, hi + 1e-6, 1.0 / 15.0)
+    xy, size = [], []
+    for t in ts:
+        m = reader.at(t)
+        if m is None or m.max() < 128:
+            xy.append([np.nan, np.nan])
+            size.append(np.nan)
+            continue
+        ys, xs = np.where(m > 127)
+        h, w = m.shape
+        xy.append([xs.mean() / w, ys.mean() / h])
+        size.append((ys.max() - ys.min() + 1) / float(h))
+    return query.Series(ts, xy, size, kind="object"), None
+
+
+# ── mask streams (person matte, object masks) on the sidecar clock ──────
+
+class MaskReader:
+    """Gray mask frames of a mask-video sidecar kind (matte.person,
+    objects.sam2) at sidecar seconds, decoded per chunk on demand and
+    cached (the item's few seconds, never a whole source)."""
+
+    def __init__(self, files, firm=False):
+        self.files = sorted(files, key=lambda f: f["t0"])
+        self.firm = firm
+        self._cache = {}
+
+    def _chunk(self, f):
+        key = f["path"]
+        hit = self._cache.get(key)
+        if hit is None:
+            m = f.get("meta") or {}
+            w, h = int(m.get("width") or 0), int(m.get("height") or 0)
+            fps = float(m.get("fps") or 30.0)
+            n = int(m.get("frames") or 0)
+            if not w or not h or not n:
+                hit = (fps, [])
+            else:
+                hit = (fps, _decode_gray(f["path"], w, h, n))
+            if len(self._cache) > 6:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[key] = hit
+        return hit
+
+    def at(self, t):
+        for f in self.files:
+            if f["t0"] - 1e-3 <= t < f["t1"] + 1e-3:
+                fps, frames = self._chunk(f)
+                if not frames:
+                    return None
+                k = int(round((t - f["t0"]) * fps))
+                k = min(len(frames) - 1, max(0, k))
+                m = frames[k]
+                if self.firm:
+                    m = _firm(m)
+                return m
+        return None
+
+
+def _firm(m):
+    x = np.clip((m.astype(np.float32) / 255.0 - FIRM_LO)
+                / (FIRM_HI - FIRM_LO), 0.0, 1.0)
+    return (255.0 * x * x * (3.0 - 2.0 * x)).astype(np.uint8)
+
+
+def _decode_gray(path, w, h, n):
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-frames:v",
+         str(n), "-f", "rawvideo", "-pix_fmt", "gray", "pipe:1"],
+        capture_output=True, check=False)
+    raw = proc.stdout
+    size = w * h
+    k = len(raw) // size
+    return [np.frombuffer(raw[i * size:(i + 1) * size], np.uint8)
+            .reshape(h, w) for i in range(k)]
+
+
+def _mask_reader(ctx, what, d=None, lo=None, hi=None):
+    """A MaskReader for the person matte or one object definition, over the
+    READY chunks (fetched into the workdir), or None."""
+    key = (what, (d or {}).get("id"))
+    if key in ctx._masks:
+        return ctx._masks[key]
+    reader = None
+    try:
+        import sidecars
+        src = ctx.source
+        if src is None:
+            raise LookupError("no source")
+        dest = os.path.join(ctx.workdir or tempfile.gettempdir(), "w3masks")
+        if what == "person":
+            import matte_track
+            params = matte_track.sidecar_params()
+            spans = []
+            for m in (ctx.edl or {}).get("motion") or []:
+                if anchored(m):
+                    s, e = float(m["start"]), float(m["end"])
+                    spans += matte_track.program_to_source(ctx.tl, s, e)
+            ranges = [(max(0.0, a - ctx.clock_offset - 0.5),
+                       b - ctx.clock_offset + 0.5) for a, b in spans]
+            if not ranges:
+                raise LookupError("no window")
+            h = matte_track.read_handle(
+                "matte.person", src,
+                sidecars.chunks_for(src.shots, src.duration_s, ranges),
+                params)
+            files = sidecars.fetch(h, dest)
+            reader = MaskReader(files, firm=True) if files else None
+        else:
+            import world_defs
+            req = world_defs.request(d, ctx.tl, ctx.clock_offset)
+            if req is None:
+                raise LookupError("no request")
+            kind, ranges, params = req
+            import matte_track
+            h = matte_track.read_handle(
+                kind, src, sidecars.chunks_for(src.shots, src.duration_s,
+                                               ranges), params)
+            files = sidecars.fetch(h, dest)
+            reader = MaskReader(files) if files else None
+    except Exception as e:  # noqa: BLE001 — a mask question never fails
+        if not isinstance(e, LookupError):
+            print(f"[world] {what} mask unreadable ({str(e)[:140]})",
+                  flush=True)
+        reader = None
+    ctx._masks[key] = reader
+    return reader
+
+
+# ── clip i/o ────────────────────────────────────────────────────────────
+
+def _decode_rgba(path, w, h):
+    proc = subprocess.Popen(
+        ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-f", "rawvideo",
+         "-pix_fmt", "rgba", "pipe:1"], stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL)
+    size = w * h * 4
+    try:
+        while True:
+            buf = proc.stdout.read(size)
+            if len(buf) < size:
+                break
+            yield np.frombuffer(buf, np.uint8).reshape(h, w, 4)
+    finally:
+        proc.stdout.close()
+        proc.wait()
+
+
+class _Encoder:
+    def __init__(self, path, w, h, fps):
+        self.path = path
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt",
+             "rgba", "-s", f"{w}x{h}", "-r", f"{fps:.6f}", "-i", "pipe:0",
+             "-c:v", "qtrle", "-pix_fmt", "argb", "-r", f"{fps:.6f}", path],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)
+
+    def write(self, rgba):
+        self.proc.stdin.write(np.ascontiguousarray(rgba, np.uint8).tobytes())
+
+    def close(self):
+        self.proc.stdin.close()
+        if self.proc.wait() != 0:
+            raise RuntimeError("world clip encoder failed")
+
+
+# ── the composite ───────────────────────────────────────────────────────
+
+class _Plan:
+    """Per-frame transforms of one anchored item."""
+
+    def __init__(self, n):
+        self.n = n
+        self.M = [None] * n          # 3x3 clip px -> output px, or None
+        self.alpha = np.ones(n)      # lost="hide" fades
+        self.A = [None] * n          # source fractions -> output fractions
+        self.trim = [None] * n       # trim seconds
+        self.quads = [None] * n      # output px quad (planes / frames)
+
+
+def _default_occluders(anchor, item, defs):
+    occ = anchor.get("occluders")
+    if occ is not None:
+        out = list(occ)
+    else:
+        out = []
+        kind, ref = _target(anchor)
+        if kind == "plane":
+            d = defs.get(ref) or {}
+            if d.get("surface") in ("floor", "desk", "table"):
+                out.append("person")
+    if item.get("layer") == "behind_subject" and "person" not in out:
+        out.append("person")
+    return out
+
+
+def compose(item, clip, ctx):
+    """(new clip | None, notes). None: keep the original clip (static)."""
+    import world_defs
+    import motion_engine
+    anchor = item["anchor"]
+    notes = []
+    n = int(getattr(clip, "frames", 0) or 0)
+    if n <= 0:
+        n = max(1, int(round((float(item["end"]) - float(item["start"]))
+                             * ctx.fps)))
+    tl = ctx.tl
+    if tl is None or ctx.source is None:
+        return None, [_MISSING + " (no source footage on this render)"]
+    s = float(item["start"])
+    plan = _Plan(n)
+    for k in range(n):
+        t = s + (k + 0.5) / ctx.fps
+        tr = tl.out_to_src(min(t, ctx.out_duration - 1e-3))
+        plan.trim[k] = tr
+    valid = [v for v in plan.trim if v is not None]
+    if not valid:
+        return None, [_MISSING + " (its window shows no main footage)"]
+    off = ctx.clock_offset
+    lo, hi = min(valid) - off, max(valid) - off
+    kind, ref = _target(anchor)
+    if kind == "screen":
+        # no tracking: the graphic stays where it was authored, and what
+        # passes in front of it (occluders) still does
+        geo = ctx.geometry(anchor.get("lock") or "world")
+        ident = np.array([[1.0, 0.0, clip.x], [0.0, 1.0, clip.y],
+                          [0.0, 0.0, 1.0]])
+        for k in range(n):
+            tr = plan.trim[k]
+            plan.A[k] = (program_affine(geo, s + (k + 0.5) / ctx.fps, tr)
+                         if tr is not None else None)
+            plan.M[k] = ident
+        return _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi)
+    series, why = series_for(anchor, ctx, lo, hi)
+    defs = world_defs.definitions(ctx.edl)
+    if series is None:
+        return None, [f"pinned static: {why}"]
+    if why:
+        notes.append(why)
+    sw, sh = ctx.src_size
+    series = series.smoothed(float(anchor.get("smooth", 0.5)),
+                             aspect=sw / sh)
+    lock = anchor.get("lock") or "world"
+    geo = ctx.geometry(lock)
+    W, H = ctx.W, ctx.H
+    cw, ch = float(clip.w), float(clip.h)
+    pin = anchor.get("pin") or [0.5, 0.5]
+    follow = set(anchor.get("follow") or ["position"])
+    offset = anchor.get("offset") or [0.0, 0.0]
+    ts = np.array([np.nan if v is None else v - off for v in plan.trim])
+    good_t = np.where(np.isfinite(ts), ts, lo)
+    xy, size, ang, quad, ok = series.at(good_t)
+    ok = ok & np.isfinite(ts)
+    if not ok.any():
+        return None, [f"pinned static: {kind} not seen in this window"]
+    if ok.mean() < 0.999:
+        notes.append(f"tracking lost on {int((~ok).sum())} of {n} frames "
+                     f"({anchor.get('lost', 'hold')})")
+    first = int(np.argmax(ok))
+    ref_size = size[first] if np.isfinite(size[first]) else None
+    ref_ang = ang[first] if np.isfinite(ang[first]) else 0.0
+    plane_like = kind == "plane" or (kind == "hand" and ref == "frame")
+    if plane_like and quad is None:
+        return None, ["pinned static: no quad for this anchor"]
+    lost = anchor.get("lost") or "hold"
+    if kind == "plane" and not anchor.get("place"):
+        # default place: the largest part of the plane on screen when the
+        # graphic lands (a slide half outside a 9:16 crop keeps its type
+        # inside the frame)
+        occ0 = anchor.get("occluders")
+        if occ0 is None:
+            occ0 = _default_occluders(anchor, item, defs)
+        person = (_mask_reader(ctx, "person") if "person" in occ0
+                  else None)
+        anchor = dict(anchor, place=_visible_place(
+            geo, s, plan.trim, first, quad, W, H, person=person, off=off))
+        item = dict(item, anchor=anchor)
+    last_good = None
+    for k in range(n):
+        tr = plan.trim[k]
+        A = program_affine(geo, s + (k + 0.5) / ctx.fps, tr) \
+            if tr is not None else None
+        plan.A[k] = A
+        if A is None:
+            plan.M[k] = None
+            continue
+        if ok[k]:
+            last_good = k
+            idx = k
+        elif lost == "hold":
+            # nearest good frame (back, then forward)
+            idx = last_good if last_good is not None else first
+        elif lost == "hide":
+            idx = last_good if last_good is not None else first
+            plan.alpha[k] = 0.0
+        else:   # static: the authored placement
+            plan.M[k] = np.array([[1, 0, clip.x], [0, 1, clip.y],
+                                  [0, 0, 1]], np.float64)
+            continue
+        Akx = np.array([[A[0, 0] * W, 0, A[0, 2] * W],
+                        [0, A[1, 1] * H, A[1, 2] * H]])
+        if plane_like:
+            q = quad[idx]
+            qo = np.array([[Akx[0, 0] * x + Akx[0, 2],
+                            Akx[1, 1] * y + Akx[1, 2]] for x, y in q])
+            M = _plane_transform(anchor, defs.get(ref) if kind == "plane"
+                                 else None, qo, cw, ch, sw, sh, W, H, A)
+            plan.quads[k] = qo
+            plan.M[k] = M
+            continue
+        p = xy[idx]
+        P = np.array([Akx[0, 0] * p[0] + Akx[0, 2],
+                      Akx[1, 1] * p[1] + Akx[1, 2]])
+        scl = 1.0
+        if "scale" in follow and ref_size and np.isfinite(size[idx]):
+            scl = float(size[idx]) / float(ref_size)
+        rot = 0.0
+        if "rotation" in follow and np.isfinite(ang[idx]):
+            rot = float(ang[idx] - ref_ang)
+        if "scale" in follow and np.isfinite(size[idx]):
+            unit = float(size[idx]) * A[1, 1] * H
+            d = np.array([offset[0] * unit, offset[1] * unit])
+        else:
+            d = np.array([offset[0] * W, offset[1] * H])
+        c, sn = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+        R = np.array([[c, -sn], [sn, c]]) * scl
+        pin_px = np.array([pin[0] * cw, pin[1] * ch])
+        t2 = P + d - R @ pin_px
+        plan.M[k] = np.array([[R[0, 0], R[0, 1], t2[0]],
+                              [R[1, 0], R[1, 1], t2[1]], [0, 0, 1]])
+    # hide fades
+    if lost == "hide" and (plan.alpha < 1).any():
+        a = plan.alpha.copy()
+        for k in range(n):
+            if a[k] == 0.0:
+                continue
+            dist = min([abs(k - j) for j in range(n) if plan.alpha[j] == 0]
+                       or [HIDE_FADE_F])
+            a[k] = min(1.0, dist / float(HIDE_FADE_F))
+        plan.alpha = a
+    return _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi)
+
+
+def _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi):
+    """Warp, occlude and encode one anchored item's clip by ``plan``."""
+    import world_defs
+    import motion_engine
+    anchor = item["anchor"]
+    defs = world_defs.definitions(ctx.edl)
+    off = ctx.clock_offset
+    sw, sh = ctx.src_size
+    W, H = ctx.W, ctx.H
+    cw, ch = float(clip.w), float(clip.h)
+    # the union box of every frame
+    corners = np.array([[0, 0, 1], [cw, 0, 1], [cw, ch, 1], [0, ch, 1]])
+    xs, ys = [], []
+    for M in plan.M:
+        if M is None:
+            continue
+        p = corners @ M.T
+        p = p[:, :2] / p[:, 2:3]
+        xs += list(p[:, 0])
+        ys += list(p[:, 1])
+    if not xs:
+        return _empty(clip, n), notes + ["the anchor is off screen for the "
+                                         "whole window"]
+    bx0 = int(max(0, math.floor(min(xs)) - 2))
+    by0 = int(max(0, math.floor(min(ys)) - 2))
+    bx1 = int(min(W, math.ceil(max(xs)) + 2))
+    by1 = int(min(H, math.ceil(max(ys)) + 2))
+    bx1 = max(bx1, bx0 + 2)
+    by1 = max(by1, by0 + 2)
+    bw, bh = bx1 - bx0, by1 - by0
+    bw -= bw % 2
+    bh -= bh % 2
+    if bw < 2 or bh < 2:
+        return _empty(clip, n), notes + ["the anchor is off screen"]
+    occ = _default_occluders(anchor, item, defs)
+    occ_readers = []
+    for o in occ:
+        if o == "person":
+            r = _mask_reader(ctx, "person")
+            if r is None:
+                notes.append("the person matte is not measured yet: drawn "
+                             "in front of the person")
+            else:
+                occ_readers.append(("mask", r))
+        elif o == "hands":
+            occ_readers.append(("hands", None))
+        elif str(o).startswith("object:"):
+            d = defs.get(str(o).split(":", 1)[1])
+            r = _mask_reader(ctx, "object", d) if d else None
+            if r is None:
+                notes.append(f"{o} is not measured yet: drawn in front of "
+                             "it")
+            else:
+                occ_readers.append(("mask", r))
+    shadow = None
+    if kind == "plane" and anchor.get("shadow"):
+        shadow = _ShadowSource(ctx, defs.get(ref), notes)
+        if not shadow.ok:
+            shadow = None
+    hands = None
+    if any(k_ == "hands" for k_, _ in occ_readers):
+        from anchors import query
+        samples, _sh, _m = query.load("landmarks.hand", ctx.source,
+                                      [(lo - 0.5, hi + 0.5)])
+        hands = samples
+        if not samples:
+            notes.append("hands not measured yet: drawn in front of them")
+    out_dir = os.path.join(ctx.workdir or tempfile.gettempdir(), "world")
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, f"w3_{item.get('id')}_{int(time.time()*1e3)}"
+                       ".mov")
+    import cv2
+    enc = _Encoder(out, bw, bh, ctx.fps)
+    T = np.array([[1, 0, -bx0], [0, 1, -by0], [0, 0, 1]], np.float64)
+    last = None
+    k = 0
+    try:
+        for rgba in _decode_rgba(clip.path, int(clip.w), int(clip.h)):
+            if k >= n:
+                break
+            last = rgba
+            enc.write(_frame(cv2, rgba, plan, k, T, bw, bh, ctx,
+                             occ_readers, hands, shadow, off, sw, sh))
+            k += 1
+        while k < n:              # a clip a frame short: hold its last
+            enc.write(_frame(cv2, last if last is not None else
+                             np.zeros((int(clip.h), int(clip.w), 4),
+                                      np.uint8),
+                             plan, k, T, bw, bh, ctx, occ_readers, hands,
+                             shadow, off, sw, sh))
+            k += 1
+    finally:
+        enc.close()
+    newclip = motion_engine.RenderedClip(
+        path=out, x=bx0, y=by0, w=bw, h=bh, frames=n, captured=n,
+        cached=False, seconds=0.0, empty=False)
+    return newclip, notes
+
+
+
+
+def _empty(clip, n):
+    import motion_engine
+    return motion_engine.RenderedClip(path=clip.path, x=clip.x, y=clip.y,
+                                      w=clip.w, h=clip.h, frames=n,
+                                      captured=0, cached=False, seconds=0.0,
+                                      empty=True)
+
+
+def _largest_rect(grid):
+    """(r0, c0, r1, c1) of the largest all-True rectangle of a 2D bool
+    grid (histogram method), or None."""
+    rows, cols = grid.shape
+    heights = np.zeros(cols, int)
+    best, out = 0, None
+    for r in range(rows):
+        heights = np.where(grid[r], heights + 1, 0)
+        stack = []
+        for c in range(cols + 1):
+            h = heights[c] if c < cols else 0
+            start = c
+            while stack and stack[-1][1] >= h:
+                start, hh = stack.pop()
+                area = hh * (c - start)
+                if area > best:
+                    best, out = area, (r - hh + 1, start, r + 1, c)
+            stack.append((start, h))
+    return out
+
+
+def _visible_place(geo, s, trims, k0, quad_series, W, H, margin=0.05,
+                   n=32, person=None, off=0.0):
+    """[u0, v0, u1, v1]: the largest plane-space rect visible at frame
+    ``k0`` — inside the frame's margins and, when the person passes in
+    front, clear of where the person stands then (the type lands where it
+    can be read); the whole plane when it all is."""
+    import cv2
+    q = quad_series[k0] if quad_series is not None else None
+    tr = trims[k0]
+    if q is None or tr is None or not np.all(np.isfinite(q)):
+        return [0.0, 0.0, 1.0, 1.0]
+    A = program_affine(geo, s, tr)
+    if A is None:
+        return [0.0, 0.0, 1.0, 1.0]
+    qo = np.array([[(A[0, 0] * x + A[0, 2]) * W, (A[1, 1] * y + A[1, 2]) * H]
+                   for x, y in q], np.float32)
+    Hq = cv2.getPerspectiveTransform(
+        np.array([[0, 0], [1, 0], [1, 1], [0, 1]], np.float32), qo)
+    us = (np.arange(n) + 0.5) / n
+    uu, vv = np.meshgrid(us, us)
+    pts = np.stack([uu.ravel(), vv.ravel()], 1).astype(np.float32)
+    out = cv2.perspectiveTransform(pts[None], Hq)[0]
+    mx, my = margin * W, margin * H
+    vis = ((out[:, 0] >= mx) & (out[:, 0] <= W - mx) & (out[:, 1] >= my)
+           & (out[:, 1] <= H - my)).reshape(n, n)
+    if person is not None:
+        m = person.at(tr - off)
+        if m is not None:
+            mh, mw = m.shape
+            Hs = cv2.getPerspectiveTransform(
+                np.array([[0, 0], [1, 0], [1, 1], [0, 1]], np.float32),
+                np.asarray(q, np.float32))
+            sp = cv2.perspectiveTransform(pts[None], Hs)[0]
+            xi = np.clip((sp[:, 0] * mw).astype(int), 0, mw - 1)
+            yi = np.clip((sp[:, 1] * mh).astype(int), 0, mh - 1)
+            grown = cv2.dilate(m, np.ones((15, 15), np.uint8))
+            vis &= (grown[yi, xi] < 100).reshape(n, n)
+    if vis.all():
+        return [0.0, 0.0, 1.0, 1.0]
+    r = _largest_rect(vis)
+    if r is None:
+        return [0.0, 0.0, 1.0, 1.0]
+    r0, c0, r1, c1 = r
+    return [c0 / n, r0 / n, c1 / n, r1 / n]
+
+
+def _plane_transform(anchor, d, qo, cw, ch, sw, sh, W, H, A):
+    """3x3: clip px -> output px onto the plane quad ``qo`` (output px):
+    the clip's box fitted (aspect kept, as the surface would be seen face
+    on) into ``place`` (default: the whole quad), PLANE_FILL of it."""
+    import cv2
+    import planes as planesmod
+    place = anchor.get("place") or [0.0, 0.0, 1.0, 1.0]
+    # the plane's own aspect, measured on the SEED quad in source pixels
+    quad_src = (d or {}).get("quad")
+    if quad_src:
+        asp = planesmod.plane_aspect(np.array(quad_src) * [sw, sh])
+    else:
+        asp = planesmod.plane_aspect(qo)
+    u0, v0, u1, v1 = place
+    pw, ph = (u1 - u0) * asp, (v1 - v0)
+    ca = cw / max(1e-6, ch)
+    if ca >= pw / ph:
+        fw, fh = pw * PLANE_FILL, pw * PLANE_FILL / ca
+    else:
+        fh, fw = ph * PLANE_FILL, ph * PLANE_FILL * ca
+    cu = (u0 + u1) / 2.0 * asp
+    cv = (v0 + v1) / 2.0
+    # plane space (u in [0, asp], v in [0, 1]) -> quad
+    src_q = np.array([[0, 0], [asp, 0], [asp, 1], [0, 1]], np.float32)
+    Hq = cv2.getPerspectiveTransform(src_q, qo.astype(np.float32))
+    rect = np.array([[cu - fw / 2, cv - fh / 2], [cu + fw / 2, cv - fh / 2],
+                     [cu + fw / 2, cv + fh / 2], [cu - fw / 2, cv + fh / 2]],
+                    np.float32)
+    dst = cv2.perspectiveTransform(rect[None], Hq)[0]
+    box = np.array([[0, 0], [cw, 0], [cw, ch], [0, ch]], np.float32)
+    return cv2.getPerspectiveTransform(box, dst.astype(np.float32)) \
+        .astype(np.float64)
+
+
+def _frame(cv2, rgba, plan, k, T, bw, bh, ctx, occ_readers, hands, shadow,
+           off, sw, sh):
+    M = plan.M[k]
+    out = np.zeros((bh, bw, 4), np.uint8)
+    if M is None:
+        return out
+    MT = T @ M
+    a = rgba[..., 3:4].astype(np.float32) / 255.0
+    pm = np.concatenate([rgba[..., :3].astype(np.float32) * a,
+                         a * 255.0], axis=2)
+    persp = abs(MT[2, 0]) > 1e-12 or abs(MT[2, 1]) > 1e-12
+    if persp:
+        w = cv2.warpPerspective(pm, MT, (bw, bh), flags=cv2.INTER_LINEAR,
+                                borderMode=cv2.BORDER_CONSTANT,
+                                borderValue=0)
+    else:
+        w = cv2.warpAffine(pm, MT[:2], (bw, bh), flags=cv2.INTER_LINEAR,
+                           borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    alpha = w[..., 3] / 255.0
+    if plan.alpha[k] < 1.0:
+        alpha = alpha * plan.alpha[k]
+    if not alpha.any():
+        return out
+    A = plan.A[k]
+    tr = plan.trim[k]
+    if A is not None and tr is not None and occ_readers:
+        occ = np.zeros((bh, bw), np.float32)
+        for kind, r in occ_readers:
+            if kind == "mask":
+                m = r.at(tr - off)
+                if m is None:
+                    continue
+                mh, mw = m.shape
+                # mask px -> source fraction -> output px -> box px
+                S = np.array([[A[0, 0] * ctx.W / mw, 0,
+                               A[0, 2] * ctx.W + T[0, 2]],
+                              [0, A[1, 1] * ctx.H / mh,
+                               A[1, 2] * ctx.H + T[1, 2]]])
+                mm = cv2.warpAffine(m, S, (bw, bh), flags=cv2.INTER_LINEAR,
+                                    borderMode=cv2.BORDER_CONSTANT,
+                                    borderValue=0)
+                occ = np.maximum(occ, mm.astype(np.float32) / 255.0)
+            elif kind == "hands" and hands:
+                occ = np.maximum(occ, _hands_mask(cv2, hands, tr - off, A,
+                                                  T, bw, bh, ctx))
+        alpha = alpha * (1.0 - occ)
+    rgb = w[..., :3] / np.maximum(w[..., 3:4] / 255.0, 1e-6)
+    if shadow is not None and A is not None and tr is not None:
+        ratio = shadow.ratio(tr - off, A, T, bw, bh)
+        if ratio is not None:
+            rgb = rgb * ratio[..., None]
+    out[..., :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(alpha * 255.0 + 0.5, 0, 255).astype(np.uint8)
+    return out
+
+
+def _hands_mask(cv2, samples, t, A, T, bw, bh, ctx):
+    """The hands' convex hulls (dilated by a finger's width) at sidecar
+    second ``t``, in box pixels."""
+    m = np.zeros((bh, bw), np.uint8)
+    best = None
+    for s in samples:
+        dt = abs(float(s["t"]) - t)
+        if dt <= 0.1 and (best is None or dt < best[0]):
+            best = (dt, s)
+    if best is None:
+        return m.astype(np.float32)
+    for hd in best[1].get("hands") or []:
+        P = np.array(hd["p"], np.float64).reshape(-1, 2)
+        ox = P[:, 0] * A[0, 0] * ctx.W + A[0, 2] * ctx.W + T[0, 2]
+        oy = P[:, 1] * A[1, 1] * ctx.H + A[1, 2] * ctx.H + T[1, 2]
+        pts = np.stack([ox, oy], 1).astype(np.int32)
+        hull = cv2.convexHull(pts)
+        cv2.fillConvexPoly(m, hull, 255)
+        span = float(np.hypot(*(np.array([ox[9], oy[9]])
+                                - np.array([ox[0], oy[0]]))))
+        r = max(2, int(span * 0.12))
+        m = cv2.dilate(m, np.ones((r, r), np.uint8))
+    m = cv2.GaussianBlur(m, (0, 0), 1.5)
+    return m.astype(np.float32) / 255.0
+
+
+class _ShadowSource:
+    """Shadow transfer for a plane: the program frame's luma against the
+    shot's clean plate (plate.clean), both read on the source clock."""
+
+    def __init__(self, ctx, d, notes):
+        self.ok = False
+        self.ctx = ctx
+        self.plate = None
+        self.frames = {}
+        if d is None or ctx.src_path is None:
+            notes.append("shadow transfer off: no plane or footage")
+            return
+        try:
+            import sidecars
+            src = ctx.source
+            st = float(d["src_t"]) - ctx.clock_offset
+            rows = sidecars.ready_chunks("plate.clean", src.sha256,
+                                         src.shots, src.duration_s,
+                                         [(st, st + 0.05)])
+            if not rows:
+                notes.append("shadow transfer off: clean plate not "
+                             "measured yet")
+                return
+            h = sidecars.Handle(kind="plate.clean", source_sha=src.sha256,
+                                chunks=(rows[0][0],), params=sidecars
+                                .canonical_params(sidecars.resolve_params(
+                                    "plate.clean", None)))
+            dest = os.path.join(ctx.workdir or tempfile.gettempdir(),
+                                "w3plates")
+            files = sidecars.fetch(h, dest)
+            if not files:
+                notes.append("shadow transfer off: clean plate unreadable")
+                return
+            import cv2
+            p = cv2.imread(files[0]["path"], cv2.IMREAD_GRAYSCALE)
+            self.plate = p.astype(np.float32) / 255.0
+            self.ok = True
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"shadow transfer off ({str(e)[:80]})")
+
+    def _luma(self, t):
+        """The source frame's luma at sidecar second ``t`` at plate size."""
+        key = round(t, 3)
+        hit = self.frames.get(key)
+        if hit is not None:
+            return hit
+        ph, pw = self.plate.shape
+        proc = subprocess.run(
+            ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i",
+             self.ctx.src_path, "-frames:v", "1", "-vf",
+             f"scale={pw}:{ph}:flags=area", "-f", "rawvideo", "-pix_fmt",
+             "gray", "pipe:1"], capture_output=True, check=False)
+        if len(proc.stdout) < pw * ph:
+            return None
+        lum = np.frombuffer(proc.stdout[:pw * ph], np.uint8).reshape(
+            ph, pw).astype(np.float32) / 255.0
+        if len(self.frames) > 4:
+            self.frames.pop(next(iter(self.frames)))
+        self.frames[key] = lum
+        return lum
+
+    def ratio(self, t, A, T, bw, bh):
+        import cv2
+        import cleanplate
+        lum = self._luma(t)
+        if lum is None:
+            return None
+        ph, pw = self.plate.shape
+        r = cleanplate.shadow_ratio(lum, self.plate, SHADOW_SIGMA * ph,
+                                    SHADOW_LO, SHADOW_HI)
+        S = np.array([[A[0, 0] * self.ctx.W / pw, 0,
+                       A[0, 2] * self.ctx.W + T[0, 2]],
+                      [0, A[1, 1] * self.ctx.H / ph,
+                       A[1, 2] * self.ctx.H + T[1, 2]]])
+        return cv2.warpAffine(r.astype(np.float32), S, (bw, bh),
+                              flags=cv2.INTER_LINEAR,
+                              borderMode=cv2.BORDER_CONSTANT,
+                              borderValue=1.0)
+
+
+# ── the motion_layer hooks ──────────────────────────────────────────────
+
+def augment(item, ctx):
+    """Before the motion engine renders ``item``: engine data its template
+    reads (3D/3E: subject-edge emitters, pose, slot spill, the truthful EDL
+    breakdown). Returns the item (a new dict when it changed). Any problem
+    leaves it unchanged."""
+    try:
+        import elements
+        return elements.augment(item, ctx)
+    except ImportError:
+        return item
+    except Exception as e:  # noqa: BLE001
+        print(f"[world] motion '{item.get('id')}' data not prepared "
+              f"({str(e)[:160]})", flush=True)
+        return item
+
+
+def finish(items, clips, ctx, warn=None):
+    """After the motion engine: every anchored item's clip replaced by its
+    world-composited clip (and video slots filled). Returns (items, clips),
+    aligned; items without an anchor or slots come back untouched."""
+    out_items, out_clips = [], []
+    for item, clip in zip(items, clips):
+        if clip is None or getattr(clip, "empty", False):
+            out_items.append(item)
+            out_clips.append(clip)
+            continue
+        try:
+            import slots
+            if slots.wants(item, clip):
+                clip = slots.fill(item, clip, ctx, warn=warn) or clip
+        except ImportError:
+            pass
+        except Exception as e:  # noqa: BLE001
+            if warn:
+                warn(f"motion '{item.get('id')}': video slots not filled "
+                     f"({str(e)[:160]})")
+        if anchored(item) and ctx is not None:
+            try:
+                t0 = time.time()
+                new, notes = compose(item, clip, ctx)
+                if new is not None:
+                    layer = item.get("layer") or "above_captions"
+                    if layer == "behind_subject":
+                        item = dict(item, layer="below_captions",
+                                    behind=None)
+                    clip = new
+                for note in notes:
+                    if warn:
+                        warn(f"motion '{item.get('id')}' (world): {note}")
+                print(f"[world] motion '{item.get('id')}' anchored to "
+                      f"{item['anchor'].get('to')} in "
+                      f"{time.time() - t0:.1f}s", flush=True)
+            except Exception as e:  # noqa: BLE001 — degrade, never fail
+                if warn:
+                    warn(f"motion '{item.get('id')}' (world): pinned static "
+                         f"({type(e).__name__}: {str(e)[:160]})")
+                if item.get("layer") == "behind_subject":
+                    item = dict(item, layer="above_captions", behind=None)
+        out_items.append(item)
+        out_clips.append(clip)
+    return out_items, out_clips
+
+
+# ── object masks for the fx graph (world_defs.object_mask) ──────────────
+
+def object_mask_clip(plan, item, clock_offset=0.0):
+    """A gray clip of the object's PROGRAM-space mask over its window
+    (plan.W x plan.H, plan.fps), from objects.sam2 chunks through the
+    render's geometry; None when nothing is measured."""
+    edl = getattr(plan, "edl", None)
+    if edl is None or plan.tl is None:
+        return None
+    ctx = Ctx(edl, plan.W, plan.H, plan.fps, tl=plan.tl, source=plan.source,
+              preview=plan.preview, plan=plan, clock_offset=clock_offset,
+              workdir=plan.workdir)
+    r = _mask_reader(ctx, "object", item)
+    if r is None:
+        return None
+    import cv2
+    import fxprims
+    f0, f1 = fxprims.frame_span(item["start"], item["end"], plan.fps)
+    path = os.path.join(plan.workdir, f"objmask_{item['id']}.mp4")
+    W, H = int(plan.W), int(plan.H)
+    proc = subprocess.Popen(
+        ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "gray",
+         "-s", f"{W}x{H}", "-r", f"{plan.fps:.6f}", "-i", "pipe:0",
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "16",
+         "-pix_fmt", "yuv420p", path], stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # fxgraph's WORLD space is the picture before the camera: the geometry
+    # without the zooms (this module's lock "screen")
+    geo = ctx.geometry("screen")
+    blank = np.zeros((H, W), np.uint8)
+    try:
+        for f in range(f0, f1):
+            t = (f + 0.5) / plan.fps
+            tr = plan.tl.out_to_src(t)
+            A = program_affine(geo, t, tr) if tr is not None else None
+            m = r.at(tr - clock_offset) if A is not None else None
+            if m is None:
+                proc.stdin.write(blank.tobytes())
+                continue
+            mh, mw = m.shape
+            S = np.array([[A[0, 0] * W / mw, 0, A[0, 2] * W],
+                          [0, A[1, 1] * H / mh, A[1, 2] * H]])
+            proc.stdin.write(cv2.warpAffine(m, S, (W, H)).tobytes())
+    finally:
+        proc.stdin.close()
+        proc.wait()
+    return path

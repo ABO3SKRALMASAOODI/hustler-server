@@ -6481,6 +6481,26 @@ def _fx_source(edl, index):
         return None
 
 
+def _world_ctx(edl, W, H, fps, tl, index, preview, plan, clock_offset,
+               workdir, src_path):
+    """The render context the world compositor reads (Wave 3,
+    devices/INTERFACES_W3.md §4): None unless a motion item is anchored or
+    uses a Wave 3 template, so every other render is exactly as before."""
+    try:
+        import world_layer
+        if not world_layer.needed(edl):
+            return None
+        src = matte_track.read_source(index)
+        return world_layer.Ctx(edl, W, H, fps, tl=tl, source=src,
+                               index=index, preview=preview, plan=plan,
+                               clock_offset=clock_offset, workdir=workdir,
+                               src_path=src_path,
+                               out_duration=tl.out_duration)
+    except Exception as e:  # noqa: BLE001 — the world never fails a render
+        print(f"[render] world compositor off ({str(e)[:160]})", flush=True)
+        return None
+
+
 def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                progress_cb=None, want_wm=False, wm_settings=None,
                cancelled_cb=None,
@@ -7054,7 +7074,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                (info["width"], info["height"]), W, H,
                                frame_mode, frame_focus, insert_locals,
                                bool(caption_motion_items)),
-            behind_why=_hero_behind_why)
+            behind_why=_hero_behind_why,
+            world=_world_ctx(edl, W, H, fps, tl, index, preview, fx_box[0],
+                             (float(info.get("format_start") or 0.0)
+                              if seek_main_source else 0.0), workdir,
+                             src_path))
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):
