@@ -2966,13 +2966,16 @@ def _fx_cuts(order, keep, edl_keep, blk_frames):
 
 
 def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
-                   card_layout, src_dur):
+                   card_layout, src_dur, shot_starts=()):
     """Where a junction side's source handle comes from: the main footage
     past a plain kept span's out-point (side "out") or before its in-point
     ("in") — or None (the edge frame is frozen): an insert, a card block, a
-    sped / censored / repainted / padded program, or no footage there. The
-    in-side floor is a second before the first kept span (the main input may
-    seek there)."""
+    sped / censored / repainted / padded program, no footage there, or a
+    SOURCE camera cut inside the handle (Wave 1 integration: a column wipe
+    onto a span that starts on a camera change revealed the previous
+    camera's frames under the incoming side; ``shot_starts`` are the
+    index's shot boundaries). The in-side floor is a second before the
+    first kept span (the main input may seek there)."""
     kind, idx, _l = entry
     if kind != "seg" or no_source or idx in card_layout:
         return None
@@ -2981,15 +2984,33 @@ def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
     nf = blk_frames.get((kind, idx))
     if nf is None:
         return None
+    eps = 0.5 / f3
     if side == "out":
-        if s_ + (nf + h) / f3 > float(src_dur) + 1e-3:
+        end = s_ + nf / f3
+        if end + h / f3 > float(src_dur) + 1e-3:
+            return None
+        if any(end - eps <= c < end + h / f3 for c in shot_starts):
             return None
         return {"seg": idx, "frames": nf}
     start = s_ - h / f3
     floor = max(0.0, min(float(a) for a, _b in keep) - 1.0)
     if start < floor - 1e-6:
         return None
+    if any(start < c <= s_ + eps for c in shot_starts):
+        return None
     return {"seg": idx, "start": round(start, 6)}
+
+
+def _index_shot_starts(index):
+    out = []
+    for sh in (index or {}).get("shots") or []:
+        try:
+            v = float(sh.get("start") if isinstance(sh, dict) else sh)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if v > 0:
+            out.append(v)
+    return sorted(out)
 
 
 def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
@@ -3523,16 +3544,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if fx_plan is not None and fx_plan.junction_items:
         fx_juncs = fxgraph.junction_specs(
             fx_plan, _fx_cuts(order, keep, edl.get("keep"), blk_frames))
+        shot_starts = _index_shot_starts(index)
         for spec in fx_juncs:
             ka, kb = spec["k"], spec["k"] + 1
             spec["a_src"] = _fx_handle_src(
                 order[ka], keep, blk_frames, spec["h"], fps, "out",
                 speed or regions or patch_inputs or src_pad > 0,
-                card_layout, src_dur)
+                card_layout, src_dur, shot_starts)
             spec["b_src"] = _fx_handle_src(
                 order[kb], keep, blk_frames, spec["h"], fps, "in",
                 speed or regions or patch_inputs or src_pad > 0,
-                card_layout, src_dur)
+                card_layout, src_dur, shot_starts)
     fx_taps = [sp for sp in fx_juncs for key in ("a_src", "b_src")
                if sp.get(key)]
     # Each segment's own sound: its span of the source, as long as its block.

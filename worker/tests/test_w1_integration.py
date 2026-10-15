@@ -313,3 +313,187 @@ def test_a_held_subject_frame_moves_with_its_footage():
     assert edl["fx"][0]["hold_t"] == 8.0 and notes
     piece = stitch._window_fx(edl["fx"], 7.0, 9.0, 25.0, set())
     assert piece[0]["start"] == 1.0 and piece[0]["hold_t"] == 1.0
+
+
+def test_a_junction_handle_never_reaches_across_a_source_camera_cut():
+    """S3 board: a column wipe onto a span that starts ON a camera change
+    showed the previous camera's frames under the incoming side (the
+    handle borrowed 0.2 s before the in-point). A handle that would cross
+    an indexed shot boundary freezes the edge frame instead."""
+    import renderer
+    keep = [(7.0, 9.9), (15.0, 18.6)]
+    blk = {("seg", 0): 87, ("seg", 1): 108}
+    args = dict(keep=keep, blk_frames=blk, h=6, fps=29.97, no_source=False,
+                card_layout={}, src_dur=30.0)
+    shots = renderer._index_shot_starts({"shots": [{"start": 7.0},
+                                                   {"start": 10.0},
+                                                   {"start": 15.0}]})
+    assert renderer._fx_handle_src(("seg", 1, 3.6), side="in",
+                                   shot_starts=shots, **args) is None
+    assert renderer._fx_handle_src(("seg", 1, 3.6), side="in",
+                                   **args) is not None     # no index: as before
+    # the outgoing side: the source cuts to a wide at 10.0 s, 0.1 s past
+    # the out-point (9.9) — frozen too; without that cut, a real handle
+    assert renderer._fx_handle_src(("seg", 0, 2.9), side="out",
+                                   shot_starts=shots, **args) is None
+    assert renderer._fx_handle_src(("seg", 0, 2.9), side="out",
+                                   shot_starts=[7.0, 15.0],
+                                   **args) is not None
+
+
+def test_the_motion_caption_track_is_laid_over_below_captions_graphics():
+    """Oct 11 run, s03: a full-frame photo on below_captions covered the
+    motion captions for 4.4 s (the track is a below_captions item drawn
+    first) while the audits said every word was shown. The track is laid
+    last on its layer, as libass captions burn over those graphics."""
+    import motion_layer
+    from types import SimpleNamespace
+    clip = SimpleNamespace(x=0, y=0)
+    photo = {"id": "iss_photo", "template": "html", "layer": "below_captions",
+             "start": 8.46, "end": 12.86}
+    caps = {"id": "__captions_0", "template": "caption_motion",
+            "layer": "below_captions", "start": 0.0, "end": 20.0,
+            "_synthetic": True}
+    parts = []
+    motion_layer.append_graph(parts, "v", [(3, caps, clip), (4, photo, clip)],
+                              "below_captions", 30.0)
+    order = [p.split("]")[0].lstrip("[") for p in parts if ":v]" in p]
+    assert order == ["4:v", "3:v"]          # the photo first, captions over it
+
+
+def test_drawn_subject_devices_lay_over_the_tonal_ones():
+    """W1-S3: red clones (s3_clones) and an isolate (s3_mono) on the same
+    window were laid in id order, so the isolate greyed the clones: the
+    'one colour kept' read was lost. Backgrounds lay first, then tonal
+    moves, then drawn devices; start order within each."""
+    import subject_fx
+    items = [{"id": "s3_clones", "type": "subject", "kind": "echo",
+              "start": 0.4},
+             {"id": "s3_mono", "type": "subject", "kind": "isolate",
+              "start": 0.4},
+             {"id": "z_bg", "type": "background", "kind": "solid",
+              "start": 0.9},
+             {"id": "a_fill", "type": "subject", "kind": "fill",
+              "start": 0.1}]
+    order = [i["id"] for i in sorted(items, key=subject_fx._lay_order)]
+    assert order == ["z_bg", "s3_mono", "a_fill", "s3_clones"]
+
+
+def test_subject_fx_window_composites_leave_undrawn_pixels_exact(tmp_path,
+                                                                  monkeypatch):
+    """An alpha overlay in ``format=auto`` moved its branch into an alpha
+    format whose blend darkened every pixel of the window by 2-4 Y levels
+    on ffmpeg 8.0 (1 on 9.0), drawn or not: a step at the window's edges,
+    and AT-1B-4's 0.5 clones read 0.58. The window composites run in
+    yuv420 (subject_fx.YUV_OVER), which leaves an undrawn pixel exact."""
+    import subprocess
+    import subject_fx
+    import test_w1b_compiler as T
+    items = [T._sx("c", kind="echo", start=0.4, end=1.0,
+                   echo={"mode": "clone", "offsets_f": [4], "opacity": 0.5}),
+             T._sx("p", kind="poster", field="accent", start=1.2, end=1.6),
+             T._sx("g", kind="glow", colour="white", start=1.8, end=2.4)]
+    parts, _out = T._emit(tmp_path, monkeypatch, items, keep=((0.0, 3.0),))
+    graph = ";".join(parts)
+    assert subject_fx.YUV_OVER in graph
+    # the only alpha-format overlays left are the RGB background blur's
+    assert "overlay=format=auto" not in graph
+    # the primitive itself: a transparent overlay leaves the program exact
+    g = ("testsrc2=s=128x72:r=25:d=0.2,format=yuv420p,split[a][b];"
+         "color=c=black:s=128x72:r=25:d=0.2,format=gray[m];"
+         f"[b]format=yuva420p[bx];[bx][m]alphamerge[c];[a][c]"
+         f"{subject_fx.YUV_OVER},format=yuv420p,framemd5")
+    ref = ("testsrc2=s=128x72:r=25:d=0.2,format=yuv420p,framemd5")
+
+    def md5s(lavfi):
+        r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                            lavfi.rsplit(",framemd5", 1)[0], "-f",
+                            "framemd5", "-"], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[-300:]
+        return [ln.split(",")[-1].strip() for ln in r.stdout.splitlines()
+                if ln and not ln.startswith("#")]
+    assert md5s(g) == md5s(ref)
+
+
+def test_white_light_never_darkens_a_saturated_rim(tmp_path):
+    """subject_fx.white_lerp: the chroma takes the 2x2 MINIMUM of the light,
+    so a light gradient across a saturated blue rim brightens every RGB
+    channel or leaves it (AT-1B-5 read -13 with overlay's averaged chroma
+    alpha)."""
+    import subprocess
+    import numpy as np
+    W, H = 64, 32
+    # a saturated blue field; the light lit on every other column in the
+    # left half (the steepest gradient 4:2:0 can meet), full on the right
+    ramp = ("geq=lum='if(gte(X,48),255,255*mod(X,2))',format=gray")
+    g = (f"color=c=0x2040f0:s={W}x{H}:r=25:d=0.04,format=yuv420p[p];"
+         f"color=c=black:s={W}x{H}:r=25:d=0.04,format=gray,{ramp},"
+         f"split[ly][lc];[lc]erosion,scale={W // 2}:{H // 2}:flags=neighbor,"
+         f"split[cu][cv];[ly][cu][cv]mergeplanes=0x001020:yuv420p[mk];"
+         f"color=c=white:s={W}x{H}:r=25:d=0.04,format=yuv420p[wh];"
+         f"[p][wh][mk]maskedmerge,format=rgb24[o]")
+    base = (f"color=c=0x2040f0:s={W}x{H}:r=25:d=0.04,format=yuv420p,"
+            f"format=rgb24")
+
+    def rgb(graph, lab=None):
+        cmd = ["ffmpeg", "-v", "error"]
+        if lab:
+            cmd += ["-filter_complex", graph, "-map", f"[{lab}]"]
+        else:
+            cmd += ["-f", "lavfi", "-i", graph]
+        cmd += ["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        out = subprocess.run(cmd, capture_output=True).stdout
+        return np.frombuffer(out, np.uint8).reshape(H, W, 3).astype(int)
+    lit, p = rgb(g, "o"), rgb(base)
+    assert (lit - p).min() >= -1             # rounding only, never darker
+    assert lit[:, -8:].min() >= 250          # and it does light to white
+    # the averaged chroma alpha (a plain 4:2:0 overlay) darkens the unlit
+    # columns: the case this guards
+    g_old = (f"color=c=0x2040f0:s={W}x{H}:r=25:d=0.04,format=yuv420p[p];"
+             f"color=c=black:s={W}x{H}:r=25:d=0.04,format=gray,{ramp}[a];"
+             f"color=c=white:s={W}x{H}:r=25:d=0.04,format=yuva420p[w];"
+             f"[w][a]alphamerge[wa];[p][wa]overlay,format=rgb24[o]")
+    assert (rgb(g_old, "o") - p).min() < -10
+
+
+def test_rgb_reads_and_lut_windows_are_exact_on_every_ffmpeg(tmp_path):
+    """ffmpeg 8.x (the production lanes) converts yuv420p to PACKED rgb24
+    ~2 levels dark when the conversion is left to negotiation: frame reads
+    (qa_metrics.read_frames) and a grade window's lut3d both took that
+    path, so AT-1E-6 read set dE 17.7 on 8.0 and 2.4 on 9.0. Both now
+    convert in the graph with accurate rounding: a read matches the BT.709
+    formula and an identity cube leaves the picture."""
+    import subprocess
+    import numpy as np
+    import gradewin
+    import qa_metrics
+    src = str(tmp_path / "s.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "testsrc2=s=320x180:r=25:d=0.2", "-pix_fmt", "yuv420p",
+                    "-color_range", "tv", "-colorspace", "bt709",
+                    "-color_primaries", "bt709", "-color_trc", "bt709",
+                    "-c:v", "libx264", "-crf", "0", src], check=True)
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", src, "-frames:v",
+                          "1", "-f", "rawvideo", "-pix_fmt", "yuv420p", "-"],
+                         capture_output=True).stdout
+    W, H = 320, 180
+    b = np.frombuffer(raw, np.uint8)
+    Y = b[:W * H].reshape(H, W).astype(float)
+    U = b[W * H:W * H * 5 // 4].reshape(H // 2, W // 2).astype(float)
+    V = b[W * H * 5 // 4:].reshape(H // 2, W // 2).astype(float)
+    U, V = (c.repeat(2, 0).repeat(2, 1) for c in (U, V))
+    y, u, v = (Y - 16) / 219, (U - 128) / 224, (V - 128) / 224
+    kr, kb = 0.2126, 0.0722
+    R, B = y + 2 * (1 - kr) * v, y + 2 * (1 - kb) * u
+    G = (y - kr * R - kb * B) / (1 - kr - kb)
+    ref = np.clip(np.stack([R, G, B], -1) * 255, 0, 255)
+    _i, frs = qa_metrics.read_frames(src, frames={0})
+    got = frs[0].astype(float)
+    assert abs(float((got - ref).mean())) < 0.5
+    # an identity cube through the grade window's own conversions
+    out = subprocess.run(["ffmpeg", "-v", "error", "-i", src, "-vf",
+                          f"{gradewin.RGB_IN},lut3d,{gradewin.YUV_OUT}",
+                          "-frames:v", "1", "-f", "rawvideo", "-pix_fmt",
+                          "yuv420p", "-"], capture_output=True).stdout
+    y2 = np.frombuffer(out, np.uint8)[:W * H].astype(float)
+    assert abs(float((y2 - Y.ravel()).mean())) < 0.5

@@ -634,7 +634,8 @@ def moments(edl, index, *, rhetoric=None, maps=None, fps=None):
     for mid, rmap in sorted((maps or {}).items()):
         out += _music_moments(mid, rmap)
     out = [m for m in out if 0.0 <= m["t"] < program_s - 0.5 / fps]
-    payoff = _payoff(out, words, program_s, fps)
+    payoff = _payoff(out, words, program_s, fps,
+                     declared=declared_payoff(edl))
     if payoff is not None:
         for m in out:
             if m is payoff["moment"]:
@@ -715,14 +716,51 @@ PAYOFF_LATE_W = 0.45
 PAYOFF_BONUS = {"number": 0.15, "after_contrast": 0.1, "last_sentence": 0.15}
 
 
-def _payoff(ms, words, program_s, fps):
+def declared_payoff(edl):
+    """(start, end) of the payoff lockup the edit itself declares — a
+    motion item with tier 'payoff', id 'payoff'/'payoff*', or a purpose
+    that starts 'payoff' (render_qc reads the payoff the same way) — or
+    None. The editor's payoff is the story's landing: devices that land
+    on "the payoff" land on it, not on a louder figure earlier on."""
+    best = None
+    for m in (edl or {}).get("motion") or []:
+        if not isinstance(m, dict):
+            continue
+        params = m.get("params") or {}
+        mid = str(m.get("id") or "")
+        rank = (0 if (params.get("tier") or m.get("tier")) == "payoff" else
+                1 if mid == "payoff" else
+                2 if mid.startswith("payoff") else
+                3 if str(m.get("purpose") or "").lower().startswith("payoff")
+                else None)
+        if rank is None:
+            continue
+        try:
+            span = (float(m["start"]), float(m["end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if best is None or (rank, -span[0]) < (best[0], -best[1][0]):
+            best = (rank, span)
+    return best[1] if best else None
+
+
+def _payoff(ms, words, program_s, fps, declared=None):
     """The payoff: the payload word where the story lands (strength, how
     late it is, a figure, the far side of a contrast, the last sentence);
-    its hold runs PAYOFF_HOLD_S past the word's phrase end."""
+    its hold runs PAYOFF_HOLD_S past the word's phrase end. When the edit
+    declares its payoff lockup (``declared``: its window) the word is
+    chosen inside that window."""
     pool = [m for m in ms if m["kind"] in ("stress", "word")
             and "payload" in (m.get("tags") or [])]
     if not pool:
         pool = [m for m in ms if m["kind"] == "stress"]
+    if declared:
+        a, b = declared
+        inside = [m for m in ms if m["kind"] in ("stress", "word")
+                  and a - 0.35 <= m["t"] <= b]
+        pref = [m for m in inside if m in pool] or inside
+        if pref:
+            pool = pref
     if not pool:
         return None
     last_start = 0.0

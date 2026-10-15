@@ -710,10 +710,13 @@ def _window_fx(items, w0, w1, fps, music_ids):
             continue
         moved = {**it, "start": la, "end": lb}
         if it.get("hold_t") is not None:
-            # the held subject frame rides the piece's clock too (1B)
+            # the held subject frame rides the piece's clock too when it is
+            # inside the item's own window AND the piece (a hold_t outside
+            # either keeps 1B's rule: the item's first frame is held)
             try:
-                moved["hold_t"] = min(max(local(min(max(float(it["hold_t"]),
-                                                         w0), w1)), la), lb)
+                ht = float(it["hold_t"])
+                if a <= ht < b and w0 <= ht < w1:
+                    moved["hold_t"] = min(max(local(ht), la), lb)
             except (TypeError, ValueError):
                 pass
         out.append(moved)

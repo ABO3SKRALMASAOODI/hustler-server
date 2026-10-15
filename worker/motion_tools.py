@@ -1036,12 +1036,26 @@ def _pinned_size(spec, item):
         return None
 
 
-def _mark_of(item, W, H):
+def _mark_of(item, W, H, ctx=None, edl=None):
     """The corner mark's reserved box a graphic keeps off (keepout.on_mark),
-    or None for a persistent band headline (band_type lays it out around
-    the mark) and off a portrait frame."""
+    or None: a persistent band headline (band_type lays it out around the
+    mark), a portrait frame's absence, or a graphic over a picture card's
+    or letterbox's band (the band machinery judges those: _band_spill_note
+    names a lockup rising into the mark's zone, and the render measures
+    it; moving it here pushed band lockups down onto the card)."""
     if motion_templates.persistent(item) or not keepout.portrait(W, H):
         return None
+    if edl is not None:
+        try:
+            video = (getattr(ctx, "index", None) or {}).get("video") or {}
+            src = ((video["width"], video["height"])
+                   if video.get("width") and video.get("height")
+                   and not edl.get("canvas") else None)
+            if headline_band(edl, float(item["start"]), float(item["end"]),
+                             W, H, src=src):
+                return None
+        except Exception:  # noqa: BLE001 — no band known: judge the mark
+            pass
     return keepout.mark_zone(W, H)
 
 
@@ -1084,7 +1098,7 @@ def _keep_out_estimated(ctx, edl, item):
     face_bad = hit["hit"] and not allow
     issues = ([i for i in keepout.safe_issues(box, W, H) if i in ("side", "rail")]
               if template in keepout.COLUMN_TEMPLATES else [])
-    mark = _mark_of(item, W, H)
+    mark = _mark_of(item, W, H, ctx, edl)
     if keepout.on_mark(box, mark):
         issues.append("mark")
     pin = _pinned_size(spec, item)
@@ -1188,7 +1202,7 @@ def _keep_out_inner(ctx, edl, item, rep):
     allow = bool(item.get("allow_face_overlap"))
     hit = keepout.assess(box, track)
     issues = keepout.safe_issues(box, W, H)
-    mark = _mark_of(item, W, H)
+    mark = _mark_of(item, W, H, ctx, edl)
     if keepout.on_mark(box, mark):
         issues.append("mark")
     pin = _pinned_size(spec, item)

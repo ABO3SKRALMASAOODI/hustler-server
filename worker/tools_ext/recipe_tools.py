@@ -159,7 +159,19 @@ def apply_recipe(ctx, name, at=None):
         near = [m for m in plan["moments"] if abs(m["t"] - t) <= 1.5]
         if not near:
             return f"REJECTED: no spoken moment within 1.5 s of {t:g}s."
-        plan = dict(plan, moments=near)
+        # recipes that land on "the payoff" land on the spoken moment
+        # nearest `at` when the planner's payoff is elsewhere (the call
+        # names the landing; it was ignored and the move went to the
+        # planner's payoff)
+        pay = plan.get("payoff")
+        if not pay or abs(float(pay["t"]) - t) > 1.5:
+            words = [m for m in near if m["kind"] in ("stress", "word")]
+            m = min(words or near, key=lambda m: (
+                abs(float(m["t"]) - t), -float(m.get("strength") or 0)))
+            pay = {"t": m["t"], "word": m.get("word"), "moment": m,
+                   "hold_end": round(min(float(plan["program_s"]) - 0.05,
+                                         float(m["t"]) + 1.5), 3)}
+        plan = dict(plan, moments=near, payoff=pay)
     ids = {str(i.get("id")) for i in edl.get("fx") or []
            if isinstance(i, dict)}
     keys = None
@@ -249,7 +261,8 @@ TOOL_SPECS = {
         "silhouette_hold, negative_hits (1-frame negatives into the "
         "payoff), white_silhouette (the speaker flashes white on the "
         "payoff), lab_scan (registered variant strobe), thermal_flip, "
-        "echo_trail. Ranked by story fit x freshness: a move the other "
+        "light_figure (the speaker as light on black), echo_trail. Ranked "
+        "by story fit x freshness: a move the other "
         "shorts of the same batch used ranks lower. Each comes with the "
         "word it lands on, why, a reference exemplar and the exact "
         "apply_edit_batch ops. Silent, zoom-free, flash-safe.",
@@ -264,7 +277,7 @@ TOOL_SPECS = {
         {"name": {"type": "string", "enum": [
             "mono_until_turn", "colour_kept_payoff", "silhouette_hold",
             "negative_hits", "white_silhouette", "lab_scan", "thermal_flip",
-            "echo_trail"]},
+            "light_figure", "echo_trail"]},
          "at": {"type": "number"}}),
 }
 

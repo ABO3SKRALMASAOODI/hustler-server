@@ -1083,5 +1083,6 @@ def still_graph(kind, W, H, item=None, workdir=None):
     g = Graph(parts, "sv", W, H, 25.0, 1, maps=maps, matte=None,
               seed=_seed(item))
     out = BUILDERS[kind](g, "src", item)
-    parts.append(f"[{out}]format=rgb24[out]")
+    parts.append(f"[{out}]scale=flags=accurate_rnd+full_chroma_int,"
+                 f"format=rgb24[out]")
     return ";".join(parts), paths

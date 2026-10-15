@@ -210,8 +210,7 @@ def _follow_hold_times(old_edl, new_edl, old_tl=None, new_tl=None):
             if abs(delta) < 1e-6:
                 continue
             t = float(before.get("hold_t", it["hold_t"])) + delta
-            it["hold_t"] = round(min(max(t, float(it["start"])),
-                                     float(it["end"])), 2)
+            it["hold_t"] = round(max(0.0, t), 2)
             moved += 1
         except (TypeError, ValueError):
             continue

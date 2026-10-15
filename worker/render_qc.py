@@ -1793,6 +1793,24 @@ def type_findings(tres, tplan, cards):
         big = max(lock, key=lock.get)
         caps["payoff"] = (pay, lock[pay], big, lock[big])
     collide, cross = [], []
+    # Measured ink on the free-tier corner mark (Oct 11 run, s06: a band
+    # lockup rendered from y 0.076, over the mark, and nothing said so — a
+    # browserless estimate cannot see it; the composition can).
+    mark_hits = []
+    try:
+        import keepout
+        W_, H_ = (tplan or {}).get("W"), (tplan or {}).get("H")
+        zone = keepout.mark_zone(int(W_), int(H_)) if W_ and H_ and \
+            keepout.portrait(W_, H_) else None
+        for i, m in meas.items():
+            it = items.get(i)
+            if zone is None or not it or it["persistent"] or not m.get("box"):
+                continue
+            if keepout.on_mark(m["box"], zone):
+                mark_hits.append((i, round(float(m["box"][1]), 3),
+                                  round(zone[3], 3)))
+    except Exception:  # noqa: BLE001 — a report never fails a render
+        mark_hits = []
     for c in (tres or {}).get("cues") or []:
         cb, t = c["box"], c["t"]
         area = max(1e-9, (cb[2] - cb[0]) * (cb[3] - cb[1]))
@@ -1826,7 +1844,8 @@ def type_findings(tres, tplan, cards):
                 if hit:
                     cross.append((t, c["text"], hit))
                     break
-    return {"caps": caps, "collide": collide, "cross": cross}
+    return {"caps": caps, "collide": collide, "cross": cross,
+            "mark": mark_hits}
 
 
 def _keyframe_times(path, program_s, most, deadline):
@@ -2372,6 +2391,12 @@ def measured_findings(res):
             f"{'under' if how == 'under' else 'over'} '{gid}' (its measured "
             "box) — the words collide on screen; move the graphic off the "
             "caption band or carry those words on it")
+    for gid, y0, floor in (tq.get("mark") or [])[:2]:
+        out.append(
+            f"GRAPHIC ON THE CORNER MARK: '{gid}' draws from y {y0:.3f}, "
+            f"into the free-tier mark's box (top-left, down to y {floor:.3f}) "
+            "— a free-tier export burns the mark over it; set it lower (its "
+            "y) or narrower so its ink starts below the mark")
     for t, text, side in (tq.get("cross") or [])[:2]:
         out.append(
             f"CAPTION CROSSES THE CARD EDGE at {t:.1f}s: '{text}' runs across "
