@@ -339,3 +339,24 @@ def test_a_speech_habit_is_not_a_callback():
         "we have a tagline we have a site the rowing joke is great and "
         "then the rowing joke again".split())]
     assert [c["text"] for c in callbacks.find(ws)] == ["the rowing joke"]
+
+
+def test_a_lockup_that_fits_nowhere_on_this_canvas_gives_its_words_back():
+    """The degrade ladder ends in 'omit, said', never a silent loss: a
+    typeset lockup no layout fits at render (another aspect, a face that
+    fills the frame) would draw nothing while its words stayed muted."""
+    import caption_carry
+    from timeline import Timeline
+    e = edl(keep=((0.0, 20.0),), ratio="9:16")
+    e["captions"] = {"enabled": True}
+    it = _item(text=" ".join(["internet"] * 20))
+    # a face filling the frame at THIS canvas (fresh, measured)
+    it["footprint"] = {"box": [0.1, 0.1, 0.9, 0.9],
+                       "ar": round(1080 / 1920, 4),
+                       "faces": [[0.02, 0.05, 0.98, 0.95]]}
+    e["motion"] = [it]
+    e = schemas.validate_edl(e, 60.0).model_dump()
+    layoutdoc.refresh_faces(e, index(), 1080, 1920)
+    assert not [m for m in e["motion"] if m["id"] == "ts1"]
+    tl = Timeline(e["keep"], [], [])
+    assert not caption_carry.heard_unshown(e, index(), tl)

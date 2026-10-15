@@ -413,6 +413,31 @@ def refresh_faces(edl, index, W, H, fps=30.0):
         if box:
             m["footprint"] = caption_carry.make_footprint(box, W, H, zones,
                                                           geo=geo)
+    # the degrade ladder's last rung, never a silent loss: a lockup no
+    # layout fits on THIS canvas (another aspect, a face that moved) would
+    # draw nothing while its words stay muted from the captions. It is
+    # left out of this render, said, and the captions carry its words.
+    drop = []
+    for m in items:
+        try:
+            doc = solve_item(m, W, H, fps)
+        except Exception:  # noqa: BLE001 — the page draws its own fallback
+            continue
+        if not doc.get("runs"):
+            drop.append(m.get("id"))
+    if drop:
+        edl["motion"] = [m for m in edl.get("motion") or []
+                         if not (isinstance(m, dict) and m.get("id") in drop
+                                 and m.get("template") == "typeset")]
+        try:
+            import motion_layer
+            for i in drop:
+                motion_layer.warn(
+                    f"typeset '{i}' left out: no layout fits this "
+                    f"{int(W)}x{int(H)} frame at a legible size — the "
+                    "captions carry its words")
+        except Exception:  # noqa: BLE001
+            pass
     return edl
 
 
