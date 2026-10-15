@@ -1,0 +1,14 @@
+{
+  "wave": 4,
+  "doc": "worker/devices/INTERFACES_W4.md §8.2: Wave 4's growth, set aside by the Wave 0/1 seam tests",
+  "fx_tags": ["depth", "time", "ui_media"],
+  "verbs": ["add_depth_effect", "add_time_effect", "remove_depth_time",
+            "add_ui_scene", "remove_ui_scene", "source_broll",
+            "critique_short", "apply_format", "deliver_aspects",
+            "retypeset_language"],
+  "skills": ["depth-time", "explainers", "broll-director", "delivery", "critic"],
+  "departments": ["delivery"],
+  "card_prefixes": ["depth", "time", "ui", "broll"],
+  "sidecar_kinds": ["depth.small"],
+  "templates": ["ui_scene"]
+}

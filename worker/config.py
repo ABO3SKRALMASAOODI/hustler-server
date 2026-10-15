@@ -582,6 +582,20 @@ W1F_RHETORIC_LLM = os.getenv("W1F_RHETORIC_LLM", "0") == "1"
 W1F_PROOF_WAIT_S = float(os.getenv("W1F_PROOF_WAIT_S", "240"))
 # ---- W1 1F end
 
+# ---- W4 (beyond footage) begin
+# Wave 4 (worker/devices/INTERFACES_W4.md). Every flag defaults to the inert
+# value; a device whose acceptance is not met ships dark behind its flag.
+# depth.small sidecar (Depth Anything V2 Small, batch lane, torch-CPU):
+# keyframe rate and long edge of the depth maps; DEPTH_MODEL overrides the
+# baked weights path (models/depth_anything_v2_small.json).
+DEPTH_KEYFRAME_FPS = float(os.getenv("DEPTH_KEYFRAME_FPS", "8"))
+DEPTH_MAX_SIDE = int(os.getenv("DEPTH_MAX_SIDE", "518"))
+DEPTH_TORCH_THREADS = int(os.getenv("DEPTH_TORCH_THREADS", "4"))
+# The motion critic's rendered-frame sampling rate (frames per second it
+# decodes from a render; flash analysis always reads every frame).
+CRITIC_SAMPLE_FPS = float(os.getenv("CRITIC_SAMPLE_FPS", "6"))
+# ---- W4 end
+
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via
 # Openverse (Wikimedia/Flickr — real people, companies, events); video
 # stock needs PEXELS_API_KEY/PIXABAY_API_KEY. Topical web VIDEO is

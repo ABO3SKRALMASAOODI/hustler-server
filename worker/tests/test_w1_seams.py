@@ -89,6 +89,11 @@ PEERS = {"face": "matte_track:face_mask", "glyph": "compositor:glyph_mask",
 # Core compact catalog at the end of Wave 1 (budget 83,000; the cap is
 # never raised). INTERFACES_W1.md §4.3.
 W1_CORE_CEILING = 82_700
+# Growth later waves declare in tests/fixtures/waves/w<N>.json
+# (INTERFACES_W4.md §8.2): their fx tags, skills and departments are set
+# aside exactly; nothing else may differ from the Wave 1 pins.
+import later_waves                                     # noqa: E402
+LATER = later_waves.growth()
 
 
 def _fx_module(name):
@@ -143,8 +148,8 @@ def preview_report():
 
 def test_preview_lane_registers_exactly_the_pinned_table(preview_report):
     reg = preview_report["registry"]
-    assert set(reg["types"]) == set(CLASSES)
-    assert set(reg["authorable"]) == set(CLASSES)
+    assert set(reg["types"]) - LATER["fx_tags"] == set(CLASSES)
+    assert set(reg["authorable"]) - LATER["fx_tags"] == set(CLASSES)
     assert reg["slots"] == ["MotionItem.composite"]
     for tag, (stages, compiler, module) in CLASSES.items():
         got = reg["classes"][tag]
@@ -182,8 +187,8 @@ def test_preview_by_track_registers_only_that_track():
     """VALMERA_FX_PREVIEW=1b adds 1B's module to whatever is live already."""
     report = _child("1b")
     live = {n for n in MEMBER_MODULES if _fx_module(n).LIVE} | {"subject"}
-    assert set(report["registry"]["types"]) == set().union(
-        *(MEMBER_MODULES[n][1] for n in live))
+    assert set(report["registry"]["types"]) - LATER["fx_tags"] == \
+        set().union(*(MEMBER_MODULES[n][1] for n in live))
     assert set(report["registry"]["slots"]) == set().union(
         *(MEMBER_MODULES[n][2] for n in live))
     # the 1B shapes are written there; a track that is not live is refused
@@ -231,7 +236,7 @@ def _strip_w1_growth(catalog):
         elif name in ("load_tools", "expand_toolset"):
             walk(tool, live)
         elif name == "read_skill":
-            walk(tool, W1_SKILLS)
+            walk(tool, W1_SKILLS | LATER["skills"])
     return cat
 
 

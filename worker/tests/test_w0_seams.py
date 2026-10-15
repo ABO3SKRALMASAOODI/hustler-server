@@ -148,10 +148,15 @@ W1_VERBS = {"add_subject_effect", "set_background", "remove_subject_effect",
             "isolate_colour", "import_lut", "match_grade", "add_finish",
             "make_variant_set", "remove_finish", "suggest_devices",
             "set_intensity", "proof_device", "audit_motion"}
+# Growth later waves declare in tests/fixtures/waves/w<N>.json
+# (INTERFACES_W4.md §8.2), set aside exactly.
+import later_waves                                     # noqa: E402
+LATER_FX_TAGS = later_waves.get("fx_tags")
+LATER_VERBS = later_waves.get("verbs")
 
 
 def test_only_pinned_fx_types_are_registered_and_others_are_rejected():
-    assert set(schemas.FX_TYPES) <= W1_FX_TAGS | {"fx_probe"}
+    assert set(schemas.FX_TYPES) <= W1_FX_TAGS | LATER_FX_TAGS | {"fx_probe"}
     assert schemas.FX_STAGES == ("world", "screen", "pre_captions",
                                  "over_type", "junction", "music_bus")
     edl = schemas.default_edl(30)
@@ -239,7 +244,7 @@ def test_fx_layer_is_advertised_exactly_when_a_type_is_authorable():
 
 
 def test_only_pinned_department_tools_and_no_extension_job_kind_exist():
-    assert tools_ext.EXT_TOOL_NAMES <= W1_VERBS
+    assert tools_ext.EXT_TOOL_NAMES <= W1_VERBS | LATER_VERBS
     live = set(agent_tools.TOOL_DOMAINS) & set(tools_ext.DEPARTMENTS)
     assert live == set(tools_ext.EXT_DEPARTMENTS)
     assert tools_ext.core_names(agent_tools.TOOLS) == [

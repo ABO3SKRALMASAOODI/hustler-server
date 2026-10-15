@@ -32,7 +32,10 @@ VERBS = ("suggest_devices", "set_intensity", "proof_device", "audit_motion")
 
 def test_verify_department_is_live_with_its_pinned_verbs():
     assert set(verify_tools.TOOL_SPECS) == set(VERBS)
-    assert tools_ext.EXT_DEPARTMENTS.get("verify") == set(VERBS)
+    # later waves' verify verbs (tests/fixtures/waves, INTERFACES_W4 §8.2)
+    import later_waves
+    assert tools_ext.EXT_DEPARTMENTS.get("verify") - \
+        later_waves.get("verbs") == set(VERBS)
     for verb in VERBS:
         assert verb in agent_tools.TOOLS
         assert verb not in tools_ext.core_names(agent_tools.TOOLS)
