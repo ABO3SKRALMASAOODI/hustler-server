@@ -441,3 +441,28 @@ def test_a_ui_scene_carries_its_cards_box_not_the_backdrop():
                                       caption_carry.frame_ar(1080, 1920))
     assert box is not None and not fp.get("estimated")
     assert box[3] < 0.8 and box[1] > 0.05      # the caption band is free
+
+
+def test_critique_short_takes_the_pack_it_judges_against(monkeypatch):
+    """A short built on a pack (apply_format E/F/...) was judged against a
+    talking head's rhythm band: the verb now takes the pack."""
+    from tools_ext import critic_tools
+    import motion_critic
+    out = critic_tools.critique_short(Ctx(_edl()), format="Z")
+    assert out.startswith("REJECTED")
+    seen = {}
+    monkeypatch.setattr(motion_critic, "critique",
+                        lambda *a, **k: seen.update(k) or {"findings": []})
+    monkeypatch.setattr(motion_critic, "critique_text", lambda r: "CRITIC")
+
+    class RCtx(Ctx):
+        workdir = "/tmp"
+        pending_images = []
+    import storage
+    monkeypatch.setattr(storage, "download_to", lambda k, p: None)
+    monkeypatch.setattr(critic_tools, "_render_row", lambda *a: {
+        "storage_key": "r/1.mp4", "meta": {"variant": "preview"}})
+    ctx = RCtx(_edl())
+    ctx.db = type("D", (), {"run": lambda self, fn, *a, **k: []})()
+    out = critic_tools.critique_short(ctx, format="e")
+    assert "CRITIC" in out and seen.get("fmt") == "E"

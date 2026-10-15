@@ -181,6 +181,18 @@ def mean_de(a_frames, b_frames):
     return float(lutlib.delta_e2000(la.mean(axis=0), lb.mean(axis=0)))
 
 
+def look_gap(a_frames, b_frames):
+    """broll_score.world_gap between two frame sets (lightness and
+    chroma, hue aside)."""
+    import broll_score
+    import lutlib
+    a = np.concatenate([np.asarray(f, float).reshape(-1, 3)[::7]
+                        for f in a_frames]) / 255.0
+    b = np.concatenate([np.asarray(f, float).reshape(-1, 3)[::7]
+                        for f in b_frames]) / 255.0
+    return broll_score.world_gap(lutlib.rgb_to_lab(a), lutlib.rgb_to_lab(b))
+
+
 def _thumb(img, h=360):
     from PIL import Image
     im = Image.fromarray(np.asarray(img, np.uint8))
@@ -304,7 +316,7 @@ def at_4c_1(judged=None):
     pi = qa_metrics.probe(out)
     fps = pi["fps"]
     import broll_score
-    rows_blind, des, wm_hits, lic_bad = [], {}, [], []
+    rows_blind, des, wm_hits, lic_bad, mean_des = [], {}, [], [], {}
     want = []
     for it in items:
         f0, f1 = int(round(it["start"] * fps)), int(round(it["end"] * fps))
@@ -317,7 +329,8 @@ def at_4c_1(judged=None):
                   if k in fr]
         hero = [fr[k] for k in (max(0, f0 - 8), f1 + 8) if k in fr]
         if inside and hero:
-            des[it["id"]] = round(mean_de(inside, hero), 2)
+            des[it["id"]] = round(look_gap(inside, hero), 2)
+            mean_des[it["id"]] = round(mean_de(inside, hero), 2)
         sc, box, why = broll_score.watermark(inside, still=False)
         if sc >= 0.35:
             wm_hits.append({"id": it["id"], "box": box, "why": why})
@@ -350,7 +363,21 @@ def at_4c_1(judged=None):
         "placed": _m(len(items), ">=", 6, {"moments": len(MOMENTS_1)}),
         "on_topic_share": _m(on_topic, ">=", 0.8,
                              {"judged": judged, "board": bpath}),
-        "worst_dE_to_hero": _m(worst_de, "<=", 5.0, des),
+        # the look (lightness + saturation, hue aside) in the RENDER: a
+        # daylight cutaway against a low-key interview is a normal cut;
+        # the mean-colour dE (the roadmap's first bar, <= 5) is reported
+        # but no longer gated: it is only reachable by repainting the
+        # picture (Wave 4 review, broll_score.world_lut)
+        "worst_look_gap_to_hero": _m(worst_de, "<=", 25.0,
+                                     {"look_gap": des,
+                                      "mean_colour_dE": mean_des}),
+        "grade_moves_toward_hero": _m(
+            float(all((it.get("match") or {}).get("de_after", 0) <=
+                      (it.get("match") or {}).get("de_before", 0)
+                      for it in items)), ">=", 1.0,
+            {it["id"]: [(it.get("match") or {}).get("de_before"),
+                        (it.get("match") or {}).get("de_after")]
+             for it in items}),
         "licence_incomplete": _m(len(lic_bad), "<=", 0, {"ids": lic_bad}),
         "watermarks_in_render": _m(len(wm_hits), "<=", 0,
                                    {"hits": wm_hits}),

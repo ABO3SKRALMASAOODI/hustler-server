@@ -58,9 +58,14 @@ def _siblings(conn, project_id, limit=_MAX_SIBLINGS):
 
 
 def critique_short(ctx, variant="auto", asset_key=None, deep=True,
-                   board=True):
+                   board=True, format=None):
     import motion_critic
     import storage
+    fmt = str(format or "").strip().upper() or None
+    if fmt and (len(fmt) != 1 or fmt not in "ABCDEFGHIJ"):
+        return ("REJECTED: format is the pack the short follows, one of "
+                "A-J (as apply_format names them), or leave it out for a "
+                "talking head (C) / a trend desk on the user's track (B).")
     row = ctx.latest_edl()
     edl, version = row["json"], row["version"]
     if asset_key:
@@ -98,7 +103,7 @@ def critique_short(ctx, variant="auto", asset_key=None, deep=True,
     res = motion_critic.critique(
         local, edl, getattr(ctx, "index", None) or {},
         request_text=getattr(ctx, "user_message", None), report=meta,
-        previous=previous, intensity=intensity, final=final,
+        previous=previous, intensity=intensity, final=final, fmt=fmt,
         want_wm=bool(final and (meta.get("picture_qc") or {}).get(
             "watermark") is not None), maps=maps, deep=bool(deep),
         board_dir=workdir if board else None)
@@ -138,7 +143,9 @@ TOOL_SPECS = {
          "asset_key": {"type": "string"},
          "deep": {"type": "boolean", "description": "faces, late words and "
                   "flicker passes (default true)"},
-         "board": {"type": "boolean"}}),
+         "board": {"type": "boolean"},
+         "format": {"type": "string", "description": "the pack the short "
+                    "follows (A-J, as apply_format): its rhythm band"}}),
 }
 REQUIRED_ARGS = {}
 WRITE_TOOLS = set()

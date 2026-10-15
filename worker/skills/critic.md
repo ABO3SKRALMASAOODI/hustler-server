@@ -52,7 +52,9 @@ your own description of the edit.
 
 ## Verification procedure
 
-1. `render_preview`, then `critique_short`.
+1. `render_preview`, then `critique_short` (pass `format` when the short
+   follows a pack — `apply_format('E')` -> `format='E'` — so its rhythm
+   is judged against that genre's references, not a talking head's).
 2. Blocking findings: zero before export.
 3. `export_final`, then `critique_short(variant='final')`: the brand
    check runs on finals (end card and watermark, exactly as rendered).
