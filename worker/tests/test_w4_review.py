@@ -305,7 +305,10 @@ def test_wave4_department_shares_stay_within_their_pins():
             "x", compact=True, names=list(names)), separators=(",", ":")))
     world = list(depth_tools.VERBS) + list(ui_tools.VERBS) + \
         list(broll_tools.VERBS)
-    assert size(world) <= 5_000          # Wave 3 owns the rest of world
+    # their own department since the engines release ("picture"); the
+    # share pin stands
+    assert size(world) <= 5_000
+    assert set(world) == set(agent_tools.TOOL_DOMAINS["picture"])
     assert size(critic_tools.VERBS) <= 1_200
     for name in world + list(critic_tools.VERBS):
         assert len(agent_tools.TOOLS[name][1]) <= 900, name
@@ -444,7 +447,7 @@ def test_a_ui_scene_carries_its_cards_box_not_the_backdrop():
 
 
 def test_critique_short_takes_the_pack_it_judges_against(monkeypatch):
-    """A short built on a pack (apply_format E/F/...) was judged against a
+    """A short built on a pack (apply_format_pack E/F/...) was judged against a
     talking head's rhythm band: the verb now takes the pack."""
     from tools_ext import critic_tools
     import motion_critic

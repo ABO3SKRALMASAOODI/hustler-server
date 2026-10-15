@@ -146,3 +146,47 @@ def test_main_footage_ramp_refuses_speech_unless_asked():
 def test_unproven_devices_ship_labelled_beta(card_id):
     import devices
     assert devices.load_cards()[card_id]["status"] == "beta"
+
+
+# ── one pack schema, one loader, one verb (Wave 2 + Wave 3 + Wave 4) ────
+
+def test_one_loader_lists_every_genre_in_one_schema():
+    import format_packs
+    assert formats.IDS == ("A", "B", "C", "D", "E", "F", "G", "H", "I",
+                           "J")
+    assert tuple(format_packs.CODES) == formats.IDS
+    for pid in formats.IDS:
+        p = formats.load(pid)
+        assert p["id"] == pid
+        for beat in p["structure"]:
+            assert beat["beat"] and beat["at"] and beat["devices"]
+        text = formats.brief(p)
+        assert text.startswith(f"FORMAT {pid}") and "black-and-white" in text
+        assert format_packs.budgets(pid)["zoom"] is None
+        assert format_packs.budgets(pid)["sfx"] is None
+    # D's policy fields stay in the pack, never become ledger budgets
+    assert formats.load("D")["budgets"]["light_dissolve_max"] == 1
+    assert "light_dissolve_max" not in format_packs.budgets("D")
+    assert {formats.load(c)["apply"] for c in "EFGIJ"} == {"brief"}
+    assert not any(formats.applies_brief(formats.load(c)) for c in "ABCDH")
+
+
+def test_the_pack_verb_is_one_verb():
+    from tools_ext import delivery_tools
+    assert "apply_format" not in delivery_tools.TOOL_SPECS
+    assert delivery_tools.VERBS == ("deliver_aspects", "retypeset_language")
+    spec = format_tools.TOOL_SPECS["apply_format_pack"][2]
+    assert spec["aspect"] == {"type": "boolean"}
+    assert spec["pack"]["enum"] == ["auto", *formats.IDS, "none"]
+
+
+def test_users_words_pick_the_later_genres_too():
+    assert formats.select(None, None, "make a product explainer")[0][
+        "id"] == "E"
+    assert formats.select(None, None, "a visual essay to my song")[0][
+        "id"] == "F"
+    assert formats.select(None, None, "creator essay in my room")[0][
+        "id"] == "D"
+    assert formats.select(None, None, "an event recap sizzle")[0]["id"] == \
+        "G"
+    assert formats.select(None, None, "lyric video please")[0]["id"] == "H"

@@ -1,6 +1,6 @@
 {
   "wave": 4,
-  "doc": "worker/devices/INTERFACES_W4.md §8.2: Wave 4's growth, set aside by the Wave 0/1 seam tests",
+  "doc": "worker/devices/INTERFACES_W4.md \u00a78.2: Wave 4's growth, set aside by the Wave 0/1 seam tests",
   "fx_tags": [
     "depth",
     "time",
@@ -16,7 +16,6 @@
     "source_broll",
     "remove_broll",
     "critique_short",
-    "apply_format",
     "deliver_aspects",
     "retypeset_language"
   ],
@@ -28,7 +27,8 @@
     "critic"
   ],
   "departments": [
-    "delivery"
+    "delivery",
+    "picture"
   ],
   "card_prefixes": [
     "depth",

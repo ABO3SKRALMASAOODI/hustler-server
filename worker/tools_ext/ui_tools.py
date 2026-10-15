@@ -21,7 +21,10 @@ Nothing here adds music, a sound or a zoom.
 import json
 import re
 
-DEPARTMENT = "world"
+# The engines release gave Wave 4's picture verbs (depth and time, UI
+# scenes, sourced B-roll) their own department: with Wave 3's world verbs
+# one department passed its 12,000-byte compact budget.
+DEPARTMENT = "picture"
 VERBS = ("add_ui_scene", "remove_ui_scene")
 
 

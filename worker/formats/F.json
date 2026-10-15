@@ -1,8 +1,115 @@
 {
- "code": "F",
+ "id": "F",
  "name": "Music-driven visual essay",
  "genre": "F",
  "intensity": "charged",
+ "apply": "brief",
+ "exemplars": [
+  "17",
+  "33",
+  "36"
+ ],
+ "asks": [
+  "visual essay",
+  "essay",
+  "music-driven essay",
+  "cinematic essay",
+  "video essay"
+ ],
+ "grammars": [],
+ "structure": [
+  {
+   "beat": "open",
+   "at": "open",
+   "share": 0.15,
+   "devices": [
+    "depth_parallax",
+    "typeset_lockup"
+   ],
+   "note": "a still that drifts in 2.5D, one line of type"
+  },
+  {
+   "beat": "build",
+   "at": "body",
+   "share": 0.35,
+   "devices": [
+    "broll_archival",
+    "broll_cutaway",
+    "montage_cut"
+   ],
+   "note": "archival and sourced B-roll on the phrase, cuts on the user's track beats"
+  },
+  {
+   "beat": "drop",
+   "at": "payoff",
+   "share": 0.35,
+   "devices": [
+    "montage_cut",
+    "depth_dof",
+    "time_echo",
+    "accent_negative"
+   ],
+   "note": "the montage on 8ths, depth and time devices on the hits"
+  },
+  {
+   "beat": "resolve",
+   "at": "end",
+   "share": 0.15,
+   "devices": [
+    "typeset_lockup",
+    "depth_dof"
+   ],
+   "note": "a held frame, the last line"
+  }
+ ],
+ "palette": {
+  "broll_cutaway": 3,
+  "broll_archival": 3,
+  "montage_cut": 1,
+  "depth_parallax": 2,
+  "depth_dof": 2,
+  "time_echo": 1,
+  "time_interpolate": 1,
+  "typeset_lockup": 3,
+  "grade_section": 1,
+  "accent_negative": 2,
+  "junction_hit_flash": 1
+ },
+ "voices": [
+  "condensed_poster",
+  "editorial_serif",
+  "hairline_wide",
+  "slot_blackletter"
+ ],
+ "type_voice": "a serif or condensed display face; lines set as lockups on the cut",
+ "punctuation": [
+  "accent_negative",
+  "accent_white_hit"
+ ],
+ "junctions": [
+  "junction_hit_flash",
+  "junction_columns"
+ ],
+ "colour_world": {
+  "rule": "one colour world per section; B&W only as a device (sections with colour on the drop, one colour kept)",
+  "palette": "from the user's footage",
+  "devices": [
+   "bw_section_to_colour",
+   "bw_keep_one_colour"
+  ],
+  "never": [
+   "whole_short_mono"
+  ]
+ },
+ "look": {
+  "grade": "one colour world per section; B&W only as a device (sections with colour on the drop, one colour kept)",
+  "palette": "from the user's footage"
+ },
+ "captions": {
+  "mode": "lockups",
+  "position": "type in the world",
+  "density": "line"
+ },
  "budgets": {
   "punctuation": null,
   "matte": {
@@ -16,38 +123,6 @@
   },
   "rhythm": null
  },
- "look": {
-  "grade": "one colour world per section; B&W only as a device (sections with colour on the drop, one colour kept)",
-  "palette": "from the user's footage"
- },
- "captions": {
-  "mode": "lockups",
-  "position": "type in the world",
-  "density": "line"
- },
- "type_voice": "a serif or condensed display face; lines set as lockups on the cut",
- "structure": [
-  {
-   "section": "open",
-   "share": 0.15,
-   "what": "a still that drifts in 2.5D, one line of type"
-  },
-  {
-   "section": "build",
-   "share": 0.35,
-   "what": "archival and sourced B-roll on the phrase, cuts on the user's track beats"
-  },
-  {
-   "section": "drop",
-   "share": 0.35,
-   "what": "the montage on 8ths, depth and time devices on the hits"
-  },
-  {
-   "section": "resolve",
-   "share": 0.15,
-   "what": "a held frame, the last line"
-  }
- ],
  "devices_prefer": [
   "broll_cutaway",
   "broll_archival",
@@ -59,6 +134,13 @@
  "devices_avoid": [
   "ui_scene_explainer"
  ],
+ "footage_quotas": {
+  "broll_share": [
+   0.5,
+   0.95
+  ],
+  "stills_max": 10
+ },
  "never": [
   "picking the music (the user's track only)",
   "a whole-short black-and-white look",

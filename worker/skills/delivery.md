@@ -1,4 +1,4 @@
-# delivery — every aspect re-solved (not scaled), every language from the user's own translation, and format packs (E UI explainer, F visual essay, G sizzle, I documentary, J edit about the edit) that brief a genre's craft
+# delivery — every aspect re-solved (not scaled), every language from the user's own translation, and the genre format packs (E UI explainer, F visual essay, G sizzle, I documentary, J edit about the edit; A-D and H too) that brief a genre's craft through apply_format_pack
 
 ## Editorial decision principles
 
@@ -29,7 +29,8 @@ audience, never a scaled copy.
   is written against, with their windows.
 - After each master: `render_preview` / `export_final`, then
   `critique_short` — type on a face, the brand, the safe area.
-- The ledger line after `apply_format`: the pack's budgets.
+- The ledger line after `apply_format_pack` (department `direction`):
+  the pack's budgets.
 
 ## Strong treatment patterns
 
@@ -37,8 +38,9 @@ audience, never a scaled copy.
   `apply='1:1'`, export; … — each a full re-solve.
 - A German version: `retypeset_language(lang='de', translation=[...one
   line per phrase...], mapping={'FINISHED SHORTS': 'FERTIGE SHORTS'})`.
-- A product explainer: `apply_format('E')`, then `add_ui_scene` with the
-  user's data; a documentary: `apply_format('I')`, then `source_broll`
+- A product explainer: `apply_format_pack(pack='E')` (its frame, brief and
+  proposals to pick), then `add_ui_scene` with the user's data; a
+  documentary: `apply_format_pack(pack='I')`, then `source_broll`
   per claim with archival where the history is.
 
 ## Common failure modes

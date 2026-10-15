@@ -1,16 +1,83 @@
 {
- "code": "J",
+ "id": "J",
  "name": "Edit about the edit (tool-love)",
  "genre": "J",
  "intensity": "designed",
- "budgets": {
-  "punctuation": 2,
-  "matte": 2,
-  "depth": {
-   "every_s": 8.0
+ "apply": "brief",
+ "exemplars": [
+  "03",
+  "18",
+  "30"
+ ],
+ "asks": [
+  "edit about the edit",
+  "behind the edit",
+  "tool-love",
+  "editing process",
+  "how i edited",
+  "before and after edit"
+ ],
+ "grammars": [],
+ "structure": [
+  {
+   "beat": "before",
+   "at": "open",
+   "share": 0.2,
+   "devices": [
+    "typeset_lockup"
+   ],
+   "note": "the raw clip, honest"
   },
-  "layout": 3,
-  "world": 2
+  {
+   "beat": "the edit",
+   "at": "body",
+   "share": 0.5,
+   "devices": [
+    "ui_scene_explainer",
+    "ui_media_slot"
+   ],
+   "note": "the edit's own EDL as an editor window and pills (idle, live, done)"
+  },
+  {
+   "beat": "after",
+   "at": "payoff",
+   "share": 0.3,
+   "devices": [
+    "depth_point_cloud",
+    "typeset_lockup"
+   ],
+   "note": "the finished moment, full frame"
+  }
+ ],
+ "palette": {
+  "ui_scene_explainer": 2,
+  "ui_media_slot": 2,
+  "depth_point_cloud": 1,
+  "typeset_lockup": 2,
+  "accent_white_hit": 2,
+  "junction_iris": 1
+ },
+ "voices": [
+  "techno_crt",
+  "swiss_grid",
+  "condensed_poster"
+ ],
+ "type_voice": "monospace for the tool, a display sans for the claim",
+ "punctuation": [
+  "accent_white_hit",
+  "accent_box_invert"
+ ],
+ "junctions": [
+  "junction_iris",
+  "junction_letter_window"
+ ],
+ "colour_world": {
+  "rule": "desk light, screen glow kept (B&W only as a device)",
+  "palette": "the editor's UI colours",
+  "devices": [],
+  "never": [
+   "whole_short_mono"
+  ]
  },
  "look": {
   "grade": "desk light, screen glow kept",
@@ -21,30 +88,28 @@
   "position": "below the interface",
   "density": "phrase"
  },
- "type_voice": "monospace for the tool, a display sans for the claim",
- "structure": [
-  {
-   "section": "before",
-   "share": 0.2,
-   "what": "the raw clip, honest"
+ "budgets": {
+  "punctuation": 2,
+  "matte": 2,
+  "depth": {
+   "every_s": 8.0
   },
-  {
-   "section": "the edit",
-   "share": 0.5,
-   "what": "the edit's own EDL as an editor window and pills (idle, live, done)"
-  },
-  {
-   "section": "after",
-   "share": 0.3,
-   "what": "the finished moment, full frame"
-  }
- ],
+  "layout": 3,
+  "world": 2
+ },
  "devices_prefer": [
   "ui_scene_explainer",
   "ui_media_slot",
   "depth_point_cloud"
  ],
  "devices_avoid": [],
+ "footage_quotas": {
+  "screen_share": [
+   0.3,
+   0.7
+  ],
+  "stills_max": 4
+ },
  "never": [
   "showing another creator's marks",
   "claims the edit cannot back"

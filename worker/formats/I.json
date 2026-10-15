@@ -1,8 +1,107 @@
 {
- "code": "I",
+ "id": "I",
  "name": "Story-led documentary case study",
  "genre": "I",
  "intensity": "designed",
+ "apply": "brief",
+ "exemplars": [
+  "07",
+  "17",
+  "33"
+ ],
+ "asks": [
+  "documentary",
+  "case study",
+  "mini doc",
+  "doc style",
+  "customer story"
+ ],
+ "grammars": [],
+ "structure": [
+  {
+   "beat": "cold open",
+   "at": "open",
+   "share": 0.12,
+   "devices": [
+    "typeset_lockup",
+    "depth_parallax"
+   ],
+   "note": "the outcome, then the question"
+  },
+  {
+   "beat": "context",
+   "at": "body",
+   "share": 0.3,
+   "devices": [
+    "broll_archival",
+    "broll_cutaway",
+    "still_move"
+   ],
+   "note": "archival and sourced B-roll that proves each claim, licence ledger kept"
+  },
+  {
+   "beat": "turn",
+   "at": "turn",
+   "share": 0.33,
+   "devices": [
+    "depth_rack_focus",
+    "typeset_lockup"
+   ],
+   "note": "the decision, a rack focus on the word that turns it"
+  },
+  {
+   "beat": "result",
+   "at": "payoff",
+   "share": 0.25,
+   "devices": [
+    "ui_scene_explainer",
+    "typeset_lockup"
+   ],
+   "note": "the user's real numbers, then the human beat"
+  }
+ ],
+ "palette": {
+  "broll_cutaway": 3,
+  "broll_archival": 3,
+  "still_move": 2,
+  "depth_rack_focus": 1,
+  "depth_dof": 1,
+  "ui_scene_explainer": 1,
+  "typeset_lockup": 3,
+  "grade_shot_match": 1,
+  "accent_white_hit": 1,
+  "junction_dissolve": 1
+ },
+ "voices": [
+  "editorial_serif",
+  "hairline_wide",
+  "swiss_grid"
+ ],
+ "type_voice": "a quiet serif for chapter titles, the interview captions plain",
+ "punctuation": [
+  "accent_white_hit"
+ ],
+ "junctions": [
+  "junction_dissolve",
+  "junction_matte_cut"
+ ],
+ "colour_world": {
+  "rule": "naturalistic, matched across sources (the B-roll de-stocked to the interview) (B&W only as a device)",
+  "palette": "warm practical light",
+  "devices": [],
+  "never": [
+   "whole_short_mono"
+  ]
+ },
+ "look": {
+  "grade": "naturalistic, matched across sources (the B-roll de-stocked to the interview)",
+  "palette": "warm practical light"
+ },
+ "captions": {
+  "mode": "words",
+  "position": "clear of faces",
+  "density": "phrase"
+ },
  "budgets": {
   "punctuation": 1,
   "matte": 2,
@@ -14,38 +113,6 @@
   },
   "layout": 2
  },
- "look": {
-  "grade": "naturalistic, matched across sources (the B-roll de-stocked to the interview)",
-  "palette": "warm practical light"
- },
- "captions": {
-  "mode": "words",
-  "position": "clear of faces",
-  "density": "phrase"
- },
- "type_voice": "a quiet serif for chapter titles, the interview captions plain",
- "structure": [
-  {
-   "section": "cold open",
-   "share": 0.12,
-   "what": "the outcome, then the question"
-  },
-  {
-   "section": "context",
-   "share": 0.3,
-   "what": "archival and sourced B-roll that proves each claim, licence ledger kept"
-  },
-  {
-   "section": "turn",
-   "share": 0.33,
-   "what": "the decision, a rack focus on the word that turns it"
-  },
-  {
-   "section": "result",
-   "share": 0.25,
-   "what": "the user's real numbers, then the human beat"
-  }
- ],
  "devices_prefer": [
   "broll_cutaway",
   "broll_archival",
@@ -57,6 +124,17 @@
   "finish_crt",
   "time_stutter"
  ],
+ "footage_quotas": {
+  "talking_head": [
+   0.4,
+   0.7
+  ],
+  "broll_share": [
+   0.3,
+   0.6
+  ],
+  "stills_max": 8
+ },
  "never": [
   "B-roll that illustrates the topic instead of proving the line",
   "an unlicensed or NC/ND clip",

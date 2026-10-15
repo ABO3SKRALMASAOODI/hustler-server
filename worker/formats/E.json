@@ -1,16 +1,96 @@
 {
- "code": "E",
+ "id": "E",
  "name": "UI / product explainer",
  "genre": "E",
  "intensity": "designed",
- "budgets": {
-  "punctuation": 1,
-  "matte": 1,
-  "depth": {
-   "every_s": 10.0
+ "apply": "brief",
+ "exemplars": [
+  "03",
+  "06",
+  "18",
+  "19"
+ ],
+ "asks": [
+  "product explainer",
+  "ui explainer",
+  "app explainer",
+  "product demo",
+  "app demo",
+  "how it works",
+  "feature walkthrough",
+  "saas"
+ ],
+ "grammars": [],
+ "structure": [
+  {
+   "beat": "hook",
+   "at": "open",
+   "share": 0.12,
+   "devices": [
+    "ui_media_slot",
+    "typeset_lockup"
+   ],
+   "note": "the problem in one line, the product's screen in a media slot"
   },
-  "layout": 3,
-  "world": 3
+  {
+   "beat": "how",
+   "at": "body",
+   "share": 0.58,
+   "devices": [
+    "ui_scene_explainer",
+    "ui_media_slot"
+   ],
+   "note": "persistent UI objects that morph step by step; counters land on spoken numbers"
+  },
+  {
+   "beat": "proof",
+   "at": "turn",
+   "share": 0.2,
+   "devices": [
+    "ui_scene_explainer"
+   ],
+   "note": "the user's real figures (data-bound), one at a time"
+  },
+  {
+   "beat": "close",
+   "at": "payoff",
+   "share": 0.1,
+   "devices": [
+    "depth_parallax",
+    "typeset_lockup"
+   ],
+   "note": "the product, still, the claim in one card"
+  }
+ ],
+ "palette": {
+  "ui_scene_explainer": 2,
+  "ui_media_slot": 2,
+  "typeset_lockup": 2,
+  "depth_parallax": 1,
+  "broll_still": 1,
+  "accent_white_hit": 1,
+  "junction_iris": 1
+ },
+ "voices": [
+  "swiss_grid",
+  "editorial_serif",
+  "hairline_wide"
+ ],
+ "type_voice": "Inter Display, tight tracking, numbers tabular; one accent from the brand",
+ "punctuation": [
+  "accent_white_hit"
+ ],
+ "junctions": [
+  "junction_iris",
+  "junction_dissolve"
+ ],
+ "colour_world": {
+  "rule": "clean neutral (B&W only as a device)",
+  "palette": "the product's own colours on near-black glass",
+  "devices": [],
+  "never": [
+   "whole_short_mono"
+  ]
  },
  "look": {
   "grade": "clean neutral",
@@ -21,29 +101,15 @@
   "position": "below the interface",
   "density": "phrase"
  },
- "type_voice": "Inter Display, tight tracking, numbers tabular; one accent from the brand",
- "structure": [
-  {
-   "section": "hook",
-   "share": 0.12,
-   "what": "the problem in one line, the product's screen in a media slot"
+ "budgets": {
+  "punctuation": 1,
+  "matte": 1,
+  "depth": {
+   "every_s": 10.0
   },
-  {
-   "section": "how",
-   "share": 0.58,
-   "what": "persistent UI objects that morph step by step; counters land on spoken numbers"
-  },
-  {
-   "section": "proof",
-   "share": 0.2,
-   "what": "the user's real figures (data-bound), one at a time"
-  },
-  {
-   "section": "close",
-   "share": 0.1,
-   "what": "the product, still, the claim in one card"
-  }
- ],
+  "layout": 3,
+  "world": 3
+ },
  "devices_prefer": [
   "ui_scene_explainer",
   "ui_media_slot",
@@ -54,6 +120,17 @@
   "finish_crt",
   "time_stutter"
  ],
+ "footage_quotas": {
+  "screen_share": [
+   0.4,
+   0.85
+  ],
+  "broll_share": [
+   0.0,
+   0.25
+  ],
+  "stills_max": 4
+ },
  "never": [
   "a figure that is not the user's data or said",
   "a dashboard that does not change the argument",

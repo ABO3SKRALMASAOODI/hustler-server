@@ -1,11 +1,10 @@
-"""Track 4E: format packs E, F, G, I, J and trend grammars (ROADMAP 4E;
-INTERFACES_W4.md §5.3).
+"""Track 4E: format-pack budgets and briefs (over the one ``formats``
+loader, A-J) and trend grammars (ROADMAP 4E; INTERFACES_W4.md §5.3).
 
-A pack (``formats/<code>.json``) is a genre's craft brief: structure,
-device palette and budgets, type voice, look, captions, the never-rules and
-the aspect. ``budgets(code)`` feeds ``taste.ledger`` (the format argument
-accepts these codes; Wave 2 owns A-D and H). A pack never prescribes music,
-a zoom or a sound.
+A pack (``formats/<id>.json``, schema in ``formats/__init__.py``) carries a
+genre's craft brief: structure, device palette and budgets, type voice,
+look, captions, the never-rules and the aspect. ``budgets(code)`` feeds
+``taste.ledger``. A pack never prescribes music, a zoom or a sound.
 
 A trend grammar (``formats/trends/<id>.json``) is STRUCTURE only: sections
 in beats relative to the drop of the user's own track, the devices of each
@@ -17,54 +16,32 @@ any reference audio is stored.
 import json
 import os
 
+import formats
+
 DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "formats")
-CODES = ("E", "F", "G", "I", "J")
-_CACHE = {}
+# Every pack the one loader lists (formats.IDS); Wave 4 shipped E, F, G, I
+# and J in its own schema, which the engines release merged into the
+# formats schema (one loader, one verb: apply_format_pack).
+CODES = formats.IDS
 
 
 def load(code):
     code = str(code or "").strip().upper()
-    if code not in CODES:
-        raise ValueError(f"format pack is one of {CODES} (Wave 4)")
-    if code not in _CACHE:
-        with open(os.path.join(DIR, f"{code}.json")) as f:
-            _CACHE[code] = json.load(f)
-    return _CACHE[code]
+    try:
+        return formats.load(code)
+    except KeyError:
+        raise ValueError(f"format pack is one of {CODES}") from None
 
 
 def budgets(code):
     """{family: int | ("every_s", s) | ("per_s", x) | None} — the
     ``taste.DEVICE_BUDGETS`` shape. None for an unknown code."""
-    try:
-        p = load(code)
-    except ValueError:
-        return None
-    out = {"zoom": None, "sfx": None}      # optional, never a target
-    for fam, spec in (p.get("budgets") or {}).items():
-        if isinstance(spec, dict):
-            if "every_s" in spec:
-                out[fam] = ("every_s", float(spec["every_s"]))
-            elif "per_s" in spec:
-                out[fam] = ("per_s", float(spec["per_s"]))
-        elif spec is None:
-            out[fam] = None
-        else:
-            out[fam] = int(spec)
-    for fam in ("punctuation", "matte", "depth"):
-        out.setdefault(fam, None)
-    return out
+    return formats.budgets(str(code or "").strip().upper())
 
 
 def brief(code):
     """The pack as a few lines for the agent."""
-    p = load(code)
-    st = " -> ".join(f"{s['section']} ({int(s['share'] * 100)}%): "
-                     f"{s['what']}" for s in p.get("structure") or [])
-    return (f"FORMAT {p['code']} — {p['name']} ({p['intensity']}). "
-            f"Structure: {st}. Type voice: {p.get('type_voice')}. Look: "
-            f"{(p.get('look') or {}).get('grade')}. Prefer: "
-            f"{', '.join(p.get('devices_prefer') or [])}. Never: "
-            f"{'; '.join(p.get('never') or [])}. {p.get('notes') or ''}")
+    return formats.brief(load(code))
 
 
 # ── trend grammars ───────────────────────────────────────────────────────

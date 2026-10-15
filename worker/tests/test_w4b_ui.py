@@ -332,7 +332,7 @@ def test_registration_and_cards():
     from tools_ext import ui_tools
     for v in ui_tools.VERBS:
         assert v in agent_tools.TOOLS and v in tools_ext.EXT_TOOL_NAMES
-        assert v in agent_tools.TOOL_DOMAINS["world"]
+        assert v in agent_tools.TOOL_DOMAINS["picture"]
     for name, (_fn, desc, _p) in ui_tools.TOOL_SPECS.items():
         assert len(desc) <= 900, name
     for cid in ("ui_scene_explainer", "ui_media_slot"):

@@ -128,7 +128,7 @@ def test_format_packs_and_budgets():
     import taste
     for code in format_packs.CODES:
         p = format_packs.load(code)
-        assert p["code"] == code and p["structure"]
+        assert p["id"] == code and p["structure"]
         blob = json.dumps(p.get("devices_prefer")).lower()
         assert "zoom" not in blob and "sfx" not in blob and "music" not in \
             blob
@@ -208,16 +208,21 @@ def test_deliver_aspects_lists_then_applies(ctx):
 
 
 def test_apply_format_sets_the_aspect_and_briefs(ctx):
-    from tools_ext import delivery_tools as format_tools
+    # Wave 4's apply_format is the one pack verb now (engines release):
+    # apply_format_pack, department direction, every genre A-J
+    from tools_ext import format_tools
     ctx._edl["frame"]["ratio"] = "1:1"
-    out = format_tools.apply_format(ctx, "I")
+    n = len(ctx.writes)
+    out = format_tools.apply_format_pack(ctx, "I")
     assert "FORMAT I" in out and "LEDGER (I)" in out
     # a chosen frame is kept unless the agent asks (review: a 16:9 edit was
     # silently re-framed vertical by a brief)
     assert ctx._edl["frame"]["ratio"] == "1:1" and "kept this edit" in out
-    out = format_tools.apply_format(ctx, "I", aspect=True)
+    # a brief pack without picks writes nothing but its frame
+    assert len(ctx.writes) == n
+    out = format_tools.apply_format_pack(ctx, "I", aspect=True)
     assert ctx._edl["frame"]["ratio"] == "9:16"
-    assert format_tools.apply_format(ctx, "Q").startswith("REJECTED")
+    assert format_tools.apply_format_pack(ctx, "Q").startswith("REJECTED")
 
 
 def test_retypeset_language_verb(ctx):

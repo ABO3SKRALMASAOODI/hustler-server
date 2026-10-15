@@ -1,8 +1,108 @@
 {
- "code": "G",
+ "id": "G",
  "name": "Event or brand sizzle / recap",
  "genre": "G",
  "intensity": "charged",
+ "apply": "brief",
+ "exemplars": [
+  "22",
+  "24",
+  "28"
+ ],
+ "asks": [
+  "sizzle",
+  "recap",
+  "event recap",
+  "brand sizzle",
+  "highlight reel",
+  "hype video",
+  "aftermovie"
+ ],
+ "grammars": [],
+ "structure": [
+  {
+   "beat": "arrival",
+   "at": "open",
+   "share": 0.2,
+   "devices": [
+    "broll_still",
+    "typeset_lockup",
+    "depth_parallax"
+   ],
+   "note": "the place, wide, the date"
+  },
+  {
+   "beat": "energy",
+   "at": "body",
+   "share": 0.5,
+   "devices": [
+    "montage_cut",
+    "broll_cutaway",
+    "accent_white_hit"
+   ],
+   "note": "faces, hands, stage moments on the user's track beats"
+  },
+  {
+   "beat": "peak",
+   "at": "payoff",
+   "share": 0.2,
+   "devices": [
+    "time_interpolate"
+   ],
+   "note": "the moment everyone remembers, slowed (interpolated, never stuttering)"
+  },
+  {
+   "beat": "sign-off",
+   "at": "end",
+   "share": 0.1,
+   "devices": [
+    "typeset_lockup"
+   ],
+   "note": "the brand mark, still"
+  }
+ ],
+ "palette": {
+  "montage_cut": 1,
+  "broll_cutaway": 3,
+  "broll_still": 2,
+  "time_interpolate": 1,
+  "depth_parallax": 1,
+  "depth_point_cloud": 1,
+  "typeset_lockup": 2,
+  "accent_white_hit": 2,
+  "junction_whip": 1
+ },
+ "voices": [
+  "condensed_poster",
+  "staircase_red",
+  "swiss_grid"
+ ],
+ "type_voice": "bold grotesk, the event's name as a lockup",
+ "punctuation": [
+  "accent_white_hit",
+  "accent_colour_hit"
+ ],
+ "junctions": [
+  "junction_whip",
+  "junction_bands"
+ ],
+ "colour_world": {
+  "rule": "event light kept, contrast lifted (B&W only as a device)",
+  "palette": "the event's brand colours",
+  "devices": [],
+  "never": [
+   "whole_short_mono"
+  ]
+ },
+ "look": {
+  "grade": "event light kept, contrast lifted",
+  "palette": "the event's brand colours"
+ },
+ "captions": {
+  "mode": "none or key lines",
+  "position": "lower third",
+  "density": "sparse"
+ },
  "budgets": {
   "punctuation": null,
   "matte": {
@@ -14,38 +114,6 @@
   "world": null,
   "rhythm": null
  },
- "look": {
-  "grade": "event light kept, contrast lifted",
-  "palette": "the event's brand colours"
- },
- "captions": {
-  "mode": "none or key lines",
-  "position": "lower third",
-  "density": "sparse"
- },
- "type_voice": "bold grotesk, the event's name as a lockup",
- "structure": [
-  {
-   "section": "arrival",
-   "share": 0.2,
-   "what": "the place, wide, the date"
-  },
-  {
-   "section": "energy",
-   "share": 0.5,
-   "what": "faces, hands, stage moments on the user's track beats"
-  },
-  {
-   "section": "peak",
-   "share": 0.2,
-   "what": "the moment everyone remembers, slowed (interpolated, never stuttering)"
-  },
-  {
-   "section": "sign-off",
-   "share": 0.1,
-   "what": "the brand mark, still"
-  }
- ],
  "devices_prefer": [
   "time_interpolate",
   "depth_point_cloud",
@@ -55,6 +123,13 @@
  "devices_avoid": [
   "ui_scene_explainer"
  ],
+ "footage_quotas": {
+  "broll_share": [
+   0.6,
+   1.0
+  ],
+  "stills_max": 12
+ },
  "never": [
   "a guest's face cut mid-word in a quote",
   "picking the music",

@@ -32,8 +32,9 @@ import importlib
 import os
 
 DEPARTMENTS = ("compositing", "rhythm", "world", "verify", "type", "direction",
-               # Wave 4 (4E): aspects, languages
-               "delivery")
+               # Wave 4: aspects and languages (4E); the picture itself —
+               # depth and time, UI scenes, sourced B-roll (4A-4C)
+               "delivery", "picture")
 DEPARTMENT_COMPACT_BUDGET = 12_000   # bytes of compact schemas per department
 TOOL_FULL_MAX_BYTES = 6_000          # one tool's full JSON schema + prose
 COMPACT_MAX_CHARS = 600

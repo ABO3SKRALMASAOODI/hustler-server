@@ -24,7 +24,10 @@ is a camera move and needs the user's ask.
 import json
 import re
 
-DEPARTMENT = "world"
+# The engines release gave Wave 4's picture verbs (depth and time, UI
+# scenes, sourced B-roll) their own department: with Wave 3's world verbs
+# one department passed its 12,000-byte compact budget.
+DEPARTMENT = "picture"
 VERBS = ("add_depth_effect", "add_time_effect", "remove_depth_time")
 
 DEPTH_KINDS = ("parallax", "ken_burns", "dof", "rack_focus", "fog", "light",

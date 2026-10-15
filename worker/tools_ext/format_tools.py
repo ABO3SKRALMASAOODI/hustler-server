@@ -174,6 +174,9 @@ def suggest_story(ctx, intensity="designed", pack="auto", max_n=8):
     ctx._w2_story = {"cands": cands, "pack": (p or {}).get("id")}
     head = (f"Pack {p['id']} ({p['name']}): {why}." if p else
             f"No pack: {why}.")
+    if p:
+        import formats
+        head += "\n" + formats.brief(p)
     pk = (p or {}).get("id") or "none"
     return "\n".join([head] + [_line(k + 1, c) for k, c in
                                enumerate(cands)] +
@@ -184,14 +187,70 @@ def suggest_story(ctx, intensity="designed", pack="auto", max_n=8):
                       "calls. Pick what serves THIS story — fewer is fine."])
 
 
-def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed"):
-    """WRITE: the pack's ranked proposals (or the picked ones) in one
-    batch; footage-solved devices are returned as the next calls."""
+def _pack_frame(ctx, edl, p, aspect):
+    """(note, write result or None): the pack's aspect (Wave 4's rule) —
+    set when the edit has no chosen frame or ``aspect`` is true; a chosen
+    frame is kept unless asked; ``aspect`` false never re-frames."""
+    want = p.get("aspect")
+    if not want or aspect is False:
+        return "", None
+    cur = (edl.get("frame") or {}).get("ratio")
+    if cur == want:
+        return "", None
+    if aspect is None and cur not in (None, "source"):
+        return (f"(kept this edit's {cur} frame: the pack is designed for "
+                f"{want}; aspect=true or deliver_aspects(apply='{want}') "
+                "re-solves it when the user wants that)"), None
+    import aspects
+    from tools_ext import delivery_tools
+    new, notes = aspects.solve(edl, want, getattr(ctx, "index", None))
+    res = delivery_tools._commit_full(ctx, new, f"format {p['id']}: {want}")
+    return "; ".join(notes), res
+
+
+def _brief_tail(ctx, p, intensity):
+    import formats
+    out = formats.brief(p)
+    try:
+        import taste
+        led = taste.ledger(ctx.latest_edl()["json"], intensity, fmt=p["id"])
+        out += f"\nLEDGER ({p['id']}): {led.line()}"
+    except Exception:  # noqa: BLE001 — the ledger is advice
+        pass
+    return out
+
+
+def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed",
+                      aspect=None):
+    """WRITE: a genre pack (A-J). Its frame when it has one (a chosen
+    frame is kept unless aspect=true), then the pack's ranked proposals
+    (or the picked ones) in one batch — or, for a brief pack without
+    picks, its brief with the proposals listed; footage-solved devices are
+    returned as the next calls."""
     from tools_ext import _write
+    import formats
     edl = _latest(ctx)
     p, why = _pack(ctx, edl, pack)
     if p is False:
         return f"REJECTED: {why}"
+    frame_note, frame_res = ("", None) if p is None else \
+        _pack_frame(ctx, edl, p, aspect)
+    if frame_res is not None:
+        if str(frame_res).startswith("REJECTED"):
+            return frame_res
+        edl = _latest(ctx)
+    lead = "\n".join(x for x in (frame_res, frame_note) if x)
+    if p is not None and formats.applies_brief(p) and not picks:
+        cands = _plan(ctx, edl, intensity, p)
+        ctx._w2_story = {"cands": cands, "pack": p["id"]}
+        lines = [_line(k + 1, c) for k, c in enumerate(cands)]
+        return "\n".join(x for x in [
+            lead, _brief_tail(ctx, p, intensity),
+            ("Proposals (nothing written: this genre's devices need the "
+             "user's data or sourced footage — pick the ones THIS story "
+             f"earns: apply_format_pack(pack='{p['id']}', intensity="
+             f"'{intensity}', picks=[...])):") if lines else "",
+            *lines] if x)
     stored = getattr(ctx, "_w2_story", None)
     cands = (stored or {}).get("cands") if picks else None
     if not cands:
@@ -214,15 +273,15 @@ def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed"):
              if c.get("call") and not (c.get("op") or c.get("ops"))]
     ops, used, notes = _solve_ops(ctx, edl, cands)
     if not ops and not calls:
-        return "NO CHANGE — nothing to apply." + (
-            " " + "; ".join(notes) + "." if notes else "")
+        return "\n".join(x for x in (lead, "NO CHANGE — nothing to apply." + (
+            " " + "; ".join(notes) + "." if notes else "")) if x)
     res = "NO CHANGE — every pick is a call."
     if ops:
         name = (p or {}).get("name", "story")
         res = _write.commit(ctx, ops, f"{name} plan: " + ", ".join(
             f"{c['device']}@{float(c.get('at') or 0):.1f}s" for c in used))
         if res.startswith("REJECTED"):
-            return res
+            return (lead + "\n" + res) if lead else res
     if notes:
         res += "\nNOTE: " + "; ".join(notes) + "."
     if left:
@@ -233,6 +292,10 @@ def apply_format_pack(ctx, pack="auto", picks=None, intensity="designed"):
     if calls:
         res += "\nNext calls (they solve against the footage): " + "; ".join(
             f"{c['verb']}({json.dumps(c.get('args') or {})})" for c in calls)
+    if lead:
+        res = lead + "\n" + res
+    if p is not None and formats.applies_brief(p):
+        res += "\n" + _brief_tail(ctx, p, intensity)
     return res
 
 
@@ -361,14 +424,20 @@ TOOL_SPECS = {
          "max_n": {"type": "integer", "minimum": 1, "maximum": 8}}),
     "apply_format_pack": (
         apply_format_pack,
-        "WRITE: the pack's proposals (or picks=[numbers] from "
-        "suggest_story) in ONE batch; devices that must be solved against "
-        "the footage (montage, drop on the payoff, loop) come back as the "
-        "next calls.",
+        "WRITE: a genre pack — A manifesto, B trend desk, C typographic "
+        "portrait, D creator essay, E UI/product explainer, F visual essay, "
+        "G sizzle, H lyric film, I documentary, J edit about the edit: its "
+        "frame when it has one (a chosen frame is kept unless aspect=true), "
+        "its craft brief, and its proposals (or picks=[numbers] from "
+        "suggest_story) in ONE batch; E-J without picks list them for you "
+        "to pick. Devices solved against the footage (montage, drop on the "
+        "payoff, loop) come back as the next calls. Never picks music, a "
+        "zoom or a sound.",
         {"pack": {"type": "string", "enum": PACK_ENUM},
          "picks": {"type": "array", "items": {"type": "integer"}},
          "intensity": {"type": "string", "enum": ["calm", "designed",
-                                                  "charged"]}}),
+                                                  "charged"]},
+         "aspect": {"type": "boolean"}}),
     "analyze_reference": (
         analyze_reference,
         "READ: 'make it like this' — a reel the user uploaded, read for its "
@@ -390,8 +459,9 @@ WRITE_TOOLS = {"apply_format_pack"}
 COMPACT = {
     "suggest_story": "READ: <=8 proposals bound to this story's beats with "
                      "what is new about each; pack auto|letter|none.",
-    "apply_format_pack": "WRITE: a genre pack's proposals (or picks) in one "
-                         "batch; footage-solved ones returned as calls.",
+    "apply_format_pack": "WRITE: genre pack A-J: frame, craft brief, "
+                         "proposals (or picks) in one batch; footage-solved "
+                         "ones returned as calls.",
     "analyze_reference": "READ: a pasted reel's device classes in order, "
                          "mapped onto this edit (never its marks).",
     "render_variants": "three type voices for a lockup as stills on the "

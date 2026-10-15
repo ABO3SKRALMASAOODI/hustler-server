@@ -64,7 +64,8 @@ def critique_short(ctx, variant="auto", asset_key=None, deep=True,
     fmt = str(format or "").strip().upper() or None
     if fmt and (len(fmt) != 1 or fmt not in "ABCDEFGHIJ"):
         return ("REJECTED: format is the pack the short follows, one of "
-                "A-J (as apply_format names them), or leave it out for a "
+                "A-J (as apply_format_pack names them), or leave it out for "
+                "a "
                 "talking head (C) / a trend desk on the user's track (B).")
     row = ctx.latest_edl()
     edl, version = row["json"], row["version"]
@@ -145,7 +146,7 @@ TOOL_SPECS = {
                   "flicker passes (default true)"},
          "board": {"type": "boolean"},
          "format": {"type": "string", "description": "the pack the short "
-                    "follows (A-J, as apply_format): its rhythm band"}}),
+                    "follows (A-J, as apply_format_pack): its rhythm band"}}),
 }
 REQUIRED_ARGS = {}
 WRITE_TOOLS = set()

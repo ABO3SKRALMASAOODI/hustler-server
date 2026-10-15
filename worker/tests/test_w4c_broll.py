@@ -660,7 +660,7 @@ def test_registration_and_budgets():
     from tools_ext import broll_tools
     for v in broll_tools.VERBS:
         assert v in agent_tools.TOOLS and v in tools_ext.EXT_TOOL_NAMES
-        assert v in agent_tools.TOOL_DOMAINS["world"]
+        assert v in agent_tools.TOOL_DOMAINS["picture"]
     assert broll_tools.WRITE_TOOLS <= agent_tools.WRITE_TOOLS
     for name, (_fn, desc, _p) in broll_tools.TOOL_SPECS.items():
         assert len(desc) <= 900, name

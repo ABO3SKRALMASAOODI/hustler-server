@@ -76,7 +76,7 @@ Everything in `INTERFACES.md` §0 and `INTERFACES_W1.md` §0 still holds:
 | `EDL.fx` tags (`fx_schemas/`) | `depth`, `time` (4A, `fx_schemas/depth.py`, TRACK `4a`); `ui_media` (4B, `fx_schemas/ui.py`, TRACK `4b`); `broll` (4C, `fx_schemas/broll.py`, TRACK `4c`) |
 | fx compilers | `depth_fx:DEPTH`, `timewarp:TIME`, `ui_media:UI_MEDIA`, `broll_fx:BROLL` |
 | Sidecar kinds | `depth.small` (reserved name; 4A ships the runner unless 3B merged one first — same model id, same key) |
-| Departments (`tools_ext`) | `world`: `add_depth_effect`, `add_time_effect`, `remove_depth_time`, `add_ui_scene`, `remove_ui_scene`, `source_broll`, `remove_broll`; `verify`: `critique_short`; new department `delivery`: `apply_format`, `deliver_aspects`, `retypeset_language` |
+| Departments (`tools_ext`) | `picture` (was `world`; the engines release split it off when Wave 3 + Wave 4 passed the world department's 12,000-byte budget): `add_depth_effect`, `add_time_effect`, `remove_depth_time`, `add_ui_scene`, `remove_ui_scene`, `source_broll`, `remove_broll`; `verify`: `critique_short`; new department `delivery`: `deliver_aspects`, `retypeset_language` (Wave 4's `apply_format` merged into `direction`'s `apply_format_pack` by the engines release) |
 | Card prefixes | `depth` 4A, `time` 4A, `ui` 4B, `broll` 4C |
 | Motion templates | `ui_scene` (4B, file drop `motion/templates/ui_scene.html`) |
 | Skills | `depth-time` (4A), `explainers` (4B), `broll-director` (4C), `delivery` (4E), `critic` (4F) |
@@ -230,7 +230,7 @@ note; pure numpy/OpenCV on review frames, every lane. Acquisition reuses
 | `tools_ext/depth_tools.py` | world | `add_depth_effect(kind, start?, end?, on?, source?, asset_key?, src_t?, move?, focus?, focus_from?, rack_at?, text?, …)`, `add_time_effect(kind, start, end, …)`, `remove_depth_time(ids)` |
 | `tools_ext/ui_tools.py` | world | `add_ui_scene(scenes, start?, end?, data?, theme?, media?, id?)`, `remove_ui_scene(ids)` |
 | `tools_ext/broll_tools.py` | world | `source_broll(moments, max?, providers?, place?)`, `remove_broll(ids)` |
-| `tools_ext/delivery_tools.py` | delivery | `apply_format(format)`, `deliver_aspects(ratios?, apply?)`, `retypeset_language(lang, translation?, srt?, captions_only?)` |
+| `tools_ext/delivery_tools.py` | delivery | ~~`apply_format(format)`~~ (merged into `apply_format_pack(pack, picks?, intensity?, aspect?)`, department `direction`, by the engines release: one pack schema in `formats/`, one verb), `deliver_aspects(ratios?, apply?)`, `retypeset_language(lang, translation?, srt?, captions_only?)` |
 | `tools_ext/critic_tools.py` | verify | `critique_short(job_id?, asset_key?, render?, deep?)` (READ) |
 
 Rules (as Wave 1): write verbs SOLVE arguments into apply_edit_batch ops and

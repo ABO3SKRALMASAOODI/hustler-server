@@ -29,7 +29,10 @@ import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-DEPARTMENT = "world"
+# The engines release gave Wave 4's picture verbs (depth and time, UI
+# scenes, sourced B-roll) their own department: with Wave 3's world verbs
+# one department passed its 12,000-byte compact budget.
+DEPARTMENT = "picture"
 VERBS = ("source_broll", "remove_broll")
 # A cutaway whose LOOK stays this far from the hero after the world grade
 # (broll_score.world_gap: mean lightness and chroma, hue aside) is not

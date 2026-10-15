@@ -1,12 +1,5 @@
 """Department ``delivery``: track 4E's verbs (INTERFACES_W4.md §4).
 
-  apply_format         WRITE: a genre's format pack (E UI explainer, F
-                       visual essay, G sizzle, I documentary, J edit about
-                       the edit): sets the pack's aspect and returns its
-                       craft brief (structure, device palette and budgets,
-                       type voice, never-rules); the ledger then counts
-                       against the pack's budgets. A pack never picks music,
-                       a zoom or a sound.
   deliver_aspects      READ / WRITE: the edit re-solved for other aspects
                        (16:9, 4:3, 1:1, 4:5, 9:16): UI scenes re-laid out,
                        measurements dropped so the render measures again,
@@ -17,12 +10,16 @@
                        USER's translation (per phrase), subtitle file or
                        text mapping — never machine-translated; every
                        window, cut and device keeps its time.
+
+Wave 4's pack verb (packs E, F, G, I, J) was merged into the one pack verb,
+``apply_format_pack`` (department ``direction``, every genre A-J, one pack
+schema in ``formats``) by the engines release.
 """
 
 import json
 
 DEPARTMENT = "delivery"
-VERBS = ("apply_format", "deliver_aspects", "retypeset_language")
+VERBS = ("deliver_aspects", "retypeset_language")
 
 
 def _rejected(msg):
@@ -50,42 +47,6 @@ def _commit_full(ctx, new_edl, summary):
     if not ops:
         return "NO CHANGE: the edit already is this"
     return _write.commit(ctx, ops, summary)
-
-
-def apply_format(ctx, format, aspect=None):
-    import format_packs
-    try:
-        p = format_packs.load(format)
-    except ValueError as e:
-        return _rejected(str(e))
-    edl, _v = _edl(ctx)
-    out = format_packs.brief(p["code"])
-    cur = (edl.get("frame") or {}).get("ratio")
-    if aspect is None and p.get("aspect") and \
-            cur not in (None, "source") and cur != p["aspect"]:
-        # the edit already has a chosen frame: a brief never re-frames it
-        # unless asked (aspect=true)
-        out += (f"\n  (kept this edit's {cur} frame: the pack is designed "
-                f"for {p['aspect']}; aspect=true or deliver_aspects(apply="
-                f"'{p['aspect']}') re-solves it when the user wants that)")
-    elif aspect is not False and p.get("aspect"):
-        if cur != p["aspect"]:
-            import aspects
-            new, notes = aspects.solve(edl, p["aspect"],
-                                       getattr(ctx, "index", None))
-            res = _commit_full(ctx, new, f"apply_format {p['code']}: "
-                               f"{p['aspect']}")
-            if str(res).startswith("REJECTED"):
-                return res
-            out = res + "\n" + out + "\n  " + "; ".join(notes)
-    try:
-        import taste
-        led = taste.ledger(ctx.latest_edl()["json"], p.get("intensity")
-                           or "designed", fmt=p["code"])
-        out += f"\nLEDGER ({p['code']}): {led.line()}"
-    except Exception:  # noqa: BLE001
-        pass
-    return out
 
 
 def deliver_aspects(ctx, ratios=None, apply=None):
@@ -153,18 +114,6 @@ def retypeset_language(ctx, lang, translation=None, srt=None, mapping=None,
 
 
 TOOL_SPECS = {
-    "apply_format": (
-        apply_format,
-        "WRITE: a format pack — E UI/product explainer, F music-driven "
-        "visual essay, G event sizzle, I documentary case study, J edit "
-        "about the edit: returns its craft brief (structure, device "
-        "palette, budgets, type voice, never-rules) for you to follow with "
-        "taste, sets its aspect when the edit has none (aspect=true "
-        "re-frames a chosen one, false never); the device ledger then "
-        "counts against its budgets. Never picks music, a zoom or a "
-        "sound.",
-        {"format": {"type": "string", "enum": ["E", "F", "G", "I", "J"]},
-         "aspect": {"type": "boolean"}}),
     "deliver_aspects": (
         deliver_aspects,
         "READ/WRITE: re-solve this edit for other aspects (16:9, 4:3, 1:1, "
@@ -188,12 +137,9 @@ TOOL_SPECS = {
          "srt": {"type": "string"}, "mapping": {"type": "object"},
          "list_phrases": {"type": "boolean"}}),
 }
-REQUIRED_ARGS = {"apply_format": ["format"],
-                 "retypeset_language": ["lang"]}
-WRITE_TOOLS = {"apply_format", "deliver_aspects", "retypeset_language"}
+REQUIRED_ARGS = {"retypeset_language": ["lang"]}
+WRITE_TOOLS = {"deliver_aspects", "retypeset_language"}
 COMPACT = {
-    "apply_format": "WRITE: format pack E|F|G|I|J: aspect + craft brief "
-                    "(structure, palette, budgets, never-rules).",
     "deliver_aspects": "READ/WRITE: re-solve for 16:9/4:3/1:1/4:5/9:16; "
                        "apply=<ratio> rewrites to that master.",
     "retypeset_language": "WRITE: another language from the user's "
