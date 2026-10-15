@@ -1499,7 +1499,10 @@ def critic_evidence(edl, index=None, *, proof_result=None, cards=None,
 
 # ── look_at(overlay=...) (track 1F owns the parameter) ─────────────────
 
-OVERLAYS = ("matte", "free_space", "beats")
+OVERLAYS = ("matte", "free_space", "beats",
+            # Wave 3 (devices/INTERFACES_W3.md §7): faces, hands, body and
+            # the world definitions, drawn by world_overlay.py
+            "anchors")
 _TINT = (40, 220, 255)
 
 
@@ -1750,6 +1753,9 @@ def apply_overlay(ctx, kind, path, *, src_t=None, out_t=None, edl=None,
             return path, ""
         if kind == "free_space":
             return overlay_free_space(path, out_path, output=output)
+        if kind == "anchors":
+            import world_overlay
+            return world_overlay.draw(ctx, path, out_path, out_t, edl)
         if kind == "beats":
             if out_t is None:
                 return path, " [beats: this source moment is not in the edit]"

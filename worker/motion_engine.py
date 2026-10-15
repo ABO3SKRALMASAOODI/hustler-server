@@ -1036,6 +1036,10 @@ async def _render_one(browser, job, out_path, deadline):
                "-pix_fmt", "argb", "-r", f"{job.fps:.6f}", out_path]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         captured, prev = 0, None
+        # Wave 3 (3E, devices/INTERFACES_W3.md §6): a page that declares
+        # video slots (MG.slot) has its rects recorded every frame; no
+        # other page runs this
+        slot_rows = [] if "MG.slot(" in job.html else None
         try:
             for i in range(n_frames):
                 if time.monotonic() > deadline:
@@ -1049,6 +1053,9 @@ async def _render_one(browser, job, out_path, deadline):
                     prev = await capture(clip)
                     captured += 1
                 proc.stdin.write(prev)
+                if slot_rows is not None:
+                    slot_rows.append(await page.evaluate(
+                        "window.MG && MG._slots ? MG._slots.current() : []"))
             proc.stdin.close()
             err = proc.stderr.read().decode("utf-8", "replace")
             if proc.wait(timeout=120) != 0:
@@ -1062,6 +1069,9 @@ async def _render_one(browser, job, out_path, deadline):
         errs = await page.evaluate("window.__mgErrors || []")
         if errs:
             raise MotionRenderError(f"{job.label}: script error: {str(errs[0])[:200]}")
+        if slot_rows is not None:
+            _write_json_atomic(out_path + ".slots.json",
+                               {"scale": scale, "frames": slot_rows})
         return RenderedClip(out_path, bx[0], bx[1], bx[2] - bx[0], bx[3] - bx[1],
                             n_frames, captured, False, time.monotonic() - t_start)
     finally:
@@ -1099,6 +1109,9 @@ async def _render_all(jobs, out_dir, pages, budget_s):
                     os.link(path, local)
                 except OSError:
                     shutil.copyfile(path, local)
+            if m.get("slots") is not None:
+                # Wave 3: the slot rects travel with the cached clip
+                _write_json_atomic(local + ".slots.json", m["slots"])
             results[i] = RenderedClip(local, m["x"], m["y"], m["w"], m["h"], m["frames"],
                                       0, True, 0.0, bool(m.get("empty")))
         else:
@@ -1116,8 +1129,12 @@ async def _render_all(jobs, out_dir, pages, budget_s):
                     clip = await _render_one(browser, job, out, deadline)
                     results[i] = clip
                     if not clip.empty and os.path.exists(out):
-                        _cache_put(key, out, {"x": clip.x, "y": clip.y, "w": clip.w,
-                                              "h": clip.h, "frames": clip.frames})
+                        meta = {"x": clip.x, "y": clip.y, "w": clip.w,
+                                "h": clip.h, "frames": clip.frames}
+                        if os.path.exists(out + ".slots.json"):
+                            with open(out + ".slots.json") as f:
+                                meta["slots"] = json.load(f)
+                        _cache_put(key, out, meta)
             await asyncio.gather(*(run(i, j, k) for i, j, k in todo))
         finally:
             await browser.close()

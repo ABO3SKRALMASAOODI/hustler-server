@@ -303,6 +303,8 @@ _READ_ONLY_EXACT = {
     # Wave 2 read verbs (rhythm, direction): measure or propose, never write
     "analyze_music", "check_speech", "align_lyrics", "pick_still",
     "suggest_story", "analyze_reference",
+    # Wave 3 pre-production (3F): a shot list, nothing written
+    "plan_footage",
 }
 # Reaches something outside this project's own files: a stock library, a URL,
 # a generation provider, a live web page.

@@ -1,0 +1,80 @@
+<!--MG-SPEC {"title": "Shapes", "category": "element",
+ "description": "Pure geometric motion: bouncing shapes that leave an echo trail, a golden spiral drawing itself over the frame, or pulsing rings — the abstract layer of a visual essay or a lyric beat. Seeded and exact; beats in 'at' bounce them. Use for an abstract idea (rhythm, growth, proportion), not under talking.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "kind": {"type": "enum", "values": ["bounce", "spiral", "rings"], "default": "bounce"},
+  "count": {"type": "int", "min": 1, "max": 24, "default": 6},
+  "palette": {"type": "enum", "values": ["mono", "accent", "candy", "gold"], "default": "candy"},
+  "accent": {"type": "color", "default": "#FF3B3B"},
+  "echo": {"type": "int", "min": 0, "max": 12, "default": 6, "hint": "trail copies (bounce)"},
+  "at": {"type": "list", "default": [], "max_items": 32, "hint": "beat times, item seconds"},
+  "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "y": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "seed": {"type": "int", "min": 1, "max": 9999, "default": 3}
+ },
+ "example": {"kind": "bounce", "count": 5},
+ "sfx": []} -->
+<style>#sh{position:absolute;left:0;top:0;width:100%;height:100%}</style>
+<div class="mg-root"><canvas id="sh"></canvas></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const cv = MG.$('#sh'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const r = MG.rand(P.seed || 3), S = Math.min(W, H);
+  const PAL = { mono: ['#F4F4F2', '#9A9A9A'], accent: [P.accent || '#FF3B3B', '#F4F4F2'],
+    candy: ['#FF5C8A', '#FFD23F', '#3BCEAC', '#5B8CFF', '#B36BFF'], gold: ['#F5C84C', '#FFF1C1', '#C9922E'] };
+  const pal = PAL[P.palette] || PAL.candy;
+  const beats = (P.at || []).map(Number).filter(isFinite).sort((a, b) => a - b);
+  const cx = (P.x ?? 0.5) * W, cy = (P.y ?? 0.5) * H;
+  const n = Math.max(1, Math.min(24, P.count || 6));
+  const shapes = [...Array(n)].map((_, i) => ({ kind: i % 3, col: pal[i % pal.length], x: r() * W * 0.7 + W * 0.15,
+    vx: (r() - 0.5) * S * 0.5, sz: S * (0.04 + r() * 0.05), ph: r() * 6.28, hop: S * (0.18 + r() * 0.2) }));
+  const beatPulse = t => { let p = 0; for (const b of beats) { const a = t - b; if (a >= 0 && a < 0.35) p = Math.max(p, 1 - a / 0.35); } return p; };
+  function shape(k, x, y, s, rot, col, a) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.globalAlpha = a; ctx.fillStyle = col;
+    ctx.beginPath();
+    if (k === 0) ctx.arc(0, 0, s / 2, 0, 6.2832);
+    else if (k === 1) { const rr = s * 0.18; ctx.roundRect(-s / 2, -s / 2, s, s, rr); }
+    else { ctx.moveTo(0, -s / 2); ctx.lineTo(s / 2, s / 2); ctx.lineTo(-s / 2, s / 2); ctx.closePath(); }
+    ctx.fill(); ctx.restore();
+  }
+  function bounceY(sh, t) {
+    const per = 0.9, ph = ((t + sh.ph) % per) / per;
+    return H * 0.78 - Math.abs(Math.sin(ph * Math.PI)) * sh.hop * (1 + 0.5 * beatPulse(t));
+  }
+  MG.frame(t => {
+    ctx.clearRect(0, 0, W, H);
+    if (P.kind === 'spiral') {
+      const phi = 1.618034, prog = MG.clamp(t / Math.max(0.3, D * 0.7));
+      ctx.strokeStyle = pal[0]; ctx.lineWidth = S * 0.004; ctx.globalAlpha = 0.85;
+      ctx.beginPath();
+      const turns = 3.2 * prog;
+      for (let i = 0; i <= 240 * prog; i++) {
+        const a = i / 240 * turns * 6.2832, rad = S * 0.012 * Math.pow(phi, a / (Math.PI / 2));
+        const x = cx + Math.cos(a) * rad, y = cy + Math.sin(a) * rad;
+        i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      }
+      ctx.stroke(); ctx.globalAlpha = 1;
+      return;
+    }
+    if (P.kind === 'rings') {
+      for (let i = 0; i < n; i++) {
+        const a = ((t + i * 0.3) % 1.8) / 1.8;
+        ctx.strokeStyle = pal[i % pal.length]; ctx.globalAlpha = (1 - a) * 0.9; ctx.lineWidth = S * 0.006 * (1 + beatPulse(t));
+        ctx.beginPath(); ctx.arc(cx, cy, S * (0.05 + a * 0.45), 0, 6.2832); ctx.stroke();
+      }
+      ctx.globalAlpha = 1; return;
+    }
+    const E = Math.max(0, Math.min(12, P.echo ?? 6));
+    shapes.forEach(sh => {
+      for (let e = E; e >= 0; e--) {
+        const tt = t - e * 0.035;
+        if (tt < 0) continue;
+        const x = ((sh.x + sh.vx * tt) % W + W) % W;
+        shape(sh.kind, x, bounceY(sh, tt), sh.sz, tt * 1.4 + sh.ph, sh.col, e ? 0.5 * (1 - e / (E + 1)) : 1);
+      }
+    });
+  });
+})();
+</script>

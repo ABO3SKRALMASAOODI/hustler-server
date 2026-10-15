@@ -1,0 +1,23 @@
+{
+  "name": "efficientsam_ti",
+  "model_id": "efficientsam_ti_2025april",
+  "model_version": "2025april",
+  "kinds": [
+    "objects.sam2"
+  ],
+  "file": "image_segmentation_efficientsam_ti_2025april.onnx",
+  "url": "https://github.com/opencv/opencv_zoo/raw/47534e27c9851bb1128ccc0102f1145e27f23f98/models/image_segmentation_efficientsam/image_segmentation_efficientsam_ti_2025april.onnx",
+  "source": "https://github.com/opencv/opencv_zoo (models/image_segmentation_efficientsam; upstream github.com/yformer/EfficientSAM)",
+  "licence": "Apache-2.0",
+  "licence_url": "https://github.com/opencv/opencv_zoo/blob/47534e27c9851bb1128ccc0102f1145e27f23f98/models/image_segmentation_efficientsam/LICENSE",
+  "commercial_use": true,
+  "sha256": "4eb496e0a7259d435b49b66faf1754aa45a5c382a34558ddda9a8c6fe5915d77",
+  "bytes": 48312857,
+  "images": [
+    "batch",
+    "vision"
+  ],
+  "env": "VALMERA_MODELS_DIR",
+  "runtime": "onnxruntime 1.19 (CPUExecutionProvider): box and point prompts, 1024 px",
+  "notes": "Wave 3 track 3B hour-1 spike winner (ROADMAP \u00a77 lists the EfficientTAM/SAM family): V02 laptop, bottle and mic segmented cleanly at ~0.75 s per keyframe on 4 threads. Keyframes every 4 frames, DIS flow between. Batch/vision only. The sidecar kind keeps its reserved name objects.sam2."
+}

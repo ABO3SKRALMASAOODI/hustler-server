@@ -1,0 +1,23 @@
+{
+  "name": "mediapipe_hand_landmarker",
+  "model_id": "mediapipe_hand_landmarker",
+  "model_version": "float16-1",
+  "kinds": [
+    "landmarks.hand"
+  ],
+  "file": "hand_landmarker.task",
+  "url": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+  "source": "https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker (MediaPipe, github.com/google-ai-edge/mediapipe)",
+  "licence": "Apache-2.0",
+  "licence_url": "https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE",
+  "commercial_use": true,
+  "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1",
+  "bytes": 7819105,
+  "images": [
+    "batch",
+    "vision"
+  ],
+  "env": "VALMERA_MODELS_DIR",
+  "runtime": "cv2.dnn.readNetFromTFLite: hand_detector.tflite (palm SSD, 2016 anchors) + hand_landmarks_detector.tflite (21 points) from the .task zip",
+  "notes": "Wave 3 track 3A (ROADMAP \u00a77). The same file 0D bootstrapped the V12 fingertip labels with. Batch/vision only."
+}

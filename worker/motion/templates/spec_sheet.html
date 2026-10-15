@@ -1,0 +1,47 @@
+<!--MG-SPEC {"title": "Spec sheet", "category": "layout", "also": ["callout"],
+ "description": "A technical spec sheet over a product or a person: thin leader lines draw from points on the subject (parts: x, y frame fractions) out to labels (the user's own facts — never invented), on an optional blueprint grid, one part per beat. Pairs with the blueprint finish and a cutout. For the product beat of an explainer (ref 01, 30).",
+ "duration": 4.0, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "parts": {"type": "rows", "required": true, "max_items": 6, "fields": ["x", "y", "label", "value", "at"], "field_types": {"x": "number", "y": "number", "at": "number"}},
+  "grid": {"type": "bool", "default": true},
+  "colour": {"type": "color", "default": "#E8F2FF"},
+  "accent": {"type": "color", "default": "#4FA3FF"},
+  "title": {"type": "str", "default": "", "max": 40}
+ },
+ "example": {"parts": [{"x": "0.5", "y": "0.3", "label": "SENSOR", "value": "48 MP", "at": "0.3"}]},
+ "sfx": []} -->
+<style>#ss{position:absolute;left:0;top:0;width:100%;height:100%}</style>
+<div class="mg-root"><canvas id="ss"></canvas></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const cv = MG.$('#ss'); cv.width = W; cv.height = H; const ctx = cv.getContext('2d');
+  const k = Math.min(W, H) / 1080, col = P.colour || '#E8F2FF', acc = P.accent || '#4FA3FF';
+  const parts = (P.parts || []).map((p, i) => ({ x: +p.x * W, y: +p.y * H, label: String(p.label || '').toUpperCase(), value: String(p.value || ''), at: isFinite(+p.at) && p.at !== '' ? +p.at : 0.25 + i * 0.35 }));
+  MG.frame(t => {
+    ctx.clearRect(0, 0, W, H);
+    if (P.grid !== false) {
+      const a = MG.clamp(t / 0.4) * 0.16; ctx.strokeStyle = `rgba(160,200,255,${a})`; ctx.lineWidth = 1;
+      for (let x = 0; x < W; x += 54 * k) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+      for (let y = 0; y < H; y += 54 * k) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+    }
+    if (P.title) { ctx.fillStyle = col; ctx.globalAlpha = MG.clamp(t / 0.4); ctx.font = `700 ${26 * k}px 'JetBrains Mono', monospace`; ctx.fillText(P.title.toUpperCase(), 48 * k, 70 * k); ctx.globalAlpha = 1; }
+    parts.forEach((p, i) => {
+      const q = MG.clamp((t - p.at) / 0.45); if (q <= 0) return;
+      const right = p.x < W * 0.5, ex = right ? Math.min(W - 300 * k, p.x + W * 0.22) : Math.max(300 * k, p.x - W * 0.22), ey = p.y - 60 * k;
+      ctx.strokeStyle = acc; ctx.fillStyle = acc; ctx.lineWidth = 2.5 * k;
+      ctx.beginPath(); ctx.arc(p.x, p.y, 7 * k, 0, 6.2832); ctx.fill();
+      ctx.beginPath(); ctx.arc(p.x, p.y, 16 * k * (0.6 + 0.4 * q), 0, 6.2832); ctx.stroke();
+      const mx = p.x + (ex - p.x) * 0.35, my = ey;
+      const L1 = MG.clamp(q * 2), L2 = MG.clamp(q * 2 - 1);
+      ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(p.x + (mx - p.x) * L1, p.y + (my - p.y) * L1); if (L2 > 0) ctx.lineTo(mx + (ex - mx) * L2, my); ctx.stroke();
+      if (L2 >= 1) {
+        ctx.fillStyle = col; ctx.font = `800 ${24 * k}px Inter, sans-serif`; ctx.textAlign = right ? 'left' : 'right';
+        ctx.fillText(p.label, ex + (right ? 10 : -10) * k, ey - 8 * k);
+        ctx.font = `600 ${20 * k}px 'JetBrains Mono', monospace`; ctx.fillStyle = acc; ctx.fillText(p.value, ex + (right ? 10 : -10) * k, ey + 22 * k);
+        ctx.textAlign = 'left';
+      }
+    });
+  });
+})();
+</script>

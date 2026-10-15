@@ -95,6 +95,14 @@ print(json.dumps({"types": sorted(s.FX_TYPES), "slots": sorted(s._FX_SLOT_TYPES)
 '''
 
 
+def _later_wave_types():
+    """(fx types, fx slots) the waves after Wave 1 register: Wave 2's
+    W2_TYPES and the Wave 3 world fixture's types and slots."""
+    w3 = json.loads((BACKEND.parent / "worker" / "tests" / "fixtures" /
+                     "w3_stale_client_ops.json").read_text())
+    return set(W2_TYPES) | set(w3["types"]), set(w3["slots"])
+
+
 def test_w1_devices_validate_batch_and_remove_in_the_backend_process():
     env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     env.update(SKIP_DB_INIT="1", DATABASE_URL="postgresql://stub/stub",
@@ -103,11 +111,14 @@ def test_w1_devices_validate_batch_and_remove_in_the_backend_process():
                        env=env, capture_output=True, text=True, timeout=180)
     assert r.returncode == 0, r.stderr[-3000:]
     got = json.loads(r.stdout.strip().splitlines()[-1])
-    # Wave 2 types (``arrange``) register beside the pinned Wave 1 set
-    assert sorted(set(got["types"]) - W2_TYPES) == sorted([
+    # Wave 2 types (``arrange``) and Wave 3's (worker/tests/fixtures/
+    # w3_stale_client_ops.json) register beside the pinned Wave 1 set
+    later, later_slots = _later_wave_types()
+    assert sorted(set(got["types"]) - later) == sorted([
         "subject", "background", "region", "accent", "strobe", "junction",
         "grade_window", "finish"])
-    assert got["slots"] == ["MotionItem.composite"]
+    assert [x for x in got["slots"] if x not in later_slots] == \
+        ["MotionItem.composite"]
     assert got["ok"] >= 31 and got["refused"] == got["bad"]
     assert got["events"] >= 1
 
@@ -135,8 +146,8 @@ print(json.dumps({"mono": True, "hooks": True}))
     assert r.returncode == 0, r.stderr[-3000:]
     lines = r.stdout.strip().splitlines()
     got = json.loads(lines[-2])
-    # later waves' types (W2_TYPES ...) register beside the pinned Wave 1 set
-    assert sorted(set(got["types"]) - W2_TYPES) == sorted([
+    # later waves' types register beside the pinned Wave 1 set
+    assert sorted(set(got["types"]) - _later_wave_types()[0]) == sorted([
         "subject", "background", "region", "accent", "strobe", "junction",
         "grade_window", "finish"])
     assert got["ok"] >= 31 and got["refused"] == got["bad"]
@@ -212,3 +223,54 @@ def test_w2_devices_validate_batch_and_remove_in_the_backend_process():
     assert got["motion"] == ["st1", "ts1"]
     assert got["refused"] is True
     assert W2_TYPES <= set(got["types"])
+
+
+# ── Wave 3 (worker/devices/INTERFACES_W3.md §0.4): the world definitions
+# (track / object / plane / light) and the MotionItem.anchor slot are
+# written, refused and removed IN THE BACKEND PROCESS through
+# apply_edit_batch alone — the TOOL REACH rule. A new world type extends
+# the worker fixture (tests/fixtures/w3_stale_client_ops.json).
+W3_SNIPPET = r'''
+import json, os, re, sys
+sys.path = [p for p in sys.path if not p.rstrip("/").endswith("worker")]
+sys.path.insert(0, os.getcwd())
+from routes import video
+s, b = video.wschemas, video.wbatch
+fx = json.load(open(os.path.join(os.getcwd(), "..", "worker", "tests",
+                                 "fixtures", "w3_stale_client_ops.json")))
+dur = fx["duration"]
+base = s.validate_edl(fx["base"], dur).model_dump()
+sig = s.edl_signature(base)
+out = b.apply_batch(base, fx["ops"], dur, set())
+v = s.validate_edl(out, dur).model_dump()
+anchors = [m["anchor"]["to"] for m in v["motion"] if m.get("anchor")]
+back = b.apply_batch(v, fx["undo"], dur, set())
+assert s.edl_signature(s.validate_edl(back, dur).model_dump()) == sig
+refused = 0
+for case in fx["bad"]:
+    try:
+        b.apply_batch(v, case["ops"], dur, set())
+    except Exception as e:
+        assert re.search(case["match"], str(e)), (case["name"], str(e))
+        refused += 1
+print(json.dumps({"types": sorted({f["type"] for f in v["fx"]}),
+                  "registered": sorted(set(fx["types"]) & set(s.FX_TYPES)),
+                  "slots": sorted(set(fx["slots"]) & set(s._FX_SLOT_TYPES)),
+                  "anchors": anchors, "refused": refused,
+                  "bad": len(fx["bad"])}))
+'''
+
+
+def test_w3_world_items_validate_batch_and_remove_in_the_backend_process():
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env.update(SKIP_DB_INIT="1", DATABASE_URL="postgresql://stub/stub",
+               PYTHONPATH=str(BACKEND))
+    r = subprocess.run([sys.executable, "-c", W3_SNIPPET], cwd=str(BACKEND),
+                       env=env, capture_output=True, text=True, timeout=180)
+    assert r.returncode == 0, r.stderr[-3000:]
+    got = json.loads(r.stdout.strip().splitlines()[-1])
+    assert got["types"] == got["registered"] == sorted(
+        ["track", "object", "plane", "light"])
+    assert got["slots"] == ["MotionItem.anchor"]
+    assert got["anchors"] == ["plane:pl1", "hand.index_tip"]
+    assert got["refused"] == got["bad"] >= 4

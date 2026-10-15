@@ -1,0 +1,74 @@
+{
+  "id": "layout_mosaic",
+  "family": "layout",
+  "verb": "add_collage",
+  "stage": "motion",
+  "params": {
+    "template": [
+      "mosaic"
+    ],
+    "layout": [
+      "justified",
+      "grid",
+      "treemap",
+      "overload"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "dozens of event photos / clips (the user's library)"
+  },
+  "binds_to": [
+    "beat",
+    "downbeat",
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 10
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 6
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 4
+    }
+  },
+  "never": [
+    "over the speaker while the line is about the speaker",
+    "two layout devices at the same time"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 30.0,
+      "batch": 30.0,
+      "local": 15.0
+    },
+    "fixed_ms": 800
+  },
+  "exemplars": [
+    "28@≈0–12.3"
+  ],
+  "verify": [
+    "determinism"
+  ],
+  "status": "live",
+  "description": "a living mosaic that pops on beats, breathes, collapses into one tile and the title",
+  "skill": "layouts"
+}

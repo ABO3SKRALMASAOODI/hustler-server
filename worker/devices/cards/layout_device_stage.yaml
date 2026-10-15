@@ -1,0 +1,31 @@
+# Track 3E (layout stage). Template device_stage (motion/templates/device_stage.html),
+# written by add_device_stage; video slots filled by slots.py.
+id: layout_device_stage
+family: layout
+verb: add_device_stage
+stage: motion
+params:
+  template: [device_stage]
+  device: [laptop, phone, tablet, monitor]
+needs:
+  sidecars: []
+  lane_features: ["chromium"]
+  footage: "a screen recording of the product"
+binds_to: [section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 10}
+  designed: {per_short: 2, min_gap_s: 6}
+  charged: {per_short: 3, min_gap_s: 4}
+never:
+  - "over the speaker while the line is about the speaker"
+  - "two layout devices at the same time"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 16.0, batch: 16.0, local: 8.0}
+  fixed_ms: 800
+exemplars: ["06@0–14.53", "18@10.84–13.3"]
+verify: ["determinism"]
+status: live
+description: "a product recording inside a drawn device with light spill and a UI breakout"
+skill: layouts

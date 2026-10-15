@@ -549,13 +549,17 @@ class _Session:
             self.page.wait_for_timeout(slice_ms)
             remaining -= slice_ms / 1000.0
 
-    def note(self, kind, x=None, y=None, label=""):
+    def note(self, kind, x=None, y=None, label="", box=None):
         ev = {"t": round(self.now(), 2), "kind": kind}
         if x is not None and y is not None:
             ev["x"] = round(min(max(x / max(1, self.W), 0.0), 1.0), 4)
             ev["y"] = round(min(max(y / max(1, self.H), 0.0), 1.0), 4)
         if label:
             ev["label"] = label[:80]
+        if box:
+            # Wave 3 (3F): the DOM element's own box in frame fractions, so
+            # a push, an iris or a breakout lands on the element itself
+            ev["box"] = element_box(box, self.W, self.H)
         self.events.append(ev)
 
     # ---- pointer ----
@@ -652,7 +656,7 @@ class _Session:
         # that teaches and one that just moves.
         self.sleep(0.35)
         label = step.get("label") or step.get("text") or step.get("selector")
-        self.note("click", cx, cy, label or "")
+        self.note("click", cx, cy, label or "", box=box)
         try:
             self.page.mouse.click(cx, cy)
         except Exception as e:
@@ -690,7 +694,7 @@ class _Session:
         cy = box["y"] + box["height"] / 2
         self.move_to(cx, cy)
         self.note("hover", cx, cy,
-                  step.get("label") or step.get("text") or "")
+                  step.get("label") or step.get("text") or "", box=box)
         self.sleep(float(step.get("seconds") or 1.0))
 
     def do_type(self, step):
@@ -701,10 +705,10 @@ class _Session:
         cy = box["y"] + box["height"] / 2
         self.move_to(cx, cy)
         self.sleep(0.25)
-        self.note("click", cx, cy, "focus the field")
+        self.note("click", cx, cy, "focus the field", box=box)
         try:
             self.page.mouse.click(cx, cy)
-            self.note("type", cx, cy, step["text"][:40])
+            self.note("type", cx, cy, step["text"][:40], box=box)
             self.page.keyboard.type(step["text"][:120],
                                     delay=config.WEB_DEMO_TYPE_DELAY_MS)
         except Exception as e:
@@ -836,7 +840,9 @@ def _transcode(list_path, workdir):
         raise WebRecordError("the page loaded but no video was captured")
     out = os.path.join(workdir, "webrecord.mp4")
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
-           "-an", "-vsync", "cfr", "-r", "30",
+           # -fps_mode (FFmpeg >= 5.1) — the old -vsync spelling is gone
+           # from FFmpeg 9 (and the capture failed to encode there)
+           "-an", "-fps_mode", "cfr", "-r", "30",
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
            "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
     try:
@@ -1054,6 +1060,31 @@ def record_demo(url, workdir, steps, orientation="landscape"):
                    True, body)
 
 
+def element_box(box, W, H):
+    """A Playwright bounding box (page px) as [x0, y0, x1, y1] fractions of
+    the W x H capture, clipped to the frame."""
+    def c(v):
+        return round(min(max(v, 0.0), 1.0), 4)
+    x, y = float(box.get("x", 0.0)), float(box.get("y", 0.0))
+    w, h = float(box.get("width", 0.0)), float(box.get("height", 0.0))
+    return [c(x / max(1, W)), c(y / max(1, H)), c((x + w) / max(1, W)),
+            c((y + h) / max(1, H))]
+
+
+def element_at(events, t, kinds=("click", "type", "hover"), tol=0.6):
+    """The DOM element box of the event nearest program-free capture second
+    ``t`` (within ``tol``), or None — the origin for an iris, the target of
+    a push, the crop of a UI breakout (3F-4)."""
+    best = None
+    for e in events or []:
+        if e.get("kind") not in kinds or not e.get("box"):
+            continue
+        d = abs(float(e.get("t", 0.0)) - float(t))
+        if d <= tol and (best is None or d < best[0]):
+            best = (d, e["box"])
+    return best[1] if best else None
+
+
 def summarize_events(events):
     """One compact line per event, as the agent reads them."""
     bits = []
@@ -1061,7 +1092,9 @@ def summarize_events(events):
         where = (f" at ({e['x']:.2f},{e['y']:.2f})"
                  if "x" in e and "y" in e else "")
         label = f" \"{e['label']}\"" if e.get("label") else ""
-        bits.append(f"{e['t']:.2f}s {e['kind']}{label}{where}")
+        box = (" box [" + ",".join(f"{v:.2f}" for v in e["box"]) + "]"
+               if e.get("box") else "")
+        bits.append(f"{e['t']:.2f}s {e['kind']}{label}{where}{box}")
     return "; ".join(bits)
 
 

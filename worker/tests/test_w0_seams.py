@@ -154,7 +154,9 @@ W1_VERBS = {"add_subject_effect", "set_background", "remove_subject_effect",
 
 def test_only_pinned_fx_types_are_registered_and_others_are_rejected():
     from w2_support import W2_FX_TAGS      # Wave 2 (INTERFACES_W2.md §5)
-    assert set(schemas.FX_TYPES) <= W1_FX_TAGS | W2_FX_TAGS | {"fx_probe"}
+    from w3_pins import W3_FX_TAGS
+    assert set(schemas.FX_TYPES) <= (W1_FX_TAGS | W2_FX_TAGS | W3_FX_TAGS
+                                     | {"fx_probe"})
     assert schemas.FX_STAGES == ("world", "screen", "pre_captions",
                                  "over_type", "junction", "music_bus")
     edl = schemas.default_edl(30)
@@ -243,7 +245,8 @@ def test_fx_layer_is_advertised_exactly_when_a_type_is_authorable():
 
 def test_only_pinned_department_tools_and_no_extension_job_kind_exist():
     from w2_support import W2_VERBS        # Wave 2 (INTERFACES_W2.md §2)
-    assert tools_ext.EXT_TOOL_NAMES <= W1_VERBS | W2_VERBS
+    from w3_pins import W3_VERBS
+    assert tools_ext.EXT_TOOL_NAMES <= W1_VERBS | W2_VERBS | W3_VERBS
     live = set(agent_tools.TOOL_DOMAINS) & set(tools_ext.DEPARTMENTS)
     assert live == set(tools_ext.EXT_DEPARTMENTS)
     assert tools_ext.core_names(agent_tools.TOOLS) == [

@@ -1,0 +1,73 @@
+{
+  "id": "anchor_track",
+  "family": "world",
+  "verb": "track_point",
+  "fx_type": "track",
+  "stage": "world",
+  "params": {
+    "radius": [
+      0.012,
+      0.02,
+      0.008
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [],
+    "footage": "a textured point that stays in its shot (a product edge, a sign, a logo)"
+  },
+  "binds_to": [
+    "word",
+    "word.payoff",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 3,
+      "min_gap_s": 4
+    },
+    "charged": {
+      "per_short": 5,
+      "min_gap_s": 2
+    }
+  },
+  "never": [
+    "on a flat, textureless patch (the track slides)",
+    "across a cut (a track lives in one shot)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "static_placement"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 0.5,
+      "batch": 0.5,
+      "local": 0.3
+    },
+    "fixed_ms": 100
+  },
+  "exemplars": [
+    "07@0.58",
+    "07@6.04",
+    "36@≈4–6"
+  ],
+  "verify": [
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "a point tracked through its shot, for graphics that ride a moving thing",
+  "skill": "tracking"
+}

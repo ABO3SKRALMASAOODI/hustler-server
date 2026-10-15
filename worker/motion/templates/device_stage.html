@@ -1,0 +1,95 @@
+<!--MG-SPEC {"title": "Device stage", "category": "layout", "also": ["media"],
+ "description": "A product's own screen recording (screen: asset key or source:<seconds>) playing inside a drawn device — laptop, phone, tablet or monitor — on a stage, its light spilling onto the surface in the screen's own colours, a gloss reflection over the glass, a slow float. 'breakout' lifts a part of the UI (a crop of the same recording) out of the screen toward the viewer at breakout_at. For product and tool stories (refs 06, 18).",
+ "duration": 5.0, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "screen": {"type": "str", "required": true, "max": 300},
+  "device": {"type": "enum", "values": ["laptop", "phone", "tablet", "monitor"], "default": "laptop"},
+  "body": {"type": "color", "default": "#1C1D21"},
+  "backdrop": {"type": "color", "default": "#0E0F13"},
+  "backdrop2": {"type": "color", "default": "#050507"},
+  "spill": {"type": "float", "min": 0, "max": 1, "default": 0.7},
+  "float": {"type": "bool", "default": true},
+  "breakout": {"type": "list", "default": [], "max_items": 4, "hint": "[x0, y0, x1, y1] fractions of the SCREEN to lift out"},
+  "breakout_at": {"type": "float", "min": 0, "max": 60, "default": 0},
+  "title": {"type": "str", "default": "", "max": 40},
+  "y": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.46}
+ },
+ "example": {"screen": "asset:media/p1/studio.mp4", "device": "laptop", "title": "STUDIO"},
+ "sfx": []} -->
+<style>
+  .dv{position:absolute;left:0;top:0}
+  #spill{position:absolute;left:0;top:0;width:100%;height:100%}
+  .gl{position:absolute;left:0;top:0;pointer-events:none}
+  .ttl{position:absolute;left:0;width:100%;text-align:center;color:#fff;font:900 76px/1 'Inter Display','Inter',sans-serif;letter-spacing:-.02em}
+  .sh{position:absolute;left:0;top:0;border-radius:18px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+</style>
+<div class="mg-root"><canvas id="spill"></canvas><div id="dev"></div><div class="ttl" id="ttl"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  MG.always(); MG.box = [0, 0, W, H];
+  const dev = MG.$('#dev'), cv = MG.$('#spill'); cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d');
+  const kind = P.device || 'laptop', body = P.body || '#1C1D21';
+  // screen geometry (design px) per device, sized to the frame's short side
+  const S = Math.min(W, H);
+  let sw, sh, rad, bezel;
+  if (kind === 'phone') { sh = S * 1.1; sw = sh * 0.462; rad = sw * 0.12; bezel = sw * 0.035; }
+  else if (kind === 'tablet') { sw = S * 0.82; sh = sw * 0.72; rad = sw * 0.03; bezel = sw * 0.035; }
+  else if (kind === 'monitor') { sw = S * 0.92; sh = sw * 0.5625; rad = sw * 0.01; bezel = sw * 0.018; }
+  else { sw = S * 0.86; sh = sw * 0.625; rad = sw * 0.018; bezel = sw * 0.03; }
+  const cx = W / 2, cy = (P.y ?? 0.46) * H;
+  // the device body: a frame with a transparent screen (the slot shows through)
+  const frame = MG.el('div', 'dv', '', dev);
+  frame.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}"><defs>
+    <linearGradient id="b" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3a3c43"/><stop offset=".08" stop-color="${body}"/><stop offset="1" stop-color="#0b0b0d"/></linearGradient>
+    <mask id="m"><rect width="${W}" height="${H}" fill="white"/><rect id="hole" rx="${rad * 0.6}" fill="black"/></mask></defs>
+    <rect id="bd" rx="${rad}" fill="url(#b)" mask="url(#m)" stroke="#55585f" stroke-width="2"/>
+    ${kind === 'laptop' ? `<path id="base" fill="#2a2c31" stroke="#5a5d64" stroke-width="2"/>` : ''}
+    ${kind === 'monitor' ? `<rect id="stem" fill="#1d1e22"/><rect id="foot" rx="8" fill="#26272c"/>` : ''}
+    ${kind === 'phone' ? `<rect id="notch" rx="12" fill="#050506"/>` : ''}
+    <rect id="gloss" rx="${rad * 0.6}" fill="url(#gl)" opacity=".18"/>
+    <linearGradient id="gl" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".9"/><stop offset=".38" stop-color="#fff" stop-opacity="0"/></linearGradient>
+    </svg>`;
+  const $ = id => frame.querySelector('#' + id);
+  const spill = P._spill || null;
+  const brk = (P.breakout && P.breakout.length === 4) ? P.breakout.map(Number) : null;
+  const ttl = MG.$('#ttl'); ttl.textContent = P.title || '';
+  MG.frame(t => {
+    const fy = P.float === false ? 0 : Math.sin(t * 1.1) * S * 0.006;
+    const x0 = cx - sw / 2, y0 = cy - sh / 2 + fy;
+    MG.slot('screen', x0, y0, sw, sh, { r: rad * 0.6 });
+    const set = (el, a) => { if (el) for (const k in a) el.setAttribute(k, a[k]); };
+    set($('hole'), { x: x0, y: y0, width: sw, height: sh });
+    set($('bd'), { x: x0 - bezel, y: y0 - bezel, width: sw + 2 * bezel, height: sh + 2 * bezel });
+    set($('gloss'), { x: x0, y: y0, width: sw, height: sh });
+    if ($('base')) $('base').setAttribute('d', `M${x0 - bezel * 3} ${y0 + sh + bezel} L${x0 + sw + bezel * 3} ${y0 + sh + bezel} L${x0 + sw + bezel * 6} ${y0 + sh + bezel * 2.6} L${x0 - bezel * 6} ${y0 + sh + bezel * 2.6} Z`);
+    if ($('stem')) { set($('stem'), { x: cx - sw * 0.04, y: y0 + sh + bezel, width: sw * 0.08, height: sh * 0.22 }); set($('foot'), { x: cx - sw * 0.18, y: y0 + sh * 1.2 + bezel, width: sw * 0.36, height: sh * 0.04 }); }
+    if ($('notch')) set($('notch'), { x: cx - sw * 0.16, y: y0 + sh * 0.012, width: sw * 0.32, height: sh * 0.03 });
+    // light spill: the screen's own colour on the stage under and around it
+    ctx.clearRect(0, 0, W, H);
+    let c = [120, 140, 200];
+    if (spill && spill.length) c = spill[Math.min(spill.length - 1, Math.max(0, Math.round(t * 10)))];
+    const k = (P.spill ?? 0.7);
+    const g = ctx.createRadialGradient(cx, y0 + sh * 1.05, sw * 0.05, cx, y0 + sh * 1.05, sw * 0.95);
+    g.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},${(0.55 * k).toFixed(3)})`);
+    g.addColorStop(1, `rgba(${c[0]},${c[1]},${c[2]},0)`);
+    ctx.fillStyle = g; ctx.fillRect(0, y0 + sh * 0.6, W, H);
+    const halo = ctx.createRadialGradient(cx, cy, sw * 0.4, cx, cy, sw * 0.95);
+    halo.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},${(0.22 * k).toFixed(3)})`); halo.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = halo; ctx.fillRect(0, 0, W, H);
+    // the breakout: a crop of the screen lifting toward the viewer
+    if (brk) {
+      const q = MG.ease.outCubic ? MG.ease.outCubic(MG.clamp((t - (P.breakout_at || D * 0.45)) / 0.6)) : MG.clamp((t - (P.breakout_at || D * 0.45)) / 0.6);
+      if (q > 0) {
+        const bx = x0 + brk[0] * sw, by = y0 + brk[1] * sh, bw = (brk[2] - brk[0]) * sw, bh = (brk[3] - brk[1]) * sh;
+        const s = 1 + 0.45 * q;
+        const nx = MG.lerp(bx, cx - bw * s / 2, q * 0.6), ny = MG.lerp(by, by - sh * 0.18 * q, 1);
+        MG.slot('screen#ui', nx, ny, bw * s, bh * s, { r: 12, z: 5, crop: brk });
+      }
+    }
+    ttl.style.top = (y0 + sh + S * 0.16) + 'px';
+    ttl.style.opacity = MG.clamp((t - 0.4) / 0.4).toFixed(3);
+  });
+})();
+</script>

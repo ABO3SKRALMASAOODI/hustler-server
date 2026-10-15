@@ -1,0 +1,73 @@
+{
+  "id": "layout_glass_card",
+  "family": "layout",
+  "verb": "add_motion_graphic",
+  "stage": "motion",
+  "params": {
+    "template": [
+      "glass_card"
+    ],
+    "width": [
+      0.3,
+      0.24,
+      0.4
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "any; attach it to a fingertip or beside a face"
+  },
+  "binds_to": [
+    "word",
+    "word.payoff",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 10
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 6
+    },
+    "charged": {
+      "per_short": 3,
+      "min_gap_s": 4
+    }
+  },
+  "never": [
+    "over the speaker while the line is about the speaker",
+    "two layout devices at the same time"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 6.0,
+      "batch": 6.0,
+      "local": 3.0
+    },
+    "fixed_ms": 800
+  },
+  "exemplars": [
+    "21@0.5",
+    "21@9.37"
+  ],
+  "verify": [
+    "determinism"
+  ],
+  "status": "live",
+  "description": "a small frosted glass card with one fact",
+  "skill": "layouts"
+}

@@ -1,0 +1,41 @@
+<!--MG-SPEC {"title": "Flat-lay", "category": "layout", "also": ["media"],
+ "description": "Objects (cutout images with transparency — product or subject cutouts) dropped one per beat onto a flat surface seen from above, each with a soft contact shadow, arranged in a loose scatter or a neat grid; the 'everything in the kit' beat (ref 30). up to 8 objects.",
+ "duration": 4.0, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "img1": {"type": "asset", "default": null}, "img2": {"type": "asset", "default": null}, "img3": {"type": "asset", "default": null}, "img4": {"type": "asset", "default": null},
+  "img5": {"type": "asset", "default": null}, "img6": {"type": "asset", "default": null}, "img7": {"type": "asset", "default": null}, "img8": {"type": "asset", "default": null},
+  "arrange": {"type": "enum", "values": ["scatter", "grid"], "default": "scatter"},
+  "surface": {"type": "color", "default": "#EDE7DD"},
+  "at": {"type": "list", "default": [], "max_items": 8},
+  "size": {"type": "float", "min": 0.1, "max": 0.5, "default": 0.26},
+  "seed": {"type": "int", "min": 1, "max": 9999, "default": 6}
+ },
+ "example": {"arrange": "scatter"},
+ "sfx": []} -->
+<style>#fs{position:absolute;inset:0}.fo{position:absolute;left:0;top:0;transform-origin:50% 50%;filter:drop-shadow(0 10px 14px rgba(0,0,0,.28)) drop-shadow(0 2px 3px rgba(0,0,0,.25))}</style>
+<div class="mg-root"><div id="fs"></div><div id="fl"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H;
+  const r = MG.rand(P.seed || 6);
+  MG.$('#fs').style.background = P.surface || '#EDE7DD';
+  const srcs = [1, 2, 3, 4, 5, 6, 7, 8].map(i => P['img' + i]).filter(Boolean);
+  const n = Math.max(1, srcs.length), sz = (P.size ?? 0.26) * Math.min(W, H);
+  const ats = (P.at || []).map(Number);
+  const cols = Math.ceil(Math.sqrt(n * W / H)), rows = Math.ceil(n / cols);
+  const els = srcs.map((s, i) => {
+    const im = MG.el('img', 'fo', '', MG.$('#fl')); im.src = s; im.style.width = sz + 'px';
+    const gx = (i % cols + 0.5) / cols * W, gy = (Math.floor(i / cols) + 0.5) / rows * H;
+    const x = P.arrange === 'grid' ? gx : gx + (r() - 0.5) * W / cols * 0.45, y = P.arrange === 'grid' ? gy : gy + (r() - 0.5) * H / rows * 0.4;
+    return { im, x, y, rot: P.arrange === 'grid' ? 0 : (r() - 0.5) * 0.5, at: isFinite(ats[i]) ? ats[i] : 0.2 + i * 0.22 };
+  });
+  MG.frame(t => {
+    els.forEach(o => {
+      const k = MG.spring ? MG.clamp(MG.spring(t, o.at, { k: 300, d: 18 }), 0, 1.1) : MG.clamp((t - o.at) / 0.2);
+      const h = o.im.getBoundingClientRect().height || sz;
+      o.im.style.opacity = MG.clamp(k * 3).toFixed(3);
+      o.im.style.transform = `translate(${(o.x - sz / 2).toFixed(1)}px, ${(o.y - h / 2 - (1 - k) * 60).toFixed(1)}px) rotate(${o.rot.toFixed(3)}rad) scale(${(1.15 - 0.15 * k).toFixed(3)})`;
+    });
+  });
+})();
+</script>

@@ -1,0 +1,31 @@
+# Track 3D (procedural FX and illustration kit). Template el_pictogram
+# (motion/templates/el_pictogram.html), written by add_element; composited as
+# light where it is light (MotionItem.composite blend screen).
+id: element_pictogram
+family: composite
+verb: add_element
+stage: motion
+params:
+  template: [el_pictogram]
+  mode: [pose, run, walk, jump, point]
+needs:
+  sidecars: [landmarks.pose]
+  lane_features: ["chromium"]
+  footage: "mode=pose needs the body in frame"
+binds_to: [section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 2, min_gap_s: 5}
+  charged: {per_short: 4, min_gap_s: 3}
+never:
+  - "next to the real person doing the same move"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 10.0, batch: 10.0, local: 5.0}
+  fixed_ms: 400
+exemplars: ["36@≈0.7–1.3"]
+verify: ["land_err_f<=1", "determinism"]
+status: live
+description: "a pictogram figure driven by the measured pose or a clean cycle"
+skill: elements

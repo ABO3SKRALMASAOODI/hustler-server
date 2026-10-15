@@ -110,7 +110,13 @@ EXEMPT_CATEGORIES = frozenset(("transition", "texture"))
 EXEMPT_TEMPLATES = frozenset(("arrow_callout", "circle_highlight",
                               "focus_spotlight", "caption_motion",
                               # W2 2D: full-frame b-roll (covers by design)
-                              "still_motion"))
+                              "still_motion",
+                              # Wave 3: elements that live ON the person or
+                              # the world (embers off the outline, an orbit
+                              # round the head) and the device stage that
+                              # owns the frame — never pushed off a face
+                              "el_orbit", "el_particles", "el_pictogram",
+                              "el_shapes", "el_sprites", "device_stage"))
 HORIZONTAL_KEYS = ("align", "side")
 
 # ── captions ──────────────────────────────────────────────────────────────
@@ -949,6 +955,9 @@ def clear_of_faces(box, zones):
 # the safe area is acted on only for COLUMN_TEMPLATES (width = their knob).
 NOMINAL_INK = {
     "bar_compare": (0.056, -0.208, 0.944, 0.208),
+    # Wave 3: the frosted card's ink at its example (value, title, body;
+    # probed)
+    "glass_card": (0.374, -0.042, 0.519, 0.04),
     "chapter_title": (0.115, -0.133, 0.93, 0.133),
     "chat_bubbles": (0.085, -0.3, 0.904, 0.015),
     "checklist": (0.237, -0.096, 0.756, 0.102),

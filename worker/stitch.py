@@ -667,6 +667,10 @@ def _clip_program_zooms(items, w0, w1):
     return out
 
 
+# Wave 3 world definitions (worker/devices/INTERFACES_W3.md §3.1)
+WORLD_DEFINITIONS = ("track", "object", "plane")
+
+
 def _window_fx(items, w0, w1, fps, music_ids):
     """EDL.fx items rebased onto a piece's own clock [0, w1 - w0).
 
@@ -704,8 +708,16 @@ def _window_fx(items, w0, w1, fps, music_ids):
         a, b = float(it["start"]), float(it["end"])
         if b <= w0 + 1e-6 or a >= w1 - 1e-6:
             continue
-        la, lb = max(0.0, local(max(a, w0))), min(local(min(b, w1)),
-                                                   round(span, 2))
+        if it.get("type") in WORLD_DEFINITIONS:
+            # a Wave 3 definition draws nothing: its window only names the
+            # SOURCE span its measurement is keyed on — rebased exactly
+            # (never frame-snapped), so the piece reads the full render's
+            # sidecar instead of asking for a new one
+            la = round(max(a, w0) - w0, 4)
+            lb = round(min(b, w1) - w0, 4)
+        else:
+            la, lb = max(0.0, local(max(a, w0))), min(local(min(b, w1)),
+                                                       round(span, 2))
         if lb - la < 0.01 - 1e-9:
             continue
         moved = {**it, "start": la, "end": lb}

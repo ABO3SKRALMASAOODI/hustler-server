@@ -1,0 +1,58 @@
+<!--MG-SPEC {"title": "Sprites", "category": "element",
+ "description": "Cutout images (people, products, objects — PNGs with transparency, e.g. subject cutouts) choreographed: a ring that spins, a row that steps in, a swarm, a pop-in burst, an implosion into the centre, a collapse into one. Each sprite lands on its own beat in 'at'. Use for a lab-scan / sizzle moment or a lineup, not under talking.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "img1": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img2": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img3": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img4": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img5": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img6": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img7": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "img8": {"type": "asset", "default": null, "hint": "project image key (a cutout reads best)"},
+  "choreo": {"type": "enum", "values": ["ring", "row", "swarm", "pop", "implode", "collapse"], "default": "ring"},
+  "size": {"type": "float", "min": 0.05, "max": 0.6, "default": 0.22, "hint": "sprite height, share of the frame height"},
+  "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "y": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "at": {"type": "list", "default": [], "max_items": 8, "hint": "landing times per sprite, item seconds"},
+  "seed": {"type": "int", "min": 1, "max": 9999, "default": 9}
+ },
+ "example": {"choreo": "ring"},
+ "sfx": []} -->
+<style>.sp{position:absolute;left:0;top:0;will-change:transform,opacity;filter:drop-shadow(0 18px 30px rgba(0,0,0,.35))}</style>
+<div class="mg-root" id="sr"></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const root = MG.$('#sr'), r = MG.rand(P.seed || 9);
+  const srcs = [1, 2, 3, 4, 5, 6, 7, 8].map(i => P['img' + i]).filter(Boolean);
+  const n = Math.max(1, srcs.length || 6), h = (P.size ?? 0.22) * H;
+  const cx = (P.x ?? 0.5) * W, cy = (P.y ?? 0.5) * H;
+  const at = (P.at || []).map(Number);
+  // no images: the choreography still reads, with tokens in the accent
+  // colours standing in (the page's own fallback, never empty)
+  const tones = ['#FF5A1F', '#FFFFFF', '#4FA3FF', '#7CF2C4', '#FFD166', '#FF3B30'];
+  const els = srcs.length ? srcs.map(s => { const im = MG.el('img', 'sp', '', root); im.src = s; im.style.height = h + 'px'; return im; })
+    : [0, 1, 2, 3, 4, 5].map(i => { const d = MG.el('div', 'sp', '', root); d.style.width = h * 0.62 + 'px'; d.style.height = h * 0.62 + 'px';
+        d.style.borderRadius = '50%'; d.style.background = tones[i % tones.length]; return d; });
+  const rnd = els.map(() => [r(), r(), r()]);
+  MG.frame(t => {
+    els.forEach((el, i) => {
+      const land = isFinite(at[i]) ? at[i] : i * Math.min(0.12, D / (n * 2.5));
+      const k = MG.spring ? MG.clamp(MG.spring(t, land, { k: 220, d: 14 })) : MG.clamp((t - land) / 0.25);
+      const w = el.naturalWidth && el.naturalHeight ? h * el.naturalWidth / el.naturalHeight : h;
+      let x = cx, y = cy, s = 1, rot = 0, a = k;
+      const ang = i / n * 6.2832 + t * 0.6;
+      if (P.choreo === 'ring') { x = cx + Math.cos(ang) * h * 1.6; y = cy + Math.sin(ang) * h * 0.55; s = 0.75 + 0.25 * (Math.sin(ang) + 1) / 2; }
+      else if (P.choreo === 'row') { x = cx + (i - (n - 1) / 2) * w * 0.82; y = cy + (1 - k) * h * 0.6; }
+      else if (P.choreo === 'swarm') { x = cx + (rnd[i][0] - 0.5) * W * 0.8 + MG.noise(t * 0.8 + i) * h * 0.3; y = cy + (rnd[i][1] - 0.5) * H * 0.5 + MG.noise(t * 0.8 + i + 9) * h * 0.3; s = 0.6 + rnd[i][2] * 0.6; }
+      else if (P.choreo === 'pop') { x = cx + (rnd[i][0] - 0.5) * W * 0.7; y = cy + (rnd[i][1] - 0.5) * H * 0.4; s = k; rot = (rnd[i][2] - 0.5) * 0.3; }
+      else if (P.choreo === 'implode') { const q = MG.clamp((t - D * 0.55) / (D * 0.35)); x = cx + Math.cos(ang) * h * 1.8 * (1 - q); y = cy + Math.sin(ang) * h * 0.9 * (1 - q); s = 1 - 0.7 * q; a = k * (1 - q * 0.8); }
+      else if (P.choreo === 'collapse') { const q = MG.clamp((t - D * 0.5) / (D * 0.4)); x = cx + (i - (n - 1) / 2) * w * 0.82 * (1 - q); a = k * (i === n - 1 ? 1 : 1 - q); }
+      el.style.opacity = MG.clamp(a).toFixed(3);
+      el.style.transform = `translate(${(x - w * s / 2).toFixed(1)}px, ${(y - h * s / 2).toFixed(1)}px) rotate(${rot.toFixed(3)}rad) scale(${s.toFixed(3)})`;
+      el.style.transformOrigin = '0 0';
+    });
+  });
+})();
+</script>

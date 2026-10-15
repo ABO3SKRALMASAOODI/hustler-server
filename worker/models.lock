@@ -2,6 +2,42 @@
   "generated_by": "worker/models/bake.py --lock",
   "lock_version": 1,
   "models": {
+    "efficientsam_ti": {
+      "bytes": 48312857,
+      "file": "image_segmentation_efficientsam_ti_2025april.onnx",
+      "licence": "Apache-2.0",
+      "model_id": "efficientsam_ti_2025april",
+      "model_version": "2025april",
+      "sha256": "4eb496e0a7259d435b49b66faf1754aa45a5c382a34558ddda9a8c6fe5915d77",
+      "url": "https://github.com/opencv/opencv_zoo/raw/47534e27c9851bb1128ccc0102f1145e27f23f98/models/image_segmentation_efficientsam/image_segmentation_efficientsam_ti_2025april.onnx"
+    },
+    "mediapipe_face_landmarker": {
+      "bytes": 3758596,
+      "file": "face_landmarker.task",
+      "licence": "Apache-2.0",
+      "model_id": "mediapipe_face_landmarker_v2",
+      "model_version": "float16-1",
+      "sha256": "64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff",
+      "url": "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+    },
+    "mediapipe_hand_landmarker": {
+      "bytes": 7819105,
+      "file": "hand_landmarker.task",
+      "licence": "Apache-2.0",
+      "model_id": "mediapipe_hand_landmarker",
+      "model_version": "float16-1",
+      "sha256": "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1",
+      "url": "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+    },
+    "mediapipe_pose_landmarker": {
+      "bytes": 9398198,
+      "file": "pose_landmarker_full.task",
+      "licence": "Apache-2.0",
+      "model_id": "mediapipe_pose_landmarker_full",
+      "model_version": "float16-1",
+      "sha256": "5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1",
+      "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task"
+    },
     "rvm_mobilenetv3": {
       "bytes": 14975696,
       "file": "rvm_mobilenetv3_fp32.onnx",

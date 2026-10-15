@@ -333,7 +333,7 @@ def headline_visible(item, items, W, H):
 
 def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
                    fetch_asset=None, extra_items=None, plate=None, behind_why=None,
-                   source_path=None):
+                   source_path=None, world=None):
     """Render motion clips and append ffmpeg inputs. Returns (inputs, next_idx)
     with inputs = [(input_index, item, RenderedClip)]. ``extra_items`` are
     renderer-synthesized items (the motion caption track); ``plate`` is the
@@ -348,10 +348,19 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
     names as a ``glyph`` region gets its own inputs for the glyph mask
     (compositor.prepare_composites). ``source_path`` (optional) is the main
     video, for a ``source`` fill. Without composites or glyph references
-    nothing here changes: the inputs are exactly today's."""
+    nothing here changes: the inputs are exactly today's.
+
+    Wave 3 (devices/INTERFACES_W3.md §4, §6): ``world`` (a world_layer.Ctx
+    the renderer lends, or None) lets ``world_layer.augment`` hand a page
+    its engine data before it renders and ``world_layer.finish`` turn an
+    anchored item's clip into its world-composited clip (and fill video
+    slots) before the inputs are opened. Items with neither come back
+    untouched: their clips and inputs are exactly today's."""
     LAST_WARNINGS.clear()
     import compositor
     compositor.forget(workdir)
+    if world is not None and fetch_asset is not None:
+        world.fetch_asset = fetch_asset        # slot sources (Wave 3, 3E)
     items = list(extra_items or []) + program_items(edl, out_duration)
     if behind_why is not None:
         swapped = []
@@ -382,9 +391,14 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
                     asset_locals[key] = fetch_asset(key)
             ydoc = yields_doc(yield_windows(item, items, W, H))
             pieces = render_pieces(item, fps)
+            if world is not None:
+                import world_layer
+                fed = [world_layer.augment(part, world) for part in pieces]
+            else:
+                fed = pieces
             built = [motion_templates.build_job(
                 part, W, H, fps, asset_locals, plate=plates.get(k),
-                yields=ydoc) for part in pieces]
+                yields=ydoc) for part in fed]
             jobs.extend(built)
             kept.extend(pieces)
             for part in pieces:
@@ -407,6 +421,9 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
                 clips.append(None)
         if all(c is None for c in clips):
             print(f"[render] motion layer unavailable: {e}", flush=True)
+    if world is not None:
+        import world_layer
+        kept, clips = world_layer.finish(kept, clips, world, warn=warn)
     inputs = []
     for item, clip in zip(kept, clips):
         if clip is None or clip.empty:

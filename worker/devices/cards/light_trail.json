@@ -1,0 +1,87 @@
+{
+  "id": "light_trail",
+  "family": "matte_fx",
+  "verb": "add_element",
+  "fx_type": "light",
+  "stage": "world",
+  "params": {
+    "kind": [
+      "trail"
+    ],
+    "colour": [
+      "white",
+      "accent"
+    ],
+    "intensity": [
+      0.8,
+      0.6,
+      1.0
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "matte.person"
+    ],
+    "lane_features": [
+      "ffmpeg:lagfun",
+      "ffmpeg:gblur",
+      "ffmpeg:alphamerge"
+    ],
+    "footage": "a person in the shot; a dark plate makes light read best"
+  },
+  "binds_to": [
+    "word.payoff",
+    "section",
+    "drop",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 10
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 6
+    },
+    "charged": {
+      "per_short": 2,
+      "min_gap_s": 4
+    }
+  },
+  "never": [
+    "on an ordinary sentence: light is a transformation or an ending",
+    "within 0.5 s of another matte_fx"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "halation"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 9.0,
+      "batch": 14.4,
+      "local": 4.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "01@1.708",
+    "33@≈6.0"
+  ],
+  "verify": [
+    "matte_flicker<=0.035",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "a moving subject leaves light trails",
+  "skill": "elements"
+}

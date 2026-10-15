@@ -1,0 +1,49 @@
+<!--MG-SPEC {"title": "Scroll wall", "category": "layout", "also": ["media"],
+ "description": "A wall of real thumbnails (tiles: images or video) scrolling in rows at a constant speed, alternate rows opposite ways — 'everything we made', a body of work, the volume of a thing (refs 07, 16). Optional title over it. Constant velocity, no tearing; best at 2-4 s.",
+ "duration": 4.0, "layer": "above_captions", "mutes_captions": true,
+ "params": {
+  "tiles": {"type": "list", "required": true, "max_items": 64, "max": 300},
+  "rows": {"type": "int", "min": 2, "max": 10, "default": 5},
+  "speed": {"type": "float", "min": 0.02, "max": 1.0, "default": 0.18, "hint": "frame widths per second"},
+  "aspect": {"type": "float", "min": 0.5, "max": 2.5, "default": 1.5, "hint": "tile width / height"},
+  "title": {"type": "str", "default": "", "max": 40},
+  "backdrop": {"type": "color", "default": "#0A0A0C"},
+  "dim": {"type": "float", "min": 0, "max": 0.8, "default": 0.25, "hint": "darken the wall under the title"}
+ },
+ "example": {"tiles": ["source:3.0", "source:8.0"], "title": "300 VIDEOS"},
+ "sfx": []} -->
+<style>.sw{position:absolute;left:0;top:0;width:100%;text-align:center;color:#fff;font-family:'Anton','Bebas Neue',sans-serif;line-height:.9;text-shadow:0 12px 40px rgba(0,0,0,.6)}
+#dim{position:absolute;inset:0}</style>
+<div class="mg-root"><div id="dim"></div><div class="sw" id="tt"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H;
+  MG.always(); MG.box = [0, 0, W, H];
+  const n = Math.max(1, (P.tiles || []).length), rows = Math.max(2, Math.min(10, P.rows || 5));
+  const gap = W * 0.012, th = (H - gap * (rows + 1)) / rows, tw = th * (P.aspect || 1.5);
+  const perRow = Math.ceil(W / (tw + gap)) + 2;
+  const v = (P.speed ?? 0.18) * W;
+  const tt = MG.$('#tt'); tt.textContent = String(P.title || '').toUpperCase(); tt.style.fontSize = (W * 0.13) + 'px';
+  tt.style.top = (H * 0.44) + 'px';
+  MG.$('#dim').style.background = `rgba(0,0,0,${(P.title ? P.dim ?? 0.25 : 0).toFixed(3)})`;
+  MG.frame(t => {
+    let k = 0;
+    for (let r = 0; r < rows; r++) {
+      const dir = r % 2 ? 1 : -1, P_ = tw + gap, d = dir * v * t;
+      const off = ((d % P_) + P_) % P_;
+      // whole tiles scrolled so far: a tile keeps its picture (and its slot
+      // id) as it crosses the frame, instead of every tile swapping
+      // pictures each time the offset wraps
+      const shift = Math.floor(d / P_);
+      const y = gap + r * (th + gap);
+      for (let c = -1; c < perRow; c++) {
+        const x = c * (tw + gap) + off - (tw + gap);
+        const cc = c - shift;
+        const idx = (((r * 7 + cc * 3) % n) + n) % n;
+        MG.slot('t' + idx + '#' + r + '_' + cc, x, y, tw, th, { r: W * 0.008 });
+        k++;
+      }
+    }
+  });
+})();
+</script>

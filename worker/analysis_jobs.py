@@ -134,7 +134,8 @@ def run_sidecar_job(worker_db, job):
     payload = job.get("payload") or {}
     kind = payload.get("kind")
     raw_chunks = payload.get("chunks") or []
-    if kind not in CHILD_RUNNERS or not raw_chunks:
+    if (kind not in CHILD_RUNNERS and _ext_kind(kind) is None) \
+            or not raw_chunks:
         raise ValueError("sidecar job needs a known kind and chunks")
     sp = sidecars.spec(kind)
     want = (payload.get("model_id"), str(payload.get("model_version")),
@@ -228,9 +229,24 @@ def _tmp_dir():
         return "/tmp/valmera"
 
 
+def _ext_kind(kind):
+    """The sidecar_kinds/ module serving ``kind`` (Wave 3 seam,
+    devices/INTERFACES_W3.md §1), or None."""
+    if kind in CHILD_RUNNERS:
+        return None
+    try:
+        import sidecar_kinds
+        return sidecar_kinds.serves(kind)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _engine(kind, faultinject):
     """{name, model_id, model_version, path} for this lane, or None."""
     import config
+    ext = _ext_kind(kind)
+    if ext is not None:
+        return ext.engine(kind, faultinject)
     missing = faultinject.fault(f"model_missing:{kind}")
     sp = sidecars.spec(kind)
     name = sp["model"]
@@ -668,7 +684,10 @@ _CHILD = {"matte.person": _child_matte, "faces.yunet": _child_faces}
 def _child_main(spec_path):
     with open(spec_path) as f:
         spec = json.load(f)
-    fn = _CHILD[spec["kind"]]
+    fn = _CHILD.get(spec["kind"])
+    if fn is None:
+        import sidecar_kinds
+        fn = sidecar_kinds.child(spec["kind"])
     with open(spec["results"], "a") as res:
         for ch in spec["chunks"]:
             row = {"key": ch["key"], "out_key": ch["out_key"],

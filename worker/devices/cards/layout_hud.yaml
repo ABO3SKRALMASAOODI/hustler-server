@@ -1,0 +1,31 @@
+# Track 3E (layout stage). Template hud (motion/templates/hud.html),
+# written by add_hud; video slots filled by slots.py.
+id: layout_hud
+family: layout
+verb: add_hud
+stage: motion
+params:
+  template: [hud]
+  brackets: [true, false]
+needs:
+  sidecars: []
+  lane_features: ["chromium"]
+  footage: "any; an event, a lab, a tool"
+binds_to: [section, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 10}
+  designed: {per_short: 2, min_gap_s: 6}
+  charged: {per_short: 3, min_gap_s: 4}
+never:
+  - "over the speaker while the line is about the speaker"
+  - "two layout devices at the same time"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 6.0, batch: 6.0, local: 3.0}
+  fixed_ms: 800
+exemplars: ["24@≈0–20", "17@0", "06@0–14.53"]
+verify: ["determinism"]
+status: live
+description: "frame furniture through the piece, clear of the corner mark"
+skill: layouts

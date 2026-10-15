@@ -1,0 +1,31 @@
+# Track 3D (procedural FX and illustration kit). Template el_doodle
+# (motion/templates/el_doodle.html), written by add_element; composited as
+# light where it is light (MotionItem.composite blend screen).
+id: element_doodle
+family: composite
+verb: add_element
+stage: motion
+params:
+  template: [el_doodle]
+  kind: [arrow, underline, circle, scribble, burst, star, check, cross, bracket, spiral]
+needs:
+  sidecars: []
+  lane_features: ["chromium"]
+  footage: "any; attach to a track or a hand to ride it"
+binds_to: [word, word.payoff, time]
+budget:
+  calm: {per_short: 1, min_gap_s: 8}
+  designed: {per_short: 2, min_gap_s: 5}
+  charged: {per_short: 4, min_gap_s: 3}
+never:
+  - "two doodles on screen at once"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 10.0, batch: 10.0, local: 5.0}
+  fixed_ms: 400
+exemplars: ["07@0.58", "07@6.04", "36@≈4–6", "23@≈7.3"]
+verify: ["land_err_f<=1", "determinism"]
+status: live
+description: "a hand-drawn mark with boil that points at or underlines the thing"
+skill: elements

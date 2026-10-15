@@ -6220,7 +6220,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             plate=_plate_probe(edl, tl, None, None, W, H,
                                (edl.get("frame") or {}).get("mode"), None,
                                insert_locals),
-            behind_why=lambda m: "a canvas program has no subject footage")
+            behind_why=lambda m: "a canvas program has no subject footage",
+            # Wave 3: layout pages fill their video slots from assets and
+            # read their engine data (no footage: anchors stay authored)
+            world=_world_ctx(edl, W, H, fps, tl, None, preview, None, 0.0,
+                             workdir, None))
         motion_inputs = motion_layer.demote_behind(
             motion_inputs, "a canvas program has no subject footage")
     # Base stages are lossless building blocks: the final composition alone
@@ -6763,6 +6767,34 @@ def _fx_source(edl, index):
         return sidecars.source_from(sha, None, video, None,
                                     (index or {}).get("shots"))
     except Exception:  # noqa: BLE001 — absent sidecars: the substitute rung
+        return None
+
+
+def _world_ctx(edl, W, H, fps, tl, index, preview, plan, clock_offset,
+               workdir, src_path):
+    """The render context the world compositor reads (Wave 3,
+    devices/INTERFACES_W3.md §4): None unless a motion item is anchored or
+    uses a Wave 3 template, so every other render is exactly as before."""
+    try:
+        import world_layer
+        if not world_layer.needed(edl):
+            return None
+        src = matte_track.read_source(index) if index else None
+        ctx = world_layer.Ctx(edl, W, H, fps, tl=tl, source=src,
+                              index=index, preview=preview, plan=plan,
+                              clock_offset=clock_offset, workdir=workdir,
+                              src_path=src_path,
+                              out_duration=tl.out_duration)
+        # the measurements its items read, launched where this render may
+        # launch (a stale client wrote them with no verb to ask); a final
+        # waits within the render's sidecar budget, a preview never
+        world_layer.warm(ctx, matte_track.RENDER_LAUNCH.get(),
+                         0.0 if preview else float(getattr(
+                             config, "SIDECAR_FINAL_WAIT_S",
+                             matte_track.FINAL_WAIT_S)))
+        return ctx
+    except Exception as e:  # noqa: BLE001 — the world never fails a render
+        print(f"[render] world compositor off ({str(e)[:160]})", flush=True)
         return None
 
 
@@ -7331,7 +7363,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                (info["width"], info["height"]), W, H,
                                frame_mode, frame_focus, insert_locals,
                                bool(caption_motion_items)),
-            behind_why=_hero_behind_why)
+            behind_why=_hero_behind_why,
+            world=_world_ctx(edl, W, H, fps, tl, index, preview, None,
+                             (float(info.get("format_start") or 0.0)
+                              if seek_main_source else 0.0), workdir,
+                             src_path))
         if caption_motion_items and not any(
                 str(it.get("id", "")).startswith("__captions_")
                 for _i, it, _c in motion_inputs):

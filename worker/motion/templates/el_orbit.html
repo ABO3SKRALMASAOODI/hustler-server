@@ -1,0 +1,62 @@
+<!--MG-SPEC {"title": "Orbit", "category": "element", "also": ["type"],
+ "description": "Words set on a ring or an arc that turns: round a head (attach to the head: the ring takes the head's size and rides it), round a product, round a sun. arc=360 is a full ring that spins; a smaller arc (120-220) is a title bent over the head. Letters reveal one by one on entry. The arc is the idea that the person IS the thing; use once.",
+ "duration": 3.0, "layer": "below_captions", "mutes_captions": false, "anchor_fit": 1.35,
+ "params": {
+  "text": {"type": "str", "required": true, "max": 60},
+  "arc": {"type": "float", "min": 40, "max": 360, "default": 200, "hint": "degrees of the ring the words span (360 = full ring)"},
+  "spin": {"type": "float", "min": -120, "max": 120, "default": 18, "hint": "degrees per second"},
+  "radius": {"type": "float", "min": 0.05, "max": 0.45, "default": 0.16, "hint": "ring radius, share of the frame height (attach to head fits it)"},
+  "squash": {"type": "float", "min": 0.3, "max": 1.0, "default": 1.0, "hint": "ellipse ratio (0.35 = a halo seen in perspective)"},
+  "role": {"type": "enum", "values": ["grotesk", "condensed", "serif", "mono"], "default": "condensed"},
+  "size": {"type": "float", "min": 0.4, "max": 2.0, "default": 1.0},
+  "colour": {"type": "color", "default": "#F8F6F2"},
+  "start_deg": {"type": "float", "min": -360, "max": 360, "default": -90, "hint": "centre of the arc (-90 = top)"},
+  "reveal": {"type": "bool", "default": true},
+  "x": {"type": "float", "min": 0, "max": 1, "default": 0.5},
+  "y": {"type": "float", "min": 0, "max": 1, "default": 0.4}
+ },
+ "example": {"text": "WORLD OF BITS", "arc": 200},
+ "sfx": []} -->
+<style>
+  #ob{position:absolute;left:0;top:0;width:100%;height:100%;overflow:visible}
+  .ch{position:absolute;left:0;top:0;white-space:pre;line-height:1;text-shadow:0 2px 14px rgba(0,0,0,.45);will-change:transform,opacity}
+  .ch.condensed{font-family:'Anton','Bebas Neue','Inter',sans-serif;letter-spacing:.02em}
+  .ch.grotesk{font-family:'Inter Display','Inter',sans-serif;font-weight:900;letter-spacing:-.01em}
+  .ch.serif{font-family:'DM Serif Display','Instrument Serif',serif;font-style:italic}
+  .ch.mono{font-family:'JetBrains Mono','DM Mono',monospace;font-weight:700}
+</style>
+<div class="mg-root"><div id="ob"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const root = MG.$('#ob');
+  const text = String(P.text || '').toUpperCase();
+  const R = (P.radius ?? 0.16) * H, sq = MG.clamp(P.squash ?? 1, 0.3, 1);
+  const cx = (P.x ?? 0.5) * W, cy = (P.y ?? 0.4) * H;
+  const arc = (P.arc ?? 200) * Math.PI / 180, spin = (P.spin ?? 18) * Math.PI / 180;
+  const fs = R * 0.36 * (P.size ?? 1);
+  // the clip box is the ring's own square, so a head anchor pins its centre
+  MG.box = [cx - R - fs, cy - R * sq - fs, cx + R + fs, cy + R * sq + fs];
+  const chars = [...text].map(c => MG.el('div', 'ch ' + (P.role || 'condensed'), c, root));
+  chars.forEach(el => { el.style.fontSize = fs + 'px'; el.style.color = P.colour || '#F8F6F2'; });
+  const widths = chars.map(el => el.getBoundingClientRect().width || fs * 0.5);
+  const total = widths.reduce((a, b) => a + b, 0) || 1;
+  const span = Math.min(arc, total / R * 1.08);
+  const step = span / Math.max(1, text.length);
+  const a0 = (P.start_deg ?? -90) * Math.PI / 180;
+  MG.frame(t => {
+    let acc = 0;
+    chars.forEach((el, i) => {
+      const w = widths[i];
+      const mid = a0 - span / 2 + (acc + w / 2) / total * span + spin * t;
+      acc += w;
+      const x = cx + Math.cos(mid) * R, y = cy + Math.sin(mid) * R * sq;
+      const rot = mid + Math.PI / 2;
+      const show = P.reveal === false ? 1 : MG.clamp((t - i * 0.035) / 0.18);
+      const out = MG.clamp((D - t) / 0.25);
+      el.style.opacity = (show * out).toFixed(3);
+      el.style.transform = `translate(${(x - w / 2).toFixed(2)}px, ${(y - fs * 0.5).toFixed(2)}px) rotate(${rot.toFixed(4)}rad) scale(1, ${sq.toFixed(3)})`;
+    });
+  });
+})();
+</script>

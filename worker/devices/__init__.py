@@ -84,7 +84,10 @@ CARD_PREFIXES = {"type": "1A", "subject": "1B", "background": "1B",
                  # Wave 2 (INTERFACES_W2.md §1)
                  "typeset": "2A", "typefx": "2B", "rhythm": "2C",
                  "montage": "2D", "arrange": "2D", "ramp": "2D",
-                 "still": "2D", "recall": "2E", "story": "2F"}
+                 "still": "2D", "recall": "2E", "story": "2F",
+                 # Wave 3 (devices/INTERFACES_W3.md §8)
+                 "anchor": "3A", "object": "3B", "plane": "3C",
+                 "element": "3D", "light": "3D", "layout": "3E"}
 
 # Sidecar kinds a card may need (INTERFACES.md §2.1; reserved names only).
 SIDECAR_KINDS = ("matte.person", "faces.yunet", "rhythm.music",

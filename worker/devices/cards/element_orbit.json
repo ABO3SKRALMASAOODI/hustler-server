@@ -1,0 +1,80 @@
+{
+  "id": "element_orbit",
+  "family": "layout",
+  "verb": "add_element",
+  "stage": "motion",
+  "params": {
+    "template": [
+      "el_orbit"
+    ],
+    "arc": [
+      200,
+      360,
+      140
+    ]
+  },
+  "needs": {
+    "sidecars": [
+      "landmarks.face"
+    ],
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "a face for a head ring; else any"
+  },
+  "binds_to": [
+    "word",
+    "word.payoff",
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 5
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 3
+    }
+  },
+  "never": [
+    "over the face",
+    "more than once a short"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "substitute": "static_placement"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 14.0,
+      "batch": 14.0,
+      "local": 7.0
+    },
+    "fixed_ms": 500
+  },
+  "exemplars": [
+    "38@≈15.0",
+    "41@≈33–37"
+  ],
+  "verify": [
+    "land_err_f<=1",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "words on a ring or arc round a head or a thing",
+  "skill": "elements"
+}

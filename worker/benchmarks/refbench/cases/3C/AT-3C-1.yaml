@@ -1,0 +1,48 @@
+# Wave 3 track 3C. Run: cd worker && python -m benchmarks.refbench.at3 AT-3C-1
+# The at3 harness builds the EDL on the fixture's file clock and measures
+# the device_metrics (boards: .valmera/refbench/boards/wave3/).
+id: AT-3C-1
+track: 3C
+title: type on the floor under the creator's real shadow (HC-A)
+local_only: true
+interim: false
+reference:
+- ref: '16'
+  t:
+  - 0.08
+  - 2.79
+footage:
+- vfl: V13
+  window: dragon_stage_walk
+music: null
+aspect: '9:16'
+mode: engine
+harness: at3
+edl:
+  base: vfl_default
+  ops: []
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+device_metrics:
+- name: reproj_rms_px
+  op: <=
+  value: 1.5
+beyond: 'blocked: needs HC-A; the W3-S2 board lays type on V13''s stage floor with the speaker''s legs
+  occluding'
+board:
+  stills: []
+  clip: null
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major
+blocked: 'blocked: needs HC-A; the W3-S2 board lays type on V13''s stage floor with the speaker''s legs
+  occluding'

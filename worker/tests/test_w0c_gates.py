@@ -437,10 +437,13 @@ def test_web_sfx_removal_frees_the_core_compact_catalog():
     # lead sign-off requested.
     w1_pinned_growth = 5 + 28 + 18 + 18 + 250
     # Wave 2's pinned core growth (INTERFACES_W2.md §2: department and
-    # skill names in the core enums, the B&W look line)
+    # skill names in the core enums, the B&W look line); Wave 3's growth is
+    # only names joining enums (tests/w3_pins.py). The Wave 1 ceiling
+    # (82,700, test_w1_seams) still binds the sum.
     from w2_support import W2_CORE_GROWTH_MAX
-    assert size <= 82_941 - 1_200 + w1_pinned_growth + W2_CORE_GROWTH_MAX, \
-        size
+    from w3_pins import w3_core_catalog_growth
+    assert size <= 82_941 - 1_200 + w1_pinned_growth + W2_CORE_GROWTH_MAX \
+        + w3_core_catalog_growth(), size
 
 
 # ── restraint rules are pinned word for word ────────────────────────────
