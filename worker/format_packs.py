@@ -102,7 +102,47 @@ def find_drop(beats, energy, bin_s, *, rise_db=8.0, quiet_s=2.5):
     return best_t, best
 
 
-def recognise(rhythm_map, energy=None, bin_s=0.5, grammar_id=None):
+def envelope(path, hop_s=0.05):
+    """(dB envelope relative to the peak, hop seconds) of the USER's audio
+    file: the fine clock a drop is placed on (the 0.5 s perception bins
+    only say which second it is in)."""
+    import subprocess
+    import numpy as np
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-ac", "1",
+                          "-ar", "16000", "-f", "f32le", "-"],
+                         capture_output=True, timeout=300).stdout
+    a = np.frombuffer(raw, np.float32)
+    hop = max(1, int(16000 * hop_s))
+    n = len(a) // hop
+    if n < 4:
+        return [], hop_s
+    rms = np.sqrt(np.mean(a[:n * hop].reshape(n, hop) ** 2, axis=1) + 1e-12)
+    db = 20.0 * np.log10(rms / max(1e-9, float(rms.max())))
+    return [round(float(x), 2) for x in db], hop_s
+
+
+def refine_drop(t, env, hop_s, beats=(), search_s=0.75):
+    """The drop's onset on the fine envelope near ``t``: the sharpest rise
+    of the smoothed envelope within ``search_s``; snapped to a beat when
+    one is within 0.15 s."""
+    import numpy as np
+    if not env:
+        return t
+    e = np.convolve(np.asarray(env, float), np.ones(4) / 4.0, mode="same")
+    k0 = int(round(t / hop_s))
+    r = int(round(search_s / hop_s))
+    lo, hi = max(1, k0 - r), min(len(e) - 1, k0 + r)
+    if hi - lo < 3:
+        return t
+    d = np.diff(e[lo - 1:hi])
+    j = int(np.argmax(d))
+    on = (lo + j) * hop_s
+    near = [b for b in beats if abs(b - on) <= 0.15]
+    return min(near, key=lambda b: abs(b - on)) if near else round(on, 3)
+
+
+def recognise(rhythm_map, energy=None, bin_s=0.5, grammar_id=None,
+              env=None, env_hop_s=0.05):
     """The best-fitting grammar placed on the user's track:
     {id, drop_s, beat_s, rise_db, sections [{name, t0, t1, devices}]} or
     None (abstain: the structure is not there)."""
@@ -127,8 +167,11 @@ def recognise(rhythm_map, energy=None, bin_s=0.5, grammar_id=None):
             quiet_s=float(req.get("quiet_s", 2.5)))
         if t is None:
             continue
-        # snap the drop to the beat grid
-        t = min(beats, key=lambda b: abs(b - t))
+        if env:
+            t = refine_drop(t, env, env_hop_s, beats)
+        else:
+            # snap the drop to the beat grid
+            t = min(beats, key=lambda b: abs(b - t))
         secs = [{"name": s["name"], "t0": round(t + s["from_beat"] * period,
                                                 3),
                  "t1": round(t + s["to_beat"] * period, 3),

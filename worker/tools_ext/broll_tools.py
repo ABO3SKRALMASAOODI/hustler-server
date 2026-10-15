@@ -178,9 +178,21 @@ def _hero(ctx, edl, start, end):
         from tools_ext import finish_tools
         prog = _program_s(edl)
         ts = [max(0.0, start - 0.4), min(prog - 0.05, end + 0.4)]
-        return finish_tools._frames(ctx, edl, ts)
+        frames = finish_tools._frames(ctx, edl, ts)
     except Exception:  # noqa: BLE001
         return []
+    # the look is what the viewer sees: the source cropped to the output
+    # frame around its aim, not the whole 16:9 plate with its dark room
+    try:
+        import broll_fx
+        _o, W, H = _frame(edl)
+        fr = edl.get("frame") or {}
+        aim = (float(fr.get("focus_x") or 0.5),
+               float(fr.get("focus_y") or 0.5))
+        return [broll_fx.crop_aspect(f, W / float(H), aim)[0]
+                for f in frames]
+    except Exception:  # noqa: BLE001
+        return frames
 
 
 def _dedupe(cands):

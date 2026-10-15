@@ -183,6 +183,7 @@ def _wikimedia(query, kind, orientation, count):
                 "width": info.get("width"), "height": info.get("height")}
         if kind == KIND_VIDEO:
             files = []
+            dur = float(info.get("duration") or 0.0)
             for d in info.get("derivatives") or []:
                 ftype = str(d.get("type") or "")
                 if not (d.get("src") and d.get("width")):
@@ -190,10 +191,20 @@ def _wikimedia(query, kind, orientation, count):
                 if not ftype.startswith(("video/webm", "video/mp4",
                                          "video/ogg")):
                     continue
+                # the original is a derivative without a transcode key and
+                # can be gigabytes: only when its own size fits the cap
+                if not d.get("transcodekey") and int(
+                        info.get("size") or 0) > MAX_VIDEO_BYTES:
+                    continue
+                bw = d.get("bandwidth")
+                if bw and dur and float(bw) / 8.0 * dur > MAX_VIDEO_BYTES:
+                    continue
+                if int(d["width"]) > 1920:
+                    continue
                 files.append({"link": d["src"], "width": int(d["width"]),
                               "height": int(d.get("height") or 0),
                               "file_type": ftype.split(";")[0],
-                              "bandwidth": d.get("bandwidth")})
+                              "bandwidth": bw})
             if not files:
                 continue
             out.append(dict(base, kind=KIND_VIDEO,

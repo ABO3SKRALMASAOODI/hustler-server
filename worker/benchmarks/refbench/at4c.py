@@ -613,6 +613,9 @@ CASES = {"AT-4C-1": at_4c_1, "AT-4C-2": at_4c_2, "AT-4C-3": at_4c_3,
 
 
 def main(argv):
+    if os.environ.get("W4_TRACE") == "1":
+        import faulthandler
+        faulthandler.dump_traceback_later(120, repeat=True)
     judged = None
     if "--judge" in argv:
         judged = argv[argv.index("--judge") + 1]

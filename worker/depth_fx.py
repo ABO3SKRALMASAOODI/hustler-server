@@ -350,8 +350,10 @@ def _matte_at(plan, src_t, dest):
         import sidecars
         if plan.source is None:
             return None
-        h = matte_track.read_handle("matte.person", plan.source,
-                                    [(max(0.0, src_t - 0.2), src_t + 0.2)])
+        src = plan.source
+        h = matte_track.read_handle("matte.person", src, sidecars.chunks_for(
+            src.shots, src.duration_s,
+            [(max(0.0, src_t - 0.2), src_t + 0.2)]))
         if h is None:
             return None
         for f in sidecars.fetch(h, dest):
@@ -603,8 +605,13 @@ class ProgramDepth:
             import matte_track
             import qa_metrics
             import sidecars
-            h = matte_track.read_handle("matte.person", self.plan.source,
-                                        [rng])
+            src = self.plan.source
+            # matte chunks live on the sidecar grid: read the grid chunks
+            # that cover the window (an off-grid span names no chunk)
+            h = matte_track.read_handle("matte.person", src,
+                                        sidecars.chunks_for(
+                                            src.shots, src.duration_s,
+                                            [rng]))
             ts, ds = [], []
             for f in sidecars.fetch(h, dest) if h is not None else []:
                 fps = float((f.get("meta") or {}).get("fps") or 30.0)
@@ -756,6 +763,23 @@ def radius_map(d, rng, R, ramp=0.28):
     dist = np.maximum(lo - d, 0.0) + np.maximum(d - hi, 0.0)
     r = np.clip(dist / ramp, 0.0, 1.0)
     return (r * float(R) + 0.5).astype(np.uint8)
+
+
+def _on(target):
+    return ((target or {}).get("on") or "subject") if target is not None \
+        else None
+
+
+def rack_progress(i, n, fps, start, rack_at, rack_f):
+    """0 before the pull, 1 once it landed (the eased travel between)."""
+    t = start + i / fps
+    end = rack_at if rack_at is not None else start + rack_f / fps
+    begin = end - (rack_f - 1) / fps
+    if t <= begin:
+        return 0.0
+    if t >= end - 1e-9:
+        return 1.0
+    return ease((t - begin) / max(1e-6, end - begin), "in_out")
 
 
 def rack_value(i, n, fps, start, rack_at, rack_f, a, b):
@@ -1040,13 +1064,37 @@ class _Depth:
                     fb = focus_range(d, item.get("focus"), per)
                 elif kind == "dof":
                     fa = fb = focus_range(d, item.get("focus"), per)
-            if kind == "dof":
-                w.write(radius_map(d, fa, R))
-            elif kind == "rack_focus":
-                f = rack_value(i, n, plan.fps3, float(item["start"]),
-                               item.get("rack_at"), int(item.get("rack_f")
-                                                        or 12), fa, fb)
-                w.write(radius_map(d, f, R))
+            if kind in ("dof", "rack_focus"):
+                if kind == "dof":
+                    r = radius_map(d, fa, R)
+                    keep = 1.0 if _on(item.get("focus")) == "subject" \
+                        else 0.0
+                else:
+                    f = rack_value(i, n, plan.fps3, float(item["start"]),
+                                   item.get("rack_at"),
+                                   int(item.get("rack_f") or 12), fa, fb)
+                    r = radius_map(d, f, R)
+                    # how much "the subject" is the focus at this frame
+                    ka = 1.0 if _on(item.get("focus_from")) == "subject" \
+                        else 0.0
+                    kb = 1.0 if _on(item.get("focus")) == "subject" else 0.0
+                    x = rack_progress(i, n, plan.fps3, float(item["start"]),
+                                      item.get("rack_at"),
+                                      int(item.get("rack_f") or 12))
+                    keep = ka + (kb - ka) * x
+                if keep > 0 and not pdepth.matte_only:
+                    # the person matte is the subject: whatever the depth
+                    # model says about a seated body (legs nearer than the
+                    # face), the person stays sharp while focus is on them
+                    pm = pdepth.person(i)
+                    if pm is not None and (pm > 0.5).mean() > 0.002:
+                        pm = cv2.GaussianBlur(
+                            cv2.dilate(pm.astype(np.float32),
+                                       np.ones((5, 5), np.uint8)), (0, 0),
+                            max(1.0, H * 0.003))
+                        r = (r.astype(np.float32) * (1.0 - keep * np.clip(
+                            pm, 0, 1)) + 0.5).astype(np.uint8)
+                w.write(r)
             elif kind == "fog":
                 far = np.clip((1.0 - d - 0.15) / 0.85, 0, 1) ** 1.4
                 w.write((far * strength * 255.0 + 0.5).astype(np.uint8))
