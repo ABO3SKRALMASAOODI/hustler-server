@@ -306,3 +306,44 @@ def test_attachment_phrases(phrase, target, part):
             "id": "m1", "template": "word_slam", "start": 1.0, "end": 2.0,
             "params": {"text": "HI"}, "anchor": a}]), 10.0)
         assert e.motion[0].anchor is not None
+
+
+# ── depth order (3B, objseg.depthorder) ──────────────────────────────────
+
+def test_depth_order_from_the_masks():
+    from objseg import depthorder
+    H, W = 120, 160
+    person = np.zeros((H, W), np.uint8)
+    person[20:120, 50:110] = 255                 # a torso
+    obj = np.zeros((H, W), np.uint8)
+    obj[60:90, 70:85] = 255                      # a mic over the chest
+    front = person.copy()
+    front[60:90, 70:85] = 0                      # the matte has its hole
+    assert depthorder.order(obj, front)[0] == "front"
+    assert depthorder.order(obj, person)[0] == "behind"
+    far = np.zeros((H, W), np.uint8)
+    far[10:30, 5:25] = 255                       # nowhere near the person
+    assert depthorder.order(far, person)[0] is None
+    o, _d = depthorder.vote([(obj, front), (obj, front), (obj, person)])
+    assert o == "front"
+    assert depthorder.vote([(far, person)])[0] is None
+
+
+def test_an_object_behind_the_person_brings_the_person_in_front(
+        store, tmp_path, monkeypatch):
+    src = w3s.source()
+    ob = {"id": "ob1", "type": "object", "stage": "world", "start": 1.0,
+          "end": 2.0, "prompt": {"src_t": 1.5, "box": [0.1, 0.1, 0.4, 0.4]},
+          "depth": "behind"}
+    clip = w3s.square_clip(str(tmp_path / "sq.mov"), n=25)
+    edl = _edl(fx=[ob], motion=[{"id": "m1", "template": "html",
+                                 "html": "x", "start": 1.0, "end": 2.0,
+                                 "anchor": {"to": "screen",
+                                            "occluders": ["object:ob1"]}}])
+    c, e = w3s.ctx(edl, src, workdir=str(tmp_path))
+    assert world_layer.object_depth(c, ob) == ("behind", "authored")
+    _new, notes = world_layer.compose(e["motion"][0], clip, c)
+    assert any("behind the person" in n for n in notes), notes
+    auto = dict(ob, depth="auto")
+    c2, _e2 = w3s.ctx(dict(edl, fx=[auto]), src, workdir=str(tmp_path))
+    assert world_layer.object_depth(c2, auto) == ("front", "not measurable")

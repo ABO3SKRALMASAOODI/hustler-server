@@ -484,6 +484,47 @@ class _Plan:
         self.quads = [None] * n      # output px quad (planes / frames)
 
 
+def object_depth(ctx, d):
+    """(``front`` | ``behind``, how) for an object definition: its authored
+    ``depth``, or (auto) the order measured from its mask and the person
+    matte at three moments of its window (objseg.depthorder). ``front``
+    when it cannot be seen (no overlap, nothing measured)."""
+    dep = (d or {}).get("depth") or "auto"
+    if dep in ("front", "behind"):
+        return dep, "authored"
+    key = ("depth", (d or {}).get("id"))
+    if key in ctx._masks:
+        return ctx._masks[key]
+    res = ("front", "not measurable")
+    try:
+        import cv2
+        from objseg import depthorder
+        a, b = float(d["start"]), float(d["end"])
+        orx = _mask_reader(ctx, "object", d)
+        pr = _mask_reader(ctx, "person", windows=[(a, b)]) if orx else None
+        pairs = []
+        for f in (0.2, 0.5, 0.8):
+            tr = ctx.tl.out_to_src(a + f * (b - a)) if pr else None
+            if tr is None:
+                continue
+            om = orx.at(tr - ctx.clock_offset)
+            pm = pr.at(tr - ctx.clock_offset)
+            if om is None or pm is None:
+                continue
+            if pm.shape != om.shape:
+                pm = cv2.resize(pm, (om.shape[1], om.shape[0]),
+                                interpolation=cv2.INTER_LINEAR)
+            pairs.append((om, pm))
+        o, _det = depthorder.vote(pairs)
+        if o:
+            res = (o, "measured")
+    except Exception as e:  # noqa: BLE001 — an order question never fails
+        print(f"[world] depth of {(d or {}).get('id')} not measured "
+              f"({str(e)[:120]})", flush=True)
+    ctx._masks[key] = res
+    return res
+
+
 def _default_occluders(anchor, item, defs):
     occ = anchor.get("occluders")
     if occ is not None:
@@ -500,8 +541,10 @@ def _default_occluders(anchor, item, defs):
     return out
 
 
-def compose(item, clip, ctx):
-    """(new clip | None, notes). None: keep the original clip (static)."""
+def compose(item, clip, ctx, plan_only=False):
+    """(new clip | None, notes). None: keep the original clip (static).
+    ``plan_only``: (the per-frame plan | None, notes) without rendering
+    (acceptance measurements read the exact transforms)."""
     import world_defs
     import motion_engine
     anchor = item["anchor"]
@@ -536,6 +579,8 @@ def compose(item, clip, ctx):
             plan.A[k] = (program_affine(geo, s + (k + 0.5) / ctx.fps, tr)
                          if tr is not None else None)
             plan.M[k] = ident
+        if plan_only:
+            return plan, notes
         return _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi)
     series, why = series_for(anchor, ctx, lo, hi)
     defs = world_defs.definitions(ctx.edl)
@@ -639,6 +684,9 @@ def compose(item, clip, ctx):
         t2 = P + d - R @ pin_px
         plan.M[k] = np.array([[R[0, 0], R[0, 1], t2[0]],
                               [R[1, 0], R[1, 1], t2[1]], [0, 0, 1]])
+    if "shape" in follow and kind in ("face", "head"):
+        _fit_face_shape(plan, ctx, anchor, good_t, ok, first, geo, s, lo, hi,
+                        notes)
     # hide fades
     if lost == "hide" and (plan.alpha < 1).any():
         a = plan.alpha.copy()
@@ -649,7 +697,60 @@ def compose(item, clip, ctx):
                        or [HIDE_FADE_F])
             a[k] = min(1.0, dist / float(HIDE_FADE_F))
         plan.alpha = a
+    if plan_only:
+        return plan, notes
     return _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi)
+
+
+def _fit_face_shape(plan, ctx, anchor, good_t, ok, first, geo, s, lo, hi,
+                    notes):
+    """``follow: shape``: each frame's transform becomes F_k . M_first,
+    F_k the least-squares affine carrying the face mesh (named + oval
+    points, output px) from the first good frame to frame k — the plate
+    foreshortens, shears and turns with the face (zero-phase smoothed)."""
+    from anchors import query, smooth as smoothmod
+    samples, _sh, _m = query.load("landmarks.face", ctx.source,
+                                  [(max(0.0, lo - 0.5), hi + 0.5)])
+    t, P = query.face_points(samples, anchor.get("which", "any"))
+    if len(t) < 2 or plan.M[first] is None:
+        notes.append("shape: the face mesh is not measured; position/scale "
+                     "only")
+        return
+    N, K = P.shape[:2]
+    flat = P.reshape(N, 2 * K)
+    sw, sh = ctx.src_size
+    flat[:, 0::2] *= sw / sh
+    flat = smoothmod.one_euro(t, smoothmod.bridge(t, flat),
+                              float(anchor.get("smooth", 0.5)), scale=0.1)
+    flat[:, 0::2] /= sw / sh
+    S = smoothmod.sample(t, flat, good_t).reshape(len(good_t), K, 2)
+    W, H = ctx.W, ctx.H
+
+    def out_px(k):
+        A = plan.A[k]
+        if A is None or not np.all(np.isfinite(S[k])):
+            return None
+        return np.c_[A[0, 0] * W * S[k][:, 0] + A[0, 2] * W,
+                     A[1, 1] * H * S[k][:, 1] + A[1, 2] * H]
+    base = out_px(first)
+    if base is None:
+        return
+    M0 = plan.M[first]
+    X = np.c_[base, np.ones(K)]
+    fitted = 0
+    for k in range(len(plan.M)):
+        if plan.M[k] is None or not ok[k]:
+            continue
+        cur = out_px(k)
+        if cur is None:
+            continue
+        F, *_ = np.linalg.lstsq(X, cur, rcond=None)      # (3, 2)
+        F3 = np.array([[F[0, 0], F[1, 0], F[2, 0]],
+                       [F[0, 1], F[1, 1], F[2, 1]], [0.0, 0.0, 1.0]])
+        plan.M[k] = F3 @ M0
+        fitted += 1
+    if fitted:
+        notes.append(f"shape: fitted to the face mesh on {fitted} frames")
 
 
 def _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi):
@@ -687,6 +788,18 @@ def _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi):
     if bw < 2 or bh < 2:
         return _empty(clip, n), notes + ["the anchor is off screen"]
     occ = _default_occluders(anchor, item, defs)
+    # an object BEHIND the person puts the graphic behind the person too
+    # (objseg.depthorder; ``depth`` auto is measured from the masks)
+    if "person" not in occ:
+        for o in list(occ):
+            if str(o).startswith("object:"):
+                d = defs.get(str(o).split(":", 1)[1])
+                dep, how = object_depth(ctx, d) if d else (None, None)
+                if dep == "behind":
+                    occ.append("person")
+                    notes.append(f"{o} is behind the person ({how}): the "
+                                 "person passes in front of the graphic too")
+                    break
     occ_readers = []
     for o in occ:
         if o == "person":

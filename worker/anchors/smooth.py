@@ -25,11 +25,29 @@ def params_for(smooth):
     return min_cutoff, beta
 
 
-def one_euro(times, values, smooth=0.5, d_cutoff=1.0, scale=1.0):
+def one_euro(times, values, smooth=0.5, d_cutoff=1.0, scale=1.0,
+             zero_phase=True):
     """Filter a (N, D) series sampled at ``times`` (seconds, increasing).
     ``scale`` is the series' natural unit (a hand's span in the same units
     as the values), so the speed term is unit-free. NaN rows pass through
-    and restart the filter after them."""
+    and restart the filter after them.
+
+    ``zero_phase`` (the default): renders are offline and know the future,
+    so the filter runs forward AND backward in time and the two passes are
+    averaged — the causal filter's lag (a card trailing a fast finger)
+    cancels, the jitter suppression stays. A live preview of a causal
+    tracker could never do this."""
+    if zero_phase:
+        f = _one_euro(times, values, smooth, d_cutoff, scale)
+        t = np.asarray(times, np.float64)
+        b = _one_euro((t[-1] - t)[::-1] if len(t) else t,
+                      np.asarray(values, np.float64)[::-1], smooth,
+                      d_cutoff, scale)[::-1]
+        return 0.5 * (f + b)
+    return _one_euro(times, values, smooth, d_cutoff, scale)
+
+
+def _one_euro(times, values, smooth=0.5, d_cutoff=1.0, scale=1.0):
     t = np.asarray(times, np.float64)
     x = np.asarray(values, np.float64)
     if x.ndim == 1:

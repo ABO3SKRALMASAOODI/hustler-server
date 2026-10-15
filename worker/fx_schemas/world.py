@@ -294,7 +294,10 @@ class MotionAnchor(BaseModel):
                span, plane fraction) when follow has "scale", else frame
                fractions
     follow     what the graphic takes from the anchor: position (always),
-               scale, rotation
+               scale, rotation, and (face / head anchors) shape — an
+               affine fitted to the face mesh each frame, so a plate
+               registered to the head foreshortens with a turn (an X-ray
+               skull keeps its eye sockets on the eyes)
     place      planes only: [u0, v0, u1, v1] on the plane (default fitted)
     occluders  what passes in front of the graphic: person, hands,
                object:<fx id>. None = the default: a plane on a floor, desk
@@ -309,7 +312,8 @@ class MotionAnchor(BaseModel):
     lock: Literal["world", "screen"] = "world"
     pin: Optional[List[float]] = None
     offset: Optional[List[float]] = None
-    follow: Optional[List[Literal["position", "scale", "rotation"]]] = None
+    follow: Optional[List[Literal["position", "scale", "rotation",
+                                  "shape"]]] = None
     place: Optional[List[float]] = None
     occluders: Optional[List[str]] = Field(default=None, max_length=6)
     shadow: Optional[bool] = None
@@ -347,6 +351,10 @@ class MotionAnchor(BaseModel):
             if not OCCLUDER_RE.match(str(o)):
                 raise ValueError(f"anchor.occluders: {o!r} is not person, "
                                  "hands or object:<id>")
+        if self.follow and "shape" in self.follow and not (
+                self.to in ("head", "face") or self.to.startswith("face.")):
+            raise ValueError("anchor.follow 'shape' belongs to a face or "
+                             "head anchor (it fits the face mesh)")
         if self.follow is not None and "position" not in self.follow:
             self.follow = ["position"] + list(self.follow)
         return self

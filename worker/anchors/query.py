@@ -201,6 +201,38 @@ def face_series(samples, part="face", which="any", meta=None):
     return Series(t, xy, size, ang, kind="face")
 
 
+def face_points(samples, which="any"):
+    """(t (N,), pts (N, K, 2)) every named point and oval point of the
+    followed face per sample, SOURCE fractions (NaN rows when not seen) —
+    what ``follow: shape`` fits its affine to."""
+    t, out = [], []
+    prev, k_pts = None, None
+    for s in samples:
+        faces = s.get("faces") or []
+
+        def cx(f):
+            return (f["b"][0] + f["b"][2]) / 2.0
+        if which == "any" and faces and prev is None:
+            faces = sorted(faces, key=lambda f: -(f["b"][2] - f["b"][0])
+                           * (f["b"][3] - f["b"][1]))
+        f = _pick(faces, which, prev, cx)
+        t.append(float(s["t"]))
+        if f is None:
+            out.append(None)
+            continue
+        prev = cx(f)
+        P = np.array(list(f["p"]) + list(f.get("o") or []),
+                     np.float64).reshape(-1, 2)
+        k_pts = k_pts or len(P)
+        out.append(P if len(P) == k_pts else None)
+    k_pts = k_pts or 1
+    arr = np.full((len(t), k_pts, 2), np.nan)
+    for i, P in enumerate(out):
+        if P is not None:
+            arr[i] = P
+    return np.asarray(t, np.float64), arr
+
+
 def _hand_pts(h):
     p = h["p"]
     return np.array(p, np.float64).reshape(-1, 2)
@@ -223,7 +255,22 @@ def hand_series(samples, part="index_tip", which="any"):
                 continue
             hs = sorted(hands, key=lambda h: _hand_pts(h)[:, 0].mean())
             L, R = _hand_pts(hs[0]), _hand_pts(hs[-1])
-            q = order_convex([L[4], L[8], R[4], R[8]])
+            if hands_overlap(L, R):
+                # fingers interlaced: which tip is whose is ambiguous, so
+                # there is no window between them (the anchor's ``lost``)
+                xy.append([np.nan, np.nan])
+                size.append(np.nan)
+                ang.append(np.nan)
+                quad.append(np.full((4, 2), np.nan))
+                continue
+            q = frame_quad(L, R)
+            if q is None:
+                # not a window: the four tips do not bound a convex area
+                xy.append([np.nan, np.nan])
+                size.append(np.nan)
+                ang.append(np.nan)
+                quad.append(np.full((4, 2), np.nan))
+                continue
             quad.append(q)
             xy.append(list(q.mean(axis=0)))
             size.append(float(np.hypot(*(q[2] - q[0]))))
@@ -247,6 +294,46 @@ def hand_series(samples, part="index_tip", which="any"):
         ang.append(math.degrees(math.atan2(v[0], -v[1])))
     return Series(t, xy, size, ang, quad if part == "frame" else None,
                   kind="hand")
+
+
+FRAME_OVERLAP_MAX = 0.2
+FRAME_MIN_ANGLE = 25.0
+
+
+def frame_quad(L, R):
+    """The window between two hands, labelled (not re-sorted per frame, so
+    the warp never flips): TL left index tip, TR right index tip, BR right
+    thumb tip, BL left thumb tip (screen left / right). None when the tips
+    do not bound a convex quad with every corner >= FRAME_MIN_ANGLE."""
+    q = np.array([L[8], R[8], R[4], L[4]], np.float64)
+    if not np.all(np.isfinite(q)):
+        return None
+    cross = []
+    for i in range(4):
+        a, b, c = q[i - 1], q[i], q[(i + 1) % 4]
+        u, v = b - a, c - b
+        cross.append(u[0] * v[1] - u[1] * v[0])
+        cosang = float(np.dot(-u, v) / max(1e-12, np.linalg.norm(u)
+                                            * np.linalg.norm(v)))
+        if math.degrees(math.acos(max(-1.0, min(1.0, cosang)))) \
+                < FRAME_MIN_ANGLE:
+            return None
+    if not (all(c > 0 for c in cross) or all(c < 0 for c in cross)):
+        return None
+    return q
+
+
+def hands_overlap(L, R, limit=FRAME_OVERLAP_MAX):
+    """Do two hands' landmark boxes overlap by more than ``limit`` of the
+    smaller box (interlaced fingers)?"""
+    def box(P):
+        return P[:, 0].min(), P[:, 1].min(), P[:, 0].max(), P[:, 1].max()
+    a, b = box(L), box(R)
+    iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    ih = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    sa = (a[2] - a[0]) * (a[3] - a[1])
+    sb = (b[2] - b[0]) * (b[3] - b[1])
+    return iw * ih > limit * max(1e-9, min(sa, sb))
 
 
 def order_convex(pts):

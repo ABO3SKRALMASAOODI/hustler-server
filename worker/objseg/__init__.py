@@ -9,7 +9,6 @@ ROADMAP Wave 3 / 3B; contract in worker/devices/INTERFACES_W3.md §1, §3.
                  to frame, a SAM re-prompt from the carried box every few
                  frames (accepted only when it agrees: no drift onto the
                  neighbour), a still object held still
-  cutout.py      one image -> an RGBA cutout (products, flat-lays, sprites)
   depthorder.py  in front of / behind the person, measured from the mattes
   jobs.py        the ``objects.sam2`` sidecar child
 
