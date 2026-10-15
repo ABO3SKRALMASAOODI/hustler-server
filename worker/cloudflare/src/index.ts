@@ -156,6 +156,23 @@ const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 // minutes rather than occupying the shard for the call's whole executor
 // lease (30 minutes for an MCP tool, up to six hours for renders and index).
 const STARTING_STALE_MS = 180 * 1000;
+// `submitted` is written by reserve() and replaced by `starting` in the same
+// handler with no network await in between. A `submitted` record older than
+// this lost its handler (a Worker deploy) before any startup, let alone /run:
+// it is failed as an abandoned start rather than holding the shard for the
+// call's whole lease (six hours for a final; Oct 13 job 67692 sat 35 minutes
+// until an operator ended it).
+const SUBMITTED_STALE_MS = 60 * 1000;
+// Alternate call identities per claim (cf-alt1 .. cf-alt32).
+const MAX_ALT_SLOT = 32;
+// Features the dispatcher reads from the root /health before relying on them.
+//  skew_guard   - a container on another release than this Worker is served
+//                 when it carries worker/skew_guard.py, which refuses (nothing
+//                 run, retryable) only the jobs its release cannot run.
+//  fence        - /calls/<lane>/<id>/fence tombstones a launch that never
+//                 reached its Durable Object, so it can never start later.
+//  alt_slots_32 - cf-alt1..cf-alt32 identities are recognised for acks.
+const WORKER_FEATURES = ["custom_filter", "stems", "skew_guard", "fence", "alt_slots_32"];
 // A dispatcher may ask to abandon an `unknown` call only after it has proved,
 // from PostgreSQL, that the executor stopped heartbeating or finished. The
 // Durable Object independently refuses until the call has been disconnected
@@ -322,10 +339,12 @@ async function matchesCompletedJob(callId: string, job: ExecutorJob): Promise<bo
     || callId === `cf-${job.type.slice(0, 18)}-${digest}`
     || (["final", "preview", "preview_check"].includes(job.type)
       && new RegExp(`^cf-render-g[0-9]+-[01]-${digest}$`).test(callId))
-    // Alternate admission identities: a busy media shard, or any job type
-    // spread off a Durable Object that could not provide a container.
-    || [1, 2].some((slot) => callId ===
-      `cf-alt${slot}-${job.type}-p${job.project_id}-${digest}`);
+    // Alternate admission identities: a busy media shard, any job type
+    // spread off a Durable Object that could not provide a container, or a
+    // job an executor on another release refused before any work (skew
+    // guard) relaunched on a fresh identity while the rollout converges.
+    || Array.from({ length: MAX_ALT_SLOT }, (_, i) => i + 1).some((slot) =>
+      callId === `cf-alt${slot}-${job.type}-p${job.project_id}-${digest}`);
 }
 
 abstract class ValmeraContainer extends Container<Env> {
@@ -437,7 +456,17 @@ abstract class ValmeraContainer extends Container<Env> {
         || expectedSource === "set-by-deploy-workflow"
         || body.code_version === expectedSource;
       const roleMatches = body.role === this.workerRole;
-      if (response.ok && body.status === "ok" && sourceMatches && roleMatches) {
+      // A container on another release than this Worker (a rollout in
+      // progress) is served only when it carries the skew guard: it then
+      // checks every job against its own release before any work and
+      // refuses, retryably with nothing run, what it cannot do. Destroying
+      // it instead did not help: during the Oct 13 rollouts a restarted
+      // container came back on the same old image for 40+ minutes while
+      // every call on that shard failed "Deploy in progress".
+      const features = Array.isArray(body.features) ? body.features : [];
+      const guarded = features.includes("skew_guard");
+      if (response.ok && body.status === "ok" && roleMatches
+          && (sourceMatches || guarded)) {
         return { ok: true, body };
       }
       return {
@@ -516,9 +545,13 @@ abstract class ValmeraContainer extends Container<Env> {
     const terminal = await this.ctx.storage.transaction(async (txn) => {
       const key = this.stateKey(callId);
       const current = (await txn.get<CallState>(key)) ?? null;
-      if (current?.status !== "starting") return current;
+      if (current?.status !== "starting" && current?.status !== "submitted") {
+        return current;
+      }
       const updatedAt = Date.parse(current.updatedAt);
-      if (!Number.isFinite(updatedAt) || now - updatedAt < STARTING_STALE_MS) {
+      const staleAfter = current.status === "submitted"
+        ? SUBMITTED_STALE_MS : STARTING_STALE_MS;
+      if (!Number.isFinite(updatedAt) || now - updatedAt < staleAfter) {
         return current;
       }
       const message = "Cloudflare container startup was abandoned before /run";
@@ -803,6 +836,43 @@ abstract class ValmeraContainer extends Container<Env> {
     if (keys.length) await this.ctx.storage.delete(keys);
   }
 
+  private async fenceUnstarted(
+    callId: string, job?: ExecutorJob, launchId?: string, now = Date.now(),
+  ): Promise<CallState | null> {
+    // The dispatcher's launch request ended without an answer and this
+    // Durable Object never stored the call (or stored only a `submitted`
+    // record whose handler is gone). A request that has not arrived after
+    // the dispatcher's bound will be refused if it ever does: the call is
+    // recorded as a terminal abandoned start, so reserve() returns that
+    // envelope instead of launching. Before this, a lost launch (Oct 12 job
+    // 66214, an MCP render_preview) was "missing" until its six-hour lease.
+    const stale = await this.expireStaleStart(callId, now);
+    if (stale && stale.status !== "refused") return stale;
+    const jobType = typeof job?.type === "string" ? job.type : "unknown";
+    return this.ctx.storage.transaction(async (txn) => {
+      const key = this.stateKey(callId);
+      const current = (await txn.get<CallState>(key)) ?? null;
+      // A refusal of an EARLIER launch of this id says nothing about the
+      // dispatcher's current request, which reserve() would still admit
+      // over it; fence that too. Its own refusal is returned as is.
+      const olderRefusal = current?.status === "refused"
+        && (!launchId || current.launchId !== launchId);
+      if (current && !olderRefusal) return current;
+      const message = "Cloudflare never received this launch; it was fenced "
+        + "so it can never start, and nothing ran";
+      const fenced: CallState = {
+        status: "failed", jobType,
+        envelope: {
+          error: message, retryable: true, fenced: true,
+          failure: { kind: "provider_start_abandoned", retryable: true },
+        },
+        error: message, updatedAt: new Date(now).toISOString(), activeUntil: now,
+      };
+      await txn.put({ [key]: fenced, [this.terminalKey(callId, now)]: callId });
+      return fenced;
+    });
+  }
+
   private async reserve(
     callId: string,
     jobType: string,
@@ -906,6 +976,15 @@ abstract class ValmeraContainer extends Container<Env> {
         completeMatch[1], body.job, body.envelope,
       );
       return json({ acknowledged: !!acknowledged }, acknowledged ? 200 : 409);
+    }
+    const fenceMatch = url.pathname.match(/^\/fence\/([^/]+)$/);
+    if (request.method === "POST" && fenceMatch && CALL_ID.test(fenceMatch[1])) {
+      const body = await request.json() as { job?: ExecutorJob; launch_id?: unknown };
+      const launchId = typeof body.launch_id === "string" && LAUNCH_ID.test(body.launch_id)
+        ? body.launch_id : undefined;
+      const state = await this.fenceUnstarted(fenceMatch[1], body.job, launchId);
+      return state ? json({ ...state, fenced: state.envelope?.fenced === true })
+        : json({ status: "missing" }, 404);
     }
     const executeMatch = url.pathname.match(/^\/execute\/([^/]+)$/);
     if (request.method !== "POST" || !executeMatch || !CALL_ID.test(executeMatch[1])) {
@@ -1184,7 +1263,7 @@ export default {
         // contract without starting a billed Container. custom_filter is in
         // every image; stems is guaranteed by the FULL_COMPUTE batch build
         // (the image build fails if Demucs or its weights cannot be baked).
-        features: ["custom_filter", "stems"],
+        features: WORKER_FEATURES,
         shards: SHARD_COUNTS,
       });
     }
@@ -1210,7 +1289,7 @@ export default {
         .fetch("https://container.internal/probe");
     }
     const match = url.pathname.match(
-      /^\/calls\/(interactive|batch|agent|mcp|shorts|vision)\/([^/]+)(\/complete|\/abandon)?$/,
+      /^\/calls\/(interactive|batch|agent|mcp|shorts|vision)\/([^/]+)(\/complete|\/abandon|\/fence)?$/,
     );
     if (!match || !CALL_ID.test(match[2])) {
       return json({ error: "not found", safe_to_fallback: true }, 404);

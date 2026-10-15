@@ -24,6 +24,9 @@ import hmac
 import json
 import os
 import shutil
+import signal
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config
@@ -37,6 +40,7 @@ import jobs_ext
 import matte
 import renderer
 import screenmatch
+import skew_guard
 import song_find
 import stems
 import tracker
@@ -44,6 +48,62 @@ import url_media
 import version
 import webrecord
 import ytaccess
+
+
+# ── Graceful drain (Oct 2026) ───────────────────────────────────────────────
+# Cloudflare replaces a container on every rollout: an idle one at once, an
+# active one after the class's rollout_active_grace_period, by SIGTERM, with
+# SIGKILL only some minutes later. Python's default SIGTERM action ended the
+# process at once, killing the in-flight render, index or tool call ("Cloudflare
+# lost the executor ... container exited"). Now SIGTERM only drains: /health
+# reports "draining" (the Worker's readiness check then never sends this
+# container another call), a /run that still arrives is refused before any
+# work as a retryable rollout wait, and the process exits as soon as the calls
+# it is already running have finished and answered.
+_DRAINING = threading.Event()
+_INFLIGHT = 0
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def _inflight(delta):
+    global _INFLIGHT
+    with _INFLIGHT_LOCK:
+        _INFLIGHT += delta
+        return _INFLIGHT
+
+
+def _exit_when_idle(poll_s=1.0):
+    while True:
+        with _INFLIGHT_LOCK:
+            idle = _INFLIGHT <= 0
+        if idle:
+            print("[executor] drained; exiting for the new release",
+                  flush=True)
+            os._exit(0)
+        time.sleep(poll_s)
+
+
+def _on_sigterm(signum, _frame):
+    if _DRAINING.is_set():
+        return
+    _DRAINING.set()
+    with _INFLIGHT_LOCK:
+        busy = _INFLIGHT
+    print(f"[executor] signal {signum}: draining {busy} in-flight call(s) "
+          "before exit", flush=True)
+    threading.Thread(target=_exit_when_idle, daemon=True,
+                     name="executor-drain").start()
+
+
+def _draining_envelope(job):
+    exc = skew_guard.RolloutPending(
+        "Deploy in progress: this executor is shutting down for a new "
+        f"release, so this {job.get('type') or 'job'} was not started and "
+        "nothing ran. It will start on the new release automatically.")
+    return {"error": str(exc), "retryable": True, "skew_refused": True,
+            "failure": {"kind": "provider_rollout_pending",
+                        "retryable": True, "max_attempts": 1,
+                        "agent_repairable": False, "error": str(exc)}}
 
 
 def _run_mcp_media_job(worker_db, job):
@@ -175,7 +235,8 @@ class Handler(BaseHTTPRequestHandler):
             # holding a terminal can answer "is the render service current?"
             # in one curl instead of a day of database forensics. Best effort
             # — a health endpoint that can 500 is not a health endpoint.
-            body = {"status": "ok", "role": config.WORKER_ROLE}
+            body = {"status": "draining" if _DRAINING.is_set() else "ok",
+                    "role": config.WORKER_ROLE}
             try:
                 body.update(version.version_report())
             except Exception as e:
@@ -237,17 +298,23 @@ class Handler(BaseHTTPRequestHandler):
         job = payload.get("job") or {}
         jtype = job.get("type")
         runner = RUNNERS.get(jtype)
-        if not runner:
+        if not runner and skew_guard.skew(job) is None:
             return self._send(400, {"error": f"unsupported job type: {jtype}"})
+        if _DRAINING.is_set():
+            return self._send(200, _draining_envelope(job))
 
-        data = executor_runtime.execute(job, RUNNERS)
+        _inflight(+1)
         try:
-            self._send(200, data)
-        except (BrokenPipeError, ConnectionResetError):
-            if not data.get("job_completed"):
-                raise
-            print("[executor] dispatcher disconnected after committed "
-                  f"job={job.get('id')}; result is safe", flush=True)
+            data = executor_runtime.execute(job, RUNNERS)
+            try:
+                self._send(200, data)
+            except (BrokenPipeError, ConnectionResetError):
+                if not data.get("job_completed"):
+                    raise
+                print("[executor] dispatcher disconnected after committed "
+                      f"job={job.get('id')}; result is safe", flush=True)
+        finally:
+            _inflight(-1)
 
 
 def serve():
@@ -262,6 +329,7 @@ def serve():
     # cannot let the reaper kill a still-running turn whose result this request
     # is responsible for committing.
     executor_runtime.ensure_heartbeat()
+    signal.signal(signal.SIGTERM, _on_sigterm)
     srv = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"valmera-{config.WORKER_ROLE.replace('_', '-')} listening on :{port} "
           f"(code={version.code_version()} "

@@ -629,11 +629,17 @@ def test_exhausted_capacity_returns_media_to_the_queue_unspent(monkeypatch,
 
 
 @pytest.mark.parametrize("job_type", ["mcp_tool", "agent_turn"])
-def test_exhausted_capacity_goes_straight_to_live_callers(monkeypatch,
-                                                          job_type):
-    calls = _process(monkeypatch, job_type, deferred=True)
+def test_live_callers_queue_through_capacity_then_report(monkeypatch,
+                                                         job_type):
+    # Oct 2026 (goal: capacity never surfaces as a failure): MCP tools and
+    # Studio turns are returned to the queue like media; their caller sees
+    # "still running". Only after every deferral is spent do they report.
+    queued = _process(monkeypatch, job_type, deferred=True)
+    fns = [fn for fn, _a, _k in queued]
+    assert dbx.defer_unlaunched_cloudflare_busy in fns
+    assert dbx.finish_job not in fns and dbx.requeue_job not in fns
+    calls = _process(monkeypatch, job_type, deferred=False)
     fns = [fn for fn, _a, _k in calls]
-    assert dbx.defer_unlaunched_cloudflare_busy not in fns
     assert dbx.finish_job in fns and dbx.requeue_job not in fns
     _fn, args, _k = next(c for c in calls if c[0] is dbx.finish_job)
     failure = args[3]["failure"]

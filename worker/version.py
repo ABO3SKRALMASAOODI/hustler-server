@@ -180,4 +180,8 @@ def version_report():
 # auto-deploys on every push and the executor does not: exact-version
 # equality would switch features off after every unrelated worker deploy.
 # Append-only: removing a name re-enables the round-53 failure shape.
-FEATURES = ("custom_filter",)
+FEATURES = ("custom_filter",
+            # worker/skew_guard.py: under source skew this executor checks
+            # each job against its own release before any work, so the
+            # Cloudflare Worker may serve it while a rollout converges.
+            "skew_guard")

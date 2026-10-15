@@ -20,6 +20,7 @@ import failure_policy
 import io_telemetry
 import job_completion
 import resource_usage
+import skew_guard
 
 
 _heartbeat_started = False
@@ -203,11 +204,25 @@ def _deployment_identity(job):
     }
 
 
+def _rollout_refusal_envelope(exc, jtype):
+    """The structured pre-work refusal of a job this release cannot run."""
+    decision = failure_policy.classify(exc, jtype)
+    return {"error": str(exc), "retryable": True,
+            "failure": decision.payload(exc), "skew_refused": True}
+
+
 def execute(job, runners):
     """Execute one job and return the established executor JSON envelope."""
     jtype = job.get("type")
     runner = runners.get(jtype)
     if not runner:
+        if skew_guard.skew(job) is not None:
+            # A newer release introduced this job type; this executor's
+            # release is still serving while the rollout converges.
+            refusal = skew_guard._refuse(
+                job, f"job type {jtype or '?'} is not in this release",
+                skew_guard.skew(job))
+            return _rollout_refusal_envelope(refusal, jtype)
         return {"error": f"unsupported job type: {jtype}",
                 "retryable": False}
 
@@ -272,6 +287,9 @@ def execute(job, runners):
                 # telemetry write must never become a new render failure.
                 print(f"[executor] could not mark remote start for job "
                       f"{job_id}: {str(exc)[:160]}", flush=True)
+        # Another release wrote this job: check it against this release
+        # before any work (nothing has run yet; see skew_guard).
+        skew_guard.check(db, job, runners)
         result = runner(db, job)
         dt = round(time.monotonic() - t0, 2)
         execution_timings = {"total_s": dt}
@@ -370,13 +388,16 @@ def execute(job, runners):
             "type": jtype, "job_id": job_id, "ok": False,
             **failure_timings,
         }, sort_keys=True, separators=(",", ":")), flush=True)
-        return {
+        envelope = {
             "error": str(exc),
             "retryable": decision.retryable,
             "failure": decision.payload(exc),
             "timings": failure_timings,
             "lease_lost": isinstance(exc, dbx.JobLeaseLost),
         }
+        if getattr(exc, "skew_refused", False):
+            envelope["skew_refused"] = True
+        return envelope
     finally:
         if not io_finished:
             try:

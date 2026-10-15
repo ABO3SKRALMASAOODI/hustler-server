@@ -94,6 +94,11 @@ def classify(error, job_type=None):
 
     if isinstance(error, dbx.JobLeaseLost):
         return FailureDecision("lease_lost", False, 0, False)
+    if getattr(error, "failure_kind", None) == "provider_rollout_pending":
+        # An executor on another release refused before any work
+        # (skew_guard), or it was draining for a new release. Not a failed
+        # try: the dispatcher relaunches the claim once the rollout lands.
+        return FailureDecision("provider_rollout_pending", True, 1, False)
     if isinstance(error, dbx.PrerequisitePending):
         # Not a failed try: the input (usually the source's analysis) is
         # still being produced. Dispatchers defer it without spending an

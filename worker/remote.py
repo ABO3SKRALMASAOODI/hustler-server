@@ -599,6 +599,10 @@ def _job_payload(job):
         # provider scheduling + image/container cold start. Monotonic clocks
         # cannot be compared across hosts.
         "dispatch_submitted_at": job.get("_dispatch_submitted_at"),
+        # The release that wrote this job's inputs. An executor on another
+        # release checks the job against its own code before any work
+        # (worker/skew_guard.py) instead of every deploy refusing all work.
+        "dispatcher_source": version.code_version(),
     }
 
 
@@ -1213,6 +1217,12 @@ def _cloudflare_alternate_safe(job):
                 and payload.get("mutation") is False))
 
 
+# cf-alt1..cf-alt2 are recognised by every deployed Worker; cf-alt3..32 only
+# by one that advertises ``alt_slots_32`` (worker/cloudflare/src/index.ts).
+_MAX_ALT_SLOT = 32
+_LEGACY_ALT_SLOTS = 2
+
+
 def _cloudflare_call_id(job):
     if job.get("id") is None:
         # Scratch frame keys are consumed and deleted by the caller, so two
@@ -1229,9 +1239,14 @@ def _cloudflare_call_id(job):
     # A capacity refusal proves the pinned Durable Object could not get a
     # container, so any job may spread to an alternate identity: there is no
     # warm process (or project cache) left on the refused shard to preserve.
-    if admission_slot in (1, 2) and (
+    # A skew-guard refusal (the executor's release cannot run this job yet,
+    # nothing ran) relaunches the same claim the same way once the rollout
+    # has had time to converge; its earlier identity is terminal.
+    if isinstance(admission_slot, int) \
+            and 1 <= admission_slot <= _MAX_ALT_SLOT and (
             _cloudflare_alternate_safe(job)
-            or job.get("_cloudflare_capacity_spread")):
+            or job.get("_cloudflare_capacity_spread")
+            or job.get("_cloudflare_rollout_spread")):
         try:
             alt_project = max(0, int(job.get("project_id")))
         except (TypeError, ValueError):
@@ -1327,15 +1342,40 @@ def _cloudflare_preflight(timeout=10):
         remote_source = str(body.get("source_version") or "unknown")
         local_source = version.code_version()
         if remote_source != "unknown" and local_source != "unknown" and \
-                remote_source != local_source:
-            # No call has been reserved. Wait for this rollout when there is
-            # no configured alternate; failing ordinary jobs here makes
-            # every deployment consume the customer's retry allowance.
+                remote_source != local_source and \
+                not _skew_tolerant(body):
+            # No call has been reserved. An executor without the skew
+            # guard cannot tell which jobs an older release may run, so
+            # wait for this rollout (the pre-Oct-2026 contract).
             raise CloudflareRolloutPending(
                 "Cloudflare source version does not match the dispatcher "
                 f"({remote_source} != {local_source})")
         _health_cache[key] = (now, body)
         return body
+
+
+def _skew_tolerant(body):
+    """Does this Cloudflare Worker serve source-skewed calls safely?
+
+    Render publishes the dispatcher minutes after a push; Cloudflare follows
+    25-60 minutes later, or not at all when its workflow fails. A Worker that
+    advertises ``skew_guard`` runs only containers that check every job
+    against their own release before any work (worker/skew_guard.py) and
+    refuse, retryably and with nothing run, what they cannot do. Source
+    difference is then a reason to check, not to refuse every user.
+    """
+    features = body.get("features") if isinstance(body, dict) else None
+    return isinstance(features, list) and "skew_guard" in features
+
+
+def _cloudflare_features():
+    """The Worker's advertised features ([] when unknown). Never raises."""
+    try:
+        body = _cloudflare_preflight(timeout=10)
+    except Exception:
+        return []
+    features = body.get("features") if isinstance(body, dict) else None
+    return list(features) if isinstance(features, list) else []
 
 
 def _cloudflare_status(call_id, lane, timeout=10):
@@ -1602,10 +1642,29 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
     launch_id = job.get("_cloudflare_launch_id")
     last = None
     unknown_polls = 0
+    unseen_since = None
     while time.monotonic() < deadline:
         try:
             status = _cloudflare_status(call_id, lane, timeout=10)
             state = status.get("status")
+            unseen = state == "missing" or (
+                state == "refused"
+                and _refusal_for_launch(status, launch_id) is None)
+            if not unseen:
+                unseen_since = None
+            elif unseen_since is None:
+                unseen_since = time.monotonic()
+            elif time.monotonic() - unseen_since >= \
+                    config.CLOUDFLARE_MISSING_FENCE_S:
+                # Our launch never reached the Durable Object. Repeated
+                # missing reads cannot prove it never will, so the shard
+                # itself records the call as an abandoned start: a request
+                # arriving later is refused, and this claim may relaunch on
+                # a new identity instead of waiting out its whole lease.
+                fenced = _fence_cloudflare_call(call_id, lane, job, launch_id)
+                if fenced is not None:
+                    return fenced
+                unseen_since = time.monotonic()
             if state == "unknown":
                 # Not proof of life: only the executor's own heartbeat keeps
                 # this claim fresh now. Once PostgreSQL proves the executor
@@ -1697,6 +1756,38 @@ def _recover_cloudflare_result(call_id, lane, job, deadline):
         last = exc
     raise RemoteExecutorError(
         f"Cloudflare call {call_id} could not be recovered: {last}") from last
+
+
+def _fence_cloudflare_call(call_id, lane, job, launch_id):
+    """Tombstone a launch its Durable Object never stored; its envelope.
+
+    Returns the terminal envelope (the fence's own abandoned-start record,
+    or whatever terminal state the call reached meanwhile), or None when
+    the Worker cannot fence or the call turned out to be alive.
+    """
+    if "fence" not in _cloudflare_features():
+        return None
+    try:
+        response = requests.post(
+            f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}/fence",
+            json={"job": {key: job.get(key) for key in
+                          ("id", "type", "project_id", "total_claims")},
+                  "launch_id": launch_id},
+            headers=_cloudflare_headers(), timeout=30)
+        body = response.json() if response.status_code == 200 else {}
+    except Exception as exc:
+        print(f"[dispatcher] Cloudflare fence of {call_id} deferred "
+              f"({type(exc).__name__})", flush=True)
+        return None
+    if not isinstance(body, dict):
+        return None
+    envelope = body.get("envelope")
+    if body.get("status") in {"done", "failed"} and isinstance(envelope, dict):
+        if body.get("fenced"):
+            print(f"[dispatcher] Cloudflare call {call_id} never reached its "
+                  "shard; fenced it so it can never start", flush=True)
+        return envelope
+    return None
 
 
 def _refused_before_run(job, call_id, lane, status_code, body):
@@ -1909,6 +2000,21 @@ def _deploy_in_progress(job, cause):
     return error
 
 
+def _next_rollout_slot(job):
+    """The next unused alternate identity for this claim, or None.
+
+    Slots above the two every Worker recognises are used only when the
+    Worker advertises them, so a completion acknowledgement or dead-call
+    abandonment for that identity can never be refused.
+    """
+    current = job.get("_cloudflare_admission_slot", 0)
+    current = current if isinstance(current, int) else 0
+    ceiling = (_MAX_ALT_SLOT if "alt_slots_32" in _cloudflare_features()
+               else _LEGACY_ALT_SLOTS)
+    nxt = current + 1
+    return nxt if nxt <= ceiling else None
+
+
 def _capacity_route(job, retry):
     """(lane, admission slot) for the retry-th launch after a refusal.
 
@@ -2046,6 +2152,7 @@ def _run_cloudflare_with_capacity_wait(job):
     deadline = started + wait_s
     rollout_deadline = started + rollout_wait_s
     delay = 2.0
+    rollout_delay = 20.0
     sync_busy_retries = 0
     capacity = None
     # No new launch starts after this point. It is measured from the first
@@ -2067,6 +2174,36 @@ def _run_cloudflare_with_capacity_wait(job):
                 job, exc, capacity, queued, capacity_end)
             continue
         except CloudflareTerminalFailure as exc:
+            if getattr(exc, "failure_kind", None) == \
+                    "provider_rollout_pending":
+                # The executor checked this job against its own release
+                # before any work and refused it (worker/skew_guard.py), or
+                # it was draining for a new release. Nothing ran; that
+                # identity is terminal. Wait inside this claim for the
+                # rollout and relaunch on a fresh identity.
+                slot = _next_rollout_slot(job)
+                remaining = rollout_deadline - time.monotonic()
+                if not queued or slot is None or remaining <= 0:
+                    raise _deploy_in_progress(job, exc) from exc
+                dbx.unmark_remote_owned(job["id"])
+                rollout_delay = max(rollout_delay, 20.0)
+                print(f"[dispatcher] {job.get('type')} {job.get('id')}: "
+                      f"{_short_reason_detail(exc, 160)}; relaunching as "
+                      f"cf-alt{slot} in {min(rollout_delay, remaining):.0f}s",
+                      flush=True)
+                time.sleep(min(rollout_delay, remaining))
+                rollout_delay = min(rollout_delay * 1.5, 120.0)
+                probe = dbx.Db()
+                try:
+                    if not probe.run(dbx.lease_is_current, job["id"],
+                                     job.get("total_claims")):
+                        raise dbx.JobLeaseLost(
+                            "job lease changed during rollout wait")
+                finally:
+                    probe.reset()
+                job["_cloudflare_rollout_spread"] = True
+                job["_cloudflare_admission_slot"] = slot
+                continue
             # A startup Cloudflare abandoned before /run is the same "no
             # container could be started" outcome, already terminal under
             # this identity; the next route uses a new one.

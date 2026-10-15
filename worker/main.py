@@ -253,12 +253,13 @@ def process_one(worker_db, job):
                       "returned to the queue without consuming its retry "
                       f"budget ({e})", flush=True)
                 return
-        if isinstance(e, remote.CloudflareRolloutPending) \
-                and job["type"] not in ("mcp_tool", "agent_turn"):
+        if isinstance(e, remote.CloudflareRolloutPending):
             # A deploy outlasted the in-claim rollout wait and nothing ran.
-            # Give a media job one more full window without spending the
-            # attempt its real failures need (a final has a single retry).
-            # MCP tools and Studio turns have a live caller; it retries.
+            # Give the job another full window without spending the attempt
+            # its real failures need (a final has a single retry). Since
+            # Oct 2026 this includes MCP tools and Studio turns: their
+            # caller sees "still running" and picks the result up, which
+            # beats a "Deploy in progress" error it must retry by hand.
             deferred = worker_db.run(
                 dbx.defer_unlaunched_cloudflare_busy, job_id, lease_claim, e,
                 config.CLOUDFLARE_ROLLOUT_MAX_DEFERRALS,
@@ -269,11 +270,12 @@ def process_one(worker_db, job):
                       "returned to the queue without consuming its retry "
                       f"budget ({e})", flush=True)
                 return
-        if isinstance(e, remote.CloudflareCapacityUnavailable) \
-                and job["type"] not in ("mcp_tool", "agent_turn"):
+        if isinstance(e, remote.CloudflareCapacityUnavailable):
             # Every capacity route was refused before /run, so nothing ran.
-            # Like a stalled rollout, give a media job another full round
-            # later without spending the attempt its real failures need.
+            # Like a stalled rollout, give the job another full round later
+            # without spending the attempt its real failures need. MCP tools
+            # and Studio turns included (Oct 2026): their caller sees "still
+            # running", never a capacity error it has to retry by hand.
             deferred = worker_db.run(
                 dbx.defer_unlaunched_cloudflare_busy, job_id, lease_claim, e,
                 config.CLOUDFLARE_CAPACITY_MAX_DEFERRALS,

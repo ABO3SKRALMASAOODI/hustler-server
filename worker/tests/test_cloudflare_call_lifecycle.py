@@ -216,7 +216,7 @@ def test_rollout_wait_ends_with_a_retryable_deploy_in_progress(
     job = {"id": 42, "type": kind, "project_id": 7, "total_claims": 1}
     with pytest.raises(remote.CloudflareRolloutPending) as caught:
         remote._run_cloudflare_with_capacity_wait(job)
-    assert now[0] == config.CLOUDFLARE_ROLLOUT_WAIT_S == 300
+    assert now[0] == config.CLOUDFLARE_ROLLOUT_WAIT_S == 600
     decision = failure_policy.decision_for(caught.value, kind)
     assert decision.kind == "provider_rollout_pending"
     assert decision.retryable is True
@@ -790,7 +790,8 @@ def _process_rollout_pending(monkeypatch, job_type, deferred):
     return [(fn, args, kwargs) for fn, args, kwargs in db.calls]
 
 
-@pytest.mark.parametrize("job_type", ["final", "preview", "index"])
+@pytest.mark.parametrize("job_type", ["final", "preview", "index",
+                                      "mcp_tool", "agent_turn"])
 def test_deploy_in_progress_returns_media_to_the_queue_unspent(
         monkeypatch, job_type):
     calls = _process_rollout_pending(monkeypatch, job_type, deferred=True)
@@ -800,7 +801,7 @@ def test_deploy_in_progress_returns_media_to_the_queue_unspent(
     _fn, args, kwargs = next(c for c in calls
                              if c[0] is dbx.defer_unlaunched_cloudflare_busy)
     assert args[:2] == (42, 3)
-    assert args[3] == config.CLOUDFLARE_ROLLOUT_MAX_DEFERRALS == 1
+    assert args[3] == config.CLOUDFLARE_ROLLOUT_MAX_DEFERRALS == 3
     assert kwargs == {"counter": "cloudflare_rollout_deferrals"}
     assert (dbx.bump_metric, ("cloudflare_rollout_deferred",), {}) in calls
 
@@ -814,11 +815,14 @@ def test_exhausted_deploy_deferral_falls_back_to_the_bounded_retry(
 
 
 @pytest.mark.parametrize("job_type", ["mcp_tool", "agent_turn"])
-def test_deploy_in_progress_goes_straight_to_live_callers(
+def test_live_callers_report_only_after_every_deploy_deferral(
         monkeypatch, job_type):
-    calls = _process_rollout_pending(monkeypatch, job_type, deferred=True)
+    # Oct 2026: MCP tools and Studio turns are returned to the queue like
+    # media (their caller sees "still running"); only once every deferral
+    # is spent does the honest retryable outcome reach them.
+    calls = _process_rollout_pending(monkeypatch, job_type, deferred=False)
     fns = [fn for fn, _a, _k in calls]
-    assert dbx.defer_unlaunched_cloudflare_busy not in fns
+    assert dbx.defer_unlaunched_cloudflare_busy in fns
     assert dbx.finish_job in fns and dbx.requeue_job not in fns
 
 

@@ -1079,7 +1079,8 @@ def test_cloudflare_config_is_provider_complete_without_modal():
     assert '"mcp_media"' in adapter
     assert '"stock_acquire"' in adapter
     assert 'MODAL_EXECUTOR_ENABLED: "0"' in adapter
-    assert 'features: ["custom_filter", "stems"]' in adapter
+    assert 'const WORKER_FEATURES = ["custom_filter", "stems", "skew_guard"' in adapter
+    assert "features: WORKER_FEATURES" in adapter
     assert "SYNCHRONOUS_TYPES.has" in adapter
     assert "Math.min(21660, requestedTimeout)" in adapter
     assert "MODAL_TOKEN_ID" not in adapter

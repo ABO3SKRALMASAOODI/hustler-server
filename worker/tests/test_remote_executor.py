@@ -27,6 +27,7 @@ import config  # noqa: E402
 import db as dbx  # noqa: E402
 import http_server  # noqa: E402
 import remote  # noqa: E402
+import version  # noqa: E402
 
 
 class _StubDb:
@@ -137,7 +138,10 @@ def test_success_roundtrip():
         assert set(seen["job"]) == {"id", "type", "project_id", "user_id",
                                     "attempts", "total_claims", "payload",
                                     "_queue_wait_s",
-                                    "dispatch_submitted_at"}
+                                    "dispatch_submitted_at",
+                                    "dispatcher_source"}
+        # Same source here, so the executor's skew guard never engages.
+        assert seen["job"]["dispatcher_source"] == version.code_version()
     finally:
         _teardown(srv, saved)
 

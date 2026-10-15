@@ -1154,10 +1154,26 @@ CLOUDFLARE_CAPACITY_MAX_DEFERRALS = max(0, min(3, int(os.getenv(
 # CLOUDFLARE_ROLLOUT_MAX_DEFERRALS times without consuming an attempt, so a
 # slow source rollout gets another full window and cannot spend a final's
 # single real retry; MCP tools and Studio turns report it to their caller.
+#
+# Oct 2026: source skew no longer refuses work at all when the Worker
+# advertises the skew guard (worker/skew_guard.py); only jobs an executor's
+# own release cannot run wait here, and container-image skew no longer
+# refuses guarded containers. What remains waits longer and is returned to
+# the queue for every job type (MCP tools and Studio turns included: nothing
+# ran, so a later claim is safe), so a slow rollout is a delay, never a
+# "Deploy in progress" failure: 600 s in-claim x (1 + 3 deferrals) covers
+# the slowest observed Cloudflare deploy (58 min push-to-converged).
 CLOUDFLARE_ROLLOUT_WAIT_S = max(0.0, min(1800.0, float(os.getenv(
-    "CLOUDFLARE_ROLLOUT_WAIT_S", "300"))))
+    "CLOUDFLARE_ROLLOUT_WAIT_S", "600"))))
 CLOUDFLARE_ROLLOUT_MAX_DEFERRALS = max(0, min(3, int(os.getenv(
-    "CLOUDFLARE_ROLLOUT_MAX_DEFERRALS", "1"))))
+    "CLOUDFLARE_ROLLOUT_MAX_DEFERRALS", "3"))))
+# A launch whose request ended without an answer and that its Durable Object
+# has still not stored after this long never reached it. The dispatcher asks
+# the shard to fence that call id (a later arrival is refused) and relaunches
+# the claim on a new identity, instead of waiting out the call's whole lease
+# (six hours for an MCP render_preview on Oct 12).
+CLOUDFLARE_MISSING_FENCE_S = max(30.0, min(600.0, float(os.getenv(
+    "CLOUDFLARE_MISSING_FENCE_S", "60"))))
 # Dead-call detection. A Cloudflare call whose /run response was lost is
 # `unknown`: its Python process may still be working, and it heartbeats
 # video_jobs/remote_executions every HEARTBEAT_EVERY_S (20 s) while it does.
