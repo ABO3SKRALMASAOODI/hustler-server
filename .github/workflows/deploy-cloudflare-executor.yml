@@ -164,6 +164,12 @@ jobs:
             elif grep -Eiq "rolling out application|rollout" "$deploy_log"; then
               echo "A container rollout is still in progress; retrying this revision in 120 s ($attempt/8)."
               sleep 120
+            elif grep -Eiq "429 Too Many Requests|toomanyrequests|rate limit" "$deploy_log"; then
+              # The base-image registry throttles anonymous pulls (run 107:
+              # public.ecr.aws "Data limit exceeded" 4 s into the build);
+              # nothing was published, so the same revision is retried.
+              echo "The image registry throttled a base-image pull; retrying this revision in 90 s ($attempt/8)."
+              sleep 90
             else
               exit 1
             fi
