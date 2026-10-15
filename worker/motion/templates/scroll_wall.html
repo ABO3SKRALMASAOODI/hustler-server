@@ -29,12 +29,18 @@
   MG.frame(t => {
     let k = 0;
     for (let r = 0; r < rows; r++) {
-      const dir = r % 2 ? 1 : -1, off = ((dir * v * t) % (tw + gap) + (tw + gap)) % (tw + gap);
+      const dir = r % 2 ? 1 : -1, P_ = tw + gap, d = dir * v * t;
+      const off = ((d % P_) + P_) % P_;
+      // whole tiles scrolled so far: a tile keeps its picture (and its slot
+      // id) as it crosses the frame, instead of every tile swapping
+      // pictures each time the offset wraps
+      const shift = Math.floor(d / P_);
       const y = gap + r * (th + gap);
       for (let c = -1; c < perRow; c++) {
         const x = c * (tw + gap) + off - (tw + gap);
-        const idx = (r * 7 + c * 3 + 101 * n) % n;
-        MG.slot('t' + idx + '#' + r + '_' + c, x, y, tw, th, { r: W * 0.008 });
+        const cc = c - shift;
+        const idx = (((r * 7 + cc * 3) % n) + n) % n;
+        MG.slot('t' + idx + '#' + r + '_' + cc, x, y, tw, th, { r: W * 0.008 });
         k++;
       }
     }

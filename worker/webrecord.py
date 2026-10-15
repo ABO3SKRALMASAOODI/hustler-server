@@ -840,7 +840,9 @@ def _transcode(list_path, workdir):
         raise WebRecordError("the page loaded but no video was captured")
     out = os.path.join(workdir, "webrecord.mp4")
     cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
-           "-an", "-vsync", "cfr", "-r", "30",
+           # -fps_mode (FFmpeg >= 5.1) — the old -vsync spelling is gone
+           # from FFmpeg 9 (and the capture failed to encode there)
+           "-an", "-fps_mode", "cfr", "-r", "30",
            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
            "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
     try:

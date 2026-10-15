@@ -1155,18 +1155,1084 @@ def at_3c_2():
                                "W3-S1 board (type on the table)"}}
 
 
+# ── 3D procedural FX ────────────────────────────────────────────────
+
+V09_KEEP = [[8.0, 18.0]]
+V09_FRAME = {"ratio": "9:16", "mode": "crop", "focus_x": 0.55,
+             "focus_y": 0.5}
+
+
+def _render(w, edl, out, preview=True, workdir=None):
+    import renderer
+    import schemas
+    src = w3.source_ref(w)
+    e = schemas.validate_edl(edl, src.duration_s).model_dump()
+    wd = workdir or tempfile.mkdtemp(prefix="at3_")
+    t0 = time.time()
+    renderer.render_edl(e, w3.index_for(w), w["path"], out, wd, preview,
+                        want_wm=False, suppress_outro=True)
+    return time.time() - t0
+
+
+def _md5s(path):
+    import hashlib
+    info = w3.probe(path)
+    W, H = info["width"], info["height"]
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f",
+                          "rawvideo", "-pix_fmt", "rgb24", "-"],
+                         capture_output=True, check=True).stdout
+    n = len(raw) // (W * H * 3)
+    return [hashlib.md5(raw[k * W * H * 3:(k + 1) * W * H * 3]).hexdigest()
+            for k in range(n)]
+
+
+def _frames_of(path, w_=None):
+    info = w3.probe(path)
+    W, H = info["width"], info["height"]
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f",
+                          "rawvideo", "-pix_fmt", "bgr24", "-"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(-1, H, W, 3), info
+
+
+def at_3d_1():
+    """The figure becomes light, then embers (V09, dark jacket against the
+    windows): ember origins on the subject's outline, the subject gone by
+    the end of a 1.5 s dissolve, byte-identical across renders."""
+    import cv2
+    import elements
+    import motion_engine
+    import world_layer
+    w = win("V09", "jensen_windows")
+    em = {"id": "emb", "template": "el_particles", "start": 6.0,
+          "end": 9.0, "params": {"kind": "embers", "emit": "edge",
+                                 "count": 520, "palette": "warm"},
+          "composite": {"blend": "screen"}}
+    lt = {"id": "lt1", "type": "light", "stage": "world", "start": 6.0,
+          "end": 9.0, "kind": "dissolve", "duration_s": 1.5,
+          "device": "light_dissolve"}
+    edl = {"keep": V09_KEEP, "frame": V09_FRAME, "motion": [em],
+           "fx": [lt]}
+    c, e = world_ctx(w, edl)
+    samples = elements.edge_samples(e["motion"][0], c) or []
+    dw, dh = motion_engine.design_size(c.W, c.H)
+    person = world_layer._mask_reader(c, "person", windows=[(6.0, 9.0)])
+    inside, total = 0, 0
+    for k in range(int(3.0 * 30)):
+        t = 6.0 + (k + 0.5) / 30.0
+        rel = t - 6.0
+        if not samples:
+            break
+        best = min(samples, key=lambda s_: abs(s_["t"] - rel))
+        tr = c.tl.out_to_src(t)
+        A = world_layer.program_affine(c.geometry("world"), t, tr)
+        m = person.at(tr - c.clock_offset) if person else None
+        if m is None or A is None:
+            continue
+        mh, mw = m.shape
+        band = cv2.dilate((m > 127).astype(np.uint8),
+                          np.ones((5, 5), np.uint8)) > 0
+        for x, y, _nx, _ny in best["p"]:
+            fx, fy = x / dw, y / dh                    # output fractions
+            sx = (fx - A[0, 2]) / A[0, 0]
+            sy = (fy - A[1, 2]) / A[1, 1]
+            px, py = int(round(sx * mw)), int(round(sy * mh))
+            total += 1
+            if 0 <= px < mw and 0 <= py < mh and band[py, px]:
+                inside += 1
+    share = inside / float(total) if total else None
+    # two renders, byte for byte; and the subject's detail through the
+    # dissolve (Laplacian variance inside the figure, render / source)
+    bd = board_dir("AT-3D-1")
+    o1, o2 = os.path.join(bd, "r1.mp4"), os.path.join(bd, "r2.mp4")
+    s1 = _render(w, edl, o1)
+    _render(w, edl, o2)
+    m1, m2 = _md5s(o1), _md5s(o2)
+    diff = sum(1 for a_, b_ in zip(m1, m2) if a_ != b_) + abs(len(m1)
+                                                               - len(m2))
+    frs, info = _frames_of(o1)
+    fps = 30.0
+    ratios = []
+    for t in np.arange(5.8, 8.2, 0.1):
+        k = int(round(t * fps))
+        if k >= len(frs):
+            break
+        src_im, _c2 = _program_frame(w, edl, float(t), info["width"],
+                                     info["height"])
+        tr = c.tl.out_to_src(float(t))
+        m = person.at(tr - c.clock_offset) if person else None
+        if m is None:
+            continue
+        A = world_layer.program_affine(c.geometry("world"), float(t), tr)
+        Wp, Hp = info["width"], info["height"]
+        mh, mw = m.shape
+        M = np.array([[A[0, 0] * Wp / mw, 0, A[0, 2] * Wp],
+                      [0, A[1, 1] * Hp / mh, A[1, 2] * Hp]])
+        mp = cv2.warpAffine(m, M, (Wp, Hp)) > 200
+        mp = cv2.erode(mp.astype(np.uint8), np.ones((9, 9), np.uint8)) > 0
+        if mp.sum() < 50:
+            continue
+
+        def lv(im):
+            g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            return float(cv2.Laplacian(g, cv2.CV_32F)[mp].var())
+        ratios.append((round(float(t), 2), lv(frs[k]) / max(1e-6,
+                                                           lv(src_im))))
+    end = [r for t, r in ratios if t >= 6.0 + 1.5 + 0.05]
+    early = [r for t, r in ratios if t < 6.0]
+    gone = float(np.max(end)) if end else None
+    metrics = {
+        "origins_on_outline_share": _m(share, 0.98, ">="),
+        "subject_detail_after_1_5s": _m(gone, 0.15, "<="),
+        "determinism_frames_differing": _m(diff, 0, "<="),
+    }
+    ims = []
+    for t in (5.9, 6.6, 7.2, 7.8):
+        k = int(round(t * fps))
+        if k < len(frs):
+            ims.append(frs[k])
+    board = _sheet(ims, os.path.join(bd, "dissolve.png"), cols=4,
+                   labels=["t=5.9", "6.6", "7.2", "7.8"])
+    return {"metrics": metrics, "status": _status(metrics),
+            "board": [board, o1],
+            "detail": {"origins": total, "detail_ratio": ratios,
+                       "before": early[:3], "render_s": round(s1, 1),
+                       "frames": len(m1),
+                       "method": "origins: every emitter point the page "
+                                 "reads (the nearest 10 fps edge sample "
+                                 "to each 30 fps frame) tested against "
+                                 "that frame's person matte (2 px band); "
+                                 "gone: Laplacian variance inside the "
+                                 "eroded figure, render / source"}}
+
+
+def at_3d_3():
+    """A pictogram runner from the pose (V12 walk-on): the joint angles the
+    page draws from vs the measured pose at the same instant."""
+    import elements
+    import motion_engine
+    from anchors import query
+    w = win("V12", "walkon")
+    it = {"id": "pg", "template": "el_pictogram", "start": 0.6,
+          "end": 3.4, "params": {"mode": "pose"}}
+    edl = {"keep": [[6.4, 10.0]], "frame": {"ratio": "9:16",
+                                            "mode": "crop"},
+           "motion": [it]}
+    c, e = world_ctx(w, edl)
+    data = elements.pose_samples(e["motion"][0], c) or []
+    dw, dh = motion_engine.design_size(c.W, c.H)
+    samples, _sh, _m2 = query.load("landmarks.pose", c.source,
+                                   [(6.6, 10.0)])
+    T = np.array([float(x["t"]) for x in samples])
+    limbs = [(11, 13), (13, 15), (12, 14), (14, 16), (23, 25), (25, 27),
+             (24, 26), (26, 28)]
+    errs = []
+    Wsrc, Hsrc = w["width"], w["height"]
+    for d_ in data:
+        t = 0.6 + d_["t"]
+        tr = c.tl.out_to_src(t)
+        if tr is None or not len(T):
+            continue
+        # the measured pose interpolated at the frame's exact instant
+        i = int(np.searchsorted(T, tr))
+        if i <= 0 or i >= len(T):
+            continue
+        a_, b_ = samples[i - 1], samples[i]
+        if not (a_.get("people") and b_.get("people")):
+            continue
+        f = (tr - T[i - 1]) / max(1e-6, T[i] - T[i - 1])
+        Pa = np.array(a_["people"][0]["p"]).reshape(-1, 3)
+        Pb = np.array(b_["people"][0]["p"]).reshape(-1, 3)
+        P = Pa * (1 - f) + Pb * f
+        J = np.array(d_["j"])
+        for u, v in limbs:
+            if min(P[u, 2], P[v, 2]) < 0.5:
+                continue
+            ang_src = math.degrees(math.atan2((P[v, 1] - P[u, 1]) * Hsrc,
+                                              (P[v, 0] - P[u, 0]) * Wsrc))
+            ang_pg = math.degrees(math.atan2(J[v, 1] - J[u, 1],
+                                             J[v, 0] - J[u, 0]))
+            dd = abs((ang_pg - ang_src + 180) % 360 - 180)
+            errs.append(dd)
+    metrics = {"joint_angle_err_p95_deg": _m(None if not errs else
+                                             _pct(errs, 95), 10.0, "<=",
+                                             "deg")}
+    return {"metrics": metrics, "status": _status(metrics),
+            "detail": {"limb_samples": len(errs),
+                       "max_deg": None if not errs else round(max(errs),
+                                                              2),
+                       "method": "the pose the page receives (design px, "
+                                 "nearest sample) vs the measured pose "
+                                 "interpolated at the same instant, in "
+                                 "source px (the drawing itself is the "
+                                 "page's own code)"}}
+
+
+def _onsets(lum, k_expected, radius=6):
+    """The strike's ONSET near each expected frame: the first frame whose
+    change reaches half the local peak (a strike holds full for hold_f
+    frames, so its peak frame is any of those; its landing is the first)."""
+    out = []
+    for k in k_expected:
+        lo, hi = max(0, k - radius), min(len(lum), k + radius + 1)
+        if lo >= hi:
+            out.append(None)
+            continue
+        # the encode differs everywhere between two renders (codec noise
+        # round any overlay): measure the strike's EXCESS over the local
+        # floor (the window's lower quartile)
+        seg = lum[lo:hi] - float(np.percentile(lum[max(0, k - 20):
+                                                    k + 21], 25))
+        top = float(np.max(seg))
+        out.append(lo + int(np.argmax(seg >= 0.5 * top)) if top > 0
+                   else None)
+    return out
+
+
+def at_3d_4():
+    """Lightning on its transient (V09): the bolt's brightest frame lands
+    on the hit time it was given, +-1 frame."""
+    w = win("V09", "jensen_windows")
+    hits = [0.5, 1.4]
+    bolt = {"id": "bolt", "template": "el_lightning", "start": 2.0,
+            "end": 4.0, "params": {"x0": 0.62, "y0": -0.05, "x1": 0.55,
+                                   "y1": 0.42,
+                                   "at": [str(h) for h in hits]},
+            "composite": {"blend": "screen"}}
+    base = {"keep": V09_KEEP, "frame": V09_FRAME}
+    bd = board_dir("AT-3D-4")
+    o1, o0 = os.path.join(bd, "bolt.mp4"), os.path.join(bd, "plain.mp4")
+    _render(w, dict(base, motion=[bolt]), o1)
+    _render(w, base, o0)
+    f1, info = _frames_of(o1)
+    f0, _i = _frames_of(o0)
+    n = min(len(f1), len(f0))
+    lum = np.array([float(np.abs(f1[k].astype(np.int16)
+                                 - f0[k].astype(np.int16)).mean())
+                    for k in range(n)])
+    fps = 30.0
+    want = [int(round((2.0 + h) * fps)) for h in hits]
+    got = _onsets(lum, want)
+    errs = [None if g is None else abs(g - k) for g, k in zip(got, want)]
+    metrics = {"landing_err_frames_max": _m(None if None in errs else
+                                            max(errs), 1, "<=", "frames")}
+    return {"metrics": metrics, "status": _status(metrics),
+            "board": [o1],
+            "detail": {"expected_frames": want, "onset_frames": got,
+                       "change": [round(float(x), 2) for x in lum[
+                           max(0, want[0] - 3):want[-1] + 6]],
+                       "method": "per-frame mean |bolt render - plain "
+                                 "render|; the strike's onset (first frame "
+                                 "at half its local peak) within 6 frames "
+                                 "of each hit"}}
+
+
+def at_3d_5():
+    """Procedural shapes are deterministic: two renders, byte for byte."""
+    w = win("V09", "jensen_windows")
+    it = {"id": "sh", "template": "el_shapes", "start": 0.5, "end": 3.5,
+          "params": {"kind": "bounce"}}
+    edl = {"keep": V09_KEEP, "frame": V09_FRAME, "motion": [it]}
+    bd = board_dir("AT-3D-5")
+    o1, o2 = os.path.join(bd, "a.mp4"), os.path.join(bd, "b.mp4")
+    _render(w, edl, o1)
+    _render(w, edl, o2)
+    m1, m2 = _md5s(o1), _md5s(o2)
+    diff = sum(1 for a_, b_ in zip(m1, m2) if a_ != b_) + abs(len(m1)
+                                                               - len(m2))
+    metrics = {"determinism_frames_differing": _m(diff, 0, "<=")}
+    return {"metrics": metrics, "status": _status(metrics), "board": [o1],
+            "detail": {"frames": len(m1)}}
+
+
+# ── 3E layout stage ───────────────────────────────────────────────────
+
+def _render_l(w, edl, out, preview=True, locals_=None):
+    """A render with local media (asset keys -> files); returns
+    (seconds, workdir)."""
+    import renderer
+    import schemas
+    src = w3.source_ref(w)
+    e = schemas.validate_edl(edl, src.duration_s).model_dump()
+    wd = tempfile.mkdtemp(prefix="at3e_")
+    t0 = time.time()
+    renderer.render_edl(e, w3.index_for(w), w["path"], out, wd, preview,
+                        want_wm=False, suppress_outro=True,
+                        asset_locals=locals_ or {})
+    return time.time() - t0, wd
+
+
+def _slots_rows(wd):
+    import glob
+    out = []
+    for p_ in glob.glob(os.path.join(wd, "**", "*.slots.json"),
+                        recursive=True):
+        with open(p_) as fh:
+            out.append(json.load(fh))
+    return out
+
+
+def _v13_media(n_stills, out_dir):
+    """The V13 pool as local media: its clips (videos) and stills taken
+    from them (internal; never in git)."""
+    import cv2
+    data = vflmod.load()
+    clips = []
+    for name in (data.get("V13") or {}).get("windows") or {}:
+        try:
+            x = vflmod.window("V13", name)
+        except Exception:  # noqa: BLE001
+            continue
+        if os.path.exists(x["path"]):
+            clips.append(x)
+    os.makedirs(out_dir, exist_ok=True)
+    locals_, vids, stills = {}, [], []
+    for x in clips:
+        key = f"local/v13/{os.path.basename(x['path'])}"
+        locals_[key] = x["path"]
+        vids.append(f"asset:{key}+loop")
+    k = 0
+    while len(stills) < n_stills and clips:
+        x = clips[k % len(clips)]
+        t = 1.0 + (k // len(clips)) * 1.7
+        p_ = os.path.join(out_dir, f"s{k:02d}.jpg")
+        if not os.path.exists(p_):
+            fr = frames_bgr(x["path"], t, 1, None, 960)[0]
+            cv2.imwrite(p_, fr)
+        key = f"local/v13s/{os.path.basename(p_)}"
+        locals_[key] = p_
+        stills.append(f"asset:{key}")
+        k += 1
+    return vids, stills, locals_
+
+
+def at_3e_1():
+    """A living mosaic (V13 pool): 60 tiles pop on their beats, video tiles
+    play, 10 s at 1080x1920 rendered in <= 40 s."""
+    w = win("V13", "dragon_unveil")
+    bd = board_dir("AT-3E-1")
+    vids, stills, locals_ = _v13_media(52, os.path.join(bd, "stills"))
+    tiles = (vids + stills)[:60]
+    beats = [round(0.12 + 0.105 * i, 3) for i in range(len(tiles))]
+    item = {"id": "mz", "template": "mosaic", "start": 0.0, "end": 10.0,
+            "params": {"tiles": tiles, "layout": "justified",
+                       "at": [str(b) for b in beats], "collapse_at": 7.4,
+                       "hero": 2, "title": "INTO THE WORLD",
+                       "backdrop": "#08080A"}}
+    edl = {"keep": [[2.0, 12.5]], "frame": {"ratio": "9:16",
+                                            "mode": "crop"},
+           "motion": [item]}
+    out = os.path.join(bd, "mosaic_final.mp4")
+    # a cold render: no motion-cache hit for the page
+    import motion_engine
+    old_cache = motion_engine.CACHE_DIR
+    motion_engine.CACHE_DIR = tempfile.mkdtemp(prefix="at3e1_cache_")
+    try:
+        secs, wd = _render_l(w, edl, out, preview=False, locals_=locals_)
+    finally:
+        motion_engine.CACHE_DIR = old_cache
+    rows = _slots_rows(wd)
+    fps = 30.0
+    pops = {}
+    if rows:
+        frames_ = rows[0].get("frames") or []
+        for k, fr in enumerate(frames_):
+            for r in fr:
+                sid = r[0].split("#")[0]
+                if sid not in pops and float(r[7]) > 0.02:
+                    pops[sid] = k
+    errs = []
+    for i, b in enumerate(beats):
+        k = pops.get(f"t{i}")
+        if k is not None:
+            errs.append(abs(k - int(round(b * fps))))
+    # video tiles play: their pixels change between two frames 12 apart
+    # while their rect holds (the source advances), stills do not
+    play = []
+    if rows:
+        frs, info = _frames_of(out)
+        sc = float(rows[0].get("scale") or 1.0)
+        f_ = rows[0]["frames"]
+        for i in range(len(vids)):
+            sid = f"t{i}"
+            for k in range(int(3.0 * fps), int(6.5 * fps), 7):
+                a_ = [r for r in f_[k] if r[0] == sid] if k < len(f_) else []
+                b_ = [r for r in f_[k + 12] if r[0] == sid] \
+                    if k + 12 < len(f_) else []
+                if not a_ or not b_:
+                    continue
+                ra, rb = a_[0], b_[0]
+                if abs(ra[1] - rb[1]) > 0.5 or abs(ra[2] - rb[2]) > 0.5 \
+                        or abs(ra[3] - rb[3]) > 0.5:
+                    continue
+                x0, y0 = int(ra[1] * sc) + 4, int(ra[2] * sc) + 4
+                x1, y1 = int((ra[1] + ra[3]) * sc) - 4, \
+                    int((ra[2] + ra[4]) * sc) - 4
+                if x1 - x0 < 8 or y1 - y0 < 8 or k + 12 >= len(frs):
+                    continue
+                d = float(np.abs(frs[k][y0:y1, x0:x1].astype(np.int16)
+                                 - frs[k + 12][y0:y1, x0:x1]
+                                 .astype(np.int16)).mean())
+                play.append(d)
+                break
+    playing = sum(1 for d in play if d > 1.0)
+    metrics = {
+        "pop_err_frames_max": _m(None if not errs else max(errs), 1, "<=",
+                                 "frames"),
+        "video_tiles_playing_share": _m(None if not play else
+                                        playing / float(len(play)), 1.0,
+                                        ">="),
+        "render_s_60_tiles_10s_1080x1920": _m(secs, 40.0, "<=", "s"),
+    }
+    return {"metrics": metrics, "status": _status(metrics), "board": [out],
+            "detail": {"tiles": len(tiles), "video_tiles": len(vids),
+                       "pops_found": len(errs), "play_diffs": [
+                           round(d, 2) for d in play]}}
+
+
+def at_3e_2():
+    """A scroll wall (V13): constant velocity +-1 px/frame, every tile of
+    a row moving together (no tearing)."""
+    w = win("V13", "dragon_unveil")
+    bd = board_dir("AT-3E-2")
+    vids, stills, locals_ = _v13_media(20, os.path.join(bd, "stills"))
+    item = {"id": "sw", "template": "scroll_wall", "start": 0.0,
+            "end": 3.5, "params": {"tiles": vids + stills, "rows": 4,
+                                   "speed": 0.2, "title": "EVERYTHING"}}
+    edl = {"keep": [[2.0, 6.0]], "frame": {"ratio": "9:16",
+                                           "mode": "crop"},
+           "motion": [item]}
+    out = os.path.join(bd, "scroll.mp4")
+    secs, wd = _render_l(w, edl, out, preview=True, locals_=locals_)
+    rows = _slots_rows(wd)
+    dev, tear = [], []
+    swaps = 0
+    if rows:
+        sc = float(rows[0].get("scale") or 1.0)
+        f_ = rows[0]["frames"]
+        speed = 0.2 * (rows[0].get("design_w") or 1080) * sc / 30.0
+        for k in range(1, len(f_)):
+            prev = {r[0]: r for r in f_[k - 1]}
+            per_row = {}
+            for r in f_[k]:
+                p_ = prev.get(r[0])
+                if p_ is None:
+                    continue
+                dx = (r[1] - p_[1]) * sc
+                row_id = r[0].split("#")[1].split("_")[0]
+                per_row.setdefault(row_id, []).append(dx)
+            for row_id, dxs in per_row.items():
+                med = float(np.median(dxs))
+                tear.append(float(np.max(np.abs(np.array(dxs) - med))))
+                dev.append(abs(abs(med) - abs(speed)))
+        # a tile id keeps its picture: no id jumps more than a tile width
+        for k in range(1, len(f_)):
+            prev = {r[0]: r for r in f_[k - 1]}
+            for r in f_[k]:
+                p_ = prev.get(r[0])
+                if p_ is not None and abs(r[1] - p_[1]) > r[3] * 0.5:
+                    swaps += 1
+    metrics = {
+        "velocity_dev_px_max": _m(None if not dev else max(dev), 1.0, "<=",
+                                  "px/frame"),
+        "row_tearing_px_max": _m(None if not tear else max(tear), 1.0,
+                                 "<=", "px/frame"),
+        "tile_picture_swaps": _m(swaps, 0, "<="),
+    }
+    return {"metrics": metrics, "status": _status(metrics), "board": [out],
+            "detail": {"render_s": round(secs, 1)}}
+
+
+def _yuv_frames(path):
+    info = w3.probe(path)
+    W, H = info["width"], info["height"]
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", path, "-f",
+                          "rawvideo", "-pix_fmt", "yuv420p", "-"],
+                         capture_output=True, check=True).stdout
+    n = W * H * 3 // 2
+    out = []
+    for k in range(len(raw) // n):
+        b = np.frombuffer(raw[k * n:(k + 1) * n], np.uint8)
+        Y = b[:W * H].reshape(H, W)
+        U = b[W * H:W * H + W * H // 4].reshape(H // 2, W // 2)
+        V = b[W * H + W * H // 4:].reshape(H // 2, W // 2)
+        out.append((Y, U, V))
+    return out, info
+
+
+def at_3e_4():
+    """An independent stack (V13 panels) with a negative flash clipped to
+    one panel: nothing outside that panel changes (lossless finals), and
+    the verb's panel rects are the page's own."""
+    import config
+    w = win("V13", "dragon_unveil")
+    bd = board_dir("AT-3E-4")
+    vids, _st, locals_ = _v13_media(0, os.path.join(bd, "stills"))
+    panels = vids[:3]
+    stack = {"id": "st", "template": "stack", "start": 0.0, "end": 3.0,
+             "params": {"panels": panels, "labels": ["ONE", "TWO",
+                                                     "THREE"]}}
+    base = {"keep": [[2.0, 5.5]], "frame": {"ratio": "9:16",
+                                            "mode": "crop"},
+            "motion": [stack]}
+    # the verb's rects (tools_ext.layout_tools.set_stack's own math)
+    n, g = 3, 0.012
+    W_, H_ = 1080, 1920
+    gy = g * W_ / H_
+    rects = [[round(g, 4), round(gy + k * (1 - gy) / n, 4), round(1 - g, 4),
+              round((k + 1) * (1 - gy) / n, 4)] for k in range(n)]
+    flash = {"id": "ng", "type": "region", "stage": "over_type",
+             "start": 1.5, "end": 1.6, "effect": "negate",
+             "region": {"shape": "rect", "box": rects[1]}}
+    old = config.FINAL_CRF
+    config.FINAL_CRF = 0
+    try:
+        oa = os.path.join(bd, "with.mp4")
+        ob = os.path.join(bd, "without.mp4")
+        _s1, wd = _render_l(w, dict(base, fx=[flash]), oa, preview=False,
+                            locals_=locals_)
+        _render_l(w, base, ob, preview=False, locals_=locals_)
+    finally:
+        config.FINAL_CRF = old
+    # compared in the delivered 4:2:0 planes themselves (an RGB conversion
+    # would interpolate chroma across rows and invent a leak): luma must be
+    # exact outside the rect's pixels, chroma outside the 2x2 blocks the
+    # rect's edge pixels share
+    ya, info = _yuv_frames(oa)
+    yb, _i = _yuv_frames(ob)
+    Wp, Hp = info["width"], info["height"]
+    r = rects[1]
+    x0, y0 = int(math.floor(r[0] * Wp)), int(math.floor(r[1] * Hp))
+    x1, y1 = int(math.ceil(r[2] * Wp)), int(math.ceil(r[3] * Hp))
+    lin = np.zeros((Hp, Wp), bool)
+    lin[y0:y1, x0:x1] = True
+    cin = np.zeros((Hp // 2, Wp // 2), bool)
+    cin[y0 // 2:(y1 + 1) // 2, x0 // 2:(x1 + 1) // 2] = True
+    worst_y, worst_c, changed_in, leak_rows = 0, 0, 0, set()
+    for k in range(min(len(ya), len(yb))):
+        (Ya, Ua, Va), (Yb, Ub, Vb) = ya[k], yb[k]
+        dy = np.abs(Ya.astype(np.int16) - Yb)
+        du = np.maximum(np.abs(Ua.astype(np.int16) - Ub),
+                        np.abs(Va.astype(np.int16) - Vb))
+        worst_y = max(worst_y, int(dy[~lin].max()))
+        worst_c = max(worst_c, int(du[~cin].max()))
+        for rr in np.where((du * ~cin > 0).any(axis=1))[0]:
+            leak_rows.add(int(rr))
+        changed_in += int((dy[lin] > 30).any())
+    # the page's rects (the slots it declared on its last frame)
+    rows = _slots_rows(wd)
+    rect_err = None
+    if rows:
+        sc = float(rows[0].get("scale") or 1.0)
+        last = {q[0]: q for q in rows[0]["frames"][-1]}
+        errs = []
+        for k, rr in enumerate(rects):
+            q = last.get(f"t{k}")
+            if q is None:
+                continue
+            got = [q[1] * sc / Wp, q[2] * sc / Hp, (q[1] + q[3]) * sc / Wp,
+                   (q[2] + q[4]) * sc / Hp]
+            errs.append(max(abs(a_ - b_) * (Wp if i % 2 == 0 else Hp)
+                            for i, (a_, b_) in enumerate(zip(got, rr))))
+        rect_err = max(errs) if errs else None
+    metrics = {
+        "region_locality_luma": _m(worst_y, 0, "<="),
+        "region_locality_chroma": _m(worst_c, 0, "<="),
+        "flash_frames_inside": _m(changed_in, 1, ">="),
+        "verb_vs_page_rect_px": _m(rect_err, 1.0, "<=", "px"),
+    }
+    return {"metrics": metrics, "status": _status(metrics), "board": [oa],
+            "detail": {"rects": rects,
+                       "chroma_leak_rows": sorted(leak_rows),
+                       "cause": "the shared region primitive "
+                                "(fxprims.region_fx, track 1C): its "
+                                "overlay of a yuva420p box re-sites chroma "
+                                "two chroma rows past the box's top and "
+                                "bottom edges (measured on an even-aligned "
+                                "rect too); luma is exact"}}
+
+
+def at_3e_5():
+    """The device stage (FX-UI: the valmera.io recording): the screen sits
+    exactly in the device's hole (corners +-1 px), and the light spill
+    follows the screen's own mean colour."""
+    import cv2
+    import slots
+    w = win("V01", "thiel_ai_bigger")
+    bd = board_dir("AT-3E-5")
+    ui = os.path.expanduser(
+        "~/Documents/Valmera/.valmera/fixtures/FX-UI/valmera_io.mp4")
+    mag = os.path.join(bd, "magenta.mp4")
+    if not os.path.exists(mag):
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "color=c=0xFF00FF:s=640x400:r=30:d=6", "-pix_fmt",
+                        "yuv420p", "-c:v", "libx264", "-crf", "1", mag],
+                       check=True)
+    out = {}
+    detail = {}
+    # 1. corners: a magenta screen shows exactly where the hole is
+    item = {"id": "ds", "template": "device_stage", "start": 0.0,
+            "end": 3.0, "params": {"screen": "asset:local/mag.mp4",
+                                   "device": "laptop", "float": False,
+                                   "spill": 0}}
+    edl = {"keep": [[2.0, 6.0]], "frame": {"ratio": "9:16",
+                                           "mode": "crop"},
+           "motion": [item]}
+    om = os.path.join(bd, "magenta_stage.mp4")
+    _secs, wd = _render_l(w, edl, om, preview=False,
+                          locals_={"local/mag.mp4": mag})
+    rows = _slots_rows(wd)
+    frs, info = _frames_of(om)
+    errs = []
+    if rows:
+        sc = float(rows[0].get("scale") or 1.0)
+        for k in (20, 45, 70):
+            r = [q for q in rows[0]["frames"][k] if q[0] == "screen"]
+            if not r or k >= len(frs):
+                continue
+            x, y, ww, hh = (v * sc for v in r[0][1:5])
+            f = frs[k].astype(np.float32)
+            # magenta coverage 0..1 per pixel (B, G, R order): the screen's
+            # edge is where coverage crosses one half, to a sub-pixel
+            cov = np.clip(((f[..., 2] + f[..., 0]) / 2.0 - f[..., 1])
+                          / 255.0, 0.0, 1.0)
+            cy_, cx_ = int(y + hh / 2), int(x + ww / 2)
+
+            def crossings(line):
+                on = line >= 0.5
+                idx = np.where(on)[0]
+                if not len(idx):
+                    return None
+                a0, b0 = idx.min(), idx.max()
+                # coverage-weighted edges: an edge pixel half covered sits
+                # at its own centre
+                lo = a0 - (line[a0 - 1] if a0 > 0 else 0.0)
+                hi = b0 + 1 + (line[b0 + 1] if b0 + 1 < len(line) else 0.0)
+                return lo, hi
+            hx, vy = crossings(cov[cy_]), crossings(cov[:, cx_])
+            if hx is None or vy is None:
+                continue
+            errs += [abs(hx[0] - x), abs(hx[1] - (x + ww)),
+                     abs(vy[0] - y), abs(vy[1] - (y + hh))]
+    out["screen_edge_err_px_max"] = _m(None if not errs else max(errs), 1.0,
+                                       "<=", "px")
+    # 2. spill: the stage's glow under the device vs the screen's mean —
+    # a screen that cycles red, green, blue (the valmera.io recording is
+    # near-black: its mean barely moves, nothing to follow), then the real
+    # recording for the board
+    cyc = os.path.join(bd, "rgb_cycle.mp4")
+    if not os.path.exists(cyc):
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+             "color=c=red:s=640x400:r=30:d=1", "-f", "lavfi", "-i",
+             "color=c=0x00C000:s=640x400:r=30:d=1", "-f", "lavfi", "-i",
+             "color=c=blue:s=640x400:r=30:d=1", "-filter_complex",
+             "[0][1][2]concat=n=3:v=1,format=yuv420p", "-c:v", "libx264",
+             "-crf", "1", cyc], check=True)
+    item2 = dict(item, params={"screen": "asset:local/cyc.mp4",
+                               "device": "laptop", "float": False})
+    edl2 = dict(edl, motion=[item2])
+    ou = os.path.join(bd, "cycle_stage.mp4")
+    _render_l(w, edl2, ou, preview=False, locals_={"local/cyc.mp4": cyc})
+    # the same stage without spill: the difference IS the spill's light
+    o0 = os.path.join(bd, "cycle_nospill.mp4")
+    _render_l(w, dict(edl, motion=[dict(item2, params=dict(
+        item2["params"], spill=0))]), o0, preview=False,
+        locals_={"local/cyc.mp4": cyc})
+    f0, _i0 = _frames_of(o0)
+    ui_board = os.path.join(bd, "ui_stage.mp4")
+    _render_l(w, dict(edl, motion=[dict(item, params={
+        "screen": "asset:local/ui.mp4", "device": "laptop",
+        "title": "STUDIO"})]), ui_board, preview=False,
+        locals_={"local/ui.mp4": ui})
+    ui = cyc
+
+    class _C:
+        src_path = None
+        clock_offset = 0.0
+        fetch_asset = staticmethod(lambda key: ui)
+    sp = slots.spill(dict(item2, start=0.0, end=3.0), _C(), fps=10.0) or []
+    fu, info_u = _frames_of(ou)
+    rows_u = []
+    glow = []
+    if rows:
+        sc = float(rows[0].get("scale") or 1.0)
+        r = [q for q in rows[0]["frames"][10] if q[0] == "screen"][0]
+        x, y, ww, hh = (v * sc for v in r[1:5])
+        y_lo = int(y + hh * 1.25)
+        y_hi = min(info_u["height"], int(y + hh * 1.6))
+        x_lo, x_hi = int(x + ww * 0.3), int(x + ww * 0.7)
+        fps_u = float(info_u.get("fps") or 30.0)   # V01 runs at 25 fps
+        for k in range(0, min(len(fu), len(f0), int(3.0 * fps_u)), 2):
+            dl = (fu[k][y_lo:y_hi, x_lo:x_hi].astype(np.float32)
+                  - f0[k][y_lo:y_hi, x_lo:x_hi].astype(np.float32))
+            glow.append(np.maximum(0.0, dl.reshape(-1, 3).mean(
+                axis=0)[::-1]))
+            rows_u.append(sp[min(len(sp) - 1, int(round(k / fps_u
+                                                          * 10.0)))]
+                          if sp else None)
+    corr = None
+    if glow and all(r_ is not None for r_ in rows_u):
+        a_ = np.array(glow, float)
+        b_ = np.array(rows_u, float)
+        # the glow's colour DIRECTION follows the screen's: correlate each
+        # channel's share (luminance would mostly read the stage)
+        an = a_ / np.maximum(1e-6, a_.sum(axis=1, keepdims=True))
+        bn = b_ / np.maximum(1e-6, b_.sum(axis=1, keepdims=True))
+        cs = []
+        for ch in range(3):
+            if np.std(an[:, ch]) > 1e-4 and np.std(bn[:, ch]) > 1e-4:
+                cs.append(float(np.corrcoef(an[:, ch], bn[:, ch])[0, 1]))
+        corr = float(np.mean(cs)) if cs else None
+    out["spill_colour_corr"] = _m(corr, 0.7, ">=")
+    detail["spill_samples"] = len(glow)
+    detail["screen_colour_range"] = None if not rows_u else [
+        np.array(rows_u).min(axis=0).tolist(),
+        np.array(rows_u).max(axis=0).tolist()]
+    return {"metrics": out, "status": _status(out),
+            "board": [ui_board, ou, om], "detail": detail}
+
+
+def at_3e_3():
+    """The edit's own breakdown: labels are the EDL's names (tests:
+    test_the_breakdown_is_drawn_from_the_edl) and the live playhead sits
+    where the page's own clock puts it, +-1 px."""
+    import motion_engine
+    w = win("V02", "thiel_flying_cars")
+    bd = board_dir("AT-3E-3")
+    item = {"id": "bd", "template": "breakdown", "start": 0.0, "end": 6.0,
+            "params": {"title": "HOW THIS WAS MADE"}}
+    edl = {"keep": [[26.0, 30.0], [40.0, 44.0]],
+           "frame": {"ratio": "9:16", "mode": "crop"},
+           "motion": [{"id": "w1", "template": "word_slam", "start": 1.0,
+                       "end": 2.5, "params": {"text": "FLYING"}}, item]}
+    ob = os.path.join(bd, "breakdown.mp4")
+    _render_l(w, edl, ob, preview=False)
+    frs, info = _frames_of(ob)
+    Wp, Hp = info["width"], info["height"]
+    dw, dh = motion_engine.design_size(Wp, Hp)
+    k_ = dw / 1080.0
+    sc = Wp / float(dw)
+    ph = 0.26 * dh
+    top = dh - ph
+    y0 = top + 56 * k_
+    dur = 8.0
+    span = min(dur, 8.0)
+    errs = {"frame_start": [], "frame_centre": []}
+    for k in range(5, min(len(frs), 175), 6):
+        f = frs[k].astype(np.int16)
+        ya, yb = int((y0 - 14 * k_) * sc), int((y0 - 7 * k_) * sc)
+        band = f[ya:yb]
+        m = (band[..., 2] > 200) & (band[..., 1] < 110) & (band[..., 0] < 110)
+        xs = np.where(m.any(axis=0))[0]
+        if not len(xs):
+            continue
+        got = (xs.min() + xs.max()) / 2.0
+        for key, t in (("frame_start", k / 30.0),
+                       ("frame_centre", (k + 0.5) / 30.0)):
+            now = t
+            v0 = max(0.0, min(dur - span, now - span * 0.35))
+            X = 150 * k_ + (now - v0) / span * (dw - 175 * k_)
+            errs[key].append(abs(got - X * sc))
+    best = min(errs, key=lambda q: np.mean(errs[q]) if errs[q] else 1e9)
+    e = errs[best]
+    metrics = {"playhead_err_px_max": _m(None if not e else max(e), 1.0,
+                                         "<=", "px")}
+    return {"metrics": metrics, "status": _status(metrics), "board": [ob],
+            "detail": {"clock": best, "frames": len(e),
+                       "other_clock_max": {q: round(max(v), 2) if v else None
+                                           for q, v in errs.items()}}}
+
+
+def at_3e_6():
+    """HUD furniture in 16:9, 4:5 and 9:16: zero pixels in the corner-mark
+    zone; it persists across cuts."""
+    import keepout
+    w = win("V01", "thiel_ai_bigger")
+    out = {}
+    detail = {}
+    for ratio in ("16:9", "4:5", "9:16"):
+        import renderer
+        Wp, Hp = renderer.frame_dims(float(w["width"]), float(w["height"]),
+                                     ratio)
+        mark = keepout.watermark_zone(int(Wp), int(Hp))
+        hud = {"id": "hud", "template": "hud", "start": 0.0, "end": 6.0,
+               "params": {"tl": "DEV DAY 2025", "tr": "SAN FRANCISCO",
+                          "bl": "KEYNOTE", "br": "CH. 02", "rec": True,
+                          "timecode": True, "brackets": True,
+                          "mark": [str(x) for x in mark]},
+               "layer": "above_captions", "mute_captions": False}
+        edl = {"keep": [[2.0, 5.0], [10.0, 13.0]],
+               "frame": {"ratio": ratio, "mode": "crop"}, "motion": [hud]}
+        if True:
+            # the HUD's pixels: a render with it vs the same render without
+            bd = board_dir("AT-3E-6")
+            oa = os.path.join(bd, f"hud_{ratio.replace(':', 'x')}.mp4")
+            ob = os.path.join(bd, f"plain_{ratio.replace(':', 'x')}.mp4")
+            _render(w, edl, oa)
+            _render(w, {k: v for k, v in edl.items() if k != "motion"}, ob)
+            fa, info = _frames_of(oa)
+            fb, _i = _frames_of(ob)
+            Wq, Hq = info["width"], info["height"]
+            mx0, my0 = int(mark[0] * Wq), int(mark[1] * Hq)
+            mx1, my1 = int(np.ceil(mark[2] * Wq)), int(np.ceil(mark[3]
+                                                               * Hq))
+            in_zone, across = 0, []
+            for k in range(min(len(fa), len(fb))):
+                d = np.abs(fa[k].astype(np.int16) - fb[k].astype(np.int16)
+                           ).max(axis=2)
+                in_zone += int((d[my0:my1, mx0:mx1] > 24).sum())
+                across.append(float((d > 24).mean()))
+            cut_f = int(round(3.0 * float(info.get("fps") or 30.0)))
+            persists = all(x > 0.0005 for x in across[cut_f - 3:cut_f + 3])
+            out[f"zone_px_{ratio}"] = _m(in_zone, 0, "<=", "px")
+            out[f"persists_{ratio}"] = _m(1.0 if persists else 0.0, 1.0,
+                                          "==")
+            detail[ratio] = {"mark": mark, "frames": len(fa)}
+    return {"metrics": out, "status": _status(out), "detail": detail}
+
+
+# ── 3F agent layer ─────────────────────────────────────────────────────
+
+def at_3f_2():
+    """The attachment language: the owner's four phrases each write the
+    right device and anchor (the verbs on a tool context, through
+    apply_edit_batch)."""
+    import importlib.util
+    here = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "tests")
+    sys.path.insert(0, here)
+    spec = importlib.util.spec_from_file_location(
+        "w3f", os.path.join(here, "test_w3f_agent.py"))
+    t = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(t)
+    from tools_ext import world_tools as WT
+    WT._executor_refusal = lambda: None
+    WT._launch_source = lambda ctx: None
+    cases = []
+    for name in ("test_put_the_price_on_the_desk",
+                 "test_hide_the_word_behind_the_laptop",
+                 "test_make_the_label_follow_his_hand",
+                 "test_arc_it_round_his_head"):
+        try:
+            getattr(t, name)()
+            cases.append((name, True, ""))
+        except Exception as e:  # noqa: BLE001
+            cases.append((name, False, f"{type(e).__name__}: {e}"))
+    ok = sum(1 for _n, g, _e in cases if g)
+    metrics = {"phrases_correct": _m(ok, 4, ">=")}
+    return {"metrics": metrics, "status": _status(metrics),
+            "detail": {"cases": cases,
+                       "footage": "the verbs map program fractions to "
+                                  "SOURCE through the render geometry; the "
+                                  "real-footage placements are AT-3A-2, "
+                                  "AT-3B-1 and the W3-S1 board"}}
+
+
+BRIEFS = {
+    "16": "floor type with my shadow, a word hidden behind the calendar, "
+          "type running along my outline, silhouettes in colour fields",
+    "21": "type on the wall and on the desk, a word behind the laptop, "
+          "arcs, a card on my fingertip, no device twice",
+    "38": "poster colour fields, BECAUSE behind me, an arc round my head, "
+          "type on the desk, a vector burst",
+}
+
+
+def at_3f_3():
+    """plan_footage for briefs in the manner of refs 16, 21 and 38."""
+    import coverage
+    out, detail = {}, {}
+    bd = board_dir("AT-3F-3")
+    boards = []
+    for ref, brief in BRIEFS.items():
+        plan = coverage.plan_footage(brief)
+        out[f"ref{ref}_shots"] = _m(len(plan["shots"]), 12, "<=")
+        out[f"ref{ref}_minutes"] = _m(plan["minutes"], 20.0, "<=", "min")
+        out[f"ref{ref}_covered"] = _m(plan["covered"], 0.9, ">=")
+        detail[ref] = {"shots": [c["name"] for c in plan["shots"]],
+                       "devices": plan["devices"],
+                       "options": coverage.acquisition(plan, 4.0)}
+        boards.append(coverage.sheet_png(plan, os.path.join(
+            bd, f"shots_ref{ref}.png")))
+    return {"metrics": out, "status": _status(out), "board": boards,
+            "detail": detail}
+
+
+_UI_PAGE = """<!doctype html><html><head><meta charset=utf-8><style>
+body{margin:0;background:#fff;font:32px sans-serif}
+.b{position:absolute;color:#fff;padding:22px 36px;border-radius:8px}
+#r{left:140px;top:180px;background:#e8202a}
+#g{left:900px;top:420px;background:#1aa84a}
+#u{left:520px;top:640px;background:#2050e0}
+</style></head><body>
+<div class=b id=r>Start</div><div class=b id=g>Pricing</div>
+<div class=b id=u>Studio</div></body></html>"""
+
+
+def at_3f_4():
+    """DOM-targeted push and element iris: the recorder's element boxes
+    (webrecord, 3F) land on the element's own pixels in the delivered
+    video, +-2 % of the width. A local page with three coloured buttons,
+    driven by the real recorder (Chromium screencast and drawn cursor);
+    the harness lets it reach 127.0.0.1 — production keeps its guard."""
+    import http.server
+    import socketserver
+    import threading
+    import cv2
+    import net_fetch
+    import webrecord
+    root = tempfile.mkdtemp(prefix="at3f4_")
+    with open(os.path.join(root, "index.html"), "w") as fh:
+        fh.write(_UI_PAGE)
+
+    class Q(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=root, **k)
+
+        def log_message(self, *a):
+            pass
+    srv = socketserver.TCPServer(("127.0.0.1", 0), Q)
+    port = srv.server_address[1]
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    saved = (net_fetch.check_url, webrecord._guard_router)
+    net_fetch.check_url = lambda url, allowed_hosts=None: "127.0.0.1"
+
+    def open_router(cache):
+        def route_all(route):
+            route.continue_()
+        return route_all
+    webrecord._guard_router = open_router
+    colours = {"Start": (42, 32, 232), "Pricing": (74, 168, 26),
+               "Studio": (224, 80, 32)}
+    try:
+        got = webrecord.record_demo(
+            f"http://127.0.0.1:{port}/index.html", root,
+            [{"do": "hover", "text": "Start"},
+             {"do": "hover", "text": "Pricing"},
+             {"do": "hover", "text": "Studio"}])
+    finally:
+        net_fetch.check_url, webrecord._guard_router = saved
+        srv.shutdown()
+    path = got.get("path") or got.get("out")
+    evs = [e for e in got.get("events") or [] if e.get("box")]
+    errs, rows = [], []
+    for e in evs:
+        lab = e.get("label") or ""
+        bgr = colours.get(lab)
+        if bgr is None:
+            continue
+        fr = frames_bgr(path, float(e["t"]) + 0.05, 1)[0].astype(np.int16)
+        H, W = fr.shape[:2]
+        m = (np.abs(fr - np.array(bgr)).sum(axis=2) < 60)
+        ys, xs = np.where(m)
+        if not len(xs):
+            continue
+        vis = [xs.min() / W, ys.min() / H, (xs.max() + 1) / W,
+               (ys.max() + 1) / H]
+        b = e["box"]
+        cx_e, cy_e = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+        cx_v, cy_v = (vis[0] + vis[2]) / 2, (vis[1] + vis[3]) / 2
+        err = max(abs(cx_e - cx_v), abs(cy_e - cy_v) * H / W)
+        errs.append(err)
+        rows.append({"label": lab, "event_box": b,
+                     "pixels_box": [round(v, 4) for v in vis],
+                     "centre_err_pct_w": round(100 * err, 3)})
+    metrics = {"element_centre_err_pct": _m(None if not errs else
+                                            100 * max(errs), 2.0, "<=",
+                                            "% width"),
+               "elements_found": _m(len(errs), 3, ">=")}
+    bd = board_dir("AT-3F-4")
+    if path and os.path.exists(path):
+        import shutil
+        shutil.copy(path, os.path.join(bd, "ui_demo.mp4"))
+    return {"metrics": metrics, "status": _status(metrics),
+            "board": [os.path.join(bd, "ui_demo.mp4")],
+            "detail": {"elements": rows,
+                       "push": "showcase_demo zooms to the event's x,y; "
+                               "with a box the push centres on the "
+                               "element's box (webrecord.element_at)"}}
+
+
+def at_3f_5():
+    """A warmed upload (V09): the upload-time policy measures the matte
+    (and the face mesh) on the batch lane before anyone asks; the first
+    matte device then renders at its full rung with no wait."""
+    import fxgraph
+    import sidecars
+    import warmers
+    w = win("V09", "jensen_windows")
+    src = w3.source_ref(w)
+    old = os.environ.get("SIDECAR_WARM_UPLOAD")
+    os.environ["SIDECAR_WARM_UPLOAD"] = "1"
+    t0 = time.time()
+    try:
+        sidecars._reset_caches()
+        hs = warmers.warm_upload(src)
+        sidecars._launcher().join(1800)
+    finally:
+        if old is None:
+            os.environ.pop("SIDECAR_WARM_UPLOAD", None)
+        else:
+            os.environ["SIDECAR_WARM_UPLOAD"] = old
+    warm_s = time.time() - t0
+    sidecars._reset_caches()
+    pol = warmers.policy(src.duration_s, src.shots or ())
+    state = warmers.warm_state(src, pol[0][1]) if pol else {}
+    # the first matte device on that upload: a preview render of a light
+    # rim at an arbitrary moment — its rung, and the render's wall time
+    lt = {"id": "lr", "type": "light", "stage": "world", "start": 3.0,
+          "end": 4.5, "kind": "rim", "colour": "#ff8a3d",
+          "device": "light_rim"}
+    edl = {"keep": [[20.0, 26.0]], "frame": V09_FRAME, "fx": [lt]}
+    rows = []
+    tok = fxgraph.collect(rows)
+    try:
+        # a FINAL: it would wait up to 90 s for a matte that is not there;
+        # a preview never waits but spends a device budget
+        out = os.path.join(board_dir("AT-3F-5"), "first_device.mp4")
+        secs = _render(w, edl, out, preview=False)
+    finally:
+        fxgraph.stop_collecting(tok)
+    rep = {r["id"]: r for r in fxgraph.merge_report(rows)}
+    rung = (rep.get("lr") or {}).get("rung")
+    reason = str((rep.get("lr") or {}).get("reason") or "")
+    waited = any(w_ in reason for w_ in ("absent", "pending", "measur"))
+    metrics = {
+        "matte_warm_share": _m(state.get("matte.person"), 1.0, ">="),
+        "first_device_full_rung": _m(1.0 if rung == "full" else 0.0, 1.0,
+                                     "=="),
+        "first_device_waited_on_matte": _m(1.0 if waited else 0.0, 0.0,
+                                           "<="),
+    }
+    return {"metrics": metrics, "status": _status(metrics), "board": [out],
+            "detail": {"kinds": sorted(hs), "warm_state": state,
+                       "warm_wall_s": round(warm_s, 1),
+                       "first_render_s": round(secs, 1),
+                       "report": rep.get("lr")}}
+
+
 # ── registry ──────────────────────────────────────────────────────────
 
 RUNS = {"AT-3A-1": at_3a_1, "AT-3A-2": at_3a_2, "AT-3A-3": at_3a_3,
         "AT-3A-4": at_3a_4, "AT-3A-5": at_3a_5, "AT-3A-6": at_3a_6,
         "AT-3B-1": at_3b_1, "AT-3B-2": at_3b_2, "AT-3B-3": at_3b_3,
-        "AT-3C-2": at_3c_2, "AT-3C-3": at_3c_3}
+        "AT-3C-2": at_3c_2, "AT-3C-3": at_3c_3,
+        "AT-3D-1": at_3d_1, "AT-3D-3": at_3d_3, "AT-3D-4": at_3d_4,
+        "AT-3D-5": at_3d_5, "AT-3E-1": at_3e_1, "AT-3E-2": at_3e_2,
+        "AT-3E-3": at_3e_3, "AT-3E-4": at_3e_4, "AT-3E-5": at_3e_5,
+        "AT-3E-6": at_3e_6, "AT-3F-2": at_3f_2, "AT-3F-3": at_3f_3,
+        "AT-3F-4": at_3f_4, "AT-3F-5": at_3f_5}
 BLOCKED = {
     "AT-3B-4": "HC-F required (fast thrown objects; no library stand-in)",
     "AT-3B-5": "needs a labelled alpha matte for the edge error (no cutout "
                "lane in Wave 3)",
     "AT-3C-1": "HC-A required (type on the floor under the creator's real "
                "shadow)",
+    "AT-3D-2": "not measured: sprite positions are the page's own "
+               "choreography math (no exported spec to compare against); "
+               "determinism of the element pages is AT-3D-5",
 }
 
 

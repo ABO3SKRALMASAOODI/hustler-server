@@ -20,8 +20,10 @@ second), never stock.
   one per beat on a surface seen from above.
 - **Stack** (`set_stack`): two to four INDEPENDENT sources at once — then
   and now, the edit and its source, three angles of one moment. One panel
-  can grow to take the frame. Accents (a flash, a negative) can be clipped
-  to one panel with `add_region_effect` and the rect the verb replies with.
+  can grow to take the frame. Accents (a flash, a negative) are clipped
+  to one panel with `add_region_effect(stage='over_type', ...)` and the
+  rect the verb replies with (the stack is a graphic: a lower stage would
+  sit under it).
 - **Device stage** (`add_device_stage`): the product's own recording in a
   laptop / phone / tablet / monitor, its light spilling on the stage; a
   `breakout` lifts the part of the UI the line is about out of the screen.

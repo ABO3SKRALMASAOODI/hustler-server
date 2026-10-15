@@ -167,8 +167,10 @@ def set_stack(ctx, panels, start, end=None, labels=None, direction=None,
             rects.append([round(g + k * (1 - g) / n, 4), round(g * H / W, 4),
                           round((k + 1) * (1 - g) / n, 4),
                           round(1 - g * H / W, 4)])
-    return res + "\nPanel rects (clip a flash or effect to one with " \
-        "add_region_effect region rect:...): " + "; ".join(
+    return res + "\nPanel rects (clip a flash or effect to one panel: " \
+        "add_region_effect(stage='over_type', region rect:...) or an " \
+        "accent with that region at stage over_type — the stack is a " \
+        "graphic, so a lower stage would sit under it): " + "; ".join(
             f"{k}: {r}" for k, r in enumerate(rects))
 
 
