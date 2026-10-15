@@ -190,3 +190,34 @@ def test_users_words_pick_the_later_genres_too():
     assert formats.select(None, None, "an event recap sizzle")[0]["id"] == \
         "G"
     assert formats.select(None, None, "lyric video please")[0]["id"] == "H"
+
+
+# ── a sped segment's internal joins never click (W2 review open item) ──
+
+def test_sped_piece_joins_fade_without_moving_time():
+    import renderer
+    from timeline import Timeline
+    edl = schemas.validate_edl({"keep": [[0.0, 10.0]], "speed": [
+        {"id": "sp1", "start": 3.0, "end": 5.0, "factor": 0.5}]},
+        10.0).model_dump()
+    tl = Timeline(edl["keep"], edl.get("inserts") or [], edl.get("speed"))
+    g = renderer.build_filtergraph(
+        edl, 10.0, True, tl, None, [], {}, False, W=1080, H=1920, fps=30,
+        frame_mode="crop", src_w=1920, src_h=1080)
+    import re
+    pieces = re.findall(r"\[pa0_(\d)\]atrim=[^\[]*\[paz0_\1\]", g)
+    assert len(pieces) == 3, g[:2000]
+    chains = {int(j): re.search(rf"\[pa0_{j}\]atrim=[^\[]*", g).group(0)
+              for j in pieces}
+    assert "afade=t=out" in chains[0] and "afade=t=in" not in chains[0]
+    assert "afade=t=in" in chains[1] and "afade=t=out" in chains[1]
+    assert "afade=t=in" in chains[2] and "afade=t=out" not in chains[2]
+    # the slowed piece is 4 s long on the program clock: its fade-out
+    # starts 4 ms before its end
+    assert "afade=t=out:st=3.996000" in chains[1]
+    # a program without speed spans is untouched
+    plain = schemas.validate_edl({"keep": [[0.0, 10.0]]}, 10.0).model_dump()
+    g2 = renderer.build_filtergraph(
+        plain, 10.0, True, Timeline(plain["keep"]), None, [], {}, False,
+        W=1080, H=1920, fps=30, frame_mode="crop", src_w=1920, src_h=1080)
+    assert "afade=t=in:st=0:d=0.004" not in g2

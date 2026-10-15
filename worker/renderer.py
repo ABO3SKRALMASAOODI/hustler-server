@@ -3806,8 +3806,20 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 parts.append(f"[pv{i}_{j}]trim=start={ps:.3f}:end={pe:.3f},"
                              f"setpts=(PTS-STARTPTS){spts}[pvz{i}_{j}]")
             tempo = "" if abs(f - 1.0) < 1e-9 else f",{_atempo_chain(f)}"
+            # Joins INSIDE a sped segment meet two independently retimed
+            # pieces: the waveform steps (a click measured at 2.25x the
+            # local peak, W2 review). A 4 ms fade on each side of an
+            # internal join removes the step without moving a sample's
+            # time (the block length is exact either way).
+            plen = (pe - ps) / f
+            jf = ""
+            if k > 1 and plen > 0.02:
+                if j > 0:
+                    jf += ",afade=t=in:st=0:d=0.004"
+                if j < k - 1:
+                    jf += f",afade=t=out:st={max(0.0, plen - 0.004):.6f}:d=0.004"
             parts.append(f"[pa{i}_{j}]atrim=start={ps:.3f}:end={pe:.3f},"
-                         f"asetpts=PTS-STARTPTS{tempo},{AUDIO_NORM}"
+                         f"asetpts=PTS-STARTPTS{tempo},{AUDIO_NORM}{jf}"
                          f"[paz{i}_{j}]")
             p_acc += (pe - ps) / f
         # On the block clock the sped sound is padded or trimmed to its
