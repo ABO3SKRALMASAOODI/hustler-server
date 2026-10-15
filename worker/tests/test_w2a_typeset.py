@@ -266,3 +266,25 @@ def test_cards_are_owner_safe():
         assert c["owner_flags"] == {"adds_sound": False, "adds_zoom": False,
                                     "flash": False}
         assert c["verb"] == "add_typeset"
+
+
+def test_consecutive_lockups_change_family_and_never_overlap(monkeypatch):
+    """Range, not a house layout: a lockup never repeats the family of the
+    one before when another fits; and two lockups are never on screen at
+    once (the earlier one ends when the next starts, never before its own
+    last word is out)."""
+    ctx = Ctx(edl())
+    monkeypatch.setattr(tt, "_faces", lambda *a, **k: FACE["16:9"])
+    phrases = [("perhaps AI", 0.6, 3.0), ("is bigger than", 2.8, 5.0),
+               ("the internet", 4.9, 6.2), ("at least has", 6.0, 7.4)]
+    for text, s, e in phrases:
+        out = tt.add_typeset(ctx, text=text, start=s, end=e,
+                             voice="magazine")
+        assert out.startswith("EDL"), out
+    from typeset import layoutdoc
+    ms = sorted((m for m in ctx.edl["motion"] if m["template"] == "typeset"),
+                key=lambda m: m["start"])
+    fams = [layoutdoc.solve_item(m, 1920, 1080).get("family") for m in ms]
+    assert all(a != b for a, b in zip(fams, fams[1:])), fams
+    for a, b in zip(ms, ms[1:]):
+        assert a["end"] <= b["start"] + 1e-6, (a["id"], b["id"])

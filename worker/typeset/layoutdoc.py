@@ -331,6 +331,17 @@ def solve_item(item, out_w, out_h, fps=30.0, faces=None):
     prefer = None
     doc = build_doc(params, W=W, H=H, fps=fps, duration=full, onsets=on,
                     faces=faces, watermark=wm, prefer=prefer)
+    if not doc.get("runs") and params.get("layout") not in (None, "",
+                                                             "auto"):
+        # a named family that does not fit THIS canvas (another aspect, a
+        # face that moved) falls back to the solver's own choice: a lockup
+        # whose words the captions gave up is never left undrawn
+        asked = params.get("layout")
+        doc = build_doc(dict(params, layout="auto"), W=W, H=H, fps=fps,
+                        duration=full, onsets=on, faces=faces, watermark=wm,
+                        prefer=prefer)
+        doc.setdefault("solver_report", {})["layout_fallback"] = (
+            f"{asked} did not fit this canvas")
     with _CACHE_LOCK:
         if len(_CACHE) >= _CACHE_MAX:
             _CACHE.clear()

@@ -197,10 +197,15 @@ def render_variants(ctx, id=None, n=3, axis="voice"):
                                                        m.get("id") == id))
     mid = (float(item["start"]) + float(item["end"])) / 2.0
     frame = _program_frame(ctx, edl, mid, W, H)
+    try:
+        import library
+        faces = [tuple(d["box"]) for d in (library.yunet_faces(frame) or [])]
+    except Exception:  # noqa: BLE001 — solved without a face then
+        faces = []
     images, labels = [], []
     for voice, e in br:
         it = next(m for m in e["motion"] if m["id"] == item["id"])
-        doc = layoutdoc.solve_item(it, W, H)
+        doc = layoutdoc.solve_item(it, W, H, faces=faces)
         if not doc.get("runs"):
             continue
         images.append(variants_edit.raster(doc, frame))

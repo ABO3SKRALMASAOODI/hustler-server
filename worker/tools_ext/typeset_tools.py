@@ -163,6 +163,13 @@ def solve_into(ctx, edl, item, faces=None):
     if rep.get("voice_fallback"):
         item["params"]["voice"] = doc.get("voice")
         notes.append("voice " + rep["voice_fallback"])
+    asked = item["params"].get("layout")
+    if asked not in (None, "", "auto") and doc.get("family") and \
+            doc.get("family") != asked:
+        # what renders is what was solved: the family the solver fell back
+        # to is written, so the render never re-tries a family that failed
+        item["params"]["layout"] = doc["family"]
+        notes.append(f"layout {asked} did not fit; set as {doc['family']}")
     if rep.get("callback"):
         notes.append("rhymes with its first telling (same geometry)")
     if rep.get("depth_fallback"):
@@ -215,10 +222,89 @@ def build_item(ctx, edl, text, s, e, mid, voice="auto", depth="front",
             "end": round(float(e), 2), "params": params,
             "layer": "above_captions",
             "purpose": "typeset lockup (replaces the captions for its words)"}
-    item, doc, notes = solve_into(ctx, edl, item, faces=faces)
+    item, doc, notes = solve_varied(ctx, edl, item, faces=faces)
     if item is None:
         return None, notes
     return item, None
+
+
+# families any voice can set besides its own (the special ones, quote
+# window, arc and slots, stay with their voices)
+GENERAL_FAMILIES = ("side_column", "justified", "staircase", "spread",
+                    "stack_up", "flank", "magazine", "stack",
+                    "constellation")
+VARY_TRIES = 5
+
+
+def _recent_families(ctx, edl, s, n=2):
+    """Families of the last ``n`` typeset lockups before program second s."""
+    try:
+        import motion_tools
+        from typeset import layoutdoc
+        W, H = motion_tools._canvas_size(ctx, edl)
+        prev = sorted((m for m in edl.get("motion") or []
+                       if m.get("template") == "typeset"
+                       and float(m.get("start") or 0) < s),
+                      key=lambda m: float(m.get("start") or 0))[-n:]
+        return [layoutdoc.solve_item(m, W, H).get("family") for m in prev]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def solve_varied(ctx, edl, item, faces=None):
+    """solve_into with range: when the layout is 'auto' (and the item is
+    not a callback, whose geometry IS the point), the families of the last
+    two lockups are tried last, so consecutive lockups never share a family
+    when another one fits. A family that fits is written into the params
+    (what renders is what was solved; another aspect falls back to auto)."""
+    p = item.get("params") or {}
+    if p.get("layout") not in (None, "", "auto") or p.get("callback_of"):
+        return solve_into(ctx, edl, item, faces=faces)
+    from typeset import voices as V
+    recent = [f for f in _recent_families(ctx, edl, float(item["start"]))
+              if f]
+    if not recent:
+        return solve_into(ctx, edl, item, faces=faces)
+    own = list((V.VOICES.get(p.get("voice")) or {}).get("layouts") or ())
+    order = [f for f in own if f not in recent] + \
+        [f for f in GENERAL_FAMILIES if f not in own and f not in recent]
+    for fam in order[:VARY_TRIES]:
+        trial = dict(item, params=dict(p, layout=fam))
+        it, doc, notes = solve_into(ctx, edl, trial, faces=faces)
+        if it is not None and doc.get("family") == fam:
+            return it, doc, notes + [f"family {fam} (the last lockups were "
+                                     f"{', '.join(recent)})"]
+    return solve_into(ctx, edl, item, faces=faces)
+
+
+def trim_previous(edl, item, pw=None, min_s=0.4):
+    """Ops ending any earlier typeset lockup still on screen when this one
+    starts (two lockups solved independently would draw over each other);
+    one that cannot keep ``min_s`` of its own is left for the user. A
+    lockup is never ended before its own last word is out: the new one
+    starts later instead (``item['start']`` moves, never past its first
+    word's onset)."""
+    s = float(item["start"])
+    out = []
+    for m in edl.get("motion") or []:
+        if m.get("template") != "typeset" or m.get("id") == item.get("id"):
+            continue
+        a, b = float(m.get("start") or 0), float(m.get("end") or 0)
+        if not a < s < b:
+            continue
+        last = None
+        if pw:
+            hit = match_words(str((m.get("params") or {}).get("text", "")),
+                              pw)
+            last = float(hit[1]["t1"]) if hit else None
+        cut = s if last is None else max(s, last)
+        if last is not None and last > s:
+            item["start"] = round(min(last, float(item["end"]) - 0.4), 2)
+            cut = float(item["start"])
+        if cut - a >= min_s and cut < b:
+            out.append({"action": "upsert", "layer": "motion", "id": m["id"],
+                        "value": {"id": m["id"], "end": round(cut, 2)}})
+    return out
 
 
 def _summary(item, doc):
@@ -296,6 +382,11 @@ def add_typeset(ctx, text=None, start=None, end=None, voice="auto",
     if any(m.get("id") == mid for m in items):
         return (f"REJECTED: '{mid}' already exists — use set_typeset to "
                 "change it.")
+    # no two lockups on screen at once: the previous one ends here (never
+    # before its own last word), solved before this one is
+    prov = {"id": mid, "start": s, "end": e}
+    trims = trim_previous(edl, prov, pw)
+    s = float(prov["start"])
     import creative
     reason = None
     cb = None
@@ -337,15 +428,18 @@ def add_typeset(ctx, text=None, start=None, end=None, voice="auto",
     item = {"id": mid, "template": "typeset", "start": s, "end": e,
             "params": params, "layer": "above_captions",
             "purpose": "typeset lockup (replaces the captions for its words)"}
-    item, doc, notes = solve_into(ctx, edl, item)
+    item, doc, notes = solve_varied(ctx, edl, item)
     if item is None:
         return (f"REJECTED: {notes} — try fewer words, another voice "
                 "(e.g. editorial_serif for a long line), layout "
                 "side_column, or depth front.")
     op = {"action": "upsert", "layer": "motion", "id": mid, "value": item}
-    res = _write.commit(ctx, [op], _summary(item, doc))
+    res = _write.commit(ctx, trims + [op], _summary(item, doc))
     if res.startswith("REJECTED") or res.startswith("NO CHANGE"):
         return res
+    if trims:
+        res += "\n" + "; ".join(f"{t['id']} now ends at {t['value']['end']:g}s"
+                                 for t in trims) + " (no two lockups overlap)"
     extra = []
     if reason:
         extra.append(f"voice: {reason}")
