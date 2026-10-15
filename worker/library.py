@@ -38,6 +38,7 @@ DESC_W, DESC_H = 192, 108
 CUT_MIN_S = 0.4                 # a shot shorter than this is a flash
 CLUSTER_SIM = 0.88
 SHOT_PAD_S = 0.12               # keep off a detected cut by this much
+WINDOW_S = 4.0                  # long shots are described per window
 
 
 def _ffmpeg():
@@ -54,6 +55,41 @@ def decode(path, fps, w, h, pix="gray", max_s=600.0):
     n = len(raw) // (w * h * c)
     arr = np.frombuffer(raw[:n * w * h * c], np.uint8)
     return arr.reshape((n, h, w) if c == 1 else (n, h, w, 3))
+
+
+RGB_FPS = 2.0
+
+
+def decode_once(path, max_s=600.0):
+    """ONE decode pass (a 4K60 clip is decode-bound): RGB frames at
+    CUT_FPS and DESC size, streamed; returns (gray [n, CUT_H, CUT_W] at
+    CUT_FPS, rgb [m, DESC_H, DESC_W, 3] at RGB_FPS)."""
+    cmd = [_ffmpeg(), "-v", "error", "-threads", "0", "-i", path, "-t",
+           f"{max_s:.3f}", "-an", "-vf",
+           f"fps={CUT_FPS},scale={DESC_W}:{DESC_H}:flags=area", "-f",
+           "rawvideo", "-pix_fmt", "rgb24", "-"]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
+    size = DESC_W * DESC_H * 3
+    step = int(round(CUT_FPS / RGB_FPS))
+    grays, rgbs, i = [], [], 0
+    while True:
+        buf = proc.stdout.read(size)
+        if len(buf) < size:
+            break
+        f = np.frombuffer(buf, np.uint8).reshape(DESC_H, DESC_W, 3)
+        g = f.mean(axis=2)
+        g = g.reshape(CUT_H, DESC_H // CUT_H, CUT_W,
+                      DESC_W // CUT_W).mean(axis=(1, 3))
+        grays.append(g.astype(np.uint8))
+        if i % step == 0:
+            rgbs.append(f.copy())
+        i += 1
+    proc.wait()
+    if not grays:
+        return (np.zeros((0, CUT_H, CUT_W), np.uint8),
+                np.zeros((0, DESC_H, DESC_W, 3), np.uint8))
+    return np.stack(grays), np.stack(rgbs)
 
 
 def cuts(gray, fps=CUT_FPS):
@@ -86,6 +122,102 @@ def _cv2():
         return cv2
     except Exception:  # noqa: BLE001
         return None
+
+
+_YUNET = {}
+YUNET_MAX_SIDE = 640
+
+
+def yunet_faces(rgb, score=0.6):
+    """[{box, eyes: [[lx, ly], [rx, ry]], score}] by YuNet (the pinned
+    model, when this lane has it) in frame fractions; None when the model
+    is not here (the caller falls back to Haar boxes)."""
+    cv2 = _cv2()
+    if cv2 is None:
+        return None
+    try:
+        import analysis_jobs
+        path, _why = analysis_jobs.model_ready("yunet")
+    except Exception:  # noqa: BLE001
+        path = None
+    if not path:
+        return None
+    h, w = rgb.shape[:2]
+    # YuNet's anchors stop at ~300 px faces: a close-up on a full-size frame
+    # comes back as half a face. Detect at <= MAX_SIDE (fractions out).
+    if max(w, h) > YUNET_MAX_SIDE:
+        k = YUNET_MAX_SIDE / float(max(w, h))
+        w, h = max(2, int(round(w * k))), max(2, int(round(h * k)))
+        rgb = cv2.resize(rgb, (w, h), interpolation=cv2.INTER_AREA)
+    key = (path, w, h)
+    det = _YUNET.get(key)
+    if det is None:
+        det = cv2.FaceDetectorYN.create(path, "", (w, h), score, 0.3, 20)
+        _YUNET.clear()
+        _YUNET[key] = det
+    _ok, found = det.detect(cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+    out = []
+    for f in found if found is not None else ():
+        x, y, bw, bh = (float(v) for v in f[:4])
+        out.append({"box": [round(max(0.0, x / w), 4), round(max(0.0, y / h), 4),
+                            round(min(1.0, (x + bw) / w), 4),
+                            round(min(1.0, (y + bh) / h), 4)],
+                    "eyes": [[round(float(f[4]) / w, 4),
+                              round(float(f[5]) / h, 4)],
+                             [round(float(f[6]) / w, 4),
+                              round(float(f[7]) / h, 4)]],
+                    "score": round(float(f[14]), 3)})
+    out.sort(key=lambda d: -(d["box"][2] - d["box"][0]) *
+             (d["box"][3] - d["box"][1]))
+    return out
+
+
+CIRCLE_SUPPORT = 0.6
+
+
+def circle_support(gx, gy, cx, cy, r, n=72):
+    """Share of the circumference with a strong RADIAL edge: a real disc,
+    wheel or hatch rim, not an accumulator artefact of busy texture."""
+    h, w = gx.shape
+    mag = np.hypot(gx, gy)
+    thr = max(8.0, float(np.percentile(mag, 75)))
+    ok = 0
+    tot = 0
+    for k in range(n):
+        a = 2 * math.pi * k / n
+        x, y = cx + r * math.cos(a), cy + r * math.sin(a)
+        xi, yi = int(round(x)), int(round(y))
+        if not (0 <= xi < w and 0 <= yi < h):
+            continue
+        tot += 1
+        g = mag[yi, xi]
+        if g < thr:
+            continue
+        cos = abs(gx[yi, xi] * math.cos(a) + gy[yi, xi] * math.sin(a)) / g
+        ok += cos > 0.7
+    return ok / float(max(tot, 1)) if tot >= n * 0.6 else 0.0
+
+
+def find_circles(g8, max_n=4):
+    """[[cx, cy, r]] verified circles (frame fractions; r of the height)."""
+    cv2 = _cv2()
+    h, w = g8.shape
+    blur = cv2.GaussianBlur(g8, (5, 5), 1.5)
+    cs = cv2.HoughCircles(blur, cv2.HOUGH_GRADIENT, dp=1.2,
+                          minDist=max(8, w // 6), param1=120, param2=30,
+                          minRadius=max(5, h // 10), maxRadius=int(h * 0.48))
+    if cs is None:
+        return []
+    f = blur.astype(np.float32)
+    gy, gx = np.gradient(f)
+    out = []
+    for x, y, r in cs[0][:12]:
+        sup = circle_support(gx, gy, float(x), float(y), float(r))
+        if sup >= CIRCLE_SUPPORT:
+            out.append([round(float(x) / w, 3), round(float(y) / h, 3),
+                        round(float(r) / h, 3), round(sup, 2)])
+    out.sort(key=lambda c: -c[3])
+    return [c[:3] for c in out[:max_n]]
 
 
 def describe(rgb):
@@ -137,35 +269,83 @@ def describe(rgb):
     temp = float(B.mean())
     sat = float(np.hypot(A, B).mean() / 64.0)
     faces = []
+    eyes = []
     circles = []
     if cv2 is not None:
         g8 = (gray * 255).astype(np.uint8)
+        yn = None
         try:
-            import follow
-            big = cv2.resize(g8, (w * 2, h * 2))
-            faces = [list(map(lambda v: round(float(v), 3), b))
-                     for b, _look in follow.detect(big)][:4]
+            big = cv2.resize(rgb, (w * 3, h * 3))
+            yn = yunet_faces(big)
         except Exception:  # noqa: BLE001
-            faces = []
+            yn = None
+        if yn is not None:
+            faces = [d["box"] for d in yn][:4]
+            eyes = [d["eyes"] for d in yn][:4]
+        else:
+            try:
+                import follow
+                big = cv2.resize(g8, (w * 2, h * 2))
+                faces = [list(map(lambda v: round(float(v), 3), b))
+                         for b, _look in follow.detect(big)][:4]
+            except Exception:  # noqa: BLE001
+                faces = []
         try:
-            cs = cv2.HoughCircles(cv2.GaussianBlur(g8, (5, 5), 1.5),
-                                  cv2.HOUGH_GRADIENT, dp=1.5,
-                                  minDist=max(8, w // 6), param1=120,
-                                  param2=38, minRadius=max(4, h // 12),
-                                  maxRadius=h // 2)
-            if cs is not None:
-                circles = [[round(float(x) / w, 3), round(float(y) / h, 3),
-                            round(float(r) / h, 3)] for x, y, r in cs[0][:4]]
+            # a head is round: a circle centred inside a face is that face
+            circles = [c for c in find_circles(g8)
+                       if not any(b[0] <= c[0] <= b[2] and
+                                  b[1] - 0.1 <= c[1] <= b[3] + 0.05
+                                  for b in faces)]
         except Exception:  # noqa: BLE001
             circles = []
+    frame_vec = np.concatenate([luma, edges * 3.0])
+    frame_vec = frame_vec / (np.linalg.norm(frame_vec) + 1e-6)
     vec = np.concatenate([luma * 1.0, lab * 0.9, edges * 3.0])
     vec = vec / (np.linalg.norm(vec) + 1e-6)
     night = bright < 0.22 or (bright < 0.32 and temp < -4.0)
     return {"vec": [round(float(v), 4) for v in vec],
-            "faces": faces, "circles": circles,
+            "layout": [round(float(v), 4) for v in frame_vec],
+            "faces": faces, "eyes": eyes, "circles": circles,
             "bright": round(bright, 3), "temp": round(temp, 2),
             "sat": round(sat, 3), "sharp": round(sharp, 3),
             "dof": round(dof, 3), "night": bool(night)}
+
+
+def frame_at(path, t, width=960):
+    """One RGB frame of ``path`` at ``t`` seconds, ``width`` px wide."""
+    cmd = [_ffmpeg(), "-v", "error", "-ss", f"{max(0.0, float(t)):.3f}",
+           "-i", path, "-frames:v", "1", "-an", "-vf",
+           f"scale={width}:-2:flags=area", "-f", "rawvideo", "-pix_fmt",
+           "rgb24", "-"]
+    raw = subprocess.run(cmd, capture_output=True, check=True).stdout
+    h = len(raw) // (width * 3)
+    if h <= 0:
+        raise ValueError("no frame there")
+    return np.frombuffer(raw[:width * h * 3], np.uint8).reshape(h, width, 3)
+
+
+def refine_eyes(entry, path, width=960):
+    """The entry's first face re-measured at ``width`` px on its middle
+    frame (the descriptor's 192 px sample puts an eye within ~1% of the
+    height; a conform zooms that error 3-4x). Updates desc in place;
+    returns True when refined."""
+    d = entry.get("desc") or {}
+    if not d.get("eyes"):
+        return False
+    try:
+        found = yunet_faces(frame_at(path, entry["mid"], width))
+    except Exception:  # noqa: BLE001
+        return False
+    if not found:
+        return False
+    (lx, ly), (rx, ry) = d["eyes"][0]
+    m = ((lx + rx) / 2, (ly + ry) / 2)
+    best = min(found, key=lambda f: (
+        ((f["eyes"][0][0] + f["eyes"][1][0]) / 2 - m[0]) ** 2 +
+        ((f["eyes"][0][1] + f["eyes"][1][1]) / 2 - m[1]) ** 2))
+    d["eyes"] = [best["eyes"]] + list(d["eyes"][1:])
+    d["faces"] = [best["box"]] + list((d.get("faces") or [])[1:])
+    return True
 
 
 def scale_of(desc):
@@ -203,15 +383,20 @@ def analyze_clip(path, max_s=600.0):
                 "size": [int(img.shape[1]), int(img.shape[0])],
                 "shots": [{"t0": 0.0, "t1": 0.0, "mid": 0.0, "motion": 0.0,
                            "desc": d}]}
-    gray = decode(path, CUT_FPS, CUT_W, CUT_H, "gray", max_s)
+    gray, rgb = decode_once(path, max_s)
     dur = len(gray) / CUT_FPS
     cts = cuts(gray)
-    sh = shots_of(dur, cts)
-    rgb = decode(path, 2.0, DESC_W, DESC_H, "rgb", max_s)
+    sh = []
+    # a long shot is described window by window (a 60 s macro reel holds
+    # many pictures; one mid frame would see one of them)
+    for a, b in shots_of(dur, cts):
+        n = max(1, int(round((b - a) / WINDOW_S)))
+        for k in range(n):
+            sh.append((a + (b - a) * k / n, a + (b - a) * (k + 1) / n))
     out = []
     for a, b in sh:
         mid = (a + b) / 2.0
-        k = min(len(rgb) - 1, max(0, int(round(mid * 2.0))))
+        k = min(len(rgb) - 1, max(0, int(round(mid * RGB_FPS))))
         d = describe(rgb[k]) if len(rgb) else {}
         g = gray[int(a * CUT_FPS):max(int(a * CUT_FPS) + 2,
                                       int(b * CUT_FPS))].astype(np.float32)

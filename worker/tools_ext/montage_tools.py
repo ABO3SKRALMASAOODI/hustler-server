@@ -368,7 +368,7 @@ def plan(ctx, edl, start, end, *, music_id=None, shots=None, modes=None,
                                   for k, v in dict(montage.SECTION_MODE,
                                                    **(modes or {})).items()},
                            on=on, every=max(1, int(every or 1)))
-    rl = montage.roles(sl, style)
+    rl = montage.roles(sl, style, rmap.get("sections"))
     words = _program_words(ctx, edl) if style != "broll" else []
     prefix = prefix or _prefix(edl)
     broll_slots = [x for x, r in zip(sl, rl) if r in ("broll", "type_over")

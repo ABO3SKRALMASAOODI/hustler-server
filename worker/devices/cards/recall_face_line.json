@@ -1,0 +1,67 @@
+{
+  "id": "recall_face_line",
+  "family": "transition",
+  "verb": "suggest_match_cuts",
+  "stage": "screen",
+  "params": {
+    "kind": [
+      "face_aligned"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "onnx.yunet"
+    ],
+    "footage": "several clips or shots with level, frontal faces"
+  },
+  "binds_to": [
+    "beat",
+    "stress",
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 0,
+      "min_gap_s": 20
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 15
+    },
+    "charged": {
+      "per_short": 1,
+      "min_gap_s": 10
+    }
+  },
+  "never": [
+    "faces of people the story is not about",
+    "a tilted or turned head (it cannot sit on the line)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 6.0,
+      "batch": 5.0,
+      "local": 4.0
+    },
+    "fixed_ms": 1500
+  },
+  "exemplars": [
+    "02@0.567"
+  ],
+  "verify": [
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "faces conformed onto one eye line, cut faster and faster",
+  "skill": "structure"
+}

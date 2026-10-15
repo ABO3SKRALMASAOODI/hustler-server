@@ -1,0 +1,66 @@
+{
+  "id": "recall_loop_rhyme",
+  "family": "transition",
+  "verb": "plan_loop",
+  "stage": "screen",
+  "params": {
+    "write": [
+      true,
+      false
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "ffmpeg:overlay"
+    ],
+    "footage": "a shot that matches the opening frame (the same framing later, or a rhyming picture)"
+  },
+  "binds_to": [
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 0
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 0
+    },
+    "charged": {
+      "per_short": 1,
+      "min_gap_s": 0
+    }
+  },
+  "never": [
+    "after the end card (the rhyme always closes the program before it)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 3.0,
+      "local": 2.0
+    },
+    "fixed_ms": 800
+  },
+  "exemplars": [
+    "13@15.92",
+    "08@13.37"
+  ],
+  "verify": [
+    "duration_exact<=0"
+  ],
+  "status": "live",
+  "description": "the last frame before the end card rhymes with the first",
+  "skill": "structure"
+}

@@ -221,16 +221,15 @@ def assign(slot_list, pool, *, seed=0, no_repeat=NO_REPEAT, beam=BEAM):
     return out
 
 
-def roles(slot_list, style):
-    """Per slot: 'broll' | 'type_black' | 'type_over' (density arcs and
-    call-and-response)."""
+def roles(slot_list, style, sections=None):
+    """Per slot: 'broll' | 'type_black' | 'type_over' (density arcs follow
+    the story's energy, arc_planner; call-and-response alternates)."""
     n = len(slot_list)
     if style == "call_response":
         return ["type_black" if k % 2 == 0 else "broll" for k in range(n)]
     if style == "arc":
-        a, b = n // 3, (2 * n) // 3
-        return ["type_black" if k < a else "type_over" if k < b else "broll"
-                for k in range(n)]
+        import arc_planner
+        return arc_planner.density(slot_list, sections)
     return ["broll"] * n
 
 

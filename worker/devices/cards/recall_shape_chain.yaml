@@ -1,0 +1,28 @@
+# Track 2E (story_match.shape_chain). Circle-centred shots chained centre to
+# centre at one radius: ref 19's circle match.
+id: recall_shape_chain
+family: transition
+verb: suggest_match_cuts
+stage: screen
+params:
+  kind: [shape_chain]
+needs:
+  lane_features: ["ffmpeg:overlay"]
+  footage: "three or more shots with a true circle in them (a wheel, an engine, a planet, an iris)"
+binds_to: [beat, time]
+budget:
+  calm: {per_short: 0, min_gap_s: 20}
+  designed: {per_short: 1, min_gap_s: 15}
+  charged: {per_short: 1, min_gap_s: 10}
+never:
+  - "with fewer than three true circles (two shapes are a coincidence)"
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 6.0, batch: 5.0, local: 4.0}
+  fixed_ms: 1500
+exemplars: ["19@8.77"]
+verify: ["land_err_f<=1"]
+status: beta
+description: "circles chained centre to centre across cuts"
+skill: structure
