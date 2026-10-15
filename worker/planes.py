@@ -170,11 +170,55 @@ def _quad_mask(shape, quad, excl=None):
     return m
 
 
-def track(grays, key, quad, excl=None, ecc_every=10):
-    """[H_t] (3x3 px) mapping the key frame's plane to frame t, [conf]
-    (reprojection residual px of the carried features; NaN = unknown)."""
+def _ring_mask(shape, quad, grow=0.18, excl=None, inside=True):
+    """The quad grown by ``grow`` of its size; without its interior when
+    ``inside`` is False (a screen whose CONTENT changes is tracked by its
+    bezel, the wall round it, never by the pictures on it)."""
     import cv2
-    from anchors import camera_motion
+    q = np.asarray(quad, np.float64)
+    c = q.mean(axis=0)
+    big = c + (q - c) * (1.0 + grow)
+    m = np.zeros(shape[:2], np.uint8)
+    cv2.fillConvexPoly(m, np.round(big).astype(np.int32), 255)
+    if not inside:
+        cv2.fillConvexPoly(m, np.round(q).astype(np.int32), 0)
+    if excl is not None:
+        m &= excl
+    return m
+
+
+def _static(grays, quad, w, h, step=3, tol=None):
+    """Is the camera locked off? The median displacement of background
+    features (outside the plane: its content may move) chained over the
+    shot, robust to a moving speaker taking part of the frame."""
+    import cv2
+    tol = tol if tol is not None else 0.004 * max(w, h)
+    bg = 255 - _ring_mask(grays[0].shape, quad, 0.05)
+    acc = np.zeros(2)
+    for i in range(step, len(grays), step):
+        pts = cv2.goodFeaturesToTrack(grays[i - step], 300, 0.01, 8,
+                                      mask=bg, blockSize=7)
+        if pts is None or len(pts) < 12:
+            return False
+        nxt, st, _e = cv2.calcOpticalFlowPyrLK(grays[i - step], grays[i],
+                                               pts, None, winSize=(21, 21),
+                                               maxLevel=3)
+        ok = st.reshape(-1) == 1
+        if ok.sum() < 12:
+            return False
+        d = (nxt.reshape(-1, 2) - pts.reshape(-1, 2))[ok]
+        acc += np.median(d, axis=0)
+        if np.hypot(*acc) > tol:
+            return False
+    return True
+
+
+def track(grays, key, quad, excl=None, ecc_every=10, content="static"):
+    """[H_t] (3x3 px) mapping the key frame's plane to frame t, [conf]
+    (reprojection residual px of the carried features; NaN = unknown).
+    ``content`` "moving" (a screen, a projection): features from the
+    surface's surround only."""
+    import cv2
     n = len(grays)
     h, w = grays[0].shape[:2]
     Hs = [None] * n
@@ -182,12 +226,18 @@ def track(grays, key, quad, excl=None, ecc_every=10):
     Hs[key] = np.eye(3)
     res[key] = 0.0
     # static camera: one homography for the shot
-    bg = [camera_motion.person_mask(grays[0].shape, [])] * n
-    chainH, _q = camera_motion.chain(grays, bg if excl is None else
-                                     [excl] * n)
-    if camera_motion.is_static(chainH, w, h):
+    if _static(grays, quad, w, h):
         return [np.eye(3)] * n, [0.0] * n, True
-    mask0 = _quad_mask(grays[key].shape, quad, excl)
+    moving = content == "moving"
+    # a surface is tracked by itself plus a thin margin; a screen whose
+    # pictures change, by its bezel and the wall round it
+    grow = 0.18 if moving else 0.06
+    mask0 = _ring_mask(grays[key].shape, quad, grow, excl,
+                       inside=not moving)
+    # the residual is read where the surface IS (not on a passer-by in the
+    # margin): the quad itself, or the screen's ring
+    res_mask = mask0 if moving else _quad_mask(grays[key].shape, quad,
+                                               excl)
     crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 60, 1e-5)
     for d in (1, -1):
         H = np.eye(3)
@@ -227,13 +277,14 @@ def track(grays, key, quad, excl=None, ecc_every=10):
             Hj = Hj / Hj[2, 2]
             Hs[j] = Hj
             # residual: the key frame's quad features, re-found by LK at j
-            res[j] = _residual(grays[key], grays[j], mask0, Hj)
+            res[j] = _residual(grays[key], grays[j], res_mask, Hj)
             H = Hj
             if pts is None or len(pts) < 30:
                 qj = apply_h(Hj, quad)
                 pts = cv2.goodFeaturesToTrack(
                     grays[j], 300, 0.01, 6,
-                    mask=_quad_mask(grays[j].shape, qj, excl))
+                    mask=_ring_mask(grays[j].shape, qj, grow, excl,
+                                    inside=not moving))
             i = j
     return Hs, res, False
 
@@ -244,7 +295,10 @@ def _residual(g0, g1, mask0, H, n=60):
     if pts is None or len(pts) < 6:
         return float("nan")
     pred = apply_h(H, pts.reshape(-1, 2)).astype(np.float32)
-    nxt, st, _e = cv2.calcOpticalFlowPyrLK(g0, g1, pts, pred.reshape(-1, 1, 2),
+    # a COPY as the initial guess: LK writes its answer into that array,
+    # and a view of ``pred`` would make every residual read 0
+    nxt, st, _e = cv2.calcOpticalFlowPyrLK(g0, g1, pts,
+                                           pred.reshape(-1, 1, 2).copy(),
                                            winSize=(21, 21), maxLevel=2,
                                            flags=cv2.OPTFLOW_USE_INITIAL_FLOW)
     ok = st.reshape(-1) == 1
@@ -279,10 +333,18 @@ def child_planes(spec, ch):
                                        n):
             grays.append(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY))
     samples, static = [], True
+    refined, moved = p["quad"], 0
     if grays:
         key = min(len(grays) - 1, max(0, int(round((st - lo) * fps))))
-        quad = quad_px(p["quad"], w, h)
-        Hs, res, static = track(grays, key, quad)
+        # the authored quad snapped to the surface's own edges on the key
+        # frame (LSD): an agent's corners from a contact sheet are a few
+        # pixels off; the edges are not
+        refined, moved = refine_quad(cv2.cvtColor(grays[key],
+                                                  cv2.COLOR_GRAY2BGR),
+                                     p["quad"])
+        quad = quad_px(refined, w, h)
+        Hs, res, static = track(grays, key, quad,
+                                content=p.get("content") or "static")
         S = np.diag([float(w), float(h), 1.0])
         Si = np.diag([1.0 / w, 1.0 / h, 1.0])
         k1080 = 1080.0 / h
@@ -301,6 +363,7 @@ def child_planes(spec, ch):
     with open(out, "w") as f:
         json.dump({"version": 1, "kind": "planes.h", "fps": fps, "width": w,
                    "height": h, "static": bool(static), "quad": p["quad"],
+                   "quad_refined": refined, "edges_snapped": moved,
                    "src_t": st, "samples": samples}, f,
                   separators=(",", ":"))
     rs = [s["r"] for s in samples if s["r"] is not None]

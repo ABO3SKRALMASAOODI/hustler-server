@@ -15,7 +15,7 @@ _FACE = identity(("yunet", "mediapipe_face_landmarker"), "w3a1")
 _HAND = identity(("mediapipe_hand_landmarker",), "w3a1")
 _POSE = identity(("yunet", "mediapipe_face_landmarker",
                   "mediapipe_pose_landmarker"), "w3a1")
-_OBJ = identity(("efficientsam_ti",), "w3b1")
+_OBJ = identity(("efficientsam_ti",), "w3b8")
 _CAM = identity(("yunet",), "w3a1")
 
 
@@ -72,7 +72,7 @@ KIND_SPECS = {
         child="objseg.jobs:child_objects"),
     "planes.h": dict(
         _json("planes.h.v1", "plane.json"), model=None,
-        model_id="opencv_planar", model_version="w3c1", models=(),
+        model_id="opencv_planar", model_version="w3c4", models=(),
         defaults={"fps": 15.0, "max_w": 960},
         rate="fps", ms_per_frame=12.0, group_s=15.0,
         child="planes:child_planes"),

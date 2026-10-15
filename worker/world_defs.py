@@ -107,6 +107,9 @@ def request(item, tl, clock_offset=0.0):
                            for x, y in item["quad"]],
                   "src_t": _r2(st - off),
                   "window": [max(0.0, _r2(a)), _r2(b)]}
+        if item.get("surface") == "screen":
+            # its pictures change: tracked by the bezel and the wall
+            params["content"] = "moving"
         return "planes.h", rng, params
     return None
 

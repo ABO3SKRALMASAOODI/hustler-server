@@ -228,7 +228,10 @@ def series_for(anchor, ctx, lo, hi):
                                                    ctx.clock_offset)
             samples, _sh, meta = query.load(k, src, ranges, params)
             if samples:
-                return query.plane_series(samples, quad), None
+                # the batch lane snapped the authored corners to the
+                # surface's edges on the key frame (planes.refine_quad)
+                return query.plane_series(
+                    samples, meta.get("quad_refined") or quad), None
         # static (written so, or not measured yet): the seed quad holds —
         # exact on a locked-off camera, the honest fallback otherwise
         why = None if st == "static" else (

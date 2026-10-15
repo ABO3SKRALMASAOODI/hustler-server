@@ -320,11 +320,22 @@ def test_depth_order_from_the_masks():
     front = person.copy()
     front[60:90, 70:85] = 0                      # the matte has its hole
     assert depthorder.order(obj, front)[0] == "front"
-    assert depthorder.order(obj, person)[0] == "behind"
+    # the matte swallowed the mic as "person": still in front
+    assert depthorder.order(obj, person)[0] == "front"
+    # a chair behind: visible beside the torso, and through the gap
+    # between the arm and the torso that the closed outline spans
+    arm = np.zeros((H, W), np.uint8)
+    arm[20:120, 50:100] = 255                    # torso
+    arm[40:120, 108:118] = 255                   # an arm, a gap between
+    arm[40:46, 100:108] = 255                    # the shoulder joins them
+    chair = np.zeros((H, W), np.uint8)
+    chair[50:110, 100:108] = 255                 # in the gap ...
+    chair[50:110, 118:150] = 255                 # ... and beside the arm
+    assert depthorder.order(chair, arm)[0] == "behind"
     far = np.zeros((H, W), np.uint8)
     far[10:30, 5:25] = 255                       # nowhere near the person
     assert depthorder.order(far, person)[0] is None
-    o, _d = depthorder.vote([(obj, front), (obj, front), (obj, person)])
+    o, _d = depthorder.vote([(obj, front), (obj, front), (chair, arm)])
     assert o == "front"
     assert depthorder.vote([(far, person)])[0] is None
 

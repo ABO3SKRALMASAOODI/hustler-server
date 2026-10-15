@@ -1,16 +1,20 @@
 """In front of / behind the person, measured from the masks (track 3B).
 
 An object definition's ``depth: auto`` is decided here from what the
-sidecars already hold — no model, no depth network:
+sidecars already hold — no model, no depth network. The object's mask is
+its VISIBLE pixels (the segmenter never sees what is hidden), so:
 
-  * where the object and the person's SILHOUETTE overlap (the person matte
-    with its holes closed: a mic in front of a chest cuts a hole in the
-    matte, the silhouette does not), the person matte either covers the
-    object's pixels (the person is in front: the object is BEHIND) or has
-    a hole shaped like them (the object is in FRONT);
-  * no overlap at all: the order cannot be seen and does not matter for
-    occlusion (None — callers treat it as "front": the object occludes
-    only what it covers).
+  * an object IN FRONT of the person shows inside the person's outline
+    (the silhouette with its holes closed: a mic in front of a chest);
+    whether the matte cut a hole for it or swallowed it as "person" (a
+    matting model often does with held / attached things), most of its
+    visible pixels sit inside the outline -> ``front``;
+  * an object BEHIND the person shows only around the outline — at its
+    edge, or through a gap (between an arm and the torso) the closed
+    silhouette spans, where the matte does not claim it -> ``behind``;
+  * no contact at all: the order cannot be seen (None — callers keep the
+    authored occluders; an author says ``depth: behind`` for a background
+    object the person never touches).
 
 What it changes (world_layer): a graphic hidden behind an object that is
 itself BEHIND the person is also hidden behind the person where they
@@ -20,7 +24,8 @@ overlap (the type is further back than both).
 import numpy as np
 
 MIN_CONTACT = 0.04        # share of the object inside the silhouette
-COVER_BEHIND = 0.55       # share of that contact the matte claims
+FRONT_CONTACT = 0.35      # this much inside the outline: in front
+COVER_FRONT = 0.55        # the matte swallowed it (an attached thing)
 
 
 def _closed(person, k):
@@ -55,7 +60,9 @@ def order(obj_mask, person_mask):
         return None, detail
     covered = float((contact & (p > 127)).sum()) / c
     detail["covered"] = round(covered, 4)
-    return ("behind" if covered >= COVER_BEHIND else "front"), detail
+    if c >= FRONT_CONTACT * n or covered >= COVER_FRONT:
+        return "front", detail
+    return "behind", detail
 
 
 def vote(pairs):

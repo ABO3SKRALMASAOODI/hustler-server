@@ -67,13 +67,52 @@ class Segmenter:
             pts.append((float(p[0]) - x0, float(p[1]) - y0))
             labels.append(1 if (len(p) < 3 or p[2]) else 0)
         masks, ious = self._run(crop, pts, labels)
-        k = int(np.argmax(ious))
+        k = _choose(masks, ious, crop.shape[:2], points, x0, y0)
         m = (masks[k] > 0).astype(np.uint8) * 255
         ch, cw = y1 - y0, x1 - x0
         m = cv2.resize(m, (cw, ch), interpolation=cv2.INTER_LINEAR)
         full = np.zeros((h, w), np.uint8)
         full[y0:y1, x0:x1] = m
         return full, float(ious[k])
+
+
+def _choose(masks, ious, crop_hw, points, x0, y0):
+    """Which of the model's candidate masks answers the prompt: the best
+    scored one that keeps every NEGATIVE point out and holds most positive
+    points, and — when there is a choice — does not span the crop edge to
+    edge (a thin mic's stem answered with "the wall behind it"). Falls back
+    to the best score."""
+    order = [int(k) for k in np.argsort(-np.asarray(ious))]
+    if not points:
+        return order[0]
+    mh, mw = masks.shape[-2:]
+    ch, cw = crop_hw
+    sx, sy = mw / float(max(1, cw)), mh / float(max(1, ch))
+    pos = [(p[0] - x0, p[1] - y0) for p in points
+           if len(p) < 3 or p[2]]
+    neg = [(p[0] - x0, p[1] - y0) for p in points
+           if len(p) > 2 and not p[2]]
+
+    def inside(m, q):
+        x = int(min(mw - 1, max(0, round(q[0] * sx))))
+        y = int(min(mh - 1, max(0, round(q[1] * sy))))
+        return bool(m[y, x] > 0)
+    ok = []
+    for k in order:
+        m = masks[k]
+        if any(inside(m, q) for q in neg):
+            continue
+        if pos and sum(inside(m, q) for q in pos) * 2 < len(pos):
+            continue
+        ok.append(k)
+    if not ok:
+        return order[0]
+    for k in ok:
+        m = masks[k] > 0
+        edges = sum(bool(e.any()) for e in (m[0], m[-1], m[:, 0], m[:, -1]))
+        if edges < 3:
+            return k
+    return ok[0]
 
 
 def mask_box(mask, thr=127):
