@@ -132,6 +132,18 @@ class Space:
             hits.append("face")
         return hits
 
+    def head_hit(self, box, depth="front"):
+        """Does ``box`` touch the head as an ELLIPSE (the zone's inscribed
+        ellipse grown by the clearance)? Path text round the head is held to
+        the head's shape, not its bounding rectangle's corners."""
+        c = CLEAR * self.W
+        zones = self.cores if depth == "behind" else self.face_zones
+        for z in zones:
+            ell = (z[0] - c, z[1] - c, z[2] + c, z[3] + c)
+            if _ellipse_cover(box, ell) > 0:
+                return True
+        return False
+
     def subject_share(self, box):
         """Share of ``box`` the subject prior covers (0..1): how much of a
         word set behind the subject is hidden."""

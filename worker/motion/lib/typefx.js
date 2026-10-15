@@ -24,7 +24,7 @@
     cut(r, t, s) { if (t < r.onset) s.o = 0; },
     fade(r, t, s) { s.o = MG.range(t, r.t_in, Math.max(FR(), r.onset - r.t_in)); },
     blur_resolve(r, t, s) {
-      const p = E.outCubic(MG.range(t, r.t_in, Math.max(FR(), r.onset - r.t_in)));
+      const p = E.inOutQuad(MG.range(t, r.t_in, Math.max(FR(), r.onset - r.t_in)));
       s.o = clamp(p * 1.6); s.blur = (1 - p) * 0.16 * r.size_px; s.sx = s.sy = 1 + 0.04 * (1 - p);
     },
     settle(r, t, s) {

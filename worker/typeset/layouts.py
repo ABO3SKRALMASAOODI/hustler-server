@@ -73,13 +73,14 @@ class Tok:
 
 class Placed:
     __slots__ = ("tok", "size", "x", "y", "track_px", "ink", "rot", "line",
-                 "cx", "cy", "glyphs")
+                 "cx", "cy", "glyphs", "gboxes")
 
     def __init__(self, tok, size, x, y, track_px, ink, line, rot=0.0):
         self.tok, self.size, self.x, self.y = tok, size, x, y
         self.track_px, self.ink, self.line, self.rot = track_px, ink, line, rot
         self.cx = self.cy = None        # rotation centre (px)
         self.glyphs = None              # [(char, x, y, rot)] for path text
+        self.gboxes = None              # per-glyph boxes for path text
 
 
 class Layout:
@@ -579,21 +580,26 @@ def arc(lines, C, region, space, opts):
     if not space.faces_px:
         return None
     f = space.faces_px[0]
+    z = space.face_zones[0]               # the head with its hair and chin
     cx = (f[0] + f[2]) / 2
-    hw, hh = (f[2] - f[0]) / 2 * 1.25, (f[3] - f[1]) / 2 * 1.45
-    cy = (f[1] + f[3]) / 2 - 0.05 * (f[3] - f[1])
+    cy = (z[1] + z[3]) / 2
+    hw, hh = (z[2] - z[0]) / 2, (z[3] - z[1]) / 2
     clear = float(opts.get("clear", 0.045)) * space.H
     toks = [t for ln in lines for t in ln]
     m = measure_line(toks, C)
     capmax = max(it[4][3] - it[4][1] for it in m["items"])
-    rx, ry = hw + clear + capmax * 0.15, hh + clear + capmax * 0.15
+    # the glyphs stand outward from the ring: its radius clears the head
+    # zone by ``clear`` plus their own depth below the baseline
+    desc = max(max(0.0, it[4][3]) for it in m["items"]) * 0.6
+    rx, ry = hw + clear + desc, hh + clear + desc
     # arc length available above the head: up to 200 degrees
     per = math.pi * (rx + ry) / 2            # half-ellipse length (approx)
     length = m["w"]
     if length > per * 1.05:
         return None
     sweep = length / ((rx + ry) / 2)
-    a0 = -math.pi / 2 - sweep / 2
+    centre = math.radians(float(opts.get("centre", -90.0)))
+    a0 = centre - sweep / 2
     placed = []
     for t, size, pen, tp, ink in m["items"]:
         sh = t.shaped(size)
@@ -607,13 +613,20 @@ def arc(lines, C, region, space, opts):
             rot = math.degrees(a + math.pi / 2)
             glyphs.append((ch, round(px, 2), round(py, 2), round(rot, 2),
                            round(gadv, 2)))
-            r = max(gadv, size * 0.7)
-            boxes.append((px - r / 2, py - size * 0.8, px + r / 2,
-                          py + size * 0.2))
+            # the glyph's own box (baseline on the ring, standing outward),
+            # rotated with it: its axis-aligned bounds
+            ra = math.radians(rot)
+            corners = [(-gadv / 2, -sh.cap * 1.05), (gadv / 2, -sh.cap * 1.05),
+                       (-gadv / 2, sh.descender * 0.6),
+                       (gadv / 2, sh.descender * 0.6)]
+            xs = [px + u * math.cos(ra) - v * math.sin(ra) for u, v in corners]
+            ys = [py + u * math.sin(ra) + v * math.cos(ra) for u, v in corners]
+            boxes.append((min(xs), min(ys), max(xs), max(ys)))
         p = Placed(t, size, glyphs[0][1] if glyphs else cx, cy, tp,
                    (min(b[0] for b in boxes), min(b[1] for b in boxes),
                     max(b[2] for b in boxes), max(b[3] for b in boxes)), 0)
         p.glyphs = glyphs
+        p.gboxes = boxes
         placed.append(p)
     lay = Layout("arc", placed, dict(opts, cx=cx, cy=cy, rx=rx, ry=ry,
                                      a0=a0, a1=a0 + sweep))

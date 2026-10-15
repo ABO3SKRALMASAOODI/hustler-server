@@ -60,10 +60,17 @@ def check(lay, space, toks, depth, H):
     """None when ``lay`` passes every hard constraint, else the reason."""
     pad = WORD_PAD * space.W
     ps = lay.placed
+    arc = lay.family == "arc"
     for p in ps:
         if not space.in_safe(p.ink):
             return "safe"
         hits = space.hard_hits(p.ink, depth=depth)
+        if arc and hits == ["face"]:
+            # glyph by glyph against the head's ellipse (a ring round the
+            # head always crosses its bounding box's corners)
+            hits = ["face"] if any(space.head_hit(b, depth) for b in
+                                   getattr(p, "gboxes", None) or [p.ink]) \
+                else []
         if hits:
             return "+".join(sorted(set(hits)))
     # a quote window shows one word at a time in one place: its words
@@ -76,6 +83,10 @@ def check(lay, space, toks, depth, H):
             # pad: a 13 px whisper and its neighbour sit 4 px apart)
             gap = 0.04 * min(ps[a].size, ps[b].size)
             if L._overlap(ps[a].ink, ps[b].ink, gap):
+                if arc and ps[a].gboxes and ps[b].gboxes and not any(
+                        L._overlap(ga, gb, 0.0) for ga in ps[a].gboxes
+                        for gb in ps[b].gboxes):
+                    continue            # curved words: glyph by glyph
                 return "collision"
     if depth == "behind":
         for p in ps:
@@ -165,6 +176,10 @@ def _variants(family, voice, seed):
         vs = [{"side": "auto"}]
     elif family == "slots":
         vs = [{"start": "left"}, {"start": "right"}]
+    elif family == "arc":
+        # over the head first, then round its shoulders to either side
+        vs = [{"centre": c} for c in (-90.0, -55.0, -125.0, -20.0, -160.0,
+                                       0.0, 180.0, 25.0, 155.0)]
     elif family == "tilt":
         vs = [{"angle": -7.0, "align": "left"}, {"angle": 6.0,
                                                  "align": "right"}]
@@ -384,5 +399,5 @@ def _solve(words, *, W, H, voice_name="auto", family="auto", depth="front",
                       "opts": {k: v_ for k, v_ in best.layout.opts.items()
                                if k in ("align", "fit", "gap", "fill",
                                         "lines", "start", "angle", "side",
-                                        "valign")}}
+                                        "valign", "centre")}}
     return best.layout, v, toks, space, report
