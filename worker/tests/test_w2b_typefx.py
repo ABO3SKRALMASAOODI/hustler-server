@@ -296,3 +296,27 @@ def test_a_brand_font_round_trip(tmp_path):
     ok, why = fonts_brand.validate(src, "commercial-licensed")
     assert not ok and "attest" in why
     assert fonts_brand.validate(src, "commercial-licensed", attest=True)[0]
+
+
+@needs_engine
+def test_outline_type_on_a_bright_plate_gets_a_dark_edge(tmp_path):
+    """W2 review (the W2-S2 board): a white outline / neon word over a lit
+    wall was invisible — the typeset page read no plate for materials that
+    carry no shadow. With a bright MG.plate the run takes a dark glyph
+    scrim; on no plate it renders as before."""
+    import base64
+    W, H = 1080, 608
+    item = _item("ENOUGH", 1.0, [0.1], voice="hairline_wide", verb="cut",
+                 material="outline", exit="hold")
+    item["footprint"]["ar"] = W / H
+    cols, rows = 16, 9
+    grid = base64.b64encode(bytes([238] * (cols * rows))).decode()
+    plate = {"c": cols, "r": rows, "s": [{"t": 0.5, "g": grid}]}
+    lit = motion_templates.build_job(item, W, H, FPS, plate=plate)
+    bare = motion_templates.build_job(item, W, H, FPS)
+    clips = motion_engine.render_jobs([lit, bare], str(tmp_path))
+    a = _alpha_frames(clips[0], [20], W, H)[20]
+    b = _alpha_frames(clips[1], [20], W, H)[20]
+    dark = lambda f: int(((f[..., 3] > 60) & (f[..., :3].max(axis=-1) < 60))
+                         .sum())
+    assert dark(a) > 200 and dark(a) > 5 * max(1, dark(b))

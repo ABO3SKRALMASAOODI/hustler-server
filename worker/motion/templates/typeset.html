@@ -81,6 +81,18 @@
       filt = mk('filter', { id: fid, x: '-20%', y: '-40%', width: '140%', height: '180%', 'color-interpolation-filters': 'sRGB' }, defs);
       mk('feDropShadow', { dx: 0, dy: (0.025 * em).toFixed(2), stdDeviation: (0.05 * em).toFixed(2), 'flood-color': '#000', 'flood-opacity': shadowA.toFixed(3) }, filt);
     }
+    // legibility on the plate under the word (MG.plate, measured by the
+    // render): flat type's drop shadow above grows with it; materials that
+    // carry no dark edge of their own (outline, ghost, neon, glow, crt)
+    // get a dark glyph scrim on the run where the plate is too bright for
+    // their ink — a white outline on a lit wall was invisible (W2-S2)
+    const needP = MG.need ? MG.need(r.ink, { ink: r.colour, ratio: 3, t0: r.onset, t1: r.t_out }) : 0;
+    if (needP > (MG.NEED_OK || 0.1) && (!filt || r.material === 'neon' || r.material === 'glow' || r.material === 'crt')) {
+      const sf = mk('filter', { id: `s${ri}`, x: '-30%', y: '-50%', width: '160%', height: '200%', 'color-interpolation-filters': 'sRGB' }, defs);
+      mk('feDropShadow', { dx: 0, dy: 0, stdDeviation: (0.035 * em).toFixed(2), 'flood-color': '#000', 'flood-opacity': Math.min(0.95, 0.45 + needP).toFixed(3), result: 's1' }, sf);
+      mk('feDropShadow', { in: 's1', dx: 0, dy: (0.02 * em).toFixed(2), stdDeviation: (0.11 * em).toFixed(2), 'flood-color': '#000', 'flood-opacity': Math.min(0.8, needP).toFixed(3) }, sf);
+      g.setAttribute('filter', `url(#s${ri})`);
+    }
     // per-frame filters: smear (x blur), mosaic, lamp glow
     const dyn = mk('filter', { id: `d${ri}`, x: '-60%', y: '-60%', width: '220%', height: '220%', 'color-interpolation-filters': 'sRGB' }, defs);
     const dynBlur = mk('feGaussianBlur', { in: 'SourceGraphic', stdDeviation: '0 0', result: 'sm' }, dyn);
