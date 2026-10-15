@@ -55,9 +55,17 @@ def setup(path, ranges, faces=False):
     import sidecars
     info = media.probe(path)
     sha = media.sha256_file(path)
-    shots = [s.start if hasattr(s, "start") else s.get("start")
-             for s in scenes.detect_shots(path, float(info["duration"]))]
-    shots = [float(s) for s in shots if s and float(s) > 0.0]
+    cache = os.path.join(VALMERA, "engines", "w1", "boards_work",
+                         f"shots_{sha[:16]}.json")
+    if os.path.exists(cache):
+        shots = json.load(open(cache))
+    else:                       # a long podcast source: minutes; once
+        shots = [s.start if hasattr(s, "start") else s.get("start")
+                 for s in scenes.detect_shots(path, float(info["duration"]))]
+        shots = [float(s) for s in shots if s and float(s) > 0.0]
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "w") as f:
+            json.dump(shots, f)
     src = sidecars.source_from(sha, path, info, 0, shots)
     t0 = time.time()
     hs = [sidecars.ensure("matte.person", src, ranges,
@@ -347,28 +355,32 @@ def _verbs(edl, index, dur, message):
 def s1_plan(name):
     """(edl after the verbs, ops for apply_edit_batch, verb log)."""
     import device_planner
-    import recipes
     from schemas import validate_edl
     edl, index, src = _s1_load(name)
     dur = float(index["video"]["duration"])
     edl = validate_edl(edl, dur).model_dump()
     ops = []
     if name == "thiel":
-        # the hook becomes the giant lockup behind the head (05@0.23): the
-        # crown crosses its lower half, the face stays clear; ghost
-        # outlines switch on where the head hides the letters (1C)
-        hook = next(m for m in edl["motion"] if m["id"] == "hook")
-        hook = copy.deepcopy(hook)
-        hook["layer"] = "behind_subject"
-        hook["params"].update({"y": 0.2, "width": 0.94, "kicker": "",
-                               "color": "#111114"})
-        # written as a stale client writes it (apply_edit_batch names the
-        # program matte; a validated write without a mask is refused)
-        ops.append({"action": "upsert", "layer": "motion", "id": "hook",
-                    "value": hook})
+        # the line the hook teased lands BEHIND him as he says it (05@0.23:
+        # the giant lockup behind the head): FLYING, the short's one hero
+        # word (one word: two wrapped onto the face), 30.12-31.2, the crown
+        # crossing its letters, ghost outlines where they hide, above the
+        # eyes and under the corner mark's floor (y 0.128); then the white
+        # silhouette on "140" with the payoff lockup.
+        ops.append({"action": "upsert", "layer": "motion", "id": "h_fly",
+                    "value": {
+                        "id": "h_fly", "template": "word_slam",
+                        "start": 30.12, "end": 31.2,
+                        "layer": "behind_subject",
+                        "composite": {"ghost": "auto"},
+                        "params": {"text": "FLYING", "tier": "hero",
+                                   "y": 0.195, "entrance": "slam",
+                                   "color": "#111114"}}})
         call, final, log = _verbs(edl, index, dur,
                                   "make this a premium short")
-        call("set_composite", motion_id="enough", blend="difference")
+        # (a difference-blend 'enough' was tried: over the black shirt
+        # difference reads exactly as normal, so it is left out — a device
+        # that changes nothing visible does not earn its place)
         call("apply_recipe", name="white_silhouette")
     elif name == "jobs":
         call, final, log = _verbs(edl, index, dur,
@@ -379,7 +391,10 @@ def s1_plan(name):
              end=card["end"], radius=0.06)
         call("add_accent", kind="white_hit", on="stress", density="pulse",
              region="card", count=6)
-        call("add_finish", kind="crt", strength=0.55)
+        # the archival is re-photographed off a tube: the CRT inside the
+        # card only (the backdrop and the type stay clean)
+        call("add_finish", kind="crt", strength=0.55,
+             region={"shape": "card"})
     else:
         call, final, log = _verbs(edl, index, dur,
                                   "make this a premium short")
@@ -388,10 +403,15 @@ def s1_plan(name):
         close = next(m for m in edl["motion"] if m["id"] == "end")
         call("apply_recipe", name="colour_kept_payoff",
              at=round(float(close["start"]) + 0.3, 2))
+        # the turn: from the evidence (three stats) to the prescription,
+        # on Rogan's reaction "That's INCREDIBLE" — a 2-frame negative of
+        # the speaker only, then the drained world for the payoff line
         plan = device_planner.moments(final(), index)
-        _items, turn, _why = recipes.build("mono_until_turn", plan)
+        turn = next((m for m in plan["moments"]
+                     if (m.get("word") or "").strip(".,!?").lower()
+                     == "incredible"), None)
         if turn is not None:
-            t = round(float(turn["t"]), 2)
+            t = round(float(turn["t"]) + 0.06, 2)
             call("add_subject_effect", kind="negate", scope="subject",
                  start=t, end=round(t + 2 / 30.0 + 0.004, 3))
     return final(), ops, log, index, src
@@ -409,7 +429,27 @@ def s1_short(out_dir, name):
     with open(out + ".verbs.json", "w") as f:
         json.dump([{"verb": n, "args": kw, "result": r.splitlines()[:6]}
                    for n, kw, r in log], f, indent=1, default=str)
-    return render(S, edl, ops, out, want_wm=True)
+    # v5's own media, as its render_showcase.py maps them: the payoff-hold
+    # stills (kept beside the v5 EDLs) and the approved-library sound
+    import sound_library
+    assets = {}
+    for ins in edl.get("inserts") or []:
+        key = str(ins.get("asset_key") or "")
+        if key.startswith("local:"):
+            assets[key] = os.path.join(V5, os.path.basename(key[6:]))
+    for sx in edl.get("sfx") or []:
+        sid = sound_library.id_for_key(sx["storage_key"]) or \
+            sx["storage_key"].split("/")[-1].rsplit(".", 1)[0]
+        assets[sx["storage_key"]] = sound_library.path(sid)
+        # v5 wrote ``at`` as the hit moment (sfx_at_is_hit), placed as
+        # add_sfx places it
+        pl = sound_library.place(sid, sx["at"], dur_s=sx.get("dur_s"))
+        sx["at"] = pl["at"]
+        if pl["offset_s"]:
+            sx["offset_s"] = pl["offset_s"]
+        if pl["dur_s"]:
+            sx["dur_s"] = pl["dur_s"]
+    return render(S, edl, ops, out, want_wm=True, assets=assets)
 
 
 # ── boards ────────────────────────────────────────────────────────────────
@@ -463,6 +503,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--piece", action="append")
+    ap.add_argument("--s1", action="append", choices=sorted(S1),
+                    help="only these W1-S1 shorts")
     ap.add_argument("--boards", help="build the boards from --out into this "
                     "directory (no renders)")
     a = ap.parse_args(argv)
@@ -485,8 +527,8 @@ def main(argv=None):
                          for p, w, rows in r}
         concat([p for p, _w, _r in r], os.path.join(a.out, "W1-S3.mp4"))
     if "S1" in pieces:
-        summary["S1"] = {}
-        for nm in S1:
+        summary.setdefault("S1", {})
+        for nm in (a.s1 or S1):
             p, w, rows = s1_short(a.out, nm)
             summary["S1"][os.path.basename(p)] = {"wall_s": w, "rows": rows}
     if "S2" in pieces:
@@ -542,9 +584,55 @@ def frame_png(path, n, out, w=360):
     return out
 
 
+# W1-S1: each device moment of a v6 short against v5 at the same program
+# second (same window, same cut) and against the named reference moment.
+S1_ROWS = [
+    ("thiel", 30.67, "FLYING behind the head, ghost outlines", "05", 0.5),
+    ("thiel", 31.27, "white silhouette on '140'", "40", 4.67),
+    ("jobs", 3.97, "white hit clipped to the card", "02", 13.7),
+    ("jobs", 2.0, "CRT re-photography inside the card", "14", 0.6),
+    ("elon", 18.29, "subject-only negative on the turn", "13", 6.92),
+    ("elon", 20.2, "grey world, speaker in colour on the payoff", "40",
+     10.0),
+]
+
+
+def build_s1_board(out_dir, dest):
+    from PIL import Image
+    rows = []
+    for name, t, label, rid, rt in S1_ROWS:
+        ours = os.path.join(out_dir, f"s1_{name}.mp4")
+        if not os.path.exists(ours):
+            continue
+        k = len(rows)
+        a = grab(ours, t, os.path.join(dest, f"W1-S1_{k}_ours.png"))
+        v5 = grab(os.path.join(V5_RENDERS, S1[name][2]), t,
+                  os.path.join(dest, f"W1-S1_{k}_v5.png"))
+        r = grab(ref(rid + "_"), rt, os.path.join(dest, f"W1-S1_{k}_ref.png"))
+        # ours | v5 side by side as one tile, the reference beside them
+        ia, ib = Image.open(a).convert("RGB"), Image.open(v5).convert("RGB")
+        pair = Image.new("RGB", (ia.width + ib.width + 8, max(ia.height,
+                                                            ib.height)),
+                         (16, 16, 16))
+        pair.paste(ia, (0, 0))
+        pair.paste(ib, (ia.width + 8, 0))
+        pp = os.path.join(dest, f"W1-S1_{k}_pair.png")
+        pair.save(pp)
+        rows.append((f"{name} v6 | v5 @{t:.2f}s: {label}", pp, r,
+                     f"{rid}@{rt:g}"))
+    if not rows:
+        return None
+    return board(rows, os.path.join(dest, "W1-S1_board.jpg"),
+                 "W1-S1 v6 vs v5 (left pair) and the reference (internal: "
+                 "references never leave this machine)")
+
+
 def build_boards(out_dir, dest):
     os.makedirs(dest, exist_ok=True)
     made = []
+    s1 = build_s1_board(out_dir, dest)
+    if s1:
+        made.append(s1)
     for name, rows in BOARD_ROWS.items():
         cells = []
         for k, (clip, n, label, rid, rt, rlabel) in enumerate(rows):

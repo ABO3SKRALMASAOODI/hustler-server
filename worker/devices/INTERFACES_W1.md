@@ -847,7 +847,31 @@ where the six tracks met; each item names its test.
 
 Recipes (`worker/recipes.py`): `mono_until_turn`, `colour_kept_payoff`,
 `silhouette_hold`, `negative_hits`, `white_silhouette`, `lab_scan`,
-`thermal_flip`, `echo_trail`. Items are ordinary fx items with ids
+`thermal_flip`, `light_figure`, `echo_trail`. Items are ordinary fx items with ids
 `rc_<recipe>_<n>` (the freshness key), cards from the five tracks, written
 and removed through apply_edit_batch like any device. Once per short;
 flash-safe unless the user opted in; matte recipes warm the person matte.
+
+`apply_recipe(at=)` re-anchors a payoff recipe on the spoken moment nearest
+`at`. `device_planner.declared_payoff(edl)`: a lockup with tier `payoff`
+(or id / purpose `payoff`) is the payoff the moment model lands on.
+
+### 10.4 Composition rules found on real frames
+
+- **Captions over below_captions graphics.** The motion caption track is a
+  `below_captions` item; `motion_layer.append_graph` lays it LAST on that
+  layer, as libass captions burn over those graphics (the Oct 11 run, s03).
+- **Subject-fx lay order.** `subject_fx._lay_order`: backgrounds, then tonal
+  moves (isolate, negate, exposure), then drawn devices (echo, poster, fill,
+  outline, glow); start order within each.
+- **Exact window composites on 8.x.** Window-local alpha composites overlay
+  in `yuv420` (`subject_fx.YUV_OVER`): `format=auto` darkened every pixel of
+  the window by 2-4 Y on ffmpeg 8.0 even where nothing was drawn.
+- **Light only adds.** `subject_fx.white_lerp`: white light lerps through
+  `maskedmerge` with chroma taking the 2x2 MINIMUM of the light.
+- **RGB conversions in the graph.** RGB-only filters run on planar gbrp with
+  `accurate_rnd+full_chroma_int` both ways (`gradewin.RGB_IN` / `YUV_OUT`);
+  packed rgb24 left to negotiation is ~2 levels dark on ffmpeg 8.x. QA reads
+  (`qa_metrics.read_frames`) convert in the graph too
+  (`RGB_READ` / `RGB_RESIZE`), so a metric reads the same on 8.x and 9.0.
+

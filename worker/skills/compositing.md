@@ -78,7 +78,9 @@ change — never a filter on every graphic.
 ## Common failure modes
 
 - Difference over a flat mid-grey plate: the word turns muddy. Use auto or
-  normal.
+  normal. Over black (a dark shirt, a night sky) difference IS normal paint:
+  nothing changes, so the device has not earned its place — move the word
+  over the busy or lit part of the picture, or leave it plain.
 - Screen on type: white-on-anything washes out. Screen is for light.
 - A footage fill that is static or dark: the letters read as flat colour.
   Pick moving, textured footage.
