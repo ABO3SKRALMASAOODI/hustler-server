@@ -1,0 +1,19 @@
+# Track 1D accent: threshold (worker/accents.py).
+id: "accent_threshold"
+family: "punctuation"
+verb: "add_accent"
+fx_type: "accent"
+stage: "pre_captions"
+params: {kind: ["threshold"], stage: ["pre_captions", "over_type"]}
+needs: {sidecars: [], lane_features: ["ffmpeg:overlay", "ffmpeg:alphamerge"], footage: "any picture"}
+binds_to: ["stress", "cut", "word.payoff", "beat.kick", "downbeat", "onset"]
+budget: {calm: {per_short: 0, min_gap_s: 6}, designed: {per_short: 1, min_gap_s: 2}, charged: {per_short: 8, min_gap_s: 0.25}}
+never: ["mid-word on a payoff word", "inside a payoff hold", "a second punctuation family in the same section", "on consecutive shots except a deliberate callback"]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: true}
+rungs: ["full", "omit"]
+cost: {ms_per_frame: {interactive: 1.6, batch: 1.2, local: 1.0}, fixed_ms: 40}
+exemplars: ["15@0.87"]
+verify: ["land_err_f<=1", "region_locality<=0", "flash_risk<=3"]
+status: "live"
+description: "A two-level black-and-white frame: a graphic punch on a hard consonant or a cut."
+skill: "punctuation"

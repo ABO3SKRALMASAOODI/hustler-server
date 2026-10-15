@@ -1,0 +1,33 @@
+# AT-1D-4: content-born and geometric junctions at real cuts (jump cuts of
+# the stage walk window, so source handles exist both sides).
+id: AT-1D-4
+track: 1D
+title: column wipe, box steps and an iris from an element, duration-preserving
+local_only: true
+interim: false
+reference:
+  - {ref: "22", t: [4.9, 5.2], approx: true, board_t: 5.0}
+  - {ref: "14", t: [15.30, 16.07], approx: false, board_t: 15.6}
+  - {ref: "03", t: [7.93, 8.4], approx: false, board_t: 8.1}
+footage:
+  - {vfl: V13, window: dragon_stage_walk}
+music: null
+aspect: "9:16"
+mode: engine
+edl:
+  base: vfl_default
+  keep: [[471.0, 474.0], [478.0, 481.0], [485.0, 488.0], [492.0, 495.0]]
+  ops:
+    - {action: upsert, layer: fx, id: jn_cols, value: {id: jn_cols, type: junction, stage: junction, at: 3.0, style: columns, duration_s: 0.5, count: 6, direction: left, device: junction_columns}}
+    - {action: upsert, layer: fx, id: jn_box, value: {id: jn_box, type: junction, stage: junction, at: 6.0, style: box_steps, duration_s: 0.8, device: junction_box_steps}}
+    - {action: upsert, layer: fx, id: jn_iris, value: {id: jn_iris, type: junction, stage: junction, at: 9.0, style: iris, duration_s: 0.4, origin: {kind: point, point: [0.62, 0.38]}, device: junction_iris}}
+chat: null
+render: {variant: final}
+allow: []
+metrics:
+  - {name: duration_exact, op: "<=", value: 0}
+  - {name: flash_risk, op: "<=", value: 3}
+  - {name: cost_ratio}
+beyond: "length and sound measured bit-identical across every junction (source handles, no re-timing), the iris centred on its element to the pixel, three styles from three operations and re-solved on any recut"
+board: {stills: [3.0, 6.0, 9.0], clip: [2.4, 9.6]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

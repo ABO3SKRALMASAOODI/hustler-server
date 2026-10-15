@@ -1,0 +1,19 @@
+# Track 1D accent: rgb_slice (worker/accents.py).
+id: "accent_rgb_slice"
+family: "punctuation"
+verb: "add_accent"
+fx_type: "accent"
+stage: "pre_captions"
+params: {kind: ["rgb_slice"], bands: [6, 8, 4], stage: ["pre_captions", "over_type"]}
+needs: {sidecars: [], lane_features: ["ffmpeg:overlay", "ffmpeg:alphamerge"], footage: "any picture"}
+binds_to: ["stress", "cut", "word.payoff", "beat.kick", "downbeat", "onset"]
+budget: {calm: {per_short: 0, min_gap_s: 6}, designed: {per_short: 1, min_gap_s: 2}, charged: {per_short: 6, min_gap_s: 0.25}}
+never: ["mid-word on a payoff word", "inside a payoff hold", "a second punctuation family in the same section", "on consecutive shots except a deliberate callback"]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: ["full", "omit"]
+cost: {ms_per_frame: {interactive: 5.0, batch: 3.6, local: 3.0}, fixed_ms: 40}
+exemplars: ["37@≈0.3–11.3"]
+verify: ["land_err_f<=1", "region_locality<=0"]
+status: "live"
+description: "Horizontal slices of the frame swapped and offset with a chroma split: a 2-frame glitch on a hard word."
+skill: "punctuation"
