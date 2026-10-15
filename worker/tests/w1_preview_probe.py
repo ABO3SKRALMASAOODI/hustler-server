@@ -102,7 +102,16 @@ def stale_client():
                     assert f"[{op['id']}]" in schemas.describe_edl(out, dur)
                 else:
                     m = [i for i in out["motion"] if i["id"] == op["id"]][0]
-                    assert m["composite"] is not None, "composite not set"
+                    want = case.get("expect") or {}
+                    if want.get("behind_key"):
+                        # 1A: a behind_subject graphic written with no mask
+                        # renders through the program matte
+                        assert m["layer"] == "behind_subject"
+                        assert (m.get("behind") or {}).get("asset_key") == \
+                            want["behind_key"], "program matte not named"
+                    else:
+                        assert m["composite"] is not None, \
+                            "composite not set"
             back = edit_batch.apply_batch(out, case["undo"], dur, allowed)
             assert schemas.edl_signature(back) == base_sig, \
                 "removal did not restore the edit"

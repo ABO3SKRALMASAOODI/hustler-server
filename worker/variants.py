@@ -69,6 +69,12 @@ def check_kinds(kinds):
     return tuple(out)
 
 
+# Stills leave the graph as packed RGB converted IN the graph with accurate
+# rounding: left to negotiation, ffmpeg 8.x (production) wrote every
+# variant ~2 levels darker than the frame it registers to.
+TO_RGB24 = "scale=flags=accurate_rnd+full_chroma_int,format=rgb24"
+
+
 def variant_graph(kinds, W, H, workdir, seed=0):
     """(filter_complex, map_paths, out_labels): every kind from input 0 in
     one graph. Map stills are inputs 1..n."""
@@ -84,9 +90,9 @@ def variant_graph(kinds, W, H, workdir, seed=0):
                 "seed": seed}
         out = f"vo{i}"
         if kind == "photo":
-            parts.append(f"[{srcs[i]}]format=rgb24[{out}]")
+            parts.append(f"[{srcs[i]}]{TO_RGB24}[{out}]")
         elif kind == "negative":
-            parts.append(f"[{srcs[i]}]negate,format=rgb24[{out}]")
+            parts.append(f"[{srcs[i]}]negate,{TO_RGB24}[{out}]")
         else:
             maps = {}
             for j, nm in enumerate(finish.maps_for(item)):
@@ -97,7 +103,7 @@ def variant_graph(kinds, W, H, workdir, seed=0):
             g = finish.Graph(parts, f"v{i}", W, H, 25.0, 1, maps=maps,
                              seed=seed)
             last = finish.BUILDERS[finish_kind(kind)](g, srcs[i], item)
-            parts.append(f"[{last}]format=rgb24[{out}]")
+            parts.append(f"[{last}]{TO_RGB24}[{out}]")
         outs.append(out)
     return ";".join(parts), paths, outs
 

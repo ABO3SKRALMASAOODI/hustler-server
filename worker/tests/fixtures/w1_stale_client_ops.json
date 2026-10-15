@@ -956,6 +956,103 @@
      }
     }
    ]
+  },
+  {
+   "name": "a graphic behind the speaker through the program matte (1A)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "layer": "behind_subject"
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "layer": "above_captions",
+      "behind": null
+     }
+    }
+   ],
+   "expect": {
+    "layer": "motion",
+    "behind_key": "sidecar:matte.person"
+   }
+  },
+  {
+   "name": "words behind the speaker, screen-locked under a push (1A + 1C stage)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "layer": "behind_subject",
+      "composite": {
+       "stage": "screen"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "layer": "above_captions",
+      "behind": null,
+      "composite": null
+     }
+    }
+   ],
+   "expect": {
+    "layer": "motion",
+    "behind_key": "sidecar:matte.person"
+   }
+  },
+  {
+   "name": "footage inside the letters on a flat field (1C composite.field)",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": {
+       "fill": {
+        "kind": "asset",
+        "asset_key": "media/p1/starship.mp4",
+        "loop": true
+       },
+       "fill_mode": "inside",
+       "field": "accent"
+      }
+     }
+    }
+   ],
+   "undo": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": null
+     }
+    }
+   ]
   }
  ],
  "bad": [
@@ -1303,6 +1400,27 @@
     }
    ],
    "match": "blend"
+  },
+  {
+   "name": "a field around letters used as windows",
+   "ops": [
+    {
+     "action": "upsert",
+     "layer": "motion",
+     "id": "m1",
+     "value": {
+      "id": "m1",
+      "composite": {
+       "fill": {
+        "kind": "next"
+       },
+       "fill_mode": "outside",
+       "field": "white"
+      }
+     }
+    }
+   ],
+   "match": "field belongs to fill_mode inside"
   }
  ]
 }

@@ -248,6 +248,77 @@ GRADE_FILTERS = {
 }
 
 
+# Texture kinds a full-frame cutaway shares with the footage it replaces
+# (the Look's film: grain and vignette). Blurs, glows and flashes are
+# moments of the main picture, not its stock.
+CUTAWAY_TEXTURES = ("grain", "vignette")
+
+
+def cutaway_look_chain(edl, o_start, o_dur):
+    """Filters that give a FULL-FRAME cutaway (an overlay with fit
+    'cover' or 'picture': b-roll that replaces the speaker) the Look the
+    footage around it has: the grade preset and grade_custom, the Look's
+    grain and vignette, and every simple grade window (worker/gradewin.py:
+    saturation, exposure, contrast — a B&W section, a mono -> colour drop)
+    over the overlap, on the overlay's own clock (t = 0 at its start).
+
+    Oct 11 podcast run (s05): under a black-and-white grade with grain and
+    vignette, both stock cutaways rendered in full colour and clean — the
+    grade and the stylize chain run on the main footage before overlays
+    are laid. [] when the edit has no look to share."""
+    fx = (edl or {}).get("effects") or {}
+    out = []
+    grade = fx.get("grade")
+    if grade and grade in GRADE_FILTERS:
+        out.append(gradelut.fast_chain(GRADE_FILTERS[grade]))
+    gc = fx.get("grade_custom")
+    if gc:
+        chain = grade_custom_chain(gc)
+        if chain:
+            out.append(gradelut.fast_chain(chain))
+    a0, a1 = float(o_start), float(o_start) + float(o_dur)
+    try:
+        import gradewin
+        for it in (edl or {}).get("fx") or []:
+            if not isinstance(it, dict) or it.get("type") != "grade_window" \
+                    or it.get("region") or it.get("start") is None:
+                continue
+            need = gradewin._needs(it, it.get("brand_hue"))
+            if need.get("iso") or need.get("protect") or need.get("tone") \
+                    or it.get("lut"):
+                continue          # keyed / LUT windows grade the footage only
+            s_, e_ = max(a0, float(it["start"])), min(a1, float(it["end"]))
+            if e_ - s_ <= 1e-3:
+                continue
+            import finish
+            yt = finish.table_expr(gradewin.y_table(it.get("ev"),
+                                                    it.get("contrast")))
+            sat = 1.0 if it.get("saturation") is None else \
+                float(it["saturation"])
+            ct = finish.table_expr(gradewin.sat_table(sat))
+            out.append(f"lutyuv=y='{yt}':u='{ct}':v='{ct}':enable="
+                       f"'between(t,{s_ - a0:.3f},{e_ - a0:.3f})'")
+    except Exception as e:  # noqa: BLE001 — the cutaway keeps its colour
+        print(f"[render] cutaway grade windows skipped ({str(e)[:120]})",
+              flush=True)
+    for st in fx.get("stylize") or []:
+        kind = (st or {}).get("kind")
+        if kind not in CUTAWAY_TEXTURES:
+            continue
+        i_ = float(st.get("intensity") or 0.5)
+        en = ""
+        if st.get("start") is not None:
+            s_, e_ = max(a0, float(st["start"])), min(a1, float(st["end"]))
+            if e_ - s_ <= 1e-3:
+                continue
+            en = f":enable='between(t,{s_ - a0:.3f},{e_ - a0:.3f})'"
+        if kind == "grain":
+            out.append(f"noise=alls={5 + int(25 * i_)}:allf=t+u{en}")
+        else:
+            out.append(f"vignette=a=PI/{4.8 - 2.2 * i_:.2f}{en}")
+    return out
+
+
 def grade_custom_chain(gc):
     """The grade_custom filter chain, as build_filtergraph emits it — shared
     with the agent's grade contact strip (round 91), which must show EXACTLY
@@ -2293,6 +2364,41 @@ def cards_current(meta, edl):
     return ((meta or {}).get("card_v") or 0) == config.CARD_LAYOUT_VERSION
 
 
+def matte_status_now(edl, index):
+    """The person matte's status over the items of ``edl`` that use it
+    (matte_track.matte_status: ready | partial | absent | unused | unknown).
+    A read only: it never launches analysis."""
+    try:
+        return (matte_track.matte_status(edl, index or {}) or {}).get(
+            "status") or "unknown"
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+def analysis_current(meta, edl, index_of):
+    """May a render drawn while its analysis was still measuring be served
+    (or stitched from) again?
+
+    A render stores the person matte's status it was drawn with
+    (``matte_status``). Drawn ``partial`` or ``absent``, its matte devices
+    and behind-subject words took their substitute in those windows; once
+    the matte is measured, serving that render again (the cache) or copying
+    its unchanged windows (a stitched preview) kept the substitute until a
+    NEW version (the 1F review's sticky degradations). Such a render is
+    current only while the matte has not improved. ``index_of()`` returns
+    the index, read only when needed."""
+    st = (meta or {}).get("matte_status")
+    if st not in ("partial", "absent"):
+        return True
+    try:
+        now = matte_status_now(edl, index_of() or {})
+    except Exception:  # noqa: BLE001 — the cache is a fine answer
+        return True
+    if now == "ready":
+        return False
+    return not (st == "absent" and now == "partial")
+
+
 def look_current(meta):
     """May new pieces be spliced into this cached render (stitched preview)?
 
@@ -2860,13 +2966,16 @@ def _fx_cuts(order, keep, edl_keep, blk_frames):
 
 
 def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
-                   card_layout, src_dur):
+                   card_layout, src_dur, shot_starts=()):
     """Where a junction side's source handle comes from: the main footage
     past a plain kept span's out-point (side "out") or before its in-point
     ("in") — or None (the edge frame is frozen): an insert, a card block, a
-    sped / censored / repainted / padded program, or no footage there. The
-    in-side floor is a second before the first kept span (the main input may
-    seek there)."""
+    sped / censored / repainted / padded program, no footage there, or a
+    SOURCE camera cut inside the handle (Wave 1 integration: a column wipe
+    onto a span that starts on a camera change revealed the previous
+    camera's frames under the incoming side; ``shot_starts`` are the
+    index's shot boundaries). The in-side floor is a second before the
+    first kept span (the main input may seek there)."""
     kind, idx, _l = entry
     if kind != "seg" or no_source or idx in card_layout:
         return None
@@ -2875,15 +2984,33 @@ def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
     nf = blk_frames.get((kind, idx))
     if nf is None:
         return None
+    eps = 0.5 / f3
     if side == "out":
-        if s_ + (nf + h) / f3 > float(src_dur) + 1e-3:
+        end = s_ + nf / f3
+        if end + h / f3 > float(src_dur) + 1e-3:
+            return None
+        if any(end - eps <= c < end + h / f3 for c in shot_starts):
             return None
         return {"seg": idx, "frames": nf}
     start = s_ - h / f3
     floor = max(0.0, min(float(a) for a, _b in keep) - 1.0)
     if start < floor - 1e-6:
         return None
+    if any(start < c <= s_ + eps for c in shot_starts):
+        return None
     return {"seg": idx, "start": round(start, 6)}
+
+
+def _index_shot_starts(index):
+    out = []
+    for sh in (index or {}).get("shots") or []:
+        try:
+            v = float(sh.get("start") if isinstance(sh, dict) else sh)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if v > 0:
+            out.append(v)
+    return sorted(out)
 
 
 def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
@@ -3417,16 +3544,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if fx_plan is not None and fx_plan.junction_items:
         fx_juncs = fxgraph.junction_specs(
             fx_plan, _fx_cuts(order, keep, edl.get("keep"), blk_frames))
+        shot_starts = _index_shot_starts(index)
         for spec in fx_juncs:
             ka, kb = spec["k"], spec["k"] + 1
             spec["a_src"] = _fx_handle_src(
                 order[ka], keep, blk_frames, spec["h"], fps, "out",
                 speed or regions or patch_inputs or src_pad > 0,
-                card_layout, src_dur)
+                card_layout, src_dur, shot_starts)
             spec["b_src"] = _fx_handle_src(
                 order[kb], keep, blk_frames, spec["h"], fps, "in",
                 speed or regions or patch_inputs or src_pad > 0,
-                card_layout, src_dur)
+                card_layout, src_dur, shot_starts)
     fx_taps = [sp for sp in fx_juncs for key in ("a_src", "b_src")
                if sp.get(key)]
     # Each segment's own sound: its span of the source, as long as its block.
@@ -4901,7 +5029,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                               "its person matte is unavailable on this "
                               "render")
             return motion_layer.overlay_clip(parts, vlabel, m_idx, m_item,
-                                             m_clip, fps, f"mgs{j}")
+                                             m_clip, fps, f"mgs{j}",
+                                             plan=fx_plan)
         print(f"[render] behind-text {(item.get('item') or {}).get('id')}: "
               "its person matte is unavailable on this render — burning it "
               "as a plain title", flush=True)
@@ -5181,6 +5310,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)'"
                 f":a='alpha(X,Y)*({alpha})'")
         picture_cover = item.get("fit") == "picture"
+        look = (cutaway_look_chain(edl, o_start, o_dur)
+                if item.get("fit") in ("cover", "picture")
+                and item["kind"] in ("video", "image") else [])
+        if look and opacity_animated:
+            # graded before the alpha geq (the chain is rgba after it)
+            chain[chain.index("format=rgba"):chain.index("format=rgba")] = \
+                ["format=yuv420p"] + look
+            look = []
         if item.get("fit") in ("cover", "picture"):
             # Cover either the canvas or its authored picture rectangle.
             # Picture-only cutaways preserve the independent headline band
@@ -5198,6 +5335,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             else:
                 ow = _even((W or 1280) * float(scale_value or 0.4))
                 chain.append(f"scale={ow}:-2")
+        if look:
+            # the Look of the footage it replaces, at the cutaway's own size
+            chain += ["format=yuv420p"] + look
         if not opacity_animated:
             chain.append("format=rgba")
         if not opacity_animated and op is not None and float(op) < 0.999:
@@ -5274,7 +5414,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         runs=card_runs, anim=card_anim)
     # Browser-rendered motion design under the dialogue captions...
     vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
-                                       "below_captions", fps)
+                                       "below_captions", fps, plan=fx_plan)
     # ---- fx: pre_captions stage — over cards and graphics, under the words.
     vlabel = fxgraph.apply_stage("pre_captions", parts, vlabel, fx_plan)
     if ass_path:
@@ -5311,7 +5451,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # ...and designed moments above every text layer (still under the
     # frame-shift bars, floating plate, watermark and end card).
     vlabel = motion_layer.append_graph(parts, vlabel, motion_inputs,
-                                       "above_captions", fps)
+                                       "above_captions", fps, plan=fx_plan)
     # ---- fx: over_type stage — over every text layer, and still UNDER the
     # aspect bars, the screen-frame plate, the watermark and the end card
     # (owner rule 4; tests/test_w0b_render.py pins it bit-exact).
@@ -5949,7 +6089,11 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     master = None if _base_stage else master_loudness(edl)
     # fx belong to the final composition, never to a bounded base stage.
     fx_box = [fxgraph.prepare({} if _base_stage else edl, tl=tl, W=W, H=H,
-                              fps=fps, preview=preview, workdir=workdir)]
+                              fps=fps, preview=preview, workdir=workdir,
+                              media={"src_path": None,
+                                     "asset_locals": asset_locals,
+                                     "index": None,
+                                     "audio_only": bool(audio_only)})]
     next_idx = fx_box[0].bind_inputs(extra_inputs, next_idx)
 
     def _graph(**extra):
@@ -6447,7 +6591,9 @@ def _fx_run(cmd, fx_box, rebuild, cancelled_cb, **run_kw):
         # and its failure is the legacy graph's, raised as before)
         pm = getattr(plan, "pm", None)
         pm_on = pm is not None and bool(pm.active and pm.wants)
-        if plan is None or (plan.empty and not pm_on) \
+        comp_on = bool(getattr(plan, "has_composites", False)
+                       and not getattr(plan, "no_composites", False))
+        if plan is None or (plan.empty and not pm_on and not comp_on) \
                 or (cancelled_cb and cancelled_cb()) \
                 or "timed out" in str(e) or "cancelled" in str(e):
             raise
@@ -6900,21 +7046,6 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             # relative) seconds sit the container's start later on it
             pm.clock_offset = (float(info.get("format_start") or 0.0)
                                if seek_main_source else 0.0)
-    # EDL.fx (Wave 0 seams): rungs decided and inputs allocated once; an
-    # EDL without fx gets an empty plan and the exact legacy graph. Prepared
-    # here, before the behind-subject items, so the compilers' matte
-    # requests and the behind items share one program matte; its inputs are
-    # bound after the motion inputs, as before.
-    pm_token = matte_track.CURRENT.set(pm)
-    try:
-        fx_box = [fxgraph.prepare(edl, tl=tl, W=W, H=H, fps=fps,
-                                  preview=preview, workdir=workdir,
-                                  source=fx_source)]
-    finally:
-        matte_track.CURRENT.reset(pm_token)
-    if pm is not None:
-        fx_box[0].pm = pm
-        fx_box[0].edl = edl
     pm_items = {}               # (layer, id) -> serves on the program matte
 
     def _screen_stage(item):
@@ -7049,7 +7180,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         motion_inputs, next_idx = motion_layer.prepare_inputs(
             edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx),
-            extra_items=caption_motion_items,
+            extra_items=caption_motion_items, source_path=src_path,
             plate=_plate_probe(edl, tl, src_path,
                                (info["width"], info["height"]), W, H,
                                frame_mode, frame_focus, insert_locals,
@@ -7112,6 +7243,28 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                    round(pieces[0][1], 3))))
             next_idx += 1
         motion_inputs = [mi for mi in motion_inputs if mi[1] is not None]
+    # EDL.fx (Wave 0 seams): rungs decided and inputs allocated once; an
+    # EDL without fx gets an empty plan and the exact legacy graph. Prepared
+    # AFTER the motion graphics (Wave 1 integration): 1C's glyph regions
+    # and letter windows read the clips prepare_inputs registers, and 1A had
+    # moved this before them, which omitted every glyph device ("its glyphs
+    # are absent"). The compilers' matte requests still share the one
+    # program matte with the behind items (wants are order-free); its
+    # inputs are bound after the motion inputs, as before.
+    pm_token = matte_track.CURRENT.set(pm)
+    try:
+        fx_box = [fxgraph.prepare(edl, tl=tl, W=W, H=H, fps=fps,
+                                  preview=preview, workdir=workdir,
+                                  source=fx_source,
+                                  media={"src_path": src_path,
+                                         "asset_locals": asset_locals,
+                                         "index": index,
+                                         "audio_only": bool(audio_only)})]
+    finally:
+        matte_track.CURRENT.reset(pm_token)
+    if pm is not None:
+        fx_box[0].pm = pm
+        fx_box[0].edl = edl
     # The program matte's chunk files (and face clip) join the fx plan's
     # inputs: fetched only when a consumer asked and something is measured.
     if pm is not None:
@@ -8547,6 +8700,11 @@ def _run_render_job(worker_db, job):
                 and watermark_current(cached.get("meta"), variant, is_paid,
                                       wm_settings) \
                 and finish_current(cached, variant) \
+                and analysis_current(
+                    cached.get("meta"), edl_row["json"],
+                    lambda: (worker_db.run(dbx.get_index_by_sha,
+                                           original["sha256"]) or {})
+                    .get("json") or {}) \
                 and _audio_model_review_cache_compatible(
                     audio_model_review, edl_row["json"], cached.get("meta")):
             cached_meta = cached.get("meta") or {}
@@ -8808,6 +8966,10 @@ def _run_render_job(worker_db, job):
         stitched_from = None
         reused_visual_meta = {}
         stitched_devices = None    # (previous devices block, previous EDL)
+        # the person matte as this render draws it (analysis_current): read
+        # BEFORE the encode, so a matte that lands mid-render re-renders next
+        drawn_matte = ("unused" if is_canvas or proof_only else
+                       matte_status_now(edl_row["json"], index))
         requested_ranges = None
         proof_segments = []
         changed_ranges = None
@@ -8877,6 +9039,8 @@ def _run_render_job(worker_db, job):
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
                             and finish_current(prev_asset, variant) \
+                            and analysis_current(pm, prev_row["json"],
+                                                 lambda: index) \
                             and (fp_now is None
                                  or pm.get("caption_fp") == fp_now):
                         out_dur = _reuse_picture_with_new_audio(
@@ -9286,7 +9450,10 @@ def _run_render_job(worker_db, job):
                            if want_wm else None),
                   **({"motion_warnings": motion_warnings[:12]}
                      if motion_warnings else {}),
-                  **({"devices": fx_devices} if fx_devices else {})})
+                  **({"devices": fx_devices} if fx_devices else {}),
+                  **({"matte_status": drawn_matte}
+                     if drawn_matte in ("ready", "partial", "absent")
+                     else {})})
         # Completed renders, including proof reels, remain recoverable history.
         # Never delete an asset referenced by an issued receipt.
         # Deterministic mid-word audit: keep boundaries that clip a word,

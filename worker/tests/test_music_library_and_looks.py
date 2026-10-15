@@ -459,9 +459,13 @@ def test_switching_systems_replaces_texture_grade_and_owned_sounds(kit):
     assert out.startswith("EDL v2"), out
     edl = ctx.latest_edl()["json"]
     fx = edl["effects"]
-    assert fx["grade"] == "bw"
+    # owner taste (15 Oct): noir pushes the colour down; black and white is
+    # a device on its moment, never the whole short's grade
+    assert fx["grade"] is None
     gc = {k: v for k, v in fx["grade_custom"].items() if v is not None}
     assert gc == agent_tools.LOOKS["mono_noir"]["grade_custom"]
+    assert 0.4 <= gc["saturation"] < 1.0
+    assert "BLACK AND WHITE is this look's device" in out
     assert sorted(s["kind"] for s in fx["stylize"]) == ["grain", "vignette"]
     assert [s["intensity"] for s in fx["stylize"] if s["kind"] == "grain"] \
         == [0.32]

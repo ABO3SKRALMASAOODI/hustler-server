@@ -74,15 +74,16 @@ def test_a_slam_in_the_headline_band_is_kept_under_the_corner_mark(monkeypatch):
     item = ctx.latest_edl()["json"]["motion"][0]
     box = item["footprint"]["box"]
     assert box[1] >= mark[3] - keepout.EDGE_TOL or box[0] >= mark[2], (box, mark)
-    assert "mark" not in keepout.safe_issues(box, 1080, 1920)
+    assert not keepout.on_mark(box, keepout.mark_zone(1080, 1920))
 
 
 def test_the_mark_issue_holds_on_landscape_frames_too():
+    # merged with Wave 1's corner-mark floor (keepout.mark_zone / on_mark)
     import keepout
-    mark = keepout.watermark_zone(1920, 1080)
-    inside = (mark[0] + 0.01, mark[1] + 0.01, mark[2] + 0.1, mark[3] + 0.1)
-    assert "mark" in keepout.safe_issues(inside, 1920, 1080)
-    assert keepout.safe_issues((0.6, 0.4, 0.9, 0.6), 1920, 1080) == []
+    zone = keepout.mark_zone(1920, 1080)
+    inside = (zone[0] + 0.01, zone[1] + 0.01, zone[2] + 0.1, zone[3] + 0.1)
+    assert keepout.on_mark(inside, zone)
+    assert not keepout.on_mark((0.6, 0.4, 0.9, 0.6), zone)
 
 
 def _html_full(start=1.9, end=5.2, params=None):

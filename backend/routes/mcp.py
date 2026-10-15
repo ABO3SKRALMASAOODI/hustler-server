@@ -294,7 +294,7 @@ _READ_ONLY_EXACT = {
     "suggest_emphasis", "download_url", "wait_for_job", "get_edl",
     "shorts_status",
     # Wave 1 verify department (1F): plan, prove and audit; none writes
-    "suggest_devices", "proof_device", "audit_motion",
+    "suggest_devices", "suggest_recipes", "proof_device", "audit_motion",
     # Wave 2 read verbs (rhythm, direction): measure or propose, never write
     "analyze_music", "check_speech", "align_lyrics", "pick_still",
     "suggest_story", "analyze_reference",

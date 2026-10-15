@@ -67,9 +67,17 @@ def test_core_catalog_growth_is_within_1fs_share():
     core = tools_ext.core_names(agent_tools.TOOLS)
     size = len(json.dumps(agent_tools.openai_tools(
         "any-model", compact=True, names=core), separators=(",", ":")))
+    # Merged Wave 1: every department name and track skill grows the enums
+    # automatically (test_w1_seams sets that growth aside byte for byte);
+    # what is left over the Wave 0 base is 1F's own share (<= 250 bytes)
+    # plus Wave 2's pinned growth (INTERFACES_W2.md §2), and the whole
+    # stays under the Wave 1 ceiling.
+    import test_w1_seams as seams
     from w2_support import W2_CORE_GROWTH_MAX
-    assert size <= 81688 + 18 + 5 + 250 + 10 + W2_CORE_GROWTH_MAX, size
-    # base + verify + fx (+ Wave 2's department and skill names)
+    stripped = len(json.dumps(seams._strip_w1_growth(agent_tools.openai_tools(
+        "any-model", compact=True, names=core)), separators=(",", ":")))
+    assert stripped - 81688 <= 250 + W2_CORE_GROWTH_MAX, stripped
+    assert size <= seams.W1_CORE_CEILING < 83_000, size
     look = agent_tools.TOOLS["look_at"][2]["overlay"]
     assert look["enum"] == ["matte", "free_space", "beats"]
 
@@ -374,4 +382,7 @@ def test_follow_crop_caveats_are_gone():
     assert "proof_device" in editing and "suggest_devices" in editing
     with open(os.path.join(plugin, "looks.md")) as fh:
         looks = fh.read()
-    assert "### Devices" in looks and re.search(r"Strobe.*\| 0 \|", looks)
+    # strobes stay out of a talking short's body except as its ONE recipe
+    # (Wave 1 integration: recipes, one signature move per short)
+    assert "### Devices" in looks and re.search(
+        r"Strobe.*\| 0, or the recipe \|", looks)

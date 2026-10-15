@@ -22,6 +22,23 @@ exposure, palette, source defects (dropouts, noise, compression), motion
 energy, the user's reference and the rendered result at every effect
 boundary.
 
+## Black and white is a device, never a flat look
+
+The owner's references use B&W as a MOMENT with a reason, never as the
+whole short's grade: a mono section that opens to colour on the drop or the
+turn, the speaker (or one colour) kept in a grey world, a silhouette held
+on a flat field for one thought, 1-frame negatives on the strongest hits.
+A whole-short `bw` grade is refused unless the user's own words ask for
+black and white (the write says so). To use B&W:
+- mono until the turn: `set_grade_window(start, end=<turn word>,
+  saturation=0, ramp_out_f=3)` — colour lands ON the word;
+- one colour kept: `isolate_colour(keep='subject')` (the speaker) or
+  `keep='hue'` (a red jacket), for the section the colour means something;
+- silhouette hold: `add_subject_effect(kind='poster')` for one thought;
+- negatives on hits: `add_accent(kind='negative', on='stress')`, 2-4 of them.
+`suggest_devices` proposes these bound to the right words. One per short,
+and a different one from the shorts before it.
+
 ## Strong treatment patterns
 
 LOOKS (`apply_look`) — one call composes caption look, grade, grain and
@@ -33,12 +50,9 @@ set:
   fast whips/flashes.
 - `cinematic_doc` — story and documentary: filmic contrast, matte blacks,
   grain, light-leak/burn junctions.
-- `mono_noir` — desaturated B&W with one accent colour on type; only when
-  the user asks for black and white (the in-house agent's apply_look
-  refuses it otherwise). B&W is a device, not a default look: a section
-  that opens to colour on the drop (set_grade_window), one colour kept
-  (isolate_colour), a silhouette hold, a one-frame negative on a hit
-  (add_accent kind=negative).
+- `mono_noir` — noir: deep contrast, colour pushed down (not removed), one
+  red accent on type. Black and white is NOT its grade: it is a device on
+  one moment (see "Black and white is a device" below).
 - `clean_minimal` — quiet product and education: clean captions, neutral
   grade, minimal texture.
 - Legacy looks `hype`, `clean`, `cinematic`, `luxury`, `meme` remain.

@@ -37,8 +37,13 @@ _MONO_DEVICE = re.compile(
 def mono_allowed(user_text):
     """True only when the user's own words ask for a black-and-white /
     monochrome look. A planner without such words treats B&W strictly as
-    a bounded device (a section, a kept colour, a hold, a hit)."""
-    return bool(_MONO_ASK.search(str(user_text or "")))
+    a bounded device (a section, a kept colour, a hold, a hit). One source
+    of truth with the write gate (W1's mono_policy.asked)."""
+    try:
+        import mono_policy
+        return bool(mono_policy.asked(user_text))
+    except ImportError:
+        return bool(_MONO_ASK.search(str(user_text or "")))
 
 
 def mono_whole_short(user_text):

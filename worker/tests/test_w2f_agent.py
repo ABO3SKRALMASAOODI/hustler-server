@@ -151,16 +151,29 @@ def test_three_voices_are_distinct_and_draw_on_the_frame():
     assert img.shape == (1920, 1080, 3) and img.max() > 100
 
 
-def test_a_whole_short_bw_look_needs_the_users_ask(monkeypatch):
-    class Ctx(S.Ctx):
-        job = {"type": "agent_turn"}
-    ctx = Ctx(S.edl())
-    ctx.user_message = "make this a premium short"
-    out = agent_tools.apply_look(ctx, "mono_noir")
-    assert out.startswith("REJECTED") and "device" in out
+def test_a_whole_short_bw_look_needs_the_users_ask():
+    """B&W is a device (W1 mono_policy, one predicate with creative): no
+    look is flat B&W, a write that makes the short flat B&W is refused
+    without the user's ask, and the planner's colour turn is a stretch."""
     import creative
+    import mono_policy
+    assert agent_tools.LOOKS["mono_noir"].get("grade") != "bw"
+    before = S.edl()
+    after = dict(before, effects=dict(before.get("effects") or {},
+                                      grade="bw"))
+    refused, _note = mono_policy.check_write("make it premium", before,
+                                             after)
+    assert refused and "device" in refused
+    assert mono_policy.check_write("make it black and white", before,
+                                   after) == (None, None)
     assert creative.mono_allowed("make it black and white")
     assert not creative.mono_allowed("make it moody")
+    cands, edl = _plan()
+    for c in cands:
+        v = (c.get("op") or {}).get("value") or {}
+        if v.get("type") == "grade_window":
+            trial = dict(edl, fx=[v])
+            assert mono_policy.whole_mono(trial) is None
 
 
 def test_suggest_then_apply_writes_one_batch(monkeypatch):

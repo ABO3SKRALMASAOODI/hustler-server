@@ -107,6 +107,7 @@ import sound_library
 import sfx_mix
 # Owner rules in code (Wave 0, track 0C): music provenance and library picks,
 # the missing-sound queue (worker/devices/INTERFACES.md §6.1).
+import mono_policy
 import music_gate
 import sound_requests
 import hooks
@@ -641,6 +642,15 @@ class ToolContext:
         if sfx_refusal:
             return (f"REJECTED (EDL v{prev['version']} unchanged): "
                     + sfx_refusal.replace("REJECTED: ", "", 1))
+        # Owner taste (15 Oct): black and white is a device, never a flat
+        # look. A write that makes the whole short B&W is refused unless the
+        # user's own words asked for it (mono_policy; with no user words —
+        # an MCP client, a script — it passes with a note).
+        mono_refusal, mono_note = mono_policy.check_write(
+            self.user_message, prev["json"], normalized)
+        if mono_refusal:
+            return (f"REJECTED (EDL v{prev['version']} unchanged): "
+                    + mono_refusal.replace("REJECTED: ", "", 1))
         advisories = quality_gate.advisory_findings(
             prev["json"], normalized, self.user_message)
         if edl_signature(normalized) == edl_signature(prev["json"]):
@@ -682,6 +692,8 @@ class ToolContext:
                 f"Before: {before}. After: {after}.")
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
+        if mono_note:
+            line += "\n" + mono_note
         # The device ledger (Wave 0, 0C; INTERFACES.md §6.3): a write that
         # added, removed or changed a device returns its family counts
         # against the budgets — advisory, never a reason to add one.
@@ -2481,19 +2493,19 @@ def project_state(ctx, edl=None):
         return {}
     out = {}
     try:
-        import devices
-        live_cards = bool(devices.load_cards())
-    except Exception:  # noqa: BLE001
-        live_cards = False
-    try:
         if edl is None:
             edl = ctx.latest_edl()["json"]
-        has_fx = bool(edl.get("fx"))
+        has_fx = bool(edl.get("fx")) or any(
+            isinstance(m, dict) and m.get("layer") == "behind_subject"
+            for m in edl.get("motion") or []) or any(
+            isinstance(t, dict) and t.get("behind")
+            for t in edl.get("texts") or [])
     except Exception:  # noqa: BLE001
         has_fx = False
-    if not (live_cards or has_fx):
-        # no device can use analysis yet: the state stays as it was, and
-        # no store listing is paid for on every turn
+    if not has_fx:
+        # nothing in this edit reads analysis: the state stays as it was,
+        # and no store listing is paid for on every turn (Wave 1 merge: the
+        # cards are live everywhere, so "cards exist" no longer says it)
         return {}
     try:
         import sidecars
@@ -27150,15 +27162,23 @@ LOOKS = {
     },
     "mono_noir": {
         "system": True,
-        "summary": ("high-contrast black-and-white, stacked captions whose "
-                    "hero word slams in (key words red), heavy grain + "
-                    "vignette, glitch transitions"),
+        # Owner taste (15 Oct): B&W is a DEVICE in the references (a section
+        # opening to colour on the drop, one colour kept, a silhouette hold,
+        # negatives on hits), never a flat look — so noir is the colour
+        # pushed down hard and the contrast up, and black and white arrives
+        # on its moment (mono_policy.DEVICES_LINE, the device hint below).
+        "summary": ("noir: deep contrast with the colour pushed down, "
+                    "stacked captions whose hero word slams in (key words "
+                    "red), heavy grain + vignette, glitch transitions; "
+                    "black and white comes as a device on its moment, "
+                    "never as the whole short"),
         "captions": {"motion_look": "stack", "preset": "impact",
                      "color": "#F7F7F5", "highlight_color": "#ED080D",
                      "size": "m"},
-        "grade": "bw",
-        "grade_custom": {"contrast": 1.08, "shadows": -0.1,
-                         "highlights": 0.05},
+        "grade": None,
+        "grade_custom": {"contrast": 1.14, "saturation": 0.62,
+                         "shadows": -0.12, "highlights": 0.05},
+        "device_hint": True,
         "stylize": (("grain", 0.32), ("vignette", 0.4)),
         "transition": ("glitch", 0.2),
         "transition_sfx": (("glitch", "whoosh_hard"), -8.0),
@@ -27455,20 +27475,6 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                 + ", ".join(sorted(LOOKS))
                 + ". Each composes captions, grade, texture, transitions "
                   "and fades in one version.")
-    asked = str(getattr(ctx, "user_message", "") or "")
-    if look.get("grade") == "bw" and asked.strip() \
-            and not music_gate.is_mcp(ctx):
-        # Wave 2 (owner, 15 Oct): B&W is a DEVICE, never the whole short
-        # unless the user's own words ask for black and white. An MCP
-        # client's call is its user's ask; a scripted context with no user
-        # words at all is not an agent choosing a look.
-        import creative
-        if not creative.mono_allowed(asked):
-            return ("REJECTED: '" + n + "' turns the WHOLE edit black and "
-                    "white, and the user did not ask for black and white. "
-                    "Use B&W as a device instead: " + "; ".join(
-                        d for _k, d in creative.B_AND_W_DEVICES) +
-                    ". Or pick another look.")
     music_req, music_err = _look_music_choice(look, music, ctx)
     if music_err:
         return music_err
@@ -27834,6 +27840,10 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
             res += ("\nNote: existing music items were NOT touched — for "
                     "the smooth speech duck this look pairs with, call "
                     "set_music_fit(id, duck_mode='smooth') on them.")
+        if look.get("device_hint"):
+            res += ("\nBLACK AND WHITE is this look's device, not its "
+                    "grade: " + mono_policy.DEVICES_LINE + ". One per "
+                    "short, on the moment that earns it.")
         if system and not _tool_disabled("add_motion_graphic"):
             heroes = _look_hero_templates(look)
             if heroes:
@@ -32164,8 +32174,7 @@ _COMPACT_CONTRACTS = {
         "ONE committed look in one version: caption look + grade + grain + "
         "transitions, reporting every component. Premium: "
         "editorial (podcast/interview default), creator_punch, cinematic_doc, "
-        "mono_noir (only when the user asks for B&W), clean_minimal; legacy "
-        "hype, clean, cinematic, luxury, meme. "
+        "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
         "Places no sound unless transition_sounds=true (sounds are optional, "
         "never rules); read the receipt before adding junction cues. Its music "
         "option, only when the user asked for background music, takes the "
