@@ -515,6 +515,10 @@ def place_in_world(ctx, where, motion_id=None, text=None, t=None, box=None,
                 where_p = attachment.behind_params(bx, W, H)
             except (TypeError, ValueError):
                 where_p = None
+            if where_p:
+                # seated at render on the object's own edge (its measured
+                # mask), so the object really cuts the letters
+                anchor["pin"] = attachment.behind_pin(bx, W, H)
             if where_p and not motion_id and \
                     m.get("template") == "word_slam":
                 # the word where the object can hide it (its lower part
@@ -644,8 +648,8 @@ TOOL_SPECS = {
         pin_to_plane,
         "Lay a graphic (motion_id) or new words (text) on a surface: an "
         "existing plane, or quad (4 corners TL,TR,BR,BL along the surface, "
-        "program fractions) at t. The person in front occludes it on "
-        "floors/desks; shadow=true lets real shadows darken it; "
+        "program fractions) at t. The person in front occludes it "
+        "(occluders=[] draws over them); shadow=true lets real shadows darken it; "
         "blend=multiply prints it into the surface.",
         {"motion_id": {"type": "string"}, "text": {"type": "string"},
          "plane": {"type": "string"},

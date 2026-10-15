@@ -104,7 +104,10 @@ asked; never music.
 Definitions are stored on the SOURCE clock in SOURCE frame fractions
 (read them off `look_at(times=[<source second>])`, the uncropped frame);
 the graphic's own params (`y`, `x`) are PROGRAM fractions — put a word
-behind an object where the object can hide part of it.
+behind an object where the object can hide part of it. A `pin` on a
+`screen` anchor that names an object SEATS the word at render: its ink
+point `pin` lands on the object's measured top edge (a wide object) or
+middle (a tall one) — `[0.5, 0.68]` hides about a third of the letters.
 
 ```json
 {"action": "upsert", "layer": "fx", "id": "ob1", "value": {"id": "ob1",
@@ -115,7 +118,8 @@ behind an object where the object can hide part of it.
  "template": "word_slam", "start": 4.2, "end": 6.4,
  "params": {"text": "SECRET", "y": 0.75, "width": 0.8},
  "layer": "above_captions",
- "anchor": {"to": "screen", "occluders": ["object:ob1"]}}}
+ "anchor": {"to": "screen", "pin": [0.5, 0.68],
+            "occluders": ["object:ob1"]}}}
 {"action": "upsert", "layer": "motion", "id": "gc1", "value": {"id": "gc1",
  "template": "glass_card", "start": 9.0, "end": 11.0,
  "params": {"title": "3x"}, "anchor": {"to": "hand.index_tip",

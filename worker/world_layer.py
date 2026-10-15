@@ -82,6 +82,8 @@ class Ctx:
                                                           0.0) or 0.0)
         self._geo = {}
         self._masks = {}
+        self._ink = {}             # item id -> dark ink (printed type)
+        self._blend = {}           # item id -> blend override
 
     # source frame size (fractions <-> pixels of the measured proxy)
     @property
@@ -621,9 +623,10 @@ def _default_occluders(anchor, item, defs):
         out = []
         kind, ref = _target(anchor)
         if kind == "plane":
-            d = defs.get(ref) or {}
-            if d.get("surface") in ("floor", "desk", "table"):
-                out.append("person")
+            # a surface of the room: the person stands on it (floor), sits
+            # at it (desk, table: hands and arms cross it) or in front of
+            # it (wall, screen, projection) — type there never covers them
+            out.append("person")
     if item.get("layer") == "behind_subject" and "person" not in out:
         out.append("person")
     return out
@@ -666,6 +669,21 @@ def compose(item, clip, ctx, plan_only=False):
             tr = plan.trim[k]
             plan.A[k] = (program_affine(geo, s + (k + 0.5) / ctx.fps, tr)
                          if tr is not None else None)
+        objs = [str(o).split(":", 1)[1] for o in anchor.get("occluders")
+                or [] if str(o).startswith("object:")]
+        if anchor.get("pin") is not None and objs:
+            # seated: the graphic's own ink point ``pin`` set on the
+            # object that hides it (a wide object's top edge, a tall one's
+            # middle), measured on the landing frame — the word sits where
+            # the object really cuts it, whatever size the page set it at
+            d = world_defs.definitions(ctx.edl).get(objs[0])
+            off_xy = _seat(item, clip, ctx, anchor, plan, d, notes) \
+                if d else None
+            if off_xy is not None:
+                ident = np.array([[1.0, 0.0, clip.x + off_xy[0]],
+                                  [0.0, 1.0, clip.y + off_xy[1]],
+                                  [0.0, 0.0, 1.0]])
+        for k in range(n):
             plan.M[k] = ident
         if plan_only:
             return plan, notes
@@ -785,9 +803,209 @@ def compose(item, clip, ctx, plan_only=False):
                        or [HIDE_FADE_F])
             a[k] = min(1.0, dist / float(HIDE_FADE_F))
         plan.alpha = a
+    if kind == "plane" and quad is not None:
+        _print_polarity(item, clip, ctx, plan, quad, ok, good_t, notes)
     if plan_only:
         return plan, notes
     return _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi)
+
+
+# Type multiplied into a surface ("printed") must be darker than it: a
+# light page on a bright wall prints in dark ink; on a dark surface a
+# multiply shows nothing, so it is laid as light (screen) instead.
+PRINT_BRIGHT, PRINT_DARK = 0.5, 0.33
+INK = (22, 22, 26)
+
+
+def _print_polarity(item, clip, ctx, plan, quad, ok, good_t, notes):
+    """For a plane graphic composited ``multiply``: measure the surface
+    (the source frame inside the quad, on the landing frame) and the
+    graphic's ink; set ``ctx._ink[id]`` (recolour to dark ink, the light
+    page's own shadow dropped) or ``ctx._blend[id] = 'screen'``."""
+    comp = item.get("composite") or {}
+    if comp.get("blend") != "multiply" or ctx.src_path is None:
+        return
+    n = len(plan.M)
+    k0 = int(min(n - 1, max(0, round(SEAT_AT_S * ctx.fps))))
+    idx = k0 if ok[k0] else int(np.argmax(ok))
+    q = quad[idx]
+    if q is None or not np.all(np.isfinite(q)):
+        return
+    lum = _source_luma(ctx, float(good_t[idx]))
+    ink = _ink_luma(clip, k0)
+    if lum is None or ink is None:
+        return
+    import cv2
+    h, w = lum.shape
+    m = np.zeros((h, w), np.uint8)
+    cv2.fillConvexPoly(m, (np.asarray(q) * [w, h]).astype(np.int32), 255)
+    if m.sum() == 0:
+        return
+    surf = float(lum[m > 0].mean())
+    iid = item.get("id")
+    if surf >= PRINT_BRIGHT and ink >= 0.6:
+        ctx._ink[iid] = INK
+        notes.append(f"printed in dark ink (the surface is bright, "
+                     f"{surf:.2f})")
+    elif surf < PRINT_DARK:
+        ctx._blend[iid] = "screen"
+        notes.append(f"laid as light (the surface is dark, {surf:.2f}: a "
+                     "multiply would vanish)")
+
+
+def _source_luma(ctx, t):
+    """The source frame's luma (0..1, 320 px wide) at sidecar second t."""
+    proc = subprocess.run(
+        ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{max(0.0, t):.3f}",
+         "-i", ctx.src_path, "-frames:v", "1", "-vf",
+         "scale=320:-2:flags=area,format=gray", "-f", "rawvideo", "-"],
+        capture_output=True, check=False)
+    sw, sh = ctx.src_size
+    w = 320
+    h = int(round(320 * sh / max(1.0, sw) / 2.0)) * 2
+    if len(proc.stdout) < w * h:
+        return None
+    return np.frombuffer(proc.stdout[:w * h], np.uint8).reshape(
+        h, w).astype(np.float32) / 255.0
+
+
+def _ink_luma(clip, k):
+    """Mean luma (0..1) of the graphic's opaque ink on frame k, or None."""
+    last = None
+    for j, rgba in enumerate(_decode_rgba(clip.path, int(clip.w),
+                                          int(clip.h))):
+        last = rgba
+        if j >= k:
+            break
+    if last is None:
+        return None
+    a = last[..., 3] > 200
+    if a.sum() < 20:
+        return None
+    rgb = last[..., :3][a].astype(np.float32) / 255.0
+    return float((0.2126 * rgb[:, 0] + 0.7152 * rgb[:, 1]
+                  + 0.0722 * rgb[:, 2]).mean())
+
+
+def _to_ink(rgba, ink):
+    """A light page as dark ink: the glyphs keep their coverage (alpha x
+    their own lightness, so a dark drop shadow falls away) in ``ink``."""
+    out = np.empty_like(rgba)
+    rgb = rgba[..., :3].astype(np.float32) / 255.0
+    light = 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
+    out[..., 0], out[..., 1], out[..., 2] = ink
+    out[..., 3] = np.clip(rgba[..., 3].astype(np.float32) * light, 0,
+                          255).astype(np.uint8)
+    return out
+
+
+SEAT_AT_S = 0.45          # the landing frame: after a rise / pop entrance
+
+
+def _ink_box(clip, k):
+    """(x0, y0, x1, y1) clip px of frame ``k``'s visible ink, or None."""
+    last = None
+    for j, rgba in enumerate(_decode_rgba(clip.path, int(clip.w),
+                                          int(clip.h))):
+        last = rgba
+        if j >= k:
+            break
+    if last is None:
+        return None
+    ys, xs = np.where(last[..., 3] > 160)
+    if xs.size < 20:
+        return None
+    return (float(xs.min()), float(ys.min()), float(xs.max() + 1),
+            float(ys.max() + 1))
+
+
+def _seat(item, clip, ctx, anchor, plan, d, notes):
+    """(dx, dy) program px that set the graphic's ink point ``pin`` on the
+    object ``d`` that hides it, or None (not measured / nothing to do).
+    A wide object (laptop, desk edge, car) takes the point on its top edge
+    over its own centre; a tall one (mic, bottle, door jamb) on its middle.
+    Kept inside the frame and off the faces the detector sees there."""
+    n = len(plan.M)
+    k0 = int(min(n - 1, max(0, round(SEAT_AT_S * ctx.fps))))
+    tr, A = plan.trim[k0], plan.A[k0]
+    if tr is None or A is None:
+        return None
+    reader = _mask_reader(ctx, "object", d)
+    m = reader.at(tr - ctx.clock_offset) if reader is not None else None
+    if m is None or m.max() < 128:
+        notes.append(f"not seated on {d.get('id')}: its mask is not "
+                     "measured yet (kept where authored)")
+        return None
+    ink = _ink_box(clip, k0)
+    if ink is None:
+        return None
+    W, H = ctx.W, ctx.H
+    mh, mw = m.shape
+    ys, xs = np.where(m > 127)
+    px = (A[0, 0] * (xs + 0.5) / mw + A[0, 2]) * W
+    py = (A[1, 1] * (ys + 0.5) / mh + A[1, 2]) * H
+    keep = (px >= 0) & (px < W) & (py >= 0) & (py < H)
+    if keep.sum() < 20:
+        return None
+    px, py = px[keep], py[keep]
+    bx0, bx1 = np.percentile(px, 2), np.percentile(px, 98)
+    by0, by1 = np.percentile(py, 2), np.percentile(py, 98)
+    pin = anchor.get("pin") or [0.5, 0.5]
+    ix0, iy0 = ink[0] + clip.x, ink[1] + clip.y
+    iw, ih = ink[2] - ink[0], ink[3] - ink[1]
+    sx = (bx0 + bx1) / 2.0
+    if bx1 - bx0 >= 1.2 * (by1 - by0):
+        # the top edge over the object's middle half (a lid, a desk edge)
+        cols = (px >= bx0 + 0.25 * (bx1 - bx0)) & \
+            (px <= bx1 - 0.25 * (bx1 - bx0))
+        sy = float(np.percentile(py[cols], 3)) if cols.sum() > 20 \
+            else float(by0)
+    else:
+        sy = float(np.median(py))
+        sx = float(np.median(px))
+    dx = sx - (ix0 + float(pin[0]) * iw)
+    dy = sy - (iy0 + float(pin[1]) * ih)
+    # inside the frame's margins
+    dx = min(max(dx, 0.03 * W - ix0), 0.97 * W - (ix0 + iw))
+    dy = min(max(dy, 0.06 * H - iy0), 0.94 * H - (iy0 + ih))
+    # never onto a face: below the chin when there is room, else as written
+    for fb in _faces_at(ctx, tr, A):
+        x0, y0, x1, y1 = fb
+        if ix0 + dx < x1 and ix0 + iw + dx > x0 and iy0 + dy < y1 and \
+                iy0 + ih + dy > y0:
+            dy2 = y1 + 0.01 * H - iy0
+            if iy0 + ih + dy2 <= 0.94 * H:
+                dy = dy2
+            else:
+                notes.append(f"not seated on {d.get('id')}: it would cover "
+                             "the face")
+                return None
+    notes.append(f"seated on {d.get('id')} (moved {dx:+.0f}, {dy:+.0f} px)")
+    return dx, dy
+
+
+def _faces_at(ctx, tr, A):
+    """Face boxes (program px) the detector saw near trim second ``tr``."""
+    try:
+        from anchors import query
+        t = tr - ctx.clock_offset
+        rows, _s, _m = query.load("faces.yunet", ctx.source,
+                                  [(max(0.0, t - 0.2), t + 0.2)])
+    except Exception:  # noqa: BLE001
+        return []
+    best = None
+    for r in rows:
+        dt = abs(float(r["t"]) - t)
+        if dt <= 0.2 and (best is None or dt < best[0]):
+            best = (dt, r)
+    out = []
+    for f in (best[1].get("faces") if best else None) or []:
+        x0, y0, x1, y1 = (float(v) for v in f[:4])
+        out.append(((A[0, 0] * x0 + A[0, 2]) * ctx.W,
+                    (A[1, 1] * y0 + A[1, 2]) * ctx.H,
+                    (A[0, 0] * x1 + A[0, 2]) * ctx.W,
+                    (A[1, 1] * y1 + A[1, 2]) * ctx.H))
+    return out
 
 
 def _fit_face_shape(plan, ctx, anchor, good_t, ok, first, geo, s, lo, hi,
@@ -929,10 +1147,13 @@ def _render(item, clip, ctx, plan, n, notes, kind, ref, lo, hi):
     T = np.array([[1, 0, -bx0], [0, 1, -by0], [0, 0, 1]], np.float64)
     last = None
     k = 0
+    ink = ctx._ink.get(item.get("id"))
     try:
         for rgba in _decode_rgba(clip.path, int(clip.w), int(clip.h)):
             if k >= n:
                 break
+            if ink is not None:
+                rgba = _to_ink(rgba, ink)
             last = rgba
             enc.write(_frame(cv2, rgba, plan, k, T, bw, bh, ctx,
                              occ_readers, hands, shadow, off, sw, sh))
@@ -1318,6 +1539,11 @@ def requests(ctx):
         for o in occ:
             if str(o).startswith("object:"):
                 add_def(str(o).split(":", 1)[1])
+        if kind == "screen" and a.get("pin") is not None and span and any(
+                str(o).startswith("object:") for o in occ):
+            # seating reads the faces to stay off them
+            out.append(("faces.yunet", [(max(0.0, span[0] - 0.5),
+                                         span[1] + 0.5)], None))
         if "person" in occ or kind == "head" or any(
                 str(o).startswith("object:") for o in occ):
             # an object's depth order reads the person matte too
@@ -1491,6 +1717,10 @@ def finish(items, clips, ctx, warn=None):
                     if layer == "behind_subject":
                         item = dict(item, layer="below_captions",
                                     behind=None)
+                    blend = ctx._blend.get(item.get("id"))
+                    if blend:
+                        item = dict(item, composite=dict(
+                            item.get("composite") or {}, blend=blend))
                     clip = new
                 for note in notes:
                     if warn:

@@ -38,7 +38,8 @@ bottle, a mic arm crossing the frame, a desk edge, a door jamb.
   t=<look_at time>, box=[x0, y0, x1, y1])` — it writes the object, the
   word and the occluder link in one batch.
 - Two objects (laptop and bottle): `select_object` each, then
-  `attach(motion_id, to='screen', occluders=['object:ob1','object:ob2'])`.
+  `attach(motion_id, to='screen', pin=[0.5, 0.68],
+  occluders=['object:ob1','object:ob2'])` (seated on the first).
 - Behind the speaker and the mic: `occluders=['person','object:mic']`.
 
 ## Common failure modes
@@ -77,9 +78,13 @@ bottle, a mic arm crossing the frame, a desk edge, a door jamb.
  "label": "laptop", "prompt": {"src_t": 43.1,
  "box": [0.398, 0.774, 0.664, 1.0]}, "device": "object_occluder"}}
 {"action": "upsert", "layer": "motion", "id": "cars", "value": {"id": "cars",
- "anchor": {"to": "screen", "occluders": ["object:ob1"]}}}
+ "anchor": {"to": "screen", "pin": [0.5, 0.68],
+            "occluders": ["object:ob1"]}}}
 ```
 
 Prompts are SOURCE seconds and SOURCE fractions (the uncropped footage).
+`pin` seats the word on the object at render (its ink point on the
+object's measured top edge, or a tall object's middle); without it the
+word stays where its params put it.
 Removing an object that a graphic still names is refused: detach first
 (`anchor: null`) or use `remove_world`, which detaches for you.

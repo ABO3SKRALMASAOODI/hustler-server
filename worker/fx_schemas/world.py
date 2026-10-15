@@ -300,8 +300,10 @@ class MotionAnchor(BaseModel):
                skull keeps its eye sockets on the eyes)
     place      planes only: [u0, v0, u1, v1] on the plane (default fitted)
     occluders  what passes in front of the graphic: person, hands,
-               object:<fx id>. None = the default: a plane on a floor, desk
-               or table puts the person in front; anything else nothing
+               object:<fx id>. None = the default: a plane anchor puts the
+               person in front (they stand before the room's surfaces);
+               anything else nothing. On a screen anchor naming an object,
+               ``pin`` seats the graphic's ink on that object
     shadow     planes only: real shadows darken the graphic
     smooth     0..1 One-Euro smoothing (0 raw, 1 very steady)
     lost       tracking lost: hold (last pose), hide (fade out), static

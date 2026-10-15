@@ -320,3 +320,94 @@ def test_a_canvas_program_gives_layout_pages_the_world(tmp_path,
                         asset_locals={"local/a.png": png})
     assert seen and isinstance(seen[0], world_layer.Ctx)
     assert seen[0].source is None
+
+
+# ── seating: a word behind an object sits where the object cuts it ─────
+
+def _object_chunks(store, tmp_path, src, item, tl, rect):
+    import world_defs
+    kind, ranges, params = world_defs.request(item, tl, 0.0)
+    for a, b in sidecars.chunks_for(src.shots, src.duration_s, ranges):
+        n = int(round((b - a) * 25))
+        p = w3s.gray_mask_clip(str(tmp_path / f"o{a}.mp4"), 640, 360, 25.0,
+                               n, rect)
+        w3s.put_chunk(store, src, kind, (a, b), path=p, params=params,
+                      meta={"fps": 25.0, "frames": n, "width": 640,
+                            "height": 360})
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg")
+def test_a_pinned_word_is_seated_on_the_objects_top_edge(store, tmp_path):
+    src = w3s.source()
+    ob = {"id": "ob1", "type": "object", "stage": "world", "start": 0.5,
+          "end": 3.5, "prompt": {"src_t": 1.0, "box": [0.15, 0.7, 0.85,
+                                                         1.0]}}
+    edl = {"keep": [[0.0, 4.0]], "fx": [ob], "motion": [
+        {"id": "w1", "template": "html", "html": "x", "start": 1.0,
+         "end": 2.5, "anchor": {"to": "screen", "pin": [0.5, 0.7],
+                                "occluders": ["object:ob1"]}}]}
+    c, e = w3s.ctx(edl, src, workdir=str(tmp_path))
+    _object_chunks(store, tmp_path, src, e["fx"][0], c.tl,
+                   (100, 250, 540, 360))
+    clip = w3s.square_clip(str(tmp_path / "sq.mov"), w=200, h=60, n=40)
+    clip.x, clip.y = 60, 40                  # authored far above the laptop
+    new, notes = world_layer.compose(e["motion"][0], clip, c)
+    assert new is not None and any("seated on ob1" in n for n in notes)
+    a = w3s.rgba_frames(new.path, new.w, new.h)[20][..., 3]
+    ys, xs = np.where(a > 127)
+    ys, xs = ys + new.y, xs + new.x
+    # the word is centred on the laptop and 30% of it is behind its lid
+    assert abs(xs.mean() - 320) <= 3
+    assert abs(ys.min() - (250 - 0.7 * 60)) <= 3
+    assert ys.max() <= 251                   # cut by the lid at y=250
+
+
+# ── print polarity: type multiplied into a surface must be darker ───────
+
+def _flat_source(tmp_path, colour):
+    p = str(tmp_path / f"{colour}.mp4")
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    f"color=c={colour}:s=640x360:r=25:d=6", "-c:v",
+                    "libx264", "-pix_fmt", "yuv420p", p], check=True)
+    return p
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg")
+@pytest.mark.parametrize("surface,expect", [("white", "ink"),
+                                            ("black", "screen"),
+                                            ("0x606060", None)])
+def test_printed_type_takes_the_polarity_the_surface_needs(store, tmp_path,
+                                                           surface, expect):
+    src = w3s.source()
+    pl = {"id": "pl1", "type": "plane", "stage": "world", "start": 0.5,
+          "end": 3.5, "src_t": 1.0, "surface": "wall", "motion": "static",
+          "quad": [[0.2, 0.1], [0.8, 0.1], [0.8, 0.5], [0.2, 0.5]]}
+    edl = {"keep": [[0.0, 4.0]], "fx": [pl], "motion": [
+        {"id": "w1", "template": "html", "html": "x", "start": 1.0,
+         "end": 2.5, "composite": {"blend": "multiply"},
+         "anchor": {"to": "plane:pl1", "occluders": []}}]}
+    c, e = w3s.ctx(edl, src, workdir=str(tmp_path))
+    c.src_path = _flat_source(tmp_path, surface)
+    clip = w3s.square_clip(str(tmp_path / "sq.mov"), w=200, h=60, n=40)
+    items, clips = world_layer.finish([e["motion"][0]], [clip], c)
+    if expect == "ink":
+        assert "w1" in c._ink
+        fr = w3s.rgba_frames(clips[0].path, clips[0].w, clips[0].h)[20]
+        on = fr[..., 3] > 200
+        assert on.any() and fr[..., :3][on].mean() < 40
+        assert items[0]["composite"]["blend"] == "multiply"
+    elif expect == "screen":
+        assert items[0]["composite"]["blend"] == "screen"
+        assert "w1" not in c._ink
+    else:
+        assert "w1" not in c._ink and "w1" not in c._blend
+        assert items[0]["composite"]["blend"] == "multiply"
+
+
+def test_every_plane_puts_the_person_in_front_by_default():
+    for surface in ("floor", "desk", "wall", "screen", "other"):
+        defs = {"pl1": {"id": "pl1", "type": "plane", "surface": surface}}
+        assert world_layer._default_occluders(
+            {"to": "plane:pl1"}, {}, defs) == ["person"]
+        assert world_layer._default_occluders(
+            {"to": "plane:pl1", "occluders": []}, {}, defs) == []

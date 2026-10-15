@@ -172,7 +172,12 @@ MotionAnchor {
   which:     any | left | right | 0..7         (which face / hand / person)
   lock:      world | screen                     (world rides the camera)
   pin:       [px, py]   point of the graphic's box set on the anchor
-             (fractions of the graphic box; default [0.5, 0.5])
+             (fractions of the graphic box; default [0.5, 0.5]). On a
+             ``screen`` anchor whose occluders name an object, ``pin``
+             SEATS the graphic: its ink point ``pin`` is set on the object
+             (a wide object's top edge, a tall one's middle) measured on
+             the landing frame, kept in frame and off the faces —
+             ``[0.5, 0.68]`` puts about a third of a word behind a laptop
   offset:    [dx, dy]   in units of the anchor's size (face height, hand
              span) when follow includes "scale", else frame fractions
   follow:    ["position"] + optional "scale", "rotation"; "shape" on face /
@@ -182,8 +187,9 @@ MotionAnchor {
   place:     [u0, v0, u1, v1]  planes only: where on the plane (plane
              fractions; default: fitted, centred)
   occluders: ["person" | "hands" | "object:<fx id>", ...]  what passes in
-             front of the graphic (default: none; a plane on the floor or a
-             desk defaults to ["person"])
+             front of the graphic (default: none; a plane anchor — floor,
+             desk, wall, screen — defaults to ["person"]: the person stands
+             in front of the room's surfaces; [] draws over them)
   shadow:    bool  planes only: the surface's real shadows darken the type
   smooth:    0..1  One-Euro smoothing (default 0.5)
   lost:      hold | hide | static   (tracking lost: keep the last pose,

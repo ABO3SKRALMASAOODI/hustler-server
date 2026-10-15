@@ -141,6 +141,16 @@ def behind_params(box, W=1080, H=1920):
             "width": 0.8}
 
 
+def behind_pin(box, W=1080, H=1920):
+    """The anchor ``pin`` that seats a word on the object at render
+    (world_layer: the ink point set on a wide object's top edge, so about
+    a third of the letters go behind it; a tall object's middle)."""
+    x0, y0, x1, y1 = (float(v) for v in box)
+    if (x1 - x0) * W >= 1.2 * (y1 - y0) * H:
+        return [0.5, 0.7]
+    return [0.5, 0.5]
+
+
 def anchor_for(parsed, which=None):
     """The anchor fields for a parsed landmark target (face, head, hand,
     pose, person-behind), or None for object / plane targets (they need a

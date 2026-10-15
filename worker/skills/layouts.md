@@ -48,8 +48,9 @@ the layout THIS story needs, not the one used last time.
   a dark or empty clip is a dead tile (the mosaic's hero especially).
 - The corner mark and captions: layouts mute captions while they own the
   frame; a HUD or breakdown keeps them.
-- Beats: the user's track's beats (`analyze_music` when a track exists) or
-  the prosody grid give the pop times; never add music to get beats.
+- Beats: the user's track's beats (`analyze_music` where the rhythm
+  department is loaded, else `get_audio_analysis`) or the prosody grid
+  give the pop times; never add music to get beats.
 
 ## Strong treatment patterns
 

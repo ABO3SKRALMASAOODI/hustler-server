@@ -289,17 +289,19 @@ def candidates(edl, index, plan, *, intensity="designed", max_n=MAX_WORLD,
             # the word where the object hides part of it (a wide object's
             # top edge, a tall one's middle), from the object's own box
             where = {"width": 0.8, "y": 0.72}
+            pin = [0.5, 0.6]
             pb = (d.get("prompt") or {}).get("box")
             wctx = _wctx(edl, index, src)
             prog_box = world_layer_box(wctx, pb, m["t"]) if pb else None
             if prog_box:
                 import attachment
                 where = attachment.behind_params(prog_box, wctx.W, wctx.H)
+                pin = attachment.behind_pin(prog_box, wctx.W, wctx.H)
             item = {"id": mid, "template": "word_slam", "start": s, "end": e,
                     "params": dict({"text": text, "entrance": "rise",
                                     "role": "condensed"}, **where),
                     "layer": "above_captions",
-                    "anchor": {"to": "screen", "occluders": [
+                    "anchor": {"to": "screen", "pin": pin, "occluders": [
                         f"object:{fid}"]}}
             c = _cand("object_occluder", "world", "place_in_world",
                       [{"action": "upsert", "layer": "motion", "id": mid,
