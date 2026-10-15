@@ -347,7 +347,13 @@ moment. Per short, on top of the graphics:
 | Junction (iris, matte cut, column wipe) | a real scene change; a jump cut inside one take stays a hard cut | 0-1 |
 | Grade window, colour isolation | a then-versus-now, a flashback, the subject against their world | 0-1 |
 | Finish (CRT or LCD re-photography, film) | archival footage or a screen the speaker talks about | 0-1, archival talks only |
-| Strobe, background swap, echo or clone | montage and sizzle on a song the user supplied; never in a talking short's body | 0 |
+| Strobe, background swap, echo or clone | montage and sizzle on a song the user supplied; in a talking short only as its one recipe on the word that earns it (lab_scan on a mechanism or number, echo_trail on a speed word) | 0, or the recipe |
+| Recipe: ONE signature move (`suggest_recipes`, then `apply_recipe`) | the story's own moment, which suggest_recipes names: the turn, the payoff, an identity word, a number, a mechanism, heat, speed | exactly 1 per short, fitted to THIS story and different from the batch's other shorts (it ranks fresh moves first) |
+
+Creativity is the bar (owner, 15 Oct): each short gets one signature move
+that surprises and fits its story, never the move the previous short used
+(last week's lamp-lit captions are an example of the bar, not a style to
+repeat). Recipes are a floor: compose a fresh device when the story asks.
 
 Nothing punctuates the payoff hold (0.8-1.5 s after the payoff word); one
 device per moment; never the same device on consecutive shots; never more

@@ -188,6 +188,37 @@ def _drop_orphan_glyph_items(old_edl, new_edl, old_tl=None, new_tl=None):
                      "with the graphic whose letters they used"]
 
 
+def _follow_hold_times(old_edl, new_edl, old_tl=None, new_tl=None):
+    """Built-in (Wave 1 integration; 1B's open item): a subject-hold
+    background (``hold_t``, the program second the frozen cut-out is taken
+    from) moves with its item. timeline.remap_program_items re-anchors the
+    item's window on its footage but knew nothing of hold_t, so after a
+    trim earlier in the program the frozen subject came from the wrong
+    second (or from outside the item)."""
+    olds = {it.get("id"): it for it in (old_edl or {}).get("fx") or []
+            if isinstance(it, dict)}
+    moved = 0
+    for it in (new_edl or {}).get("fx") or []:
+        if not isinstance(it, dict) or it.get("hold_t") is None:
+            continue
+        before = olds.get(it.get("id"))
+        if not before or before.get("start") is None \
+                or it.get("start") is None:
+            continue
+        try:
+            delta = float(it["start"]) - float(before["start"])
+            if abs(delta) < 1e-6:
+                continue
+            t = float(before.get("hold_t", it["hold_t"])) + delta
+            it["hold_t"] = round(min(max(t, float(it["start"])),
+                                     float(it["end"])), 2)
+            moved += 1
+        except (TypeError, ValueError):
+            continue
+    return new_edl, ([f"{moved} held subject frame(s) moved with their "
+                      "footage"] if moved else [])
+
+
 def on_music_swap(edl, old_music_id, new_music_id):
     """(edl, notes) after the user's track changed under ``old_music_id``
     (same id, new song) or moved to ``new_music_id``. Never mutates the
@@ -203,7 +234,8 @@ def on_keep_change(old_edl, new_edl, old_tl=None, new_tl=None):
     for a keep change: device re-solvers run on the remapped EDL."""
     edl = copy.deepcopy(new_edl or {})
     edl, notes = _drop_orphan_bus_items(old_edl or {}, edl, old_tl, new_tl)
-    for builtin in (_drop_orphan_glyph_items, _drop_orphan_junctions):
+    for builtin in (_follow_hold_times, _drop_orphan_glyph_items,
+                    _drop_orphan_junctions):
         try:
             edl, more = builtin(old_edl or {}, edl, old_tl, new_tl)
             notes += list(more or [])

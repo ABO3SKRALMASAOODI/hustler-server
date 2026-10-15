@@ -147,7 +147,9 @@ W1_VERBS = {"add_subject_effect", "set_background", "remove_subject_effect",
             "set_junction", "remove_punctuation", "set_grade_window",
             "isolate_colour", "import_lut", "match_grade", "add_finish",
             "make_variant_set", "remove_finish", "suggest_devices",
-            "set_intensity", "proof_device", "audit_motion"}
+            "set_intensity", "proof_device", "audit_motion",
+            # Wave 1 integration: recipes (INTERFACES_W1.md §10)
+            "suggest_recipes", "apply_recipe"}
 
 
 def test_only_pinned_fx_types_are_registered_and_others_are_rejected():

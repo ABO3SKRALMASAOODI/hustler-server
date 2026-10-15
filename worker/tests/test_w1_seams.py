@@ -81,6 +81,7 @@ DEPARTMENTS = {
                                      "import_lut", "match_grade",
                                      "add_finish", "make_variant_set",
                                      "remove_finish")),
+    "recipe_tools": ("compositing", ("suggest_recipes", "apply_recipe")),
     "verify_tools": ("verify", ("suggest_devices", "set_intensity",
                                 "proof_device", "audit_motion")),
 }

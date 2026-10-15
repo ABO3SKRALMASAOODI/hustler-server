@@ -294,7 +294,7 @@ _READ_ONLY_EXACT = {
     "suggest_emphasis", "download_url", "wait_for_job", "get_edl",
     "shorts_status",
     # Wave 1 verify department (1F): plan, prove and audit; none writes
-    "suggest_devices", "proof_device", "audit_motion",
+    "suggest_devices", "suggest_recipes", "proof_device", "audit_motion",
 }
 # Reaches something outside this project's own files: a stock library, a URL,
 # a generation provider, a live web page.

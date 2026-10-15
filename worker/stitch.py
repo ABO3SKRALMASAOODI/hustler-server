@@ -708,7 +708,15 @@ def _window_fx(items, w0, w1, fps, music_ids):
                                                    round(span, 2))
         if lb - la < 0.01 - 1e-9:
             continue
-        out.append({**it, "start": la, "end": lb})
+        moved = {**it, "start": la, "end": lb}
+        if it.get("hold_t") is not None:
+            # the held subject frame rides the piece's clock too (1B)
+            try:
+                moved["hold_t"] = min(max(local(min(max(float(it["hold_t"]),
+                                                         w0), w1)), la), lb)
+            except (TypeError, ValueError):
+                pass
+        out.append(moved)
     return out
 
 

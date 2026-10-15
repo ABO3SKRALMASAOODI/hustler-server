@@ -296,3 +296,20 @@ def test_a_full_frame_cutaway_takes_the_looks_grade_and_sections(tmp_path):
     # stays while the main picture around it is graded
     assert _chroma_spread(res["pip"]["dumps"]["40"], W, H,
                           (0.17, 0.2, 0.32, 0.3)) > 10
+
+
+def test_a_held_subject_frame_moves_with_its_footage():
+    """1B open item: hold_t (the program second the frozen cut-out comes
+    from) was not re-anchored by a keep change or a stitched piece."""
+    import hooks
+    import stitch
+    old = {"keep": [[0.0, 20.0]], "fx": [
+        {"id": "bg", "type": "background", "stage": "world", "start": 10.0,
+         "end": 10.6, "kind": "strobe", "hold_subject": True,
+         "hold_t": 10.0}]}
+    new = {"keep": [[2.0, 20.0]], "fx": [dict(old["fx"][0], start=8.0,
+                                              end=8.6)]}
+    edl, notes = hooks.on_keep_change(old, new)
+    assert edl["fx"][0]["hold_t"] == 8.0 and notes
+    piece = stitch._window_fx(edl["fx"], 7.0, 9.0, 25.0, set())
+    assert piece[0]["start"] == 1.0 and piece[0]["hold_t"] == 1.0

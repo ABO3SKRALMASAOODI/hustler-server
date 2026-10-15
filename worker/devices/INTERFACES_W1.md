@@ -778,3 +778,76 @@ never an EDL field in Wave 1).
   backend, skills, plugin), compact-catalog bytes (core and your department
   share), the AT results with numbers, any card shipped `dark` and why, and
   every contract you needed changed.
+
+---
+
+## 10. Integration additions (Wave 1 integration, claude/w1-engine)
+
+Binding for Waves 2-4, which merge this branch. Everything below was added
+where the six tracks met; each item names its test.
+
+### 10.1 Seams
+
+- **Plan context.** `fxgraph.prepare(edl, ..., media=)`: every plan carries
+  `plan.edl` (the dump it renders) and `plan.media` = `{src_path,
+  asset_locals, index, audio_only}`. Compilers read context from the plan,
+  never from the call stack (`wipe_masks.render_env`, `subject_fx.plan_edl`
+  read these first). `plan.has_composites` / `plan.no_composites`: a failed
+  graph retries with every motion composite drawn as its plain graphic
+  (`fxgraph.without_fx`; `test_w1_integration`).
+- **Order in `render_edl`.** fx are prepared AFTER the motion graphics
+  (`motion_layer.prepare_inputs`), so 1C's glyph registry is filled when a
+  glyph region or letter window prepares; matte wants are order-free.
+- **One window stamp.** `fxprims.repad` re-stamps on the microsecond time
+  base, rounded, `fxprims.EARLY_US` (2 us) ahead of its program frame;
+  `fxprims.restamp(fps)` is the same stamp without the pad. Track copies
+  (`wipe_masks.repad`) delegate to it.
+- **Regions per build.** `regions.pad` / `card_pad` hand out one pad per input
+  per graph BUILD (`regions._spent(ctx)` keyed on `ctx.parts`).
+- **Keep-change built-ins** (`hooks.on_keep_change`, worker and backend):
+  `_follow_hold_times` (a subject hold's `hold_t` moves with its item),
+  `_drop_orphan_glyph_items` (fx anchored to letters of a graphic that is
+  gone), `_drop_orphan_junctions` (1D's, now built in). `hooks.program_cuts`.
+- **Stitched previews.** Letters filled from another moment (`fill.kind`
+  next / previous / program / source) render in full; an accent's decay tail
+  is inside its piece; `hold_t` is rebased with its item.
+- **Cache currency.** A render stores `matte_status` (ready / partial /
+  absent) in its meta; `renderer.analysis_current` refuses to serve or
+  stitch from a render drawn while the matte measured once it has improved.
+
+### 10.2 Owner taste and the Oct 11 run, in code
+
+- **B&W is a device** (`worker/mono_policy.py`, pure): `whole_mono(edl)`,
+  `asked(text)`, `check_write(user_text, before, after)`. ToolContext.write_edl
+  refuses a write that makes the whole short flat B&W unless the user's words
+  asked; with no user words (MCP) it passes with `NOTE (taste)`; the backend's
+  MCP batch returns the note in `notes`. No look sets `grade: "bw"`
+  (`test_w1_mono`).
+- **Cutaways take the Look.** `renderer.cutaway_look_chain`: a full-frame
+  overlay (fit cover / picture) gets the grade preset, grade_custom, grain,
+  vignette and simple grade windows over its overlap.
+- **Keep-out measured on frames.** `keepout.detect_faces` runs YuNet on the
+  exact frame first (landmark chin, `YUNET_CHIN_K`), cascades after;
+  `keepout.chin_zone` / `CHIN_HIT`; `keepout.mark_zone` / `on_mark` (the
+  corner mark's reserved box, persistent band headlines excepted);
+  `candidates(..., chins=, mark=, pin_size=)`; `motion_tools._pinned_size`
+  (a width the editor set is never stepped down) (`test_w1_keepout`).
+- **MEASURES** (`render_qc`): hook = tier hook > first lockup by 0.5 s > band;
+  `caps.band`, `caps.lockups`; payoff by tier > id > purpose prefix > late
+  type lockup (`NON_TYPE_TEMPLATES` never compete); `ink_lines` keeps big
+  short lines (`BIG_LINE_X`) and lone glyphs (`LONE_GLYPH_*`); the type pass
+  runs before the frame pass (`test_w1_measures`).
+
+### 10.3 Recipes (department `compositing`, `tools_ext/recipe_tools.py`)
+
+| Verb | Kind | What |
+|---|---|---|
+| `suggest_recipes(start?, end?, max_results?)` | read | whole creative moves ranked by story fit x freshness against the sibling shorts of the batch, each with its word, why, exemplar and exact ops |
+| `apply_recipe(name, at?)` | write | one recipe, solved on the cut, committed through `tools_ext._write.commit` |
+
+Recipes (`worker/recipes.py`): `mono_until_turn`, `colour_kept_payoff`,
+`silhouette_hold`, `negative_hits`, `white_silhouette`, `lab_scan`,
+`thermal_flip`, `echo_trail`. Items are ordinary fx items with ids
+`rc_<recipe>_<n>` (the freshness key), cards from the five tracks, written
+and removed through apply_edit_batch like any device. Once per short;
+flash-safe unless the user opted in; matte recipes warm the person matte.
