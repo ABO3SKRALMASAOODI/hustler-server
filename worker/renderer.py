@@ -149,6 +149,26 @@ class RenderVerificationError(media.MediaError, dbx.PermanentJobError):
     """The same bytes and EDL will fail identically; a retry only rebills it."""
 
 
+def _bounded_review_times(times, cap):
+    """At most ``cap`` review times, spread evenly, first and last kept.
+
+    Caption review pages every risky caption state into contact sheets, one
+    frame seek each. On a full-length podcast preview that was thousands of
+    seeks: Oct 2026 preview 63863 spent 11,923 s (3.3 h of an interactive
+    shard) building caption sheets for a 48-minute program. A short's
+    handful of states is unaffected.
+    """
+    times = list(times or [])
+    cap = int(cap or 0)
+    if cap <= 0 or len(times) <= cap:
+        return times
+    if cap == 1:
+        return times[:1]
+    picks = sorted({round(i * (len(times) - 1) / (cap - 1))
+                    for i in range(cap)})
+    return [times[i] for i in picks]
+
+
 def caption_review_times(edl, index, workdir, duration, max_times=16):
     """High-information output times at real compiled caption state changes.
 
@@ -773,6 +793,18 @@ def _needs_preview_downscale(H):
 
 
 _PREVIEW_QUALITY = ContextVar("preview_quality", default="draft")
+
+
+def _quality_label():
+    """What a render's asset and result say about its quality.
+
+    "draft"/"approval" are PREVIEW qualities; a final export rendered from
+    the original is "final" (every final used to be labelled "draft" because
+    the preview context variable defaulted to it; run report C12).
+    """
+    if _RENDER_JOB_TYPE.get() == "final":
+        return "final"
+    return _PREVIEW_QUALITY.get()
 
 
 def preview_geometry(W, H, fps):
@@ -5360,6 +5392,67 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 
+# A still is downscaled once, before the graph, to the pixels the graph can
+# use: the cover size of the output frame (insert camera moves ride the
+# normalized W x H program after concat, so more source pixels are never
+# sampled). Only when it saves at least this share of the pixels.
+STILL_PRESCALE_MAX_SCALE = 0.8
+
+
+def _insert_still(path, item, W, H, workdir):
+    """A still downscaled to cover W x H (crop and rotation honoured), or
+    ``path`` itself when that would save little or anything goes wrong.
+
+    Symmetric in orientation (EXIF or the insert's own rotation), so it
+    never leaves fewer pixels than either orientation's cover needs. The
+    EXIF block is preserved, so ffmpeg sees the same orientation as before.
+    """
+    try:
+        from PIL import Image
+        crop = item.get("crop")
+        fw = fh = 1.0
+        if crop:
+            x0, y0, x1, y1 = (float(c) for c in crop)
+            fw, fh = max(0.05, x1 - x0), max(0.05, y1 - y0)
+        with Image.open(path) as im:
+            w0, h0 = im.size
+            fmt = (im.format or "").upper()
+            need = max(W / (w0 * fw), H / (h0 * fh),
+                       W / (h0 * fh), H / (w0 * fw))
+            if need >= STILL_PRESCALE_MAX_SCALE or fmt not in (
+                    "JPEG", "PNG", "WEBP"):
+                return path
+            tw = max(16, int(math.ceil(w0 * need / 2.0)) * 2)
+            th = max(16, int(math.ceil(h0 * need / 2.0)) * 2)
+            digest = hashlib.sha1(
+                f"{os.path.abspath(path)}:{os.path.getsize(path)}:"
+                f"{tw}x{th}".encode()).hexdigest()[:16]
+            alpha = im.mode in ("RGBA", "LA") or (
+                im.mode == "P" and "transparency" in im.info)
+            out = os.path.join(workdir, "stills",
+                               f"{digest}.{'png' if alpha else 'jpg'}")
+            if os.path.exists(out):
+                return out
+            os.makedirs(os.path.dirname(out), exist_ok=True)
+            exif = im.info.get("exif")
+            if fmt == "JPEG":
+                im.draft("RGB", (tw, th))
+            small = im.convert("RGBA" if alpha else "RGB").resize(
+                (tw, th), Image.LANCZOS)
+            tmp = out + ".part"
+            if alpha:
+                small.save(tmp, "PNG")
+            else:
+                kwargs = {"quality": 95}
+                if exif:
+                    kwargs["exif"] = exif
+                small.save(tmp, "JPEG", **kwargs)
+            os.replace(tmp, out)
+            return out
+    except Exception as e:
+        print(f"[render] still prescale skipped ({str(e)[:120]})", flush=True)
+        return path
+
 
 def _plate_probe(edl, tl, src_path, src_size, W, H, frame_mode, frame_focus,
                  insert_locals, captions=False):
@@ -5491,6 +5584,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             continue
         local = _fetch(item["asset_key"], "insert", next_idx)
         insert_locals[item["asset_key"]] = local
+        if item["kind"] == "image":
+            local = _insert_still(local, item, W, H, workdir)
         input_args, graph_item = render_plan.insert_input(
             item, local, fps, copy_timestamps=False)
         extra_inputs += input_args
@@ -6354,6 +6449,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             continue
         local = _fetch(item["asset_key"], "insert", next_idx)
         insert_locals[item["asset_key"]] = local
+        if item["kind"] == "image":
+            local = _insert_still(local, item, W, H, workdir)
         input_args, graph_item = render_plan.insert_input(
             item, local, fps, copy_timestamps=seek_main_source)
         extra_inputs += input_args
@@ -8052,7 +8149,8 @@ def _run_render_job(worker_db, job):
                     "audio_model_review": audio_model_review,
                     "duration_s": cached["duration_s"], "edl_version": version,
                     "variant": variant, "render_job_id": cached_meta.get("render_job_id"),
-                    "quality": cached_meta.get("quality", "draft"),
+                    "quality": ("final" if variant == "final" else
+                                cached_meta.get("quality", "draft")),
                     "sha256": cached.get("sha256"), "cached": True,
                     **({"motion_warnings": cached_meta["motion_warnings"]}
                        if cached_meta.get("motion_warnings") else {}),
@@ -8509,8 +8607,10 @@ def _run_render_job(worker_db, job):
         if not proof_only and variant == "preview" \
                 and edl_row["json"].get("captions"):
             try:
-                caption_times = caption_review_times(
-                    edl_row["json"], index, workdir, out_dur, max_times=0)
+                caption_times = _bounded_review_times(
+                    caption_review_times(edl_row["json"], index, workdir,
+                                         out_dur, max_times=0),
+                    config.CAPTION_REVIEW_MAX_FRAMES)
                 if caption_times:
                     planned_pages = [caption_times[offset:offset + 16]
                                      for offset in range(0, len(caption_times), 16)]
@@ -8679,7 +8779,7 @@ def _run_render_job(worker_db, job):
             fps=out_info["fps"],
             meta={"variant": asset_variant, "edl_version": version,
                   "render_job_id": job_id,
-                  "quality": _PREVIEW_QUALITY.get(),
+                  "quality": _quality_label(),
                   "sha256": render_sha,
                   "sheet_key": sheet_key, "verify_sheet_key": verify_sheet_key,
                   "caption_sheet_key": caption_sheet_key,
@@ -8771,7 +8871,7 @@ def _run_render_job(worker_db, job):
             print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
                   flush=True)
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
-                "render_job_id": job_id, "quality": _PREVIEW_QUALITY.get(),
+                "render_job_id": job_id, "quality": _quality_label(),
                 "sha256": render_sha,
                 "verify_sheet_key": verify_sheet_key,
                 "caption_sheet_key": caption_sheet_key,

@@ -19,6 +19,8 @@ def test_limits_leave_room_for_other_accounts(monkeypatch):
     monkeypatch.setattr(config, '_CLOUDFLARE_REMOTE_EXEC', True)
     for family, total, account in queue_admission.policies():
         assert 0 < account < total
+        # A lone account grows past its share but always leaves a reserve.
+        assert account <= queue_admission.lone_account_limit(total, account) < total
     mcp = next(p for p in queue_admission.policies() if 'mcp_tool' in p[0])
     assert mcp[2] >= 3  # the supported three-editor marketing workflow
     deployed = json.loads((Path(__file__).resolve().parents[1] / 'cloudflare/wrangler.jsonc').read_text())
@@ -91,11 +93,14 @@ def test_parallel_claims_cannot_exhaust_pool_for_one_account(queue_db):
     with ThreadPoolExecutor(max_workers=12) as pool:
         for _ in range(8):
             list(pool.map(claim, range(12)))
+    # The share is work-conserving (Oct 2026): it binds while another
+    # account waits; once account 2 runs, account 1 grows to the fleet less
+    # the reserve (queue_admission.lone_account_limit: 18 of 20).
     with queue_db() as conn, conn.cursor() as cur:
         cur.execute("SELECT user_id,count(*) n FROM video_jobs WHERE state='running' GROUP BY 1")
-        assert {r['user_id']: r['n'] for r in cur.fetchall()} == {1:6, 2:1}
+        assert {r['user_id']: r['n'] for r in cur.fetchall()} == {1:18, 2:1}
         cur.execute("SELECT count(*) n FROM video_jobs WHERE state='queued' AND attempts=0 AND total_claims=0")
-        assert cur.fetchone()['n'] == 24
+        assert cur.fetchone()['n'] == 12
         cur.execute("UPDATE video_jobs SET state='done' WHERE id=(SELECT min(id) FROM video_jobs WHERE state='running' AND user_id=1)")
     assert claim(None)['user_id'] == 1
 
@@ -108,5 +113,18 @@ def test_index_and_final_share_the_account_budget(queue_db):
             VALUES (3,1,'final'), (4,2,'final')''')
     with queue_db() as conn:
         assert db.claim_job(conn, ('final',), 3)['user_id'] == 2
+    # Nobody else waits now, so account 1 may exceed its share of 2.
     with queue_db() as conn:
-        assert db.claim_job(conn, ('final',), 3) is None
+        assert db.claim_job(conn, ('final',), 3)['user_id'] == 1
+
+
+def test_account_share_binds_while_another_account_waits(queue_db):
+    with queue_db() as conn, conn.cursor() as cur:
+        cur.execute('''INSERT INTO video_jobs (project_id,user_id,type,state,heartbeat_at)
+            VALUES (1,1,'index','running',now()), (2,1,'index','running',now());
+            INSERT INTO video_jobs (project_id,user_id,type)
+            VALUES (3,1,'index'), (4,2,'index')''')
+    with queue_db() as conn:
+        assert db.claim_job(conn, ('index',), 3)['user_id'] == 2
+    with queue_db() as conn:
+        assert db.claim_job(conn, ('index',), 3)['user_id'] == 1

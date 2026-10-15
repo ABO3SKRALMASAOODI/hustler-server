@@ -171,6 +171,13 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         # killing the process closes the pipe and unblocks the read loop.
         stall_s = config.FFMPEG_STALL_TIMEOUT_S
         last = [time.monotonic()]
+        # Output-clock progress, separately from "any line at all": ffmpeg
+        # keeps printing progress blocks while its output clock stands still
+        # (Oct 15 preview 69514 sat at 0.0/3.0 s for the full 3000 s
+        # wall clock on a 2-vCPU lane). No advance of out_time for this long
+        # is a hang, not a slow encode.
+        advance_stall_s = config.FFMPEG_PROGRESS_STALL_S
+        advanced = [time.monotonic()]
         kill_reason = []
         progress_state = {"out_s": 0.0, "speed": None}
         # How much output time is still explainable. Past this the graph is
@@ -195,6 +202,12 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                     return
                 if now - last[0] > stall_s:
                     kill_reason.append(f"no progress for {stall_s}s")
+                    proc.kill()
+                    return
+                if advance_stall_s and now - advanced[0] > advance_stall_s:
+                    kill_reason.append(
+                        f"no progress: output clock stalled for "
+                        f"{advance_stall_s}s")
                     proc.kill()
                     return
                 # Abandoned: the dispatcher gave up on this job and requeued
@@ -240,6 +253,8 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
                         if abs(out_time_us) >= _FFMPEG_NOPTS_ABS_MIN_US:
                             continue
                         secs = out_time_us / 1_000_000.0
+                        if secs > progress_state["out_s"] + 1e-6:
+                            advanced[0] = time.monotonic()
                         progress_state["out_s"] = secs
                         # Check BEFORE clamping. The min(0.999, ...) below is
                         # what hid the watermark runaway for a full hour: it

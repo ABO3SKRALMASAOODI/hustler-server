@@ -171,3 +171,41 @@ class MemorySampler:
         self._finished_mib = _mib(self._peak_bytes)
         self._finished = True
         return self._finished_mib
+
+
+def _vm_used_bytes(proc_root="/proc"):
+    """MemTotal - MemAvailable of the micro-VM, or None."""
+    total = avail = None
+    try:
+        with open(os.path.join(proc_root, "meminfo")) as handle:
+            for line in handle:
+                fields = line.split()
+                if fields and fields[0] == "MemTotal:":
+                    total = int(fields[1]) * 1024
+                elif fields and fields[0] == "MemAvailable:":
+                    avail = int(fields[1]) * 1024
+                if total is not None and avail is not None:
+                    break
+    except (OSError, ValueError, IndexError):
+        return None
+    if total is None or avail is None:
+        return None
+    return max(0, total - avail)
+
+
+class VmMemorySampler(MemorySampler):
+    """Peak VM-wide working memory where cgroup memory files are hidden.
+
+    A Cloudflare container is its own micro-VM: the kernel OOM killer acts
+    on the VM, and the cgroup files the parent sampler reads are not there,
+    so every job reported no memory peak and lanes could not be sized from
+    evidence (Oct 2026). MemTotal - MemAvailable, sampled ten times a second.
+    """
+
+    def __init__(self, proc_root="/proc", interval_s=0.1):
+        self._proc_root = proc_root
+        super().__init__(root=proc_root, interval_s=interval_s)
+
+    def _current(self):
+        return _vm_used_bytes(self._proc_root)
+

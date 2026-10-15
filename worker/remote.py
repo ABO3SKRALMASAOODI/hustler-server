@@ -2000,6 +2000,72 @@ def _deploy_in_progress(job, cause):
     return error
 
 
+# Mirrors worker/cloudflare/src/index.ts SHARD_COUNTS / shardName. The
+# Python replica lets a busy refusal pick an alternate identity that lands on
+# a DIFFERENT shard; test_busy_shard_hop pins it against the adapter source.
+_CLOUDFLARE_SHARD_COUNTS = {"interactive": 20, "batch": 8, "agent": 5,
+                            "mcp": 20, "shorts": 8}
+_CLOUDFLARE_FACES_SHARDS = 2
+
+
+def _fnv1a32(text):
+    value = 2166136261
+    for ch in text:
+        value ^= ord(ch)
+        value = (value * 16777619) & 0xFFFFFFFF
+    return value
+
+
+def _cloudflare_shard_index(lane, call_id):
+    """The shard number the Worker routes ``call_id`` to on ``lane``."""
+    count = _CLOUDFLARE_SHARD_COUNTS.get(lane)
+    if not count:
+        return None
+    call_id = str(call_id)
+    key = call_id
+    m = re.match(r"^cf-mcp-p([0-9]+)-", call_id) if lane == "mcp" else None
+    p = re.match(r"^cf-preview-p([0-9]+)-", call_id) \
+        if lane == "interactive" else None
+    g = re.match(r"^cf-render-g([0-9]+-[01])-", call_id) \
+        if lane in ("batch", "interactive") else None
+    if g:
+        key = f"render-group:{g.group(1)}"
+    elif m:
+        key = f"project:{m.group(1)}"
+    elif p:
+        key = f"project:{p.group(1)}"
+    value = _fnv1a32(key)
+    if lane == "batch" and call_id.startswith("cf-faces-"):
+        return count - 1 - (value % _CLOUDFLARE_FACES_SHARDS)
+    return value % count
+
+
+def _busy_hop_after_s(job):
+    """How long a queue-backed job waits on its own busy shard first."""
+    if job.get("type") == "mcp_tool":
+        return config.CLOUDFLARE_MCP_BUSY_HOP_AFTER_S
+    return 0.0
+
+
+def _busy_hop_slot(job, refused_shards):
+    """An unused alternate slot whose identity lands on an unrefused shard."""
+    lane = _cloudflare_lane_for(job)
+    count = _CLOUDFLARE_SHARD_COUNTS.get(lane)
+    if not count or len(refused_shards) >= count:
+        return None
+    current = job.get("_cloudflare_admission_slot", 0)
+    current = current if isinstance(current, int) else 0
+    ceiling = (_MAX_ALT_SLOT if "alt_slots_32" in _cloudflare_features()
+               else _LEGACY_ALT_SLOTS)
+    probe = dict(job, _cloudflare_capacity_spread=True)
+    for slot in range(current + 1, ceiling + 1):
+        probe["_cloudflare_admission_slot"] = slot
+        shard = _cloudflare_shard_index(lane, _cloudflare_call_id(probe))
+        if shard not in refused_shards:
+            return slot
+    return None
+
+
 def _next_rollout_slot(job):
     """The next unused alternate identity for this claim, or None.
 
@@ -2154,6 +2220,7 @@ def _run_cloudflare_with_capacity_wait(job):
     delay = 2.0
     rollout_delay = 20.0
     sync_busy_retries = 0
+    refused_shards = set()
     capacity = None
     # No new launch starts after this point. It is measured from the first
     # launch and never exceeds the job's own provider budget; an id-less
@@ -2222,6 +2289,23 @@ def _run_cloudflare_with_capacity_wait(job):
             # Preserve project affinity on the first try, but don't make one
             # occupied shard strand a short preview while the pool is idle.
             slot = job.get('_cloudflare_admission_slot', 0)
+            if not rollout and queued and not modal_alternate:
+                # A busy shard is one occupied Durable Object of a pool
+                # that usually has idle ones: an index burst hashed 14 jobs
+                # onto 8 batch shards and each collision waited up to 120 s
+                # on its own shard while others sat empty. Hop to an
+                # identity that lands on a shard not yet refused, at once
+                # for work with no warm state to keep, after a short wait
+                # for an MCP tool (its project shard holds the session).
+                refused_shards.add(_cloudflare_shard_index(
+                    _cloudflare_lane_for(job), _cloudflare_call_id(job)))
+                waited = time.monotonic() - started
+                if waited >= _busy_hop_after_s(job):
+                    hop = _busy_hop_slot(job, refused_shards)
+                    if hop is not None:
+                        job["_cloudflare_capacity_spread"] = True
+                        job['_cloudflare_admission_slot'] = hop
+                        continue
             if not rollout and slot < 2 and _cloudflare_alternate_safe(job):
                 job['_cloudflare_admission_slot'] = slot + 1
                 continue

@@ -247,6 +247,12 @@ def execute(job, runners):
     except Exception:
         # Observability never becomes a new reason a customer render can fail.
         memory_sampler = None
+    vm_sampler = None
+    if vm_start is not None:
+        try:
+            vm_sampler = resource_usage.VmMemorySampler()
+        except Exception:
+            vm_sampler = None
 
     def measured_resources():
         nonlocal io_finished
@@ -259,6 +265,12 @@ def execute(job, runners):
             sampled_peak = None
         if sampled_peak is not None:
             measured["container_memory_sampled_peak_mib"] = sampled_peak
+        try:
+            vm_peak = vm_sampler.finish() if vm_sampler else None
+        except Exception:
+            vm_peak = None
+        if vm_peak is not None:
+            measured["vm_memory_sampled_peak_mib"] = vm_peak
         if not io_finished:
             measured.update(io_telemetry.finish(io_token))
             io_finished = True

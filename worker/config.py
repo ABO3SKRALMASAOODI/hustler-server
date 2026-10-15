@@ -1115,6 +1115,12 @@ CLOUDFLARE_BUSY_MAX_DEFERRALS = max(1, min(
 # deliberately share a project shard and a new claim cannot move that shard.
 CLOUDFLARE_BUSY_WAIT_S = max(0.0, min(300.0, float(os.getenv(
     "CLOUDFLARE_BUSY_WAIT_S", "120"))))
+# Before that wait, a queue-backed job whose shard is busy hops to an
+# alternate identity that lands on a shard not yet refused (remote.py
+# _busy_hop_slot): immediately for media/index work, after this long for an
+# MCP tool, whose project shard keeps its warm session (proxy, index).
+CLOUDFLARE_MCP_BUSY_HOP_AFTER_S = max(0.0, min(120.0, float(os.getenv(
+    "CLOUDFLARE_MCP_BUSY_HOP_AFTER_S", "15"))))
 # An id-less synchronous child (fetch_url, stock acquisition, frames) has no
 # queue lease to defer. Its "shard is busy" 429 stored nothing under the
 # refused call id, so it retries on a fresh identity (and therefore another
@@ -1137,7 +1143,7 @@ CLOUDFLARE_CAPACITY_RETRIES = max(0, min(8, int(os.getenv(
 # to the queue this many times without spending its attempt (nothing ran).
 # MCP tools and Studio turns have a live caller and report it instead.
 CLOUDFLARE_CAPACITY_MAX_DEFERRALS = max(0, min(3, int(os.getenv(
-    "CLOUDFLARE_CAPACITY_MAX_DEFERRALS", "1"))))
+    "CLOUDFLARE_CAPACITY_MAX_DEFERRALS", "3"))))
 # Render and Cloudflare publish independently. Source/image mismatch is
 # proven pre-compute admission, so retain the same heartbeated queue lease
 # across a bounded rollout window instead of burning retries/reuploads.
@@ -1895,6 +1901,9 @@ PREVIEW_MAX_FPS = float(os.getenv("PREVIEW_MAX_FPS", "30"))
 # well as from uniform timeline coverage. Two 4x4 pages gives a critic much
 # broader evidence without sending the video itself or an unbounded frame set.
 SCREENING_MAX_FRAMES = int(os.getenv("SCREENING_MAX_FRAMES", "32"))
+# Caption review sheets: at most this many frames (4 pages of 16) however long
+# the program (renderer._bounded_review_times).
+CAPTION_REVIEW_MAX_FRAMES = int(os.getenv("CAPTION_REVIEW_MAX_FRAMES", "64"))
 SCREENING_BASE_FRAMES = int(os.getenv("SCREENING_BASE_FRAMES", "12"))
 SCREENING_PAGE_TILES = int(os.getenv("SCREENING_PAGE_TILES", "16"))
 SCREENING_FRAME_PARALLELISM = int(os.getenv(
@@ -2437,6 +2446,9 @@ def modal_timeout_for(job_type):
 # media slot for hours). Kill an encode that goes this long with no progress,
 # well before the full wall-clock cap above.
 FFMPEG_STALL_TIMEOUT_S = int(os.getenv("FFMPEG_STALL_TIMEOUT_S", "300"))
+# ...and no advance of the OUTPUT clock for this long (0 disables). A slow
+# encode still advances; a wedged graph prints progress blocks forever.
+FFMPEG_PROGRESS_STALL_S = int(os.getenv("FFMPEG_PROGRESS_STALL_S", "600"))
 # An encode that RUNS AWAY is loud, not silent: it emits -progress forever, so
 # the stall cap above can never fire and the wall-clock cap is an hour away.
 # But we know exactly how long the output must be, so out_time sailing past it

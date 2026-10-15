@@ -75,6 +75,9 @@ def test_capacity_wait_is_bounded_and_stops_on_lost_ownership(monkeypatch, lease
     monkeypatch.setattr(remote.time, "sleep", lambda t: now.__setitem__(0, now[0]+t))
     monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", False)
     monkeypatch.setattr(config, "CLOUDFLARE_BUSY_WAIT_S", 5)
+    # Every shard of the lane refused already: no idle shard to hop to
+    # (test_busy_shard_hop covers the hop), so the bounded wait applies.
+    monkeypatch.setattr(remote, "_busy_hop_slot", lambda *_a: None)
     class Probe:
         def run(self, *args): return lease
         def reset(self): pass
