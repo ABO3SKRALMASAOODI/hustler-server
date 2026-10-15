@@ -158,6 +158,10 @@ disagree, v9 wins on method and the brief wins on preferences.
    `download_url(kind='final', edl_version=...)`, save as
    `exports/<structure>__<short_id>__<slug>.mp4`, then `run.py export`
    (it computes the sha256). Watch the first final in full (`--verified-full`).
+   If `export_final` answers `verification_open`, nothing was started: repair
+   the listed findings on a new version, or justify a genuine false positive
+   with `justify_verification_findings` citing the frames you checked, then
+   export again.
 10. **Manifest.** `run.py finalize --not-selected <file>` writes
    `exports/manifest.json`, `publishing-manifest.json` and `PUBLISHING.md`
    in the format the publisher already reads.

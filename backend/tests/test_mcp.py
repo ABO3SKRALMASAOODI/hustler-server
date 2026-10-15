@@ -2241,10 +2241,13 @@ def test_index_status_says_where_a_queued_analysis_stands(client, monkeypatch):
     class Cur(FakeCur):
         def execute(self, sql, params=()):
             s = " ".join(sql.split())
-            if "SELECT id, state, progress, error, result FROM video_jobs" in s:
+            if "SELECT id, state, progress, error, result," in s \
+                    and "FROM video_jobs" in s:
                 assert "payload->>'asset_id' = %s" in s
                 assert params == (3, "81")
-                self.rows = [{"id": 41, "state": DB["index_state"], "progress": 0,
+                self.rows = [{"id": 41, "state": DB["index_state"],
+                              "progress": DB.get("index_progress", 0),
+                              "age_s": DB.get("index_age_s", 20),
                               "error": "version mismatch", "result": {
                                   "failure": {"kind": "provider_rollout_pending"}}}]
             elif "AS sub FROM users" in s:
@@ -2272,7 +2275,15 @@ def test_index_status_says_where_a_queued_analysis_stands(client, monkeypatch):
     DB["index_state"] = "running"
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "index_status", "arguments": {"project_id": 3}}))
-    assert "running — 0% (job 41)" in body and "ahead" not in body
+    assert "running — 0% (job 41: downloading and probing" in body
+    assert "ahead" not in body
+    # Run report B10: a long tail at 90% says which step and for how long.
+    DB["index_progress"], DB["index_age_s"] = 90, 17 * 60
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "index_status", "arguments": {"project_id": 3}}))
+    assert "running — 90% (job 41: building the visual storyboard" in body
+    assert "17 min since queued" in body
+    DB["index_progress"], DB["index_age_s"] = 0, 20
     DB["index_state"] = "failed"
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
         "name": "index_status", "arguments": {"project_id": 3}}))
@@ -2300,3 +2311,61 @@ def test_duplicate_upload_reports_actual_analysis_state(
             "project_id": 3, "storage_key": "originals/3/video.mp4"}})
     assert expected in text_of(response)
     assert response.get_json()["result"].get("isError", False) is is_error
+
+
+@pytest.mark.parametrize("final_exists", [False, True])
+def test_mcp_export_waits_for_open_verification_findings(client, monkeypatch, final_exists):
+    """Run report C15: 51 of 187 finals in a week were exported while their
+    version's verification record still said repair_required."""
+    from flask import jsonify
+    calls = []
+    monkeypatch.setattr(mcpmod, "_request_final",
+                        lambda *a, **k: calls.append(a) or jsonify(job_id=556))
+    record = {"unresolved_findings": [
+        {"finding_id": "vf_7b9acc1057d359f8", "severity": "error",
+         "message": "picture QC: JUMP OFF A CUT at 23.60s"}]}
+
+    def opened(cur, project_id, version):
+        assert (project_id, version) == (3, 9)
+        return [] if final_exists else record["unresolved_findings"]
+
+    monkeypatch.setattr(mcpmod, "_open_verification_findings", opened)
+    result = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "export_final",
+        "arguments": {"project_id": 3, "edl_version": 9}}).get_json()["result"]
+    if final_exists:
+        assert result["isError"] is False and len(calls) == 1
+        return
+    assert result["isError"] is True and calls == []
+    export = result["structuredContent"]["export"]
+    assert export["code"] == "verification_open"
+    assert export["unresolved_finding_ids"] == ["vf_7b9acc1057d359f8"]
+    text = result["content"][0]["text"]
+    assert "no export was started" in text
+    assert "justify_verification_findings(project_id=3" in text
+
+
+def test_open_findings_query_reads_only_repair_required_without_a_final():
+    class Cur:
+        def __init__(self, rows):
+            self.rows, self.sql = rows, []
+
+        def execute(self, sql, params=()):
+            self.sql.append(" ".join(sql.split()))
+
+        def fetchone(self):
+            return self.rows.pop(0) if self.rows else None
+
+    findings = [{"finding_id": "vf_1", "message": "m"}]
+    cur = Cur([{"t": "verification_records"},
+               {"status": "repair_required",
+                "record": {"unresolved_findings": findings}}, None])
+    assert mcpmod._open_verification_findings(cur, 3, 9) == findings
+    cur = Cur([{"t": "verification_records"},
+               {"status": "justified", "record": {}}])
+    assert mcpmod._open_verification_findings(cur, 3, 9) == []
+    cur = Cur([{"t": "verification_records"},
+               {"status": "repair_required",
+                "record": {"unresolved_findings": findings}}, {"?column?": 1}])
+    assert mcpmod._open_verification_findings(cur, 3, 9) == []   # final exists
+    assert mcpmod._open_verification_findings(Cur([{"t": None}]), 3, 9) == []

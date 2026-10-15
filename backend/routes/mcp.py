@@ -1858,7 +1858,10 @@ def _t_index_status(tok, args):
                     "Nothing to analyze.")
         if original["sha256"] and _index_row(cur, original["sha256"]):
             return "done — the video is analyzed and ready to edit."
-        cur.execute("""SELECT id, state, progress, error, result FROM video_jobs
+        cur.execute("""SELECT id, state, progress, error, result,
+                              EXTRACT(EPOCH FROM (NOW() - created_at))
+                                AS age_s
+                       FROM video_jobs
                        WHERE project_id = %s AND type = 'index'
                          AND payload->>'asset_id' = %s
                        ORDER BY id DESC LIMIT 1""", (project_id, str(original["id"])))
@@ -1887,9 +1890,40 @@ def _t_index_status(tok, args):
                 f"{job['id']}). It starts on its own; poll index_status (or "
                 "wait_for_job) rather than re-uploading. Transcript, shots and "
                 "silences are unavailable until this reaches done.")
-    return (f"{job['state']} — {job['progress']}% (job {job['id']}). "
+    return (f"{job['state']} — {job['progress']}% (job {job['id']}"
+            f"{_index_stage(job)}). "
             "Transcript, shots and silences are unavailable until this "
             "reaches done.")
+
+
+def _index_stage(job):
+    """Which part of the analysis a running index is in, and for how long.
+
+    Run report B10: an index sat at 90% for 15-22 minutes with no stage or
+    estimate. The indexer's progress bands are fixed (worker/indexer.py):
+    the picture and sound lanes report up to 90%, the visual storyboard of
+    the whole recording runs at 90-92% and is the long tail on multi-hour
+    sources, then the index is saved.
+    """
+    try:
+        pct = int(job.get("progress") or 0)
+    except (TypeError, ValueError):
+        pct = 0
+    if pct < 12:
+        stage = "downloading and probing the upload"
+    elif pct < 90:
+        stage = "proxy, transcription, shots and filmstrip"
+    elif pct < 92:
+        stage = ("building the visual storyboard of the whole recording "
+                 "(the long step on multi-hour sources)")
+    else:
+        stage = "saving the analysis"
+    try:
+        minutes = float(job.get("age_s") or 0) / 60.0
+    except (TypeError, ValueError):
+        minutes = 0.0
+    age = f", {minutes:.0f} min since queued" if minutes >= 1 else ""
+    return f": {stage}{age}"
 
 
 def _index_queue(cur, job_id, user_id):
@@ -2253,12 +2287,70 @@ def _record_download_receipt(tok, project_id, receipt):
 
 
 
+def _open_verification_findings(cur, project_id, version):
+    """Unresolved findings of this version's verification record, or [].
+
+    Run report C15: 51 of 187 finals in the week to 15 Oct were exported
+    while their version's record still said repair_required; the findings
+    were justified (or not) after the file existed. An MCP export now waits
+    for the repair or the evidence-backed justification, unless a final of
+    this version already exists (re-downloading it is never blocked).
+    """
+    cur.execute("SELECT to_regclass('public.verification_records') AS t")
+    if not (cur.fetchone() or {}).get("t"):
+        return []
+    cur.execute("""SELECT status, record FROM verification_records
+                   WHERE project_id = %s AND edl_version = %s""",
+                (int(project_id), int(version)))
+    row = cur.fetchone() or {}
+    record = row.get("record") if isinstance(row.get("record"), dict) else {}
+    if row.get("status") != "repair_required":
+        return []
+    cur.execute("""SELECT 1 FROM assets WHERE project_id = %s
+                     AND kind = 'render' AND meta->>'variant' = 'final'
+                     AND meta->>'edl_version' = %s LIMIT 1""",
+                (int(project_id), str(int(version))))
+    if cur.fetchone():
+        return []
+    return [f for f in (record.get("unresolved_findings") or [])
+            if isinstance(f, dict)]
+
+
 def _t_export_final(tok, args):
     project_id, version = args.get("project_id"), args.get("edl_version")
     if type(project_id) is not int or project_id < 1 or type(version) is not int or version < 1:
         return _text("Supply positive integer project_id and reviewed edl_version.", True)
     with vdb() as conn:
-        response = _request_final(conn.cursor(), int(tok["user_id"]),
+        cur = conn.cursor()
+        if _project_for_user(cur, project_id, tok["user_id"]):
+            try:
+                open_findings = _open_verification_findings(
+                    cur, project_id, version)
+            except Exception:
+                conn.rollback()
+                open_findings = []
+            if open_findings:
+                ids = [str(f.get("finding_id")) for f in open_findings
+                       if f.get("finding_id")]
+                lines = "\n".join(
+                    f"  {f.get('finding_id')}: {str(f.get('message'))[:220]}"
+                    for f in open_findings[:6])
+                text = (
+                    f"PROJECT {project_id}: EDL v{version} still has "
+                    f"{len(open_findings)} unresolved verification "
+                    f"finding(s), so no export was started:\n{lines}\n"
+                    "Repair them on a new version and review its preview, or, "
+                    "for a genuine false positive, call "
+                    f"justify_verification_findings(project_id={project_id}, "
+                    f"finding_ids={json.dumps(ids[:12])}, justification=...) "
+                    "citing the direct evidence; then export again.")
+                return {"content": [{"type": "text", "text": text}],
+                        "structuredContent": {"export": {
+                            "project_id": project_id, "edl_version": version,
+                            "code": "verification_open",
+                            "unresolved_finding_ids": ids}},
+                        "isError": True}
+        response = _request_final(cur, int(tok["user_id"]),
                                   project_id, version, reuse_existing=True)
         response, status = response if isinstance(response, tuple) else (response, 200)
         data = response.get_json()
