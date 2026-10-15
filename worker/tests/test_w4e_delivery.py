@@ -212,6 +212,10 @@ def test_apply_format_sets_the_aspect_and_briefs(ctx):
     ctx._edl["frame"]["ratio"] = "1:1"
     out = format_tools.apply_format(ctx, "I")
     assert "FORMAT I" in out and "LEDGER (I)" in out
+    # a chosen frame is kept unless the agent asks (review: a 16:9 edit was
+    # silently re-framed vertical by a brief)
+    assert ctx._edl["frame"]["ratio"] == "1:1" and "kept this edit" in out
+    out = format_tools.apply_format(ctx, "I", aspect=True)
     assert ctx._edl["frame"]["ratio"] == "9:16"
     assert format_tools.apply_format(ctx, "Q").startswith("REJECTED")
 

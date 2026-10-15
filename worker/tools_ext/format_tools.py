@@ -52,7 +52,7 @@ def _commit_full(ctx, new_edl, summary):
     return _write.commit(ctx, ops, summary)
 
 
-def apply_format(ctx, format, aspect=True):
+def apply_format(ctx, format, aspect=None):
     import format_packs
     try:
         p = format_packs.load(format)
@@ -60,8 +60,15 @@ def apply_format(ctx, format, aspect=True):
         return _rejected(str(e))
     edl, _v = _edl(ctx)
     out = format_packs.brief(p["code"])
-    if aspect and p.get("aspect"):
-        cur = (edl.get("frame") or {}).get("ratio")
+    cur = (edl.get("frame") or {}).get("ratio")
+    if aspect is None and p.get("aspect") and \
+            cur not in (None, "source") and cur != p["aspect"]:
+        # the edit already has a chosen frame: a brief never re-frames it
+        # unless asked (aspect=true)
+        out += (f"\n  (kept this edit's {cur} frame: the pack is designed "
+                f"for {p['aspect']}; aspect=true or deliver_aspects(apply="
+                f"'{p['aspect']}') re-solves it when the user wants that)")
+    elif aspect is not False and p.get("aspect"):
         if cur != p["aspect"]:
             import aspects
             new, notes = aspects.solve(edl, p["aspect"],
@@ -150,10 +157,12 @@ TOOL_SPECS = {
         apply_format,
         "WRITE: a format pack — E UI/product explainer, F music-driven "
         "visual essay, G event sizzle, I documentary case study, J edit "
-        "about the edit: sets its aspect and returns its craft brief "
-        "(structure, device palette, budgets, type voice, never-rules) "
-        "for you to follow with taste; the device ledger then counts "
-        "against its budgets. Never picks music, a zoom or a sound.",
+        "about the edit: returns its craft brief (structure, device "
+        "palette, budgets, type voice, never-rules) for you to follow with "
+        "taste, sets its aspect when the edit has none (aspect=true "
+        "re-frames a chosen one, false never); the device ledger then "
+        "counts against its budgets. Never picks music, a zoom or a "
+        "sound.",
         {"format": {"type": "string", "enum": ["E", "F", "G", "I", "J"]},
          "aspect": {"type": "boolean"}}),
     "deliver_aspects": (
