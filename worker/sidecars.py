@@ -119,6 +119,29 @@ _KIND_SPECS = {
         "group_max_s": 1800.0,
     },
 }
+
+
+def _merge_ext_kinds():
+    """Wave 3 seam (devices/INTERFACES_W3.md §1): kinds dropped into
+    ``sidecar_kinds/`` join the table. Only RESERVED names; a kind already
+    here is never replaced; a package that cannot be imported (the backend
+    loads this file by path, without the worker tree) adds nothing."""
+    try:
+        import sidecar_kinds
+        ext = sidecar_kinds.kind_specs()
+    except Exception:  # noqa: BLE001 — no seam here: Wave 0 kinds only
+        return ()
+    added = []
+    for name, sp in (ext or {}).items():
+        if name in _KIND_SPECS or name not in RESERVED_KINDS:
+            continue
+        _KIND_SPECS[name] = dict(sp)
+        added.append(name)
+    return tuple(added)
+
+
+KINDS = KINDS + _merge_ext_kinds()
+
 # Seconds a launch costs beyond compute (admission, cold start, staging).
 _CALL_OVERHEAD_S = 20.0
 _LIST_TTL_S = 1.0
@@ -223,8 +246,15 @@ def spec(kind):
     """{kind, model, model_id, model_version, format, formats, ext, ...} for
     a shipped kind. KeyError for a reserved or unknown one."""
     base = _KIND_SPECS[kind]
-    info = model_info(base["model"])
     out = dict(base)
+    if base.get("model_id") is not None:
+        # a sidecar_kinds/ kind (Wave 3 seam) names its own id and version
+        # (model-free kinds, or several pinned files behind one key)
+        out.update(kind=kind, model_id=str(base["model_id"]),
+                   model_version=str(base["model_version"]),
+                   model_sha256=base.get("model_sha256"))
+        return out
+    info = model_info(base["model"])
     out.update(kind=kind, model_id=info["model_id"],
                model_version=str(info["model_version"]),
                model_sha256=info.get("sha256"))

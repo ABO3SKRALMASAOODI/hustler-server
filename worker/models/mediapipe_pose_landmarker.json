@@ -1,0 +1,23 @@
+{
+  "name": "mediapipe_pose_landmarker",
+  "model_id": "mediapipe_pose_landmarker_full",
+  "model_version": "float16-1",
+  "kinds": [
+    "landmarks.pose"
+  ],
+  "file": "pose_landmarker_full.task",
+  "url": "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task",
+  "source": "https://ai.google.dev/edge/mediapipe/solutions/vision/pose_landmarker (MediaPipe, github.com/google-ai-edge/mediapipe)",
+  "licence": "Apache-2.0",
+  "licence_url": "https://github.com/google-ai-edge/mediapipe/blob/master/LICENSE",
+  "commercial_use": true,
+  "sha256": "5134a3aad27a58b93da0088d431f366da362b44e3ccfbe3462b3827a839011b1",
+  "bytes": 9398198,
+  "images": [
+    "batch",
+    "vision"
+  ],
+  "env": "VALMERA_MODELS_DIR",
+  "runtime": "cv2.dnn.readNetFromTFLite: pose_landmarks_detector.tflite (33 points). The task's pose_detector.tflite uses DENSIFY, which cv2.dnn does not import: the ROI comes from the YuNet face and the previous landmarks instead",
+  "notes": "Wave 3 track 3A (ROADMAP \u00a77). Batch/vision only."
+}
