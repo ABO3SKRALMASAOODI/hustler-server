@@ -145,6 +145,9 @@ class _UiMedia:
         n = f1 - f0
         if n < 1:
             return ("omit", "an empty window")
+        if depth_fx.audio_only(plan):
+            _state(plan)[item["id"]] = {"audio_only": True}
+            return None
         W, H = int(plan.W), int(plan.H)
         k = W / float(graph.get("W") or W)
         src = item.get("source") or {}
@@ -215,6 +218,8 @@ class _UiMedia:
     def _emit(self, ctx, label, it):
         import finish
         st = _state(ctx.plan).get(it.get("id")) or {}
+        if st.get("audio_only"):
+            return label
         clip = ctx.input_label(f"w4u:{it['id']}")
         if not st.get("clip") or clip is None:
             raise ValueError("the slot intermediate was never bound")

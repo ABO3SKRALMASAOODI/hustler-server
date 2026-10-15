@@ -345,3 +345,53 @@ def test_a_2_5d_move_never_tears_a_continuous_surface():
         assert steps.min() >= -0.5 and steps.max() <= 2.0, (path, steps.min(),
                                                            steps.max())
         assert depth_fx.visible_inpaint_planes(planes, W, H, move, 3) < 0.2
+
+
+# ── audio-only rebuilds draw no W4 picture ───────────────────────────────
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+def test_an_audio_only_rebuild_precomputes_no_w4_picture(tmp_path,
+                                                         monkeypatch):
+    """Stitched previews rebuild the track with render_edl(audio_only):
+    the picture chains are pruned, so the depth / cutaway / slot
+    precompute (clips, maps, clouds: seconds per device) must not run."""
+    import depth_fx
+    import media
+    import renderer
+    import w4a_support as sup
+    src = sup.make_split_source(str(tmp_path / "s.mp4"), dur=4.0)
+    still = sup.make_split_still(str(tmp_path / "p.png"))
+    info = media.probe(src)
+    idx = {"words": [], "silences": [], "sentences": [],
+           "video": {"width": info["width"], "height": info["height"],
+                     "fps": info["fps"], "duration": info["duration"]}}
+    edl = {"keep": [[0.0, 4.0]], "captions": {"enabled": False}, "fx": [
+        {"id": "p", "type": "depth", "stage": "screen", "start": 0.5,
+         "end": 1.5, "kind": "parallax", "source": {
+             "kind": "asset", "asset_key": "media/7/p.png"}},
+        {"id": "k", "type": "depth", "stage": "world", "start": 1.6,
+         "end": 2.6, "kind": "ken_burns", "source": {
+             "kind": "source", "src_t": 1.0}},
+        {"id": "b", "type": "broll", "stage": "screen", "start": 2.7,
+         "end": 3.5, "media": "still", "source": {
+             "kind": "asset", "asset_key": "media/7/p.png"},
+         "credit": {"provider": "owner", "license": "Public domain"}}]}
+    written = []
+    real = depth_fx.ClipWriter.__init__
+
+    def spy(self, *a, **k):
+        written.append(a[0] if a else k.get("path"))
+        return real(self, *a, **k)
+    monkeypatch.setattr(depth_fx.ClipWriter, "__init__", spy)
+    from schemas import validate_edl
+    e = validate_edl(edl, 4.0).model_dump()
+    out = str(tmp_path / "a.m4a")
+    renderer.render_edl(e, idx, src, out, str(tmp_path / "w"), True,
+                        audio_only=True, asset_locals={"media/7/p.png":
+                                                       still})
+    assert os.path.exists(out) and os.path.getsize(out) > 1000
+    assert written == []
+    vid = str(tmp_path / "v.mp4")
+    renderer.render_edl(e, idx, src, vid, str(tmp_path / "w2"), True,
+                        asset_locals={"media/7/p.png": still})
+    assert len(written) == 3                      # the picture render draws

@@ -108,6 +108,13 @@ def _state(plan):
     return plan.__dict__.setdefault("_w4_depth", {})
 
 
+def audio_only(plan):
+    """Is this render the audio-only rebuild of the same graph (the
+    picture chains are pruned)? Then no picture precompute is worth it."""
+    media = getattr(plan, "media", None)
+    return bool(isinstance(media, dict) and media.get("audio_only"))
+
+
 def _env(plan):
     import subject_fx
     return subject_fx.render_env(plan)
@@ -998,6 +1005,11 @@ class _Depth:
         n = f1 - f0
         if n < 1:
             return ("omit", "an empty window")
+        if audio_only(plan):
+            # an audio-only rebuild (stitched previews) prunes the picture:
+            # no depth read, no clip written — the item stays, drawn as is
+            _state(plan)[item.get("id")] = {"audio_only": True}
+            return None
         wait_s = 0.0 if plan.preview else 90.0
         st = {"n": n, "rung": "full", "reason": "ok"}
         os.makedirs(plan.workdir, exist_ok=True)
@@ -1245,6 +1257,8 @@ class _Depth:
     def _emit(self, ctx, label, it):
         import finish
         st = _state(ctx.plan).get(it.get("id")) or {}
+        if st.get("audio_only"):
+            return label
         f0, f1 = ctx.frames(it)
         n = f1 - f0
         u = ctx.uid("dp")

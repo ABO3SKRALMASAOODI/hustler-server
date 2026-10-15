@@ -114,6 +114,10 @@ class _Broll:
         n = f1 - f0
         if n < 1:
             return ("omit", "an empty window")
+        import depth_fx
+        if depth_fx.audio_only(plan):
+            _state(plan)[item.get("id")] = {"audio_only": True}
+            return None
         os.makedirs(plan.workdir, exist_ok=True)
         src = item.get("source") or {}
         st = {"n": n, "rung": "full", "reason": "ok", "lut_path": None}
@@ -266,6 +270,8 @@ class _Broll:
     def _emit(self, ctx, label, it):
         import finish
         st = _state(ctx.plan).get(it.get("id")) or {}
+        if st.get("audio_only"):
+            return label
         f0, f1 = ctx.frames(it)
         n = f1 - f0
         u = ctx.uid("br")
