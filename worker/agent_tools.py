@@ -27455,6 +27455,20 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
                 + ", ".join(sorted(LOOKS))
                 + ". Each composes captions, grade, texture, transitions "
                   "and fades in one version.")
+    asked = str(getattr(ctx, "user_message", "") or "")
+    if look.get("grade") == "bw" and asked.strip() \
+            and not music_gate.is_mcp(ctx):
+        # Wave 2 (owner, 15 Oct): B&W is a DEVICE, never the whole short
+        # unless the user's own words ask for black and white. An MCP
+        # client's call is its user's ask; a scripted context with no user
+        # words at all is not an agent choosing a look.
+        import creative
+        if not creative.mono_allowed(asked):
+            return ("REJECTED: '" + n + "' turns the WHOLE edit black and "
+                    "white, and the user did not ask for black and white. "
+                    "Use B&W as a device instead: " + "; ".join(
+                        d for _k, d in creative.B_AND_W_DEVICES) +
+                    ". Or pick another look.")
     music_req, music_err = _look_music_choice(look, music, ctx)
     if music_err:
         return music_err
@@ -32150,7 +32164,8 @@ _COMPACT_CONTRACTS = {
         "ONE committed look in one version: caption look + grade + grain + "
         "transitions, reporting every component. Premium: "
         "editorial (podcast/interview default), creator_punch, cinematic_doc, "
-        "mono_noir, clean_minimal; legacy hype, clean, cinematic, luxury, meme. "
+        "mono_noir (only when the user asks for B&W), clean_minimal; legacy "
+        "hype, clean, cinematic, luxury, meme. "
         "Places no sound unless transition_sounds=true (sounds are optional, "
         "never rules); read the receipt before adding junction cues. Its music "
         "option, only when the user asked for background music, takes the "

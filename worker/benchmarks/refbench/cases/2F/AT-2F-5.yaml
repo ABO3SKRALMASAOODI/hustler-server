@@ -1,0 +1,28 @@
+# AT-2F-5 (agent mode): restraint with Wave 2 live: the 1F restraint cases
+# still pass (no music, sound, zoom or whole-short B&W added unasked).
+id: AT-2F-5
+track: 2F
+title: "restraint holds with Wave 2 devices live"
+local_only: true
+interim: false
+reference:
+  - {ref: "05", t: [0.23, 12.23], approx: false, board_t: 1.0}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "make this a premium short"
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: flash_risk, op: "<=", value: 3}
+expect:
+  music: 0
+  zoom: 0
+  sfx: 0
+  whole_short_mono: 0
+  reply_max_words: 60
+beyond: "Wave 2's devices widen the palette without loosening a single owner rule"
+board: {stills: [1.0], clip: [0.0, 12.0]}
+judges: {lenses: [owner_rules, craft], pass: all_no_major}

@@ -1,0 +1,31 @@
+# AT-2F-2 (agent mode): pack A on a V01 monologue: a density arc, words on
+# black -> words over picture -> picture.
+id: AT-2F-2
+track: 2F
+title: "pack A (manifesto) on a V01 monologue: the density arc"
+local_only: true
+interim: false
+reference:
+  - {ref: "04", t: [0.3, 14.1], approx: true}
+  - {ref: "11", t: [1.3, 13.9], approx: true}
+footage:
+  - {vfl: V01, window: thiel_ai_bigger}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "make this a manifesto edit"
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: land_err_f, op: "<=", value: 1}
+  - {name: legibility, role: payload, op: ">=", value: 60}
+expect:
+  music: 0
+  sfx: 0
+  zoom: 0
+  pack: A
+  density_arc: [type_black, type_over, broll]
+  whole_short_mono: 0
+beyond: "the arc follows the story's own energy (arc_planner), not fixed thirds"
+board: {stills: [1.0, 6.0, 12.0], clip: [0.0, 14.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

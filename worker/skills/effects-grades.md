@@ -33,7 +33,12 @@ set:
   fast whips/flashes.
 - `cinematic_doc` — story and documentary: filmic contrast, matte blacks,
   grain, light-leak/burn junctions.
-- `mono_noir` — desaturated B&W with one accent colour on type.
+- `mono_noir` — desaturated B&W with one accent colour on type; only when
+  the user asks for black and white (the in-house agent's apply_look
+  refuses it otherwise). B&W is a device, not a default look: a section
+  that opens to colour on the drop (set_grade_window), one colour kept
+  (isolate_colour), a silhouette hold, a one-frame negative on a hit
+  (add_accent kind=negative).
 - `clean_minimal` — quiet product and education: clean captions, neutral
   grade, minimal texture.
 - Legacy looks `hype`, `clean`, `cinematic`, `luxury`, `meme` remain.
