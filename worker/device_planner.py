@@ -1097,6 +1097,11 @@ def _type_on_screen(edl, t, payoff=False):
 # the type pops.
 INK_CONTRAST_MIN = 3.0
 INK_KEYS = ("color", "accent", "left_color", "right_color", "highlight")
+# Where a lockup must sit to be laid over the speaker's body (its centre y,
+# frame fractions): a band headline above a card or a talking head's crown
+# (y < 0.3) never sits on the silhouette, so a white hit stays white there
+# (a black one disappears on a dark backdrop: the Jobs card, review w1r).
+INK_BODY_Y = (0.3, 0.95)
 
 
 def _lum(hexv):
@@ -1150,6 +1155,12 @@ def lockup_inks(edl, t0, t1):
         if b <= t0 or a >= t1:
             continue
         params = m.get("params") or {}
+        try:
+            y = float(params.get("y", 0.5))
+        except (TypeError, ValueError):
+            y = 0.5
+        if not INK_BODY_Y[0] <= y <= INK_BODY_Y[1]:
+            continue        # a band lockup above the speaker (or a footer)
         for k in INK_KEYS:
             h = _resolve_hex(params.get(k), edl)
             if h:
