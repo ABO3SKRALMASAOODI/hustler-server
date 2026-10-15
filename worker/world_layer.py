@@ -919,6 +919,40 @@ def _ink_box(clip, k):
             float(ys.max() + 1))
 
 
+def _last_line(clip, k, box):
+    """(y0, y1) clip px of the LAST line of ink inside ``box`` (rows of
+    ink separated from the line above by an empty band), or the box."""
+    last = None
+    for j, rgba in enumerate(_decode_rgba(clip.path, int(clip.w),
+                                          int(clip.h))):
+        last = rgba
+        if j >= k:
+            break
+    y0, y1 = int(box[1]), int(box[3])
+    if last is None or y1 - y0 < 4:
+        return box[1], box[3]
+    rows = (last[y0:y1, ..., 3] > 160).sum(axis=1)
+    on = rows > max(1, 0.01 * (box[2] - box[0]))
+    # walk up from the bottom: the last run of inked rows
+    i = len(on) - 1
+    while i >= 0 and not on[i]:
+        i -= 1
+    bot = i
+    gap = max(2, int(0.04 * (y1 - y0)))
+    while i >= 0:
+        if not on[i]:
+            j = i
+            while j >= 0 and not on[j]:
+                j -= 1
+            if i - j >= gap:
+                break
+            i = j
+            continue
+        i -= 1
+    top = i + 1
+    return float(y0 + top), float(y0 + bot + 1)
+
+
 def _seat(item, clip, ctx, anchor, plan, d, notes):
     """(dx, dy) program px that set the graphic's ink point ``pin`` on the
     object ``d`` that hides it, or None (not measured / nothing to do).
@@ -954,7 +988,13 @@ def _seat(item, clip, ctx, anchor, plan, d, notes):
     ix0, iy0 = ink[0] + clip.x, ink[1] + clip.y
     iw, ih = ink[2] - ink[0], ink[3] - ink[1]
     sx = (bx0 + bx1) / 2.0
-    if bx1 - bx0 >= 1.2 * (by1 - by0):
+    wide = bx1 - bx0 >= 1.2 * (by1 - by0)
+    # the pin's height is read on the LAST line of type: a wide object bites
+    # the baseline of a stacked headline, never swallows its last line
+    ly0, ly1 = _last_line(clip, k0, ink) if wide else (ink[1], ink[3])
+    py0 = ly0 + clip.y
+    lh = ly1 - ly0
+    if wide:
         # the top edge over the object's middle half (a lid, a desk edge)
         cols = (px >= bx0 + 0.25 * (bx1 - bx0)) & \
             (px <= bx1 - 0.25 * (bx1 - bx0))
@@ -964,7 +1004,7 @@ def _seat(item, clip, ctx, anchor, plan, d, notes):
         sy = float(np.median(py))
         sx = float(np.median(px))
     dx = sx - (ix0 + float(pin[0]) * iw)
-    dy = sy - (iy0 + float(pin[1]) * ih)
+    dy = sy - (py0 + float(pin[1]) * lh)
     # inside the frame's margins
     dx = min(max(dx, 0.03 * W - ix0), 0.97 * W - (ix0 + iw))
     dy = min(max(dy, 0.06 * H - iy0), 0.94 * H - (iy0 + ih))

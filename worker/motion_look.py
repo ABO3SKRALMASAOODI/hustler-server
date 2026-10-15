@@ -376,9 +376,13 @@ def _series_key(m):
 def series_runs(items):
     """[[item, ...], ...]: the parallel runs (two or more members) among
     ``items`` (program-clock motion item dicts)."""
+    # a graphic attached to the world (Wave 3 MotionItem.anchor: on a wall,
+    # behind an object, on a hand) lives in the room's space, not the
+    # screen's column: it never shares a series size with screen slams
     cand = sorted((m for m in items or [] if isinstance(m, dict)
                    and m.get("template") in SERIES_TEMPLATES and not m.get("_synthetic")
-                   and not m.get("full_duration_s")),
+                   and not m.get("full_duration_s")
+                   and not isinstance(m.get("anchor"), dict)),
                   key=lambda m: (float(m.get("start") or 0.0), str(m.get("id"))))
     runs, cur = [], []
     for m in cand:

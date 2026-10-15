@@ -477,3 +477,17 @@ def test_definition_keys_survive_a_stitch_window(w0, w1):
         full = world_defs.request(world_defs.definitions(e)[fid], tl, 0.0)
         part = world_defs.request(world_defs.definitions(we)[fid], tl2, 0.0)
         assert full == part, fid
+
+
+def test_world_graphics_never_join_a_screen_series():
+    import motion_look
+    a = {"id": "a", "template": "word_slam", "start": 0.6, "end": 3.9,
+         "params": {"text": "THE WORLD OF BITS", "role": "condensed"},
+         "anchor": {"to": "plane:pl1"}}
+    b = {"id": "b", "template": "word_slam", "start": 4.55, "end": 6.85,
+         "params": {"text": "FLYING CARS", "role": "condensed"},
+         "anchor": {"to": "screen", "occluders": ["object:ob1"]}}
+    c = dict(b, id="c", anchor=None)
+    d = dict(a, id="d", anchor=None)
+    assert motion_look.series_runs([a, b]) == []
+    assert len(motion_look.series_runs([d, c])) == 1
