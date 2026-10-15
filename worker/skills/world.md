@@ -11,7 +11,7 @@ Say where in plain words and the verbs do the measuring:
 | "put the price on the desk" | `place_in_world(where='on the desk', text=..., t, quad)` | a plane definition + type pinned to it (`plane:<id>`) |
 | "hide the word behind the laptop" | `place_in_world(where='behind the laptop', text=..., t, box)` | an object definition + the word occluded by it (`object:<id>`) |
 | "make the label follow his hand" | `place_in_world(where='follow his hand', motion_id=...)` or `attach(to='hand.palm')` | a hand anchor; `lost='hide'` when the hand leaves |
-| "the number on her fingertip" | `attach(to='hand.index_tip', pin=[0.5, 1.1])` | a card riding the fingertip |
+| "the number on her fingertip" | `attach(to='hand.index_tip', pin=[0.5, 0.72])` | a glass card riding the fingertip |
 | "between his hands" | `place_in_world(where='between his hands')` | the hands' frame quad (`hand.frame`) |
 | "arc it round his head" | `add_element(kind='orbit', attach='round his head')` | words orbiting the head, the far side behind it |
 | "next to her face" | `attach(to='face.cheek', which='left'/'right')` | a label beside the face, following it |
@@ -107,5 +107,5 @@ asked; never music.
 {"action": "upsert", "layer": "motion", "id": "gc1", "value": {"id": "gc1",
  "template": "glass_card", "start": 9.0, "end": 11.0,
  "params": {"title": "3x"}, "anchor": {"to": "hand.index_tip",
- "pin": [0.5, 1.12], "lost": "hide"}}}
+ "pin": [0.5, 0.72], "lost": "hide"}}}
 ```

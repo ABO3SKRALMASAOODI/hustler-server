@@ -358,3 +358,81 @@ def test_an_object_behind_the_person_brings_the_person_in_front(
     auto = dict(ob, depth="auto")
     c2, _e2 = w3s.ctx(dict(edl, fx=[auto]), src, workdir=str(tmp_path))
     assert world_layer.object_depth(c2, auto) == ("front", "not measurable")
+
+
+# ── measured-quality guards (W3 acceptance findings) ─────────────────────
+
+def test_zero_phase_smoothing_does_not_trail_a_moving_anchor():
+    from anchors import smooth
+    t = np.arange(0, 3, 1 / 15.0)
+    x = np.where(t < 1.5, 0.2 + 0.3 * t, 0.65 - 0.3 * (t - 1.5))
+    y = np.full_like(t, 0.5)
+    xy = np.c_[x, y]
+    causal = smooth.one_euro(t, xy, 0.5, scale=0.1, zero_phase=False)
+    both = smooth.one_euro(t, xy, 0.5, scale=0.1)
+    mid = (t > 0.5) & (t < 1.3)
+    lag_c = float(np.mean(np.abs(causal[mid, 0] - x[mid])))
+    lag_z = float(np.mean(np.abs(both[mid, 0] - x[mid])))
+    assert lag_z < 0.25 * lag_c and lag_z < 0.002
+
+
+def test_the_finger_window_needs_a_convex_untangled_quad():
+    from anchors import query
+    L = np.zeros((21, 2))
+    R = np.zeros((21, 2))
+    L[:, 0], L[:, 1] = np.linspace(0.20, 0.30, 21), 0.6
+    R[:, 0], R[:, 1] = np.linspace(0.60, 0.70, 21), 0.6
+    L[8], L[4] = [0.32, 0.40], [0.30, 0.62]      # index up, thumb down
+    R[8], R[4] = [0.58, 0.40], [0.60, 0.62]
+    q = query.frame_quad(L, R)
+    assert q is not None and q[0][0] < q[1][0] and q[0][1] < q[3][1]
+    R2 = R.copy()
+    R2[8], R2[4] = [0.31, 0.45], [0.31, 0.47]    # tips collapse: no window
+    assert query.frame_quad(L, R2) is None
+    assert query.hands_overlap(L, L + 0.001)
+    assert not query.hands_overlap(L, R)
+
+
+def test_follow_shape_belongs_to_a_face_or_head_anchor():
+    ok = _edl(motion=[{"id": "m1", "template": "word_slam", "start": 1.0,
+                       "end": 2.0, "params": {"text": "X"},
+                       "anchor": {"to": "head", "follow": ["shape"]}}])
+    e = schemas.validate_edl(ok, 10.0).model_dump()
+    assert e["motion"][0]["anchor"]["follow"] == ["position", "shape"]
+    bad = copy.deepcopy(ok)
+    bad["motion"][0]["anchor"]["to"] = "hand.palm"
+    with pytest.raises(EDLValidationError):
+        schemas.validate_edl(bad, 10.0)
+
+
+def test_the_plane_residual_reads_true_motion():
+    import cv2
+    import planes
+    rng = np.random.default_rng(0)
+    g0 = cv2.GaussianBlur((rng.random((240, 320)) * 255).astype(np.uint8),
+                          (0, 0), 1.5)
+    g1 = np.roll(g0, 3, axis=1)
+    m = np.full(g0.shape, 255, np.uint8)
+    assert abs(planes._residual(g0, g1, m, np.eye(3)) - 3.0) < 0.3
+    H = np.array([[1, 0, 3], [0, 1, 0], [0, 0, 1]], float)
+    assert planes._residual(g0, g1, m, H) < 0.3
+
+
+def test_a_still_object_keeps_its_mask_while_the_scene_moves():
+    from objseg import propagate
+    import cv2
+    rng = np.random.default_rng(1)
+    bg = cv2.GaussianBlur((rng.random((180, 360, 3)) * 255).astype(np.uint8),
+                          (0, 0), 2.0)
+    tex = cv2.GaussianBlur((rng.random((60, 60, 3)) * 255).astype(np.uint8),
+                           (0, 0), 1.5)
+    frames = []
+    for k in range(12):
+        f = np.ascontiguousarray(bg[:, 2 * k:2 * k + 320])  # the scene pans
+        f[60:120, 100:160] = tex                            # a still object
+        frames.append(f)
+    key = np.zeros((180, 320), np.uint8)
+    key[60:120, 100:160] = 255
+    masks, stats = propagate.propagate(frames, 6, key, segmenter=None)
+    assert all(np.array_equal(m, key) for m in masks)
+    assert stats["still_frames"] == 11

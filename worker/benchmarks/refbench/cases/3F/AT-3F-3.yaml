@@ -1,0 +1,61 @@
+# Wave 3 track 3F. Run: cd worker && python -m benchmarks.refbench.at3 AT-3F-3
+# The at3 harness builds the EDL on the fixture's file clock and measures
+# the device_metrics (boards: .valmera/refbench/boards/wave3/).
+id: AT-3F-3
+track: 3F
+title: plan_footage for 16 / 21 / 38 briefs
+local_only: true
+interim: true
+reference:
+- ref: '16'
+  t:
+  - 0.0
+  - 32.6
+- ref: '21'
+  t:
+  - 0.0
+  - 10.0
+  approx: true
+- ref: '38'
+  t:
+  - 10.0
+  - 17.0
+  approx: true
+footage:
+- vfl: V12
+  window: gestures
+music: null
+aspect: '9:16'
+mode: engine
+harness: at3
+edl:
+  base: vfl_default
+  ops: []
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+device_metrics:
+- name: shots
+  op: <=
+  value: 12
+- name: minutes
+  op: <=
+  value: 20
+- name: covered
+  op: '>='
+  value: 0.9
+beyond: shot cards with framing diagrams and at most three priced options
+board:
+  stills: []
+  clip: null
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

@@ -283,7 +283,7 @@ def candidates(edl, index, plan, *, intensity="designed", max_n=MAX_WORLD,
         item = {"id": mid, "template": "glass_card", "start": s, "end": e,
                 "params": {"title": _word_text(m) or "THIS", "width": 0.26},
                 "layer": "above_captions",
-                "anchor": {"to": "hand.index_tip", "pin": [0.5, 1.12],
+                "anchor": {"to": "hand.index_tip", "pin": [0.5, 0.72],
                            "lost": "hide"}}
         if take(_cand("anchor_hand", "world", "attach",
                       [{"action": "upsert", "layer": "motion", "id": mid,

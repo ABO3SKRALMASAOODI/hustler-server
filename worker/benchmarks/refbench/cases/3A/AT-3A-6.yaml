@@ -1,0 +1,46 @@
+# Wave 3 track 3A. Run: cd worker && python -m benchmarks.refbench.at3 AT-3A-6
+# The at3 harness builds the EDL on the fixture's file clock and measures
+# the device_metrics (boards: .valmera/refbench/boards/wave3/).
+id: AT-3A-6
+track: 3A
+title: 'the follow regression: YuNet vs Haar face-loss events'
+local_only: true
+interim: true
+reference:
+- ref: '05'
+  t:
+  - 0.23
+  - 12.23
+  approx: true
+footage:
+- vfl: V01
+  window: thiel_ai_bigger
+music: null
+aspect: source
+mode: engine
+harness: at3
+edl:
+  base: vfl_default
+  ops: []
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+device_metrics:
+- name: loss_reduction_vs_haar
+  op: '>='
+  value: 0.3
+beyond: followed-face losses counted inside shots over 20 VFL windows
+board:
+  stills: []
+  clip: null
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

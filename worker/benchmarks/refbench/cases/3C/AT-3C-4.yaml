@@ -1,0 +1,47 @@
+# Wave 3 track 3C. Run: cd worker && python -m benchmarks.refbench.at3 AT-3C-4
+# The at3 harness builds the EDL on the fixture's file clock and measures
+# the device_metrics (boards: .valmera/refbench/boards/wave3/).
+id: AT-3C-4
+track: 3C
+title: '''keyword'' on the desk plane (owner board)'
+local_only: true
+interim: false
+reference:
+- ref: '38'
+  t:
+  - 17.0
+  - 17.0
+  approx: true
+footage:
+- vfl: V06
+  window: boom_mic
+music: null
+aspect: '9:16'
+mode: engine
+harness: at3
+edl:
+  base: vfl_default
+  ops: []
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+device_metrics:
+- name: owner_board
+  op: '>='
+  value: 1.0
+beyond: 'owner board pending: the V06 window shows no desk'
+board:
+  stills: []
+  clip: null
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major
+blocked: 'owner board pending: the V06 window shows no desk'

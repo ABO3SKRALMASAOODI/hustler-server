@@ -1,0 +1,50 @@
+# Wave 3 track 3B. Run: cd worker && python -m benchmarks.refbench.at3 AT-3B-4
+# The at3 harness builds the EDL on the fixture's file clock and measures
+# the device_metrics (boards: .valmera/refbench/boards/wave3/).
+id: AT-3B-4
+track: 3B
+title: fast thrown objects with re-prompting (HC-F)
+local_only: true
+interim: false
+reference:
+- ref: '16'
+  t:
+  - 14.6
+  - 14.6
+- ref: '07'
+  t:
+  - 41.7
+  - 41.7
+footage:
+- vfl: V12
+  window: walkon
+music: null
+aspect: '9:16'
+mode: engine
+harness: at3
+edl:
+  base: vfl_default
+  ops: []
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+device_metrics:
+- name: per_frame_iou
+  op: '>='
+  value: 0.8
+beyond: 'blocked: needs HC-F footage'
+board:
+  stills: []
+  clip: null
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major
+blocked: 'blocked: needs HC-F footage'

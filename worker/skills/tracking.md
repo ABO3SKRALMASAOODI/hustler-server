@@ -11,7 +11,7 @@ gesture it reads as the speaker's own idea made visible.
 
 - **Fingertip / palm** (`attach` to `hand.index_tip`, `hand.palm`): a small
   glass card, a number, one word — the size of the hand, never bigger. Use
-  `pin` [0.5, 1.1] so the card sits just above the finger, and
+  `pin` [0.5, 0.72] (glass_card: its box carries the shadow below the card) so the card sits just above the finger, and
   `lost: hide` (the default for hands) so it fades when the hand drops.
 - **Between the hands** (`hand.frame`): the graphic fills the quad of both
   thumbs and index fingers — a window, a picture, an effect the speaker
@@ -52,7 +52,7 @@ tracked graphic is silent and zoom-free.
 ## Strong treatment patterns
 
 - Fingertip card: `add_motion_graphic` (a small card or `glass_card`), then
-  `attach(motion_id, to='hand.index_tip', pin=[0.5, 1.12])`.
+  `attach(motion_id, to='hand.index_tip', pin=[0.5, 0.72])`.
 - "Between his hands": `attach(motion_id, to='hand.frame')` with an image
   or a footage fill — the graphic is warped into the hands' quad.
 - Head arc: `place_in_world(text='SIX FACES OF THE FUTURE', where='round
@@ -99,7 +99,7 @@ A client whose tool list predates Wave 3 writes the same anchor directly:
 
 ```json
 {"action": "upsert", "layer": "motion", "id": "m1", "value": {"id": "m1",
- "anchor": {"to": "hand.index_tip", "pin": [0.5, 1.12], "lost": "hide"}}}
+ "anchor": {"to": "hand.index_tip", "pin": [0.5, 0.72], "lost": "hide"}}}
 {"action": "upsert", "layer": "motion", "id": "m2", "value": {"id": "m2",
  "anchor": {"to": "head", "follow": ["position", "scale"]}}}
 {"action": "upsert", "layer": "fx", "id": "tr1", "value": {"id": "tr1",

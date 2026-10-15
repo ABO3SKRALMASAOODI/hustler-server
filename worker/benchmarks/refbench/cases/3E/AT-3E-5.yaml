@@ -1,0 +1,52 @@
+# Wave 3 track 3E. Run: cd worker && python -m benchmarks.refbench.at3 AT-3E-5
+# The at3 harness builds the EDL on the fixture's file clock and measures
+# the device_metrics (boards: .valmera/refbench/boards/wave3/).
+id: AT-3E-5
+track: 3E
+title: a device stage with light spill
+local_only: true
+interim: true
+reference:
+- ref: '06'
+  t:
+  - 0.0
+  - 14.53
+- ref: '18'
+  t:
+  - 10.84
+  - 13.3
+footage:
+- vfl: V01
+  window: thiel_ai_bigger
+music: null
+aspect: '9:16'
+mode: engine
+harness: at3
+edl:
+  base: vfl_default
+  ops: []
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+device_metrics:
+- name: screen_edge_err_px_max
+  op: <=
+  value: 1.0
+- name: spill_colour_corr
+  op: '>='
+  value: 0.7
+beyond: the product's own recording on the screen (FX-UI); spill follows the screen's colour
+board:
+  stills: []
+  clip: null
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

@@ -1,0 +1,54 @@
+# Wave 3 track 3A. Run: cd worker && python -m benchmarks.refbench.at3 AT-3A-3
+# The at3 harness builds the EDL on the fixture's file clock and measures
+# the device_metrics (boards: .valmera/refbench/boards/wave3/).
+id: AT-3A-3
+track: 3A
+title: a plate registered to the head through a turn
+local_only: true
+interim: true
+reference:
+- ref: '15'
+  t:
+  - 1.13
+  - 1.13
+- ref: '27'
+  t:
+  - 19.7
+  - 19.7
+  approx: true
+footage:
+- vfl: V01
+  window: thiel_ai_bigger
+music: null
+aspect: source
+mode: engine
+harness: at3
+edl:
+  base: vfl_default
+  ops: []
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+device_metrics:
+- name: eye_socket_err_p95_pct_h
+  op: <=
+  value: 2.0
+- name: yaw_range_deg
+  op: '>='
+  value: 30.0
+beyond: 'follow shape: an affine fitted to the face mesh each frame, so a flat plate foreshortens with
+  the turn (5.3 % with a similarity alone)'
+board:
+  stills: []
+  clip: null
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major

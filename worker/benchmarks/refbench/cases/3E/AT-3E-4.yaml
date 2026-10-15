@@ -1,0 +1,56 @@
+# Wave 3 track 3E. Run: cd worker && python -m benchmarks.refbench.at3 AT-3E-4
+# The at3 harness builds the EDL on the fixture's file clock and measures
+# the device_metrics (boards: .valmera/refbench/boards/wave3/).
+id: AT-3E-4
+track: 3E
+title: an independent stack with a flash clipped to one panel
+local_only: true
+interim: true
+reference:
+- ref: '19'
+  t:
+  - 0.0
+  - 17.5
+- ref: '39'
+  t:
+  - 0.0
+  - 8.0
+  approx: true
+footage:
+- vfl: V13
+  window: dragon_unveil
+music: null
+aspect: '9:16'
+mode: engine
+harness: at3
+edl:
+  base: vfl_default
+  ops: []
+chat: null
+render:
+  variant: final
+allow: []
+metrics:
+- name: duration_exact
+  op: <=
+  value: 0
+device_metrics:
+- name: region_locality_luma
+  op: <=
+  value: 0
+- name: region_locality_chroma
+  op: <=
+  value: 0
+- name: verb_vs_page_rect_px
+  op: <=
+  value: 1.0
+beyond: the verb replies with the page's own panel rects
+board:
+  stills: []
+  clip: null
+judges:
+  lenses:
+  - motion
+  - craft
+  - owner_rules
+  pass: 2of3_no_major
