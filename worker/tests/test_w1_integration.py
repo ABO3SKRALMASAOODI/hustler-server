@@ -313,3 +313,29 @@ def test_a_held_subject_frame_moves_with_its_footage():
     assert edl["fx"][0]["hold_t"] == 8.0 and notes
     piece = stitch._window_fx(edl["fx"], 7.0, 9.0, 25.0, set())
     assert piece[0]["start"] == 1.0 and piece[0]["hold_t"] == 1.0
+
+
+def test_a_junction_handle_never_reaches_across_a_source_camera_cut():
+    """S3 board: a column wipe onto a span that starts ON a camera change
+    showed the previous camera's frames under the incoming side (the
+    handle borrowed 0.2 s before the in-point). A handle that would cross
+    an indexed shot boundary freezes the edge frame instead."""
+    import renderer
+    keep = [(7.0, 9.9), (15.0, 18.6)]
+    blk = {("seg", 0): 87, ("seg", 1): 108}
+    args = dict(keep=keep, blk_frames=blk, h=6, fps=29.97, no_source=False,
+                card_layout={}, src_dur=30.0)
+    shots = renderer._index_shot_starts({"shots": [{"start": 7.0},
+                                                   {"start": 10.0},
+                                                   {"start": 15.0}]})
+    assert renderer._fx_handle_src(("seg", 1, 3.6), side="in",
+                                   shot_starts=shots, **args) is None
+    assert renderer._fx_handle_src(("seg", 1, 3.6), side="in",
+                                   **args) is not None     # no index: as before
+    # the outgoing side: the source cuts to a wide at 10.0 s, 0.1 s past
+    # the out-point (9.9) — frozen too; without that cut, a real handle
+    assert renderer._fx_handle_src(("seg", 0, 2.9), side="out",
+                                   shot_starts=shots, **args) is None
+    assert renderer._fx_handle_src(("seg", 0, 2.9), side="out",
+                                   shot_starts=[7.0, 15.0],
+                                   **args) is not None

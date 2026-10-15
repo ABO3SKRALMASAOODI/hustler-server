@@ -33,13 +33,22 @@ NEEDS = [fixture("V12", "walkon.mp4"), fixture("V11", "karp_stage_60p.mp4"),
                             "rvm_mobilenetv3_fp32.onnx")]
 pytestmark = [local_only(*NEEDS)]
 
-os.environ.setdefault("MATTE_RVM_MODEL", NEEDS[-1])
-
-
 @pytest.fixture(scope="module")
 def A():
+    # the pinned RVM for this module's renders only: set at import time it
+    # leaked into every later test of the run (collection imports every
+    # module first), and test_text_behind's synthetic rooms then ran the
+    # real person model and found "0.00% subject" (Wave 1 integration)
+    old = os.environ.get("MATTE_RVM_MODEL")
+    os.environ.setdefault("MATTE_RVM_MODEL", NEEDS[-1])
     import w1b_accept
-    return w1b_accept
+    try:
+        yield w1b_accept
+    finally:
+        if old is None:
+            os.environ.pop("MATTE_RVM_MODEL", None)
+        else:
+            os.environ["MATTE_RVM_MODEL"] = old
 
 
 def _geom(res):

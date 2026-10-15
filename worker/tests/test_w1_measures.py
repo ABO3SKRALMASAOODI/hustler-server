@@ -114,3 +114,27 @@ def test_the_hook_slam_is_measured_before_the_band_headline():
     assert "band headline 'headline' 3.5%" in line
     assert "'odds' 9.2%" in line            # every lockup, counters included
     assert "picture area 1.00 (full frame" in line   # full-bleed reported
+
+
+def test_measured_ink_on_the_corner_mark_is_a_finding():
+    """s06: a band lockup rendered from y 0.076, over the free-tier corner
+    mark, and nothing said so. The type pass measures the composition, so
+    the render names it."""
+    items = [{"id": "rounds23", "template": "word_slam", "start": 30.8,
+              "end": 32.7, "tier": "display", "persistent": False,
+              "layer": "above_captions"},
+             {"id": "headline", "template": "headline", "start": 2.0,
+              "end": 39.0, "tier": None, "persistent": True,
+              "layer": "above_captions"}]
+    tplan = {"items": items, "hook": None, "band": "headline",
+             "payoff": None, "W": 1080, "H": 1920}
+    tres = {"items": {"rounds23": {"cap": 0.094,
+                                   "box": [0.2278, 0.0781, 0.7759, 0.276]},
+                      "headline": {"cap": 0.034,
+                                   "box": [0.1981, 0.0953, 0.9204, 0.2292]}},
+            "cues": []}
+    tq = render_qc.type_findings(tres, tplan, [])
+    assert [m[0] for m in tq["mark"]] == ["rounds23"]     # band headline ok
+    lines = render_qc.measured_findings({"type": tq})
+    assert any(ln.startswith("GRAPHIC ON THE CORNER MARK: 'rounds23'")
+               for ln in lines)

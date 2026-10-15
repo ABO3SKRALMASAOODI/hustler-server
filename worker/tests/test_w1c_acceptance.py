@@ -52,10 +52,19 @@ pytestmark = local_only(*FOOTAGE)
 
 @pytest.fixture(scope="module")
 def at(tmp_path_factory):
+    old = {k: os.environ.get(k) for k in ("MATTE_RVM_MODEL", "W1C_AT_DIR")}
     os.environ.setdefault("MATTE_RVM_MODEL", RVM)
     d = tmp_path_factory.mktemp("w1c_at")
     os.environ.setdefault("W1C_AT_DIR", str(d / "cases"))
-    return w1c_at.run_child(str(d / "results.json"))
+    try:
+        return w1c_at.run_child(str(d / "results.json"))
+    finally:
+        # never leak the pinned model into later tests of the run
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def _ok(at, cid):

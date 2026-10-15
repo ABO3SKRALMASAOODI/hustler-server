@@ -380,4 +380,7 @@ def test_follow_crop_caveats_are_gone():
     assert "proof_device" in editing and "suggest_devices" in editing
     with open(os.path.join(plugin, "looks.md")) as fh:
         looks = fh.read()
-    assert "### Devices" in looks and re.search(r"Strobe.*\| 0 \|", looks)
+    # strobes stay out of a talking short's body except as its ONE recipe
+    # (Wave 1 integration: recipes, one signature move per short)
+    assert "### Devices" in looks and re.search(
+        r"Strobe.*\| 0, or the recipe \|", looks)
