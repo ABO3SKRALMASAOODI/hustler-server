@@ -141,7 +141,10 @@ def _swap_texts(edl, mapping):
                         ch[k] = tr(ch[k])
         if p.get("graph"):
             import ui_scene
-            p["shown"] = ui_scene.shown_texts(p["graph"])
+            p["shown"] = ui_scene.caption_shown(p["graph"])
+            fp = ui_scene.footprint(p["graph"])
+            if fp:
+                m["footprint"] = fp      # the layout did not move
     for t in edl.get("texts") or []:
         if isinstance(t, dict) and isinstance(t.get("text"), str):
             t["text"] = tr(t["text"])

@@ -113,7 +113,11 @@ def add_ui_scene(ctx, scenes, start=None, end=None, data=None, theme="dark",
         if s is None:
             raise ValueError("give start (program seconds) or anchor the "
                              "first scene on a word")
-        e = float(end) if end is not None else min(prog, s + 8.0)
+        # the window: to the end of the last anchored scene's line (each
+        # scene holds while its words are said), at least 8 s
+        last = max([a for a in anchors if a is not None] + [s])
+        e = float(end) if end is not None else min(
+            prog, max(s + 8.0, last + 3.0))
     except (TypeError, ValueError) as x:
         return _rejected(str(x))
     if not (0 <= s < e <= prog + 1e-6):
@@ -158,13 +162,19 @@ def add_ui_scene(ctx, scenes, start=None, end=None, data=None, theme="dark",
     mid = str(id or _new_id(edl.get("motion") or [], "ui"))
     item = {"id": mid, "template": "ui_scene", "start": round(s, 2),
             "end": round(e, 2), "layer": "below_captions",
-            "params": {"graph": graph, "shown": ui_scene.shown_texts(graph),
+            "params": {"graph": graph,
+                       # what stays on screen the whole window: the
+                       # caption plan never hides a word a passing card
+                       # is not showing
+                       "shown": ui_scene.caption_shown(graph),
                        "backdrop": backdrop,
                        # what the graph was solved from: another aspect
                        # re-solves the layout instead of scaling pixels
                        "spec": {"scenes": solved, "words": words,
                                 "theme": theme, "accent": accent}},
-            "purpose": "UI explainer (add_ui_scene)"}
+            "purpose": "UI explainer (add_ui_scene)",
+            # the cards' own box: captions sit on the backdrop beside them
+            "footprint": ui_scene.footprint(graph)}
     ops = [{"action": "upsert", "layer": "motion", "id": mid,
             "value": item}]
     taken = list(edl.get("fx") or [])

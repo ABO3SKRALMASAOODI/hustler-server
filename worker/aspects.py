@@ -56,8 +56,11 @@ def _resolve_ui(item, ratio):
     g = ui_scene.solve(copy.deepcopy(spec["scenes"]), dur, W, H,
                        words=spec.get("words") or [],
                        theme=spec.get("theme"), accent=spec.get("accent"))
-    p = dict(p, graph=g, shown=ui_scene.shown_texts(g))
+    p = dict(p, graph=g, shown=ui_scene.caption_shown(g))
     item["params"] = p
+    fp = ui_scene.footprint(g)
+    if fp:
+        item["footprint"] = fp           # the re-solved cards, this aspect
     return True
 
 

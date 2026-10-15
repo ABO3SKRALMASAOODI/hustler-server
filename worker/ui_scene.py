@@ -440,6 +440,11 @@ def solve(scenes, duration, W, H, *, words=(), theme=None, accent=None):
     if float(scenes[0].get("at") or 0.0) > 0.01:
         scenes[0] = dict(scenes[0], at=0.0)
     times = [float(s.get("at") or 0.0) for s in scenes] + [float(duration)]
+    if times[-2] > float(duration) - (MORPH_S + 0.15):
+        raise ValueError(f"the last scene starts {times[-2]:g}s into a "
+                         f"{float(duration):g}s item: give the item a later "
+                         "end (each scene holds at least "
+                         f"{MORPH_S + 0.15:g}s)")
     for a, b in zip(times, times[1:]):
         if b - a < MORPH_S + 0.15:
             raise ValueError(f"scenes at {a:g}s and {b:g}s are too close "
@@ -666,6 +671,89 @@ def iris_radius(obj, t):
     far = max(math.hypot(cx - ir["ox"], cy - ir["oy"])
               for cx in (r[0], r[0] + r[2]) for cy in (r[1], r[1] + r[3]))
     return _EASE["outCubic"](p) * far
+
+
+def caption_shown(graph):
+    """The strings the scene shows for its WHOLE window — what the caption
+    plan may treat as already on screen (MotionItem params ``shown``).
+
+    The caption plan reads a graphic's printed words as shown over the
+    item's whole window. A scene graph changes by scene, so its passing
+    cards are not on screen while most of the words are said: listing
+    them hid heard words the screen never showed (Wave 4 review, V01: 'It
+    was bigger than anything else' muted at 6 s because a card at 14 s
+    reads 'bigger than the internet'). Only an object present from the
+    first frame to the last, with text no scene updates, is listed."""
+    dur = float(graph.get("dur") or 0.0)
+    keys = ("title", "body", "text", "label", "name", "value", "delta",
+            "caption")
+    out = []
+    for o in graph.get("objects") or []:
+        segs = o.get("segs") or []
+        if not segs or min(float(sg[0]) for sg in segs) > 0.05 or \
+                max(float(sg[1]) for sg in segs) < dur - 0.05:
+            continue
+        if any(float(sg[11]) <= 0.01 for sg in segs[1:]):
+            continue                      # it leaves on the way
+        changed = set()
+        for ch in (o.get("updates") or {}).values():
+            changed |= set(ch or {})
+        for key in keys:
+            if key not in changed and isinstance(o.get(key), str) and \
+                    o[key].strip():
+                out.append(o[key].strip())
+        if "lines" not in changed:
+            out += [ln.strip() for ln in o.get("lines") or []
+                    if isinstance(ln, str) and ln.strip()]
+        if "rows" not in changed:
+            for r in o.get("rows") or []:
+                for key in ("label", "value"):
+                    if isinstance(r.get(key), str) and r[key].strip():
+                        out.append(r[key].strip())
+    seen, uniq = set(), []
+    for x in out:
+        if x.lower() not in seen:
+            seen.add(x.lower())
+            uniq.append(x[:120])
+    return uniq[:40]
+
+
+def footprint_box(graph, pad=0.012):
+    """(x0, y0, x1, y1) frame fractions of what the scene DRAWS — the union
+    of every object's rectangle over all its segments — or None. Its
+    backdrop is not part of it: captions sit on a solid or dimmed backdrop
+    and keep clear of the cards (a probe of the page measures the
+    backdrop as a full-frame cover, and the caption plan then mutes every
+    heard word under the scene)."""
+    W = float(graph.get("W") or 1080)
+    H = float(graph.get("H") or 1920)
+    xs0, ys0, xs1, ys1 = [], [], [], []
+    for o in graph.get("objects") or []:
+        for sg in o.get("segs") or []:
+            for x, y, w, h in ((sg[2], sg[3], sg[4], sg[5]),
+                               (sg[6], sg[7], sg[8], sg[9])):
+                if w <= 0 or h <= 0:
+                    continue
+                xs0.append(x)
+                ys0.append(y)
+                xs1.append(x + w)
+                ys1.append(y + h)
+    if not xs0:
+        return None
+    return (max(0.0, min(xs0) / W - pad), max(0.0, min(ys0) / H - pad),
+            min(1.0, max(xs1) / W + pad), min(1.0, max(ys1) / H + pad))
+
+
+def footprint(graph):
+    """The MotionItem.footprint of a solved scene (see footprint_box), or
+    None: written with the graph so the render keeps it (a measured box
+    at this frame aspect is never probed again)."""
+    import caption_carry
+    box = footprint_box(graph)
+    if box is None:
+        return None
+    return caption_carry.make_footprint(box, float(graph.get("W") or 1080),
+                                        float(graph.get("H") or 1920))
 
 
 def media_slots(graph):

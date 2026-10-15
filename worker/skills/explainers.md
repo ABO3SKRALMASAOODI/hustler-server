@@ -81,9 +81,13 @@ so the viewer never loses the thread. That continuity is the craft.
 
 The scene graph is SOLVED by the verb (layout, morphs, irises, counters);
 a stale client writes the solved item. The motion item's `params.graph` is
-the solved graph (`ui_scene.solve`), `params.shown` every string it
-prints; each media slot is a `ui_media` fx item naming the motion item and
-the slot.
+the solved graph (`ui_scene.solve`); `params.shown` lists only the strings
+on screen for the WHOLE item (the caption plan hides heard words it
+lists); `footprint` is the union of the cards' rectangles as frame
+fractions with the frame's aspect (`ar` = W/H) — without it a solid
+backdrop is measured as a full-frame graphic and the captions under the
+scene are muted. Each media slot is a `ui_media` fx item naming the motion
+item and the slot.
 
 ```json
 {"action": "upsert", "layer": "motion", "id": "ui1", "value": {
@@ -93,8 +97,13 @@ the slot.
   "kind": "card", "title": "Front forks", "design": [70, 760, 940, 200],
   "segs": [[0.0, 0.45, 70, 760, 940, 200, 70, 760, 940, 200, 0, 1,
   "snap"], [0.45, 8.0, 70, 760, 940, 200, 70, 760, 940, 200, 1, 1,
-  "linear"]], "iris": null, "enter": 0.0}], "irises": [], "u": 3.0},
-  "shown": ["Front forks"], "backdrop": "solid"}}}
+  "linear"]], "iris": null, "enter": 0.0}, {"id": "screen", "kind":
+  "media", "design": [70, 1000, 940, 528], "segs": [[0.0, 0.45, 70, 1000,
+  940, 528, 70, 1000, 940, 528, 0, 1, "snap"], [0.45, 8.0, 70, 1000, 940,
+  528, 70, 1000, 940, 528, 1, 1, "linear"]], "iris": null, "enter": 0.0}],
+  "irises": [], "u": 3.0},
+  "shown": ["Front forks"], "backdrop": "solid"},
+  "footprint": {"box": [0.053, 0.384, 0.947, 0.808], "ar": 0.5625}}}
 ```
 
 ```json

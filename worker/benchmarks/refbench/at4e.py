@@ -78,7 +78,7 @@ def _short(index):
               "end": 2.4, "params": {"text": "TIME HORIZONS"}},
              {"id": "ui1", "template": "ui_scene", "start": 31.6,
               "end": 34.8, "layer": "below_captions", "params": {
-                  "graph": g, "shown": ui_scene.shown_texts(g),
+                  "graph": g, "shown": ui_scene.caption_shown(g),
                   "backdrop": "dim",
                   "spec": {"scenes": g_sc, "words": []}}}],
          "fx": [

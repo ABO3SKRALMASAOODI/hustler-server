@@ -90,6 +90,11 @@ a section change — never as a filter on everything.
 - The same device on every short of a run (a house style): the critic
   flags it; choose the device this story earns.
 - A rack focus with no turn in the words: decoration.
+- A rack from an EMPTY background (a dark wall, a plain backdrop): the
+  first beat is only his face out of focus while he talks — it reads as
+  a focus fault. Pull from something worth seeing (a screen, a product,
+  the other person; `focus_from: 'near'` for an object in front of him),
+  or choose another device.
 - Depth effects stacked on one moment, or on consecutive shots.
 - Reverse/stutter/remap on spoken words (refused unless the user wants it).
 - A point cloud held through a whole sentence: the face disappears.

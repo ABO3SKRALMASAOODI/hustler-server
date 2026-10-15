@@ -174,7 +174,7 @@ spans plus an `interpolate` item over the slowed part (one call, both ops).
 
 ### 3.4 `ui_media` (4B)
 
-`motion_id` (a `ui_scene` motion item on layer `above_captions`), `slot` (an
+`motion_id` (a `ui_scene` motion item on layer `below_captions`), `slot` (an
 object id of that scene graph with a media window), `source` (FxSource:
 asset video/image or `source`), `fit` cover|contain. The compiler draws the
 footage into the slot's solved rectangle per frame (rounded to the card's

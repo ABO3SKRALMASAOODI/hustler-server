@@ -395,3 +395,49 @@ def test_an_audio_only_rebuild_precomputes_no_w4_picture(tmp_path,
     renderer.render_edl(e, idx, src, vid, str(tmp_path / "w2"), True,
                         asset_locals={"media/7/p.png": still})
     assert len(written) == 3                      # the picture render draws
+
+
+# ── UI scenes and the captions ───────────────────────────────────────────
+
+def _three_scene_graph():
+    import ui_scene
+    scenes = [
+        {"at": 0.0, "layout": "stack", "objects": [
+            {"id": "pill", "kind": "pill", "label": "Growth engine",
+             "state": "idle"},
+            {"id": "net", "kind": "card", "title": "The internet",
+             "body": "a growth driver"}]},
+        {"at": 4.0, "layout": "stack", "objects": [
+            {"id": "pill", "kind": "pill", "label": "Growth engine",
+             "state": "live"},
+            {"id": "ai", "kind": "card", "title": "AI",
+             "body": "bigger than the internet", "from": "net"}]}]
+    return ui_scene.solve(scenes, 8.0, 1080, 1920)
+
+
+def test_only_text_on_screen_for_the_whole_scene_counts_as_shown():
+    """The caption plan reads params.shown as on screen for the item's
+    whole window: a passing card listed there hid heard words the screen
+    was not showing (V01: 'It was bigger than anything else' muted at 6 s
+    by a card that appears at 14 s)."""
+    import ui_scene
+    g = _three_scene_graph()
+    shown = ui_scene.caption_shown(g)
+    assert "Growth engine" in shown
+    assert "bigger than the internet" not in shown
+    assert "The internet" not in shown
+    assert "bigger than the internet" in ui_scene.shown_texts(g)
+
+
+def test_a_ui_scene_carries_its_cards_box_not_the_backdrop():
+    """A probe measures a solid backdrop as a full-frame cover and the
+    caption plan then mutes every word under the scene: the item carries
+    the union of its cards instead (fresh at this aspect, not estimated)."""
+    import caption_carry
+    import ui_scene
+    g = _three_scene_graph()
+    fp = ui_scene.footprint(g)
+    box = caption_carry.footprint_box({"footprint": fp},
+                                      caption_carry.frame_ar(1080, 1920))
+    assert box is not None and not fp.get("estimated")
+    assert box[3] < 0.8 and box[1] > 0.05      # the caption band is free
