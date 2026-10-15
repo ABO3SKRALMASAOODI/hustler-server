@@ -938,8 +938,13 @@ def _greet_via_llm(worker_db, project_id, stats, pending, out_of_credits,
     user = (f"Real stats to state: {stats}.\n"
             f"Transcript opening (verbatim, may be empty): \"{snippet}\"\n"
             f"{branch}")
-    res = llm.ask_text(system, user, max_tokens=220, temperature=0.5,
-                       purpose="index_greet")
+    # A reasoning model spends its cap thinking before it writes: at 220,
+    # 147 of 204 greetings in the two weeks to 15 Oct came back empty and
+    # the template went out instead. Room to answer, low effort, and one
+    # retry when the cap was the reason.
+    res = llm.ask_text(system, user, max_tokens=1200, temperature=0.5,
+                       purpose="index_greet", reasoning_effort="low",
+                       retry_empty=True)
     try:
         worker_db.run(dbx.insert_llm_call, project_id, None, "index_greet",
                       config.AGENT_MODEL,

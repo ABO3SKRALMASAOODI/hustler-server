@@ -183,3 +183,34 @@ def test_typing_extensions_satisfies_the_sdk():
                encoding="utf-8").read()
     m = re.search(r"^typing_extensions==(\d+)\.(\d+)", src, re.M)
     assert m and tuple(int(g) for g in m.groups()) >= (4, 11)
+
+
+def test_reasoning_models_get_room_to_answer(monkeypatch):
+    """Oct 2026: 12 of 67 concierge replies in two weeks were EMPTY, each
+    having spent exactly the 300-token cap on hidden reasoning, and the user
+    got the canned line. The request now leaves room and asks for low effort;
+    a model or SDK that rejects reasoning_effort has it dropped, not the reply."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    seen = []
+
+    class _Resp:
+        choices = [types.SimpleNamespace(message=types.SimpleNamespace(
+            content='{"act": false, "reply": "Hi! Send the video."}'))]
+        usage = types.SimpleNamespace(prompt_tokens=10, completion_tokens=5)
+
+    def create(**kw):
+        seen.append(dict(kw))
+        if "reasoning_effort" in kw and len(seen) == 1:
+            raise TypeError("Completions.create() got an unexpected keyword "
+                            "argument 'reasoning_effort'")
+        return _Resp()
+
+    monkeypatch.setattr(v, "_concierge_client", types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(
+            create=create))))
+    text, meta, _rec, _act = v._concierge_reply(
+        "no_video", [{"role": "user", "content": "hi"}], [], can_act=True)
+    assert meta["kind"] != "canned" and text == "Hi! Send the video."
+    assert seen[0]["reasoning_effort"] == "low"
+    assert seen[0]["max_tokens"] >= 1000
+    assert "reasoning_effort" not in seen[1]       # dropped, answer kept

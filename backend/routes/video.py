@@ -165,6 +165,7 @@ VIDEO_KINDS = ("original", "proxy", "audio", "thumb", "sheet", "render",
 # job).
 # Defaults follow the worker onto OpenAI GPT-6 Luna. Use the exact model id.
 CONCIERGE_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+CONCIERGE_MAX_TOKENS = int(os.getenv("CONCIERGE_MAX_TOKENS", "1500"))
 CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL",
                             os.getenv("AGENT_MODEL", "gpt-6-luna"))
 if CONCIERGE_MODEL == "gpt-5.6-luna":
@@ -557,8 +558,14 @@ def _concierge_reply(stage, history, attachments, index_error=None,
         # Concierge classification/copy does not need sampling. Reasoning
         # models reject custom temperature, so omitting it avoids spending the
         # first request of every pre-index conversation on a known 400.
+        # The cap must leave room for a reasoning model's hidden thinking:
+        # at 300, 12 of 67 concierge replies in the two weeks to 15 Oct were
+        # EMPTY (every one had used exactly 300 completion tokens) and the
+        # user got the canned line. Low effort keeps the reply fast and
+        # cheap; a model that rejects the field has it dropped below.
         create_kwargs = dict(model=CONCIERGE_MODEL, messages=msgs,
-                             max_tokens=300)
+                             max_tokens=CONCIERGE_MAX_TOKENS,
+                             reasoning_effort="low")
         if want_act:
             # Force the {act, reply} object so a plain-prose answer to a real
             # create request can't be silently misread as chat (act=False) and
@@ -584,6 +591,11 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                 had_max_completion = "max_completion_tokens" in create_kwargs
                 if "temperature" in create_kwargs and "temperature" in msg:
                     create_kwargs.pop("temperature")
+                    adapted = True
+                if "reasoning_effort" in create_kwargs and (
+                        "reasoning_effort" in msg or "reasoning" in msg
+                        or isinstance(adapt_e, TypeError)):
+                    create_kwargs.pop("reasoning_effort")
                     adapted = True
                 if had_max_tokens and "max_tokens" in msg:
                     create_kwargs["max_completion_tokens"] = \
