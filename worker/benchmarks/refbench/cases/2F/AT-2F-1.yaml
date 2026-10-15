@@ -1,0 +1,32 @@
+# AT-2F-1 (agent mode): "make it like this" with ref 20 as an INTERNAL test
+# reference (never uploaded or shown). The agent reads the reel with
+# analyze_reference and transfers its device classes in order; it never
+# copies the reel's text, handle, logo or footage.
+id: AT-2F-1
+track: 2F
+title: "\"make it like this\" (ref 20 internal) on V02 + V07 + HM1"
+local_only: true
+interim: true
+reference:
+  - {ref: "20", t: [0.0, 13.6], approx: true}
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+  - {vfl: V07, window: white_room_macros}
+music: {fixture: HM1}
+aspect: "9:16"
+mode: agent
+chat: "make it like this"
+render: {variant: preview}
+allow: [music, flash_optin]
+metrics:
+  - {name: flash_risk}
+  - {name: land_err_f, op: "<=", value: 1}
+expect:
+  sfx: 0
+  zoom: 0
+  device_classes_in_order: [negative, type_on_black, bw_keep_colour]
+  creator_marks: 0
+  reply_max_words: 80
+beyond: "the reel's grammar transferred onto the user's own moments in one turn; the reference was cut by hand for its own footage"
+board: {stills: [2.0, 6.0], clip: [0.0, 8.0]}
+judges: {lenses: [motion, craft, owner_rules], pass: 2of3_no_major}

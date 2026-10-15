@@ -28,3 +28,11 @@ strength]], src: "music" | "speech"}`.
 
 Without `_beats` every helper answers "no beat", so a page that uses them
 still renders.
+
+## `MG.beat` (Wave 2, track 2C) — in `beats.js`
+
+`MG.beat(t, kind)` — where `t` sits in the bar: `{i, phase, since, until,
+down, bar}` (`phase` 0..1 to the next beat; `down` on a bar's first beat).
+It lives in `beats.js`, which a page pulls in by naming `MG.beats` or by
+carrying `_beats` in its params; a page that calls only `MG.beat` should
+guard it (`MG.beat && MG.beat(t)`).

@@ -1,0 +1,21 @@
+{
+  "id": "H",
+  "name": "Lyric film",
+  "genre": "lyric / kinetic-typography music video",
+  "exemplars": ["23", "27", "31", "32"],
+  "asks": ["lyric", "lyrics", "lyric video", "music video", "kinetic typography"],
+  "grammars": [],
+  "needs": ["user_track", "lyrics"],
+  "structure": [
+    {"beat": "intro", "at": "open", "devices": ["arrange_intro_filter", "typeset_lockup"], "note": "a muffled intro, the title set small"},
+    {"beat": "verse", "at": "body", "devices": ["typeset_lockup"], "note": "syllable-split lyrics on the singer's timing"},
+    {"beat": "drop", "at": "payoff", "devices": ["montage_cut", "accent_white_hit"], "note": "the hook line widens into a footage window on the drop"},
+    {"beat": "outro", "at": "end", "devices": ["recall_loop_rhyme"], "note": "the title again, the loop"}
+  ],
+  "palette": {"typeset_lockup": 8, "montage_cut": 1, "accent_white_hit": 2, "arrange_intro_filter": 1, "recall_loop_rhyme": 1},
+  "voices": ["techno_crt", "swiss_grid", "neon_script", "staircase_red", "hairline_wide"],
+  "punctuation": ["accent_white_hit", "accent_box_invert"],
+  "junctions": ["junction_letter_window"],
+  "colour_world": {"rule": "the song's palette; white box flashes on the hits", "devices": ["negative_on_hit"], "never": ["whole_short_mono"]},
+  "footage_quotas": {"broll_share": [0.2, 0.8], "stills_max": 10}
+}

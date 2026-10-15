@@ -1,0 +1,26 @@
+# AT-2F-3 (agent mode): "give me three type voices" -> three distinct voice
+# previews (render_variants stills on the real frame) in under 6 minutes.
+id: AT-2F-3
+track: 2F
+title: "\"give me three type voices\" on the V01 payoff lockup"
+local_only: true
+interim: false
+reference:
+  - {ref: "15", t: [0.0, 16.8], approx: true}
+footage:
+  - {vfl: V01, window: thiel_ai_bigger}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "give me three type voices for the payoff"
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: cost_ratio}
+expect:
+  voices_distinct: 3
+  wall_s_max: 360
+  sfx: 0
+beyond: "three voices on the user's own frame in seconds, not three renders"
+board: {stills: [12.8], clip: [11.0, 14.0]}
+judges: {lenses: [craft, owner_rules], pass: all_no_major}

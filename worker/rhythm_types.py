@@ -257,9 +257,17 @@ def to_program(rmap, timeline, music_item=None, track_dur=None):
             return hits
 
         def spans(t0, t1):
-            return [(a, min(a + float(t1) - float(t0), end))
-                    for a in points(t0) if min(a + float(t1) - float(t0),
-                                               end) > a]
+            out = [(a, min(a + float(t1) - float(t0), end))
+                   for a in points(t0) if min(a + float(t1) - float(t0),
+                                              end) > a]
+            # a span already under way where the item starts (the track is
+            # entered mid-section) is clipped to the item's start, not lost
+            a0 = start + (float(t0) - off)
+            b0 = start + (float(t1) - off)
+            if not period and a0 < start - 1e-9 < b0 and min(b0, end) > \
+                    start:
+                out.insert(0, (start, min(b0, end)))
+            return out
     out["beats"] = sorted(x for t in rmap.get("beats") or []
                           for x in points(t))
     out["downbeats"] = sorted(x for t in rmap.get("downbeats") or []

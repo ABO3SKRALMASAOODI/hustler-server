@@ -1,0 +1,71 @@
+{
+  "id": "ramp_swing",
+  "family": "camera",
+  "verb": "set_speed_ramp",
+  "stage": "world",
+  "params": {
+    "curve": [
+      "ease_in_out",
+      "ease_in",
+      "ease_out",
+      "linear"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "ffmpeg:overlay"
+    ],
+    "footage": "motion worth slowing (a swing, a launch, a gesture); 60p reaches 0.5x clean"
+  },
+  "binds_to": [
+    "drop",
+    "beat",
+    "word.payoff",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 0,
+      "min_gap_s": 20
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 12
+    },
+    "charged": {
+      "per_short": 2,
+      "min_gap_s": 8
+    }
+  },
+  "never": [
+    "over speech the viewer must follow (it plays stretched)",
+    "below the source's clean floor without the user's ok"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "reduced",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 2.0,
+      "batch": 1.5,
+      "local": 1.0
+    },
+    "fixed_ms": 100
+  },
+  "exemplars": [
+    "34@11.3"
+  ],
+  "verify": [
+    "duration_exact<=0"
+  ],
+  "status": "live",
+  "description": "an eased slow-motion swing on the footage clock",
+  "skill": "montage"
+}

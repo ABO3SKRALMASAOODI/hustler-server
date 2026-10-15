@@ -1,0 +1,66 @@
+{
+  "id": "arrange_intro_filter",
+  "family": "rhythm",
+  "verb": "shape_music",
+  "fx_type": "arrange",
+  "stage": "music_bus",
+  "params": {
+    "filter": [
+      "lowpass",
+      "highpass"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "ffmpeg:lowpass"
+    ],
+    "footage": "a user track with a drop"
+  },
+  "binds_to": [
+    "drop",
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 20
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 12
+    },
+    "charged": {
+      "per_short": 1,
+      "min_gap_s": 8
+    }
+  },
+  "never": [
+    "on music the user did not supply, name or pick"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 0.3,
+      "batch": 0.3,
+      "local": 0.2
+    },
+    "fixed_ms": 50
+  },
+  "exemplars": [
+    "18@0-3.64"
+  ],
+  "verify": [
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "a muffled intro that blooms to full range on the drop frame",
+  "skill": "montage"
+}

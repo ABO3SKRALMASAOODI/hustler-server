@@ -69,12 +69,14 @@ def test_core_catalog_growth_is_within_1fs_share():
         "any-model", compact=True, names=core), separators=(",", ":")))
     # Merged Wave 1: every department name and track skill grows the enums
     # automatically (test_w1_seams sets that growth aside byte for byte);
-    # what is left over the Wave 0 base is 1F's own share (<= 250 bytes),
-    # and the whole stays under the Wave 1 ceiling.
+    # what is left over the Wave 0 base is 1F's own share (<= 250 bytes)
+    # plus Wave 2's pinned growth (INTERFACES_W2.md §2), and the whole
+    # stays under the Wave 1 ceiling.
     import test_w1_seams as seams
+    from w2_support import W2_CORE_GROWTH_MAX
     stripped = len(json.dumps(seams._strip_w1_growth(agent_tools.openai_tools(
         "any-model", compact=True, names=core)), separators=(",", ":")))
-    assert stripped - 81688 <= 250, stripped
+    assert stripped - 81688 <= 250 + W2_CORE_GROWTH_MAX, stripped
     assert size <= seams.W1_CORE_CEILING < 83_000, size
     look = agent_tools.TOOLS["look_at"][2]["overlay"]
     assert look["enum"] == ["matte", "free_space", "beats"]

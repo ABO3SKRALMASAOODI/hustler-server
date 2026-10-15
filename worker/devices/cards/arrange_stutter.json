@@ -1,0 +1,68 @@
+{
+  "id": "arrange_stutter",
+  "family": "rhythm",
+  "verb": "shape_music",
+  "fx_type": "arrange",
+  "stage": "music_bus",
+  "params": {
+    "slice": [
+      "1/8",
+      "1/16"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "ffmpeg:aloop"
+    ],
+    "footage": "a user track with a beat grid"
+  },
+  "binds_to": [
+    "beat",
+    "downbeat",
+    "drop"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 0,
+      "min_gap_s": 20
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 10
+    },
+    "charged": {
+      "per_short": 2,
+      "min_gap_s": 6
+    }
+  },
+  "never": [
+    "on music the user did not supply, name or pick",
+    "under a word the viewer must hear"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 0.3,
+      "batch": 0.3,
+      "local": 0.2
+    },
+    "fixed_ms": 50
+  },
+  "exemplars": [
+    "22@6.1"
+  ],
+  "verify": [
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "a stuttered slice of the track over one beat",
+  "skill": "montage"
+}

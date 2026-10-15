@@ -70,6 +70,7 @@ KINDS = ("matte.person", "faces.yunet")
 RESERVED_KINDS = (
     "rhythm.music", "rhythm.speech",           # 2C (speech = prosody grid)
     "embed.siglip2", "embed.dinov2",           # 2E
+    "embed.classic",                           # 2E (model-free, Wave 2)
     "landmarks.face", "landmarks.hand", "landmarks.pose", "track.points",
     "camera.motion",                           # 3A
     "objects.sam2", "depth.small",             # 3B / 4A

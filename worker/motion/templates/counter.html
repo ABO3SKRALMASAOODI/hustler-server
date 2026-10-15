@@ -137,7 +137,9 @@
   // editor (or the write tool, from the transcript) set 'land'; otherwise a
   // reveal cuts on at once and a count lands at min(1.0, 55% of the item)
   // (sfx "kick" at 1.0 for the default length)
-  const reveal = P.style === 'reveal';
+  // a comparison ('<10%', '~3x', '>1M') is not a growing quantity: counting
+  // it would show values nobody said ('<3%': run report defect 22)
+  const reveal = P.style === 'reveal' || /[<>≤≥~≈]/.test(String(P.value || '').trim().slice(0, 2));
   const XD = Math.min(0.22, D * 0.1);                   // exit, faster than the entrance
   const landP = Number(P.land) > 0 ? Number(P.land) : 0;
   const CT = landP > 0 ? Math.min(landP, Math.max(0, D - XD - 0.1)) : reveal ? 0 : Math.min(1.0, Math.max(0.5, D * 0.55));
@@ -237,8 +239,14 @@
     // a countdown can start wider than it lands: size (and reserve) for the widest
     const sizeStr = RNG ? loFinal + DASH + finalStr : odo ? (signed ? '−' : '') + odoStr
       : !reveal && widthAt(100, startStr) > widthAt(100, finalStr) ? startStr : finalStr;
-    const maxFs = Math.min(400 * P.size, (SAFE.y1 - SAFE.y0) * 0.42);
-    const fs = Math.max(40, Math.min(maxFs, 100 * (SAFE.x1 - SAFE.x0 - 40) / widthAt(100, sizeStr)));
+    // size scales the fitted number (a width-bound figure at size 0.62 is
+    // smaller than at 0.7: run report defect 22); above 1 it grows to the
+    // width and the height cap, never past them
+    const fitW = 100 * (SAFE.x1 - SAFE.x0 - 40) / widthAt(100, sizeStr);
+    const S = Number(P.size) || 1;
+    const fs = Math.max(40, S <= 1
+      ? Math.min(400, (SAFE.y1 - SAFE.y0) * 0.42, fitW) * S
+      : Math.min(400 * S, (SAFE.y1 - SAFE.y0) * 0.42, fitW));
     num.style.fontSize = fs + 'px';
     num.style.letterSpacing = track + 'em';
     const digitTop = metric('8', fs, fam, fw).actualBoundingBoxAscent;

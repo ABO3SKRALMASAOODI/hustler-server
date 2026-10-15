@@ -436,7 +436,11 @@ def test_web_sfx_removal_frees_the_core_compact_catalog():
     # the saving being used, not the saving lost. Re-pinned by 1F; round
     # lead sign-off requested.
     w1_pinned_growth = 5 + 28 + 18 + 18 + 250
-    assert size <= 82_941 - 1_200 + w1_pinned_growth, size
+    # Wave 2's pinned core growth (INTERFACES_W2.md §2: department and
+    # skill names in the core enums, the B&W look line)
+    from w2_support import W2_CORE_GROWTH_MAX
+    assert size <= 82_941 - 1_200 + w1_pinned_growth + W2_CORE_GROWTH_MAX, \
+        size
 
 
 # ── restraint rules are pinned word for word ────────────────────────────

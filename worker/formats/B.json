@@ -1,0 +1,21 @@
+{
+  "id": "B",
+  "name": "Trend desk",
+  "genre": "trend-audio creator-desk edit",
+  "exemplars": ["08", "15", "19", "20", "29"],
+  "asks": ["trend", "trending audio", "desk edit", "setup", "aesthetic edit", "creator desk"],
+  "grammars": ["voiceover-montage"],
+  "structure": [
+    {"beat": "hook", "at": "open", "devices": ["arrange_stutter", "typeset_lockup"], "note": "a stutter intro under slot type"},
+    {"beat": "quote", "at": "body", "devices": ["typeset_lockup"], "note": "one line in a type voice that is not the last one's"},
+    {"beat": "drop", "at": "payoff", "devices": ["arrange_intro_filter", "subject_fill_flash"], "note": "the low-pass opens on the drop"},
+    {"beat": "montage", "at": "body", "devices": ["montage_cut", "still_move"], "note": "macros cut on the kick one frame early"},
+    {"beat": "loop", "at": "end", "devices": ["recall_loop_rhyme"], "note": "a loop rhyme before the end card"}
+  ],
+  "palette": {"typeset_lockup": 3, "montage_cut": 2, "arrange_stutter": 1, "arrange_intro_filter": 1, "subject_fill_flash": 1, "still_move": 4, "recall_loop_rhyme": 1},
+  "voices": ["staircase_red", "slot_blackletter", "neon_script", "techno_crt"],
+  "punctuation": ["accent_negative", "accent_colour_hit"],
+  "junctions": ["junction_whip", "junction_pixel_stretch"],
+  "colour_world": {"rule": "the user's palette; a negative on a hit, never a mono look", "devices": ["negative_on_hit"], "never": ["whole_short_mono"]},
+  "footage_quotas": {"broll_share": [0.6, 0.95], "macro_share": [0.3, 0.8], "stills_max": 8}
+}

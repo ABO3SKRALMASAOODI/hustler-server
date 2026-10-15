@@ -1,0 +1,76 @@
+{
+  "id": "still_move",
+  "family": "layout",
+  "verb": "animate_still",
+  "stage": "motion",
+  "params": {
+    "path": [
+      "auto",
+      "push_in",
+      "pull_out",
+      "pan_left",
+      "pan_right",
+      "rise",
+      "fall",
+      "drift"
+    ],
+    "fit": [
+      "cover",
+      "contain_blur",
+      "contain"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "chromium"
+    ],
+    "footage": "a project photo (archive still, document, clipping)"
+  },
+  "binds_to": [
+    "word",
+    "phrase_end",
+    "beat",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 4,
+      "min_gap_s": 2
+    },
+    "designed": {
+      "per_short": 8,
+      "min_gap_s": 1
+    },
+    "charged": {
+      "per_short": 12,
+      "min_gap_s": 0.5
+    }
+  },
+  "never": [
+    "the same move on two stills in a row"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 120.0,
+      "batch": 100.0,
+      "local": 107.0
+    },
+    "fixed_ms": 500
+  },
+  "exemplars": [],
+  "verify": [
+    "duration_exact<=0"
+  ],
+  "status": "live",
+  "description": "an archive still that moves, sub-pixel smooth, toward what matters in it",
+  "skill": "montage"
+}

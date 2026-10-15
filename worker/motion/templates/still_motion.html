@@ -1,0 +1,129 @@
+<!--MG-SPEC {"title": "Moving still", "category": "layout",
+ "description": "A project photo as FULL-FRAME b-roll that moves: an eased Ken Burns push, pull, pan, rise or drift toward a chosen point (a face in the photo, the headline of a clipping), sub-pixel smooth, while the program's audio keeps playing. Use it for archive stills, documents and photos a cover overlay would hold dead still; animate_still converts such an overlay to it.",
+ "duration": 3.0, "layer": "below_captions", "mutes_captions": false,
+ "params": {
+  "image": {"type": "asset", "default": null, "hint": "the project photo"},
+  "path": {"type": "enum", "values": ["push_in", "pull_out", "pan_left", "pan_right", "rise", "fall", "drift"], "default": "push_in", "hint": "push_in closes in on focus; pull_out opens from it; pans and rise/fall travel across the photo; drift is a slow diagonal float"},
+  "focus_x": {"type": "float", "min": 0.0, "max": 1.0, "default": 0.5, "hint": "where in the PHOTO the move heads (fraction of its width), e.g. the face"},
+  "focus_y": {"type": "float", "min": 0.0, "max": 1.0, "default": 0.42, "hint": "where in the PHOTO the move heads (fraction of its height)"},
+  "amount": {"type": "float", "min": 0.03, "max": 0.4, "default": 0.12, "hint": "how far it travels: the scale change of a push/pull, the frame share a pan crosses"},
+  "ease": {"type": "enum", "values": ["in_out", "out", "linear", "settle"], "default": "in_out", "hint": "in_out glides; out lands fast then floats; linear is documentary-steady; settle arrives early then holds almost still"},
+  "fit": {"type": "enum", "values": ["cover", "contain_blur", "contain"], "default": "cover", "hint": "cover fills the frame (cropping); contain_blur shows the whole photo over a soft enlarged copy of itself (portrait scans on landscape, clippings); contain shows it whole on black"},
+  "treatment": {"type": "enum", "values": ["none", "archive"], "default": "none", "hint": "archive adds a faint gate weave, grain and vignette (old prints); none leaves the photo as it is"},
+  "enter": {"type": "enum", "values": ["cut", "fade"], "default": "cut"},
+  "exit": {"type": "enum", "values": ["cut", "fade"], "default": "cut"},
+  "seed": {"type": "int", "min": 0, "max": 9999, "default": 0}
+ },
+ "example": {"path": "push_in", "focus_x": 0.5, "focus_y": 0.35},
+ "sfx": []} -->
+<style>
+  .st{position:absolute;left:0;top:0;width:100%;height:100%;overflow:hidden;background:#000}
+  .st img,.st .ph{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
+  .st .bg{filter:blur(46px) brightness(.62) saturate(1.1)}
+  .st .ph{background:radial-gradient(120% 90% at 30% 20%,#5a5f6e,#22252d 60%,#121318)}
+  .st .vig{position:absolute;inset:0;pointer-events:none;background:radial-gradient(130% 100% at 50% 50%,rgba(0,0,0,0) 55%,rgba(0,0,0,.42))}
+  .st canvas.gr{position:absolute;inset:0;width:100%;height:100%;mix-blend-mode:overlay;opacity:.22;pointer-events:none}
+</style>
+<div class="mg-root"><div class="st" id="st"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const st = MG.$('#st');
+  const mk = (tag, cls) => { const e = document.createElement(tag); if (cls) e.className = cls; st.appendChild(e); return e; };
+  const fit = P.fit || 'cover';
+  let bg = null, img = null;
+  if (P.image) {
+    if (fit === 'contain_blur') { bg = mk('img', 'bg'); bg.src = P.image; }
+    img = mk('img'); img.src = P.image;
+  } else {
+    img = mk('div', 'ph');
+  }
+  const archive = P.treatment === 'archive';
+  let vig = null, gr = null, gctx = null;
+  if (archive) {
+    vig = mk('div', 'vig');
+    gr = mk('canvas', 'gr'); gr.width = Math.ceil(W / 4); gr.height = Math.ceil(H / 4);
+    gctx = gr.getContext('2d');
+  }
+  let iw = 1600, ih = 1000;
+  const loaded = (P.image ? Promise.all([img, bg].filter(Boolean).map(e => e.decode())) : Promise.resolve())
+    .then(() => { if (P.image) { iw = img.naturalWidth || iw; ih = img.naturalHeight || ih; } })
+    .catch(() => {
+      const msg = 'still_motion: image asset could not be decoded (unsupported format or too large)';
+      window.__mgErrors.push(msg);
+      throw new Error(msg);
+    });
+  MG.ready = loaded;
+
+  // ── the eased path: scale and the photo point at the frame centre ──────
+  const ease = u => {
+    u = MG.clamp(u);
+    if (P.ease === 'linear') return u;
+    if (P.ease === 'out') return 1 - Math.pow(1 - u, 3);
+    if (P.ease === 'settle') return 1 - Math.pow(1 - u, 5);
+    return u * u * u * (u * (6 * u - 15) + 10);          // C2 in-out
+  };
+  const A = P.amount, fx = P.focus_x, fy = P.focus_y;
+  const path = P.path || 'push_in';
+  // base scale: the photo covering (or fitting) the frame
+  const base = () => fit === 'cover' ? Math.max(W / iw, H / ih) : Math.min(W / iw, H / ih);
+  // [scale multiplier, centre point in photo fractions] at u = 0 and 1
+  const ends = () => {
+    const c = [0.5, 0.5], f = [fx, fy];
+    const pan = A * 1.0;
+    switch (path) {
+      case 'pull_out': return [[1 + A, f], [1, c]];
+      case 'pan_left': return [[1 + pan * 0.6, [0.5 + pan / 2, fy]], [1 + pan * 0.6, [0.5 - pan / 2, fy]]];
+      case 'pan_right': return [[1 + pan * 0.6, [0.5 - pan / 2, fy]], [1 + pan * 0.6, [0.5 + pan / 2, fy]]];
+      case 'rise': return [[1 + pan * 0.6, [fx, 0.5 + pan / 2]], [1 + pan * 0.6, [fx, 0.5 - pan / 2]]];
+      case 'fall': return [[1 + pan * 0.6, [fx, 0.5 - pan / 2]], [1 + pan * 0.6, [fx, 0.5 + pan / 2]]];
+      case 'drift': return [[1 + A * 0.5, [0.5 - A / 3, 0.5 + A / 4]], [1 + A * 0.8, [0.5 + A / 3, 0.5 - A / 4]]];
+      default: return [[1, c], [1 + A, f]];               // push_in
+    }
+  };
+  // keep the photo covering the frame: clamp the centre so no edge shows
+  const clampC = (cx, cy, s) => {
+    const w = iw * s, h = ih * s;
+    const hx = Math.min(0.5, W / 2 / w), hy = Math.min(0.5, H / 2 / h);
+    return [w >= W ? MG.clamp(cx, hx, 1 - hx) : 0.5, h >= H ? MG.clamp(cy, hy, 1 - hy) : 0.5];
+  };
+  const fadeIn = P.enter === 'fade' ? Math.min(0.3, D * 0.2) : 0;
+  const fadeOut = P.exit === 'fade' ? Math.min(0.3, D * 0.2) : 0;
+  let seedN = (P.seed | 0) * 7919 + 13;
+  const rnd = () => { seedN = (seedN * 1103515245 + 12345) & 0x7fffffff; return seedN / 0x7fffffff; };
+
+  MG.frame(t => {
+    const [[m0, c0], [m1, c1]] = ends();
+    const e = ease(t / Math.max(1e-6, D));
+    const s = base() * (m0 + (m1 - m0) * e);
+    let cx = c0[0] + (c1[0] - c0[0]) * e, cy = c0[1] + (c1[1] - c0[1]) * e;
+    if (fit === 'cover') [cx, cy] = clampC(cx, cy, s);
+    let wx = 0, wy = 0;
+    if (archive) {                                       // faint gate weave
+      const k = Math.floor(t * MG.fps / 2);
+      wx = Math.sin(k * 12.9898 + P.seed) * 0.0011 * W;
+      wy = Math.sin(k * 78.233 + P.seed) * 0.0016 * H;
+    }
+    const tx = W / 2 - cx * iw * s + wx, ty = H / 2 - cy * ih * s + wy;
+    img.style.width = iw + 'px'; img.style.height = ih + 'px';
+    img.style.transform = `translate3d(${tx.toFixed(3)}px,${ty.toFixed(3)}px,0) scale(${s.toFixed(6)})`;
+    if (bg) {
+      const sb = Math.max(W / iw, H / ih) * 1.08 * (1 + 0.04 * e);
+      bg.style.width = iw + 'px'; bg.style.height = ih + 'px';
+      bg.style.transform = `translate3d(${(W / 2 - 0.5 * iw * sb).toFixed(3)}px,${(H / 2 - 0.5 * ih * sb).toFixed(3)}px,0) scale(${sb.toFixed(6)})`;
+    }
+    let op = 1;
+    if (fadeIn && t < fadeIn) op = t / fadeIn;
+    if (fadeOut && t > D - fadeOut) op = Math.max(0, (D - t) / fadeOut);
+    st.style.opacity = op.toFixed(4);
+    if (gctx) {
+      const id = gctx.createImageData(gr.width, gr.height);
+      for (let i = 0; i < id.data.length; i += 4) {
+        const v = 128 + (rnd() - 0.5) * 120;
+        id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255;
+      }
+      gctx.putImageData(id, 0, 0);
+    }
+  });
+})();
+</script>

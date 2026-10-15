@@ -582,6 +582,38 @@ W1F_RHETORIC_LLM = os.getenv("W1F_RHETORIC_LLM", "0") == "1"
 W1F_PROOF_WAIT_S = float(os.getenv("W1F_PROOF_WAIT_S", "240"))
 # ---- W1 1F end
 
+# Wave 2 (worker/devices/INTERFACES_W2.md): one block per track, same rule
+# as Wave 1 — a track adds its flags between its own lines only, every flag
+# defaults to the inert value.
+# ---- W2 2A (typesetter v2) begin
+# The layout solver's time budget per phrase (seconds, 1 vCPU target 2 s).
+TYPESET_SOLVE_BUDGET_S = float(os.getenv("TYPESET_SOLVE_BUDGET_S", "2.0"))
+# ---- W2 2A end
+
+# ---- W2 2B (TypeFX runtime, fonts) begin
+# Brand fonts a user uploads (fonts_brand.py): the largest file accepted.
+BRAND_FONT_MAX_MB = float(os.getenv("BRAND_FONT_MAX_MB", "8"))
+# ---- W2 2B end
+
+# ---- W2 2C (rhythm, syllables, lyrics) begin
+# Longest user track rhythm.analyze reads (seconds).
+RHYTHM_MAX_S = float(os.getenv("RHYTHM_MAX_S", "900"))
+# ---- W2 2C end
+
+# ---- W2 2D (montage, arrangement, ramps) begin
+# Slowest automatic ramp floor on a source without native high frame rate
+# (below it frames repeat; the planner prefers 50/60p sources).
+RAMP_MIN_FACTOR = float(os.getenv("RAMP_MIN_FACTOR", "0.5"))
+# ---- W2 2D end
+
+# ---- W2 2E (library recall, story planners) begin
+# Frames sampled per second of footage for model-free shot descriptors.
+LIBRARY_SAMPLE_FPS = float(os.getenv("LIBRARY_SAMPLE_FPS", "1.0"))
+# ---- W2 2E end
+
+# ---- W2 2F (agent layer v2) begin
+# ---- W2 2F end
+
 # Stock/topical b-roll search (worker/stock.py): photos are keyless via
 # Openverse (Wikimedia/Flickr — real people, companies, events); video
 # stock needs PEXELS_API_KEY/PIXABAY_API_KEY. Topical web VIDEO is

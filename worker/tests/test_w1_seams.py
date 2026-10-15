@@ -47,6 +47,7 @@ import motion_layer                                    # noqa: E402
 import regions                                         # noqa: E402
 import schemas                                         # noqa: E402
 import tools_ext                                       # noqa: E402
+from w2_support import W2_FX_TAGS                      # noqa: E402
 
 FIX = os.path.join(HERE, "fixtures")
 
@@ -144,8 +145,10 @@ def preview_report():
 
 def test_preview_lane_registers_exactly_the_pinned_table(preview_report):
     reg = preview_report["registry"]
-    assert set(reg["types"]) == set(CLASSES)
-    assert set(reg["authorable"]) == set(CLASSES)
+    # Wave 2 members (INTERFACES_W2.md §5: ``arrange``) register beside
+    # the pinned Wave 1 table, which stays exactly as it was
+    assert set(reg["types"]) - W2_FX_TAGS == set(CLASSES)
+    assert set(reg["authorable"]) - W2_FX_TAGS == set(CLASSES)
     assert reg["slots"] == ["MotionItem.composite"]
     for tag, (stages, compiler, module) in CLASSES.items():
         got = reg["classes"][tag]
@@ -183,7 +186,7 @@ def test_preview_by_track_registers_only_that_track():
     """VALMERA_FX_PREVIEW=1b adds 1B's module to whatever is live already."""
     report = _child("1b")
     live = {n for n in MEMBER_MODULES if _fx_module(n).LIVE} | {"subject"}
-    assert set(report["registry"]["types"]) == set().union(
+    assert set(report["registry"]["types"]) - W2_FX_TAGS == set().union(
         *(MEMBER_MODULES[n][1] for n in live))
     assert set(report["registry"]["slots"]) == set().union(
         *(MEMBER_MODULES[n][2] for n in live))
@@ -232,7 +235,8 @@ def _strip_w1_growth(catalog):
         elif name in ("load_tools", "expand_toolset"):
             walk(tool, live)
         elif name == "read_skill":
-            walk(tool, W1_SKILLS)
+            from w2_support import W2_SKILLS   # Wave 2's skills, same rule
+            walk(tool, W1_SKILLS | W2_SKILLS)
     return cat
 
 

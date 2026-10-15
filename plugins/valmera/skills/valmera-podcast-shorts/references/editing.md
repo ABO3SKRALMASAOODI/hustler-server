@@ -126,6 +126,10 @@ recheck every output-timed item and the card's end.
 | Designed beats | 2-5 `add_motion_graphic` | one per beat that EARNS ITS PLACE: about one hero graphic per 6-8 s at most, under ~50% of the runtime, at most 3 type roles and one accent; never a lockup or typewriter of the words being heard, never a spoken list as rows of text (insert the items instead); silent by default; `sfx=true` only on the hook, the payoff or a graphic showing a real-world action; `purpose` names the beat, stable `id` |
 | Signature move | 1 `suggest_recipes`, then 1 `apply_recipe(name)` | after the designed beats: ONE recipe that fits THIS story (it names the word), preferring a fresh one over what the batch's other shorts used; or compose your own device when no recipe fits; never repeat last short's move by habit |
 | Devices | 0-1 `suggest_devices`, then the kept candidates' `op`s in ONE `apply_edit_batch` | at most what looks.md **Devices** allows beside the signature move (usually nothing more, maybe one punctuation frame on the turn); copy each op exactly; zero is fine |
+| Poster type | 0-2 `add_typeset(text=the line)` | the exception to "never a lockup of the words being heard": the hook, the turn or the payoff line set as poster type INSTEAD of its captions (they step aside for its words). 3-6 words; `voice` auto fits a voice to the line, fresh in the batch, or `render_variants` shows three on the real frame. Read the reply (voice, family, payload % of the height). A REJECTED "no layout fits" means the head fills the frame there: fewer words or another beat, never a forced size |
+| Archive stills | 1 `animate_still(id)` per still photo | a photo never sits dead: it pushes toward its face or pans its clipping; the Look and a B&W section reach it |
+| Story shapes | 0-1 `suggest_story` (read); `plan_loop`, `pick_still` | ideas bound to THIS story's beats, each saying what is new; take the 0-2 that serve the story (`apply_format_pack(picks=[...])` with the same pack and intensity), then invent your own; a loop or a freeze poster only where the tool reports a real rhyme |
+| The owner's song | `analyze_music`, then `shape_music(payoff=...)` or `plan_to_music` | only when the owner supplied the song: the drop on the payoff word after a held breath, b-roll cut one frame before the kick; never a song you chose |
 | Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas, a genuinely jarring jump cut); zero is fine; never on every cut, take, sentence or hero moment. Modes per the Look (schema names) |
 | Cut hygiene | none in MCP | `conceal_jump_cuts` is not in the MCP tool list (Oct 2026): leave a same-shot jump cut bare, land a graphic change or B-roll on it, or re-cut at a breath; none in the first 1.5 s, at most one in the first 3 s |
 | Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
@@ -245,7 +249,10 @@ unacknowledged one).
    described a node graph the render showed as an empty box).
 3. `audit_captions` once (heard-but-unshown words are defects, not
    advisories) and `review_audio` on the opening and the joins (up to 6 clips
-   per call); read the render's warnings.
+   per call); read the render's warnings. For WHICH words are audible, or an
+   "um" or half a word the transcript lacks at a join, trust `check_speech`
+   (program seconds, each side of the cut): it measures the sound and never
+   echoes the question, where `review_audio` can.
 4. Copy the render's MEASURES numbers into the handback: picture area
    (and upscale), the hook headline's cap height and the captions' (share
    of frame height), the payoff's cap height against the largest other

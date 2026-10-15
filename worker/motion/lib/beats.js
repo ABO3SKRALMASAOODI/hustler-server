@@ -26,4 +26,15 @@
     until: (t, k) => { const a = list(k || 't'), i = last(a, t) + 1; return i >= a.length ? Infinity : a[i] - t; },
     pulse: (t, decay, k) => { const s = MG.beats.since(t, k); return s === Infinity ? 0 : Math.max(0, 1 - s / (decay || 0.25)); },
   };
+  /* Wave 2 (2C): where t sits in the bar. {i: beat index, phase: 0..1 to
+     the next beat, since, until, down: true on the bar's first beat, bar:
+     bar index}. With no _beats: {i: -1, phase: 0, since/until Infinity}. */
+  MG.beat = (t, k) => {
+    const a = list(k || 't'), i = last(a, t);
+    if (i < 0) return { i: -1, phase: 0, since: Infinity, until: a.length ? a[0] - t : Infinity, down: false, bar: -1 };
+    const nxt = i + 1 < a.length ? a[i + 1] : Infinity, len = nxt === Infinity ? Infinity : nxt - a[i];
+    const d = list('down'), bi = last(d, t + 1e-6);
+    return { i, phase: len === Infinity ? 0 : (t - a[i]) / len, since: t - a[i], until: nxt - t,
+      down: d.some(x => Math.abs(x - a[i]) < 1e-3), bar: bi };
+  };
 })();

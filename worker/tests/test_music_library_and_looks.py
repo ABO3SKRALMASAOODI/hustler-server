@@ -530,7 +530,8 @@ def test_a_picked_library_track_lays_a_ducked_bed_in_the_same_version(store):
 
 def test_music_choice_by_picked_slug_and_lead_without_speech(store):
     ctx = _Ctx(ratio="9:16", speech=False)
-    ctx.user_message = "Dance Of The Dead"
+    # Wave 2: a whole-short B&W look needs the user's ask for black and white
+    ctx.user_message = "Dance Of The Dead, black and white"
     out = agent_tools.apply_look(ctx, "mono_noir", music="hiphop-dance-of-the-dead")
     assert out.startswith("EDL v1"), out
     m = ctx.latest_edl()["json"]["music"][0]

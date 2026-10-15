@@ -315,6 +315,28 @@ def asset_params(name, params):
             if p.get("type") == "asset" and params.get(k)}
 
 
+# Templates whose page params are SOLVED per canvas (Wave 2): name ->
+# "module:function" taking (item, out_w, out_h, fps) and returning extra
+# params (underscore keys). Resolved lazily; a failure leaves the page to
+# draw its own fallback (never the render).
+DERIVED = {"typeset": "typeset.layoutdoc:page_params"}
+
+
+def derived_params(item, out_w, out_h, fps):
+    spec_ = DERIVED.get(item.get("template"))
+    if not spec_:
+        return {}
+    try:
+        import importlib
+        mod, fn = spec_.split(":")
+        return dict(getattr(importlib.import_module(mod), fn)(
+            item, out_w, out_h, fps) or {})
+    except Exception as e:  # noqa: BLE001 — degrade the item, never the render
+        print(f"[render] motion '{item.get('id')}' solve failed: "
+              f"{str(e)[:160]}", flush=True)
+        return {}
+
+
 def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None,
               yields=None):
     """motion_engine.RenderJob for one MotionItem dict. ``plate`` is the
@@ -333,6 +355,9 @@ def build_job(item, out_w, out_h, fps, asset_locals=None, plate=None,
     if item.get("series"):
         # a parallel run's shared sizing (MotionItem.series)
         params["_series"] = item["series"]
+    # Wave 2 seam (INTERFACES_W2.md §3.3): a template whose geometry is
+    # solved in Python for THIS canvas (typeset: the LayoutDoc)
+    params.update(derived_params(item, out_w, out_h, fps))
     assets = {}
     for key, storage_key in asset_params(name, params).items():
         local = (asset_locals or {}).get(storage_key)

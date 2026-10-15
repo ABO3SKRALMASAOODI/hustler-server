@@ -154,6 +154,9 @@ FOLLOW_MOVE_MIN = 0.02        # a follow pan that moves the crop this much
 
 # Templates whose job is information the captions cannot carry (a number, a
 # contrast, an identification, evidence, a UI artefact): never "restating".
+# Templates that print the spoken line IN PLACE of its captions (their
+# words leave the caption track): never a re-typeset beside running ones.
+REPLACES_CAPTIONS = frozenset(("typeset",))
 INFO_TEMPLATES = frozenset((
     "counter", "stat_card", "bar_compare", "line_chart", "progress_ring",
     "timeline_steps", "versus_split", "image_card", "photo_stack",
@@ -804,6 +807,12 @@ def _restate_notes(ms, prog, hook_ids, payoff):
             continue
         tpl = m["template"]
         if tpl in INFO_TEMPLATES or tpl.startswith("text:lower_third"):
+            continue
+        if tpl in REPLACES_CAPTIONS:
+            # Wave 2 typeset: the line set as poster type INSTEAD of its
+            # captions (ROADMAP 2A: type that replaces the captions for a
+            # passage is the device; type that duplicates them is the
+            # miss). Its count still meets the graphics budget below.
             continue
         seq = shown(m["lines"])[0]
         content = set(seq)

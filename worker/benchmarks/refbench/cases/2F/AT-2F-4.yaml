@@ -1,0 +1,26 @@
+# AT-2F-4 (agent mode): a new track uploaded mid-conversation re-cuts the
+# recorded montage (hooks music_swap) in one reply with a one-line diff.
+id: AT-2F-4
+track: 2F
+title: "a new track mid-conversation: the montage re-cut in one reply"
+local_only: true
+interim: true
+reference:
+  - {ref: "22", t: [0.0, 14.0], approx: true}
+footage:
+  - {vfl: V13, window: starship_launch_4k60}
+music: {fixture: HM1}
+aspect: "9:16"
+mode: agent
+chat: "use this song instead"
+render: {variant: preview}
+allow: [music]
+metrics:
+  - {name: land_err_f, op: "<=", value: 1}
+expect:
+  replies: 1
+  diff_lines: 1
+  cuts_on_kick_minus_1_pct: 95
+beyond: "no reference re-cuts on a swap"
+board: {stills: [4.0], clip: [0.0, 14.0]}
+judges: {lenses: [motion, owner_rules], pass: all_no_major}

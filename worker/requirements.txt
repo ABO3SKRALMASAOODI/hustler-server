@@ -32,3 +32,15 @@ curl-cffi==0.15.0
 # the same commit when bumping, or the runtime downloads a browser on a box
 # with no disk to spare.
 playwright==1.49.1
+# Wave 2 (worker/devices/INTERFACES_W2.md): HarfBuzz shaping for the
+# typesetter on every lane (typeset/shaping.py measures the page's own font
+# files, so layout is solved browserless) and hyphenation for syllables
+# (syllables.py). Apache-2.0 / MPL-2.0 option.
+uharfbuzz==0.56.2
+pyphen==0.18.1
+# The typesetter reads a variable font's axes (wght, wdth, opsz) with
+# fontTools: without it every variable face is measured at its default
+# instance while the page sets the voice's weight and width (the solved
+# boxes no longer match the render), and brand fonts cannot be validated
+# (fonts_brand.py). It was only in the dev venv. MIT.
+fonttools==4.67.0

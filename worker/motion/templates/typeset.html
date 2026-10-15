@@ -1,0 +1,256 @@
+<!--MG-SPEC {"title": "Typeset lockup (solved)", "category": "type",
+ "description": "Poster-scale typography solved in Python for this frame and aspect: a layout family (magazine lockup, staircase, slots, constellation, side column, quote window, arc round the head ...) and a type voice, every word landing on its spoken onset with its own verb. It REPLACES the captions for the words it shows. Write it with add_typeset (or apply_edit_batch, template 'typeset'); the geometry is solved per render, never stored.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": true, "reads_onsets": true,
+ "params": {
+  "text": {"type": "text", "required": true, "max": 240, "hint": "the words as printed, in spoken order; *star* the one accent word"},
+  "voice": {"type": "enum", "values": ["auto", "magazine", "whisper_shout", "staircase_red", "slot_blackletter", "neon_script", "editorial_serif", "quote_window", "condensed_poster", "lamp_karaoke", "hairline_wide", "marker_note", "swiss_grid", "techno_crt"], "default": "auto", "hint": "a typographic personality; add_typeset picks one per story beat"},
+  "layout": {"type": "enum", "values": ["auto", "stack", "magazine", "staircase", "stack_up", "justified", "side_column", "slots", "flank", "constellation", "spread", "tilt", "quote_window", "arc"], "default": "auto"},
+  "depth": {"type": "enum", "values": ["front", "behind", "ghost", "auto"], "default": "front", "hint": "behind = set behind the subject (layer behind_subject)"},
+  "verb": {"type": "enum", "values": ["auto", "cut", "fade", "blur_resolve", "settle", "decay", "scramble_lock", "mosaic_resolve", "stretch_smear", "duration_wipe", "strobe_flip", "emboss_ink", "echo_stack", "outline_fill", "glyph_morph", "lamp", "typewriter", "drop"], "default": "auto", "hint": "the hero words' entrance (the voice decides the rest)"},
+  "exit": {"type": "enum", "values": ["cut", "fade", "decay", "hold"], "default": "cut"},
+  "material": {"type": "enum", "values": ["auto", "flat", "glow", "neon", "crt", "outline", "ghost", "emboss", "texture"], "default": "auto"},
+  "ink": {"type": "str", "default": "", "max": 7, "hint": "#rrggbb; empty = the voice's ink"},
+  "accent": {"type": "str", "default": "", "max": 7, "hint": "#rrggbb; empty = the voice's accent"},
+  "region": {"type": "enum", "values": ["auto", "above", "below", "left", "right"], "default": "auto"},
+  "over": {"type": "enum", "values": ["picture", "card"], "default": "picture", "hint": "card: set on a plain card or black (no face to keep clear of)"},
+  "emphasis": {"type": "list", "default": [], "max_items": 4, "max": 30, "hint": "words that take the accent"},
+  "flip_at": {"type": "float", "min": 0, "max": 60, "default": 0, "hint": "item seconds at which ink and accent swap (a colour flip on a hit); 0 = none"},
+  "orbit": {"type": "float", "min": -2, "max": 2, "default": 0, "hint": "arc layout only: radians per second the words circle the head"},
+  "seed": {"type": "int", "default": 0},
+  "callback_of": {"type": "str", "default": "", "max": 80, "hint": "a typeset item id whose geometry this repeat reuses (a callback)"},
+  "mirror": {"type": "bool", "default": false},
+  "hint": {"type": "str", "default": "", "max": 300, "hint": "engine-written: the first telling's geometry a callback reuses (typeset.memory)"}
+ },
+ "example": {"text": "AI may be *bigger* than the internet", "voice": "whisper_shout"},
+ "sfx": []} -->
+<style>
+  .mg-root svg{position:absolute;left:0;top:0;overflow:visible}
+  .mg-root text{white-space:pre;font-kerning:normal;text-rendering:geometricPrecision}
+</style>
+<div class="mg-root" id="root"></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H;
+  const doc = P._layout;
+  const root = MG.$('#root');
+  if (!doc || !Array.isArray(doc.runs) || !doc.runs.length) { MG.active([]); return; }
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (tag, attrs, parent) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs || {}) e.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+  const sx = W / (doc.canvas.w || W), sy = H / (doc.canvas.h || H);
+  const svg = mk('svg', { width: W, height: H, viewBox: `0 0 ${doc.canvas.w} ${doc.canvas.h}` }, root);
+  const defs = mk('defs', {}, svg);
+  const hexA = (h, a) => { const n = parseInt(String(h).slice(1), 16); return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`; };
+  const whiter = (h, k) => MG.lift ? MG.lift(h, k) : h;
+  const orbit = Number(P.orbit) || 0;
+
+  const runs = doc.runs.map((r, ri) => {
+    const g = mk('g', {}, svg);
+    if (r.rot_deg && r.rot_c) g.setAttribute('transform', `rotate(${r.rot_deg} ${r.rot_c[0]} ${r.rot_c[1]})`);
+    const inner = mk('g', {}, g);
+    const em = r.size_px;
+    const css = Object.assign({}, r.css, { 'font-size': `${em}px` });
+    const styleOf = el => { for (const k in css) el.style.setProperty(k, css[k]); };
+    const fid = `f${ri}`;
+    // the material: a filter (static) under the per-frame state
+    let filt = null;
+    const shadowA = 0.42 + 0.4 * Math.min(1, MG.need ? MG.need(r.ink, { ink: r.colour, ratio: 3, t0: r.onset, t1: r.t_out }) : 0);
+    if (r.material === 'neon' || r.material === 'glow') {
+      filt = mk('filter', { id: fid, x: '-40%', y: '-60%', width: '180%', height: '220%', 'color-interpolation-filters': 'sRGB' }, defs);
+      mk('feGaussianBlur', { in: 'SourceAlpha', stdDeviation: (0.05 * em).toFixed(2), result: 'b1' }, filt);
+      mk('feGaussianBlur', { in: 'SourceAlpha', stdDeviation: (0.16 * em).toFixed(2), result: 'b2' }, filt);
+      mk('feFlood', { 'flood-color': r.material === 'neon' ? r.colour : r.colour, 'flood-opacity': r.material === 'neon' ? 0.95 : 0.7, result: 'c' }, filt);
+      mk('feComposite', { in: 'c', in2: 'b1', operator: 'in', result: 'g1' }, filt);
+      mk('feComposite', { in: 'c', in2: 'b2', operator: 'in', result: 'g2' }, filt);
+      const m = mk('feMerge', {}, filt);
+      mk('feMergeNode', { in: 'g2' }, m); mk('feMergeNode', { in: 'g1' }, m); mk('feMergeNode', { in: 'SourceGraphic' }, m);
+    } else if (r.material === 'crt') {
+      filt = mk('filter', { id: fid, x: '-10%', y: '-20%', width: '120%', height: '140%', 'color-interpolation-filters': 'sRGB' }, defs);
+      mk('feOffset', { in: 'SourceGraphic', dx: (-0.018 * em).toFixed(2), result: 'r0' }, filt);
+      mk('feColorMatrix', { in: 'r0', type: 'matrix', values: '1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.8 0', result: 'rr' }, filt);
+      mk('feOffset', { in: 'SourceGraphic', dx: (0.018 * em).toFixed(2), result: 'b0' }, filt);
+      mk('feColorMatrix', { in: 'b0', type: 'matrix', values: '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 0.8 0', result: 'bb' }, filt);
+      mk('feGaussianBlur', { in: 'SourceGraphic', stdDeviation: (0.06 * em).toFixed(2), result: 'gl' }, filt);
+      const m = mk('feMerge', {}, filt);
+      mk('feMergeNode', { in: 'gl' }, m); mk('feMergeNode', { in: 'rr' }, m); mk('feMergeNode', { in: 'bb' }, m); mk('feMergeNode', { in: 'SourceGraphic' }, m);
+    } else if (r.material !== 'outline' && r.material !== 'ghost') {
+      filt = mk('filter', { id: fid, x: '-20%', y: '-40%', width: '140%', height: '180%', 'color-interpolation-filters': 'sRGB' }, defs);
+      mk('feDropShadow', { dx: 0, dy: (0.025 * em).toFixed(2), stdDeviation: (0.05 * em).toFixed(2), 'flood-color': '#000', 'flood-opacity': shadowA.toFixed(3) }, filt);
+    }
+    // legibility on the plate under the word (MG.plate, measured by the
+    // render): flat type's drop shadow above grows with it; materials that
+    // carry no dark edge of their own (outline, ghost, neon, glow, crt)
+    // get a dark glyph scrim on the run where the plate is too bright for
+    // their ink — a white outline on a lit wall was invisible (W2-S2)
+    const needP = MG.need ? MG.need(r.ink, { ink: r.colour, ratio: 3, t0: r.onset, t1: r.t_out }) : 0;
+    if (needP > (MG.NEED_OK || 0.1) && (!filt || r.material === 'neon' || r.material === 'glow' || r.material === 'crt')) {
+      const sf = mk('filter', { id: `s${ri}`, x: '-30%', y: '-50%', width: '160%', height: '200%', 'color-interpolation-filters': 'sRGB' }, defs);
+      mk('feDropShadow', { dx: 0, dy: 0, stdDeviation: (0.035 * em).toFixed(2), 'flood-color': '#000', 'flood-opacity': Math.min(0.95, 0.45 + needP).toFixed(3), result: 's1' }, sf);
+      mk('feDropShadow', { in: 's1', dx: 0, dy: (0.02 * em).toFixed(2), stdDeviation: (0.11 * em).toFixed(2), 'flood-color': '#000', 'flood-opacity': Math.min(0.8, needP).toFixed(3) }, sf);
+      g.setAttribute('filter', `url(#s${ri})`);
+    }
+    // per-frame filters: smear (x blur), mosaic, lamp glow
+    const dyn = mk('filter', { id: `d${ri}`, x: '-60%', y: '-60%', width: '220%', height: '220%', 'color-interpolation-filters': 'sRGB' }, defs);
+    const dynBlur = mk('feGaussianBlur', { in: 'SourceGraphic', stdDeviation: '0 0', result: 'sm' }, dyn);
+    const lampBlur = mk('feGaussianBlur', { in: 'SourceAlpha', stdDeviation: (0.12 * em).toFixed(2), result: 'lb' }, dyn);
+    const lampFlood = mk('feFlood', { 'flood-color': r.alt === r.colour ? r.colour : (r.colour), 'flood-opacity': 0, result: 'lc' }, dyn);
+    mk('feComposite', { in: 'lc', in2: 'lb', operator: 'in', result: 'lg' }, dyn);
+    const dm = mk('feMerge', {}, dyn);
+    mk('feMergeNode', { in: 'lg' }, dm); mk('feMergeNode', { in: 'sm' }, dm);
+
+    // the word: per-character tspans at the solved x positions (no reflow)
+    const mkText = (parent, extra) => {
+      if (r.path && r.path.glyphs) {
+        const grp = mk('g', {}, parent);
+        const ts = r.path.glyphs.map(gl => {
+          const tx = mk('text', { 'text-anchor': 'middle', transform: `translate(${gl[1]} ${gl[2]}) rotate(${gl[3]})` }, grp);
+          styleOf(tx); tx.textContent = gl[0];
+          return tx;
+        });
+        return { el: grp, chars: ts, path: true };
+      }
+      const tx = mk('text', { x: r.chars_x.join(' '), y: r.y }, parent);
+      styleOf(tx);
+      Object.assign(tx.style, extra || {});
+      const chars = Array.from(r.text).map((ch, i) => { const s = mk('tspan', {}, tx); s.textContent = ch; return s; });
+      return { el: tx, chars };
+    };
+    const echoes = [];
+    if (r.verb === 'echo_stack') {
+      for (let k = 4; k >= 1; k--) {
+        const eg = mk('g', { transform: `translate(${(0.07 * em * k).toFixed(2)} ${(0.07 * em * k).toFixed(2)})` }, inner);
+        const t = mkText(eg);
+        t.el.setAttribute('fill', 'none'); t.el.setAttribute('stroke', r.colour);
+        t.el.setAttribute('stroke-width', Math.max(1.5, 0.018 * em).toFixed(2));
+        eg.style.opacity = 0; echoes.push(eg);
+      }
+    }
+    let emb = null;
+    if (r.verb === 'emboss_ink' || r.material === 'emboss') {
+      const hi = mkText(mk('g', { transform: `translate(${(-0.012 * em).toFixed(2)} ${(-0.012 * em).toFixed(2)})` }, inner));
+      hi.el.setAttribute('fill', 'rgba(255,255,255,.55)');
+      const lo = mkText(mk('g', { transform: `translate(${(0.02 * em).toFixed(2)} ${(0.02 * em).toFixed(2)})` }, inner));
+      lo.el.setAttribute('fill', 'rgba(0,0,0,.55)');
+      emb = [hi, lo];
+    }
+    const main = mkText(inner);
+    if (filt) main.el.setAttribute('filter', `url(#${fid})`);
+    const outline = r.material === 'outline' || r.material === 'ghost';
+    const strokeW = Math.max(1.5, 0.024 * em);
+    if (outline) {
+      main.el.setAttribute('fill', 'none'); main.el.setAttribute('stroke', r.colour);
+      main.el.setAttribute('stroke-width', strokeW.toFixed(2));
+      if (r.material === 'ghost') main.el.setAttribute('stroke-opacity', '0.55');
+    }
+    if (r.material === 'neon') { main.el.setAttribute('stroke', r.colour); main.el.setAttribute('stroke-width', (0.012 * em).toFixed(2)); }
+    // duration wipe: a feathered gradient mask over the word's ink
+    let wipeStops = null;
+    if (r.verb === 'duration_wipe') {
+      const gid = `w${ri}`, mid = `m${ri}`;
+      const lg = mk('linearGradient', { id: gid, gradientUnits: 'userSpaceOnUse', x1: r.ink[0], y1: 0, x2: r.ink[2], y2: 0 }, defs);
+      wipeStops = [mk('stop', { offset: 0, 'stop-color': '#fff' }, lg), mk('stop', { offset: 0, 'stop-color': '#000' }, lg)];
+      const mask = mk('mask', { id: mid, maskUnits: 'userSpaceOnUse', x: r.ink[0] - em, y: r.ink[1] - em, width: (r.ink[2] - r.ink[0]) + 2 * em, height: (r.ink[3] - r.ink[1]) + 2 * em }, defs);
+      mk('rect', { x: r.ink[0] - em, y: r.ink[1] - em, width: (r.ink[2] - r.ink[0]) + 2 * em, height: (r.ink[3] - r.ink[1]) + 2 * em, fill: `url(#${gid})` }, mask);
+      inner.setAttribute('mask', `url(#${mid})`);
+    }
+    // mosaic: a pixelate filter whose block size is set per frame
+    let mos = null;
+    if (r.verb === 'mosaic_resolve') {
+      const f = mk('filter', { id: `x${ri}`, x: 0, y: 0, width: '100%', height: '100%' }, defs);
+      const fl = mk('feFlood', { x: 1, y: 1, width: 2, height: 2 }, f);
+      const fc = mk('feComposite', { width: 8, height: 8 }, f);
+      mk('feTile', { result: 'a' }, f);
+      mk('feComposite', { in: 'SourceGraphic', in2: 'a', operator: 'in' }, f);
+      const mo = mk('feMorphology', { operator: 'dilate', radius: 4 }, f);
+      mos = { f, fl, fc, mo };
+    }
+    // glyph morph: lerped outlines before the word lands
+    let morph = null;
+    if (r.verb === 'glyph_morph' && r.morph && r.morph.from && r.morph.to) {
+      const p = mk('path', { fill: r.colour }, inner);
+      morph = { p, a: r.morph.from, b: r.morph.to };
+    }
+    return { r, g, inner, main, echoes, emb, wipeStops, mos, morph, outline, strokeW, em };
+  });
+
+  const toD = pts => pts.map(c => 'M' + c.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join('L') + 'Z').join('');
+
+  MG.frame(t => {
+    for (const R of runs) {
+      const r = R.r, s = MG.typefx.state(r, t);
+      R.g.style.opacity = s.o <= 0 ? 0 : 1;
+      if (s.o <= 0) continue;
+      const cx = (r.ink[0] + r.ink[2]) / 2, cy = (r.ink[1] + r.ink[3]) / 2;
+      const tr = [];
+      if (s.dx || s.dy) tr.push(`translate(${s.dx.toFixed(2)} ${s.dy.toFixed(2)})`);
+      if (s.sx !== 1 || s.sy !== 1) tr.push(`translate(${cx} ${cy}) scale(${s.sx.toFixed(4)} ${s.sy.toFixed(4)}) translate(${-cx} ${-cy})`);
+      R.inner.setAttribute('transform', tr.join(' '));
+      R.inner.style.opacity = Math.max(0, Math.min(1, s.o));
+      R.inner.style.filter = s.blur > 0.05 ? `blur(${s.blur.toFixed(2)}px)` : '';
+      const col = s.dim ? hexA(r.colour, 0.55) : s.colour;
+      if (!R.outline) {
+        R.main.el.setAttribute('fill', s.fillK >= 1 ? col : hexA(col.length === 7 ? col : r.colour, s.fillK.toFixed(3)));
+        if (s.stroke || s.fillK < 1) { R.main.el.setAttribute('stroke', col); R.main.el.setAttribute('stroke-width', R.strokeW.toFixed(2)); }
+        else if (r.material !== 'neon') R.main.el.removeAttribute('stroke');
+      } else R.main.el.setAttribute('stroke', s.colour);
+      // per-character states (typewriter, scramble, decay)
+      if (s.chars && R.main.chars) {
+        s.chars.forEach((c, i) => {
+          const el = R.main.chars[i];
+          if (!el) return;
+          if (el.textContent !== c.ch) el.textContent = c.ch;
+          el.style.opacity = c.o;
+          if (R.main.path) return;
+          el.setAttribute('dy', c.dy ? c.dy.toFixed(2) : 0);
+        });
+      } else if (R.main.chars) {
+        R.main.chars.forEach((el, i) => { if (el.style.opacity !== '') el.style.opacity = ''; });
+      }
+      if (R.main.path && orbit) {
+        r.path.glyphs.forEach((gl, i) => {
+          const q = MG.paths.orbit(r.path, gl, t, orbit, r.onset);
+          R.main.chars[i].setAttribute('transform', `translate(${q.x.toFixed(2)} ${q.y.toFixed(2)}) rotate(${q.rot.toFixed(2)})`);
+        });
+      }
+      // smear / lamp glow through the dynamic filter
+      const dyn = s.smear > 0.2 || s.glow > 0.01;
+      R.main.el.parentNode.style.filter = '';
+      if (dyn) {
+        const f = MG.$(`#d${runs.indexOf(R)}`);
+        f.children[0].setAttribute('stdDeviation', `${(s.smear || 0).toFixed(2)} 0`);
+        f.children[2].setAttribute('flood-opacity', (0.95 * s.glow).toFixed(3));
+        R.inner.setAttribute('filter', `url(#d${runs.indexOf(R)})`);
+      } else R.inner.removeAttribute('filter');
+      if (R.wipeStops && s.wipe != null) {
+        const f = 0.18;
+        const a = Math.max(0, Math.min(1, s.wipe * (1 + f) - f)), b = Math.max(0, Math.min(1, s.wipe * (1 + f)));
+        R.wipeStops[0].setAttribute('offset', a.toFixed(4)); R.wipeStops[1].setAttribute('offset', b.toFixed(4));
+      }
+      if (R.mos) {
+        if (s.mosaic > 1) {
+          const b = s.mosaic;
+          R.mos.fl.setAttribute('x', (b / 2).toFixed(1)); R.mos.fl.setAttribute('y', (b / 2).toFixed(1));
+          R.mos.fc.setAttribute('width', b); R.mos.fc.setAttribute('height', b);
+          R.mos.mo.setAttribute('radius', (b / 2).toFixed(1));
+          R.main.el.setAttribute('filter', `url(#x${runs.indexOf(R)})`);
+        } else if (R.main.el.getAttribute('filter') === `url(#x${runs.indexOf(R)})`) R.main.el.removeAttribute('filter');
+      }
+      R.echoes.forEach((e, k) => { e.style.opacity = s.echo > (R.echoes.length - 1 - k) ? (0.5 - 0.1 * (R.echoes.length - 1 - k)).toFixed(2) : 0; });
+      if (R.morph) {
+        if (s.morph != null && t < r.onset) {
+          const k = s.morph;
+          const pts = R.morph.a.map((c, ci) => c.map((p, pi) => { const q = (R.morph.b[ci] || c)[pi] || p; return [p[0] + (q[0] - p[0]) * k, p[1] + (q[1] - p[1]) * k]; }));
+          R.morph.p.setAttribute('d', toD(pts)); R.morph.p.style.opacity = 1; R.main.el.style.opacity = 0;
+        } else { R.morph.p.style.opacity = 0; R.main.el.style.opacity = ''; }
+      }
+    }
+  });
+  const wins = [];
+  doc.runs.forEach(r => MG.typefx.windows(r).forEach(w => wins.push(w)));
+  if (orbit) MG.always(); else MG.active(wins);
+})();
+</script>

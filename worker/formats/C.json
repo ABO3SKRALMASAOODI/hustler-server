@@ -1,0 +1,21 @@
+{
+  "id": "C",
+  "name": "Typographic portrait",
+  "genre": "talking-head typographic portrait / gesture FX",
+  "exemplars": ["05", "09", "10", "13", "25"],
+  "asks": ["typographic", "portrait", "kinetic type", "talking head", "type behind", "magazine"],
+  "grammars": ["talking-head-promo", "kinetic-typography-talking-head", "podcast-reel"],
+  "structure": [
+    {"beat": "hook", "at": "open", "devices": ["typeset_lockup", "typeset_behind"], "note": "the hook line as a lockup around the head"},
+    {"beat": "build", "at": "body", "devices": ["typeset_lockup", "subject_outline"], "note": "a side column for the quote; ghost outlines"},
+    {"beat": "turn", "at": "turn", "devices": ["typeset_lockup", "recall_face_line"], "note": "whisper / shout on the contrast"},
+    {"beat": "payoff", "at": "payoff", "devices": ["typeset_behind", "accent_white_hit"], "note": "the payoff behind the head, a white/red lock"},
+    {"beat": "callback", "at": "callback", "devices": ["typeset_lockup"], "note": "a repeated line rhymes with its first telling"}
+  ],
+  "palette": {"typeset_lockup": 4, "typeset_behind": 2, "subject_outline": 1, "accent_white_hit": 1, "recall_face_line": 1},
+  "voices": ["magazine", "whisper_shout", "editorial_serif", "hairline_wide", "lamp_karaoke", "swiss_grid", "marker_note"],
+  "punctuation": ["accent_white_hit"],
+  "junctions": ["junction_matte_cut"],
+  "colour_world": {"rule": "the footage's own colour; a lamp or one accent colour carries the type", "devices": ["bw_silhouette_hold"], "never": ["whole_short_mono"]},
+  "footage_quotas": {"broll_share": [0.0, 0.25], "stills_max": 2}
+}

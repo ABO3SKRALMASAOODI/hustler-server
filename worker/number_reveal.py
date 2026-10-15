@@ -107,10 +107,14 @@ def _digit_values(tok, nxt):
     return vals, took
 
 
-def _word_value(toks, i):
+def _word_value(toks, i, breaks=frozenset()):
     """(value, tokens used) for a spelled-out number starting at toks[i]
     ("one hundred and forty", "sixty-two thousand", "a million", "four point
-    nine", "nineteen eighty-three"), or (None, 0)."""
+    nine", "nineteen eighty-three"), or (None, 0). ``breaks``: token indices
+    followed by a comma or full stop in the transcript — a spoken pause that
+    ends a number unless a scale word was just said ("three hundred sixty,
+    three hundred seventy" is two numbers, never 363: run report defect 22;
+    "three thousand, two hundred" stays one)."""
     parts = []
     for ti in range(i, min(len(toks), i + 10)):
         parts.extend((p, ti) for p in toks[ti].split("-") if p)
@@ -165,6 +169,9 @@ def _word_value(toks, i):
         seen = True
         k += 1
         used = k
+        if parts[k - 1][1] in breaks and last != "scale" and (
+                k >= len(parts) or parts[k][1] != parts[k - 1][1]):
+            break
     if not seen or not used:
         return None, 0
     value = total + cur if year is None else year * 100 + cur
@@ -175,6 +182,8 @@ def spoken_numbers(words):
     """[{values, t0, t1, said}] for every number spoken in ``words`` (program
     words with w/t0/t1, e.g. captions.heard_words)."""
     toks = [_clean(w.get("w")) for w in words]
+    breaks = frozenset(k for k, w in enumerate(words)
+                       if re.search(r"[,.;:!?]['\"”’)]*$", str(w.get("w") or "").strip()))
     out, i = [], 0
     while i < len(toks):
         t = toks[i]
@@ -182,7 +191,7 @@ def spoken_numbers(words):
         vals, took = _digit_values(t, nxt)
         n = 2 if took else 1
         if vals is None:
-            v, n = _word_value(toks, i)
+            v, n = _word_value(toks, i, breaks)
             vals = {v} if v is not None else None
         if vals:
             j = min(len(words), i + n) - 1

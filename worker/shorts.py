@@ -547,6 +547,18 @@ def _validated_clips(raw, duration, want, index=None, visual=False,
             near = min(ends, key=lambda x: abs(x - e))
             if abs(near - e) <= 5.0:
                 e = near
+        bounds_note = None
+        if not caller_authored and not visual and index:
+            # Wave 2 (run report defect 27: s01 opened mid-question): an
+            # automatic range starts on its sentence's first word and ends
+            # on a sentence's last
+            import audio_checks
+            s2, why_s = audio_checks.sentence_start(index, s)
+            e2, why_e = audio_checks.sentence_end(index, e)
+            if e2 - s2 <= CLIP_MAX_S + 4.0:
+                s, e = max(0.0, s2), min(duration, e2)
+                bounds_note = "; ".join(w for w in (why_s, why_e) if w) \
+                    or None
         if e - s < CLIP_MIN_S:
             continue
         if e - s > CLIP_MAX_S:
@@ -619,6 +631,8 @@ def _validated_clips(raw, duration, want, index=None, visual=False,
             normalized["broll"] = broll
         if c.get("context_restored"):
             normalized["context_restored"] = str(c["context_restored"])[:80]
+        if bounds_note:
+            normalized["sentence_bounds"] = bounds_note[:120]
         clips.append(normalized)
     if not caller_authored:
         clips.sort(key=lambda c: -c["score"])

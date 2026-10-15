@@ -1,0 +1,68 @@
+{
+  "id": "arrange_drop_hold",
+  "family": "rhythm",
+  "verb": "shape_music",
+  "fx_type": "arrange",
+  "stage": "music_bus",
+  "params": {
+    "kind": [
+      "hold",
+      "hole"
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "ffmpeg:volume"
+    ],
+    "footage": "a user track with a confident bar grid and a drop"
+  },
+  "binds_to": [
+    "drop",
+    "word.payoff",
+    "gap"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 20
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 12
+    },
+    "charged": {
+      "per_short": 2,
+      "min_gap_s": 8
+    }
+  },
+  "never": [
+    "on music the user did not supply, name or pick",
+    "when the bar grid is not confident (the edit would land off the bar)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 0.2,
+      "batch": 0.2,
+      "local": 0.1
+    },
+    "fixed_ms": 50
+  },
+  "exemplars": [
+    "02@12.15-13.67"
+  ],
+  "verify": [
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "description": "bed out, a held silence, the drop on the payoff onset via a bar-aligned edit",
+  "skill": "montage"
+}
