@@ -691,7 +691,15 @@ def score(frames, meta, hero=None, W=1080, H=1920, fit="cover",
         spread, clip
 
     # palette vs the hero, and the matched LUT
-    before, after, lut = palette_gap(small, hero) if hero is not None \
+    # the colour the viewer gets is the part the cover crop shows: the
+    # match is learnt on that window (a sunset's sky outside a 9:16 crop
+    # must not pull the grade)
+    shown = small
+    if fit == "cover":
+        import broll_fx
+        shown = [broll_fx.crop_aspect(f, aspect, (fx, fy))[0]
+                 for f in small]
+    before, after, lut = palette_gap(shown, hero) if hero is not None \
         else (None, None, None)
     ms["de_hero"] = None if before is None else round(before, 2)
     ms["de_matched"] = None if after is None else round(after, 2)

@@ -31,6 +31,9 @@ from concurrent.futures import ThreadPoolExecutor
 
 DEPARTMENT = "world"
 VERBS = ("source_broll", "remove_broll")
+# A cutaway whose matched colour stays this far (dE2000 of the means) from
+# the hero is not placed (a night aerial against a lit face).
+UNMATCHABLE_DE = 6.0
 MAX_MOMENTS = 8
 SHORTLIST = 3
 DEFAULT_SPAN = 2.4
@@ -343,7 +346,13 @@ def _judge(ctx, fetched, W, H, hero, need_s, archival):
                             archival=fit == "frame",
                             native=bool(got.get("native")))
     rel = float(cand.get("_rel") or 0.0)
-    res["final"] = round(0.55 * res["score"] + 0.45 * rel, 4)
+    res["final"] = 0.55 * res["score"] + 0.45 * rel
+    # a picture the match cannot bring into the camera's world (a night
+    # aerial against a lit face) loses to one it can, other things equal
+    dm = (res.get("measures") or {}).get("de_matched")
+    if dm is not None and dm > 5.0:
+        res["final"] -= min(0.2, 0.04 * (dm - 5.0))
+    res["final"] = round(res["final"], 4)
     return {"cand": cand, "got": got, "res": res, "fit": fit}
 
 
@@ -591,6 +600,14 @@ def _source_broll(ctx, moments, limit, providers, place):
                                  "check"))
             continue
         best = max(ok, key=lambda j: j["res"]["final"])
+        dm = (best["res"].get("measures") or {}).get("de_matched")
+        if dm is not None and dm > UNMATCHABLE_DE:
+            # better no cutaway than one that breaks the world: the match
+            # cannot bring it within reach of the camera's look
+            misses.append((spec, f"nothing found sits in the camera's "
+                                 f"world (the best stays dE {dm:.0f} away "
+                                 "after the match grade)"))
+            continue
         used.add(best["cand"].get("page_url"))
         plans.append((spec, best, hero))
     plans = plans[:max(0, cap)]

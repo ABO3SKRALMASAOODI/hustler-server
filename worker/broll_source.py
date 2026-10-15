@@ -276,8 +276,18 @@ def nasa_renditions(cand):
         for h in hrefs:
             for suf, (w, hh) in order.items():
                 if h.endswith(suf):
+                    # NASA's renditions run to gigabytes: ask each one's
+                    # size first and keep what the byte cap can take
+                    try:
+                        _ct, size = net_fetch.head_kind(
+                            h, timeout_s=API_TIMEOUT_S)
+                    except Exception:  # noqa: BLE001
+                        size = None
+                    if size and size > MAX_VIDEO_BYTES:
+                        continue
                     files.append({"link": h, "width": w, "height": hh,
-                                  "file_type": "video/mp4", "nominal": True})
+                                  "file_type": "video/mp4", "nominal": True,
+                                  "size": size})
         cand["_files"] = files
     else:
         for suf in ("~large.jpg", "~orig.jpg", "~medium.jpg"):
@@ -295,7 +305,8 @@ def _archive(query, kind, orientation, count):
          "licenseurl:(*publicdomain* OR *creativecommons*)")
     data = net_fetch.get_json(IA_SEARCH, params={
         "q": q, "fl[]": ["identifier", "title", "licenseurl", "creator",
-                         "year"], "rows": max(20, count * 6),
+                         "year", "subject", "description"],
+        "rows": max(20, count * 6),
         "output": "json"}, timeout_s=API_TIMEOUT_S + 10,
         allowed_hosts=["archive.org"])
     docs = ((data.get("response") or {}).get("docs") or [])
@@ -309,7 +320,16 @@ def _archive(query, kind, orientation, count):
             "provider": "archive", "kind": KIND_VIDEO,
             "id": f"archive:video:{ident}", "title": _clip(d.get("title"),
                                                              200),
-            "description": _clip(d.get("title"), 300),
+            # a film's title rarely names its pictures: its subjects and
+            # description do (relevance reads them)
+            "description": _clip(" ".join(x for x in (
+                d.get("description") if isinstance(d.get("description"),
+                                                   str) else "",
+            ) if x), 300) or _clip(d.get("title"), 300),
+            "keywords": (d.get("subject") if isinstance(d.get("subject"),
+                                                        list)
+                         else [d.get("subject")] if d.get("subject")
+                         else []),
             "credit": _clip(d.get("creator") if not isinstance(
                 d.get("creator"), list) else ", ".join(d["creator"]), 200),
             "license": lic[0], "license_url": lic[1],

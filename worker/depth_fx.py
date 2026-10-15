@@ -66,7 +66,7 @@ CLOUD_POINTS = 200_000
 CLOUD_GRID = 540
 # Palettes by depth (near -> far), RGB 0..1.
 PALETTES = {
-    "red": ((1.0, 0.42, 0.3), (0.95, 0.12, 0.07), (0.38, 0.02, 0.03)),
+    "red": ((1.0, 0.3, 0.2), (1.0, 0.1, 0.05), (0.55, 0.03, 0.03)),
     "cyan": ((0.85, 1.0, 1.0), (0.1, 0.85, 1.0), (0.02, 0.18, 0.4)),
     "white": ((1.0, 1.0, 1.0), (0.75, 0.78, 0.82), (0.22, 0.24, 0.3)),
     "amber": ((1.0, 0.95, 0.75), (1.0, 0.62, 0.1), (0.4, 0.13, 0.02)),
@@ -813,6 +813,7 @@ class Cloud:
         self.n = int(min(CLOUD_POINTS, 0.12 * self.W * self.H)
                      * float(density or 1.0))
         self.palette = PALETTES.get(palette, PALETTES["red"])
+        self.density = float(density or 1.0)
         self.rng = np.random.default_rng(int(seed or 0))
         self.trails = int(trails or 0)
         self.scan = bool(True if scan is None else scan)
@@ -829,6 +830,10 @@ class Cloud:
                                                               1), lo)
 
     def render(self, depth, valid, p, i, n, orbit=0.35, shade=None):
+        """One frame: the valid cells sampled the way a LiDAR sweeps —
+        scan rows (rings) of points with a sparse scatter between them —
+        projected through a slow orbit, splatted as crisp points with a
+        glow, the scan band sweeping down."""
         import cv2
         gw, gh = self.gw, self.gh
         d = cv2.resize(depth, (gw, gh), interpolation=cv2.INTER_AREA)
@@ -836,19 +841,19 @@ class Cloud:
             if shade is not None else None
         v = cv2.resize(valid.astype(np.float32), (gw, gh),
                        interpolation=cv2.INTER_AREA) > 0.5
-        ys, xs = np.nonzero(v)
-        if self.sel is None or len(self.sel) != min(self.n, max(1, len(xs))):
-            # one seeded subset of grid cells (re-drawn only if the valid
-            # area changes size class): points do not crawl frame to frame
-            self.order = self.rng.permutation(gw * gh)
-        cells = ys * gw + xs
-        rank = np.empty(gw * gh, np.int64)
-        rank[self.order] = np.arange(gw * gh)
-        keep = np.argsort(rank[cells])[:self.n]
-        xs, ys = xs[keep], ys[keep]
+        if self.sel is None:
+            # one seeded field: the same cells light every frame (points
+            # never crawl), rings every ``k`` rows plus a sparse scatter
+            self.sel = self.rng.random((gh, gw)).astype(np.float32)
+        k = max(2, int(round(3.0 / max(0.2, self.density))))
+        rows = (np.arange(gh) % k == 0)[:, None]
+        pick = v & ((rows & (self.sel < 0.72)) | (self.sel < 0.035))
+        ys, xs = np.nonzero(pick)
+        if len(xs) > self.n:
+            keep = np.argsort(self.sel[ys, xs])[:self.n]
+            ys, xs = ys[keep], xs[keep]
         dz = d[ys, xs]
         lum = sh[ys, xs] if sh is not None else None
-        self.sel = keep
         # camera: points live at Z = 1 (near) .. 3 (far); a slow orbit
         f = 1.15 * max(gw, gh)
         X = (xs - gw / 2.0) / f * 2.0
@@ -862,28 +867,32 @@ class Cloud:
         Zr = -sa * X + ca * (Z - Zc) + Zc
         px = (Xr / np.maximum(Zr, 0.2) * f / 2.0 + gw / 2.0) * (self.W / gw)
         py = (Y / np.maximum(Zr, 0.2) * f / 2.0 + gh / 2.0) * (self.H / gh)
-        ok = (px >= 0) & (px < self.W - 1) & (py >= 0) & (py < self.H - 1)
+        s = max(1, int(round(self.W / 720.0)))     # point size in pixels
+        ok = (px >= 0) & (px < self.W - s) & (py >= 0) & (py < self.H - s)
         px, py, dz = px[ok].astype(np.int32), py[ok].astype(np.int32), dz[ok]
         col = self._colour(dz)
-        bright = 0.35 + 0.4 * dz
+        bright = 1.05 + 0.45 * dz
         if lum is not None:
             # the picture's own light shades the points: a face reads
-            bright = bright * (0.35 + 1.3 * lum[ok])
+            bright = bright * (0.65 + 0.7 * lum[ok])
         if self.scan:
             band = (i / max(1, n - 1) * 1.35 - 0.15) * self.H
-            bright = bright + 1.6 * np.exp(-((py - band) / (0.02 * self.H))
+            bright = bright + 1.4 * np.exp(-((py - band) / (0.02 * self.H))
                                            ** 2)
         img = np.zeros((self.H, self.W, 3), np.float32)
-        np.add.at(img, (py, px), col * bright[:, None])
-        glow = cv2.GaussianBlur(img, (0, 0), max(1.0, self.H * 0.003))
-        img = img + 1.5 * glow
+        val = col * bright[:, None]
+        for dy in range(s):
+            for dx in range(s):
+                np.add.at(img, (py + dy, px + dx), val)
+        glow = cv2.GaussianBlur(img, (0, 0), max(1.0, self.H * 0.004))
+        img = img + 1.8 * glow
         if self.trails:
             decay = 0.5 + 0.05 * self.trails
             self.acc = img if self.acc is None else np.maximum(
                 img, self.acc * decay)
             img = self.acc
         # filmic shoulder: dense areas glow, never clip to a flat blob
-        img = 1.0 - np.exp(-1.6 * img)
+        img = 1.0 - np.exp(-2.2 * img)
         return np.clip(img * 255.0, 0, 255).astype(np.uint8)
 
 

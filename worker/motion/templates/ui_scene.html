@@ -145,9 +145,11 @@
   });
   // where the scene draws (capture bounds and the caption plan)
   const back = P.backdrop || 'solid';
-  // the content's bounds (the backdrop is a ground, not a graphic the
-  // captions must avoid: they sit in the band under the interface)
-  {
+  // a backdrop is drawn over the whole frame, so the capture is the whole
+  // frame (the scene sits under the captions: they stay on top of it);
+  // floating UI captures only its content's bounds
+  if (back !== 'none') MG.box = [0, 0, MG.W, MG.H];
+  else {
     let b = null;
     nodes.forEach(n => n.o.segs.forEach(s => {
       const xs = [s[2], s[6]], ys = [s[3], s[7]];

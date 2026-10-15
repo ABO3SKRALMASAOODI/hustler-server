@@ -551,6 +551,9 @@ def test_source_broll_places_licensed_matched_cutaways(project, monkeypatch):
     from tools_ext import broll_tools
     ctx, clip, _store = project
     monkeypatch.setenv("VALMERA_BROLL_LOCAL", "1")
+    # the synthetic clip (a fractal) cannot be graded into the synthetic
+    # camera's world; the colour gate is pinned in its own test below
+    monkeypatch.setattr(broll_tools, "UNMATCHABLE_DE", 99.0)
     monkeypatch.setattr(broll_source, "status",
                         lambda: {p: "on" for p in broll_source.PROVIDERS})
     monkeypatch.setattr(broll_source, "search",
@@ -664,3 +667,21 @@ def test_stock_download_refuses_a_page_served_as_a_photo(tmp_path,
     with pytest.raises(stock.StockError, match="web page"):
         stock.download({"kind": "photo", "_url": "https://x/y.jpg"},
                        str(tmp_path / "p.jpg"), 1080, 1920)
+
+
+@needs_ffmpeg
+def test_a_cutaway_the_grade_cannot_bring_home_is_not_placed(project,
+                                                             monkeypatch):
+    import broll_source
+    from tools_ext import broll_tools
+    ctx, clip, _store = project
+    monkeypatch.setenv("VALMERA_BROLL_LOCAL", "1")
+    monkeypatch.setattr(broll_tools, "UNMATCHABLE_DE", 2.0)
+    monkeypatch.setattr(broll_source, "status",
+                        lambda: {p: "on" for p in broll_source.PROVIDERS})
+    monkeypatch.setattr(broll_source, "search",
+                        lambda *a, **k: (_cands(clip), [], ["nasa"]))
+    out = broll_tools.source_broll(ctx, moments=[
+        {"id": "rk", "word": "rocket", "query": "rocket launch"}])
+    assert "camera's world" in out and "SHOOT LIST" in out
+    assert not ctx.writes

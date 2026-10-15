@@ -42,8 +42,8 @@ def w4_s1():
               "Owner footage (internal showcase)", "title": "V13 pool"}
     edl = {"keep": [list(keep)],
            "frame": {"ratio": "9:16", "mode": "crop", "focus_x": 0.5},
-           "motion": [{"id": "t1", "template": "hook_title", "start": 0.3,
-                       "end": 2.0, "params": {
+           "motion": [{"id": "t1", "template": "hook_title", "start": 2.3,
+                       "end": 4.1, "params": {
                            "text": "HOW A MACHINE LEARNS TO MOVE"}}],
            "fx": [
                {"id": "pc", "type": "depth", "stage": "world", "start": 0.0,
