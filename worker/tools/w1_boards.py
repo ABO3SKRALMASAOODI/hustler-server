@@ -588,7 +588,8 @@ def frame_png(path, n, out, w=360):
 # second (same window, same cut) and against the named reference moment.
 S1_ROWS = [
     ("thiel", 30.67, "FLYING behind the head, ghost outlines", "05", 0.5),
-    ("thiel", 31.27, "white silhouette on '140'", "40", 4.67),
+    ("thiel", 31.27, "silhouette hit on '140' (black: the lockup is light)",
+     "40", 4.67),
     ("jobs", 3.97, "white hit clipped to the card", "02", 13.7),
     ("jobs", 2.0, "CRT re-photography inside the card", "14", 0.6),
     ("elon", 18.29, "subject-only negative on the turn", "13", 6.92),
