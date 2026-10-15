@@ -377,3 +377,80 @@ def test_drawn_subject_devices_lay_over_the_tonal_ones():
               "start": 0.1}]
     order = [i["id"] for i in sorted(items, key=subject_fx._lay_order)]
     assert order == ["z_bg", "s3_mono", "a_fill", "s3_clones"]
+
+
+def test_subject_fx_window_composites_leave_undrawn_pixels_exact(tmp_path,
+                                                                  monkeypatch):
+    """An alpha overlay in ``format=auto`` moved its branch into an alpha
+    format whose blend darkened every pixel of the window by 2-4 Y levels
+    on ffmpeg 8.0 (1 on 9.0), drawn or not: a step at the window's edges,
+    and AT-1B-4's 0.5 clones read 0.58. The window composites run in
+    yuv420 (subject_fx.YUV_OVER), which leaves an undrawn pixel exact."""
+    import subprocess
+    import subject_fx
+    import test_w1b_compiler as T
+    items = [T._sx("c", kind="echo", start=0.4, end=1.0,
+                   echo={"mode": "clone", "offsets_f": [4], "opacity": 0.5}),
+             T._sx("p", kind="poster", field="accent", start=1.2, end=1.6),
+             T._sx("g", kind="glow", colour="white", start=1.8, end=2.4)]
+    parts, _out = T._emit(tmp_path, monkeypatch, items, keep=((0.0, 3.0),))
+    graph = ";".join(parts)
+    assert subject_fx.YUV_OVER in graph
+    # the only alpha-format overlays left are the RGB background blur's
+    assert "overlay=format=auto" not in graph
+    # the primitive itself: a transparent overlay leaves the program exact
+    g = ("testsrc2=s=128x72:r=25:d=0.2,format=yuv420p,split[a][b];"
+         "color=c=black:s=128x72:r=25:d=0.2,format=gray[m];"
+         f"[b]format=yuva420p[bx];[bx][m]alphamerge[c];[a][c]"
+         f"{subject_fx.YUV_OVER},format=yuv420p,framemd5")
+    ref = ("testsrc2=s=128x72:r=25:d=0.2,format=yuv420p,framemd5")
+
+    def md5s(lavfi):
+        r = subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                            lavfi.rsplit(",framemd5", 1)[0], "-f",
+                            "framemd5", "-"], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[-300:]
+        return [ln.split(",")[-1].strip() for ln in r.stdout.splitlines()
+                if ln and not ln.startswith("#")]
+    assert md5s(g) == md5s(ref)
+
+
+def test_white_light_never_darkens_a_saturated_rim(tmp_path):
+    """subject_fx.white_lerp: the chroma takes the 2x2 MINIMUM of the light,
+    so a light gradient across a saturated blue rim brightens every RGB
+    channel or leaves it (AT-1B-5 read -13 with overlay's averaged chroma
+    alpha)."""
+    import subprocess
+    import numpy as np
+    W, H = 64, 32
+    # a saturated blue field; the light lit on every other column in the
+    # left half (the steepest gradient 4:2:0 can meet), full on the right
+    ramp = ("geq=lum='if(gte(X,48),255,255*mod(X,2))',format=gray")
+    g = (f"color=c=0x2040f0:s={W}x{H}:r=25:d=0.04,format=yuv420p[p];"
+         f"color=c=black:s={W}x{H}:r=25:d=0.04,format=gray,{ramp},"
+         f"split[ly][lc];[lc]erosion,scale={W // 2}:{H // 2}:flags=neighbor,"
+         f"split[cu][cv];[ly][cu][cv]mergeplanes=0x001020:yuv420p[mk];"
+         f"color=c=white:s={W}x{H}:r=25:d=0.04,format=yuv420p[wh];"
+         f"[p][wh][mk]maskedmerge,format=rgb24[o]")
+    base = (f"color=c=0x2040f0:s={W}x{H}:r=25:d=0.04,format=yuv420p,"
+            f"format=rgb24")
+
+    def rgb(graph, lab=None):
+        cmd = ["ffmpeg", "-v", "error"]
+        if lab:
+            cmd += ["-filter_complex", graph, "-map", f"[{lab}]"]
+        else:
+            cmd += ["-f", "lavfi", "-i", graph]
+        cmd += ["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+        out = subprocess.run(cmd, capture_output=True).stdout
+        return np.frombuffer(out, np.uint8).reshape(H, W, 3).astype(int)
+    lit, p = rgb(g, "o"), rgb(base)
+    assert (lit - p).min() >= -1             # rounding only, never darker
+    assert lit[:, -8:].min() >= 250          # and it does light to white
+    # the averaged chroma alpha (a plain 4:2:0 overlay) darkens the unlit
+    # columns: the case this guards
+    g_old = (f"color=c=0x2040f0:s={W}x{H}:r=25:d=0.04,format=yuv420p[p];"
+             f"color=c=black:s={W}x{H}:r=25:d=0.04,format=gray,{ramp}[a];"
+             f"color=c=white:s={W}x{H}:r=25:d=0.04,format=yuva420p[w];"
+             f"[w][a]alphamerge[wa];[p][wa]overlay,format=rgb24[o]")
+    assert (rgb(g_old, "o") - p).min() < -10
