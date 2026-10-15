@@ -297,9 +297,17 @@ def suggest_devices(ctx, start=None, end=None, families=None, intensity=None,
         keys = {}
     matte = matte_state(ctx, edl)
     try:
+        # freshness across the batch (owner, 15 Oct: "more and better, not
+        # only the same"): the devices the sibling shorts already carry
+        import tools_ext.recipe_tools as _rt
+        batch = device_planner.batch_usage(_rt.sibling_edls(ctx))
+    except Exception:  # noqa: BLE001 — freshness is advice
+        batch = {}
+    try:
         cands = device_planner.suggest(
             edl, ctx.index or {}, intensity=level, window=window,
             families=families, asked=_asked(ctx, asked),
+            batch=batch, seed=getattr(ctx, "project_id", None),
             max_n=max_candidates or device_planner.MAX_CANDIDATES,
             rhetoric=_rhetoric(ctx, edl), maps=music_maps(ctx, edl),
             matte=matte, weights=weights,

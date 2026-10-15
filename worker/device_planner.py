@@ -1483,11 +1483,35 @@ def _flash_times(item):
     return [float(t)] if t is not None else []
 
 
+# A device the sibling shorts of the batch already carry ranks this much
+# lower per short using it (recipes.FRESH_DECAY's twin): ten shorts of one
+# podcast must not all wipe with the same bands or flash the same way.
+BATCH_DECAY = 0.6
+
+
+def batch_usage(edls):
+    """{device card id: sibling shorts carrying it} over sibling EDLs."""
+    out = {}
+    for e in edls or []:
+        seen = {str(it.get("device")) for it in (e or {}).get("fx") or []
+                if isinstance(it, dict) and it.get("device")}
+        for d in seen:
+            out[d] = out.get(d, 0) + 1
+    return out
+
+
+def _tie(seed, cid):
+    """A per-project order among equally scored cards (never the alphabet:
+    'junction_bands' would open every short's scene change)."""
+    return hashlib.sha256(f"{seed}:{cid}".encode()).hexdigest()[:8]
+
+
 def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
             families=None, asked=(), max_n=MAX_CANDIDATES, cards=None,
             rhetoric=None, maps=None, matte=None, weights=None,
             lane="interactive", sidecar_status=None, duration=None,
-            media_keys=None, request_text=None, validate=True):
+            media_keys=None, request_text=None, validate=True,
+            batch=None, seed=None):
     """<= ``max_n`` ranked candidates (INTERFACES_W1.md §8).
 
     Each candidate: {device, family, verb, op, at, bind, reason, exemplar,
@@ -1588,7 +1612,7 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
             weights.get(card.get("family"), 1.0))
         if pref <= 0.0:
             continue
-        pref *= prior
+        pref *= prior * BATCH_DECAY ** int((batch or {}).get(cid, 0))
         for m in plan["moments"]:
             if not lo - 1e-6 <= m["t"] < hi:
                 continue
@@ -1608,7 +1632,7 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
             pairs.append({"card": card, "moment": m, "score": score,
                           "rung": rung, "notes": notes})
     pairs.sort(key=lambda p: (-p["score"], p["moment"]["t"],
-                              p["card"]["id"]))
+                              _tie(seed, p["card"]["id"])))
     if pairs:
         top = pairs[0]["score"]
         pairs = [p for p in pairs if p["score"] >= SCORE_FLOOR * top]
@@ -1664,6 +1688,10 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
             have = sec_punct.get(m["section"])
             if have is not None and have != cid:
                 continue           # one punctuation family per section
+        if fam == "transition" and any(
+                c["family"] == "transition" and c["device"] != cid
+                for c in chosen):
+            continue               # one transition style per short
         if fam == "transition" and len(
                 [c for c in chosen if c["family"] == "transition"]) + len(
                 [e for e in existing if e["family"] == "transition"

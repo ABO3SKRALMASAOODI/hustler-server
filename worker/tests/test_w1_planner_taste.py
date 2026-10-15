@@ -215,3 +215,24 @@ def test_sustained_devices_never_stack_and_hits_may_land_inside():
     assert not dp._overlaps_same(hit, "subject_fill_flash", chosen, [])
     assert dp._overlaps_same({"start": 6.0, "end": 9.0}, "subject_poster",
                              chosen, [])
+
+
+def test_a_batch_is_steered_off_the_devices_its_siblings_carry():
+    """Freshness for devices too (recipes have it): with the alphabet as
+    the tie-break every short of a batch opened its scene change with
+    'junction_bands'. Sibling usage decays a card's rank; ties fall in a
+    per-project order; one transition style per short."""
+    edl, index = _program()
+    first = _suggest(edl, index, intensity="charged", seed=1)
+    top = first[0]["device"]
+    sib = [{"fx": [{"id": "a", "device": top}]},
+           {"fx": [{"id": "b", "device": top}]}]
+    usage = dp.batch_usage(sib)
+    assert usage == {top: 2}
+    again = _suggest(edl, index, intensity="charged", seed=1, batch=usage)
+    assert again[0]["device"] != top
+    styles = {c["device"] for c in again if c["family"] == "transition"}
+    assert len(styles) <= 1
+    juncs = {s: [c["device"] for c in _suggest(edl, index, seed=s)
+                 if c["family"] == "transition"] for s in range(1, 9)}
+    assert len({tuple(v) for v in juncs.values()}) > 1, juncs
