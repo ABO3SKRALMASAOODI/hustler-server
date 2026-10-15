@@ -236,3 +236,24 @@ def test_a_batch_is_steered_off_the_devices_its_siblings_carry():
     juncs = {s: [c["device"] for c in _suggest(edl, index, seed=s)
                  if c["family"] == "transition"] for s in range(1, 9)}
     assert len({tuple(v) for v in juncs.values()}) > 1, juncs
+
+
+def test_the_word_behind_the_head_is_one_hero_at_head_height():
+    """On the real cards the planner's word behind the speaker sat at
+    word_slam's default y 0.56 (behind the chest, hidden by a dark shirt),
+    twice a short, and on the payoff it set the payoff lockup's words a
+    second time behind the head (review w1r, Thiel '140 CHARACTERS')."""
+    edl, index = _program()
+    edl["motion"] = [{"id": "payoff", "template": "word_slam", "start": 21.2,
+                      "end": 23.0, "layer": "above_captions",
+                      "params": {"text": "140 DOLLARS", "tier": "payoff"}}]
+    edl = schemas.validate_edl(edl, 40.0).model_dump()
+    for level in ("designed", "charged"):
+        heroes = [c["op"]["value"] for c in _suggest(edl, index,
+                                                     intensity=level)
+                  if c["family"] == "type_depth"]
+        assert len(heroes) <= 1
+        for v in heroes:
+            assert v["params"]["tier"] == "hero"
+            assert v["params"]["y"] <= 0.3
+            assert not (v["start"] < 23.0 and 21.2 < v["end"]), v

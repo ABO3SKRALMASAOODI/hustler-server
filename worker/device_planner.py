@@ -866,11 +866,19 @@ CARD_TASTE = {
                                 "prior": 0.25},
     # the hero word behind the head is a word worth setting: the payoff, a
     # payload, a number, an emotion or the turn (never a bare stress)
+    # tier hero: ONE giant word per short, at head height so the head
+    # crosses its letters (05@0.23; word_slam's own default y 0.56 sat it
+    # behind the chest, mostly hidden by a dark shirt)
     "type_behind_graphic": {"place": {"span": "payoff_hold", "min_s": 1.0,
                                       "max_s": 2.2}, "prior": 1.0,
                             "binds_to": ["word.payoff", "word.payload",
                                          "word.number", "word.emotion",
-                                         "word.contrast"]},
+                                         "word.contrast"],
+                            "values": {"params": {"tier": "hero",
+                                                  "y": 0.24}},
+                            "budget": {"calm": {"per_short": 1},
+                                       "designed": {"per_short": 1},
+                                       "charged": {"per_short": 1}}},
     "type_behind_text": {"place": {"span": "payoff_hold", "min_s": 1.0,
                                    "max_s": 2.2}, "prior": 0.85,
                          "binds_to": ["word.payoff", "word.payload",
@@ -1057,8 +1065,11 @@ def metaphor_ok(gate, moment, plan):
 def _type_on_screen(edl, t, payoff=False):
     """Is a type lockup of the edit already on screen around program
     second ``t``? (light graphics and the caption track are not type
-    lockups; on the payoff word the payoff's own lockup may be the one the
-    planner moves behind the speaker, so only OTHER lockups count)."""
+    lockups). The payoff's own lockup counts too: a word behind the head on
+    the payoff word set the same words a second time (review w1r: '140
+    CHARACTERS' behind the chest under the '140 CHARACTERS' lockup).
+    ``payoff`` True excuses the payoff lockup (kept for callers that move
+    that very lockup)."""
     for m in (edl or {}).get("motion") or []:
         if not isinstance(m, dict) or m.get("template") in LIGHT_HOSTS:
             continue
@@ -1626,7 +1637,7 @@ def suggest(edl, index, *, intensity=DEFAULT_INTENSITY, window=None,
             if _flash(card) and m["t"] < HOOK_FLASH_FREE_S:
                 continue           # the hook's first second is never a flash
             if card.get("family") == "type_depth" and _type_on_screen(
-                    edl, m["t"], m.get("kind") == "word.payoff"):
+                    edl, m["t"]):
                 continue           # one lockup at a time: no word on a word
             score = m["strength"] * fit * pref * rung_factor
             pairs.append({"card": card, "moment": m, "score": score,
