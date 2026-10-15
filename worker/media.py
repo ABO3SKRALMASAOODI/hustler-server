@@ -130,6 +130,24 @@ def _command_failure(cmd, returncode, lines, oom_before, prefix=None):
 _FFMPEG_NOPTS_ABS_MIN_US = 1 << 62
 
 
+# A media child the kernel should kill BEFORE the executor itself when the
+# VM runs out of memory (Linux oom_score_adj, -1000..1000; raising one's own
+# child needs no privilege). Without it the OOM killer may pick the Python
+# executor -- the largest process while a model is loaded -- and the whole
+# container exits: the job then ends as "Cloudflare lost the executor"
+# (Oct 14 index 68973, a 3840x3360 60 fps GoPro source, twice) instead of an
+# executor-memory failure the dispatcher can report and route.
+MEDIA_CHILD_OOM_SCORE_ADJ = 800
+
+
+def _prefer_child_for_oom(proc):
+    try:
+        with open(f"/proc/{proc.pid}/oom_score_adj", "w") as handle:
+            handle.write(str(MEDIA_CHILD_OOM_SCORE_ADJ))
+    except (OSError, ValueError):
+        pass
+
+
 def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         cancelled_cb=None):
     """Run ffmpeg/ffprobe. With progress_cb, parses -progress pipe:1 output
@@ -166,6 +184,7 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, text=True,
                                 errors="replace")
+        _prefer_child_for_oom(proc)
         # A genuine hang emits nothing on either stream, so a watchdog still
         # enforces a hard wall-clock cap and a shorter no-progress stall cap;
         # killing the process closes the pipe and unblocks the read loop.
@@ -304,6 +323,7 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True,
                              errors="replace")
+        _prefer_child_for_oom(p)
         started = time.monotonic()
         while True:
             try:

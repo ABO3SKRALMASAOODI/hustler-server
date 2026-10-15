@@ -194,3 +194,35 @@ def test_cover_mode_stills_are_cut_to_the_exact_frame(tmp_path):
                                   str(tmp_path), cover=True)
     with Image.open(kept) as im:
         assert im.size != (1080, 1920)
+
+
+def test_media_children_volunteer_for_the_oom_killer(monkeypatch, tmp_path):
+    written = {}
+
+    class FakeProc:
+        pid = 4242
+
+    real_open = open
+
+    def fake_open(path, mode="r", *a, **k):
+        if str(path) == "/proc/4242/oom_score_adj":
+            class W:
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+                def write(self_inner, value):
+                    written["value"] = value
+            return W()
+        return real_open(path, mode, *a, **k)
+
+    monkeypatch.setattr("builtins.open", fake_open)
+    media._prefer_child_for_oom(FakeProc())
+    assert int(written["value"]) == media.MEDIA_CHILD_OOM_SCORE_ADJ > 0
+    # Unavailable /proc (macOS, a locked-down sandbox): silently nothing.
+    monkeypatch.setattr("builtins.open", real_open)
+    class Missing:
+        pid = 999999999
+    media._prefer_child_for_oom(Missing())
