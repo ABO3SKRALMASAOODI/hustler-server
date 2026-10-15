@@ -1092,7 +1092,9 @@ def summarize_events(events):
         where = (f" at ({e['x']:.2f},{e['y']:.2f})"
                  if "x" in e and "y" in e else "")
         label = f" \"{e['label']}\"" if e.get("label") else ""
-        bits.append(f"{e['t']:.2f}s {e['kind']}{label}{where}")
+        box = (" box [" + ",".join(f"{v:.2f}" for v in e["box"]) + "]"
+               if e.get("box") else "")
+        bits.append(f"{e['t']:.2f}s {e['kind']}{label}{where}{box}")
     return "; ".join(bits)
 
 

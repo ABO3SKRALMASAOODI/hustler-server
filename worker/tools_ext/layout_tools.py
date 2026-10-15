@@ -231,7 +231,8 @@ def add_breakdown(ctx, start=None, end=None, position=None, title=None,
 
 
 def add_device_stage(ctx, screen, start, end=None, device=None, title=None,
-                     breakout=None, breakout_at=None, id=None):
+                     breakout=None, breakout_at=None, id=None,
+                     breakout_element=None):
     """A recording inside a drawn device with light spill."""
     edl = _latest(ctx)
     s, e = _window(edl, start, end, 5.0)
@@ -240,6 +241,20 @@ def add_device_stage(ctx, screen, start, end=None, device=None, title=None,
         params["device"] = device
     if title:
         params["title"] = str(title)[:40]
+    note = ""
+    if breakout_element or (isinstance(breakout, str) and
+                            breakout.strip().lower() in ("element", "click")):
+        # the element the recording clicked / hovered nearest breakout_at
+        # (webrecord's DOM boxes): the crop is the UI part itself, padded
+        if breakout_at is None:
+            return ("REJECTED: breakout_element needs breakout_at (the "
+                    "program second the UI part lifts out).")
+        box, why = _element_crop(ctx, params["screen"],
+                                 max(0.0, float(breakout_at) - s))
+        if box is None:
+            return f"REJECTED: {why}"
+        breakout = box
+        note = f" (breakout = the clicked element {box})"
     if breakout:
         params["breakout"] = [str(float(x)) for x in _strs(breakout)][:4]
         if breakout_at is not None:
@@ -249,7 +264,37 @@ def add_device_stage(ctx, screen, start, end=None, device=None, title=None,
     item = {"id": mid, "template": "device_stage", "start": s, "end": e,
             "params": params, "layer": "above_captions"}
     return _commit(ctx, item, f"device stage ({device or 'laptop'}) "
-                   f"{s:g}-{e:g}s [{mid}]")
+                   f"{s:g}-{e:g}s [{mid}]{note}")
+
+
+def _element_crop(ctx, screen, t, pad=0.15):
+    """([x0, y0, x1, y1] screen fractions, None) of the DOM element the
+    recording's event track names nearest its second ``t``, padded — or
+    (None, why)."""
+    key = str(screen)
+    if not key.startswith("asset:"):
+        return None, ("breakout_element reads a web recording's clicks: "
+                      "screen must be that recording (asset:<key>).")
+    key = key.split(":", 1)[1].replace("+loop", "")
+    try:
+        import agent_tools
+        import webrecord
+        asset, err = agent_tools._resolve_media_asset(ctx, key,
+                                                      ("video_clip",))
+        if err:
+            return None, err.replace("REJECTED: ", "")
+        events = (asset.get("meta") or {}).get("demo_events") or []
+        box = webrecord.element_at(events, t, tol=1.5)
+    except Exception as e:  # noqa: BLE001
+        return None, f"the recording's events are unreadable ({e})"
+    if not box:
+        return None, (f"the recording has no clicked or hovered element near "
+                      f"{t:.1f}s of it; give breakout [x0, y0, x1, y1] "
+                      "(screen fractions from look_at_asset)")
+    x0, y0, x1, y1 = (float(v) for v in box)
+    px, py = pad * (x1 - x0), pad * (y1 - y0)
+    return [round(max(0.0, x0 - px), 3), round(max(0.0, y0 - py), 3),
+            round(min(1.0, x1 + px), 3), round(min(1.0, y1 + py), 3)], None
 
 
 def set_brand_kit(ctx, logo=None, accent=None, sting=None):
@@ -358,14 +403,16 @@ TOOL_SPECS = {
         add_device_stage,
         "A recording (screen: " + _SRC + ") inside a drawn laptop, phone, "
         "tablet or monitor, its light spilling on the stage; breakout "
-        "[x0,y0,x1,y1] (screen fractions) lifts that part of the UI out at "
-        "breakout_at.",
+        "[x0,y0,x1,y1] (screen fractions), or breakout_element=true (the "
+        "element a web recording clicked near breakout_at), lifts that part "
+        "of the UI out.",
         {"screen": {"type": "string"}, "start": {"type": "number"},
          "end": {"type": "number"},
          "device": {"type": "string", "enum": ["laptop", "phone", "tablet",
                                                "monitor"]},
          "title": {"type": "string"},
          "breakout": {"type": "array", "items": {"type": "number"}},
+         "breakout_element": {"type": "boolean"},
          "breakout_at": {"type": "number"}, "id": {"type": "string"}}),
     "set_brand_kit": (
         set_brand_kit,
@@ -389,6 +436,7 @@ COMPACT = {
                 "brackets) clear of the corner mark."),
     "add_breakdown": "The edit's own live-playhead timeline (truthful).",
     "add_device_stage": ("Recording in a drawn laptop/phone/tablet/monitor "
-                         "with light spill; UI breakout."),
+                         "with light spill; UI breakout (box, or "
+                         "breakout_element: the clicked element)."),
     "set_brand_kit": "Logo palette / accent onto layouts; sting before end card.",
 }

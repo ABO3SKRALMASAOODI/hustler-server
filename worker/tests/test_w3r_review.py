@@ -500,3 +500,33 @@ def test_the_w1_card_loop_leaves_wave3_cards_to_the_world_planner():
     assert device_planner._world_card("light_dissolve")
     assert not device_planner._world_card("subject_fill_flash")
     assert not device_planner._world_card("grade_section")
+
+
+# ── a device-stage breakout can lift the element the recording clicked ──
+
+def test_breakout_element_lifts_the_clicked_dom_element(monkeypatch):
+    import agent_tools
+    import webrecord
+    from tools_ext import layout_tools as LT
+    events = [{"t": 1.0, "kind": "click", "x": 0.3, "y": 0.2,
+               "box": [0.2, 0.15, 0.4, 0.25]},
+              {"t": 4.0, "kind": "click", "x": 0.7, "y": 0.6,
+               "box": [0.55, 0.5, 0.85, 0.7]}]
+    monkeypatch.setattr(agent_tools, "_resolve_media_asset",
+                        lambda ctx, key, kinds: ({"meta": {
+                            "demo_events": events}}, None))
+    ctx = Ctx(BASE)
+    res = LT.add_device_stage(ctx, "asset:media/p1/a.mp4", start=2.0,
+                              end=8.0, breakout_element=True,
+                              breakout_at=6.1)
+    assert res.startswith("EDL v3 -> v4"), res
+    (m,) = [x for x in ctx.edl["motion"] if x["template"] == "device_stage"]
+    b = [float(v) for v in m["params"]["breakout"]]
+    # the 4.0 s click (6.1 - 2.0 = 4.1 s into the recording), padded 15%
+    assert b == pytest.approx([0.505, 0.47, 0.895, 0.73], abs=1e-3)
+    assert "box [0.55,0.50,0.85,0.70]" in webrecord.summarize_events(events)
+    # no element near: an honest refusal
+    res2 = LT.add_device_stage(ctx, "asset:media/p1/a.mp4", start=2.0,
+                               end=8.0, breakout_element=True,
+                               breakout_at=9.5)
+    assert res2.startswith("REJECTED")

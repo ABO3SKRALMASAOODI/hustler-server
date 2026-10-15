@@ -59,7 +59,10 @@ the layout THIS story needs, not the one used last time.
 - `set_stack(panels=['source:812.0', 'asset:media/p1/then.mp4'],
   labels=['NOW', 'THEN'], grow=0, grow_at=<payoff>)`.
 - `add_device_stage(screen='asset:media/p1/studio.mp4', device='laptop',
-  breakout=[0.05, 0.1, 0.45, 0.4], breakout_at=<word>)`.
+  breakout_element=true, breakout_at=<word>)` on a `record_website`
+  capture: the element it clicked there lifts out whole (its DOM box,
+  padded); on any other recording give `breakout=[x0, y0, x1, y1]` from
+  `look_at_asset`, with the whole headline or control inside it.
 - `add_hud(tl='DEV DAY 2025', tr='SAN FRANCISCO', bl='KEYNOTE')` for the
   whole program.
 
