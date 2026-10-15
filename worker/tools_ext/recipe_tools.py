@@ -159,7 +159,19 @@ def apply_recipe(ctx, name, at=None):
         near = [m for m in plan["moments"] if abs(m["t"] - t) <= 1.5]
         if not near:
             return f"REJECTED: no spoken moment within 1.5 s of {t:g}s."
-        plan = dict(plan, moments=near)
+        # recipes that land on "the payoff" land on the spoken moment
+        # nearest `at` when the planner's payoff is elsewhere (the call
+        # names the landing; it was ignored and the move went to the
+        # planner's payoff)
+        pay = plan.get("payoff")
+        if not pay or abs(float(pay["t"]) - t) > 1.5:
+            words = [m for m in near if m["kind"] in ("stress", "word")]
+            m = min(words or near, key=lambda m: (
+                abs(float(m["t"]) - t), -float(m.get("strength") or 0)))
+            pay = {"t": m["t"], "word": m.get("word"), "moment": m,
+                   "hold_end": round(min(float(plan["program_s"]) - 0.05,
+                                         float(m["t"]) + 1.5), 3)}
+        plan = dict(plan, moments=near, payoff=pay)
     ids = {str(i.get("id")) for i in edl.get("fx") or []
            if isinstance(i, dict)}
     keys = None

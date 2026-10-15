@@ -168,3 +168,45 @@ def test_the_white_silhouette_holds_two_frames_then_decays_three():
     fps = plan.get("fps") or 30.0
     frames = round((it["end"] - it["start"]) * fps)
     assert frames == 2 + it["decay_f"] == 5
+
+
+def test_the_payoff_the_edit_declares_is_the_payoff_devices_land_on():
+    """The planner chose the loudest late figure ('26' of three stats) while
+    the editor's payoff lockup (tier 'payoff') held the closing line; the
+    moment model now lands "the payoff" inside the declared lockup, as the
+    render's size report reads it."""
+    import device_planner
+    edl = validate_edl(default_edl(30.0), 30.0).model_dump()
+    edl["keep"] = [[0.0, 26.0]]
+    plain = device_planner.moments(edl, _index())
+    edl["motion"] = [{"id": "close", "template": "word_slam", "start": 7.0,
+                      "end": 9.0, "layer": "above_captions",
+                      "params": {"text": "nineteen months", "tier": "payoff"}}]
+    assert device_planner.declared_payoff(edl) == (7.0, 9.0)
+    plan = device_planner.moments(edl, _index())
+    assert 6.6 <= plan["payoff"]["t"] <= 9.0
+    assert plan["payoff"]["t"] != plain["payoff"]["t"]
+    items, landing, _why = recipes.build("white_silhouette", plan)
+    assert 6.6 <= items[0]["start"] <= 9.0
+
+
+def test_apply_recipe_at_moves_a_payoff_recipe_to_that_moment():
+    """apply_recipe(at=) restricted the moments but kept the planner's
+    payoff, so colour_kept_payoff still landed on the planner's word."""
+    import agent_tools
+    from w0c_support import tool_context
+    edl = default_edl(30.0)
+    edl["keep"] = [[0.0, 26.0]]
+    ctx, fake = tool_context(edl, duration=30.0, user_message="premium")
+    ctx.index = _index()
+    out = agent_tools.TOOLS["apply_recipe"][0](ctx, name="colour_kept_payoff",
+                                               at=6.3)
+    assert out.startswith("EDL v"), out
+    it = fake.rows[-1]["json"]["fx"][0]
+    landed = it["start"] + 0.5            # the isolate opens 0.5 s early
+    assert abs(landed - 6.3) <= 1.5, it
+    ctx2, fake2 = tool_context(edl, duration=30.0, user_message="premium")
+    ctx2.index = _index()
+    agent_tools.TOOLS["apply_recipe"][0](ctx2, name="colour_kept_payoff")
+    free = fake2.rows[-1]["json"]["fx"][0]
+    assert abs(free["start"] + 0.5 - 6.3) > 1.5   # the planner's own payoff

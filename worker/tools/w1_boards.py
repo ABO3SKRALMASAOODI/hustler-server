@@ -293,6 +293,125 @@ def s2_lab(out_dir):
                   assets=assets)
 
 
+# ── W1-S1 "Showcase v6" ───────────────────────────────────────────────────
+# The three v5 showcase shorts (same windows, same cut, same type) re-edited
+# with Wave 1 devices through the AGENT VERBS a mid-tier model calls
+# (agent_tools over a local ToolContext: apply_recipe, set_composite,
+# add_accent, add_finish, set_picture_card, add_subject_effect), plus the
+# one motion move a verb-less stale client writes through apply_edit_batch.
+# Not the chat agent itself (that is the agent-mode AT, 1F's lane): the
+# same calls, chosen by hand from the ROADMAP's W1-S1 device list.
+
+V5 = os.path.join(FIX, "baselines", "v5")
+V5_RENDERS = os.path.expanduser(
+    "~/Documents/Valmera/Showcase Shorts 2026-10-10")
+S1 = {"thiel": ("thiel_final8.json", "idx_thiel_v3.json",
+                "v5 01 Thiel - They promised us flying cars.mp4"),
+      "jobs": ("jobs_final8.json", "idx_jobs_v3.json",
+               "v5 02 Jobs - Computer fonts were garbage.mp4"),
+      "elon": ("elon_final8.json", "idx_elon_v4.json",
+               "v5 03 Elon and Rogan - Gamers make better surgeons.mp4")}
+
+
+def _s1_load(name):
+    spec_f, idx_f, _v5 = S1[name]
+    spec = json.load(open(os.path.join(V5, spec_f)))
+    index = json.load(open(os.path.join(V5, idx_f)))
+    return spec["edl"], index, spec["source"]
+
+
+def _verbs(edl, index, dur, message):
+    """A real agent ToolContext (FakeDb, the real write path) over ``edl``;
+    returns (call, final_edl)."""
+    tests = os.path.join(HERE, "tests")
+    if tests not in sys.path:
+        sys.path.insert(0, tests)
+    import agent_tools
+    from w0c_support import tool_context
+    ctx, fake = tool_context(edl, duration=dur, user_message=message)
+    ctx.index = index
+    log = []
+
+    def call(verb, **kw):
+        out = agent_tools.TOOLS[verb][0](ctx, **kw)
+        log.append((verb, kw, out))
+        print(f"[S1] {verb}({kw}) -> {out.splitlines()[0][:220]}",
+              flush=True)
+        return out
+
+    def final():
+        return copy.deepcopy(fake.rows[-1]["json"]) if fake.rows else edl
+    return call, final, log
+
+
+def s1_plan(name):
+    """(edl after the verbs, ops for apply_edit_batch, verb log)."""
+    import device_planner
+    import recipes
+    from schemas import validate_edl
+    edl, index, src = _s1_load(name)
+    dur = float(index["video"]["duration"])
+    edl = validate_edl(edl, dur).model_dump()
+    ops = []
+    if name == "thiel":
+        # the hook becomes the giant lockup behind the head (05@0.23): the
+        # crown crosses its lower half, the face stays clear; ghost
+        # outlines switch on where the head hides the letters (1C)
+        hook = next(m for m in edl["motion"] if m["id"] == "hook")
+        hook = copy.deepcopy(hook)
+        hook["layer"] = "behind_subject"
+        hook["params"].update({"y": 0.2, "width": 0.94, "kicker": "",
+                               "color": "#111114"})
+        # written as a stale client writes it (apply_edit_batch names the
+        # program matte; a validated write without a mask is refused)
+        ops.append({"action": "upsert", "layer": "motion", "id": "hook",
+                    "value": hook})
+        call, final, log = _verbs(edl, index, dur,
+                                  "make this a premium short")
+        call("set_composite", motion_id="enough", blend="difference")
+        call("apply_recipe", name="white_silhouette")
+    elif name == "jobs":
+        call, final, log = _verbs(edl, index, dur,
+                                  "make this a premium short")
+        # v5 already holds the archival in a card: round it further
+        card = edl["effects"]["picture_cards"][0]
+        call("set_picture_card", id=card["id"], start=card["start"],
+             end=card["end"], radius=0.06)
+        call("add_accent", kind="white_hit", on="stress", density="pulse",
+             region="card", count=6)
+        call("add_finish", kind="crt", strength=0.55)
+    else:
+        call, final, log = _verbs(edl, index, dur,
+                                  "make this a premium short")
+        # the close ('end': "You should be required in medical school...")
+        # is this edit's payoff line; v5 declares none, so the verb is told
+        close = next(m for m in edl["motion"] if m["id"] == "end")
+        call("apply_recipe", name="colour_kept_payoff",
+             at=round(float(close["start"]) + 0.3, 2))
+        plan = device_planner.moments(final(), index)
+        _items, turn, _why = recipes.build("mono_until_turn", plan)
+        if turn is not None:
+            t = round(float(turn["t"]), 2)
+            call("add_subject_effect", kind="negate", scope="subject",
+                 start=t, end=round(t + 2 / 30.0 + 0.004, 3))
+    return final(), ops, log, index, src
+
+
+def s1_short(out_dir, name):
+    edl, ops, log, index, src = s1_plan(name)
+    keep = edl["keep"]
+    S = setup(src, [(max(0.0, a - 1.0), b + 1.0) for a, b in keep],
+              faces=True)
+    S["index"] = dict(index, video=dict(index["video"],
+                                        **S["index"]["video"]),
+                      shots=S["index"]["shots"])
+    out = os.path.join(out_dir, f"s1_{name}.mp4")
+    with open(out + ".verbs.json", "w") as f:
+        json.dump([{"verb": n, "args": kw, "result": r.splitlines()[:6]}
+                   for n, kw, r in log], f, indent=1, default=str)
+    return render(S, edl, ops, out, want_wm=True)
+
+
 # ── boards ────────────────────────────────────────────────────────────────
 
 def grab(path, t, out, w=360):
@@ -365,6 +484,11 @@ def main(argv=None):
         summary["S3"] = {os.path.basename(p): {"wall_s": w, "rows": rows}
                          for p, w, rows in r}
         concat([p for p, _w, _r in r], os.path.join(a.out, "W1-S3.mp4"))
+    if "S1" in pieces:
+        summary["S1"] = {}
+        for nm in S1:
+            p, w, rows = s1_short(a.out, nm)
+            summary["S1"][os.path.basename(p)] = {"wall_s": w, "rows": rows}
     if "S2" in pieces:
         p, w, rows = s2_lab(a.out)
         summary["S2"] = {os.path.basename(p): {"wall_s": w, "rows": rows}}
