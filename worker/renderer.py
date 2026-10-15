@@ -5399,13 +5399,21 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp")
 STILL_PRESCALE_MAX_SCALE = 0.8
 
 
-def _insert_still(path, item, W, H, workdir):
+def _insert_still(path, item, W, H, workdir, cover=False):
     """A still downscaled to cover W x H (crop and rotation honoured), or
     ``path`` itself when that would save little or anything goes wrong.
 
     Symmetric in orientation (EXIF or the insert's own rotation), so it
     never leaves fewer pixels than either orientation's cover needs. The
     EXIF block is preserved, so ffmpeg sees the same orientation as before.
+
+    cover=True (the caller resolved the insert to the centre-crop mode on a
+    full-frame picture) goes one step further and centre-crops to exactly
+    W x H, which is what the graph's scale+crop would produce: every looped
+    image input holds ~8 decoded frames, so frame size IS the per-input
+    memory (30 photos: 3.0 GB at camera size, 2.5 GB at cover size, 1.7 GB
+    at W x H; the graph's own scale/crop become identities). Never for an
+    insert crop, a rotation or an EXIF-rotated photo.
     """
     try:
         from PIL import Image
@@ -5424,9 +5432,20 @@ def _insert_still(path, item, W, H, workdir):
                 return path
             tw = max(16, int(math.ceil(w0 * need / 2.0)) * 2)
             th = max(16, int(math.ceil(h0 * need / 2.0)) * 2)
+            try:
+                orientation = int(im.getexif().get(0x0112) or 1)
+            except Exception:
+                orientation = 0
+            exact = (cover and not crop and orientation == 1
+                     and not int(item.get("rotation") or 0) % 360)
+            if exact:
+                scale = max(W / w0, H / h0)
+                tw = max(W, int(math.ceil(w0 * scale)))
+                th = max(H, int(math.ceil(h0 * scale)))
             digest = hashlib.sha1(
                 f"{os.path.abspath(path)}:{os.path.getsize(path)}:"
-                f"{tw}x{th}".encode()).hexdigest()[:16]
+                f"{tw}x{th}:{int(W)}x{int(H) if exact else 0}".encode()
+            ).hexdigest()[:16]
             alpha = im.mode in ("RGBA", "LA") or (
                 im.mode == "P" and "transparency" in im.info)
             out = os.path.join(workdir, "stills",
@@ -5439,6 +5458,9 @@ def _insert_still(path, item, W, H, workdir):
                 im.draft("RGB", (tw, th))
             small = im.convert("RGBA" if alpha else "RGB").resize(
                 (tw, th), Image.LANCZOS)
+            if exact:
+                left, top = (tw - int(W)) // 2, (th - int(H)) // 2
+                small = small.crop((left, top, left + int(W), top + int(H)))
             tmp = out + ".part"
             if alpha:
                 small.save(tmp, "PNG")
@@ -6450,7 +6472,12 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         local = _fetch(item["asset_key"], "insert", next_idx)
         insert_locals[item["asset_key"]] = local
         if item["kind"] == "image":
-            local = _insert_still(local, item, W, H, workdir)
+            local = _insert_still(
+                local, item, W, H, workdir,
+                cover=((item.get("fit") or frame_mode
+                        or (edl.get("frame") or {}).get("mode")
+                        or "crop") == "crop"
+                       and not (edl.get("frame") or {}).get("picture")))
         input_args, graph_item = render_plan.insert_input(
             item, local, fps, copy_timestamps=seek_main_source)
         extra_inputs += input_args

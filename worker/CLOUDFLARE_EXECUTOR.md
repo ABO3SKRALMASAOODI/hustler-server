@@ -23,6 +23,33 @@ prunes them in bounded batches after later completions. Active and ambiguous
 calls are never age-pruned; this prevents unbounded Durable Object storage
 growth without sacrificing restart recovery.
 
+## Zero-downtime deploys (Oct 2026)
+
+Render publishes the dispatcher and backend 3-5 minutes after a push; this
+Worker and its containers follow 25-60 minutes later (CI, image builds, a
+staged rollout), or not at all when the workflow fails. Source skew between
+the two is normal and is not a reason to refuse work:
+
+- Every job carries `dispatcher_source`. An executor on another release runs
+  `worker/skew_guard.py` before any work and refuses, retryably with nothing
+  run (`provider_rollout_pending`), only what its release cannot do: an
+  unknown job type, MCP tool or tool argument, or an EDL its schema rejects or
+  would silently drop fields from. Everything else runs on the older code.
+- The dispatcher tolerates source skew when the Worker's root `/health`
+  advertises `skew_guard`; the Worker serves a container on another release
+  when the container advertises it (role must match; a `draining` container is
+  never used). A guard refusal is relaunched inside the claim on fresh
+  `cf-alt1..32` identities for up to `CLOUDFLARE_ROLLOUT_WAIT_S` (600 s), then
+  returned to the queue (`CLOUDFLARE_ROLLOUT_MAX_DEFERRALS`, 3) for every job
+  type, MCP tools and Studio turns included.
+- SIGTERM drains a container: in-flight calls finish, `/health` reports
+  `draining`, a late `/run` is a rollout wait. `rollout_active_grace_period`
+  is 1800 s on batch (index/final) and 900 s on the agent lane.
+- A launch that never reached its Durable Object is fenced
+  (`/calls/<lane>/<id>/fence`) after `CLOUDFLARE_MISSING_FENCE_S` (60 s) and
+  relaunched; a `submitted` record whose handler was lost fails as an
+  abandoned start after 60 s instead of holding its shard for the lease.
+
 ## Resource admission (there is no one-hour limit)
 
 Cloudflare's self-serve maximum is 4 vCPU, 12 GiB RAM and 20 GB disk. Source

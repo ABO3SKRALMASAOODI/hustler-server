@@ -169,3 +169,28 @@ def test_caption_review_frames_are_bounded():
     src = open(os.path.join(os.path.dirname(__file__), "..",
                             "renderer.py")).read()
     assert "_bounded_review_times(\n                    caption_review_times(" in src
+
+
+def test_cover_mode_stills_are_cut_to_the_exact_frame(tmp_path):
+    from PIL import Image
+    src = _photo(str(tmp_path / "phone.jpg"), (4032, 3024))
+    out = renderer._insert_still(src, {"kind": "image"}, 1080, 1920,
+                                 str(tmp_path), cover=True)
+    with Image.open(out) as im:
+        assert im.size == (1080, 1920)
+    # Never for an insert crop, a rotation or an EXIF-rotated photo: those
+    # keep the cover-size still and the graph does the geometry.
+    for item in ({"kind": "image", "crop": [0.1, 0.1, 0.9, 0.9]},
+                 {"kind": "image", "rotation": 90}):
+        kept = renderer._insert_still(src, item, 1080, 1920, str(tmp_path),
+                                      cover=True)
+        with Image.open(kept) as im:
+            assert im.size != (1080, 1920)
+    rotated = str(tmp_path / "rotated.jpg")
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    Image.new("RGB", (4032, 3024)).save(rotated, exif=exif.tobytes())
+    kept = renderer._insert_still(rotated, {"kind": "image"}, 1080, 1920,
+                                  str(tmp_path), cover=True)
+    with Image.open(kept) as im:
+        assert im.size != (1080, 1920)
