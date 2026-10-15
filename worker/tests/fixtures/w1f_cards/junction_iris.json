@@ -1,0 +1,59 @@
+{
+  "id": "junction_iris",
+  "family": "transition",
+  "verb": "set_junction",
+  "stage": "junction",
+  "params": {
+    "style": [
+      "iris"
+    ],
+    "duration_s": [
+      0.4
+    ],
+    "origin": [
+      {
+        "kind": "face"
+      }
+    ]
+  },
+  "needs": {},
+  "binds_to": [
+    "cut"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 1
+    },
+    "charged": {
+      "per_short": 2
+    }
+  },
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 2.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "03@7.93"
+  ],
+  "verify": [
+    "duration_exact"
+  ],
+  "status": "live",
+  "fx_type": "junction",
+  "description": "iris junction opening from the face across the cut"
+}

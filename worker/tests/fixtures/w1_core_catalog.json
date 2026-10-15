@@ -1,5 +1,5 @@
 {
- "bytes": 81688,
- "sha256": "c3d5e31b6ee75e4ac15243cfd84b03c2dbe8532251b9f05952bccb438cba779b",
- "_doc": "Core compact catalog at the Wave 1 base (e8a775f + interface pass), Wave 1's automatic growth set aside (tests/test_w1_seams.py). Round-lead owned; only 1F re-pins it (look_at overlay), reporting the byte delta."
+ "bytes": 81868,
+ "sha256": "fd2963977d03308b50b15ff8469d997b473cf4bdb0af1d494a5a3e1e7d4c1c03",
+ "_doc": "Core compact catalog with Wave 1's automatic growth set aside (tests/test_w1_seams.py). Base 81,688 B at the interface pass (e8a775f + 46c1bf9). Re-pinned by track 1F: +180 B = look_at overlay (enum matte|free_space|beats and its compact line), the apply_edit_batch compact line naming the fx layer, and the new 'devices' skill in read_skill's name enum. With the live verify department name the full core catalog is 81886 B (ceiling 82,700; budget 83,000)."
 }

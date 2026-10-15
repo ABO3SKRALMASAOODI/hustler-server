@@ -1,0 +1,58 @@
+{
+  "id": "grade_mono_window",
+  "family": "finish",
+  "verb": "set_grade_window",
+  "stage": "world",
+  "params": {
+    "saturation": [
+      0.0
+    ],
+    "ramp_out_f": [
+      3
+    ],
+    "span": [
+      "section"
+    ]
+  },
+  "needs": {},
+  "binds_to": [
+    "section"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 1
+    },
+    "charged": {
+      "per_short": 2
+    }
+  },
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 2.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "24@\u224810.7",
+    "18@0"
+  ],
+  "verify": [
+    "land_err_f<=1"
+  ],
+  "status": "live",
+  "fx_type": "grade_window",
+  "description": "black-and-white section that snaps back to colour"
+}

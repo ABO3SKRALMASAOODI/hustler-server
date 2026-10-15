@@ -102,6 +102,18 @@ FADES (`set_fades`): a closing fade belongs on long-form and cinematic
 pieces. On a reel it plays into the loop, and a fade-in spends the only
 second where retention is decided on black.
 
+GRADE WINDOWS, ISOLATION AND FINISHES (compositing devices): a grade
+window changes one stretch — mono to colour landing on a drop (the ramp
+ends ON the frame), a black-and-white then-versus-now; isolate_colour keeps
+the subject or one hue in colour while the world goes mono; import_lut and
+match_grade carry a supplied look or match two shots of the same set;
+add_finish — CRT or LCD re-photography, film, halftone, thermal, X-ray,
+blueprint — is a metaphor or an archival treatment, never a default look;
+make_variant_set builds registered stills from one frame for a strobe. The
+one committed look still rules: these are moments inside it.
+`suggest_devices` proposes them where a section earns one, `proof_device`
+proves them; read_skill devices.
+
 ## Common failure modes
 
 - Two looks mixed (hype captions over a cinematic grade), or a grade that

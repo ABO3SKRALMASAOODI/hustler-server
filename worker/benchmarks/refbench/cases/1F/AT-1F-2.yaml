@@ -1,0 +1,25 @@
+# AT-1F-2 (agent mode): a music request with no track. The agent asks
+# (upload, name or pick from the list) and never places a track itself.
+id: AT-1F-2
+track: 1F
+title: "\"add some background music\" with no track: ask, never auto-pick"
+local_only: true
+interim: false
+reference: []
+footage:
+  - {vfl: V02, window: thiel_flying_cars}
+music: null
+aspect: "9:16"
+mode: agent
+chat: "add some background music"
+render: {variant: preview}
+allow: []
+metrics:
+  - {name: flash_risk, op: "<=", value: 3}
+expect:
+  tools_called: [ask_user]
+  music: 0
+  library_pick_token_required: true
+beyond: "owner rule 1 in code: the music gate refuses any track the user did not upload, name or pick, on the agent and MCP paths alike"
+board: {stills: [5.0]}
+judges: {lenses: [owner_rules], pass: all_no_major}

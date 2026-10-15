@@ -102,6 +102,13 @@ LICENCES TRAVEL WITH THE TRACK: relay any obligation a user-provided or
 fetched track carries (credit, non-commercial-only); never work around a
 commercial-use restriction for a business or monetized reel.
 
+DEVICES ON THE USER'S TRACK: once the user supplies a track, devices may
+follow it — punctuation frames on its kicks and downbeats, a mono-to-colour
+grade window that lands on the drop, strobes inside drop sections — and a
+song swap re-lands them. Without a user track devices bind to the speech;
+never add or swap music to get a beat grid. `set_intensity` sets how dense
+they run; read_skill devices.
+
 ## Common failure modes
 
 - Music added that the user never asked for, or a stock bed chosen when they

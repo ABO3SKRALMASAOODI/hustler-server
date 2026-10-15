@@ -5461,12 +5461,46 @@ def _final_gate(cur, project_id, user_id):
     def ok(asset_id, meta, version):
         if asset_id in small_finals:
             return False
+        if final_degraded_hold(meta):
+            return False          # a degraded device nobody acknowledged
         if asset_id in confirmed:
             return True           # the worker has already declined to re-render
         return (_final_is_current(meta)
                 and _transitions_are_current(meta, version in with_transition)
                 and _watermark_is_current(meta, is_paid, wm))
     return ok
+
+
+def final_degraded_hold(meta):
+    """The final-export DEGRADED gate (Wave 1, 1F; INTERFACES_W1.md §6.3):
+    the device rows of a final that rendered below full quality and that its
+    version's verification record has not acknowledged. The worker computes
+    them with quality_verifier.unacknowledged_degradations when the final
+    commits and again whenever the editor acknowledges a finding, and
+    stamps them on the asset (``degraded_hold``, [] when every one is
+    acknowledged), so this read needs no query. Until that stamp exists (the
+    moments between the render storing the asset and its job committing, or
+    a commit whose stamp failed) every degraded row of the render's own
+    ``devices`` report holds it: a degraded device never ships unjudged.
+    [] = downloadable."""
+    meta = meta or {}
+    if "degraded_hold" in meta:
+        held = meta.get("degraded_hold")
+        return [r for r in held if isinstance(r, dict)] \
+            if isinstance(held, list) else []
+    rows = meta.get("devices")
+    return [r for r in rows if isinstance(r, dict)
+            and r.get("rung") != "full"] \
+        if isinstance(rows, list) else []
+
+
+def final_hold_message(held):
+    names = ", ".join(f"{r.get('device') or r.get('id')} ({r.get('rung')})"
+                      for r in held[:4])
+    return ("This export is held: " + names
+            + (" and more" if len(held) > 4 else "")
+            + " rendered below full quality. Ask the editor to fix it, or "
+              "to confirm it is acceptable, then export again.")
 
 
 @video_bp.route("/projects/<int:project_id>/edls", methods=["GET"])
@@ -5662,11 +5696,25 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
                      "first — your edit is saved and nothing is lost.",
             "code": "original_uploading",
             "upload_progress": pct}), 409
+    cur.execute("""SELECT id, meta FROM assets WHERE project_id=%s AND kind='render'
+                   AND meta->>'variant'='final' AND meta->>'edl_version'=%s
+                   ORDER BY id DESC LIMIT 1""", (project_id, str(version)))
+    existing = cur.fetchone()
+    # The final-export DEGRADED gate (Wave 1, 1F): this version's final
+    # rendered a device below full quality and nobody acknowledged it.
+    # Re-encoding the same immutable EDL cannot change that; the editor
+    # fixes the cause (a new version) or acknowledges it.
+    held = final_degraded_hold((existing or {}).get("meta") or {})
+    if held:
+        devices = [{k: r.get(k) for k in ("id", "device", "rung", "reason")}
+                   for r in held[:6]]
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "device_degraded", "version": version,
+                    "devices": devices}, origin="server")
+        return jsonify({"error": final_hold_message(held),
+                        "code": "device_degraded", "devices": devices}), 409
     if render_group or reuse_existing:
-        cur.execute("""SELECT id, meta FROM assets WHERE project_id=%s AND kind='render'
-                       AND meta->>'variant'='final' AND meta->>'edl_version'=%s
-                       ORDER BY id DESC LIMIT 1""", (project_id, str(version)))
-        existing = cur.fetchone()
         if existing and _final_gate(cur, project_id, user_id)(
                 existing["id"], existing.get("meta") or {}, version):
             return jsonify(asset_id=existing["id"], reused=True)

@@ -1,0 +1,64 @@
+{
+  "id": "accent_negative",
+  "family": "punctuation",
+  "verb": "add_accent",
+  "stage": "pre_captions",
+  "params": {
+    "kind": "negative",
+    "frames": [
+      1
+    ]
+  },
+  "needs": {
+    "lane_features": [
+      "ffmpeg:negate"
+    ]
+  },
+  "binds_to": [
+    "stress",
+    "cut",
+    "downbeat",
+    "beat.kick"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 3,
+      "min_gap_s": 1.5
+    },
+    "designed": {
+      "per_short": 4,
+      "min_gap_s": 1.0
+    },
+    "charged": {
+      "per_short": 8,
+      "min_gap_s": 0.34
+    }
+  },
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": true
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4.0,
+      "batch": 2.5
+    },
+    "fixed_ms": 300
+  },
+  "exemplars": [
+    "04@1.93",
+    "24@\u224813"
+  ],
+  "verify": [
+    "land_err_f<=1",
+    "flash_risk"
+  ],
+  "status": "live",
+  "fx_type": "accent",
+  "description": "one-frame negative on a hard transient"
+}

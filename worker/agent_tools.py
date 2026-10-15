@@ -99,6 +99,7 @@ import webrecord
 import typography_scenes
 import motion_tools
 import motion_planner
+import motion_qa
 import cut_steps
 import jump_cut_report
 import music_library
@@ -2016,7 +2017,7 @@ def _fit_and_zoom_frame(workdir, idx, fp, t, canvas, mode, focus, zooms,
     return out, suffix
 
 
-def _look_at_output(ctx, output_times, question):
+def _look_at_output(ctx, output_times, question, overlay=None):
     """Frames of the ASSEMBLED PROGRAM at output seconds — round 71.
 
     The user watches the OUTPUT, and until now the agent could only see the
@@ -2056,7 +2057,7 @@ def _look_at_output(ctx, output_times, question):
     except (TypeError, ValueError):
         return "REJECTED: output_times must be numbers of seconds."
     evidence_key = ("look_output", edl["version"],
-                    tuple(round(t, 3) for t in wants))
+                    tuple(round(t, 3) for t in wants), overlay)
     evidence = _evidence_cache(ctx)
     if evidence_key in evidence:
         _metric(ctx, "visual_decodes_reused")
@@ -2166,8 +2167,15 @@ def _look_at_output(ctx, output_times, question):
            for o in (edl["json"].get("overlays") or []) if o.get("screen")]
     frames, labels = [], []
     src_of = {i: s for i, k, s, _lb in plan if k == "main"}
+    ov_cache = {}
     for i in sorted(results):
         fp, lb = results[i]
+        if overlay == "matte" and i in src_of:
+            # drawn on the source frame so the crop, follow and zoom below
+            # carry the matte exactly as they carry the picture
+            fp, ov = motion_qa.apply_overlay(ctx, overlay, fp,
+                                             src_t=src_of[i], stage="raw")
+            lb += ov
         raw = fp
         t = wants[i]
         try:
@@ -2190,6 +2198,11 @@ def _look_at_output(ctx, output_times, question):
         if any(a - 1e-6 <= t <= b + 1e-6 for a, b in tko):
             sfx += (" [inside a screen-takeover window — its push/pin is "
                     "not shown here]")
+        if overlay and overlay != "matte":
+            fp, ov = motion_qa.apply_overlay(ctx, overlay, fp, out_t=t,
+                                             edl=edl["json"], stage="post",
+                                             output=True, cache=ov_cache)
+            sfx += ov
         frames.append(fp)
         labels.append(lb + sfx)
     if frames:
@@ -2292,16 +2305,31 @@ def open_visual_page(ctx, pages=None):
 
 
 def look_at(ctx, times=None, question="", start=None, end=None,
-            output_times=None, rendered=False, native_resolution=False):
+            output_times=None, rendered=False, native_resolution=False,
+            overlay=None):
     """Round 67: the agent's own eyes. Pass any source `times` and
     the exact frames at those moments come back as ONE labeled picture in the
     agent's own context. start/end still work as a range and sample evenly.
     Round 71: `output_times` samples the ASSEMBLED PROGRAM instead — output
-    seconds of the current edit, inserts included."""
+    seconds of the current edit, inserts included.
+    Wave 1 (1F): `overlay` draws what a device decision needs on the
+    delivered copies — `matte` the person matte (it launches the one
+    missing chunk and says "measuring" meanwhile), `free_space` what type
+    must avoid and the free rectangles, `beats` a ruler of stresses, cuts,
+    the user's beats and device landings around each frame."""
+    if overlay in ("", "none", None):
+        overlay = None
+    elif overlay not in motion_qa.OVERLAYS:
+        return ("REJECTED: overlay is one of "
+                + ", ".join(motion_qa.OVERLAYS) + ".")
     # The assembled-program path deliberately omits effects that only exist
     # after ffmpeg composition. rendered=true resolves the preview for the
     # CURRENT immutable EDL version and inspects those real pixels instead,
     # including captions, overlays, grades and designed text.
+    if rendered and overlay:
+        return ("REJECTED: overlay reads the source moment behind each frame "
+                "— use it with times=[...] or output_times=[...], not "
+                "rendered=true.")
     if rendered:
         row = ctx.latest_edl()
         asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
@@ -2330,7 +2358,8 @@ def look_at(ctx, times=None, question="", start=None, end=None,
     # rejections in one session (project 382, 2026-08-07) under the old
     # `is not None` — with the valid source times discarded each time.
     if output_times:
-        return _look_at_output(ctx, output_times, question)
+        return _look_at_output(ctx, output_times, question,
+                               **({"overlay": overlay} if overlay else {}))
     if times:
         if not isinstance(times, (list, tuple)):
             return ("REJECTED: times must be an array of source "
@@ -2357,7 +2386,8 @@ def look_at(ctx, times=None, question="", start=None, end=None,
                 "at), a start/end range, or output_times=[...] (OUTPUT "
                 "seconds of the assembled program). An empty array counts "
                 "as not passed.")
-    evidence_key = ("look_source", tuple(round(float(t), 3) for t in times))
+    evidence_key = ("look_source", tuple(round(float(t), 3) for t in times),
+                    overlay)
     evidence = _evidence_cache(ctx)
     if evidence_key in evidence:
         _metric(ctx, "visual_decodes_reused")
@@ -2428,6 +2458,9 @@ def look_at(ctx, times=None, question="", start=None, end=None,
                          .get("ratio"))
     except Exception:
         has_frame = False
+    if overlay:
+        frames, frame_names = _overlay_source_frames(
+            ctx, overlay, frames, frame_names)
     src_note = (" (SOURCE footage — the output frame crop/letterbox is "
                 "applied later at render, so do not judge aspect ratio here)"
                 if has_frame else "")
@@ -2436,6 +2469,105 @@ def look_at(ctx, times=None, question="", start=None, end=None,
         f"Frames from the MAIN video, {s:.2f}s-{e:.2f}s{src_note}")
     evidence.add(evidence_key)
     return out
+
+
+def project_state(ctx, edl=None):
+    """The analysis half of the project state (Wave 1, 1F): which sidecars
+    are measured for the main video (sidecars.summary) and what the person
+    matte covers on the CURRENT program (matte_status: ready / partial /
+    pending / absent), plus the project's device intensity. Reads only — a
+    state block never launches analysis. {} for a canvas program."""
+    if not getattr(ctx, "has_main_video", False):
+        return {}
+    out = {}
+    try:
+        import devices
+        live_cards = bool(devices.load_cards())
+    except Exception:  # noqa: BLE001
+        live_cards = False
+    try:
+        if edl is None:
+            edl = ctx.latest_edl()["json"]
+        has_fx = bool(edl.get("fx"))
+    except Exception:  # noqa: BLE001
+        has_fx = False
+    if not (live_cards or has_fx):
+        # no device can use analysis yet: the state stays as it was, and
+        # no store listing is paid for on every turn
+        return {}
+    try:
+        import sidecars
+        sha = sidecars.index_source_sha(ctx.index)
+        out["sidecars"] = sidecars.summary(sha) if sha else {}
+    except Exception as exc:  # noqa: BLE001 — state is best effort
+        out["sidecars"] = {"error": str(exc)[:80]}
+    try:
+        import tools_ext.verify_tools as verify_tools
+        out["matte_status"] = verify_tools.matte_state(ctx, edl or {})
+        out["intensity"] = verify_tools.project_intensity(ctx)
+    except Exception as exc:  # noqa: BLE001
+        out["matte_status"] = {"status": "unknown", "error": str(exc)[:80]}
+    return out
+
+
+def project_state_line(ctx, edl=None):
+    """One line of project_state for the CURRENT PROJECT STATE block
+    (``edl``: the EDL json the caller already read)."""
+    state = project_state(ctx, edl)
+    if not state:
+        return ""
+    bits = []
+    for kind, row in sorted((state.get("sidecars") or {}).items()):
+        if isinstance(row, dict) and any(row.values()):
+            bits.append(f"{kind} {row.get('ready', 0)} ready"
+                        + (f"/{row['pending']} measuring"
+                           if row.get("pending") else "")
+                        + (f"/{row['failed']} failed"
+                           if row.get("failed") else ""))
+    matte = state.get("matte_status") or {}
+    status = matte.get("status") or "unknown"
+    line = ("ANALYSIS (sidecars): " + ("; ".join(bits) if bits else
+                                       "nothing measured yet")
+            + f". Person matte on the current cut: {status}"
+            + (" (matte devices render as their substitutes until it is "
+               "ready; suggest_devices or look_at(overlay='matte') starts "
+               "it)" if status not in ("ready", "pending")
+               else " (matte devices render as their substitutes until it "
+               "is ready)" if status == "pending" else "")
+            + f". Device intensity: {state.get('intensity', 'designed')}.")
+    return line
+
+
+def _overlay_source_frames(ctx, overlay, frames, names):
+    """look_at(overlay=...) on SOURCE frames: each '@<t>s' label names its
+    source second; the program second (for beats) comes through the
+    current keep. Frames and labels, overlaid copies in place."""
+    try:
+        edl = ctx.latest_edl()["json"]
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts"),
+                      edl.get("speed"))
+    except Exception:
+        edl, tl = None, None
+    cache = {}
+    out_f, out_n = [], []
+    for fp, name in zip(frames, names):
+        try:
+            t = float(name.lstrip("@").rstrip("s"))
+        except (TypeError, ValueError):
+            out_f.append(fp)
+            out_n.append(name)
+            continue
+        out_t = tl.src_to_out(t) if tl is not None else None
+        fp, suf = motion_qa.apply_overlay(ctx, overlay, fp, src_t=t,
+                                          out_t=out_t, edl=edl, stage="raw",
+                                          output=False, cache=cache)
+        fp, suf2 = motion_qa.apply_overlay(ctx, overlay, fp, src_t=t,
+                                           out_t=out_t, edl=edl,
+                                           stage="post", output=False,
+                                           cache=cache)
+        out_f.append(fp)
+        out_n.append(name + suf + suf2)
+    return out_f, out_n
 
 
 def find_visual_moments(ctx, query, start=0.0, end=None, max_results=12):
@@ -23283,6 +23415,13 @@ def justify_verification_findings(ctx, finding_ids, justification,
         return ("TRANSIENT FAILURE: the justification was not persisted: "
                 f"{str(exc)[:240]}. Retry this idempotent verification call.")
     ctx.verification_records[version] = updated
+    # Wave 1 (1F): an acknowledged device_degraded finding releases a final
+    # the export gate held for exactly that device instance
+    if any(str(f) == quality_verifier.DEGRADED_FINDING or str(f).startswith(
+            "vf_") for f in finding_ids or []):
+        import job_completion
+        job_completion.refresh_final_hold(ctx.db, ctx.project_id, version,
+                                          updated)
     resolved = {row.get("finding_id") for row in updated.get("justifications")
                 or []}
     resolved_messages = {
@@ -24176,6 +24315,21 @@ def _independent_preview_review(ctx, result, plan=None,
     if broll:
         priority_lines.append(
             "Authored B-roll evidence: " + " | ".join(broll)[:2200])
+    # Wave 1 (1F): device strips of the latest proof of THIS version, so the
+    # critic sees each device's landing as a sequence, not a still.
+    proofed = getattr(ctx, "last_device_proof", None) or {}
+    try:
+        reviewed = int(ctx.latest_edl()["version"])
+    except Exception:
+        reviewed = None
+    if proofed.get("edl_version") == reviewed:
+        for d in (proofed.get("devices") or [])[:4]:
+            if d.get("strip") and os.path.exists(d["strip"]):
+                images.append(d["strip"])
+                labels.append(
+                    f"device strip {d['id']} [{d.get('device') or d.get('type')}]"
+                    f" frames -3..+6 around its landing (top: with, bottom: "
+                    "without)")
     context = preview_critic.pack_context(priority_lines, lines)
     return preview_critic.review(images, labels, context)
 
@@ -24295,6 +24449,25 @@ def _preview_critic_report(ctx, result, plan=None):
             ctx, result, plan, convergence_context=convergence)
     else:
         report = _independent_preview_review(ctx, result, plan)
+    if report is not None and any(
+            f.get("category") in preview_critic.NEVER_BLOCK_CATEGORIES
+            for f in report.get("findings") or []):
+        # Wave 1 (1F): a motion finding is actionable only when a
+        # deterministic metric corroborates it — a proof of THIS version
+        # only (a device moved since keeps its id, not its old failure)
+        try:
+            proofed = getattr(ctx, "last_device_proof", None) or {}
+            try:
+                current = int(ctx.latest_edl()["version"])
+            except Exception:
+                current = None
+            report = preview_critic.corroborate(report, motion_qa.critic_evidence(
+                edl, ctx.index,
+                proof_result=(proofed if proofed.get("edl_version") == current
+                              and current is not None else None),
+                request_text=getattr(ctx, "user_message", None)))
+        except Exception as exc:
+            print(f"[critic] corroboration skipped: {exc}", flush=True)
     if report is not None:
         prior_report = prior.get("report") or {}
         if prior_report.get("verdict") == "pass" and \
@@ -28345,7 +28518,9 @@ TOOLS = {
         "field shapes and project media keys. All times describe the RESULTING timeline: "
         "include dependent caption/music/text timing changes in the same batch. "
         "Unknown fields or invalid media reject the whole batch. This saves an edit; "
-        "it does not certify picture/audio quality. Review changed moments, then the finished edit.",
+        "it does not certify picture/audio quality. Review changed moments, then the finished edit. "
+        "Layer fx holds the creative devices (silhouette flashes, punctuation frames, junctions, grade "
+        "windows, finishes) by id: read_skill('devices') for their exact shapes.",
         {"base_version": {"type": "integer"}, "operation_id": {"type": "string"},
          "operations": {"type": "array", "minItems": 1, "maxItems": 64,
             "items": {"type": "object", "properties": {
@@ -28828,7 +29003,12 @@ TOOLS = {
                 "the CURRENT preview's real pixels—including captions, text, "
                 "overlays and grade. In rendered mode output_times (or times) "
                 "are output seconds and any useful set can be batched for "
-                "caption QA.",
+                "caption QA. overlay (with times or output_times) marks what "
+                "a device decision needs: 'matte' tints the person matte "
+                "(measuring it first if needed), 'free_space' shades faces, "
+                "UI bands and the watermark and outlines the free "
+                "rectangles for type, 'beats' adds a ruler of stresses, "
+                "cuts, the user's beats and device landings.",
                 {"times": {"type": "array", "items": {"type": "number"}},
                  "output_times": {"type": "array",
                                   "items": {"type": "number"}},
@@ -28836,7 +29016,9 @@ TOOLS = {
                  "start": {"type": "number"},
                  "end": {"type": "number"},
                  "rendered": {"type": "boolean"},
-                 "native_resolution": {"type": "boolean", "description": "With rendered=true, keep width up to 1920px: each time is its own full-detail image (no contact sheet), no re-encode."}}),
+                 "native_resolution": {"type": "boolean", "description": "With rendered=true, keep width up to 1920px: each time is its own full-detail image (no contact sheet), no re-encode."},
+                 "overlay": {"type": "string",
+                             "enum": ["matte", "free_space", "beats"]}}),
     "look_at_asset": (look_at_asset, "YOUR OWN EYES on an UPLOADED clip or "
                       "image, or a finished RENDER (storage_key from "
                       "list_assets; kind='render' lists past previews/"
@@ -30716,10 +30898,11 @@ TOOLS = {
                         "the words appear. REQUIREMENTS I check and refuse on, "
                         "so read the reply: a PERSON must be visible in the "
                         "window (nothing to go behind otherwise — I say so and "
-                        "you offer add_text instead), they must not fill most "
-                        "of the frame (the words would never be visible), "
-                        "the window must be inside ONE take with no cut in it, "
-                        "and no speed ramp over that footage. I also report how "
+                        "you offer add_text instead). Follow crops, cuts and "
+                        "speed ramps in the window are fine: the program matte "
+                        "keeps the words behind the speaker, and a stretch it "
+                        "cannot measure renders as a face-safe slam that the "
+                        "reply names. I also report how "
                         "much of the text the subject actually crosses — if "
                         "that is near zero the user will see a plain title, so "
                         "move the text or the window. BIG TYPE IS THE LOOK: "
@@ -31846,7 +32029,7 @@ _COMPACT_CONTRACTS = {
         "set replaces one complete layer; upsert patches one object by id; "
         "remove deletes by id; reorder takes all insert ids. Preserve existing "
         "field shapes. Times describe the resulting timeline. Review changed "
-        "moments, then the complete edit."),
+        "moments, then the complete edit. Layer fx: devices (read_skill devices)."),
     "add_text": (
         "Add text in OUTPUT seconds within current program length. Explicit "
         "motion keyframes use seconds relative to text start, bounded by end-start; "
@@ -31869,7 +32052,8 @@ _COMPACT_CONTRACTS = {
         "preview of the current EDL version (render_preview(complete=true); a changed-section "
         "proof is rejected) shows real captions, motion graphics and grade: batch "
         "up to 8 dense output_times around a landing. Read positions off the "
-        "tenths grid. Uploads: look_at_asset."),
+        "tenths grid. overlay=matte|free_space|beats marks subject, free room, "
+        "beats. Uploads: look_at_asset."),
     "look_at_asset": (
         "Inspect an uploaded IMAGE or VIDEO by its exact asset_key from list_assets. "
         "Times are relative to that source. For audio use get_audio_analysis; "
