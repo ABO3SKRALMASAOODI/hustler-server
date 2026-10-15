@@ -1,0 +1,82 @@
+{
+  "id": "depth_dof",
+  "family": "world",
+  "verb": "add_depth_effect",
+  "fx_type": "depth",
+  "stage": "world",
+  "params": {
+    "kind": "dof",
+    "focus": [
+      {
+        "true": "subject"
+      }
+    ],
+    "blur": [
+      0.6,
+      0.8,
+      0.45
+    ],
+    "span": [
+      "phrase"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:varblur",
+      "ffmpeg:overlay"
+    ],
+    "footage": "a person or object in front of a background; depth measured (person matte as the two-plane fallback)"
+  },
+  "binds_to": [
+    "section",
+    "word.payoff",
+    "stress"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 0
+    },
+    "designed": {
+      "per_short": 1,
+      "min_gap_s": 8
+    },
+    "charged": {
+      "per_short": 2,
+      "min_gap_s": 5
+    }
+  },
+  "never": [
+    "on a shot already shallow (the lens did it)",
+    "under text that needs the plate's detail"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    {
+      "reduced": "two planes from the person matte"
+    },
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 10,
+      "batch": 10,
+      "local": 5
+    },
+    "fixed_ms": 250
+  },
+  "exemplars": [
+    "40@≈5–14.3"
+  ],
+  "verify": [
+    "region_locality"
+  ],
+  "status": "live",
+  "description": "Depth of field from measured depth - the subject sharp, the world falls away",
+  "skill": "depth-time"
+}

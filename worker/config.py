@@ -588,6 +588,10 @@ W1F_PROOF_WAIT_S = float(os.getenv("W1F_PROOF_WAIT_S", "240"))
 # depth.small sidecar (Depth Anything V2 Small, batch lane, torch-CPU):
 # keyframe rate and long edge of the depth maps; DEPTH_MODEL overrides the
 # baked weights path (models/depth_anything_v2_small.json).
+DEPTH_MODEL = os.getenv(
+    "DEPTH_MODEL",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                 "models", "depth_anything_v2_vits.pth"))
 DEPTH_KEYFRAME_FPS = float(os.getenv("DEPTH_KEYFRAME_FPS", "8"))
 DEPTH_MAX_SIDE = int(os.getenv("DEPTH_MAX_SIDE", "518"))
 DEPTH_TORCH_THREADS = int(os.getenv("DEPTH_TORCH_THREADS", "4"))

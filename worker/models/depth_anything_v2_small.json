@@ -1,0 +1,18 @@
+{
+  "name": "depth_anything_v2_small",
+  "model_id": "depth_anything_v2_vits",
+  "model_version": "hf-03876f86",
+  "kinds": ["depth.small"],
+  "file": "depth_anything_v2_vits.pth",
+  "url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/resolve/03876f8651c73a60fe4c2c48294e09fcb6838fcf/depth_anything_v2_vits.pth",
+  "source": "https://github.com/DepthAnything/Depth-Anything-V2",
+  "licence": "Apache-2.0",
+  "licence_url": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small/blob/03876f8651c73a60fe4c2c48294e09fcb6838fcf/README.md",
+  "commercial_use": true,
+  "sha256": "715fade13be8f229f8a70cc02066f656f2423a59effd0579197bbf57860e1378",
+  "bytes": 99218434,
+  "images": ["batch", "vision"],
+  "env": "DEPTH_MODEL",
+  "runtime": "torch-CPU (the batch image's torch 2.4.1) + worker/depth_anything (official network code, Apache-2.0)",
+  "notes": "Wave 4 track 4A (INTERFACES_W4.md §2): the depth.small sidecar, keyframes only (8 fps by default, 518-px long side). ONLY the Small checkpoint is Apache-2.0; Base and Large are CC-BY-NC and are refused by this checksum. Measured 0.46 s per 518x924 keyframe on 4 threads (Apple M5 Pro); the batch lane's 4 vCPU are slower. Never loaded by a render, an agent or an MCP lane."
+}

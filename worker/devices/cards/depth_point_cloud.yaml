@@ -1,0 +1,38 @@
+# Track 4A device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (depth_point_cloud). INTERFACES_W4.md §3.2.
+id: depth_point_cloud
+family: world
+verb: add_depth_effect
+fx_type: depth
+stage: world
+params:
+  kind: point_cloud
+  focus:
+  - {on: subject}
+  backdrop: [black, dim]
+  move:
+  - {path: orbit_left, amount: 0.4, ease: in_out}
+  duration_s: [1.6]
+needs:
+  sidecars: []
+  lane_features: [ffmpeg:overlay, ffmpeg:blend]
+  footage: a figure or object with depth (a runner, a product, a face turning); depth measured
+binds_to: [section, drop, word.payoff]
+budget:
+  calm: {per_short: 0}
+  designed: {per_short: 0}
+  charged: {per_short: 1, min_gap_s: 8}
+never: [on a talking head mid-sentence for long (lips vanish into points; hold it for a beat)]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs:
+- full
+- {reduced: silhouette points from the person matte}
+- omit
+cost:
+  ms_per_frame: {interactive: 12, batch: 12, local: 6}
+  fixed_ms: 300
+exemplars: ["01@0.958–3.79", "17@1.83"]
+verify: [region_locality, determinism, flash_risk]
+status: live
+description: A LiDAR-style point cloud of the shot from measured depth - the figure as data
+skill: depth-time

@@ -1,0 +1,32 @@
+# Track 4A device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (depth_light). INTERFACES_W4.md §3.2.
+id: depth_light
+family: world
+verb: add_depth_effect
+fx_type: depth
+stage: world
+params:
+  kind: light
+  strength: [0.6, 0.8]
+  colour: ['#ffd9a0', accent]
+  duration_s: [1.6]
+needs:
+  sidecars: []
+  lane_features: [ffmpeg:maskedmerge, ffmpeg:blend]
+  footage: a scene with depth; depth measured
+binds_to: [section, word.payoff, drop]
+budget:
+  calm: {per_short: 0}
+  designed: {per_short: 0}
+  charged: {per_short: 1, min_gap_s: 8}
+never: [as a transition on every cut]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 8, batch: 8, local: 4}
+  fixed_ms: 200
+exemplars: ["41@≈25–32", "33@≈9–10"]
+verify: [region_locality]
+status: live
+description: A band of light travels through the scene near to far, by measured depth
+skill: depth-time

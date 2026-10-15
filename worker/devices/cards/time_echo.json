@@ -1,0 +1,63 @@
+{
+  "id": "time_echo",
+  "family": "rhythm",
+  "verb": "add_time_effect",
+  "fx_type": "time",
+  "stage": "world",
+  "params": {
+    "kind": "echo"
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [],
+    "footage": "movement worth re-timing (B-roll, a gesture, a walk)"
+  },
+  "binds_to": [
+    "section",
+    "drop",
+    "stress"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 0
+    },
+    "designed": {
+      "per_short": 0
+    },
+    "charged": {
+      "per_short": 1,
+      "min_gap_s": 8
+    }
+  },
+  "never": [
+    "on spoken words (the audio keeps playing forward)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 4,
+      "batch": 4,
+      "local": 2
+    },
+    "fixed_ms": 100
+  },
+  "exemplars": [
+    "40@≈18.3–19.3",
+    "41@≈9–11.7"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "Trails - each frame carries its last few, decaying; motion leaves light behind",
+  "skill": "depth-time"
+}

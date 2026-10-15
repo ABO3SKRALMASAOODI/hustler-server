@@ -60,7 +60,10 @@ _VERIFIED = {}
 def model_path(name):
     import config
     return {"rvm_mobilenetv3": config.MATTE_RVM_MODEL,
-            "yunet": config.YUNET_MODEL}.get(name)
+            "yunet": config.YUNET_MODEL,
+            # Wave 4 (4A): depth.small (INTERFACES_W4.md §2)
+            "depth_anything_v2_small": getattr(config, "DEPTH_MODEL",
+                                               None)}.get(name)
 
 
 def _file_sha(path):
@@ -685,6 +688,17 @@ def _child_main(spec_path):
             res.write(json.dumps(row) + "\n")
             res.flush()
     return 0
+
+
+# Wave 4 (4A): the depth.small child (INTERFACES_W4.md §2); torch and the
+# network load only inside the child process.
+def _child_depth(spec, ch):
+    import depth_track
+    return depth_track.child_depth(spec, ch)
+
+
+CHILD_RUNNERS = CHILD_RUNNERS + ("depth.small",)
+_CHILD["depth.small"] = _child_depth
 
 
 if __name__ == "__main__":

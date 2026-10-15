@@ -81,6 +81,9 @@ CARD_PREFIXES = {"type": "1A", "subject": "1B", "background": "1B",
                  "composite": "1C", "region": "1C", "accent": "1D",
                  "strobe": "1D", "junction": "1D", "grade": "1E",
                  "finish": "1E", "variant": "1E"}
+# Wave 4 (INTERFACES_W4.md §1): depth / time 4A, ui 4B, broll 4C.
+CARD_PREFIXES.update({"depth": "4A", "time": "4A", "ui": "4B",
+                      "broll": "4C"})
 
 # Sidecar kinds a card may need (INTERFACES.md §2.1; reserved names only).
 SIDECAR_KINDS = ("matte.person", "faces.yunet", "rhythm.music",

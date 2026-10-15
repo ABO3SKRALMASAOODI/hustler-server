@@ -1,0 +1,42 @@
+# Track 4A device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (depth_parallax). Contract: devices/INTERFACES.md §5,
+# INTERFACES_W4.md §3.2. Authoring source; compile with
+#   cd worker && python -m devices.compiler
+id: depth_parallax
+family: world
+verb: add_depth_effect
+fx_type: depth
+stage: world
+params:
+  kind: parallax
+  move:
+  - {path: push_in, amount: 0.35, ease: in_out}
+  - {path: drift_left, amount: 0.3, ease: in_out}
+  - {path: orbit_left, amount: 0.4, ease: in_out}
+  span: [payoff_hold]
+needs:
+  sidecars: []
+  lane_features: [ffmpeg:overlay]
+  footage: a still, or a frame the moment can hold (a pause, the payoff hold); depth measured (person matte as the two-plane fallback)
+binds_to: [word.payoff, section]
+budget:
+  calm: {per_short: 1, min_gap_s: 10}
+  designed: {per_short: 1, min_gap_s: 8}
+  charged: {per_short: 2, min_gap_s: 5}
+never:
+- over a sentence still being spoken (a frozen frame stops the lips; use a pause, the payoff hold or a cutaway still)
+- on every archive photo of a montage (vary the move, or let one hold flat)
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs:
+- full
+- {reduced: two planes from the person matte}
+- {substitute: depth_ken_burns}
+- omit
+cost:
+  ms_per_frame: {interactive: 10, batch: 10, local: 5}
+  fixed_ms: 300
+exemplars: ["13@3.44–18.32", "16@9.2–10.1"]
+verify: [region_locality, determinism]
+status: live
+description: A 2.5D move through a still or a held frame, layered by measured depth; archive photos come alive
+skill: depth-time

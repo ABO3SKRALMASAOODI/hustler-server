@@ -1,0 +1,39 @@
+# Track 4A device card (costs: local ms per PREVIEW frame, measured; lanes x2)
+# (depth_rack_focus). INTERFACES_W4.md §3.2.
+id: depth_rack_focus
+family: world
+verb: add_depth_effect
+fx_type: depth
+stage: world
+params:
+  kind: rack_focus
+  focus_from:
+  - {on: background}
+  focus:
+  - {on: subject}
+  rack_f: [12]
+  offset_f: [-12]
+  duration_s: [2.2]
+needs:
+  sidecars: []
+  lane_features: [ffmpeg:varblur, ffmpeg:overlay]
+  footage: two depth planes worth pulling between; depth measured (person matte as the two-plane fallback)
+binds_to: [word.contrast, word.negation, stress, word.payoff]
+budget:
+  calm: {per_short: 0}
+  designed: {per_short: 1, min_gap_s: 8}
+  charged: {per_short: 2, min_gap_s: 5}
+never: [two racks in one sentence, a rack without a turn in the words]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs:
+- full
+- {reduced: two planes from the person matte}
+- omit
+cost:
+  ms_per_frame: {interactive: 10, batch: 10, local: 5}
+  fixed_ms: 250
+exemplars: ["16@9.2–10.1"]
+verify: [land_err_f<=1, region_locality]
+status: live
+description: The focus pulls between depth planes and lands on the word that turns the argument
+skill: depth-time

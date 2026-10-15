@@ -1534,3 +1534,20 @@ def use_launcher(launcher):
     with _LAUNCHER_LOCK:
         prev, _LAUNCHER = _LAUNCHER, launcher
     return prev
+
+
+# ── Wave 4 track 4A: depth.small (worker/devices/INTERFACES_W4.md §2) ───
+# Depth Anything V2 Small keyframes on the batch lane (the one lane with
+# torch). Registered here, after the Wave 0 table, so the kinds above stay
+# byte-identical; the child runner is depth_track.child_depth
+# (analysis_jobs). ms_per_frame: 0.46 s per 518-px keyframe measured on 4
+# local threads, x2 for the batch lane's vCPU.
+_KIND_SPECS["depth.small"] = {
+    "model": "depth_anything_v2_small",
+    "format": "depth.npz.v1", "formats": ("depth.npz.v1",),
+    "ext": "npz", "content_type": "application/octet-stream",
+    "fallback_models": (),
+    "defaults": {"fps": 8.0, "max_side": 518, "input_size": 518},
+    "rate": "fps", "ms_per_frame": 900.0, "group_s": 15.0,
+}
+KINDS = KINDS + ("depth.small",)

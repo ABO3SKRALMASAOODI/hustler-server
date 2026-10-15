@@ -86,8 +86,12 @@ def test_a_key_that_does_not_match_its_range_is_refused(local, clip):
 
 
 def test_unknown_kind_or_no_chunks_is_a_bad_request(local):
+    import analysis_jobs
+    import sidecars
+    unshipped = next(k for k in sidecars.RESERVED_KINDS
+                     if k not in analysis_jobs.CHILD_RUNNERS)
     with pytest.raises(ValueError):
-        _run({"kind": "depth.small", "chunks": [{"key": "x"}]})
+        _run({"kind": unshipped, "chunks": [{"key": "x"}]})
     with pytest.raises(ValueError):
         _run({"kind": "faces.yunet", "chunks": []})
 

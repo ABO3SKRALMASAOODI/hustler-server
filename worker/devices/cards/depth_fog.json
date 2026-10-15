@@ -1,0 +1,69 @@
+{
+  "id": "depth_fog",
+  "family": "world",
+  "verb": "add_depth_effect",
+  "fx_type": "depth",
+  "stage": "world",
+  "params": {
+    "kind": "fog",
+    "strength": [
+      0.6,
+      0.8
+    ],
+    "span": [
+      "phrase"
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:maskedmerge"
+    ],
+    "footage": "a scene with depth (a background to lose); depth measured"
+  },
+  "binds_to": [
+    "section",
+    "phrase_end"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 0
+    },
+    "designed": {
+      "per_short": 0
+    },
+    "charged": {
+      "per_short": 1,
+      "min_gap_s": 8
+    }
+  },
+  "never": [
+    "over a whole short (it is a mood for a passage)"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 6,
+      "batch": 6,
+      "local": 3
+    },
+    "fixed_ms": 200
+  },
+  "exemplars": [
+    "41@≈25–32"
+  ],
+  "verify": [
+    "region_locality"
+  ],
+  "status": "live",
+  "description": "The far planes dissolve into a colour by measured depth - the figure stands out of the haze",
+  "skill": "depth-time"
+}
