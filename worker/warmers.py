@@ -118,7 +118,13 @@ def warm_upload(src, *, budget_s=BUDGET_S):
             if kind in NEVER:
                 continue
             try:
-                out[kind] = sidecars.ensure(kind, src, ranges, priority=prio)
+                params = None
+                if kind == "matte.person":
+                    # the params every Wave 1 reader keys the matte with
+                    import matte_track
+                    params = matte_track.sidecar_params()
+                out[kind] = sidecars.ensure(kind, src, ranges, priority=prio,
+                                            params=params)
             except Exception as e:  # noqa: BLE001
                 print(f"[warmers] {kind} not warmed: {str(e)[:160]}",
                       flush=True)
@@ -138,8 +144,12 @@ def warm_state(src, ranges, kinds=WARM_KINDS):
     for kind in kinds:
         try:
             chunks = sidecars.chunks_for(src.shots, src.duration_s, ranges)
+            params = None
+            if kind == "matte.person":
+                import matte_track
+                params = matte_track.sidecar_params()
             ready = sidecars.ready_chunks(kind, src.sha256, src.shots,
-                                          src.duration_s, ranges)
+                                          src.duration_s, ranges, params)
             out[kind] = round(len(ready) / float(len(chunks)), 3) \
                 if chunks else 0.0
         except Exception:  # noqa: BLE001

@@ -128,7 +128,7 @@ def world_ctx(w, edl, aspect="9:16", workdir=None):
                                (e.get("frame") or {}).get("ratio"))
     idx = w3.index_for(w)
     c = world_layer.Ctx(e, int(W), int(H), 30.0, tl=tl, source=src,
-                        index=idx, workdir=workdir or tempfile.mkdtemp(),
+                        index=idx, workdir=workdir or _tmp(),
                         out_duration=tl.out_duration, src_path=w["path"])
     return c, e
 
@@ -1185,7 +1185,7 @@ def _render(w, edl, out, preview=True, workdir=None):
     import schemas
     src = w3.source_ref(w)
     e = schemas.validate_edl(edl, src.duration_s).model_dump()
-    wd = workdir or tempfile.mkdtemp(prefix="at3_")
+    wd = workdir or _tmp("at3_")
     t0 = time.time()
     renderer.render_edl(e, w3.index_for(w), w["path"], out, wd, preview,
                         want_wm=False, suppress_outro=True)
@@ -1472,7 +1472,7 @@ def _render_l(w, edl, out, preview=True, locals_=None):
     import schemas
     src = w3.source_ref(w)
     e = schemas.validate_edl(edl, src.duration_s).model_dump()
-    wd = tempfile.mkdtemp(prefix="at3e_")
+    wd = _tmp("at3e_")
     t0 = time.time()
     renderer.render_edl(e, w3.index_for(w), w["path"], out, wd, preview,
                         want_wm=False, suppress_outro=True,
@@ -1544,7 +1544,7 @@ def at_3e_1():
     # a cold render: no motion-cache hit for the page
     import motion_engine
     old_cache = motion_engine.CACHE_DIR
-    motion_engine.CACHE_DIR = tempfile.mkdtemp(prefix="at3e1_cache_")
+    motion_engine.CACHE_DIR = _tmp("at3e1_cache_")
     try:
         secs, wd = _render_l(w, edl, out, preview=False, locals_=locals_)
     finally:
@@ -2100,7 +2100,7 @@ def at_3f_4():
     import cv2
     import net_fetch
     import webrecord
-    root = tempfile.mkdtemp(prefix="at3f4_")
+    root = _tmp("at3f4_")
     with open(os.path.join(root, "index.html"), "w") as fh:
         fh.write(_UI_PAGE)
 
@@ -2254,6 +2254,23 @@ BLOCKED = {
 }
 
 
+_TMPS = []
+
+
+def _tmp(prefix="at3w_"):
+    """A scratch dir the case may use; removed after the case (a 60-tile
+    render leaves ~1 GB)."""
+    d = tempfile.mkdtemp(prefix=prefix)
+    _TMPS.append(d)
+    return d
+
+
+def _clean_tmps():
+    import shutil
+    while _TMPS:
+        shutil.rmtree(_TMPS.pop(), ignore_errors=True)
+
+
 def run(ids):
     path = os.path.join(BOARDS, "results.json")
     os.makedirs(BOARDS, exist_ok=True)
@@ -2275,6 +2292,7 @@ def run(ids):
                 r = {"status": "error", "metrics": {},
                      "detail": {"error": f"{type(e).__name__}: {e}",
                                 "trace": traceback.format_exc()[-1500:]}}
+        _clean_tmps()
         r["id"] = i
         r["seconds"] = round(time.time() - t0, 1)
         res[i] = r
