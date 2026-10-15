@@ -20,7 +20,7 @@ other); with no confident downbeat grid the shaper is not offered.
 import math
 
 FILTERS = ("aeval", "asplit", "amix", "lowpass", "highpass", "atrim",
-           "asetpts", "aloop", "adelay", "anull", "afade")
+           "asetpts", "aloop", "adelay", "anull", "afade", "aformat")
 KEEPS_FRAME_TAGS = True            # audio only: picture frames untouched
 HOLE_FADE_MS = 10.0
 OPEN_S = 0.005                     # a filter opens over this (no click)
@@ -69,6 +69,16 @@ class _Arrange:
     def music_bus(self, ctx, items):
         label = ctx.label
         parts = ctx.parts
+        if any(it.get("kind") not in ("montage_intent", "fit_intent")
+               for it in items):
+            # one known layout on the bus before any per-sample gain: aeval
+            # on a MONO track that is later mixed with the stereo program
+            # segfaults ffmpeg (8.0 and 9.0, reproduced) — the whole fx
+            # graph then fell back and the arrangement was silently lost
+            u0 = ctx.uid("arf")
+            parts.append(f"[{label}]aformat=sample_fmts=fltp:"
+                         f"channel_layouts=stereo[{u0}]")
+            label = u0
         for it in sorted(items, key=lambda x: float(x.get("start") or 0)):
             kind = it.get("kind")
             if kind in ("montage_intent", "fit_intent"):

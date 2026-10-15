@@ -412,7 +412,7 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
         if clip is None or clip.empty:
             continue
         args += ["-i", clip.path]
-        inputs.append((next_idx, item, clip))
+        inputs.append((next_idx, _with_look(edl, item), clip))
         next_idx += 1
     if compositor.needed(edl, [it for _i, it, _c in inputs]):
         n_args = len(args)
@@ -427,6 +427,33 @@ def prepare_inputs(edl, workdir, W, H, fps, out_duration, args, next_idx,
             print(f"[render] composites not prepared ({str(e)[:200]}); "
                   "graphics drawn plain", flush=True)
     return inputs, next_idx
+
+
+# Motion templates that ARE the picture for their window (full-frame b-roll,
+# Wave 2 2D): they take the Look the footage around them has, as a
+# full-frame cutaway overlay does (renderer.cutaway_look_chain).
+FULL_FRAME_CUTAWAYS = frozenset(("still_motion",))
+
+
+def _with_look(edl, item):
+    """``item`` with ``_look`` (filters on its own clock) when it is a
+    full-frame cutaway and the edit has a Look or a grade window over it:
+    a B&W section, a mono -> colour drop, the grade, grain and vignette
+    reach the archive still too (the run report's defect 4, which W1 fixed
+    for overlays, on Wave 2's moving stills). Unchanged otherwise."""
+    if item.get("template") not in FULL_FRAME_CUTAWAYS:
+        return item
+    try:
+        import renderer
+        s = float(item["start"]) - float(item.get("phase_s") or 0.0)
+        look = renderer.cutaway_look_chain(
+            edl, s, float(item.get("full_duration_s") or (
+                float(item["end"]) - float(item["start"]))))
+    except Exception as e:  # noqa: BLE001 — the still stays as drawn
+        print(f"[render] motion '{item.get('id')}': look not shared "
+              f"({str(e)[:120]})", flush=True)
+        return item
+    return dict(item, _look=list(look)) if look else item
 
 
 def overlay_clip(parts, vlabel, idx, item, clip, fps, tag, plan=None):
@@ -452,9 +479,24 @@ def overlay_clip(parts, vlabel, idx, item, clip, fps, tag, plan=None):
     s, e = float(item["start"]), float(item["end"])
     # Hold the clip's last frame for a couple of frames: framesync can
     # quantize a fractional program clock a frame past the clip's EOF.
-    parts.append(f"[{idx}:v]setpts=PTS-STARTPTS,format=rgba,"
-                 f"tpad=stop_mode=clone:stop_duration={2.0 / max(fps, 1):.4f},"
-                 f"setpts=PTS+{s:.4f}/TB[{tag}c]")
+    if item.get("_look"):
+        # a full-frame cutaway graded like the picture (its alpha kept: a
+        # fade in or out still dissolves); the look runs on the clip's own
+        # clock (t = 0 at its start), as for overlays
+        k = item.get("phase_s") or 0.0
+        parts.append(f"[{idx}:v]setpts=PTS-STARTPTS,format=rgba,"
+                     f"tpad=stop_mode=clone:stop_duration={2.0 / max(fps, 1):.4f}"
+                     + (f",setpts=PTS+{float(k):.4f}/TB" if k else "")
+                     + f",split=2[{tag}k0][{tag}k1]")
+        parts.append(f"[{tag}k0]format=yuv420p,{','.join(item['_look'])},"
+                     f"format=rgba[{tag}k2]")
+        parts.append(f"[{tag}k1]alphaextract[{tag}k3]")
+        parts.append(f"[{tag}k2][{tag}k3]alphamerge,setpts=PTS-STARTPTS,"
+                     f"setpts=PTS+{s:.4f}/TB[{tag}c]")
+    else:
+        parts.append(f"[{idx}:v]setpts=PTS-STARTPTS,format=rgba,"
+                     f"tpad=stop_mode=clone:stop_duration={2.0 / max(fps, 1):.4f},"
+                     f"setpts=PTS+{s:.4f}/TB[{tag}c]")
     parts.append(f"[{vlabel}][{tag}c]overlay=x={clip.x}:y={clip.y}:eof_action=pass"
                  f":format=auto:enable='gte(t,{s:.4f})*lt(t,{e:.4f})'[{tag}o]")
     return f"{tag}o"

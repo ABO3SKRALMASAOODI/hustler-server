@@ -315,7 +315,11 @@ def test_a_hold_is_silent_sample_accurately_without_clicks():
     # 10 ms ramps either side: no sample jump bigger than the tone's own
     tone = float(np.abs(np.diff(y[:int(0.9 * sr)])).max())
     assert float(np.abs(np.diff(y)).max()) <= tone * 1.05
-    assert np.abs(y[int(1.52 * sr):int(1.6 * sr)]).max() > 0.1
+    # back at the tone's own level after the hold (relative: the bus is
+    # set to stereo before its gains, W2 review — a mono track crashed
+    # ffmpeg — and this harness folds it back to mono)
+    level = float(np.abs(y[:int(0.9 * sr)]).max())
+    assert np.abs(y[int(1.52 * sr):int(1.6 * sr)]).max() > 0.8 * level
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
