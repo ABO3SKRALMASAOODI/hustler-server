@@ -41,7 +41,8 @@ def commit(ctx, operations, summary):
     import edit_batch
     row = ctx.latest_edl()
     try:
-        keys = ctx.db.run(edit_batch.project_media_keys, ctx.project_id)
+        keys = ctx.db.run(edit_batch.project_media_keys,
+                          ctx.project_id) or set()
         updated = edit_batch.apply_batch(row["json"], operations,
                                          ctx.duration or None, keys)
     except (ValueError, TypeError) as exc:

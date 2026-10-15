@@ -58,7 +58,8 @@ import fxprims
 FILTERS = ("split", "trim", "setpts", "tpad", "overlay", "format",
            "alphamerge", "lut", "lutyuv", "color", "gblur", "dilation",
            "erosion", "blend", "scale", "negate", "hue", "loop", "nullsink",
-           "null", "crop", "mix", "fps", "setsar", "pad")
+           "null", "crop", "mix", "fps", "setsar", "pad", "maskedmerge",
+           "mergeplanes")
 # Composites are overlays onto the program stream: frames keep their tags.
 KEEPS_FRAME_TAGS = True
 
@@ -69,6 +70,10 @@ TYPES = ("subject", "background")
 # keep a wider ramp so a grade change never shows a hard seam.
 FIRM_CRISP = (0.30, 0.70)
 FIRM_SOFT = (0.12, 0.88)
+# A crisp device shorter than this keeps its crisp edge on an unsteady
+# chunk (flicker cannot read in a few frames); a poster demotes to a SOFT
+# EDGE, not to a glow (a field with the speaker on it stays that device).
+SOFT_MIN_S = 0.4
 # The poster field encroaches this much (px at a 1080-high frame) into the
 # subject's soft edge: the footage's own background never fringes the field.
 POSTER_CHOKE_PX = 1.5
@@ -83,7 +88,7 @@ RADIAL_RADIUS = 0.08
 # wrap (WRAP x 1 - the tightest tail) on a faint CORE wash.
 GLOW_TAIL = ((0.10, 0.30), (0.25, 0.35), (0.38, 0.35))
 GLOW_WRAP = 0.9
-GLOW_CORE = 0.09
+GLOW_CORE = 0.04
 # Glow and blurs are soft by nature: they are computed at a working height
 # of about SOFT_LINES (a 1920-line final works at 1/4 resolution, a 480-line
 # preview at full), so a preview and its final show the same light and the
@@ -93,6 +98,13 @@ RADIAL_COPIES = 8
 # A coloured light composites its screened picture through min(1, GAIN x
 # light): the RGB round trip only shows where the light itself does.
 LIGHT_ALPHA_GAIN = 8
+# Window-local alpha composites over a yuv420p branch. ``format=yuv420``
+# keeps the branch in yuv420p and leaves every pixel the overlay does not
+# draw exactly as it was; ``format=auto`` moved the branch into an alpha
+# format, whose blend darkened the WHOLE window by 2-4 Y levels on ffmpeg
+# 8.0 (1 on 9.0) even where the overlay is transparent: a visible step at
+# the window's edges, and clone opacity read 0.58 for 0.5 (AT-1B-4).
+YUV_OVER = "overlay=format=yuv420"
 # Echo tint (duotone): tint x clip(LIFT + GAIN x luma).
 DUO_LIFT = 70
 DUO_GAIN = 1.05
@@ -580,12 +592,19 @@ class _Compiler:
         if missing and not rung:
             rung = ("reduced", "the person matte is missing for part of "
                     "this window (that part shows the plain picture)")
-        if item.get("type") == "subject" and item.get("kind") in CRISP_KINDS:
+        if item.get("type") == "subject" and item.get("kind") in CRISP_KINDS \
+                and float(item["end"]) - float(item["start"]) >= SOFT_MIN_S:
+            # an unsteady edge only reads over time: a 2-frame fill flash
+            # keeps its crisp edge whatever the chunk QA says (Wave 1
+            # integration, the S3 board)
             bad = _demote_crisp(info, item)
             if bad:
                 st["mode"] = "soft"
                 rung = ("reduced", "the matte edge is unsteady here (QA "
-                        "over the bar): the crisp effect is drawn as a glow")
+                        "over the bar): " + (
+                            "the poster is drawn with a soft edge"
+                            if item.get("kind") == "poster" else
+                            "the crisp effect is drawn as a glow"))
         return rung
 
     @staticmethod
@@ -787,15 +806,21 @@ class _Compiler:
 
     # -- emit ------------------------------------------------------------
     def stage(self, ctx, items):
-        """Each item is laid over the running program in start order. An
-        item that fails to compile is rolled back ALONE (its filters gone,
-        any mask pad it took from a provider closed with a nullsink, the
-        program label as it was) and reported omit: its siblings in this
-        stage still draw (fxgraph's own rollback drops the whole group)."""
+        """Each item is laid over the running program in layer order, then
+        start order (``_lay_order``): a background swap first, then the
+        tonal moves that re-grade the picture (isolate, negate, exposure),
+        then the drawn subject devices (echo, poster, fill, outline, glow).
+        Where windows overlap a drawn device keeps its colour: red clones
+        over an isolated walk stay red (W1-S3), they are not greyed by the
+        isolate that keeps colour on the live subject. An item that fails
+        to compile is rolled back ALONE (its filters gone, any mask pad it
+        took from a provider closed with a nullsink, the program label as it
+        was) and reported omit: its siblings in this stage still draw
+        (fxgraph's own rollback drops the whole group)."""
         label = ctx.label
         edl_cache = plan_edl(ctx.plan)
         real_mask = ctx.mask
-        for it in sorted(items, key=lambda i: (float(i["start"]), i["id"])):
+        for it in sorted(items, key=_lay_order):
             st = _state(ctx.plan).get(it["id"]) or {"mode": "full"}
             mark, taken = len(ctx.parts), []
 
@@ -820,6 +845,20 @@ class _Compiler:
                 ctx.mask = real_mask
         ctx.label = label
         return label
+
+
+# Lay order within the stage (see _Compiler.stage).
+TONAL_KINDS = ("isolate", "negate", "exposure")
+
+
+def _lay_order(it):
+    if it.get("type") == "background":
+        tier = 0
+    elif it.get("kind") in TONAL_KINDS:
+        tier = 1
+    else:
+        tier = 2
+    return (tier, float(it["start"]), str(it["id"]))
 
 
 def _outputs(parts):
@@ -881,7 +920,9 @@ class _Emit:
             return getattr(self, "sub_" + st["substitute"])(label)
         if it.get("type") == "background":
             return self.background(label)
-        kind = "glow" if st.get("mode") == "soft" else it.get("kind")
+        kind = it.get("kind")
+        if st.get("mode") == "soft" and kind != "poster":
+            kind = "glow"
         return getattr(self, "k_" + kind)(label)
 
     # -- building blocks -------------------------------------------------
@@ -1032,16 +1073,18 @@ class _Emit:
         field = self.colour_layer(resolve_colour(it.get("field"), self.edl,
                                                  "accent"))
         inten = float(_get(it, "intensity", 1.0))
+        firm = FIRM_SOFT if self.st.get("mode") == "soft" else FIRM_CRISP
         if it.get("keep_footage", True):
             a = self.mask_window(self.raw_mask(), invert=True,
-                                 grow_px=-POSTER_CHOKE_PX, intensity=inten)
+                                 grow_px=-POSTER_CHOKE_PX, intensity=inten,
+                                 firm=firm)
             return self.lay(label, field, a)
-        sil = self.mask_window(self.raw_mask(), region=False)
+        sil = self.mask_window(self.raw_mask(), region=False, firm=firm)
         col = self.colour_layer(self.colour("colour", "black"))
         cf, layer = self.lab("cf"), self.lab("pl")
         self.p.append(f"[{col}]format=yuva420p[{cf}a]")
         self.p.append(f"[{cf}a][{sil}]alphamerge[{cf}]")
-        self.p.append(f"[{field}][{cf}]overlay=format=auto,"
+        self.p.append(f"[{field}][{cf}]{YUV_OVER},"
                       f"format=yuv420p[{layer}]")
         alpha = None
         if self.st.get("region"):
@@ -1090,9 +1133,21 @@ class _Emit:
         outside, inside, wrap = L("gx"), L("gy"), L("gw")
         self.p.append(f"[{m}3]negate[{m}n]")
         self.p.append(f"[{tail}][{m}n]blend=all_mode=multiply[{outside}]")
-        # light wrap: just inside the edge the subject catches the light
-        self.p.append(f"[{tails[0]}w]negate,lut=c0='clip(val*{GLOW_WRAP:.4f}"
-                      f"+{GLOW_CORE * 255:.1f},0,255)'[{wrap}]")
+        # light wrap: just inside the edge the subject catches the light,
+        # falling to GLOW_CORE deep inside. The first tail is the blurred
+        # matte times 2 x its weight, so it is normalised back before it is
+        # inverted: un-normalised it never fell below ~0.4 inside, and every
+        # glow washed the whole speaker grey (Wave 1 integration, the S3
+        # board: a dark-suited MCU read as fogged)
+        # The wrap meets the outside light on the edge (a blurred step is
+        # 0.5 there, so 2 x (1 - b) is 1) and fades to the core within
+        # the first tail's reach: a light cliff on the edge made the 4:2:0
+        # chroma of a saturated rim darker than it was (AT-1B-5: -13 on a
+        # blue sweater's edge).
+        w0 = 2.0 * GLOW_TAIL[0][1]
+        self.p.append(f"[{tails[0]}w]lut=c0='clip(min(255,(255-min(255,val/"
+                      f"{w0:.4f}))*2)*{GLOW_WRAP:.4f}+{GLOW_CORE * 255:.1f},"
+                      f"0,255)'[{wrap}]")
         self.p.append(f"[{wrap}][{m}4]blend=all_mode=multiply[{inside}]")
         inten = max(0.0, min(1.0, float(intensity)))
         self.p.append(f"[{outside}][{inside}]blend=all_mode=addition,"
@@ -1102,18 +1157,42 @@ class _Emit:
             out = self.intersect_region(out)
         return out
 
+    def white_lerp(self, pic, light):
+        """``pic`` lerped to white through ``light`` (window-local gray),
+        its chroma through the MINIMUM light of each 2x2 block. Overlay's
+        4:2:0 blend averages the block's alpha for chroma, so on a light
+        gradient a saturated pixel's chroma was pulled to neutral harder
+        than its luma brightened and its rim read darker than the
+        program (AT-1B-5: -13 on a blue sweater's edge). With the chroma
+        alpha never above any of its pixels' luma alpha no channel falls:
+        light only adds."""
+        L = self.lab
+        ly, lc, cu, cv = L("wy"), L("wc"), L("wu"), L("wv")
+        mk, wh, out = L("wm"), L("wh"), L("wl")
+        self.p.append(f"[{light}]format=gray,split[{ly}][{lc}]")
+        self.p.append(f"[{lc}]erosion,scale={self.W // 2}:{self.H // 2}:"
+                      f"flags=neighbor,split[{cu}][{cv}]")
+        self.p.append(f"[{ly}][{cu}][{cv}]mergeplanes=0x001020:yuv420p"
+                      f"[{mk}]")
+        self.p.append(f"[{self.colour_layer('#ffffff')}]format=yuv420p"
+                      f"[{wh}]")
+        self.p.append(f"[{pic}][{wh}][{mk}]maskedmerge[{out}]")
+        return out
+
     def screen_light(self, label, light_alpha, tint):
         """screen(P, tint x light) inside the window.
 
         A white light is exactly a lerp to white (screen(P, L) = P + L x
-        (1 - P)), which is linear in Y'CbCr too: it is laid as white through
-        the light as alpha, with no colour round trip at all. A coloured
+        (1 - P)), which is linear in Y'CbCr too: it is a lerp to white
+        through the light (``white_lerp``), with no colour round trip at
+        all. A coloured
         light is screened in RGB and laid back through a soft alpha
         (min(1, 8 L)), so where the light is faint the RGB round trip's
         chroma-edge rounding cannot show; where there is no light the
         program is untouched."""
         if str(tint).lower() == "#ffffff":
-            return self.lay(label, self.colour_layer("#ffffff"), light_alpha)
+            main, pw = self.window_pic(label)
+            return self.lay(main, self.white_lerp(pw, light_alpha))
         main, pw = self.window_pic(label)
         la, lb = self.lab("la"), self.lab("lb")
         self.p.append(f"[{light_alpha}]split[{la}][{lb}]")
@@ -1287,14 +1366,14 @@ class _Emit:
             ca, nxt = self.lab("ea"), self.lab("ec")
             self.p.append(f"[{cp}]format=yuva420p[{ca}x]")
             self.p.append(f"[{ca}x][{am}]alphamerge[{ca}]")
-            self.p.append(f"[{canvas}][{ca}]overlay=format=auto,"
+            self.p.append(f"[{canvas}][{ca}]{YUV_OVER},"
                           f"format=yuv420p[{nxt}]")
             canvas = nxt
         sp = window_of(pics[k_n + 1], lead, ",format=yuva420p")
         sm = window_of(masks[0], lead)
         cur, res = self.lab("es"), self.lab("er")
         self.p.append(f"[{sp}][{sm}]alphamerge[{cur}]")
-        self.p.append(f"[{canvas}][{cur}]overlay=format=auto,"
+        self.p.append(f"[{canvas}][{cur}]{YUV_OVER},"
                       f"format=yuv420p[{res}]")
         return self.lay(main, res, self.region_alpha())
 
@@ -1443,7 +1522,7 @@ class _Emit:
         kp = L("bk")
         self.p.append(f"[{keep}]format=yuva420p[{kp}x]")
         self.p.append(f"[{kp}x][{wt}f]alphamerge[{kp}]")
-        self.p.append(f"[{fill}][{kp}]overlay=format=auto,format=yuv420p"
+        self.p.append(f"[{fill}][{kp}]{YUV_OVER},format=yuv420p"
                       f"[{out}]")
         return out
 
@@ -1582,7 +1661,7 @@ class _Emit:
                       f"[{cp}]")
         self.p.append(f"[{cp}][{cm}]alphamerge[{cc}]")
         self.p.append(f"[{field}][{cc}]overlay=x={(self.W - cw) // 2}:"
-                      f"y={(self.H - ch) // 2}:format=auto,format=yuv420p"
+                      f"y={(self.H - ch) // 2}:format=yuv420,format=yuv420p"
                       f"[{res}]")
         return self.lay(main, res, self.region_alpha())
 

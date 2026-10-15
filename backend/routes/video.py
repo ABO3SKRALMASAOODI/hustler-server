@@ -135,6 +135,10 @@ wmusic = _pure_worker_module("music_gate")
 # Device re-solvers after a keep change (Wave 0; INTERFACES.md §6.4): the
 # Studio keep path runs the same pure hooks the agent's keep writes run.
 whooks = _pure_worker_module("hooks")
+# Owner taste (15 Oct): black and white is a device, never a flat look. An
+# MCP batch carries no user words, so a batch that makes the whole short B&W
+# is applied with the advisory the worker's writes give (worker/mono_policy).
+wmono = _pure_worker_module("mono_policy")
 
 video_bp = Blueprint("video", __name__)
 
@@ -4816,6 +4820,15 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                                        normalized)
             if refusal:
                 return {"error": refusal[:500]}, 400
+        notes = []
+        if origin == "mcp":
+            try:
+                _none, mono_note = wmono.check_write("", latest["json"],
+                                                     normalized)
+            except Exception:  # an advisory never fails a batch
+                mono_note = None
+            if mono_note:
+                notes.append(mono_note)
         work = wplayback.changed_work(latest["json"], normalized)
         changed = wschemas.edl_signature(latest["json"]) != wschemas.edl_signature(normalized)
         version = base
@@ -4834,6 +4847,8 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                         (Json({"superseded_by": version}), project_id, version))
         result = dict(version=version, no_change=not changed, preview_on_demand=True,
                       work=work, review_status="pending" if changed else "unchanged")
+        if notes:
+            result["notes"] = notes
         cur.execute("""INSERT INTO chat_messages (session_id,role,content,meta)
                        VALUES (%s,'activity',%s,%s)""",
                     (project["chat_session_id"], f"{origin} → EDL v{version}: applied edit batch",

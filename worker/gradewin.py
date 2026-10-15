@@ -69,6 +69,11 @@ COST_LUT_EXTRA = (200.0, 0.5, 13.0)
 # JSON). Production never sets either.
 ASSET_LOCALS = {}
 
+# Exact RGB round trips for the RGB-only filters (lut3d): planar gbrp with
+# accurate rounding and full chroma interpolation (see the lut3d chain).
+RGB_IN = "scale=flags=accurate_rnd+full_chroma_int,format=gbrp"
+YUV_OUT = "scale=flags=accurate_rnd+full_chroma_int,format=yuv420p"
+
 
 # ── the hue key (peer for 1B) ────────────────────────────────────────────
 
@@ -492,8 +497,12 @@ def grade_graph(parts, src, u, item, W, H, *, lut_path=None,
             orig, base = f"{u}s0", f"{u}s1"
         else:
             orig, base = None, src
-        parts.append(f"[{base}]lut3d=file='{_escape(lut_path)}'"
-                     f":interp=tetrahedral,scale,format=yuv420p[{u}L]")
+        # planar RGB with accurate rounding both ways: left to negotiation
+        # lut3d took packed rgb24, whose conversion on ffmpeg 8.x (the
+        # production lanes) darkened every pixel ~1.9 levels even through
+        # an identity cube (AT-1E-6 failed on 8.0: set dE 17.7, 2.4 on 9.0)
+        parts.append(f"[{base}]{RGB_IN},lut3d=file='{_escape(lut_path)}'"
+                     f":interp=tetrahedral,{YUV_OUT}[{u}L]")
         parts.append(f"[{u}L]extractplanes=y+u+v[{u}y][{u}u][{u}v]")
         if orig is not None:
             parts.append(f"[{orig}]extractplanes=y+u+v"

@@ -147,7 +147,9 @@ W1_VERBS = {"add_subject_effect", "set_background", "remove_subject_effect",
             "set_junction", "remove_punctuation", "set_grade_window",
             "isolate_colour", "import_lut", "match_grade", "add_finish",
             "make_variant_set", "remove_finish", "suggest_devices",
-            "set_intensity", "proof_device", "audit_motion"}
+            "set_intensity", "proof_device", "audit_motion",
+            # Wave 1 integration: recipes (INTERFACES_W1.md §10)
+            "suggest_recipes", "apply_recipe"}
 # Growth later waves declare in tests/fixtures/waves/w<N>.json
 # (INTERFACES_W4.md §8.2), set aside exactly.
 import later_waves                                     # noqa: E402

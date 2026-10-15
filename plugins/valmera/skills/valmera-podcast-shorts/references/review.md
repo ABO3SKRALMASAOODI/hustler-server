@@ -131,7 +131,7 @@ a fair fix.
 | Editorial Serif | a quiet field, serif contrast on the right word, depth behind the subject |
 | Kinetic Poster | captions perform almost every stressed word (sound only on the few that earn it), hero graphics add information; the payoff is the biggest event |
 | Cinematic Doc | graded and textured; archive feels like film |
-| Mono Noir | stark monochrome, red only where it matters, any sound hits with weight |
+| Mono Noir | stark noir colour, B&W only as a device on its moment (never the whole short), red only where it matters, any sound hits with weight |
 | Clean Data | numbers become pictures, and a settled figure lands (one sound at most) |
 | Creator Glow | glowing words build beside the face; the hook reads before the sentence ends |
 

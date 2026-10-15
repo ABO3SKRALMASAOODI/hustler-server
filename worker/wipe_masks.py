@@ -420,15 +420,10 @@ EARLY_US = 2
 
 
 def repad(f0, fps, alpha=False):
-    """fxprims.repad with the rounded stamp (see ``pts``), a hair early (see
-    ``EARLY_US``): a window branch re-padded to the program clock from frame
-    ``f0``."""
+    """fxprims.repad (rounded, microsecond time base, ``EARLY_US`` early):
+    the shared primitive now carries this track's fix, so there is one."""
     import fxprims
-    color = "black@0" if alpha else "black"
-    lead = f"start={int(f0)}:" if f0 > 0 else ""
-    f3 = float(fxprims.fps3(fps))
-    return (f",tpad={lead}stop=1:start_mode=add:stop_mode=add:color={color},"
-            f"settb=AVTB,setpts='round(N/{f3:.3f}/TB)-{EARLY_US}*gt(N,0)'")
+    return fxprims.repad(f0, fps, alpha=alpha)
 
 
 # ── files ───────────────────────────────────────────────────────────────

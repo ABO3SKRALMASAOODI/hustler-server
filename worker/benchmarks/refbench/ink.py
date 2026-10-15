@@ -45,7 +45,7 @@ def capture_overlays():
     rec = {}
     orig = motion_layer.overlay_clip
 
-    def wrapped(parts, vlabel, idx, item, clip, fps, tag):
+    def wrapped(parts, vlabel, idx, item, clip, fps, tag, **kw):
         iid = item.get("id")
         if iid and iid not in rec and getattr(clip, "path", None):
             rec[iid] = {"path": clip.path, "x": int(clip.x),
@@ -54,7 +54,8 @@ def capture_overlays():
                         "end": float(item["end"]),
                         "template": item.get("template"),
                         "layer": item.get("layer")}
-        return orig(parts, vlabel, idx, item, clip, fps, tag)
+        # **kw: the render's fx plan (Wave 1: composites read its masks)
+        return orig(parts, vlabel, idx, item, clip, fps, tag, **kw)
     motion_layer.overlay_clip = wrapped
     try:
         yield rec

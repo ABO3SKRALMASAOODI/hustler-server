@@ -385,7 +385,12 @@ def composite_behind_switch():
             side = getattr(clip, "composite", None)
             if not (side and side.stroke and side.ghost):
                 continue
-            i = parts.index(f"[bhf{j}][bhm{j}]alphamerge[bhfa{j}]")
+            pat = f"[bhf{j}][bhm{j}]alphamerge[bhfa{j}]"
+            if pat not in parts:
+                # 1A's real seam (merged): motion_layer.composite_behind
+                # already split the mask and laid the ghost pass itself
+                continue
+            i = parts.index(pat)
             parts[i:i + 1] = [f"[bhm{j}]split[bhm{j}s][bhm{j}g]",
                               f"[bhf{j}][bhm{j}s]alphamerge[bhfa{j}]"]
             k = next(n for n, p in enumerate(parts)

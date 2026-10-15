@@ -770,7 +770,8 @@ def _scene_boxes(ctx, edl, item):
         return []
 
 
-def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=()):
+def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(),
+              mark=None, pin=None):
     """Search and verify a clear placement: (patch, real ink box, params,
     the verifying probe report) or None. Alternatives the solver cannot
     predict (another align/side) are probed first, then the cheapest
@@ -803,6 +804,7 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(
             if rep and not rep.get("errors") and rep.get("visible_frames"):
                 variants.append((a, keepout.settled_ink(rep, times)))
     mouths = keepout.zones_of(track, keepout.mouth_zone)
+    chins = keepout.zones_of(track, keepout.chin_zone)
     known = []                       # measured (patch without y, box at the current y)
     ycur = keepout.num(item.get("params") or {}, "y", (pspec.get("y") or {}).get("default", 0.5))
     room = bands[2] if len(bands) > 2 else None
@@ -817,7 +819,8 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(
             picks = fallback
         else:
             kw = dict(captions=bands[0], near_captions=bands[1], predict=rnd == 0,
-                      mouths=mouths, scene=scene,
+                      mouths=mouths, scene=scene, chins=chins, mark=mark,
+                      pin_size=bool(pin),
                       clear_penalty=keepout.CLEAR_PENALTY if off_face else 0.0)
             args = (item["template"], spec, item.get("params") or {},
                     box if rnd == 0 else None, variants if rnd == 0 else known,
@@ -848,13 +851,14 @@ def _relocate(item, spec, box, zones, track, W, H, bands, off_face=True, scene=(
             real = keepout.settled_ink(rep, times)
             if not real:
                 continue
-            if not keepout.safe_issues(real, W, H) and not keepout.assess(real, track)["hit"]:
+            if not keepout.safe_issues(real, W, H) and not keepout.assess(real, track)["hit"] \
+                    and not keepout.on_mark(real, mark):
                 return patch, real, trial["params"], rep
             # the real box of that knob setting, for a y-only second round
             dy = float(patch.get("y", ycur)) - ycur if "y" in patch else 0.0
             known.append(({k: v for k, v in patch.items() if k != "y"},
                           keepout.shift(real, 0.0, -dy)))
-        if rnd == 0:
+        if rnd == 0 and not pin:
             known += _size_ladder(item, spec, W, H, times)
     return None
 
@@ -1007,6 +1011,59 @@ BRIDGE_LINE_CHARS = caption_carry.BRIDGE_LINE_CHARS
 _bridged = caption_carry.bridged_box
 
 
+def _pinned_size(spec, item):
+    """The size knob (width/size/scale) the keep-out may NOT step down: one
+    the editor set (a value other than the template's default). Oct 11 run:
+    set_motion_graphic(width=0.544) came back at 0.435 — and an end-time-only
+    write did the same — because the ESTIMATED box (18% taller than the
+    render) grazed the mouth; the hook rendered at 6.6% of the frame, under
+    the 7% floor, and the short was killed. An explicit size moves (y, x,
+    align) or stays where it is with a NOTE; it is never shrunk silently.
+    None when the size is the template's own default."""
+    pspec = (spec or {}).get("params") or {}
+    sizer = next((k for k in ("width", "size", "scale")
+                  if (pspec.get(k) or {}).get("type") == "float"), None)
+    if not sizer:
+        return None
+    sp = pspec[sizer]
+    default = sp.get("default", sp.get("max"))
+    val = (item.get("params") or {}).get(sizer)
+    if val is None or default is None:
+        return None
+    try:
+        return sizer if abs(float(val) - float(default)) > 1e-6 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _mark_of(item, W, H, ctx=None, edl=None):
+    """The corner mark's reserved box a graphic keeps off (keepout.on_mark),
+    or None: a persistent band headline (band_type lays it out around the
+    mark), a portrait frame's absence, or a graphic over a picture card's
+    or letterbox's band (the band machinery judges those: _band_spill_note
+    names a lockup rising into the mark's zone, and the render measures
+    it; moving it here pushed band lockups down onto the card)."""
+    if motion_templates.persistent(item) or not keepout.portrait(W, H):
+        return None
+    if edl is not None:
+        try:
+            video = (getattr(ctx, "index", None) or {}).get("video") or {}
+            src = ((video["width"], video["height"])
+                   if video.get("width") and video.get("height")
+                   and not edl.get("canvas") else None)
+            if headline_band(edl, float(item["start"]), float(item["end"]),
+                             W, H, src=src):
+                return None
+        except Exception:  # noqa: BLE001 — no band known: judge the mark
+            pass
+    return keepout.mark_zone(W, H)
+
+
+def _what_hit(hit):
+    return ("the speaker's mouth" if hit.get("mouth") else
+            "the speaker's chin" if hit.get("chin") else "the speaker's face")
+
+
 def _keep_out_estimated(ctx, edl, item):
     """The keep-out on a lane with no browser to probe the composition. The
     agent, MCP and shorts lanes ship no Chromium, so this is what production
@@ -1041,11 +1098,15 @@ def _keep_out_estimated(ctx, edl, item):
     face_bad = hit["hit"] and not allow
     issues = ([i for i in keepout.safe_issues(box, W, H) if i in ("side", "rail")]
               if template in keepout.COLUMN_TEMPLATES else [])
+    mark = _mark_of(item, W, H, ctx, edl)
+    if keepout.on_mark(box, mark):
+        issues.append("mark")
+    pin = _pinned_size(spec, item)
     bands = _caption_anchors(ctx, edl, item)
     notes = []
     if face_bad or (issues and not allow):
         why = []
-        what = "the speaker's mouth" if hit["mouth"] else "the speaker's face"
+        what = _what_hit(hit)
         if face_bad:
             w0, w1 = hit["when"]
             why.append(f"covered {what} at {w0:.2f}-{w1:.2f}s")
@@ -1054,6 +1115,8 @@ def _keep_out_estimated(ctx, edl, item):
                   near_captions=[keepout.caption_obstacle(y) for y in bands],
                   room=keepout.caption_room(bands, zones, W, H),
                   mouths=keepout.zones_of(track, keepout.mouth_zone),
+                  chins=keepout.zones_of(track, keepout.chin_zone),
+                  mark=mark, pin_size=bool(pin),
                   clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0,
                   scene=_scene_boxes(ctx, edl, item))
         params0 = item.get("params") or {}
@@ -1098,11 +1161,15 @@ def _keep_out_estimated(ctx, edl, item):
             moved = True
             break
         if not moved:
+            kept = (f" Its {pin} {_fmt(params0.get(pin))} is yours, so the "
+                    "keep-out did not shrink it." if pin else "")
             notes.append(
                 f"NOTE (keep-out, estimated): by the template's estimated size it "
-                f"{' and '.join(why)}, and no clear zone fits it. Make it smaller"
-                + (" or move it to a moment where the face is elsewhere (or "
-                   "allow_face_overlap=true if deliberate)." if face_bad else "."))
+                f"{' and '.join(why)}, and no clear zone fits it." + kept
+                + " Check the preview's measured frames"
+                + (": move it (y), shorten the copy, put it on a moment where "
+                   "the face is elsewhere, or pass allow_face_overlap=true if "
+                   "deliberate." if face_bad else ": make it smaller or move it."))
     elif allow and issues:
         notes.append("NOTE (keep-out, estimated): kept as designed (allow_face_overlap), but by "
                      "the template's estimated size it "
@@ -1135,6 +1202,10 @@ def _keep_out_inner(ctx, edl, item, rep):
     allow = bool(item.get("allow_face_overlap"))
     hit = keepout.assess(box, track)
     issues = keepout.safe_issues(box, W, H)
+    mark = _mark_of(item, W, H, ctx, edl)
+    if keepout.on_mark(box, mark):
+        issues.append("mark")
+    pin = _pinned_size(spec, item)
     movable = keepout.applicable(template, spec, item.get("layer"))
     bands = _caption_anchors(ctx, edl, item)
     notes = []
@@ -1142,7 +1213,7 @@ def _keep_out_inner(ctx, edl, item, rep):
     if movable and not allow and (face_bad or issues):
         why = []
         if face_bad:
-            what = "the speaker's mouth" if hit["mouth"] else "the speaker's face"
+            what = _what_hit(hit)
             w0, w1 = hit["when"]
             why.append(f"covered {what} at {w0:.2f}-{w1:.2f}s")
         why += [keepout.ISSUE_TEXT[i] for i in issues]
@@ -1155,7 +1226,8 @@ def _keep_out_inner(ctx, edl, item, rep):
                           ([keepout.caption_band(y) for y in bands],
                            [keepout.caption_obstacle(y, grow) for y in bands],
                            keepout.caption_room(bands, zones, W, H, grow)),
-                          off_face=face_bad, scene=_scene_boxes(ctx, edl, item))
+                          off_face=face_bad, scene=_scene_boxes(ctx, edl, item),
+                          mark=mark, pin=pin)
         if found:
             patch, real, params, rep = found
             old = item.get("params") or {}
@@ -1184,8 +1256,11 @@ def _keep_out_inner(ctx, edl, item, rep):
                         "no placement its own y/x/size reach fits the 9:16 safe area")
             notes.append(
                 f"NOTE (keep-out): it {' and '.join(why)}{face}, and {where_to} (6% side "
-                "margins, the right 12% clear between y 0.5 and 0.85, nothing below y 0.80). "
-                "It stays where it is: make it smaller or shorter"
+                "margins, the right 12% clear between y 0.5 and 0.85, nothing below y 0.80, "
+                "the corner mark's box top-left). "
+                + (f"Its {pin} {_fmt((item.get('params') or {}).get(pin))} is yours, so "
+                   "it was not shrunk. " if pin else "")
+                + "It stays where it is: make it smaller or shorter"
                 + (", put it on a moment where the face is elsewhere, use "
                    "layer='behind_subject' for type behind the speaker, or pass "
                    "allow_face_overlap=true if covering the face is deliberate." if face_bad
