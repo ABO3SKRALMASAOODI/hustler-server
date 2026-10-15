@@ -1,0 +1,28 @@
+# Track 1E device card (grade_isolate_hue). Contract: devices/INTERFACES.md §5.
+id: grade_isolate_hue
+family: finish
+verb: isolate_colour
+fx_type: grade_window
+stage: world
+params:
+  isolate:
+  - {hue: auto, tolerance: 0.12, softness: 0.1}
+needs:
+  sidecars: []
+  lane_features: ['ffmpeg:maskedmerge']
+binds_to: [section, time]
+budget:
+  calm: {per_short: 1}
+  designed: {per_short: 2}
+  charged: {per_short: 3}
+never: [when the kept hue is the skin of the speaker, two finish families in one section]
+owner_flags: {adds_sound: false, adds_zoom: false, flash: false}
+rungs: [full, omit]
+cost:
+  ms_per_frame: {interactive: 9.6, batch: 9.6, local: 4.8}
+  fixed_ms: 300
+exemplars: [40@≈0–23, 18@7.56, 21@0.58]
+verify: [region_locality, determinism]
+status: live
+description: 'Keep one colour, the world mono: the red jacket in a grey world'
+skill: finishing

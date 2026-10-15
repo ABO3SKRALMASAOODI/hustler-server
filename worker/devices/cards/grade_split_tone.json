@@ -1,0 +1,74 @@
+{
+  "id": "grade_split_tone",
+  "family": "finish",
+  "verb": "set_grade_window",
+  "fx_type": "grade_window",
+  "stage": "world",
+  "params": {
+    "split_tone": [
+      {
+        "shadows": "#1f4e79",
+        "highlights": "#e9b44c",
+        "balance": 0.0
+      }
+    ],
+    "protect": [
+      [
+        "skin"
+      ]
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:maskedmerge"
+    ]
+  },
+  "binds_to": [
+    "section",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1
+    },
+    "designed": {
+      "per_short": 2
+    },
+    "charged": {
+      "per_short": 3
+    }
+  },
+  "never": [
+    "decoration with no metaphor behind it",
+    "two finish families in one section"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 11.8,
+      "batch": 11.8,
+      "local": 5.9
+    },
+    "fixed_ms": 600
+  },
+  "exemplars": [
+    "12@4.417",
+    "19@4.90"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "A split tone (cool shadows, warm highlights) with skin and the brand hue protected",
+  "skill": "finishing"
+}

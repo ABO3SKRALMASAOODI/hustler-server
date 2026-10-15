@@ -1,0 +1,75 @@
+{
+  "id": "finish_band_tear",
+  "family": "finish",
+  "verb": "add_finish",
+  "fx_type": "finish",
+  "stage": "pre_captions",
+  "params": {
+    "kind": [
+      "band_tear"
+    ],
+    "strength": [
+      1.0,
+      0.75
+    ]
+  },
+  "needs": {
+    "sidecars": [],
+    "lane_features": [
+      "ffmpeg:swaprect"
+    ]
+  },
+  "binds_to": [
+    "cut",
+    "section",
+    "beat",
+    "drop",
+    "word.payoff",
+    "time"
+  ],
+  "budget": {
+    "calm": {
+      "per_short": 1,
+      "min_gap_s": 6
+    },
+    "designed": {
+      "per_short": 2,
+      "min_gap_s": 3
+    },
+    "charged": {
+      "per_short": 4,
+      "min_gap_s": 1.5
+    }
+  },
+  "never": [
+    "decoration with no metaphor behind it",
+    "two finish families in one section"
+  ],
+  "owner_flags": {
+    "adds_sound": false,
+    "adds_zoom": false,
+    "flash": false
+  },
+  "rungs": [
+    "full",
+    "omit"
+  ],
+  "cost": {
+    "ms_per_frame": {
+      "interactive": 8.4,
+      "batch": 8.4,
+      "local": 4.2
+    },
+    "fixed_ms": 150
+  },
+  "exemplars": [
+    "24@≈17.7"
+  ],
+  "verify": [
+    "region_locality",
+    "determinism"
+  ],
+  "status": "live",
+  "description": "Bands torn sideways with an RGB split, seeded",
+  "skill": "finishing"
+}

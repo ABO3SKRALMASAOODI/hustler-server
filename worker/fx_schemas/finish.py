@@ -23,6 +23,7 @@ Like every fx_schemas member this imports pydantic, the standard library and
 its own package only (the backend loads schemas.py by path).
 """
 
+import re
 from typing import ClassVar, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -30,8 +31,8 @@ from pydantic import BaseModel, Field, model_validator
 from . import FxColour, FxItemBase, FxRegion, live, region_check
 
 TRACK = "1e"
-# Track 1E flips this when gradewin.py and finish.py compile both types.
-LIVE = False
+# Track 1E: gradewin.py and finish.py compile both types.
+LIVE = True
 
 FINISH_KINDS = ("lcd", "crt", "led", "halftone", "xerox", "band_tear",
                 "film", "thermal", "xray", "blueprint", "line_art",
@@ -42,6 +43,53 @@ VARIANT_KINDS = ("photo", "negative", "line", "blueprint", "thermal", "xray",
                  "solarise", "posterise", "kaleidoscope", "pixel_stretch",
                  "night_vision", "halftone")
 PROTECT = ("skin", "brand")
+# Palettes a finish kind may name (None = its default).
+FINISH_PALETTES = {
+    "thermal": ("iron", "rainbow", "white_hot", "black_hot"),
+    "halftone": ("newsprint", "red", "blue", "black"),
+    "night_vision": ("phosphor", "goggles"),
+    "blueprint": ("blue", "dark"),
+    "line_art": ("paper", "ink"),
+}
+# Finish kinds that flip the picture's luminance: a short full-frame window
+# of one is a flash (flash_safety reads flash_times).
+LUMA_FLIP_KINDS = ("thermal", "xray", "blueprint", "solarise", "line_art",
+                   "night_vision", "halftone", "xerox")
+# A window shorter than this, over most of the frame, reads as a flash.
+FLASH_WINDOW_S = 0.5
+FLASH_AREA = 0.25
+_HEX = re.compile(r"^#[0-9a-f]{6}$")
+
+
+def _region_area(region):
+    """Frame share a region covers (the largest keyframe), or None when it
+    is an anchor (glyph, face, card: never a full-frame flash)."""
+    if region is None:
+        return 1.0
+    if region.invert:
+        return 1.0
+    boxes = []
+    if region.shape in ("rect", "ellipse"):
+        if region.box:
+            boxes.append(region.box)
+        boxes += [[*k.points[0], *k.points[1]] for k in region.keys or []]
+        k = 1.0 if region.shape == "rect" else 0.785
+        return max((max(0.0, min(1.0, b[2]) - max(0.0, b[0])) *
+                    max(0.0, min(1.0, b[3]) - max(0.0, b[1])) * k
+                    for b in boxes), default=0.0)
+    if region.shape == "polygon":
+        polys = ([region.points] if region.points else []) + \
+            [k.points for k in region.keys or []]
+        best = 0.0
+        for pts in polys:
+            a = 0.0
+            for i in range(len(pts)):
+                x0, y0 = pts[i]
+                x1, y1 = pts[(i + 1) % len(pts)]
+                a += x0 * y1 - x1 * y0
+            best = max(best, abs(a) / 2)
+        return min(1.0, best)
+    return None
 
 
 class GradeLut(BaseModel):
@@ -53,6 +101,15 @@ class GradeLut(BaseModel):
     # match: the program second of the hero frame it was matched to
     match_t: Optional[float] = Field(default=None, ge=0.0,
                                      allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _a_cube(self):
+        # import_lut / match_grade store canonical ``.cube`` assets; any
+        # other project media (a video) is never fetched as a LUT
+        if not self.asset_key.strip().lower().endswith(".cube"):
+            raise ValueError("lut.asset_key names a .cube asset (import_lut "
+                             "or match_grade stores one)")
+        return self
 
 
 class HueKey(BaseModel):
@@ -107,6 +164,19 @@ class GradeWindowFx(FxItemBase):
     ramp_in_f: int = Field(default=0, ge=0, le=48)
     ramp_out_f: int = Field(default=0, ge=0, le=48)
     region: Optional[FxRegion] = None
+    # The hue ``protect: [brand]`` keeps (#rrggbb, solved from the Look at
+    # write time; without it brand protection protects nothing).
+    brand_hue: Optional[str] = Field(default=None, min_length=7,
+                                     max_length=7)
+
+    @model_validator(mode="after")
+    def _brand_hue(self):
+        if self.brand_hue is not None:
+            h = self.brand_hue.strip().lower()
+            if not _HEX.match(h):
+                raise ValueError("brand_hue is #rrggbb")
+            self.brand_hue = h
+        return self
 
     @model_validator(mode="after")
     def _changes_something(self):
@@ -120,10 +190,37 @@ class GradeWindowFx(FxItemBase):
 
     def check(self, ctx):
         region_check(self.region, ctx, f"fx {self.id}")
+        n = int(round((self.end - self.start) * 100)) if \
+            self.start is not None and self.end is not None else 0
+        if n and (self.ramp_in_f or self.ramp_out_f):
+            # ramps are whole frames inside the window (at <= 60 fps a
+            # frame is >= 1.67 cs)
+            if (self.ramp_in_f + self.ramp_out_f) * 1.67 > n + 1e-6:
+                raise ValueError(f"fx {self.id}: ramps of "
+                                 f"{self.ramp_in_f}+{self.ramp_out_f} frames "
+                                 "do not fit in the window")
+
+    def flash_times(self):
+        """A short full-frame exposure jump is a flash; a colour change
+        (mono, a hue key, a LUT) is not. Ramps do not exempt it: a window
+        under half a second goes up AND back down inside it, which is the
+        opposing pair of transitions a flash is, eased or not."""
+        if self.start is None or self.end is None:
+            return []
+        area = _region_area(self.region)
+        short = (self.end - self.start) < FLASH_WINDOW_S
+        if area is not None and area >= FLASH_AREA and short and \
+                abs(self.ev or 0.0) >= 1.0:
+            return [self.start]
+        return []
 
     def describe(self):
         bits = [f for f in ("saturation", "ev", "contrast", "lut", "isolate",
                             "split_tone") if getattr(self, f) is not None]
+        if self.isolate is not None:
+            bits[bits.index("isolate")] = f"keep {self.isolate.hue}"
+        if self.ramp_in_f or self.ramp_out_f:
+            bits.append(f"ramps {self.ramp_in_f}/{self.ramp_out_f}f")
         return f"{super().describe()} ({', '.join(bits)})"
 
 
@@ -151,18 +248,50 @@ class FinishFx(FxItemBase):
     palette: Optional[str] = Field(default=None, max_length=40)
     matte_weighted: bool = False
     region: Optional[FxRegion] = None
+    # pixel_stretch: where the smeared column/row sits (0..1 of the frame)
+    # and which way it smears
+    origin: Optional[float] = Field(default=None, ge=0.0, le=1.0,
+                                    allow_inf_nan=False)
+    direction: Optional[Literal["left", "right", "up", "down"]] = None
+    # whole-frame eases into and out of the finish
+    ramp_in_f: int = Field(default=0, ge=0, le=48)
+    ramp_out_f: int = Field(default=0, ge=0, le=48)
 
     @model_validator(mode="after")
     def _kind_fields(self):
         if self.matte_weighted and self.kind not in ("thermal", "xray"):
             raise ValueError("matte_weighted belongs to thermal or xray")
+        if self.palette is not None:
+            allowed = FINISH_PALETTES.get(self.kind)
+            if not allowed:
+                raise ValueError(f"a {self.kind} finish takes no palette")
+            if self.palette not in allowed:
+                raise ValueError(f"palette for {self.kind} is one of "
+                                 f"{', '.join(allowed)}")
+        if (self.origin is not None or self.direction is not None) and \
+                self.kind != "pixel_stretch":
+            raise ValueError("origin and direction belong to pixel_stretch")
         return self
 
     def check(self, ctx):
         region_check(self.region, ctx, f"fx {self.id}")
 
+    def flash_times(self):
+        """A luminance-flipping finish (thermal, X-ray, solarise ...) held
+        for under half a second over most of the frame is a flash, ramped
+        or not (it flips and flips back inside half a second)."""
+        if self.start is None or self.end is None:
+            return []
+        area = _region_area(self.region)
+        if self.kind in LUMA_FLIP_KINDS and area is not None and \
+                area >= FLASH_AREA and self.strength >= 0.5 and \
+                (self.end - self.start) < FLASH_WINDOW_S:
+            return [self.start]
+        return []
+
     def describe(self):
-        return f"{super().describe()} ({self.kind})"
+        extra = f", {self.palette}" if self.palette else ""
+        return f"{super().describe()} ({self.kind}{extra})"
 
 
 FX_MEMBERS = (GradeWindowFx, FinishFx) if live(LIVE, TRACK) else ()
