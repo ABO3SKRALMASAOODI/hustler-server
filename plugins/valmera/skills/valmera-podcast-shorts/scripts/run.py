@@ -1001,6 +1001,7 @@ def delivery_name(meta: dict, count: int) -> str:
     """'<Speaker> - <Title> (<year>) - <N> Finals', the owner's folder pattern."""
     people = [p for p in (meta.get("people_verified") or []) if p]
     speaker = people[0] if people else (meta.get("channel") or "Podcast")
+    speaker = re.sub(r"\s*[(;,].*$", "", str(speaker)).strip() or "Podcast"
     title = (meta.get("title") or "Shorts").strip()
     if title.lower().startswith(speaker.lower()):
         title = title[len(speaker):].lstrip(" :-–—|")

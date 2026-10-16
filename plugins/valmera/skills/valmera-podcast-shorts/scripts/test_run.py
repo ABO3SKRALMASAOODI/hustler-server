@@ -200,6 +200,12 @@ class RunTests(unittest.TestCase):
         self.assertEqual(again["folder"], out["folder"])  # idempotent
         self.assertEqual(self.state()["delivered_to"], out["folder"])
 
+    def test_delivery_name_uses_the_bare_speaker_name(self) -> None:
+        name = run.delivery_name({"people_verified": [
+            "Elon Musk (guest; named in the video title)", "Joe Rogan (host)"],
+            "title": "Joe Rogan Experience #2054 - Elon Musk", "upload_date": "20240627"}, 6)
+        self.assertEqual(name, "Elon Musk - Joe Rogan Experience #2054 - Elon Musk (2024) - 6 Finals")
+
     def test_deliver_requires_a_finalized_run(self) -> None:
         self.add("s01", 11)
         self.fails("finalize the run before delivering", "deliver",
