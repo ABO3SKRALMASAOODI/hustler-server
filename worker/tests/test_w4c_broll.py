@@ -423,12 +423,16 @@ def test_a_cutaway_changes_only_its_window(runs, name):
     ch = _changed(ctl, got)
     assert ch and min(ch) >= 50 and max(ch) < 90, (ch[:3], ch[-3:])
     assert len(ch) == 40                     # every frame of the window
-    # picture only: the decoded sound is the control's (the AAC encoder
-    # may re-pack a frame or two at the start, a few LSBs)
+    # picture only: the decoded sound is the control's. The AAC encoder
+    # may re-pack a frame or two and round differently per platform: on
+    # CI's Linux ffmpeg 8.1 two encodes of the same mix differ by up to 13
+    # LSB (-68 dBFS) where macOS builds differ by 2 (engines release, run
+    # 109); a cutaway that touched the sound would differ by thousands.
     a = _pcm(os.path.join(runs["dir"], "control.mp4"))
     b = _pcm(os.path.join(runs["dir"], f"{name}.mp4"))
-    assert len(a) == len(b) and np.abs(a.astype(int) - b.astype(int))[
-        24000:].max() <= 2
+    d = np.abs(a.astype(int) - b.astype(int))[24000:]
+    assert len(a) == len(b) and d.max() <= 64 and d.mean() <= 1.0, (
+        d.max(), d.mean())
 
 
 @needs_ffmpeg
