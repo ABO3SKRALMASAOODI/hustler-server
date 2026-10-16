@@ -4825,9 +4825,11 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
         cur.execute("SELECT storage_key,duration_s FROM assets WHERE project_id=%s", (project_id,))
         keys = {row["storage_key"]: row for row in cur.fetchall()}
         original = _active_original(cur, project_id)
+        batch_notes = []
         try:
             normalized = wbatch.apply_batch(latest["json"], data.get("operations"),
-                (original or {}).get("duration_s") or None, keys)
+                (original or {}).get("duration_s") or None, keys,
+                notes=batch_notes)
         except (ValueError, TypeError, wschemas.EDLValidationError) as exc:
             return {"error": str(exc)[:500]}, 400
         except Exception as exc:  # an engine fault, not the batch's: name it
@@ -4843,7 +4845,7 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                                        normalized)
             if refusal:
                 return {"error": refusal[:500]}, 400
-        notes = []
+        notes = list(batch_notes)
         if origin == "mcp":
             try:
                 _none, mono_note = wmono.check_write("", latest["json"],

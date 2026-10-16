@@ -9,9 +9,10 @@ import os
 import sys
 
 try:
-    from schemas import FX_AUTHORABLE_TYPES, FX_TYPES, validate_edl
+    from schemas import FX_AUTHORABLE_TYPES, FX_TYPES, program_duration, validate_edl
 except ImportError:
-    from worker_schemas import FX_AUTHORABLE_TYPES, FX_TYPES, validate_edl
+    from worker_schemas import (FX_AUTHORABLE_TYPES, FX_TYPES,
+                                program_duration, validate_edl)
 
 # "fx" (Wave 0 seam, worker/devices/INTERFACES.md §4): registered effect
 # items by id. Accepted here always; advertised in apply_edit_batch's layer
@@ -275,7 +276,99 @@ def _check_new_motion_params(before, edl):
             raise ValueError(f"motion '{item.get('id')}': {e}")
 
 
-def apply_batch(before, operations, duration, allowed_keys):
+# An item whose end is this close to the programme's end before the batch
+# ran with it to the end.
+END_WITH_PROGRAMME_S = 0.06
+# Program-time item lists whose end moves with a shortened programme:
+# (dotted path, display name). Overlays end at start + duration_s.
+_END_LAYERS = (("motion", "motion"), ("texts", "text"), ("vectors", "vector"),
+               ("effects.picture_cards", "picture card"),
+               ("effects.zooms", "zoom"), ("effects.stylize", "stylize"),
+               ("effects.custom", "custom filter"),
+               ("effects.regions", "region"), ("fx", "fx"))
+
+
+def _layer_items(edl, path):
+    node = edl
+    for part in path.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    return [i for i in node or [] if isinstance(i, dict)] \
+        if isinstance(node, list) else []
+
+
+def _programme_end(edl):
+    try:
+        return float(program_duration(edl))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def end_with_programme(before, edl, operations):
+    """A batch that SHORTENS the programme (an insert or a hold removed, a
+    keep trimmed) ends, at the new end, every item the batch did not author
+    that ran with the programme to its old end; the rest that would now end
+    past it are refused together, by name.
+
+    The batch contract stands: authored times describe the resulting
+    timeline, so nothing the batch names is moved and no start is ever
+    remapped. Without this, removing a payoff hold failed one layer at a
+    time: the owner's Jensen run, s25 (project 3762 v12/v13): 'motion[0]:
+    end 32.35 exceeds the limit 31.35s', the headline re-ended by hand, then
+    'picture card: end 32.35 exceeds the limit 31.35s', and the short was
+    abandoned. Returns the notes; raises ValueError naming every item that
+    still overruns."""
+    old_end, new_end = _programme_end(before), _programme_end(edl)
+    if old_end is None or new_end is None or new_end >= old_end - 0.005:
+        return []
+    touched_layers, touched_ids = set(), set()
+    for op in operations:
+        layer = op.get("layer")
+        if op.get("id"):
+            touched_ids.add((layer, op.get("id")))
+        else:
+            touched_layers.add(layer)
+    ended, over = [], []
+    for path, name in _END_LAYERS + (("overlays", "overlay"),):
+        top = path.split(".")[0]
+        for item in _layer_items(edl, path):
+            try:
+                start = float(item.get("start"))
+                end = (start + float(item["duration_s"]) if path == "overlays"
+                       else float(item.get("end")))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end <= new_end + 0.01:
+                continue
+            label = f"{name} '{item.get('id') or '?'}'"
+            authored = top in touched_layers or \
+                (top, item.get("id")) in touched_ids
+            if not authored and abs(end - old_end) <= END_WITH_PROGRAMME_S \
+                    and new_end - start >= 0.2:
+                if path == "overlays":
+                    item["duration_s"] = round(new_end - start, 3)
+                else:
+                    item["end"] = round(new_end, 3)
+                ended.append(label)
+            else:
+                over.append(f"{label} ends at {end:g}s")
+    if over:
+        raise ValueError(
+            f"This batch makes the programme {new_end:g}s long (it was "
+            f"{old_end:g}s), and these items end after it: "
+            + "; ".join(over) + ". A batch's times describe the resulting "
+            "timeline: end each one at or before the new end in this same "
+            "batch (items that ran to the old end and that the batch does "
+            "not name are ended with it), or remove an insert with "
+            "remove_insert, which re-anchors every item.")
+    if not ended:
+        return []
+    return [f"PROGRAMME END {old_end:g}s -> {new_end:g}s: "
+            + ", ".join(ended) + f" ran to the end and now end at {new_end:g}s."]
+
+
+def apply_batch(before, operations, duration, allowed_keys, notes=None):
+    """``notes``: an optional list the batch appends its receipts to (an
+    item ended with a shortened programme)."""
     if not isinstance(operations, list) or not 1 <= len(operations) <= 64:
         raise ValueError("Supply between 1 and 64 edit operations.")
     if len(json.dumps(operations, allow_nan=False)) > 256_000:
@@ -372,6 +465,9 @@ def apply_batch(before, operations, duration, allowed_keys):
         known.add(PROGRAM_MATTE_KEY)
     if (set(media_keys(edl)) | _motion_refs(edl)) - known - set(allowed_keys):
         raise ValueError("Use media attached to this project. A referenced asset is not available here.")
+    moved = end_with_programme(before, edl, operations)
+    if notes is not None:
+        notes.extend(moved)
     _check_new_motion_params(before, edl)
     # A graphic behind the subject needs a subject mask: a measured clip
     # (add_motion_graphic builds one) or, from Wave 1, the program matte.

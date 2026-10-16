@@ -25,11 +25,18 @@ def _disable_independent_cast_by_default(monkeypatch):
 
 
 # ------------------------------------------------------------------ helpers
-def test_default_count_scales_with_duration_and_caps_auto_planner_only():
-    assert shorts._default_count(120) == 1          # 2 min -> still 1
-    assert shorts._default_count(1500) == 5         # 25 min -> 5
-    assert shorts._default_count(6 * 3600) == \
-        shorts.config.SHORTS_AUTO_MAX_CLIPS
+def test_the_scout_has_no_target_minimum_maximum_or_rate():
+    """Owner policy (Oct 2026): the stories decide how many shorts a source
+    yields; the old ~1 per 5 minutes and the cap of 8 are gone. Only a
+    count the user names bounds the slate."""
+    assert not hasattr(shorts, "_default_count")
+    assert not hasattr(shorts.config, "SHORTS_AUTO_MAX_CLIPS")
+    line = shorts._count_line(None)
+    assert "EVERY" in line and "no target, minimum or maximum" in line
+    assert "asked for 3 clips" in shorts._count_line(3)
+    # the answer has room for every candidate it may keep
+    assert shorts._plan_tokens(None, 40) >= 40 * shorts.PLAN_TOKENS_PER_CLIP
+    assert shorts._plan_tokens(None, 1) == shorts.PLAN_MAX_TOKENS
 
 
 def test_json_from_tolerates_fences_and_prose():
@@ -137,6 +144,21 @@ def test_plan_drops_short_long_and_overlapping_clips(monkeypatch):
     assert trimmed["end"] - trimmed["start"] <= shorts.CLIP_MAX_S
     # orders are assigned contiguously by score
     assert [c["order"] for c in out] == list(range(len(out)))
+
+
+def test_plan_keeps_every_story_that_clears_the_bar_without_a_count(monkeypatch):
+    seen = {}
+
+    def ask(*a, **k):
+        seen["user"], seen["max_tokens"] = a[5], k.get("max_tokens")
+        return {"clips": [{"start": i * 30.0, "end": i * 30.0 + 25,
+                           "title": f"c{i}", "score": 100 - i} for i in range(19)]}
+    monkeypatch.setattr(shorts, "_ask_json", ask)
+    out = shorts._plan_clips(None, {"user_id": 1}, _index(SENTS), 600.0,
+                             None, {}, False, "free")
+    assert len(out) == 19                     # no cap of 8, no 1 per 5 min
+    assert "Return EVERY complete story" in seen["user"]
+    assert "never more than" not in seen["user"] and "Aim for" not in seen["user"]
 
 
 def test_plan_respects_requested_count(monkeypatch):
@@ -334,7 +356,9 @@ def test_long_podcast_shortlist_spans_full_source_and_keeps_qa_context():
         index, 7200.0, 6, "launch lessons and customer evidence")
 
     assert meta["source_sentences"] == 720
-    assert 16 <= meta["candidates"] <= 64
+    # a 2-hour recording hands the scout more evidence than the old 64,
+    # and still far less than the whole transcript
+    assert 16 <= meta["candidates"] <= shorts.SHORTLIST_MAX
     assert len(compact) < len(full)
     assert "CANDIDATE ARC" in compact
     assert "6500.0-6508.0" in compact
@@ -1011,7 +1035,7 @@ def test_explicit_arc_count_has_only_source_duration_natural_bound():
     assert "received 10 arcs" in result
 
 
-def test_legacy_auto_planner_count_remains_separately_bounded():
+def test_a_count_the_user_names_is_passed_as_named():
     from types import SimpleNamespace
     import agent_tools
     import db as dbx
@@ -1032,10 +1056,9 @@ def test_legacy_auto_planner_count_remains_separately_bounded():
         index={"words": [{"w": "hello"}]}, db=FakeDb(), project_id=7,
         job={"user_id": 60})
 
-    agent_tools.make_shorts(ctx, count=999)
+    agent_tools.make_shorts(ctx, count=40)
 
-    assert captured["payload"]["count"] == \
-        shorts.config.SHORTS_AUTO_MAX_CLIPS
+    assert captured["payload"]["count"] == 40
 
 
 def test_parent_agent_cannot_boot_children_without_card_press():

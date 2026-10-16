@@ -63,10 +63,43 @@ def _now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _default_count(duration_s):
-    """~1 clip/5 minutes for the bounded in-house auto-planner only."""
-    return max(1, min(config.SHORTS_AUTO_MAX_CLIPS,
-                      int(round(duration_s / 300.0)) or 1))
+# Owner policy (Oct 2026): the number of shorts follows the source — every
+# story that clears the bar is made, 7 if only 7 are good, 70 if 70 are; never
+# a target, minimum, maximum or rate ("one per five minutes", "at most 8").
+# A count is honoured only when the USER names one. The scout's answer needs
+# room for every story it keeps: about this many tokens per clip, inside
+# these bounds.
+PLAN_TOKENS_PER_CLIP = 260
+PLAN_MAX_TOKENS = 3500
+PLAN_MAX_TOKENS_ALL = 16000
+# Candidate arcs a long recording's shortlist may hand the scout: two strong
+# arcs per region across the whole timeline, then the strongest globally.
+SHORTLIST_MAX = 120
+
+
+def _plan_tokens(want, candidates):
+    """The scout's answer budget: what ``want`` clips need when the user
+    named a count, else room for every candidate it might keep."""
+    if want:
+        return max(PLAN_MAX_TOKENS,
+                   min(PLAN_MAX_TOKENS_ALL, 900 + PLAN_TOKENS_PER_CLIP * int(want)))
+    return max(PLAN_MAX_TOKENS,
+               min(PLAN_MAX_TOKENS_ALL,
+                   900 + PLAN_TOKENS_PER_CLIP * max(1, int(candidates or 0))))
+
+
+def _count_line(want, visual=False):
+    """The scout's instruction on how many: the user's number, or every
+    story that clears the bar."""
+    unit = "visual arc" if visual else "story"
+    if want:
+        return (f"The user asked for {int(want)} clips: return at most that "
+                "many, fewer when the material is thin; never pad.")
+    return (f"Return EVERY complete {unit} that clears "
+            "the bar. There is no target, minimum or maximum: a thin "
+            "recording may honestly give one or two, a rich one dozens. Never "
+            "pad with weak fragments, and never leave out a strong one to "
+            "keep the list short.")
 
 
 def _save_shorts_meta(conn, project_id, shorts_meta):
@@ -328,11 +361,11 @@ def _reference_profile(worker_db, job, ref, workdir):
 
 
 # ------------------------------------------------------------------ the plan
-_PLAN_SYSTEM = """You are the parent story scout for Valmera. You are given the timed sentence transcript of a long podcast or video. Your only job is to find the few genuinely compelling, self-contained stories worth handing to a fresh short-form editor. You do not style, caption, reframe, score music, prescribe B-roll, or imitate an editing template.
+_PLAN_SYSTEM = """You are the parent story scout for Valmera. You are given the timed sentence transcript of a long podcast or video. Your only job is to find every genuinely compelling, self-contained story worth handing to a fresh short-form editor — as many or as few as the recording really holds. You do not style, caption, reframe, score music, prescribe B-roll, or imitate an editing template.
 
 STORY CONTRACT — A SHORT IS A MICRO-STORY, NOT A TRANSCRIPT EXCERPT. Every selected window must have (1) a hook/setup or intelligible question, (2) development that changes or deepens the viewer's understanding, and (3) a payoff: resolution, lesson, reveal, decision, consequence, or punchline. A handful of related sentences that merely state information is not a short. Reject it even if one sentence is quotable. In interviews/podcasts, include the nearby question or premise when the answer needs it, preserve speaker turns, and do not cut away before the answer resolves. Before accepting a clip, be able to summarize its setup, development and payoff separately.
 
-QUALITY OVER QUANTITY — Returning fewer stories is a sign of judgment. Never fill a requested count with weak fragments. Do not choose several clips that repeat the same idea. Let each story use the time its arc genuinely needs; do not compress it to one or two sentences merely to resemble the duration of an editing reference.
+QUALITY DECIDES THE COUNT — every story that clears the bar is kept and nothing that misses it is. There is no quota in either direction: never fill a count with weak fragments, never drop a strong story to keep the list short. Do not choose several clips that repeat the same idea. Let each story use the time its arc genuinely needs; do not compress it to one or two sentences merely to resemble the duration of an editing reference.
 
 Reply with STRICT JSON only:
 {"clips": [{"start": <source seconds>, "end": <source seconds>, "title": "<truthful story title, max 55 chars, no quotes inside>", "hook": "<the first spoken words of the clip, verbatim>", "score": <0-100 relative story-worthiness>, "story": {"setup": "<what establishes the question/stakes>", "development": "<what changes/deepens>", "payoff": "<how it resolves and why it satisfies>"}}]}
@@ -461,12 +494,13 @@ def _shortlist_transcript_arcs(index, duration, n_target, direction=""):
         return _transcript_block(index), {
             "candidates": 0, "source_sentences": len(sents)}
 
-    # Evidence grows with both requested output and recording length. Two
-    # strong arcs per five-minute region prevents an opening-heavy shortlist;
-    # remaining places go to the strongest non-duplicate arcs globally.
+    # Evidence grows with the recording's length (and with a count the user
+    # named). Two strong arcs per region prevents an opening-heavy
+    # shortlist; remaining places go to the strongest non-duplicate arcs
+    # globally. No quota: the scout keeps every candidate that clears the bar.
     budget = max(16, int(n_target or 1) * 6,
-                 int(math.ceil(max(duration, 1.0) / 600.0)) * 4)
-    budget = min(64, budget)
+                 int(math.ceil(max(duration, 1.0) / 600.0)) * 6)
+    budget = min(SHORTLIST_MAX, budget)
     bucket_s = max(180.0, max(duration, 1.0) /
                    max(1.0, math.ceil(budget / 2.0)))
     buckets = {}
@@ -637,10 +671,10 @@ def _validated_clips(raw, duration, want, index=None, visual=False,
     if not caller_authored:
         clips.sort(key=lambda c: -c["score"])
     chosen = []
-    selection_limit = (want if want is not None
-                       else config.SHORTS_AUTO_MAX_CLIPS)
+    # Only a count the user named limits the slate; without one every
+    # non-overlapping story the scout kept is made (owner policy).
     for c in clips:
-        if len(chosen) >= max(1, int(selection_limit)):
+        if want is not None and len(chosen) >= max(1, int(want)):
             break
         overlap = any(min(c["end"], k["end"]) - max(c["start"], k["start"])
                       > 0.3 * (c["end"] - c["start"]) for k in chosen)
@@ -745,13 +779,14 @@ def _visual_plan_clips(index, duration, n_target, selection_limit, note,
         raise dbx.PermanentJobError(
             "this video has no transcribed speech and its visual filmstrip "
             "could not be read")
-    context = (f"Video duration: {duration:.1f}s. Select about {n_target} "
-               f"clips, never more than {config.SHORTS_AUTO_MAX_CLIPS}; each "
-               "should be 15-60 seconds."
+    context = (f"Video duration: {duration:.1f}s. "
+               + _count_line(selection_limit, visual=True)
+               + " Each should be 15-60 seconds."
                + (f" User direction: {note}" if note else ""))
     answer = llm.ask_vision(
         _VISUAL_PLAN_SYSTEM + "\n\n" + context, paths,
-        max_tokens=1800, purpose="shorts_visual_plan",
+        max_tokens=max(1800, _plan_tokens(selection_limit, len(paths) * 3)),
+        purpose="shorts_visual_plan",
         image_names=labels, reasoning_effort="low")
     out = _json_from(answer) if answer else None
     return _validated_clips((out or {}).get("clips") or [], duration,
@@ -798,10 +833,10 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
         want = int(want) if want else None
     except (TypeError, ValueError):
         want = None
-    n_target = min(want, config.SHORTS_AUTO_MAX_CLIPS) if want \
-        else _default_count(duration)
-    selection_limit = min(want, config.SHORTS_AUTO_MAX_CLIPS) if want \
-        else config.SHORTS_AUTO_MAX_CLIPS
+    # A count only when the user named one (owner policy: no target,
+    # minimum, maximum or rate; the stories decide).
+    n_target = want
+    selection_limit = want
 
     len_hint = ("Let each selected story use the time its complete arc needs "
                 "(often 25-90 seconds); completeness outranks runtime. The "
@@ -843,16 +878,20 @@ def _plan_clips(worker_db, job, index, duration, style, payload,
             "boundaries shown inside ONE candidate arc; never splice two "
             "unrelated arcs together.\n")
     user = (f"Video duration: {duration:.1f}s. "
-            f"Aim for {n_target} clips (fewer if the material is thin, "
-            f"never more than {config.SHORTS_AUTO_MAX_CLIPS}). {len_hint}\n"
+            + _count_line(want) + f" {len_hint}\n"
             f"Detected speakers: {int(index.get('speakers') or 0)}. "
             "When there are multiple speakers, preserve complete nearby "
             "question-and-answer turns rather than isolated quotes.\n"
             + evidence_note
             + (f"User's direction: {note}\n" if note else "")
             + f"\n{evidence_label}:\n{transcript}")
+    # Room in the answer for every story the scout keeps: the shortlist's
+    # candidate count, or for a whole transcript about one per two minutes
+    # of speech (an answer budget, never a target).
+    room = (shortlist_meta or {}).get("candidates") or \
+        int(math.ceil(max(duration, 60.0) / 120.0))
     out = _ask_json(worker_db, job, subscribed, plan, _PLAN_SYSTEM, user,
-                    "shorts_plan", max_tokens=3500)
+                    "shorts_plan", max_tokens=_plan_tokens(want, room))
     raw_clips = _complete_conversation_arcs(
         (out or {}).get("clips") or [], index, duration)
     clips = _validated_clips(raw_clips, duration, selection_limit, index=index)

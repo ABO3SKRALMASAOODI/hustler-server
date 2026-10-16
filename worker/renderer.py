@@ -1774,6 +1774,74 @@ def program_render_s(tl, fps):
     return max(out, first_frame_at(out, fps) / fps)
 
 
+# A layer that runs to the programme's end is extended this far past the
+# render's last frame, so its exit (a card's fade or lift, a graphic's
+# exit, a text's fade-out) falls after the cut to the end card instead of
+# inside the last frames of the programme.
+END_LAYER_TAIL_S = 0.6
+
+
+def layers_to_render_end(edl, tl, fps):
+    """Layers that run with the programme to its end hold to its LAST frame.
+
+    An item ending at the programme end used to end its window there: the
+    render runs up to a frame past tl.out_duration (program_render_s) under
+    half-open windows (enable gte(t,start)*lt(t,end), an ASS event's end,
+    motion_layer clamping its items to the bound it is given), and every exit
+    animation — a card's 0.45 s fade or lift, a graphic's exit, a text's
+    fade-out — played in the programme's last frames, right before the end
+    card. The owner's runs, Oct 2026: Zuckerberg s24 (project 3635 v16) lost
+    the standing headline and the payoff from 38.29 s of a 38.33 s
+    programme; Steve Jobs MIT s18 'flashing back to raw footage' 0.03 s
+    before the end and s16 'a picture-card layout shift during the ending
+    hold'. Items ending within a frame of the programme end now run
+    END_LAYER_TAIL_S past the render's end, in this render's own copy of the
+    EDL (never the stored one): they hold to the last frame and the cut to
+    the end card is their exit. Returns the bound the layer builders clamp
+    to."""
+    out = float(tl.out_duration)
+    try:
+        fps = round(float(fps or 0.0), 3)
+    except (TypeError, ValueError):
+        return out
+    if fps <= 0 or out <= 0:
+        return out
+    to = round(max(out, program_render_s(tl, fps)) + END_LAYER_TAIL_S, 4)
+    reach = 1.0 / fps
+
+    def runs_to_end(e):
+        try:
+            e = float(e)
+        except (TypeError, ValueError):
+            return False
+        return out - reach - 1e-6 <= e <= out + 0.011
+
+    def extend(items):
+        for it in items or []:
+            if isinstance(it, dict) and it.get("end") is not None \
+                    and runs_to_end(it["end"]):
+                it["end"] = to
+    for key in ("motion", "texts", "vectors"):
+        extend(edl.get(key))
+    for it in edl.get("overlays") or []:
+        try:
+            s, d = float(it["start"]), float(it["duration_s"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if runs_to_end(s + d):
+            it["duration_s"] = round(to - s, 4)
+    fx = edl.get("effects") if isinstance(edl.get("effects"), dict) else {}
+    for key in ("picture_cards", "zooms", "stylize", "custom", "regions"):
+        extend(fx.get(key))
+    for it in edl.get("fx") or []:
+        # picture devices only: a music-bus item's end is the score's, and a
+        # junction has no window
+        if isinstance(it, dict) and it.get("start") is not None and \
+                it.get("stage") in fxgraph.PICTURE_STAGES:
+            extend([it])
+    return to
+
+
 def join_fades(spans, seg_len, src_dur, cut_after, insert_before=None,
                insert_after=None, crossfade=True):
     """How each kept segment's audio meets its neighbours, as four lists of
@@ -6085,6 +6153,8 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     voiceover = edl.get("voiceover") or []
     # keep=[] -> Timeline.out_duration == sum of insert durations (the program).
     tl = Timeline(edl["keep"], inserts)
+    # Graphics that run to the programme's end cover its last frame.
+    layer_end = layers_to_render_end(edl, tl, fps)
     # Resolve this before opening music inputs: a looped track may need five
     # more seconds of source to stay phase-continuous across the real card.
     outro_s = 0.0 if suppress_outro else outro_seconds(preview)
@@ -6092,7 +6162,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     ass_path = cap_ass_override if cap_ass_override is not None else caplib.build_ass(edl, {}, tl,
                                 os.path.join(workdir, "captions.ass"),
                                 play_res=(W, H))
-    gfx_path = graphics.build_gfx_ass(edl, tl.out_duration,
+    gfx_path = graphics.build_gfx_ass(edl, layer_end,
                                       os.path.join(workdir, "graphics.ass"),
                                       play_res=(W, H))
 
@@ -6108,6 +6178,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
             if original_progress else None)
         inserts = edl["inserts"]
         tl = Timeline(edl["keep"], inserts)
+        layer_end = layers_to_render_end(edl, tl, fps)
         if original_progress:
             progress_cb = lambda f: original_progress(0.8 + f * 0.2)
 
@@ -6227,7 +6298,7 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     motion_inputs = []
     if not audio_only:
         motion_inputs, next_idx = motion_layer.prepare_inputs(
-            edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
+            edl, workdir, W, H, fps, layer_end, extra_inputs, next_idx,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx),
             plate=_plate_probe(edl, tl, None, None, W, H,
                                (edl.get("frame") or {}).get("mode"), None,
@@ -6917,6 +6988,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     inserts = edl.get("inserts") or []
     voiceover = edl.get("voiceover") or []
     tl = Timeline(edl["keep"], inserts, edl.get("speed"))
+    # Graphics, cards and zooms that run to the programme's end cover its
+    # last frame (the render runs up to a frame past tl.out_duration).
+    layer_end = layers_to_render_end(edl, tl, fps)
     # A stitched piece suppresses the card entirely. Otherwise resolve the
     # real card duration before opening music inputs, because a looped score
     # may need additional demuxer source for its continuous carried tail.
@@ -6962,7 +7036,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     behind_texts = [t for t in (edl.get("texts") or []) if t.get("behind")]
     front_texts = [t for t in (edl.get("texts") or []) if not t.get("behind")]
     gfx_path = graphics.build_gfx_ass(dict(edl, texts=front_texts),
-                                      tl.out_duration,
+                                      layer_end,
                                       os.path.join(workdir, "graphics.ass"),
                                       play_res=(W, H))
 
@@ -7277,7 +7351,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                 edl, tl, item, geom_now) and _program_serves(item, "texts"):
             # through the program matte: the text's own program window
             ass = graphics.build_gfx_ass(
-                dict(edl, texts=[item], vectors=[]), tl.out_duration,
+                dict(edl, texts=[item], vectors=[]), layer_end,
                 os.path.join(workdir, f"behind_{bi}.ass"), play_res=(W, H))
             if ass:
                 behind_inputs.append(_program_entry(item, {"ass": ass}))
@@ -7314,7 +7388,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                 # to this text alone. Program vectors stay in the ordinary
                 # front graphics file; carrying them here would burn every
                 # shape twice and incorrectly put one copy behind the person.
-                dict(edl, texts=[item], vectors=[]), tl.out_duration,
+                dict(edl, texts=[item], vectors=[]), layer_end,
                 os.path.join(workdir, f"behind_{bi}.ass"), play_res=(W, H))
         if not pieces or not ass:
             print(f"[render] behind-text {item.get('id')}: "
@@ -7336,7 +7410,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     if behind_texts:
         # Rebuild the front layer — anything that degraded above belongs in it.
         gfx_path = graphics.build_gfx_ass(dict(edl, texts=front_texts),
-                                          tl.out_duration,
+                                          layer_end,
                                           os.path.join(workdir,
                                                        "graphics.ass"),
                                           play_res=(W, H))
@@ -7368,7 +7442,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         return None
     if not audio_only:
         motion_inputs, next_idx = motion_layer.prepare_inputs(
-            edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx,
+            edl, workdir, W, H, fps, layer_end, extra_inputs, next_idx,
             fetch_asset=lambda k: _fetch(k, "motion", next_idx),
             extra_items=caption_motion_items, source_path=src_path,
             plate=_plate_probe(edl, tl, src_path,

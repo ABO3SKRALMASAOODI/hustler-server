@@ -2181,14 +2181,12 @@ OUTRO_VERSION = 14     # v14: attribution and lower URL, without the product des
                       # See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
-# The in-house one-call story scout needs a bounded response target. This is
-# ONLY its model-output safety limit; it is not an editorial quota. Explicit
-# caller-selected, non-overlapping arcs are all preserved and are naturally
-# bounded by source duration / the ten-second technical minimum instead.
-# Read the old env name as a deployment-compatible fallback while operators
-# migrate to the accurately scoped name.
-SHORTS_AUTO_MAX_CLIPS = max(1, int(os.getenv(
-    "SHORTS_AUTO_MAX_CLIPS", os.getenv("SHORTS_MAX_CLIPS", "8"))))
+# No clip quota anywhere (owner policy, Oct 2026): the in-house scout keeps
+# every story that clears the bar — no default rate (it was ~1 per 5 min)
+# and no maximum (it was 8, SHORTS_AUTO_MAX_CLIPS, now unread). Only a count
+# the user names bounds it; explicit caller arcs are bounded by the source's
+# duration and the ten-second technical minimum (shorts.PLAN_* size the
+# scout's answer to hold them).
 # Flat credits per finished clip, charged on top of the run's model cost —
 # a shorts run fans out N final renders that a plain chat turn never does.
 SHORTS_CLIP_CREDITS = float(os.getenv("SHORTS_CLIP_CREDITS", "2.0"))

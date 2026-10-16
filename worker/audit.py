@@ -145,11 +145,32 @@ def midword_audit(keep, words, duration=None, source=None, timeout=10.0,
     hits = midword_boundaries(keep, words, duration)
     if hits and source:
         hits = _audible(hits, source, duration, timeout, frame_s)
-    return [f"boundary {h['boundary']:.2f} inside '{h['word']}' "
-            f"({h['t0']:.2f}-{h['t1']:.2f}"
-            + (f", sound {h['db']:.0f} dB" if h.get("db") is not None else "")
-            + ")"
-            for h in hits]
+    out = [f"boundary {h['boundary']:.2f} inside '{h['word']}' "
+           f"({h['t0']:.2f}-{h['t1']:.2f}"
+           + (f", sound {h['db']:.0f} dB" if h.get("db") is not None else "")
+           + ")"
+           for h in hits]
+    if source:
+        out += _clipped_onset_lines(keep, words, duration, source, timeout)
+    return out
+
+
+def _clipped_onset_lines(keep, words, duration, source, timeout):
+    """Starts that keep a word from inside its sound although the transcript
+    puts them on its onset (cut_audio.clipped_onsets): the index's onsets run
+    late on contiguous word boundaries, so no word-based check sees them."""
+    try:
+        import cut_audio
+        starts = [b for _i, side, b in cut_audio.cut_edges(keep, duration)
+                  if side == "start"]
+        if not starts:
+            return []
+        level = cut_audio.source_levels(source, starts, duration,
+                                        timeout=timeout)
+        return cut_audio.onset_lines(
+            cut_audio.clipped_onsets(keep, words, duration, level))
+    except Exception:  # noqa: BLE001 — a diagnostic never fails a render
+        return []
 
 
 def _audible(hits, source, duration, timeout, frame_s):
@@ -173,9 +194,28 @@ def _audible(hits, source, duration, timeout, frame_s):
             continue
         # the floor read on the same reader place_edge judged that edge on
         # (an end's: the loudest of the frame either side)
-        if cut_audio._is_loud(db, cut_audio._floor(lv, h["boundary"])):
-            out.append(dict(h, db=db))
+        if not cut_audio._is_loud(db, cut_audio._floor(lv, h["boundary"])):
+            continue
+        # a clear dip between sounds is a pause whatever the transcript's
+        # word times say: the index's boundaries run up to ~0.1 s off, and
+        # the pause before a word its onset was moved back to (cut_audio.
+        # _contiguous_onset) sits inside the index's previous word
+        if _dip_depth(lv, h["boundary"]) >= cut_audio.ONSET_DIP_DB:
+            continue
+        out.append(dict(h, db=db))
     return out
+
+
+def _dip_depth(level, b, reach=0.08):
+    """How far (dB) the sound at b sits under the loudest point within
+    ``reach`` either side; 0.0 when the sound cannot be read."""
+    vals = [level(round(b + k * 0.01, 2)) for k in range(-int(reach * 100),
+                                                         int(reach * 100) + 1)]
+    vals = [v for v in vals if v is not None]
+    here = level(b)
+    if not vals or here is None:
+        return 0.0
+    return max(vals) - here
 
 
 def kept_share(side, b, t0, t1):

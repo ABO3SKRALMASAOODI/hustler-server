@@ -51,7 +51,7 @@ def parse_report(answer, candidate_ids):
     allowed = {str(value) for value in candidate_ids}
     decisions = []
     seen = set()
-    for item in (raw.get("decisions") or [])[:16]:
+    for item in (raw.get("decisions") or [])[:max(16, len(allowed))]:
         if not isinstance(item, dict):
             continue
         candidate_id = str(item.get("id") or "").strip()
@@ -95,11 +95,13 @@ def _sentence_rows(index):
     return rows
 
 
-def build_evidence(clips, index, direction=""):
-    """Build exact proposed programs plus narrow cut-away context."""
+def build_evidence(clips, index, direction="", offset=0):
+    """Build exact proposed programs plus narrow cut-away context.
+    ``offset``: the slate position of the first clip (a batch's ids stay
+    the slate's own: clip_<position>)."""
     source = _sentence_rows(index)
     candidates = []
-    for position, clip in enumerate(clips, 1):
+    for position, clip in enumerate(clips, 1 + int(offset)):
         start, end = float(clip["start"]), float(clip["end"])
         window = [row for row in source
                   if row["t1"] >= start and row["t0"] <= end]
@@ -160,20 +162,39 @@ Return JSON only:
 Return one decision for every supplied candidate."""
 
 
+# Candidates one review call judges. A slate has no fixed size (owner
+# policy: the stories decide how many), so a large one is reviewed in
+# batches of this many, each one bounded call.
+JUDGE_BATCH = 12
+
+
 def review(clips, index, direction=""):
-    """Run one bounded fresh-context review for the proposed slate."""
+    """Run bounded fresh-context reviews for the proposed slate, JUDGE_BATCH
+    candidates per call; one merged report (None when no batch answered)."""
     if not clips or not _sentence_rows(index):
         return None
-    evidence = build_evidence(clips, index, direction)
-    ids = [row["id"] for row in evidence["candidates"]]
-    answer = llm.ask_text(
-        _SYSTEM,
-        json.dumps(evidence, ensure_ascii=False, separators=(",", ":")),
-        max_tokens=1800,
-        temperature=0.2,
-        purpose="independent_shorts_cast",
-    )
-    return parse_report((answer or {}).get("text"), ids) if answer else None
+    reports = []
+    for at in range(0, len(clips), JUDGE_BATCH):
+        evidence = build_evidence(clips[at:at + JUDGE_BATCH], index, direction,
+                                  offset=at)
+        ids = [row["id"] for row in evidence["candidates"]]
+        answer = llm.ask_text(
+            _SYSTEM,
+            json.dumps(evidence, ensure_ascii=False, separators=(",", ":")),
+            max_tokens=1800,
+            temperature=0.2,
+            purpose="independent_shorts_cast",
+        )
+        report = parse_report((answer or {}).get("text"), ids) if answer else None
+        if report:
+            reports.append(report)
+    if not reports:
+        return None
+    if len(reports) == 1:
+        return reports[0]
+    return {"version": reports[0]["version"],
+            "summary": " ".join(r["summary"] for r in reports if r.get("summary"))[:300],
+            "decisions": [d for r in reports for d in r["decisions"]]}
 
 
 def apply_report(clips, report, reject_threshold=0.82):

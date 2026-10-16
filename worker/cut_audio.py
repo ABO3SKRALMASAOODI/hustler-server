@@ -69,6 +69,12 @@ QUIET_DB = 8.0          # within this of the local floor = already quiet
 QUIET_ABS_DB = -42.0    # ...or this quiet outright (room tone, a pause)
 LOUD_ABS_DB = -30.0     # this loud is sound at a cut whatever its floor
 TAIL_REACH_S = 0.25     # an edge still in sound looks this far into the cut
+# A start on a CONTIGUOUS transcript boundary (the removed word ends where
+# the kept one starts) that is already in sound looks back this far for the
+# pause before the kept word — the index's onsets run 50-110 ms late there.
+CONTIGUOUS_S = 0.02
+ONSET_LEAD_S = 0.12
+ONSET_DIP_DB = 12.0     # ...for a dip this far under the sound at the cut
 ONSET_SLACK_S = 0.03    # a start may sit this far past the transcript onset
 FAR_MARGIN_S = 0.03     # ...stopping this short of the removed side's word
 FLOOR_REACH_S = 0.30    # the local floor: the quietest point this close
@@ -253,6 +259,13 @@ def place_edge(side, b, words, level=None, lo_limit=None, hi_limit=None,
             # transcript, sound from 129.30): the pause may sit just past it.
             hi = b + REACH_S if onset is None \
                 else min(b + REACH_S, onset + ONSET_SLACK_S)
+            if far is not None and b - far <= CONTIGUOUS_S and loud:
+                # ...but on a contiguous boundary already in sound the
+                # kept word is sounding (the index's onsets run LATE there):
+                # a pause just past it is the gap after that word, and
+                # moving there drops it (JRE #2190 s10, 'there' 911.16-911.20
+                # under an index onset of 911.21).
+                hi = b
     else:
         far = ws.start_after(hit[1] if hit else b)
         hi = b + REACH_S if far is None else min(b + REACH_S, far)
@@ -275,6 +288,12 @@ def place_edge(side, b, words, level=None, lo_limit=None, hi_limit=None,
     if abs(t - b) >= 0.005 and db_b - db >= MIN_GAIN_DB:
         out.update(t=t, db=db, why="word" if hit else "quiet")
         loud = _is_loud(db, floor)
+    if loud and side == "start" and not hit:
+        onset = _contiguous_onset(b, ws, level, lo_limit,
+                                  out["db"] if out["db"] is not None else db_b)
+        if onset is not None:
+            out.update(t=onset[0], db=onset[1], why="quiet")
+            loud = False
     if loud:
         # Still in sound: a word's release (a trailing 's', a breath) runs
         # past Whisper's end and an onset starts before its start. Reach
@@ -308,6 +327,26 @@ def place_edge(side, b, words, level=None, lo_limit=None, hi_limit=None,
                 break
     out["loud"] = loud
     return out
+
+
+def _contiguous_onset(b, ws, level, lo_limit, db_at):
+    """(t, dB) of the pause a START at b really follows, or None.
+
+    The transcript ends the removed word exactly where the kept one starts
+    (CONTIGUOUS_S): an aligner's boundary, not a pause, and the index's
+    onsets run 50-110 ms late there. When the sound at b is already running
+    and a clear dip (ONSET_DIP_DB under it) sits within ONSET_LEAD_S before
+    b, the kept word began after that dip: the start belongs there. The
+    owner's JRE #2190 run (Oct 15): 'Galaxy' kept from 3931.95 (-13 dB),
+    its sound rising from 3931.86 after a -37 dB pause at 3931.84; the cut
+    read 'Policy Quest' and took a fix pass and a local ASR to find."""
+    far = ws.end_before(b)
+    if far is None or b - far > CONTIGUOUS_S:
+        return None
+    q = _quietest(level, max(b - ONSET_LEAD_S, lo_limit), b - 0.02, b)
+    if q is None or db_at is None or db_at - q[1] < ONSET_DIP_DB:
+        return None
+    return q
 
 
 def _kept_share(side, b, hit):
@@ -473,6 +512,44 @@ def report(moves, checked):
             "softens it, it cannot hide it). Keep it only if it sounds "
             "clean; else cut at a breath or sentence end.")
     return lines
+
+
+def clipped_onsets(keep, words, duration=None, level=None, prev_keep=None):
+    """START edges that cut the onset of the word they keep: each real cut
+    start (cut_edges) on a contiguous transcript boundary, already in sound,
+    with a clear pause just before it (_contiguous_onset) —
+    [{"b", "t", "db_b", "db_t", "word"}]. For writes that keep their exact
+    times (snap_to_words=false, an edit batch) and for the render's audit,
+    which otherwise judge an edge only against the transcript's words: five
+    of the JRE #2190 run's 24 shorts went back for a clipped first word."""
+    if level is None:
+        return []
+    ws = words if isinstance(words, _Words) else _Words(words)
+    spans = [(float(s), float(e)) for s, e in keep or []]
+    out = []
+    for i, side, b in cut_edges(spans, duration, prev_keep):
+        if side != "start" or ws.inside(b):
+            continue
+        db_b = level(b)
+        if db_b is None or not _is_loud(db_b, _floor(level, b)):
+            continue
+        lo_limit = spans[i - 1][1] + 0.02 if i else 0.0
+        got = _contiguous_onset(b, ws, level, lo_limit, db_b)
+        if got is None:
+            continue
+        nxt = ws.word_starting(b)
+        out.append({"b": b, "t": got[0], "db_b": db_b, "db_t": got[1],
+                    "word": nxt[2] if nxt else None})
+    return out
+
+
+def onset_lines(found):
+    """One line per clipped onset (clipped_onsets)."""
+    return [f"start {f['b']:g} clips the onset of "
+            + (f"'{f['word']}'" if f.get("word") else "the word it keeps")
+            + f": its sound is already running there ({f['db_b']:.0f} dB) "
+            f"after a pause at {f['t']:g} ({f['db_t']:.0f} dB) — start at "
+            f"{f['t']:g}" for f in found]
 
 
 def unsafe_edges(keep, words, duration=None, prev_keep=None, level=None):

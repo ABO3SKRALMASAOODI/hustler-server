@@ -3537,6 +3537,33 @@ def _audio_safe_keep(ctx, keep, prev_keep, words):
     return ([list(x) for x in new] or keep), notes, quiet
 
 
+def _exact_keep_onset_notes(ctx, keep, prev_keep, words):
+    """ADVISORY lines for exact-time keeps (snap_to_words=false): a start
+    that cuts the onset of the word it keeps (cut_audio.clipped_onsets).
+    The times are written as given; the line says where the word's sound
+    begins. The owner's JRE #2190 run wrote every keep exact and five shorts
+    went back for a clipped first word ('Galaxy' heard as 'Policy')."""
+    import cut_audio
+    try:
+        starts = [b for _i, side, b in cut_audio.cut_edges(
+            keep, ctx.duration, prev_keep) if side == "start"]
+    except Exception:  # noqa: BLE001
+        return []
+    hook = getattr(ctx, "cut_sound_source", None)
+    if not starts or not callable(hook):
+        return []
+    try:
+        source = hook()
+        level = cut_audio.source_levels(source, starts, ctx.duration,
+                                        timeout=CUT_SOUND_BUDGET_S) \
+            if source else None
+        lines = cut_audio.onset_lines(cut_audio.clipped_onsets(
+            keep, words, ctx.duration, level, prev_keep))
+    except Exception:  # noqa: BLE001 — an advisory never fails a write
+        return []
+    return ["ADVISORY (exact times kept as written): " + ln for ln in lines]
+
+
 def _write_keep(ctx, new_keep, desc, snap_to_words=None,
                 check_regression=False, place_all=False):
     """Shared tail for every keep-modifying write: audio-safe cut edges
@@ -3559,6 +3586,9 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     audio_notes, quiet_edges = [], set()
     if snap_to_words is not False:
         new_keep, audio_notes, quiet_edges = _audio_safe_keep(
+            ctx, new_keep, None if place_all else prev_keep, words)
+    else:
+        audio_notes = _exact_keep_onset_notes(
             ctx, new_keep, None if place_all else prev_keep, words)
     new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
     edl = dict(prev["json"])
@@ -5584,6 +5614,8 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
             rules = CaptionsFromTranscript(corrections=rules).corrections or []
         except (ValueError, TypeError, IndexError, KeyError) as exc:
             return "REJECTED: invalid correction: " + str(exc)[:300]
+    unmatched = _unmatched_caption_fixes(ctx, edl, rules) \
+        if operation != "clear" else []
     if operation == "append":
         def key(rule):
             return (" ".join(caplib._norm_word(t) for t in rule["from"].split()),
@@ -5601,9 +5633,51 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
                            corrections=rules or None)
     result = ctx.write_edl(edl, f"caption corrections {operation}: {len(rules)} active")
     if result.startswith("EDL v"):
+        if unmatched:
+            result += "\nNOT APPLIED (no caption words match): " + "; ".join(unmatched)
         result += "\nACTIVE CORRECTIONS: " + json.dumps(rules)
         result += "\nCAPTION PREVIEW: " + audit_captions(ctx)
     return result
+
+
+def _unmatched_caption_fixes(ctx, edl, rules):
+    """The corrections in ``rules`` that change no caption word, each with
+    why: start/end are PROGRAM seconds, and a rule scoped by source seconds
+    matched nothing and was stored without a word of warning (the owner's
+    Zuckerberg run, s01 v29: 'coach you' -> 'coaches you' scoped 112.82-
+    113.14, the shipped final still read 'coach you'). [] when all match or
+    the words cannot be read."""
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        base = caplib._mark_insert_breaks(
+            caplib.kept_program_words(ctx.index or {}, tl), tl)
+        variants = [base, caplib.rejoin_split_words(base)]
+    except Exception:  # noqa: BLE001 — a receipt never fails the write
+        return []
+    out = []
+    for rule in rules or []:
+        def hits(r):
+            return any(caplib.apply_scoped_fixes(v, [r]) != v for v in variants)
+        if hits(rule):
+            continue
+        frm = str(rule.get("from") or "")
+        scoped = rule.get("start") is not None or rule.get("end") is not None
+        if scoped and hits({k: v for k, v in rule.items()
+                            if k not in ("start", "end")}):
+            where = [w["t0"] for w in variants[1]
+                     if caplib._norm_word(w["w"]) ==
+                     caplib._norm_word(frm.split()[0])] if frm.split() else []
+            out.append(
+                f"'{frm}' within {rule.get('start')}-{rule.get('end')}s: those "
+                "words are said elsewhere in the program"
+                + (f" (at {', '.join(f'{t:.2f}' for t in where[:4])}s)" if where else "")
+                + " — start/end are PROGRAM seconds (get_kept_transcript), "
+                "not source seconds")
+        else:
+            out.append(f"'{frm}': no caption reads it (match the words as "
+                       "get_kept_transcript spells them)")
+    return out
 
 
 def set_caption_style(ctx, style=None, emphasis_words=None,
@@ -28032,7 +28106,26 @@ def _direct_short_clips(ctx, clips, snap="none"):
                 n = words_[k + 1]
                 return str(w.get("w") or "").rstrip("\"'”’)").endswith(
                     (".", "?", "!", "…")) or float(n["t0"]) - t1 >= 0.3
-        return False
+        # An edge in a stretch the transcript has no words in — a pause of a
+        # breath or more, a silent or unindexed visual setup — cuts no
+        # speech: the same rule as a word's onset after a 0.3 s pause. (The
+        # owner's Jensen run, s10: a story opening on 8 s of visual setup
+        # the index had no speech for was snapped to its first sentence,
+        # 7 s long, and refused at the 10 s minimum.)
+        prev_end, next_start = None, None
+        for w in words_:
+            t0, t1 = float(w["t0"]), float(w["t1"])
+            if t0 + eps < value < t1 - eps:
+                return False
+            if t1 <= value + eps:
+                prev_end = t1 if prev_end is None else max(prev_end, t1)
+            if t0 >= value - eps:
+                next_start = t0 if next_start is None else min(next_start, t0)
+        if not words_:
+            return False
+        lo = prev_end if prev_end is not None else float("-inf")
+        hi = next_start if next_start is not None else float("inf")
+        return hi - lo >= 0.3
 
     planned, problems, moves = [], [], []
     for i, raw in enumerate(clips, 1):
@@ -28213,10 +28306,12 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
         "source": ("mcp_direct" if is_mcp else
                    "agent_direct" if planned else "agent")})
     if not planned:
+        # Only a number the USER named: without one the scout keeps every
+        # story that clears the bar (owner policy, Oct 2026: no target,
+        # minimum, maximum or rate).
         try:
             if count:
-                payload["count"] = max(1, min(
-                    int(count), config.SHORTS_AUTO_MAX_CLIPS))
+                payload["count"] = max(1, int(count))
         except (TypeError, ValueError):
             pass
     if style_note:
@@ -28598,11 +28693,14 @@ def apply_edit_batch(ctx, base_version, operations, operation_id):
         return f"REJECTED: current EDL is v{row['version']}; read it before rebuilding this batch."
     try:
         keys = ctx.db.run(edit_batch.project_media_keys, ctx.project_id) or set()
-        updated = edit_batch.apply_batch(row["json"], operations, ctx.duration or None, keys)
+        batch_notes = []
+        updated = edit_batch.apply_batch(row["json"], operations, ctx.duration or None, keys,
+                                         notes=batch_notes)
     except (ValueError, TypeError) as exc:
         return f"REJECTED: no batch changes were saved: {exc}"
     result = ctx.write_edl(updated, f"applied {len(operations)} edits as one batch")
     if result.startswith("EDL v"):
+        result += "".join("\n" + n for n in batch_notes)
         result += "".join("\n" + n for n in _batch_framing_advisories(
             ctx, row["json"], updated))
         result += "\nReview scope: " + json.dumps(playback_plan.changed_work(row["json"], updated))
@@ -31615,11 +31713,11 @@ TOOLS = {
                     "Edit on a card to boot a fresh editor. MCP callers open "
                     "each child and perform the edits directly. It returns "
                     "the scouting job ID; poll with wait_for_job or "
-                    "shorts_status. count bounds only Valmera's legacy "
-                    "one-call auto-scout. An explicit clips array keeps every "
-                    "valid non-overlapping story arc; total creation is "
-                    "naturally bounded by source duration, not an editorial "
-                    "quota. Each clip must start and end on transcript "
+                    "shorts_status. count only if the user named a "
+                    "number; else the scout keeps every story that clears "
+                    "the bar (no quota). An explicit clips array keeps "
+                    "every valid non-overlapping story arc, bounded only by "
+                    "source duration. Each clip must start and end on transcript "
                     f"sentence boundaries and last {SHORT_CLIP_MIN_S:g}-"
                     f"{SHORT_CLIP_MAX_S:g}s; ranges must not overlap. "
                     "snap='sentence' (the MCP default) moves a boundary to "

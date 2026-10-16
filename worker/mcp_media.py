@@ -630,15 +630,20 @@ def _filmstrip(ctx, local, duration, start, count):
     asked to see the program; it gets the program's pixels, in its own
     context, in the same call — instead of a link and an afternoon of ffmpeg.
     Labels are OUTPUT seconds of the real timeline (start + offset), so a
-    moment read off a tile can be handed straight to a tool."""
+    moment read off a tile can be handed straight to a tool. ``local`` is the
+    whole file the window is cut from (the audio clip seeks it to ``start``
+    too), so each frame is read at start + offset: a window 3402-3437 s of a
+    source used to show its first 35 s labelled 3403-3435 (the owner's
+    Jensen run, Oct 15)."""
     n = max(2, min(int(count), 20))
     span = max(float(duration or 0), 0.1)
     times = [span * (i + 0.5) / n for i in range(n)]
     frames, labels = [], []
+    base = max(0.0, float(start or 0.0))
     for i, t in enumerate(times):
-        fp = os.path.join(ctx.workdir, f"watch_{_sig(local, t)}_{i}.jpg")
+        fp = os.path.join(ctx.workdir, f"watch_{_sig(local, base + t)}_{i}.jpg")
         try:
-            media.frame_at(local, t, fp, width=640)
+            media.frame_at(local, base + t, fp, width=640)
         except media.MediaError:
             continue
         frames.append(fp)

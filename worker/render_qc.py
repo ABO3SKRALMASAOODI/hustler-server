@@ -152,6 +152,10 @@ LONE_GLYPH_ASPECT = 3.0     # a lone glyph (or touching digits: '90') is
 LONE_GLYPH_FILL = (.2, .9)  # ...and inks this share of its box (a grid's
                             # frame inks 2%, a solid bar ~100%)
 BIG_LINE_X = 1.6
+# A letter this many times its line's median letter height is a capital or
+# an ascender over x-height letters (sentence case): Inter's cap height is
+# ~1.33x its x-height, Instrument Serif's ~1.5x, a 't' only ~1.25x.
+SENTENCE_CASE_X = 1.3
 CAPTION_SAMPLES = 24
 COLLIDE_SHARE = .15         # a caption this much under a graphic's box
 EDGE_PAD = .004             # a caption this far past a card edge crosses it
@@ -1664,7 +1668,17 @@ def ink_lines(png_bytes, threshold=TYPE_INK):
                 # glyph: a chart's solid bar, a grid's thin frame
                 continue
         hs = sorted(c[3] for c in grp)
-        tall = [x for x in hs if x >= .82 * hs[int(.9 * (len(hs) - 1))]]
+        # Sentence case: a few capitals and ascenders over a line of
+        # x-height letters. The 90th-percentile height below is then an
+        # x-height (or a 't'), and the line read at ~0.7 of its real size —
+        # Jensen s24 of the owner's Oct 15 run (project 3761): a headline
+        # the page set at 92 px (cap 3.5%) measured 3.1%, 'smaller than the
+        # captions', and the short was failed for it. Letters clearly taller
+        # than the line's median letter are its capitals and ascenders.
+        mid = float(np.median(hs))
+        tall = [x for x in hs if x >= SENTENCE_CASE_X * mid]
+        if not tall:
+            tall = [x for x in hs if x >= .82 * hs[int(.9 * (len(hs) - 1))]]
         cap = float(np.median(tall))
         base = float(np.median([c[1] + c[3] for c in grp]))
         lines.append({"base": round(base / H, 4), "cap": round(cap / H, 4),

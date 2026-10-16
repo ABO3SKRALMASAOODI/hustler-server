@@ -763,6 +763,45 @@ def _wrap(text, line_chars=MAX_LINE_CHARS):
     return lines
 
 
+def _fit_lines(words, line_chars, max_lines, text=lambda w: w["w"]):
+    """``words`` in consecutive runs that each wrap (_wrap) within
+    ``max_lines`` lines of ``line_chars``: a caption may split a phrase, it
+    never drops a word. A single word longer than a line is a run of its
+    own (libass wraps or shrinks it as before)."""
+    runs, cur = [], []
+    for w in words:
+        if cur and len(_wrap(" ".join(text(x) for x in cur + [w]),
+                             line_chars)) > max_lines:
+            runs.append(cur)
+            cur = [w]
+        else:
+            cur.append(w)
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def _item_pages(text, line_chars, max_lines, start, end):
+    """A dictated caption item too long for ``max_lines`` lines as
+    consecutive pages over its own time span, each timed by its share of the
+    characters: [(start, end, text)]. Jensen s29 (the owner's Oct 15 run,
+    project 3764 v8): long add_captions items lost every word past their
+    second line on screen while audit_captions passed them."""
+    pages = [" ".join(run) for run in
+             _fit_lines(str(text or "").split(), line_chars, max_lines,
+                        text=lambda w: w)]
+    if len(pages) <= 1:
+        return [(start, end, text)]
+    total = float(sum(len(pg) for pg in pages)) or 1.0
+    out, t = [], float(start)
+    for k, pg in enumerate(pages):
+        t1 = float(end) if k == len(pages) - 1 else \
+            t + (float(end) - float(start)) * len(pg) / total
+        out.append((round(t, 3), round(t1, 3), pg))
+        t = t1
+    return out
+
+
 def line_chars_for(style, play_res=BASE_PLAY_RES):
     """How many characters fit on one caption line at this frame + font size.
     Narrow/vertical frames with large fonts fit far fewer than the 42 the
@@ -1134,13 +1173,19 @@ def events_from_transcript(out_words, max_words=None, line_chars=MAX_LINE_CHARS,
         nonlocal group, chars
         if not group:
             return
-        text = " ".join(w["w"] for w in group)
-        lines = _wrap(text, line_chars)[:max_lines]
-        start = group[0]["t0"]
-        end = _hold_to_cut(max(group[-1]["t1"], start + MIN_EVENT_S),
-                           group[-1], start)
-        events.append({"start": start, "end": end,
-                       "text": r"\N".join(_esc(l) for l in lines)})
+        # A group within the character budget can still wrap onto one line
+        # more than it may show (a long word that does not fit a line's
+        # end); its overflow words used to be cut off the caption unseen.
+        # It is shown as consecutive events instead, never losing a word: a
+        # group that fits (every group, almost always) is unchanged.
+        for part in _fit_lines(group, line_chars, max_lines):
+            text = " ".join(w["w"] for w in part)
+            lines = _wrap(text, line_chars)[:max_lines]
+            start = part[0]["t0"]
+            end = _hold_to_cut(max(part[-1]["t1"], start + MIN_EVENT_S),
+                               part[-1], start)
+            events.append({"start": start, "end": end,
+                           "text": r"\N".join(_esc(l) for l in lines)})
         group, chars = [], 0
 
     for w in out_words:
@@ -2673,44 +2718,48 @@ def events_from_items(items, tl, play_res=BASE_PLAY_RES):
             # treatments are invented on text the agent wrote out.
             upper = ns["uppercase"] if ns["uppercase"] is not None \
                 else p["uppercase"]
-            text = get("text").upper() if upper else get("text")
-            lines = _wrap(text, item_chars)[:PREMIUM_MAX_LINES]
+            full = get("text").upper() if upper else get("text")
             px = _premium_font_px(p, ns, play_res)
-            geom = _geom_prefix(p, ns, play_res,
-                                [[0]] * len(lines), [None], px)
             anim = _premium_anim_prefix(ns.get("animation")
                                         or p.get("animation"), px)
-            # Manual/translated captions use the same single vector panel as
-            # transcript captions. Without this, a documentary style applied
-            # successfully to translated items but its contrast panel was
-            # silently absent.
-            disp = [_display_word(x, upper) for x in text.split()]
-            panel_lines = _premium_layout(disp, p["wpl"], item_chars)
-            panel = _premium_panel(
-                p, ns, play_res, disp, [None] * len(disp), panel_lines, px,
-                animation=ns.get("animation") or p.get("animation"))
-            if panel:
-                events.append({"start": start,
-                               "end": end,
-                               "text": panel, "item_style": get("style"),
-                               "layer": 0, "premium": True,
+            for p_start, p_end, text in _item_pages(
+                    full, item_chars, PREMIUM_MAX_LINES, start, end):
+                lines = _wrap(text, item_chars)[:PREMIUM_MAX_LINES]
+                geom = _geom_prefix(p, ns, play_res,
+                                    [[0]] * len(lines), [None], px)
+                # Manual/translated captions use the same single vector
+                # panel as transcript captions. Without this, a documentary
+                # style applied successfully to translated items but its
+                # contrast panel was silently absent.
+                disp = [_display_word(x, upper) for x in text.split()]
+                panel_lines = _premium_layout(disp, p["wpl"], item_chars)
+                panel = _premium_panel(
+                    p, ns, play_res, disp, [None] * len(disp), panel_lines,
+                    px, animation=ns.get("animation") or p.get("animation"))
+                if panel:
+                    events.append({"start": p_start,
+                                   "end": p_end,
+                                   "text": panel, "item_style": get("style"),
+                                   "layer": 0, "premium": True,
+                                   "motion_mode": item_motion_mode,
+                                   "motion_motif": item_motion_motif})
+                events.append({"start": p_start,
+                               "end": p_end,
+                               "text": geom + anim +
+                               r"\N".join(_esc(l) for l in lines),
+                               "item_style": get("style"), "layer": 5,
+                               "premium": True,
                                "motion_mode": item_motion_mode,
                                "motion_motif": item_motion_motif})
-            events.append({"start": start,
-                           "end": end,
-                           "text": geom + anim +
-                           r"\N".join(_esc(l) for l in lines),
-                           "item_style": get("style"), "layer": 5,
-                           "premium": True,
+            continue
+        for p_start, p_end, text in _item_pages(
+                get("text"), item_chars, MAX_LINES, start, end):
+            lines = _wrap(text, item_chars)[:MAX_LINES]
+            events.append({"start": p_start, "end": p_end,
+                           "text": r"\N".join(_esc(l) for l in lines),
+                           "item_style": get("style"),
                            "motion_mode": item_motion_mode,
                            "motion_motif": item_motion_motif})
-            continue
-        lines = _wrap(get("text"), item_chars)[:MAX_LINES]
-        events.append({"start": start, "end": end,
-                       "text": r"\N".join(_esc(l) for l in lines),
-                       "item_style": get("style"),
-                       "motion_mode": item_motion_mode,
-                       "motion_motif": item_motion_motif})
     events.sort(key=lambda ev: ev["start"])
     return events
 
