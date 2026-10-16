@@ -546,12 +546,15 @@ abstract class ValmeraContainer extends Container<Env> {
   }
 
   private async releaseStartable(): Promise<boolean> {
-    // Is this Worker's release known to start on this lane? Cached briefly:
-    // only an instance whose container is on an older release asks.
+    // Is this Worker's release known to start on this lane? Only an
+    // instance whose container is on an older release asks.
     const expected = this.expectedSource();
     const now = Date.now();
     const cached = this.imageReadyCache;
-    if (cached && cached.source === expected && now - cached.at < 30_000) {
+    // A "ready" answer never goes stale for one release; "not yet" is
+    // re-asked after 10 s so a lane recycles soon after its first new start.
+    if (cached && cached.source === expected
+        && now - cached.at < (cached.ready ? 300_000 : 10_000)) {
       return cached.ready;
     }
     let ready = false;
