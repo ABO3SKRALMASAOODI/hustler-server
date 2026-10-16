@@ -4030,7 +4030,14 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                         "no main video.")
             for a, b in zip(fx.picture_cards, fx.picture_cards[1:]):
                 if b.start < a.end - .001:
-                    raise EDLValidationError("Picture-card windows must not overlap.")
+                    # name both cards: "must not overlap." alone sent the
+                    # owner's Codex editors into whole-effects rewrites
+                    raise EDLValidationError(
+                        f"Picture-card windows must not overlap: '{b.id}' "
+                        f"({b.start:g}-{b.end:g}s) starts before '{a.id}' "
+                        f"({a.start:g}-{a.end:g}s) ends. End '{a.id}' at "
+                        f"{b.start:g}s or earlier (set_picture_card id='{a.id}'), "
+                        f"start '{b.id}' at {a.end:g}s, or remove_picture_card('{a.id}').")
             fx.picture_cards = fx.picture_cards or None
         # all-empty effects is the absence of effects — normalize so old
         # EDLs and cleared-effects EDLs compare identical.

@@ -338,31 +338,59 @@ def _caption_semantics(evidence, sheets, workdir):
         return "raw_contact_sheets_required"
 
     per_call = max(1, int(config.VISUAL_SEMANTIC_SHEETS_PER_CALL or 8))
-    any_success = False
+    pages = []
     for offset in range(0, len(sheets), per_call):
         page = sheets[offset:offset + per_call]
         rows = [missing[evidence_id]
                 for sheet in page for evidence_id in sheet["evidence_ids"]
                 if evidence_id in missing]
-        if not rows:
-            continue
-        paths = [sheet["path"] for sheet in page]
-        names = [f'visual-sheet:{sheet["digest"]}' for sheet in page]
-        answer = llm.ask_vision(
-            _semantic_prompt(rows), paths,
-            max_tokens=max(900, len(rows) * 140),
-            purpose="visual_index_semantics", image_names=names,
-            reasoning_effort="low")
-        if not answer:
-            # ask_vision switches to the configured agent-vision fallback
-            # after a proven blind provider; a second attempt also covers a
-            # transient first-provider failure without making indexing fatal.
+        if rows:
+            pages.append((page, rows))
+    # The pages are independent calls: run them side by side like the index's
+    # tile captions (sheets.caption_points, VISION_CAPTION_PARALLELISM). One
+    # after another they were the whole "90%" wait on a long source: the
+    # owner's 90-minute Jensen vlog (3,064 clusters, 511 sheets, 64 calls) sat
+    # at 90% for 1.5 h (index 69728, 15 Oct). Same calls, same answers; the
+    # recorder is thread-local, so each pool thread installs the caller's.
+    recorder = llm.get_recorder()
+
+    def _ask(job):
+        page, rows = job
+        if recorder is not None:
+            llm.set_recorder(recorder)
+        try:
+            paths = [sheet["path"] for sheet in page]
+            names = [f'visual-sheet:{sheet["digest"]}' for sheet in page]
             answer = llm.ask_vision(
                 _semantic_prompt(rows), paths,
                 max_tokens=max(900, len(rows) * 140),
-                purpose="visual_index_semantics_fallback", image_names=names,
+                purpose="visual_index_semantics", image_names=names,
                 reasoning_effort="low")
-        parsed = llm.extract_json_array(answer)
+            if not answer:
+                # ask_vision switches to the configured agent-vision fallback
+                # after a proven blind provider; a second attempt also covers a
+                # transient first-provider failure without making indexing fatal.
+                answer = llm.ask_vision(
+                    _semantic_prompt(rows), paths,
+                    max_tokens=max(900, len(rows) * 140),
+                    purpose="visual_index_semantics_fallback", image_names=names,
+                    reasoning_effort="low")
+            return llm.extract_json_array(answer)
+        except Exception as exc:  # noqa: BLE001 — one page never fails the index
+            print(f"[visual-index] semantic page failed: {str(exc)[:160]}", flush=True)
+            return None
+        finally:
+            if recorder is not None:
+                llm.set_recorder(None)
+
+    workers = max(1, min(int(config.VISION_CAPTION_PARALLELISM or 1), len(pages)))
+    if workers == 1:
+        answers = [_ask(job) for job in pages]
+    else:
+        with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            answers = list(pool.map(_ask, pages))
+    cache_rows = []
+    for (_page, rows), parsed in zip(pages, answers):
         if not parsed:
             continue
         by_id = {str(item.get("evidence_id")): item for item in parsed
@@ -372,11 +400,16 @@ def _caption_semantics(evidence, sheets, workdir):
             if not semantic:
                 continue
             _apply_semantic(row, semantic)
-            cache_row = {key: row.get(key) for key in (
+            cache_rows.append({key: row.get(key) for key in (
                 "frame_hash", "subjects", "actions", "objects", "setting",
-                "visible_text", "semantic_description", "composition")}
-            _write_cached_semantics(cache_row, workdir)
-            any_success = True
+                "visible_text", "semantic_description", "composition")})
+    any_success = bool(cache_rows)
+    if cache_rows:
+        # one small object per frame (3,064 on the Jensen vlog): side by side
+        with futures.ThreadPoolExecutor(
+                max_workers=max(1, min(int(config.UPLOAD_PARALLELISM or 1),
+                                       len(cache_rows)))) as pool:
+            list(pool.map(lambda r: _write_cached_semantics(r, workdir), cache_rows))
     remaining = [row for row in evidence if not row.get("semantic_description")]
     if remaining:
         return ("partial_raw_contact_sheets_required" if any_success else
@@ -431,12 +464,20 @@ def build(src_path, duration, shots, motion, spatial, sentences, sha,
     sheets = _build_sheets(evidence, os.path.join(workdir, "visual_sheets"))
     semantic_status = _caption_semantics(evidence, sheets, workdir)
 
-    uploaded = []
-    for page, sheet in enumerate(sheets, start=1):
+    def _upload(sheet):
         key = (f"visual-evidence/storyboards/v{VISUAL_STORYBOARD_VERSION}/"
                f"{sha}/{sheet['digest']}.jpg")
         if not storage.exists(key):
             storage.upload_file(sheet["path"], key, "image/jpeg")
+        return key
+
+    # hundreds of sheets on a long source: upload them side by side
+    with futures.ThreadPoolExecutor(
+            max_workers=max(1, min(int(config.UPLOAD_PARALLELISM or 1),
+                                   len(sheets) or 1))) as pool:
+        keys = list(pool.map(_upload, sheets))
+    uploaded = []
+    for page, (sheet, key) in enumerate(zip(sheets, keys), start=1):
         uploaded.append({"page": page, "key": key,
                          "evidence_ids": sheet["evidence_ids"],
                          "t0": round(sheet["t0"], 2),

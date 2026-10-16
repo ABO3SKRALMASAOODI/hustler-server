@@ -13998,16 +13998,24 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
     # picture rectangle. Either way x/y/scale cannot move it.
     fills = ("the whole frame" if hit.get("fit") == "cover"
              else "the program's picture rectangle")
+    # A photo that fills the frame moves with animate_still (a Ken Burns
+    # push, pull or pan): the owner's Codex editors asked set_overlay_motion
+    # for a slow 1.0 -> 1.04 push on stills seven times (13-15 Oct) and were
+    # only told to animate opacity or use a PIP.
+    still = (f" For this photo, animate_still(id='{id}') gives it the camera "
+             "move (push_in, pull_out, pan_left/right, or auto: a drift toward "
+             "a face) in one call." if hit.get("kind") == "image" else "")
     dropped = ("" if not ignored else
                "\nNot applied: " + ", ".join(sorted(ignored))
                + f" — overlay {id} has fit={hit.get('fit')}, which always "
-                 f"fills {fills}. Use a PIP overlay for position/scale motion.")
+                 f"fills {fills}. Use a PIP overlay for position/scale motion."
+               + still)
     if ignored and not set(motion) - ignored:
         return (f"REJECTED: overlay {id} has fit={hit.get('fit')}; such "
                 f"overlays always fill {fills} and ignore "
                 + ", ".join(sorted(ignored))
                 + ". Animate opacity/rotation, or use a PIP overlay for "
-                  "position and scale motion.")
+                  "position and scale motion." + still)
     # Apply the properties a cover CAN render in this same call and say
     # exactly what was dropped, instead of rejecting the whole move.
     motion = {k: v for k, v in motion.items() if k not in ignored}
@@ -14019,6 +14027,25 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
         if err:
             return err
         hit[name] = value
+    # scale is the overlay's WIDTH as a fraction of the frame; the schema holds
+    # it to OVERLAY_SCALE_MIN-MAX. Say so instead of writing a curve that the
+    # clamp flattens (a "1.0 -> 1.08 push" on a full-width PIP never moved).
+    if "scale" in motion:
+        from schemas import OVERLAY_SCALE_MAX, OVERLAY_SCALE_MIN
+        sv = hit.get("scale")
+        vals = ([k.get("v") for k in sv if isinstance(k, dict)]
+                if isinstance(sv, list) else [sv])
+        out = sorted({round(float(v), 3) for v in vals
+                      if isinstance(v, (int, float))
+                      and not OVERLAY_SCALE_MIN <= float(v) <= OVERLAY_SCALE_MAX})
+        if out:
+            dropped += (f"\nNOTE: scale is the overlay's WIDTH as a fraction of "
+                        f"the frame ({OVERLAY_SCALE_MIN:g}-{OVERLAY_SCALE_MAX:g}); "
+                        f"{', '.join(f'{v:g}' for v in out)} will be held at that "
+                        "limit, so that part of the move does not show. Grow it "
+                        "within the range (e.g. 0.92 -> 1.0)"
+                        + (", or animate_still for a push on a photo." if
+                           hit.get("kind") == "image" else "."))
     if motion_motif is None and hit.get("motion_motif") and not any(
             isinstance(hit.get(name), list)
             for name in _OVERLAY_MOTION_FIELDS):
@@ -15440,6 +15467,24 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
         return "REJECTED: text is empty."
     if not isinstance(mute_captions, bool):
         return "REJECTED: mute_captions must be true or false."
+    # font_size is a fraction of the frame height; a pixel size (24, 30: the
+    # owner's Codex editors, 13-14 Oct, twice) is read as pixels of the output
+    # frame instead of refused.
+    px_note = ""
+    try:
+        px = float(font_size) if font_size is not None else None
+    except (TypeError, ValueError):
+        px = None
+    if px is not None and 4 <= px <= 600:
+        try:
+            import motion_tools
+            _w, frame_h = motion_tools._canvas_size(ctx, ctx.latest_edl()["json"])
+        except Exception:  # noqa: BLE001
+            frame_h = 1920
+        font_size = round(px / float(frame_h or 1920), 4)
+        px_note = (f"\nFONT SIZE: {px:g} read as pixels of the {frame_h}px-tall "
+                   f"frame: stored as {font_size:g} (font_size is a fraction of "
+                   "the frame height, 0.012-0.3).")
     for name, value, low, high in (("font_size", font_size, .012, .3),
                                    ("max_width", max_width, .1, .96)):
         if value is not None:
@@ -15586,7 +15631,7 @@ def add_text(ctx, text, start, end, template="title", x=None, y=None,
                       "or disappears with it and two word layers never stack.")
     return ctx.write_edl(
         edl, f"{tpl} text \"{t[:40]}\" at {s}-{e}s (program time) "
-             f"[{item['id']}]") + clamped + placement_note + muted_note
+             f"[{item['id']}]") + clamped + placement_note + muted_note + px_note
 
 
 # ── Typography choreography (round 82e) ─────────────────────────────────
@@ -21217,6 +21262,48 @@ def research_broll(ctx, moments, orientation=None):
               "recorded output moments so speech/captions continue.")
 
 
+def _stock_hit_by_provider_id(ctx, sid):
+    """(saved hit, None) for a bare provider id ('pexels:photo:15020901')
+    that a research_broll result listed as 'broll:1:detroit:pexels:photo:
+    15020901', in this project's saved results or its parent's (a shorts
+    run researches once on the board; its children place the picks), or
+    (None, refusal naming the candidates) when it is ambiguous, or (None,
+    None). The owner's klRb0 run (15 Oct) lost six picks this way: s05 passed
+    the provider id research_broll had listed in the same project, s09/s25
+    passed ids researched on their parent (3705)."""
+    if not sid:
+        return None, None
+    pools = [dict(ctx.stock_results or {})]
+    parent = (getattr(ctx, "project", None) or {}).get("parent_project_id")
+    keys = [_search_hit_cache_key(ctx, "stock")]
+    if parent:
+        keys.append(f"search_hits:stock:project:{int(parent)}")
+    for key in keys:
+        try:
+            raw = ctx.db.run(dbx.kv_get, key)
+            cached = json.loads(raw) if raw else {}
+        except Exception:  # noqa: BLE001
+            cached = {}
+        if isinstance(cached, dict):
+            pools.append(cached)
+    found = {}
+    for pool in pools:
+        for hid, hit in pool.items():
+            if not isinstance(hit, dict):
+                continue
+            hid = str(hit.get("id") or hid)
+            if hid == sid or hit.get("_provider_result_id") == sid \
+                    or hid.endswith(":" + sid):
+                found.setdefault(hit.get("_provider_result_id") or hid, (hid, hit))
+    if len(found) == 1:
+        return next(iter(found.values()))[1], None
+    if len(found) > 1:
+        return None, ("REJECTED: '" + sid + "' matches several saved results: "
+                      + ", ".join(sorted(h for h, _ in found.values())[:6])
+                      + ". Pass one of these ids exactly.")
+    return None, None
+
+
 def add_stock_media(ctx, id):
     """Download a chosen search result and register it as a project asset."""
     if not stock.available():
@@ -21224,6 +21311,10 @@ def add_stock_media(ctx, id):
     sid = (id or "").strip()
     item, _recovery_error = _recover_search_hit(
         ctx, "stock", sid, resolver=None)
+    if not item:
+        item, note = _stock_hit_by_provider_id(ctx, sid)
+        if note:
+            return note
     if not item:
         return ("REJECTED: unknown stock id for this project. Call "
                 "search_stock or research_broll and pass an id exactly as it "
@@ -22353,6 +22444,19 @@ def audit_captions(ctx, offset=0, limit=80):
             unbacked_mutes.append([start, end])
     if unbacked_mutes:
         warnings.append("Authored caption mute windows without continuous text coverage need review")
+    # A stored correction that changes no caption word is not a passing
+    # caption: "active_corrections" + PASS read as "fixed" while the render
+    # still showed the misheard words (owner's runs, 15-16 Oct: corrections
+    # scoped in SOURCE seconds on klRb0 s11/s12 and Jensen s25, all PASS).
+    corrections_not_applied = []
+    if isinstance(caps, dict) and caps.get("corrections"):
+        corrections_not_applied = _unmatched_caption_fixes(
+            ctx, row["json"], caps.get("corrections"))
+        if corrections_not_applied:
+            warnings.append(
+                f"{len(corrections_not_applied)} caption correction(s) change no "
+                "word, so the captions still read the original words: "
+                + "; ".join(corrections_not_applied[:3]))
     contract_failed = bool(density_violations or wrap_violations)
     result = {
         "version": row["version"],
@@ -22363,6 +22467,7 @@ def audit_captions(ctx, offset=0, limit=80):
                                    if isinstance(caps, dict) else None),
         "program_duration_s": tl.out_duration,
         "active_corrections": caps.get("corrections") if isinstance(caps, dict) else None,
+        "corrections_not_applied": corrections_not_applied or None,
         "legacy_global_fixes": caps.get("text_fixes") if isinstance(caps, dict) else None,
         "authored_mute_windows": caplib.effective_caption_mutes(edl),
         "caption_past_program_end": [s for s in states if s["end"] > tl.out_duration + .001],

@@ -71,6 +71,26 @@ def _canvas_size(ctx, edl):
                                delivery=True)
 
 
+def _box_in_fractions(ctx, edl, box):
+    """(box, note): a box is [x0, y0, x1, y1] FRACTIONS of the frame; one
+    given in pixels (every value past 1.5) is divided by the output frame
+    instead of clamping to an empty box. The owner's Zuckerberg run (s23,
+    project 3629 v15): box [50, 1030, 1030, 1290] for an html payoff was
+    refused "motion[3].box is empty"."""
+    try:
+        vals = [float(v) for v in box]
+    except (TypeError, ValueError):
+        return box, ""
+    if len(vals) != 4 or max(vals) <= 1.5:
+        return box, ""
+    W, H = _canvas_size(ctx, edl)
+    frac = [round(min(max(v / d, 0.0), 1.0), 4)
+            for v, d in zip(vals, (W, H, W, H))]
+    return frac, (f"\nBOX: {[round(v, 1) for v in vals]} read as pixels of the "
+                  f"{W}x{H} frame and stored as fractions {frac} (box takes 0-1 "
+                  "fractions).")
+
+
 # ── Sound library (real recordings approved by the owner) ─────────────────
 
 SOUND_PREFIX = sound_library.REF_PREFIX
@@ -1554,11 +1574,13 @@ def _number_landing(ctx, edl, item, prog):
     (changed, reply text). Never blocks the write it comments on."""
     try:
         import number_reveal
+        local = number_reveal.local_landing(item)
         changed, note = number_reveal.land(edl, getattr(ctx, "index", None) or {}, item, prog)
     except Exception as e:  # noqa: BLE001
         print(f"[motion] number landing skipped: {str(e)[:160]}", flush=True)
         return False, ""
-    return changed, ("\n" + note if note else "")
+    note = "\n".join(n for n in (local, note) if n)
+    return bool(changed or local), ("\n" + note if note else "")
 
 
 # ── the window: its first visible word and the cut (round 4 judging) ──────
@@ -2823,7 +2845,9 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
             "layer": layer}
     if template == "html":
         item["html"] = html
+    box_note = ""
     if box is not None:
+        box, box_note = _box_in_fractions(ctx, edl, box)
         item["box"] = box
     if mute_captions is not None:
         item["mute_captions"] = bool(mute_captions)
@@ -2897,7 +2921,7 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         return res
     tail = (_yield_report(ctx, edl, item) if persistent
             else _band_note(ctx, edl, item) + _band_spill_note(ctx, edl, item, bbox))
-    return (res + where + band_note + keep_note + clamp + number_note + size_note
+    return (res + where + box_note + band_note + keep_note + clamp + number_note + size_note
             + window_note + series_note + hero_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + _owned_sfx_checks(ctx, edl, mid)
@@ -2979,7 +3003,9 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         # the hero tier is a word BEHIND the speaker (see add_motion_graphic)
         hit["params"] = dict(hit["params"], tier="display")
         hero_note = _HERO_OFF_NOTE.format(layer=hit.get("layer") or "above_captions")
+    box_note = ""
     if box is not None:
+        box, box_note = _box_in_fractions(ctx, edl, box)
         hit["box"] = box or None
     if mute_captions is not None:
         hit["mute_captions"] = bool(mute_captions)
@@ -3081,7 +3107,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         return res
     tail = (_yield_report(ctx, edl, hit) if persistent
             else _band_note(ctx, edl, hit) + _band_spill_note(ctx, edl, hit, bbox))
-    return (res + where + band_note + keep_note + number_note + size_note
+    return (res + where + box_note + band_note + keep_note + number_note + size_note
             + window_note + series_note + hero_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + (_owned_sfx_checks(ctx, edl, id) if checked else "")

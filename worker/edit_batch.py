@@ -9,9 +9,10 @@ import os
 import sys
 
 try:
-    from schemas import FX_AUTHORABLE_TYPES, FX_TYPES, program_duration, validate_edl
+    from schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, CaptionStyle,
+                         program_duration, validate_edl)
 except ImportError:
-    from worker_schemas import (FX_AUTHORABLE_TYPES, FX_TYPES,
+    from worker_schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, CaptionStyle,
                                 program_duration, validate_edl)
 
 # "fx" (Wave 0 seam, worker/devices/INTERFACES.md §4): registered effect
@@ -366,6 +367,67 @@ def end_with_programme(before, edl, operations):
             + ", ".join(ended) + f" ran to the end and now end at {new_end:g}s."]
 
 
+# Near misses a batch author means unambiguously (the owner's Codex runs,
+# 13-16 Oct: each cost a rejected batch with a raw validation dump).
+_NO_TRANSITION = ("cut", "none", "hard_cut", "hard cut", "")
+_CARD_FIT = {"contain": "pad", "letterbox": "pad", "fit": "pad",
+             "cover": "crop", "fill": "crop"}
+_CARD_ANIM_MIN_S = 0.12
+
+
+def _near_misses(edl, layers):
+    """Normalize the values a batch plainly meant and return their notes."""
+    notes = []
+    fx = edl.get("effects") if "effects" in layers else None
+    if isinstance(fx, dict):
+        tr = fx.get("transition")
+        style = tr.get("style") if isinstance(tr, dict) else tr
+        if tr is not None and isinstance(style, str) and \
+                style.strip().lower() in _NO_TRANSITION:
+            fx["transition"] = None
+            notes.append(f"effects.transition '{style}' is a plain cut: stored as "
+                         "no transition (null)")
+        for card in fx.get("picture_cards") or []:
+            if not isinstance(card, dict):
+                continue
+            cid = card.get("id") or "?"
+            if isinstance(card.get("follow"), bool):
+                if card["follow"]:
+                    raise ValueError(
+                        f"picture card {cid}: follow is the list of measured face "
+                        "paths set_picture_card(source='auto', follow=true) writes, "
+                        "not a switch. Leave it out for a still crop, or call "
+                        "set_picture_card to measure it.")
+                card.pop("follow")
+                notes.append(f"picture card {cid}: follow false = no follow (left out)")
+            fit = card.get("fit")
+            if isinstance(fit, str) and fit.strip().lower() in _CARD_FIT:
+                card["fit"] = _CARD_FIT[fit.strip().lower()]
+                notes.append(f"picture card {cid}: fit '{fit}' stored as "
+                             f"'{card['fit']}' (fit is 'crop' or 'pad')")
+            dur = card.get("duration_s")
+            if isinstance(dur, (int, float)) and not isinstance(dur, bool) \
+                    and 0 <= dur < _CARD_ANIM_MIN_S:
+                card["duration_s"] = _CARD_ANIM_MIN_S
+                notes.append(f"picture card {cid}: duration_s is its entrance/exit "
+                             f"animation (0.12-1.2 s), so {dur:g} is stored as 0.12; "
+                             "the card's window is start-end")
+    return notes
+
+
+def _style_field_hint(path, unknown):
+    """A caption track given its style fields at the top level: say where
+    they go instead of only listing them."""
+    if path != "captions":
+        return ""
+    style = sorted(set(unknown) & set(CaptionStyle.model_fields))
+    if not style:
+        return ""
+    return (f" {', '.join(style)} {'is a style field' if len(style) == 1 else 'are style fields'}: "
+            "put them under captions.style, e.g. {\"mode\": \"from_transcript\", "
+            "\"style\": {\"font\": ..., \"size\": ...}}.")
+
+
 def apply_batch(before, operations, duration, allowed_keys, notes=None):
     """``notes``: an optional list the batch appends its receipts to (an
     item ended with a shortened programme)."""
@@ -465,9 +527,10 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         known.add(PROGRAM_MATTE_KEY)
     if (set(media_keys(edl)) | _motion_refs(edl)) - known - set(allowed_keys):
         raise ValueError("Use media attached to this project. A referenced asset is not available here.")
+    near = _near_misses(edl, {op["layer"] for op in operations})
     moved = end_with_programme(before, edl, operations)
     if notes is not None:
-        notes.extend(moved)
+        notes.extend(near + moved)
     _check_new_motion_params(before, edl)
     # A graphic behind the subject needs a subject mask: a measured clip
     # (add_motion_graphic builds one) or, from Wave 1, the program matte.
@@ -487,7 +550,8 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         if isinstance(raw, dict) and isinstance(clean, dict):
             unknown = set(raw) - set(clean)
             if unknown:
-                raise ValueError(f"Unknown field in {path}: {', '.join(sorted(unknown))}.")
+                raise ValueError(f"Unknown field in {path}: {', '.join(sorted(unknown))}."
+                                 + _style_field_hint(path, unknown))
             for key, value in raw.items():
                 check_fields(value, clean[key], f"{path}.{key}")
         elif isinstance(raw, list) and isinstance(clean, list):

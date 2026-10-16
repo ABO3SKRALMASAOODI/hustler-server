@@ -57,6 +57,11 @@ SEARCH_AFTER_S = 0.3
 # word_slam: when its hero is legible / lands, by entrance (item seconds)
 SLAM_LANDING = {"slam": 0.2, "ghost": 0.067}
 
+# a count said as an adverb: "maybe twice a year", "once or twice a week"
+# (the owner's Zuckerberg run, 13 Oct: counters '2' and '1–2' found no spoken
+# number, so they never landed on "twice" / "once or twice")
+_ADVERBS = {"once": 1, "twice": 2, "thrice": 3}
+
 _UNITS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen "
     "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
@@ -124,6 +129,8 @@ def _word_value(toks, i, breaks=frozenset()):
     while k < len(parts):
         p = parts[k][0]
         nxt = parts[k + 1][0] if k + 1 < len(parts) else ""
+        if not seen and k == 0 and p in _ADVERBS:
+            return float(_ADVERBS[p]), 1
         if p in _UNITS or p in _TENS:
             n = _UNITS.get(p, _TENS.get(p))
             if not seen or last in ("hundred", "scale") or (last == "tens" and n < 10):
@@ -249,6 +256,44 @@ def range_values(text):
     if not a or not b:
         return None
     return a, b
+
+
+def local_landing(item):
+    """A counter's ``land``/``land_first`` are item seconds. One written in
+    PROGRAM seconds (start + offset) lies past the item's end, where the
+    template clamps it to the last instant: the number stayed blank through
+    its word and a range read '0–0' (the owner's Zuckerberg run, 13 Oct,
+    project 3624: land 4.16 and 14.44 on 2 s items starting at 3.76 and
+    13.56). Such a value is moved into item time; returns the note, or ''."""
+    if item.get("template") != "counter":
+        return ""
+    params = item.get("params") or {}
+    try:
+        s, e = float(item["start"]), float(item["end"])
+    except (KeyError, TypeError, ValueError):
+        return ""
+    span = e - s
+    notes = []
+    for key in ("land_first", "land"):
+        try:
+            v = float(params.get(key) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if v <= 0 or v <= span - 0.05:
+            continue
+        if s - 0.05 <= v <= e + 0.05:
+            local = round(min(max(0.0, v - s), max(0.0, span - 0.05)), 3)
+            params[key] = local
+            notes.append(f"'{key}' {v:g} is a PROGRAM time inside this {span:.2f}s "
+                         f"graphic ({s:g}-{e:g}s): set to {local:g} s into it")
+        else:
+            notes.append(f"'{key}' {v:g} is past this {span:.2f}s graphic's end: the "
+                         f"number completes at its last instant; '{key}' is seconds "
+                         f"into the graphic (0-{span:.2f})")
+    if not notes:
+        return ""
+    item["params"] = params
+    return "LANDING: " + "; ".join(notes) + "."
 
 
 def counter_landing(params, span):

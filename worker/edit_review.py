@@ -485,6 +485,17 @@ class _Program:
             except Exception:  # noqa: BLE001
                 voice = None
             self.kept = self.tl.kept_words(self.words, rescue=True, voice=voice)
+            # The review quotes and reads the words the captions show: the
+            # editor's corrections applied (the owner's Jensen run, s13 v10:
+            # the render report quoted "their compute started" over a caption
+            # corrected to "starved", and the editor took the render for wrong)
+            caps = edl.get("captions")
+            if isinstance(caps, dict) and (caps.get("corrections") or caps.get("text_fixes")):
+                try:
+                    import captions as caplib
+                    self.kept = caplib._corrected(self.kept, caps)
+                except Exception:  # noqa: BLE001 — the raw words still review
+                    pass
 
     def joins(self, covered=False):
         """[(i, program_t, src_end, src_start)] for every real cut between

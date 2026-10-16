@@ -391,11 +391,51 @@ def resolve(item, want_w, want_h):
     return f["link"], MAX_VIDEO_BYTES
 
 
+def _too_big(exc):
+    text = str(exc)
+    return "MB limit" in text or "exceeded" in text
+
+
+def _smaller_renditions(files, picked_w, picked_h):
+    """Usable renditions smaller than the pick, largest first, down to a
+    720-line short side."""
+    usable = [f for f in files
+              if f.get("link") and (f.get("width") or 0) > 0
+              and str(f.get("file_type", "video/mp4")).startswith("video")
+              and min(f.get("width") or 0, f.get("height") or 0) >= 720
+              and (f.get("width") or 0) * (f.get("height") or 0)
+              < (picked_w or 0) * (picked_h or 0)]
+    return sorted(usable, key=lambda f: -(f["width"] * f["height"]))
+
+
 def download(item, out_path, want_w, want_h):
     """Fetch the chosen rendition to out_path. Returns the item, annotated."""
     url, cap = resolve(item, want_w, want_h)
-    net_fetch.download(url, out_path, max_bytes=cap,
-                       timeout_s=DOWNLOAD_TIMEOUT_S)
+    try:
+        net_fetch.download(url, out_path, max_bytes=cap,
+                           timeout_s=DOWNLOAD_TIMEOUT_S)
+    except net_fetch.FetchError as exc:
+        # The smallest rendition that COVERS a 9:16 frame is 4K for a
+        # landscape clip, often over the byte cap: the owner's Zuckerberg run
+        # (14 Oct, project 3639) lost two picks at 234 and 157 MB. A smaller
+        # rendition (a slight upscale under a cover crop) beats no shot.
+        if item.get("kind") != KIND_VIDEO or not _too_big(exc):
+            raise
+        for f in _smaller_renditions(item.get("_files") or [],
+                                     item.get("picked_width"),
+                                     item.get("picked_height")):
+            try:
+                net_fetch.download(f["link"], out_path, max_bytes=cap,
+                                   timeout_s=DOWNLOAD_TIMEOUT_S)
+            except net_fetch.FetchError as again:
+                if _too_big(again):
+                    continue
+                raise
+            item["picked_width"], item["picked_height"] = f.get("width"), f.get("height")
+            url = f["link"]
+            break
+        else:
+            raise
     if item.get("kind") == KIND_PHOTO:
         # Wave 4 (4C, JRE defect 29): a "photo" link can serve a web page
         # (a login wall, a landing page); judge the bytes, never the name
