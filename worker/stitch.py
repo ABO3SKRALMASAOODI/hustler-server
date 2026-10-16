@@ -817,8 +817,12 @@ def window_edl(edl, tl, w0, w1, keep_audio=False, fps=None):
                         "end": round(b - w0, 3)})
         return out
 
-    fx["regions"] = _shift_optional_window(fx.get("regions"))
-    fx["custom"] = _shift_optional_window(fx.get("custom"))
+    # Clip every timed effect to the window. A changed-section proof can
+    # start inside a custom filter or a region's span; shifting without
+    # clipping left a negative start that validate_edl refused (preview
+    # check 72200, 16 Oct 2026: "effects.custom[0]: negative time").
+    fx["regions"] = _shift_optional_window(fx.get("regions"), clip=True)
+    fx["custom"] = _shift_optional_window(fx.get("custom"), clip=True)
     fx["stylize"] = _shift_optional_window(fx.get("stylize"), clip=True)
     cards = []
     for card in fx.get("picture_cards") or []:
