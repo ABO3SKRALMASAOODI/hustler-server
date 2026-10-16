@@ -14,7 +14,8 @@ import credits as credits_mod
 import offers
 import paid_subscription_alert
 import trial_state
-from plan_catalog import PLAN_MONTHLY_CREDITS, MONTHLY_CYCLE_PLANS, daily_credits_for_plan
+from plan_catalog import (PLAN_MONTHLY_CREDITS, MONTHLY_CYCLE_PLANS,
+                          daily_credits_for_plan, is_yearly_price)
 
 paddle_webhook = Blueprint('paddle_webhook', __name__)
 
@@ -115,8 +116,8 @@ for _name, _cfg in (_PADDLE_PLANS or {}).items():
 def _record_new_annual_period(user_id, plan, subscription_id, data):
     """A verified paid annual price funds a calendar-month refill schedule."""
     cfg = _PADDLE_PLANS.get(plan) or {}
-    if plan not in MONTHLY_CYCLE_PLANS or \
-            _price_id_from_data(data) != cfg.get('yearly_price_id'):
+    if plan not in MONTHLY_CYCLE_PLANS or not is_yearly_price(
+            plan, _price_id_from_data(data), _PADDLE_PLANS):
         return
     period = data.get('billing_period') or {}
     if not period.get('starts_at') or not period.get('ends_at'):
@@ -567,8 +568,8 @@ def handle_webhook():
         # would now shadow the billing module imported at the top of the file.
         period = custom_data.get('billing', 'monthly')
         if plan in MONTHLY_CYCLE_PLANS:
-            period = ('yearly' if _price_id_from_data(data) ==
-                      _PADDLE_PLANS[plan].get('yearly_price_id') else 'monthly')
+            period = ('yearly' if is_yearly_price(
+                plan, _price_id_from_data(data), _PADDLE_PLANS) else 'monthly')
         # Transactions carry the paid term in billing_period, not
         # next_billed_at. The completed event must not erase the renewal date
         # supplied by the preceding subscription event.

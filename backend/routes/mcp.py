@@ -3567,10 +3567,16 @@ def server_card():
         ],
         "pricing": {
             "free": "Account creation and upload are free; editing requires a subscription",
-            "paidFrom": "USD 25/month",
+            "paidFrom": f"USD {_cheapest_shopfront_monthly()}/month",
             "url": "https://valmera.io/subscribe",
         },
     })
+
+
+def _cheapest_shopfront_monthly():
+    """The entry price of the plans on sale, read from the one catalog."""
+    from plan_catalog import NEW_PLANS, PLAN_PRICES_USD
+    return min(PLAN_PRICES_USD[plan]["monthly"] for plan in NEW_PLANS)
 
 
 def _group_of(name):

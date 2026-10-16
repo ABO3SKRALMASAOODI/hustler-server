@@ -129,8 +129,11 @@ def checkout_config():
 
     price_id = (PLANS[plan]['yearly_price_id'] if billing == 'yearly'
                 else PLANS[plan]['price_id'])
+    # The list price of exactly this price id, so the checkout summary quotes
+    # the server's number rather than a figure baked into the browser bundle.
     out = {"price_id": price_id, "email": user_email,
-           "user_id": str(user_id), "plan": plan, "billing": billing}
+           "user_id": str(user_id), "plan": plan, "billing": billing,
+           "price_usd": (PLAN_PRICES_USD.get(plan) or {}).get(billing)}
 
     upgrade, error = _upgrade_checkout_context(user_id, plan, billing)
     if error:
