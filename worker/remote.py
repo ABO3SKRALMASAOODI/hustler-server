@@ -1008,8 +1008,13 @@ def reconcile_remote_execution(worker_db, row):
             # job that may be running fine (an MCP call has one attempt).
             return {"status": "unknown", "job": job, "error": exc}
         decision = failure_policy.decision_for(exc, job.get("type"))
-        worker_db.run(dbx.finish_remote_execution, job_id, claim,
-                      "failed", exc, provider, row.get("call_id"))
+        closed = worker_db.run(dbx.finish_remote_execution, job_id, claim,
+                               "failed", exc, provider, row.get("call_id"))
+        if closed is False:
+            # The claim's ledger names another call now (its dispatcher
+            # relaunched it): this observation is stale; never fail the
+            # claim another call is serving.
+            return {"status": "superseded", "job": job, "error": exc}
         if decision.retryable and job["attempts"] < decision.max_attempts:
             requeued = worker_db.run(
                 dbx.requeue_job, job_id, exc, claim)
@@ -1050,6 +1055,10 @@ def reconcile_remote_execution(worker_db, row):
                            else "superseded"),
                 "job": job, "error": exc,
             }
+        if closed is False:
+            # Stale observation: another call of this claim owns the ledger
+            # (a relaunch), so this ended call says nothing about the job.
+            return {"status": "superseded", "job": job, "error": exc}
         counter = _orphan_unspent_counter(job, exc, decision)
         if counter and closed:
             # The dispatcher that launched this call is gone (a Render deploy

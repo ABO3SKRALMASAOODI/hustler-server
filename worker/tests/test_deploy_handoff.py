@@ -687,3 +687,27 @@ def test_an_unreachable_worker_ends_as_a_deferral_never_a_failure(
                                                        False, 5))
     # main.process_one defers exactly this class back to the queue unspent.
     assert isinstance(caught.value, remote.CloudflareCapacityUnavailable)
+
+
+def test_guardian_never_fails_a_claim_another_call_now_serves(monkeypatch):
+    """A guardian pass that read the ledger just before the dispatcher
+    fenced and relaunched the claim observes the OLD call ending: the
+    identity-scoped ledger close finds nothing, so it stands down."""
+    monkeypatch.setattr(remote, "check_executor_version",
+                        lambda quiet=True: "")
+    monkeypatch.setattr(remote, "_cloudflare_status", lambda *_a, **_k: {
+        "status": "failed", "envelope": dict(LOST, retryable=False, failure={
+            "kind": "outcome_unknown", "retryable": False,
+            "max_attempts": 0})})
+
+    class Relaunched(_GuardianDb):
+        def run(self, fn, *args, **kwargs):
+            if fn is dbx.finish_remote_execution:
+                self.calls.append((fn, args, kwargs))
+                return False
+            return super().run(fn, *args, **kwargs)
+
+    db = Relaunched()
+    event = remote.reconcile_remote_execution(db, _orphan())
+    assert event["status"] == "superseded"
+    assert dbx.finish_job not in db.fns()
