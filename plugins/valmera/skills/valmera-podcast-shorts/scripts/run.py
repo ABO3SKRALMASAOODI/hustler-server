@@ -492,8 +492,17 @@ def cmd_register(args: argparse.Namespace) -> dict:
         load_brief(str(path), payload["short_id"], window)  # validate first
         title = payload.get("child_title") or payload.get("headline")
         plans.append((path, payload, title, window))
-    rows = []
+    rows, skipped = [], []
+    with locked(run_dir(args.run_dir)) as state:
+        status = {sid: item["status"] for sid, item in state["shorts"].items()}
     for path, payload, title, window in plans:
+        # Re-registering a folder after some shorts moved on (the owner's
+        # klRb0 run, 15 Oct: "cannot assign s01 while it is candidate" stopped
+        # the whole register) leaves those shorts as they are.
+        if status.get(payload["short_id"]) not in (None, "queued", "editing", "fix"):
+            skipped.append({"short_id": payload["short_id"],
+                            "status": status[payload["short_id"]]})
+            continue
         start, end = (window if isinstance(window, (list, tuple)) and len(window) == 2
                       else (None, None))
         cmd_add_short(argparse.Namespace(
@@ -509,7 +518,13 @@ def cmd_register(args: argparse.Namespace) -> dict:
                      "structure": item["structure"],
                      "music_effective": item["music_effective"],
                      "max_beat_gap_s": item["brief"].get("max_beat_gap_s")})
-    return {"registered": len(rows), "shorts": rows}
+    out = {"registered": len(rows), "shorts": rows}
+    if skipped:
+        out["skipped"] = skipped
+        out["note"] = ("shorts already past their brief are left as they are; "
+                       "change one with run.py assign --brief while it is "
+                       "queued, editing or in fix")
+    return out
 
 
 def cmd_candidate(args: argparse.Namespace) -> dict:
@@ -529,8 +544,23 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
         raise StateError("handback must be a JSON object")
     with locked(run_dir(args.run_dir)) as state:
         item = short(state, args.short_id)
-        require(item, ("editing", "queued", "fix"), "record a candidate for")
-        if item["status"] == "editing":
+        require(item, ("editing", "queued", "fix", "candidate"),
+                "record a candidate for")
+        if item["status"] == "candidate":
+            # A newer render of a short still waiting for its review replaces
+            # the pending candidate (the review reads the latest); the older
+            # one stays in the history. The owner's klRb0 run (15 Oct) was
+            # refused "cannot record a candidate for s22 while it is candidate".
+            if args.editor and item["candidates"] and \
+                    item["candidates"][-1].get("editor") not in (None, args.editor):
+                raise StateError(
+                    f"{args.short_id}'s pending candidate belongs to editor "
+                    f"{item['candidates'][-1].get('editor')!r}")
+            item["editor"] = args.editor or (item["candidates"][-1].get("editor")
+                                             if item["candidates"] else None)
+            event(state, "candidate_replaced", short_id=args.short_id,
+                  edl_version=args.edl_version)
+        elif item["status"] == "editing":
             if args.editor and item.get("editor") != args.editor:
                 raise StateError(
                     f"{args.short_id} belongs to editor {item.get('editor')!r}")

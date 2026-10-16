@@ -103,11 +103,28 @@ disagree, v9 wins on method and the brief wins on preferences.
    source as `original` (`upload_start`/`upload_finish`; download a URL
    locally once if Valmera cannot fetch it; with yt-dlp fetch the video and
    the `en-orig` captions in separate calls, so a caption 429 cannot block the
-   download). Indexing takes about 20-25 min and shows "0%" while queued:
-   do not poll. Meanwhile read selection.md and looks.md, fetch the audience
-   signal (selection.md, **Audience signal**) and draft candidates from the
-   platform's captions if it has them; then check `index_status` about every 5
-   minutes. Waiting: the harness blocks a foreground `sleep`; run
+   download). **Downloading** (`fetch_url` refuses media over 60 minutes, so
+   a long podcast is always downloaded here): run yt-dlp with a Python 3.10+
+   (`.valmera/venv-worker/bin/python -m yt_dlp`; the system `python3` is 3.9
+   and cannot import it), `-f 'bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080]'
+   --merge-output-format mp4 -N 8 --ffmpeg-location
+   /Users/masaoodi/Documents/Valmera/audit/subscriber-reliability-20260908/bin-arm`.
+   On HTTP 403 the downloader is outdated (the owner: update it, never stop
+   for it): make `<run-dir>/tools` with `.valmera/venv-worker/bin/python -m
+   venv`, `pip install -U 'yt-dlp[default]'` into it, and add `--js-runtimes
+   node:/Users/masaoodi/Documents/Valmera/.valmera/venv-worker/lib/python3.12/site-packages/playwright/driver/node`
+   (Jensen run, 15 Oct: this recovered the 90-minute 1080p source after two
+   403s). Indexing takes about 20-25 min for an hour of talking heads and
+   longer for long or busy footage (a 90-minute vlog sat at 90%, "building
+   the visual storyboard", for 90 min): 90% is progress, not a stall. It
+   shows "0%" while queued. Meanwhile read selection.md and looks.md, fetch
+   the audience signal (selection.md, **Audience signal**) and draft
+   candidates from the platform's captions if it has them; then check
+   `index_status` about every 5 minutes, or `wait_for_job(job_id)` (each call
+   waits up to ~110 s). **Never end your turn while an index, render or
+   export of the run is still running**: the run has no one to resume it
+   (Jensen run: the coordinator stopped at 90% and the finished index sat
+   unused for 4.5 h). Waiting: the harness blocks a foreground `sleep`; run
    `sleep 300` with `run_in_background` and continue when it reports done.
 3. **Select every moment that clears the bar**
    ([selection.md](references/selection.md)). A FULL SCAN, not a skim: walk
@@ -303,8 +320,12 @@ time.
   dumps, preview downloads or reading Valmera's backend code; use the tool
   schemas. Editors list templates and the sound library once.
 - On a rejected call, correct the arguments and retry once. On a lost
-  response, check `shorts_status` and the job id before retrying. A transient
-  failure gets one retry, then `run.py exception` and move on.
+  response (a transport error, "error sending request"), never repeat a
+  render or export blindly: `render_preview(report=true)` returns the stored
+  report of a render that finished, `download_url(kind='final')` names an
+  export still running (wait for that job), and `shorts_status` and the job
+  id answer the rest. A transient failure gets one retry, then
+  `run.py exception` and move on.
 - To resume, read `run.py status --json` and `shorts_status(parent)`.
 
 ## Known Valmera limits

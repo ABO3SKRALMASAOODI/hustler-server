@@ -308,6 +308,43 @@ class RunTests(unittest.TestCase):
                    "--short-id", "s05", "--preview", "p", "--edl-version", "2",
                    "--note", "n")
 
+    def test_a_newer_render_replaces_a_pending_candidate(self) -> None:
+        # klRb0 run (15 Oct): "cannot record a candidate for s22 while it is
+        # candidate" when an editor re-rendered before its review.
+        self.add("s22", 22)
+        self.to_candidate("s22", "e1", version=9)
+        self.ok("candidate", "--run-dir", self.dir, "--short-id", "s22",
+                "--preview", "p10", "--edl-version", "10", "--note", "tail fixed")
+        item = self.state()["shorts"]["s22"]
+        self.assertEqual(item["status"], "candidate")
+        self.assertEqual([c["edl_version"] for c in item["candidates"]], [9, 10])
+        self.assertEqual(item["candidates"][-1]["editor"], "e1")
+        self.fails("belongs to editor 'e1'", "candidate", "--run-dir", self.dir,
+                   "--short-id", "s22", "--preview", "p", "--edl-version", "11",
+                   "--note", "n", "--editor", "e2")
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s22",
+                "--verdict", "fix", "--note", "9s: caption on the chin; move it")
+
+    def test_register_again_leaves_shorts_past_their_brief(self) -> None:
+        # klRb0 run (15 Oct): re-registering the folder failed outright on
+        # "cannot assign s01 while it is candidate".
+        folder = self.root / "assignments"
+        folder.mkdir()
+        for n, project in ((1, 21), (2, 22)):
+            sid = f"s0{n}"
+            payload = json.loads(Path(self.brief(sid)).read_text())
+            payload.update(child_project_id=project, source_window_s=[459.31, 470.0])
+            (folder / f"{sid}.json").write_text(json.dumps(payload))
+        self.ok("register", "--run-dir", self.dir, "--assignments", str(folder))
+        self.ok("assign", "--run-dir", self.dir, "--short-id", "s01", "--editor", "e1")
+        self.ok("candidate", "--run-dir", self.dir, "--short-id", "s01",
+                "--preview", "p", "--edl-version", "4", "--note", "n")
+        out = json.loads(self.ok("register", "--run-dir", self.dir,
+                                 "--assignments", str(folder)))
+        self.assertEqual(out["registered"], 1)
+        self.assertEqual(out["skipped"], [{"short_id": "s01", "status": "candidate"}])
+        self.assertEqual(self.state()["shorts"]["s01"]["status"], "candidate")
+
     def test_brief_beat_gap_is_checked(self) -> None:
         self.add("s01", 11)
         beats = [{"role": "hook", "cue": "a", "source_s": 459.5, "move": "slam"},
