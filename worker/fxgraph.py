@@ -524,13 +524,40 @@ def _sidecar_status(item, source, plan):
     try:
         import sidecars
         ranges = _source_ranges(item, plan)
+        ask = _launching_source(source)
         for kind in kinds:
-            h = sidecars.ensure(kind, source, ranges, priority="interactive")
+            h = sidecars.ensure(kind, ask, ranges, priority="interactive")
             sidecars.wait([h], 0 if plan.preview else 90)
             out[kind] = sidecars.status(h)
     except Exception:  # noqa: BLE001
         out.update({k: "failed" for k in kinds if k not in out})
     return out
+
+
+def _launching_source(source):
+    """The render's read source, made able to LAUNCH what it lacks where
+    this render may launch (matte_track.RENDER_LAUNCH: the project's proxy
+    and geometry). Keys stay the reader's (same sha, shots and duration),
+    so a launch lands exactly where this item reads.
+
+    Engines release, found live on project 3419: a matte device written
+    through apply_edit_batch (no verb to launch its windows) read
+    "matte.person absent" on every render — the render only read status,
+    the device was then omitted, and an omitted device's compiler never
+    asked the program matte either, so nothing ever measured its window.
+    World items already launch this way (world_layer.warm)."""
+    try:
+        import dataclasses
+        import matte_track
+        launch = matte_track.RENDER_LAUNCH.get()
+        if launch is None or source is None:
+            return source
+        return dataclasses.replace(
+            source, storage_key=launch.storage_key, fps=launch.fps,
+            width=launch.width, height=launch.height,
+            project_id=launch.project_id)
+    except Exception:  # noqa: BLE001 — read-only then
+        return source
 
 
 def _source_ranges(item, plan):

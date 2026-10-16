@@ -290,3 +290,53 @@ def test_a_world_note_is_not_reported_as_a_missing_graphic():
     line = agent_tools._motion_warning_line(both)
     assert "WORLD DEVICE NOTE" in line and "MOTION RENDER WARNING" in line
     assert agent_tools._motion_warning_line({}) == ""
+
+
+# ── renders launch the sidecars their devices read (live check, 3419) ──
+
+def test_a_render_launches_the_matte_its_device_reads(tmp_path):
+    import json as _json
+    import fxgraph
+    import matte_track
+    import sidecars
+    store = sidecars.LocalStore(str(tmp_path / "store"))
+    calls = []
+    sidecars.use_store(store)
+    prev = sidecars.use_launcher(sidecars._Launcher(
+        execute=lambda s, p: calls.append((s.storage_key, p)) or {}))
+    read = sidecars.SourceRef(sha256="ab" * 32, storage_key="None",
+                              duration_s=60.0, fps=29.97, width=646,
+                              height=480, shots=(10.0,))
+    launch = sidecars.SourceRef(sha256="ab" * 32,
+                                storage_key="proxies/1/p.mp4",
+                                duration_s=60.0, fps=29.97, width=646,
+                                height=480, project_id=7, shots=(10.0,))
+    try:
+        # read-only lane: no launch source, nothing launched
+        assert fxgraph._launching_source(read) is read
+        tok = matte_track.RENDER_LAUNCH.set(launch)
+        try:
+            ask = fxgraph._launching_source(read)
+        finally:
+            matte_track.RENDER_LAUNCH.reset(tok)
+        assert ask.sha256 == read.sha256 and ask.shots == read.shots
+        assert ask.storage_key == "proxies/1/p.mp4"
+        # the launch lands on the reader's keys
+        a = sidecars.ensure("matte.person", read, [(12.0, 14.0)])
+        b = sidecars.ensure("matte.person", ask, [(12.0, 14.0)])
+        assert [c.key for c in a.chunks] == [c.key for c in b.chunks]
+        sidecars._launcher().join(5)
+        assert calls and calls[0][0] == "proxies/1/p.mp4"
+        # a failure says why in project_state's summary
+        key = a.chunks[0].key
+        store.put_bytes(sidecars.failed_key("objects.sam2", read.sha256,
+                                            key),
+                        _json.dumps({"reason": "model_missing",
+                                     "why": "efficientsam not on lane"})
+                        .encode())
+        row = sidecars.summary(read.sha256)["objects.sam2"]
+        assert row["failed"] == 1
+        assert row["last_failure"] == "model_missing: efficientsam not on lane"
+    finally:
+        sidecars.use_launcher(prev)
+        sidecars.use_store(None)

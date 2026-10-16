@@ -2535,7 +2535,10 @@ def project_state_line(ctx, edl=None):
                         + (f"/{row['pending']} measuring"
                            if row.get("pending") else "")
                         + (f"/{row['failed']} failed"
-                           if row.get("failed") else ""))
+                           if row.get("failed") else "")
+                        + (f" (last failure: {row['last_failure']})"
+                           if row.get("failed") and row.get("last_failure")
+                           else ""))
     matte = state.get("matte_status") or {}
     status = matte.get("status") or "unknown"
     line = ("ANALYSIS (sidecars): " + ("; ".join(bits) if bits else

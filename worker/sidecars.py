@@ -981,6 +981,7 @@ def summary(source_sha):
     except Exception:  # noqa: BLE001
         return {}
     out = {}
+    failed_keys = {}
     for full in listing:
         rest = full[len(prefix):]
         if "/" not in rest:
@@ -995,6 +996,19 @@ def summary(source_sha):
             row = out.setdefault(kind, {"ready": 0, "pending": 0,
                                         "failed": 0})
             row[role] += 1
+            if role == "failed":
+                failed_keys.setdefault(kind, []).append(full)
+    # why a kind failed (one marker read per failing kind): without it a
+    # failure on the batch lane is invisible to everyone but its logs
+    for kind, keys in failed_keys.items():
+        try:
+            body = _read_json(store, sorted(keys)[-1]) or {}
+            why = str(body.get("reason") or "failed")
+            if body.get("why"):
+                why += f": {body['why']}"
+            out[kind]["last_failure"] = why[:160]
+        except Exception:  # noqa: BLE001 — a count is still useful
+            pass
     return out
 
 
