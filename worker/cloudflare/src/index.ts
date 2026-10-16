@@ -233,6 +233,18 @@ function startupRefusal(jobType: string, error: unknown): JsonObject {
   };
 }
 
+function sdkStartFailure(status: number, body: string): string | null {
+  // The answers @cloudflare/containers' containerFetch gives ITSELF when the
+  // container is gone and cannot be started again: it returns them instead of
+  // forwarding the request, so no /run reached Python. The executor's own
+  // replies are always JSON envelopes.
+  const text = body.trim();
+  if (status === 500 && text.startsWith("Failed to start container:")) return text;
+  if (status === 503 && text.startsWith("There is no Container instance available")) return text;
+  if (status === 429 && text && !text.startsWith("{")) return text;
+  return null;
+}
+
 function abandonedEnvelope(state: CallState, reason: string): JsonObject {
   // The executor process is gone or provably finished, so nothing will ever
   // return this call's own envelope. Reads and deterministic media jobs are
@@ -365,6 +377,18 @@ abstract class ValmeraContainer extends Container<Env> {
   // update but in-flight handlers do not, so a persisted `running` call that
   // is absent here has lost the only code path that could record its result.
   private readonly liveRuns = new Set<string>();
+  // The lane whose deployment-probe Durable Object keeps this lane's release
+  // registry (null: the dark vision lane has no probe and no registry).
+  protected readonly registryLane: Lane | null = null;
+  // Stale-container recycling for this instance (see recycleIfStale):
+  // the release it last tried to reach, how often, and when.
+  private recycleTarget = "";
+  private recycleCount = 0;
+  private recycleAt = 0;
+  // Cached registry answer: is this Worker's release startable on the lane?
+  private imageReadyCache: { source: string; ready: boolean; at: number } | null = null;
+  // The release this instance already reported as running on the lane.
+  private reportedSource = "";
 
   override async onActivityExpired(): Promise<void> {
     // Cloudflare's default hook sends SIGTERM.  The production Python
@@ -478,11 +502,110 @@ abstract class ValmeraContainer extends Container<Env> {
       return {
         ok: false,
         body,
-        error: `container readiness mismatch role=${String(body.role)} source=${String(body.code_version)} expected_role=${this.workerRole} expected_source=${expectedSource}`,
+        error: `container readiness mismatch role=${String(body.role)} source=${String(body.code_version)} expected_role=${this.workerRole} expected_source=${expectedSource} status=${String(body.status)}`,
       };
     } catch (error) {
       return { ok: false, error: `container readiness failed: ${String(error)}` };
     }
+  }
+
+  // ── Release registry (Oct 2026) ──────────────────────────────────────────
+  // A Worker publish and its container rollout are not one moment: a lane's
+  // new image becomes startable minutes after this Worker is live (Oct 16:
+  // MCP cold starts still came up on the old image 18 minutes after the
+  // publish), and a warm container on the old image keeps serving until its
+  // rollout grace ends (old code answered jobs 12 minutes after the lane's
+  // first new-image start). Serving the guarded old release while no new one
+  // can start is right; serving it after one can is stale code. Each lane's
+  // deployment-probe Durable Object records when this release first ran on
+  // the lane (the deploy probe, or any call's fresh container); a call that
+  // finds an idle container on an older release then recycles it first.
+
+  private expectedSource(): string {
+    const source = this.env.SOURCE_VERSION ?? "unknown";
+    return source === "set-by-deploy-workflow" ? "unknown" : source;
+  }
+
+  private onOlderRelease(body?: JsonObject): boolean {
+    const expected = this.expectedSource();
+    return expected !== "unknown" && typeof body?.code_version === "string"
+      && body.code_version !== expected;
+  }
+
+  private registryFetch(init?: RequestInit): Promise<Response> | null {
+    const lane = this.registryLane;
+    if (!lane) return null;
+    const namespaces = {
+      interactive: this.env.INTERACTIVE, batch: this.env.BATCH,
+      agent: this.env.AGENT, mcp: this.env.MCP, shorts: this.env.SHORTS,
+    };
+    const namespace = namespaces[lane];
+    if (!namespace) return null;
+    return namespace.getByName(`${lane}-deployment-probe`)
+      .fetch("https://container.internal/release-ready", init);
+  }
+
+  private async releaseStartable(): Promise<boolean> {
+    // Is this Worker's release known to start on this lane? Cached briefly:
+    // only an instance whose container is on an older release asks.
+    const expected = this.expectedSource();
+    const now = Date.now();
+    const cached = this.imageReadyCache;
+    if (cached && cached.source === expected && now - cached.at < 30_000) {
+      return cached.ready;
+    }
+    let ready = false;
+    try {
+      const pending = this.registryFetch();
+      if (pending) {
+        const response = await pending;
+        const body = (await response.json()) as JsonObject;
+        ready = response.ok && body.source === expected;
+      }
+    } catch { ready = false; }
+    this.imageReadyCache = { source: expected, ready, at: now };
+    return ready;
+  }
+
+  private reportRelease(body?: JsonObject): void {
+    // A container came up on this Worker's own release: tell the lane.
+    const expected = this.expectedSource();
+    if (expected === "unknown" || body?.code_version !== expected
+        || this.reportedSource === expected) return;
+    this.reportedSource = expected;
+    let pending: Promise<Response> | null = null;
+    try {
+      pending = this.registryFetch({
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ source: expected }),
+      });
+    } catch { pending = null; }
+    if (!pending) { this.reportedSource = ""; return; }
+    this.ctx.waitUntil(pending.then(() => undefined,
+      () => { this.reportedSource = ""; }));
+  }
+
+  private async recordRelease(source: unknown): Promise<boolean> {
+    // Registry side (the lane's probe Durable Object): only this Worker's
+    // own release can be recorded, so a stale caller cannot regress it.
+    const expected = this.expectedSource();
+    if (expected === "unknown" || source !== expected) return false;
+    const current = await this.ctx.storage.get<{ source: string }>("releaseReady");
+    if (current?.source !== expected) {
+      await this.ctx.storage.put("releaseReady", { source: expected, at: Date.now() });
+    }
+    return true;
+  }
+
+  private recycleAllowed(now = Date.now()): boolean {
+    // At most three recycles per release per instance, two minutes apart:
+    // a restart that still comes back old (this instance not rolled yet)
+    // is served as before rather than cold-started on every call.
+    const expected = this.expectedSource();
+    if (this.recycleTarget !== expected) {
+      this.recycleTarget = expected; this.recycleCount = 0; this.recycleAt = 0;
+    }
+    return this.recycleCount < 3 && now - this.recycleAt >= 120_000;
   }
 
   private async retireUnreadyContainer(
@@ -961,7 +1084,26 @@ abstract class ValmeraContainer extends Container<Env> {
       // the same old image instead of the rollout. It serves nothing else.
       try { await this.destroy(); }
       catch { /* Idle expiry still reclaims it. */ }
+      if (readiness.ok) {
+        // This probe IS the lane's release registry: a fresh container on
+        // this Worker's release proves the release starts on the lane.
+        try { await this.recordRelease(readiness.body?.code_version); }
+        catch { /* The next probe or call records it. */ }
+      }
       return json(readiness.body ?? { error: readiness.error }, readiness.ok ? 200 : 503);
+    }
+    if (url.pathname === "/release-ready") {
+      // The lane's release registry, kept by its deployment-probe Durable
+      // Object. Reads and writes storage only; never starts a container.
+      if (request.method === "POST") {
+        let source: unknown;
+        try { source = ((await request.json()) as JsonObject).source; }
+        catch { source = undefined; }
+        const recorded = await this.recordRelease(source);
+        return json({ recorded }, recorded ? 200 : 409);
+      }
+      const current = await this.ctx.storage.get<{ source: string; at: number }>("releaseReady");
+      return json(current ?? {});
     }
     const statusMatch = url.pathname.match(/^\/status\/([^/]+)$/);
     if (request.method === "GET" && statusMatch && CALL_ID.test(statusMatch[1])) {
@@ -1094,46 +1236,34 @@ abstract class ValmeraContainer extends Container<Env> {
         updatedAt: new Date().toISOString(), activeUntil,
         ...(launchId ? { launchId } : {}),
       });
-      await this.startAndWaitForPorts({
-        ports: [8080],
-        startOptions: { envVars: this.environment(), enableInternet: true },
-        cancellationOptions: { portReadyTimeoutMS: 120_000, instanceGetTimeoutMS: 30_000 },
-      });
+      await this.startContainer();
     } catch (error) {
-      // No /run request was sent. Record the refusal (rather than deleting
-      // the call) so a dispatcher whose launch request already timed out
-      // learns it on reconnect instead of polling a missing call until its
-      // deadline. A later launch may reserve the same id over it.
-      const refusal = startupRefusal(job.type, error);
-      const refusedAt = Date.now();
-      const terminal = await this.ctx.storage.transaction(async (txn) => {
-        const current = (await txn.get<CallState>(stateKey)) ?? null;
-        if (current?.status === "done" || current?.status === "failed") return current;
-        await txn.put({
-          [stateKey]: {
-            status: "refused", jobType: job.type, error: String(error),
-            envelope: refusal, updatedAt: new Date(refusedAt).toISOString(),
-            activeUntil: refusedAt, ...(launchId ? { launchId } : {}),
-          } satisfies CallState,
-          [this.terminalKey(callId, refusedAt)]: callId,
-        });
-        const active = await txn.get<ActiveCall>("active");
-        if (active?.callId === callId) await txn.delete("active");
-        return null;
-      });
-      if (terminal) {
-        return json(terminal.envelope ?? {
-          error: terminal.error ?? "Cloudflare call ended during startup",
-        });
-      }
-      return json(refusal, 503);
+      return this.refuseStartup(callId, job.type, launchId, error);
     }
 
     // Wrangler activates Worker code before every old Container instance is
     // necessarily replaced. Validate the image's own source fingerprint and
     // role after startup but before /run; deploy skew then becomes a safe
     // Modal fallback instead of an older renderer touching a current EDL.
-    const readiness = await this.containerReadiness();
+    let readiness = await this.containerReadiness();
+    if (readiness.ok && this.onOlderRelease(readiness.body)
+        && this.recycleAllowed() && await this.releaseStartable()) {
+      // This idle container runs an older release while this Worker's
+      // release already starts on the lane: replace it before /run, so no
+      // call is served by stale code once new code can serve it. This call
+      // holds the shard's only reservation, so nothing else runs in it.
+      this.recycleCount += 1;
+      this.recycleAt = Date.now();
+      console.log(`Recycling ${String(readiness.body?.code_version)} container for release ${this.expectedSource()}`);
+      try {
+        await this.destroy();
+        await this.refreshStarting(callId);
+        await this.startContainer();
+      } catch (error) {
+        return this.refuseStartup(callId, job.type, launchId, error);
+      }
+      readiness = await this.containerReadiness();
+    }
     if (!readiness.ok) {
       const refusal = {
         error: readiness.error ?? "Cloudflare container image is not ready",
@@ -1142,6 +1272,7 @@ abstract class ValmeraContainer extends Container<Env> {
       await this.retireUnreadyContainer(callId, refusal);
       return json(refusal, 503);
     }
+    this.reportRelease(readiness.body);
 
     // Track this handler before `running` is persisted, so a status read in
     // this instance can never mistake a live /run for a lost one.
@@ -1151,6 +1282,88 @@ abstract class ValmeraContainer extends Container<Env> {
     } finally {
       this.liveRuns.delete(callId);
     }
+  }
+
+  private async startContainer(): Promise<void> {
+    await this.startAndWaitForPorts({
+      ports: [8080],
+      startOptions: { envVars: this.environment(), enableInternet: true },
+      cancellationOptions: { portReadyTimeoutMS: 120_000, instanceGetTimeoutMS: 30_000 },
+    });
+  }
+
+  private async refreshStarting(callId: string): Promise<void> {
+    // A recycle starts a second container inside one startup; measure the
+    // abandoned-start bound from this start, not the first.
+    await this.ctx.storage.transaction(async (txn) => {
+      const key = this.stateKey(callId);
+      const current = await txn.get<CallState>(key);
+      const active = await txn.get<ActiveCall>("active");
+      if (current?.status !== "starting" || active?.callId !== callId) return;
+      await txn.put(key, { ...current, updatedAt: new Date().toISOString() });
+    });
+  }
+
+  private async refuseStartup(
+    callId: string, jobType: string, launchId: string | undefined, error: unknown,
+  ): Promise<Response> {
+    // No /run request was sent. Record the refusal (rather than deleting
+    // the call) so a dispatcher whose launch request already timed out
+    // learns it on reconnect instead of polling a missing call until its
+    // deadline. A later launch may reserve the same id over it.
+    const stateKey = this.stateKey(callId);
+    const refusal = startupRefusal(jobType, error);
+    const refusedAt = Date.now();
+    const terminal = await this.ctx.storage.transaction(async (txn) => {
+      const current = (await txn.get<CallState>(stateKey)) ?? null;
+      if (current?.status === "done" || current?.status === "failed") return current;
+      await txn.put({
+        [stateKey]: {
+          status: "refused", jobType, error: String(error),
+          envelope: refusal, updatedAt: new Date(refusedAt).toISOString(),
+          activeUntil: refusedAt, ...(launchId ? { launchId } : {}),
+        } satisfies CallState,
+        [this.terminalKey(callId, refusedAt)]: callId,
+      });
+      const active = await txn.get<ActiveCall>("active");
+      if (active?.callId === callId) await txn.delete("active");
+      return null;
+    });
+    if (terminal) {
+      return json(terminal.envelope ?? {
+        error: terminal.error ?? "Cloudflare call ended during startup",
+      });
+    }
+    return json(refusal, 503);
+  }
+
+  private async refuseUnsentRun(
+    callId: string, jobType: string, error: string,
+  ): Promise<Response> {
+    const stateKey = this.stateKey(callId);
+    const refusal = startupRefusal(jobType, error);
+    const refusedAt = Date.now();
+    const current = await this.ctx.storage.transaction(async (txn) => {
+      const state = (await txn.get<CallState>(stateKey)) ?? null;
+      const active = await txn.get<ActiveCall>("active");
+      if (state?.status !== "running" || active?.callId !== callId) return state;
+      await txn.put({
+        [stateKey]: {
+          status: "refused", jobType, error,
+          envelope: refusal, updatedAt: new Date(refusedAt).toISOString(),
+          activeUntil: refusedAt, ...(state.launchId ? { launchId: state.launchId } : {}),
+        } satisfies CallState,
+        [this.terminalKey(callId, refusedAt)]: callId,
+      });
+      await txn.delete("active");
+      return null;
+    });
+    if (current) {
+      return json(current.envelope ?? {
+        error: current.error ?? "Cloudflare call ended before /run",
+      });
+    }
+    return json(refusal, 503);
   }
 
   private async runAccepted(
@@ -1184,6 +1397,14 @@ abstract class ValmeraContainer extends Container<Env> {
         }),
       });
       const body = await response.text();
+      const unsent = sdkStartFailure(response.status, body);
+      if (unsent) {
+        // containerFetch found the container gone and could not start it
+        // again, so the SDK answered itself and no /run reached Python. That
+        // is a startup refusal (nothing ran), never an ambiguous call whose
+        // mutation might have landed.
+        return this.refuseUnsentRun(callId, job.type, unsent);
+      }
       let envelope: JsonObject;
       try { envelope = JSON.parse(body) as JsonObject; }
       catch { throw new Error(`Container /run HTTP ${response.status} returned non-JSON: ${body.slice(0, 240)}`); }
@@ -1232,24 +1453,29 @@ abstract class ValmeraContainer extends Container<Env> {
 }
 
 export class ValmeraInteractive extends ValmeraContainer {
+  protected override readonly registryLane = "interactive" as const;
   override sleepAfter = MODEL_GAP_SLEEP_AFTER;
   protected readonly containerProfile = "standard-3" as const;
   protected readonly workerRole = "executor" as const;
 }
 export class ValmeraBatch extends ValmeraContainer {
+  protected override readonly registryLane = "batch" as const;
   protected readonly containerProfile = "standard-4" as const;
   protected readonly workerRole = "executor" as const;
 }
 export class ValmeraAgent extends ValmeraContainer {
+  protected override readonly registryLane = "agent" as const;
   protected readonly containerProfile = "standard-1" as const;
   protected readonly workerRole = "agent_executor" as const;
 }
 export class ValmeraMcp extends ValmeraContainer {
+  protected override readonly registryLane = "mcp" as const;
   override sleepAfter = MODEL_GAP_SLEEP_AFTER;
   protected readonly containerProfile = "standard-1" as const;
   protected readonly workerRole = "mcp_executor" as const;
 }
 export class ValmeraShorts extends ValmeraContainer {
+  protected override readonly registryLane = "shorts" as const;
   protected readonly containerProfile = "standard-1" as const;
   protected readonly workerRole = "shorts_executor" as const;
 }

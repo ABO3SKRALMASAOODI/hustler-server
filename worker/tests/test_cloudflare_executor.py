@@ -335,8 +335,11 @@ def test_shutdown_winner_refuses_cloudflare_before_launch(monkeypatch):
         lambda *a, **k: (_ for _ in ()).throw(
             AssertionError("shutdown-lost job must not reach Cloudflare")))
 
-    with pytest.raises(remote.CloudflareLaunchUnavailable, match="shutdown"):
+    # Nothing was submitted: the claim goes back to the queue unspent
+    # (main.process_one), never a "launch unavailable" failure.
+    with pytest.raises(remote.DispatcherDraining, match="shutdown") as caught:
         remote._run_cloudflare(job)
+    assert not isinstance(caught.value, remote.CloudflareLaunchUnavailable)
 
 
 def test_cloudflare_authenticated_preflight_is_cached(monkeypatch):

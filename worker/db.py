@@ -549,6 +549,37 @@ def release_jobs(conn, ids):
         return len(cur.fetchall())
 
 
+def release_unlaunched_jobs(conn, claims):
+    """Hand back claims that provably submitted nothing, Studio turns too.
+
+    ``claims`` maps job id -> the exact queue claim this dispatcher holds.
+    release_jobs keeps agent turns out because a turn that RAN may have
+    written EDL versions; these never reached a provider (see
+    REMOTE_DISPATCH_CLAIMS), so giving them back cannot replay anything. The
+    attempt is refunded (a deploy is not the job's failure); total_claims is
+    not, so MAX_CLAIMS_ABSOLUTE still bounds a job crossing many deploys.
+    The claim fence makes a release that lost a race with a newer claim (or a
+    terminal write) a no-op. Returns the ids actually released.
+    """
+    released = []
+    if not claims:
+        return released
+    with conn.cursor() as cur:
+        for job_id, claim in claims.items():
+            if claim is None:
+                continue
+            cur.execute("""UPDATE video_jobs
+                           SET state = 'queued', progress = 0,
+                               attempts = GREATEST(0, attempts - 1),
+                               updated_at = NOW()
+                           WHERE id = %s AND state = 'running'
+                             AND total_claims = %s
+                           RETURNING id""", (job_id, claim))
+            if cur.fetchone():
+                released.append(job_id)
+    return released
+
+
 def active_job_ids():
     with _ACTIVE_LOCK:
         return list(ACTIVE_JOBS)
@@ -1256,6 +1287,32 @@ def mark_remote_execution_running(conn, job_id, total_claims,
         return cur.rowcount > 0
 
 
+def fence_unadopted_remote_execution(conn, job_id, total_claims, provider,
+                                     call_id, error=None):
+    """Cancel one provider call that no executor has adopted, atomically.
+
+    An executor must confirm ownership (confirm_remote_execution_ownership,
+    which sets ``started_at`` and ``running`` in one statement and fails
+    closed) before any work. So when this compare-and-set finds the exact
+    call still ``submitted`` with no ``started_at``, nothing ran, and after it
+    nothing can: a late executor finds its call cancelled and exits before
+    touching the project. Returns whether the call was fenced.
+    """
+    if job_id is None or total_claims is None or not call_id \
+            or not remote_executions_table_ready(conn):
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE remote_executions
+                       SET state = 'cancelled', completed_at = NOW(),
+                           last_observed_at = NOW(), error = %s
+                       WHERE job_id = %s AND total_claims = %s
+                         AND provider = %s AND call_id = %s
+                         AND state = 'submitted' AND started_at IS NULL""",
+                    (error_text.excerpt(error, 2000) if error else None,
+                     job_id, total_claims, provider, str(call_id)))
+        return cur.rowcount > 0
+
+
 def heartbeat_remote_execution(conn, job_id, total_claims):
     """Heartbeat only after the provider or executor proved the call alive."""
     if job_id is None or total_claims is None \
@@ -1759,6 +1816,15 @@ ACTIVE_JOBS = set()
 # itself begins heartbeating after it actually starts.
 REMOTE_OWNED_JOBS = set()
 REMOTE_LAUNCHING_JOBS = set()
+# Jobs this dispatcher runs ONLY through a provider call (job id -> its queue
+# claim). While such a job is not remote-owned, nothing has been submitted
+# under its claim: it is either before its first launch or between launches
+# that a provider proved it never accepted (capacity, rollout, startup
+# refusals, all of which unmark it). A planned shutdown can therefore hand it
+# back to the queue unspent, Studio turns included, instead of letting the
+# claim fail "dispatcher shutdown began before Cloudflare submission" (jobs
+# 73272 and 73277, 16 Oct) or die with the process.
+REMOTE_DISPATCH_CLAIMS = {}
 _REMOTE_LAUNCHES_STOPPED = False
 _ACTIVE_LOCK = threading.Lock()
 
@@ -1766,6 +1832,47 @@ _ACTIVE_LOCK = threading.Lock()
 def track_job(job_id):
     with _ACTIVE_LOCK:
         ACTIVE_JOBS.add(job_id)
+
+
+def mark_remote_dispatch(job_id, total_claims):
+    """This claim's work happens only inside a provider call."""
+    if job_id is None or total_claims is None:
+        return
+    with _ACTIVE_LOCK:
+        if job_id in ACTIVE_JOBS:
+            REMOTE_DISPATCH_CLAIMS[job_id] = total_claims
+
+
+def unlaunched_dispatch_claims():
+    """{job id: claim} for dispatched jobs with no provider call in flight."""
+    with _ACTIVE_LOCK:
+        return {job_id: claim
+                for job_id, claim in REMOTE_DISPATCH_CLAIMS.items()
+                if job_id in ACTIVE_JOBS and job_id not in REMOTE_OWNED_JOBS}
+
+
+def remote_launches_stopped():
+    with _ACTIVE_LOCK:
+        return _REMOTE_LAUNCHES_STOPPED
+
+
+# Jobs whose runner has returned or raised in this process: what remains is
+# the dispatcher's own terminal/requeue write. A remote-owned job here is no
+# longer protected by a live provider ledger row, so a planned shutdown waits
+# for that write (milliseconds) instead of stranding the claim `running` for
+# the reaper to fail (an MCP call has one attempt).
+SETTLING_JOBS = set()
+
+
+def mark_settling(job_id):
+    with _ACTIVE_LOCK:
+        if job_id in ACTIVE_JOBS:
+            SETTLING_JOBS.add(job_id)
+
+
+def settling_job_ids():
+    with _ACTIVE_LOCK:
+        return list(SETTLING_JOBS & ACTIVE_JOBS)
 
 
 def mark_remote_owned(job_id):
@@ -1803,6 +1910,8 @@ def untrack_job(job_id):
         ACTIVE_JOBS.discard(job_id)
         REMOTE_OWNED_JOBS.discard(job_id)
         REMOTE_LAUNCHING_JOBS.discard(job_id)
+        REMOTE_DISPATCH_CLAIMS.pop(job_id, None)
+        SETTLING_JOBS.discard(job_id)
 
 
 def begin_remote_shutdown():

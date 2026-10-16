@@ -117,12 +117,15 @@ def test_rollout_wait_keeps_one_claim_and_has_a_hard_deadline(monkeypatch, outco
     job = {"id": 42, "project_id": 7, "type": "preview", "total_claims": 2}
     if outcome == "ready":
         assert remote._run_cloudflare_with_capacity_wait(job) == {"done": True}
-        assert now[0] == 45
+        # Every image carries the skew guard, so the first readiness refusal
+        # is almost always a container draining for the rollout: retried
+        # after 3 s, then the old 15-s rollout pacing.
+        assert now[0] == 18
     else:
         expected = db.JobLeaseLost if outcome == "lease_lost" else remote.CloudflareRolloutPending
         with pytest.raises(expected) as error:
             remote._run_cloudflare_with_capacity_wait(job)
-        assert now[0] == (15 if outcome == "lease_lost" else 50)
+        assert now[0] == (3 if outcome == "lease_lost" else 50)
         if outcome == "timeout":
             # Nothing ran, so the end of the window is an explicit, retryable
             # "deploy in progress" with the ordinary bounded media retry.

@@ -812,9 +812,10 @@ class _GuardianDb:
     def __init__(self):
         self.calls = []
 
-    def run(self, fn, *args):
+    def run(self, fn, *args, **_kwargs):
         self.calls.append(fn)
-        if fn in (dbx.finish_remote_execution, dbx.finish_job):
+        if fn in (dbx.finish_remote_execution, dbx.finish_job,
+                  dbx.defer_unlaunched_cloudflare_busy):
             return True
         return None
 
@@ -856,8 +857,12 @@ def test_guardian_acts_on_a_refusal_only_once_it_is_an_orphan(
     event = remote.reconcile_remote_execution(
         db, _refused_row(now - timedelta(seconds=submitted_ago)))
     if acts:
-        assert event["status"] == "failed"
+        # The orphaned refusal ran nothing: the claim is deferred back to
+        # the queue unspent, never failed (an MCP call has one attempt).
+        assert event["status"] == "requeued"
         assert dbx.finish_remote_execution in db.calls
+        assert dbx.defer_unlaunched_cloudflare_busy in db.calls
+        assert dbx.finish_job not in db.calls
     else:
         assert event["status"] == "unknown"
         assert db.calls == []
