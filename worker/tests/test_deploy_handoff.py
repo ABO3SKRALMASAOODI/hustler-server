@@ -289,6 +289,57 @@ def test_shutdown_waits_for_the_queue_write_of_an_answered_call(
     assert clock[0] == 1.5
 
 
+@pytest.mark.parametrize("stamped", ["modal", "cloudflare"])
+def test_a_drain_refused_modal_launch_returns_the_claim(
+        monkeypatch, ownership, stamped):
+    """The Modal reservation has the same race as Cloudflare's: a claim on
+    Modal, or one Cloudflare refused and handed to the Modal fallback, meets
+    the drain at its reservation. Nothing was spawned, so it goes back to the
+    queue unspent instead of failing "before Modal submission"."""
+    job = _job(73277, "restore_range", True, 3772)
+    job["payload"]["execution_provider"] = stamped
+    monkeypatch.setattr(config, "MODAL_EXECUTOR_ENABLED", True)
+    monkeypatch.setattr(config, "CLOUDFLARE_MODAL_FALLBACK", True)
+
+    def cloudflare_refuses(_job):
+        raise remote.CloudflareCapacityUnavailable(NO_INSTANCE)
+
+    monkeypatch.setattr(remote, "_run_cloudflare_with_capacity_wait",
+                        cloudflare_refuses)
+
+    class MustNotSpawn:
+        @staticmethod
+        def spawn(_payload):
+            pytest.fail("a drain-refused claim must not reach Modal")
+
+    def modal_function(_name):
+        # Render's SIGTERM lands just before the Modal reservation.
+        dbx.begin_remote_shutdown()
+        return MustNotSpawn()
+
+    monkeypatch.setattr(remote, "_modal_function", modal_function)
+    calls = []
+
+    class WorkerDb:
+        def run(self, fn, *args, **kwargs):
+            calls.append((fn, args))
+            if fn is dbx.release_unlaunched_jobs:
+                return list(args[0])
+            return None
+
+    monkeypatch.setattr(remote, "stamp_execution_provider",
+                        lambda _db, _job: stamped)
+    monkeypatch.setattr(worker_main, "_runner_for_job",
+                        lambda _job: (remote.run_mcp_remote, "redesign"))
+    monkeypatch.setattr(worker_main, "_notify_failure",
+                        lambda *_a: pytest.fail("a drained claim is no failure"))
+    worker_main.process_one(WorkerDb(), dict(job))
+    fns = [fn for fn, _args in calls]
+    assert dbx.finish_job not in fns and dbx.requeue_job not in fns
+    released = [args for fn, args in calls if fn is dbx.release_unlaunched_jobs]
+    assert released == [({73277: 1},)]
+
+
 def test_release_of_unlaunched_claims_is_fenced_and_refunds_the_attempt():
     executed = []
 
