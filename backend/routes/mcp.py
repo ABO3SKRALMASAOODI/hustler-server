@@ -543,10 +543,22 @@ _GATEWAY_HINT = (
 
 
 def _as_list(value):
+    """An array argument as a list. A stale client serializes an argument
+    its cached schema does not declare as JSON TEXT (production, Oct 2026:
+    describe arrived as the string '["suggest_devices"]'), so a string is
+    parsed as a JSON array first, else read as comma-separated names."""
     if value is None:
         return []
     if isinstance(value, str):
-        return [value]
+        text = value.strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                return parsed
+        return [part for part in re.split(r"[\s,]+", text) if part]
     return value
 
 

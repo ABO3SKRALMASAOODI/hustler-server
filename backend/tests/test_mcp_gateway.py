@@ -452,3 +452,31 @@ def test_a_gateway_fault_is_a_tool_error_with_a_reference(client,
     assert result["result"]["isError"] is True
     assert "Reference " in result["result"]["content"][0]["text"]
     assert DB["enqueued"] == []
+
+
+def test_a_stale_client_sends_undeclared_arguments_as_json_text(client,
+                                                                released):
+    """Production, Oct 2026: a client whose cached expand_toolset schema
+    lacks describe/call serializes them as strings. They must still work."""
+    described = _call(client, "expand_toolset", {
+        "project_id": 3, "domains": [],
+        "describe": json.dumps([NEW_TOOL, "suggest_devices"])})["result"]
+    assert described["isError"] is False
+    names = [json.loads(line)["name"] for line in
+             described["content"][0]["text"].splitlines()
+             if line.startswith("{")]
+    assert names == [NEW_TOOL, "suggest_devices"]
+    assert _call(client, "expand_toolset", {
+        "describe": f"{NEW_TOOL}, suggest_devices"})["result"][
+        "isError"] is False
+    listed = _call(client, "expand_toolset",
+                   {"domains": '["verify"]'})["result"]
+    assert "verify: suggest_devices" in listed["content"][0]["text"]
+
+    args = {"project_id": 3, "pack": "documentary"}
+    direct = _call(client, NEW_TOOL, dict(args))
+    as_text = _call(client, "expand_toolset", {
+        "project_id": 3, "domains": [],
+        "call": json.dumps({"name": NEW_TOOL, "arguments": args})})
+    assert as_text == direct
+    assert [p["args"] for p in DB["enqueued"]] == [{"pack": "documentary"}] * 2
