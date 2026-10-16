@@ -647,3 +647,18 @@ def test_review_program_audio_reuses_current_proof_without_full_render(monkeypat
     extracted.clear()
     result = agent_tools.review_audio(ctx, output_times=[8], span_s=2)
     assert result.startswith('REJECTED:') and not extracted
+
+
+def test_active_podcast_skill_never_sends_agents_to_the_listening_model():
+    """Owner rule (14 Oct): no second model listens to the audio. The paid
+    reviewer is off by default, and the shared podcast-shorts skill must
+    not send editors or reviewers to it (they used it badly and burned API
+    quota). Deterministic checks (audit_audio_mix, check_speech) replace it."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[2]
+    skill = root / "plugins" / "valmera" / "skills" / "valmera-podcast-shorts"
+    active = [skill / "SKILL.md", *sorted((skill / "references").glob("*.md"))]
+    for path in active:
+        for line in path.read_text().splitlines():
+            if "review_audio" in line:
+                assert "switched off" in line or "disabled" in line, (path.name, line)

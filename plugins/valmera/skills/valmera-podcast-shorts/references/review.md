@@ -38,9 +38,10 @@ advisories, no new render: the measured picture area, upscale and cap
 heights the floors below are judged on), one rendered `look_at` batch (0,
 0.3, 1.0 s, each hero, the densest caption, the payoff, the last frame),
 `native_resolution` frames at the hook and the payoff in one call to confirm
-those numbers by eye, `audit_captions`, and the editor's
-`review_audio` / `audit_audio_mix` results (spot-check one join with
-`review_audio` when the note flags it). The preview has no end card or
+those numbers by eye, `audit_captions`, and the editor's `audit_audio_mix`
+and `check_speech` results (re-run `check_speech` on one join when the note
+flags it). Never ask another model to listen: `review_audio` is switched off
+by the owner and only answers "disabled". The preview has no end card or
 corner mark: branding is checked on the final. Then answer:
 
 1. **Hook:** does a designed moment land by 0.6 s, with the hook line

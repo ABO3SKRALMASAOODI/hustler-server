@@ -248,11 +248,11 @@ unacknowledged one).
    hero and the payoff look as intended in the pixels (an Oct handback
    described a node graph the render showed as an empty box).
 3. `audit_captions` once (heard-but-unshown words are defects, not
-   advisories) and `review_audio` on the opening and the joins (up to 6 clips
-   per call); read the render's warnings. For WHICH words are audible, or an
-   "um" or half a word the transcript lacks at a join, trust `check_speech`
-   (program seconds, each side of the cut): it measures the sound and never
-   echoes the question, where `review_audio` can.
+   advisories) and `audit_audio_mix`; read the render's warnings. For WHICH
+   words are audible, or an "um" or half a word the transcript lacks at a
+   join, use `check_speech` (program seconds, each side of the cut): it
+   measures the sound itself. Never ask another model to listen:
+   `review_audio` is switched off by the owner and only answers "disabled".
 4. Copy the render's MEASURES numbers into the handback: picture area
    (and upscale), the hook headline's cap height and the captions' (share
    of frame height), the payoff's cap height against the largest other
