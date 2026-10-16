@@ -93,22 +93,23 @@ Record it with `run.py review --checks hook=...,payoff=...,targets=...,attention
 | Answers | Verdict |
 | --- | --- |
 | all yes | **ship**: note the strongest moment in one line |
-| one no that one change can repair, and nothing else would still fail | **fix**: one targeted fix (below) |
+| a no (or a few) with a concrete change that repairs each | **fix**: a targeted fix (below), as many passes as there are concrete defects |
 | attention is no, or several no | **kill**: say why; a weak story is not rescued by styling |
-| a Valmera defect decides it (a tool that errors, a template or layout the engine renders below the floor, an export that fails), or the editor handed back `blocked` | `run.py exception --status failed_technical`, next action "revive after Valmera fix: <defect>"; it is a product finding, not an editorial kill |
+| a Valmera defect decides it (a tool that errors, a template or layout the engine renders below the floor, an export that fails), or the editor handed back `blocked` | first a fix that takes a path that works (another layout, template, device or tool); only when none does, `run.py exception --status failed_technical`, next action "revive after Valmera fix: <defect>", and the defect goes into REPORT.md |
 | a technical failure outside the edit | `run.py exception` with the next action |
 
 **After every verdict ask: do the shorts in flight share this cause?** A
 layout, source, template or tool cause is shared. Then the coordinator
-stops handing out shorts, fixes `framing.json` and the open briefs (or
-stops the line, SKILL.md) before the next hand-out. Oct 2026: the first
+fixes `framing.json` and the open briefs before the next hand-out, and
+keeps handing out (SKILL.md, **Defects: keep going, report at the end**). Oct 2026: the first
 candidate showed the run-killing cause (picture 0.34, headline smaller
 than captions) at 23:15; it was reviewed at 00:04, after five more shorts
 had been started with the same defect.
 
-Each short gets at most one targeted fix. A second weak candidate is shipped
-if all five answers are yes, otherwise killed or recorded as an exception.
-Killing a short is cheaper and better than a rescue; every selected short
+A fix pass names concrete defects and their changes; a short gets as many
+as it has fixable defects (owner, Oct 2026: never abandon a good story for
+a render or fix count). A story that is weak rather than broken is killed:
+killing it is cheaper and better than a rescue, and every selected short
 still appears in the manifest.
 
 ### Fix packet (at most 5 lines)

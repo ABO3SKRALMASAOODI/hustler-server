@@ -594,10 +594,12 @@ def cmd_review(args: argparse.Namespace) -> dict:
                     + ", ".join(missing) + " (use fix or kill instead)")
             item["status"] = "approved"
         elif args.verdict == "fix":
-            if item["fix_used"]:
-                raise StateError("the one targeted fix is already used; "
-                                 "ship, kill or record an exception")
+            # No fix limit (owner, Oct 2026: a short with a concrete,
+            # fixable defect is fixed, never abandoned for a count; the
+            # owner overrode the old one-fix rule on two runs). Each fix
+            # names its defect; the count is recorded for the report.
             item["fix_used"] = True
+            item["fix_count"] = int(item.get("fix_count") or 0) + 1
             item["status"] = "fix"
         else:
             item["status"] = "killed"
@@ -613,8 +615,27 @@ def cmd_review(args: argparse.Namespace) -> dict:
         return item
 
 
+# Where ffprobe lives on the owner's Mac when it is not on PATH (every export
+# agent of the Oct 11 run prepended it by hand; without it export failed
+# with "could not probe the duration").
+FFPROBE_FALLBACKS = (
+    "/Users/masaoodi/Documents/Valmera/audit/subscriber-reliability-20260908/bin-arm/ffprobe",
+    "/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe",
+)
+
+
+def ffprobe_path() -> str | None:
+    """ffprobe from $VALMERA_FFPROBE, PATH or the owner's known locations."""
+    env = os.environ.get("VALMERA_FFPROBE")
+    for cand in ([env] if env else []) + [shutil.which("ffprobe") or ""] + \
+            list(FFPROBE_FALLBACKS):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def probe(path: Path) -> dict:
-    tool = shutil.which("ffprobe")
+    tool = ffprobe_path()
     if not tool:
         return {}
     try:
@@ -652,7 +673,11 @@ def cmd_export(args: argparse.Namespace) -> dict:
         measured = {} if (args.duration is not None and args.width) else probe(media)
         duration = args.duration if args.duration is not None else measured.get("duration")
         if duration is None:
-            raise StateError("could not probe the duration; pass --duration")
+            raise StateError(
+                "could not probe the duration: " + (
+                    "ffprobe could not read the file" if ffprobe_path() else
+                    "no ffprobe found (set VALMERA_FFPROBE or put it on PATH)")
+                + "; or pass --duration and --width/--height")
         duration = number(duration, "duration")
         if not state["min_final_s"] - 0.05 <= duration <= state["max_final_s"] + 0.05:
             raise StateError(
@@ -809,7 +834,7 @@ def publishing_item(state: dict, item: dict) -> dict:
         "kept_transcript": handback.get("kept_transcript"),
         "kept_source_ranges_s": handback.get("kept_source_ranges_s"),
         "broll": handback.get("broll") or [],
-        "required_credits": handback.get("required_credits") or [],
+        "required_credits": credits_list(handback.get("required_credits")),
         "rights_note": handback.get("rights_note"),
         # "verdict" keeps the v7 value "ready" for consumers of older manifests;
         # "review" carries the v9 verdict. v9 has no numeric score.
@@ -823,6 +848,25 @@ def publishing_item(state: dict, item: dict) -> dict:
             for c in item["candidates"]],
         "music": music, "published": False,
     }
+
+
+def credits_list(value) -> list:
+    """required_credits as a list: a handback that stores one credit as a
+    string was printed one letter per line (the Oct 11 run, s10: 80
+    one-letter credits in PUBLISHING.md)."""
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, (list, tuple)):
+        return [c for c in value if c]
+    return [value]
+
+
+def sentence(text) -> str:
+    """Text that ends like a sentence, so two of them never run together."""
+    text = str(text or "").strip()
+    return text if not text or text[-1] in ".!?" else text + "."
 
 
 def exception_item(item: dict) -> dict:
@@ -854,8 +898,8 @@ def publishing_markdown(manifest: dict) -> str:
                 f"- File: `{it['file']}` ({it['duration_s']} s = {it['editorial_s']} s + "
                 f"{it['native_ending_s']} s ending; {dims}; SHA-256 `{it['sha256'][:16]}...`)",
                 f"- Look: {it['look']}. Structure: {it['style_lane']}."
-                + (f" Why: {it['lane_reason']}" if it.get("lane_reason") else "")
-                + (f" Closest alternative: {it['closest_alternative']}"
+                + (f" Why: {sentence(it['lane_reason'])}" if it.get("lane_reason") else "")
+                + (f" Closest alternative: {sentence(it['closest_alternative'])}"
                    if it.get("closest_alternative") else "")]
         if it.get("source_range_hms"):
             out.append(f"- Source: {it['source_range_hms'][0]}-{it['source_range_hms'][1]}"

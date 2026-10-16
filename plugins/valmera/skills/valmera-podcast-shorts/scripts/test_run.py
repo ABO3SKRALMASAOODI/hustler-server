@@ -190,7 +190,7 @@ class RunTests(unittest.TestCase):
         self.to_candidate("s01", "e1")
         self.fails("s01 (candidate), s02 (queued)", "finalize", "--run-dir", self.dir)
 
-    def test_one_targeted_fix_then_ship_or_kill(self) -> None:
+    def test_targeted_fixes_until_ship_or_kill(self) -> None:
         self.add("s01", 11)
         self.to_candidate("s01", "e1")
         self.fails("non-empty", "review", "--run-dir", self.dir, "--short-id", "s01",
@@ -201,11 +201,16 @@ class RunTests(unittest.TestCase):
         self.ok("assign", "--run-dir", self.dir, "--short-id", "s01", "--editor", "e2")
         self.ok("candidate", "--run-dir", self.dir, "--short-id", "s01",
                 "--preview", "p2", "--edl-version", "9", "--note", "fixed payoff")
-        self.fails("already used", "review", "--run-dir", self.dir, "--short-id", "s01",
-                   "--verdict", "fix", "--note", "again")
+        # no fix limit (owner, Oct 2026): a second concrete defect gets its
+        # own targeted fix, and the count is kept for the report
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s01",
+                "--verdict", "fix", "--note", "21.0s: caption 'were' should read 'we are'")
+        self.assertEqual(self.state()["shorts"]["s01"]["fix_count"], 2)
+        self.ok("candidate", "--run-dir", self.dir, "--short-id", "s01",
+                "--preview", "p3", "--edl-version", "10", "--note", "fixed caption")
         self.ok("review", "--run-dir", self.dir, "--short-id", "s01",
                 "--verdict", "ship", "--note", "ok", "--checks", CHECKS)
-        self.assertEqual(self.state()["shorts"]["s01"]["review"]["edl_version"], 9)
+        self.assertEqual(self.state()["shorts"]["s01"]["review"]["edl_version"], 10)
 
     def test_editor_pool_limits(self) -> None:
         for n in range(1, 5):
@@ -486,6 +491,34 @@ class RunTests(unittest.TestCase):
             _out, err = proc.communicate(timeout=60)
             self.assertEqual(proc.returncode, 0, err)
         self.assertEqual(len(self.state()["shorts"]), 12)
+
+
+    def test_credits_and_reasons_print_as_written(self) -> None:
+        # Oct 11 run: a string credit printed one letter per line, and "Why"
+        # ran into "Closest alternative" with no separator
+        self.assertEqual(run.credits_list("Photo: NASA/JPL (PD)"),
+                         ["Photo: NASA/JPL (PD)"])
+        self.assertEqual(run.credits_list(["a", "", None, "b"]), ["a", "b"])
+        self.assertEqual(run.credits_list(None), [])
+        self.assertEqual(run.sentence("Physical evidence carries it"),
+                         "Physical evidence carries it.")
+        self.assertEqual(run.sentence("Already done."), "Already done.")
+
+    def test_ffprobe_is_found_off_path(self) -> None:
+        import os
+        import stat
+        fake = self.root / "ffprobe"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+        old = os.environ.get("VALMERA_FFPROBE")
+        os.environ["VALMERA_FFPROBE"] = str(fake)
+        try:
+            self.assertEqual(run.ffprobe_path(), str(fake))
+        finally:
+            if old is None:
+                os.environ.pop("VALMERA_FFPROBE", None)
+            else:
+                os.environ["VALMERA_FFPROBE"] = old
 
 
 if __name__ == "__main__":

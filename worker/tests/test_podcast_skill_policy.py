@@ -30,3 +30,20 @@ def test_short_count_follows_the_podcast_never_a_number():
     assert "hero cap" not in text.lower()
     run_py = (SKILL / "scripts" / "run.py").read_text()
     assert "HERO_CAP" not in run_py
+
+
+def test_render_fix_and_call_counts_are_budgets_never_stops():
+    """Owner policy (16 Oct 2026): runs kept ending good shorts on the
+    two-render ceiling, the one-fix rule and the call cap, and the owner
+    overrode them twice ("ignore and solve it, report it at the end")."""
+    import re
+    text = _active_text()
+    low = text.lower()
+    assert "two renders is the ceiling" not in low
+    assert "two renders is a ceiling" not in low
+    assert not re.search(r"at most one targeted fix|one targeted fix\b", low)
+    assert "budgets, never stops" in low
+    prompt = (SKILL / "agents" / "openai.yaml").read_text().lower()
+    assert "stop the line" not in prompt
+    run_py = (SKILL / "scripts" / "run.py").read_text()
+    assert "already used" not in run_py

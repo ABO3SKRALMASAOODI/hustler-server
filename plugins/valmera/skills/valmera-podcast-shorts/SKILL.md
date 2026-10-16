@@ -150,7 +150,9 @@ disagree, v9 wins on method and the brief wins on preferences.
    `run.py candidate --editor <name>` (no slot needed).
 8. **Review** ([review.md](references/review.md)) each candidate as it
    arrives, before any new short goes out: five yes/no questions, then
-   **ship**, **one targeted fix** or **kill**, recorded with `run.py review`.
+   **ship**, **a targeted fix** (one per concrete defect, no limit) or
+   **kill**, recorded with `run.py review`. Fix passes go before new
+   briefs: a fix is the nearest thing a run has to an export.
    **First-candidate gate:** `run.py` hands out no more than `max_editors`
    shorts until the run's first review. If a verdict names a cause the shorts
    in flight share (layout, source, template, a Valmera tool), fix the
@@ -246,24 +248,28 @@ time.
   <defect>", and move on to the next short. Stop handing out only if EVERY
   remaining short is blocked by the same defect, and even then finish
   exporting what passed and write the report.
-- Do not grind: the same operation failing twice means stop working around
-  that operation, not the run (Oct 2026: editing nine shorts around one
-  defect cost 2 h 55 min, 729 editor calls and 25 renders for 0 exports).
+- Do not grind: the same operation failing twice means change the approach
+  (another layout, template, device or tool, or the `apply_edit_batch`
+  route), never stop the short or the run for it (Oct 2026: editing nine
+  shorts by repeating one failing call cost 2 h 55 min, 729 editor calls and
+  25 renders for 0 exports).
 - Write every REAL defect once, with its evidence (call, arguments, error
   text, job id, frame), into REPORT.md's **Valmera defects** section at the
   end of the run, ranked by impact. That list is how Valmera gets fixed.
 
 ## Efficiency rules
 
-- Per short: about 25-40 Valmera calls, at most 2 renders, at most 3
+- Per short: about 25-40 Valmera calls, 1-2 renders, at most 3
   `wait_for_job` calls per render. Savings come from polling, verification
   and bookkeeping; never drop a planned beat to save calls.
-- **Hard stops.** Two renders is a ceiling, never a target: a defect found
-  after render 2 goes into the handback, not into a third render (5 of 9
-  Oct shorts rendered 3-4 times and were killed anyway). The same operation
-  failing twice, or about 60 calls on one short, means stop working around
-  it: hand back `blocked` with the error text, and the coordinator records
-  `failed_technical` instead of a review.
+- **Budgets, never stops** (owner, Oct 2026: runs kept ending shorts on the
+  two-render ceiling, the one-fix rule and the call cap, and the owner had
+  to say "ignore and solve it" twice). A render count, a call count or a
+  second failure of one operation never ends a short or the run. A short
+  with a concrete, named defect gets the render that fixes it; what changes
+  after the same operation fails twice is the approach. A short is
+  `failed_technical` only when no working path remains, and every quality,
+  factual and exact-version export gate still applies.
 - `render_preview` now waits longer. Never poll in a loop, never re-render
   an unchanged version, never use a heartbeat or scheduled task. Long waits
   (indexing, `make_shorts`, exports) are checked every few minutes, not
@@ -308,8 +314,8 @@ claim against the captions and names the fix when it is smaller.
 `add-short` · `assign` · `candidate` · `review` (ship | fix | kill) ·
 `export` · `exception` · `status [--json]` · `finalize`, run with
 `python3`. It locks `run.json` (editors record their own candidates, from
-`queued` or `fix` too, without holding a slot), enforces one
-fix per short, brief and note limits, beat coverage in the brief, the
+`queued` or `fix` too, without holding a slot), counts each short's fix
+passes (no limit), brief and note limits, beat coverage in the brief, the
 first-candidate gate, the export name and length, and that every short is
 accounted for. It never scores taste. Editors save their note and handback
 as `candidates/<id>-note.txt` and `candidates/<id>-handback.json`, never in

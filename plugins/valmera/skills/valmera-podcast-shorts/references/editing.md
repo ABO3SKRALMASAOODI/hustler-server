@@ -7,20 +7,20 @@ best short in the batch. You do not spawn agents, touch siblings, export, or
 approve your own work. Read [looks.md](looks.md): **Shared grammar**, your
 structure, and your Look block. Nothing else is required.
 
-**Budget per short:** about 25-40 Valmera calls, at most 2 renders, at most 3
+**Budget per short:** about 25-40 Valmera calls, 1-2 renders, at most 3
 `wait_for_job` calls per render, one batched `look_at` on source frames and
 one rendered `look_at` per render. Savings come from polling, verification
 and bookkeeping; never drop a planned beat to save calls. Independent typed
 writes (graphics, zooms, sounds) may go back to back without re-reading the
 state between them; re-read only after a cut or a rejection.
 
-**Hard stops** (Oct 2026 editors averaged 77 calls and 2.6 renders, mostly
-working around broken tools, and all nine shorts were killed): two renders
-is the ceiling, never three; an operation that fails twice is not tried a
-third way; past about 60 calls, or when the pilot's frame cannot be
-reproduced on your child, stop and hand back `blocked` with the call, its
-arguments and the error text. A blocked handback is useful work: it is how
-Valmera gets fixed.
+**Budgets, never stops** (owner, Oct 2026). A render or call count never
+ends a short: a concrete, named defect gets the render that fixes it. An
+operation that fails twice is not tried a third time the same way: change
+the approach (another layout, template, device or tool, or one
+`apply_edit_batch`) and note the failure for the run's defect list. Hand
+back `blocked` only when no working path remains, with the call, its
+arguments and the error text: it is how Valmera gets fixed.
 
 ## 0. Once per editor (reuse for every later short)
 
@@ -258,8 +258,9 @@ unacknowledged one).
    of frame height), the payoff's cap height against the largest other
    lockup; add the longest stretch without a beat. Picture area under the
    Look floor or a hook headline under 1.2x the captions after following
-   the pilot's recipe is a recipe or Valmera problem, not something to
-   re-render around: hand back `blocked` with the numbers.
+   the pilot's recipe is a recipe or Valmera problem: switch to the layout
+   or template that meets it (looks.md, **Card geometry**), and hand back
+   `blocked` with the numbers only when none does.
 5. Measure against your Look's targets: hook at or before 0.6 s, visual
    change rate, hero count, picture area, sounds within budget and spacing
    (list each with its time, on-screen partner and level; `audit_audio_mix`
@@ -285,8 +286,8 @@ unacknowledged one).
 Fix real defects (clipped words, collisions, unreadable or wrong captions,
 digital silence, a sound with no on-screen event, an exposed edge or
 one-frame pop) and the single weakest designed
-moment. Re-render only if the fix changed pixels or sound that matter;
-two renders is the ceiling.
+moment. Re-render only if the fix changed pixels or sound that matter, and
+render again whenever a concrete defect is still on screen.
 
 ## 6. Hand back
 
@@ -330,3 +331,5 @@ slot. A `blocked` handback is recorded the same way, its first line
 | a deliberate caption mute (a word the speaker swallows) is reported by the blocking CAPTION CHECK like any heard-but-unshown word | carry the word on a graphic, or keep the mute and say why in the handback |
 | write-time size and position estimates for lockups (`word_slam`, `phrase_build`, the payoff) run up to 2-3x off the render | size the payoff and band lockups from render 1's MEASURES line, never on estimates (the `headline` claim alone is measured at write) |
 | `erase_region` repaints only its box: a picture-in-picture's frame or shadow outside it stays visible | draw the box over the whole inset, border included; check the patch on rendered frames once |
+| `set_picture_card` `source='auto'` follows ONE face and can pick a bystander or a co-passenger in vlog, street and multi-person footage (Jensen run, Oct 2026: s01 and s17 framed a passenger through the payoff) | after the write, `look_at` one rendered frame per shot the card spans; where it framed the wrong person give that shot its own card with an explicit `source` rect around the speaker |
+| `keep_segments(snap_to_words=false)` and `apply_edit_batch` keep your exact times, and the index's word onsets often run 50-110 ms LATE where two words touch: a start on one clips the first sound of the word ('Galaxy' heard as 'Policy', JRE #2190 run) | open a story on the default `keep_segments` (it places each new edge on the sound and reaches back to the pause before a word) and read the ADVISORY and MID-WORD AUDIT lines it and the render print; exact times are for stutter cuts |
