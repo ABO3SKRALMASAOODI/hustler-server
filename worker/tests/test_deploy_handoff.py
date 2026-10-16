@@ -762,3 +762,25 @@ def test_guardian_never_fails_a_claim_another_call_now_serves(monkeypatch):
     event = remote.reconcile_remote_execution(db, _orphan())
     assert event["status"] == "superseded"
     assert dbx.finish_job not in db.fns()
+
+
+# ───────────────────── a render routed nowhere (16 Oct, job 76037) ─────
+
+def test_a_behind_the_speaker_matte_does_not_make_a_render_unroutable():
+    """The program matte is derived from the source, never a staged object:
+    sizing it as one made the render inadmissible everywhere and failed it
+    with "no remote executor is configured for preview_check"."""
+    import execution_inputs
+    edl = {"keep": [[0, 10]],
+           "motion": [{"id": "m1", "layer": "behind_subject",
+                       "behind": {"asset_key": "sidecar:matte.person"}}],
+           "overlays": [{"id": "ov1", "asset_key": "fetched/1/stock/a.mp4"}]}
+    refs = execution_inputs.render_references(edl)
+    assert set(refs) == {"fetched/1/stock/a.mp4"}
+    rows = [{"storage_key": "fetched/1/stock/a.mp4", "kind": "video_clip",
+             "bytes": 7978154, "duration_s": 8.0},
+            {"storage_key": "proxies/1/p.mp4", "kind": "proxy",
+             "bytes": 423860791, "duration_s": 9676.66}]
+    shape = execution_inputs.job_shape(rows, edl, "preview_check", {})
+    assert shape["staged_bytes"] <= config.CLOUDFLARE_MAX_INPUT_BYTES
+    assert shape["max_bytes"] <= config.CLOUDFLARE_MAX_INPUT_BYTES

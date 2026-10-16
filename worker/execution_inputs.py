@@ -46,12 +46,24 @@ def filmstrip_inputs(rows, edl, limit=FILMSTRIP_ASSETS):
     return selected[:limit] if limit is not None else selected
 
 
+# Keys an EDL names for data the renderer DERIVES from the source rather
+# than stages as an object: the program matte of a behind-the-speaker item
+# (matte_track.PROGRAM_KEY, "sidecar:matte.person") is measured or fetched
+# per program window from the source this shape already counts. Sizing it as
+# a storage object found none, made every such render "unknown size" and so
+# inadmissible on Cloudflare: 2 of 2 renders using it failed on 16 Oct
+# ("no remote executor is configured for preview_check", job 76037).
+DERIVED_KEY_PREFIXES = ('sidecar:',)
+
+
 def render_references(value, path=()):
     """Include nested masks, patches and clean sources as well as visible clips."""
     refs = {}
     if isinstance(value, dict):
         for key, child in value.items():
             if key in {'asset_key', 'storage_key', 'proxy_key'} and child:
+                if str(child).startswith(DERIVED_KEY_PREFIXES):
+                    continue
                 refs.setdefault(str(child), set()).add(path)
             else:
                 for ref, paths in render_references(child, path + (key,)).items():
