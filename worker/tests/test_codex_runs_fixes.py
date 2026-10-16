@@ -365,3 +365,28 @@ def test_the_review_reads_the_corrected_words():
                        {"w": "started,", "t0": 110.8, "t1": 111.2}]}
     words = [w["w"] for w in edit_review._Program(edl, index).kept]
     assert "starved" in words and not any(w.startswith("started") for w in words)
+
+
+# ── a fetched photo over the cap is shrunk, not refused ─────────────────────
+
+def test_a_fetched_photo_over_the_cap_is_stored_as_a_fitting_jpeg(monkeypatch, tmp_path):
+    """PG s12/s19 (3590, 3602, 13 Oct): Wikimedia originals of 23 MB and
+    21 MB were refused 'over the 10 MB limit for image'."""
+    import random
+    from PIL import Image
+    import net_fetch
+    import url_media
+    rng = random.Random(7)
+    big = tmp_path / "orig.png"
+    Image.frombytes("RGB", (1600, 1000),
+                    bytes(rng.getrandbits(8) for _ in range(1600 * 1000 * 3))).save(big)
+    assert big.stat().st_size > 3 << 20
+    monkeypatch.setattr(net_fetch, "check_url", lambda url: None)
+    monkeypatch.setattr(url_media, "_download_direct", lambda url, workdir: (str(big), url))
+    monkeypatch.setitem(url_media.KIND_MAX_BYTES, url_media.KIND_IMAGE, 3 << 20)
+    out = url_media.fetch("https://upload.wikimedia.org/wikipedia/commons/a/ab/X.png",
+                          str(tmp_path))
+    assert out["kind"] == url_media.KIND_IMAGE and out["bytes"] <= 3 << 20
+    assert out["path"].endswith("_fit.jpg")
+    with Image.open(out["path"]) as im:
+        assert im.size == (1600, 1000)

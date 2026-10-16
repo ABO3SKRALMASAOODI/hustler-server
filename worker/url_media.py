@@ -527,6 +527,26 @@ def _title_from(url, info, kind, path=None):
     return (title or "fetched media") + suffix
 
 
+def _shrink_image(path, limit, long_side=3840):
+    """A JPEG of ``path`` at most ``long_side`` px on its long side and under
+    ``limit`` bytes, or None when it cannot be made."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            im.load()
+            rgb = im.convert("RGB")
+        if max(rgb.size) > long_side:
+            rgb.thumbnail((long_side, long_side), Image.Resampling.LANCZOS)
+        out = os.path.splitext(path)[0] + "_fit.jpg"
+        for quality in (90, 82, 72):
+            rgb.save(out, "JPEG", quality=quality, optimize=True)
+            if os.path.getsize(out) <= limit:
+                return out
+    except Exception as exc:  # noqa: BLE001 — the size refusal stands
+        print(f"[fetch_url] image shrink failed: {str(exc)[:120]}", flush=True)
+    return None
+
+
 def fetch(url, workdir, prefer=None):
     """Download `url` into `workdir` and say what it is.
 
@@ -607,6 +627,15 @@ def fetch(url, workdir, prefer=None):
 
     nbytes = os.path.getsize(path)
     limit = KIND_MAX_BYTES.get(kind, config.FETCH_MAX_BYTES)
+    if nbytes > limit and kind == KIND_IMAGE:
+        # A photo over the cap is already here: a 4K JPEG of it fits and
+        # loses nothing a 1080x1920 frame can show (the owner's PG run, 13 Oct:
+        # two Wikimedia originals, 23 MB and 21 MB, were refused outright).
+        smaller = _shrink_image(path, limit)
+        if smaller:
+            path = smaller
+            kind, probed = classify(path)
+            nbytes = os.path.getsize(path)
     if nbytes > limit:
         raise FetchMediaError(
             f"that {KIND_LABEL.get(kind, 'file')} is {nbytes >> 20} MB, over "
