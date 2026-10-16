@@ -349,7 +349,7 @@ def _overview(cur):
             return 100 if current > 0 else 0
         return round(((current - previous) / previous) * 100, 1)
 
-    return {
+    out = {
         'meta': {
             'metrics_epoch': METRICS_EPOCH,
             'excluded_emails': len(EXCLUDE_EMAILS),
@@ -370,6 +370,22 @@ def _overview(cur):
         },
         'visits': classic.overview_visits(cur),
     }
+    # The headline split the owner checks against Paddle's dashboard:
+    # renewing / cancelled-with-access / payment failing, and both MRRs.
+    out['subscriptions']['paddle'] = _paddle_split(cur)
+    return out
+
+
+def _paddle_split(cur):
+    """Paddle's subscriptions split by state (admin_metrics.subscriptions);
+    a failure hides the split, never the page around it."""
+    from admin_metrics import subscriptions as subs
+    try:
+        return subs.paddle_split(cur)
+    except Exception:
+        current_app.logger.warning("paddle subscription split unavailable",
+                                   exc_info=True)
+        return {'available': False}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -678,6 +694,9 @@ def _revenue(cur):
         },
         # Lifetime payments by plan launch (July / September / October).
         'plan_cohorts': _plan_cohorts(cur, scope),
+        # Renewing MRR and Paddle MRR, with the renewing / cancelled /
+        # failing split they come from (per Paddle subscription).
+        'paddle': _paddle_split(cur),
     }
 
 
@@ -1148,6 +1167,9 @@ USER_FILTERS = {
     # Never paid.
     'free': "u_status = 'free'",
 }
+# Plus one filter per subscriber state (admin_metrics.subscriptions:
+# renewing, cancelled_access, payment_failing, ended), answered by the same
+# summarize() that draws each row's status, so a filter and its rows agree.
 
 
 @admin_bp.route('/users', methods=['GET'])
@@ -1161,7 +1183,7 @@ def list_users():
     retired app builder's `jobs` table is no longer read: "Edits" are video
     edit requests. Filters answer the owner's questions directly: who
     subscribed, who paid, who cancelled, who exported, who never paid."""
-    from admin_metrics import money
+    from admin_metrics import money, subscriptions as subs
     try:
         page = max(1, int(request.args.get('page', 1)))
         per_page = max(10, min(200, int(request.args.get('per_page', 50))))
@@ -1170,7 +1192,7 @@ def list_users():
     search = request.args.get('search', '').strip()
     plan_filter = request.args.get('plan', '').strip()
     flt = request.args.get('filter', 'all').strip().lower()
-    if flt not in USER_FILTERS:
+    if flt not in USER_FILTERS and flt not in subs.FILTER_STATES:
         flt = 'all'
     sort = request.args.get('sort', 'created_at').strip()
     order = 'asc' if request.args.get('order', 'desc').strip() == 'asc' \
@@ -1204,22 +1226,33 @@ def list_users():
                          WHERE vf.user_id = u.id AND vf.type = 'final'
                            AND vf.state = 'done') AS u_exports
                   FROM users u {where}"""
+            states = {}
+            try:
+                states = subs.account_states(cur)
+            except Exception:
+                current_app.logger.warning("subscriber states unavailable",
+                                           exc_info=True)
+
+            def cond(name, alias):
+                if name in subs.FILTER_STATES:
+                    return subs.ids_in(states, name, alias)
+                return (USER_FILTERS[name]
+                        .replace('u_status', f'{alias}.u_status')
+                        .replace('u_exports', f'{alias}.u_exports'))
+
             # Counts for the filter buttons and the header, over the same
             # search (the filter itself never changes them).
+            names = (('subscribed', 'paid', 'canceled', 'exported', 'free')
+                     + tuple(subs.FILTER_STATES))
             cur.execute(f"""
                 WITH b AS ({base})
                 SELECT COUNT(*) AS all_,
-                       COUNT(*) FILTER (WHERE {USER_FILTERS['subscribed']}) AS subscribed,
-                       COUNT(*) FILTER (WHERE {USER_FILTERS['paid']}) AS paid,
-                       COUNT(*) FILTER (WHERE {USER_FILTERS['canceled']}) AS canceled,
-                       COUNT(*) FILTER (WHERE {USER_FILTERS['exported']}) AS exported,
-                       COUNT(*) FILTER (WHERE {USER_FILTERS['free']}) AS free
+                       {", ".join(f"COUNT(*) FILTER (WHERE {cond(n, 'b')}) AS {n}"
+                                  for n in names)}
                   FROM b""", params)
             c = cur.fetchone() or {}
             counts = {'all': c.get('all_') or 0}
-            counts.update({k: c.get(k) or 0 for k in
-                           ('subscribed', 'paid', 'canceled', 'exported',
-                            'free')})
+            counts.update({k: c.get(k) or 0 for k in names})
             total = counts.get(flt, counts['all'])
 
             day0, week0 = _local_day_bounds()
@@ -1233,6 +1266,8 @@ def list_users():
                 WITH b AS ({base})
                 SELECT
                     u.id, u.email, u.plan, u.is_subscribed,
+                    u.subscription_id, u.payment_failed_at,
+                    u.billing_synced_at,
                     to_jsonb(u)->>'billing_period' AS billing_period,
                     to_jsonb(u)->>'billing_plan' AS billing_plan,
                     to_jsonb(u)->>'billing_status' AS billing_status,
@@ -1278,16 +1313,32 @@ def list_users():
                       FROM payments p
                      WHERE p.user_id = u.id AND p.status IN ('completed', 'paid')
                        AND p.amount_cents > 0) pay ON TRUE
-                WHERE {USER_FILTERS[flt].replace('u_status', 'u.u_status').replace('u_exports', 'u.u_exports')}
+                WHERE {cond(flt, 'u')}
                 ORDER BY {sort_col} {order} NULLS LAST, u.id DESC
                 LIMIT %s OFFSET %s
             """, params + [per_page, offset])
-            rows = cur.fetchall()
+            rows = [dict(r) for r in cur.fetchall()]
+            # Each row's one subscriber status (same as Subscribers/People).
+            journeys = {}
+            try:
+                journeys = subs.for_customers(
+                    cur, [r for r in rows if r['id'] in states])
+            except Exception:
+                current_app.logger.warning("user renewal lookup failed",
+                                           exc_info=True)
 
         users = []
-        for r in rows:
-            row = dict(r)
+        for row in rows:
             row['paid_usd'] = round(float(row.pop('paid_cents') or 0) / 100.0, 2)
+            for k in ('subscription_id', 'payment_failed_at',
+                      'billing_synced_at'):
+                row.pop(k, None)
+            j = journeys.get(row['id']) or {}
+            row.update({k: j.get(k) for k in (
+                'renewal_state', 'renewal_at', 'subscriber_kind',
+                'returned_at')})
+            if not j and states:
+                row['renewal_state'] = 'none'
             users.append(row)
         return jsonify({
             'users': users,

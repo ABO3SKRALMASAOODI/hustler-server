@@ -67,8 +67,9 @@ def test_subscribers_keeps_churn_and_distinguishes_access_from_health(
         response = admin_video.video_subscribers.__wrapped__()
         body = response.get_json()
 
-    row_sql, row_params = conn.cur.sql[0]
-    summary_sql, _ = conn.cur.sql[1]
+    row_sql, row_params = next(q for q in conn.cur.sql
+                               if "matched_subscribers" in q[0])
+    summary_sql, _ = next(q for q in conn.cur.sql if "AS ever_paid" in q[0])
     assert "pay.status = 'completed'" in row_sql
     assert "pay.amount_cents > 0" in row_sql
     assert "s.subscriber_state = %s" in row_sql
