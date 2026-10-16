@@ -1211,22 +1211,38 @@ SUBSCRIBERS_ORDER = """
 @admin_video_bp.route("/admin/video/subscribers", methods=["GET"])
 @admin_required
 def video_subscribers():
-    """Every customer who has ever completed a positive payment."""
+    """Every customer who has ever completed a positive payment.
+
+    `status` filters by the one subscriber status the rows show (renewing,
+    cancelled_access, payment_failing, ended, from Paddle's snapshots) or by
+    the account's own billing state (active, canceled, past_due, attention:
+    "attention" is a DB/Paddle contradiction to review)."""
+    from admin_metrics import subscriptions as subs
     search = (request.args.get("search") or "").strip()
     state = (request.args.get("status") or "all").strip().lower()
-    if state not in ("all", "active", "canceled", "past_due", "attention"):
+    if state not in ("all", "active", "canceled", "past_due", "attention") \
+            and state not in subs.FILTER_STATES:
         state = "all"
     page = max(1, request.args.get("page", type=int) or 1)
     per_page = max(10, min(100, request.args.get("per_page", type=int) or 50))
     offset = (page - 1) * per_page
-    state_where = "" if state == "all" else "AND s.subscriber_state = %s"
-    params = [f"%{search}%"]
-    if state != "all":
-        params.append(state)
-    params.extend([per_page, offset])
 
     with adb() as conn:
         cur = conn.cursor()
+        states = {}
+        try:
+            states = subs.account_states(cur)
+        except Exception:
+            current_app.logger.warning("subscriber states unavailable")
+        params = [f"%{search}%"]
+        if state == "all":
+            state_where = ""
+        elif state in subs.FILTER_STATES:
+            state_where = "AND " + subs.ids_in(states, state, "s")
+        else:
+            state_where = "AND s.subscriber_state = %s"
+            params.append(state)
+        params.extend([per_page, offset])
         cur.execute(SUBSCRIBERS_SQL + state_where + SUBSCRIBERS_ORDER, params)
         rows = cur.fetchall()
         if not rows and page > 1:
@@ -1264,20 +1280,28 @@ def video_subscribers():
                    COUNT(*) FILTER (
                        WHERE NOT EXISTS (SELECT 1 FROM projects p
                                           WHERE p.user_id = paid_users.id))
-                       AS no_project
+                       AS no_project,
+                   """ + ",".join(
+                       f"COUNT(*) FILTER (WHERE "
+                       f"{subs.ids_in(states, name, 'paid_users')}) AS {name}"
+                       for name in subs.FILTER_STATES) + """
               FROM paid_users
         """)
         summary = cur.fetchone() or {}
+        # Paddle's own count, per subscription: renewing / cancelled with
+        # access / payment failing, Paddle's "Active subscribers" and MRR.
+        try:
+            paddle = subs.paddle_split(cur)
+        except Exception:
+            current_app.logger.warning("paddle subscription split unavailable")
+            paddle = {"available": False}
 
         # What each subscriber chose: renews (next payment date), cancelled
         # (access ends on), ended, paused or overdue, from the stored Paddle
         # snapshots (never a live Paddle call from a page view).
         journeys = {}
         try:
-            from admin_metrics import subscriptions as subs
-            journeys = subs.for_customers(cur, [
-                {"id": r["id"], "subscription_id": r.get("subscription_id")}
-                for r in rows])
+            journeys = subs.for_customers(cur, [dict(r) for r in rows])
         except Exception:
             current_app.logger.warning("subscriber renewal lookup failed")
 
@@ -1288,6 +1312,10 @@ def video_subscribers():
         "summary": {k: int(summary.get(k) or 0) for k in (
             "ever_paid", "entitled_now", "active", "canceled", "past_due",
             "attention", "no_project")},
+        # The same customers by the status their rows show.
+        "state_counts": {k: int(summary.get(k) or 0)
+                         for k in subs.FILTER_STATES},
+        "paddle": paddle,
         "subscribers": [{
             "id": r["id"], "email": r["email"],
             "state": r["subscriber_state"],
