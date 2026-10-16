@@ -126,7 +126,9 @@ EDL = dict(
     keep=[[2.0, 40.0], [55.5, 90.25], [20.0, 30.0], [140.0, 180.0]],
     inserts=[{"id": "ins1", "kind": "video", "asset_key": CLIP_KEY,
               "at_output_s": 20.0, "duration_s": 3.0}],
-    captions={"mode": "from_transcript", "style": {"size": "m"}})
+    captions={"mode": "from_transcript", "style": {"size": "m"}},
+    music=[{"id": "mu1", "storage_key": "media/3419/music/ambient.mp3",
+            "start": 0.0, "end": 30.0}])
 
 
 def _rows(plan="plus_2026", original=True, edl=EDL, preview=True,
@@ -143,6 +145,33 @@ def _rows(plan="plus_2026", original=True, edl=EDL, preview=True,
     assets.append({"id": 12, "project_id": PROJECT_ID, "kind": "video_clip",
                    "storage_key": CLIP_KEY, "sha256": "c" * 64,
                    "duration_s": 3.0, "meta": {"filename": "Park B-roll.mp4"}})
+    assets.extend([
+        {"id": 20, "project_id": PROJECT_ID, "kind": "music",
+         "storage_key": "media/3419/music/ambient.mp3", "sha256": "d" * 64,
+         "duration_s": 182.4,
+         "meta": {"filename": "ambient.mp3", "provider": "freemusicarchive",
+                  "id": "freemusicarchive:991", "license": "CC BY-NC 4.0",
+                  "creator": "Lee Ann", "page_url": "https://fma.example/t/991",
+                  "source_audio_stream_status": "probed",
+                  "source_has_audio_stream": True,
+                  "source_audio_stream_codec": "mp3",
+                  "source_audio_stream_channels": 2}},
+        {"id": 21, "project_id": PROJECT_ID, "kind": "music",
+         "storage_key": "media/3419/music/unknown.wav", "sha256": None,
+         "duration_s": None, "meta": {"filename": "unknown.wav"}},
+        {"id": 22, "project_id": PROJECT_ID, "kind": "image_ref",
+         "storage_key": "media/3419/img/chart.png", "sha256": "e" * 64,
+         "duration_s": None,
+         "meta": {"filename": "chart.png", "caption": "A bar chart of revenue"}},
+        {"id": 23, "project_id": PROJECT_ID, "kind": "video_clip",
+         "storage_key": "media/3419/clips/staged.mov", "sha256": "9" * 64,
+         "duration_s": 12.0, "meta": {"filename": "staged.mov",
+                                      "staged": True}},
+        {"id": 24, "project_id": PROJECT_ID, "kind": "video_clip",
+         "storage_key": "media/3419/clips/ref.mp4", "sha256": "8" * 64,
+         "duration_s": 30.0, "meta": {"filename": "ref.mp4",
+                                      "role": "edit_reference"}},
+    ])
     if preview:
         assets.append({"id": 55, "project_id": PROJECT_ID, "kind": "render",
                        "storage_key": "renders/3419/v7.mp4",
@@ -217,6 +246,11 @@ class _Cursor:
         elif sql.startswith("SELECT * FROM assets WHERE project_id = %s AND "
                             "kind = %s ORDER BY id DESC"):
             out = [dict(a) for a in reversed(assets) if a["kind"] == params[1]][:1]
+        elif sql.startswith("SELECT * FROM assets WHERE project_id = %s AND "
+                            "kind = ANY(%s) ORDER BY id DESC LIMIT %s"):
+            out = [copy.deepcopy(a) for a in sorted(
+                assets, key=lambda a: a["id"], reverse=True)
+                if a["kind"] in params[1]][:params[2]]
         elif sql.startswith("SELECT * FROM assets WHERE project_id = %s AND "
                             "storage_key = %s"):
             out = [dict(a) for a in reversed(assets)
@@ -342,6 +376,12 @@ CALLS = [
     ("get_edl", {"sections": ["keep", "inserts"]}),
     ("get_edl", {"compact": True}),
     ("get_edl", {"offset": 1, "limit": 2}),
+    ("list_assets", {}),
+    ("list_assets", {"kind": "all"}),
+    ("list_assets", {"kind": "clips"}),
+    ("list_assets", {"kind": "\"image\""}),
+    ("list_assets", {"kind": "render"}),
+    ("list_assets", {"kind": "nonsense"}),
     ("list_motion_templates", {}),
     ("list_motion_templates", {"category": "callout"}),
     ("list_motion_templates", {"category": "no-such-category"}),
@@ -398,7 +438,7 @@ def test_anything_unproven_is_queued_instead(tool, args):
 
 def test_an_edl_from_a_newer_release_is_queued_like_the_skew_guard_would():
     rows = _rows(edl=dict(EDL, future_device={"kind": "lens"}))
-    assert read_tools.edl_problem(EDL) is None
+    assert read_tools.edl_problem(EDL) is None, read_tools.edl_problem(EDL)
     got, _message = fast_answer(rows, "get_edl", {})
     assert got is None
 

@@ -58,7 +58,7 @@ ACQUIRE_TIMEOUT_S = 1.0
 # under worker_<name> unless this process already has them (a worker test
 # process imports them by their plain names).
 _SHARED = ("schemas", "timeline", "visual", "edl_read", "tool_outcome",
-           "read_tools")
+           "music_rights", "read_tools")
 _load_lock = threading.Lock()
 
 
@@ -87,7 +87,7 @@ def read_tools():
     if "read_tools" not in sys.modules:
         # Standalone (the backend): read_tools resolves these by worker_<name>.
         for name in ("schemas", "timeline", "visual", "edl_read",
-                     "tool_outcome"):
+                     "tool_outcome", "music_rights"):
             _worker(name)
     return _worker("read_tools")
 

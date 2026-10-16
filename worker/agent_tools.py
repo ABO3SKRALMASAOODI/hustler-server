@@ -121,6 +121,8 @@ from read_tools import (  # noqa: E402,F401
     _fmt_t, _metric, _norm_token, _program_map, classify_repeated_phrases,
     find_repeated_phrases, get_edl, get_kept_transcript, get_shots,
     get_transcript, get_words, program_name_of, search_transcript)
+from read_tools import (  # noqa: E402,F401
+    _tool_identifier, edl_used_asset_keys, list_assets)
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      custom_chain_error, patch_clip_key, patch_fingerprint,
@@ -1277,162 +1279,6 @@ def _silence_range_hint(ctx):
         return ""
     return (f"\n(The whole {dur:.0f}s source. Your program keeps {a:.2f}-{b:.2f}s: "
             f"find_silences(start={a:g}, end={b:g}) lists only that span.)")
-
-
-def edl_used_asset_keys(edl):
-    """Every storage_key the current edit already places — inserts,
-    overlays, music, voiceover and sfx. Unused project files are still
-    available to place; this set is how the inventory says which are which."""
-    keys = set()
-    if not isinstance(edl, dict):
-        return keys
-    for ins in edl.get("inserts") or []:
-        if ins.get("asset_key"):
-            keys.add(ins["asset_key"])
-    for ov in edl.get("overlays") or []:
-        if ov.get("asset_key"):
-            keys.add(ov["asset_key"])
-    for m in edl.get("music") or []:
-        if m.get("storage_key"):
-            keys.add(m["storage_key"])
-    for v in edl.get("voiceover") or []:
-        if v.get("asset_key"):
-            keys.add(v["asset_key"])
-    for s in edl.get("sfx") or []:
-        if s.get("storage_key"):
-            keys.add(s["storage_key"])
-    return keys
-
-
-def list_assets(ctx, kind=None):
-    """Project files the user has uploaded or the system has produced.
-    kind 'audio' (the pipeline's extracted copy of the source's own audio,
-    used for transcription) is deliberately excluded everywhere — offering
-    it as 'music' just doubles the speaker's voice under itself."""
-    kinds = {"music": ["music"], "image": ["image_ref"],
-             "clip": ["video_clip"], "render": ["render"],
-             "all": ["music", "image_ref", "video_clip",
-                     "render", "original"]}
-    requested = _tool_identifier(kind or "music").lower()
-    aliases = {
-        "video": "clip", "videos": "clip", "clips": "clip",
-        "images": "image", "photo": "image", "photos": "image",
-        "audio": "music", "song": "music", "songs": "music",
-        "renders": "render", "everything": "all",
-    }
-    canonical = aliases.get(requested, requested)
-    sel = kinds.get(canonical)
-    if not sel:
-        return ("REJECTED: kind must be one of "
-                f"{', '.join(sorted(kinds))}.")
-    rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, sel)
-    if not rows:
-        if sel == kinds["music"]:
-            return ("No audio uploaded to this project. fetch_url ingests a "
-                    "music link the user pastes (song URL, YouTube, "
-                    "SoundCloud); for a SPECIFIC song they named, load the "
-                    "acquisition department and find_song can locate a link. "
-                    "For a generic genre/vibe or a trending platform sound, "
-                    "ask the user to attach the file (paperclip button in "
-                    "chat, mp3/wav/m4a) instead of repeatedly searching, or "
-                    "offer library tracks with ask_user and place their "
-                    "pick. Sound effects come from the approved library "
-                    "(list_sound_library).")
-        return f"No {canonical} assets in this project."
-    try:
-        edl_row = ctx.latest_edl()
-        used = edl_used_asset_keys(edl_row["json"])
-    except Exception:
-        edl_row = {"version": None}
-        used = set()
-    unused_n = 0
-    lines = []
-    for a in rows:
-        m = a.get("meta") or {}
-        dur = f", {a['duration_s']:.1f}s" if a.get("duration_s") else ""
-        cap = f" — {m['caption'][:120]}" if m.get("caption") else ""
-        role = m.get("role") or ""
-        role_bit = (f" ROLE={role} — STYLE REFERENCE, not footage: "
-                    "look_at_asset / extract_audio, never insert_media"
-                    if role in ("edit_reference", "shorts_reference")
-                    else "")
-        key = a.get("storage_key") or ""
-        if a["kind"] == "render" or role in ("edit_reference",
-                                             "shorts_reference"):
-            place = ""
-        elif key in used:
-            place = " — in the current edit"
-        else:
-            place = (" — AVAILABLE, not in the current edit "
-                     "(insert_media / add_overlay / add_music)")
-            unused_n += 1
-        staged = (m.get("staged") is True or m.get("staged") == "true")
-        if staged:
-            place = " — STAGING TRAY (user has not pressed Submit)"
-        rights_bit = ""
-        if a["kind"] == "music":
-            evidence_input = dict(m)
-            evidence_input.setdefault("downloaded_sha256", a.get("sha256"))
-            rights = music_search.provenance(evidence_input)
-            rights["tool_normalized_license_note"] = (
-                m.get("tool_normalized_license_note") or
-                m.get("license_note") or music_search.license_note(
-                    evidence_input))
-            rights_bit = (" — MUSIC_PROVENANCE=" + json.dumps(
-                rights, sort_keys=True, separators=(",", ":")))
-            source_probe = {
-                "source_audio_stream_status": (
-                    m.get("source_audio_stream_status") or "not_exposed"),
-                "source_has_audio_stream": (
-                    m.get("source_has_audio_stream")
-                    if isinstance(m.get("source_has_audio_stream"), bool)
-                    else None),
-                "source_audio_stream_codec": (
-                    m.get("source_audio_stream_codec") or None),
-                "source_audio_stream_channels": (
-                    m.get("source_audio_stream_channels")
-                    if type(m.get("source_audio_stream_channels")) is int
-                    else None),
-                "source_audio_stream_probe_tool": (
-                    m.get("source_audio_stream_probe_tool") or None),
-                "source_audio_stream_probed_at": (
-                    m.get("source_audio_stream_probed_at") or None),
-            }
-            rights_bit += (" — MUSIC_SOURCE_PROBE=" + json.dumps(
-                source_probe, sort_keys=True, separators=(",", ":")))
-        lines.append(f"[{a['kind']}] storage_key={a['storage_key']} "
-                     f"\"{m.get('filename', '?')}\"{dur}{cap}{role_bit}"
-                     f"{place}{rights_bit}")
-    head = ""
-    if unused_n:
-        head = (f"{unused_n} file(s) are in the project and NOT on the "
-                "timeline — use them; do not tell the user they have no "
-                "footage.\n")
-    out = head + "\n".join(lines)
-    # The commonest way a user delivers a SONG is as the video they found it
-    # in — a TikTok/Reel download. Say here that this works, at the moment the
-    # agent is looking at the clip, rather than leaving it to guess.
-    if any(a["kind"] == "video_clip" for a in rows):
-        out += ("\nAny [video_clip] can also be used as SOUND ONLY — pass its "
-                "storage_key straight to add_music / add_sfx / add_voiceover "
-                "(or call extract_audio first). Its picture stays out of the "
-                "edit entirely.")
-    result = _cap(out)
-    fingerprint = (
-        "list_assets", str(kind or "music").strip().lower(),
-        edl_row.get("version"),
-        tuple((a.get("id"), a.get("kind"), a.get("storage_key"),
-               a.get("duration_s"),
-               json.dumps(a.get("meta") or {}, sort_keys=True, default=str))
-              for a in rows))
-    evidence = _evidence_cache(ctx)
-    if fingerprint in evidence:
-        _metric(ctx, "evidence_reads_reused")
-        return ("UNCHANGED INVENTORY — this exact asset list and placement "
-                "state was already returned earlier in this turn. Use that "
-                "result; call again only after an asset or EDL change.")
-    evidence.add(fingerprint)
-    return result
 
 
 def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None,
@@ -24456,14 +24302,6 @@ def ask_user(ctx, question):
     if offer and music_gate.is_mcp(ctx):
         q = q + music_gate.offer_note(offer)
     raise AskUser(q)
-
-
-def _tool_identifier(value):
-    """Normalize one double-encoded identifier, never arbitrary tool text."""
-    value = str(value or "").strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
-        value = value[1:-1].strip()
-    return value
 
 
 def read_skill(ctx, name, section=None):

@@ -20,7 +20,8 @@ import config
 # Plain reads shared with the backend's MCP fast path (read_tools.py):
 # one definition, re-exported here under the names every caller uses.
 from read_tools import (  # noqa: E402,F401
-    add_message, asset_by_key, find_render_asset, get_index_by_sha,
+    add_message, asset_by_key, assets_by_kinds, find_render_asset,
+    get_index_by_sha,
     latest_asset, latest_edl, user_billing)
 import error_text
 import io_telemetry
@@ -2451,15 +2452,6 @@ def delete_assets(conn, asset_ids):
     with conn.cursor() as cur:
         cur.execute("DELETE FROM assets WHERE id = ANY(%s)", (list(asset_ids),))
         return cur.rowcount
-
-
-def assets_by_kinds(conn, project_id, kinds, limit=200):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
-                       WHERE project_id = %s AND kind = ANY(%s)
-                       ORDER BY id DESC LIMIT %s""",
-                    (project_id, list(kinds), limit))
-        return cur.fetchall()
 
 
 def update_asset_meta(conn, asset_id, patch):
