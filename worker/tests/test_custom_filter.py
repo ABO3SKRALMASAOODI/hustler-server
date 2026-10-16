@@ -139,6 +139,19 @@ we = stitch.window_edl(new, tln, 1.0, 6.0)
 cf = (we.get("effects") or {}).get("custom") or []
 check("window_edl shifts the chain into the piece's clock",
       len(cf) == 1 and cf[0]["start"] == 1.0 and cf[0]["end"] == 4.0)
+# A proof window that starts INSIDE the chain's span (preview check 72200,
+# 16 Oct 2026) must clip it, never leave a negative start.
+inside = stitch.window_edl(new, tln, 3.0, 6.0)
+cfi = (inside.get("effects") or {}).get("custom") or []
+check("a window starting inside the chain clips it to the piece",
+      len(cfi) == 1 and cfi[0]["start"] == 0.0 and cfi[0]["end"] == 2.0)
+try:
+    schemas.validate_edl(inside, 10.0)
+    ok_inside = True
+except Exception as exc:  # noqa: BLE001
+    ok_inside = False
+    print("   ", exc)
+check("...and the clipped piece validates", ok_inside)
 
 print("== 4. edl_diff ==")
 
