@@ -171,6 +171,12 @@ disagree, v9 wins on method and the brief wins on preferences.
 10. **Manifest.** `run.py finalize --not-selected <file>` writes
    `exports/manifest.json`, `publishing-manifest.json` and `PUBLISHING.md`
    in the format the publisher already reads.
+11. **Deliver.** Always run `run.py deliver --run-dir <run>` right after
+   finalize. It copies every final (sha256-checked), `README.md`,
+   `CREDITS.md` and the manifests into the owner's publishing folder,
+   `~/Documents/Valmera/Podcast Shorts/<Speaker> - <Title> (<year>) - <N>
+   Finals/` (`--name` overrides the folder name). End the run by telling the
+   user that folder's path: their publishing agents are pointed at it.
 
 ## Non-negotiables
 

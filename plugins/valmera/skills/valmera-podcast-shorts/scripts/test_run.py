@@ -183,6 +183,28 @@ class RunTests(unittest.TestCase):
         self.assertIn("## Not exported", markdown)
         self.assertEqual(self.state()["stage"], "complete")
 
+        # Owner (16 Oct 2026): every finished podcast lands in a folder the
+        # publishing agents can be pointed at.
+        root = self.root / "Podcast Shorts"
+        out = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root", str(root)))
+        folder = Path(out["folder"])
+        self.assertEqual(folder.parent, root)
+        self.assertTrue(folder.name.startswith("Steve Jobs - "))
+        self.assertTrue(folder.name.endswith(" - 1 Finals"))
+        copied = folder / final.name
+        self.assertEqual(hashlib.sha256(copied.read_bytes()).hexdigest(),
+                         item["sha256"])
+        for name in ("README.md", "CREDITS.md", "publishing-manifest.json"):
+            self.assertTrue((folder / name).exists(), name)
+        again = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root", str(root)))
+        self.assertEqual(again["folder"], out["folder"])  # idempotent
+        self.assertEqual(self.state()["delivered_to"], out["folder"])
+
+    def test_deliver_requires_a_finalized_run(self) -> None:
+        self.add("s01", 11)
+        self.fails("finalize the run before delivering", "deliver",
+                   "--run-dir", self.dir, "--root", str(self.root / "out"))
+
     def test_finalize_requires_every_short_accounted_for(self) -> None:
         self.fails("no selected shorts", "finalize", "--run-dir", self.dir)
         self.add("s01", 11)
