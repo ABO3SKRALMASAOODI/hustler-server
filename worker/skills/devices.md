@@ -206,8 +206,11 @@ at the landings → `audit_motion` before handing over.
 Every device is an item of the `fx` layer (or the `composite` of a motion
 graphic), written and removed through apply_edit_batch exactly like its
 verb — clients whose tool list predates the device verbs reach every device
-this way. Copy the `op` of a `suggest_devices` candidate as it is; the
-shapes are:
+this way. An MCP client can also run a verb its cached list lacks:
+expand_toolset(describe=["suggest_devices"]) returns its current schema and
+expand_toolset(call={"name": "suggest_devices", "arguments": {...}}) runs it
+exactly like a direct call. Copy the `op` of a `suggest_devices` candidate
+as it is; the shapes are:
 
 - add or replace: {"action": "upsert", "layer": "fx", "id": "<id>",
   "value": {"id": "<id>", "type": "<type>", "stage": "<stage>", "start":

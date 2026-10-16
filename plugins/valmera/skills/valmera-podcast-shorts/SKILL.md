@@ -270,10 +270,16 @@ nothing (Oct 2026: 2 h 55 min, 729 editor calls, 25 renders, 0 exports).
 ## Known Valmera limits
 
 Tools change; the live server schema wins over any doc. A client caches
-`tools/list` when it connects, so a long-lived session can miss parameters
-the server added since (Oct 2026: `set_picture_card` `source`/`panels`/
-`follow`, `add_freeze_frame` audio_mode 'hold'); start a fresh session to
-refresh it. Real limits as of Oct 2026 (a face filling its card, write-time
+`tools/list` when it connects, so a long-lived session can miss tools and
+parameters the server added since (e.g. `suggest_devices`,
+`apply_format_pack`, `set_picture_card` `panels`). Never restart or work
+around it: **if a tool you need is not in your list,
+`expand_toolset(describe=['<tool>'])` returns its current schema, then
+`expand_toolset(call={'name': '<tool>', 'arguments': {..., 'project_id':
+<id>}})` runs it** exactly like a direct call (same project check, gates,
+charges, errors and result). A parameter your cached schema lacks: pass it
+anyway, or make the call through `call`. `expand_toolset(domains=[])` lists
+every current tool. Real limits as of Oct 2026 (a face filling its card, write-time
 size estimates for lockups) are in editing.md **Known Valmera limits** with
 the working path. Read it before the pilot and before editing; never spend
 more than two calls rediscovering one. The render result measures what

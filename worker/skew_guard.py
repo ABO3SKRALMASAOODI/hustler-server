@@ -163,6 +163,31 @@ def _unknown_keys(raw, kept, kept_alias, path, out):
                           b[i] if i < len(b) else None, f"{path}[]", out)
 
 
+def _gateway_inner(tool, args):
+    """(tool, args) of the call an MCP gateway payload carries, else as is.
+
+    expand_toolset(call={"name": T, "arguments": A}) is how a client whose
+    cached tools/list predates T reaches it. The backend unwraps it before
+    queueing, so its job already names T; a payload that still carries the
+    wrapper (a backend mid-deploy) is judged by the INNER tool and
+    arguments, never by the wrapper's always-known name. project_id is the
+    MCP transport scope, popped before queueing, never a tool argument.
+    """
+    if tool != "expand_toolset" or not isinstance(args, dict) \
+            or "call" not in args:
+        return tool, args
+    call = args.get("call")
+    if not isinstance(call, dict) or not isinstance(call.get("name"), str):
+        return tool, args
+    inner = call.get("arguments", call.get("args"))
+    if inner is None:
+        inner = {k: v for k, v in call.items() if k != "name"}
+    if not isinstance(inner, dict):
+        return tool, args
+    inner = {k: v for k, v in inner.items() if k != "project_id"}
+    return call["name"].strip(), inner
+
+
 def _mcp_problem(payload):
     """Why this executor cannot run this MCP tool call, or None."""
     tool = str(payload.get("tool") or "")
@@ -171,6 +196,9 @@ def _mcp_problem(payload):
     import agent_tools
     args = payload.get("args")
     if not isinstance(args, dict):
+        return None
+    tool, args = _gateway_inner(tool, args)
+    if not tool or tool in _MCP_CONTROL_TOOLS:
         return None
     try:
         name, normalized, _notes = agent_tools._normalize_tool_call(tool, args)

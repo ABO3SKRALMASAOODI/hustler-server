@@ -362,11 +362,11 @@ they never bring a sound or a camera move with them. Plan them with
 `suggest_devices` (it applies these budgets and returns each candidate's
 exact `apply_edit_batch` op), write the ones you keep in ONE batch, then
 `proof_device` them (editing.md step 5). If your tool list has no
-`suggest_devices` (the session connected before the device release), the
-devices are still reachable: `read_skill('devices')` gives the exact
-`apply_edit_batch` shapes; write at most the payoff device that way, on
-the payoff word's first frame in program seconds (`get_kept_transcript`),
-with `"bind": {"on": "time", "ref": <that second>}`. Look affinities: Headline Pro and
+`suggest_devices` or `proof_device` (the session connected before the
+device release), they are still yours: `expand_toolset(describe=
+['suggest_devices'])`, then `expand_toolset(call={'name':
+'suggest_devices', 'arguments': {'project_id': <id>, ...}})` runs it
+exactly like a direct call. Look affinities: Headline Pro and
 Clean Data at most one device (the payoff); Kinetic Poster the poster or a
 silhouette flash on the payoff plus a punctuation frame on the turn; Mono
 Noir a colour-isolation window; Cinematic Doc a film finish on archival

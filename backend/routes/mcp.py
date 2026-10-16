@@ -44,6 +44,7 @@ and project ownership are checked on every authenticated request.
 """
 
 import base64
+import difflib
 import hashlib
 import json
 import math
@@ -406,6 +407,9 @@ def _editor_tools(catalog):
         # otherwise deploy skew briefly restores the delegation path.
         if name == "make_shorts" and "clips" not in props:
             continue
+        if name == GATEWAY_TOOL:
+            out.append(_gateway_spec(fn, schema))
+            continue
         props["project_id"] = {
             "type": "integer",
             "description": ("Required immutable scope for this call. Copy the "
@@ -431,6 +435,310 @@ def _editor_tools(catalog):
                     "inputSchema": schema,
                     "annotations": _annotations_for(name)})
     return out
+
+
+# ------------------------------------------------------------------ #
+#  expand_toolset: the gateway for clients with a stale tools/list     #
+# ------------------------------------------------------------------ #
+#
+# WHY. MCP clients (Claude Code, claude.ai, ChatGPT) fetch tools/list once,
+# when they connect, and this server cannot announce changes
+# (capabilities.tools.listChanged is False: there is no stream to send the
+# notification on). A session connected before a release therefore cannot
+# call any tool that release added — Oct 2026: about 150 of 202 tools, every
+# Wave 1-4 verb missing. expand_toolset is in every client's cached list,
+# and clients pass an argument their cached schema lacks straight through,
+# so it is the one door every stale session already has:
+#
+#   expand_toolset(domains=[...])   current tool names per department
+#   expand_toolset(describe=[...])  current descriptions and input schemas
+#   expand_toolset(call={"name": T, "arguments": A})
+#                                   runs T through _call_tool, the SAME
+#                                   function a direct tools/call of T runs
+#
+# A call is a re-dispatch, not a second execution path: the same session
+# token, project-ownership check, owner and export gates, job payload (so the
+# executor's charging, audit row and rollout skew guard all see T and A, never
+# the wrapper), error formatting and public error metrics under T's name.
+# The gateway adds only refusals that run nothing: recursion, an unknown
+# name, and a project_id that differs from the outer call's.
+
+GATEWAY_TOOL = "expand_toolset"
+DESCRIBE_MAX = 20
+
+_GATEWAY_DESCRIBE_SCHEMA = {
+    "type": "array", "items": {"type": "string"}, "maxItems": DESCRIBE_MAX,
+    "description": ("Exact tool names: returns each one's CURRENT "
+                    "description and inputSchema, including tools your "
+                    "client's cached list lacks."),
+}
+_GATEWAY_CALL_SCHEMA = {
+    "type": "object",
+    "description": ("{\"name\": <tool>, \"arguments\": {...}} runs that tool "
+                    "exactly like a direct tools/call of it (same project_id "
+                    "rule, gates, charges and errors) and returns its result. "
+                    "For a tool missing from your client's cached list."),
+    "properties": {"name": {"type": "string"},
+                   "arguments": {"type": "object"}},
+    "required": ["name"],
+}
+
+
+def _gateway_spec(fn, schema):
+    """expand_toolset as MCP serves it: the worker's description and
+    domains, plus the two arguments only this backend answers."""
+    props = schema.setdefault("properties", {})
+    props["describe"] = json.loads(json.dumps(_GATEWAY_DESCRIBE_SCHEMA))
+    props["call"] = json.loads(json.dumps(_GATEWAY_CALL_SCHEMA))
+    props["project_id"] = {
+        "type": "integer",
+        "description": ("Optional. With call, it must equal "
+                        "call.arguments.project_id; nothing runs otherwise."),
+    }
+    # Every argument is optional: no arguments lists every current tool.
+    schema["required"] = []
+    return {"name": GATEWAY_TOOL,
+            "title": "List, describe or call any current tool",
+            "description": fn.get("description") or "",
+            "inputSchema": schema,
+            "annotations": {"readOnlyHint": False, "destructiveHint": False,
+                            "idempotentHint": False, "openWorldHint": False}}
+
+
+def _current_tools(catalog):
+    """{name: MCP tool spec} exactly as tools/list serves them now."""
+    return {t["name"]: t for t in SESSION_TOOLS + _editor_tools(catalog)}
+
+
+def _near_names(name, names, n=5):
+    """Close spellings first, then names sharing a meaningful word."""
+    name = str(name or "").strip().lower()
+    near = difflib.get_close_matches(name, sorted(names), n=n, cutoff=0.5)
+    words = [w for w in re.split(r"[^a-z0-9]+", name) if len(w) >= 4]
+    for candidate in sorted(names):
+        if len(near) >= n:
+            break
+        if candidate not in near and any(w in candidate for w in words):
+            near.append(candidate)
+    return near
+
+
+def _gateway_refusal(text):
+    return _text("CORRECTION NEEDED: " + text + " Nothing ran.", True)
+
+
+def _unknown_tool_text(name, tools):
+    near = _near_names(name, tools)
+    return (f"there is no tool called '{name}' on this deployment."
+            + (f" Near names: {', '.join(near)}." if near else "")
+            + " expand_toolset(domains=[]) lists every current tool.")
+
+
+_GATEWAY_HINT = (
+    "A name your client's own tool list lacks (it cached tools/list when it "
+    "connected) is still callable: expand_toolset(describe=[names]) returns "
+    "its current schema, then expand_toolset(call={\"name\": \"<tool>\", "
+    "\"arguments\": {..., \"project_id\": <id>}}) runs it exactly like a "
+    "direct call.")
+
+
+def _as_list(value):
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return value
+
+
+def _gateway_domains(catalog, domains):
+    """Current tool names per department, from the published catalog."""
+    if not catalog:
+        return _text(CATALOG_MISSING, True)
+    wanted = _as_list(domains)
+    if not isinstance(wanted, list) or not all(
+            isinstance(d, str) for d in wanted):
+        return _gateway_refusal("domains must be an array of department "
+                                "names (or omitted for every tool).")
+    tools = _current_tools(catalog)
+    published = catalog.get("domains")
+    if not isinstance(published, dict):
+        # A catalog published before this release carries no department
+        # map; the names are still current.
+        return _text("CURRENT TOOLS (" + str(len(tools)) + "): "
+                     + ", ".join(sorted(tools)) + "\n" + _GATEWAY_HINT)
+    wanted = [d.strip().lower() for d in wanted if d.strip()]
+    unknown = [d for d in wanted if d not in published]
+    if unknown:
+        return _gateway_refusal(
+            "unknown tool domain(s): " + ", ".join(unknown)
+            + ". Available: " + ", ".join(sorted(published)) + ".")
+    rows = []
+    for domain in (sorted(set(wanted)) or sorted(published)):
+        names = [n for n in published.get(domain) or [] if n in tools]
+        if names:
+            rows.append(f"{domain}: " + ", ".join(names))
+    if not wanted:
+        listed = set().union(*(set(v or []) for v in published.values()))
+        session = sorted(t["name"] for t in SESSION_TOOLS)
+        rows.append("projects, uploads, jobs and delivery: "
+                    + ", ".join(session))
+        other = sorted(n for n in tools
+                       if n not in listed and n not in session)
+        if other:
+            rows.append("evidence, planning, verification and utility: "
+                        + ", ".join(other))
+    return _text(f"CURRENT TOOLS BY DOMAIN ({len(tools)} tools on this "
+                 "deployment)\n" + "\n".join(rows) + "\n" + _GATEWAY_HINT)
+
+
+def _gateway_describe(catalog, names):
+    """Current descriptions and input schemas, one compact JSON line each."""
+    if not catalog:
+        return _text(CATALOG_MISSING, True)
+    names = _as_list(names)
+    if not isinstance(names, list) or not names or not all(
+            isinstance(n, str) and n.strip() for n in names):
+        return _gateway_refusal(
+            "describe must be a non-empty array of exact tool names, e.g. "
+            "describe=[\"list_motion_templates\"].")
+    wanted = list(dict.fromkeys(n.strip() for n in names))
+    if len(wanted) > DESCRIBE_MAX:
+        return _gateway_refusal(
+            f"describe at most {DESCRIBE_MAX} names per call; split the "
+            "list.")
+    tools = _current_tools(catalog)
+    rows, missing = [], []
+    for name in wanted:
+        spec = tools.get(name)
+        if spec is None:
+            missing.append(_unknown_tool_text(name, tools))
+            continue
+        rows.append(json.dumps({"name": name,
+                                "description": spec.get("description", ""),
+                                "inputSchema": spec.get("inputSchema", {})},
+                               separators=(",", ":")))
+    text = ("CURRENT SCHEMAS. Run any of these with expand_toolset(call="
+            "{\"name\": \"<tool>\", \"arguments\": {...}}); the arguments "
+            "follow its inputSchema, project_id included where it is "
+            "required.\n" + "\n".join(rows))
+    if missing:
+        text += "\nUNKNOWN: " + " ".join(missing)
+    return _text(text, not rows)
+
+
+def _gateway_call(req_id, tok, catalog, outer_project_id, call):
+    """Run one current tool for a client whose cached list lacks it."""
+    def refuse(text):
+        return _tool_call_result(req_id, tok, GATEWAY_TOOL,
+                                 _gateway_refusal(text))
+
+    shape = ("call must be {\"name\": \"<tool>\", \"arguments\": {...}}.")
+    if isinstance(call, str):
+        try:
+            call = json.loads(call)
+        except ValueError:
+            return refuse(shape)
+    if not isinstance(call, dict) or not isinstance(call.get("name"), str) \
+            or not call["name"].strip():
+        return refuse(shape)
+    name = call["name"].strip()
+    key = "arguments" if "arguments" in call else (
+        "args" if "args" in call else None)
+    rest = {k: v for k, v in call.items() if k not in ("name", key)}
+    if key is None:
+        # {"name": T, "project_id": 3, ...}: the remaining keys ARE the
+        # arguments; nothing else could be meant.
+        inner = rest
+    elif rest:
+        return refuse(shape + " Put " + ", ".join(sorted(rest))
+                      + " inside arguments.")
+    else:
+        inner = call[key]
+    if inner is None:
+        inner = {}
+    if isinstance(inner, str):
+        try:
+            inner = json.loads(inner)
+        except ValueError:
+            return refuse("call.arguments must be an object.")
+    if not isinstance(inner, dict):
+        return refuse("call.arguments must be an object.")
+    if name == GATEWAY_TOOL:
+        return refuse("expand_toolset cannot call itself; call the tool "
+                      "you need by name.")
+    if name in MCP_DENIED_TOOLS:
+        # Exactly the direct call's refusal, recorded under its own name.
+        return _call_tool(req_id, tok, name, dict(inner))
+    if not catalog:
+        return _tool_call_result(req_id, tok, GATEWAY_TOOL,
+                                 _text(CATALOG_MISSING, True))
+    tools = _current_tools(catalog)
+    spec = tools.get(name)
+    if spec is None:
+        return refuse(_unknown_tool_text(name, tools))
+    scoped = "project_id" in ((spec.get("inputSchema") or {})
+                              .get("properties") or {})
+    if outer_project_id is not None and scoped:
+        try:
+            outer = int(outer_project_id)
+        except (TypeError, ValueError):
+            return refuse("project_id must be an integer project id.")
+        if inner.get("project_id") is None:
+            return refuse(
+                f"call.arguments.project_id is missing; {name} is "
+                f"project-scoped, so repeat project_id {outer} inside "
+                "call.arguments.")
+        try:
+            same = int(inner["project_id"]) == outer
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            return refuse(
+                f"project scope mismatch: the outer project_id is {outer} "
+                f"but call.arguments.project_id is {inner['project_id']!r}. "
+                "Send one project id.")
+    return _call_tool(req_id, tok, name, dict(inner))
+
+
+def _gateway(req_id, tok, args):
+    """expand_toolset over MCP: domains, describe or call (see above)."""
+    try:
+        return _gateway_answer(req_id, tok, args)
+    except Exception:
+        # Same contract as _call_tool: a tool result with a log reference,
+        # never a transport error. A call's own failures are answered (and
+        # logged) inside _call_tool under the inner tool's name.
+        trace_id = secrets.token_hex(8)
+        current_app.logger.exception(
+            "mcp tool %s failed reference=%s", GATEWAY_TOOL, trace_id)
+        return _tool_call_result(req_id, tok, GATEWAY_TOOL, _text(
+            f"{GATEWAY_TOOL} encountered an internal error. No completion "
+            f"can be inferred from this response; inspect the project "
+            f"before retrying. Reference {trace_id}.", True))
+
+
+def _gateway_answer(req_id, tok, args):
+    catalog = _catalog()
+    call = args.get("call")
+    describe = args.get("describe")
+    if call is not None:
+        if describe is not None:
+            return _tool_call_result(req_id, tok, GATEWAY_TOOL, _gateway_refusal(
+                "describe and call are separate requests: describe first, "
+                "then call."))
+        # A stale client whose cached schema still requires domains may send
+        # them beside call; they ask for nothing here.
+        return _gateway_call(req_id, tok, catalog, args.get("project_id"),
+                             call)
+    if describe is not None:
+        result = _gateway_describe(catalog, describe)
+        if args.get("domains") and not result.get("isError"):
+            listing = _gateway_domains(catalog, args.get("domains"))
+            if not listing.get("isError"):
+                result["content"] = listing["content"] + result["content"]
+        return _tool_call_result(req_id, tok, GATEWAY_TOOL, result)
+    return _tool_call_result(req_id, tok, GATEWAY_TOOL,
+                             _gateway_domains(catalog, args.get("domains")))
 
 
 # ------------------------------------------------------------------ #
@@ -889,10 +1197,22 @@ Two things are different from a normal tool session, and both matter:
    export checks, queue and plan watermark as Studio. Poll wait_for_job until
    done, then call download_url(project_id=ID, kind="final",
    edl_version=REVIEWED_VERSION) and share the returned download link. A job
-   id or preview is not a final MP4. If tools are cached, reconnect to refresh
-   the catalog; Studio Export remains available too.
+   id or preview is not a final MP4. Studio Export remains available too.
    A source under one minute is already one direct short: edit that project
    normally instead of starting the multi-clip workflow.
+
+7. A TOOL YOUR LIST LACKS IS STILL CALLABLE. Your client fetched tools/list
+   once, when it connected, and Valmera keeps shipping tools and arguments.
+   If a tool you need (a doc, skill or result names it) is not in your list,
+   or its schema lacks an argument the docs name, do not reconnect and do
+   not work around it: expand_toolset(describe=["tool_name"]) returns its
+   current description and inputSchema, then
+   expand_toolset(call={"name": "tool_name", "arguments": {...,
+   "project_id": ID}}) runs it exactly like a direct call — same project
+   check, gates, charges and errors, and its own result. The inner
+   arguments carry the project_id the tool requires; an outer project_id,
+   if you send one, must be the same id. expand_toolset(domains=[]) lists
+   every current tool by department.
 
 Nothing is charged to their Valmera credits for the thinking you do — but a
 render, a look at the footage and a media fetch are real work on real
@@ -928,7 +1248,10 @@ INSTRUCTIONS_MODE = os.getenv("MCP_INSTRUCTIONS", "full").strip().lower()
 _IN_APP_TOOL_PAGING_RE = re.compile(
     r"The first provider page intentionally carries.*?rest of the turn\.")
 _MCP_TOOL_PAGING = ("Your MCP client already lists every tool: call the "
-                    "exact tools you need directly.")
+                    "exact tools you need directly. A tool released after "
+                    "your client connected is missing from that list: "
+                    "expand_toolset(describe=[names]) then "
+                    "expand_toolset(call={name, arguments}) reaches it.")
 # The CAPABILITIES block carries the same in-app paging instruction
 # (worker/agent_loop.capabilities_block).
 _IN_APP_CAPS_PAGING_RE = re.compile(
@@ -2922,156 +3245,165 @@ def _handle(tok, msg):
     if method == "tools/call":
         name = params.get("name") or ""
         args = params.get("arguments") or {}
-        if not isinstance(args, dict):
-            return _tool_call_result(
-                req_id, tok, name,
-                _text("arguments must be an object.", True))
-        if name in MCP_DENIED_TOOLS:
-            return _tool_call_result(
-                req_id, tok, name, _text(MCP_DENIED_MESSAGES[name], True))
-        try:
-            if name in SESSION_IMPL:
-                out = SESSION_IMPL[name](tok, args)
-                session_error = isinstance(out, _SessionToolError) or (
-                    isinstance(out, dict) and bool(out.get("isError")))
-                # Almost every session tool answers with a string. watch_video
-                # answers with a whole tools/call result, because a video
-                # cannot be a sentence.
-                if isinstance(out, str) and \
-                        name in _PROJECT_SCOPED_SESSION_TOOLS and \
-                        args.get("project_id") is not None and \
-                        not out.startswith("PROJECT "):
-                    identity = _session_project_identity(
-                        tok, args.get("project_id"))
-                    if identity:
-                        out = identity + "\n" + out
-                return _tool_call_result(
-                    req_id, tok, name, out if isinstance(out, dict)
-                    else _text(str(out), session_error))
-            catalog = _catalog()
-            known = {t["name"] for t in _editor_tools(catalog)}
-            if name not in known:
-                # Honest and specific: an unknown name here usually means the
-                # tool exists but this deployment has it switched off (no key
-                # for its backing service), and "unknown tool" alone would
-                # send the model looking for a typo.
-                return _tool_call_result(req_id, tok, name, _text(
-                    f"There is no tool called '{name}' on this deployment. "
-                    "Call tools/list for what is actually available — a tool "
-                    "whose backing service is unconfigured is hidden rather "
-                    "than failing at call time.", True))
-            raw_project_id = args.pop("project_id", None)
-            try:
-                project_id = int(raw_project_id)
-            except (TypeError, ValueError):
-                return _tool_call_result(req_id, tok, name, _text(
-                    f"{name} requires an explicit integer project_id. Call "
-                    "list_projects/open_project, then pass that same id on "
-                    "every editor tool call; Valmera will not guess from the "
-                    "active project.", True))
-            # raw, because a look tool now answers with PICTURES as well as
-            # words — the outside model reads them itself instead of being
-            # told what our vision model saw in them.
-            out = _run_tool_job(tok, name, args, raw=True,
-                                project_id=project_id)
-            body = out.get("text") or json.dumps(out)
-            public_error = False
-            delivered_indexes = set()
-            image_content = _image_blocks(
-                out.get("images"), delivered_indexes)
-            content = [{"type": "text", "text": body}] + image_content
-            if isinstance(out.get("visual_evidence"), dict):
-                out = dict(out)
-                evidence = dict(out["visual_evidence"])
-                delivered = sum(
-                    block.get("type") == "image" for block in image_content)
-                evidence["delivered_this_response"] = delivered
-                receipts = []
-                receipt_indexes = set()
-                for index, captured in enumerate(out.get("images") or []):
-                    key = (captured or {}).get("storage_key")
-                    if not key:
-                        continue
-                    try:
-                        url = storage.presign_get(key)
-                    except Exception:
-                        url = None
-                    if url:
-                        receipt_indexes.add(index)
-                        receipts.append({
-                            "label": captured.get("label"),
-                            "url": url,
-                        })
-                evidence["retrievable_receipts"] = receipts
-                attempted = int(evidence.get("publish_attempts") or 0)
-                expected = max(
-                    attempted,
-                    sum(bool((captured or {}).get("storage_key"))
-                        for captured in (out.get("images") or [])))
-                # A response can carry artifact A inline while only artifact B
-                # gets a signed receipt. Count their union, not max(counts),
-                # or a completely accessible mixed delivery looks partial.
-                accessible = len(delivered_indexes | receipt_indexes)
-                if expected and accessible < expected:
-                    evidence["delivery_status"] = (
-                        "partial" if accessible else "missing")
-                    public_error = True
-                    content[0]["text"] += (
-                        "\n\nVISUAL EVIDENCE DELIVERY FAILED: only "
-                        f"{accessible} of {expected} captured artifact(s) "
-                        "reached this response or a retrievable receipt. Do "
-                        "not claim the complete visual check passed.")
-                elif delivered:
-                    evidence["delivery_status"] = "delivered"
-                elif receipts:
-                    evidence["delivery_status"] = "retrievable"
-                    content[0]["text"] += (
-                        "\n\nVisual evidence was stored but the inline image "
-                        "block could not be assembled; use the signed receipt "
-                        "in structuredContent.visual_evidence.")
-                elif expected:
-                    evidence["delivery_status"] = "missing"
-                    public_error = True
-                    content[0]["text"] += (
-                        "\n\nVISUAL EVIDENCE DELIVERY FAILED: no image block "
-                        "or retrievable receipt reached this response. Do not "
-                        "claim the visual check passed.")
-                else:
-                    evidence["delivery_status"] = "not_requested"
-                out["visual_evidence"] = evidence
-            public = {"content": content,
-                      "isError": bool(out.get("is_error")) or
-                                 public_error}
-            structured = _editor_structured_content(out)
-            if public_error:
-                operation = structured.get("tool_outcome")
-                operation_changed = (
-                    bool(operation.get("state_changed"))
-                    if isinstance(operation, dict)
-                    else bool(out.get("edl_changed")))
-                structured["delivery_outcome"] = _delivery_failure(
-                    "Captured visual evidence was not completely delivered.",
-                    idempotent=not operation_changed,
-                    evidence={
-                        "expected": expected,
-                        "accessible": accessible,
-                        "delivery_status": evidence["delivery_status"],
-                    })
-            if structured:
-                public["structuredContent"] = structured
-            return _tool_call_result(req_id, tok, name, public)
-        except Exception as e:
-            trace_id = secrets.token_hex(8)
-            current_app.logger.exception(
-                "mcp tool %s project=%s failed reference=%s",
-                name, args.get("project_id"), trace_id)
-            return _tool_call_result(req_id, tok, name, _text(
-                f"{name} encountered an internal error. No completion can "
-                f"be inferred from this response; inspect the project or "
-                f"wait for its queued job before retrying. Reference "
-                f"{trace_id}.", True))
+        if name == GATEWAY_TOOL and isinstance(args, dict):
+            return _gateway(req_id, tok, args)
+        return _call_tool(req_id, tok, name, args)
 
     return _error(req_id, -32601, f"method not found: {method}")
+
+
+def _call_tool(req_id, tok, name, args):
+    """One tools/call of `name`: the single execution path behind a direct
+    call and an expand_toolset(call=...) gateway call alike."""
+    if not isinstance(args, dict):
+        return _tool_call_result(
+            req_id, tok, name,
+            _text("arguments must be an object.", True))
+    if name in MCP_DENIED_TOOLS:
+        return _tool_call_result(
+            req_id, tok, name, _text(MCP_DENIED_MESSAGES[name], True))
+    try:
+        if name in SESSION_IMPL:
+            out = SESSION_IMPL[name](tok, args)
+            session_error = isinstance(out, _SessionToolError) or (
+                isinstance(out, dict) and bool(out.get("isError")))
+            # Almost every session tool answers with a string. watch_video
+            # answers with a whole tools/call result, because a video
+            # cannot be a sentence.
+            if isinstance(out, str) and \
+                    name in _PROJECT_SCOPED_SESSION_TOOLS and \
+                    args.get("project_id") is not None and \
+                    not out.startswith("PROJECT "):
+                identity = _session_project_identity(
+                    tok, args.get("project_id"))
+                if identity:
+                    out = identity + "\n" + out
+            return _tool_call_result(
+                req_id, tok, name, out if isinstance(out, dict)
+                else _text(str(out), session_error))
+        catalog = _catalog()
+        known = {t["name"] for t in _editor_tools(catalog)}
+        if name not in known:
+            # Honest and specific: an unknown name here usually means the
+            # tool exists but this deployment has it switched off (no key
+            # for its backing service), and "unknown tool" alone would
+            # send the model looking for a typo.
+            return _tool_call_result(req_id, tok, name, _text(
+                f"There is no tool called '{name}' on this deployment. "
+                "Call tools/list for what is actually available — a tool "
+                "whose backing service is unconfigured is hidden rather "
+                "than failing at call time. expand_toolset(domains=[]) "
+                "lists every current tool by name.", True))
+        raw_project_id = args.pop("project_id", None)
+        try:
+            project_id = int(raw_project_id)
+        except (TypeError, ValueError):
+            return _tool_call_result(req_id, tok, name, _text(
+                f"{name} requires an explicit integer project_id. Call "
+                "list_projects/open_project, then pass that same id on "
+                "every editor tool call; Valmera will not guess from the "
+                "active project.", True))
+        # raw, because a look tool now answers with PICTURES as well as
+        # words — the outside model reads them itself instead of being
+        # told what our vision model saw in them.
+        out = _run_tool_job(tok, name, args, raw=True,
+                            project_id=project_id)
+        body = out.get("text") or json.dumps(out)
+        public_error = False
+        delivered_indexes = set()
+        image_content = _image_blocks(
+            out.get("images"), delivered_indexes)
+        content = [{"type": "text", "text": body}] + image_content
+        if isinstance(out.get("visual_evidence"), dict):
+            out = dict(out)
+            evidence = dict(out["visual_evidence"])
+            delivered = sum(
+                block.get("type") == "image" for block in image_content)
+            evidence["delivered_this_response"] = delivered
+            receipts = []
+            receipt_indexes = set()
+            for index, captured in enumerate(out.get("images") or []):
+                key = (captured or {}).get("storage_key")
+                if not key:
+                    continue
+                try:
+                    url = storage.presign_get(key)
+                except Exception:
+                    url = None
+                if url:
+                    receipt_indexes.add(index)
+                    receipts.append({
+                        "label": captured.get("label"),
+                        "url": url,
+                    })
+            evidence["retrievable_receipts"] = receipts
+            attempted = int(evidence.get("publish_attempts") or 0)
+            expected = max(
+                attempted,
+                sum(bool((captured or {}).get("storage_key"))
+                    for captured in (out.get("images") or [])))
+            # A response can carry artifact A inline while only artifact B
+            # gets a signed receipt. Count their union, not max(counts),
+            # or a completely accessible mixed delivery looks partial.
+            accessible = len(delivered_indexes | receipt_indexes)
+            if expected and accessible < expected:
+                evidence["delivery_status"] = (
+                    "partial" if accessible else "missing")
+                public_error = True
+                content[0]["text"] += (
+                    "\n\nVISUAL EVIDENCE DELIVERY FAILED: only "
+                    f"{accessible} of {expected} captured artifact(s) "
+                    "reached this response or a retrievable receipt. Do "
+                    "not claim the complete visual check passed.")
+            elif delivered:
+                evidence["delivery_status"] = "delivered"
+            elif receipts:
+                evidence["delivery_status"] = "retrievable"
+                content[0]["text"] += (
+                    "\n\nVisual evidence was stored but the inline image "
+                    "block could not be assembled; use the signed receipt "
+                    "in structuredContent.visual_evidence.")
+            elif expected:
+                evidence["delivery_status"] = "missing"
+                public_error = True
+                content[0]["text"] += (
+                    "\n\nVISUAL EVIDENCE DELIVERY FAILED: no image block "
+                    "or retrievable receipt reached this response. Do not "
+                    "claim the visual check passed.")
+            else:
+                evidence["delivery_status"] = "not_requested"
+            out["visual_evidence"] = evidence
+        public = {"content": content,
+                  "isError": bool(out.get("is_error")) or
+                             public_error}
+        structured = _editor_structured_content(out)
+        if public_error:
+            operation = structured.get("tool_outcome")
+            operation_changed = (
+                bool(operation.get("state_changed"))
+                if isinstance(operation, dict)
+                else bool(out.get("edl_changed")))
+            structured["delivery_outcome"] = _delivery_failure(
+                "Captured visual evidence was not completely delivered.",
+                idempotent=not operation_changed,
+                evidence={
+                    "expected": expected,
+                    "accessible": accessible,
+                    "delivery_status": evidence["delivery_status"],
+                })
+        if structured:
+            public["structuredContent"] = structured
+        return _tool_call_result(req_id, tok, name, public)
+    except Exception as e:
+        trace_id = secrets.token_hex(8)
+        current_app.logger.exception(
+            "mcp tool %s project=%s failed reference=%s",
+            name, args.get("project_id"), trace_id)
+        return _tool_call_result(req_id, tok, name, _text(
+            f"{name} encountered an internal error. No completion can "
+            f"be inferred from this response; inspect the project or "
+            f"wait for its queued job before retrying. Reference "
+            f"{trace_id}.", True))
 
 
 def _unauthorized(err):
@@ -3243,9 +3575,17 @@ def _tool_names():
     names = []
     for msg in msgs:
         if isinstance(msg, dict) and msg.get("method") == "tools/call":
-            name = (msg.get("params") or {}).get("name")
+            params = msg.get("params") or {}
+            name = params.get("name") if isinstance(params, dict) else None
             if isinstance(name, str):
-                names.append(name[:40])
+                # A gateway call is logged by the tool it actually ran.
+                arguments = params.get("arguments")
+                call = (arguments.get("call")
+                        if name == GATEWAY_TOOL and isinstance(arguments, dict)
+                        else None)
+                if isinstance(call, dict) and isinstance(call.get("name"), str):
+                    name = f"{name}>{call['name']}"
+                names.append(name[:60])
     return names
 
 

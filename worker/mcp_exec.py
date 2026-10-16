@@ -104,11 +104,17 @@ def catalog():
     tools = [t for t in agent_tools.openai_tools()
              if (t.get("function") or {}).get("name")
              not in MCP_DENIED_TOOLS | MCP_SESSION_OVERRIDES]
+    published = {(t.get("function") or {}).get("name") for t in tools}
     return {
         "tools": tools,
         "system_prompt": system_prompt(),
         "capabilities": agent_loop.capabilities_block(),
         "write_tools": sorted(agent_tools.WRITE_TOOLS),
+        # Department membership of every published tool, for the backend's
+        # expand_toolset gateway: a client whose tools/list was cached before
+        # a release asks it for current names by domain.
+        "domains": {domain: [n for n in names if n in published]
+                    for domain, names in agent_tools.tool_domain_map().items()},
     }
 
 

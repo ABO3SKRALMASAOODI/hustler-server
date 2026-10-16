@@ -24957,8 +24957,22 @@ def load_tools(ctx, names=None, domains=None):
             + ". Continue the edit now.")
 
 
-def expand_toolset(ctx, domains):
-    """Backward-compatible alias for clients that learned the old name."""
+def expand_toolset(ctx, domains=None, describe=None, call=None):
+    """Backward-compatible alias for clients that learned the old name.
+
+    Over MCP this name is also the GATEWAY for clients whose cached
+    tools/list predates newer tools (backend/routes/mcp.py, _gateway):
+    ``describe`` returns current schemas and ``call`` runs any current tool
+    through the very same tools/call path. The backend answers both before
+    any editor job exists, so they never reach this function from a current
+    backend; one that does (a stale backend mid-deploy) is refused here with
+    nothing run, never executed by a second, ungated path.
+    """
+    if describe is not None or call is not None:
+        return ("CORRECTION NEEDED: expand_toolset describe/call are answered "
+                "by Valmera's MCP gateway before any editor job; this request "
+                "reached the editor directly (a deploy is rolling out), so "
+                "nothing ran. Retry the same call in a minute.")
     return load_tools(ctx, domains=domains)
 
 
@@ -28982,6 +28996,9 @@ TOOLS = {
         expand_toolset,
         "Load additional tool schemas for the NEXT reasoning step when the "
         "compact catalog does not expose a capability you need. "
+        "Over MCP it lists current tools by domain and reaches tools your "
+        "cached list lacks: describe=[names] returns their current schemas, "
+        "call={name, arguments} runs one exactly like a direct call. "
         "This changes no media or EDL and is not a tool limit: request any "
         "relevant domains, then continue immediately.",
         {"domains": {"type": "array", "items": {"type": "string",
@@ -32107,6 +32124,17 @@ def capability_directory():
     rows.append("evidence, planning, verification and utility: "
                 + ", ".join(core))
     return "\n".join(rows)
+
+
+def tool_domain_map():
+    """{department: [tool, ...]} for every live tool, department (tools_ext)
+    verbs included. Published in the MCP catalog so the backend's
+    expand_toolset(domains=...) lists the CURRENT names per department for
+    a client whose cached tools/list predates them."""
+    return {domain: sorted(name for name in TOOL_DOMAINS[domain]
+                           if name in TOOLS and name not in AGENT_SCHEMA_HIDDEN
+                           and not _tool_disabled(name))
+            for domain in sorted(TOOL_DOMAINS)}
 
 
 def _compact_description(description):
