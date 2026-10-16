@@ -275,3 +275,18 @@ def test_every_master_reruns_the_face_keep_out(monkeypatch):
     assert ctx._edl["frame"]["ratio"] == "16:9"
     assert float(m["params"]["y"]) > 0.52         # below the chin now
     assert m["footprint"]["estimated"] is True
+
+
+def test_a_world_note_is_not_reported_as_a_missing_graphic():
+    import agent_tools
+    world = {"motion_warnings": [
+        "motion 'w' (world): object:ob is not measured yet: drawn in front "
+        "of it"]}
+    line = agent_tools._motion_warning_line(world)
+    assert "WORLD DEVICE NOTE" in line and "ARE in this render" in line
+    assert "NOT in this render" not in line
+    both = {"motion_warnings": world["motion_warnings"] + [
+        "motion 'm1' failed: script error"]}
+    line = agent_tools._motion_warning_line(both)
+    assert "WORLD DEVICE NOTE" in line and "MOTION RENDER WARNING" in line
+    assert agent_tools._motion_warning_line({}) == ""

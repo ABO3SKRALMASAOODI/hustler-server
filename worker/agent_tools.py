@@ -22639,9 +22639,23 @@ def _motion_warning_line(result):
     without them (motion_layer degrades an item to absent), so without this
     line the editor would approve frames that silently lack its design."""
     warnings = [str(w) for w in (result or {}).get("motion_warnings") or []]
+    # Wave 3 world notes (world_layer: "motion 'x' (world): ...") describe an
+    # item that IS drawn, as placed, until its measurement lands — not a
+    # missing graphic (engines release: the old line told the editor it was
+    # absent, inviting a duplicate)
+    world = [w for w in warnings if "(world):" in w]
+    warnings = [w for w in warnings if "(world):" not in w]
+    line = ""
+    if world:
+        line += (" WORLD DEVICE NOTE: " + "; ".join(world[:4])
+                 + (f" (+{len(world) - 4} more)" if len(world) > 4 else "")
+                 + ". These graphics ARE in this render, drawn as placed: "
+                   "their measurement was launched and lands on a later "
+                   "render (a preview never waits; a final waits up to "
+                   "90 s, then reports the device degraded).")
     if not warnings:
-        return ""
-    return (" MOTION RENDER WARNING: " + "; ".join(warnings[:4])
+        return line
+    return line + (" MOTION RENDER WARNING: " + "; ".join(warnings[:4])
             + (f" (+{len(warnings) - 4} more)" if len(warnings) > 4 else "")
             + ". These motion items are NOT in this render; the EDL still "
               "has them. A script/params error is yours to fix with "
