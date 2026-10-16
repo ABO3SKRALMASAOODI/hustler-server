@@ -83,8 +83,8 @@ disagree, v9 wins on method and the brief wins on preferences.
   rules, and the music preference. Music is off unless the owner supplies
   or approves a specific song for the run (the brief's Music line names it;
   record it with `--song`).
-- **Superseded:** "no maximum" story counts (use 8-12 heroes; a standard
-  tier only when asked); v7 run state (use `scripts/run.py`);
+- **Superseded:** any fixed story count, minimum, maximum or rate (8-12,
+  "up to N", "one per N minutes"): the count follows the podcast; v7 run state (use `scripts/run.py`);
   `premium-design.md`, `additional-reels.md` and `set_typography_scene` as
   primary direction (use looks.md); the bare clip-page defaults, the blanket
   SFX ban (sound is now optional, sparse and library-only), any `auto` music
@@ -109,9 +109,11 @@ disagree, v9 wins on method and the brief wins on preferences.
    minutes. Waiting: the harness blocks a foreground `sleep`; run
    `sleep 300` with `run_in_background` and continue when it reports done.
 3. **Select hero stories** ([selection.md](references/selection.md)): read
-   the full transcript once, rank by hook and payoff, keep the top 8-12
-   (fewer if fewer clear the bar), a standard tier only when asked, and a
-   one-line reason for every story left out. Look at 3-4 source frames
+   the full transcript once, grade every candidate by hook and payoff, and
+   keep EVERY story that clears the bar. There is no number: the count
+   follows the podcast (7 if only 7 are good, 70 if 70 are), never a target,
+   minimum, maximum or rate. Write a one-line reason for every story left
+   out. Look at 3-4 source frames
    first: what the picture allows (a call window, a picture-in-picture,
    UI, logos, a 4:3 archive) decides the layouts and so the Looks.
 4. **Materialize once.** One `make_shorts` call with verified sentence
@@ -306,7 +308,7 @@ claim against the captions and names the fix when it is smaller.
 `add-short` · `assign` · `candidate` · `review` (ship | fix | kill) ·
 `export` · `exception` · `status [--json]` · `finalize`, run with
 `python3`. It locks `run.json` (editors record their own candidates, from
-`queued` or `fix` too, without holding a slot), enforces the hero cap, one
+`queued` or `fix` too, without holding a slot), enforces one
 fix per short, brief and note limits, beat coverage in the brief, the
 first-candidate gate, the export name and length, and that every short is
 accounted for. It never scores taste. Editors save their note and handback

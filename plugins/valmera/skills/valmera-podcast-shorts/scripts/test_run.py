@@ -468,13 +468,13 @@ class RunTests(unittest.TestCase):
         self.fails("0-100", "add-short", "--run-dir", self.dir, "--short-id", "s02",
                    "--project-id", "12", "--title", "x", "--score", "140")
 
-    def test_hero_cap(self) -> None:
-        for n in range(run.HERO_CAP):
+    def test_no_count_cap(self) -> None:
+        # Owner policy (16 Oct 2026): the count follows the podcast, never a
+        # number; every story that clears the bar is made, 7 or 70.
+        self.assertFalse(hasattr(run, "HERO_CAP"))
+        for n in range(30):
             self.add(f"h{n:02d}", 100 + n)
-        self.fails("hero cap reached", "add-short", "--run-dir", self.dir,
-                   "--short-id", "h99", "--project-id", "999", "--title", "x")
-        self.ok("add-short", "--run-dir", self.dir, "--short-id", "h99",
-                "--project-id", "999", "--title", "x", "--tier", "standard")
+        self.assertEqual(len(self.state()["shorts"]), 30)
 
     def test_concurrent_writers_do_not_lose_updates(self) -> None:
         procs = [subprocess.Popen(

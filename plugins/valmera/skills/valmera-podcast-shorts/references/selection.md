@@ -62,15 +62,14 @@ potential 0-3 as a tie-breaker (a concrete noun, number, contrast or action a
 Look can show). Compare overlapping or near-duplicate candidates and keep the
 stronger complete version.
 
-- **Hero tier:** the top 8-12 by hook + payoff (the state script caps hero
-  shorts at 12). Never pad: if only five stories clear the bar, make five.
-  Older saved briefs that say "no maximum" are superseded on this point:
-  more strong stories than 12 go to the standard tier only when the run
-  asks for volume, otherwise to the not-selected list with the reason
-  "beyond the hero cap".
-- **Standard tier (optional):** only when the run brief asks for volume. Up to
-  8 more, each with `apply_look` + captions + 1-2 designed beats, one render,
-  and a spot-check review.
+- **Hero tier:** every story that clears the bar on hook + payoff. The
+  count follows the podcast, never a number: no target, minimum, maximum or
+  rate. Never pad (if only five stories clear the bar, make five), and never
+  drop a story that clears the bar to hit a count (if 60 do, make 60).
+- **Standard tier (optional):** only when the run brief asks for volume:
+  good moments just below the hero bar, each with `apply_look` + captions +
+  1-2 designed beats, one render, and a spot-check review. No fixed count
+  here either.
 - Everything else goes in a not-selected list with one line each
   (`story (start-end s): reason`), passed to `run.py finalize --not-selected`.
 

@@ -45,7 +45,6 @@ import tempfile
 VERSION = "valmera-podcast-shorts-v9"
 LEGACY_VERSION = "valmera-podcast-shorts-v7"
 DEFAULT_EDITORS = 3
-HERO_CAP = 12
 BRIEF_MAX_WORDS = 250
 NOTE_MAX_LINES = 10
 # Beat coverage is planned in the brief: the body needs a beat that adds
@@ -347,12 +346,6 @@ def cmd_add_short(args: argparse.Namespace) -> dict:
         if existing and existing["child_project_id"] != args.project_id:
             raise StateError(f"{args.short_id} already maps to project "
                              f"{existing['child_project_id']}")
-        heroes = [i for i in state["shorts"].values()
-                  if i["tier"] == "hero" and i["short_id"] != args.short_id]
-        if args.tier == "hero" and len(heroes) >= HERO_CAP:
-            raise StateError(
-                f"hero cap reached ({HERO_CAP}); rank the slate and keep the best, "
-                "or add this one with --tier standard")
         item = existing or {
             "short_id": args.short_id, "child_project_id": args.project_id,
             "status": "queued", "editor": None, "look": None, "structure": None,
