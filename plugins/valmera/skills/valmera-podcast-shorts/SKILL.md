@@ -128,9 +128,10 @@ disagree, v9 wins on method and the brief wins on preferences.
    `selection/framing.json`; every brief copies it. If no layout meets the
    Look floors, change the Looks and structures to one that does (looks.md,
    **Card geometry**); if Valmera cannot render or export the proven layout,
-   stop here and report the product defect (**Stop the line**). Oct 2026: 8
-   of 9 shorts died on a frame the pilot would have caught in the first 20
-   minutes.
+   fall back to the safest layout that does work (full-bleed, no band), note
+   the defect for the end-of-run report, and carry on (**Defects: keep going,
+   report at the end**). Oct 2026: 8 of 9 shorts died on a frame the pilot
+   would have caught in the first 20 minutes.
 6. **Brief.** Draft while the children build (4-7 min), finish with the
    pilot's measurements (Looks and layouts it allows), not by eye: for each short a Look, a
    structure and a 150-word brief with a beat sheet (hook, turn, payoff,
@@ -151,8 +152,9 @@ disagree, v9 wins on method and the brief wins on preferences.
    **First-candidate gate:** `run.py` hands out no more than `max_editors`
    shorts until the run's first review. If a verdict names a cause the shorts
    in flight share (layout, source, template, a Valmera tool), fix the
-   framing recipe and the open briefs before the next hand-out, or stop the
-   line.
+   framing recipe and the open briefs before the next hand-out (switch to a
+   layout, template or device that works), then keep handing out. Never stop
+   the run to wait for a fix.
 9. **Export** only a short whose latest review is **ship** on that exact
    EDL version: `export_final(project_id, edl_version)`, `wait_for_job`,
    `download_url(kind='final', edl_version=...)`, save as
@@ -225,18 +227,29 @@ around speech, or, when neither works, are flagged in the handback for the
 owner to add a song when posting (looks.md, **Sound without music**). Never
 invent a music choice.
 
-## Stop the line (the runs exist to upgrade Valmera)
+## Defects: keep going, report at the end
 
-The owner's priority is upgrading Valmera; a podcast run is how its defects
-are found, not a deadline to edit around them. Run one podcast at a time.
-When the pilot, the first review or two editors hit the same Valmera defect
-(a tool that errors, a template that renders type smaller than captions, a
-layout the engine refuses, an export that fails), stop handing out shorts:
-record the unstarted ones with `run.py exception --status failed_technical`
-and the next action "revive after Valmera fix: <defect>", write the defect
-with its evidence (call, arguments, error text, job id) into the report, and
-end the run. Editing nine shorts around a defect costs hours and ships
-nothing (Oct 2026: 2 h 55 min, 729 editor calls, 25 renders, 0 exports).
+A run never pauses to wait for a Valmera fix, and never asks the user
+whether to continue: it finishes on its own and reports. Run one podcast at a
+time.
+
+- When a Valmera defect blocks a path (a tool that errors, a template that
+  renders type smaller than captions, a layout the engine refuses, an export
+  that fails), switch to a path that works: another layout or template,
+  another device, the `apply_edit_batch` route, or a simpler version of the
+  beat. Fix the framing recipe and the open briefs so the other shorts avoid
+  it.
+- If one short truly cannot be made, record it with `run.py exception
+  --status failed_technical` and the next action "revive after Valmera fix:
+  <defect>", and move on to the next short. Stop handing out only if EVERY
+  remaining short is blocked by the same defect, and even then finish
+  exporting what passed and write the report.
+- Do not grind: the same operation failing twice means stop working around
+  that operation, not the run (Oct 2026: editing nine shorts around one
+  defect cost 2 h 55 min, 729 editor calls and 25 renders for 0 exports).
+- Write every REAL defect once, with its evidence (call, arguments, error
+  text, job id, frame), into REPORT.md's **Valmera defects** section at the
+  end of the run, ranked by impact. That list is how Valmera gets fixed.
 
 ## Efficiency rules
 

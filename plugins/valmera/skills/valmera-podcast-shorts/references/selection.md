@@ -142,8 +142,9 @@ needs and the card that leaves), use the no-band layout (a hook-tier
 `word_slam` carries the hook and the name) and assign Looks and structures
 that work without a persistent band. If no layout reaches the floor at the
 2x upscale cap, the source is not premium material: pick fewer shorts from
-its best-framed moments, or stop and report it. If the render or the export
-fails on a Valmera defect, stop the line (SKILL.md).
+its best-framed moments. If the render or the export fails on a Valmera
+defect, use the next layout that works, note the defect for the end-of-run
+report and carry on (SKILL.md, **Defects: keep going, report at the end**).
 
 ## Headlines
 
