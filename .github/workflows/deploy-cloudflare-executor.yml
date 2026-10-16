@@ -167,9 +167,23 @@ jobs:
             elif grep -Eiq "429 Too Many Requests|toomanyrequests|rate limit" "$deploy_log"; then
               # The base-image registry throttles anonymous pulls (run 107:
               # public.ecr.aws "Data limit exceeded" 4 s into the build);
-              # nothing was published, so the same revision is retried.
-              echo "The image registry throttled a base-image pull; retrying this revision in 90 s ($attempt/8)."
-              sleep 90
+              # nothing was published, so the same revision is retried. The
+              # throttle can outlast every retry on one registry (run 116,
+              # twice: eight attempts over 11 min, all "Data limit
+              # exceeded"), so each retry alternates the base image between
+              # ECR Public and Google's Docker Hub mirror, which serve the
+              # same official image (python:3.11-slim-bookworm resolves to
+              # one digest on both). Only this checkout's Dockerfiles change.
+              if grep -q "^FROM public.ecr.aws/docker/library/" ../Dockerfile.cloudflare; then
+                from="public.ecr.aws/docker/library/"; to="mirror.gcr.io/library/"
+              else
+                from="mirror.gcr.io/library/"; to="public.ecr.aws/docker/library/"
+              fi
+              for dockerfile in ../Dockerfile.cloudflare ../Dockerfile.agent-base ../Dockerfile.vision; do
+                sed -i "s#^FROM ${from}#FROM ${to}#" "$dockerfile"
+              done
+              echo "The image registry throttled a base-image pull; retrying this revision from ${to} in 30 s ($attempt/8)."
+              sleep 30
             else
               exit 1
             fi
