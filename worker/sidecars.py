@@ -262,18 +262,31 @@ def spec(kind):
     return out
 
 
+def _norm_number(v):
+    """30.0 -> 30 at every depth (dict values, list items); bools and
+    non-finite floats stay as they are."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, float):
+        return int(v) if math.isfinite(v) and v == int(v) else v
+    if isinstance(v, dict):
+        return {k: _norm_number(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_norm_number(x) for x in v]
+    return v
+
+
 def resolve_params(kind, params=None):
     """The params a key is made from: the kind's defaults under the caller's,
-    numbers normalised so 30 and 30.0 key the same."""
+    numbers normalised so 30 and 30.0 key the same — NESTED ones too: the
+    payload crosses the Cloudflare Worker (JavaScript), which writes 1755.0
+    as 1755, so a Wave 3 prompt's src_t or window keyed by the launcher as
+    1755.0 reached the batch child as 1755 and every objects.sam2 chunk was
+    refused as bad_key (engines release, found live on project 3419)."""
     out = dict(_KIND_SPECS.get(kind, {}).get("defaults") or {})
     for k, v in (params or {}).items():
         out[str(k)] = v
-    for k, v in list(out.items()):
-        if isinstance(v, bool):
-            continue
-        if isinstance(v, (int, float)) and float(v) == int(v):
-            out[k] = int(v)
-    return out
+    return {k: _norm_number(v) for k, v in out.items()}
 
 
 def _rate(kind, params, source_fps=None):

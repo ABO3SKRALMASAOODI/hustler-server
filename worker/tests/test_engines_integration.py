@@ -340,3 +340,26 @@ def test_a_render_launches_the_matte_its_device_reads(tmp_path):
     finally:
         sidecars.use_launcher(prev)
         sidecars.use_store(None)
+
+
+def test_a_sidecar_key_survives_the_workers_javascript_round_trip():
+    """The payload crosses the Cloudflare Worker (JavaScript): 1755.0
+    arrives as 1755. A nested prompt keyed by the launcher must key the
+    same in the batch child (it refused every objects.sam2 chunk as
+    bad_key in production)."""
+    import json as _json
+    import re
+    import sidecars
+    params = {"prompt": {"src_t": 1755.0, "box": [0.545, 0.5, 0.68, 1.0]},
+              "window": [1754.86, 1757.0]}
+    js = re.sub(r"(\d)\.0(?=[,\]\}])", r"\1", _json.dumps(params))
+    assert "1755," in js and "1757]" in js           # what JS writes
+    a = sidecars.resolve_params("objects.sam2", params)
+    b = sidecars.resolve_params("objects.sam2", _json.loads(js))
+    span = (1751.96, 1766.886)
+    ka = sidecars.sidecar_key("objects.sam2", "ab" * 32, "m", "v", a, span)
+    kb = sidecars.sidecar_key("objects.sam2", "ab" * 32, "m", "v", b, span)
+    assert ka == kb
+    # top-level numbers keep their old normalisation (no re-key for W0)
+    assert sidecars.resolve_params("faces.yunet", {"fps": 10.0})["fps"] == 10
+    assert sidecars.resolve_params("faces.yunet", {"x": True})["x"] is True
