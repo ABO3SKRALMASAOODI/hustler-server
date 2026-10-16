@@ -15,7 +15,11 @@ def command_identity(data):
         return None, None
     if not isinstance(operation_id, str) or not re.fullmatch(
             r"[A-Za-z0-9_-]{16,80}", operation_id):
-        raise ValueError("Invalid edit operation ID.")
+        shown = operation_id if isinstance(operation_id, str) else type(operation_id).__name__
+        raise ValueError(
+            "Invalid edit operation ID: operation_id must be 16-80 letters, digits, "
+            f"'-' or '_' (got {str(shown)[:90]!r}, {len(str(shown))} characters), "
+            "e.g. 's06-serif-label-v1'.")
     payload = {k: data.get(k) for k in
                ("op", "args", "base_version", "defer_preview", "preview_mode")}
     fingerprint = hashlib.sha256(json.dumps(

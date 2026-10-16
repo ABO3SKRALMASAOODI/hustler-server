@@ -143,6 +143,9 @@ wmono = _pure_worker_module("mono_policy")
 video_bp = Blueprint("video", __name__)
 
 MAX_CONCURRENT_JOBS_PER_USER = int(os.getenv("MAX_CONCURRENT_JOBS_PER_USER", "3"))
+# A running job whose heartbeat is older than this holds nothing (the worker's
+# STALE_AFTER_S: the reaper's to bury, never an editor at work).
+_EDITOR_LOCK_STALE_S = int(os.getenv("STALE_AFTER_S", "120"))
 # Forced (cache-skipping) preview re-renders per EDL version per hour. The
 # studio's own 2-per-visit bound lives in a ref that a page reload clears, so
 # this is the one that actually holds. See render_preview_endpoint.
@@ -1889,8 +1892,11 @@ def complete_upload_core(user_id, project_id, data):
 
         if kind == "original" and not _subscribe_gate_applies(cur, user_id) and \
                 _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
-            return {"error": "Too many jobs running. "
-                             "Wait for one to finish."}, 429
+            busy, first = _busy_jobs_text(cur, user_id)
+            wait = (f" (wait_for_job(job_id={first}))" if first else "")
+            return {"error": "Too many jobs running" + busy + ". Wait for one to "
+                             "finish" + wait + ", then finish this upload again with "
+                             "the same arguments: the uploaded file is kept."}, 429
 
     # ── The deferred original ────────────────────────────────────────────
     # The browser already built and uploaded a 540p proxy; the original is
@@ -4785,6 +4791,27 @@ def _mcp_web_sound_gate(cur, project_id, before, after):
     return err.replace("REJECTED: ", "", 1) if err else None
 
 
+def _busy_jobs_text(cur, user_id, limit=4):
+    """(' (job 71300 render_preview on project 3755, running; ...)', first id)
+    for the jobs that hold a user's concurrency slots, or ('', None). The bare
+    "Too many jobs running" left the owner's Jensen coordinator guessing for
+    19 minutes, asking for list_jobs/cancel_job tools that do not exist."""
+    try:
+        cur.execute("""SELECT id, type, state, project_id, payload->>'tool' AS tool
+                       FROM video_jobs WHERE user_id = %s
+                         AND state IN ('queued','running')
+                         AND type IN ('agent_turn','shorts_plan','mcp_tool')
+                       ORDER BY id LIMIT %s""", (int(user_id), int(limit)))
+        rows = [r for r in (cur.fetchall() or []) if isinstance(r, dict) and r.get("id")]
+    except Exception:  # noqa: BLE001 — the plain refusal still stands
+        return "", None
+    if not rows:
+        return "", None
+    parts = [f"job {r['id']} {r.get('tool') or r.get('type')} on project "
+             f"{r.get('project_id')}, {r.get('state')}" for r in rows]
+    return " (" + "; ".join(parts) + ")", rows[0]["id"]
+
+
 def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
     """Authenticated caller, one transaction, one revision, no compute job."""
     try:
@@ -4817,11 +4844,29 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
         if not latest or latest["version"] != base:
             return {"error": "The edit changed. Read the current version before applying this batch.",
                     "current_version": latest["version"] if latest else None}, 409
+        # Only a job that may WRITE this edit holds it: the agent's own
+        # read-only calls (render_preview, look_at, audits: mutation=false,
+        # the same rule the worker's claim serializer applies) never did, and
+        # a running row whose heartbeat died is the reaper's, not an editor
+        # (owner's Codex runs, 13-15 Oct: four batches refused "Another editor"
+        # while their own render_preview or a dead look_at was the only job).
         cur.execute("""SELECT id FROM video_jobs WHERE project_id=%s
                        AND type IN ('agent_turn','mcp_tool')
-                       AND state IN ('queued','running') LIMIT 1""", (project_id,))
-        if cur.fetchone():
-            return {"error": "Another editor is working on this project. Wait for it to finish before applying this batch."}, 409
+                       AND NOT (type = 'mcp_tool'
+                                AND COALESCE(payload->>'mutation', 'true') = 'false')
+                       AND (state = 'queued'
+                            OR (state = 'running'
+                                AND COALESCE(heartbeat_at, updated_at)
+                                    >= NOW() - make_interval(secs => %s)))
+                       ORDER BY id LIMIT 1""", (project_id, _EDITOR_LOCK_STALE_S))
+        busy = cur.fetchone()
+        if busy:
+            job = busy.get("id") if isinstance(busy, dict) else None
+            named = (f" (job {job}): call wait_for_job(job_id={job}), then read the "
+                     "current version and apply the batch on it" if job else "")
+            return {"error": "Another editor is working on this project" + named
+                             + ". Wait for it to finish before applying this batch.",
+                    "blocking_job_id": job}, 409
         cur.execute("SELECT storage_key,duration_s FROM assets WHERE project_id=%s", (project_id,))
         keys = {row["storage_key"]: row for row in cur.fetchall()}
         original = _active_original(cur, project_id)

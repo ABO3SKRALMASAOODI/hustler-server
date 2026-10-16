@@ -2774,6 +2774,42 @@ def _t_export_final(tok, args):
             "structuredContent": {"export": receipt}, "isError": False}
 
 
+def _final_job_note(cur, project_id, edl_version):
+    """What the latest final-export job for this version is doing, when no
+    final file exists yet; None when there is no such job. 'No final has been
+    rendered yet — call export_final' while the export was RUNNING sent the
+    owner's Codex editors back to export_final four times (13-16 Oct: jobs
+    67692, 69124, 71322, 71776 were each mid-render)."""
+    sql = ("SELECT id, state, progress, error, payload->>'edl_version' AS v "
+           "FROM video_jobs WHERE project_id = %s AND type = 'final'")
+    params = [project_id]
+    if edl_version is not None:
+        try:
+            params.append(str(int(edl_version)))
+        except (TypeError, ValueError):
+            return None
+        sql += " AND payload->>'edl_version' = %s"
+    try:
+        cur.execute(sql + " ORDER BY id DESC LIMIT 1", params)
+        job = cur.fetchone()
+    except Exception:  # noqa: BLE001 — the plain answer below still holds
+        return None
+    if not job or not job.get("id"):
+        return None
+    ver = f"EDL v{job.get('v')}" if job.get("v") else "this edit"
+    if job.get("state") in ("queued", "running"):
+        return (f"PROJECT {project_id}: the final export of {ver} is job {job['id']} "
+                f"({job['state']}, {int(job.get('progress') or 0)}%) and its MP4 is not "
+                f"ready yet. Call wait_for_job(job_id={job['id']}) until done, then "
+                "download_url again. Do not submit another export.")
+    if job.get("state") == "failed":
+        why = " ".join(str(job.get("error") or "no reason recorded").split())[:240]
+        return (f"PROJECT {project_id}: the last final export of {ver} (job {job['id']}) "
+                f"failed: {why}. Call export_final again with project_id and the "
+                "reviewed edl_version.")
+    return None
+
+
 def _t_download_url(tok, args):
     project_id, error = _required_project_id(args)
     if error:
@@ -2825,6 +2861,10 @@ def _t_download_url(tok, args):
                     "...) saying why it is acceptable, then export_final "
                     "again.")
             return _session_error("This export needs refreshing. Call export_final with this project_id and reviewed edl_version.")
+        pending = (_final_job_note(cur, project_id, args.get("edl_version"))
+                   if not row and kind == "final" else None)
+    if pending:
+        return _session_error(pending)
     if not row:
         return _session_error(
             f"No {kind} has been rendered yet"
