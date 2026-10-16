@@ -17,6 +17,11 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 import config
+# Plain reads shared with the backend's MCP fast path (read_tools.py):
+# one definition, re-exported here under the names every caller uses.
+from read_tools import (  # noqa: E402,F401
+    add_message, asset_by_key, find_render_asset, get_index_by_sha,
+    latest_asset, latest_edl, user_billing)
 import error_text
 import io_telemetry
 import model_prices
@@ -2127,22 +2132,6 @@ def get_asset(conn, asset_id):
         return cur.fetchone()
 
 
-def latest_asset(conn, project_id, kind):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
-                       WHERE project_id = %s AND kind = %s
-                       ORDER BY id DESC LIMIT 1""", (project_id, kind))
-        return cur.fetchone()
-
-
-def asset_by_key(conn, project_id, storage_key):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
-                       WHERE project_id = %s AND storage_key = %s
-                       ORDER BY id DESC LIMIT 1""", (project_id, storage_key))
-        return cur.fetchone()
-
-
 def library_music_used_by_user(conn, user_id, exclude_project_id=None,
                                limit=24):
     """CC0 library slugs that score this user's OTHER projects, newest
@@ -2402,17 +2391,6 @@ def latest_render_asset(conn, project_id, variant):
         return cur.fetchone()
 
 
-def find_render_asset(conn, project_id, variant, edl_version):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
-                       WHERE project_id = %s AND kind = 'render'
-                         AND meta->>'variant' = %s
-                         AND (meta->>'edl_version')::int = %s
-                       ORDER BY id DESC LIMIT 1""",
-                    (project_id, variant, int(edl_version)))
-        return cur.fetchone()
-
-
 def latest_render(conn, project_id, variant):
     """The newest render of a variant REGARDLESS of EDL version — what the
     project last actually produced. find_render_asset answers "is version N
@@ -2512,12 +2490,6 @@ def update_asset_probe(conn, asset_id, duration_s, width, height, fps, sha256):
                            fps = %s, sha256 = %s
                        WHERE id = %s""",
                     (duration_s, width, height, fps, sha256, asset_id))
-
-
-def get_index_by_sha(conn, sha256):
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM indexes WHERE video_sha256 = %s", (sha256,))
-        return cur.fetchone()
 
 
 def index_exists(conn, sha256):
@@ -2637,13 +2609,6 @@ def _bump_edl_write_generation(project_id):
     with _EDL_WRITE_GEN_LOCK:
         key = int(project_id)
         _EDL_WRITE_GEN[key] = _EDL_WRITE_GEN.get(key, 0) + 1
-
-
-def latest_edl(conn, project_id):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM edls WHERE project_id = %s
-                       ORDER BY version DESC LIMIT 1""", (project_id,))
-        return cur.fetchone()
 
 
 def get_edl_version(conn, project_id, version):
@@ -2923,15 +2888,6 @@ def insert_llm_call(conn, project_id, job_id, purpose, model, request,
               Json(_capped_payload(request)),
               Json(_capped_payload(response) if response is not None else None),
               prompt_tokens, completion_tokens))
-
-
-def add_message(conn, session_id, role, content, meta=None):
-    with conn.cursor() as cur:
-        cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
-                       VALUES (%s, %s, %s, %s) RETURNING id""",
-                    (session_id, role, content,
-                     Json(meta) if meta is not None else None))
-        return cur.fetchone()["id"]
 
 
 def add_job_failure_message(conn, session_id, content, job_id,
@@ -3428,41 +3384,6 @@ def user_is_subscribed(conn, user_id):
                     (user_id,))
         row = cur.fetchone()
         return bool(row and row["is_subscribed"])
-
-
-def user_billing(conn, user_id):
-    """(is_subscribed, plan, trialing) — everything the turn needs about who is
-    paying, in one query.
-
-    The plan is here because routing stopped being a boolean in round 49: the
-    Frontier tier ('ai_max') runs its agent AND its vision on the frontier
-    provider, so "which model answers" now depends on WHICH plan, not merely on
-    whether there is one.
-
-    `trialing` is here because "you're out of credits" has a third truth. A
-    trialling account is is_subscribed, but its pool is 10% of the plan and the
-    rest is released by converting — so telling that user their credits
-    "refresh on your plan's cycle" points them at waiting when the thing that
-    helps is one click away.
-
-    Degrades rather than raises: a missing trial_status column (they are added
-    by hand in the Render shell) yields trialing=False and the old behaviour.
-    """
-    with conn.cursor() as cur:
-        try:
-            cur.execute("SELECT is_subscribed, plan, trial_status "
-                        "FROM users WHERE id = %s", (user_id,))
-            row = cur.fetchone()
-        except Exception:
-            conn.rollback()     # a missing column poisons the transaction
-            cur.execute("SELECT is_subscribed, plan FROM users WHERE id = %s",
-                        (user_id,))
-            row = cur.fetchone()
-    if not row:
-        return False, "free", False
-    return (bool(row["is_subscribed"]),
-            (row.get("plan") or "free"),
-            bool(row["is_subscribed"]) and row.get("trial_status") == "trialing")
 
 
 # ── Credits ──────────────────────────────────────────────────────────────────

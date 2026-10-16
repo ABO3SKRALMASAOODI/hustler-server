@@ -27,6 +27,7 @@ import music_search
 import preview_critic
 import preference_memory
 import quality_verifier
+import read_tools
 import reference_profile
 import remote
 import request_intent
@@ -1713,47 +1714,18 @@ def _complete_adopted_steers(ctx, worker_db, job):
 
 def _activity(worker_db, session_id, name, args, result, source=None,
               edl_version=None, change=None, creative_blueprint=None):
-    res_str = (result or "").replace("\n", " ")
-    # Long enough that a diff line PLUS its appended WARNING lines survive —
-    # truncating warnings out of the activity feed would hide them from the
-    # user entirely.
-    if len(res_str) > 600:
-        res_str = res_str[:600] + "…"
-    # Auto-triggered previews read as "auto preview" in the UI; the raw
-    # trigger tag stays in meta for the logs.
-    if name == "render_preview" and (args or {}).get("auto"):
-        label = "auto preview"
-    else:
-        arg_str = json.dumps(args or {}, ensure_ascii=False)
-        if len(arg_str) > 160:
-            arg_str = arg_str[:160] + "…"
-        label = f"{name}{arg_str if arg_str != '{}' else '()'}"
-    meta = {"tool": name, "args": args, "source": source or "agent",
-            "tool_outcome": {"status": agent_tools.tool_outcome_mod.from_legacy(result).status}}
-    if edl_version is not None:
-        # The EDL version current when this call ran — lets the studio roll
-        # the activity feed back in step with the version stepper.
-        meta["edl_version"] = edl_version
-    if change:
-        # Structural diff of THIS write (edl_diff.change_ranges): the output
-        # ranges the edit touched, so the studio can flash them briefly when
-        # the next preview lands. Only ever present on the row of an EDL
-        # write; read rows and non-writing calls never carry it.
-        meta["change"] = change
-    if source:
-        # Which driver made this call. The studio renders MCP activity exactly
-        # like the agent's — it IS the same tool doing the same thing — but the
-        # admin views and the logs must be able to tell an outside model's edit
-        # from ours.
-        meta["source"] = source
+    # The row itself is composed in read_tools.activity_row, which the
+    # backend's MCP fast path writes for the reads it answers.
+    content, meta = read_tools.activity_row(
+        name, args, result, source=source, edl_version=edl_version,
+        change=change)
     if creative_blueprint is not None:
         # Append-only durable direction: the latest activity carrying this
         # field becomes the project's blueprint on the next agent/MCP turn.
         normalized = director.normalize_blueprint(creative_blueprint)
         if normalized:
             meta["creative_blueprint"] = normalized
-    worker_db.run(dbx.add_message, session_id, "activity",
-                  f"{label} → {res_str}", meta)
+    worker_db.run(dbx.add_message, session_id, "activity", content, meta)
 
 
 def _user_facing_failure(e):

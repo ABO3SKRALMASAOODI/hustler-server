@@ -44,6 +44,7 @@ import db as dbx
 import director
 import llm
 import mcp_media
+import read_tools
 import resource_usage
 import storage
 import tool_outcome
@@ -233,14 +234,8 @@ def _tool_result_contract(ctx, text):
     success for that text caused callers and dashboards to count 192 refused
     operations as wins and encouraged models to continue from a false premise.
     """
-    structured = getattr(ctx, "last_structured_tool_outcome", None)
-    if not isinstance(structured, dict) or \
-            structured.get("status") not in tool_outcome.STATUSES:
-        structured = tool_outcome.from_legacy(text).to_dict()
-    return {
-        "is_error": structured["status"] != "success",
-        "tool_outcome": structured,
-    }
+    return read_tools.tool_result_contract(
+        getattr(ctx, "last_structured_tool_outcome", None), text)
 
 
 class IndexNotReady(RuntimeError):
@@ -466,14 +461,14 @@ def _refresh_contract_budget(ctx, worker_db, job, billing=None):
         else worker_db.run(dbx.user_billing, job["user_id"]))
     if ctx.plan != previous_plan:
         ctx.llm_client, ctx.agent_model = llm.agent_client_for(ctx.subscribed, ctx.plan)
-    if ctx.plan in {"mcp_connect", "advanced", "plus_2026", "pro_2026", "max_2026"}:
+    if ctx.plan in read_tools.METERED_PLANS:
         ctx.model_usage = {}
         ctx.tokens_in = ctx.tokens_out = ctx.tokens_cached_in = 0
         ctx.images_generated = []
         ctx.gen_extra_cost_usd = 0.0
         ctx.credit_budget = (worker_db.run(dbx.user_credits_balance, job["user_id"])
                              if ctx.subscribed else 0.0)
-    elif previous_plan in {"mcp_connect", "advanced", "plus_2026", "pro_2026", "max_2026"}:
+    elif previous_plan in read_tools.METERED_PLANS:
         # An already-queued call must not keep a prepaid generation budget
         # after cancellation, even if its project context remains cached.
         ctx.credit_budget = 0.0
@@ -614,7 +609,7 @@ def run_mcp_job(worker_db, job):
                                  creative_blueprint=None)
             out = {"text": text, "edl_version": after,
                    "edl_changed": after != before}
-            if ctx.plan in {"mcp_connect", "advanced", "plus_2026", "pro_2026", "max_2026"}:
+            if ctx.plan in read_tools.METERED_PLANS:
                 out["metered_contract"] = True
             out.update(_tool_result_contract(ctx, text))
             if tool == "justify_verification_findings" and text.startswith(
@@ -626,14 +621,14 @@ def run_mcp_job(worker_db, job):
             imgs, publish_attempts = _drain_images(ctx)
             if imgs:
                 out["images"] = imgs
-            out["visual_evidence"] = {
-                "available_before": pending_before,
-                "created_this_call": max(
+            out["visual_evidence"] = read_tools.visual_evidence(
+                available_before=pending_before,
+                created_this_call=max(
                     0, pending_after_execute - pending_before),
-                "publish_attempts": publish_attempts,
-                "published_this_call": sum(bool(img.get("storage_key")) for img in imgs),
-                "remaining": len(ctx.pending_images or []),
-            }
+                publish_attempts=publish_attempts,
+                published_this_call=sum(
+                    bool(img.get("storage_key")) for img in imgs),
+                remaining=len(ctx.pending_images or []))
             if ctx.pending_images:
                 out["images_remaining"] = len(ctx.pending_images)
                 out["text"] += (
@@ -647,23 +642,7 @@ def run_mcp_job(worker_db, job):
             except Exception:
                 preview_asset = None
             if preview_asset:
-                preview_meta = preview_asset.get("meta") or {}
-                out["preview"] = {
-                    "render_type": "complete_preview",
-                    "render_job_id": preview_meta.get("render_job_id"),
-                    "quality": preview_meta.get("quality", "draft"),
-                    "sha256": preview_asset.get("sha256") or preview_meta.get("sha256"),
-                    "edl_version": int(preview_meta.get("edl_version")),
-                    "duration_s": preview_asset.get("duration_s"),
-                    "audio_model_review": preview_meta.get(
-                        "audio_model_review", False),
-                    "asset_id": preview_asset.get("id"),
-                }
-                if preview_meta.get("motion_warnings"):
-                    # Motion items this render could not draw: the edit is
-                    # intact, the pixels are missing them.
-                    out["preview"]["motion_warnings"] = list(
-                        preview_meta["motion_warnings"])
+                out["preview"] = read_tools.preview_summary(preview_asset)
             check = getattr(ctx, "last_preview_check", None)
             if check:
                 out["changed_section_preview"] = {

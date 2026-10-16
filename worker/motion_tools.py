@@ -191,42 +191,9 @@ def list_sound_library(ctx, role=None):
 
 # ── motion graphics ───────────────────────────────────────────────────────
 
-def list_motion_templates(ctx, category=None):
-    cat = motion_templates.catalog(category or None)
-    if not cat:
-        if category:
-            known = sorted({c for t in motion_templates.catalog()
-                            for c in motion_templates.categories(t) if c})
-            return (f"No motion templates match category '{category}'. Categories: "
-                    f"{', '.join(known)}.")
-        return "No motion templates are installed on this deployment."
-    lines = []
-    for t in cat:
-        ps = []
-        for k, p in t["params"].items():
-            bit = k
-            if p.get("required"):
-                bit += "*"
-            if p["type"] == "enum":
-                bit += "=" + "|".join(map(str, p.get("values") or []))
-            elif p["type"] == "rows":
-                # a row's shape: the editor never has to guess it (Oct 2026
-                # run: rejected calls and 's'/'xl' sizes nobody read)
-                types = p.get("field_types") or {}
-                bit += "=[{" + ",".join(
-                    f + (":" + ("|".join(types[f]) if isinstance(types[f], list)
-                                else types[f]) if f in types else "")
-                    for f in p.get("fields") or []) + "}]"
-            elif "default" in p and p["type"] not in ("text", "str"):
-                bit += f"={p['default']}"
-            ps.append(bit)
-        cats = "/".join(c for c in motion_templates.categories(t) if c)
-        lines.append(f"- {t['name']} [{cats}, ~{t['duration']}s]: {t['description']} "
-                     f"Params: {', '.join(ps)}" + (f". Sound: {', '.join(t['sfx'])}" if t["sfx"] else ""))
-    return ("Motion templates (add_motion_graphic(template, start, end, params)). * = required.\n"
-            + "\n".join(lines) +
-            "\nOr template='html' with your own composition on the MG runtime (read_skill "
-            "'motion-design' for the API).")
+# list_motion_templates is a pure read: one implementation in read_tools,
+# shared with the backend's MCP fast path.
+from read_tools import list_motion_templates  # noqa: E402,F401
 
 
 _JS_FLOAT = re.compile(r"\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)")

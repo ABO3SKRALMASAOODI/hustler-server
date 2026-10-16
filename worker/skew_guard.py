@@ -106,61 +106,10 @@ def _edl_json(conn, project_id, edl_version=None):
     return value
 
 
-def _edl_problem(data, strip_unknown_fx=False):
-    """Why this executor's schema cannot read ``data``, or None.
-
-    ``strip_unknown_fx`` applies the render path's own Wave 0 degrade rule
-    (schemas.strip_unknown_fx: a lane older than the writer drops an fx
-    device it does not register and reports it, rather than failing). It is
-    used for previews only; a final waits for the release that draws every
-    device, and an editor never edits a document it cannot fully read.
-    """
-    if not isinstance(data, dict):
-        return None
-    import schemas
-    if strip_unknown_fx and hasattr(schemas, "strip_unknown_fx"):
-        try:
-            data = schemas.strip_unknown_fx(data)[0]
-        except Exception:
-            pass
-    try:
-        model = schemas.EDL.model_validate(data)
-    except Exception as exc:
-        first = " ".join(str(exc).split())[:160]
-        return f"its EDL uses fields this release does not know: {first}"
-    unknown = []
-    _unknown_keys(data, model.model_dump(), model.model_dump(by_alias=True),
-                  "", unknown)
-    if unknown:
-        shown = ", ".join(sorted(set(unknown))[:4])
-        return f"its EDL uses fields this release does not know: {shown}"
-    return None
-
-
-def _unknown_keys(raw, kept, kept_alias, path, out):
-    """Append every key of ``raw`` this schema would silently drop.
-
-    ``kept``/``kept_alias`` are the validated model dumped by field name and
-    by alias. A raw dict facing no dumped dict is a free-form value (a
-    dict-typed field) and is not inspected further.
-    """
-    if isinstance(raw, dict):
-        if not isinstance(kept, dict) and not isinstance(kept_alias, dict):
-            return
-        a = kept if isinstance(kept, dict) else {}
-        b = kept_alias if isinstance(kept_alias, dict) else {}
-        for key, value in raw.items():
-            if key not in a and key not in b:
-                out.append(f"{path}.{key}" if path else str(key))
-            else:
-                _unknown_keys(value, a.get(key), b.get(key),
-                              f"{path}.{key}" if path else str(key), out)
-    elif isinstance(raw, list):
-        a = kept if isinstance(kept, list) else []
-        b = kept_alias if isinstance(kept_alias, list) else []
-        for i, value in enumerate(raw):
-            _unknown_keys(value, a[i] if i < len(a) else None,
-                          b[i] if i < len(b) else None, f"{path}[]", out)
+# The EDL check lives in read_tools: the backend's MCP fast path applies
+# the same rule before it answers a read from its own release.
+from read_tools import _unknown_keys  # noqa: E402,F401
+from read_tools import edl_problem as _edl_problem  # noqa: E402,F401
 
 
 def _gateway_inner(tool, args):

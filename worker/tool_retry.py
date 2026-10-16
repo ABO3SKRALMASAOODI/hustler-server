@@ -6,11 +6,7 @@ from tool_outcome import ToolOutcome
 # Not being an EDL setter does NOT make an operation idempotent: rendering,
 # scouting, fetching and extracting can accept work before losing the reply.
 # Only these inspected reads may be repeated without first reconciling state.
-SAFE_READS = frozenset({
-    'get_edl', 'get_video_info', 'get_transcript', 'get_words',
-    'get_kept_transcript', 'get_shots', 'search_transcript', 'list_assets',
-    'wait_for_job',
-})
+from read_tools import SAFE_READS  # noqa: E402,F401  (one definition)
 
 
 def decision(error):

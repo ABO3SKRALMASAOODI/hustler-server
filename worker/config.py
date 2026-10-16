@@ -1788,10 +1788,10 @@ AGENT_TPM_HARD_CAP = int(os.getenv("AGENT_TPM_HARD_CAP", "200000"))
 # last-60s burn + this fits under HARD_CAP.
 AGENT_TPM_CALL_RESERVE = int(os.getenv("AGENT_TPM_CALL_RESERVE", "55000"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
-TOOL_OUTPUT_CHAR_BUDGET = 12000   # ~3000 tokens
-# Transcript tools get a far larger budget: silently dropping the tail of a
-# long video's transcript is how far-apart repetitions go unseen.
-TRANSCRIPT_CHAR_BUDGET = 48000    # ~12000 tokens
+# Output budgets: defined once in read_tools (the backend's MCP fast path
+# runs the same read tools and must cut them identically).
+from read_tools import (TOOL_OUTPUT_CHAR_BUDGET,  # noqa: E402,F401
+                        TRANSCRIPT_CHAR_BUDGET)
 
 # Full-index-in-context (Q1): for short videos, put the ENTIRE sentence-level
 # transcript + every shot caption + all keep spans directly into the per-turn
@@ -2128,7 +2128,7 @@ VISUAL_FRAME_PARALLELISM = int(os.getenv("VISUAL_FRAME_PARALLELISM", "4"))
 # however many shots it happened to have. The ceiling is unchanged:
 # MAX_VISION_SHEETS x 25 tiles, which has bounded this since round 22 and
 # which a single-shot video used to spend 1 of.
-VISUAL_SAMPLE_S = float(os.getenv("VISUAL_SAMPLE_S", "4.0"))
+from read_tools import VISUAL_SAMPLE_S  # noqa: E402,F401  (env, read once)
 # Contact sheets are captioned concurrently — they are independent network
 # calls, and going from 1 sheet to as many as 12 would otherwise add minutes
 # of pure round-trip wait to an index. Kept small: the point is to overlap

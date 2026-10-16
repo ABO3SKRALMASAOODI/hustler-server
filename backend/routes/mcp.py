@@ -57,13 +57,14 @@ import time
 from datetime import datetime, timezone
 
 import psycopg2
-from flask import Blueprint, request, jsonify, current_app, Response
+from flask import Blueprint, request, jsonify, current_app, Response, g
 
 import storage
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
 from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core, _request_final, _final_gate, final_degraded_hold, final_hold_message
+from video_services import mcp_fast_reads
 from video_services.mcp_reads import read_metadata
 from video_services.jobs import enqueue as _enqueue
 from video_services.project_state import (
@@ -1644,11 +1645,6 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
                 f"Project {project_id} does not exist on this account. Call "
                 "list_projects and copy the intended id."))
         catalog = _catalog() or {}
-        immediate = read_metadata(cur, project_id, name, args, wschemas)
-        if immediate is not None:
-            identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
-            result = {"text": identity + "\n" + immediate, "is_error": False}
-            return _out(result["text"], result)
         # An index-dependent call cannot succeed by cold-starting an editor
         # before its transcript exists. While analysis is running, wait for
         # it here (one small query every INDEX_POLL_S, no worker job, no
@@ -1656,6 +1652,15 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
         # past the budget, return the analysis job to wait on as a
         # retryable PREREQUISITE. Control calls answer immediately.
         ready, analysis = _index_ready(cur, project_id)
+        # read_skill, and get_edl while the video is still being analyzed,
+        # answer from metadata at once. Once it is analyzed get_edl is a fast
+        # read below: the executor's own code and answer, without a queue.
+        immediate = (read_metadata(cur, project_id, name, args, wschemas)
+                     if name != "get_edl" or not ready else None)
+        if immediate is not None:
+            identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
+            result = {"text": identity + "\n" + immediate, "is_error": False}
+            return _out(result["text"], result)
         wait_budget = min(INDEX_WAIT_S, SYNC_WAIT_S) - _index_waited_s
         wait_for_index = (not ready and analysis.get("active")
                           and wait_budget > 0 and not name.startswith("__"))
@@ -1691,6 +1696,16 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
                                        "waited_s": round(_index_waited_s, 1)},
                           "affected_ranges": []}}
             return _out(_session_error(result["text"]), result)
+        if not wait_for_index and mcp_fast_reads.eligible(name) and \
+                name not in set(catalog.get("write_tools") or []):
+            # A pure read of Postgres rows: answered here by the same code
+            # the executor runs, with the same stored answer, or None and the
+            # call is queued exactly as before.
+            fast = mcp_fast_reads.answer(
+                conn, tok["user_id"], project, project_id, name, args,
+                started=_call_started())
+            if fast is not None:
+                return _tool_answer(project, project_id, fast, raw, _out)
         if not wait_for_index:
             mutation = name in set(catalog.get("write_tools") or []) or \
                 name in {"reset_edit"}
@@ -1727,7 +1742,14 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
         return _out(failed["text"], failed)
     if row["state"] in ("queued", "running"):
         return _out(identity + "\n" + _still_running(row, label))
-    result = row.get("result") or {}
+    return _tool_answer(project, project_id, row.get("result") or {}, raw,
+                        _out)
+
+
+def _tool_answer(project, project_id, result, raw, _out):
+    """One finished tool call's reply, from its stored result. Queued calls
+    and fast reads (mcp_fast_reads) both answer through here."""
+    identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
     text = identity + "\n" + (result.get("text") or json.dumps(result))
     text += _preview_policy_line(result.get("preview"))
     if raw:
@@ -1735,6 +1757,14 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
         result.update(text=text, project_id=project_id,
                       project_title=project.get("title"))
     return _out(text, result)
+
+
+def _call_started():
+    """When this request's tools/call began (monotonic), for fast-read timing."""
+    try:
+        return getattr(g, "mcp_call_started", None)
+    except RuntimeError:
+        return None
 
 
 # ------------------------------------------------------------------ #
@@ -3307,6 +3337,10 @@ def _handle(tok, msg):
 def _call_tool(req_id, tok, name, args):
     """One tools/call of `name`: the single execution path behind a direct
     call and an expand_toolset(call=...) gateway call alike."""
+    try:
+        g.mcp_call_started = time.monotonic()
+    except RuntimeError:
+        pass
     if not isinstance(args, dict):
         return _tool_call_result(
             req_id, tok, name,
