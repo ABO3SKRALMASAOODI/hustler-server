@@ -992,6 +992,71 @@ def cmd_finalize(args: argparse.Namespace) -> dict:
         return base
 
 
+DELIVERY_ROOT = Path(os.environ.get(
+    "VALMERA_SHORTS_DELIVERY_DIR",
+    str(Path.home() / "Documents" / "Valmera" / "Podcast Shorts")))
+
+
+def delivery_name(meta: dict, count: int) -> str:
+    """'<Speaker> - <Title> (<year>) - <N> Finals', the owner's folder pattern."""
+    people = [p for p in (meta.get("people_verified") or []) if p]
+    speaker = people[0] if people else (meta.get("channel") or "Podcast")
+    speaker = re.sub(r"\s*[(;,].*$", "", str(speaker)).strip() or "Podcast"
+    title = (meta.get("title") or "Shorts").strip()
+    if title.lower().startswith(speaker.lower()):
+        title = title[len(speaker):].lstrip(" :-–—|")
+    title = re.sub(r"\s*[|].*$", "", title).strip() or "Shorts"
+    year = str(meta.get("upload_date") or "")[:4]
+    name = f"{speaker} - {title[:70].rstrip()}"
+    if year.isdigit():
+        name += f" ({year})"
+    name += f" - {count} Finals"
+    return re.sub(r'[\\/:*?"<>]', "", name).strip()
+
+
+def cmd_deliver(args: argparse.Namespace) -> dict:
+    """Copy a finalized run's finals into the owner's publishing folder."""
+    directory = run_dir(args.run_dir)
+    with locked(directory) as state:
+        if state.get("stage") != "complete":
+            raise StateError("finalize the run before delivering it")
+        exports = directory / "exports"
+        publishing = read_json(str(exports / "publishing-manifest.json"),
+                               "publishing manifest")
+        items = publishing.get("items") or []
+        if not items:
+            raise StateError("no exported finals to deliver")
+        name = args.name or delivery_name(state.get("source_meta") or {}, len(items))
+        dest = Path(args.root or DELIVERY_ROOT).expanduser() / name
+        dest.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for item in items:
+            src = Path(item.get("file") or "")
+            if not src.is_absolute():
+                src = exports / src.name
+            if not src.exists():
+                src = exports / Path(item.get("file", "")).name
+            target = dest / src.name
+            if not (target.exists() and sha256(target) == item.get("sha256")):
+                shutil.copy2(src, target)
+            if item.get("sha256") and sha256(target) != item["sha256"]:
+                raise StateError(f"copy of {src.name} does not match its sha256")
+            copied.append(target.name)
+        for extra in ("publishing-manifest.json", "manifest.json"):
+            if (exports / extra).exists():
+                shutil.copy2(exports / extra, dest / extra)
+        readme = (exports / "PUBLISHING.md").read_text() if (exports / "PUBLISHING.md").exists() \
+            else publishing_markdown(publishing)
+        write_atomic(dest / "README.md", readme)
+        credits = [f"- **{it.get('title') or it.get('short_id')}**: " + "; ".join(it["required_credits"])
+                   for it in items if it.get("required_credits")]
+        write_atomic(dest / "CREDITS.md", "# Credits to paste into each post\n\n" + (
+            "\n".join(credits) if credits else "No third-party credits required.") + "\n")
+        state["delivered_to"] = str(dest)
+        event(state, "delivered", folder=str(dest), files=len(copied))
+        return {"folder": str(dest), "files": copied}
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 def parser() -> argparse.ArgumentParser:
@@ -1101,6 +1166,13 @@ def parser() -> argparse.ArgumentParser:
                 "publishing-manifest.json and PUBLISHING.md.")
     p.add_argument("--not-selected", help="JSON list of 'story (range): reason' strings")
     p.add_argument("--reindex-count", type=int, default=0)
+
+    p = command("deliver", cmd_deliver, "Copy the finalized finals, README.md "
+                "and CREDITS.md into the owner's publishing folder "
+                "(default ~/Documents/Valmera/Podcast Shorts/<Speaker> - <Title> "
+                "(<year>) - <N> Finals).")
+    p.add_argument("--root", help="publishing root folder (default: Podcast Shorts)")
+    p.add_argument("--name", help="folder name override")
     return root
 
 

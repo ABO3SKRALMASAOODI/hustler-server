@@ -94,7 +94,7 @@ Record it with `run.py review --checks hook=...,payoff=...,targets=...,attention
 | --- | --- |
 | all yes | **ship**: note the strongest moment in one line |
 | a no (or a few) with a concrete change that repairs each | **fix**: a targeted fix (below), as many passes as there are concrete defects |
-| attention is no, or several no | **kill**: say why; a weak story is not rescued by styling |
+| attention is no (the story itself fails with the name hidden), or a selection exclusion found late (selection.md, six reasons) | **kill**: say why; a weak story is not rescued by styling |
 | a Valmera defect decides it (a tool that errors, a template or layout the engine renders below the floor, an export that fails), or the editor handed back `blocked` | first a fix that takes a path that works (another layout, template, device or tool); only when none does, `run.py exception --status failed_technical`, next action "revive after Valmera fix: <defect>", and the defect goes into REPORT.md |
 | a technical failure outside the edit | `run.py exception` with the next action |
 
@@ -108,9 +108,12 @@ had been started with the same defect.
 
 A fix pass names concrete defects and their changes; a short gets as many
 as it has fixable defects (owner, Oct 2026: never abandon a good story for
-a render or fix count). A story that is weak rather than broken is killed:
-killing it is cheaper and better than a rescue, and every selected short
-still appears in the manifest.
+a render or fix count). Several craft no's (a floor, the frame, a headline,
+a beat gap, a boundary) are several fixes, never a kill: Oct 2026, all four
+kills of the Elon Musk run had attention=yes and died on fixable floors. A
+story that is weak rather than broken is killed: killing it is cheaper and
+better than a rescue, and every selected short still appears in the
+manifest.
 
 ### Fix packet (at most 5 lines)
 

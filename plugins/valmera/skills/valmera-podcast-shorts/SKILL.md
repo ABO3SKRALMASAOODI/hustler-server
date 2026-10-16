@@ -104,18 +104,30 @@ disagree, v9 wins on method and the brief wins on preferences.
    locally once if Valmera cannot fetch it; with yt-dlp fetch the video and
    the `en-orig` captions in separate calls, so a caption 429 cannot block the
    download). Indexing takes about 20-25 min and shows "0%" while queued:
-   do not poll. Meanwhile read selection.md and looks.md and draft candidates
-   from the platform's captions if it has them; then check `index_status` about every 5
+   do not poll. Meanwhile read selection.md and looks.md, fetch the audience
+   signal (selection.md, **Audience signal**) and draft candidates from the
+   platform's captions if it has them; then check `index_status` about every 5
    minutes. Waiting: the harness blocks a foreground `sleep`; run
    `sleep 300` with `run_in_background` and continue when it reports done.
-3. **Select hero stories** ([selection.md](references/selection.md)): read
-   the full transcript once, grade every candidate by hook and payoff, and
-   keep EVERY story that clears the bar. There is no number: the count
-   follows the podcast (7 if only 7 are good, 70 if 70 are), never a target,
-   minimum, maximum or rate. Write a one-line reason for every story left
-   out. Look at 3-4 source frames
-   first: what the picture allows (a call window, a picture-in-picture,
-   UI, logos, a 4:3 archive) decides the layouts and so the Looks.
+3. **Select every moment that clears the bar**
+   ([selection.md](references/selection.md)). A FULL SCAN, not a skim: walk
+   the whole transcript in order, chapter by chapter, and list every
+   self-contained moment worth a short (a story, a striking claim, a
+   surprising number, a funny or emotional exchange, a strong opinion, a
+   vivid explanation). Map YouTube's most-replayed windows and timestamped
+   top comments onto them. Grade each moment INDEPENDENTLY on hook, payoff
+   and inspiration (would a viewer stop scrolling, finish it, and feel or
+   learn something?) and keep EVERY one that clears the bar. There is no
+   number: the count follows the podcast (7 if only 7 are good, 70 if 70
+   are), never a target, minimum, maximum or rate. Leave a moment out only
+   for one of selection.md's six valid reasons, with a one-line reason
+   for every moment left out; never for quota, theme overlap, "host-led"
+   or "chatter" that is actually funny. Then the **challenge
+   pass**: re-read the not-selected list as the owner who watched the whole
+   podcast ("would I miss this?") and overturn every weak reason before
+   `make_shorts`. Look at 3-4 source frames first: what the picture allows
+   (a call window, a picture-in-picture, UI, logos, a 4:3 archive) decides
+   the layouts and so the Looks.
 4. **Materialize once.** One `make_shorts` call with verified sentence
    boundaries and a 0-100 score. Its reply (or `shorts_status(parent)` once
    the children exist) carries the **SOURCE LAYOUT**: a call window, its
@@ -151,7 +163,8 @@ disagree, v9 wins on method and the brief wins on preferences.
 8. **Review** ([review.md](references/review.md)) each candidate as it
    arrives, before any new short goes out: five yes/no questions, then
    **ship**, **a targeted fix** (one per concrete defect, no limit) or
-   **kill**, recorded with `run.py review`. Fix passes go before new
+   **kill** (only a story that fails on its own: a craft defect is a fix),
+   recorded with `run.py review`. Fix passes go before new
    briefs: a fix is the nearest thing a run has to an export.
    **First-candidate gate:** `run.py` hands out no more than `max_editors`
    shorts until the run's first review. If a verdict names a cause the shorts
@@ -171,6 +184,12 @@ disagree, v9 wins on method and the brief wins on preferences.
 10. **Manifest.** `run.py finalize --not-selected <file>` writes
    `exports/manifest.json`, `publishing-manifest.json` and `PUBLISHING.md`
    in the format the publisher already reads.
+11. **Deliver.** Always run `run.py deliver --run-dir <run>` right after
+   finalize. It copies every final (sha256-checked), `README.md`,
+   `CREDITS.md` and the manifests into the owner's publishing folder,
+   `~/Documents/Valmera/Podcast Shorts/<Speaker> - <Title> (<year>) - <N>
+   Finals/` (`--name` overrides the folder name). End the run by telling the
+   user that folder's path: their publishing agents are pointed at it.
 
 ## Non-negotiables
 
@@ -323,7 +342,9 @@ a session scratchpad.
 
 ## Completion report
 
-Shorts exported by tier, Look and structure; the two or three best moments
+Moments found, selected and left out (and what happened to each
+high-replay window); shorts exported by tier, Look and structure; the two
+or three best moments
 (short, timestamp, what lands); kills and exceptions with reasons; elapsed
 time; renders per short; re-index count; manifest paths. Optionally score
 2-3 shorts on the calibration rubric. Never claim viral performance or
