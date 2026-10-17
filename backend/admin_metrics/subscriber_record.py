@@ -118,12 +118,21 @@ def build_record(contracts, history, now=None):
 
 
 def read_record(cur):
+    # Payments retain the original account id after deletion. Keep those
+    # customers in history when the live provider confirms their contract;
+    # deleting an account must never lower a previously reached record.
+    # Existing owner/test/pre-relaunch accounts still follow customer scope.
     if not db.has_table(cur, "admin_subscription_history"):
         return {"available": False}
     cur.execute(f"""SELECT p.user_id, p.subscription_id,
         min(COALESCE(p.occurred_at,p.created_at)) AS first_paid_at
-        FROM payments p JOIN users u ON u.id=p.user_id
-        WHERE {defs.customer('u')} AND {defs.success('p')}
+        FROM payments p LEFT JOIN users u ON u.id=p.user_id
+        WHERE ({defs.customer('u')} OR (
+            u.id IS NULL AND p.user_id IS NOT NULL
+            AND COALESCE(p.occurred_at,p.created_at) >= DATE '{defs.METRICS_EPOCH}'
+            AND EXISTS (SELECT 1 FROM admin_subscription_history h
+                        WHERE h.subscription_id=p.subscription_id AND h.event_id IS NOT NULL)
+        )) AND {defs.success('p')}
           AND p.subscription_id LIKE 'sub_%%'
         GROUP BY p.user_id,p.subscription_id""")
     contracts = [dict(r) for r in cur.fetchall()]

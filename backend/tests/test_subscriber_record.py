@@ -73,3 +73,36 @@ def test_simultaneous_contract_switch_does_not_create_false_peak():
     h=[event('a','2026-09-01',kind='subscription.created'),event('a','2026-09-02',action='cancel'),
        event('b','2026-09-02',kind='subscription.created')]
     assert build_record(c,h,dt('2026-09-03'))['high']==1
+
+
+def test_postgres_peak_preserves_deleted_customers_but_excludes_owner(monkeypatch):
+    import os
+    from urllib.parse import urlparse
+    import pytest
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from admin_metrics import subscriber_record as mod
+    url=os.getenv('QUEUE_TEST_DATABASE_URL')
+    if not url:
+        pytest.skip('requires isolated CI PostgreSQL')
+    assert urlparse(url).hostname in {'localhost','127.0.0.1','postgres'}
+    conn=psycopg2.connect(url,cursor_factory=RealDictCursor)
+    try:
+        with conn.cursor() as cur:
+            cur.execute('''CREATE TEMP TABLE users(id int,email text,is_verified int,created_at timestamp);
+                CREATE TEMP TABLE payments(user_id int,subscription_id text,occurred_at timestamp,
+                    created_at timestamp,status text,amount_cents int);
+                CREATE TEMP TABLE admin_subscription_history(subscription_id text,
+                    provider_updated_at timestamptz,status text,scheduled_action text,next_billed_at timestamptz,
+                    event_id text,event_type text);
+                INSERT INTO users VALUES (1,'customer@example.test',1,'2026-08-01'),
+                    (2,'thevalmera@gmail.com',1,'2026-08-01'),(3,'old@example.test',1,'2025-01-01');
+                INSERT INTO payments SELECT id, 'sub_'||id, '2026-09-01', '2026-09-01','paid',1500
+                    FROM generate_series(1,4) id;
+                INSERT INTO admin_subscription_history SELECT 'sub_'||id, '2026-09-01','active',NULL,
+                    '2027-09-01','evt_'||id,'subscription.created' FROM generate_series(1,4) id;''')
+            monkeypatch.setattr(mod.db,'has_table',lambda cur,table: True)
+            result=mod.read_record(cur)
+            assert result['current']==2 and result['high']==2 and result['complete']
+    finally:
+        conn.rollback();conn.close()
