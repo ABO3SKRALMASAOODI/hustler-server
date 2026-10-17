@@ -257,6 +257,7 @@ def acquisition_report(cur, period, model="first"):
         before = before_tracking(signups)
     return {"model": model, "coverage": coverage(signups), "channels": rows,
             "rate_since": rate_since,
+            "excluded": {k: (classes or {}).get(k, 0) for k in ("link_preview", "robot", "internal", "no_signal")},
             "told_vs_measured": told, "before_tracking": before}
 
 

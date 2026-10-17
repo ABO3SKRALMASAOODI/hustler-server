@@ -412,6 +412,13 @@ def handle_webhook():
     event_type = payload.get('event_type')
     data = payload.get('data', {})
 
+    # Signed provider history is reporting-only. Save even events for an
+    # account that was deleted, and lifecycle types without an access action.
+    if isinstance(event_type, str) and event_type.startswith('subscription.'):
+        from subscription_reporting import record_snapshot
+        if record_snapshot(get_db(), data, event=payload):
+            get_db().commit()
+
     # Paddle BILLING event names (not the Classic *_refunded/_failed alerts,
     # which never fire on this integration). Grants activate the plan; refunds
     # arrive as adjustment.* with action='refund'; cancellations arrive as
@@ -475,13 +482,6 @@ def handle_webhook():
         print("⛔ Paddle event did not resolve to a verified local account; "
               "browser custom_data was ignored")
         return 'Payer identity could not be verified', 503
-
-    # Keep reporting separate from access: an active contract may already
-    # have renewal cancelled. Capture old contract cancellations too.
-    if event_type.startswith('subscription.'):
-        from subscription_reporting import record_snapshot
-        if record_snapshot(get_db(), data):
-            get_db().commit()
 
     # A completed one-time charge is revenue but not a subscription grant.
     # Record it without trying to invent recurring entitlement. Conversely, a

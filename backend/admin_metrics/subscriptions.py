@@ -50,11 +50,11 @@ def _account_state(account, sid, groups):
     if status in ("past_due", "paused"):
         return "past_due", account.get("payment_failed_at")
     if status == "canceled" and (groups or sid):
-        return "ended", account.get("billing_synced_at")
+        return "ended", None
     return ("unknown" if sid else "none"), None
 
 
-def summarize(groups, snapshots, current_id=None, now=None, account=None):
+def summarize(groups, snapshots, current_id=None, now=None, account=None, cancellations=None):
     now = now or datetime.now(timezone.utc)
     groups = sorted(groups, key=lambda p: _utc(p["first_paid_at"]))
     contracts = [g for g in groups if g.get("subscription_id")]
@@ -95,6 +95,12 @@ def summarize(groups, snapshots, current_id=None, now=None, account=None):
         "subscriber_kind": kind, "returned_at": defs.iso(returned_at),
         "renewal_state": state, "renewal_at": defs.iso(effective_at),
         "subscription_checked_at": defs.iso(snapshot.get("observed_at")),
+        "cancelled_at": ((cancellations or {}).get(sid) or {}).get("cancelled_at")
+            if state in ("cancelled", "ended") else None,
+        "plan_ends_at": (defs.iso(snapshot.get("canceled_at") if state == "ended"
+                                  else snapshot.get("scheduled_effective_at"))
+                         or ((cancellations or {}).get(sid) or {}).get("plan_ends_at"))
+            if state in ("cancelled", "ended") else None,
     }
 
 
@@ -120,8 +126,10 @@ def for_customers(cur, customers):
         cur.execute("SELECT * FROM admin_subscription_snapshots WHERE subscription_id = ANY(%s)",
                     (sorted(sids),))
         snapshots = {r["subscription_id"]: dict(r) for r in cur.fetchall()}
+    from admin_metrics.subscriber_record import for_subscriptions
+    cancellations = for_subscriptions(cur, sids)
     return {c["id"]: summarize(groups.get(c["id"], []), snapshots,
-                               c.get("subscription_id"), account=c)
+                               c.get("subscription_id"), account=c, cancellations=cancellations)
             for c in customers}
 
 
@@ -131,6 +139,7 @@ def for_customers(cur, customers):
 FILTER_STATES = {
     "renewing": ("renews",),
     "cancelled_access": ("cancelled",),
+    "cancelled": ("cancelled", "ended"),
     "payment_failing": ("past_due",),
     "ended": ("ended",),
 }

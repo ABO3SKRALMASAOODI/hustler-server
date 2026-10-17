@@ -561,7 +561,8 @@ def test_customers_list_contract_and_true_total(app):
                         "credits_left", "credits_used", "edit_requests",
                         "uploads", "country", "browser", "auth_provider", "name", "latest_project_id",
                         "first_paid_at", "last_paid_at", "payment_count", "subscriber_kind",
-                        "returned_at", "renewal_state", "renewal_at", "subscription_checked_at"}
+                        "returned_at", "renewal_state", "renewal_at", "subscription_checked_at",
+                        "cancelled_at", "plan_ends_at"}
     # The full email, never shortened: the admin is the owner's own tool.
     assert row["email"] == "customer1@example.com"
     assert row["credits_left"] == 980.0 and row["edit_requests"] == 6
@@ -974,7 +975,7 @@ def test_every_v2_route_is_read_only_and_admin_gated():
     app.register_blueprint(admin_v2.admin_v2_bp)
     rules = [r for r in app.url_map.iter_rules()
              if r.rule.startswith("/admin/v2")]
-    assert len(rules) == 34
+    assert len(rules) == 35
     for r in rules:
         assert r.methods - {"HEAD", "OPTIONS"} == {"GET"}, r.rule
         view = app.view_functions[r.endpoint]
@@ -1152,3 +1153,12 @@ def test_lifetime_failure_does_not_become_zero(app, monkeypatch):
     assert r.json["data"]["signups"] is None
     assert r.json["data"]["unique_visitors"] == 5
     assert r.json["meta"]["section_errors"][0]["section"] == "signups"
+
+
+def test_subscriber_record_endpoint_is_cached_and_returns_report(app, monkeypatch):
+    expected = {"available": True, "current": 7, "high": 13, "complete": True,
+                "high_at": "2026-09-26T01:33:24Z", "missing_contracts": 0, "series": []}
+    monkeypatch.setattr(admin_v2.subscriber_record, "read_record", lambda cur: expected)
+    response = get(app, "/admin/v2/subscribers/record")
+    assert response.status_code == 200
+    assert response.json["data"] == expected
