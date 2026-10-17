@@ -99,6 +99,9 @@ def test_postgres_reporting_keeps_lifetime_dates_and_rejects_old_webhooks(monkey
             migration = Path(__file__).parents[1] / 'migrations/035_admin_subscription_snapshots.sql'
             cur.execute(migration.read_text().replace('BEGIN;', '').replace('COMMIT;', '')
                         .replace('CREATE TABLE IF NOT EXISTS', 'CREATE TEMP TABLE'))
+            history_migration = Path(__file__).parents[1] / 'migrations/037_subscription_history.sql'
+            cur.execute(history_migration.read_text().replace('BEGIN;', '').replace('COMMIT;', '')
+                        .replace('CREATE TABLE IF NOT EXISTS', 'CREATE TEMP TABLE'))
             cur.execute('''INSERT INTO payments
                 SELECT 1,'sub_1',date '2025-01-01' + n,date '2025-01-01' + n,
                        'completed',100,'USD' FROM generate_series(0,220) n''')

@@ -25,7 +25,7 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     numbers = {int(name.split("_", 1)[0]) for name in names}
 
-    assert numbers == set(range(37))
+    assert numbers == set(range(38))
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names
@@ -34,7 +34,7 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
 def test_admin_rebuild_migrations_are_additive_and_lock_bounded():
     for name in ("031_admin_visitor_quality.sql", "032_billing_daily_status.sql",
                  "033_estimated_early_signup_sources.sql", "034_customer_display_name.sql",
-                 "035_admin_subscription_snapshots.sql", "036_october_annual_credit_plans.sql"):
+                 "035_admin_subscription_snapshots.sql", "036_october_annual_credit_plans.sql", "037_subscription_history.sql"):
         source = (MIGRATIONS / name).read_text(encoding="utf-8")
         assert "SET LOCAL lock_timeout" in source
         assert "BEGIN;" in source and "COMMIT;" in source
