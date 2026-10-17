@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from flask import Flask
+import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -86,3 +87,31 @@ def test_subscribers_keeps_churn_and_distinguishes_access_from_health(
     assert body["subscribers"][0]["canceled_recorded_at"] is not None
     assert body["subscribers"][0]["feedback_up"] == 4
     assert body["subscribers"][0]["feedback_down"] == 1
+
+
+@pytest.mark.parametrize("state", ["cancelled", "ended"])
+def test_subscriber_list_includes_cancellation_request_and_plan_end(monkeypatch, state):
+    from admin_metrics import subscriptions
+
+    conn = _Conn()
+
+    @contextmanager
+    def fake_adb():
+        yield conn
+
+    journey = {
+        "renewal_state": state,
+        "cancelled_at": "2026-09-14T10:23:00Z",
+        "plan_ends_at": "2026-10-14T10:23:00Z",
+    }
+    monkeypatch.setattr(admin_video, "adb", fake_adb)
+    monkeypatch.setattr(subscriptions, "account_states", lambda cur: {7: state})
+    monkeypatch.setattr(subscriptions, "paddle_split", lambda cur: {"available": False})
+    monkeypatch.setattr(subscriptions, "for_customers", lambda cur, rows: {7: journey})
+    app = Flask(__name__)
+    with app.test_request_context("/admin/video/subscribers?status=cancelled"):
+        body = admin_video.video_subscribers.__wrapped__().get_json()
+    row = body["subscribers"][0]
+    assert row["renewal_state"] == state
+    assert row["cancelled_at"] == journey["cancelled_at"]
+    assert row["plan_ends_at"] == journey["plan_ends_at"]
