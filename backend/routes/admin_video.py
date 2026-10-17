@@ -1353,7 +1353,8 @@ def video_subscribers():
                               if r["last_activity"] else None),
             **{k: (journeys.get(r["id"]) or {}).get(k) for k in (
                 "renewal_state", "renewal_at", "subscriber_kind",
-                "returned_at", "subscription_checked_at")},
+                "returned_at", "subscription_checked_at", "cancelled_at",
+                "plan_ends_at")},
         } for r in rows],
     })
 
