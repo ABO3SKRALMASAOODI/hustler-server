@@ -31,6 +31,8 @@ vm.runInNewContext(code, {
   },
 });
 
+const NEW = 'aaaaaaaaaaaa';
+const OLD = 'bbbbbbbbbbbb';
 const job = { id: 73449, total_claims: 1, project_id: 3771, type: 'mcp_tool',
   payload: { tool: 'set_picture_card', args: {}, mutation: true } };
 const digest = createHash('sha256').update(`${job.type}:${job.id}:${job.total_claims}`)
@@ -65,7 +67,7 @@ function storageFor(values) {
 
 // An MCP namespace whose deployment probe is a real adapter instance: the
 // lane's release registry.
-function lane(cls = 'ValmeraMcp', source = 'new-source') {
+function lane(cls = 'ValmeraMcp', source = NEW) {
   const registryValues = new Map();
   const waits = [];
   const env = { SOURCE_VERSION: source };
@@ -107,7 +109,7 @@ test('/run that the SDK could not deliver is a pre-run refusal, never an unknown
     adapter.startAndWaitForPorts = async () => {};
     adapter.containerFetch = async (url) => {
       if (String(url).endsWith('/health')) {
-        return new Response(JSON.stringify(health('new-source')));
+        return new Response(JSON.stringify(health(NEW)));
       }
       return new Response(text, { status: httpStatus });
     };
@@ -129,7 +131,7 @@ test('an answer from the executor itself still goes through the normal path', as
   const { adapter, values } = shard();
   adapter.startAndWaitForPorts = async () => {};
   adapter.containerFetch = async (url) => {
-    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health('new-source')));
+    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health(NEW)));
     return new Response(JSON.stringify({ error: 'boom', retryable: false }), { status: 200 });
   };
   const response = await execute(adapter);
@@ -156,13 +158,13 @@ test('a startup that loses its container is refused before /run with the launch 
 
 test('an idle container on an older release is recycled once the new release starts on the lane', async () => {
   const { shard, registryValues } = lane();
-  registryValues.set('releaseReady', { source: 'new-source', at: Date.now() });
+  registryValues.set(`releaseReady:${NEW}`, { source: NEW, at: Date.now() });
   const { adapter, values } = shard();
-  let image = 'old-source';
+  let image = OLD;
   let starts = 0;
   let destroyed = 0;
   adapter.startAndWaitForPorts = async () => { starts += 1; };
-  adapter.destroy = async () => { destroyed += 1; image = 'new-source'; };
+  adapter.destroy = async () => { destroyed += 1; image = NEW; };
   const served = [];
   adapter.containerFetch = async (url) => {
     if (String(url).endsWith('/health')) return new Response(JSON.stringify(health(image)));
@@ -173,7 +175,7 @@ test('an idle container on an older release is recycled once the new release sta
   assert.equal(response.status, 200);
   assert.equal(destroyed, 1);
   assert.equal(starts, 2);
-  assert.deepEqual(served, ['new-source']);
+  assert.deepEqual(served, [NEW]);
   assert.equal(values.get(`call:${callId}`).status, 'done');
   assert.equal(values.has('active'), false);
 });
@@ -185,23 +187,23 @@ test('while the new release cannot start yet, the guarded old container keeps se
   adapter.destroy = async () => { throw new Error('must not recycle without a startable release'); };
   const served = [];
   adapter.containerFetch = async (url) => {
-    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health('old-source')));
-    served.push('old-source');
+    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health(OLD)));
+    served.push(OLD);
     return new Response(JSON.stringify({ result: { text: 'ok' }, job_completed: true }));
   };
   assert.equal((await execute(adapter)).status, 200);
-  assert.deepEqual(served, ['old-source']);
+  assert.deepEqual(served, [OLD]);
 });
 
 test('a recycle that still comes back old serves it and does not retry on every call', async () => {
   const { shard, registryValues } = lane();
-  registryValues.set('releaseReady', { source: 'new-source', at: Date.now() });
+  registryValues.set(`releaseReady:${NEW}`, { source: NEW, at: Date.now() });
   const { adapter } = shard();
   let destroyed = 0;
   adapter.startAndWaitForPorts = async () => {};
   adapter.destroy = async () => { destroyed += 1; };
   adapter.containerFetch = async (url) => {
-    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health('old-source')));
+    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health(OLD)));
     return new Response(JSON.stringify({ result: { text: 'ok' }, job_completed: true }));
   };
   assert.equal((await execute(adapter)).status, 200);
@@ -220,7 +222,7 @@ test('a call on the new release reports it to the lane registry, once', async ()
   const { adapter } = shard();
   adapter.startAndWaitForPorts = async () => {};
   adapter.containerFetch = async (url) => {
-    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health('new-source')));
+    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health(NEW)));
     return new Response(JSON.stringify({ result: { text: 'ok' }, job_completed: true }));
   };
   assert.equal((await execute(adapter)).status, 200);
@@ -231,22 +233,50 @@ test('a call on the new release reports it to the lane registry, once', async ()
       method: 'POST', body: JSON.stringify({ job: second, timeout_s: 600, launch_id: 'launch-0002' }),
     }))).status, 200);
   await Promise.all(waits);
-  assert.equal(registryValues.get('releaseReady').source, 'new-source');
+  assert.equal(registryValues.get(`releaseReady:${NEW}`).source, NEW);
   assert.deepEqual(names, ['mcp-deployment-probe']);
 });
 
-test('the registry records only its own release and the probe records a fresh start', async () => {
-  const { registry, registryValues } = lane();
-  const stale = await registry.fetch(new Request('https://container.internal/release-ready', {
-    method: 'POST', body: JSON.stringify({ source: 'old-source' }) }));
-  assert.equal(stale.status, 409);
-  assert.equal(registryValues.has('releaseReady'), false);
+test('the registry keeps each release apart, whatever Worker version it runs', async () => {
+  // The registry Durable Object can still run the previous Worker (render
+  // shards did for eight minutes on 16 Oct): a newer caller's record counts.
+  const { registry, registryValues } = lane('ValmeraMcp', OLD);
+  const post = (source) => registry.fetch(new Request('https://container.internal/release-ready', {
+    method: 'POST', body: JSON.stringify({ source }) }));
+  assert.equal((await post('not-a-release')).status, 409);
+  assert.equal((await post(NEW)).status, 200);
+  const ask = async (source) => (await registry.fetch(new Request(
+    `https://container.internal/release-ready?source=${source}`))).json();
+  assert.equal((await ask(NEW)).source, NEW);
+  assert.deepEqual(await ask(OLD), {});
+  // The probe records what its fresh container actually runs.
   registry.startAndWaitForPorts = async () => {};
   registry.destroy = async () => {};
-  registry.containerFetch = async () => new Response(JSON.stringify(health('new-source')));
+  registry.containerFetch = async () => new Response(JSON.stringify(health(OLD)));
   assert.equal((await registry.fetch(new Request('https://container.internal/probe'))).status, 200);
-  const body = await (await registry.fetch(new Request('https://container.internal/release-ready'))).json();
-  assert.equal(body.source, 'new-source');
+  assert.equal((await ask(OLD)).source, OLD);
+  // Bounded: only the newest few releases are kept.
+  for (let i = 0; i < 12; i += 1) await post(String(i).padStart(12, '0'));
+  assert.ok([...registryValues.keys()].filter((k) => k.startsWith('releaseReady:')).length <= 8);
+});
+
+test('a shard on the new Worker recycles even when the registry runs the old one', async () => {
+  const { shard, registry } = lane('ValmeraMcp', NEW);
+  registry.env = { ...registry.env, SOURCE_VERSION: OLD };
+  await registry.fetch(new Request('https://container.internal/release-ready', {
+    method: 'POST', body: JSON.stringify({ source: NEW }) }));
+  const { adapter } = shard();
+  let image = OLD;
+  adapter.startAndWaitForPorts = async () => {};
+  adapter.destroy = async () => { image = NEW; };
+  const served = [];
+  adapter.containerFetch = async (url) => {
+    if (String(url).endsWith('/health')) return new Response(JSON.stringify(health(image)));
+    served.push(image);
+    return new Response(JSON.stringify({ result: { text: 'ok' }, job_completed: true }));
+  };
+  assert.equal((await execute(adapter)).status, 200);
+  assert.deepEqual(served, [NEW]);
 });
 
 test('a draining container names its state in the readiness refusal', async () => {
@@ -254,7 +284,7 @@ test('a draining container names its state in the readiness refusal', async () =
   const { adapter } = shard();
   adapter.startAndWaitForPorts = async () => {};
   adapter.destroy = async () => {};
-  adapter.containerFetch = async () => new Response(JSON.stringify(health('new-source', 'draining')));
+  adapter.containerFetch = async () => new Response(JSON.stringify(health(NEW, 'draining')));
   const response = await execute(adapter);
   assert.equal(response.status, 503);
   const body = await response.json();

@@ -121,6 +121,8 @@ const SYNCHRONOUS_TYPES = new Set([
 // The dark ValmeraVision lane runs sidecar analysis only.
 const VISION_TYPES = new Set(["sidecar"]);
 const CALL_ID = /^[a-zA-Z0-9_-]{8,96}$/;
+// A release's source fingerprint (worker/version.py code_version).
+const RELEASE_ID = /^[0-9a-f]{12}$/;
 const LAUNCH_ID = /^[a-zA-Z0-9_-]{8,64}$/;
 // What the Containers runtime and SDK say when no container could be
 // started for a Durable Object. Nothing ran; the dispatcher may start the
@@ -532,7 +534,7 @@ abstract class ValmeraContainer extends Container<Env> {
       && body.code_version !== expected;
   }
 
-  private registryFetch(init?: RequestInit): Promise<Response> | null {
+  private registryFetch(source: string, init?: RequestInit): Promise<Response> | null {
     const lane = this.registryLane;
     if (!lane) return null;
     const namespaces = {
@@ -541,8 +543,8 @@ abstract class ValmeraContainer extends Container<Env> {
     };
     const namespace = namespaces[lane];
     if (!namespace) return null;
-    return namespace.getByName(`${lane}-deployment-probe`)
-      .fetch("https://container.internal/release-ready", init);
+    return namespace.getByName(`${lane}-deployment-probe`).fetch(
+      `https://container.internal/release-ready?source=${encodeURIComponent(source)}`, init);
   }
 
   private async releaseStartable(): Promise<boolean> {
@@ -559,7 +561,7 @@ abstract class ValmeraContainer extends Container<Env> {
     }
     let ready = false;
     try {
-      const pending = this.registryFetch();
+      const pending = this.registryFetch(expected);
       if (pending) {
         const response = await pending;
         const body = (await response.json()) as JsonObject;
@@ -578,7 +580,7 @@ abstract class ValmeraContainer extends Container<Env> {
     this.reportedSource = expected;
     let pending: Promise<Response> | null = null;
     try {
-      pending = this.registryFetch({
+      pending = this.registryFetch(expected, {
         method: "POST", headers: { "content-type": "application/json" },
         body: JSON.stringify({ source: expected }),
       });
@@ -589,13 +591,21 @@ abstract class ValmeraContainer extends Container<Env> {
   }
 
   private async recordRelease(source: unknown): Promise<boolean> {
-    // Registry side (the lane's probe Durable Object): only this Worker's
-    // own release can be recorded, so a stale caller cannot regress it.
-    const expected = this.expectedSource();
-    if (expected === "unknown" || source !== expected) return false;
-    const current = await this.ctx.storage.get<{ source: string }>("releaseReady");
-    if (current?.source !== expected) {
-      await this.ctx.storage.put("releaseReady", { source: expected, at: Date.now() });
+    // Registry side (the lane's probe Durable Object). Durable Objects pick
+    // up a new Worker version one by one (16 Oct: render shards ran the old
+    // Worker for eight minutes after another ran the new one), so the
+    // registry may be on another version than its caller: it records each
+    // release under its own key, and a reader asks only about its own.
+    if (typeof source !== "string" || !RELEASE_ID.test(source)) return false;
+    const key = `releaseReady:${source}`;
+    if (!(await this.ctx.storage.get(key))) {
+      await this.ctx.storage.put(key, { source, at: Date.now() });
+      // Keep the newest few releases only.
+      const recorded = await this.ctx.storage.list<{ at: number }>({ prefix: "releaseReady:" });
+      const stale = [...recorded.entries()]
+        .sort(([, a], [, b]) => (b?.at ?? 0) - (a?.at ?? 0))
+        .slice(8).map(([k]) => k);
+      if (stale.length) await this.ctx.storage.delete(stale);
     }
     return true;
   }
@@ -1088,8 +1098,8 @@ abstract class ValmeraContainer extends Container<Env> {
       try { await this.destroy(); }
       catch { /* Idle expiry still reclaims it. */ }
       if (readiness.ok) {
-        // This probe IS the lane's release registry: a fresh container on
-        // this Worker's release proves the release starts on the lane.
+        // This probe IS the lane's release registry: the fresh container's
+        // release is proven to start on the lane.
         try { await this.recordRelease(readiness.body?.code_version); }
         catch { /* The next probe or call records it. */ }
       }
@@ -1105,7 +1115,10 @@ abstract class ValmeraContainer extends Container<Env> {
         const recorded = await this.recordRelease(source);
         return json({ recorded }, recorded ? 200 : 409);
       }
-      const current = await this.ctx.storage.get<{ source: string; at: number }>("releaseReady");
+      const source = url.searchParams.get("source") ?? "";
+      const current = RELEASE_ID.test(source)
+        ? await this.ctx.storage.get<{ source: string; at: number }>(`releaseReady:${source}`)
+        : undefined;
       return json(current ?? {});
     }
     const statusMatch = url.pathname.match(/^\/status\/([^/]+)$/);
