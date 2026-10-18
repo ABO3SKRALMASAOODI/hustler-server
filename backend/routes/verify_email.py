@@ -2,6 +2,7 @@ import os
 import random
 import requests
 import brevo_delivery
+from email_delivery import delivery_tag
 from routes.newsletter_content import verification_email
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -113,7 +114,7 @@ def verify_code():
 # every pending verification code and hijack signups)
 
 # ✅ Utility — the single place a code email is actually sent.
-def send_code_to_email(email, code):
+def send_code_to_email(email, code, *, challenge=None, delivery_aware=False):
     """Send a 6-digit code via Brevo. Returns True on success, False on failure.
 
     On failure it logs the REAL Brevo response (status + body) so an outage is
@@ -133,8 +134,11 @@ def send_code_to_email(email, code):
             "email": os.getenv("FROM_EMAIL", "support@valmera.io")
         },
         "to": [{"email": email}],
-        **verification_email(code),
+        **verification_email(code, minutes=10 if challenge else 5, delivery_aware=delivery_aware),
     }
+    if delivery_aware:
+        reference = challenge
+        payload['tags'] = ['valmera-verification', delivery_tag(reference)]
 
     return brevo_delivery.send_email(
         payload, category="critical", logger=current_app.logger)
