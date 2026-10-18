@@ -29,6 +29,10 @@ def delivery_tag(reference):
     return "verify-" + digest
 
 
+def legacy_reference(email, code):
+    return "legacy:" + email.strip().lower() + ":" + str(code)
+
+
 def provider_delivery(tag, email, created_at):
     """Only the exact tagged recipient's first delivery can extend a code.
 
