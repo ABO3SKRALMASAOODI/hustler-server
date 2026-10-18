@@ -162,7 +162,7 @@ def daily_content(day, templates):
     key = keys[(day - datetime(2026, 10, 18).date()).days % len(keys)]
     template = templates[key]
     cta = "https://valmera.io/studio?" + urlencode({
-        "utm_source": "valmera", "utm_medium": "email", "utm_campaign": f"daily-{day}:{key}",
+        "utm_source": "valmera", "utm_medium": "email", "utm_campaign": f"daily-{day}-{key}",
         "utm_content": CONTENT_VERSION, "utm_term": "kit",
     })
     # Kit's selected template supplies its own unsubscribe, postal address and

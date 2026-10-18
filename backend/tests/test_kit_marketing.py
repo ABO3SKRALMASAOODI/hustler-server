@@ -116,6 +116,10 @@ def test_dubai_midnight_does_not_trigger_the_next_evening_broadcast(cfg, client)
 
 
 def test_daily_content_tracks_return_and_contains_no_personal_tokens():
+    import html
+    import re
+    from urllib.parse import parse_qs, urlsplit
+    from acquisition import clean_touch, channel
     from routes.newsletter_content import DEFAULT_TEMPLATES
     day = datetime(2026, 10, 18).date()
     key, content = m.daily_content(day, DEFAULT_TEMPLATES)
@@ -123,6 +127,15 @@ def test_daily_content_tracks_return_and_contains_no_personal_tokens():
     assert "utm_term=kit" in content["content"]
     assert "AI editing requires a subscription" in content["content"]
     assert "{{CREDITS}}" not in content["content"]
+    # Email links must survive the browser/server attribution label contract.
+    # Punctuation such as ':' silently drops the campaign from that contract.
+    href = next(url for url in re.findall(r'href="([^"]+)"', content["content"])
+                if "utm_term=kit" in url)
+    tags = parse_qs(urlsplit(html.unescape(href)).query)
+    touch = clean_touch({name: tags[f"utm_{name}"][0]
+                         for name in ("source", "medium", "campaign", "content")} | {"at": 1000}, now=1000)
+    assert touch["campaign"] == f"daily-{day}-{key}"
+    assert channel(touch)["channel"] == "email"
 
 
 def test_signature_rejects_tampering_replay_and_missing_secret():
