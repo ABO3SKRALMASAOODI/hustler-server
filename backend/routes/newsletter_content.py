@@ -331,15 +331,17 @@ def plain_text(html):
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
-def verification_email(code):
-    """Keep the requested code prominent; authentication is not an upsell."""
+def verification_email(code, minutes=5, delivery_aware=False):
+    """Small standalone auth mail: no remote images or marketing links."""
     safe_code = escape(str(code))
-    body = (eyebrow("Confirm your email") + h1("Your next step is six digits.")
-            + p("Enter this code in the Valmera tab where you requested it.")
-            + card(f'<p style="margin:0;font:700 36px/1.4 {MONO};letter-spacing:0.12em;color:{WHITE};">{safe_code}</p>')
-            + p("The code expires in 5 minutes. Keep it private; Valmera support will never ask you to share it.")
-            + small("If you didn't request this code, you can ignore this email."))
-    html = wrap_email(body, preheader="Your verification code expires in 5 minutes.")
+    expiry = (f"Use this code within {minutes} minutes of delivery. We allow up to two hours for delayed delivery."
+              if delivery_aware else f"The code expires in {minutes} minutes.")
+    html = ('<!doctype html><html><body style="margin:0;padding:24px;font:16px/1.6 Arial,sans-serif;color:#111;background:#fff">'
+            '<p style="font-weight:700">VALMERA</p><h1 style="font-size:22px">Your verification code</h1>'
+            '<p>Enter this code in the Valmera tab where you requested it.</p>'
+            f'<p style="font:700 36px/1.4 monospace;letter-spacing:0.16em">{safe_code}</p>'
+            f'<p>{expiry}</p><p>Keep it private; Valmera support will never ask you to share it.</p>'
+            '<p>If you did not request this code, you can ignore this account-service email.</p></body></html>')
     return {"subject": "Your Valmera verification code", "htmlContent": html,
             "textContent": plain_text(html)}
 

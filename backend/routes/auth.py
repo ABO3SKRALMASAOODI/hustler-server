@@ -341,7 +341,7 @@ def register():
                 ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, created_at = NOW()
             """, (email, code))
             conn.commit()
-            ok = send_code_to_email(email, code)
+            ok = send_code_to_email(email, code, delivery_aware=True)
             cursor.close(); conn.close()
             if not ok:
                 return jsonify({'error': "We couldn't send your verification email. Please try again in a moment."}), 502
@@ -366,7 +366,7 @@ def register():
         ON CONFLICT (email) DO UPDATE SET code = EXCLUDED.code, created_at = NOW()
     """, (email, code))
     conn.commit()
-    ok = send_code_to_email(email, code)
+    ok = send_code_to_email(email, code, delivery_aware=True)
     cursor.close(); conn.close()
     if not ok:
         return jsonify({'error': "We couldn't send your verification email. Please try again in a moment."}), 502

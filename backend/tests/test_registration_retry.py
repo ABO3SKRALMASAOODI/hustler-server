@@ -18,7 +18,7 @@ from routes import auth, verify_email
 class Cursor:
     def __init__(self, db): self.cur = db.cursor()
     def execute(self, sql, params=()):
-        self.cur.execute(sql.replace('%s', '?'), params)
+        self.cur.execute(sql.replace('%s', '?').replace(' FOR UPDATE', ''), params)
     def fetchone(self):
         row = self.cur.fetchone()
         if row is None: return None
@@ -34,6 +34,7 @@ class Connection:
     def __init__(self, db): self.db = db
     def cursor(self): return Cursor(self.db)
     def commit(self): self.db.commit()
+    def rollback(self): self.db.rollback()
     def close(self): pass
 
 
@@ -48,14 +49,18 @@ def signup(monkeypatch):
         is_verified INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
         auth_provider TEXT, credits_daily NUMERIC, credits_bonus NUMERIC,
         credits_monthly NUMERIC, credits_balance NUMERIC);
+      CREATE TABLE email_signin_challenges (
+        id TEXT PRIMARY KEY, email TEXT, code_hash TEXT, created_at TEXT, expires_at TEXT,
+        sent BOOLEAN, attempts INTEGER DEFAULT 0, consumed BOOLEAN DEFAULT FALSE);
       CREATE TABLE email_codes (
         email TEXT PRIMARY KEY, code TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP);
     ''')
     for module in (auth, verify_email):
         monkeypatch.setattr(module, 'get_db', lambda: Connection(db))
     sent = []
-    monkeypatch.setattr(auth, 'send_code_to_email', lambda email, code: sent.append((email, code)) or True)
+    monkeypatch.setattr(auth, 'send_code_to_email', lambda email, code, **kwargs: sent.append((email, code)) or True)
     app = Flask(__name__)
+    app.config['SECRET_KEY'] = 'legacy-test-secret-not-production-0000'
     app.register_blueprint(auth.auth_bp, url_prefix='/auth')
     app.register_blueprint(verify_email.verify_bp, url_prefix='/verify')
     yield app.test_client(), db, sent
@@ -100,11 +105,11 @@ def test_verified_account_is_never_overwritten(signup):
 
 def test_delivery_failure_is_visible_and_retry_recovers(signup,monkeypatch):
     client,db,sent=signup
-    monkeypatch.setattr(auth,'send_code_to_email',lambda *_:False)
+    monkeypatch.setattr(auth,'send_code_to_email',lambda *_, **kwargs:False)
     data={'email':'delivery@example.com','password':'test-password'}
     assert client.post('/auth/register',json=data).status_code == 502
     account_id=db.execute('SELECT id FROM users').fetchone()[0]
-    monkeypatch.setattr(auth,'send_code_to_email',lambda email,code:sent.append((email,code)) or True)
+    monkeypatch.setattr(auth,'send_code_to_email',lambda email,code,**kwargs:sent.append((email,code)) or True)
     assert client.post('/auth/register',json=data).status_code == 200
     assert db.execute('SELECT id FROM users').fetchone()[0] == account_id
     assert client.post('/verify/verify-code',json={'email':data['email'],'code':sent[-1][1]}).status_code == 200
@@ -125,3 +130,37 @@ def test_signup_is_attributed_only_after_verification(signup, monkeypatch):
     assert good.status_code==200 and len(events)==1 and events[0][1]==ids
     client.post('/verify/verify-code',json={'email':email,'code':sent[-1][1],'analytics':ids})
     assert len(events)==1
+
+
+def test_password_signup_accepts_74_minute_delayed_email_once(signup, monkeypatch):
+    client, db, sent = signup
+    email = 'delayed@icloud.com'
+    client.post('/auth/register', json={'email': email, 'password': 'local-test-password'})
+    created = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=75)
+    db.execute('UPDATE email_codes SET created_at=? WHERE email=?', (created.isoformat(), email)); db.commit()
+    monkeypatch.setattr('email_delivery.provider_delivery', lambda *args: {'state': 'delivered', 'delivered_at': created+datetime.timedelta(minutes=74)})
+    response = client.post('/verify/verify-code', json={'email': email, 'code': sent[-1][1]})
+    assert response.status_code == 200
+    assert client.post('/verify/verify-code', json={'email': email, 'code': sent[-1][1]}).status_code == 400
+
+
+def test_password_signup_five_wrong_attempts_block_even_the_correct_code(signup):
+    client, db, sent = signup
+    email = 'attempts@icloud.com'
+    client.post('/auth/register', json={'email': email, 'password': 'local-test-password'})
+    for _ in range(5):
+        assert client.post('/verify/verify-code', json={'email': email, 'code': 'wrong'}).status_code == 400
+    response = client.post('/verify/verify-code', json={'email': email, 'code': sent[-1][1]})
+    assert response.status_code == 400 and 'Too many attempts' in response.json['error']
+    assert db.execute('SELECT is_verified FROM users WHERE email=?', (email,)).fetchone()[0] == 0
+
+
+def test_password_signup_reporting_failure_keeps_code_retryable(signup, monkeypatch):
+    client, db, sent = signup
+    email = 'retry-delay@icloud.com'
+    client.post('/auth/register', json={'email': email, 'password': 'local-test-password'})
+    created = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=75)
+    db.execute('UPDATE email_codes SET created_at=? WHERE email=?', (created.isoformat(), email)); db.commit()
+    monkeypatch.setattr('email_delivery.provider_delivery', lambda *args: {'state': 'unknown'})
+    assert client.post('/verify/verify-code', json={'email': email, 'code': sent[-1][1]}).status_code == 503
+    assert db.execute('SELECT code FROM email_codes WHERE email=?', (email,)).fetchone()[0] == sent[-1][1]
