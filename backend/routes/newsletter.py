@@ -22,6 +22,7 @@ import jwt
 from flask import Blueprint, request, jsonify, current_app, Response
 
 import brevo_delivery
+import kit_marketing
 from routes.admin import _scope as customer_scope
 from routes.newsletter_content import (
     DEFAULT_TEMPLATES, LIFECYCLE_ORDER, CAMPAIGN_LABELS, DEFAULT_CTA_URL,
@@ -331,6 +332,10 @@ def _send_one(email, subject, html, unsub_url, campaign=None):
     Logs the real Brevo status+body on failure (same honesty discipline as the
     verification-code sender) so an outage is diagnosable, not silent.
     """
+    if kit_marketing.enabled():
+        # Kit broadcasts run through the durable daily scheduler. Never leak
+        # marketing traffic back into verification's Brevo allowance.
+        return False
     payload = {
         "sender": {
             "name": os.getenv("FROM_NAME", "Valmera"),
@@ -608,6 +613,8 @@ def run_daily_tick(force=False, dry_run=False):
             return {"skipped": "locked"}
         try:
             settings = get_settings(conn)
+            if kit_marketing.enabled():
+                return kit_marketing.run(conn, settings, force=force, dry_run=dry_run)
             if not settings.get("master_enabled"):
                 return {"skipped": "disabled"}
             now = datetime.utcnow()
@@ -869,6 +876,8 @@ def write_settings():
 @newsletter_bp.route('/test-send', methods=['POST'])
 @admin_required
 def test_send():
+    if kit_marketing.enabled():
+        return jsonify(error="Preview and test Kit campaigns in the Kit dashboard."), 409
     data = request.get_json(silent=True) or {}
     key = data.get("key")
     if key not in DEFAULT_TEMPLATES:
@@ -950,6 +959,8 @@ def get_subscribers():
 @admin_required
 def send_newsletter():
     """Manual broadcast to a chosen segment (per-recipient, personalized unsub)."""
+    if kit_marketing.enabled():
+        return jsonify(error="Marketing now uses Kit. Create manual broadcasts in the Kit dashboard."), 409
     data = request.get_json(silent=True) or {}
     subject = (data.get('subject') or '').strip()
     html_content = (data.get('htmlContent') or '').strip()
@@ -1069,6 +1080,9 @@ def unsubscribe():
         cur.execute("UPDATE users SET unsubscribed_at=NOW() WHERE lower(email)=lower(%s) AND unsubscribed_at IS NULL", (email,))
         conn.commit()
         cur.close()
+        if kit_marketing.enabled():
+            kit_marketing.suppress_local(conn, email.lower(), None)
+            kit_marketing.unsubscribe_remote(conn, email.lower())
     finally:
         conn.close()
 
@@ -1085,6 +1099,9 @@ def resubscribe():
     token = (request.args.get('t') or '').strip()
     if not email or not token or not hmac.compare_digest(token, _unsub_token(email)):
         return _unsub_page("Invalid link", "This link isn't valid."), 400
+    if kit_marketing.enabled():
+        return _unsub_page("Choose your email preferences",
+                          'Open <a href="https://valmera.io/account">your account</a> to choose whether to receive daily editing tips. Verification and billing emails remain active.')
     conn = get_db()
     try:
         ensure_newsletter_schema(conn)
