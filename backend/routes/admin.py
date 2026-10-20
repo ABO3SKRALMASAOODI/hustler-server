@@ -1301,9 +1301,13 @@ def list_users():
                         AS total_credits_used,
                     pay.first_paid_at, pay.last_paid_at, pay.payments,
                     COALESCE(pay.cents, 0) AS paid_cents,
+                    -- Group within this user's indexed rows. An ungrouped
+                    -- MAX can make PostgreSQL walk the global created_at
+                    -- index backwards for every inactive/new customer.
                     GREATEST(u.last_seen_at,
                              (SELECT MAX(vj.created_at) FROM video_jobs vj
-                               WHERE vj.user_id = u.id)) AS last_active
+                               WHERE vj.user_id = u.id
+                               GROUP BY vj.user_id)) AS last_active
                 FROM b u
                 LEFT JOIN LATERAL (
                     SELECT MIN(COALESCE(p.occurred_at, p.created_at)) AS first_paid_at,
