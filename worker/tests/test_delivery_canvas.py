@@ -56,9 +56,13 @@ def test_real_archival_final_rasterizes_captions_and_branding_at_hd(tmp_path):
     info = renderer.media.probe(str(output))
     assert (info["width"], info["height"]) == (1080, 1920)
     assert 5.9 <= info["duration"] <= 6.2  # full five-second branding preserved
-    for name in ("captions.ass", "watermark.ass"):
-        ass = (tmp_path / name).read_text()
-        assert "PlayResX: 1080" in ass and "PlayResY: 1920" in ass
+    ass = (tmp_path / "captions.ass").read_text()
+    assert "PlayResX: 1080" in ass and "PlayResY: 1920" in ass
+    # the corner mark (v6) is drawn as one image at the delivery height
+    import brandmark
+    from PIL import Image
+    mark = Image.open(tmp_path / f"valmera_mark_v{brandmark.DESIGN}_1920.png")
+    assert list(mark.size) == renderer.watermark_geometry(1080, 1920)["image"][2:]
     # Decode a real frame. This also catches missing/late composition output.
     raw = subprocess.check_output(["ffmpeg", "-v", "error", "-ss", "0.5", "-i",
                                    str(output), "-frames:v", "1", "-f", "rawvideo",
