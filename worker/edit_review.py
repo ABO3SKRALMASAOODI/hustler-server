@@ -39,8 +39,9 @@ showcase shorts, and every one of them is visible in the EDL plus the index:
   than the captions, and never a live caption stacked under it (Thiel's
   3%-high hook caps with '1960s technology' fading in beneath them).
 - PAYOFF. The punchline needs air before the end card (0.8-1.5 s after the
-  last word: the source's own tail, else a held frame over room tone —
-  add_freeze_frame audio_mode='hold'; a big payoff number ~2 s on screen)
+  last word on LIVE footage: the source's own tail — never a freeze-frame or
+  a slowed tail before the end card, which reads as the video stalling; a
+  big payoff number ~2 s on screen)
   and its number locked up with its noun ('140 / CHARACTERS').
 - IDENTIFY. 'Lisa:' in script reads as a dialogue label, not Apple's 1983
   computer; a broadcast lower third over a famous face is a second text
@@ -1711,11 +1712,10 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
                     "reaction_button_short", dur - length,
                     (f"The closing reaction lasts {length:.2f}s — too short to "
                      "read as a reaction before the end card."),
-                    ("Give the reaction 1.0-1.5 s (extend the last keep, "
-                     "or hold its last frame over room tone where the "
-                     "source runs into dialogue: add_freeze_frame "
-                     "audio_mode='hold'), framed like that speaker's earlier "
-                     "shot, or end on the line instead."),
+                    ("Give the reaction 1.0-1.5 s of live footage (extend "
+                     "the last keep), framed like that speaker's earlier "
+                     "shot, or end on the line instead — never a "
+                     "freeze-frame before the end card."),
                     {"seconds": round(length, 2)}))
     if payoff is not None and dur > 0:
         notes += _payoff_number_hold(payoff, dur)
@@ -1768,8 +1768,7 @@ def _payoff_number_hold(payoff, dur):
          f"{PAYOFF_NUMBER_HOLD_S:g} s to land."),
         (f"Hold it about {PAYOFF_NUMBER_HOLD_S:g} s: keep it landing on its word "
          "and extend the last keep into the speaker's tail (restore_range), or "
-         "hold the closing frame under it before the end card (add_freeze_frame "
-         "audio_mode='hold')."),
+         "land it earlier — never a held frame before the end card."),
         {"id": payoff["id"], "held_s": round(held, 2)})]
 
 

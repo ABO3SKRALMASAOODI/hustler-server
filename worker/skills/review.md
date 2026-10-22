@@ -117,7 +117,8 @@ SCREEN IN THIS ORDER — each item is a yes/no question:
    scene obviously rawer than the rest.
 9. THE END: the payoff is the largest accented lockup (a number with its
    noun), held 0.8–1.5 s after the last word before the end card (the
-   natural tail, else add_freeze_frame audio_mode='hold'; a big number
+   natural tail on LIVE footage, never a freeze-frame or a slowed tail
+   before the end card; a big number
    ~2 s on screen), a
    reaction button 1.0–1.5 s or none, a requested CTA after it (not over
    it), last beat lands clean for the loop.

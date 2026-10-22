@@ -779,7 +779,13 @@ def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
         assert "strongest line or statistic" in text
         assert "generic question" in text
         assert "earn" in text and "its place" in text
-        assert "0.8-1.5 s" in text and "0.6-1.5 s" not in text
+        assert "0.6-1.5 s" not in text
+        # the payoff holds on LIVE footage: no guidance prescribes a freeze
+        # before the end card (owner, 22 Oct 2026). The worker side keeps
+        # its 0.8-1.5 s; the podcast plugin states its own live-tail range.
+        assert "never a freeze" in text.lower()
+        if text is not plugin["SKILL.md"]:
+            assert "0.8-1.5 s" in text
         # beat coverage, the budget's other half (round 5 judging)
         assert "list_build" in text and "6-8 s" in text
     for text in (sfd, looks):

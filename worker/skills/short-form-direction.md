@@ -226,8 +226,9 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    its number and noun together ("140 / CHARACTERS"), rhyming with an
    earlier setup device where one exists. Hold it after the last spoken
    word before the end card — about 0.8–1.5 s, and about 2 s on screen for a
-   big payoff number (never cut on the last syllable; the natural tail, else
-   add_freeze_frame audio_mode='hold' over room tone), with a type
+   big payoff number (never cut on the last syllable; the natural tail on
+   LIVE footage, never a freeze-frame or a slowed tail before the end
+   card), with a type
    accent (scale, colour; the one impact or the music's button only when
    the landing earns it) and land so the reel loops. A reaction button
    gets 1.0–1.5 s, framed like that speaker's earlier shot, or is left

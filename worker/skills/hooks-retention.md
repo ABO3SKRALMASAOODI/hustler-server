@@ -139,8 +139,8 @@ noun together ("140 / CHARACTERS", never a bare 140), face-safe. Where the
 story set up a device earlier, rhyme with it (a 1960s-vs-TODAY split pays
 off as FLYING CARS vs 140 CHARACTERS). Hold 0.8–1.5 s after the last word
 (a big payoff number about 2 s on screen) before the end card instead of
-cutting away on the last syllable (the source's natural tail, else a held
-frame over room tone: add_freeze_frame audio_mode='hold'); a sound
+cutting away on the last syllable (the source's natural tail, on LIVE
+footage: never a freeze-frame or a slowed tail before the end card); a sound
 or a camera move joins only when the landing clearly earns one, and a
 reaction button gets 1.0–1.5 s or is left out.
 
