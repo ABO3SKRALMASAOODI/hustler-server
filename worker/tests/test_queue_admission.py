@@ -93,6 +93,13 @@ def test_parallel_claims_cannot_exhaust_pool_for_one_account(queue_db):
     with ThreadPoolExecutor(max_workers=12) as pool:
         for _ in range(8):
             list(pool.map(claim, range(12)))
+    # A fixed number of concurrent polls does not promise saturation:
+    # advisory-lock losers deliberately yield without claiming. Finish with
+    # uncontended polls, then retain the exact fleet/share/untouched-attempt
+    # assertions below. Any parallel over-admission remains visible here.
+    for _ in range(31):
+        if claim(None) is None:
+            break
     # The share is work-conserving (Oct 2026): it binds while another
     # account waits; once account 2 runs, account 1 grows to the fleet less
     # the reserve (queue_admission.lone_account_limit: 18 of 20).
