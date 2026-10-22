@@ -17543,12 +17543,95 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
     return box, rect, fit, "; ".join(bits), track, follows
 
 
-def set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
-                     border=.001, border_color="#444444", background=None,
-                     shadow=.35, entrance="lift", exit="fade", duration_s=.45,
-                     motion_motif=None, background_style=None,
-                     background_color2=None, background_dim=None, grain=None,
-                     vignette=None, source=None, panels=None, follow=True):
+_CARD_UNSET = object()
+_CARD_DEFAULTS = dict(
+    box=None, fit=None, radius=.045, border=.001, border_color="#444444",
+    background=None, shadow=.35, entrance="lift", exit="fade",
+    duration_s=.45, motion_motif=None, background_style=None,
+    background_color2=None, background_dim=None, grain=None, vignette=None,
+    source=None, panels=None, follow=True)
+# What a card keeps from its current row when a call for the same id does not
+# name it (Oct 22 Kamath run, gk 3798 job 89132: set_picture_card(id, start,
+# end) to re-key the last card reset its rect, entrance and exit to the
+# defaults). The motion keys one by one; the canvas as one choice (a colour
+# named alone is a flat canvas, a style named alone takes its own knobs); the
+# geometry and framing only when the call names none of them.
+_CARD_MOTION = ("radius", "border", "border_color", "shadow", "entrance",
+                "exit", "duration_s", "motion_motif")
+_CARD_CANVAS = ("background", "background_style", "background_color2",
+                "background_dim", "grain", "vignette")
+_CARD_FRAMING = ("box", "fit", "source", "panels", "follow")
+
+
+def set_picture_card(ctx, id, start, end, box=_CARD_UNSET, fit=_CARD_UNSET,
+                     radius=_CARD_UNSET, border=_CARD_UNSET,
+                     border_color=_CARD_UNSET, background=_CARD_UNSET,
+                     shadow=_CARD_UNSET, entrance=_CARD_UNSET,
+                     exit=_CARD_UNSET, duration_s=_CARD_UNSET,
+                     motion_motif=_CARD_UNSET, background_style=_CARD_UNSET,
+                     background_color2=_CARD_UNSET, background_dim=_CARD_UNSET,
+                     grain=_CARD_UNSET, vignette=_CARD_UNSET,
+                     source=_CARD_UNSET, panels=_CARD_UNSET,
+                     follow=_CARD_UNSET):
+    """Create one footage card, or change the card with this id: what the
+    call leaves out keeps the current card's value (entrance/exit and the
+    other motion keys one by one, the canvas as one choice, the box, fit
+    and framing when none of them is named), so id/start/end alone re-times
+    it. A null counts as left out."""
+    given = {k: v for k, v in dict(
+        box=box, fit=fit, radius=radius, border=border,
+        border_color=border_color, background=background, shadow=shadow,
+        entrance=entrance, exit=exit, duration_s=duration_s,
+        motion_motif=motion_motif, background_style=background_style,
+        background_color2=background_color2, background_dim=background_dim,
+        grain=grain, vignette=vignette, source=source, panels=panels,
+        follow=follow).items() if v is not _CARD_UNSET and v is not None}
+    current = next((c for c in ((ctx.latest_edl()["json"].get("effects") or {})
+                                .get("picture_cards") or [])
+                    if isinstance(c, dict) and c.get("id") == id), None)
+    args, kept = dict(_CARD_DEFAULTS), []
+
+    def keep(keys):
+        for key in keys:
+            if current.get(key) is not None:
+                args[key] = current[key]
+                kept.append(key)
+    if current:
+        keep([k for k in _CARD_MOTION if k not in given])
+        if not any(k in given for k in _CARD_CANVAS):
+            keep(_CARD_CANVAS)
+        if not any(k in given for k in _CARD_FRAMING):
+            keep(("box", "fit"))
+            if current.get("panels"):
+                # an 'auto' panel (it follows the speaker) is framed again
+                # for the new window; a fixed one keeps its rect
+                args["panels"] = [
+                    {"box": p.get("box"),
+                     "source": ("auto" if p.get("follow") or p.get("conceal")
+                                else p.get("source") or "auto")}
+                    for p in current["panels"] if isinstance(p, dict)]
+                kept.append("panels")
+            elif current.get("source_track") or current.get("follow"):
+                args["source"] = "auto"          # framed per shot again
+            elif current.get("source"):
+                args["source"] = list(current["source"])
+                args["follow"] = False
+                kept.append("source rect")
+    args.update(given)
+    out = _set_picture_card(ctx, id, start, end, **args)
+    if kept and isinstance(out, str) and out.startswith("EDL v"):
+        out += ("\nKEPT from the current card: " + ", ".join(kept)
+                + " (name any of them to change it; source='auto' frames "
+                  "the speaker again).")
+    return out
+
+
+def _set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
+                      border=.001, border_color="#444444", background=None,
+                      shadow=.35, entrance="lift", exit="fade", duration_s=.45,
+                      motion_motif=None, background_style=None,
+                      background_color2=None, background_dim=None, grain=None,
+                      vignette=None, source=None, panels=None, follow=True):
     """Create/replace one native footage-only composition in one revision.
     follow (default on): an 'auto' card follows a speaker who moves inside
     a shot (_card_follow); False keeps one still framing per shot."""
@@ -22550,15 +22633,36 @@ def _stored_render_report(ctx, row):
     version = row["version"]
     asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
                        version)
-    stale = ""
+    stale, lead, asset_current = "", "", bool(asset)
     if not asset:
         asset = ctx.db.run(dbx.latest_render, ctx.project_id, "preview")
         if not asset:
             return ("PREREQUISITE: no complete preview exists to report on — "
                     "call render_preview(complete=true) first.")
         old = (asset.get("meta") or {}).get("edl_version")
-        stale = (f" STALE: the edit is now at v{version}; this is the report "
-                 f"of v{old}, and nothing changed since is in it.")
+        # Said first, with the call that answers it: a studio agent (project
+        # 2592, 22 Oct) asked report=true ten times over v18-v21, read v8's
+        # stale -29.6 LUFS each time, re-ran set_master_loudness against a
+        # master already on, and the turn ended "no longer making progress".
+        lead = (f"STALE REPORT — EDL v{version} has no complete preview yet. "
+                "report=true only reads a stored report and never renders: "
+                f"call render_preview(complete=true) to render v{version} and "
+                f"read its own report. Below is v{old}'s; what changed since "
+                f"v{old} is not in it, and a finding below may already be "
+                "fixed.")
+        seen = getattr(ctx, "_stale_reports", None)
+        if seen is None:
+            seen = set()
+            try:
+                ctx._stale_reports = seen
+            except Exception:  # noqa: BLE001
+                pass
+        if (version, old) in seen:
+            return ("PREREQUISITE: " + lead.split(" — ", 1)[1].split(
+                " Below is", 1)[0] + f" (v{old}'s report was already "
+                "returned; it has not changed.)")
+        seen.add((version, old))
+        stale = ""
     meta = asset.get("meta") or {}
     result = {}
     try:
@@ -22571,10 +22675,11 @@ def _stored_render_report(ctx, row):
     pq = result.get("picture_qc") or meta.get("picture_qc") or {}
     aq = result.get("audio_qc") or meta.get("audio_qc") or {}
     rv = meta.get("edl_version")
-    lines = [f"RENDER REPORT (read-only: nothing was rendered or enqueued) — "
-             f"complete preview of EDL v{rv}: asset {asset.get('id')}, "
-             f"{meta.get('quality', 'draft')}, {asset.get('duration_s')}s."
-             + stale]
+    lines = ([lead] if not asset_current else []) + [
+        f"RENDER REPORT (read-only: nothing was rendered or enqueued) — "
+        f"complete preview of EDL v{rv}: asset {asset.get('id')}, "
+        f"{meta.get('quality', 'draft')}, {asset.get('duration_s')}s."
+        + stale]
     pqf = pq.get("findings") or []
     if pqf:
         lines.append("PICTURE CHECK (measured on the rendered frames): "
@@ -25164,7 +25269,65 @@ def _normalize_tool_call(name, args):
         if not error and not any(isinstance(v, list) and v for v in (parsed or {}).values()):
             args.pop("motion_motif", None)
             notes.append("static motion_motif dropped")
+    _argument_aliases(name, args, notes)
     return name, args, notes
+
+
+def _json_text(value):
+    """A list/object a client sent as JSON text, parsed; else the value."""
+    if isinstance(value, str) and value.strip()[:1] in "[{":
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+# One-to-one argument spellings the owner's Codex and Claude editors sent and
+# paid a refusal for (production, 21-22 Oct: remove_typeset(id) twice,
+# look_at(native), apply_look(look), set_caption_fixes(fixes) as JSON text,
+# justify_verification_findings(justifications) with a reason per finding).
+_ARG_ALIASES = {
+    "look_at": {"native": "native_resolution"},
+    "look_at_asset": {"native": "native_resolution"},
+    "apply_look": {"look": "name"},
+    "set_caption_fixes": {"fixes": "replacements",
+                          "corrections": "replacements"},
+}
+
+
+def _argument_aliases(name, args, notes):
+    for alias, real in (_ARG_ALIASES.get(name) or {}).items():
+        if alias in args and real not in args:
+            args[real] = _json_text(args.pop(alias))
+            notes.append(f"{alias} -> {real}")
+    if name == "set_caption_fixes" and isinstance(args.get("replacements"),
+                                                  str):
+        args["replacements"] = _json_text(args["replacements"])
+    if name == "remove_typeset" and "ids" not in args and "id" in args:
+        one = args.pop("id")
+        args["ids"] = one if isinstance(one, list) else [one]
+        notes.append("id -> ids")
+    if name == "justify_verification_findings" and \
+            "justifications" in args and "finding_ids" not in args:
+        rows = _json_text(args.pop("justifications"))
+        rows = rows if isinstance(rows, list) else [rows]
+        ids, why = [], []
+        for row in rows:
+            if isinstance(row, dict):
+                fid = row.get("finding_id") or row.get("id") or row.get("code")
+                reason = (row.get("justification") or row.get("reason")
+                          or row.get("why") or "")
+                if fid:
+                    ids.append(str(fid))
+                    if reason:
+                        why.append(f"{fid}: {reason}")
+            elif isinstance(row, str):
+                ids.append(row)
+        args["finding_ids"] = ids
+        if "justification" not in args:
+            args["justification"] = " | ".join(why)
+        notes.append("justifications -> finding_ids + justification")
 
 
 class _RecipeContext:
@@ -29914,7 +30077,9 @@ TOOLS = {
     "set_picture_card": (
         set_picture_card,
         "Compose FOOTAGE ONLY as a rounded picture card during start/end program seconds. "
-        "Captions, designed type and branding stay independent and sharp. Stable id replaces the card. "
+        "Captions, designed type and branding stay independent and sharp. Calling it again with an existing id "
+        "changes that card: every argument you leave out keeps the card's current value (box, fit, entrance/exit, "
+        "canvas, framing), so id/start/end alone re-times it; source='auto' frames the speaker again. "
         "box=[left,top,right,bottom] on the output canvas; radius 0-.25 of card short side; "
         "border 0-.015 of canvas short side. entrance/exit none, fade, lift (restrained settle), "
         "or reveal (picture opens/closes inside its rounded window): an animated end DISSOLVES "

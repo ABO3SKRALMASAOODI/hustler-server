@@ -801,6 +801,9 @@ def _cut_step_lost(z, ns, ne, old_tl, new_tl):
 # with the backend, which does not load the motion registry; a test keeps
 # the two in step.
 PINNED_MOTION_TEMPLATES = ("headline",)
+# An item ending this close to the programme's end ran to the end (a payoff,
+# the last card): after a re-cut it still ends on the new end.
+RUNS_TO_END_S = 0.05
 
 
 def remap_program_items(edl, old_tl, new_tl):
@@ -916,6 +919,30 @@ def remap_program_items(edl, old_tl, new_tl):
                     return nw[0] + (min(max(clip_t, c0), c1) - c0) / r_new
             return None
         raise _CannotReason()
+
+    def _follow_span(s0, e0, old_prog):
+        """(new start, new end) of a program span whose two ends follow
+        their own content (footage through the source, a spliced scene
+        through its window); an end at the old programme's end lands on
+        the new end. "gone" when its footage left the edit; None when an
+        end cannot be attributed (the caller keeps its program time)."""
+        e0m = min(e0, old_prog)
+        moved = remap_program_span(old_tl, new_tl, s0, e0m)
+        if moved is None:
+            try:
+                a, b = _map_point(s0), _map_point(e0m)
+            except _CannotReason:
+                return None
+            if a is None and b is None:
+                return "gone"
+            if a is None or b is None or b - a < 1e-3:
+                return None
+            moved = (round(a, 2), round(b, 2))
+        if e0 >= old_prog - RUNS_TO_END_S:
+            moved = (moved[0], prog)
+        if moved[1] - moved[0] < 1e-3:
+            return "gone"
+        return moved
 
     def _remap_path_zoom(z):
         """Round 77. A travelling zoom's KEYFRAMES are program-time points
@@ -1324,16 +1351,57 @@ def remap_program_items(edl, old_tl, new_tl):
             fx_changed = True
     if fx.get("picture_cards"):
         cards = []
+        old_prog = round(old_tl.out_duration, 2)
         for card in fx["picture_cards"]:
             card = dict(card)
-            # Like text and overlays, this is a composition of the program,
-            # not an independently chosen source shot.
+            s0, e0 = float(card["start"]), float(card["end"])
+            # A card fed from the source (a rect, panels or a per-shot
+            # source_track in SOURCE seconds) is framed on the shots under
+            # it: it follows that footage through an earlier cut, like a
+            # zoom. Left in program time, every card after a trimmed span
+            # opened on the previous shot's framing (Oct 22 Kamath run:
+            # br1 3801 v30 -> v31, a 0.41 s trim left c_d, c_f and c_g
+            # 0.41 s late on their shots; editors re-keyed cards by hand).
+            # A card of the composed program stays a span of the edit.
+            if card.get("source") or card.get("panels") or \
+                    card.get("source_track"):
+                moved = _follow_span(s0, e0, old_prog)
+                if moved == "gone":
+                    region_notes.append(
+                        f"note: picture card {card['id']} was removed — the "
+                        "footage it was framed on is no longer in the edit.")
+                    continue
+                if moved is not None and moved != (s0, e0):
+                    card["start"], card["end"] = moved
+                    if card.get("full_duration_s") is not None:
+                        card["end"] = min(
+                            card["end"], round(card["start"] + float(
+                                card["full_duration_s"])
+                                - float(card.get("phase_s") or 0.0), 2))
+                    region_notes.append(
+                        f"note: picture card {card['id']} moved to "
+                        f"{card['start']:g}-{card['end']:g}s with its footage.")
             end = min(card["end"], prog)
             if end-card["start"] < MIN_SPAN_S:
                 region_notes.append(f"note: picture card {card['id']} removed outside the shortened edit.")
                 continue
             card["end"] = end
             cards.append(card)
+        cards.sort(key=lambda c: float(c["start"]))
+        for k in range(len(cards) - 1, 0, -1):
+            a, b = cards[k - 1], cards[k]
+            if float(b["start"]) < float(a["end"]) - .001:
+                # a program-anchored card a moved neighbour now overlaps
+                if float(b["start"]) - float(a["start"]) >= MIN_SPAN_S:
+                    a["end"] = b["start"]
+                    region_notes.append(
+                        f"note: picture card {a['id']} now ends at "
+                        f"{a['end']:g}s, where {b['id']} starts.")
+                else:
+                    region_notes.append(
+                        f"note: picture card {a['id']} was removed — "
+                        f"{b['id']} now covers its window.")
+                    cards.pop(k - 1)
         if cards != fx["picture_cards"]:
             fx["picture_cards"] = cards or None
             fx_changed = True
@@ -1784,8 +1852,11 @@ def remap_program_items(edl, old_tl, new_tl):
                     mo["start"], mo["end"] = 0.0, prog
                 kept_mo.append(mo)
                 continue
+            # an end a hair past the old programme end (rounding) still
+            # ran to the end: read it at the end
+            e0m = min(e0, old_prog)
             on_footage = (old_tl.out_to_src(s0) is not None
-                          and old_tl.out_to_src(e0) is not None)
+                          and old_tl.out_to_src(e0m) is not None)
             behind = (mo.get("behind")
                       if mo.get("layer") == "behind_subject" else None)
             if behind:
@@ -1835,13 +1906,15 @@ def remap_program_items(edl, old_tl, new_tl):
                 kept_mo.append(mo)
                 continue
             if on_footage:
-                moved = remap_program_span(old_tl, new_tl, s0, e0)
+                moved = remap_program_span(old_tl, new_tl, s0, e0m)
                 if moved is None or moved[1] - moved[0] < 0.3:
                     region_notes.append(
                         f"note: motion graphic {mo.get('id')} "
                         f"({mo.get('template')}) was removed — the moment it "
                         "was cued to is no longer in the edit.")
                     continue
+                if e0 >= old_prog - RUNS_TO_END_S:
+                    moved = (moved[0], prog)     # it ran to the end: still does
                 if (moved[0], moved[1]) != (s0, e0):
                     mo["start"], mo["end"] = moved
                     region_notes.append(
@@ -1851,6 +1924,18 @@ def remap_program_items(edl, old_tl, new_tl):
                 d = _insert_shift(s0, e0)
                 if d:
                     mo["start"], mo["end"] = round(s0 + d, 2), round(e0 + d, 2)
+                else:
+                    # It starts on footage and ends on a spliced insert (a
+                    # payoff held over the closing still, br1 3801 v30 -> v31:
+                    # a 0.41 s trim left it 0.41 s late on its word): each
+                    # end follows its own content.
+                    moved = _follow_span(s0, e0, old_prog)
+                    if moved not in (None, "gone") and \
+                            moved[1] - moved[0] >= 0.3 and moved != (s0, e0):
+                        mo["start"], mo["end"] = moved
+                        region_notes.append(
+                            f"note: motion graphic {mo.get('id')} moved to "
+                            f"{moved[0]}-{moved[1]}s with its moment.")
             if float(mo["end"]) > prog:
                 if float(mo["start"]) >= prog - 0.3:
                     region_notes.append(

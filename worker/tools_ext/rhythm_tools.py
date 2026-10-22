@@ -206,46 +206,108 @@ def get_syllables(ctx, start, end):
     return head + "\n".join(rows[:60])
 
 
+# The longest program window check_speech reads in one call (a whole short).
+CHECK_SPEECH_MAX_S = 60.0
+
+
+def _kept_pieces(tl, s, e):
+    """[(p0, p1, a, b, f)]: the kept footage under program [s, e] — its
+    program span, its source span and rate — one row per kept piece, so a
+    window across a cut reads each side's own sound."""
+    out = []
+    for pcs, off in zip(tl.pieces, tl.offsets):
+        acc = float(off)
+        for ps, pe, f in pcs:
+            plen = (pe - ps) / f
+            p0, p1 = max(s, acc), min(e, acc + plen)
+            if p1 - p0 > 0.02:
+                out.append((p0, p1, ps + (p0 - acc) * f,
+                            ps + (p1 - acc) * f, f))
+            acc += plen
+    return out
+
+
+def _listen_sources(ctx):
+    src = None
+    hook = getattr(ctx, "cut_sound_source", None)
+    if callable(hook):
+        try:
+            src = hook()
+        except Exception:  # noqa: BLE001
+            src = None
+    if not src:
+        try:
+            src = ctx.proxy_path()
+        except Exception:  # noqa: BLE001
+            src = None
+    return src
+
+
 def check_speech(ctx, start, end):
-    """READ: deterministic listening over [start, end] (program s)."""
+    """READ: deterministic listening over [start, end] (program s). Each
+    kept span under the window is read on its own source sound and reported
+    on the PROGRAM clock (Oct 22 Kamath run: a window across a cut read the
+    whole source range between its ends, cut-away words and fillers
+    included, on a clock that ran off after the first cut)."""
     edl = _latest(ctx)
     try:
         s, e = float(start), float(end)
     except (TypeError, ValueError):
         return "REJECTED: start and end are program seconds."
-    if e - s > 20.0:
-        return "REJECTED: ask for a window of at most 20 s."
+    if e <= s:
+        return "REJECTED: end must be after start (program seconds)."
+    if e - s > CHECK_SPEECH_MAX_S:
+        return (f"REJECTED: ask for a window of at most "
+                f"{CHECK_SPEECH_MAX_S:g} s (a whole short fits).")
     tl = _tl(edl)
-    a = tl.out_to_src(s + 1e-3)
-    b = tl.out_to_src(max(s, e - 1e-3))
-    if a is None or b is None or b <= a:
-        return ("That window is not continuous main footage (an insert or "
-                "a cut inside it): ask for each kept span separately.")
-    got = _source_audio(ctx, a - 0.05, b + 0.05)
-    if got is None:
+    pieces = _kept_pieces(tl, s, e)
+    if not pieces:
+        return ("No main footage plays in that window (a spliced insert or "
+                "past the end): there is no speech of the source to check.")
+    src = _listen_sources(ctx)
+    import cut_audio
+    windows = [(max(0.0, a - 0.05), b + 0.05) for _p0, _p1, a, b, _f in pieces]
+    got = cut_audio.fetch(src, windows, timeout=30.0) if src else {}
+    if not got:
         return ("The source sound cannot be read on this lane; nothing was "
                 "guessed. Try again after the preview renders.")
-    w0, y = got
     import audio_checks
     words = [w for w in (getattr(ctx, "index", None) or {}).get("words") or []
              if isinstance(w, dict) and "t0" in w]
-    rep = audio_checks.listen(y, 16000, words, a, b, clock_offset=w0)
-    shift = s - a
+    heard, extra, floors, clipped, clicks, unread = [], [], [], 0.0, [], []
+    for (p0, p1, a, b, f), win in zip(pieces, windows):
+        y = got.get(win)
+        if y is None:
+            unread.append(f"{p0:.2f}-{p1:.2f}s")
+            continue
+        rep = audio_checks.listen(y, 16000, words, a, b, clock_offset=win[0])
+
+        def prog(t, _p0=p0, _a=a, _f=f):
+            return _p0 + (float(t) - _a) / _f
+        floors.append(rep["floor_db"])
+        heard += [f"{r['w']}@{max(p0, prog(r['t0'])):.2f}"
+                  + ("" if r["audible"] else " (inaudible)")
+                  for r in rep["words"]]
+        extra += [f"UNTRANSCRIBED sound {max(p0, prog(u['t0'])):.2f}-"
+                  f"{min(p1, prog(u['t1'])):.2f}s ({u['db']} dBFS): "
+                  f"{u['guess']}" for u in rep["unexplained"]]
+        clipped += float(rep["clipped_s"] or 0.0)
+        clicks += [prog(c) for c in rep["clicks"]]
+    cuts = [round(p1, 2) for _p0, p1, *_r in pieces[:-1]]
     lines = [f"Measured sound over program {s:.2f}-{e:.2f}s (floor "
-             f"{rep['floor_db']} dBFS):"]
-    heard = [f"{r['w']}@{r['t0'] + shift:.2f}" + ("" if r["audible"]
-                                                   else " (inaudible)")
-             for r in rep["words"]]
+             f"{min(floors) if floors else '?'} dBFS"
+             + (f"; {len(pieces)} kept spans, cut at "
+                + ", ".join(f"{c:g}s" for c in cuts[:8]) if cuts else "")
+             + "; program seconds):"]
     lines.append("transcript words: " + (", ".join(heard) or "none"))
-    for u in rep["unexplained"]:
-        lines.append(f"UNTRANSCRIBED sound {u['t0'] + shift:.2f}-"
-                     f"{u['t1'] + shift:.2f}s ({u['db']} dBFS): {u['guess']}")
-    if rep["clipped_s"] > 0:
-        lines.append(f"CLIPPING: {rep['clipped_s']:.3f}s of full-scale "
-                     "samples")
-    if rep["clicks"]:
-        lines.append("CLICKS at " + ", ".join(
-            f"{c + shift:.2f}s" for c in rep["clicks"][:8]))
+    lines += extra
+    if clipped > 0:
+        lines.append(f"CLIPPING: {clipped:.3f}s of full-scale samples")
+    if clicks:
+        lines.append("CLICKS at " + ", ".join(f"{c:.2f}s" for c in clicks[:8]))
+    if unread:
+        lines.append("NOT READ (the source sound did not decode): "
+                     + ", ".join(unread))
     if len(lines) == 2:
         lines.append("no untranscribed sound, clipping or clicks")
     return "\n".join(lines)
@@ -294,10 +356,11 @@ TOOL_SPECS = {
         {"start": {"type": "number"}, "end": {"type": "number"}}),
     "check_speech": (
         check_speech,
-        "READ: deterministic listening over a program window — audible "
-        "transcript words, untranscribed sound (an 'um', a cut word's tail, "
-        "a breath), clipping, clicks. Measured, never guessed; use it "
-        "before and after a cut.",
+        "READ: deterministic listening over a program window (up to 60 s: "
+        "a whole short) — audible transcript words, untranscribed sound (an "
+        "'um', a cut word's tail, a breath), clipping, clicks, all on the "
+        "program clock; a window across cuts reads each kept span's own "
+        "sound. Measured, never guessed; use it before and after a cut.",
         {"start": {"type": "number"}, "end": {"type": "number"}}),
     "align_lyrics": (
         align_lyrics,

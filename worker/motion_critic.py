@@ -579,21 +579,53 @@ def lens_words(edl, index, plan, program_s, path=None):
         last = float(keep[-1][1])
         w_end = next((w for w in words if float(w["t0"]) + 0.03 < last
                       < float(w["t1"]) - 0.03), None)
+        # The ASR word's end runs 0.1-0.5 s late on many sources: the
+        # render's own sound at the cut decides (Oct 22 Kamath run: lv 3803,
+        # pd 3804 'consciousness', kd 3805 'thoughts.' ended in the pause
+        # after the word, and the offered op cut the payoff word away).
+        t_last = next((float(b["out_end"]) for b in reversed(blocks)
+                       if b.get("kind") == "footage"
+                       and abs(float(b.get("src_end", -1)) - last) < 0.011),
+                      None)
+        if w_end is not None and t_last is not None:
+            lv = _level(db, fs, t_last - JOIN_WIN_S - 0.01, t_last - 0.01)
+            if lv is not None and lv < JOIN_LOUD_DB:
+                w_end = None              # the word has ended: a clean end
         if w_end is not None:
-            cut = round(float(w_end["t0"]) - 0.02, 2)
+            t1 = float(w_end["t1"])
+            nxt = next((w for w in words if float(w["t0"]) >= t1 - 0.01
+                        and w is not w_end), None)
+            prv = [w for w in words if float(w["t1"]) <= float(w_end["t0"])
+                   + 0.01 and w is not w_end]
+            # a word that opens a new sentence is a stray start; one that
+            # carries the sentence on is usually the payoff
+            opens = not prv or bool(re.search(
+                r"[.?!]$", str(prv[-1].get("w") or ""))) or \
+                float(w_end["t0"]) - float(prv[-1]["t1"]) >= 0.4
+            finish = round(t1 + 0.04, 2)
+            new = [list(x) for x in keep]
+            if not opens and (nxt is None
+                              or float(nxt["t0"]) >= finish + 0.06):
+                # finish the word: the line's last word is its payoff
+                new[-1][1] = finish
+                fix = (f"finish the word: end the last span at {finish:.2f}s "
+                       "(its end in the transcript; check the sound) — or "
+                       "before it, if the thought ends earlier")
+            else:
+                new[-1][1] = round(float(w_end["t0"]) - 0.02, 2)
+                fix = (f"end the last span before the word "
+                       f"({new[-1][1]:.2f}s) — or after it, if the thought "
+                       "needs it")
             op = None
-            if cut - float(keep[-1][0]) >= 0.2:
-                new = [list(x) for x in keep]
-                new[-1][1] = cut
+            if new[-1][1] - float(keep[-1][0]) >= 0.2:
                 op = {"action": "set", "layer": "keep", "value": new}
             out.append(_f(
                 "fix", "words", "ends_mid_word",
                 f"the short ends inside '{w_end.get('w')}' (source "
-                f"{float(w_end['t0']):.2f}-{float(w_end['t1']):.2f}s): the "
-                "last thing heard before the end card is a fragment.",
-                fix=f"end the last span before the word ({cut:.2f}s) — or "
-                    "after it, if the thought needs it",
-                t=program_s, op=op))
+                f"{float(w_end['t0']):.2f}-{t1:.2f}s) and the sound is still "
+                "on at the cut: the last thing heard before the end card is "
+                "a fragment.",
+                fix=fix, t=program_s, op=op))
         first = keep[0][0]
         prev = [w for w in words if float(w["t1"]) <= float(first) + 0.02]
         nxt = [w for w in words if float(w["t0"]) >= float(first) - 0.02]
@@ -616,9 +648,11 @@ def lens_words(edl, index, plan, program_s, path=None):
                 "fix", "words", "payoff_hold_short",
                 f"{hold:.2f}s after the last word before the end card "
                 f"(<{PAYOFF_HOLD_S}s): the payoff does not breathe.",
-                fix=f"hold {PAYOFF_HOLD_S - hold + 0.05:.2f}s more on the "
-                    "last frame (extend the final keep into the pause, or a "
-                    "freeze hold)", t=program_s))
+                fix=f"hold {PAYOFF_HOLD_S - hold + 0.05:.2f}s more on LIVE "
+                    "footage: extend the final keep into the pause after the "
+                    "word (the layers that ran to the end follow it); with no "
+                    "live tail, end on the last word — never a freeze-frame "
+                    "or a slowed tail before the end card", t=program_s))
     return out
 
 
@@ -932,12 +966,13 @@ def landing_targets(edl, words, reach_s=1.2):
         if not toks:
             continue
         a = float(m["start"])
-        near = [w for w in words if a - reach_s <= w["t0"] <= a + reach_s]
-        hit = None
-        for w in near:
-            if _tokens(w.get("w"))[:1] == toks[:1]:
-                hit = w
-                break
+        near = [w for w in words if a - reach_s <= w["t0"] <= a + reach_s
+                and _tokens(w.get("w"))[:1] == toks[:1]]
+        # the occurrence nearest the graphic's start, not the first in
+        # reach (Kamath run: x1 3796 and pc 3800 payoff slams were keyed
+        # to an earlier saying of their word)
+        hit = min(near, key=lambda w: abs(float(w["t0"]) - a)) if near \
+            else None
         if hit is not None:
             out.append((m, float(hit["t0"]), hit.get("w")))
     return out
@@ -986,11 +1021,38 @@ def visual_onset(path, info, box, t_expect, *, before=0.4, after=0.9,
     return None
 
 
-def lens_late_words(path, info, edl, plan, budget_s=20.0):
+def _program_cuts(edl, index):
+    """Program seconds where the picture cuts: the timeline's own joins and
+    insert edges, and the indexed camera cuts inside the kept footage."""
+    import timeline as tl_mod
+    try:
+        tl = tl_mod.Timeline((edl or {}).get("keep") or [],
+                             (edl or {}).get("inserts") or [],
+                             (edl or {}).get("speed") or [])
+    except Exception:  # noqa: BLE001
+        return []
+    cuts = set(tl_mod.cut_points(tl))
+    for shot in (index or {}).get("shots") or []:
+        try:
+            t = tl.src_to_out(float(shot["start"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if t is not None and t > 1e-3:
+            cuts.add(round(t, 3))
+    return sorted(cuts)
+
+
+# A change in a graphic's box this close to a picture cut is the footage
+# cutting under it, not the graphic landing.
+CUT_ONSET_FRAMES = 2.5
+
+
+def lens_late_words(path, info, edl, plan, budget_s=20.0, index=None):
     out = []
     fps = float(info.get("fps") or 30.0)
     W, H = info.get("width") or 1080, info.get("height") or 1920
     deadline = time.monotonic() + budget_s
+    cuts = _program_cuts(edl, index)
     for m, t_word, word in landing_targets(edl, plan.get("words") or []):
         if time.monotonic() > deadline:
             break
@@ -1000,22 +1062,31 @@ def lens_late_words(path, info, edl, plan, budget_s=20.0):
         seen = visual_onset(path, info, box, t_word)
         if seen is None:
             continue
+        if any(abs(seen - c) <= CUT_ONSET_FRAMES / fps for c in cuts):
+            continue      # the picture cut under the box (Kamath gk 3798)
         late = int(round((seen - t_word) * fps))
         if late > LATE_FRAMES:
+            start = round(float(m["start"]) - late / fps, 2)
+            op, fix = None, (
+                f"start {m['id']} on the word: move it {late} frames "
+                "earlier (its landing should sit on the onset, a frame "
+                "early at most)")
+            if start >= 0.0:
+                op = {"action": "upsert", "layer": "motion", "id": m["id"],
+                      "value": {"id": m["id"], "start": start,
+                                "end": round(float(m["end"]) - late / fps,
+                                             2)}}
+            else:
+                # it already opens the short (kd 3805: the op asked for a
+                # start at -0.64 s): only a faster entrance lands it sooner
+                fix = (f"{m['id']} already starts at {float(m['start']):g}s, "
+                       "so it cannot move earlier: a faster entrance "
+                       "('cut' or 'slam') lands it on the word")
             out.append(_f(
                 "fix", "motion", "late_word",
                 f"'{word}' is said at {t_word:.2f}s but graphic {m['id']} "
                 f"lands {late} frames later ({seen:.2f}s).",
-                fix=f"start {m['id']} on the word: move it {late} frames "
-                    "earlier (its landing should sit on the onset, a frame "
-                    "early at most)",
-                t=t_word, id=m["id"],
-                op={"action": "upsert", "layer": "motion", "id": m["id"],
-                    "value": {"id": m["id"],
-                              "start": round(float(m["start"]) - late / fps,
-                                             2),
-                              "end": round(float(m["end"]) - late / fps,
-                                           2)}}))
+                fix=fix, t=t_word, id=m["id"], op=op))
     return out
 
 
@@ -1542,7 +1613,7 @@ def critique(path, edl, index=None, *, request_text=None, report=None,
     if deep:
         findings += run("faces", lens_faces, path, edl, info) or []
         findings += run("late_words", lens_late_words, path, info, edl,
-                        plan) or []
+                        plan, index=index) or []
         findings += run("flicker", lens_flicker, path, info, edl) or []
     got = run("range", lens_range, edl, plan, previous)
     ideas = []

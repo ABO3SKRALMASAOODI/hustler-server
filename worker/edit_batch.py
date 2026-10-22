@@ -275,6 +275,39 @@ def _check_new_motion_params(before, edl):
                                           item.get("params") or {}, html=item.get("html"))
         except ValueError as e:
             raise ValueError(f"motion '{item.get('id')}': {e}")
+        if prev is not None and prev.get("params") == item.get("params"):
+            _check_capture_box(item)
+
+
+def _check_capture_box(item):
+    """A motion item's ``box`` is a CAPTURE window: only that part of the
+    composition renders. One that misses where the graphic draws (its
+    measured footprint) renders nothing, and the write said it succeeded
+    (Oct 22 Kamath run, kd 3805 v39: a typeset given box [0.06, 0.86, 0.94,
+    0.97] while it draws at y 0.50-0.80 vanished)."""
+    box = item.get("box")
+    fp = (item.get("footprint") or {}).get("box")
+    try:
+        bx = [float(v) for v in box or []]
+        fx = [float(v) for v in fp or []]
+    except (TypeError, ValueError):
+        return
+    if len(bx) != 4 or len(fx) != 4:
+        return
+    inter = max(0.0, min(bx[2], fx[2]) - max(bx[0], fx[0])) * \
+        max(0.0, min(bx[3], fx[3]) - max(bx[1], fx[1]))
+    area = max(1e-9, (fx[2] - fx[0]) * (fx[3] - fx[1]))
+    if inter >= .1 * area:
+        return
+    how = ("move a typeset with set_typeset(region=...)"
+           if item.get("template") == "typeset" else
+           "place a template with its x/y params (set_motion_graphic)")
+    raise ValueError(
+        f"motion '{item.get('id')}': box {[round(v, 3) for v in bx]} is a "
+        "capture window (only that part of the composition renders) and "
+        f"this graphic draws at x {fx[0]:.2f}-{fx[2]:.2f}, y {fx[1]:.2f}-"
+        f"{fx[3]:.2f}, outside it: nothing of it would show. Leave box out "
+        f"and {how}.")
 
 
 # An item whose end is this close to the programme's end before the batch

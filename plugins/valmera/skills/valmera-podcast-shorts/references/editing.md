@@ -58,6 +58,12 @@ cues, and art direction. Call `get_kept_transcript` once and confirm:
   that "joins running speech" has no pause near it — re-cut at a breath
   or sentence end unless it sounds clean. snap_to_words:false keeps exact
   times for a deliberate stutter.
+- A keep change carries the layers with their footage: source-fed picture
+  cards, word-cued graphics and the payoff move with the shots they sit on,
+  and a card or graphic that ran to the end still ends on the new end (a
+  longer live tail carries the payoff and the last card). Re-time a card by
+  hand only to change its window: `set_picture_card(id, start, end)` keeps
+  its box, fit, framing, entrance/exit and canvas; name only what changes.
 - The turn changes or deepens the idea and the payoff resolves it. Stop on the
   strongest sentence; the payoff holds about 0.6-1.2 s after its last word
   before the end card, on LIVE footage only: the natural tail the brief's end
@@ -250,8 +256,9 @@ unacknowledged one).
 3. `audit_captions` once (heard-but-unshown words are defects, not
    advisories) and `audit_audio_mix`; read the render's warnings. For WHICH
    words are audible, or an "um" or half a word the transcript lacks at a
-   join, use `check_speech` (program seconds, each side of the cut): it
-   measures the sound itself. Never ask another model to listen:
+   join, use `check_speech` (program seconds; up to 60 s, so one call reads
+   the whole short, each kept span on its own sound): it measures the sound
+   itself. Never ask another model to listen:
    `review_audio` is switched off by the owner and only answers "disabled".
 4. Copy the render's MEASURES numbers into the handback: picture area
    (and upscale), the hook headline's cap height and the captions' (share

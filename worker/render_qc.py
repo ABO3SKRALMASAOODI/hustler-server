@@ -602,7 +602,21 @@ def picture_measures(edl, index, tl, W, H, program_s, others=()):
 # Graphics whose ink is not a line of type (a diagram, a cell grid, a
 # chart drawn in html): their measured "cap" is a cell or a bar, never a
 # lockup's size, so they are neither the payoff nor its rival.
-NON_TYPE_TEMPLATES = ("html",)
+# Graphics that draw a picture plane, not type: a photo filling the frame
+# (still_motion) and a transition's light (flash, burn, leak, glitch). Their
+# measured ink is the whole picture, so a caption reads over them as it reads
+# over footage and the corner mark is burned over them as over footage (Oct
+# 22 Kamath run: every full-bleed still cutaway was 'GRAPHIC ON THE CORNER
+# MARK' from y 0.000 and 'CAPTION OVER A GRAPHIC' 100%, c1 3788 v35 and gk
+# 3798 v60 refused export until justified). Nor are they a type lockup.
+PICTURE_TEMPLATES = ("still_motion", "flash_transition", "film_burn",
+                     "light_leak", "glitch_burst")
+TRANSITION_TEMPLATES = ("flash_transition", "film_burn", "light_leak",
+                        "glitch_burst")
+# A transition's light this brief over a caption is the transition (en 3799
+# v27: a 0.3 s warm flash over 'As' covering a camera cut), not a collision.
+BRIEF_TRANSITION_S = .8
+NON_TYPE_TEMPLATES = ("html",) + PICTURE_TEMPLATES
 
 
 def is_type_lockup(it):
@@ -689,7 +703,8 @@ def _type_plan(edl, index, tl, W, H, fps, program_s):
     band = next((it["id"] for it in items if it["persistent"]), None)
     hook = next((it["id"] for it in lockups if it.get("tier") == "hook"),
                 None) or \
-        next((it["id"] for it in lockups if it["start"] <= .5), None) or band
+        next((it["id"] for it in lockups if it["start"] <= .5
+              and it.get("template") not in PICTURE_TEMPLATES), None) or band
     segs = []
     if motion_captions.look_of(e) and (index or {}).get("words"):
         try:
@@ -1290,6 +1305,44 @@ def _head(box):
             box[2] + HEAD_SIDE * w, box[3] + HEAD_CHIN * h]
 
 
+# A detection whose centre lies this close (a share of the area's width) to
+# its area's left or right edge, while another face sits nearer the area's
+# centre, is not the speaker that area frames.
+STRAY_BAND = .15
+
+
+def main_faces(cands):
+    """``cands`` [(box, look, area)] without the edge strays: in each card
+    panel (or the frame) the face nearest its centre is the speaker it
+    frames; another detection centred within STRAY_BAND of a side edge
+    beside it is a shoulder, an arm or the other person's out-of-focus head
+    at the frame edge (Oct 22 Kamath run: 'FACE CUT BY THE CARD EDGE' /
+    'FACE AT THE LEFT EDGE' on nine shorts and every version, x1 3796 v35's
+    export refused; the native frames showed the whole head 12-28% inside
+    the edge, the flagged box on the far shoulder, Nikhil's shoulder in the
+    over-the-shoulder crop, or pc 3800's blurred foreground at x 0). A lone
+    detection, or every face near an edge, is still judged."""
+    groups = {}
+    for c in cands:
+        groups.setdefault(tuple(c[2]), []).append(c)
+    out = []
+    for area, group in groups.items():
+        if len(group) < 2:
+            out += group
+            continue
+        aw = max(1e-6, area[2] - area[0])
+
+        def at(c):
+            return ((c[0][0] + c[0][2]) / 2.0 - area[0]) / aw
+        main = min(group, key=lambda c: abs(at(c) - .5))
+        if not STRAY_BAND <= at(main) <= 1.0 - STRAY_BAND:
+            out += group
+            continue
+        out += [c for c in group if c is main
+                or STRAY_BAND <= at(c) <= 1.0 - STRAY_BAND]
+    return out
+
+
 def cut_faces(samples, plan_, src_windows=()):
     """[(t0, t1, side, over, where)] runs of samples whose main face's head
     (_head: hair, chin, sides) reaches past the edge of the picture-card
@@ -1321,14 +1374,16 @@ def cut_faces(samples, plan_, src_windows=()):
             areas = [areas]
         top = max(d[0][3] - d[0][1] for d in dets)
         worst = None
+        cands = []
         for box, look in dets:
             if box[3] - box[1] < .6 * top:
                 continue
             cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
             area = next((ar for ar in areas if ar[0] - .02 <= cx <= ar[2] + .02
                          and ar[1] - .02 <= cy <= ar[3] + .02), None)
-            if area is None:
-                continue
+            if area is not None:
+                cands.append((box, look, area))
+        for box, look, area in main_faces(cands):
             head = _head(box)
             if any(a <= t < b for a, b in src_windows):
                 head = [box[0], head[1], box[2], head[3]]
@@ -1872,7 +1927,8 @@ def type_findings(tres, tplan, cards):
             keepout.portrait(W_, H_) else None
         for i, m in meas.items():
             it = items.get(i)
-            if zone is None or not it or it["persistent"] or not m.get("box"):
+            if zone is None or not it or it["persistent"] or not m.get("box") \
+                    or it.get("template") in PICTURE_TEMPLATES:
                 continue
             if keepout.on_mark(m["box"], zone):
                 mark_hits.append((i, round(float(m["box"][1]), 3),
@@ -1886,6 +1942,11 @@ def type_findings(tres, tplan, cards):
             box = it.get("box")
             if not box or not it["start"] <= t < it["end"]:
                 continue
+            if it.get("template") in PICTURE_TEMPLATES and (
+                    it["layer"] != "above_captions"
+                    or (it.get("template") in TRANSITION_TEMPLATES
+                        and it["end"] - it["start"] <= BRIEF_TRANSITION_S)):
+                continue        # a caption over a photo; a flash's beat
             share = _overlap(cb, box) / area
             if share > COLLIDE_SHARE:
                 collide.append((t, c["text"], it["id"], round(share, 2),
@@ -1980,9 +2041,9 @@ def clipped_faces(samples, plan_, src_windows=()):
             continue
         top = max(d[0][3] - d[0][1] for d, _ar in inside)
         worst = None
-        for (box, look), area in inside:
-            if box[3] - box[1] < .6 * top:
-                continue
+        cands = [(box, look, area) for (box, look), area in inside
+                 if box[3] - box[1] >= .6 * top]
+        for box, look, area in main_faces(cands):
             aw, ah = area[2] - area[0], area[3] - area[1]
             fw, fh = (box[2] - box[0]) / aw, (box[3] - box[1]) / ah
             gaps = []
@@ -2414,6 +2475,7 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
             closed = closed_eyes(eye_counts(path, plan_, deadline), fps)
             if closed:
                 res["hook_eyes"] = list(closed)
+                res["hook_fps"] = fps
                 res["hook_advice"] = hook_advice(plan_, closed, fps)
         except Exception as exc:
             res["skipped"].append(f"hook eyes: {str(exc)[:80]}")
@@ -2529,7 +2591,7 @@ def findings(res, plan_):
                 f"(focus_track edge at source {src:g}s) with no cut there — "
                 "a visible jump; put the edge on a camera cut or a keep "
                 "join, or remove it")
-    if res.get("hook_eyes"):
+    if res.get("hook_eyes") and not hook_eyes_advisory(res):
         a, n, opened = res["hook_eyes"]
         adv = res.get("hook_advice") or {}
         offer = ""
@@ -2668,13 +2730,33 @@ def measured_findings(res):
     return out
 
 
+def hook_eyes_advisory(res):
+    """True when the opening's closed eyes are a trade-off, not a defect:
+    the only clean start the check found drops the hook's opening words
+    (Oct 22 Kamath run, kd 3805 v41: 7 frames of a blink at frame 0, the
+    clean start drops 'Maybe' and changes the claim; the finding blocked
+    the verification record until it was justified)."""
+    return bool(res.get("hook_eyes")) and \
+        bool((res.get("hook_advice") or {}).get("drops"))
+
+
 def advice(res):
     """The Look's measured rules — a craft call, never a defect on its own:
     picture area against the card floor, a hook headline smaller than the
     captions, a payoff that is not the largest lockup. Shown on every
     render (the editor and the reviewer read the numbers instead of
-    estimating them) and kept as advisories."""
+    estimating them) and kept as advisories. Also the opening blink whose
+    only clean start costs the hook's first words (hook_eyes_advisory)."""
     out = []
+    if hook_eyes_advisory(res):
+        fps = float(res.get("hook_fps") or 30.0)
+        a, n, _opened = res["hook_eyes"]
+        adv = res["hook_advice"]
+        out.append(
+            f"HOOK OPENS ON A BLINK {a / fps:.2f}-{(a + n) / fps:.2f}s ({n} "
+            f"frames): the only clean start is source {adv['start']:.2f}s, "
+            f"which drops '{' '.join(adv['drops'])}' — keep the line whole "
+            "unless it still reads without them")
     pic = res.get("picture") or {}
     floor = float(pic.get("floor") or PICTURE_FLOOR)
     for w in pic.get("windows") or []:

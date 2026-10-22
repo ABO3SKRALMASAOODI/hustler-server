@@ -552,13 +552,19 @@ def test_the_clean_start_is_offered_on_a_word_onset_never_applied():
     adv = render_qc.hook_advice(plan, (3, 8, 11), 29.97)
     assert adv["word"] == "was" and adv["start"] == 129.65
     assert adv["drops"] == ["if", "somebody"]
-    lines = render_qc.findings({"hook_eyes": [3, 8, 11], "hook_advice": adv},
-                               plan)
+    res = {"hook_eyes": [3, 8, 11], "hook_advice": adv}
+    # a later start that drops the hook's first words is a trade-off the
+    # editor weighs (Kamath run, kd 3805): advice naming what it costs,
+    # never a finding that blocks the version
+    assert not any("CLOSED EYES" in f for f in render_qc.findings(res, plan))
+    line = next(a for a in render_qc.advice(res) if "BLINK" in a)
+    assert line.startswith("HOOK OPENS ON A BLINK 0.10-0.37s")
+    assert "129.65" in line and "drops 'if somebody'" in line
+    # a clean start that costs no word stays a finding, never applied
+    adv["drops"] = []
+    lines = render_qc.findings(res, plan)
     assert lines[0].startswith("HOOK OPENS ON CLOSED EYES 0.10-0.37s")
     assert "129.65" in lines[0] and "nothing was moved" in lines[0]
-    # a later start that drops the hook's first words says what it costs
-    assert "cuts the hook's opening words" in lines[0]
-    assert "frame 0 is open" in lines[0]
     lines = render_qc.findings({"hook_sound": [-18.0, -55.0]}, plan)
     assert lines[0].startswith("HOOK OPENS MID-SOUND")
 

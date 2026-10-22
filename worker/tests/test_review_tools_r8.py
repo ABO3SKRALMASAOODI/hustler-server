@@ -578,8 +578,15 @@ def test_render_report_reads_the_stored_report_without_rendering():
                    dbx.get_job: None, dbx.get_verification_record: None})
     ctx.db = stale
     ctx.latest_edl = lambda: {"version": 50, "json": {}}
-    assert "STALE: the edit is now at v50" in agent_tools.render_preview(
-        ctx, report=True)
+    out = agent_tools.render_preview(ctx, report=True)
+    # said first, with the call that renders the current version
+    assert out.startswith("STALE REPORT — EDL v50 has no complete preview")
+    assert "render_preview(complete=true) to render v50" in out
+    assert "RENDER REPORT (read-only" in out and "EDL v46" in out
+    # asked again with nothing changed: the direction alone, not v46 again
+    again = agent_tools.render_preview(ctx, report=True)
+    assert again.startswith("PREREQUISITE") and "EDL v46" not in again
+    assert "render_preview(complete=true)" in again
     ctx.db = _FnDb({dbx.find_render_asset: None, dbx.latest_render: None})
     assert agent_tools.render_preview(ctx, report=True).startswith(
         "PREREQUISITE")
