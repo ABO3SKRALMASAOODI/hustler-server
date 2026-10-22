@@ -59,8 +59,13 @@ LOOKS = (
 )
 STRUCTURES = (
     "fast-conversation", "headline-conversation", "hook-to-silent-montage",
-    "silent-action-to-conversation",
+    "silent-action-to-conversation", "cover-to-conversation",
 )
+# cover-to-conversation opens on the short's cover headline (Valmera's
+# cover_headline template): its brief carries the title as cover_text, the
+# words the template sets (3-10 words; it takes at most 70 characters).
+COVER_STRUCTURE = "cover-to-conversation"
+COVER_TEXT_MAX = 70
 # Music is off unless the owner supplies or approves a specific song for the
 # run (init --song). Agents never choose music: no CC0 library bed, no stock
 # track, no song picked by taste. Runs created with the retired "auto" switch
@@ -420,6 +425,16 @@ def load_brief(path_text: str, short_id: str, window: list | None = None) -> dic
         value = payload.get(key)
         record[key] = " ".join(value.split()) if isinstance(value, str) and \
             value.strip() else None
+    if payload["structure"] == COVER_STRUCTURE:
+        cover = payload.get("cover_text")
+        cover = " ".join(cover.split()) if isinstance(cover, str) else ""
+        n = len(cover.replace("*", "").replace(" / ", " ").split())
+        if not 3 <= n <= 10 or len(cover) > COVER_TEXT_MAX:
+            raise StateError(
+                "a cover-to-conversation brief needs cover_text: the cover headline's "
+                f"title, 3-10 words and at most {COVER_TEXT_MAX} characters (a strong "
+                "curiosity title, e.g. 'The ruthless focus of *Mark Zuckerberg*')")
+        record["cover_text"] = cover
     return {"look": look, "structure": payload["structure"], "brief": record}
 
 

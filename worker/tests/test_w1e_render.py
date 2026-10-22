@@ -502,9 +502,9 @@ def test_brand_end_card_is_md5_identical(brand):
 
 
 def test_brand_watermark_robot_is_drawn_after_every_finish(brand):
-    from test_w0b_render import _robot_opaque
+    from test_w0b_render import _mark_opaque
     W, H = 270, 480
-    m = _robot_opaque(W, H)
+    m = _mark_opaque(W, H)
     assert m.sum() > 40
     cm = m[::2, ::2] & m[1::2, ::2] & m[::2, 1::2] & m[1::2, 1::2]
     for k in ("60", "150"):

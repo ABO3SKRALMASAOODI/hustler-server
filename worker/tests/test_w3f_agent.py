@@ -251,7 +251,7 @@ def test_layout_verbs_write_and_hud_avoids_the_corner_mark():
         ctx, "asset:media/p1/a.mp4", 7.0, 9.0, device="laptop")
     hud = next(m for m in ctx.edl["motion"] if m["template"] == "hud")
     mark = [float(x) for x in hud["params"]["mark"]]
-    assert mark[0] < 0.5 and mark[1] < 0.2   # the top-left corner-mark zone
+    assert mark[0] > 0.5 and mark[1] < 0.2   # the top-right corner-mark zone (v6)
     _removable(ctx)
 
 

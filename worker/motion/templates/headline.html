@@ -4,7 +4,7 @@
  "params": {
   "text": {"type": "str", "required": true, "max": 80, "hint": "the claim, 3-12 words, third person ('Jobs called 1983 computer fonts *garbage*'); at most one *accent* span; ' / ' forces a line break"},
   "kicker": {"type": "str", "default": "", "max": 40, "hint": "optional small line above it: who + when ('Steve Jobs, 1983')"},
-  "kicker_y": {"type": "float", "min": 0.0, "max": 0.5, "default": 0.0, "hint": "0 = the kicker sits above the claim; > 0 (set by the write when the band is tight) = the kicker's line centre beside the corner mark, right-aligned to the column, leaving the whole band to the claim"},
+  "kicker_y": {"type": "float", "min": 0.0, "max": 0.5, "default": 0.0, "hint": "0 = the kicker sits above the claim; > 0 (set by the write when the band is tight) = the kicker's line centre beside the corner mark, left-aligned to the column, leaving the whole band to the claim"},
   "style": {"type": "enum", "values": ["sans", "serif", "condensed"], "default": "sans", "hint": "sans = heavy grotesk sentence case; serif = Instrument Serif; condensed = tall condensed caps"},
   "accent_style": {"type": "enum", "values": ["color", "serif"], "default": "color", "hint": "the accent span in the accent colour, or also set in italic serif"},
   "x": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.5, "hint": "horizontal centre of the block (frame fraction)"},
@@ -44,7 +44,7 @@
   // ' / ' forces a line break (as in marker_text; '24/7' stays one word)
   const LINES = String(P.text || '').split(/\s+\/\s*|\s*\/\s+/).map(s => s.trim()).filter(Boolean);
   // a kicker set ASIDE sits on its own line beside the corner mark (the
-  // mark covers the top-left only), right-aligned to the column: the whole
+  // mark covers the top-right only), left-aligned to the column: the whole
   // band is the claim's
   const aside = String(P.kicker || '').trim() && P.kicker_y > 0 && !left;
   let kick = null, claim = null, BKS = [];
@@ -105,7 +105,7 @@
     blk.style.top = (H * P.y - r0.height / 2) + 'px';
     if (aside) {
       const k0 = kick.getBoundingClientRect();
-      kick.style.left = (W * P.x + colW / 2 - k0.width) + 'px';
+      kick.style.left = (W * P.x - colW / 2) + 'px';
       kick.style.top = (H * P.kicker_y - k0.height / 2) + 'px';
     }
     // the ink, not the column: what the band holds

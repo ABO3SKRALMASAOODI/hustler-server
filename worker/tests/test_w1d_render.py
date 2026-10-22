@@ -588,22 +588,10 @@ def test_an_audio_only_render_skips_the_picture_precomputes(work,
 
 # ── brand integrity (owner rule 4) ──────────────────────────────────────
 
-def _robot_opaque(W, H):
-    import subprocess
+def _mark_opaque(W, H):
+    """The v6 corner mark's fully opaque pixels (renderer.watermark_opaque_mask)."""
     import renderer
-    g = renderer.watermark_geometry(W, H)
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", renderer.robot_path(), "-vf",
-         f"scale={g['rw']}:{g['rh']},format=rgba", "-f", "rawvideo", "-"],
-        capture_output=True, check=True).stdout
-    a = np.frombuffer(raw, np.uint8).reshape(g["rh"], g["rw"], 4)[..., 3]
-    core = a == 255
-    core = (core & np.roll(core, 1, 0) & np.roll(core, -1, 0)
-            & np.roll(core, 1, 1) & np.roll(core, -1, 1))
-    m = np.zeros((H, W), bool)
-    m[g["margin_y"]:g["margin_y"] + g["rh"],
-      g["margin_x"]:g["margin_x"] + g["rw"]] = core
-    return m
+    return renderer.watermark_opaque_mask(W, H)
 
 
 def test_end_card_and_watermark_are_untouched_by_every_1d_compiler(
@@ -635,7 +623,7 @@ def test_end_card_and_watermark_are_untouched_by_every_1d_compiler(
     y0, _ = frames(o0)
     y1, _ = frames(o1)
     H, W = y0.shape[1:]
-    m = _robot_opaque(W, H)
+    m = _mark_opaque(W, H)
     assert m.sum() > 40
     for f in (10, 30, 55, 100):
         assert np.abs(y1[f].astype(int) - y0[f])[m].max() == 0

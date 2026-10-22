@@ -31,8 +31,8 @@ The coordinator assigns one Look and one structure per short. The editor reads
 
 | Target | Value |
 | --- | --- |
-| Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam` or a card reveal; a punch-in or landing zoom only when the opening earns it) — no reflexive opening whoosh; a sound only when the title has a real entrance that earns one |
-| Hook as text | the hook line complete and readable on screen by 1.5 s as a HEADLINE (`word_slam` `tier='hook'`: the *starred* main line at 7%+ of the frame height, the lead-in small above it, owning its zone — the captions wait until it exits — or a headline band whose main line measures at least 1.2x the caption cap height (the `headline` write measures it and names the fix; Card geometry); never type no bigger than the captions with a live caption under it, never a slow typewriter), PAYOFF-LED: the clip's strongest line or statistic as a specific claim the ending completes ("They promised us flying cars…" before "…all we got was 140 characters"), never a generic question ("WHERE DID PROGRESS GO?"), never the punchline itself, never a word a later graphic slams (GARBAGE in the hook and again as the slam at 13 s lands flat), never contradicting the words under it |
+| Hook interrupt | a designed visual event at 0.0-0.6 s (`hook_title`, `word_slam`, the `cover_headline` on frame 0 or a card reveal; a punch-in or landing zoom only when the opening earns it) — no reflexive opening whoosh; a sound only when the title has a real entrance that earns one |
+| Hook as text | the hook line complete and readable on screen by 1.5 s as a HEADLINE (in `cover-to-conversation` the cover headline is the hook: on frame 0, see **Structures**; otherwise `word_slam` `tier='hook'`: the *starred* main line at 7%+ of the frame height, the lead-in small above it, owning its zone — the captions wait until it exits — or a headline band whose main line measures at least 1.2x the caption cap height (the `headline` write measures it and names the fix; Card geometry); never type no bigger than the captions with a live caption under it, never a slow typewriter), PAYOFF-LED: the clip's strongest line or statistic as a specific claim the ending completes ("They promised us flying cars…" before "…all we got was 140 characters"), never a generic question ("WHERE DID PROGRESS GO?"), never the punchline itself, never a word a later graphic slams (GARBAGE in the hook and again as the slam at 13 s lands flat), never contradicting the words under it |
 | Hook frame | frame 0 shows the speaker facing camera on a clean word onset (no tail of the previous word, no "if somebody was like,"); no jump cut inside the first 1.5 s, at most one in the first 3 s. A 1.5-2 s cold-open tease of the punchline only when it exists as its own clip asset (kept footage plays in source order) |
 | Speaker identity | each speaker named within ~3 s of first appearing, in the hook's kicker or the headline band (verified name plus role, venue or year); a famous speaker needs no broadcast `lower_third`, which stacks a second text system on the chest |
 | Meaning | each graphic means what the speaker means: a tick is "achieved" (broken promises and myths take `mark='cross'`), slams go on information-bearing words, never on clichés, and no graphic only recaps an earlier one. Proper nouns and products are identified ("Apple Lisa, 1983" as a label, the product shown when an image exists), never set as "Lisa:" with a colon |
@@ -126,8 +126,10 @@ Never the flat default colour.
 
 **What the engine enforces (Oct 2026; the earlier table ignored it and
 cost a whole run).** Band graphics never go above y 0.128: the free-tier
-mark's reserved zone (the mark sits top-left, x 0.09-0.50, y 0.05-0.128,
-and its zone is kept clear across the width on every tier). The headline
+mark's reserved zone (since Oct 2026 the mark sits top-RIGHT, x 0.55-0.91,
+y 0.05-0.128: "EDITED USING" / the robot and "Valmera AI" / "valmera.io",
+right-aligned; a full-width band is kept below it on every tier, and only a
+short line may sit beside it, left of it). The headline
 band therefore runs from y 0.128 to the card's top minus 0.012; the
 `headline` template refuses a band under 0.06 and otherwise fits its claim
 to the band (at most 84 px x `size`, size up to 1.4, two lines up to 50
@@ -136,7 +138,8 @@ against the captions (HEADLINE TYPE): it refuses a claim smaller than them
 and names the card top that fixes it (with the largest card that band
 leaves against the floor), a shorter claim or kicker; and for params you
 did not pass it sets a short kicker (about 12 characters) on its own line
-beside the corner mark (`kicker_y`), leaving the band to the claim. The old
+beside the corner mark (`kicker_y`: left of it, left-aligned to the
+column), leaving the band to the claim. The old
 4:5 row ([0.06, 0.175, 0.94, 0.794], headline zone y 0.08-0.17) leaves a
 0.035 band: the template refuses it, and lowering the card to make room
 drops the picture below the floor (8 of 9 Oct shorts). Use these rows, and
@@ -168,7 +171,7 @@ headline yields to it and returns as it exits.
 
 Nothing designed goes below y 0.80, the band the platform covers: with
 these cards, captions and hero words sit inside the card. A card's top never
-rises into the mark's zone (y 0.128 on the left half).
+rises into the mark's zone (y 0.128 on the right half).
 
 ### Camera (`add_zoom`; read its schema before the first call)
 
@@ -390,7 +393,7 @@ support; another creator's logo, footage or identity.
 
 ## Structures
 
-Structures are the four story shapes. Their IDs prefix every final's filename,
+Structures are the five story shapes. Their IDs prefix every final's filename,
 so they stay as named; "silent" now means no dialogue, never no sound. Any
 structure can wear any Look unless noted.
 
@@ -422,6 +425,30 @@ structure can wear any Look unless noted.
   library sound into the hook title (`riser_2` ending on it, or a soft
   whoosh), carries the owner's song only when `music_effective` is on, and
   gets a `hook_title` by 1.5 s.
+- **cover-to-conversation** (owner, Oct 2026; SOME shorts, never most,
+  about one in four, only where the title is a strong curiosity title): the
+  short opens on its COVER, the title as one huge centred headline in tall
+  condensed white caps over the speaker ('THE RUTHLESS FOCUS OF / MARK
+  ZUCKERBERG'), complete on frame 0 so the frame a feed shows before anyone
+  presses play is a thumbnail that makes people click; it holds 2-3 s while
+  the speaker starts, then fades into the talk, which carries the story
+  like fast-conversation (a headline band, if the layout has one, yields to
+  the cover and returns as it exits). ONE call:
+  `add_motion_graphic(template='cover_headline', start=0, end=2.6,
+  params={'text': '<cover_text>'})`, or one `apply_edit_batch` upsert
+  `{"action": "upsert", "layer": "motion", "id": "cover", "value": {"id":
+  "cover", "template": "cover_headline", "start": 0, "end": 2.6, "params":
+  {"text": "<cover_text>"}}}`. Optional params: `font` (`Anton` default,
+  `League Gothic` taller, `Bebas Neue`), `accent` for the *starred* words
+  (one span, the Look's accent), `width` 0.5-0.86 (0.72), `y` (the write
+  moves it off the face), `exit` (`fade` default, `cut`, `blur`). The cover
+  IS the hook: no hook-tier `word_slam` or `hook_title` over it, no zoom or
+  sound under it; the captions wait until it exits. The title (brief
+  `cover_text`, 3-10 words): specific and curiosity-driven, speaker
+  anchored ('The ruthless focus of *Mark Zuckerberg*', 'Why Thiel never
+  hires from *Harvard*'), never a generic question, never the punchline,
+  never a word a later graphic slams. Not for openers built on action or
+  montage.
 
 ## Choosing a Look
 

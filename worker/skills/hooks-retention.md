@@ -67,6 +67,18 @@ THE HOOK — 0 to 1.5 s:
   task. A headline band is the other way. Never hook type no bigger than
   the captions with the live caption fading in under it: two sentences at
   once in the first second.
+- THE COVER HEADLINE (some shorts, never every one): when the short's
+  title is a strong curiosity title ("The ruthless focus of *Mark
+  Zuckerberg*", "Why Thiel never hires from Harvard"), open on it as the
+  COVER — one call, `add_motion_graphic(template='cover_headline',
+  start=0, end=2.5-3, params={text})`: huge centred condensed caps (2-4
+  balanced lines at ~72% of the width, one size, a soft shadow, no band)
+  complete on frame 0, so the frame a feed shows before anyone presses
+  play is a thumbnail that sells the story; it holds 2-3.5 s while the
+  speaker starts, then fades into the talk. It owns its zone like the hook
+  tier (the captions wait until it exits; a standing headline band yields
+  to it), so it REPLACES the hook title: one opening title per short. The
+  write moves it off the face and pins its start to frame 0 (COVER).
 - NEVER SPEND A LATER HERO WORD: the hook must not show the word a later
   graphic slams. GARBAGE in the hook and the same GARBAGE slam at 13 s makes
   the real moment land as a repeat. Leave the word for the moment it is

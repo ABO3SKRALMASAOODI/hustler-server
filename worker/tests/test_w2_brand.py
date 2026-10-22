@@ -22,7 +22,7 @@ sys.path.insert(0, HERE)
 
 import motion_engine                                          # noqa: E402
 import w0b_probe                                              # noqa: E402
-from test_w0b_render import (_base, _case, _robot_opaque,     # noqa: E402,F401
+from test_w0b_render import (_base, _case, _mark_opaque,     # noqa: E402,F401
                              _yuv, work)
 
 needs_engine = pytest.mark.skipif(not motion_engine.available(),
@@ -134,7 +134,7 @@ def test_every_w2_device_renders_and_the_end_card_is_untouched(brand):
 @needs_engine
 def test_the_watermark_robot_is_drawn_after_every_w2_device(brand):
     W, H = 270, 480
-    m = _robot_opaque(W, H)
+    m = _mark_opaque(W, H)
     assert m.sum() > 40
     for k in ("30", "150"):
         a = _yuv(brand["plain"]["dumps"][k], W, H)

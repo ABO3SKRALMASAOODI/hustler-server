@@ -33,9 +33,9 @@ captions and say what makes it legible:
   size, and the largest card box left under that band with its area against
   a picture floor.
 * ``mark_strip`` is the free strip BESIDE the free-tier mark: the mark
-  covers the top-left only (keepout.watermark_zone, x 0.09-0.50), so a
-  short kicker can sit right of it, above the band, and leave the whole band
-  to the claim.
+  covers the top-right only (keepout.watermark_zone, x 0.55-0.91, since the
+  v6 sponsor-style mark), so a short kicker can sit LEFT of it, above the
+  band, left-aligned to the column, and leave the whole band to the claim.
 
 Everything here is read-only geometry; it never changes a render by itself.
 """
@@ -612,8 +612,9 @@ def max_claim_chars(params, W, H, target_cap, kicker_beside=None):
 
 def mark_strip(W, H, top=None):
     """[x0, y0, x1, y1] (frame fractions) of the free strip beside the
-    free-tier mark, above the band (the mark sits top-left only), or None.
-    ``top`` is the highest a band graphic may reach (the feed header)."""
+    free-tier mark, above the band (the mark sits top-RIGHT only: the strip
+    is left of it), or None. ``top`` is the highest a band graphic may
+    reach (the feed header)."""
     import keepout
     try:
         mark = keepout.watermark_zone(int(W), int(H))
@@ -621,24 +622,28 @@ def mark_strip(W, H, top=None):
         return None
     y0 = float(top if top is not None else keepout.SAFE_Y0)
     y1 = float(mark[3])
-    x0, x1 = float(mark[2]) + STRIP_GAP, keepout.SAFE_X1
+    x0, x1 = keepout.SAFE_X0, float(mark[0]) - STRIP_GAP
     if y1 - y0 < 0.02 or x1 - x0 < 0.15:
         return None
     return [round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)]
 
 
+def _column_left(p):
+    return _num(p, "x", 0.5) - _num(p, "width", 0.84) / 2.0
+
+
 def kicker_beside_fits(params, W, H, strip):
-    """(fits, kicker_y): the kicker set beside the mark, right-aligned to the
+    """(fits, kicker_y): the kicker set beside the mark, LEFT-aligned to the
     column, inside ``strip`` at the size it takes in the stack."""
     p = params or {}
     kicker = " ".join(str(p.get("kicker") or "").split())
     if not kicker or not strip or str(p.get("align") or "center") != "center":
         return False, 0.0
     lay = headline_layout(p, W, H, kicker_beside=True)
-    right = _num(p, "x", 0.5) + _num(p, "width", 0.84) / 2.0
-    if right > strip[2] + 1e-6:
+    left = _column_left(p)
+    if left < strip[0] - 1e-6:
         return False, 0.0
-    if lay["kicker_lines"] != 1 or right - lay["kicker_w"] < strip[0]:
+    if lay["kicker_lines"] != 1 or left + lay["kicker_w"] > strip[2]:
         return False, 0.0
     kh = lay["kicker_h"]
     if kh > strip[3] - strip[1]:
@@ -648,15 +653,15 @@ def kicker_beside_fits(params, W, H, strip):
 
 def kicker_box(params, W, H, lay=None):
     """[x0, y0, x1, y1] (frame fractions) of a kicker set aside
-    (``kicker_y`` > 0, a centred block): right-aligned to the column, its
+    (``kicker_y`` > 0, a centred block): left-aligned to the column, its
     line centred on kicker_y. None when the kicker is in the stack."""
     p = params or {}
     lay = lay or headline_layout(p, W, H)
     if not lay["kicker_beside"]:
         return None
-    right = _num(p, "x", 0.5) + _num(p, "width", 0.84) / 2.0
+    left = _column_left(p)
     ky, kh = _num(p, "kicker_y", 0.0), lay["kicker_h"]
-    return [round(right - lay["kicker_w"], 4), round(ky - kh / 2.0, 4), round(right, 4),
+    return [round(left, 4), round(ky - kh / 2.0, 4), round(left + lay["kicker_w"], 4),
             round(ky + kh / 2.0, 4)]
 
 
@@ -667,14 +672,14 @@ def kicker_chars_beside(params, W, H, strip):
     kicker = " ".join(str(p.get("kicker") or "").split())
     if not kicker or not strip:
         return 0
-    right = min(_num(p, "x", 0.5) + _num(p, "width", 0.84) / 2.0, strip[2])
+    left = max(_column_left(p), strip[0])
     # a shorter kicker is set at the largest kicker size (a long one was
     # fitted down to its column): its characters at that size
     path = font_path(KICKER["family"], KICKER["weight"])
     top_px = max(KICKER_MAX_PX * _num(p, "size", 1.0),
                  MIN_CAP * design_height(W, H) / metrics(path)[0])
     per = text_width(path, kicker, top_px, KICKER["track"]) / 1080.0 / len(kicker)
-    return int((right - strip[0]) / per) if per > 0 else 0
+    return int((strip[2] - left) / per) if per > 0 else 0
 
 
 def largest_card(top, W=1080, H=1920, floor=None, bottom=CARD_BOTTOM, src_px=None,

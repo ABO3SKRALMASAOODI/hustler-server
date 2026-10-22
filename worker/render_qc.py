@@ -474,7 +474,7 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
     wm = None
     if want_wm:
         g = renderer.watermark_geometry(int(W), int(H), wm_anchor_y)
-        wm = {"x": g["margin_x"], "y": g["margin_y"], "w": g["rw"], "h": g["rh"],
+        wm = {"x": g["rx"], "y": g["ry"], "w": g["rw"], "h": g["rh"],
               "robot": renderer.robot_path()}
     endcard = None
     if outro_s and outro_s > 0:
@@ -2070,17 +2070,25 @@ def robot_match(path, plan_, deadline):
         import cv2
     except Exception:
         return None
-    rgba = cv2.imread(robot, cv2.IMREAD_UNCHANGED)
-    if rgba is None or rgba.ndim != 3 or rgba.shape[2] != 4:
-        return None
     w, h = int(wm["w"]), int(wm["h"])
     if h < ROBOT_MIN_PX:
         return None                # too few pixels to tell after encoding
-    rgba = cv2.resize(rgba, (w, h), interpolation=cv2.INTER_AREA)
+    try:
+        # the robot exactly as the mark draws it (brandmark: its stalk
+        # lifted to white, Lanczos-sized to the drawn box)
+        import brandmark
+        rgba = np.asarray(brandmark.robot_rgba(w, h))
+        luma = cv2.cvtColor(np.ascontiguousarray(rgba[:, :, :3]),
+                            cv2.COLOR_RGB2GRAY)
+    except Exception:  # noqa: BLE001 — the bundled file, sized here
+        rgba = cv2.imread(robot, cv2.IMREAD_UNCHANGED)
+        if rgba is None or rgba.ndim != 3 or rgba.shape[2] != 4:
+            return None
+        rgba = cv2.resize(rgba, (w, h), interpolation=cv2.INTER_AREA)
+        luma = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_BGR2GRAY)
     alpha = rgba[:, :, 3] > 230
     if alpha.sum() < 30:
         return None
-    luma = cv2.cvtColor(rgba[:, :, :3], cv2.COLOR_BGR2GRAY)
     # ROBOT_SAMPLES frames spread over the programme, one seek each: a
     # decode of the whole programme for six frames was minutes on a long
     # final, and a pipe that yields a frame per minute of video cannot be
@@ -2266,7 +2274,7 @@ def findings(res, plan_):
             res["watermark"] < ROBOT_MIN_NCC:
         out.append(
             "WATERMARK MISSING: this free-tier export should carry the "
-            "Valmera watermark top-left and the frames do not show it (match "
+            "Valmera watermark top-right and the frames do not show it (match "
             f"{res['watermark']:.2f}) — the mark is automatic; re-render the "
             "export and report it if it persists")
     for kind, fr, cut in res.get("jumps") or []:
@@ -2441,7 +2449,7 @@ def measured_findings(res):
     for gid, y0, floor in (tq.get("mark") or [])[:2]:
         out.append(
             f"GRAPHIC ON THE CORNER MARK: '{gid}' draws from y {y0:.3f}, "
-            f"into the free-tier mark's box (top-left, down to y {floor:.3f}) "
+            f"into the free-tier mark's box (top-right, down to y {floor:.3f}) "
             "— a free-tier export burns the mark over it; set it lower (its "
             "y) or narrower so its ink starts below the mark")
     for t, text, side in (tq.get("cross") or [])[:2]:

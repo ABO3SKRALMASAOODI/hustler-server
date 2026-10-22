@@ -1,5 +1,5 @@
 <!--MG-SPEC {"title": "HUD", "category": "layout", "also": ["type"],
- "description": "Frame furniture that runs through a piece: corner labels (venue, date, chapter, a running count), a blinking REC dot, a running timecode, corner brackets, a centre crosshair, a faint grid — in the brand colour, small, steady across cuts. Never enters the free-tier corner-mark zone (top-left): the top-left furniture sits below it. For event recaps, tool stories, lab-scan essays (refs 24, 17, 06).",
+ "description": "Frame furniture that runs through a piece: corner labels (venue, date, chapter, a running count), a blinking REC dot, a running timecode, corner brackets, a centre crosshair, a faint grid — in the brand colour, small, steady across cuts. Never enters the free-tier corner-mark zone (top-right): the furniture on that side sits below it. For event recaps, tool stories, lab-scan essays (refs 24, 17, 06).",
  "duration": 10.0, "layer": "above_captions", "mutes_captions": false, "persistent": false,
  "params": {
   "tl": {"type": "str", "default": "", "max": 40, "hint": "top-left label"},
@@ -31,13 +31,16 @@
   const k = (P.scale ?? 1) * Math.min(W, H) / 1080, m = 46 * k, fs = 24 * k;
   const root = MG.$('#hr'); root.style.setProperty('--fs', fs + 'px'); root.style.setProperty('--c', P.colour || '#F2F2F2');
   const cv = MG.$('#hc'); cv.width = W; cv.height = H; const ctx = cv.getContext('2d');
-  const mk = (P.mark && P.mark.length === 4) ? P.mark.map(Number) : [0.09, 0.05, 0.5, 0.13];
-  // the top-left furniture starts below the corner mark's zone
-  const yTopL = Math.max(m * 1.2, mk[3] * H + m * 0.6);
+  const mk = (P.mark && P.mark.length === 4) ? P.mark.map(Number) : [0.55, 0.05, 0.91, 0.13];
+  // the furniture on the corner mark's side (top-right since the v6 mark)
+  // starts below its zone; the other top corner keeps the frame's inset
+  const markRight = (mk[0] + mk[2]) / 2 > 0.5;
+  const below = Math.max(m * 1.2, mk[3] * H + m * 0.6);
+  const yTopL = markRight ? m * 1.2 : below, yTopR = markRight ? below : m * 1.2;
   const yb = H - m - fs * 1.5;
   const lab = (txt, x, y, al) => { if (!txt) return null; const e = MG.el('div', 'hl', String(txt).toUpperCase(), root); const w = e.getBoundingClientRect().width; e.style.transform = `translate(${(al === 'r' ? x - w : x).toFixed(1)}px, ${y.toFixed(1)}px)`; return e; };
-  lab(P.tl, m * 1.6, yTopL); lab(P.tr, W - m * 1.6, m * 1.2, 'r'); lab(P.bl, m * 1.6, yb); lab(P.br, W - m * 1.6, yb, 'r');
-  const tc = P.timecode !== false ? lab('00:00:00:00', W - m * 1.6, m * 1.2 + fs * 1.7, 'r') : null;
+  lab(P.tl, m * 1.6, yTopL); lab(P.tr, W - m * 1.6, yTopR, 'r'); lab(P.bl, m * 1.6, yb); lab(P.br, W - m * 1.6, yb, 'r');
+  const tc = P.timecode !== false ? lab('00:00:00:00', W - m * 1.6, yTopR + fs * 1.7, 'r') : null;
   const rec = P.rec !== false ? lab('● REC', m * 1.6, yTopL + fs * 1.7) : null;
   if (rec) rec.style.color = P.accent || '#FF3B30';
   MG.frame(t => {
@@ -46,7 +49,7 @@
     if (P.brackets !== false) {
       const L = 54 * k, x0 = m * 0.8, y0 = m * 0.8, x1 = W - m * 0.8, y1 = H - m * 0.8;
       const br = (x, y, dx, dy) => { ctx.beginPath(); ctx.moveTo(x, y + dy * L); ctx.lineTo(x, y); ctx.lineTo(x + dx * L, y); ctx.stroke(); };
-      br(x0, yTopL - m * 0.4, 1, 1); br(x1, y0, -1, 1); br(x0, y1, 1, -1); br(x1, y1, -1, -1);
+      br(x0, markRight ? y0 : yTopL - m * 0.4, 1, 1); br(x1, markRight ? yTopR - m * 0.4 : y0, -1, 1); br(x0, y1, 1, -1); br(x1, y1, -1, -1);
     }
     if (P.crosshair) { const c = 22 * k; ctx.beginPath(); ctx.moveTo(W / 2 - c, H / 2); ctx.lineTo(W / 2 + c, H / 2); ctx.moveTo(W / 2, H / 2 - c); ctx.lineTo(W / 2, H / 2 + c); ctx.stroke(); }
     if (P.grid) { ctx.globalAlpha = 0.12; ctx.lineWidth = 1.5 * k; for (let i = 1; i < 3; i++) { ctx.beginPath(); ctx.moveTo(W * i / 3, 0); ctx.lineTo(W * i / 3, H); ctx.moveTo(0, H * i / 3); ctx.lineTo(W, H * i / 3); ctx.stroke(); } }

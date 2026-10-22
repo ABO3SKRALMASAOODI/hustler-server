@@ -1277,7 +1277,7 @@ def _keep_out_inner(ctx, edl, item, rep):
             notes.append(
                 f"NOTE (keep-out): it {' and '.join(why)}{face}, and {where_to} (6% side "
                 "margins, the right 12% clear between y 0.5 and 0.85, nothing below y 0.80, "
-                "the corner mark's box top-left). "
+                "the corner mark's box top-right). "
                 + (f"Its {pin} {_fmt((item.get('params') or {}).get(pin))} is yours, so "
                    "it was not shrunk. " if pin else "")
                 + "It stays where it is: make it smaller or shorter"
@@ -1691,9 +1691,26 @@ def _on_first_word(ctx, edl, item):
             f"nothing of it showed for the first {new_s - s:.2f}s.")
 
 
+def _cover_at_open(item):
+    """A cover headline (worker/cover.py) IS the opening frame: one started
+    within cover.COVER_START_S starts at 0, so frame 0 (the thumbnail a feed
+    shows) carries it complete. Mutates ``item``; returns the reply line."""
+    import cover
+    if not cover.is_cover(item):
+        return ""
+    s = float(item.get("start") or 0.0)
+    if 1e-6 < s <= cover.COVER_START_S + 1e-6:
+        item["start"] = 0.0
+        return (f"\nCOVER: starts at 0, not {s:g}s — frame 0 is the cover (the thumbnail "
+                "a feed shows before anyone presses play).")
+    return ""
+
+
 def _snap_to_cuts(ctx, edl, item, prog):
     """Move an entrance or exit within SNAP_CUT_S of a cut onto the cut.
-    Mutates ``item``; returns the reply line ('' when nothing moved)."""
+    Mutates ``item``; returns the reply line ('' when nothing moved). A cover
+    headline at 0 keeps its entrance on frame 0 (only its exit snaps)."""
+    import cover
     if motion_templates.persistent(item) or item.get("phase_s"):
         return ""
     cuts = _program_cuts(ctx, edl)
@@ -1706,7 +1723,8 @@ def _snap_to_cuts(ctx, edl, item, prog):
         return c if 1e-3 < abs(c - t) <= SNAP_CUT_S + 1e-6 else None
     bits = []
     word_timed = caption_carry.reads_onsets(item)
-    c = near(s) if not _number_timed(item) else None
+    opens = cover.is_cover(item) and s <= 1e-6
+    c = near(s) if not _number_timed(item) and not opens else None
     if c is not None and e - c >= SNAP_MIN_ITEM_S:
         item["start"] = round(c, 3)
         if word_timed:
@@ -1898,14 +1916,18 @@ HOOK_TIER_LONG_S = 3.0
 
 
 def _tier_notes(ctx, edl, item):
-    """Advisory lines for the hook, hero and payoff tiers."""
+    """Advisory lines for the hook, hero and payoff tiers, and the cover
+    headline (worker/cover.py)."""
+    import cover
     tier = _tier(item.get("params"))
-    if tier not in ("hook", "hero", "payoff"):
+    if tier not in ("hook", "hero", "payoff") and not cover.is_cover(item):
         return []
     others = [m for m in edl.get("motion") or []
               if isinstance(m, dict) and m.get("id") != item.get("id")
               and not motion_templates.persistent(m)
               and not str(m.get("template") or "").startswith("caption")]
+    if cover.is_cover(item):
+        return cover.notes(item, others)
     out = []
     if tier == "hook":
         twin = [m["id"] for m in others if m.get("template") == "word_slam"
@@ -1913,6 +1935,13 @@ def _tier_notes(ctx, edl, item):
         if twin:
             out.append(f"NOTE (tier): '{twin[0]}' is already this short's hook title; the hook "
                        "tier is the ONE opening headline. Make one of them a display slam.")
+        covered = [m["id"] for m in others if cover.is_cover(m)
+                   and float(m.get("end") or 0.0) > float(item.get("start") or 0.0) + 0.05]
+        if covered:
+            out.append(f"NOTE (cover): '{covered[0]}' is this short's cover headline, the "
+                       "opening title already; a hook title over its window is a second "
+                       "headline. Remove this one, or start it as a display slam after the "
+                       "cover ends.")
         if float(item.get("start") or 0.0) > HOOK_TIER_START_S + 1e-6:
             out.append(f"NOTE (tier): the hook tier is the opening title (start it by "
                        f"{HOOK_TIER_START_S:g}s); at {float(item['start']):g}s it is only a big "
@@ -2190,11 +2219,12 @@ def feed_top(W, H):
 def band_top(W, H):
     """The highest a band graphic may reach on a W x H frame: below the 9:16
     feed header and below the free-tier mark's reserved zone
-    (keepout.watermark_zone, top-left: the judged Jobs kickers at y
-    0.09-0.115 sat on it). A paid export has no mark; its zone is reserved
-    all the same — the edit does not know the tier. That is the top of a
-    full-width line; the mark covers the top-left only, so a short line may
-    sit beside it, higher (band_type.mark_strip: the headline's kicker)."""
+    (keepout.watermark_zone, top-right since v6: the judged Jobs kickers at
+    y 0.09-0.115 sat on the v5 one). A paid export has no mark; its zone is
+    reserved all the same — the edit does not know the tier. That is the top
+    of a full-width line; the mark covers the top-right only, so a short
+    line may sit beside it (left of it), higher (band_type.mark_strip: the
+    headline's kicker)."""
     safe = feed_top(W, H)
     try:
         mark = keepout.watermark_zone(W, H)
@@ -2281,7 +2311,7 @@ def _persistent_contract(ctx, edl, item, items, place, passed=(), strict=True):
 # smaller than them and names the card top, claim length or kicker that
 # makes it legible. In the band it first takes what costs no design toward
 # a claim that owns the band (HEADLINE_OWNS_RATIO): the kicker on its own
-# line beside the corner mark (the mark covers the top-left only, so the
+# line beside the corner mark (the mark covers the top-right only, so the
 # band is the claim's) and a larger ``size`` — never a param the editor
 # passed.
 # The params whose change re-measures the claim strictly (an edit that
@@ -2882,7 +2912,8 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
     _landed, number_note = _number_landing(ctx, edl, item, prog)
     size_note = _cap_size_levels(item)
     _attach_reading(ctx, edl, item)
-    window_note = _on_first_word(ctx, edl, item) + _snap_to_cuts(ctx, edl, item, prog)
+    window_note = (_cover_at_open(item) + _on_first_word(ctx, edl, item)
+                   + _snap_to_cuts(ctx, edl, item, prog))
     s, e = item["start"], item["end"]
     fit_note = _hero_fit(ctx, edl, item) if hero else ""
     series_before = _attach_series(edl, items + [item])
@@ -3040,7 +3071,8 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     relanded = (hit.get("params") or {}).get("land") != old_land
     size_note = _cap_size_levels(hit)
     _attach_reading(ctx, edl, hit)
-    window_note = _on_first_word(ctx, edl, hit) + _snap_to_cuts(ctx, edl, hit, prog)
+    window_note = (_cover_at_open(hit) + _on_first_word(ctx, edl, hit)
+                   + _snap_to_cuts(ctx, edl, hit, prog))
     fit_note = (_hero_fit(ctx, edl, hit)
                 if _tier(hit["params"]) == "hero" and hit.get("layer") == "behind_subject" else "")
     series_before = _attach_series(edl, items)
@@ -3211,7 +3243,12 @@ TOOL_SPECS = {
         "accent ('*140* / characters') — the short's largest lockup (NOTE (payoff) names a "
         "taller one); 'hero' is ONE giant word per short, behind the speaker by default on a "
         "measured person matte, drawn as a face-safe display slam above the picture when no "
-        "person matte can be had (HERO FALLBACK).",
+        "person matte can be had (HERO FALLBACK). "
+        "THE COVER (one call): template='cover_headline', start=0, end ~2.5-3, params "
+        "{text: a strong curiosity title, 3-10 words, *stars* for the accent} sets the "
+        "short's opening frame as a thumbnail: huge centred condensed caps, complete on frame "
+        "0, then it fades into the talk; it owns its zone like the hook tier (the captions "
+        "wait until it exits; COVER). For SOME shorts, never every one.",
         {"template": _TEMPLATE_PARAM, "start": {"type": "number"}, "end": {"type": "number"},
          "params": _PARAMS_PARAM, "html": {"type": "string"},
          "layer": {"type": "string", "enum": list(LAYERS)},

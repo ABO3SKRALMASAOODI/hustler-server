@@ -39,8 +39,8 @@ budget: every thesis line, spoken list or triad, named product or place and
 number gets a beat that adds information, with no body stretch past ~6-8 s
 without one. The hook is written from the clip's strongest line or
 statistic (never a generic question), is a headline that owns its zone
-(`word_slam` `tier='hook'`: the captions wait until it exits) and never
-shows a word a later graphic slams; a counter really counts and shows a
+(`word_slam` `tier='hook'`, or on some shorts the cover headline: the
+captions wait until it exits) and never shows a word a later graphic slams; a counter really counts and shows a
 spoken range as said ('30–40'); the payoff locks its number and noun
 together and holds 0.8-1.5 s after the last word (the natural tail, chosen
 at selection, else `add_freeze_frame` audio_mode='hold': the composed last
@@ -165,7 +165,9 @@ disagree, v9 wins on method and the brief wins on preferences.
    would have caught in the first 20 minutes.
 6. **Brief.** Draft while the children build (4-7 min), finish with the
    pilot's measurements (Looks and layouts it allows), not by eye: for each short a Look, a
-   structure and a 150-word brief with a beat sheet (hook, turn, payoff,
+   structure (`cover-to-conversation`, the cover-headline opening, for SOME
+   shorts whose title is a strong curiosity title, with its `cover_text`;
+   looks.md **Structures**) and a 150-word brief with a beat sheet (hook, turn, payoff,
    2-4 hero moments with exact word cues, no source gap over 12 s),
    saved as `assignments/<id>.json` with `child_project_id`, `rank`,
    `score` and the pilot's `framing`. Then one `shorts_status(parent)` and
@@ -223,8 +225,9 @@ disagree, v9 wins on method and the brief wins on preferences.
   in the headline or the hook's kicker, so a famous speaker needs no
   broadcast lower third. If identity is uncertain, omit the name; never
   borrow one from a reference or earlier run.
-- **Branding.** Every final keeps the native corner watermark ("Edited
-  using Valmera AI") and the complete 5-second native Valmera end card
+- **Branding.** Every final keeps the native corner watermark (top-right
+  since Oct 2026: "EDITED USING" / the robot and "Valmera AI" /
+  "valmera.io", right-aligned) and the complete 5-second native Valmera end card
   exactly as Valmera renders them: never cropped, covered, trimmed,
   shortened, moved or replaced. They are the owner's marketing. The final is
   15-45 s including that ending.

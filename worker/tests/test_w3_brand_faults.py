@@ -163,9 +163,9 @@ def test_every_w3_path_renders_and_the_end_card_is_untouched(brand):
 
 
 def test_the_watermark_is_drawn_after_every_w3_path(brand):
-    from test_w0b_render import _robot_opaque, _yuv
+    from test_w0b_render import _mark_opaque, _yuv
     W, H = 270, 480
-    m = _robot_opaque(W, H)
+    m = _mark_opaque(W, H)
     assert m.sum() > 40
     for k in ("40", "160"):
         a = _yuv(brand["plain"]["dumps"][k], W, H)

@@ -735,21 +735,10 @@ def brand(work):
             os.environ["OUTRO_ON_PREVIEW"] = old
 
 
-def _robot_opaque():
+def _mark_opaque():
+    """The v6 corner mark's fully opaque pixels (renderer.watermark_opaque_mask)."""
     import renderer
-    g = renderer.watermark_geometry(W, H)
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", renderer.robot_path(), "-vf",
-         f"scale={g['rw']}:{g['rh']},format=rgba", "-f", "rawvideo", "-"],
-        capture_output=True, check=True).stdout
-    a = np.frombuffer(raw, np.uint8).reshape(g["rh"], g["rw"], 4)[..., 3]
-    core = a == 255
-    core = (core & np.roll(core, 1, 0) & np.roll(core, -1, 0)
-            & np.roll(core, 1, 1) & np.roll(core, -1, 1))
-    m = np.zeros((H, W), bool)
-    m[g["margin_y"]:g["margin_y"] + g["rh"],
-      g["margin_x"]:g["margin_x"] + g["rw"]] = core
-    return m
+    return renderer.watermark_opaque_mask(W, H)
 
 
 @needs_browser
@@ -760,7 +749,7 @@ def test_brand_end_card_and_watermark_are_untouched(brand):
     assert a["frames"][200:] == b["frames"][200:]       # the 5 s card
     assert set(range(200)) - set(_diff(a, b)) == set()
     assert all(r["rung"] == "full" for r in b["report"]), b["report"]
-    m = _robot_opaque()
+    m = _mark_opaque()
     assert m.sum() > 40
     cm = m[::2, ::2] & m[1::2, ::2] & m[::2, 1::2] & m[1::2, 1::2]
     p = brand["bp"]

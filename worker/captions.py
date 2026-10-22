@@ -2851,15 +2851,20 @@ HOOK_ZONE_START_S = 1.5
 
 
 def hook_owns_zone(item):
-    """Is ``item`` the opening hook-tier title that owns its zone (word_slam
-    tier='hook' starting by HOOK_ZONE_START_S, mute_captions not false)? The
-    captions wait until it exits: the judged hooks had the live caption fade
-    in right under the title, two sentences at once in the first second."""
-    if not isinstance(item, dict) or item.get("template") != "word_slam":
+    """Is ``item`` the opening title that owns its zone (word_slam
+    tier='hook', or the cover headline (worker/cover.py), starting by
+    HOOK_ZONE_START_S, mute_captions not false)? The captions wait until it
+    exits: the judged hooks had the live caption fade in right under the
+    title, two sentences at once in the first second."""
+    if not isinstance(item, dict):
+        return False
+    template = item.get("template")
+    if template not in ("word_slam", "cover_headline"):
         return False
     if item.get("mute_captions") is False:
         return False
-    if str((item.get("params") or {}).get("tier") or "") != "hook":
+    if template == "word_slam" and \
+            str((item.get("params") or {}).get("tier") or "") != "hook":
         return False
     try:
         return float(item.get("start") or 0.0) <= HOOK_ZONE_START_S + 1e-6

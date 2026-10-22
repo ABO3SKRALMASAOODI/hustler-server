@@ -21,7 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import w0b_probe                                              # noqa: E402
-from test_w0b_render import (_base, _case, _robot_opaque,     # noqa: E402,F401
+from test_w0b_render import (_base, _case, _mark_opaque,     # noqa: E402,F401
                              _yuv, work)
 
 CREDIT = {"provider": "owner", "license": "Public domain", "title": "t"}
@@ -102,7 +102,7 @@ def test_every_w4_compiler_renders_and_the_end_card_is_untouched(brand):
 
 def test_the_watermark_robot_is_drawn_after_every_w4_stage(brand):
     W, H = 270, 480
-    m = _robot_opaque(W, H)
+    m = _mark_opaque(W, H)
     assert m.sum() > 40
     cm = m[::2, ::2] & m[1::2, ::2] & m[::2, 1::2] & m[1::2, 1::2]
     inner = (cm & np.roll(cm, 1, 0) & np.roll(cm, -1, 0)

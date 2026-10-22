@@ -2439,9 +2439,11 @@ RENDER_LOOK_VERSION = 1
 # not worth them. Bump when an export-only treatment changes again.
 FINISH_VERSION = 1
 
-# ── Free-tier watermark (round 41) ────────────────────────────────────────
-# The site's robot in the top-left of the EXPORT, with "edited by valmera
-# agent" sliding out beside it every few seconds and sliding back.
+# ── Free-tier watermark (round 41; v6 Oct 2026) ───────────────────────────
+# A sponsor-style signature at the TOP-RIGHT of the EXPORT: "EDITED USING"
+# in small tracked caps, the robot + "Valmera AI" wordmark, "valmera.io",
+# on one right edge (worker/brandmark.py draws it; v1-v5 were a robot at the
+# top-left with a line of text beside it).
 #
 # FINAL renders only, and only for users without a paid plan. Previews are
 # never marked: the watermark is what a paid plan removes, so it belongs on
@@ -2464,7 +2466,11 @@ FINISH_VERSION = 1
 # 4 = the copy alternates continuously between the fuller product name and
 # valmera.io. The bump re-encodes cached marked finals with the new text.
 # 5 = steady two-line "Edited using Valmera AI" / "valmera.io" signature.
-WATERMARK_VERSION = 5
+# 6 = the sponsor-style mark at the TOP-RIGHT (owner, Oct 2026): EDITED
+# USING / [robot] Valmera AI / valmera.io, right-aligned on one edge, soft
+# shades instead of an outline (brandmark.py). The bump re-encodes cached
+# free-tier finals with the new mark on their next download.
+WATERMARK_VERSION = 6
 # ON by owner's decision (the tradeoff was raised and taken deliberately).
 #
 # KNOWN OUTSTANDING: 44 public pages (58 occurrences) plus public/llms.txt and
@@ -2475,48 +2481,37 @@ WATERMARK_VERSION = 5
 # do. Set WATERMARK_ENABLED=0 to switch the mark back off in one env var if
 # that needs to be undone in a hurry.
 WATERMARK_ENABLED = os.getenv("WATERMARK_ENABLED", "1") == "1"
-# Capitalised at the owner's request. Set as a literal rather than .upper()'d
-# at render time so an operator overriding WATERMARK_TEXT gets exactly the
-# casing they typed instead of having it silently rewritten.
-WATERMARK_TEXT = os.getenv("WATERMARK_TEXT",
-                           "Edited using Valmera AI")
+# The mark's three lines (brandmark.py sets them; v6). Literals, not
+# .upper()'d at render time, so an operator override renders exactly as
+# typed. WATERMARK_TEXT is the whole attribution as one sentence (what the
+# QC and the docs quote).
+WATERMARK_KICKER_TEXT = os.getenv("WATERMARK_KICKER_TEXT", "EDITED USING")
+WATERMARK_NAME_TEXT = os.getenv("WATERMARK_NAME_TEXT", "Valmera AI")
 WATERMARK_URL_TEXT = os.getenv("WATERMARK_URL_TEXT", "valmera.io")
+WATERMARK_TEXT = "Edited using Valmera AI"
 # The site's wordmark face (frontend navbar uses Plus Jakarta Sans 800), so
-# the mark on the video and the logo on the page are the same type. This is
-# the font's FULL name — libass resolves it out of the bundled fonts dir the
-# same way "Inter Display Black" and "Syne ExtraBold" already resolve.
+# the mark on the video and the logo on the page are the same type; the
+# small lines are Inter Display Bold (the end card's supporting face).
 WATERMARK_FONT_NAME = "Plus Jakarta Sans ExtraBold"
-# Fractions of the OUTPUT frame, so the mark lands proportionate on 9:16,
-# 16:9, 1:1 and 4:5 without a per-ratio asset — same principle as the card.
-WATERMARK_ROBOT_H_FRAC = float(os.getenv("WATERMARK_ROBOT_H_FRAC", "0.058"))
 # Margins are PER-AXIS since v3 (they were one 3% figure, and Instagram ate
 # it — see the WATERMARK_VERSION note). X is a fraction of min(W,H): on a
-# 9:16 reel that is the width, a 10% inset that clears the ~9% side-crop of
-# the full-screen "cover" zoom; on 16:9 it stays a modest 5.6% of the width.
-# Y is a fraction of the HEIGHT directly, dropping the mark below the status
-# bar / "Reels" header band on vertical and keeping the same visual inset on
-# landscape.
+# 9:16 reel that is the width, a 10% inset of the mark's RIGHT edge that
+# clears the ~9% side-crop of the full-screen "cover" zoom; on 16:9 it stays
+# a modest 5.6% of the width. Y is a fraction of the HEIGHT directly,
+# dropping the mark below the status bar / "Reels" header band on vertical
+# and keeping the same visual inset on landscape. The mark's size scales
+# with the output height (brandmark.REF_H), so it lands proportionate on
+# 9:16, 16:9, 1:1 and 4:5 without a per-ratio asset.
 WATERMARK_MARGIN_X_FRAC = float(os.getenv("WATERMARK_MARGIN_X_FRAC", "0.10"))
 WATERMARK_MARGIN_Y_FRAC = float(os.getenv("WATERMARK_MARGIN_Y_FRAC", "0.06"))
 # The third admin position preserves the established horizontal alignment and
 # only lowers the mark by another 5% of frame height.
 WATERMARK_LOWER_MARGIN_Y_FRAC = float(os.getenv(
     "WATERMARK_LOWER_MARGIN_Y_FRAC", "0.11"))
-WATERMARK_TEXT_H_FRAC = float(os.getenv("WATERMARK_TEXT_H_FRAC", "0.0175"))
-# Aspect of brand/robot.png (1467x2157). Pinned as a constant because the
-# text's x position is computed from the robot's WIDTH, and a regenerated
-# asset with a different aspect would silently overlap the two. A worker test
-# asserts this matches the bundled file.
+# Aspect of brand/robot.png (1467x2157). A worker test asserts this matches
+# the bundled file: a regenerated asset with another shape changes the
+# mark's lockup, which must be a deliberate (version-bumped) change.
 WATERMARK_ROBOT_ASPECT = 1467.0 / 2157.0
-# Timing of one cycle: the product line slides out + fades in, holds, then
-# slides back while valmera.io takes its place for the rest of the cycle.
-# The robot and one of the two text lines are therefore always branding the
-# programme without either line reading as a permanent banner.
-WATERMARK_PERIOD_S = float(os.getenv("WATERMARK_PERIOD_S", "11.0"))
-WATERMARK_SHOW_S = float(os.getenv("WATERMARK_SHOW_S", "3.4"))
-WATERMARK_FADE_S = float(os.getenv("WATERMARK_FADE_S", "0.5"))
-WATERMARK_SLIDE_FRAC = float(os.getenv("WATERMARK_SLIDE_FRAC", "0.014"))
-WATERMARK_OPACITY = float(os.getenv("WATERMARK_OPACITY", "0.92"))
 
 # MUST stay below the platform's own request timeout, or it is dead code: at
 # 5400 it sat ABOVE Cloud Run's 3600s, so Cloud Run always killed the request

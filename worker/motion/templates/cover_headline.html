@@ -1,0 +1,168 @@
+<!--MG-SPEC {"title": "Cover headline", "category": "type",
+ "description": "The short's COVER: one huge centred headline in tall condensed white caps, set on frame 0 COMPLETE (no entrance), so the frame a feed shows before anyone presses play is a thumbnail that sells the story ('THE RUTHLESS FOCUS OF / MARK ZUCKERBERG' over the speaker). Balanced 2-4 lines at about 70% of the frame width, a soft shadow, no band; it holds about 2-3.5 s while the speaker starts, then fades (or cuts) into the talk, and the captions wait until it exits. Start it at 0. Use it for some shorts whose title is strong and curiosity-driven, never on every short.",
+ "duration": 3.0, "layer": "above_captions", "mutes_captions": false,
+ "params": {
+  "text": {"type": "str", "required": true, "max": 70, "hint": "the title, 3-10 words ('The ruthless focus of *Mark Zuckerberg*'); the page breaks it into balanced lines (2-4); ' / ' forces a break; *stars* set a word in the accent"},
+  "font": {"type": "enum", "values": ["Anton", "League Gothic", "Bebas Neue"], "default": "Anton", "hint": "the condensed caps face: Anton (bold, the default), League Gothic (taller, lighter), Bebas Neue"},
+  "color": {"type": "color", "default": "#FFFFFF"},
+  "accent": {"type": "color", "default": "#FFD84D", "hint": "the colour of *starred* words"},
+  "width": {"type": "float", "min": 0.5, "max": 0.86, "default": 0.72, "hint": "the widest line's width as a frame fraction (every line is set at one size)"},
+  "x": {"type": "float", "min": 0.3, "max": 0.7, "default": 0.5, "hint": "horizontal centre (frame fraction)"},
+  "y": {"type": "float", "min": 0.2, "max": 0.8, "default": 0.5, "hint": "vertical centre (frame fraction); the write moves it off the face"},
+  "exit": {"type": "enum", "values": ["fade", "cut", "blur"], "default": "fade", "hint": "how it leaves the talk: fade (0.25 s), cut, or a quick blur"}
+ },
+ "example": {"text": "The ruthless focus of *Mark Zuckerberg*"},
+ "sfx": []} -->
+<style>
+  .blk{position:absolute;left:0;top:0;display:flex;flex-direction:column;align-items:center;text-align:center}
+  .line{display:block;white-space:nowrap;text-transform:uppercase}
+  .line .mg-w{margin-right:.2em}
+  .line .mg-w:last-child{margin-right:0}
+</style>
+<div class="mg-root"><div class="blk" id="blk"></div></div>
+<script>
+(() => {
+  const P = MG.params, W = MG.W, H = MG.H, D = MG.duration;
+  const blk = MG.$('#blk');
+  // ── the condensed caps faces (worker/cover.py FACES keeps these in step) ──
+  const FACES = {
+    'Anton': { css: `'Anton','Bebas Neue',sans-serif`, track: 0.004, lh: 1.0 },
+    'League Gothic': { css: `'League Gothic','Anton',sans-serif`, track: 0.012, lh: 0.98 },
+    'Bebas Neue': { css: `'Bebas Neue','Anton',sans-serif`, track: 0.01, lh: 0.98 },
+  };
+  const F = FACES[P.font] || FACES['Anton'];
+  // ── the layout rules (cover.py mirrors them for the browserless lanes) ──
+  // one shared size: the widest line fills `width`, each line at most
+  // LINE_MAX of the frame height, the block at most BLOCK_MAX; the FEWEST
+  // lines (2-4; one word: one line) whose caps reach TARGET_CAP of the
+  // frame height without breaking a *starred* span, and among those (or
+  // all, when none does) the best score:
+  // the type size, less RAGGED x how ragged the lines are, LINE_COST per line
+  // past two, WEAK_END per line ending on a little word, SPLIT_ACCENT per
+  // break inside a *starred* span and SPLIT_NAME per break inside a name
+  // (two capitalised words, not the title's first)
+  const TARGET_CAP = 0.055, LINE_MAX = 0.115, BLOCK_MAX = 0.36, RAGGED = 0.5, LINE_COST = 0.93, MAX_LINES = 4;
+  const WEAK_END = 0.75, SPLIT_ACCENT = 0.85, SPLIT_NAME = 0.75;
+  const WEAK = new Set(('a an the of to at in on for and or but with by from as ' +
+                        'is are was his her my your our their its this that').split(' '));
+  const maxW = W * (P.width > 0 ? P.width : 0.72);
+  const raw = String(P.text || '').trim();
+  const forced = raw.split(/\s+\/\s*|\s*\/\s+/).map(s => s.trim()).filter(Boolean);
+  const rows = forced.map(r => MG.starWords(r).map(w => ({ text: w.t.toUpperCase(), acc: w.acc,
+                                                         cap: /^\p{Lu}/u.test(w.t) })))
+    .filter(r => r.length);
+  const first = rows.length && rows[0].length ? rows[0][0] : null;
+  const words = rows.flat();
+  const memo = new Map();
+  let probe = null;
+  const widthOf = (ws) => {
+    const key = ws.map(w => w.text).join(' ');
+    if (memo.has(key)) return memo.get(key);
+    probe.textContent = '';
+    ws.forEach(w => MG.el('span', 'mg-w', w.text, probe));
+    const v = probe.scrollWidth / 100;
+    memo.set(key, v);
+    return v;
+  };
+  // every contiguous split of the words into n lines
+  const splits = (ws, n) => {
+    if (n === 1) return [[ws]];
+    const out = [];
+    for (let a = 1; a <= ws.length - n + 1; a++)
+      splits(ws.slice(a), n - 1).forEach(rest => out.push([ws.slice(0, a)].concat(rest)));
+    return out;
+  };
+  const sizeOf = (c) => {
+    const ws = c.map(widthOf);
+    const widest = Math.max(...ws, 0.01);
+    const fs = Math.min(maxW / widest, LINE_MAX * H, BLOCK_MAX * H / (c.length * F.lh));
+    const ragged = c.length > 1 ? 1 - Math.min(...ws) / widest : 0;
+    const weak = c.slice(0, -1).filter(l => WEAK.has(l[l.length - 1].text.toLowerCase())).length;
+    const split = c.slice(1).filter((l, i) => l[0].acc && c[i][c[i].length - 1].acc).length;
+    const name = c.slice(1).filter((l, i) => { const e = c[i][c[i].length - 1]; return l[0].cap && e.cap && e !== first; }).length;
+    return { c, fs, split, score: fs * (1 - RAGGED * ragged) * Math.pow(LINE_COST, Math.max(0, c.length - 2))
+                             * Math.pow(WEAK_END, weak) * Math.pow(SPLIT_ACCENT, split) * Math.pow(SPLIT_NAME, name) };
+  };
+  let fs = 24, lines = [];
+  // measured at layout time, again once the face has loaded (a fallback
+  // face's widths would size and break the title wrongly)
+  const build = () => {
+    memo.clear();
+    blk.textContent = '';
+    probe = MG.el('div', 'line', null, blk);
+    Object.assign(probe.style, { fontFamily: F.css, fontWeight: 400, letterSpacing: F.track + 'em',
+      lineHeight: F.lh, position: 'absolute', visibility: 'hidden', fontSize: '100px' });
+    let pick;
+    if (rows.length > 1) pick = sizeOf(rows);
+    else {
+      const cands = [];
+      for (let n = words.length > 1 ? 2 : 1; n <= Math.min(MAX_LINES, words.length); n++) splits(words, n).forEach(c => cands.push(sizeOf(c)));
+      probe.textContent = 'H';
+      const cap = MG.capRatio(probe);
+      // a *starred* span is kept on one line when any break allows it
+      const whole = cands.filter(x => !x.split);
+      const big = (whole.length ? whole : cands).filter(x => x.fs * cap >= TARGET_CAP * H - 0.5);
+      pick = (big.length ? big.sort((p, q) => p.c.length - q.c.length || q.score - p.score)
+                         : (whole.length ? whole : cands).sort((p, q) => q.score - p.score || p.c.length - q.c.length))[0]
+             || sizeOf([words]);
+    }
+    probe.remove();
+    fs = Math.max(24, pick.fs);
+    lines = pick.c.map(ws => {
+      const el = MG.el('div', 'line', null, blk);
+      Object.assign(el.style, { fontFamily: F.css, fontWeight: 400, letterSpacing: F.track + 'em',
+        lineHeight: F.lh, fontSize: fs + 'px', color: P.color });
+      ws.forEach(w => { const s = MG.el('span', 'mg-w', w.text, el); if (w.acc) s.style.color = P.accent; });
+      return el;
+    });
+    // a soft two-stage shadow, never an outline or a band: a contact shade
+    // and a wide falloff that lifts the caps off the speaker
+    const shadow = `0 ${(fs * 0.02).toFixed(1)}px ${(fs * 0.06).toFixed(1)}px rgba(0,0,0,0.42), ` +
+                   `0 ${(fs * 0.045).toFixed(1)}px ${(fs * 0.26).toFixed(1)}px rgba(0,0,0,0.5)`;
+    lines.forEach(el => { el.style.textShadow = shadow; });
+  };
+  const place = () => {
+    const r = blk.getBoundingClientRect();
+    const left = W * (P.x > 0 ? P.x : 0.5) - r.width / 2;
+    // centred on y, inside the 9:16 safe band (y 0.08-0.80)
+    const top = Math.min(Math.max(H * P.y - r.height / 2, H * 0.08), H * 0.80 - r.height);
+    blk.style.left = left + 'px';
+    blk.style.top = top + 'px';
+    const b = blk.getBoundingClientRect();
+    const pad = fs * 0.35;
+    MG.box = [Math.max(0, b.left - pad), Math.max(0, b.top - pad),
+              Math.min(W, b.right + pad), Math.min(H, b.bottom + pad)];
+  };
+  // legibility over the measured plate (MG.legible): nothing where the
+  // white caps read; dark ink or a glyph scrim only where the picture under
+  // every weak glyph is bright
+  let BKS = [];
+  const legible = () => {
+    BKS.forEach(el => el.remove()); BKS = [];
+    MG.unlegible(lines);
+    if (!MG.plate || MG.luminance(P.color) < 0.3) return;
+    const res = MG.legible(lines.map(el => ({ el, ratio: 3, ink: P.color, accent: P.accent, base: 0.3,
+                                              acc: Array.from(el.querySelectorAll('.mg-w')).filter(w => w.style.color) })),
+      { root: MG.$('.mg-root'), box: { pad: [0.2 * fs, 0.06 * fs], feather: 0.3 * fs, radius: 0.24 * fs } });
+    res.boxes.forEach(bk => { BKS.push(bk); MG.growBox(bk.box); });
+  };
+  const layout = () => { build(); place(); legible(); };
+  layout();
+  MG.ready = document.fonts.load(`400 100px ${F.css}`).catch(() => 0)
+    .then(() => document.fonts.ready).then(layout);
+
+  // ── choreography: complete on frame 0 (the cover), an exit only ──
+  const exitDur = P.exit === 'fade' ? Math.min(0.25, D * 0.2) : P.exit === 'blur' ? Math.min(0.2, D * 0.2) : 0;
+  MG.active(exitDur > 0 ? [[Math.max(0, D - exitDur - 0.04), D]] : [[0, 0]]);
+  MG.frame(t => {
+    let x = { opacity: 1 };
+    if (exitDur > 0 && t > D - exitDur - 1e-6) {
+      const q = MG.range(t, D - exitDur, exitDur);
+      if (P.exit === 'fade') x.opacity = 1 - MG.ease.inOutQuad(q);
+      else x = { opacity: 1 - MG.ease.inQuad(q), blur: q * 14, scale: 1 + 0.04 * q };
+    }
+    MG.set(blk, x);
+    BKS.forEach(el => { el.style.opacity = (x.opacity ?? 1).toFixed(4); });
+  });
+})();
+</script>

@@ -1990,8 +1990,9 @@ _BRAND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "brand")
 # customer's export.
 ENDCARD_PATH = os.path.join(_BRAND_DIR, "endcard.mp4")
 ENDCARD_POSTER_PATH = os.path.join(_BRAND_DIR, "endcard.png")
-# The mark itself: the same white robot the end card and the site navbar use,
-# so the corner watermark and the brand are one character.
+# The mark's robot: the same white robot the end card and the site navbar
+# use, so the corner watermark and the brand are one character
+# (worker/brandmark.py draws the mark around it).
 ROBOT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                           "brand", "robot.png")
 
@@ -2626,13 +2627,13 @@ def watermark_current(meta, variant, is_paid, settings=None):
 def watermark_anchor_y(edl, src_w, src_h, W, H, settings=None):
     """Optional top edge for lower/scene placement; None is the normal corner.
 
-    Lower is a pure Y-axis move, preserving the established X. The scene-aware
-    position is intentionally narrow: a horizontal
-    main picture contained inside a 9:16 `pad`/`pad_blur` output. In that
-    layout fit_fractions gives the exact foreground rectangle emitted by
-    frame_fit_filter, so the robot sits just inside the scene's top edge rather
-    than high in the portrait bars/backdrop. Crop layouts already fill the
-    frame and all other ratios retain the established position.
+    Lower is a pure Y-axis move, preserving the established X (the mark's
+    right edge). The scene-aware position is intentionally narrow: a
+    horizontal main picture contained inside a 9:16 `pad`/`pad_blur` output.
+    In that layout fit_fractions gives the exact foreground rectangle emitted
+    by frame_fit_filter, so the mark sits just inside the scene's top edge
+    rather than high in the portrait bars/backdrop. Crop layouts already fill
+    the frame and all other ratios retain the established position.
     """
     position = watermark_position(settings)
     if position == "lower":
@@ -2656,68 +2657,91 @@ def watermark_anchor_y(edl, src_w, src_h, W, H, settings=None):
     content_top = int(round(y0 * H))
     content_bottom = int(round(y1 * H))
     content_h = max(1, content_bottom - content_top)
-    rh = max(24, _even(H * config.WATERMARK_ROBOT_H_FRAC))
+    ink = watermark_geometry(W, H)["ink"]
+    mark_h = ink[3] - ink[1]
     inset = max(10, int(round(content_h * config.WATERMARK_MARGIN_Y_FRAC)))
     return max(content_top, min(content_top + inset,
-                                content_bottom - rh - 10))
+                                content_bottom - mark_h - 10))
 
 
 def watermark_geometry(W, H, anchor_y=None):
-    """Pixel geometry of the mark for an output frame: the robot's box, and
-    where the text sits relative to it. One function so the ffmpeg overlay
-    and the ASS text agree on where the robot ends and the words begin —
-    computing them separately is how the two drift into overlapping.
+    """Pixel geometry of the mark on a W x H output (brandmark.layout): {
+      "ink": [x0, y0, x1, y1]  the type and the robot (no shade),
+      "image": [x, y, w, h]    where the overlay image is laid,
+      "rx", "ry", "rw", "rh"   the robot as drawn,
+      "rows"                   each line's ink box,
+      "right", "top"           the ink's right edge and top}.
+    One function, so the overlay, keepout.watermark_zone (the box every
+    layout keeps clear) and render_qc's crop can never drift apart.
 
-    The corner offset is per-axis (v3): Instagram's full-screen "cover" zoom
-    crops ~9% off each side of a 9:16 reel and overlays its header on the
-    top strip, so x clears the side-crop (10% of the width on vertical) and
-    y drops below the UI band (6% of the height) — still reading as the
-    top-left corner, no longer under the knife."""
-    rh = max(24, _even(H * config.WATERMARK_ROBOT_H_FRAC))
-    rw = max(16, _even(rh * config.WATERMARK_ROBOT_ASPECT))
-    margin_x = max(10, int(round(min(W, H)
-                                 * config.WATERMARK_MARGIN_X_FRAC)))
-    margin_y = (max(10, int(round(H * config.WATERMARK_MARGIN_Y_FRAC)))
-                if anchor_y is None else max(0, int(round(anchor_y))))
-    fs = max(9, int(round(H * config.WATERMARK_TEXT_H_FRAC)))
-    gap = max(6, int(round(fs * 0.72)))
-    slide = max(4, int(round(W * config.WATERMARK_SLIDE_FRAC)))
-    return {"rw": rw, "rh": rh, "margin_x": margin_x, "margin_y": margin_y,
-            "fontsize": fs,
-            # tucked against the robot, then slid clear
-            "x_in": margin_x + rw + gap,
-            "x_out": margin_x + rw + gap + slide,
-            "y": margin_y + max(0, (rh - 2 * fs) // 2)}
+    Top-RIGHT since v6 (the sponsor-mark signature). The offsets are per
+    axis: Instagram's full-screen "cover" zoom crops ~9% off each side of a
+    9:16 reel and overlays its header on the top strip, so the right edge
+    clears the side-crop (10% of the width on vertical) and the top drops
+    below the UI band (6% of the height). ``anchor_y`` (watermark_anchor_y,
+    the lower and scene placements) moves only the top."""
+    margin_x = max(10, int(round(min(W, H) * config.WATERMARK_MARGIN_X_FRAC)))
+    top = (max(10, int(round(H * config.WATERMARK_MARGIN_Y_FRAC)))
+           if anchor_y is None else max(0, int(round(anchor_y))))
+    import brandmark
+    g = brandmark.layout(int(W), int(H), right=int(W) - margin_x, top=top)
+    rx, ry, rw, rh = g["robot"]
+    return {"ink": g["ink"], "image": g["image"], "rows": g["rows"],
+            "rx": rx, "ry": ry, "rw": rw, "rh": rh,
+            "right": int(W) - margin_x, "top": top, "margin_x": margin_x}
+
+
+def watermark_image(workdir, W, H):
+    """The mark as an RGBA image for this output (brandmark.render), written
+    once into ``workdir``; None when it cannot be drawn (the render then
+    goes out unmarked rather than failing — the endcard_path() contract)."""
+    try:
+        import brandmark
+        return brandmark.image_path(int(H), workdir)
+    except Exception as e:  # noqa: BLE001 — a cosmetic asset never fails a render
+        print(f"[render] watermark image could not be drawn ({str(e)[:160]}) "
+              "— rendering without it", flush=True)
+        return None
+
+
+def watermark_opaque_mask(W, H, anchor_y=None):
+    """A W x H bool mask of the pixels the mark covers FULLY (its image's
+    alpha 255: the type's and the robot's cores). Whatever any stage drew
+    under it, a marked frame shows the mark's own colour there — what the
+    brand-integrity checks compare."""
+    import numpy as np
+    import brandmark
+    g = watermark_geometry(W, H, anchor_y)
+    a = np.asarray(brandmark.render(int(W), int(H)))[..., 3] == 255
+    m = np.zeros((int(H), int(W)), bool)
+    x, y = g["image"][0], g["image"][1]
+    h, w = a.shape
+    x0, y0 = max(0, x), max(0, y)
+    x1, y1 = min(int(W), x + w), min(int(H), y + h)
+    m[y0:y1, x0:x1] = a[y0 - y:y1 - y, x0 - x:x1 - x]
+    return m
 
 
 def build_watermark_ass(path, out_duration_s, W, H, anchor_y=None):
-    g = watermark_geometry(W, H, anchor_y)
-    return graphics.build_watermark_ass(
-        path, out_duration_s, (W, H), config.WATERMARK_TEXT,
-        config.WATERMARK_URL_TEXT,
-        g["x_in"], g["x_out"], g["y"], g["fontsize"],
-        config.WATERMARK_FONT_NAME, config.WATERMARK_PERIOD_S,
-        config.WATERMARK_SHOW_S, config.WATERMARK_FADE_S)
+    """Retired with v6: the mark's type is drawn into its image
+    (brandmark.render), so there is no libass layer. Kept, returning None,
+    for callers that still ask."""
+    return None
 
 
-def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H,
+def _watermark_parts(vlabel, out_label, mark_idx, wm_ass_path, W, H,
                      anchor_y=None):
-    """Filtergraph for the corner mark: the robot pinned top-left, then the
-    wordmark burned over it from its own .ass layer.
+    """Filtergraph for the corner mark: its image (watermark_image, the
+    type, the robot and their soft shade in one RGBA picture) laid at the
+    top-right by one overlay. ``wm_ass_path`` is ignored (v5's libass text
+    layer; v6 draws its type into the image).
 
     Applied to the PROGRAM stream before the end card is concatenated, so the
     mark never lands on the card (which is already branded).
-
-    The robot is an overlay and the text is libass — not one mechanism for
-    both — because a PNG needs no shaping and a string does. libass is the
-    pipeline's proven text burner (captions and graphics both ride it) and
-    gives \\move/\\fad for free; drawtext would need ffmpeg built with
-    libfreetype, which is not guaranteed.
     """
     g = watermark_geometry(W, H, anchor_y)
-    parts = [f"[{robot_idx}:v]scale={g['rw']}:{g['rh']}[wmbot]"]
-    tail = out_label if not wm_ass_path else "wmv"
-    # shortest=1 is load-bearing: the robot is a LOOPED still, so with
+    x, y = g["image"][0], g["image"][1]
+    # shortest=1 is load-bearing: the mark is a LOOPED still, so with
     # overlay's default shortest=0 ("do not end when the shortest input
     # ends") the filter keeps emitting frames forever after the programme
     # finishes and ffmpeg encodes into the void. That is not theoretical --
@@ -2725,12 +2749,9 @@ def _watermark_parts(vlabel, out_label, robot_idx, wm_ass_path, W, H,
     # which looks exactly like "slow" and never ends. The main stream drives
     # the length; the input is ALSO bounded with -t as a second line of
     # defence, generously, so it can never be the shorter one and truncate.
-    parts.append(f"[{vlabel}][wmbot]overlay={g['margin_x']}:{g['margin_y']}:"
-                 f"format=auto:shortest=1[{tail}]")
-    if wm_ass_path:
-        parts.append(f"[wmv]subtitles=filename='{wm_ass_path}'"
-                     f":fontsdir='{caplib.FONTS_DIR}'[{out_label}]")
-    return parts
+    return [f"[{mark_idx}:v]format=rgba[wmbot]",
+            f"[{vlabel}][wmbot]overlay={x}:{y}:"
+            f"format=auto:shortest=1[{out_label}]"]
 
 
 def sfx_source(key, fetch):
@@ -6278,15 +6299,13 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
         next_idx += 1
 
     robot_idx, wm_ass_path = None, None
-    if want_wm:
+    mark_img = watermark_image(workdir, W, H) if want_wm else None
+    if mark_img:
         extra_inputs += ["-loop", "1",
                          "-t", f"{tl.out_duration + 5.0:.3f}",
-                         "-r", f"{fps:.3f}", "-i", robot_path()]
+                         "-r", f"{fps:.3f}", "-i", mark_img]
         robot_idx = next_idx
         next_idx += 1
-        wm_ass_path = build_watermark_ass(
-            os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H,
-            wm_anchor_y)
 
     plate_idx, plate_box = _screen_frame_input(
         edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx)
@@ -7243,18 +7262,16 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
         card_idx = next_idx
         next_idx += 1
 
-    # Same deal for the free-tier robot: a looped still input, held for the
+    # Same deal for the free-tier mark: a looped still input, held for the
     # PROGRAM's length (not the outro's — the mark stops before the card).
     robot_idx, wm_ass_path = None, None
-    if want_wm:
+    mark_img = watermark_image(workdir, W, H) if want_wm else None
+    if mark_img:
         extra_inputs += ["-loop", "1",
                          "-t", f"{tl.out_duration + 5.0:.3f}",
-                         "-r", f"{fps:.3f}", "-i", robot_path()]
+                         "-r", f"{fps:.3f}", "-i", mark_img]
         robot_idx = next_idx
         next_idx += 1
-        wm_ass_path = build_watermark_ass(
-            os.path.join(workdir, "watermark.ass"), tl.out_duration, W, H,
-            wm_anchor_y)
 
     plate_idx, plate_box = _screen_frame_input(
         edl, workdir, W, H, fps, tl.out_duration, extra_inputs, next_idx)

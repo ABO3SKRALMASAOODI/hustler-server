@@ -259,7 +259,7 @@ def test_robot_core_matches_the_watermark_geometry():
     core = standing.robot_core(1080, 1920)
     g = renderer.watermark_geometry(1080, 1920)
     x, y, m, rgb = core
-    assert (x, y) == (g["margin_x"], g["margin_y"])
+    assert (x, y) == (g["rx"], g["ry"])
     assert m.shape == (g["rh"], g["rw"]) == rgb.shape[:2]
     assert 0.1 < m.mean() < 0.6                    # the eroded silhouette
     x0, y0, x1, y1 = standing.watermark_roi(1080, 1920)

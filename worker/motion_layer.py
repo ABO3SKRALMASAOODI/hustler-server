@@ -270,7 +270,10 @@ def yield_windows(item, items, W, H):
         if b - a < 0.05:
             continue
         box = _band_box(other, W, H)
-        if box and _shares_band(mine, box):
+        # the cover headline (worker/cover.py) is the opening's one reading
+        # task wherever it sits: the band hands over to it and returns as it
+        # exits
+        if (box and _shares_band(mine, box)) or other.get("template") == "cover_headline":
             spans.append([a, b])
     spans.sort()
     merged = []

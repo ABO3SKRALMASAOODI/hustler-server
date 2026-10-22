@@ -464,18 +464,7 @@ def test_end_card_and_watermark_are_untouched(brand):
     assert n == len(b["frames"]) == 150 + 125
     assert a["frames"][150:] == b["frames"][150:]       # the end card
     import renderer
-    g = renderer.watermark_geometry(W, H)
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", renderer.robot_path(), "-vf",
-         f"scale={g['rw']}:{g['rh']},format=rgba", "-f", "rawvideo", "-"],
-        capture_output=True, check=True).stdout
-    alpha = np.frombuffer(raw, np.uint8).reshape(g["rh"], g["rw"], 4)[..., 3]
-    m = np.zeros((H, W), bool)
-    core = alpha == 255
-    core = core & np.roll(core, 1, 0) & np.roll(core, -1, 0) & \
-        np.roll(core, 1, 1) & np.roll(core, -1, 1)
-    m[g["margin_y"]:g["margin_y"] + g["rh"],
-      g["margin_x"]:g["margin_x"] + g["rw"]] = core
+    m = renderer.watermark_opaque_mask(W, H)      # the v6 mark's opaque core
     assert m.sum() > 40
     for k in ("60", "140"):
         ya = w1b_probe.yuv(a["dumps"][k], W, H)[0]

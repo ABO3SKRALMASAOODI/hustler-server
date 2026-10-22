@@ -78,7 +78,8 @@ the layout THIS story needs, not the one used last time.
 
 - Preview: tiles play (not frozen), pops land on their beats (±1 frame),
   the collapse ends on the hero filling the frame; panels never bleed into
-  each other; the HUD never touches the top-left corner-mark zone.
+  each other; the HUD never touches the top-right corner-mark zone (its
+  top-right labels and timecode sit below it).
 - The render report names any slot "could not be filled" (an unreadable
   source shows the page's placeholder): replace that tile.
 

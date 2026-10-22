@@ -390,10 +390,14 @@ def test_the_check_sees_the_end_card_and_the_watermark(tmp_path):
     body = str(tmp_path / "body.mp4")
     _clip(body, "scale=540:960", size="540x960")
     marked = str(tmp_path / "marked.mp4")
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", body, "-i", robot,
+    # the mark exactly as a final lays it (renderer.watermark_image and
+    # _watermark_parts: the v6 sponsor mark, top-right)
+    mark = renderer.watermark_image(str(tmp_path), W, H)
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", body,
+                    "-loop", "1", "-t", "3", "-i", mark,
                     "-filter_complex",
-                    f"[1:v]scale={g['rw']}:{g['rh']}[r];"
-                    f"[0:v][r]overlay={g['margin_x']}:{g['margin_y']}",
+                    ";".join(renderer._watermark_parts("0:v", "vo", 1, None, W, H)),
+                    "-map", "[vo]",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", marked], check=True)
     cw, ch = int(W * .98) // 2 * 2, int(H * .98) // 2 * 2
     full = str(tmp_path / "full.mp4")
@@ -406,7 +410,7 @@ def test_the_check_sees_the_end_card_and_the_watermark(tmp_path):
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", full], check=True)
     base = {"program_s": 2.0, "fps": 30.0, "W": W, "H": H, "end_frame": 60,
             "cut_frames": [], "events": [], "cards": []}
-    wm = {"x": g["margin_x"], "y": g["margin_y"], "w": g["rw"], "h": g["rh"],
+    wm = {"x": g["rx"], "y": g["ry"], "w": g["rw"], "h": g["rh"],
           "robot": robot}
     good = render_qc.check(full, dict(base, watermark=wm,
                                       endcard={"path": card, "s": 3.0}))

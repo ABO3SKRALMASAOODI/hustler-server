@@ -157,8 +157,9 @@ def test_caption_cap_heights_follow_the_track():
 def test_the_strip_beside_the_mark_and_the_kickers_that_fit_it():
     mark = keepout.watermark_zone(W, H)
     strip = band_type.mark_strip(W, H, top=motion_tools.feed_top(W, H))
-    assert strip[0] > mark[2] and strip[1] == motion_tools.HEADLINE_SAFE_TOP
-    assert strip[3] == pytest.approx(mark[3]) and strip[2] <= keepout.SAFE_X1
+    # the v6 mark sits top-RIGHT: the strip is left of it
+    assert strip[2] < mark[0] and strip[1] == motion_tools.HEADLINE_SAFE_TOP
+    assert strip[3] == pytest.approx(mark[3]) and strip[0] >= keepout.SAFE_X0
     ok, ky = band_type.kicker_beside_fits(_p(text="x y z", kicker="ELON MUSK"), W, H, strip)
     assert ok and strip[1] < ky < strip[3]
     assert not band_type.kicker_beside_fits(_p(text="x", kicker=ELON), W, H, strip)[0]
@@ -166,8 +167,8 @@ def test_the_strip_beside_the_mark_and_the_kickers_that_fit_it():
                                             W, H, strip)[0]
     p = _p(text="x y z", kicker="ELON MUSK", kicker_y=ky)
     box = band_type.kicker_box(p, W, H)
-    assert box[0] > mark[2] and box[1] >= strip[1] and box[3] <= strip[3]
-    assert box[2] == pytest.approx(0.92)                    # right-aligned to the column
+    assert box[2] < mark[0] and box[1] >= strip[1] and box[3] <= strip[3]
+    assert box[0] == pytest.approx(0.08)                    # left-aligned to the column
     assert 9 < band_type.kicker_chars_beside(p, W, H, strip) < 22
 
 
@@ -186,8 +187,8 @@ def test_the_browserless_estimate_holds_a_kicker_set_aside():
 
 
 # A kicker too long for one line wraps at the floor size, max-width the
-# column: its box is the whole column, and set aside its lines start at the
-# column's LEFT edge — onto the corner mark.
+# column: its box is the whole column, and set aside its lines run across
+# the column — onto the corner mark.
 LONG_KICKER = "PAUL GRAHAM ON WRITING, THINKING CLEARLY"
 
 
@@ -320,7 +321,7 @@ def test_a_kicker_that_fits_beside_the_mark_is_set_there():
     assert lay["claim_cap"] >= target > stacked["claim_cap"]
     box = band_type.kicker_box(p, W, H, lay)
     mark = keepout.watermark_zone(W, H)
-    assert box[0] > mark[2] and box[1] >= motion_tools.feed_top(W, H)
+    assert box[2] < mark[0] and box[1] >= motion_tools.feed_top(W, H)
     assert box[3] <= p["y"] - lay["block_h"] / 2           # above the claim
 
 
@@ -545,9 +546,10 @@ def test_the_page_draws_what_was_measured():
         if lay["kicker_px"]:
             assert lay["kicker_px"] == pytest.approx(got["kfs"], rel=0.01)
         if lay["kicker_beside"]:
-            # beside the corner mark, right-aligned to the column, on its line
+            # beside the corner mark (left of the v6 mark), left-aligned to
+            # the column, on its line
             mark = keepout.watermark_zone(W, H)
             k = [v / s for v, s in zip(got["kick"], (W, H, W, H))]
-            assert k[0] > mark[2] and k[3] <= got["claim"][1] / H
-            assert k[2] == pytest.approx(params["x"] + params["width"] / 2, abs=2e-3)
+            assert k[2] < mark[0] and k[3] <= got["claim"][1] / H
+            assert k[0] == pytest.approx(params["x"] - params["width"] / 2, abs=2e-3)
             assert (k[1] + k[3]) / 2 == pytest.approx(params["kicker_y"], abs=2e-3)

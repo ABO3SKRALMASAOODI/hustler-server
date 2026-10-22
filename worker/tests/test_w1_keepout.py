@@ -45,7 +45,7 @@ def test_a_moved_graphic_keeps_off_the_corner_mark():
     the free-tier corner mark, with no warning."""
     W, H = 1080, 1920
     mark = keepout.mark_zone(W, H)
-    assert mark and mark[3] < 0.2 and mark[0] < 0.2
+    assert mark and mark[3] < 0.2 and mark[2] > 0.8      # top-right (v6)
     slam = (0.2278, 0.0781, 0.7759, 0.276)
     assert keepout.on_mark(slam, mark)
     assert not keepout.on_mark((0.2278, 0.15, 0.7759, 0.30), mark)

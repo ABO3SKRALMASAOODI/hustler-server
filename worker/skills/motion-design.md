@@ -97,7 +97,11 @@ sound grammar.
 
 CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
 - Opening and thesis: `word_slam` with `tier='hook'` (below) or
-  `hook_title` for the 1–3 line hook readable by 1.5 s;
+  `hook_title` for the 1–3 line hook readable by 1.5 s; `cover_headline`
+  for a COVER opening on SOME shorts with a strong curiosity title: one
+  call (`start=0`, `end` 2.5-3, `params={text}`) sets huge centred
+  condensed caps complete on frame 0 (the thumbnail), fading into the talk;
+  it owns its zone like the hook tier and replaces it (one opening title);
   `word_slam` for one hero word on its spoken onset (the most common hero
   moment); `phrase_build` for a short lockup assembled word by word on
   onsets (rows quote the transcript; the engine lands each spoken word on
@@ -148,8 +152,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   picture floor), the claim length or the kicker — and says what lifts one
   under 1.2x. For params you did not pass it first sets a short kicker
   (about 12 characters) on its own line beside the corner mark (kicker_y:
-  the mark covers the top-left only, so the band is the claim's) and a
-  larger size. A headline that opens
+  the mark covers the top-RIGHT only, x 0.55-0.91 down to y 0.128, so the
+  kicker sits left of it, left-aligned to the column, and the band is the
+  claim's) and a larger size. A headline that opens
   the program is the hook on frame 0, the thumbnail: the write sets it
   complete there (entrance 'none') unless you pass an entrance. It holds the band and
   YIELDS on its own at render time — gone on the frame any graphic that
@@ -170,7 +175,7 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   every lockup that shares the band as a motion template. A graphic set in
   that band (with or without a headline) is NOTEd (band) when it spills out
   of it — onto the top of the card or up into the feed header / the
-  watermark's zone (top-left, where a free-tier final burns the mark) —
+  watermark's zone (top-right, where a free-tier final burns the mark) —
   narrow it or move its y. Without a
   browser at write time the box is the template's estimate, which runs a
   little tall: only a clear spill is named there, and a preview measures it.

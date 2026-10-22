@@ -5486,46 +5486,50 @@ for _position, _placement in (
           renderer.watermark_current(_meta, "final", False, _s)
           and _wm_ns["_watermark_is_current"](_meta, False, _s))
 
-# Geometry: the text must start clear of the robot, or the words sit on it.
+# Geometry (v6): the sponsor-style mark at the TOP-RIGHT — its three lines
+# end on ONE right edge, the robot sits left of the wordmark and clear of
+# it, and the whole mark (its soft shade included) stays inside the frame.
 for _W, _H in ((1080, 1920), (1920, 1080), (1080, 1080), (864, 1080)):
     _g = renderer.watermark_geometry(_W, _H)
-    check(f"watermark {_W}x{_H}: text starts clear of the robot",
-          _g["x_in"] >= _g["margin_x"] + _g["rw"])
-    check(f"watermark {_W}x{_H}: the mark fits inside the frame",
-          _g["margin_y"] + _g["rh"] < _H and _g["x_out"] < _W)
-    # x_out is where the words START; they extend RIGHT from there (\an7).
-    # Capitalising the text made it ~15% wider, and libass clips silently at
-    # the frame edge -- a half-visible wordmark is worse than none, and no
-    # error would appear anywhere. 0.75*fontsize per glyph is a deliberately
-    # generous advance for an ExtraBold uppercase face.
-    _tw = len(wconfig.WATERMARK_TEXT) * 0.75 * _g["fontsize"]
-    check(f"watermark {_W}x{_H}: '{wconfig.WATERMARK_TEXT}' fits without "
-          f"clipping (ends ~{int(_g['x_out'] + _tw)} of {_W})",
-          _g["x_out"] + _tw < _W)
+    _ix0, _iy0, _ix1, _iy1 = _g["ink"]
+    _rows = _g["rows"]
+    check(f"watermark {_W}x{_H}: the mark (shade included) fits inside the frame",
+          _g["image"][0] >= 0 and _g["image"][1] >= 0
+          and _g["image"][0] + _g["image"][2] <= _W
+          and _g["image"][1] + _g["image"][3] < _H)
+    check(f"watermark {_W}x{_H}: it sits top-RIGHT",
+          _ix0 > _W * 0.45 and _ix1 == _W - _g["margin_x"])
+    check(f"watermark {_W}x{_H}: the three lines end on one right edge",
+          all(abs(r[2] - _ix1) <= 1 for r in _rows.values()))
+    check(f"watermark {_W}x{_H}: EDITED USING / Valmera AI / valmera.io read "
+          f"top to bottom",
+          _rows["kick"][3] <= _rows["name"][1] and _rows["name"][3] <= _rows["url"][1])
+    check(f"watermark {_W}x{_H}: the robot sits left of the wordmark, clear of it",
+          _g["rx"] + _g["rw"] < _rows["name"][0] and _g["rx"] >= _ix0
+          and _g["ry"] < _rows["name"][1] and _g["ry"] + _g["rh"] > _rows["name"][3])
 
-# v3: the whole point of the move. On a 9:16 reel Instagram's full-screen
-# "cover" zoom crops ~9% off EACH side and overlays its header on the top
-# strip — the robot's left edge must clear the side-crop and its top edge
+# v3's whole point, kept on the right edge: on a 9:16 reel Instagram's
+# full-screen "cover" zoom crops ~9% off EACH side and overlays its header on
+# the top strip — the mark's right edge must clear the side-crop and its top
 # must sit below the UI band, or a zoomed Reel eats the mark again
 # (2026-08-10: it did, at the old single 3% margin).
 _g916 = renderer.watermark_geometry(1080, 1920)
-check("watermark 9:16: robot clears Instagram's ~9% side-crop",
-      _g916["margin_x"] >= int(1080 * 0.095))
-check("watermark 9:16: robot sits below the top UI band (>=4.5% of H)",
-      _g916["margin_y"] >= int(1920 * 0.045))
+check("watermark 9:16: the mark's right edge clears Instagram's ~9% side-crop",
+      1080 - _g916["ink"][2] >= int(1080 * 0.095))
+check("watermark 9:16: the mark sits below the top UI band (>=4.5% of H)",
+      _g916["top"] >= int(1920 * 0.045) and _g916["ink"][1] == _g916["top"])
 
 _lower_y = renderer.watermark_anchor_y(
     {}, 1080, 1920, 1080, 1920,
     {"enabled": True, "force": False, "lower": True})
 _glower = renderer.watermark_geometry(1080, 1920, _lower_y)
 check("watermark lower: preserves the original horizontal alignment",
-      _glower["margin_x"] == _g916["margin_x"]
-      and _glower["x_in"] == _g916["x_in"]
-      and _glower["x_out"] == _g916["x_out"])
+      _glower["ink"][0] == _g916["ink"][0] and _glower["ink"][2] == _g916["ink"][2]
+      and _glower["rx"] == _g916["rx"])
 check("watermark lower: moves down from 6% to 11% of frame height",
-      _glower["margin_y"] == int(round(1920 * 0.11))
-      and _glower["margin_y"] > _g916["margin_y"]
-      and _glower["margin_y"] + _glower["rh"] < 1920)
+      _glower["top"] == int(round(1920 * 0.11))
+      and _glower["top"] > _g916["top"]
+      and _glower["ink"][3] < 1920)
 
 _scene_edl = {"frame": {"ratio": "9:16", "mode": "pad_blur"}}
 _scene_y = renderer.watermark_anchor_y(
@@ -5537,7 +5541,7 @@ _scene_bottom = int(round(_scene_fit[4] * 1920))
 check("watermark scene-top: horizontal footage in a padded 9:16 frame "
       "moves the mark onto the visible scene",
       _scene_y is not None and _scene_top < _scene_y < _scene_bottom
-      and _scene_y > _g916["margin_y"])
+      and _scene_y > _g916["top"])
 check("watermark scene-top: current corner and ineligible layouts stay put",
       renderer.watermark_anchor_y(
           _scene_edl, 1920, 1080, 1080, 1920,
@@ -5577,8 +5581,8 @@ check("watermark: the bundled font really answers to WATERMARK_FONT_NAME "
       "(a mismatch falls back to DejaVu with no error anywhere)",
       bool(_fam) and wconfig.WATERMARK_FONT_NAME in _fam)
 
-# The robot's aspect is a CONSTANT the text position depends on; a
-# regenerated asset with a different shape would silently overlap the two.
+# The robot's aspect is pinned: a regenerated asset with another shape
+# changes the mark's lockup, which must be a deliberate, version-bumped act.
 try:
     from PIL import Image as _Img
     _rw, _rh = _Img.open(renderer.robot_path()).size
@@ -5587,38 +5591,27 @@ try:
 except ImportError:
     pass
 
-# One steady attribution and address span the program, without cycling.
-_ass_p = os.path.join(tempfile.mkdtemp(), "wm.ass")
-_res = renderer.build_watermark_ass(_ass_p, 25.0, 1080, 1920)
-_body = open(_ass_p).read()
-_dialogs = [l for l in _body.splitlines() if l.startswith("Dialogue:")]
-check("watermark: the ass layer is written", _res == _ass_p)
-check("watermark: agreed attribution and address stay visible together",
+# v6 draws the whole mark (type, robot, soft shade) into ONE image laid by
+# one overlay: no libass layer, no motion, one steady signature.
+_wm_dir = tempfile.mkdtemp()
+_wm_img = renderer.watermark_image(_wm_dir, 1080, 1920)
+check("watermark: the mark image is drawn", bool(_wm_img) and os.path.exists(_wm_img))
+try:
+    from PIL import Image as _Img
+    _im = _Img.open(_wm_img)
+    check("watermark: the image is RGBA at the size the overlay lays",
+          _im.mode == "RGBA" and list(_im.size) == _g916["image"][2:])
+except ImportError:
+    pass
+check("watermark: the retired libass text layer is not written",
+      renderer.build_watermark_ass(os.path.join(_wm_dir, "wm.ass"), 25.0,
+                                   1080, 1920) is None)
+check("watermark: agreed attribution and address",
       wconfig.WATERMARK_TEXT == "Edited using Valmera AI"
-      and wconfig.WATERMARK_URL_TEXT == "valmera.io"
-      and "Edited using Valmera AI\\Nvalmera.io" in _body)
-check("watermark: one steady event covers the program",
-      len(_dialogs) == 1 and ",0:00:00.00,0:00:25.00," in _dialogs[0])
-check("watermark: no recurring movement, fades or text swaps",
-      "\\move" not in _body and "\\fad(" not in _body and "\\pos(" in _body)
-check("watermark: it is anchored top-left", "\\an7" in _body)
-check("watermark: it uses the site's wordmark face",
-      wconfig.WATERMARK_FONT_NAME in _body)
-def _ass_secs(ts):
-    h, m, rest = ts.split(":")
-    return int(h) * 3600 + int(m) * 60 + float(rest)
-
-
-_ends = [_ass_secs(d.split(",")[2]) for d in _dialogs]
-_starts = [_ass_secs(d.split(",")[1]) for d in _dialogs]
-check("watermark: no event runs past the end of the program",
-      max(_ends) <= 25.0 + 1e-6)
-check("watermark: events are ordered and non-overlapping",
-      all(_starts[i] >= _ends[i - 1] - 1e-6 for i in range(1, len(_dialogs))))
-check("watermark: there is no textless gap",
-      all(_starts[i] <= _ends[i - 1] + 0.02
-          for i in range(1, len(_dialogs))))
-# The overlay MUST end with the programme. The robot is a looped still, so
+      and wconfig.WATERMARK_KICKER_TEXT == "EDITED USING"
+      and wconfig.WATERMARK_NAME_TEXT == "Valmera AI"
+      and wconfig.WATERMARK_URL_TEXT == "valmera.io")
+# The overlay MUST end with the programme. The mark is a looped still, so
 # with overlay's default shortest=0 the filter emits frames forever after the
 # video ends and ffmpeg encodes into the void -- this hung a real export at
 # 89% for 8 minutes with a healthy heartbeat, which reads as "slow", not
@@ -5627,14 +5620,14 @@ _wm_graph = ";".join(renderer._watermark_parts("v0", "vout", 9, None,
                                                1080, 1920))
 check("watermark: the overlay ends with the programme (shortest=1)",
       "shortest=1" in _wm_graph)
-check("watermark: the looped robot input is bounded by -t like every other "
+check("watermark: one overlay at the mark's own corner, no text layer",
+      f"overlay={_g916['image'][0]}:{_g916['image'][1]}:" in _wm_graph
+      and "subtitles=" not in _wm_graph)
+check("watermark: the looped mark input is bounded by -t like every other "
       "still in the renderer",
       'f"{tl.out_duration + 5.0:.3f}"' in open(
           os.path.join(os.path.dirname(__file__), "..", "renderer.py")).read())
 
-_short = renderer.build_watermark_ass(_ass_p, 0.2, 1080, 1920)
-check("watermark: a too-short program gets no layer (no wasted pass)",
-      _short is None)
 # The kill switch is the one-env-var undo if the mark has to come off in a
 # hurry, so it is asserted directly rather than inferred from the default.
 wconfig.WATERMARK_ENABLED = False

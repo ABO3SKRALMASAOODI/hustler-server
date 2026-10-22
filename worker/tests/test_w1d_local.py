@@ -156,12 +156,9 @@ def measure_at1(out_dir, monkeypatch, opted_in=True):
     # the watermark never inverts (it is composited after every stage)
     import renderer
     H, W = y1.shape[1:]
-    g = renderer.watermark_geometry(W, H)
     y0, _ = frames(c)
-    roi = (slice(g["margin_y"], g["margin_y"] + g["rh"]),
-           slice(g["margin_x"], g["margin_x"] + g["rw"]))
-    wm_alpha = _robot_alpha(W, H) if g else None
-    wm_diff = max(int(np.abs(y1[f][roi].astype(int) - y0[f][roi])[
+    wm_alpha = renderer.watermark_opaque_mask(W, H)   # the v6 mark's opaque core
+    wm_diff = max(int(np.abs(y1[f].astype(int) - y0[f])[
         wm_alpha].max()) for f in got) if got else 0
     import flash_safety
     return {"result": res.splitlines()[0][:160], "planned": planned,
@@ -174,19 +171,6 @@ def measure_at1(out_dir, monkeypatch, opted_in=True):
             "rungs": sorted({r["rung"] for r in rep}),
             "flash": flash_safety.assess(ctx.edl,
                                          request_text=msg)}
-
-
-def _robot_alpha(W, H):
-    import renderer
-    g = renderer.watermark_geometry(W, H)
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", renderer.robot_path(), "-vf",
-         f"scale={g['rw']}:{g['rh']},format=rgba", "-f", "rawvideo", "-"],
-        capture_output=True, check=True).stdout
-    a = np.frombuffer(raw, np.uint8).reshape(g["rh"], g["rw"], 4)[..., 3]
-    core = a == 255
-    return (core & np.roll(core, 1, 0) & np.roll(core, -1, 0)
-            & np.roll(core, 1, 1) & np.roll(core, -1, 1))
 
 
 @local_only(V02)

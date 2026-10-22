@@ -231,40 +231,25 @@ def safe_issues(box, W, H):
 
 def watermark_zone(W=1080, H=1920, anchor_y=None, pad=0.01):
     """The free-tier watermark's box on a W x H output, in fractions: the
-    robot plus the two-line wordmark at its slid-out position, padded by
-    ``pad``. A reserved zone for text placement (band planner, captions,
-    graphics): a free-tier final burns the mark there, top-left, over the
-    program. Read-only — the mark itself is renderer.watermark_geometry and
-    never moves for a layout. ``anchor_y``: renderer.watermark_anchor_y
-    (lower or scene placement), None for the normal corner."""
-    import config
+    mark's ink (EDITED USING / the robot and Valmera AI / valmera.io,
+    renderer.watermark_geometry -> brandmark.layout), padded by ``pad``. A
+    reserved zone for text placement (band planner, captions, graphics): a
+    free-tier final burns the mark there, TOP-RIGHT, over the program.
+    Read-only — the mark itself never moves for a layout. ``anchor_y``:
+    renderer.watermark_anchor_y (lower or scene placement), None for the
+    normal corner."""
     import renderer
-    g = renderer.watermark_geometry(int(W), int(H), anchor_y)
-    fs = g["fontsize"]
-
-    def text_w(text):
-        # libass sizes a font by its line height (ascent + descent), not
-        # its em, so the measured advance is scaled by that ratio
-        try:
-            from PIL import ImageFont
-            font = ImageFont.truetype(renderer.watermark_font_path(), fs)
-            asc, desc = font.getmetrics()
-            return float(font.getlength(text)) * fs / max(1.0, asc + desc)
-        except Exception:
-            return 0.5 * fs * len(text)
-    words = max(text_w(config.WATERMARK_TEXT), text_w(config.WATERMARK_URL_TEXT))
-    x0, y0 = g["margin_x"], g["margin_y"]
-    x1 = g["x_out"] + words
-    y1 = max(y0 + g["rh"], g["y"] + 2.4 * fs)
+    x0, y0, x1, y1 = renderer.watermark_geometry(int(W), int(H), anchor_y)["ink"]
     W, H = float(W), float(H)
     return [round(max(0.0, x0 / W - pad), 4), round(max(0.0, y0 / H - pad), 4),
             round(min(1.0, x1 / W + pad), 4), round(min(1.0, y1 / H + pad), 4)]
 
 
 # A graphic may not lay ink on the free-tier corner mark's reserved box
-# (top-left): the mark is burned over the program on a free-tier final and
-# stays exactly as it is, so type there collides with it (Oct 11 run, s06: a
-# band lockup at y 0.178 rendered over the mark from y 0.076, no warning).
+# (top-right since v6): the mark is burned over the program on a free-tier
+# final and stays exactly as it is, so type there collides with it (Oct 11
+# run, s06: a band lockup at y 0.178 rendered over the mark from y 0.076,
+# no warning).
 # Persistent band headlines are laid out around it by band_type and are not
 # judged here. MARK_HIT: share of the reserved box a graphic may cover.
 MARK_HIT = 0.03
@@ -286,9 +271,16 @@ def on_mark(box, zone):
     return bool(box and zone) and inter(box, zone) > MARK_HIT * area(zone)
 
 
+def hud_mark_params(item, out_w, out_h, fps=None):
+    """The HUD's ``mark`` param for this canvas (motion_templates.DERIVED):
+    the reserved zone of the mark the render burns now, never the one the
+    item was written against."""
+    return {"mark": [str(v) for v in watermark_zone(int(out_w), int(out_h))]}
+
+
 ISSUE_TEXT = {
-    "mark": "lay on the free-tier corner mark's reserved box (top-left, "
-            "above y 0.13)",
+    "mark": "lay on the free-tier corner mark's reserved box (top-right, "
+            "x 0.55-0.91, above y 0.13)",
     "side": "reached into the 6% side margins",
     "rail": "ran into the platform's right button rail (x > 0.88 between y 0.5 and 0.85)",
     "bottom": "sat in the bottom UI band (below y 0.80)",
@@ -962,6 +954,9 @@ NOMINAL_INK = {
     "chat_bubbles": (0.085, -0.3, 0.904, 0.015),
     "checklist": (0.237, -0.096, 0.756, 0.102),
     "comment_cta": (0.067, -0.156, 0.933, 0.162),
+    # the cover's estimate follows its title (cover.layout, _cover_ink); this
+    # row is the example's two lines at y 0.5
+    "cover_headline": (0.14, -0.048, 0.86, 0.048),
     "counter": (0.081, -0.075, 0.933, 0.088),
     # midpoint of Apple Color Emoji (macOS: .548,-.058,.848,.081) and Noto
     # Color Emoji (the Linux render lanes: .511,-.088,.885,.110) glyph boxes
@@ -1064,6 +1059,9 @@ def nominal_ink(template, spec, params, frame=None):
     y = num(params, "y", pspec["y"].get("default", 0.5))
     if template == "headline":
         return _headline_ink(params or {}, y)
+    if template == "cover_headline":
+        import cover
+        return cover.nominal_ink(dict(params or {}, y=y), frame)
     if template == "typewriter":
         return _typewriter_ink(params or {}, y, frame)
     if template == "list_build":

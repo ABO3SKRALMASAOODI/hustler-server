@@ -335,7 +335,11 @@ def asset_params(name, params):
 # "module:function" taking (item, out_w, out_h, fps) and returning extra
 # params (underscore keys). Resolved lazily; a failure leaves the page to
 # draw its own fallback (never the render).
-DERIVED = {"typeset": "typeset.layoutdoc:page_params"}
+DERIVED = {"typeset": "typeset.layoutdoc:page_params",
+           # the corner mark's zone for THIS canvas at render time, so a HUD
+           # written against an earlier mark (v5: top-left) lays its corner
+           # furniture around the mark the export actually carries
+           "hud": "keepout:hud_mark_params"}
 
 
 def derived_params(item, out_w, out_h, fps):

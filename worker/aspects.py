@@ -209,7 +209,7 @@ def safe_area_violations(path, ratio, samples=12, wm_box=None,
 
 
 def _wm_box(path):
-    """The free-tier mark's corner (robot + its two lines) in frame
+    """The free-tier mark's corner (its three lines and the robot) in frame
     fractions: Valmera's own mark, placed exactly as rendered — never a
     safe-area violation of the edit's type."""
     try:
@@ -217,10 +217,8 @@ def _wm_box(path):
         import renderer
         info = qa_metrics.probe(path)
         W, H = int(info["width"]), int(info["height"])
-        g = renderer.watermark_geometry(W, H)
-        x1 = g["x_out"] + 24 * g["fontsize"] * 0.62
-        return [g["margin_x"] / W - 0.01, g["margin_y"] / H - 0.01,
-                x1 / W + 0.01, (g["margin_y"] + g["rh"]) / H + 0.02]
+        x0, y0, x1, y1 = renderer.watermark_geometry(W, H)["ink"]
+        return [x0 / W - 0.01, y0 / H - 0.01, x1 / W + 0.01, y1 / H + 0.02]
     except Exception:  # noqa: BLE001
         return None
 

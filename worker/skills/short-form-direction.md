@@ -98,7 +98,9 @@ THE PREMIUM SHORT-FORM GRAMMAR — targets you can measure in the render:
    of the frame height (caps) with the lead-in small above it ("They
    promised us / *flying cars*…") and owns its zone — the captions wait
    until it exits, so the first seconds have one reading task — or the
-   claim stands in a headline band. Never hook type no bigger than the
+   claim stands in a headline band, or (some shorts with a strong curiosity
+   title) it is the COVER: `cover_headline` at 0, huge centred caps complete
+   on frame 0 for 2-3 s (hooks-retention). Never hook type no bigger than the
    captions with a live caption fading in under it. Frame 0 shows the speaker
    facing camera, fully in frame, on a clean word onset (no fragment of the
    previous word, no disfluency), and the hook plays as one take: no jump

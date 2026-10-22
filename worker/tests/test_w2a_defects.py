@@ -73,7 +73,10 @@ def test_a_slam_in_the_headline_band_is_kept_under_the_corner_mark(monkeypatch):
     assert "corner mark" in out, out
     item = ctx.latest_edl()["json"]["motion"][0]
     box = item["footprint"]["box"]
-    assert box[1] >= mark[3] - keepout.EDGE_TOL or box[0] >= mark[2], (box, mark)
+    # below the mark's floor, or beside it (the v6 mark sits top-right:
+    # left of it is free)
+    assert (box[1] >= mark[3] - keepout.EDGE_TOL or box[2] <= mark[0]
+            or box[0] >= mark[2]), (box, mark)
     assert not keepout.on_mark(box, keepout.mark_zone(1080, 1920))
 
 

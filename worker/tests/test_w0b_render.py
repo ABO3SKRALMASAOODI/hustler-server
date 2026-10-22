@@ -335,22 +335,14 @@ def brand(work):
             os.environ["OUTRO_ON_PREVIEW"] = old
 
 
-def _robot_opaque(W, H):
+def _mark_opaque(W, H):
+    """The v6 corner mark's fully opaque pixels in a W x H frame (its
+    image's alpha 255: the type's and the robot's cores), where it is laid
+    (renderer.watermark_opaque_mask). The mark is one exact overlay, so no
+    resampling softens those pixels: a marked frame shows the mark's own
+    colour there whatever any stage drew under it."""
     import renderer
-    g = renderer.watermark_geometry(W, H)
-    raw = subprocess.run(
-        ["ffmpeg", "-v", "error", "-i", renderer.robot_path(), "-vf",
-         f"scale={g['rw']}:{g['rh']},format=rgba", "-f", "rawvideo", "-"],
-        capture_output=True, check=True).stdout
-    a = np.frombuffer(raw, np.uint8).reshape(g["rh"], g["rw"], 4)[..., 3]
-    core = a == 255
-    for _ in range(1):                     # erode: away from soft edges
-        core = (core & np.roll(core, 1, 0) & np.roll(core, -1, 0)
-                & np.roll(core, 1, 1) & np.roll(core, -1, 1))
-    m = np.zeros((H, W), bool)
-    m[g["margin_y"]:g["margin_y"] + g["rh"],
-      g["margin_x"]:g["margin_x"] + g["rw"]] = core
-    return m
+    return renderer.watermark_opaque_mask(W, H)
 
 
 @pytest.mark.parametrize("name", ["plain", "shift", "plate"])
@@ -381,14 +373,23 @@ def test_end_card_survives_aspect_shifts_and_the_floating_plate(brand, name):
 
 def test_at_0b_5_watermark_robot_is_drawn_after_every_stage(brand):
     W, H = 270, 480
-    m = _robot_opaque(W, H)
+    m = _mark_opaque(W, H)
     assert m.sum() > 40
     cm = m[::2, ::2] & m[1::2, ::2] & m[::2, 1::2] & m[1::2, 1::2]
+    # The v6 mark is laid exact (no resampling), so its mask is its opaque
+    # core itself, not eroded: its luma is bit-exact. Chroma is subsampled
+    # with neighbours, so a chroma sample on the type's rim reads the
+    # (here inverted) picture beside it by a few levels; one sample in, the
+    # mark's chroma is exact too.
+    inner = (cm & np.roll(cm, 1, 0) & np.roll(cm, -1, 0)
+             & np.roll(cm, 1, 1) & np.roll(cm, -1, 1))
     for k in ("60", "150"):
         a = _yuv(brand["plain0"]["dumps"][k], W, H)
         b = _yuv(brand["plain1"]["dumps"][k], W, H)
         assert np.abs(a[0] - b[0])[m].max() == 0
-        assert np.abs(a[1] - b[1])[cm].max() == 0
+        assert np.abs(a[1] - b[1])[cm].max() <= 10
+        if inner.any():
+            assert np.abs(a[1] - b[1])[inner].max() == 0
         # ...while the picture around it IS inverted
         outside = ~m
         outside[:60, :] = False

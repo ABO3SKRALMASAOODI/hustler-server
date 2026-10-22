@@ -268,7 +268,12 @@ beats name those, so every graphic earns its place.
 ## The brief (one JSON per short)
 
 Assign a Look and a structure ([looks.md](looks.md)) from the story, not from
-editor convenience, and record why and the closest alternative. Write the art
+editor convenience, and record why and the closest alternative. Give
+`cover-to-conversation` to SOME shorts (about one in four, never most)
+whose title is a strong curiosity title, a named person and a specific
+promise ('The ruthless focus of *Mark Zuckerberg*'); its brief adds
+`cover_text`, the cover's 3-10 words (`run.py` rejects the structure
+without it). Write the art
 direction in about 150 words: the one visual idea that makes the turn and
 payoff visible, the hero words with their source-time cues, the evidence or
 B-roll you expect (with rights), and anything the editor must avoid. Save it

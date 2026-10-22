@@ -34,18 +34,15 @@ ROBOT_MATCH_TOL = 24.0
 
 
 def watermark_roi(W, H):
-    """(x0, y0, x1, y1) around the free-tier mark: the robot box plus room
-    for the wordmark, from renderer.watermark_geometry."""
+    """(x0, y0, x1, y1) around the free-tier mark: its ink box (the three
+    lines and the robot), from renderer.watermark_geometry."""
     try:
         import renderer
-        g = renderer.watermark_geometry(W, H)
-        x0 = max(0, g["margin_x"] - 6)
-        y0 = max(0, g["margin_y"] - 6)
-        x1 = min(W, g["x_out"] + int(0.45 * W))
-        y1 = min(H, g["margin_y"] + g["rh"] + 6)
-        return x0, y0, x1, y1
+        x0, y0, x1, y1 = renderer.watermark_geometry(W, H)["ink"]
+        return (max(0, x0 - 6), max(0, y0 - 6), min(W, x1 + 6),
+                min(H, y1 + 6))
     except Exception:
-        return 0, 0, int(0.6 * W), int(0.14 * H)
+        return int(0.4 * W), 0, W, int(0.14 * H)
 
 
 def edl_summary(edl):
@@ -117,15 +114,14 @@ def robot_core(W, H, *, erode=2):
         p = renderer.robot_path()
         if not p:
             return None
+        import brandmark
         g = renderer.watermark_geometry(W, H)
-        im = Image.open(p).convert("RGBA").resize((g["rw"], g["rh"]),
-                                                  Image.BICUBIC)
-        a = np.asarray(im)
+        a = np.asarray(brandmark.robot_rgba(g["rw"], g["rh"]))
         m = np.pad(a[..., 3] == 255, erode, constant_values=False)
         m = qa_metrics._erode(m, erode)[erode:-erode, erode:-erode]
         if not m.any():
             return None
-        return g["margin_x"], g["margin_y"], m, a[..., :3]
+        return g["rx"], g["ry"], m, a[..., :3]
     except Exception:
         return None
 

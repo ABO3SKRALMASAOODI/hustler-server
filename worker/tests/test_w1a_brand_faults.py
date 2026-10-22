@@ -113,9 +113,9 @@ def test_end_card_is_md5_identical_with_the_program_matte(brand):
 
 def test_watermark_robot_is_untouched_by_the_program_matte(brand):
     import renderer
-    from test_w0b_render import _robot_opaque
+    from test_w0b_render import _mark_opaque
     W, H = 270, 480
-    m = _robot_opaque(W, H)
+    m = _mark_opaque(W, H)
     cm = m[::2, ::2] & m[1::2, ::2] & m[::2, 1::2] & m[1::2, 1::2]
     for k in ("60", "100"):
         ya, ua = _yuv(brand["b0"]["dumps"][k], W, H)

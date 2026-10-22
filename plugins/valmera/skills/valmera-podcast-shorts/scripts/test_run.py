@@ -415,9 +415,20 @@ class RunTests(unittest.TestCase):
                    "--short-id", "s01", "--brief", self.brief("s01", brief="word " * 300))
         self.fails("not 's01'", "assign", "--run-dir", self.dir, "--short-id", "s01",
                    "--brief", self.brief("s02"))
+        self.fails("needs cover_text", "assign", "--run-dir", self.dir,
+                   "--short-id", "s01", "--brief",
+                   self.brief("s01", structure="cover-to-conversation"))
+        self.fails("needs cover_text", "assign", "--run-dir", self.dir,
+                   "--short-id", "s01", "--brief",
+                   self.brief("s01", structure="cover-to-conversation", cover_text="Focus"))
         self.ok("assign", "--run-dir", self.dir, "--short-id", "s01",
-                "--brief", self.brief("s01", look="custom-quiet-confession"),
+                "--brief", self.brief("s01", look="custom-quiet-confession",
+                                      structure="cover-to-conversation",
+                                      cover_text="The ruthless focus of *Mark Zuckerberg*"),
                 "--editor", "e1")
+        item = self.state()["shorts"]["s01"]
+        self.assertEqual((item["structure"], item["brief"]["cover_text"]),
+                         ("cover-to-conversation", "The ruthless focus of *Mark Zuckerberg*"))
         self.fails("keep it to 10", "candidate", "--run-dir", self.dir,
                    "--short-id", "s01", "--preview", "p", "--edl-version", "2",
                    "--note", "\n".join(f"line {i}" for i in range(11)))
