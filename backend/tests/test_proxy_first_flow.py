@@ -341,6 +341,7 @@ def test_staged_clip_waits_for_tray_submit_before_indexing(env):
     assert status == 200
     assert out["staged"] is True
     assert env.enqueued == []
+    assert env.assets[out["asset_id"]]["meta"]["requires_submit"] is True
 
 
 def test_new_project_cannot_submit_only_reference_video_clips():
