@@ -175,14 +175,26 @@ disagree, v9 wins on method and the brief wins on preferences.
    `score` and the pilot's `framing`. Then one `shorts_status(parent)` and
    one `run.py register --assignments <run>/assignments` (it rejects a brief
    whose beats leave a long gap).
-7. **Edit.** Hand each editor one short (`run.py assign --editor`) with its
-   brief, `music_effective` and `music_song`; run exactly `max_editors`
-   editors. Editors execute in batched calls, render once, self-check with
-   rendered `look_at` (editing.md step 5), fix only the weakest moment and
-   hand back a note of at most 10 lines, recorded by the editor itself with
-   `run.py candidate --editor <name>` (no slot needed).
-8. **Review** ([review.md](references/review.md)) each candidate as it
-   arrives, before any new short goes out: five yes/no questions, then
+7. **Edit.** Run exactly `max_editors` PERSISTENT editors (lane0, lane1,
+   lane2): each owns a fixed share of the shorts (sorted short ids, index
+   modulo the editor count) and edits them one after another, fix passes
+   first, so what it learns on one short carries to the next. Each editor
+   reads the guides once, then keeps notes: the run's shared
+   `lanes/LESSONS.md` (framing, Valmera quirks, what landed, what reviewers
+   flagged; 1-3 lines after every short) and its own `lanes/<editor>-notes.md`.
+   Read both before each short. After about 4 shorts, or when its context is
+   long, an editor hands over to a fresh one that starts from those notes.
+   Per short: `run.py assign --editor <name>` with its brief,
+   `music_effective` and `music_song`; plan with `suggest_devices` and the
+   brief, then go further; build in batched calls; `proof_device` and
+   `audit_motion` before rendering; render once, self-check with rendered
+   `look_at` (editing.md step 5), fix the weakest moment, and hand back a note
+   of at most 10 lines with `run.py candidate --editor <name>`.
+8. **Review** ([review.md](references/review.md)) candidates in small
+   batches as editors hand them back (one reviewer reads review.md once and
+   judges the batch; no reviewer waits idle for work). Use the evidence
+   recipe plus `critique_short` (the motion critic) and `audit_motion`:
+   five yes/no questions, then
    **ship**, **a targeted fix** (one per concrete defect, no limit) or
    **kill** (only a story that fails on its own: a craft defect is a fix),
    recorded with `run.py review`. Fix passes go before new
