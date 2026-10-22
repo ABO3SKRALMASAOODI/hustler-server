@@ -2066,6 +2066,11 @@ def complete_upload_core(user_id, project_id, data):
         meta = {"filename": filename}
         if staged:
             meta["staged"] = True
+            # Current Studio sends a lone first video directly to indexing.
+            # A staged selection therefore waits for the user's Send action.
+            # Inactivity cannot distinguish an abandoned tray from a slow
+            # multi-file upload; never let the legacy reaper submit this tray.
+            meta["requires_submit"] = True
             if tray_pos is not None:
                 meta["tray_pos"] = tray_pos
         # A shorts STYLE REFERENCE (round 99) is a clip that never joins the

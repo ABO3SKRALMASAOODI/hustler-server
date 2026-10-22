@@ -2236,6 +2236,10 @@ def rescue_abandoned_trays(conn):
               AND NOT EXISTS (SELECT 1 FROM video_jobs j
                               WHERE j.project_id = s.project_id
                                 AND j.type = 'index')
+              AND NOT EXISTS (SELECT 1 FROM assets pending
+                              WHERE pending.project_id = s.project_id
+                                AND pending.meta->>'staged' = 'true'
+                                AND pending.meta->>'requires_submit' = 'true')
               AND NOT EXISTS (SELECT 1 FROM assets q
                               WHERE q.project_id = s.project_id
                                 AND q.created_at > NOW()
@@ -2256,12 +2260,16 @@ def rescue_abandoned_trays(conn):
                              AND kind = 'original' LIMIT 1""", (pid,))
             if cur.fetchone():
                 continue
-            cur.execute("""SELECT id, kind, duration_s FROM assets
+            cur.execute("""SELECT id, kind, duration_s, meta FROM assets
                            WHERE project_id = %s
                              AND COALESCE(meta->>'staged','') = 'true'
                            ORDER BY COALESCE((meta->>'tray_pos')::float, 1e9),
                                     id""", (pid,))
             tray = cur.fetchall()
+            # Recheck after taking the same project lock as completion and
+            # submission. A newly completed batch item must win this race.
+            if any((a.get("meta") or {}).get("requires_submit") for a in tray):
+                continue
             main_i = next((i for i, a in enumerate(tray)
                            if a["kind"] == "video_clip"), None)
             if main_i is None:
