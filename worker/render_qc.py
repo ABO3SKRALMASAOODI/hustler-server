@@ -48,6 +48,14 @@ it is measurable in two cheap passes over the rendered file:
     is read on frames of its own: no ink there for longer than
     BAND_EMPTY_S (between graphics, before the headline's return) is a
     hole the viewer reads as a dropped layer.
+  * THE JOIN INTO THE END CARD (owner, 22 Oct 2026: "a brief freeze
+    before the end card" on every short) — the programme's last
+    STALL_TAIL_S and the card's first STALL_CARD_S, decoded at 64 px: a
+    black frame there, or the same picture held for STALL_HELD_S or more
+    in the programme's tail, is a STALL BEFORE END CARD, named by its
+    cause (the edit's own fade-out, a freeze-frame or still, a slowed
+    tail, the footage itself, or the renderer's join). The card's own
+    static hold after its elements settle is the card, never a stall.
   * BRANDING — the end card (when the variant carries one) is compared
     with the card the renderer composes, and the free-tier robot (when the
     variant should carry the watermark) with the robot image, both by
@@ -63,7 +71,8 @@ import os
 import subprocess
 import time
 
-QC_VERSION = 4              # v4: card faces read on the source, type and picture measures
+QC_VERSION = 5              # v5: the stall before the end card
+                            # v4: card faces read on the source, type and picture measures
                             # v3: orphan shots, reframes off a cut, the hook frame
 DIFF_W = 64                 # width of the frame-difference pass
 GLOBAL_SHARE = 0.45         # share of the tiny frame that must change...
@@ -81,6 +90,17 @@ ROBOT_MIN_NCC = 0.60
 ROBOT_MIN_PX = 40           # a robot shorter than this is not measured
 ROBOT_SAMPLES = 6           # frames the watermark is read on (one seek each)
 BUDGET_S = 60.0
+STALL_TAIL_S = 1.5          # programme seconds before the end card read for a stall
+STALL_CARD_S = 0.3          # ...and the card's first seconds
+STALL_HELD_S = 0.1          # the same picture this long (repeats) is held
+STALL_HELD_DIFF = 0.02      # mean |diff| (0-255, 64 px) under which a frame repeats
+STALL_LIT = 26              # a pixel brighter than this (10% of 0-255) is lit...
+STALL_BLACK_SHARE = 0.02    # ...a programme frame with less than 2% lit is black
+                            # (blackdetect's pic_th; the corner mark is < 1%)
+STALL_CARD_DARK = 40        # a card frame whose brightest pixel is under this
+                            # shows no card at all (its type, even pillarboxed
+                            # on 16:9, reads >= 150 settled)
+STALL_SLOW = 0.5            # a speed under this repeats frames
 MAX_FULL_PASS_S = 180.0     # programmes longer than this skip the frame pass
                             # and sample faces on keyframes
 ORPHAN_FRAMES = 2           # a shot this short between two cuts is an orphan
@@ -501,7 +521,8 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             "softened": softened,
             "trans_windows": trans_windows, "reframes": reframes,
             "true_cuts": true_cuts, "has_shots": has_shots,
-            "hook": _hook_plan(edl, index, tl)}
+            "hook": _hook_plan(edl, index, tl),
+            "tail": _safe(tail_plan, edl, tl, float(program_s))}
 
 
 def _safe(fn, *args):
@@ -2113,6 +2134,175 @@ def robot_match(path, plan_, deadline):
 # The check
 # ═════════════════════════════════════════════════════════════════════════
 
+def tail_plan(edl, tl=None, program_s=None):
+    """What the edit itself puts in the programme's last STALL_TAIL_S — the
+    causes boundary_stall names: {fade_out_s, stills: [[t0, t1, id, hold]],
+    slow: [[t0, t1, rate]]} in programme seconds."""
+    import timeline
+    edl = edl or {}
+    if tl is None:
+        tl = timeline.Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                               edl.get("speed"))
+    end = float(tl.out_duration if program_s is None else program_s)
+    lo = end - STALL_TAIL_S
+    try:
+        fade_out = float(((edl.get("effects") or {}).get("fade_out_s")) or 0.0)
+    except (TypeError, ValueError):
+        fade_out = 0.0
+    stills = []
+    items = sorted(edl.get("inserts") or [], key=timeline._ins_sort_key)
+    for it, (a, d) in zip(items, tl.insert_positions()):
+        if a + d <= lo or not isinstance(it, dict):
+            continue
+        if it.get("kind") == "image" or timeline.is_hold_insert(it):
+            stills.append([round(a, 3), round(a + d, 3), it.get("id"),
+                           bool(timeline.is_hold_insert(it))])
+    slow = []
+    for i, pcs in enumerate(tl.pieces):
+        t = float(tl.offsets[i])
+        for ps, pe, f in pcs:
+            n = (pe - ps) / f
+            if f < STALL_SLOW and t + n > lo:
+                slow.append([round(t, 3), round(t + n, 3), round(float(f), 3)])
+            t += n
+    return {"fade_out_s": fade_out, "stills": stills, "slow": slow}
+
+
+def tail_causes(edl):
+    """EDL-only (no render): the edit's own stalls before the end card, as
+    plain-language notes — a freeze-frame or still, a slowed tail or the
+    edit's fade-out in the programme's last STALL_TAIL_S."""
+    tp = tail_plan(edl)
+    out = []
+    for a, b, iid, hold in tp["stills"]:
+        out.append(f"{'the held frame' if hold else 'the still'} "
+                   f"'{iid}' ({a:.2f}-{b:.2f}s) holds the picture in the "
+                   "programme's last seconds: a freeze right before the end "
+                   "card — end on live footage")
+    for a, b, f in tp["slow"]:
+        out.append(f"the tail is slowed to {f:g}x ({a:.2f}-{b:.2f}s): its "
+                   "frames repeat right before the end card — end at 1x")
+    if tp["fade_out_s"] > 0:
+        out.append(f"the edit's own fade-out ({tp['fade_out_s']:g}s) takes "
+                   "the picture toward black before the end card — keep it "
+                   "only if the dip is meant; without it the card dissolves "
+                   "straight from the live picture")
+    return out
+
+
+def _stall_cause(kind, t0, t1, plan_):
+    """(code, words) naming why the frames t0-t1 (programme seconds) stall."""
+    prog = plan_["program_s"]
+    tp = plan_.get("tail") or {}
+    if kind == "black":
+        if t0 >= prog - 1e-3:
+            return ("join", "the end card opens on black — the renderer's "
+                    "join into the card; re-render the export and report it "
+                    "if it persists")
+        fo = float(tp.get("fade_out_s") or 0.0)
+        if fo > 0 and t0 >= prog - fo - 0.05:
+            return ("fade_out", f"the edit's own fade-out ({fo:g}s, "
+                    "set_fades) takes the picture to black before the card "
+                    "— keep it only if the dip is meant; without it the card "
+                    "dissolves straight from the live picture")
+        return ("picture", "the programme's own picture is black there (the "
+                "footage, a colour screen or a transition to black) — end "
+                "on picture")
+    for a, b, iid, hold in tp.get("stills") or []:
+        if a - 1e-3 <= t0 and t0 < b:
+            return ("hold" if hold else "still",
+                    f"{'the held frame' if hold else 'the still'} '{iid}' "
+                    f"({a:.2f}-{b:.2f}s) freezes the picture before the "
+                    "card — end on live footage (shorten or move it so "
+                    "moving picture runs into the card)")
+    for a, b, f in tp.get("slow") or []:
+        if a - 1e-3 <= t0 and t0 < b:
+            return ("slow", f"the tail is slowed to {f:g}x ({a:.2f}-"
+                    f"{b:.2f}s), so its frames repeat before the card — "
+                    "end at 1x")
+    if t1 > prog + 1e-3:
+        return ("join", "the programme's last frame repeats into the card's "
+                "start — a gap at the renderer's join; report it")
+    return ("footage", "the footage itself does not move there (a static "
+            "shot or duplicated source frames) — end on a moving moment")
+
+
+def boundary_stall(path, plan_, deadline):
+    """[[kind, t0, t1, code, words]] — black or held frames where the
+    programme hands over to the end card, in programme seconds: black in
+    the programme's last STALL_TAIL_S or the card's first STALL_CARD_S
+    (when the render carries one), and the same picture held STALL_HELD_S
+    or more starting in the programme's tail. Runs inside the card are its
+    own designed hold and never count."""
+    import numpy as np
+    fps, W, H = float(plan_["fps"]), plan_["W"], plan_["H"]
+    prog = float(plan_["program_s"])
+    card = STALL_CARD_S if plan_.get("endcard") else 0.0
+    # Frame-exact: the source clock kept (-copyts) and the first frame
+    # chosen by its own timestamp, half a frame inside the window — an input
+    # seek alone may hand back the frame before it.
+    k0 = max(0, math.ceil((prog - STALL_TAIL_S) * fps - 1e-6))
+    first = k0 / fps
+    n = max(1, int(round((prog + card - first) * fps)))
+    w, h = DIFF_W, _tiny_h(W, H, DIFF_W)
+    cmd = ["ffmpeg", "-v", "error", "-nostdin",
+           "-ss", f"{max(0.0, first - 1.0):.3f}", "-copyts", "-i", path,
+           "-an", "-sn", "-dn", "-map", "0:v:0",
+           "-vf", f"select='gte(t\\,{first - .5 / fps:.6f})',"
+                  f"scale={w}:{h}:flags=area,format=gray",
+           "-frames:v", str(n), "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    eps = .25 / fps
+    black, diffs, times, prev = [], [], [], None
+    for i, f in enumerate(_stream(cmd, w, h, deadline)):
+        t = first + i / fps
+        if t > prog + card - eps:
+            break
+        times.append(t)
+        if t < prog - eps:
+            black.append(float((f > STALL_LIT).mean()) < STALL_BLACK_SHARE)
+        else:
+            black.append(int(f.max()) < STALL_CARD_DARK)
+        g = f.astype(np.int16)
+        diffs.append(None if prev is None
+                     else float(np.abs(g - prev).mean()))
+        prev = g
+    rows = []
+
+    def add(kind, a, b):
+        code, words = _stall_cause(kind, a, b, plan_)
+        rows.append([kind, round(a, 3), round(b, 3), code, words])
+
+    side = [t >= prog - eps for t in times]     # False: programme, True: card
+    i = 0
+    while i < len(times):                       # black runs, per side
+        if black[i]:
+            j = i
+            while j + 1 < len(times) and black[j + 1] and \
+                    side[j + 1] == side[i]:
+                j += 1
+            add("black", times[i], times[j] + 1 / fps)
+            i = j + 1
+        else:
+            i += 1
+    need = max(1, math.ceil(STALL_HELD_S * fps - 1e-6))
+    i = 1
+    while i < len(times):                       # held runs (repeats)
+        if diffs[i] is not None and diffs[i] < STALL_HELD_DIFF and \
+                not black[i]:
+            j = i
+            while j + 1 < len(times) and diffs[j + 1] is not None and \
+                    diffs[j + 1] < STALL_HELD_DIFF:
+                j += 1
+            # the held picture first shows at times[i - 1]; a run that
+            # starts inside the card is the card's own hold
+            if j - i + 1 >= need and times[i - 1] < prog - eps:
+                add("held", times[i - 1], times[j] + 1 / fps)
+            i = j + 1
+        else:
+            i += 1
+    return rows
+
+
 def _t(frame, fps):
     return frame / float(fps)
 
@@ -2153,6 +2343,10 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
             res["watermark"] = robot_match(path, plan_, deadline)
         except Exception as exc:
             res["skipped"].append(f"watermark: {str(exc)[:80]}")
+    try:
+        res["stall"] = boundary_stall(path, plan_, deadline)
+    except Exception as exc:
+        res["skipped"].append(f"stall: {str(exc)[:80]}")
     try:
         samples = face_samples(path, prog, W, H, deadline,
                                keyframes=prog > MAX_FULL_PASS_S)
@@ -2259,6 +2453,18 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
     return res
 
 
+def stall_findings(rows, plan_=None):
+    """The STALL BEFORE END CARD advisories for boundary_stall's rows."""
+    out = []
+    for kind, a, b, _code, words in rows or []:
+        n = b - a
+        what = ("black" if kind == "black" else "a held picture")
+        out.append(f"STALL BEFORE END CARD {a:.2f}-{b:.2f}s: {n:.2f}s of "
+                   f"{what} where the programme hands over to the end card "
+                   f"— {words}")
+    return out
+
+
 def findings(res, plan_):
     """Plain-language findings from a check result, worst first."""
     fps = plan_.get("fps") or 30.0
@@ -2277,6 +2483,7 @@ def findings(res, plan_):
             "Valmera watermark top-right and the frames do not show it (match "
             f"{res['watermark']:.2f}) — the mark is automatic; re-render the "
             "export and report it if it persists")
+    out += stall_findings(res.get("stall"), plan_)
     for kind, fr, cut in res.get("jumps") or []:
         t = _t(fr, fps)
         if kind == "pop":

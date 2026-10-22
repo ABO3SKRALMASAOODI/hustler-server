@@ -5274,7 +5274,8 @@ def user_edl_write(user_id, project_id):
 # enqueues a render, and the worker re-encodes with the card.
 #
 # Previews are exempt: they carry no card, so their absent stamp is correct.
-OUTRO_VERSION = 14     # v14: attribution and lower URL, without the product descriptor
+OUTRO_VERSION = 15     # v15: the card dissolves in from the programme's last live frames
+                       # v14: attribution and lower URL, without the product descriptor
                        # (keep in step with worker/config.py OUTRO_VERSION —
                        # test_units checks the two match)
 

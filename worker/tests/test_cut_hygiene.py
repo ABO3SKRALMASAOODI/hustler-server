@@ -697,11 +697,17 @@ def test_the_end_card_follows_the_last_frame_whole(rendered_card):
     k = renderer.first_frame_at(tl.out_duration, FPS)          # 151
     n_card = int(round(rendered_card["outro"] * FPS))
     assert len(frames) == k + n_card
-    code = frames[:, 85:95, 155:165].mean(axis=(1, 2))
+    # OUTRO_VERSION 15: the card's head dissolves over the programme's last
+    # j frames (the owner's "freeze before the end card" was the old cut
+    # to the card's black first frame and a fade-in from black)
+    j = renderer.outro_join_frames(FPS, tl.out_duration)
     lines = frames[:, RH // 2, BORDER:-BORDER].astype(np.float64).std(axis=1)
-    assert lines[k - 1] > 40 and lines[k - 2] > 40     # programme picture
-    assert abs(code[k - 1] - code[k - 2]) > 2          # no repeated frame
-    assert frames[k].mean() < 8                        # the card's first
+    assert lines[k - j - 1] > 40 and lines[k - j - 2] > 40   # live picture
+    f = frames.astype(np.int16)
+    moves = [float(np.abs(f[i] - f[i - 1]).mean()) for i in range(k - j, k + 1)]
+    assert min(moves) > 1                              # no repeated frame
+    assert frames[k].mean() < 8                        # the card's first...
+    assert frames[k].max() > 200                       # ...not black
     assert len(rendered_card["audio"]) / 48000.0 == pytest.approx(
         len(frames) / FPS, abs=0.002)
 

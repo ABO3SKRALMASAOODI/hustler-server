@@ -1421,6 +1421,17 @@ def audit(edl, index=None, *, intensity="designed", request_text=None,
         findings.append({"code": "overlapping_devices",
                          "severity": "advisory", "id": b,
                          "message": f"{a} and {b} overlap at the same stage"})
+    # The edit's own stall before the end card (owner, 22 Oct 2026): a
+    # freeze-frame, a still, a slowed tail or a fade-out in the programme's
+    # last seconds. The rendered join itself is render_qc's to measure.
+    try:
+        import render_qc
+        for note in render_qc.tail_causes(edl):
+            findings.append({"code": "stall_before_end_card",
+                             "severity": "advisory", "id": None,
+                             "message": "STALL BEFORE END CARD: " + note})
+    except Exception:  # noqa: BLE001 — an audit never fails over a lens
+        pass
     zooms = len(((edl.get("effects") or {}).get("zooms")) or [])
     sfx = len(edl.get("sfx") or [])
     return {"ledger": ledger, "flash": flash, "devices": rows,

@@ -399,9 +399,12 @@ def test_outro_join_is_pinned_to_the_source_matrix():
     g = renderer.build_filtergraph(e, 30.0, True, tl, None, [], INDEX, False,
                                    src_color_space="bt709", **kw)
     prog = re.search(r"\]([^;]*)\[vprog\]", g).group(1)
-    card = re.search(r"\[ocomp\]([^;]*)\[ovid\]", g).group(1)
+    # the card after the dissolve ([ort] -> [ovid]) and its dissolving head
+    card = re.search(r"\[ort\]([^;]*)\[ovid\]", g).group(1)
+    head = re.search(r"\[ohead\]([^;]*)\[oheadp\]", g).group(1)
     assert "out_color_matrix=bt709:out_range=tv" in prog
     assert "scale=out_color_matrix=bt709:out_range=tv,format=yuv420p" in card
+    assert "scale=out_color_matrix=bt709:out_range=tv,format=yuva420p" in head
     assert renderer._outro_matrix("bt2020nc") == "bt2020"
     assert renderer._outro_matrix("bt470bg") == "bt470"
     # an untagged source keeps the old free negotiation, byte for byte

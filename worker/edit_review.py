@@ -1648,9 +1648,13 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
             if ext < 0.1:
                 ext = 0.0                       # too little to restore
             rest = round(max(0.0, want - ext), 2)
-            hold_call = (f"add_freeze_frame(at_output_s={dur + ext:.2f}, "
-                         f"duration_s={max(0.3, rest):.1f}, "
-                         "audio_mode='hold')")
+            # Never a held frame or a slowed tail to make up the rest (owner,
+            # 22 Oct 2026: a freeze right before the end card reads as the
+            # video stalling, on every short). The air comes from LIVE
+            # footage — the source's own tail — or the ending moves.
+            never = ("never a freeze-frame or a slowed tail before the end "
+                     "card: a held picture there reads as the video "
+                     "stalling")
             if ext and rest < 0.1:
                 fix = (f"Hold {PAYOFF_HOLD_MIN_S:g}-{PAYOFF_HOLD_MAX_S:g} s "
                        "after the last word: extend the last keep to about "
@@ -1665,23 +1669,20 @@ def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
                        f"{keep_end + ext:.2f}s source (restore_range; "
                        + (f"'{_get(nxt, 'w')}' follows" if nxt is not None
                           else "the source ends")
-                       + f"), then hold the frame for the rest: {hold_call} "
-                       "— the composed frame over room tone, any payoff "
-                       "graphic held over it.")
+                       + f") — all the live air the source has; {never}. "
+                       "If that is still too tight, end on an earlier line "
+                       "that leaves a pause.")
             elif nxt is not None:
                 fix = (f"The speaker runs on into '{_get(nxt, 'w')}' "
                        f"{_f(_get(nxt, 't0')) - (src_end or keep_end):.2f}s "
                        f"after '{last['w']}', so the source has no longer "
-                       f"tail: hold the frame instead — {hold_call} (the "
-                       "composed frame over the source's room tone, the "
-                       "last words fading into it; the payoff graphic holds "
-                       "over it), or end on an earlier line that leaves a "
-                       "pause.")
+                       "tail: end on an earlier line that leaves a pause, "
+                       f"or keep this ending deliberately — {never}.")
             else:
                 fix = (f"The source itself ends {max(0.0, src_dur - (src_end or keep_end or 0.0)):.2f}s "
                        f"after '{last['w']}', so there is no tail to "
-                       f"restore: hold the frame — {hold_call} — or end on "
-                       "an earlier line that leaves a pause.")
+                       "restore: end on an earlier line that leaves a "
+                       f"pause, or keep this ending deliberately — {never}.")
             notes.append(_note(
                 "payoff_hold", _f(last["t1"]),
                 (f"The payoff gets {max(0.0, hold):.2f}s after '{last['w']}' "

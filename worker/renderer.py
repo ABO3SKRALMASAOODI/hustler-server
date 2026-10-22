@@ -2062,6 +2062,74 @@ def _endcard_input_args(path, duration_s, fps):
     return ["-stream_loop", "-1", "-t", f"{duration_s:.3f}", "-i", path]
 
 
+def outro_join_frames(ofps, program_s=None):
+    """How many programme frames the card dissolves over (OUTRO_JOIN_S at the
+    output rate; at least 1, and never more than half a short programme)."""
+    d = float(config.OUTRO_JOIN_S)
+    if program_s is not None:
+        d = min(d, max(0.0, float(program_s)) / 2)
+    return max(1, int(round(d * float(ofps))))
+
+
+def outro_card_parts(card_idx, oW, H, ofps, outro_s, card_csp="",
+                     motion=True, program_s=None):
+    """The end card's graph: (parts, join_n).
+
+    Two outputs. ``[ohead]`` (RGBA, ``join_n`` frames) is the card's head,
+    its alpha ramping up frame by frame, which the caller lays over the
+    programme's last ``join_n`` frames. ``[ovid]`` (yuv420p, the outro's own
+    ``outro_s``) is the rest, concatenated after the programme.
+
+    The card's clock is shifted by the dissolve, not stretched: its reveal
+    starts ``join_n`` frames before the programme ends, plays up to the frame
+    where every element has settled (ENDCARD_SETTLE_S), holds that frame for
+    ``join_n`` frames (inside the card's own static hold, so nothing visibly
+    pauses) and then continues on EXACTLY the old clock, so every frame of the
+    card from the end of the old fade-in on is the same as before. The poster
+    fallback has no reveal: its first frame is already settled.
+    """
+    cw, ch = _even(oW * 0.98), _even(H * 0.98)
+    n = max(1, int(round(float(outro_s) * float(ofps))))
+    j = outro_join_frames(ofps, program_s)
+    # The first composite frame that shows the settled card (the overlay
+    # below shows the latest card frame at or before each output frame).
+    settle = (math.ceil(config.ENDCARD_SETTLE_S * float(ofps) - 1e-6)
+              if motion else 0)
+    r = min(n, max(1, settle + 1))
+    fo = min(config.OUTRO_FADE_OUT_S, outro_s / 3)
+    return [
+        # v7: the motion card is a full 9:16 sheet that carries its own
+        # margins, so it fills the frame rather than being inset again.
+        f"color=c=black:s={oW}x{H}:r={ofps:.3f}:d={outro_s:.3f},"
+        "format=rgba[obg]",
+        # One 9:16 card fits every aspect ratio: scaled to FIT (never crop)
+        # inside a box that is a fraction of BOTH dimensions, it lands
+        # proportionate on 9:16, 16:9, 1:1 and 4:5 without a per-ratio asset
+        # — height-bound on the wide ratios, edge-to-edge on vertical.
+        f"[{card_idx}:v]scale={cw}:{ch}:"
+        "force_original_aspect_ratio=decrease,format=rgba[ocard]",
+        "[obg][ocard]overlay=(W-w)/2:(H-h)/2:shortest=0[ocomp]",
+        # The far-edge fade-out first, on the composite's own frames,
+        # timestamps and pixel format exactly as before (the head converts
+        # to RGBA on its own branch below: an alpha need here would pull
+        # this whole branch into RGBA, where the same fade lands a level or
+        # two apart). Then the reveal (frames 0..r-1), the settled frame
+        # held join_n frames, and the card's own frames from r on: `loop`
+        # repeats the one frame and shifts the rest by exactly its frames.
+        f"[ocomp]fade=t=out:st={outro_s - fo:.2f}:d={fo:.2f},"
+        f"loop=loop={j}:size=1:start={r - 1},split=2[ohd][ort]",
+        # the head: alpha 1/(j+1) .. j/(j+1) — the first dissolve frame
+        # already carries the card, the last is nearly all card (the clone
+        # frame tpad adds in front is the ramp's zero, dropped again)
+        f"[ohd]trim=end_frame={j},setpts=PTS-STARTPTS,format=rgba,"
+        "tpad=start=1:start_mode=clone,"
+        f"fade=t=in:s=0:n={j + 1}:alpha=1,"
+        "trim=start_frame=1,setpts=PTS-STARTPTS[ohead]",
+        f"[ort]trim=start_frame={j},setpts=PTS-STARTPTS,"
+        f"{card_csp}format=yuv420p,setsar=1[ovid]",
+    ], j
+
+
 # ffprobe colour-matrix name -> the swscale out_color_matrix that writes it.
 _SCALE_MATRIX = {"bt709": "bt709", "smpte170m": "smpte170m",
                  "bt470bg": "bt470", "fcc": "fcc", "smpte240m": "smpte240m",
@@ -5696,15 +5764,6 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         vlabel = "vwm"
 
     outro_here = outro_s > 0.0 and card_idx is not None
-    v_final = "vout"
-    # Only when the programme is still taller than the preview height —
-    # preview_geometry now caps H there, so on every path that goes through it
-    # this is a no-op and is skipped rather than emitted as an extra
-    # full-frame pass. Kept for any caller that builds a graph without it.
-    if not outro_here and preview and _needs_preview_downscale(H):
-        parts.append(rf"[{vlabel}]scale=-2:min({config.PREVIEW_MAX_HEIGHT}\,"
-                     r"floor(ih/2)*2)[vsc]")
-        vlabel = "vsc"
     if outro_here:
         # Force exact geometry before concat. concat demands identical
         # dimensions, SAR and pixel format across segments, and the cheap
@@ -5733,25 +5792,48 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         pin = _outro_matrix(src_color_space)
         csp = f":out_color_matrix={pin}:out_range=tv" if pin else ""
         card_csp = f"scale=out_color_matrix={pin}:out_range=tv," if pin else ""
+        card_parts, join_n = outro_card_parts(
+            card_idx, oW, H, ofps, outro_s, card_csp,
+            motion=not str(endcard_path() or "").lower().endswith(IMAGE_EXTS),
+            program_s=total_dur)
+        parts.extend(card_parts)
+        # The join (OUTRO_VERSION 15): the card's head — its reveal, alpha
+        # ramping in — dissolves over the programme's last live frames, on the
+        # programme's own geometry, so the card is fully formed on the frame
+        # the programme ends and [ovid] continues it with no black frame, no
+        # held frame and no second fade. Laid over the FINISHED programme
+        # (after the mark): the mark is drawn exactly as before on every
+        # programme frame — the same pixels, the same format negotiation —
+        # and leaves with the picture it is on, never landing on the card.
+        # Before t_join the overlay has no frame and passes the programme
+        # through untouched.
+        parts.append(f"[ohead]{card_csp}format=yuva420p"
+                     + (f",scale={W}:{H}" if oW != W else "") + "[oheadp]")
+        head = "oheadp"
+        # On the programme's own frame grid (its frames are those before
+        # program_render_s), a quarter frame early so each head frame meets
+        # exactly its programme frame whatever the two time bases round to
+        # (re-based to microseconds first: on the card's 1/fps base a
+        # sub-frame offset rounds to a whole frame).
+        n_prog = math.ceil(program_render_s(tl, ofps) * ofps - 1e-6)
+        t_join = (n_prog - join_n - 0.25) / ofps
+        parts.append(f"[{head}]settb=AVTB,setpts=PTS-STARTPTS+"
+                     f"{max(0.0, t_join):.6f}/TB[oheadt]")
+        parts.append(f"[{vlabel}][oheadt]overlay=0:0:format=auto:"
+                     "eof_action=repeat[vjoin]")
+        vlabel = "vjoin"
+    v_final = "vout"
+    # Only when the programme is still taller than the preview height —
+    # preview_geometry now caps H there, so on every path that goes through it
+    # this is a no-op and is skipped rather than emitted as an extra
+    # full-frame pass. Kept for any caller that builds a graph without it.
+    if not outro_here and preview and _needs_preview_downscale(H):
+        parts.append(rf"[{vlabel}]scale=-2:min({config.PREVIEW_MAX_HEIGHT}\,"
+                     r"floor(ih/2)*2)[vsc]")
+        vlabel = "vsc"
+    if outro_here:
         parts.append(f"[{vlabel}]scale={oW}:{H}{csp},setsar=1,"
                      f"format=yuv420p[vprog]")
-        # v7: the motion card is a full 9:16 sheet that carries its own
-        # margins, so it fills the frame rather than being inset again.
-        cw, ch = _even(oW * 0.98), _even(H * 0.98)
-        parts.append(f"color=c=black:s={oW}x{H}:r={ofps:.3f}:d={outro_s:.3f},"
-                     f"format=rgba[obg]")
-        # One 9:16 card fits every aspect ratio: scaled to FIT (never crop)
-        # inside a box that is a fraction of BOTH dimensions, it lands
-        # proportionate on 9:16, 16:9, 1:1 and 4:5 without a per-ratio asset —
-        # height-bound on the wide ratios, edge-to-edge on vertical.
-        parts.append(f"[{card_idx}:v]scale={cw}:{ch}:"
-                     f"force_original_aspect_ratio=decrease,format=rgba[ocard]")
-        parts.append("[obg][ocard]overlay=(W-w)/2:(H-h)/2:shortest=0[ocomp]")
-        fi = min(config.OUTRO_FADE_IN_S, outro_s / 3)
-        fo = min(config.OUTRO_FADE_OUT_S, outro_s / 3)
-        parts.append(f"[ocomp]fade=t=in:st=0:d={fi:.2f},"
-                     f"fade=t=out:st={outro_s - fo:.2f}:d={fo:.2f},"
-                     f"{card_csp}format=yuv420p,setsar=1[ovid]")
         v_final = "vprog"
     else:
         parts.append(f"[{vlabel}]format=yuv420p[vout]")
@@ -8208,6 +8290,12 @@ def _timeline_stitch(job_id, prev_edl, new_edl, tl_prev, tl_new, index,
         if not parts or parts[-1][0] != "copy" or abs(parts[-1][3]) > .001:
             return None
         k, a, b, offset = parts[-1]
+        # ...and that run must hold the whole dissolve into the card (the
+        # programme's last outro_join_frames): a re-encoded window renders
+        # without the card, so one reaching into the dissolve would cut its
+        # undissolved frames against the copied card.
+        if a > dur_out - (outro_join_frames(fps, dur_out) + 1) / fps:
+            return None
         parts[-1] = (k, a, b + outro_seconds(False), offset)
         dur_out += outro_seconds(False)
 
@@ -8407,8 +8495,13 @@ def _stitched_preview(job_id, new_row, prev_row, prev_asset, index,
             return None
 
         # A window suppresses the card; never copy a final with its ending
-        # missing when a keyframe snap extends a patch into that card.
-        if any(b > tl_new.out_duration + .001 for a, b in snapped):
+        # missing when a keyframe snap extends a patch into that card — nor
+        # into the dissolve before it (the programme's last
+        # outro_join_frames, drawn with the card's head).
+        edge = tl_new.out_duration
+        if outro_seconds(preview):
+            edge -= (outro_join_frames(fps, edge) + 1) / fps
+        if any(b > edge + .001 for a, b in snapped):
             return None
         pieces = []
         for i, (a, b) in enumerate(snapped):

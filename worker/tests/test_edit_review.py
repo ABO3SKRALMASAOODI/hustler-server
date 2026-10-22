@@ -373,15 +373,16 @@ def test_the_payoff_hold_fix_reads_how_much_tail_the_source_has():
     tight = words + [{"w": "Not", "t0": 30.6, "t1": 30.8}]
     note = _note(_edl(dur=30.5), "payoff_hold", {"words": tight})
     assert "runs on into 'Not'" in note["fix"]
-    # no tail to restore: the fix is a held frame over room tone, sized to
-    # bring the air to a second
-    assert "add_freeze_frame(at_output_s=30.50, duration_s=0.7, " \
-        "audio_mode='hold')" in note["fix"]
-    # a pause shorter than the air needed: extend into it, hold the rest
+    # no tail to restore: move the ending — never a held frame or a slowed
+    # tail before the end card (owner, 22 Oct 2026: it reads as a freeze)
+    assert "end on an earlier line" in note["fix"]
+    assert "add_freeze_frame" not in note["fix"]
+    assert "never a freeze-frame" in note["fix"]
+    # a pause shorter than the air needed: extend into it, nothing held
     some = words + [{"w": "Then", "t0": 30.85, "t1": 31.1}]
     note = _note(_edl(dur=30.5), "payoff_hold", {"words": some})
     assert "extend the last keep to about 30.80s" in note["fix"]
-    assert "duration_s=0.4, audio_mode='hold'" in note["fix"]
+    assert "audio_mode='hold'" not in note["fix"]
     # 0.8 s of air is enough (judges: never less than 0.8 s)
     assert "payoff_hold" not in _codes(_edl(dur=31.0), {"words": words})
     assert "payoff_hold" in _codes(_edl(dur=30.9), {"words": words})

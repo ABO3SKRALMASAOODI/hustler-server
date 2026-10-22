@@ -2179,7 +2179,22 @@ RENDER_BLACK_MAX_RATIO = float(os.getenv("RENDER_BLACK_MAX_RATIO", "0.7"))
 # OUTRO_ON_PREVIEW=1 to show it in previews too — the renderer supports it and
 # the tests cover both — but fix the studio's time base first.
 OUTRO_DURATION_S = float(os.getenv("OUTRO_DURATION_S", "5.0"))
-OUTRO_FADE_IN_S = 0.45
+# The join into the card (owner, 22 Oct 2026: "a brief freeze before the end
+# card" on every short). The programme used to cut to the card's first frame
+# (black) and the renderer then faded the whole card in from black over
+# 0.45 s, on top of the card's own reveal from black: about 0.15 s of pure
+# black and a dark, static stall before the type appeared. Now the card's head
+# DISSOLVES into the programme's last live frames: its own staggered reveal
+# plays over the last OUTRO_JOIN_S of the picture, so the card lands fully
+# formed on the programme's last frame, with no black frame and no renderer
+# fade-in. Only those transition frames changed: from the frame the old
+# fade-in had finished, the card is the same frames as before (md5).
+OUTRO_JOIN_S = 0.3
+# When the motion card's elements have settled (endcard.mp4 frame 11 of 30
+# fps: worker/brand/README.md, "all elements resolve within 0.36 seconds").
+# The renderer plays the reveal up to here, then holds this frame for the
+# dissolve's length, so the card's 5 s on screen keep their exact clock.
+ENDCARD_SETTLE_S = 11 / 30
 OUTRO_FADE_OUT_S = 0.35
 # Silent-card fallback: when no score reaches the program's final frame, fade
 # the program's last 0.25s so speech/room tone does not cut dead into silence.
@@ -2192,8 +2207,10 @@ OUTRO_ON_PREVIEW = os.getenv("OUTRO_ON_PREVIEW", "0") == "1"
 # Bumped whenever the card's LOOK or its audio handoff changes. It is stored on
 # every render asset and busts the cache, so an existing export re-encodes with
 # the complete current outro treatment instead of serving stale bytes forever.
-OUTRO_VERSION = 14     # v14: attribution and lower URL, without the product descriptor.
-                      # See tools/build_endcard.py
+OUTRO_VERSION = 15     # v15: the card dissolves in from the programme's last
+                      # live frames (no black, no renderer fade-in).
+                      # v14: attribution and lower URL, without the product
+                      # descriptor. See tools/build_endcard.py
 
 # ── Shorts mode (round 99) ───────────────────────────────────────────────
 # No clip quota anywhere (owner policy, Oct 2026): the in-house scout keeps

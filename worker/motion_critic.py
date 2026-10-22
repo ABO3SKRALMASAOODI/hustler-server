@@ -1412,6 +1412,44 @@ def lens_brand(path, edl, index, info, *, final, want_wm, budget_s=30.0,
                                                "endcard": ec, "watermark": rb}
 
 
+def lens_ending(path, edl, info, *, final, report=None, budget_s=10.0):
+    """STALL BEFORE END CARD (owner, 22 Oct 2026): black or a held picture
+    where the programme hands over to the card — render_qc.boundary_stall,
+    read from the render's own picture check when it carries it, else
+    measured here (about two seconds of 64 px frames)."""
+    import render_qc
+    qc = (report or {}).get("picture_qc") or {}
+    rows = qc.get("stall")
+    if rows is None:
+        import config
+        import renderer
+        from timeline import Timeline
+        e = edl or {}
+        fps = float(info.get("fps") or 30.0)
+        tl = Timeline(e.get("keep") or [], e.get("inserts") or [],
+                      e.get("speed"))
+        prog = renderer.program_render_s(tl, fps)
+        outro = float(getattr(config, "OUTRO_DURATION_S", 5.0) or 0.0)
+        p = {"program_s": prog, "fps": fps, "W": int(info["width"]),
+             "H": int(info["height"]),
+             "endcard": ({"s": outro} if final and renderer.endcard_path()
+                         else None),
+             "tail": render_qc.tail_plan(e, tl, prog)}
+        rows = render_qc.boundary_stall(path, p,
+                                        time.monotonic() + budget_s)
+    out = []
+    for kind, a, b, code, words in rows or []:
+        sev = ("blocking" if code == "join" else
+               "advisory" if code in ("fade_out", "footage") else "fix")
+        out.append(_f(sev, "motion", "stall_before_end_card",
+                      f"STALL BEFORE END CARD {a:.2f}-{b:.2f}s: "
+                      f"{b - a:.2f}s of "
+                      f"{'black' if kind == 'black' else 'a held picture'} "
+                      "where the programme hands over to the end card.",
+                      fix=words, t=a))
+    return out, {"stall": rows}
+
+
 def _brand_findings(ec, rb, render_qc):
     out = []
     if ec is not None and ec < render_qc.ENDCARD_MIN_NCC:
@@ -1517,6 +1555,11 @@ def critique(path, edl, index=None, *, request_text=None, report=None,
     if got:
         findings += got[0]
         measures["brand"] = got[1]
+    got = run("ending", lens_ending, path, edl, info, final=final,
+              report=report)
+    if got:
+        findings += got[0]
+        measures["ending"] = got[1]
     order = {s: i for i, s in enumerate(SEVERITIES)}
     findings.sort(key=lambda f: (order.get(f["severity"], 9),
                                  f.get("t") if f.get("t") is not None

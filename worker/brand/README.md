@@ -12,6 +12,19 @@ The larger attribution leads, followed by the robot/name and the address lower
 in the frame. All elements resolve within 0.36 seconds
 and hold until the final 0.2-second fade.
 
+## The join (OUTRO_VERSION 15)
+
+The card's own reveal starts on black, so the renderer never cuts to its
+first frame. Its head dissolves over the programme's last `OUTRO_JOIN_S`
+(0.3 s): the type rises in while the last live frames (and the free-tier mark
+on them) dissolve away, and the card is fully formed on the programme's last
+frame. The reveal plays up to the settled frame (`ENDCARD_SETTLE_S`, frame 11),
+which is held for the dissolve's length inside the card's static hold, so the
+card keeps its five seconds and every frame of it from the end of the old
+0.45 s fade-in on is the same as before. There is no renderer fade-in.
+`render_qc` reports black or a held picture around the join as a STALL BEFORE
+END CARD.
+
 `endcard.png` is the fully revealed poster. The renderer prefers the MP4 and
 uses the PNG only as a graceful fallback if the animation is missing from a
 build. Both are scaled to fit on black, never cropped, so the same 9:16 master

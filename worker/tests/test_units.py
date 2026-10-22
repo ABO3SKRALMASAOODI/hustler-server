@@ -4407,7 +4407,13 @@ check("outro: the card input is the one the renderer allocated",
       "[7:v]scale=" in _g_out)
 check("outro: geometry is forced before concat (the cheap graph guarantees none)",
       "scale=1080:1920,setsar=1" in _g_out)
-check("outro: the card fades in and out", "fade=t=in:st=0" in _g_out
+# v15 (owner, 22 Oct 2026: "a brief freeze before the end card"): the card
+# no longer fades in from black over its own black-starting reveal. Its head
+# dissolves over the programme's last live frames (alpha ramp), and it still
+# fades out at its far edge.
+check("outro: the card dissolves in over the programme, never from black",
+      "fade=t=in:st=0" not in _g_out
+      and "fade=t=in:s=0:n=10:alpha=1" in _g_out
       and "fade=t=out:st=2.15" in _g_out)
 check("outro: its audio is real silence, not the music mix",
       "anullsrc=r=48000:cl=stereo:d=2.500" in _g_out)
