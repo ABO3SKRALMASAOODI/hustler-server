@@ -53,6 +53,37 @@ the two is normal and is not a reason to refuse work:
   relaunched; a `submitted` record whose handler was lost fails as an
   abandoned start after 60 s instead of holding its shard for the lease.
 
+Deploy handoffs (Oct 17, after release 6d6e5b83 failed 4 of 956 jobs):
+
+- Dispatcher swap. A claim whose work is one provider call is tracked
+  (`db.REMOTE_DISPATCH_CLAIMS`); while no call is in flight it has run
+  nothing, so SIGTERM hands it back unspent (`db.release_unlaunched_jobs`,
+  claim-fenced, Studio turns included), including one a provider refuses
+  during the drain. A launch the drain refuses raises `DispatcherDraining`,
+  which `main.process_one` releases, never fails. Shutdown waits only for
+  local work, ambiguous launches and answered calls' queue writes.
+- The replacement dispatcher's guardian defers (unspent) an orphaned call
+  that ran nothing: capacity/startup/skew/drain refusals and lost read-only
+  calls. A database hiccup in the guardian is "observe again", not a failure.
+- Startup. Any 5xx `safe_to_fallback` refusal before `/run` (e.g. "The
+  container is not running" while the rollout stops containers) is
+  `CloudflareStartInterrupted`: the same identity starts again twice, then
+  the claim spreads like a capacity refusal. A `/run` the SDK could not
+  deliver ("Failed to start container: ...") is recorded `refused`, not
+  `unknown`. An `unknown` call whose container was gone at `/run` is fenced
+  in PostgreSQL when no executor adopted it
+  (`db.fence_unadopted_remote_execution`; adoption is a compare-and-set too)
+  and relaunched. A read-only MCP call whose container was lost mid-run is
+  relaunched twice. A draining executor's refusal relaunches after 3 s.
+- Preflight 404/5xx while the Worker publishes is a retry, never a failure.
+- Stale code. Each lane's deployment-probe Durable Object is the lane's
+  release registry (`/release-ready`): the deploy probe, or any call whose
+  fresh container reports this Worker's release, records it. A call that
+  then finds an idle container on an older release recycles it before
+  `/run` (at most 3 times per release per instance, 2 minutes apart), so no
+  job is served by stale code once new code can serve it. Before that the
+  guarded older release serves, as above.
+
 ## Resource admission (there is no one-hour limit)
 
 Cloudflare's self-serve maximum is 4 vCPU, 12 GiB RAM and 20 GB disk. Source

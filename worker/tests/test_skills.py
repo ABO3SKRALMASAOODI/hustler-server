@@ -61,8 +61,10 @@ def test_skills_name_only_live_tools_and_never_retired_ones():
 
 
 def test_motion_library_points_at_an_installed_skill():
-    # list_motion_templates tells the editor to read 'motion-design'.
+    # list_motion_templates tells the editor to read 'motion-design'. The
+    # tool is a pure read shared with the backend's MCP fast path, so it
+    # lives in read_tools.py (motion_tools imports it back).
     assert "motion-design" in agent_prompt.skill_names()
-    text = Path(skill_validator.ROOT / "motion_tools.py").read_text(
+    text = Path(skill_validator.ROOT / "read_tools.py").read_text(
         encoding="utf-8")
     assert "'motion-design'" in text

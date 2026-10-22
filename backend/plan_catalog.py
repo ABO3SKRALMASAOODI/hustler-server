@@ -9,7 +9,20 @@ wrong allowance.
 
 PLANS_LIVE = {
     # October 2026 offers are separate contracts, never renamed legacy IDs.
-    "plus_2026": {"monthly_credits": 500, "price_id": "pri_01m4tq08e68mg9t3n4f86qwhb3", "yearly_price_id": "pri_01m4tq08na6vh0x92pfk573f9e"},
+    # Plus moved from $25/$250 to $15/$150 on 16 Oct 2026: new Paddle prices on
+    # the same product, same contract, allowance and features. The launch
+    # prices are never sold again but stay resolvable, so a subscription bought
+    # on them keeps its price, allowance and annual refill schedule.
+    "plus_2026": {
+        "monthly_credits": 500,
+        "price_id": "pri_01m531e69sp4td4sh65gabj3ng",
+        "yearly_price_id": "pri_01m531e6r0cyx7v9eap1shk6v0",
+        "legacy_prices": {
+            "pri_01m4tq08e68mg9t3n4f86qwhb3": 500,
+            "pri_01m4tq08na6vh0x92pfk573f9e": 500,
+        },
+        "legacy_yearly_prices": ("pri_01m4tq08na6vh0x92pfk573f9e",),
+    },
     "pro_2026": {"monthly_credits": 1500, "price_id": "pri_01m4tq09etphbn3b0btrtj1sad", "yearly_price_id": "pri_01m4tq09nz5axz948yjdh6jk72"},
     "max_2026": {"monthly_credits": 4000, "price_id": "pri_01m4tq0afzgw5t3h0k8m362fyw", "yearly_price_id": "pri_01m4tq0ar7xt1hkm3a60m9rvts"},
     # September 2026 contracts: never reuse a grandfathered price/plan ID.
@@ -119,6 +132,19 @@ COMPARISON_ONLY_PLANS = ({
 LEGACY_SHOPFRONT_PLANS = frozenset({"ai", "ai_pro", "ai_max"})
 PURCHASABLE_PLANS = NEW_PLANS | SEPTEMBER_PLANS | LEGACY_SHOPFRONT_PLANS
 
+def is_yearly_price(plan, price_id, plans=None):
+    """Whether a paid price is one of this plan's annual prices.
+
+    The current annual price and any grandfathered annual price both count, so
+    an annual subscription bought before a price change keeps its monthly
+    refill schedule and its yearly billing period.
+    """
+    config = (plans if plans is not None else PLANS_LIVE).get(plan) or {}
+    return bool(price_id) and (
+        price_id == config.get("yearly_price_id")
+        or price_id in (config.get("legacy_yearly_prices") or ()))
+
+
 def daily_credits_for_plan(plan):
     """New offers sell a fixed monthly allowance; legacy daily grants persist."""
     return 0 if plan in NEW_PLANS else 20
@@ -142,7 +168,9 @@ PLAN_MONTHLY_CREDITS = {
 }
 
 PLAN_PRICES_USD = {
-    "plus_2026": {"monthly": 25, "yearly": 250},
+    # List prices. MRR reports list price, so the launch-price Plus
+    # subscriptions (none existed when the price moved) report at $15.
+    "plus_2026": {"monthly": 15, "yearly": 150},
     "pro_2026": {"monthly": 50, "yearly": 500},
     "max_2026": {"monthly": 100, "yearly": 1000},
     "mcp_connect": {"monthly": 25, "yearly": 250},

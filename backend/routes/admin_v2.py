@@ -20,7 +20,7 @@ from admin_metrics import (attention as attention_mod, cache,
                            channels_report, costs as costs_mod, customers,
                            db, defs, funnel as funnel_mod, health, insights,
                            live as live_mod, money, outreach, projects,
-                           ranges, registry, visitors)
+                           ranges, registry, visitors, subscriber_record)
 from admin_metrics.ranges import RangeError
 from routes.admin import admin_required, gzip_large_json
 
@@ -1420,3 +1420,12 @@ def health_waits():
 @admin_required
 def live():
     return _respond(live_mod.live(db.cursor()))
+
+
+@admin_v2_bp.route("/subscribers/record", methods=["GET"])
+@admin_required
+def subscribers_record():
+    def compute():
+        return {"data": subscriber_record.read_record(db.cursor()), "errors": []}
+    value, computed_at, age = _cached("summary", {"report": "subscriber_record"}, compute)
+    return _respond(value["data"], computed_at=computed_at, cache_age=age)

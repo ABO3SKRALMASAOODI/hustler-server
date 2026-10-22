@@ -792,6 +792,49 @@ def _record_upload_subscription_lock(cur, session_id, asset_id):
     return cur.fetchone()["id"]
 
 
+# The answer to an edit request from an account without a plan: one agent
+# reply that carries the plans themselves (the Studio renders them as compact
+# cards inside the message), instead of a full-page modal opening on its own.
+_PLANS_MESSAGE = "You’re on the free plan. Upgrade to start editing."
+
+
+def _message_out(row):
+    created = row.get("created_at")
+    return {"id": row.get("id"), "role": row.get("role") or "assistant",
+            "content": row.get("content"), "meta": row.get("meta") or {},
+            "created_at": created.isoformat() if hasattr(created, "isoformat")
+            else created}
+
+
+def _record_plans_message(cur, session_id, surface, request_message_id=None):
+    """Persist the plans reply once and return it as a chat message.
+
+    A blocked send is never stored, so when the newest conversation message is
+    already this reply, a repeated send reuses it instead of stacking another
+    set of plan cards. Prices are not frozen here as the source of truth: the
+    Studio prefers the account's current offer and falls back to this copy.
+    """
+    cur.execute("""SELECT id, role, content, meta, created_at
+                   FROM chat_messages
+                   WHERE session_id = %s AND role IN ('user', 'assistant')
+                   ORDER BY id DESC LIMIT 1""", (session_id,))
+    last = cur.fetchone()
+    if (last and last.get("role") == "assistant"
+            and (last.get("meta") or {}).get("kind") == "subscription_plans"):
+        return _message_out(last)
+    meta = {"kind": "subscription_plans", "subscribe_required": True,
+            "subscribe_gate": True, "surface": surface,
+            "subscription_offer": _subscribe_offer_body()}
+    if request_message_id is not None:
+        meta["request_message_id"] = request_message_id
+    cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
+                   VALUES (%s, 'assistant', %s, %s)
+                   RETURNING id, role, content, meta, created_at""",
+                (session_id, _PLANS_MESSAGE, Json(meta)))
+    row = cur.fetchone() or {}
+    return _message_out({"content": _PLANS_MESSAGE, "meta": meta, **row})
+
+
 def _upload_subscription_payload(asset_id, message_id):
     """Fields appended to a successful-but-locked upload response."""
     offer = dict(_subscribe_offer_body())
@@ -2023,6 +2066,11 @@ def complete_upload_core(user_id, project_id, data):
         meta = {"filename": filename}
         if staged:
             meta["staged"] = True
+            # Current Studio sends a lone first video directly to indexing.
+            # A staged selection therefore waits for the user's Send action.
+            # Inactivity cannot distinguish an abandoned tray from a slow
+            # multi-file upload; never let the legacy reaper submit this tray.
+            meta["requires_submit"] = True
             if tray_pos is not None:
                 meta["tray_pos"] = tray_pos
         # A shorts STYLE REFERENCE (round 99) is a clip that never joins the
@@ -3407,16 +3455,20 @@ def post_message(user_id, project_id):
 
         # THE SUBSCRIBE GATE — empty projects keep the lightweight concierge;
         # the wall becomes authoritative once a main upload exists. The
-        # blocked text is intentionally not persisted and no model or executor
-        # work is started. The upload acknowledgement itself was persisted by
-        # complete_upload_core, so chat still contains the honest next step.
+        # blocked text is intentionally not persisted (the Studio returns it to
+        # the composer) and no model or executor work is started. The answer
+        # IS persisted: one agent reply carrying the plans, reused rather than
+        # repeated while the conversation has not moved on.
         if original and _subscribe_gate_applies(cur, user_id):
             record_client_event(user_id, project_id, "trial_gate_shown",
                                 detail={"message_chars": len(text),
                                         "subscribe_offer": True,
                                         "surface": "chat"},
                                 origin="server")
-            return jsonify(_subscribe_offer_body()), 402
+            body = dict(_subscribe_offer_body())
+            body["subscription_message"] = _record_plans_message(
+                cur, p["chat_session_id"], "chat")
+            return jsonify(body), 402
 
         # The account may have upgraded after uploading. No index job existed
         # while it was locked, so the first post-upgrade request becomes the
@@ -3827,13 +3879,9 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                     # A website recording or blank-canvas build is an edit
                     # attempt too. New accounts have no free grant to exhaust;
                     # send the same offer as the uploaded-video path.
-                    _say("Choose a plan so I can start your edit.", {
-                        "kind": "subscription_required",
-                        "credits_exhausted": True,
-                        "subscribe_required": True,
-                        "subscription_offer": _subscribe_offer_body(),
-                        "request_message_id": ctx["message_id"],
-                    })
+                    _record_plans_message(
+                        cur, ctx["session_id"], "blank_canvas",
+                        request_message_id=ctx["message_id"])
                     subscription_blocked = True
                 elif float(info.get("balance") or 0) < 1.0:
                     spent = info.get("free_trial_exhausted")

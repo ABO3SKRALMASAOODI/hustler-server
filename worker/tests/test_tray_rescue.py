@@ -156,6 +156,15 @@ def test_an_images_only_tray_is_left_alone():
     assert not st["promoted"] and not st["patched"]
 
 
+def test_current_studio_batch_is_never_submitted_by_inactivity():
+    # The first three clips can finish while a fourth spends eight minutes
+    # uploading. Even a scan selected before that completion must stand down.
+    st = _state([CLIP_A, {**CLIP_B, "meta": {"requires_submit": True}}])
+    assert dbx.rescue_abandoned_trays(FakeConn(st)) == []
+    assert st["locked"] == [461]
+    assert not st["promoted"] and not st["patched"] and not st["indexed"]
+
+
 def test_the_scan_only_selects_projects_with_nothing_to_lose():
     """The guards are the whole safety argument, so they are pinned as text:
     no original, no index job ever, and no asset activity inside the quiet
@@ -165,6 +174,7 @@ def test_the_scan_only_selects_projects_with_nothing_to_lose():
     scan = st["sql"][0][0]
     assert "o.kind = 'original'" in scan
     assert "j.type = 'index'" in scan
+    assert "pending.meta->>'requires_submit' = 'true'" in scan
     assert "q.created_at > NOW() - make_interval(secs => %s)" in scan
     assert st["sql"][0][1] == (config.TRAY_RESCUE_AFTER_S,)
     assert config.TRAY_RESCUE_AFTER_S >= 120

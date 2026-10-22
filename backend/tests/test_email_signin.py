@@ -1,5 +1,6 @@
 from unittest.mock import MagicMock, Mock
 import secrets
+from datetime import datetime, timedelta, timezone
 import jwt
 import pytest
 from flask import Flask
@@ -45,6 +46,9 @@ def test_start_sends_hashed_code_without_creating_account(app, db, monkeypatch):
     insert = next(c.args[1] for c in cur.execute.call_args_list if 'INSERT INTO email_signin_challenges' in c.args[0])
     assert insert[2] != code and len(insert[2]) == 64
     assert insert[0] == response.json['challenge']
+    assert insert[0].startswith('d2_') and len(insert[0]) == 43
+    assert insert[3] == response.json['expires_in'] == 600
+    assert send.call_args.kwargs == {'challenge': insert[0], 'delivery_aware': True}
 
 
 @pytest.mark.parametrize('counts', [dict(daily=5,recent=0,burst=0),dict(daily=1,recent=1,burst=1),dict(daily=0,recent=0,burst=30)])
@@ -66,14 +70,15 @@ def test_delivery_failure_never_claims_code_sent(app, db, monkeypatch):
 
 def challenge_row(app, challenge, **changes):
     with app.app_context():
-        row = dict(email='test@example.com', sent=True, consumed=False, valid_time=True, attempts=0,
+        now = datetime.now(timezone.utc)
+        row = dict(id=challenge, email='test@example.com', created_at=now, expires_at=now+timedelta(minutes=5), sent=True, consumed=False, valid_time=True, attempts=0,
                    code_hash=route.code_digest(challenge,'012345'))
     return {**row, **changes}
 
 
 @pytest.mark.parametrize('changes', [dict(sent=False),dict(consumed=True),dict(valid_time=False),dict(attempts=5)])
 def test_expired_consumed_or_exhausted_code_cannot_login(app,db,monkeypatch,changes):
-    challenge=secrets.token_urlsafe(32);db[1].fetchone.return_value=challenge_row(app,challenge,**changes)
+    challenge=secrets.token_urlsafe(32);db[1].fetchall.return_value=[challenge_row(app,challenge,**changes)]
     account=Mock();monkeypatch.setattr(route,'verified_account',account)
     response=app.test_client().post('/auth/email-code/finish',json={'challenge':challenge,'code':'012345'})
     assert response.status_code==400 and response.json['restart']
@@ -81,7 +86,7 @@ def test_expired_consumed_or_exhausted_code_cannot_login(app,db,monkeypatch,chan
 
 
 def test_wrong_code_persists_failed_attempt(app,db,monkeypatch):
-    challenge=secrets.token_urlsafe(32);db[1].fetchone.return_value=challenge_row(app,challenge,attempts=4)
+    challenge=secrets.token_urlsafe(32);db[1].fetchall.return_value=[challenge_row(app,challenge,attempts=4)]
     account=Mock();monkeypatch.setattr(route,'verified_account',account)
     response=app.test_client().post('/auth/email-code/finish',json={'challenge':challenge,'code':'654321'})
     assert response.status_code==400 and response.json['restart']
@@ -90,7 +95,7 @@ def test_wrong_code_persists_failed_attempt(app,db,monkeypatch):
 
 
 def test_success_preserves_account_and_consumes_code(app,db,monkeypatch):
-    challenge=secrets.token_urlsafe(32);db[1].fetchone.return_value=challenge_row(app,challenge)
+    challenge=secrets.token_urlsafe(32);db[1].fetchall.return_value=[challenge_row(app,challenge)]
     monkeypatch.setattr(route,'verified_account',Mock(return_value=(123,'Test@example.com','advanced',False)))
     response=app.test_client().post('/auth/email-code/finish',json={'challenge':challenge,'code':'012345'})
     assert response.status_code==200 and response.json['plan']=='advanced'
@@ -130,3 +135,73 @@ def test_digest_binds_code_to_challenge_and_server_key(app):
         assert a!=route.code_digest('second','123456')
         app.config['SECRET_KEY']='another-test-key'
         assert a!=route.code_digest('first','123456')
+
+
+def test_delayed_previous_resend_code_can_sign_in_and_consumes_group(app, db, monkeypatch):
+    old, latest = 'd2_'+secrets.token_urlsafe(30), 'd2_'+secrets.token_urlsafe(30)
+    now = datetime.now(timezone.utc)
+    previous = challenge_row(app, old, valid_time=False, created_at=now-timedelta(minutes=75), expires_at=now-timedelta(minutes=65))
+    newest = challenge_row(app, latest)
+    with app.app_context(): newest['code_hash'] = route.code_digest(latest, '654321')
+    db[1].fetchall.return_value = [previous, newest]
+    monkeypatch.setattr('email_delivery.provider_delivery', Mock(return_value={'state': 'delivered', 'delivered_at': now-timedelta(minutes=1)}))
+    monkeypatch.setattr(route, 'verified_account', Mock(return_value=(123, 'test@example.com', 'free', True)))
+    response = app.test_client().post('/auth/email-code/finish', json={'challenge': latest, 'previous_challenges': [old], 'code': '012345'})
+    assert response.status_code == 200
+    assert db[1].execute.call_args.args[1] == ([latest, old],)
+    assert 'consumed = TRUE' in db[1].execute.call_args.args[0]
+
+
+def test_earlier_code_from_another_email_cannot_authenticate(app, db, monkeypatch):
+    old, latest = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    db[1].fetchall.return_value = [challenge_row(app, old, email='other@example.com'), challenge_row(app, latest)]
+    account = Mock(); monkeypatch.setattr(route, 'verified_account', account)
+    response = app.test_client().post('/auth/email-code/finish', json={'challenge': latest, 'previous_challenges': [old], 'code': '012345'})
+    assert response.status_code == 400
+    account.assert_not_called()
+
+
+@pytest.mark.parametrize('state', ['pending', 'unknown'])
+def test_delayed_code_reporting_failure_keeps_same_code_retryable(app, db, monkeypatch, state):
+    challenge = 'd2_'+secrets.token_urlsafe(30)
+    now = datetime.now(timezone.utc)
+    db[1].fetchall.return_value = [challenge_row(app, challenge, valid_time=False, created_at=now-timedelta(minutes=75), expires_at=now-timedelta(minutes=65))]
+    monkeypatch.setattr('email_delivery.provider_delivery', Mock(return_value={'state': state}))
+    account = Mock(); monkeypatch.setattr(route, 'verified_account', account)
+    response = app.test_client().post('/auth/email-code/finish', json={'challenge': challenge, 'code': '012345'})
+    assert response.status_code == 503 and not response.json['restart']
+    account.assert_not_called(); db[0].commit.assert_not_called()
+
+
+def test_concurrent_consumption_is_rechecked_under_lock(app, db, monkeypatch):
+    challenge = secrets.token_urlsafe(32)
+    db[1].fetchall.side_effect = [[challenge_row(app, challenge)], [challenge_row(app, challenge, consumed=True)]]
+    account = Mock(); monkeypatch.setattr(route, 'verified_account', account)
+    response = app.test_client().post('/auth/email-code/finish', json={'challenge': challenge, 'code': '012345'})
+    assert response.status_code == 400
+    account.assert_not_called(); db[0].commit.assert_not_called()
+
+
+def test_wrong_resend_code_uses_up_attempt_on_each_challenge(app, db, monkeypatch):
+    old, latest = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+    db[1].fetchall.return_value = [challenge_row(app, old, attempts=4), challenge_row(app, latest, attempts=4)]
+    response = app.test_client().post('/auth/email-code/finish', json={'challenge': latest, 'previous_challenges': [old], 'code': '654321'})
+    assert response.status_code == 400 and response.json['restart']
+    assert set(db[1].execute.call_args.args[1][0]) == {old, latest}
+
+
+def test_delivery_status_contains_no_email_or_code(app, db, monkeypatch):
+    challenge = 'd2_'+secrets.token_urlsafe(30)
+    db[1].fetchone.return_value = challenge_row(app, challenge)
+    monkeypatch.setattr('email_delivery.provider_delivery', Mock(return_value={'state': 'pending'}))
+    response = app.test_client().post('/auth/email-code/status', json={'challenge': challenge})
+    assert response.status_code == 200 and response.json['state'] == 'pending'
+    assert response.headers['Cache-Control'] == 'no-store'
+    assert 'test@example.com' not in response.text and '012345' not in response.text
+
+
+@pytest.mark.parametrize('previous', ['not a list', [None], ['x']*5])
+def test_malformed_history_rejected_before_database(app, db, previous):
+    response = app.test_client().post('/auth/email-code/finish', json={'challenge': secrets.token_urlsafe(32), 'previous_challenges': previous, 'code': '012345'})
+    assert response.status_code == 400
+    db[1].execute.assert_not_called()

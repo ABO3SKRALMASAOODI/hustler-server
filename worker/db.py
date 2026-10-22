@@ -17,6 +17,12 @@ import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 import config
+# Plain reads shared with the backend's MCP fast path (read_tools.py):
+# one definition, re-exported here under the names every caller uses.
+from read_tools import (  # noqa: E402,F401
+    add_message, asset_by_key, assets_by_kinds, find_render_asset,
+    get_index_by_sha,
+    latest_asset, latest_edl, user_billing)
 import error_text
 import io_telemetry
 import model_prices
@@ -547,6 +553,37 @@ def release_jobs(conn, ids):
                          AND type <> 'agent_turn'
                        RETURNING id""", (list(ids),))
         return len(cur.fetchall())
+
+
+def release_unlaunched_jobs(conn, claims):
+    """Hand back claims that provably submitted nothing, Studio turns too.
+
+    ``claims`` maps job id -> the exact queue claim this dispatcher holds.
+    release_jobs keeps agent turns out because a turn that RAN may have
+    written EDL versions; these never reached a provider (see
+    REMOTE_DISPATCH_CLAIMS), so giving them back cannot replay anything. The
+    attempt is refunded (a deploy is not the job's failure); total_claims is
+    not, so MAX_CLAIMS_ABSOLUTE still bounds a job crossing many deploys.
+    The claim fence makes a release that lost a race with a newer claim (or a
+    terminal write) a no-op. Returns the ids actually released.
+    """
+    released = []
+    if not claims:
+        return released
+    with conn.cursor() as cur:
+        for job_id, claim in claims.items():
+            if claim is None:
+                continue
+            cur.execute("""UPDATE video_jobs
+                           SET state = 'queued', progress = 0,
+                               attempts = GREATEST(0, attempts - 1),
+                               updated_at = NOW()
+                           WHERE id = %s AND state = 'running'
+                             AND total_claims = %s
+                           RETURNING id""", (job_id, claim))
+            if cur.fetchone():
+                released.append(job_id)
+    return released
 
 
 def active_job_ids():
@@ -1091,6 +1128,7 @@ def project_execution_shape(conn, project_id, asset_id=None, job_type=None, payl
                                   COALESCE(duration_s, 0) AS max_duration_s,
                                   COALESCE(width, 0) AS max_width,
                                   COALESCE(height, 0) AS max_height,
+                                  kind AS asset_kind,
                                   1 AS assets
                            FROM assets WHERE id = %s AND project_id = %s""",
                         (asset_id, project_id))
@@ -1253,6 +1291,32 @@ def mark_remote_execution_running(conn, job_id, total_claims,
                        WHERE job_id = %s AND total_claims = %s
                          AND state IN ('submitted', 'running')"""
                     + identity_where, params)
+        return cur.rowcount > 0
+
+
+def fence_unadopted_remote_execution(conn, job_id, total_claims, provider,
+                                     call_id, error=None):
+    """Cancel one provider call that no executor has adopted, atomically.
+
+    An executor must confirm ownership (confirm_remote_execution_ownership,
+    which sets ``started_at`` and ``running`` in one statement and fails
+    closed) before any work. So when this compare-and-set finds the exact
+    call still ``submitted`` with no ``started_at``, nothing ran, and after it
+    nothing can: a late executor finds its call cancelled and exits before
+    touching the project. Returns whether the call was fenced.
+    """
+    if job_id is None or total_claims is None or not call_id \
+            or not remote_executions_table_ready(conn):
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE remote_executions
+                       SET state = 'cancelled', completed_at = NOW(),
+                           last_observed_at = NOW(), error = %s
+                       WHERE job_id = %s AND total_claims = %s
+                         AND provider = %s AND call_id = %s
+                         AND state = 'submitted' AND started_at IS NULL""",
+                    (error_text.excerpt(error, 2000) if error else None,
+                     job_id, total_claims, provider, str(call_id)))
         return cur.rowcount > 0
 
 
@@ -1759,6 +1823,15 @@ ACTIVE_JOBS = set()
 # itself begins heartbeating after it actually starts.
 REMOTE_OWNED_JOBS = set()
 REMOTE_LAUNCHING_JOBS = set()
+# Jobs this dispatcher runs ONLY through a provider call (job id -> its queue
+# claim). While such a job is not remote-owned, nothing has been submitted
+# under its claim: it is either before its first launch or between launches
+# that a provider proved it never accepted (capacity, rollout, startup
+# refusals, all of which unmark it). A planned shutdown can therefore hand it
+# back to the queue unspent, Studio turns included, instead of letting the
+# claim fail "dispatcher shutdown began before Cloudflare submission" (jobs
+# 73272 and 73277, 16 Oct) or die with the process.
+REMOTE_DISPATCH_CLAIMS = {}
 _REMOTE_LAUNCHES_STOPPED = False
 _ACTIVE_LOCK = threading.Lock()
 
@@ -1766,6 +1839,47 @@ _ACTIVE_LOCK = threading.Lock()
 def track_job(job_id):
     with _ACTIVE_LOCK:
         ACTIVE_JOBS.add(job_id)
+
+
+def mark_remote_dispatch(job_id, total_claims):
+    """This claim's work happens only inside a provider call."""
+    if job_id is None or total_claims is None:
+        return
+    with _ACTIVE_LOCK:
+        if job_id in ACTIVE_JOBS:
+            REMOTE_DISPATCH_CLAIMS[job_id] = total_claims
+
+
+def unlaunched_dispatch_claims():
+    """{job id: claim} for dispatched jobs with no provider call in flight."""
+    with _ACTIVE_LOCK:
+        return {job_id: claim
+                for job_id, claim in REMOTE_DISPATCH_CLAIMS.items()
+                if job_id in ACTIVE_JOBS and job_id not in REMOTE_OWNED_JOBS}
+
+
+def remote_launches_stopped():
+    with _ACTIVE_LOCK:
+        return _REMOTE_LAUNCHES_STOPPED
+
+
+# Jobs whose runner has returned or raised in this process: what remains is
+# the dispatcher's own terminal/requeue write. A remote-owned job here is no
+# longer protected by a live provider ledger row, so a planned shutdown waits
+# for that write (milliseconds) instead of stranding the claim `running` for
+# the reaper to fail (an MCP call has one attempt).
+SETTLING_JOBS = set()
+
+
+def mark_settling(job_id):
+    with _ACTIVE_LOCK:
+        if job_id in ACTIVE_JOBS:
+            SETTLING_JOBS.add(job_id)
+
+
+def settling_job_ids():
+    with _ACTIVE_LOCK:
+        return list(SETTLING_JOBS & ACTIVE_JOBS)
 
 
 def mark_remote_owned(job_id):
@@ -1803,6 +1917,8 @@ def untrack_job(job_id):
         ACTIVE_JOBS.discard(job_id)
         REMOTE_OWNED_JOBS.discard(job_id)
         REMOTE_LAUNCHING_JOBS.discard(job_id)
+        REMOTE_DISPATCH_CLAIMS.pop(job_id, None)
+        SETTLING_JOBS.discard(job_id)
 
 
 def begin_remote_shutdown():
@@ -2018,22 +2134,6 @@ def get_asset(conn, asset_id):
         return cur.fetchone()
 
 
-def latest_asset(conn, project_id, kind):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
-                       WHERE project_id = %s AND kind = %s
-                       ORDER BY id DESC LIMIT 1""", (project_id, kind))
-        return cur.fetchone()
-
-
-def asset_by_key(conn, project_id, storage_key):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
-                       WHERE project_id = %s AND storage_key = %s
-                       ORDER BY id DESC LIMIT 1""", (project_id, storage_key))
-        return cur.fetchone()
-
-
 def library_music_used_by_user(conn, user_id, exclude_project_id=None,
                                limit=24):
     """CC0 library slugs that score this user's OTHER projects, newest
@@ -2137,6 +2237,10 @@ def rescue_abandoned_trays(conn):
               AND NOT EXISTS (SELECT 1 FROM video_jobs j
                               WHERE j.project_id = s.project_id
                                 AND j.type = 'index')
+              AND NOT EXISTS (SELECT 1 FROM assets pending
+                              WHERE pending.project_id = s.project_id
+                                AND pending.meta->>'staged' = 'true'
+                                AND pending.meta->>'requires_submit' = 'true')
               AND NOT EXISTS (SELECT 1 FROM assets q
                               WHERE q.project_id = s.project_id
                                 AND q.created_at > NOW()
@@ -2157,12 +2261,16 @@ def rescue_abandoned_trays(conn):
                              AND kind = 'original' LIMIT 1""", (pid,))
             if cur.fetchone():
                 continue
-            cur.execute("""SELECT id, kind, duration_s FROM assets
+            cur.execute("""SELECT id, kind, duration_s, meta FROM assets
                            WHERE project_id = %s
                              AND COALESCE(meta->>'staged','') = 'true'
                            ORDER BY COALESCE((meta->>'tray_pos')::float, 1e9),
                                     id""", (pid,))
             tray = cur.fetchall()
+            # Recheck after taking the same project lock as completion and
+            # submission. A newly completed batch item must win this race.
+            if any((a.get("meta") or {}).get("requires_submit") for a in tray):
+                continue
             main_i = next((i for i, a in enumerate(tray)
                            if a["kind"] == "video_clip"), None)
             if main_i is None:
@@ -2293,17 +2401,6 @@ def latest_render_asset(conn, project_id, variant):
         return cur.fetchone()
 
 
-def find_render_asset(conn, project_id, variant, edl_version):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
-                       WHERE project_id = %s AND kind = 'render'
-                         AND meta->>'variant' = %s
-                         AND (meta->>'edl_version')::int = %s
-                       ORDER BY id DESC LIMIT 1""",
-                    (project_id, variant, int(edl_version)))
-        return cur.fetchone()
-
-
 def latest_render(conn, project_id, variant):
     """The newest render of a variant REGARDLESS of EDL version — what the
     project last actually produced. find_render_asset answers "is version N
@@ -2366,15 +2463,6 @@ def delete_assets(conn, asset_ids):
         return cur.rowcount
 
 
-def assets_by_kinds(conn, project_id, kinds, limit=200):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM assets
-                       WHERE project_id = %s AND kind = ANY(%s)
-                       ORDER BY id DESC LIMIT %s""",
-                    (project_id, list(kinds), limit))
-        return cur.fetchall()
-
-
 def update_asset_meta(conn, asset_id, patch):
     """Shallow-merge patch into assets.meta."""
     with conn.cursor() as cur:
@@ -2403,12 +2491,6 @@ def update_asset_probe(conn, asset_id, duration_s, width, height, fps, sha256):
                            fps = %s, sha256 = %s
                        WHERE id = %s""",
                     (duration_s, width, height, fps, sha256, asset_id))
-
-
-def get_index_by_sha(conn, sha256):
-    with conn.cursor() as cur:
-        cur.execute("SELECT * FROM indexes WHERE video_sha256 = %s", (sha256,))
-        return cur.fetchone()
 
 
 def index_exists(conn, sha256):
@@ -2528,13 +2610,6 @@ def _bump_edl_write_generation(project_id):
     with _EDL_WRITE_GEN_LOCK:
         key = int(project_id)
         _EDL_WRITE_GEN[key] = _EDL_WRITE_GEN.get(key, 0) + 1
-
-
-def latest_edl(conn, project_id):
-    with conn.cursor() as cur:
-        cur.execute("""SELECT * FROM edls WHERE project_id = %s
-                       ORDER BY version DESC LIMIT 1""", (project_id,))
-        return cur.fetchone()
 
 
 def get_edl_version(conn, project_id, version):
@@ -2814,15 +2889,6 @@ def insert_llm_call(conn, project_id, job_id, purpose, model, request,
               Json(_capped_payload(request)),
               Json(_capped_payload(response) if response is not None else None),
               prompt_tokens, completion_tokens))
-
-
-def add_message(conn, session_id, role, content, meta=None):
-    with conn.cursor() as cur:
-        cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
-                       VALUES (%s, %s, %s, %s) RETURNING id""",
-                    (session_id, role, content,
-                     Json(meta) if meta is not None else None))
-        return cur.fetchone()["id"]
 
 
 def add_job_failure_message(conn, session_id, content, job_id,
@@ -3319,41 +3385,6 @@ def user_is_subscribed(conn, user_id):
                     (user_id,))
         row = cur.fetchone()
         return bool(row and row["is_subscribed"])
-
-
-def user_billing(conn, user_id):
-    """(is_subscribed, plan, trialing) — everything the turn needs about who is
-    paying, in one query.
-
-    The plan is here because routing stopped being a boolean in round 49: the
-    Frontier tier ('ai_max') runs its agent AND its vision on the frontier
-    provider, so "which model answers" now depends on WHICH plan, not merely on
-    whether there is one.
-
-    `trialing` is here because "you're out of credits" has a third truth. A
-    trialling account is is_subscribed, but its pool is 10% of the plan and the
-    rest is released by converting — so telling that user their credits
-    "refresh on your plan's cycle" points them at waiting when the thing that
-    helps is one click away.
-
-    Degrades rather than raises: a missing trial_status column (they are added
-    by hand in the Render shell) yields trialing=False and the old behaviour.
-    """
-    with conn.cursor() as cur:
-        try:
-            cur.execute("SELECT is_subscribed, plan, trial_status "
-                        "FROM users WHERE id = %s", (user_id,))
-            row = cur.fetchone()
-        except Exception:
-            conn.rollback()     # a missing column poisons the transaction
-            cur.execute("SELECT is_subscribed, plan FROM users WHERE id = %s",
-                        (user_id,))
-            row = cur.fetchone()
-    if not row:
-        return False, "free", False
-    return (bool(row["is_subscribed"]),
-            (row.get("plan") or "free"),
-            bool(row["is_subscribed"]) and row.get("trial_status") == "trialing")
 
 
 # ── Credits ──────────────────────────────────────────────────────────────────

@@ -25,6 +25,11 @@ work through it.
 
 ## Email operations
 
+- Production marketing uses Kit Free when `MARKETING_EMAIL_PROVIDER=kit`; verification and billing stay on Brevo. `KIT_DAILY_ENABLED=1` activates one private, tag-filtered daily broadcast after `newsletter_settings.send_hour_utc` (15 UTC / 19 Dubai). The existing hourly scheduler and advisory lock own this job; never add a second scheduler.
+- Kit requires `KIT_API_KEY`, `KIT_ACCOUNT_ID`, `KIT_AUDIENCE_TAG_ID`, `KIT_EMAIL_TEMPLATE_ID`, and `KIT_FROM_EMAIL` in Render's protected environment. Check a permanent free plan, verified/DMARC-authenticated sender, and the 10,000-subscriber limit before imports. Never upgrade automatically.
+- Only `newsletter_permissions` entries with verified real-customer accounts and no local/provider opt-out enter the managed tag. The owner's October 19, 2026 attestation covers the initial existing-customer migration; future accounts opt in through Account. Preserve Brevo's blocklist during migration. Kit free webhook access is unavailable on this account, so sync reads all Kit subscriber states before every broadcast; local opt-outs call Kit immediately and failed opt-outs block subsequent sends until retried.
+- `kit_daily_runs` durably deduplicates each Dubai date. On an uncertain create response, reconcile by the unique description; never blindly resend. Submitted/completed is not proof of inbox delivery. `/newsletter/kit-status` and the admin Newsletter tab expose the active provider, audience and recorded runs. A Kit failure must never fall back to Brevo marketing.
+- The following capacity/cadence rules apply only while the legacy Brevo marketing provider is selected.
 - Brevo's free allowance is 300 emails/day. Keep the shared 200 marketing / 100 account-service budget and check Brevo's actual remaining credits before sending: HTTP 201 can mean queued, not delivered. Never infer available provider credits from the local day's counter alone.
 - Marketing follows the admin's real-customer scope, except the main admin account remains included. Hidden pre-relaunch/test accounts must not consume marketing capacity.
 - Recent signups (last 30 days) receive 75% of available marketing capacity; older customers retain 25%, with unused shares reassigned. Keep the 48-hour gap and three-marketing-emails-per-seven-days ceiling.

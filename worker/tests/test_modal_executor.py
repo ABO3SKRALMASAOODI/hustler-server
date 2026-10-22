@@ -465,7 +465,7 @@ def test_shutdown_winner_refuses_modal_before_spawn(monkeypatch):
     monkeypatch.setattr(remote, "_modal_function", lambda _name: MustNotSpawn())
     monkeypatch.setattr(remote.dbx, "mark_remote_owned", lambda _job_id: False)
 
-    with pytest.raises(remote.ModalLaunchUnavailable, match="shutdown"):
+    with pytest.raises(remote.DispatcherDraining, match="shutdown"):
         remote._run_modal(JOB)
 
 

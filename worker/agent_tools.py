@@ -113,6 +113,16 @@ import sound_requests
 import hooks
 import sfx_placement
 import version as worker_version
+# The pure read tools live in read_tools.py: one implementation for the
+# executors and the backend's MCP fast path (same code, same answers).
+import read_tools  # noqa: E402
+from read_tools import (  # noqa: E402,F401
+    GET_WORDS_MAX_WORDS, SHOT_TIMELINE_MAX_LINES, _cap, _evidence_cache,
+    _fmt_t, _metric, _norm_token, _program_map, classify_repeated_phrases,
+    find_repeated_phrases, get_edl, get_kept_transcript, get_shots,
+    get_transcript, get_words, program_name_of, search_transcript)
+from read_tools import (  # noqa: E402,F401
+    _tool_identifier, edl_used_asset_keys, list_assets)
 from captions import CAPTION_DESIGN_VERSION, KARAOKE_HARD_MAX
 from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      custom_chain_error, patch_clip_key, patch_fingerprint,
@@ -492,16 +502,7 @@ class ToolContext:
                 self.running_credits() >= self.credit_budget)
 
     def clamp(self, t):
-        try:
-            t = float(t)
-        except (TypeError, ValueError):
-            raise ValueError(f"'{t}' is not a number of seconds")
-        # With no main video there is no source clock to clamp against; the
-        # placement tools bound program positions against program_duration
-        # themselves, so keep a generous upper here rather than collapsing
-        # every time to 0.
-        upper = self.duration if self.duration > 0 else 1e7
-        return round(min(max(t, 0.0), upper), 2)
+        return read_tools.clamp_seconds(self.duration, t)
 
     def proxy_path(self):
         if self._proxy_local is None:
@@ -737,29 +738,6 @@ class ToolContext:
         return line
 
 
-def _cap(text, budget=None):
-    budget = budget or config.TOOL_OUTPUT_CHAR_BUDGET
-    if len(text) <= budget:
-        return text
-    return text[:budget] + "\n...[truncated — narrow your range and call again]"
-
-
-def _evidence_cache(ctx):
-    cache = getattr(ctx, "_read_evidence_seen", None)
-    if cache is None:
-        cache = set()
-        setattr(ctx, "_read_evidence_seen", cache)
-    return cache
-
-
-def _metric(ctx, key, amount=1):
-    metrics = getattr(ctx, "editing_metrics", None)
-    if metrics is None:
-        metrics = {}
-        setattr(ctx, "editing_metrics", metrics)
-    metrics[key] = metrics.get(key, 0) + amount
-
-
 def program_cast_inputs(ctx, edl=None):
     """(inferred_grammar, program_shape) measured from the KEPT program.
 
@@ -907,43 +885,6 @@ def _loaded_skills(ctx):
     return cache
 
 
-def _fmt_t(t):
-    return f"{t:.2f}"
-
-
-# ------------------------------------------------------------------ #
-#  READ tools                                                          #
-# ------------------------------------------------------------------ #
-
-def program_name_of(ctx):
-    """asset_key -> display filename for the scene map (timeline.
-    describe_program), cached on the ctx so a turn does at most one DB
-    lookup per distinct key. Returns None for unknown keys — the caller
-    falls back to the key's basename."""
-    cache = getattr(ctx, "_asset_names", None)
-    if cache is None:
-        cache = ctx._asset_names = {}
-
-    def name_of(key):
-        if key not in cache:
-            try:
-                a = ctx.db.run(dbx.asset_by_key, ctx.project_id, key)
-                cache[key] = (a.get("meta") or {}).get("filename") \
-                    if a else None
-            except Exception:
-                cache[key] = None
-        return cache[key]
-    return name_of
-
-
-def _program_map(ctx, edl_json):
-    """The viewer-ordered scene listing for this EDL, or ''."""
-    try:
-        return timeline_mod.describe_program(edl_json, program_name_of(ctx))
-    except Exception:
-        return ""
-
-
 def get_video_info(ctx):
     if not ctx.has_main_video:
         edl = ctx.latest_edl()
@@ -1004,309 +945,6 @@ def get_video_info(ctx):
             + (f"\n{prog}" if prog else "")
             + (f"\n{layout}" if (layout := _layout_report(ctx, edl["json"]))
                else ""))
-
-
-def get_transcript(ctx, start=0, end=None, asset_key=None):
-    if asset_key:
-        # Round 84: every uploaded clip/music file is indexed too — read ITS
-        # transcript by the asset's sha. Times are CLIP seconds.
-        asset = ctx.db.run(
-            lambda conn: dbx.asset_by_key(conn, ctx.project_id, asset_key))
-        if not asset:
-            return f"REJECTED: no asset with storage_key {asset_key!r}."
-        row = asset.get("sha256") and \
-            ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
-        idx = (row or {}).get("json") or {}
-        sents = idx.get("sentences") or []
-        if not sents:
-            return ("That upload has no transcript (no speech, no audio "
-                    "track, or its analysis has not finished yet).")
-        multi = (idx.get("speakers") or 0) > 1
-        out = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}]"
-               + (f" S{s['speaker']}:" if multi
-                  and s.get("speaker") is not None else "")
-               + f" {s['text']}" for s in sents]
-        return _cap(f"Transcript of {asset_key} (CLIP seconds):\n"
-                    + "\n".join(out),
-                    budget=config.TRANSCRIPT_CHAR_BUDGET)
-    start = ctx.clamp(start or 0)
-    end = ctx.clamp(end if end is not None else ctx.duration)
-    if end <= start:
-        return "REJECTED: end must be greater than start."
-    rows = [s for s in ctx.index.get("sentences", [])
-            if s["t1"] > start and s["t0"] < end]
-    if not rows:
-        return (f"No transcribed speech between {start}s and {end}s."
-                if ctx.index.get("sentences") else
-                "This video has no transcript (no speech or no audio track).")
-    # Only label speakers when there is more than one — "S0:" on every line of
-    # a solo talking head is noise the model pays for on every read.
-    multi = (ctx.index.get("speakers") or 0) > 1
-    out = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}]"
-           + (f" S{s['speaker']}:" if multi and s.get("speaker") is not None
-              else "")
-           + f" {s['text']}"
-           for s in rows]
-    # Transcripts get a much larger budget than other tools: silently losing
-    # the tail of a long video is exactly how far-apart repetitions go unseen.
-    return (_cap("\n".join(out), budget=config.TRANSCRIPT_CHAR_BUDGET)
-            + "\n(for word-exact timing, call get_words(start, end))")
-
-
-def _norm_token(w):
-    return re.sub(r"[^a-z0-9']+", "", (w or "").lower())
-
-
-def find_repeated_phrases(out_words, shingle=4):
-    """Repeated N-word phrases in the kept program text, as
-    [(phrase, [program_times])]. Consecutive repeated shingles merge into
-    longer phrases so 'we just built the ultimate ai pipeline' reports once,
-    not as four overlapping 4-gram hits."""
-    toks = [( _norm_token(w["w"]), w["t0"]) for w in out_words]
-    toks = [(t, at) for t, at in toks if t]
-    if len(toks) < shingle * 2:
-        return []
-    counts = {}
-    for i in range(len(toks) - shingle + 1):
-        key = " ".join(t for t, _ in toks[i:i + shingle])
-        counts.setdefault(key, []).append(i)
-    rep_idx = sorted({i for idxs in counts.values() if len(idxs) > 1
-                      for i in idxs})
-    if not rep_idx:
-        return []
-    runs, s, p = [], rep_idx[0], rep_idx[0]
-    for i in rep_idx[1:]:
-        if i == p + 1:
-            p = i
-        else:
-            runs.append((s, p))
-            s = p = i
-    runs.append((s, p))
-    phrases = {}
-    for a, b in runs:
-        text = " ".join(t for t, _ in toks[a:b + shingle])
-        phrases.setdefault(text, []).append(round(toks[a][1], 1))
-    return [(t, times) for t, times in phrases.items() if len(times) > 1]
-
-
-def classify_repeated_phrases(out_words, shingle=4):
-    """Separate edit duplication from words the speaker actually repeated.
-
-    Timeline.kept_words carries the original source clock. If the same phrase
-    appears twice in program time with the same source start, an EDL segment
-    was duplicated. Distinct source starts mean the speaker said it twice;
-    that may be rhetorical, a stutter, or two takes and is not proof of an
-    editing bug.
-    """
-    rows = [( _norm_token(w.get("w")), w) for w in out_words]
-    rows = [(token, word) for token, word in rows if token]
-    results = []
-    for phrase, _times in find_repeated_phrases(out_words, shingle=shingle):
-        needle = phrase.split()
-        occ = []
-        for i in range(len(rows) - len(needle) + 1):
-            if [token for token, _word in rows[i:i + len(needle)]] != needle:
-                continue
-            word = rows[i][1]
-            occ.append({"program_s": round(float(word.get("t0", 0.0)), 3),
-                        "source_s": (round(float(word["src_t0"]), 3)
-                                     if word.get("src_t0") is not None
-                                     else None)})
-        source_times = [x["source_s"] for x in occ if x["source_s"] is not None]
-        duplicated_source = any(
-            abs(a - b) <= 0.08
-            for i, a in enumerate(source_times)
-            for b in source_times[i + 1:])
-        kind = ("edit_duplicate" if duplicated_source else
-                "spoken_repetition" if len(source_times) >= 2 else
-                "ambiguous")
-        results.append({"phrase": phrase, "kind": kind,
-                        "occurrences": occ})
-    return results
-
-
-def get_kept_transcript(ctx):
-    """The transcript of what the CURRENT edit actually keeps — program
-    time — with repeated-phrase detection. THE tool for verifying that a
-    repetition/tightening pass really removed the repeats."""
-    latest = ctx.latest_edl()
-    edl = latest["json"]
-    tl = Timeline(edl["keep"], edl.get("inserts") or [],
-                  edl.get("speed") or [])
-    # Every word the viewer HEARS, including one whose midpoint a pause cut
-    # removed while its sound survived (the captions show the same words).
-    from timeline import Voice
-    out_words = tl.kept_words(ctx.index.get("words", []), rescue=True,
-                              voice=Voice.from_index(ctx.index))
-    if not out_words:
-        return ("The current edit keeps no transcribed speech."
-                if ctx.index.get("words") else
-                "This video has no transcript (no speech or no audio track).")
-    lines, group = [], []
-
-    def flush():
-        if not group:
-            return
-        src0 = tl.out_to_src(group[0]["t0"])
-        src1 = tl.out_to_src(group[-1]["t1"])
-        src = (f" | src {_fmt_t(src0)}-{_fmt_t(src1)}"
-               if src0 is not None and src1 is not None else "")
-        lines.append(f"[{_fmt_t(group[0]['t0'])}-{_fmt_t(group[-1]['t1'])}"
-                     f"{src}] " + " ".join(w["w"] for w in group))
-        group.clear()
-
-    for w in out_words:
-        if group and (w["t0"] - group[-1]["t1"] > 0.9 or len(group) >= 14):
-            flush()
-        group.append(w)
-    flush()
-    header = (f"Program transcript of EDL v{latest['version']} "
-              f"({tl.out_duration:.1f}s output — program time, with the "
-              "matching source spans):")
-    reps = classify_repeated_phrases(out_words)
-    if reps:
-        duplicate = [r for r in reps if r["kind"] == "edit_duplicate"]
-        spoken = [r for r in reps if r["kind"] == "spoken_repetition"]
-        parts = []
-        if duplicate:
-            parts.append("\nEDIT DUPLICATIONS (same source phrase used more "
-                         "than once—repair the EDL):\n" + "\n".join(
-                f"  '{r['phrase']}' at " + ", ".join(
-                    f"{o['program_s']}s" for o in r["occurrences"])
-                for r in duplicate[:6]))
-        if spoken:
-            parts.append("\nSPOKEN REPETITIONS (distinct source moments—not "
-                         "proof of an edit bug; preserve rhetorical repeats "
-                         "unless the brief asks to tighten them):\n" + "\n".join(
-                f"  '{r['phrase']}' at " + ", ".join(
-                    f"{o['program_s']}s" for o in r["occurrences"])
-                for r in spoken[:6]))
-        note = ("\nPOSSIBLE REPETITIONS (classified by source provenance):"
-                + "".join(parts))
-    else:
-        note = "\nNo repeated phrases detected in the output."
-    return _cap(header + "\n" + "\n".join(lines) + note,
-                budget=config.TRANSCRIPT_CHAR_BUDGET)
-
-
-# Adaptive response bound (was a 60s hard range reject): a wide range over
-# sparse speech is perfectly answerable, so the WORD count is what's capped —
-# the tail says exactly how much was withheld and how to get it.
-GET_WORDS_MAX_WORDS = 400
-
-
-def get_words(ctx, start=0, end=None):
-    """Word-level timestamps straight from the index — the ONLY correct
-    source for cut points inside a sentence."""
-    start = ctx.clamp(start or 0)
-    end = ctx.clamp(end if end is not None else ctx.duration)
-    if end <= start:
-        return "REJECTED: end must be greater than start."
-    words = ctx.index.get("words", [])
-    rows = [w for w in words if w["t1"] > start and w["t0"] < end]
-    if not rows:
-        return (f"No transcribed words between {start}s and {end}s."
-                if words else
-                "This video has no transcript (no speech or no audio track).")
-    shown = rows[:GET_WORDS_MAX_WORDS]
-    multi = (ctx.index.get("speakers") or 0) > 1
-    out = [f"{_fmt_t(w['t0'])}-{_fmt_t(w['t1'])} {w['w']}"
-           + (f" [S{w['speaker']}]" if multi and w.get("speaker") is not None
-              else "")
-           + (" [filler]" if w.get("filler") else "")
-           + (f" [confidence={w['confidence']:.3f}" +
-              (", REVIEW]" if w['confidence'] < .8 else "]")
-              if w.get("confidence") is not None else "")
-           for w in shown]
-    tail = ""
-    if len(rows) > len(shown):
-        # Floor the suggested start (int()): rounding UP could skip words
-        # whose t1 falls inside the rounded gap; flooring only re-shows a
-        # ≤1s overlap the strict t1>start filter tolerates. The end is
-        # printed exactly for the same reason.
-        tail = (f"\n...{len(rows) - len(shown)} more words (up to {end}s) "
-                f"not shown — narrow the range and call again "
-                f"(e.g. get_words({int(shown[-1]['t1'])}, {end:g})).")
-    unknown = sum(w.get("confidence") is None for w in shown)
-    confidence_note = (f"\nConfidence unavailable for {unknown} displayed token(s)."
-                       if unknown else "")
-    return _cap("\n".join(out) + confidence_note + tail,
-                budget=config.TRANSCRIPT_CHAR_BUDGET)
-
-
-def search_transcript(ctx, query):
-    q = (query or "").strip().lower()
-    if not q:
-        return "REJECTED: query is empty."
-    sentences = ctx.index.get("sentences", [])
-    if not sentences:
-        return "This video has no transcript to search."
-    exact = [s for s in sentences if q in s["text"].lower()]
-    fuzzy = []
-    if len(exact) < 5:
-        texts = {s["id"]: s["text"].lower() for s in sentences}
-        close = difflib.get_close_matches(q, list(texts.values()), n=8,
-                                          cutoff=0.5)
-        hit_ids = {sid for sid, t in texts.items() if t in close}
-        fuzzy = [s for s in sentences
-                 if s["id"] in hit_ids and s not in exact]
-    lines = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}] {s['text']}"
-             for s in exact[:20]]
-    lines += [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}] (similar) {s['text']}"
-              for s in fuzzy[:8]]
-    if not lines:
-        return f"No matches for '{query}'. Try a shorter or different phrase."
-    return _cap(f"{len(exact)} exact matches:\n" + "\n".join(lines))
-
-
-# How many lines of visual timeline one get_shots call may return. Past this
-# the shortest moments are dropped with a pointer to a narrower range — an
-# unbounded timeline on a long video would bury the transcript in the same
-# context window.
-SHOT_TIMELINE_MAX_LINES = 60
-
-
-def get_shots(ctx, start=0, end=None):
-    start = ctx.clamp(start or 0)
-    end = ctx.clamp(end if end is not None else ctx.duration)
-    rows = [s for s in ctx.index.get("shots", [])
-            if s["end"] > start and s["start"] < end]
-    if not rows:
-        return f"No shots between {start}s and {end}s."
-    lines = []
-    for s in rows:
-        cap = s.get("caption") or {}
-        desc = "; ".join(x for x in (cap.get("action"), cap.get("setting"),
-                                     cap.get("people")) if x)
-        ost = cap.get("on_screen_text")
-        if ost:
-            desc += f'; on-screen text: "{ost}"'
-        if cap.get("subtitles"):
-            desc += "; [burned-in captions visible]"
-        lines.append(f"[#{s['id']} {_fmt_t(s['start'])}-{_fmt_t(s['end'])}] "
-                     f"{desc or '(no visual caption)'}")
-    # Round 69: shots are SCENE structure — on a locked-off talking head there
-    # is exactly one of them, and one line describing 19 minutes of footage was
-    # the whole of what the editor could see. The sampled timeline below says
-    # what is on screen over time, collapsed so that each line is a CHANGE.
-    tl = visual.timeline_lines(ctx.index.get("moments") or [], start, end,
-                               max_lines=SHOT_TIMELINE_MAX_LINES)
-    if tl:
-        step = config.VISUAL_SAMPLE_S
-        lines.append(f"\nWHAT IS ON SCREEN OVER TIME (sampled ~every {step:g}s, "
-                     "consecutive identical frames merged — a span means "
-                     "nothing changed through it):")
-        lines += tl
-    elif not any(s.get("caption") for s in rows):
-        # v10 indexes carry no captions by design: the PICTURE is the
-        # filmstrip in your context and look_at. These timings are the cut
-        # geometry only — never pick scenes or zoom targets from them alone.
-        lines.append(
-            "\nThese are scene-change timings only. WHAT IS ON SCREEN is in "
-            "your filmstrip tiles (timestamps under each frame) — read those, "
-            "or look_at exact times for a closer view, before choosing "
-            "anything visual.")
-    return _cap("\n".join(lines))
 
 
 EDITORIAL_MAP_MAX_ROWS = 80
@@ -1641,162 +1279,6 @@ def _silence_range_hint(ctx):
         return ""
     return (f"\n(The whole {dur:.0f}s source. Your program keeps {a:.2f}-{b:.2f}s: "
             f"find_silences(start={a:g}, end={b:g}) lists only that span.)")
-
-
-def edl_used_asset_keys(edl):
-    """Every storage_key the current edit already places — inserts,
-    overlays, music, voiceover and sfx. Unused project files are still
-    available to place; this set is how the inventory says which are which."""
-    keys = set()
-    if not isinstance(edl, dict):
-        return keys
-    for ins in edl.get("inserts") or []:
-        if ins.get("asset_key"):
-            keys.add(ins["asset_key"])
-    for ov in edl.get("overlays") or []:
-        if ov.get("asset_key"):
-            keys.add(ov["asset_key"])
-    for m in edl.get("music") or []:
-        if m.get("storage_key"):
-            keys.add(m["storage_key"])
-    for v in edl.get("voiceover") or []:
-        if v.get("asset_key"):
-            keys.add(v["asset_key"])
-    for s in edl.get("sfx") or []:
-        if s.get("storage_key"):
-            keys.add(s["storage_key"])
-    return keys
-
-
-def list_assets(ctx, kind=None):
-    """Project files the user has uploaded or the system has produced.
-    kind 'audio' (the pipeline's extracted copy of the source's own audio,
-    used for transcription) is deliberately excluded everywhere — offering
-    it as 'music' just doubles the speaker's voice under itself."""
-    kinds = {"music": ["music"], "image": ["image_ref"],
-             "clip": ["video_clip"], "render": ["render"],
-             "all": ["music", "image_ref", "video_clip",
-                     "render", "original"]}
-    requested = _tool_identifier(kind or "music").lower()
-    aliases = {
-        "video": "clip", "videos": "clip", "clips": "clip",
-        "images": "image", "photo": "image", "photos": "image",
-        "audio": "music", "song": "music", "songs": "music",
-        "renders": "render", "everything": "all",
-    }
-    canonical = aliases.get(requested, requested)
-    sel = kinds.get(canonical)
-    if not sel:
-        return ("REJECTED: kind must be one of "
-                f"{', '.join(sorted(kinds))}.")
-    rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id, sel)
-    if not rows:
-        if sel == kinds["music"]:
-            return ("No audio uploaded to this project. fetch_url ingests a "
-                    "music link the user pastes (song URL, YouTube, "
-                    "SoundCloud); for a SPECIFIC song they named, load the "
-                    "acquisition department and find_song can locate a link. "
-                    "For a generic genre/vibe or a trending platform sound, "
-                    "ask the user to attach the file (paperclip button in "
-                    "chat, mp3/wav/m4a) instead of repeatedly searching, or "
-                    "offer library tracks with ask_user and place their "
-                    "pick. Sound effects come from the approved library "
-                    "(list_sound_library).")
-        return f"No {canonical} assets in this project."
-    try:
-        edl_row = ctx.latest_edl()
-        used = edl_used_asset_keys(edl_row["json"])
-    except Exception:
-        edl_row = {"version": None}
-        used = set()
-    unused_n = 0
-    lines = []
-    for a in rows:
-        m = a.get("meta") or {}
-        dur = f", {a['duration_s']:.1f}s" if a.get("duration_s") else ""
-        cap = f" — {m['caption'][:120]}" if m.get("caption") else ""
-        role = m.get("role") or ""
-        role_bit = (f" ROLE={role} — STYLE REFERENCE, not footage: "
-                    "look_at_asset / extract_audio, never insert_media"
-                    if role in ("edit_reference", "shorts_reference")
-                    else "")
-        key = a.get("storage_key") or ""
-        if a["kind"] == "render" or role in ("edit_reference",
-                                             "shorts_reference"):
-            place = ""
-        elif key in used:
-            place = " — in the current edit"
-        else:
-            place = (" — AVAILABLE, not in the current edit "
-                     "(insert_media / add_overlay / add_music)")
-            unused_n += 1
-        staged = (m.get("staged") is True or m.get("staged") == "true")
-        if staged:
-            place = " — STAGING TRAY (user has not pressed Submit)"
-        rights_bit = ""
-        if a["kind"] == "music":
-            evidence_input = dict(m)
-            evidence_input.setdefault("downloaded_sha256", a.get("sha256"))
-            rights = music_search.provenance(evidence_input)
-            rights["tool_normalized_license_note"] = (
-                m.get("tool_normalized_license_note") or
-                m.get("license_note") or music_search.license_note(
-                    evidence_input))
-            rights_bit = (" — MUSIC_PROVENANCE=" + json.dumps(
-                rights, sort_keys=True, separators=(",", ":")))
-            source_probe = {
-                "source_audio_stream_status": (
-                    m.get("source_audio_stream_status") or "not_exposed"),
-                "source_has_audio_stream": (
-                    m.get("source_has_audio_stream")
-                    if isinstance(m.get("source_has_audio_stream"), bool)
-                    else None),
-                "source_audio_stream_codec": (
-                    m.get("source_audio_stream_codec") or None),
-                "source_audio_stream_channels": (
-                    m.get("source_audio_stream_channels")
-                    if type(m.get("source_audio_stream_channels")) is int
-                    else None),
-                "source_audio_stream_probe_tool": (
-                    m.get("source_audio_stream_probe_tool") or None),
-                "source_audio_stream_probed_at": (
-                    m.get("source_audio_stream_probed_at") or None),
-            }
-            rights_bit += (" — MUSIC_SOURCE_PROBE=" + json.dumps(
-                source_probe, sort_keys=True, separators=(",", ":")))
-        lines.append(f"[{a['kind']}] storage_key={a['storage_key']} "
-                     f"\"{m.get('filename', '?')}\"{dur}{cap}{role_bit}"
-                     f"{place}{rights_bit}")
-    head = ""
-    if unused_n:
-        head = (f"{unused_n} file(s) are in the project and NOT on the "
-                "timeline — use them; do not tell the user they have no "
-                "footage.\n")
-    out = head + "\n".join(lines)
-    # The commonest way a user delivers a SONG is as the video they found it
-    # in — a TikTok/Reel download. Say here that this works, at the moment the
-    # agent is looking at the clip, rather than leaving it to guess.
-    if any(a["kind"] == "video_clip" for a in rows):
-        out += ("\nAny [video_clip] can also be used as SOUND ONLY — pass its "
-                "storage_key straight to add_music / add_sfx / add_voiceover "
-                "(or call extract_audio first). Its picture stays out of the "
-                "edit entirely.")
-    result = _cap(out)
-    fingerprint = (
-        "list_assets", str(kind or "music").strip().lower(),
-        edl_row.get("version"),
-        tuple((a.get("id"), a.get("kind"), a.get("storage_key"),
-               a.get("duration_s"),
-               json.dumps(a.get("meta") or {}, sort_keys=True, default=str))
-              for a in rows))
-    evidence = _evidence_cache(ctx)
-    if fingerprint in evidence:
-        _metric(ctx, "evidence_reads_reused")
-        return ("UNCHANGED INVENTORY — this exact asset list and placement "
-                "state was already returned earlier in this turn. Use that "
-                "result; call again only after an asset or EDL change.")
-    evidence.add(fingerprint)
-    return result
 
 
 def _deliver_frames(ctx, frames, labels, question, subject_line, provenance=None,
@@ -22533,24 +22015,6 @@ _EDL_OVERVIEW_ALIASES = {"program", "overview", "summary", "video"}
 _EDL_ALL_ALIASES = {"all", "everything", "full"}
 
 
-def get_edl(ctx, sections=None, compact=False, offset=0, limit=100):
-    from edl_read import read_edl
-    row = ctx.latest_edl()
-    key = ("get_edl", row["version"], json.dumps([sections, compact, offset, limit], sort_keys=True))
-    evidence = _evidence_cache(ctx)
-    if key in evidence:
-        _metric(ctx, "evidence_reads_reused")
-        return (f"UNCHANGED EDL — v{row['version']} and these exact sections "
-                "were already returned earlier in this turn. The earlier "
-                "JSON remains authoritative; call again after a write or "
-                "request different sections/page.")
-    result = read_edl(row, ctx.duration, _program_map(ctx, row["json"]),
-                      sections, compact, offset, limit)
-    if not result.startswith("REJECTED"):
-        evidence.add(key)
-    return result
-
-
 def _grade_chain_of(edl_json):
     """The global color chain this EDL renders with, as one filter string —
     "" when it has none. Preset first, then custom, matching the graph."""
@@ -24840,14 +24304,6 @@ def ask_user(ctx, question):
     raise AskUser(q)
 
 
-def _tool_identifier(value):
-    """Normalize one double-encoded identifier, never arbitrary tool text."""
-    value = str(value or "").strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'`":
-        value = value[1:-1].strip()
-    return value
-
-
 def read_skill(ctx, name, section=None):
     """Load one of the on-demand playbooks (worker/skills/*.md) into the
     turn. The catalog in the system prompt names them; content arrives when
@@ -25614,11 +25070,7 @@ def _normalize_tool_call(name, args):
             and "duration" in args and "duration_s" not in args:
         args["duration_s"] = args.pop("duration")
         notes.append("duration -> duration_s")
-    if name in {"get_transcript", "get_audio_analysis"}:
-        key = str(args.get("asset_key") or "").strip().lower()
-        if key in {"main", "source", "original", "main_video"}:
-            args.pop("asset_key", None)
-            notes.append("main asset alias -> omitted")
+    read_tools.main_asset_alias(name, args, notes)
     # Recipe ids may still be an explicit {"$ref": "alias"} object during
     # preflight. Canonicalize concrete strings only; the reference resolver
     # supplies the generated compact id before dispatch.

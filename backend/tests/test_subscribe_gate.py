@@ -121,7 +121,8 @@ def test_offer_body_is_subscribe_not_trial():
     assert body["code"] == "subscribe_required"
     by_id = {p["id"]: p for p in body["plans"]}
     assert set(by_id) == {"plus_2026", "pro_2026", "max_2026"}
-    assert by_id["plus_2026"]["monthly"] == 25
+    assert by_id["plus_2026"]["monthly"] == 15
+    assert by_id["plus_2026"]["yearly"] == 150
     assert by_id["plus_2026"]["credits"] == 500
     assert by_id["max_2026"]["monthly"] == 100
     assert by_id["max_2026"]["credits"] == 4000

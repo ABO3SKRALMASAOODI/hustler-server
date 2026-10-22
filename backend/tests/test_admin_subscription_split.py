@@ -114,13 +114,13 @@ def test_rows_date_failing_and_ended_accounts_without_guessing():
                        account={"payment_failed_at": failed})
     assert (result["renewal_state"], result["renewal_at"]) == (
         "past_due", "2026-09-26T09:27:00Z")
-    # No snapshot: an account Paddle cancelled reads ended, dated when noticed.
+    # No snapshot: sync time is not a cancellation or plan-end time.
     synced = datetime(2026, 9, 27, 9, 7)
     ended = summarize([group(sid=None)], {}, None, now=dt("2026-10-16"),
                       account={"billing_status": "canceled",
                                "billing_synced_at": synced})
     assert (ended["renewal_state"], ended["renewal_at"]) == (
-        "ended", "2026-09-27T09:07:00Z")
+        "ended", None)
     # A cancelled trial that never paid is not an ended subscription.
     trial = summarize([], {}, None, now=dt("2026-10-16"),
                       account={"billing_status": "canceled"})
@@ -217,7 +217,7 @@ def test_subscribers_filter_by_status_and_return_paddles_count(monkeypatch):
                                  "active": 19, "canceled": 12, "past_due": 3,
                                  "attention": 3, "no_project": 5,
                                  "renewing": 8, "cancelled_access": 11,
-                                 "payment_failing": 3, "ended": 12}),
+                                 "payment_failing": 3, "ended": 12, "cancelled": 23}),
                ("matched_subscribers", [])])
 
     @contextmanager
@@ -235,7 +235,7 @@ def test_subscribers_filter_by_status_and_return_paddles_count(monkeypatch):
     assert "s.subscriber_state = %s" not in listing
     assert r.json["status"] == "cancelled_access"
     assert r.json["state_counts"] == {"renewing": 8, "cancelled_access": 11,
-                                      "payment_failing": 3, "ended": 12}
+                                      "payment_failing": 3, "ended": 12, "cancelled": 23}
     assert r.json["paddle"] == {"available": True, "paddle_active": 23}
     summary_sql = next(s for s in cur.sql if "AS ever_paid" in s)
     assert "paid_users.id = ANY(ARRAY[7]::int[])) AS payment_failing" in summary_sql

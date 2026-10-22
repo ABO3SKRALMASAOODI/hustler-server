@@ -10,8 +10,9 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    # Media tests take about 22 minutes; leave room for setup and cleanup.
-    timeout-minutes: 40
+    # Real-media tests can exceed 40 minutes on a busy shared runner.
+    # Keep the full suite and allow dependency setup and cleanup to finish.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

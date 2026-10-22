@@ -10,7 +10,7 @@ numpy<2
 # 64). CPU provider only — the executor is the box that runs the forward
 # passes. The model file itself is baked by the Dockerfile, not pip.
 onnxruntime==1.19.2
-pillow==12.3.0
+pillow==13.0.0
 requests==2.34.2
 # Durable scale-to-zero executor client. Only the Render dispatcher calls the
 # SDK; executor containers receive ordinary Python dicts from Modal Functions.
@@ -44,3 +44,4 @@ pyphen==0.18.1
 # boxes no longer match the render), and brand fonts cannot be validated
 # (fonts_brand.py). It was only in the dev venv. MIT.
 fonttools==4.67.0
+certifi>=2026.10.19

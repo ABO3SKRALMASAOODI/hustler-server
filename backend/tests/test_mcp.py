@@ -427,7 +427,7 @@ def test_server_card_pricing_matches_the_public_shopfront(client):
 
     assert card["pricing"] == {
         "free": "Account creation and upload are free; editing requires a subscription",
-        "paidFrom": "USD 25/month",
+        "paidFrom": "USD 15/month",
         "url": "https://valmera.io/subscribe",
     }
 

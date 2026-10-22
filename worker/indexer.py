@@ -194,6 +194,35 @@ def _build_and_upload_tiles(job_id, project_id, sha, src_path, duration,
     return keys, step, spatial_sidecar
 
 
+def _stream_index_source(worker_db, job, asset, workdir):
+    """Keep large originals in storage and reserve scratch for bounded outputs."""
+    src = storage.presign_get(
+        asset["storage_key"], expires=config.cloudflare_timeout_for("index") + 3600)
+    info = media.probe(src)
+    if info["duration"] > config.MAX_DURATION_S:
+        raise RuntimeError(
+            f"Video is {info['duration']/3600:.1f}h — the limit is "
+            f"{config.MAX_DURATION_S/3600:.0f}h")
+    # Capped H.264 + AAC, mono 16 kHz PCM, plus tile/metadata overhead.
+    # The normal headroom also covers faststart's temporary second copy.
+    scratch_bytes = (info["duration"] * (
+        (config.INDEX_STREAM_PROXY_MAXRATE_KBPS + 128) * 1000 / 8 + 32000)
+        + 256 * 1024 ** 2)
+    storage.check_workdir_capacity(scratch_bytes, workdir)
+    last = [0.0]
+
+    def progress(fraction):
+        now = time.monotonic()
+        if now - last[0] >= PROGRESS_EVERY_S or fraction >= 1:
+            last[0] = now
+            _set_progress(worker_db, job["id"], 3 + int(5 * fraction))
+
+    sha = storage.sha256_object(
+        asset["storage_key"], int(asset["bytes"]), progress_cb=progress,
+        cancelled_cb=lambda: _cancelled(worker_db))
+    return src, sha, info
+
+
 def run_index_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     asset = worker_db.run(dbx.get_asset, job["payload"].get("asset_id"))
@@ -248,6 +277,10 @@ def run_index_job(worker_db, job):
                         upload_meta.get("client_proxy_key") or "").strip()
     from_client_proxy = bool(client_proxy_key) and \
         not storage.exists(asset["storage_key"])
+    streamed_source = not from_client_proxy and config.index_source_should_stream(
+        asset["kind"], asset.get("bytes"))
+    proxy_kwargs = ({"maxrate_kbps": config.INDEX_STREAM_PROXY_MAXRATE_KBPS}
+                    if streamed_source else {})
     if client_proxy_key and not from_client_proxy:
         print(f"[index {job_id}] original has landed — indexing from it "
               f"rather than the browser proxy", flush=True)
@@ -296,6 +329,9 @@ def run_index_job(worker_db, job):
                 "has_audio": proxy_info["has_audio"],
                 "vfr": False,          # adopt_client_proxy guarantees CFR
             }
+        elif streamed_source:
+            src, sha, info = _stream_index_source(worker_db, job, asset, workdir)
+            _mark("stream_sha256_s")
         else:
             # 1. Pull original + hash it
             src = os.path.join(workdir,
@@ -326,7 +362,8 @@ def run_index_job(worker_db, job):
                 config.PIPELINE_VERSION and _index_has_tiles(cached["json"]):
             _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
                           workdir,
-                          ready_proxy=src if from_client_proxy else None)
+                          ready_proxy=src if from_client_proxy else None,
+                          **proxy_kwargs)
             _ensure_audio(worker_db, project_id, sha, info)
             _finish_setup(worker_db, project_id, session_id, info,
                           cached["json"], job["user_id"],
@@ -347,6 +384,7 @@ def run_index_job(worker_db, job):
             _mark("cache_hit_s")
             return {"sha256": sha, "cached": True,
                     "from_client_proxy": from_client_proxy,
+                    "streamed_source": streamed_source,
                     "shots": len(cached["json"].get("shots", [])),
                     "words": len(cached["json"].get("words", [])),
                     "timings": timings}
@@ -414,7 +452,7 @@ def run_index_job(worker_db, job):
                     info["has_audio"], duration=info["duration"],
                     progress_cb=lambda frac: _lane_progress(
                         "picture", 0.02 + 0.58 * frac),
-                    cancelled_cb=lambda: _cancelled(worker_db))
+                    cancelled_cb=lambda: _cancelled(worker_db), **proxy_kwargs)
                 # Probed here, not at upload time: tile extraction needs the
                 # proxy's REAL duration to keep frame seeks inside it.
                 state["proxy_info"] = media.probe(proxy_local)
@@ -655,6 +693,7 @@ def run_index_job(worker_db, job):
         _mark("upload_persist_s")
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,
+                "streamed_source": streamed_source,
                 "tiles": len(tile_keys), "speakers": speakers,
                 "visual_clusters": int(
                     (visual_storyboard or {}).get("distinct_clusters") or 0),
@@ -685,18 +724,23 @@ def _run_clip_index(worker_db, job, asset):
         _t = time.monotonic()
 
     try:
-        src = os.path.join(workdir,
-                           "src" + os.path.splitext(asset["storage_key"])[1])
-        storage.download_to(asset["storage_key"], src)
+        streamed_source = config.index_source_should_stream(
+            asset["kind"], asset.get("bytes"))
+        if streamed_source:
+            src, sha, info = _stream_index_source(worker_db, job, asset, workdir)
+        else:
+            src = os.path.join(workdir,
+                               "src" + os.path.splitext(asset["storage_key"])[1])
+            storage.download_to(asset["storage_key"], src)
+            sha = media.sha256_file(src)
         _set_progress(worker_db, job_id, 10)
         _mark("download_s")
-        sha = media.sha256_file(src)
         if is_music:
             dur = media.probe_audio_duration(src)
             info = {"duration": dur or (asset.get("duration_s") or 0.0),
                     "width": 0, "height": 0, "fps": 0.0, "has_audio": True,
                     "vfr": False}
-        else:
+        elif not streamed_source:
             info = media.probe(src)
         worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
                       info["width"], info["height"], info["fps"], sha)
@@ -713,6 +757,17 @@ def _run_clip_index(worker_db, job, asset):
                     "timings": timings}
 
         warnings = []
+        if streamed_source:
+            # Clip perception seeks repeatedly. Give it one local proxy while
+            # retaining the original's hash, geometry and clock in the index.
+            proxy = os.path.join(workdir, "proxy.mp4")
+            media.make_proxy(
+                src, proxy, info["fps"], info["vfr"], info["has_audio"],
+                duration=info["duration"],
+                progress_cb=_stage_progress(worker_db, job_id, 20, 25),
+                cancelled_cb=lambda: _cancelled(worker_db),
+                maxrate_kbps=config.INDEX_STREAM_PROXY_MAXRATE_KBPS)
+            src = proxy
         wav_local = None
         if info["has_audio"]:
             wav_local = os.path.join(workdir, "audio.wav")
@@ -785,7 +840,7 @@ def _run_clip_index(worker_db, job, asset):
             video=VideoInfo(duration=info["duration"], fps=info["fps"] or 0.0,
                             width=info["width"], height=info["height"],
                             has_audio=info["has_audio"],
-                            vfr_normalized=False),
+                            vfr_normalized=bool(streamed_source and info["vfr"])),
             shots=shots,
             words=words,
             sentences=sentences,
@@ -818,7 +873,7 @@ def _run_clip_index(worker_db, job, asset):
 
 
 def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
-                  workdir, ready_proxy=None):
+                  workdir, ready_proxy=None, maxrate_kbps=None):
     """Cache hits still need a proxy asset for THIS project (the player and
     preview renders read it). Reuse the stored object when possible.
 
@@ -840,8 +895,9 @@ def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
         return
     proxy_local = ready_proxy or os.path.join(workdir, "proxy.mp4")
     if not ready_proxy:
+        proxy_kwargs = ({"maxrate_kbps": maxrate_kbps} if maxrate_kbps else {})
         media.make_proxy(src_local, proxy_local, info["fps"], info["vfr"],
-                         info["has_audio"], duration=info["duration"])
+                         info["has_audio"], duration=info["duration"], **proxy_kwargs)
     storage.upload_file(proxy_local, proxy_key, "video/mp4")
     p = media.probe(proxy_local)
     worker_db.run(dbx.insert_asset, project_id, "proxy", proxy_key,

@@ -184,6 +184,17 @@ def _runner_for_job(job):
     return RUNNERS_BY_POLICY[policy][job["type"]], policy
 
 
+# Runners whose whole job is one fenced provider call (Cloudflare, or the
+# Modal fallback): the dispatcher does no work of its own for them, so a
+# claim with no call in flight has run nothing (db.REMOTE_DISPATCH_CLAIMS).
+_PROVIDER_CALL_RUNNERS = frozenset({
+    remote.run_render_remote, remote.run_filmstrip_remote,
+    remote.run_index_remote, remote.run_agent_remote,
+    remote.run_mcp_remote, remote.run_shorts_remote,
+})
+_PROVIDER_CALL_PROVIDERS = frozenset({"cloudflare", "modal"})
+
+
 def process_one(worker_db, job):
     job_id = job["id"]
     dbx.track_job(job_id)
@@ -201,10 +212,20 @@ def process_one(worker_db, job):
     try:
         provider = remote.stamp_execution_provider(worker_db, job)
         runner, execution_policy = _runner_for_job(job)
+        if provider in _PROVIDER_CALL_PROVIDERS \
+                and runner in _PROVIDER_CALL_RUNNERS:
+            # This claim's work happens only inside a fenced provider call,
+            # so a planned shutdown may hand it back while none is in flight.
+            dbx.mark_remote_dispatch(job_id, lease_claim)
         print(f"[job {job_id}] start {job['type']} project={job['project_id']} "
               f"attempt={job['attempts']} queue_wait={queue_wait}s "
               f"policy={execution_policy} provider={provider}", flush=True)
-        result = runner(worker_db, job)
+        try:
+            result = runner(worker_db, job)
+        finally:
+            # The provider call (if any) has answered; what remains is this
+            # process's own queue write, which a planned shutdown waits for.
+            dbx.mark_settling(job_id)
         total = round(time.monotonic() - t0, 2)
         # A request-based executor owns its terminal write so a Render redeploy
         # cannot lose the result after Cloud Run completed it.
@@ -235,6 +256,23 @@ def process_one(worker_db, job):
               f"{(result or {}).get('timings') if isinstance(result, dict) else None}",
               flush=True)
     except Exception as e:
+        if isinstance(e, remote.DispatcherDraining):
+            # A deploy began before this claim submitted anything. Give it
+            # back unspent; the replacement dispatcher runs it. Never a
+            # failure (jobs 73272/73277 failed here on 16 Oct). The claim
+            # fence makes this a no-op when shutdown already released it.
+            try:
+                released = worker_db.run(
+                    dbx.release_unlaunched_jobs, {job_id: lease_claim})
+            except Exception as exc:
+                # _on_shutdown releases every unlaunched claim itself.
+                released = None
+                print(f"[job {job_id}] drain release deferred to shutdown "
+                      f"({str(exc)[:120]})", flush=True)
+            print(f"[job {job_id}] dispatcher shutting down before launch; "
+                  + ("returned to the queue unspent" if released
+                     else "already handed back"), flush=True)
+            return
         if isinstance(e, remote.RemoteBatchDetached):
             # The Cloud Run Job owns heartbeats + terminal state. Requeueing
             # an ambiguous launch here is exactly how one execution becomes
@@ -777,21 +815,53 @@ def _on_shutdown(signum, _frame):
     # remote-owned while this process waits for its accepted call id — never
     # released and launched at the same time.
     ids, remote_ids = dbx.begin_remote_shutdown()
+    # Launches are stopped now, so a dispatched claim with no provider call
+    # in flight can never start one here: it has run nothing and goes back
+    # unspent, Studio turns included. One that a provider refuses later
+    # (capacity, rollout, startup) joins it below.
+    handed_back = set()
+    unlaunched = dbx.unlaunched_dispatch_claims()
+    local_ids = [job_id for job_id in ids if job_id not in unlaunched]
+    db = dbx.Db()
     try:
-        n = dbx.Db().run(dbx.release_jobs, ids)
-        print(f"[shutdown] signal {signum}: handed {n} of {len(ids)} in-flight "
-              f"locally-owned job(s) back to the queue; preserving "
-              f"{len(remote_ids)} durable remote job(s)", flush=True)
+        n = db.run(dbx.release_jobs, local_ids)
+        released = db.run(dbx.release_unlaunched_jobs, unlaunched)
+        handed_back.update(unlaunched)
+        print(f"[shutdown] signal {signum}: handed {n} of {len(local_ids)} "
+              f"in-flight locally-owned job(s) and {len(released)} of "
+              f"{len(unlaunched)} unlaunched provider claim(s) back to the "
+              f"queue; preserving {len(remote_ids)} durable remote job(s)",
+              flush=True)
     except Exception as e:
         # Best effort — if we can't reach the DB the reaper still cleans up,
-        # just the slower, attempt-charging way.
+        # just the slower, attempt-charging way. Unlaunched claims are
+        # retried below while the grace lasts.
         print(f"[shutdown] could not release jobs: {e}", flush=True)
+
+    def _waiting_on():
+        # A provider call that answered while we drain leaves its queue
+        # write to this process (settling); a refused one is unlaunched
+        # again and is handed back here rather than waited for.
+        late = {job_id: claim for job_id, claim in
+                dbx.unlaunched_dispatch_claims().items()
+                if job_id not in handed_back}
+        if late:
+            try:
+                db.run(dbx.release_unlaunched_jobs, late)
+                handed_back.update(late)
+            except Exception as exc:
+                print(f"[shutdown] late release failed: {exc}", flush=True)
+        local = [job_id for job_id in dbx.locally_owned_job_ids()
+                 if job_id not in handed_back]
+        settling = [job_id for job_id in dbx.settling_job_ids()
+                    if job_id not in handed_back]
+        return local or settling or dbx.remote_launching_job_ids()
+
     deadline = time.time() + config.SHUTDOWN_GRACE_S
-    while time.time() < deadline and (
-            dbx.locally_owned_job_ids()
-            or dbx.remote_launching_job_ids()):
+    while time.time() < deadline and _waiting_on():
         time.sleep(0.5)
-    left = len(dbx.locally_owned_job_ids())
+    left = len([job_id for job_id in dbx.locally_owned_job_ids()
+                if job_id not in handed_back])
     launching = len(dbx.remote_launching_job_ids())
     if left:
         print(f"[shutdown] {left} local job(s) still running at the wire — the "
