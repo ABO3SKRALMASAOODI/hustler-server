@@ -1334,6 +1334,21 @@ CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
 # enabling an otherwise retired provider or moving compute onto Render.
 CLOUDFLARE_MAX_INDEX_INPUT_BYTES = max(1, int(os.getenv(
     "CLOUDFLARE_MAX_INDEX_INPUT_BYTES", str(8 * 1024 ** 3))))
+# Larger videos stay in object storage. Only the bounded proxy and waveform
+# occupy scratch; the original's full SHA is still verified in a bounded read.
+INDEX_STREAM_PROXY_MAXRATE_KBPS = 4000
+
+
+def index_source_should_stream(kind, source_bytes):
+    try:
+        size = int(source_bytes or 0)
+    except (TypeError, ValueError):
+        return False
+    return (kind in {"original", "video_clip"}
+            and CLOUDFLARE_MAX_INDEX_INPUT_BYTES < size
+            <= MAX_UPLOAD_GB * 1024 ** 3)
+
+
 # Long sources are usually edited into short, sparse output ranges. Feeding
 # ffmpeg a presigned R2 URL lets it range-read those windows instead of making
 # every parallel Container stage the same multi-hour proxy in full.

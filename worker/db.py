@@ -1128,6 +1128,7 @@ def project_execution_shape(conn, project_id, asset_id=None, job_type=None, payl
                                   COALESCE(duration_s, 0) AS max_duration_s,
                                   COALESCE(width, 0) AS max_width,
                                   COALESCE(height, 0) AS max_height,
+                                  kind AS asset_kind,
                                   1 AS assets
                            FROM assets WHERE id = %s AND project_id = %s""",
                         (asset_id, project_id))

@@ -307,10 +307,15 @@ def _cloudflare_selected(job):
             staged_bytes = max(0, staged_bytes - original_bytes) + int(shape["proxy_bytes"])
         byte_limit = (config.CLOUDFLARE_MAX_INDEX_INPUT_BYTES
                       if job_type == "index" else config.CLOUDFLARE_MAX_INPUT_BYTES)
-        # Indexing downloads one source. Unknown/zero metadata cannot prove
-        # it will fit; unlike a streamed render, zero is not a valid shape.
+        # Ordinary indexing downloads one source. Unknown/zero metadata
+        # cannot prove it fits; zero is never a valid index shape.
         bytes_ok = (0 < staged_bytes <= byte_limit if job_type == "index"
                     else 0 <= staged_bytes <= byte_limit)
+        if job_type == "index" and config.index_source_should_stream(
+                shape.get("asset_kind"), staged_bytes):
+            # The kind/size come from the selected asset row. The indexer
+            # rechecks actual object size and duration before streaming it.
+            bytes_ok = True
         duration_limit = float(config.CLOUDFLARE_MAX_SOURCE_DURATION_S)
         duration_ok = duration_limit <= 0 or (
             float(shape.get("max_duration_s") or 0) <= duration_limit)
