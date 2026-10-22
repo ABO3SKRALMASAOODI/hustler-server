@@ -51,8 +51,9 @@ corner mark: branding is checked on the final. Then answer:
    the first 1.5 s), and would a stranger keep watching?
 2. **Payoff:** is the payoff the largest accented lockup (number and noun
    together; a sound or a camera move only where it earns one; the owner's
-   song's button when music is on), held 0.8-1.5 s after the last word,
-   and does it resolve the viewer question?
+   song's button when music is on), held about 0.6-1.2 s after the last word
+   on LIVE footage (a frozen or slowed last frame before the end card is a
+   fail: it reads as a stall), and does it resolve the viewer question?
 3. **Targets:** does it meet its Look's targets: change rate, hero moments,
    picture area; sound only from the approved library, zero by default and
    at most 1-2 per short, each on a structural on-screen moment with a
@@ -73,7 +74,8 @@ corner mark: branding is checked on the final. Then answer:
    products identified), no zoom or sound without a reason you can name (unearned
    zooms and sounds look childish — zero of either is fine), no white type
    on white clothing, at most one impact sound
-   (on the payoff), 0.8-1.5 s after the last word before the end card,
+   (on the payoff), a live 0.6-1.2 s tail after the last word before the
+   end card (no freeze frame, no slowed tail),
    nothing over the face or the brand corner, the corner mark and native end
    card untouched, no flash frames, pops, exposed edges or clipped words,
    no face at the frame's edge, a clean PICTURE CHECK on the complete

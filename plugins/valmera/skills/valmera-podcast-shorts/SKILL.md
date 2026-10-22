@@ -42,9 +42,11 @@ statistic (never a generic question), is a headline that owns its zone
 (`word_slam` `tier='hook'`, or on some shorts the cover headline: the
 captions wait until it exits) and never shows a word a later graphic slams; a counter really counts and shows a
 spoken range as said ('30–40'); the payoff locks its number and noun
-together and holds 0.8-1.5 s after the last word (the natural tail, chosen
-at selection, else `add_freeze_frame` audio_mode='hold': the composed last
-frame over the source's room tone; a payoff number ~2 s on screen). Valmera's render result carries an EARN ITS PLACE advisory naming
+together and holds about 0.6-1.2 s after the last word on LIVE footage: the
+natural tail chosen at selection (a reaction, a nod, a breath). Never a
+freeze frame or a slowed tail before the end card: viewers read it as the
+video stalling (owner, 22 Oct 2026). With no natural tail, end cleanly on the
+last word; the end card follows directly. A payoff number stays ~2 s on screen. Valmera's render result carries an EARN ITS PLACE advisory naming
 what breaks these rules, each with a fix ([looks.md](references/looks.md),
 **Shared grammar**, has the details).
 

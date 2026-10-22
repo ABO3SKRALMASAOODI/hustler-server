@@ -121,3 +121,12 @@ def test_a_craft_defect_is_a_fix_never_a_kill():
     assert "are several fixes, never a kill" in review
     selection = (SKILL / "references" / "selection.md").read_text()
     assert "**Kills are expensive.**" in selection
+
+
+def test_payoff_never_holds_on_a_freeze_or_slow_tail():
+    """Owner (22 Oct 2026): a frozen or slowed last frame before the end card
+    reads as the video stalling. The payoff holds on live footage only."""
+    text = _active_text()
+    assert "audio_mode='hold'" not in text.replace("NEVER `add_freeze_frame`", "")
+    assert "0.5x slow tail" not in text and "slow last 0.4 s" not in text
+    assert "LIVE footage" in text

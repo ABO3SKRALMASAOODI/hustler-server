@@ -59,13 +59,12 @@ cues, and art direction. Call `get_kept_transcript` once and confirm:
   or sentence end unless it sounds clean. snap_to_words:false keeps exact
   times for a deliberate stutter.
 - The turn changes or deepens the idea and the payoff resolves it. Stop on the
-  strongest sentence; the payoff needs 0.8-1.5 s after its last word before
-  the end card (a reaction button 1.0-1.5 s, or none): the natural tail
-  first (the brief's end leaves it), else `add_freeze_frame`
-  audio_mode='hold' (the COMPOSED last frame — card, type and all — over the
-  source's room tone; check it on render 1), or slow the last ~0.4 s of air
-  with `set_speed` 0.5x. Never audio_mode 'continue' for a payoff hold: it
-  plays on under the raw source frame.
+  strongest sentence; the payoff holds about 0.6-1.2 s after its last word
+  before the end card, on LIVE footage only: the natural tail the brief's end
+  leaves (a reaction, a nod, a breath). NEVER `add_freeze_frame` or a
+  `set_speed` slow tail at the end: a frozen or stuttering last frame before
+  the end card reads as the video stalling (owner, 22 Oct 2026). With no
+  natural tail, end on the last word and let the end card follow.
 - Trim for rhythm: cut low-information connectors ("it was like a lot of
   things and"), keep 150-250 ms at sentence boundaries, never drop an
   article inside a clause.

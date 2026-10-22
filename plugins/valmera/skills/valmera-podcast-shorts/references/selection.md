@@ -87,12 +87,12 @@ hook, turn or evidence, final payoff**. Then check:
   at least as strong as anything after it. Stop when the thought resolves.
 - **The ends are editable.** The start is a whole first word that does not
   run on from the previous one (a pause before it in `get_words`), on a
-  frame with the speaker's eyes open (look at it). The end leaves 0.8-1.5 s
-  before the next spoken word, so the payoff holds on its natural tail: on a
-  card layout Valmera cannot freeze the composed frame (Oct 2026: s02, s03
-  and s05 spent renders and slow-motion hacks on it). When the payoff's last
-  word runs straight into more speech, take a later sentence end or note
-  "tail: slow last 0.4 s at 0.5x" in the brief.
+  frame with the speaker's eyes open (look at it). The end leaves about
+  0.6-1.2 s of live footage before the next spoken word, so the payoff holds
+  on its natural tail (a reaction, a nod, a breath). When the payoff's last
+  word runs straight into more speech, take a later sentence end, or end on
+  the last word. Never plan a freeze frame or a slowed tail: it reads as a
+  stall before the end card (owner, 22 Oct 2026).
 - Qualifiers stay. Never turn a cautious statement into certainty.
 - "Interesting topic", "famous person" and "complete sentence" are not reasons.
   Name the actual tension, image or insight.
