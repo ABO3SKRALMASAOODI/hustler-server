@@ -1,6 +1,7 @@
 """Worker-side object storage: stream downloads to disk, upload artifacts.
 Media bytes only ever live on the worker's ephemeral disk during a job."""
 
+import hashlib
 import os
 import shutil
 
@@ -169,6 +170,33 @@ def upload_file(path, key, content_type):
         io_telemetry.add_uploaded(os.path.getsize(path))
     except OSError:
         pass
+
+
+def sha256_object(key, expected_bytes, progress_cb=None, cancelled_cb=None):
+    """Hash a complete immutable upload without staging it on local disk."""
+    if cancelled_cb and cancelled_cb():
+        raise RuntimeError("job was cancelled or handed to another worker")
+    response = client().get_object(Bucket=config.S3_BUCKET, Key=key)
+    body = response["Body"]
+    total, digest = 0, hashlib.sha256()
+    try:
+        if int(response["ContentLength"]) != int(expected_bytes):
+            raise RuntimeError("Stored upload size differs from the completed upload")
+        for chunk in body.iter_chunks(chunk_size=8 * 1024 * 1024):
+            if cancelled_cb and cancelled_cb():
+                raise RuntimeError("job was cancelled or handed to another worker")
+            total += len(chunk)
+            if total > expected_bytes:
+                raise RuntimeError("Stored upload grew while being read")
+            digest.update(chunk)
+            io_telemetry.add_downloaded(len(chunk))
+            if progress_cb:
+                progress_cb(total / expected_bytes)
+        if total != expected_bytes:
+            raise RuntimeError("Stored upload read ended before all bytes arrived")
+        return digest.hexdigest()
+    finally:
+        body.close()
 
 
 def presign_get(key, expires=3600):

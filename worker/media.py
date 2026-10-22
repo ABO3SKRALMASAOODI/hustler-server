@@ -57,7 +57,8 @@ def stderr_tail(lines, limit=STDERR_TAIL_CHARS):
     Noise lines are dropped first; the result keeps whole lines from the end
     and only cuts the OLDEST kept line when a single line exceeds the budget.
     """
-    kept = [ln.strip() for ln in lines if ln and ln.strip()
+    kept = [re.sub(r"https?://[^\s|'\"]+", "[media URL]", ln.strip())
+            for ln in lines if ln and ln.strip()
             and not _is_log_noise(ln)]
     out, used = [], 0
     for ln in reversed(kept):
@@ -513,7 +514,7 @@ def _proxy_vf(h, pad_s=0.0):
 
 
 def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
-                  expected_out_s=None, cancelled_cb=None):
+                  expected_out_s=None, cancelled_cb=None, maxrate_kbps=None):
     # DO NOT SLICE THIS ENCODE ACROSS CORES. It was tried and MEASURED, on a
     # 90s 3840x2160 95Mbps file (the profile of the customer upload that spent
     # 386.8s of a 493s index right here):
@@ -542,6 +543,9 @@ def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
            _proxy_vf(config.PROXY_HEIGHT, pad_s),
            "-c:v", "libx264", "-preset", config.PROXY_PRESET,
            "-crf", str(config.PROXY_CRF), "-pix_fmt", "yuv420p"]
+    if maxrate_kbps:
+        cmd += ["-maxrate", f"{int(maxrate_kbps)}k",
+                "-bufsize", f"{2 * int(maxrate_kbps)}k"]
     if vfr:
         cmd += ["-fps_mode", "cfr", "-r", f"{max(1.0, min(fps, 60.0)):.3f}"]
     if has_audio:
@@ -589,7 +593,7 @@ def client_proxy_gap_tolerance(declared_duration):
 
 
 def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None,
-               cancelled_cb=None):
+               cancelled_cb=None, maxrate_kbps=None):
     """Downscaled H.264 proxy, +faststart. VFR sources are normalized to CFR
     here so every downstream timestamp is stable.
 
@@ -610,6 +614,8 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None,
     without having to tell them apart.
     """
     cancel_kw = ({"cancelled_cb": cancelled_cb} if cancelled_cb else {})
+    if maxrate_kbps:
+        cancel_kw["maxrate_kbps"] = maxrate_kbps
     _encode_proxy(src, dst, fps, vfr, has_audio, progress_cb=progress_cb,
                   expected_out_s=duration, **cancel_kw)
     if not duration or duration <= 0:
@@ -620,7 +626,7 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None,
     if gap <= max(PROXY_SHORT_MIN_S, PROXY_SHORT_FRAC * duration):
         return
     print(f"[media] proxy picture track ran {gap:.2f}s short of the "
-          f"{duration:.2f}s recording ({os.path.basename(src)}) — holding the "
+          f"{duration:.2f}s recording — holding the "
           f"last frame to fill it", flush=True)
     _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=gap,
                   progress_cb=progress_cb, expected_out_s=duration,
