@@ -130,3 +130,12 @@ def test_payoff_never_holds_on_a_freeze_or_slow_tail():
     assert "audio_mode='hold'" not in text.replace("NEVER `add_freeze_frame`", "")
     assert "0.5x slow tail" not in text and "slow last 0.4 s" not in text
     assert "LIVE footage" in text
+
+
+def test_persistent_editors_share_lessons_and_reviews_use_the_critic():
+    """Owner (22 Oct 2026): Codex runs must work like the Claude runs:
+    persistent editors with a shared lessons file, batch reviews with the
+    motion critic."""
+    text = _active_text()
+    assert "PERSISTENT editors" in text and "lanes/LESSONS.md" in text
+    assert "critique_short" in text and "in small\n   batches" in text
