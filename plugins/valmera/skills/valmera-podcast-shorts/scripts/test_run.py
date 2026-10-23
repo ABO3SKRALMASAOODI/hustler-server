@@ -31,6 +31,14 @@ class RunTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        # The finals here are stand-in bytes; deliver's tail check is
+        # exercised with measured results below and with real video in
+        # TailCheckTests.
+        self._measure = run.measure_tail
+        self.tails: dict[str, dict] = {}
+        run.measure_tail = lambda path: self.tails.get(path.name, {
+            "file": path.name, "held_s": 0.0, "held_ends_before_card_s": None,
+            "flag": False})
         self.dir = str(self.root / "run")
         self.ok("init", "--run-dir", self.dir, "--run-id", "pod-1",
                 "--source", "https://youtu.be/x", "--source-title", "A talk",
@@ -38,6 +46,7 @@ class RunTests(unittest.TestCase):
                 "--parent-project-id", "100")
 
     def tearDown(self) -> None:
+        run.measure_tail = self._measure
         self.tmp.cleanup()
 
     def ok(self, *argv: str) -> str:
@@ -199,6 +208,64 @@ class RunTests(unittest.TestCase):
         again = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root", str(root)))
         self.assertEqual(again["folder"], out["folder"])  # idempotent
         self.assertEqual(self.state()["delivered_to"], out["folder"])
+
+    def shipped_run(self) -> Path:
+        """One shipped, exported and finalized short (s01)."""
+        self.add("s01", 11, rank=1, speaker="Steve Jobs")
+        self.to_candidate("s01", "e1")
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s01",
+                "--verdict", "ship", "--note", "slam lands", "--checks", CHECKS)
+        final = self.final("s01")
+        self.ok("export", "--run-dir", self.dir, "--short-id", "s01",
+                "--file", str(final), "--job-id", "9", "--edl-version", "7",
+                "--duration", "40.641", "--width", "1080", "--height", "1920")
+        self.ok("finalize", "--run-dir", self.dir)
+        return final
+
+    def test_deliver_refuses_a_held_final_and_copies_nothing(self) -> None:
+        """Owner (22 Oct 2026): a still picture before the end card reads as
+        a stall. JRE #2054 Part 2 shipped five such finals on 23 Oct."""
+        final = self.shipped_run()
+        self.tails[final.name] = {"file": final.name, "held_s": 0.87,
+                                  "held_ends_before_card_s": 0.46, "flag": True}
+        root = self.root / "Podcast Shorts"
+        self.fails("tail_check HELD", "deliver", "--run-dir", self.dir,
+                   "--root", str(root))
+        code, _out, err = call("deliver", "--run-dir", self.dir, "--root", str(root))
+        self.assertEqual(code, 2)
+        self.assertIn(f"{final.name} (0.87s held, ends 0.46s before the card)", err)
+        self.assertIn("Nothing was delivered", err)
+        self.assertIn("0.6-1.2 s after the last word", err)
+        self.assertIn("--allow-held", err)
+        self.assertFalse(root.exists(), "a refused delivery must copy nothing")
+        self.assertNotIn("delivered_to", self.state())
+        out = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root",
+                                 str(root), "--allow-held"))
+        self.assertEqual(out["held"], [final.name])
+        self.assertTrue((Path(out["folder"]) / final.name).exists())
+        self.assertEqual(self.state()["events"][-1]["held"], [final.name])
+
+    def test_deliver_refuses_a_final_it_cannot_measure(self) -> None:
+        final = self.shipped_run()
+        self.tails[final.name] = {"file": final.name, "flag": None,
+                                  "error": "ffmpeg and ffprobe not found"}
+        self.fails("could not be measured", "deliver", "--run-dir", self.dir,
+                   "--root", str(self.root / "out"))
+        out = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root",
+                                 str(self.root / "out"), "--allow-held"))
+        self.assertEqual(out["unmeasured"], [final.name])
+
+    def test_deliver_measures_every_final_with_tail_check(self) -> None:
+        final = self.shipped_run()
+        seen = []
+        run.measure_tail = lambda path: seen.append(path) or {
+            "file": path.name, "held_s": 0.03, "held_ends_before_card_s": 1.2,
+            "flag": False}
+        out = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root",
+                                 str(self.root / "out")))
+        self.assertEqual([p.resolve() for p in seen], [final.resolve()])
+        self.assertEqual(out["held"], [])
+        self.assertEqual(out["tail_check"][0]["held_s"], 0.03)
 
     def test_delivery_name_uses_the_bare_speaker_name(self) -> None:
         name = run.delivery_name({"people_verified": [
@@ -595,6 +662,210 @@ class RunTests(unittest.TestCase):
                 os.environ.pop("VALMERA_FFPROBE", None)
             else:
                 os.environ["VALMERA_FFPROBE"] = old
+
+
+class TailCheckTests(unittest.TestCase):
+    """scripts/tail_check.py on real video (skipped without ffmpeg)."""
+
+    def setUp(self) -> None:
+        import tail_check
+        self.tc = tail_check
+        try:
+            self.ffmpeg, _probe = tail_check.find_tools()
+        except tail_check.TailCheckError as exc:
+            self.skipTest(str(exc))
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def clip(self, name: str, held_s: float) -> Path:
+        """2 s of moving noise, held_s of its last frame frozen, then a 5 s
+        white 'end card'."""
+        path = self.root / name
+        graph = "color=c=gray:s=64x112:r=30:d=2,noise=alls=40:allf=t"
+        if held_s:
+            graph += f",tpad=stop_mode=clone:stop_duration={held_s}"
+        graph += ",tpad=stop_mode=add:stop_duration=5:color=white"
+        subprocess.run([self.ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", graph,
+                        "-c:v", "mpeg4", "-q:v", "10", str(path)], check=True)
+        return path
+
+    def test_a_frozen_last_second_is_held_and_live_footage_is_not(self) -> None:
+        held = self.tc.check(str(self.clip("held.mp4", 1.0)))
+        self.assertTrue(held["flag"])
+        self.assertAlmostEqual(held["held_s"], 1.0, delta=0.1)
+        live = self.tc.check(str(self.clip("live.mp4", 0)))
+        self.assertFalse(live["flag"])
+        self.assertLess(live["held_s"], self.tc.FLAG_S)
+
+    def test_cli_exit_codes(self) -> None:
+        script = str(Path(__file__).with_name("tail_check.py"))
+        live, held = self.clip("live.mp4", 0), self.clip("held.mp4", 0.8)
+        bad = self.root / "bad.mp4"
+        bad.write_bytes(b"not a video")
+        code = lambda *a: subprocess.run([sys.executable, script, *map(str, a)],
+                                         capture_output=True).returncode
+        self.assertEqual(code(live), 0)
+        self.assertEqual(code(live, held), 1)
+        self.assertEqual(code(bad), 2)
+
+    def test_deliver_uses_the_real_check(self) -> None:
+        r = run.measure_tail(self.clip("held.mp4", 1.0))
+        self.assertTrue(r["flag"])
+        bad = self.root / "bad.mp4"
+        bad.write_bytes(b"not a video")
+        r = run.measure_tail(bad)
+        self.assertIsNone(r["flag"])
+        self.assertIn("not a readable video", r["error"])
+
+    def test_ffmpeg_is_found_from_valmera_ffmpeg_bin(self) -> None:
+        import os
+        import shutil as sh
+        folder = self.root / "bin"
+        folder.mkdir()
+        probe = sh.which("ffprobe") or str(Path(self.ffmpeg).with_name("ffprobe"))
+        for tool, src in (("ffmpeg", self.ffmpeg), ("ffprobe", probe)):
+            (folder / tool).symlink_to(src)
+        old_path, old_env = os.environ.get("PATH", ""), os.environ.get("VALMERA_FFMPEG_BIN")
+        os.environ["PATH"] = str(self.root / "empty")
+        try:
+            for value in (str(folder), str(folder / "ffmpeg")):
+                os.environ["VALMERA_FFMPEG_BIN"] = value
+                self.assertEqual(self.tc.find_tools(),
+                                 (str(folder / "ffmpeg"), str(folder / "ffprobe")))
+        finally:
+            os.environ["PATH"] = old_path
+            if old_env is None:
+                os.environ.pop("VALMERA_FFMPEG_BIN", None)
+            else:
+                os.environ["VALMERA_FFMPEG_BIN"] = old_env
+
+
+class UploadPartsTests(unittest.TestCase):
+    """scripts/upload_parts.py against a local PUT server."""
+
+    def setUp(self) -> None:
+        import http.server
+        import threading
+        import upload_parts
+        self.up = upload_parts
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.got: dict[str, bytes] = {}
+        self.fail_once: set[str] = set()
+        test = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_PUT(self):  # noqa: N802
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                if self.path in test.fail_once:
+                    test.fail_once.discard(self.path)
+                    self.send_response(500)
+                    self.end_headers()
+                    return
+                test.got[self.path] = body
+                self.send_response(200)
+                self.send_header("ETag", '"' + hashlib.md5(body).hexdigest() + '"')
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self._sleep = upload_parts.time.sleep
+        upload_parts.time.sleep = lambda s: None
+
+    def tearDown(self) -> None:
+        self.up.time.sleep = self._sleep
+        self.server.shutdown()
+        self.server.server_close()
+        self.tmp.cleanup()
+
+    def main(self, argv: list) -> int:
+        with contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            return self.up.main(argv)
+
+    def plan(self, size: int, part: int) -> dict:
+        finish = {"project_id": 4348, "storage_key": "originals/4348/a.mp4",
+                  "filename": "chm.mp4", "kind": "original", "upload_id": "u-1"}
+        parts = [{"part_number": i + 1, "url": f"{self.base}/p{i + 1}",
+                  "offset": i * part, "length": min(part, size - i * part)}
+                 for i in range((size + part - 1) // part)]
+        return {"mode": "multipart", "storage_key": finish["storage_key"],
+                "upload_id": "u-1", "part_size": part, "size_bytes": size,
+                "parts": parts, "upload_finish_arguments": finish}
+
+    def test_multipart_puts_every_part_and_writes_the_finish_arguments(self) -> None:
+        data = bytes(range(256)) * 41            # 10496 bytes: 3 parts of 4096
+        local = self.root / "chm.mp4"
+        local.write_bytes(data)
+        plan = self.plan(len(data), 4096)
+        # the whole tool result, as an agent would save it
+        saved = self.root / "plan.json"
+        saved.write_text(json.dumps({"content": [{"type": "text", "text":
+                                     "PROJECT 4348\nThis file needs a MULTIPART upload..."
+                                     "\n\n" + json.dumps(plan)}],
+                                     "structuredContent": plan, "isError": False}))
+        self.fail_once.add("/p2")                # one transient failure is retried
+        code = self.main([str(local), str(saved)])
+        self.assertEqual(code, 0)
+        self.assertEqual(b"".join(self.got[f"/p{i}"] for i in (1, 2, 3)), data)
+        args = json.loads((self.root / "upload_finish.json").read_text())
+        self.assertEqual(args["upload_id"], "u-1")
+        self.assertEqual(args["storage_key"], "originals/4348/a.mp4")
+        self.assertEqual(args["parts"], [
+            {"part_number": i, "etag": '"' + hashlib.md5(
+                data[(i - 1) * 4096:i * 4096]).hexdigest() + '"'} for i in (1, 2, 3)])
+
+    def test_the_plan_is_found_in_the_saved_text_alone(self) -> None:
+        plan = self.plan(10, 4)
+        saved = self.root / "plan.txt"
+        saved.write_text("This file needs a MULTIPART upload: {not json}\n\n"
+                         + json.dumps(plan))
+        self.assertEqual(self.up.load_plan(saved)["upload_id"], "u-1")
+
+    def test_a_size_mismatch_is_refused_before_any_put(self) -> None:
+        local = self.root / "chm.mp4"
+        local.write_bytes(b"x" * 9)
+        saved = self.root / "plan.json"
+        saved.write_text(json.dumps(self.plan(10, 4)))
+        self.assertEqual(self.main([str(local), str(saved)]), 2)
+        self.assertEqual(self.got, {})
+
+    def test_a_rerun_resumes_from_the_finished_parts(self) -> None:
+        data = b"y" * 10
+        local = self.root / "chm.mp4"
+        local.write_bytes(data)
+        plan = self.plan(10, 4)
+        saved = self.root / "plan.json"
+        saved.write_text(json.dumps(plan))
+        (self.root / "upload_finish.json.parts.json").write_text(json.dumps(
+            {"upload_id": "u-1", "etags": {"1": '"kept"'}}))
+        self.assertEqual(self.main([str(local), str(saved)]), 0)
+        self.assertNotIn("/p1", self.got)
+        args = json.loads((self.root / "upload_finish.json").read_text())
+        self.assertEqual(args["parts"][0], {"part_number": 1, "etag": '"kept"'})
+        self.assertEqual(len(args["parts"]), 3)
+
+    def test_single_mode_puts_once(self) -> None:
+        local = self.root / "clip.mp4"
+        local.write_bytes(b"z" * 100)
+        plan = {"mode": "single", "storage_key": "clips/9/c.mp4",
+                "content_type": "video/mp4", "url": f"{self.base}/one",
+                "upload_finish_arguments": {"project_id": 9,
+                                            "storage_key": "clips/9/c.mp4",
+                                            "filename": "clip.mp4", "kind": "clip"}}
+        saved = self.root / "plan.json"
+        saved.write_text(json.dumps(plan))
+        self.assertEqual(self.main([str(local), str(saved)]), 0)
+        self.assertEqual(self.got["/one"], b"z" * 100)
+        args = json.loads((self.root / "upload_finish.json").read_text())
+        self.assertNotIn("parts", args)
 
 
 if __name__ == "__main__":

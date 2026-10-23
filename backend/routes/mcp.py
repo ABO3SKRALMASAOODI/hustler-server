@@ -64,7 +64,9 @@ import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
 from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core, _request_final, _final_gate, final_degraded_hold, final_hold_message
+from routes.video import wtimeline
 from video_services import mcp_fast_reads
+from video_services import tail_gate
 from video_services.mcp_reads import read_metadata
 from video_services.jobs import enqueue as _enqueue
 from video_services.project_state import (
@@ -762,7 +764,7 @@ _NO_ARGS = {"type": "object", "properties": {}}
 
 SESSION_TOOLS = [
     {"name": "export_final",
-     "description": "Export a reviewed edit as a full-resolution MP4 when the user asks for the finished video. Pass the explicit project_id and reviewed edl_version. Uses the same ownership, upload, timeline, quality and watermark checks as Studio. Repeated requests reuse an existing current export or its running job. A queued job is NOT a finished video: call wait_for_job, then download_url(kind='final', edl_version=...) to deliver the file. Never claim delivery until a download link is returned.",
+     "description": "Export a reviewed edit as a full-resolution MP4 when the user asks for the finished video. Pass the explicit project_id and reviewed edl_version. Uses the same ownership, upload, timeline, quality and watermark checks as Studio, and refuses an edit whose last picture before the end card is held (a freeze-frame, a still, a slowed or time-effect tail), naming the fix. Repeated requests reuse an existing current export or its running job. A queued job is NOT a finished video: call wait_for_job, then download_url(kind='final', edl_version=...) to deliver the file. Never claim delivery until a download link is returned.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer", "minimum": 1},
          "edl_version": {"type": "integer", "minimum": 1}},
@@ -2672,6 +2674,51 @@ def _record_download_receipt(tok, project_id, receipt):
 
 
 
+def _held_tail(cur, project_id, version):
+    """export_final's refusal when EDL v{version} ends on a held picture
+    before the end card (video_services/tail_gate), else None. It reads the
+    EDL itself and the newest render of that version's measured stall rows,
+    and it applies even when a final of the version exists: re-exporting a
+    held final is delivering it (JRE #2054 Part 2, 23 Oct 2026: five such
+    finals shipped on records written before the join was measured)."""
+    cur.execute("""SELECT json FROM edls WHERE project_id = %s
+                   AND version = %s""", (int(project_id), int(version)))
+    row = cur.fetchone() or {}
+    edl = row.get("json") if isinstance(row.get("json"), dict) else None
+    if edl is None:
+        return None                     # _request_final names the bad version
+    holds = tail_gate.edl_holds(edl, wtimeline)
+    cur.execute("""SELECT meta->'picture_qc' AS qc FROM assets
+                   WHERE project_id = %s AND kind = 'render'
+                     AND meta->>'edl_version' = %s
+                     AND meta->'picture_qc' ? 'stall'
+                   ORDER BY id DESC LIMIT 1""",
+                (int(project_id), str(int(version))))
+    qc = (cur.fetchone() or {}).get("qc")
+    measured = []
+    if qc and not holds:
+        cur.execute("SELECT to_regclass('public.verification_records') AS t")
+        record = None
+        if (cur.fetchone() or {}).get("t"):
+            cur.execute("""SELECT record FROM verification_records
+                           WHERE project_id = %s AND edl_version = %s""",
+                        (int(project_id), int(version)))
+            record = (cur.fetchone() or {}).get("record")
+        measured = tail_gate.rendered_holds(qc, record)
+    if not holds and not measured:
+        return None
+    keep = [k for k in (edl.get("keep") or [])
+            if isinstance(k, (list, tuple)) and len(k) >= 2]
+    text = tail_gate.refusal(project_id, version, holds, measured,
+                             last_keep=keep[-1] if keep else None)
+    return {"content": [{"type": "text", "text": text}],
+            "structuredContent": {"export": {
+                "project_id": project_id, "edl_version": version,
+                "code": "held_tail",
+                "edl_holds": holds, "measured_holds": measured}},
+            "isError": True}
+
+
 def _open_verification_findings(cur, project_id, version):
     """Unresolved findings of this version's verification record, or [].
 
@@ -2740,6 +2787,13 @@ def _t_export_final(tok, args):
     with vdb() as conn:
         cur = conn.cursor()
         if _project_for_user(cur, project_id, tok["user_id"]):
+            try:
+                held = _held_tail(cur, project_id, version)
+            except Exception:  # noqa: BLE001 — the render's own QC still reports it
+                conn.rollback()
+                held = None
+            if held:
+                return held
             try:
                 open_findings = _open_verification_findings(
                     cur, project_id, version)

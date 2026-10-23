@@ -1059,8 +1059,45 @@ def delivery_name(meta: dict, count: int) -> str:
     return re.sub(r'[\\/:*?"<>]', "", name).strip()
 
 
+def measure_tail(path: Path) -> dict:
+    """scripts/tail_check.py on one final: {"file", "held_s",
+    "held_ends_before_card_s", "flag"}, or {"file", "error", "flag": None}
+    when it cannot be measured."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import tail_check
+    try:
+        return tail_check.check(str(path))
+    except tail_check.TailCheckError as exc:
+        return {"file": path.name, "error": str(exc), "flag": None}
+
+
+def held_refusal(held: list, unread: list) -> str:
+    """deliver's refusal: every HELD or unmeasured final, and the fix."""
+    parts = []
+    if held:
+        parts.append(f"{len(held)} final(s) hold a still picture before the end "
+                     "card (tail_check HELD): " + "; ".join(
+                         f"{r['file']} ({r['held_s']:.2f}s held, ends "
+                         f"{r['held_ends_before_card_s']}s before the card)"
+                         for r in held))
+    if unread:
+        parts.append(f"{len(unread)} final(s) could not be measured: " + "; ".join(
+            f"{r['file']} ({r['error']})" for r in unread))
+    return (". ".join(parts) + ". Nothing was delivered. Owner rule (22 Oct "
+            "2026): the payoff holds 0.6-1.2 s on LIVE footage, or the short ends "
+            "on the last word; never a freeze-frame, a slowed or time-effect tail, "
+            "or a still before the end card. Re-cut each HELD short (remove the "
+            "hold, extend the last keep onto live footage 0.6-1.2 s after the last "
+            "word, or end on the last word), export it again, record it with "
+            "run.py export and finalize; or pass --allow-held to deliver them "
+            "anyway (they are listed as held in the delivery result).")
+
+
 def cmd_deliver(args: argparse.Namespace) -> dict:
-    """Copy a finalized run's finals into the owner's publishing folder."""
+    """Copy a finalized run's finals into the owner's publishing folder.
+    Every final is measured with scripts/tail_check.py first: a HELD one (a
+    still picture before the end card) or an unmeasurable one stops the
+    delivery, which then copies nothing, unless --allow-held."""
     directory = run_dir(args.run_dir)
     with locked(directory) as state:
         if state.get("stage") != "complete":
@@ -1071,16 +1108,26 @@ def cmd_deliver(args: argparse.Namespace) -> dict:
         items = publishing.get("items") or []
         if not items:
             raise StateError("no exported finals to deliver")
-        name = args.name or delivery_name(state.get("source_meta") or {}, len(items))
-        dest = Path(args.root or DELIVERY_ROOT).expanduser() / name
-        dest.mkdir(parents=True, exist_ok=True)
-        copied = []
+        sources = []
         for item in items:
             src = Path(item.get("file") or "")
             if not src.is_absolute():
                 src = exports / src.name
             if not src.exists():
                 src = exports / Path(item.get("file", "")).name
+            if not src.exists():
+                raise StateError(f"final file does not exist: {src}")
+            sources.append((item, src))
+        tails = [measure_tail(src) for _item, src in sources]
+        held = [r for r in tails if r.get("flag")]
+        unread = [r for r in tails if r.get("error")]
+        if (held or unread) and not args.allow_held:
+            raise StateError(held_refusal(held, unread))
+        name = args.name or delivery_name(state.get("source_meta") or {}, len(items))
+        dest = Path(args.root or DELIVERY_ROOT).expanduser() / name
+        dest.mkdir(parents=True, exist_ok=True)
+        copied = []
+        for item, src in sources:
             target = dest / src.name
             if not (target.exists() and sha256(target) == item.get("sha256")):
                 shutil.copy2(src, target)
@@ -1098,8 +1145,12 @@ def cmd_deliver(args: argparse.Namespace) -> dict:
         write_atomic(dest / "CREDITS.md", "# Credits to paste into each post\n\n" + (
             "\n".join(credits) if credits else "No third-party credits required.") + "\n")
         state["delivered_to"] = str(dest)
-        event(state, "delivered", folder=str(dest), files=len(copied))
-        return {"folder": str(dest), "files": copied}
+        event(state, "delivered", folder=str(dest), files=len(copied),
+              held=[r["file"] for r in held],
+              unmeasured=[r["file"] for r in unread])
+        return {"folder": str(dest), "files": copied, "tail_check": tails,
+                "held": [r["file"] for r in held],
+                "unmeasured": [r["file"] for r in unread]}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -1212,12 +1263,17 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--not-selected", help="JSON list of 'story (range): reason' strings")
     p.add_argument("--reindex-count", type=int, default=0)
 
-    p = command("deliver", cmd_deliver, "Copy the finalized finals, README.md "
-                "and CREDITS.md into the owner's publishing folder "
-                "(default ~/Documents/Valmera/Podcast Shorts/<Speaker> - <Title> "
-                "(<year>) - <N> Finals).")
+    p = command("deliver", cmd_deliver, "Tail-check every final "
+                "(scripts/tail_check.py: refuses a HELD one), then copy the "
+                "finalized finals, README.md and CREDITS.md into the owner's "
+                "publishing folder (default ~/Documents/Valmera/Podcast Shorts/"
+                "<Speaker> - <Title> (<year>) - <N> Finals).")
     p.add_argument("--root", help="publishing root folder (default: Podcast Shorts)")
     p.add_argument("--name", help="folder name override")
+    p.add_argument("--allow-held", action="store_true",
+                   help="deliver even when tail_check measures a final HELD (a still "
+                   "picture before the end card) or cannot measure one; by default "
+                   "such a run delivers nothing and lists them")
     return root
 
 

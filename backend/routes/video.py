@@ -34,6 +34,8 @@ import storage
 from video_services.jobs import (
     enqueue as _enqueue,
     running_orchestration_jobs as _running_jobs_count,
+    running_started_jobs as _started_jobs_count,
+    STARTED_JOB_TYPES as _STARTED_JOB_TYPES,
 )
 from video_services.project_state import (
     active_original as _active_original,
@@ -1933,13 +1935,14 @@ def complete_upload_core(user_id, project_id, data):
             return _duplicate_upload_result(
                 cur, project_id, user_id, project, dup)
 
-        if kind == "original" and not _subscribe_gate_applies(cur, user_id) and \
-                _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
-            busy, first = _busy_jobs_text(cur, user_id)
-            wait = (f" (wait_for_job(job_id={first}))" if first else "")
-            return {"error": "Too many jobs running" + busy + ". Wait for one to "
-                             "finish" + wait + ", then finish this upload again with "
-                             "the same arguments: the uploaded file is kept."}, 429
+        # No job cap here. Finishing an upload registers bytes already in
+        # storage and QUEUES the index job; the worker's index lane (fair
+        # share per project, see worker/db.py claim_job) is the capacity
+        # control, as the export queue is for a final. The cap used to count
+        # the account's own MCP tool calls, so parallel editors running
+        # render_preview / look_at / keep_segments refused the next podcast's
+        # upload_finish ~25 times in 40 minutes (CHM 2013, project 4348, 22
+        # Oct 2026) while no indexing competed with it at all.
 
     # ── The deferred original ────────────────────────────────────────────
     # The browser already built and uploaded a 540p proxy; the original is
@@ -4839,17 +4842,23 @@ def _mcp_web_sound_gate(cur, project_id, before, after):
     return err.replace("REJECTED: ", "", 1) if err else None
 
 
-def _busy_jobs_text(cur, user_id, limit=4):
+def _busy_jobs_text(cur, user_id, limit=4, types=None):
     """(' (job 71300 render_preview on project 3755, running; ...)', first id)
     for the jobs that hold a user's concurrency slots, or ('', None). The bare
     "Too many jobs running" left the owner's Jensen coordinator guessing for
-    19 minutes, asking for list_jobs/cancel_job tools that do not exist."""
+    19 minutes, asking for list_jobs/cancel_job tools that do not exist.
+
+    It names the jobs and nothing to do with them: the advice to
+    wait_for_job on another project's job (22 Oct 2026) made a coordinator
+    pull that job's full image payload into its context."""
+    types = list(types or ("agent_turn", "shorts_plan", "mcp_tool"))
     try:
         cur.execute("""SELECT id, type, state, project_id, payload->>'tool' AS tool
                        FROM video_jobs WHERE user_id = %s
                          AND state IN ('queued','running')
-                         AND type IN ('agent_turn','shorts_plan','mcp_tool')
-                       ORDER BY id LIMIT %s""", (int(user_id), int(limit)))
+                         AND type = ANY(%s)
+                       ORDER BY id LIMIT %s""", (int(user_id), types,
+                                                 int(limit)))
         rows = [r for r in (cur.fetchall() or []) if isinstance(r, dict) and r.get("id")]
     except Exception:  # noqa: BLE001 — the plain refusal still stands
         return "", None
@@ -6345,9 +6354,17 @@ def start_shorts(user_id, project_id):
             return jsonify({"error": "Shorts are already being cut for "
                                      "this project.",
                             "code": "shorts_running"}), 409
-        if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
-            return jsonify({"error": "Too many jobs running. "
-                                     "Wait for one to finish."}), 429
+        # The cap counts the chat turns and shorts plans this plan competes
+        # with, never the account's MCP tool calls (an editor's
+        # render_preview on another short is not a reason to refuse one).
+        if _started_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
+            busy, _first = _busy_jobs_text(cur, user_id,
+                                           types=_STARTED_JOB_TYPES)
+            return jsonify({"error": "A few chat edits or shorts runs are "
+                                     "still processing" + busy + ". Start "
+                                     "shorts again when one of them "
+                                     "finishes.",
+                            "code": "busy_capacity"}), 429
         payload = {"source": "user"}
         try:
             if data.get("count"):

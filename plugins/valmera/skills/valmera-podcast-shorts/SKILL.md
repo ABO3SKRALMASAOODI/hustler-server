@@ -102,7 +102,15 @@ disagree, v9 wins on method and the brief wins on preferences.
    owner supplied or approved one, otherwise music stays off). A new podcast
    is a new run.
 2. **Acquire and index once.** `create_project(kind='shorts')`, upload the
-   source as `original` (`upload_start`/`upload_finish`; download a URL
+   source as `original` (`upload_start`/`upload_finish`). **Uploading:**
+   never copy presigned URLs into curl by hand. Save the `upload_start`
+   result (its structuredContent, or the JSON closing its text) as
+   `<run>/source/plan.json`, run `python3 scripts/upload_parts.py <local
+   file> <run>/source/plan.json` (it checks the size, PUTs every part 4 at a
+   time with retries, and resumes on a re-run), then call `upload_finish`
+   with exactly the arguments it writes to `<run>/source/upload_finish.json`.
+   A plan's URLs last 12 hours; a size mismatch means `upload_start` again
+   with the file's real `size_bytes`. Download a URL
    locally once if Valmera cannot fetch it; with yt-dlp fetch the video and
    the `en-orig` captions in separate calls, so a caption 429 cannot block the
    download). **Downloading** (`fetch_url` refuses media over 60 minutes, so
@@ -217,15 +225,32 @@ disagree, v9 wins on method and the brief wins on preferences.
    brief transition flash is no longer flagged for the corner mark or the
    captions, and an opening blink whose only clean start drops words is an
    advisory: a finding of that kind on a new render is worth reporting.
+   If it answers `held_tail`, nothing was started: the EDL ends on a held
+   picture (a freeze-frame or payoff hold, a still, a slowed or time-effect
+   tail) or the render measured one. Remove the hold it names, extend the
+   last keep onto live footage 0.6-1.2 s after the last word or end on the
+   last word, render a preview and export that version. No justification
+   clears an EDL hold.
+   **Tail check every final** right after downloading it:
+   `python3 scripts/tail_check.py <file>` (ffmpeg from PATH,
+   `$VALMERA_FFMPEG_BIN` or the bin-arm build). `HELD` means the final
+   stalls before the end card and must not be delivered: re-cut it as above
+   and export again. `deliver` runs the same check on every final.
 10. **Manifest.** `run.py finalize --not-selected <file>` writes
    `exports/manifest.json`, `publishing-manifest.json` and `PUBLISHING.md`
    in the format the publisher already reads.
 11. **Deliver.** Always run `run.py deliver --run-dir <run>` right after
-   finalize. It copies every final (sha256-checked), `README.md`,
-   `CREDITS.md` and the manifests into the owner's publishing folder,
-   `~/Documents/Valmera/Podcast Shorts/<Speaker> - <Title> (<year>) - <N>
-   Finals/` (`--name` overrides the folder name). End the run by telling the
-   user that folder's path: their publishing agents are pointed at it.
+   finalize. It runs `scripts/tail_check.py` on every final first: if any
+   is `HELD` (a still picture before the end card) or cannot be measured,
+   it delivers nothing and lists them. Re-cut those shorts, export them
+   again, `run.py export` and finalize, then deliver again (if one cannot be
+   repaired, close it with `run.py exception` before finalize; never pass
+   `--allow-held` unless the owner asks). Then it copies every final
+   (sha256-checked), `README.md`, `CREDITS.md` and the manifests into the
+   owner's publishing folder, `~/Documents/Valmera/Podcast Shorts/<Speaker>
+   - <Title> (<year>) - <N> Finals/` (`--name` overrides the folder name).
+   End the run by telling the user that folder's path: their publishing
+   agents are pointed at it.
 
 ## Non-negotiables
 
