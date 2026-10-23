@@ -125,6 +125,16 @@ def line(r: dict) -> str:
 
 
 def main(argv: list[str]) -> int:
+    if any(a in ("-h", "--help") for a in argv):
+        # a flag is never a file (Earnings run: '-h' was read as a path)
+        print(__doc__.strip())
+        return 0
+    unknown = [a for a in argv if a.startswith("-") and a != "--json"
+               and not os.path.exists(a)]
+    if unknown:
+        print(f"unknown option {unknown[0]} (usage: tail_check.py [--json] "
+              "<final.mp4 | folder> ...)", file=sys.stderr)
+        return 2
     as_json = "--json" in argv
     paths: list[str] = []
     for a in (x for x in argv if x != "--json"):

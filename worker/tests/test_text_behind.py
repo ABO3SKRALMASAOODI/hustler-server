@@ -428,9 +428,11 @@ def test_a_behind_text_dies_with_its_footage():
     assert any("no longer in the edit" in n for n in notes), notes
 
 
-def test_an_ordinary_text_is_still_program_anchored():
-    """The other half of the same policy: a plain title covers a span of the
-    EDIT, so it must NOT be dragged through the source."""
+def test_an_ordinary_text_follows_its_words():
+    """A plain callout is cued to what is said (earnings run w1023: 4527's
+    'SIMULATION' label stayed 0.31 s late after a head trim while the motion
+    graphics moved), so it follows the footage too — without a mask to
+    rewrite. Only one held over the whole programme keeps the programme."""
     e = _edl()
     e["texts"][0].pop("behind")
     edl = validate_edl(e, SHOT_S).model_dump()
@@ -438,7 +440,8 @@ def test_an_ordinary_text_is_still_program_anchored():
     new = Timeline([[2.0, SHOT_S]], [], [])
     edl["keep"] = [[2.0, SHOT_S]]
     tl_mod.remap_program_items(edl, old, new)
-    assert edl["texts"][0]["start"] == 1.0    # unchanged program position
+    # source 1-4 s: its first second was cut, the rest now plays at 0-2 s
+    assert (edl["texts"][0]["start"], edl["texts"][0]["end"]) == (0.0, 2.0)
 
 
 # ------------------------------------------------------------------ #

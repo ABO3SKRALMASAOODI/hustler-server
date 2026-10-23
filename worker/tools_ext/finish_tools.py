@@ -219,6 +219,7 @@ def set_grade_window(ctx, start=None, end=None, saturation=None, ev=None,
         return _rejected(str(x))
     if isinstance(protect, str):
         protect = [p.strip() for p in protect.split(",") if p.strip()]
+    contrast, c_note = _contrast_factor(contrast)
     acc = _accent(edl)
     if isinstance(split_tone, dict) and acc:
         # 'accent' is the Look's accent: solved now, stored as its hex
@@ -238,7 +239,26 @@ def set_grade_window(ctx, start=None, end=None, saturation=None, ev=None,
     if gone:
         return gone
     return _commit(ctx, [_upsert(item)], f"grade window {item['id']} "
-                   f"{s:g}-{e:g}s")
+                   f"{s:g}-{e:g}s") + c_note
+
+
+# Contrast is a FACTOR (1.0 leaves it; the schema floor is 0.25). Earnings
+# run (w1023): contrast 0.1 (4566 job 96714, 4570 job 98438) and -0.08
+# (4578 job 96468) were refused by the schema — a change written as a delta
+# (+10%, -8%). A value under the floor can only mean that: read as 1 + it.
+CONTRAST_FLOOR = 0.25
+
+
+def _contrast_factor(v):
+    try:
+        f = float(v) if v is not None and v != "" else None
+    except (TypeError, ValueError):
+        return v, ""
+    if f is None or f >= CONTRAST_FLOOR or not -0.75 < f:
+        return v, ""
+    g = round(1.0 + f, 3)
+    return g, (f"\nNOTE: contrast is a factor (1.0 = unchanged): {f:g} was "
+               f"read as a change of {f:+g}, contrast {g:g}.")
 
 
 # ── isolate_colour ──────────────────────────────────────────────────────

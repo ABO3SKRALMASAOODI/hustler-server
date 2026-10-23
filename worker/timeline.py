@@ -831,8 +831,10 @@ def remap_program_items(edl, old_tl, new_tl):
       music /    - PROGRAM-anchored ("music under the whole video", "narrate
       voiceover    at 10s"): clamp to the new program length.
       regions    - PROGRAM-anchored censor window: clamp (drop if outside).
-      overlays / - PROGRAM-anchored (they cover a span of the EDIT, not a
-      texts        moment of the footage): clamp ends, drop when outside;
+      overlays / - CONTENT-anchored when cued to words (a b-roll cutaway, a
+      texts        callout): they follow their footage like a motion
+                   graphic; one held over the whole programme is layout and
+                   keeps the programme. Ends past the programme clamp;
                    keyframed x/y is trimmed (clip_anim) when a window
                    shrinks, or validation rejects the stranded keyframes."""
     region_notes = []
@@ -948,6 +950,36 @@ def remap_program_items(edl, old_tl, new_tl):
             moved = (moved[0], prog)
         if moved[1] - moved[0] < 1e-3:
             return "gone"
+        return moved
+
+    def _cued_window(s0, e0, old_prog, min_s):
+        """Where a cutaway or a callout cued to words (a b-roll overlay, an
+        add_text label) lands after the re-cut: (new start, new end) through
+        the content under it, the same policy as a motion graphic's — the
+        opening still opens and an item that ran to the end still does.
+        "gone" when its footage left the edit (or under ``min_s`` of it
+        survives); None when it cannot be attributed (it keeps its program
+        time). Earnings run (w1023): a 0.31 s head trim left 4527's ov1/ov2
+        and tx1 0.31 s late on their words while the motion graphics moved,
+        and 4563's three cutaways 1.26 s late; every editor re-timed them by
+        hand after "SYNC REVIEW REQUIRED"."""
+        e0m = min(e0, old_prog)
+        if old_tl.out_to_src(s0) is not None \
+                and old_tl.out_to_src(e0m) is not None:
+            moved = remap_program_span(old_tl, new_tl, s0, e0m)
+            if moved is None or moved[1] - moved[0] < min_s:
+                return "gone"
+            if e0 >= old_prog - RUNS_TO_END_S:
+                moved = (moved[0], prog)
+            if s0 <= RUNS_TO_END_S:
+                moved = (0.0, moved[1])
+            return moved
+        d = _insert_shift(s0, e0)
+        if d:
+            return round(s0 + d, 2), round(e0 + d, 2)
+        moved = _follow_span(s0, e0, old_prog)
+        if moved in (None, "gone") or moved[1] - moved[0] < min_s:
+            return None
         return moved
 
     def _remap_path_zoom(z):
@@ -1585,18 +1617,53 @@ def remap_program_items(edl, old_tl, new_tl):
                     return float(b["out_start"])
             return 0.0
 
+        old_prog_ov = round(old_tl.out_duration, 2)
         for ov in edl["overlays"]:
             ov = dict(ov)
-            if ov.get("kind") == "video" and not ov.get("screen"):
+            if not ov.get("screen"):
                 start = float(ov.get("start", 0))
-                end = start + float(ov.get("duration_s", 0))
-                probes = [start + (end-start)*fraction for fraction in (.01, .5, .99)]
-                if any(old_tl.out_to_src(t) != new_tl.out_to_src(t) for t in probes):
+                d0 = float(ov.get("duration_s", 0))
+                end = start + d0
+                # One laid over the whole programme is layout (a frame, an
+                # externally cropped copy of the programme): it keeps the
+                # programme. Anything shorter is a cutaway or a picture cued
+                # to words, and follows them like a motion graphic.
+                whole = start <= RUNS_TO_END_S \
+                    and end >= old_prog_ov - RUNS_TO_END_S
+                win = None if whole else _cued_window(start, end,
+                                                      old_prog_ov, 0.2)
+                if win == "gone":
                     region_notes.append(
-                        f"SYNC REVIEW REQUIRED: video overlay {ov.get('id')} remains "
-                        "anchored to program time, but its underlying source changed. "
-                        "An externally cropped program may now be out of sync; inspect "
-                        "or replace it with source-time frame.focus_track crops.")
+                        f"note: overlay {ov.get('id')} was removed — the "
+                        "moment it was cued to is no longer in the edit.")
+                    continue
+                if win is not None:
+                    ns, ne = win
+                    nd = round(ne - ns, 2)
+                    if ov.get("kind") == "video" and nd > d0:
+                        # the clip's own length is unknown here: never ask
+                        # it for more than it played
+                        nd = round(d0, 2)
+                    if (round(ns, 2), nd) != (round(start, 2), round(d0, 2)):
+                        ov["start"] = round(ns, 2)
+                        if nd < d0 - 1e-6:
+                            for prop in ("x", "y", "scale", "rotation",
+                                         "opacity"):
+                                if isinstance(ov.get(prop), list):
+                                    ov[prop] = clip_anim(ov[prop], nd)
+                        ov["duration_s"] = nd
+                        region_notes.append(
+                            f"note: overlay {ov.get('id')} moved to "
+                            f"{ov['start']:g}-{round(ov['start'] + nd, 2):g}s "
+                            "with its moment.")
+                elif ov.get("kind") == "video":
+                    probes = [start + (end-start)*fraction for fraction in (.01, .5, .99)]
+                    if any(old_tl.out_to_src(t) != new_tl.out_to_src(t) for t in probes):
+                        region_notes.append(
+                            f"SYNC REVIEW REQUIRED: video overlay {ov.get('id')} remains "
+                            "anchored to program time, but its underlying source changed. "
+                            "An externally cropped program may now be out of sync; inspect "
+                            "or replace it with source-time frame.focus_track crops.")
             if ov.get("screen"):
                 old_arr = float(ov["start"]) + float(ov["duration_s"])
                 # The handoff is found by the OLD windows first (round 75):
@@ -1803,6 +1870,29 @@ def remap_program_items(edl, old_tl, new_tl):
                     tx["start"], tx["end"] = ns, ne
                 kept_tx.append(tx)
                 continue
+            # A callout is cued to what is said (add_text 'SIMULATION' on the
+            # rocket shot): it follows its words like a motion graphic; one
+            # held over the whole programme keeps the programme.
+            t0, t1 = float(tx["start"]), float(tx["end"])
+            old_prog_tx = round(old_tl.out_duration, 2)
+            if not (t0 <= RUNS_TO_END_S and t1 >= old_prog_tx - RUNS_TO_END_S):
+                win = _cued_window(t0, t1, old_prog_tx, 0.3)
+                if win == "gone":
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\") was removed — "
+                        "the moment it was cued to is no longer in the edit.")
+                    continue
+                if win is not None and (round(win[0], 2), round(win[1], 2)) \
+                        != (round(t0, 2), round(t1, 2)):
+                    ns, ne = round(win[0], 2), round(win[1], 2)
+                    if ne - ns < t1 - t0 - 1e-6:
+                        _clip_text_motion(tx, ne - ns)
+                    tx["start"], tx["end"] = ns, ne
+                    region_notes.append(
+                        f"note: text {tx.get('id')} "
+                        f"(\"{str(tx.get('text', ''))[:24]}\") moved to "
+                        f"{ns:g}-{ne:g}s with its moment.")
             if float(tx["end"]) > prog:
                 if float(tx["start"]) >= prog - 0.3:
                     region_notes.append(

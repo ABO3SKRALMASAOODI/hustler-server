@@ -119,7 +119,10 @@ Order matters: cuts first (they move every later time; the child already
 starts 9:16 from the SOURCE LAYOUT), then the pilot's card (card end =
 program end), THEN `erase_region`, stock overlays and captions, then
 designed beats, camera, transitions and sound. If you must re-cut later,
-recheck every output-timed item and the card's end.
+the cutaways (`add_overlay`), `add_text` callouts, motion graphics, cards
+and sounds follow the words they were cued to (the keep tool's notes say
+where each moved; one held over the whole short keeps the short): read
+those notes and recheck the card's end, no hand re-timing.
 
 | Step | Calls | Notes |
 | --- | --- | --- |
@@ -261,7 +264,14 @@ unacknowledged one).
    words are audible, or an "um" or half a word the transcript lacks at a
    join, use `check_speech` (program seconds; up to 60 s, so one call reads
    the whole short, each kept span on its own sound): it measures the sound
-   itself. Never ask another model to listen:
+   itself, and its REPEATED WORDS lines name every word or phrase heard
+   twice in a row ('you don't you don't', or 'to be | to be' that a cut
+   made) with the source cut that drops the first saying. A repeated phrase
+   or a repeat across a join is a blocking `repeated_phrase` finding: cut
+   it; a single doubled word inside a take ('we we') is an advisory: cut it
+   in the hook and the payoff, elsewhere where a quiet gap allows. Never
+   hide a heard stutter with `set_caption_fixes` ('THAT THAT' -> 'THAT'):
+   the audio still says it. Never ask another model to listen:
    `review_audio` is switched off by the owner and only answers "disabled".
 4. Copy the render's MEASURES numbers into the handback: picture area
    (and upscale), the hook headline's cap height and the captions' (share
@@ -343,6 +353,8 @@ slot. A `blocked` handback is recorded the same way, its first line
 | a close-up face fills the card to its foot: no room under the chin for the captions at your `anchor_y`, and a graphic holds the canvas around the card | the captions keep the anchor (pages of one line in the card's column) and the render and `audit_captions` name it, CAPTIONS ON THE MEASURED FACE; leave ~0.06 of the frame between the chin and the card's bottom edge (a looser source rect, a smaller zoom) or set `anchor_y` below the card when a line fits between the card's foot and y 0.80 (the captions' safe foot: any anchor past it is laid at 0.80, so under a card that ends at ~0.795, as the call layout's does, the captions go inside the card, above its edge) |
 | a deliberate caption mute (a word the speaker swallows) is reported by the blocking CAPTION CHECK like any heard-but-unshown word | carry the word on a graphic, or keep the mute and say why in the handback |
 | write-time size and position estimates for lockups (`word_slam`, `phrase_build`, the payoff) run up to 2-3x off the render | size the payoff and band lockups from render 1's MEASURES line, never on estimates (the `headline` claim alone is measured at write) |
+| a long single word in `word_slam` (SUPERINTELLIGENCE, SHAREHOLDERS) or a long `versus_split` label is width-bound: `width`/`size` cannot raise it past about 5-6% cap height (Earnings run, Oct 2026) | for a payoff that must be the largest lockup, use `role='condensed'` (about 45% taller at the same width), a shorter word, or a number with its noun ('*1,000x* / agents'); step the other lockups down rather than fighting the width |
+| MEASURES `captions 6.0% (largest line; their other lines read at 1.9%)` on a stack or lockup caption look | the reading size is the second number: under 2.5% is unreadable (`type_too_small`); raise `size_scale` |
 | `erase_region` repaints only its box: a picture-in-picture's frame or shadow outside it stays visible | draw the box over the whole inset, border included; check the patch on rendered frames once |
 | `set_picture_card` `source='auto'` follows ONE face and can pick a bystander or a co-passenger in vlog, street and multi-person footage (Jensen run, Oct 2026: s01 and s17 framed a passenger through the payoff) | after the write, `look_at` one rendered frame per shot the card spans; where it framed the wrong person give that shot its own card with an explicit `source` rect around the speaker |
 | `add_stock_media` refused "unknown stock id" for a pick named elsewhere (klRb0 run, Oct 2026: ids from a plan file or another short's research) | pass the id exactly as `research_broll` / `search_stock` printed it (`broll:1:detroit:pexels:photo:…`); the bare provider id of a result researched in this short or on its parent board also resolves. Research in the child (or the parent) before placing |

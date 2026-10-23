@@ -425,9 +425,13 @@ def proof_device(ctx, ids=None, start=None, end=None):
     if ids:
         missing = sorted(set(map(str, ids)) - {d["id"] for d in devs})
         if missing:
-            return ("REJECTED: no device item with id "
-                    + ", ".join(missing) + " in the current EDL (fx items, "
-                    "motion items with a composite or behind the subject).")
+            have = [str(i.get("id")) for i in (edl.get("fx") or [])
+                    + (edl.get("motion") or []) if isinstance(i, dict)
+                    and i.get("stage") != "music_bus"]
+            return ("REJECTED: no fx or motion item with id "
+                    + ", ".join(missing) + " in the current EDL"
+                    + (f" (it has: {', '.join(have[:16])})" if have
+                       else " (it has no fx or motion items)") + ".")
     if not devs:
         return ("Nothing to prove: no device item changed since the last "
                 "version" + (" in that window" if window else "")

@@ -477,3 +477,81 @@ def regression_warnings(prev_keep, new_keep, index):
     return ["WARNING (regression): this keep list " + "; ".join(lines)
             + ". If that was not intentional, call get_edl and use "
               "cut_range/restore_range for local fixes."]
+
+
+# ── repeated words in what is heard ──────────────────────────────────────
+# A word said twice on purpose ('no, no', 'very very', 'bye bye').
+DOUBLE_OK = frozenset({"had", "that", "is", "very", "no", "bye", "ha", "go",
+                       "so", "really", "yeah", "knock", "now", "well", "oh",
+                       "tick", "tock", "bla", "blah", "yes"})
+REPEAT_MAX_N = 3
+
+
+def _tok(w):
+    import re
+    return re.sub(r"[^\w']", "", str(w or "")).lower().strip("'")
+
+
+def repeated_phrases(keep, words, ducks=None):
+    """Words or phrases heard twice in a row in the KEPT programme: the
+    speaker's restart left in ('you don't you don't', Earnings 4563 v21) or
+    one a cut made ('to be | To to be', the end of a kept span repeated by
+    the start of the next). Words are read in programme order (a word plays
+    when its midpoint lies in a kept span); fillers and words set_volume
+    silences are not heard. Returns [{'n', 'text', 'first' (t0, t1),
+    'second' (t0, t1), 'across_join', 'cut' (source span that drops the
+    first instance)}], one per repeat, longest n first at a position."""
+    if not keep or not words:
+        return []
+    seq = []
+    for k, (a, b) in enumerate(keep):
+        a, b = float(a), float(b)
+        for w in words:
+            if not isinstance(w, dict) or w.get("filler"):
+                continue
+            t0, t1 = float(w["t0"]), float(w["t1"])
+            mid = (t0 + t1) / 2.0
+            if not (a - EPS <= mid <= b + EPS):
+                continue
+            if ducks and silenced(t0, t1, ducks):
+                continue
+            tok = _tok(w.get("w"))
+            if tok:
+                seq.append((tok, t0, t1, k))
+    seq.sort(key=lambda r: (r[3], r[1]))
+    spans = [[float(a), float(b)] for a, b in keep]
+
+    def joined(k0, k1):
+        """Is there a real cut between kept spans k0 < k1 (source skipped)?"""
+        return any(spans[j + 1][0] - spans[j][1] > 1e-3 for j in range(k0, k1))
+
+    out, used = [], set()
+    for i in range(len(seq)):
+        for n in range(min(REPEAT_MAX_N, (len(seq) - i) // 2), 0, -1):
+            a = [r[0] for r in seq[i:i + n]]
+            b = [r[0] for r in seq[i + n:i + 2 * n]]
+            if a != b or (n > 1 and len(set(a)) == 1):
+                # 'no no no no' is one word run, read as single doubles
+                continue
+            if n == 1 and (a[0] in DOUBLE_OK or a[0].isdigit()):
+                continue
+            if any(j in used for j in range(i, i + 2 * n)):
+                continue
+            first, second = seq[i:i + n], seq[i + n:i + 2 * n]
+            # a long pause between them is a new sentence, not a stutter
+            if second[0][1] - first[-1][2] > 1.0 and \
+                    not joined(first[-1][3], second[0][3]):
+                continue
+            across = joined(first[-1][3], second[0][3])
+            out.append({"n": n,
+                        "text": " ".join(r[0] for r in first + second),
+                        "first": (round(first[0][1], 2),
+                                  round(first[-1][2], 2)),
+                        "second": (round(second[0][1], 2),
+                                   round(second[-1][2], 2)),
+                        "across_join": across,
+                        "cut": (round(first[0][1], 2),
+                                round(second[0][1], 2))})
+            used.update(range(i, i + 2 * n))
+            break
+    return out

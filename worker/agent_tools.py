@@ -25557,7 +25557,10 @@ def _argument_aliases(name, args, notes):
             args.pop("source")
             if flag:
                 notes.append("source=true -> times are source seconds")
-    if name == "remove_typeset" and "ids" not in args and "id" in args:
+    # remove_ui_scene(id='requests') (Earnings run 4574, job 99222) paid a
+    # refusal the same way remove_typeset(id) once did
+    if name in ("remove_typeset", "remove_ui_scene") and "ids" not in args \
+            and "id" in args:
         one = args.pop("id")
         args["ids"] = one if isinstance(one, list) else [one]
         notes.append("id -> ids")
