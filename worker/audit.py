@@ -20,6 +20,46 @@ EPS = 0.011   # times are rounded to 0.01s; boundaries must be STRICTLY inside
 KEEP_WORD_FRAC = 0.4
 
 
+# set_volume this low (dB) on the main sound silences what it covers: the
+# editor's tool for a next speaker's first word in the payoff's tail.
+SILENCED_DB = -40.0
+
+
+def ducked_spans(edl, floor_db=SILENCED_DB):
+    """SOURCE windows whose main sound set_volume turns down to ``floor_db``
+    or below: [(start, end)]."""
+    out = []
+    for v in (edl or {}).get("volume") or []:
+        try:
+            a, b, g = float(v["start"]), float(v["end"]), float(v["gain_db"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if g <= floor_db and b > a:
+            out.append((a, b))
+    return out
+
+
+def silenced(s0, s1, spans, share=0.5):
+    """Is the word at SOURCE [s0, s1] silenced — at least ``share`` of it
+    under ``spans`` (ducked_spans)? A word with no source times is not.
+
+    The Gates run's payoff tails: the next speaker starts 0.16-0.66 s after
+    the last word, so the editor extended the keep, ducked that word to
+    -60 dB and muted its caption; critique_short's payoff hold and the
+    review's EARN ITS PLACE still counted it as the last word said (a 0.00 s
+    hold) and the caption check called it heard but never shown (s01, s02,
+    s05, s06, s08, s09, s11-s13, s15)."""
+    if not spans or s0 is None or s1 is None:
+        return False
+    try:
+        s0, s1 = float(s0), float(s1)
+    except (TypeError, ValueError):
+        return False
+    n = max(1e-6, s1 - s0)
+    cov = sum(max(0.0, min(s1, b) - max(s0, a)) for a, b in spans)
+    return cov / n >= share
+
+
 def word_at_boundary(words, b):
     """The word whose interior strictly contains boundary time b, or None."""
     for w in words:
@@ -109,14 +149,29 @@ def nearest_silence_midpoint(silences, t):
     return best
 
 
-def boundary_warning_lines(keep, words, silences, duration=None, skip=()):
+def boundary_warning_lines(keep, words, silences, duration=None, skip=(),
+                           safe=None):
     """WARNING lines for keep boundaries inside words. ``skip``: boundary
     times (hundredths) already judged clean on the source's sound — the
-    transcript puts a word there but the sound is quiet (cut_audio)."""
+    transcript puts a word there but the sound is quiet (cut_audio).
+    ``safe``: {boundary (hundredths): the sound-safe edge} (edge_verdicts)
+    — named instead of the transcript's word edges, which run 0.05-0.25 s
+    off the sound, so this warning, the render's MID-WORD AUDIT,
+    critique_short and check_speech all name the same edge."""
     lines = []
     skip = {round(float(t), 2) for t in skip or ()}
+    safe = {round(float(k), 2): float(v) for k, v in (safe or {}).items()}
     for hit in midword_boundaries(keep, words, duration):
         if round(float(hit["boundary"]), 2) in skip:
+            continue
+        at = safe.get(round(float(hit["boundary"]), 2))
+        if at is not None:
+            lines.append(
+                f"WARNING: keep {hit['kind']} boundary {hit['boundary']:.2f} "
+                f"lands inside the word '{hit['word']}' while it sounds "
+                f"({hit['t0']:.2f}-{hit['t1']:.2f} in the transcript) — "
+                f"move it to {at:.2f}, where the source's sound is quiet "
+                "(measured; the transcript's word edges run off the sound).")
             continue
         cands = [f"{hit['t0']:.2f} (word start)", f"{hit['t1']:.2f} (word end)"]
         mid = nearest_silence_midpoint(silences, hit["boundary"])
@@ -144,11 +199,13 @@ def midword_audit(keep, words, duration=None, source=None, timeout=10.0,
     s05). Unread sound keeps the transcript's verdict."""
     hits = midword_boundaries(keep, words, duration)
     if hits and source:
-        hits = _audible(hits, source, duration, timeout, frame_s)
+        hits = _audible(hits, source, duration, timeout, frame_s, keep, words)
     out = [f"boundary {h['boundary']:.2f} inside '{h['word']}' "
            f"({h['t0']:.2f}-{h['t1']:.2f}"
            + (f", sound {h['db']:.0f} dB" if h.get("db") is not None else "")
            + ")"
+           + (f" -> the sound-safe edge is {h['safe']:.2f}"
+              if h.get("safe") is not None else "")
            for h in hits]
     if source:
         out += _clipped_onset_lines(keep, words, duration, source, timeout)
@@ -173,9 +230,12 @@ def _clipped_onset_lines(keep, words, duration, source, timeout):
         return []
 
 
-def _audible(hits, source, duration, timeout, frame_s):
+def _audible(hits, source, duration, timeout, frame_s, keep=None,
+             words=None):
     """``hits`` (midword_boundaries) whose sound is loud at the cut, each
-    with its level in ``db``; all of them when the sound cannot be read."""
+    with its level in ``db`` (and, given ``keep`` and ``words``, the
+    sound-safe edge in ``safe``: edge_verdicts); all of them when the sound
+    cannot be read."""
     try:
         import cut_audio
         level = cut_audio.source_levels(
@@ -184,25 +244,65 @@ def _audible(hits, source, duration, timeout, frame_s):
         level = None
     if level is None:
         return hits
-    end_level = cut_audio._robust(level, frame_s)
+    return [h for h in edge_verdicts(hits, level, frame_s, keep, words)
+            if h["loud"]]
+
+
+def edge_verdicts(hits, level, frame_s=1.0 / 30.0, keep=None, words=None):
+    """THE sound-based verdict on keep edges the transcript puts inside a
+    word (midword_boundaries) — one rule for the keep tools' warnings, the
+    render's MID-WORD AUDIT, critique_short and check_speech. Each hit comes
+    back with ``db`` (the level at the cut; None unread), ``loud`` (the cut
+    clips sound: judged as cut_audio.place_edge judges it) and ``safe``
+    (where the cut should sit: place_edge on the same sound, inside the
+    edge's own span; None when it cannot move or the sound is unread).
+
+    The ASR's word edges run 0.05-0.25 s off the sound, so the four checks
+    used to disagree: the audit asked for 846.63 where the keep's 'word
+    end' advice said 846.75 (Gates s15 4364), 2361.30 vs 2361.49 (4383), and
+    critique_short's op moved an edge onto a transcript edge that the next
+    render's audit flagged again (Diamandis 4416-4425)."""
+    import cut_audio
+    end_level = cut_audio._robust(level, frame_s) if level else None
+    spans = [(float(s), float(e)) for s, e in keep or []]
     out = []
     for h in hits:
+        b = float(h["boundary"])
         lv = end_level if h["kind"] == "end" else level
-        db = lv(h["boundary"])
+        db = lv(b) if lv else None
         if db is None:
-            out.append(h)
+            out.append(dict(h, db=None, loud=True, safe=None))
             continue
         # the floor read on the same reader place_edge judged that edge on
-        # (an end's: the loudest of the frame either side)
-        if not cut_audio._is_loud(db, cut_audio._floor(lv, h["boundary"])):
-            continue
-        # a clear dip between sounds is a pause whatever the transcript's
-        # word times say: the index's boundaries run up to ~0.1 s off, and
-        # the pause before a word its onset was moved back to (cut_audio.
+        # (an end's: the loudest of the frame either side); a clear dip
+        # between sounds is a pause whatever the transcript's word times
+        # say: the index's boundaries run up to ~0.1 s off, and the pause
+        # before a word its onset was moved back to (cut_audio.
         # _contiguous_onset) sits inside the index's previous word
-        if _dip_depth(lv, h["boundary"]) >= cut_audio.ONSET_DIP_DB:
-            continue
-        out.append(dict(h, db=db))
+        loud = cut_audio._is_loud(db, cut_audio._floor(lv, b)) and \
+            _dip_depth(lv, b) < cut_audio.ONSET_DIP_DB
+        safe = None
+        if loud and words:
+            i = next((k for k, (s, e) in enumerate(spans)
+                      if abs((s if h["kind"] == "start" else e) - b) < 0.006),
+                     None)
+            lo = hi = None
+            if i is not None:
+                if h["kind"] == "start":
+                    lo = spans[i - 1][1] + 0.02 if i else 0.0
+                    hi = spans[i][1] - 0.05
+                else:
+                    lo = spans[i][0] + 0.05
+                    hi = spans[i + 1][0] - 0.02 if i + 1 < len(spans) \
+                        else None
+            try:
+                got = cut_audio.place_edge(h["kind"], b, words, lv, lo, hi)
+            except Exception:  # noqa: BLE001 — a verdict never fails a check
+                got = None
+            if got and got.get("why") is not None and \
+                    abs(float(got["t"]) - b) >= 0.005:
+                safe = round(float(got["t"]), 2)
+        out.append(dict(h, db=db, loud=loud, safe=safe))
     return out
 
 

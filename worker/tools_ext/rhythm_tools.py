@@ -317,9 +317,69 @@ def check_speech(ctx, start=None, end=None):
     if unread:
         lines.append("NOT READ (the source sound did not decode): "
                      + ", ".join(unread))
+    edge_lines = _cut_edge_lines(ctx, edl, pieces, words, src)
     if len(lines) == 2:
         lines.append("no untranscribed sound, clipping or clicks")
-    return "\n".join(lines)
+    return "\n".join(lines + edge_lines)
+
+
+def _cut_edge_lines(ctx, edl, pieces, words, src):
+    """The keep's cut edges under the window, judged by the one sound-based
+    rule the keep tools, the render's MID-WORD AUDIT and critique_short use
+    (audit.edge_verdicts): a cut the transcript puts inside a word is named
+    only when the source still sounds there, with the edge to move it to.
+    Before, check_speech said nothing about edges while the other three
+    gave three different answers (ASR word edges run 0.05-0.25 s off the
+    sound; Diamandis 4416-4425, Gates 4364/4383)."""
+    import audit
+    import cut_audio
+    keep = [[float(a), float(b)] for a, b in (edl or {}).get("keep") or []]
+    if not keep or not words or not src:
+        return []
+    duration = getattr(ctx, "duration", None)
+    srcs = [round(a, 2) for _p0, _p1, a, _b, _f in pieces] + \
+        [round(b, 2) for _p0, _p1, _a, b, _f in pieces]
+    hits = [h for h in audit.midword_boundaries(keep, words, duration)
+            if round(float(h["boundary"]), 2) in srcs]
+    edges = sum(1 for i, side, b in cut_audio.cut_edges(keep, duration)
+                if round(b, 2) in srcs)
+    if not edges:
+        return []
+    if not hits:
+        return [f"CUT EDGES: {edges} cut edge{'s' if edges != 1 else ''} "
+                "here, none inside a transcript word"]
+    try:
+        level = cut_audio.source_levels(src, [h["boundary"] for h in hits],
+                                        duration, timeout=20.0)
+    except Exception:  # noqa: BLE001
+        level = None
+    if level is None:
+        return ["CUT EDGES: " + ", ".join(
+            f"{h['kind']} {h['boundary']:g} inside '{h['word']}'"
+            for h in hits) + " (transcript only: the sound at the cut was "
+            "not read)"]
+    try:
+        fps = float(((getattr(ctx, "index", None) or {}).get("video") or {})
+                    .get("fps") or 30.0)
+    except (TypeError, ValueError):
+        fps = 30.0
+    verdicts = audit.edge_verdicts(hits, level, 1.0 / max(fps, 1.0), keep,
+                                   words)
+    bad = [v for v in verdicts if v["loud"]]
+    out = []
+    for v in bad:
+        out.append(
+            f"CUT INSIDE A SOUNDING WORD: {v['kind']} {v['boundary']:g} in "
+            f"'{v['word']}' ({v['db']:.0f} dB at the cut)"
+            + (f" -> move it to {v['safe']:g} (the sound-safe edge)"
+               if v.get("safe") is not None else
+               " -> no quiet point within reach: cut at a breath or "
+               "sentence end"))
+    quiet = len(verdicts) - len(bad)
+    out.append(f"CUT EDGES: {edges} here; {quiet} the transcript puts in a "
+               "word sit in quiet sound (its word timing is off: clean)"
+               if quiet else f"CUT EDGES: {edges} here")
+    return out
 
 
 def align_lyrics(ctx, lyrics, music_id=None):
@@ -369,8 +429,11 @@ TOOL_SPECS = {
         "a whole short) — audible transcript words, untranscribed sound (an "
         "'um', a cut word's tail, a breath), clipping, clicks, all on the "
         "program clock; a window across cuts reads each kept span's own "
-        "sound. Measured, never guessed; use it before and after a cut. "
-        "Omit start/end to read the whole short.",
+        "sound, and a cut inside a word that still sounds is named with "
+        "the sound-safe edge to move it to (the edge keep_segments, the "
+        "render's MID-WORD AUDIT and critique_short name). Measured, never "
+        "guessed; use it before and after a cut. Omit start/end to read the "
+        "whole short.",
         {"start": {"type": "number"}, "end": {"type": "number"}}),
     "align_lyrics": (
         align_lyrics,

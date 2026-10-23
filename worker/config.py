@@ -2449,6 +2449,16 @@ HANDOFF_VERSION = 1
 # v3: explicit source cards align to indexed camera frames without a focus track.
 CARD_LAYOUT_VERSION = 3
 
+# Repaint patches on their own frames (renderer.patch_clock, Oct 2026). The
+# overlay shifted a patch clip by the REQUESTED src_start while
+# inpaint.build_patch starts it on the frame grid (floor(start * fps) / fps),
+# so every repainted window ran one frame late: at a camera cut inside it the
+# crop and picture cards framed the old shot's last frame with the new shot's
+# layout (Gates s15 4368 at 6.72 s, s23 4356 at 25.36 s). Stamped as
+# `patch_v` and compared ONLY for EDLs that carry a repaint patch. Everything
+# else keeps its cache.
+PATCH_CLOCK_VERSION = 1
+
 # The picture pipeline's look. A stitched preview stream-copies the unchanged
 # stretches of the previous preview and splices in newly rendered pieces, so
 # pieces from a different look show a sharpness/tone seam at every splice.

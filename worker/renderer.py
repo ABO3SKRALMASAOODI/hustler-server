@@ -2525,6 +2525,58 @@ def follow_current(meta, edl):
     return ((meta or {}).get("follow_v") or 0) == config.FOLLOW_VERSION
 
 
+def patch_clock(src_start, src_end, fps, origin=None):
+    """(shift, enable_from, enable_to): where a repaint patch clip sits on
+    the source clock the main trims read, and the window its overlay
+    replaces — so patch frame k replaces the very source frame it was
+    painted from.
+
+    inpaint.build_patch snaps the window OUTWARD to the frame grid
+    (floor(src_start * fps) / fps) and decodes from there: its frame 0 is the
+    first source frame at or after that snapped start. The overlay used to
+    shift the clip by the REQUESTED src_start (345.14 where frame 0 sat at
+    345.1365), so every patch frame landed a few ms after its own source
+    frame and overlay — which shows the latest secondary frame at or before
+    each main frame — showed the PREVIOUS patch frame: the whole repainted
+    window ran one frame late. At a camera cut inside the window, the crop
+    and the picture cards (switched on the source's real cut) then framed
+    the last frame of the old shot with the new shot's layout: Gates s15
+    (4368, 6.72 s, patch over 1171.05-1175.63, cut 1174.882) and s23 (4356,
+    25.36 s, patch over 345.14-349.47, cut 348.723) — the orphan frames no
+    EDL edit could move.
+
+    Here frame 0's time is computed on the main picture's own grid
+    (origin + k / fps, origin = the picture's first-frame time, 0 when
+    unknown) and the clip goes HALF a frame before it, so float rounding
+    on either side cannot pick the neighbour; the enable window spans the
+    same frames, half a frame either side. fps None/0 (a VFR or unknown
+    picture) keeps the legacy placement."""
+    ps, pe = float(src_start), float(src_end)
+    try:
+        fps = float(fps or 0.0)
+    except (TypeError, ValueError):
+        fps = 0.0
+    if fps <= 0:
+        return ps, ps, pe
+    o = float(origin or 0.0)
+    snapped = math.floor(ps * fps) / fps           # inpaint.build_patch
+    end = math.ceil(pe * fps) / fps
+    k0 = math.ceil((snapped - o) * fps - 1e-3)
+    t0 = o + k0 / fps
+    frames = max(1, int(round((end - snapped) * fps)))
+    half = 0.5 / fps
+    return t0 - half, t0 - half, t0 + frames / fps - half
+
+
+def patch_clock_current(meta, edl):
+    """Was this render's repainted window drawn on its own source frames
+    (config.PATCH_CLOCK_VERSION, patch_clock)? Only EDLs that carry a
+    repaint patch can be stale; everything else keeps its cache."""
+    if not any(isinstance(p, dict) for p in (edl or {}).get("patches") or []):
+        return True
+    return ((meta or {}).get("patch_v") or 0) == config.PATCH_CLOCK_VERSION
+
+
 def cards_current(meta, edl):
     """Was this render's layout drawn by today's cards and headline band
     (config.CARD_LAYOUT_VERSION)? Only EDLs that carry a picture card or a
@@ -4013,9 +4065,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         # to the patch's own window and eof_action=pass hands the stream
         # back to the untouched source after the last patch frame.
         for pj, (pidx, pit) in enumerate(patch_inputs or []):
-            pps = float(pit["src_start"])
-            ppe = float(pit["src_end"])
-            parts.append(f"[{pidx}:v]setpts=PTS+{pps:.3f}/TB[ptc{pj}]")
+            # On the frame each patch frame was painted from (patch_clock):
+            # the requested src_start ran the whole window a frame late.
+            pps, pon, ppe = patch_clock(pit["src_start"], pit["src_end"],
+                                        src_fps, focus_origin)
+            parts.append(f"[{pidx}:v]setpts=PTS+{pps:.6f}/TB[ptc{pj}]")
             # The patch builder records display-sized, square-pixel frames.
             # Scale them back to the decoded source's pixel grid before the
             # source is normalized.  scale2ref looked convenient here, but
@@ -4033,7 +4087,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             # programme to the patch window.  The primary must always run on.
             parts.append(f"[{vsrc}][pts{pj}]overlay=eof_action=pass:"
                          "shortest=0:repeatlast=0"
-                         f":enable='between(t,{pps:.3f},{ppe:.3f})'"
+                         f":enable='between(t,{pon:.6f},{ppe:.6f})'"
                          f"[vptc{pj}]")
             vsrc = f"vptc{pj}"
     # Distant keep clusters read from their own bounded inputs (render_edl
@@ -9069,6 +9123,7 @@ def _run_render_job(worker_db, job):
                 and carry_current(cached.get("meta"), edl_row["json"]) \
                 and follow_current(cached.get("meta"), edl_row["json"]) \
                 and cards_current(cached.get("meta"), edl_row["json"]) \
+                and patch_clock_current(cached.get("meta"), edl_row["json"]) \
                 and (not handoff_may_matter(edl_row["json"])
                      or handoff_current(
                          cached.get("meta"), edl_row["json"],
@@ -9414,6 +9469,7 @@ def _run_render_job(worker_db, job):
                             and carry_current(pm, prev_row["json"]) \
                             and follow_current(pm, prev_row["json"]) \
                             and cards_current(pm, prev_row["json"]) \
+                            and patch_clock_current(pm, prev_row["json"]) \
                             and handoff_current(pm, prev_row["json"], index) \
                             and watermark_current(pm, variant, is_paid,
                                                   wm_settings) \
@@ -9797,6 +9853,10 @@ def _run_render_job(worker_db, job):
                   "card_v": (reused_visual_meta.get("card_v") or 0
                              if reused_visual_meta
                              else config.CARD_LAYOUT_VERSION),
+                  # ...and the repaint patches on the frames it drew them.
+                  "patch_v": (reused_visual_meta.get("patch_v") or 0
+                              if reused_visual_meta
+                              else config.PATCH_CLOCK_VERSION),
                   # A reused picture keeps the block clock it was cut on.
                   "clock_v": (reused_visual_meta.get("clock_v") or 0
                               if reused_visual_meta

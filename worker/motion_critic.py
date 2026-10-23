@@ -509,16 +509,56 @@ def _level(db, frame_s, t0, t1):
     return float(seg.max()) if len(seg) else None
 
 
+def _sound_safe_edge(w, edge, kind, keep, words, level, index):
+    """(edge, measured) for a keep edge the transcript puts inside word
+    ``w``: (False, True) when the source's sound is quiet there
+    (audit.edge_verdicts: the transcript's timing is off, no mid-word cut);
+    the sound-safe edge measured on the source; else the edge the keep
+    tools fall back to without the sound (cut_audio.place_edge, padded past
+    the word's transcript edge)."""
+    import audit
+    import cut_audio
+    if level is not None:
+        try:
+            fps = float(((index or {}).get("video") or {}).get("fps") or 30.0)
+            v = audit.edge_verdicts(
+                [{"boundary": float(edge), "kind": kind,
+                  "word": w.get("w"), "t0": float(w["t0"]),
+                  "t1": float(w["t1"])}],
+                level, 1.0 / max(fps, 1.0), keep, words)[0]
+            if v.get("db") is not None:
+                if not v["loud"]:
+                    return False, True
+                if v.get("safe") is not None:
+                    return round(float(v["safe"]), 2), True
+        except Exception:  # noqa: BLE001 — fall back to the transcript
+            pass
+    got = cut_audio.place_edge(kind, float(edge), words, None)
+    t = round(float(got["t"]), 2)
+    if abs(t - float(edge)) < 0.005:
+        t = round(float(w["t1"]) + 0.02 if kind == "end"
+                  else float(w["t0"]) - 0.02, 2)
+    return t, False
+
+
 # A join is audible mid-sound when both sides are this loud (the master
 # sits around -14 LUFS; a pause reads well under -40 dBFS).
 JOIN_LOUD_DB = -32.0
 JOIN_WIN_S = 0.03
 
 
-def lens_words(edl, index, plan, program_s, path=None):
+def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
     """Cuts that split a word (the ASR span straddles the cut AND the
     render's audio is loud on both sides of the join), an opening
-    mid-sentence, the payoff hold."""
+    mid-sentence, the payoff hold.
+
+    ``cut_level``: the SOURCE's sound at the keep's edges (cut_audio.
+    source_levels). With it a join is judged and repaired by the one rule
+    the keep tools and the render's MID-WORD AUDIT use (audit.
+    edge_verdicts): an edge whose source sound is quiet is no mid-word cut,
+    and the op moves a loud one to the sound-safe edge, not to the
+    transcript's word edge (which runs 0.05-0.25 s off the sound: the op's
+    edge was flagged again by the next audit, Diamandis 4416-4425)."""
     out = []
     words = [w for w in (index or {}).get("words") or []
              if isinstance(w, dict) and not w.get("filler")]
@@ -537,6 +577,8 @@ def lens_words(edl, index, plan, program_s, path=None):
             if prev.get("kind") != "footage" or nxt.get("kind") != "footage":
                 continue
             out_pt, in_pt = float(prev["src_end"]), float(nxt["src_start"])
+            if abs(out_pt - in_pt) < 0.011:
+                continue      # one continuous run split for a camera: no cut
             t = float(nxt["out_start"])
             straddle = None
             for edge, side in ((out_pt, "out"), (in_pt, "in")):
@@ -554,15 +596,18 @@ def lens_words(edl, index, plan, program_s, path=None):
                     la < JOIN_LOUD_DB:
                 continue           # silent on one side: a clean cut
             w, edge, side = straddle
+            kind = "end" if side == "out" else "start"
+            snap, measured = _sound_safe_edge(w, edge, kind, keep, words,
+                                              cut_level, index)
+            if snap is False:
+                continue      # the source is quiet there: no mid-word cut
             k = next((i for i, kk in enumerate(keep)
                       if abs(float(kk[1 if side == "out" else 0]) - edge)
                       < 0.011), None)
-            snap = float(w["t1"]) if side == "out" else float(w["t0"])
             op = None
             if k is not None:
                 new = [list(x) for x in keep]
-                new[k][1 if side == "out" else 0] = round(
-                    snap + (0.02 if side == "out" else -0.02), 2)
+                new[k][1 if side == "out" else 0] = snap
                 if all(b - a >= 0.2 for a, b in new) and all(
                         new[i][1] <= new[i + 1][0]
                         for i in range(len(new) - 1)):
@@ -573,8 +618,14 @@ def lens_words(edl, index, plan, program_s, path=None):
                 f"{float(w['t0']):.2f}-{float(w['t1']):.2f}s): sound runs "
                 f"through the join ({lb:.0f} / {la:.0f} dBFS), an audible "
                 "fragment.",
-                fix=f"move the {side}-point to the word's "
-                    f"{'end' if side == 'out' else 'start'} ({snap:.2f}s)",
+                fix=(f"move the {side}-point to {snap:.2f}s, where the "
+                     "source's sound is quiet (measured — the same edge the "
+                     "keep tools and the render's MID-WORD AUDIT name)"
+                     if measured else
+                     f"move the {side}-point past the word's "
+                     f"{'end' if side == 'out' else 'start'} ({snap:.2f}s: "
+                     "its transcript edge, padded as the keep tools pad it "
+                     "without the sound; check_speech it)"),
                 t=t, op=op))
         # the last frame: a short that ends inside a word ends on a
         # fragment ("Ye-" before the end card)
@@ -643,6 +694,12 @@ def lens_words(edl, index, plan, program_s, path=None):
                     fix="start on the sentence's first word, or open on a "
                         "line that stands alone", t=0.0))
     pw = plan.get("words") or []
+    import audit
+    duck = audit.ducked_spans(edl)
+    if duck:
+        # a word set_volume silences is not the last word heard
+        pw = [w for w in pw if not audit.silenced(w.get("s0"), w.get("s1"),
+                                                  duck)]
     if pw and program_s:
         hold = program_s - max(float(w["t1"]) for w in pw)
         if 0 < hold < PAYOFF_HOLD_S - 1e-3:
@@ -1543,7 +1600,8 @@ def _brand_findings(ec, rb, render_qc):
 
 def critique(path, edl, index=None, *, request_text=None, report=None,
              previous=None, fmt=None, intensity="designed", final=None,
-             want_wm=False, maps=None, deep=True, board_dir=None):
+             want_wm=False, maps=None, deep=True, board_dir=None,
+             cut_level=None):
     """Judge the render at ``path`` of ``edl``. Returns {version, score,
     genre, findings (ranked), measures, ideas, strengths, board, wall_s}.
     Never raises for a lens: a lens that fails is reported, the others
@@ -1599,7 +1657,8 @@ def critique(path, edl, index=None, *, request_text=None, report=None,
     if got:
         findings += got[0]
         measures["rhythm"] = got[1]
-    got = run("words", lens_words, edl, index, plan, program_s, path)
+    got = run("words", lens_words, edl, index, plan, program_s, path,
+              cut_level)
     findings += got or []
     got = run("type", lens_type, report)
     if got:

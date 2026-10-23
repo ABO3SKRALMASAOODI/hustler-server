@@ -3054,26 +3054,35 @@ def _exact_keep_quiet_edges(ctx, keep, words):
     so the audit asks for a start in the pause the index files under the
     previous word, and the keep write then warned "lands inside the word"
     on that very edge (JRE #2054 part 2, p25 3228.71 / 3239.62 / 3279.70,
-    p33 4925.71): two checks, opposite advice, one rework loop each."""
+    p33 4925.71): two checks, opposite advice, one rework loop each.
+    Returns (quiet edges, {loud edge: its sound-safe edge}): the same verdict
+    (audit.edge_verdicts) names where a loud one should move, so the
+    warning stops offering the transcript's word edges, which the next
+    audit flagged again (Gates 4364 846.75 vs 846.63, 4383 2361.30 vs
+    2361.49)."""
     hook = getattr(ctx, "cut_sound_source", None)
     if not callable(hook) or not words:
-        return set()
+        return set(), {}
     try:
         hits = audit.midword_boundaries(keep, words, ctx.duration)
         if not hits:
-            return set()
+            return set(), {}
         source = hook()
         if not source:
-            return set()
+            return set(), {}
         loud = audit._audible(hits, source, ctx.duration,
-                              CUT_SOUND_BUDGET_S, 1.0 / 30.0)
+                              CUT_SOUND_BUDGET_S,
+                              1.0 / _index_fps(getattr(ctx, "index", None)),
+                              keep, words)
     except Exception:  # noqa: BLE001 — an advisory never fails a write
-        return set()
+        return set(), {}
     if loud is hits:
-        return set()                       # the sound could not be read
+        return set(), {}                   # the sound could not be read
     keep_loud = {round(float(h["boundary"]), 2) for h in loud}
-    return {round(float(h["boundary"]), 2) for h in hits
-            if round(float(h["boundary"]), 2) not in keep_loud}
+    return ({round(float(h["boundary"]), 2) for h in hits
+             if round(float(h["boundary"]), 2) not in keep_loud},
+            {round(float(h["boundary"]), 2): h["safe"] for h in loud
+             if h.get("safe") is not None})
 
 
 def _write_keep(ctx, new_keep, desc, snap_to_words=None,
@@ -3103,8 +3112,10 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         audio_notes = _exact_keep_onset_notes(
             ctx, new_keep, None if place_all else prev_keep, words)
     new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
+    safe_edges = {}
     if snap_to_words is False:
-        quiet_edges = _exact_keep_quiet_edges(ctx, new_keep, words)
+        quiet_edges, safe_edges = _exact_keep_quiet_edges(ctx, new_keep,
+                                                          words)
     edl = dict(prev["json"])
     edl["keep"] = new_keep
     speed = edl.get("speed") or []
@@ -3132,7 +3143,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         result += "\n" + "\n".join(region_notes + audio_notes + shot_notes)
     warn = audit.boundary_warning_lines(
         [[s, e] for s, e in new_keep], words, silences, ctx.duration,
-        skip=quiet_edges)
+        skip=quiet_edges, safe=safe_edges)
     if snap_to_words:
         warn = []   # snapping guarantees word-clean boundaries
     if check_regression:

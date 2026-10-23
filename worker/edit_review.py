@@ -1624,8 +1624,14 @@ def _end_hold_s(edl, prog):
 def _payoff_notes(prog, payoff, ms=(), index=None, edl=None):
     notes = []
     dur = prog.duration
-    if prog.kept and dur > 0:
-        last = max(prog.kept, key=lambda w: _f(w["t1"]))
+    import audit
+    duck = audit.ducked_spans(edl)
+    # a word set_volume silences (the next speaker's first word, ducked in
+    # the payoff's tail) is not the last word heard
+    heard = [w for w in prog.kept
+             if not audit.silenced(w.get("src_t0"), w.get("src_t1"), duck)]
+    if heard and dur > 0:
+        last = max(heard, key=lambda w: _f(w["t1"]))
         hold = dur - _f(last["t1"])
         if hold < PAYOFF_HOLD_MIN_S - 1e-6:
             src_end = _f(last.get("src_t1"), None)

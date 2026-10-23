@@ -210,7 +210,11 @@ def test_a_cut_through_a_sounding_word_is_blocking(two_tone):
     f = [x for x in got if x["code"] == "cut_mid_word"]
     assert f and f[0]["severity"] == "blocking"
     assert f[0]["op"]["layer"] == "keep"
-    assert f[0]["op"]["value"][0][1] == pytest.approx(2.32)
+    # the op names the edge the keep tools place there without the sound
+    # (one rule: cut_audio.place_edge), not the bare transcript edge
+    import cut_audio
+    want = cut_audio.place_edge("end", 2.0, index["words"], None)["t"]
+    assert f[0]["op"]["value"][0][1] == pytest.approx(want)
 
 
 def test_a_cut_in_silence_inside_an_asr_word_span_is_clean(two_tone):

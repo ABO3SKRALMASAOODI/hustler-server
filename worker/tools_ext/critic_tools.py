@@ -57,6 +57,28 @@ def _siblings(conn, project_id, limit=_MAX_SIBLINGS):
         return [r["json"] for r in cur.fetchall() if r.get("json")]
 
 
+def _cut_level(ctx, edl):
+    """The source's sound at the keep's edges (cut_audio.source_levels), so
+    the critic judges a join by the rule the keep tools and the render's
+    MID-WORD AUDIT use (audit.edge_verdicts); None when it cannot be read
+    (the critic then falls back to the render's own sound)."""
+    hook = getattr(ctx, "cut_sound_source", None)
+    times = [float(x) for span in (edl or {}).get("keep") or []
+             for x in span[:2]]
+    if not callable(hook) or len(times) < 4:
+        return None
+    try:
+        import cut_audio
+        src = hook()
+        if not src:
+            return None
+        return cut_audio.source_levels(src, times,
+                                       getattr(ctx, "duration", None),
+                                       timeout=20.0)
+    except Exception:  # noqa: BLE001 — the critic still judges without it
+        return None
+
+
 def critique_short(ctx, variant="auto", asset_key=None, deep=True,
                    board=True, format=None):
     import motion_critic
@@ -101,13 +123,14 @@ def critique_short(ctx, variant="auto", asset_key=None, deep=True,
     except Exception:  # noqa: BLE001
         intensity = "designed"
     final = (meta.get("variant") == "final")
+    cut_level = _cut_level(ctx, edl)
     res = motion_critic.critique(
         local, edl, getattr(ctx, "index", None) or {},
         request_text=getattr(ctx, "user_message", None), report=meta,
         previous=previous, intensity=intensity, final=final, fmt=fmt,
         want_wm=bool(final and (meta.get("picture_qc") or {}).get(
             "watermark") is not None), maps=maps, deep=bool(deep),
-        board_dir=workdir if board else None)
+        board_dir=workdir if board else None, cut_level=cut_level)
     ctx._last_critique = res
     text = motion_critic.critique_text(res)
     if res.get("board") and isinstance(getattr(ctx, "pending_images", None),

@@ -58,6 +58,7 @@ measure it — and any estimated box — before they build captions
 has no box and never moves or mutes a caption.
 """
 
+import audit
 import difflib
 import math
 import re
@@ -2268,6 +2269,11 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
     if not (index or {}).get("words"):
         return []
     spoken = caplib.transcript_words(edl, index, tl)
+    duck = audit.ducked_spans(edl)
+    if duck:
+        # a word set_volume silences is not heard: it need not be shown
+        spoken = [w for w in spoken if not audit.silenced(
+            w.get("src_t0"), w.get("src_t1"), duck)]
     mutes = caplib.effective_caption_mutes(edl)
     after_mutes = caplib.transcript_words(edl, index, tl, mutes)
     p = plan(edl, index, tl, after_mutes)
