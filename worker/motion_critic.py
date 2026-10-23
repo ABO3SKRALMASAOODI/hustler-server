@@ -559,6 +559,8 @@ def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
     and the op moves a loud one to the sound-safe edge, not to the
     transcript's word edge (which runs 0.05-0.25 s off the sound: the op's
     edge was flagged again by the next audit, Diamandis 4416-4425)."""
+    import audit
+    duck = audit.ducked_spans(edl)
     out = []
     words = [w for w in (index or {}).get("words") or []
              if isinstance(w, dict) and not w.get("filler")]
@@ -597,6 +599,10 @@ def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
                 continue           # silent on one side: a clean cut
             w, edge, side = straddle
             kind = "end" if side == "out" else "start"
+            kept_part = (float(w["t0"]), edge) if kind == "end" \
+                else (edge, float(w["t1"]))
+            if audit.silenced(kept_part[0], kept_part[1], duck):
+                continue      # set_volume silences what the cut keeps
             snap, measured = _sound_safe_edge(w, edge, kind, keep, words,
                                               cut_level, index)
             if snap is False:
@@ -694,8 +700,6 @@ def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
                     fix="start on the sentence's first word, or open on a "
                         "line that stands alone", t=0.0))
     pw = plan.get("words") or []
-    import audit
-    duck = audit.ducked_spans(edl)
     if duck:
         # a word set_volume silences is not the last word heard
         pw = [w for w in pw if not audit.silenced(w.get("s0"), w.get("s1"),

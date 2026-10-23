@@ -339,7 +339,8 @@ def _cut_edge_lines(ctx, edl, pieces, words, src):
     duration = getattr(ctx, "duration", None)
     srcs = [round(a, 2) for _p0, _p1, a, _b, _f in pieces] + \
         [round(b, 2) for _p0, _p1, _a, b, _f in pieces]
-    hits = [h for h in audit.midword_boundaries(keep, words, duration)
+    hits = [h for h in audit.midword_boundaries(keep, words, duration,
+                                                audit.ducked_spans(edl))
             if round(float(h["boundary"]), 2) in srcs]
     edges = sum(1 for i, side, b in cut_audio.cut_edges(keep, duration)
                 if round(b, 2) in srcs)

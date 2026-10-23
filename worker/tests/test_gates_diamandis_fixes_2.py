@@ -168,3 +168,19 @@ def test_silenced_needs_most_of_the_word_under_a_deep_duck():
     assert not audit.silenced(9.8, 10.1, spans)       # a third of it
     assert not audit.silenced(20.1, 20.4, spans)      # a mix duck, heard
     assert not audit.silenced(None, None, spans)
+
+
+def test_a_cut_into_a_ducked_word_is_no_mid_word_cut():
+    # Gates s15 (4368 v69): keep end 1214.67 inside 'That' (1214.50-1214.82)
+    # under a -60 dB duck: the MID-WORD AUDIT read 'sound -8 dB' on the
+    # source although nothing of it is heard
+    keep = [[1200.56, 1214.67]]
+    words = [{"w": "That", "t0": 1214.50, "t1": 1214.82}]
+    edl = {"keep": keep,
+           "volume": [{"start": 1214.46, "end": 1214.7, "gain_db": -60.0}]}
+    assert audit.midword_boundaries(keep, words, 4429.5)
+    ducks = audit.ducked_spans(edl)
+    assert not audit.midword_boundaries(keep, words, 4429.5, ducks)
+    assert not audit.midword_audit(keep, words, 4429.5, ducks=ducks)
+    assert not audit.boundary_warning_lines(keep, words, [], 4429.5,
+                                            ducks=ducks)

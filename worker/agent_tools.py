@@ -3064,7 +3064,9 @@ def _exact_keep_quiet_edges(ctx, keep, words):
     if not callable(hook) or not words:
         return set(), {}
     try:
-        hits = audit.midword_boundaries(keep, words, ctx.duration)
+        hits = audit.midword_boundaries(
+            keep, words, ctx.duration,
+            audit.ducked_spans(ctx.latest_edl()["json"]))
         if not hits:
             return set(), {}
         source = hook()
@@ -3143,7 +3145,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         result += "\n" + "\n".join(region_notes + audio_notes + shot_notes)
     warn = audit.boundary_warning_lines(
         [[s, e] for s, e in new_keep], words, silences, ctx.duration,
-        skip=quiet_edges, safe=safe_edges)
+        skip=quiet_edges, safe=safe_edges, ducks=audit.ducked_spans(edl))
     if snap_to_words:
         warn = []   # snapping guarantees word-clean boundaries
     if check_regression:

@@ -71,9 +71,14 @@ def word_at_boundary(words, b):
     return None
 
 
-def midword_boundaries(keep, words, duration=None):
+def midword_boundaries(keep, words, duration=None, ducks=None):
     """All keep boundaries (excluding 0 and the video end) that land inside
-    a word. Returns [{'boundary', 'kind': 'start'|'end', 'word', 't0','t1'}]."""
+    a word. Returns [{'boundary', 'kind': 'start'|'end', 'word', 't0','t1'}].
+    ``ducks`` (ducked_spans): a boundary whose KEPT part of the word
+    set_volume silences cuts nothing anyone hears — the next speaker's
+    first word ducked in a payoff's tail (Gates s15 4368: 'That'
+    1214.50-1214.82 under a -60 dB duck, keep end 1214.67, read 'sound
+    -8 dB' on the source by the MID-WORD AUDIT)."""
     out = []
     for i, (s, e) in enumerate(keep):
         for b, kind in ((s, "start"), (e, "end")):
@@ -88,6 +93,9 @@ def midword_boundaries(keep, words, duration=None):
                 continue
             hit = word_at_boundary(words, b)
             if hit:
+                kept = (b, hit["t1"]) if kind == "start" else (hit["t0"], b)
+                if ducks and silenced(kept[0], kept[1], ducks):
+                    continue
                 out.append({"boundary": b, "kind": kind, "word": hit["w"],
                             "t0": hit["t0"], "t1": hit["t1"]})
     return out
@@ -150,7 +158,7 @@ def nearest_silence_midpoint(silences, t):
 
 
 def boundary_warning_lines(keep, words, silences, duration=None, skip=(),
-                           safe=None):
+                           safe=None, ducks=None):
     """WARNING lines for keep boundaries inside words. ``skip``: boundary
     times (hundredths) already judged clean on the source's sound — the
     transcript puts a word there but the sound is quiet (cut_audio).
@@ -161,7 +169,7 @@ def boundary_warning_lines(keep, words, silences, duration=None, skip=(),
     lines = []
     skip = {round(float(t), 2) for t in skip or ()}
     safe = {round(float(k), 2): float(v) for k, v in (safe or {}).items()}
-    for hit in midword_boundaries(keep, words, duration):
+    for hit in midword_boundaries(keep, words, duration, ducks):
         if round(float(hit["boundary"]), 2) in skip:
             continue
         at = safe.get(round(float(hit["boundary"]), 2))
@@ -186,7 +194,7 @@ def boundary_warning_lines(keep, words, silences, duration=None, skip=(),
 
 
 def midword_audit(keep, words, duration=None, source=None, timeout=10.0,
-                  frame_s=1.0 / 30.0):
+                  frame_s=1.0 / 30.0, ducks=None):
     """Compact strings for render results / logs.
 
     With ``source`` (the source media the render read: a path or a URL
@@ -197,7 +205,7 @@ def midword_audit(keep, words, duration=None, source=None, timeout=10.0,
     quiet (Whisper's onsets run late and its ends early), and the render's
     audit used to flag the very edge they chose (Oct 10 podcast run, s04 and
     s05). Unread sound keeps the transcript's verdict."""
-    hits = midword_boundaries(keep, words, duration)
+    hits = midword_boundaries(keep, words, duration, ducks)
     if hits and source:
         hits = _audible(hits, source, duration, timeout, frame_s, keep, words)
     out = [f"boundary {h['boundary']:.2f} inside '{h['word']}' "

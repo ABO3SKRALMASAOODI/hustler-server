@@ -9906,7 +9906,8 @@ def _run_render_job(worker_db, job):
         mw = [] if is_canvas else audit.midword_audit(
             edl_row["json"]["keep"], index.get("words", []),
             index["video"]["duration"], source=src_local,
-            frame_s=1.0 / float((index.get("video") or {}).get("fps") or 30.0))
+            frame_s=1.0 / float((index.get("video") or {}).get("fps") or 30.0),
+            ducks=audit.ducked_spans(edl_row["json"]))
         if mw:
             print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
                   flush=True)
