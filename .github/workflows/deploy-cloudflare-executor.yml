@@ -22,7 +22,11 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 23 Oct 2026: the runner's Ubuntu mirror served the apt step for ~50
+    # minutes (normally ~2), and run #144 (50a57450) was cancelled at the
+    # 90-minute ceiling with its tests at 78%. The suite alone is ~25 min and
+    # publish + verify ~15, so a slow mirror must not cost the release.
+    timeout-minutes: 150
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
