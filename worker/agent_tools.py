@@ -25520,6 +25520,37 @@ def _argument_aliases(name, args, notes):
             args.pop("end")
             args["duration_s"] = dur
             notes.append("end -> duration_s")
+    # Production 23 Oct (Gates/Diamandis/live runs): add_stock_media(ids=[one
+    # research_broll id]) twice, research_broll(query=...) twice, and
+    # look_at(source=true) / look_at(view='source') were refused before any
+    # work.
+    if name == "add_stock_media" and "id" not in args and "ids" in args:
+        ids = _json_text(args["ids"])
+        ids = ids if isinstance(ids, list) else [ids]
+        if len(ids) == 1 and isinstance(ids[0], str):
+            args.pop("ids")
+            args["id"] = ids[0]
+            notes.append("ids -> id")
+    if name == "research_broll" and "moments" not in args and \
+            isinstance(args.get("query"), str):
+        moment = {k: args.pop(k) for k in
+                  ("query", "query_variants", "kind", "at", "duration_s",
+                   "purpose", "id") if k in args}
+        args["moments"] = [moment]
+        notes.append("query -> moments[0]")
+    if name == "look_at":
+        view = str(args.get("view") or "").strip().lower()
+        if "view" in args and view in ("source", "rendered", "render",
+                                       "preview"):
+            args.pop("view")
+            if view != "source" and "rendered" not in args:
+                args["rendered"] = True
+            notes.append(f"view '{view}' -> "
+                         + ("times are source seconds" if view == "source"
+                            else "rendered=true"))
+        if isinstance(args.get("source"), bool):
+            if args.pop("source"):
+                notes.append("source=true -> times are source seconds")
     if name == "remove_typeset" and "ids" not in args and "id" in args:
         one = args.pop("id")
         args["ids"] = one if isinstance(one, list) else [one]

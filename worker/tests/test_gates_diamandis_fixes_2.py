@@ -184,3 +184,24 @@ def test_a_cut_into_a_ducked_word_is_no_mid_word_cut():
     assert not audit.midword_audit(keep, words, 4429.5, ducks=ducks)
     assert not audit.boundary_warning_lines(keep, words, [], 4429.5,
                                             ducks=ducks)
+
+
+# ── argument spellings refused in production on 23 Oct ─────────────────
+
+def test_argument_spellings_from_the_23_oct_runs_are_read():
+    import agent_tools
+    norm = agent_tools._normalize_tool_call
+    assert norm("add_stock_media", {"ids": '["broll:1:m1:pexels:photo:1"]'}
+                )[1] == {"id": "broll:1:m1:pexels:photo:1"}
+    # several ids stay a refusal (the tool downloads one at a time)
+    assert "ids" in norm("add_stock_media", {"ids": ["a", "b"]})[1]
+    got = norm("research_broll", {"kind": "video",
+                                  "query": "semiconductor wafer cleanroom"})[1]
+    assert got == {"moments": [{"query": "semiconductor wafer cleanroom",
+                                "kind": "video"}]}
+    assert norm("look_at", {"times": [1.0], "source": True})[1] == {
+        "times": [1.0]}
+    assert norm("look_at", {"times": [1.0], "view": "source"})[1] == {
+        "times": [1.0]}
+    assert norm("look_at", {"output_times": [1.0], "view": "rendered"}
+                )[1] == {"output_times": [1.0], "rendered": True}
