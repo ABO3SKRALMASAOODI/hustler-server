@@ -804,6 +804,12 @@ PINNED_MOTION_TEMPLATES = ("headline",)
 # An item ending this close to the programme's end ran to the end (a payoff,
 # the last card): after a re-cut it still ends on the new end.
 RUNS_TO_END_S = 0.05
+# A motion graphic starting on the first frame is the OPENING (the hook):
+# after a re-cut it still opens the programme, and a trim before its word
+# never leaves it shorter than this (JRE #2054 part 2: a 0.84 s head trim
+# left p25's hook word_slam 0.77 s long, an earlier start moved it to
+# 0.88-2.25 s and opened the short bare; p14's collapsed to 0.61 s).
+OPENING_HOLD_MIN_S = 1.2
 
 
 def remap_program_items(edl, old_tl, new_tl):
@@ -1915,11 +1921,20 @@ def remap_program_items(edl, old_tl, new_tl):
                     continue
                 if e0 >= old_prog - RUNS_TO_END_S:
                     moved = (moved[0], prog)     # it ran to the end: still does
+                opening = False
+                if s0 <= RUNS_TO_END_S:
+                    # the hook still opens the programme, and stays readable
+                    held = (0.0, round(min(prog, max(
+                        moved[1], min(e0 - s0, OPENING_HOLD_MIN_S))), 2))
+                    opening = held != tuple(moved)
+                    moved = held
                 if (moved[0], moved[1]) != (s0, e0):
                     mo["start"], mo["end"] = moved
                     region_notes.append(
                         f"note: motion graphic {mo.get('id')} moved to "
-                        f"{moved[0]}-{moved[1]}s with its moment.")
+                        f"{moved[0]}-{moved[1]}s "
+                        + ("— it opens the programme, so it keeps the "
+                           "opening." if opening else "with its moment."))
             else:
                 d = _insert_shift(s0, e0)
                 if d:
@@ -2317,6 +2332,11 @@ def transition_junctions(edl, index, n_blocks=None):
 
     if scope == "every_cut":
         return selected(set(range(n_junctions)) - protected)
+    if scope == "media":
+        return selected({k for k in range(n_junctions)
+                         if k not in protected
+                         and (blocks[k][0] == "ins"
+                              or blocks[k + 1][0] == "ins")})
 
     shots = (index or {}).get("shots") or []
     if not shots:

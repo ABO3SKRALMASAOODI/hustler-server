@@ -1315,7 +1315,16 @@ TRANSITION_MAX_S = 1.5
 #                 people mean by "add transitions".
 #   "every_cut" — the old behaviour. Legitimate for a montage assembled from
 #                 many separate clips; it has to be asked for.
-TRANSITION_SCOPES = ("scene", "every_cut")
+#   "media"     — only where spliced media enters or leaves (b-roll, a still,
+#                 a title card). A conversation short changes camera inside
+#                 one exchange; a dip there blanks the picture between two
+#                 lines (JRE #2054 part 2, project 3850), so a look's dip
+#                 base on a talking short keeps to the media joins.
+TRANSITION_SCOPES = ("scene", "every_cut", "media")
+# The scopes set_transitions' schema lists: the core tool catalog is pinned
+# byte for byte (tests/test_w1_seams.py), so 'media' is what apply_look
+# writes on a talking short; set_transitions still accepts it by name.
+TRANSITION_SCOPES_PUBLIC = ("scene", "every_cut")
 
 
 class TransitionSpec(BaseModel):
@@ -1330,7 +1339,7 @@ class TransitionSpec(BaseModel):
     # them to the fixed behaviour repairs them on their next render rather than
     # grandfathering a bug. Already-rendered outputs are untouched — renders
     # are cached by EDL fingerprint and the stored JSON does not change.
-    scope: Literal["scene", "every_cut"] = "scene"
+    scope: Literal["scene", "every_cut", "media"] = "scene"
     # Optional exact subset of eligible junction indexes. This lets a subtle
     # treatment mark two or three meaningful changes without forcing the same
     # full-screen effect onto every scene change in a dense montage.
@@ -4391,6 +4400,8 @@ def describe_edl(edl_dict, duration=None, src_shape=None):
                         f"{fx.transition.duration_s}s"
                         + (" at every cut"
                            if fx.transition.scope == "every_cut"
+                           else " where media enters or leaves"
+                           if fx.transition.scope == "media"
                            else " at scene changes"))
         if fx.regions:
             bits.append("censor region x" + str(len(fx.regions)))

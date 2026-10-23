@@ -98,6 +98,9 @@ THE JUMP-CUT LAW:
 - `set_transitions` defaults to scope='scene' and lands only on real shot
   changes and insert boundaries. READ THE RESULT — it says how many junctions
   it used ("7 of 45"); report THAT number, not the cut count.
+- On a conversation (podcast, interview) the camera changes inside one
+  exchange: scope='media' fires only where B-roll, a still or a card enters
+  or leaves, and a look's base transition on a talking short already does.
 - If nothing qualified, this footage is one continuous shot: the junction
   vocabulary then comes from per-junction motion transitions on the real
   section turns, chapter titles and B-roll entries. Use scope='every_cut'

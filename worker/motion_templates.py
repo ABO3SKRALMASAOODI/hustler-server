@@ -180,6 +180,21 @@ def _check_row(where, row, clean, fields, types):
             raise ValueError(f"{where}.{f} must be one of {kind}, not '{val}'")
 
 
+def _visible_text(v):
+    """A template string as it reads on screen: without the *accent* stars,
+    each ' / ' line break one space."""
+    return str(v).replace("*", "").replace(" / ", " ")
+
+
+def _unset(p, v):
+    """An empty string for a non-text parameter is "not given": a client
+    that sends every optional field ("tier": "") meant the default (five
+    word_slam refusals 'tier must be one of [...]' in one run)."""
+    return p.get("type", "str") in ("enum", "color", "float", "int",
+                                    "bool") \
+        and isinstance(v, str) and not v.strip()
+
+
 def _coerce(name, key, p, v, strict):
     t = p.get("type", "str")
     where = f"{name}.{key}"
@@ -190,9 +205,20 @@ def _coerce(name, key, p, v, strict):
         if t == "str":
             v = " ".join(v.split())
         mx = int(p.get("max", 200))
-        if len(v) > mx:
+        # The budget is what reads on screen: the *accent* stars and the
+        # ' / ' line breaks are markup (a hook 'EX-TWITTER STAFF /
+        # *"SHIFT TO THE RIGHT"*' is 36 characters of type, refused as 41;
+        # 12 word_slam refusals in the JRE #2054 part 2 run alone).
+        shown = len(_visible_text(v))
+        if shown > mx:
             if strict:
-                raise ValueError(f"{where} is {len(v)} characters; keep it to {mx}")
+                raise ValueError(
+                    f"{where} is {shown} characters on screen; keep it to "
+                    f"{mx} (the *stars* and ' / ' breaks are not counted)"
+                    + (" — a lead-in line can go in 'kicker'"
+                       if key == "text" and "kicker" in (
+                           (_load().get(name) or {}).get("params") or {})
+                       else ""))
             v = v[:mx]
         return v
     if t == "int":
@@ -307,7 +333,8 @@ def normalize_params(name, params, html=None, strict=False):
         raise ValueError(f"{name} has no parameter(s) {unknown}; it accepts "
                          f"{sorted(s['params'])}")
     for key, p in s["params"].items():
-        if key in params and params[key] is not None:
+        if key in params and params[key] is not None \
+                and not _unset(p, params[key]):
             out[key] = _coerce(name, key, p, params[key], strict)
         elif p.get("required"):
             raise ValueError(f"{name} needs '{key}' ({p.get('hint') or p.get('type', 'str')})")

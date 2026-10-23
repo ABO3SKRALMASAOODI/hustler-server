@@ -421,7 +421,9 @@ def test_editorial_sets_a_coherent_system_in_one_version(monkeypatch):
     kinds = sorted((s["kind"], s["intensity"]) for s in fx["stylize"])
     assert kinds == [("grain", 0.18), ("vignette", 0.25)]
     assert fx["transition"]["style"] == "dip_white"
-    assert fx["transition"]["scope"] == "scene"
+    # a talking vertical short: the base keeps to media joins, never a dip
+    # at a camera change inside the conversation (test_jre2_run_fixes)
+    assert fx["transition"]["scope"] == "media"
     assert not fx.get("fade_in_s")                 # vertical: opens on picture
     assert "fade in cleared" in out
     assert "HERO MOMENTS" in out and "hook_title" in out

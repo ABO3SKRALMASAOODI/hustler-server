@@ -505,6 +505,13 @@ def _behind_report(stats, edl, item):
                 "shows the graphic over the subject, set_motion_graphic it "
                 "again once the model is back.")
     tc, tw = stats.get("text_covered"), stats.get("text_width_covered")
+    vis = stats.get("text_visible_mean")
+    if vis is not None and vis < _at().BEHIND_VISIBLE_WARN \
+            and not (tc is not None and tc < 0.02):
+        bits.append(
+            f"LEGIBILITY: on average {vis * 100:.0f}% of the graphic stays "
+            "visible across the window (below the 65% a word needs to read "
+            "at a glance).")
     if tc is not None and tc < 0.02:
         bits.append(
             f"WARNING: the subject crosses only {tc * 100:.1f}% of where the "
@@ -512,12 +519,18 @@ def _behind_report(stats, edl, item):
             "Tell the user, and move it (params/box) to where the subject "
             "actually is, or shift the window to when they cross it.")
     elif tw is not None and tw >= 0.45:
+        # "Right for a giant hero word" shipped broken words: a hero
+        # ANYWHERE at 73% rendered 'ANYW.RE' over a tight single and
+        # FRAGILE read 'FR GILE' (JRE #2054 part 2, 3856 job 89180, 3850).
         bits.append(
             f"LEGIBILITY: at its peak the subject covers {tw * 100:.0f}% of "
-            "the graphic's WIDTH. Right for a giant hero word the speaker "
-            "stands in front of (the eye completes tall letters); wrong for "
-            "copy that must be read in full. The craft fix is BIGGER type, "
-            "never smaller.")
+            "the graphic's WIDTH, so a word loses whole letters there "
+            "('ANYWHERE' read 'ANYW.RE', 'FRAGILE' read 'FR GILE'). Right "
+            "only if the subject SWEEPS PAST and the word re-emerges; when "
+            "they hold still in front of it, raise it (params y) so the head "
+            "crosses only the bottom of the letters, set the word beside the "
+            "head, or make the type BIGGER (never smaller) — then look_at "
+            "the rendered frame at the peak and say which you did.")
     elif tw is not None:
         bits.append(
             f"The subject crosses {tw * 100:.0f}% of the graphic's width at "

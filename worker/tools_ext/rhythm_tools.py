@@ -243,13 +243,22 @@ def _listen_sources(ctx):
     return src
 
 
-def check_speech(ctx, start, end):
+def check_speech(ctx, start=None, end=None):
     """READ: deterministic listening over [start, end] (program s). Each
     kept span under the window is read on its own source sound and reported
     on the PROGRAM clock (Oct 22 Kamath run: a window across a cut read the
     whole source range between its ends, cut-away words and fillers
-    included, on a clock that ran off after the first cut)."""
+    included, on a clock that ran off after the first cut). Without a
+    window it reads the whole short (its first 60 s): three calls with no
+    window were refused 'missing 2 required positional arguments' in the
+    JRE #2054 part 2 run."""
     edl = _latest(ctx)
+    if start is None and end is None:
+        start, end = 0.0, min(CHECK_SPEECH_MAX_S, _tl(edl).out_duration)
+    elif start is None:
+        start = max(0.0, float(end) - CHECK_SPEECH_MAX_S)
+    elif end is None:
+        end = min(float(start) + CHECK_SPEECH_MAX_S, _tl(edl).out_duration)
     try:
         s, e = float(start), float(end)
     except (TypeError, ValueError):
@@ -360,7 +369,8 @@ TOOL_SPECS = {
         "a whole short) — audible transcript words, untranscribed sound (an "
         "'um', a cut word's tail, a breath), clipping, clicks, all on the "
         "program clock; a window across cuts reads each kept span's own "
-        "sound. Measured, never guessed; use it before and after a cut.",
+        "sound. Measured, never guessed; use it before and after a cut. "
+        "Omit start/end to read the whole short.",
         {"start": {"type": "number"}, "end": {"type": "number"}}),
     "align_lyrics": (
         align_lyrics,

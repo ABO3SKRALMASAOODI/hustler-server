@@ -199,10 +199,13 @@ never across it. Aim with `rect` or `cx`/`cy` read off `look_at`'s grid.
 
 ### Transitions and their sounds
 
-`apply_look` sets a base transition, firing only at real scene changes, and
-places no sound unless called with `transition_sounds=true` (do not, unless
-the brief asks for transition sounds). `set_transitions` (keep
-`scope='scene'` so jump cuts stay invisible) adds no sound. Add 1-2
+`apply_look` sets a base transition and places no sound unless called with
+`transition_sounds=true` (do not, unless the brief asks for transition
+sounds). On a talking short the base fires only where B-roll, a still or a
+card enters or leaves (`scope='media'`): camera changes inside the
+conversation stay hard cuts, so there is no need to clear it with
+`set_transitions('none')`. `set_transitions` (`scope='scene'` or `'media'`,
+so jump cuts stay invisible) adds no sound. Add 1-2
 transition templates (`list_motion_templates('transition')`) at the story's
 turn; templates are silent unless you pass `sfx=true`.
 

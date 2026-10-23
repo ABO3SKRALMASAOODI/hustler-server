@@ -630,7 +630,26 @@ def executor_supports(feature, timeout=8):
         body = executor_health(timeout=timeout)
     except Exception:
         return None
-    return feature in (body.get("features") or [])
+    features = body.get("features") or []
+    if feature in features:
+        return True
+    # An EDL.fx type is a schema member, not a build option. The Cloudflare
+    # Worker's root /health lists build features only (custom_filter, stems,
+    # skew_guard...), never "fx:<type>", so every fx write gate read it as
+    # "cannot draw": 97 writes refused in the week to 23 Oct (source_broll,
+    # add_time_effect, set_grade_window, add_accent, add_depth_effect...).
+    # An executor that carries the skew guard checks each job's EDL against
+    # its own schema before any work and waits for the rollout on a type it
+    # does not know (worker/skew_guard.py), so a type THIS release registers
+    # is safe to store.
+    if isinstance(feature, str) and feature.startswith("fx:") \
+            and "skew_guard" in features:
+        try:
+            import schemas
+            return feature[3:] in schemas.FX_TYPES
+        except Exception:  # noqa: BLE001 — unknown is not "no"
+            return None
+    return False
 
 
 def _job_payload(job):

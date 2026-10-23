@@ -124,7 +124,7 @@ recheck every output-timed item and the card's end.
 | Step | Calls | Notes |
 | --- | --- | --- |
 | Cuts | 0-1 `keep_segments` | only to tighten inside the range |
-| Look | 1 `apply_look(name)`, never with a music option | sets caption look, grade, grain and base transitions, and no sound (never pass `transition_sounds=true` unless the brief asks); read what it set |
+| Look | 1 `apply_look(name)`, never with a music option | sets caption look, grade, grain and a base transition that fires only where media enters or leaves (camera changes stay hard cuts), and no sound (never pass `transition_sounds=true` unless the brief asks); read what it set |
 | Captions | 1 `add_captions(mode='from_transcript', style={...})` or `set_caption_style` | `style.motion_look` per Look; `emphasis_words` = the meaning-bearing words; keep the active-word accent if the brief asks |
 | Frame | 1-2: the pilot's layout (`set_picture_card`), or `auto_reframe`/`set_frame` for full-bleed | full-bleed with a per-shot `focus_track` (source seconds), or the card from `framing.json` / looks.md **Card geometry** with `background_style` (`blur` or a gradient), grain and vignette. On a call source (SOURCE LAYOUT in `get_video_info`) `auto_reframe` and `source='auto'` frame the call's picture at <= 2x (an 'auto' card narrows rather than cut the face) and name the `erase_region` for the host's self-view: run that erase first. `auto_reframe` and an `'auto'` card follow a speaker who leans or steps inside a shot (still while they sway, a glide only when a still frame would cut the head; a turned close-up keeps its nose side clear) — a hand-written `set_frame` aim is still and drops that. A burned-in screenshot or screen share the host reads from is never cropped through and never shown without the speaker for more than a second while they talk: act on SCREEN INSET / NO FACE IN THE CROP notes with the call they name (a speaker + screen stack per camera shot, `panels=[{..., source:'auto'}, {..., source:'inset'}]`, so the speaker stays on screen while they talk — the speaker panel is solved from the face track: whole head, chin and hair margins, lead room, the screen box kept out where any framing can, and a gutter between the panels that captions never sit on (they take a free band, usually above the speaker panel); `set_picture_card(source='inset')` alone only for a beat — over speech it reports NO FACE ON SCREEN), and keep captions and graphics clear of the card. A card's fade/lift entrance and exit dissolve the whole card with the full-frame shot (never a frame of bare canvas); on a cut use `'none'` |
 | Headline | 0-1 `set_editorial_graphic(kind="headline", speaker, text)`, or with a card 0-1 `add_motion_graphic(template='headline', start=0, params={text, kicker})` | the editorial headline for headline-conversation (verified speaker first; it never moves); on a card layout whose band also carries hero lockups, the persistent `headline` template instead: end and y omitted, it sits in the band above the card and yields to every motion-graphic lockup there by itself (not to add_text or typography scenes, so band lockups are motion templates), so the band is never empty for seconds |
@@ -138,7 +138,7 @@ recheck every output-timed item and the card's end.
 | The owner's song | `analyze_music`, then `shape_music(payoff=...)` or `plan_to_music` | only when the owner supplied the song: the drop on the payoff word after a held breath, b-roll cut one frame before the kick; never a song you chose |
 | Camera | 0-3 `add_zoom` (optional) | only where a moment clearly earns a move (the payoff word, a real turn between ideas, a genuinely jarring jump cut); zero is fine; never on every cut, take, sentence or hero moment. Modes per the Look (schema names) |
 | Cut hygiene | none in MCP | `conceal_jump_cuts` is not in the MCP tool list (Oct 2026): leave a same-shot jump cut bare, land a graphic change or B-roll on it, or re-cut at a breath; none in the first 1.5 s, at most one in the first 3 s |
-| Transitions | 0-1 `set_transitions` | base style, `scope='scene'` |
+| Transitions | 0-1 `set_transitions` | base style, `scope='media'` (media joins) or `'scene'` |
 | Sound | 0-2 `add_sfx(storage_key='sound:<id>', at=...)` with gain_db unset (optional) | zero by default; at most 1-2 per short (template cues count), each on a structural moment with a visual partner, from your Look's family, none on a payoff word's onset, no literal puns, none repeated within ~3 s; the tool levels each against the voice and its MIX/CHECK lines say where it sits |
 | Music | 0-1 `add_music` (after `fetch_url` for a link) | only the owner's song, only when `music_effective` is on; bed -20 dB ducked; a montage's bed leads |
 | Sound without music | 0-2 | montage or action opener with music off: natural sound, design around speech, one or two library sounds, or a flag (looks.md) |
@@ -254,7 +254,10 @@ unacknowledged one).
    hero and the payoff look as intended in the pixels (an Oct handback
    described a node graph the render showed as an empty box).
 3. `audit_captions` once (heard-but-unshown words are defects, not
-   advisories) and `audit_audio_mix`; read the render's warnings. For WHICH
+   advisories; so is a word shown twice, `doubled_words`, and read every
+   caption line for ASR nonsense such as 'at service' for 'sea level' —
+   no check catches that, fix it with `set_caption_fixes`) and
+   `audit_audio_mix`; read the render's warnings. For WHICH
    words are audible, or an "um" or half a word the transcript lacks at a
    join, use `check_speech` (program seconds; up to 60 s, so one call reads
    the whole short, each kept span on its own sound): it measures the sound

@@ -137,6 +137,7 @@ from schemas import (CANVAS_DIMS, CaptionStyle, clean_fingerprint,
                      INSERT_RATE_MIN, INSERT_RATE_MAX,
                      GRADE_PRESETS, TRANSITION_STYLES, TRANSITION_MIN_S,
                      TRANSITION_MAX_S, TRANSITION_SCOPES,
+                     TRANSITION_SCOPES_PUBLIC,
                      OVERLAY_ANIMS, OVERLAY_SCALE_MIN,
                      OVERLAY_SCALE_MAX, SPEED_FACTOR_MIN, SPEED_FACTOR_MAX,
                      STYLIZE_KINDS, TEXT_ANIMS, TEXT_FONTS, TEXT_TEMPLATES,
@@ -3046,6 +3047,35 @@ def _exact_keep_onset_notes(ctx, keep, prev_keep, words):
     return ["ADVISORY (exact times kept as written): " + ln for ln in lines]
 
 
+def _exact_keep_quiet_edges(ctx, keep, words):
+    """Edges of an exact-time keep that the transcript puts inside a word
+    but whose SOUND is quiet there — judged as the render's MID-WORD AUDIT
+    judges them (audit._audible). The ASR's word edges run 0.05-0.25 s off,
+    so the audit asks for a start in the pause the index files under the
+    previous word, and the keep write then warned "lands inside the word"
+    on that very edge (JRE #2054 part 2, p25 3228.71 / 3239.62 / 3279.70,
+    p33 4925.71): two checks, opposite advice, one rework loop each."""
+    hook = getattr(ctx, "cut_sound_source", None)
+    if not callable(hook) or not words:
+        return set()
+    try:
+        hits = audit.midword_boundaries(keep, words, ctx.duration)
+        if not hits:
+            return set()
+        source = hook()
+        if not source:
+            return set()
+        loud = audit._audible(hits, source, ctx.duration,
+                              CUT_SOUND_BUDGET_S, 1.0 / 30.0)
+    except Exception:  # noqa: BLE001 — an advisory never fails a write
+        return set()
+    if loud is hits:
+        return set()                       # the sound could not be read
+    keep_loud = {round(float(h["boundary"]), 2) for h in loud}
+    return {round(float(h["boundary"]), 2) for h in hits
+            if round(float(h["boundary"]), 2) not in keep_loud}
+
+
 def _write_keep(ctx, new_keep, desc, snap_to_words=None,
                 check_regression=False, place_all=False):
     """Shared tail for every keep-modifying write: audio-safe cut edges
@@ -3073,6 +3103,8 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         audio_notes = _exact_keep_onset_notes(
             ctx, new_keep, None if place_all else prev_keep, words)
     new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
+    if snap_to_words is False:
+        quiet_edges = _exact_keep_quiet_edges(ctx, new_keep, words)
     edl = dict(prev["json"])
     edl["keep"] = new_keep
     speed = edl.get("speed") or []
@@ -5118,8 +5150,42 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
         if unmatched:
             result += "\nNOT APPLIED (no caption words match): " + "; ".join(unmatched)
         result += "\nACTIVE CORRECTIONS: " + json.dumps(rules)
-        result += "\nCAPTION PREVIEW: " + audit_captions(ctx)
+        result += "\nCAPTION PREVIEW: " + _compact_caption_preview(
+            audit_captions(ctx, limit=200), rules)
     return result
+
+
+def _compact_caption_preview(audit_text, rules, max_states=8):
+    """The caption audit a correction write needs: its verdict, warnings,
+    unapplied corrections and the caption states that now carry a corrected
+    word. The whole audit (every state, ~8 KB) rode along on every
+    set_caption_fixes call: 216 calls averaged 12.8 KB of reply in the
+    week to 23 Oct. audit_captions() still returns it all."""
+    try:
+        audit = json.loads(audit_text)
+    except (TypeError, ValueError):
+        return audit_text
+    if not isinstance(audit, dict) or "event_page" not in audit:
+        return audit_text
+    wanted = [str(r.get("to") or "").strip().lower()
+              for r in rules or () if isinstance(r, dict)]
+    wanted = [w for w in wanted if w]
+    states = []
+    for st in audit.get("event_page") or []:
+        text = " ".join(st.get("text_lines") or [])
+        low = text.lower()
+        if any(w in low for w in wanted):
+            states.append({"start": st.get("start"), "end": st.get("end"),
+                           "text": text})
+            if len(states) >= max_states:
+                break
+    keep = ("version", "status", "warnings", "corrections_not_applied",
+            "heard_unshown", "doubled_words", "density_violation_count",
+            "wrap_violation_count")
+    out = {k: audit.get(k) for k in keep if k in audit}
+    out["corrected_states"] = states
+    out["full_audit"] = "audit_captions() lists every caption state"
+    return json.dumps(out, indent=1)
 
 
 def _unmatched_caption_fixes(ctx, edl, rules):
@@ -5565,6 +5631,20 @@ def _remember_search_hits(ctx, lane, hits, limit=12):
                    json.dumps(payload), limit)
     except Exception:
         pass
+
+
+def _remember_delivered_thumbs(ctx, hits):
+    """Persist the thumbnail evidence a search just delivered. The hits are
+    saved BEFORE their thumbnails are fetched (an id must survive a failed
+    fetch), so the saved copies never carried _thumbnail_delivered, and
+    add_stock_media in the next MCP call refused every provider result
+    without a description: 10 refusals 'no evidence of what the shot
+    depicts' in the JRE #2054 part 2 run, on candidates the editor had
+    looked at."""
+    seen = [h for h in hits or () if isinstance(h, dict)
+            and h.get("_thumbnail_delivered") and h.get("id")]
+    if seen:
+        _remember_search_hits(ctx, "stock", seen, limit=512)
 
 
 def _recover_search_hit(ctx, lane, result_id, resolver):
@@ -10528,7 +10608,8 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "or an insert splices in. 'every_cut' puts one at every "
                 "junction including the jump cuts left behind by "
                 "cut_silences — only right for a montage built from separate "
-                "clips.")
+                "clips. 'media' puts one only where B-roll, a still or a "
+                "card enters or leaves (camera changes stay hard cuts).")
     edl = dict(ctx.latest_edl()["json"])
     fx = dict(edl.get("effects") or {})
     if p in ("none", "off"):
@@ -10642,12 +10723,17 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "NO transition; those are meant to be invisible. Use "
                 "scope='every_cut' whenever the editor intends one on every "
                 "cut")
+    if sc == "media":
+        notes.append("camera changes stay hard cuts; it fires where B-roll, "
+                     "a still or a card enters or leaves"
+                     + (" (none is placed yet)" if hit == 0 else ""))
     unselected = max(0, eligible_count - hit)
     if unselected:
         notes.append(f"{unselected} additional eligible scene changes use "
                      "clean hard cuts to respect max_transitions")
     note = (" — " + "; ".join(notes)) if notes else ""
-    where = ("every cut" if sc == "every_cut" else "scene changes")
+    where = ("every cut" if sc == "every_cut" else
+             "media joins" if sc == "media" else "scene changes")
     res = ctx.write_edl(
         edl, f"transitions: {d}s {p} ({TRANSITION_DESC[p]}) at {where} — "
              f"{hit} of {n_cuts} junction{'s' if n_cuts != 1 else ''}{note}"
@@ -17544,6 +17630,9 @@ def _resolve_panel(ctx, edl, spans, box, source, fit, canvas, follow=False,
 
 
 _CARD_UNSET = object()
+# A card end this far past the programme's end is the end (a duration read
+# off a rounded figure); further is a real error and still refuses.
+CARD_END_SLACK_S = 0.15
 _CARD_DEFAULTS = dict(
     box=None, fit=None, radius=.045, border=.001, border_color="#444444",
     background=None, shadow=.35, entrance="lift", exit="fade",
@@ -17683,6 +17772,13 @@ def _set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         s0, e0 = float(start), float(end)
     except (TypeError, ValueError):
         return "REJECTED: start and end are program seconds (numbers)."
+    prog_end = round(program_duration(edl), 2)
+    if prog_end > s0 and prog_end < e0 <= prog_end + CARD_END_SLACK_S:
+        # 'end 23.04 exceeds the limit 23.0s' (JRE #2054 part 2, 3859 job
+        # 89471): an end read off a rounded duration means the end.
+        report.append(f"end {e0:g}s is past the programme's end, so the "
+                      f"card ends with it at {prog_end:g}s.")
+        e0 = end = prog_end
     s0, e0, snap_notes = _snap_window_to_cuts(ctx, edl, s0, e0)
     if snap_notes:
         start, end = s0, e0
@@ -20475,6 +20571,7 @@ def search_stock(ctx, query, kind="video", orientation=None, count=6):
     # footage.
     _remember_search_hits(ctx, "stock", hits, limit=512)
     seen = _queue_candidate_thumbs(ctx, hits)
+    _remember_delivered_thumbs(ctx, hits)
     eye = ("\n\nTheir thumbnails are attached below, labeled by id — pick "
            "by LOOKING at them, the way an editor scans a results grid: "
            "the frame that actually shows the subject, in light and color "
@@ -20782,6 +20879,7 @@ def research_broll(ctx, moments, orientation=None):
     _remember_search_hits(
         ctx, "stock", list(ctx.stock_results.values()), limit=512)
     board_n = _queue_broll_research_sheet(ctx, labeled)
+    _remember_delivered_thumbs(ctx, [hit for _m, hit in labeled])
     _metric(ctx, "broll_moments_researched", len(specs))
     _metric(ctx, "broll_query_routes_searched", len(work))
     _metric(ctx, "broll_candidates_compared", len(labeled))
@@ -21763,6 +21861,36 @@ def _caption_graphics_report(edl, plan):
     return shown, under
 
 
+# Doubles English uses on purpose ("I had had enough", "that that is"):
+# never a stutter by themselves.
+CAPTION_DOUBLE_OK = frozenset({"had", "that", "is", "very", "no", "bye",
+                               "ha", "go", "so", "really", "yeah", "knock",
+                               "now", "well", "oh", "tick", "tock", "bla",
+                               "blah", "yes"})
+
+
+def caption_doubled_words(states):
+    """Caption states that show one word twice in a row ('COULD COULD' on
+    JRE #2054 part 2 p59; six stuttered 'at's on p30): [{"start", "text"}],
+    one per distinct phrase. The critic reads frames, not words, and passed
+    them."""
+    out, seen = [], set()
+    for st in states or ():
+        for line in st.get("text_lines") or ():
+            toks = [re.sub(r"[^\w']", "", t).lower()
+                    for t in str(line).split()]
+            for a, b in zip(toks, toks[1:]):
+                if a and a == b and a not in CAPTION_DOUBLE_OK \
+                        and not a.isdigit():
+                    key = (a, str(line).strip().lower())
+                    if key not in seen:
+                        seen.add(key)
+                        out.append({"start": round(float(st["start"]), 2),
+                                    "text": " ".join(str(line).split())})
+                    break
+    return out
+
+
 def audit_captions(ctx, offset=0, limit=80):
     """Compile and mechanically audit the caption track before/after render.
 
@@ -22022,6 +22150,14 @@ def audit_captions(ctx, offset=0, limit=80):
                 f"{len(corrections_not_applied)} caption correction(s) change no "
                 "word, so the captions still read the original words: "
                 + "; ".join(corrections_not_applied[:3]))
+    doubled = caption_doubled_words(states)
+    if doubled:
+        warnings.append(
+            f"{len(doubled)} caption(s) show a word twice in a row ("
+            + "; ".join(f"'{d['text']}' at {d['start']:.2f}s"
+                        for d in doubled[:3])
+            + ") — a stutter or an ASR doubling the transcript kept: "
+            "set_caption_fixes it to one word, or cut the stutter")
     contract_failed = bool(density_violations or wrap_violations)
     result = {
         "version": row["version"],
@@ -22056,6 +22192,7 @@ def audit_captions(ctx, offset=0, limit=80):
         "captions_under_graphics": under_graphics[:10],
         "captions_unplaced": unplaced[:10],
         "overlaps": overlaps[:20],
+        "doubled_words": doubled[:10] or None,
         "warnings": warnings,
         "short_phrase_states": fragment_states,
         "short_phrase_count": len(fragment_states),
@@ -25289,7 +25426,12 @@ def _json_text(value):
 # justify_verification_findings(justifications) with a reason per finding).
 _ARG_ALIASES = {
     "look_at": {"native": "native_resolution"},
-    "look_at_asset": {"native": "native_resolution"},
+    # JRE #2054 part 2 week: look_at_asset(storage_key), add_overlay(media /
+    # media_key / storage_key, end) refused before any work
+    "look_at_asset": {"native": "native_resolution",
+                      "storage_key": "asset_key"},
+    "add_overlay": {"media_key": "asset_key", "media": "asset_key",
+                    "storage_key": "asset_key"},
     "apply_look": {"look": "name"},
     "set_caption_fixes": {"fixes": "replacements",
                           "corrections": "replacements"},
@@ -25304,6 +25446,15 @@ def _argument_aliases(name, args, notes):
     if name == "set_caption_fixes" and isinstance(args.get("replacements"),
                                                   str):
         args["replacements"] = _json_text(args["replacements"])
+    if name == "add_overlay" and "end" in args and "duration_s" not in args:
+        try:
+            dur = round(float(args["end"]) - float(args.get("start")), 2)
+        except (TypeError, ValueError):
+            dur = None
+        if dur is not None and dur > 0:
+            args.pop("end")
+            args["duration_s"] = dur
+            notes.append("end -> duration_s")
     if name == "remove_typeset" and "ids" not in args and "id" in args:
         one = args.pop("id")
         args["ids"] = one if isinstance(one, list) else [one]
@@ -27419,18 +27570,36 @@ def apply_look(ctx, name, music=None, transition_sounds=None):
         fx["grade_custom"] = gc
         set_bits.append("custom grade " + ", ".join(
             f"{k} {v:+g}" for k, v in look["grade_custom"].items()))
+    portrait = _look_portrait(ctx, edl)
+    short = portrait and program_duration(edl) <= taste.SHORT_FORM_MAX_S
     if "transition" in look:
         tr = look["transition"]
         if tr:
             tst, tdur = tr
+            scope = "scene"
+            if short and ctx.has_main_video \
+                    and (ctx.index.get("words") or []):
+                # A conversation short changes camera on almost every join,
+                # and 'scene' scope fires there: cinematic_doc's 0.45 s
+                # dip_black blanked the picture mid-sentence at every camera
+                # change of a podcast short (JRE #2054 part 2, project 3850,
+                # job 88629), and the run's editors removed the look's base
+                # transition with set_transitions('none') 41 times in 54
+                # looks (editorial dips, creator_punch zoom punches,
+                # mono_noir glitches). On a talking short the base keeps to
+                # spliced media; the turn earns its own transition.
+                scope = "media"
             fx["transition"] = {"style": tst, "duration_s": tdur,
-                                "scope": "scene"}
-            set_bits.append(f"transitions {tst} {tdur}s at scene changes")
+                                "scope": scope}
+            set_bits.append(
+                f"transitions {tst} {tdur}s at scene changes" if scope ==
+                "scene" else
+                f"transitions {tst} {tdur}s where B-roll or a still enters "
+                "or leaves (camera changes inside the conversation stay hard "
+                "cuts)")
         elif fx.get("transition"):
             fx["transition"] = None
             set_bits.append("transitions cleared (hard cuts)")
-    portrait = _look_portrait(ctx, edl)
-    short = portrait and program_duration(edl) <= taste.SHORT_FORM_MAX_S
     for fk, label in (("fade_in_s", "fade in"), ("fade_out_s", "fade out")):
         if fk not in look:
             continue
@@ -30358,7 +30527,7 @@ TOOLS = {
                                  "2-4 when the user asks for subtle or not "
                                  "excessive transitions."},
                          "scope": {"type": "string",
-                                   "enum": list(TRANSITION_SCOPES),
+                                   "enum": list(TRANSITION_SCOPES_PUBLIC),
                                    "description":
                                        "'scene' (default) = only where the "
                                        "footage changes shot or an insert "
