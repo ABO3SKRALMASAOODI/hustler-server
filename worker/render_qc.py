@@ -71,7 +71,8 @@ import os
 import subprocess
 import time
 
-QC_VERSION = 5              # v5: the stall before the end card
+QC_VERSION = 6              # v6: the black ending traced whole
+                            # v5: the stall before the end card
                             # v4: card faces read on the source, type and picture measures
                             # v3: orphan shots, reframes off a cut, the hook frame
 DIFF_W = 64                 # width of the frame-difference pass
@@ -101,6 +102,8 @@ STALL_CARD_DARK = 40        # a card frame whose brightest pixel is under this
                             # shows no card at all (its type, even pillarboxed
                             # on 16:9, reads >= 150 settled)
 STALL_SLOW = 0.5            # a speed under this repeats frames
+BLACK_TAIL_MAX_S = 120.0    # how far back a black ending is traced
+BLACK_TAIL_DENSE_S = 8.0    # the frame-exact refine window, at most
 MAX_FULL_PASS_S = 180.0     # programmes longer than this skip the frame pass
                             # and sample faces on keyframes
 ORPHAN_FRAMES = 2           # a shot this short between two cuts is an orphan
@@ -522,7 +525,10 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             "trans_windows": trans_windows, "reframes": reframes,
             "true_cuts": true_cuts, "has_shots": has_shots,
             "hook": _hook_plan(edl, index, tl),
-            "tail": _safe(tail_plan, edl, tl, float(program_s))}
+            "tail": _safe(tail_plan, edl, tl, float(program_s)),
+            # programme seconds -> source seconds (None inside an insert),
+            # so a finding at the ending can name the keep to change
+            "out_to_src": tl.out_to_src}
 
 
 def _safe(fn, *args):
@@ -2364,6 +2370,128 @@ def boundary_stall(path, plan_, deadline):
     return rows
 
 
+def _frames_with_times(path, start, end, w, h, deadline, keyframes=False):
+    """[(t, grey frame)] of ``path`` from ``start`` to before ``end``
+    (programme seconds, the file's own clock kept), every frame or only the
+    keyframes. Times come from showinfo, read from a file so a long pass
+    never blocks on a full stderr pipe."""
+    import re
+    import tempfile
+    import numpy as np
+    with tempfile.NamedTemporaryFile("w+", suffix=".log", delete=True) as log:
+        cmd = ["ffmpeg", "-v", "info", "-nostdin", "-hide_banner",
+               *(["-skip_frame", "nokey"] if keyframes else []),
+               "-ss", f"{max(0.0, start - 1.0):.3f}", "-copyts", "-i", path,
+               "-an", "-sn", "-dn", "-map", "0:v:0",
+               "-vf", f"select='gte(t\\,{start:.6f})*lt(t\\,{end:.6f})',"
+                      f"showinfo,scale={w}:{h}:flags=area,format=gray",
+               "-fps_mode", "passthrough",
+               "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+        size = w * h
+        frames = []
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=log)
+        try:
+            while True:
+                if time.monotonic() > deadline:
+                    raise TimeoutError("picture QC budget")
+                buf = proc.stdout.read(size)
+                if not buf or len(buf) < size:
+                    break
+                frames.append(np.frombuffer(buf, np.uint8).reshape(h, w))
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            proc.wait()
+        log.seek(0)
+        times = [float(m) for m in re.findall(
+            r"\bpts_time:\s*([-0-9.]+)", log.read())]
+    return list(zip(times, frames))
+
+
+def _is_black(frame):
+    return float((frame > STALL_LIT).mean()) < STALL_BLACK_SHARE
+
+
+def black_tail(path, plan_, deadline, stall_rows=None):
+    """[t0, t1, exact] — the black run the PROGRAMME ends on, in programme
+    seconds (t1 the programme's end), or None when its last frame shows
+    picture. boundary_stall reads only the last STALL_TAIL_S, so a long
+    black ending (studio project 2592, 22 Oct 2026: a gaming edit that ran
+    on over the game's black screen) was reported, at most, as 1.5 s. The
+    run is traced back on keyframes up to BLACK_TAIL_MAX_S and its first
+    black frame found frame-exactly; ``exact`` is False when the whole
+    traced span is black (the run is at least that long)."""
+    fps, W, H = float(plan_["fps"]), plan_["W"], plan_["H"]
+    prog = float(plan_["program_s"])
+    eps = .25 / fps
+    rows = stall_rows if stall_rows is not None else boundary_stall(
+        path, plan_, deadline)
+    ends = [r for r in rows or [] if r[0] == "black"
+            and float(r[1]) < prog - eps and float(r[2]) >= prog - eps]
+    if not ends:
+        return None
+    run_from = float(ends[0][1])
+    w, h = DIFF_W, _tiny_h(W, H, DIFF_W)
+    # boundary_stall's window opens on frame k0: a run that starts after it
+    # is already whole; one that starts on it may run on further back.
+    window = math.ceil((prog - STALL_TAIL_S) * fps - 1e-6) / fps
+    if run_from > window + .5 / fps or run_from <= .5 / fps:
+        return [round(run_from, 3), round(prog, 3), True]
+    lo = max(0.0, prog - BLACK_TAIL_MAX_S)
+    keys = [(t, f) for t, f in _frames_with_times(
+        path, lo, run_from, w, h, deadline, keyframes=True) if t < run_from]
+    lit = [t for t, f in keys if not _is_black(f)]
+    if not lit:
+        if lo <= 1e-6:
+            return [0.0, round(prog, 3), True]
+        return [round(lo, 3), round(prog, 3), False]
+    last_lit = lit[-1]
+    # Frame-exact from the last lit keyframe: through the whole stretch to
+    # the measured run when it is short, else to the first black keyframe.
+    if run_from - last_lit <= BLACK_TAIL_DENSE_S:
+        hi = run_from
+    else:
+        later = [t for t, f in keys if t > last_lit]
+        hi = min(later[0] if later else run_from,
+                 last_lit + BLACK_TAIL_DENSE_S)
+    dense = _frames_with_times(path, last_lit, hi + 1.0 / fps, w, h,
+                               deadline)
+    t0 = None
+    for t, f in dense:
+        if _is_black(f):
+            t0 = t if t0 is None else t0
+        else:
+            t0 = None
+    if t0 is None:
+        return [round(hi, 3), round(prog, 3), False]
+    return [round(max(t0, 0.0), 3), round(prog, 3), True]
+
+
+def black_tail_finding(tail, plan_):
+    """The BLACK TAIL finding for black_tail's row, naming the one call that
+    ends the programme on its last picture, or None."""
+    if not tail:
+        return None
+    t0, t1, exact = tail
+    n = t1 - t0
+    src = ""
+    try:
+        s0 = plan_.get("out_to_src")(t0) if plan_.get("out_to_src") else None
+    except Exception:  # noqa: BLE001
+        s0 = None
+    if s0 is not None:
+        src = f" (the picture goes black at source {s0:.2f}s)"
+    card = " before the end card" if plan_.get("endcard") else ""
+    return (f"BLACK TAIL {t0:.2f}-{t1:.2f}s: the programme ends on "
+            f"{'at least ' if not exact else ''}{n:.2f}s of black picture"
+            f"{card}{src} — end it on its last picture: "
+            f"cut_output_range(start={t0:.2f}, end={t1:.2f}), or end the "
+            "last kept span there (finish the last line before the screen "
+            "goes black, or cut the black stretch and its words together)")
+
+
 def _t(frame, fps):
     return frame / float(fps)
 
@@ -2408,6 +2536,12 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
         res["stall"] = boundary_stall(path, plan_, deadline)
     except Exception as exc:
         res["skipped"].append(f"stall: {str(exc)[:80]}")
+    if res.get("stall"):
+        try:
+            res["black_tail"] = black_tail(path, plan_, deadline,
+                                           stall_rows=res["stall"])
+        except Exception as exc:  # noqa: BLE001
+            res["skipped"].append(f"black tail: {str(exc)[:80]}")
     try:
         samples = face_samples(path, prog, W, H, deadline,
                                keyframes=prog > MAX_FULL_PASS_S)
@@ -2545,7 +2679,17 @@ def findings(res, plan_):
             "Valmera watermark top-right and the frames do not show it (match "
             f"{res['watermark']:.2f}) — the mark is automatic; re-render the "
             "export and report it if it persists")
-    out += stall_findings(res.get("stall"), plan_)
+    tail = res.get("black_tail")
+    rows = res.get("stall")
+    if tail:
+        # The traced run is the whole story of the black ending; the stall
+        # row for the same frames would only repeat it, shorter.
+        prog = float(plan_.get("program_s") or 0.0)
+        rows = [r for r in rows or [] if not (
+            r[0] == "black" and float(r[1]) < prog
+            and float(r[2]) >= prog - .25 / float(fps))]
+        out.append(black_tail_finding(tail, plan_))
+    out += stall_findings(rows, plan_)
     for kind, fr, cut in res.get("jumps") or []:
         t = _t(fr, fps)
         if kind == "pop":

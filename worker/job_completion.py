@@ -168,9 +168,14 @@ def finalize_success(worker_db, job, result, lease_claim):
                 payload.get("root_agent_job_id") or job["id"])
         except (TypeError, ValueError):
             accounting_job_id = int(job["id"])
+        # Stagnant slices of a turn stopped for making no progress are not
+        # billed (agent_loop's repeated-blocker stop; db.charge_turn_credits).
+        unbilled = (dbx._excluded_ids(result.get("unbilled_job_ids"))
+                    if job["type"] == "agent_turn" else [])
         terminal = worker_db.run(
             dbx.finish_accounted_job, job["id"], result, lease_claim,
-            job["user_id"], billable, extra, qualifies, accounting_job_id)
+            job["user_id"], billable, extra, qualifies, accounting_job_id,
+            **({"exclude_job_ids": unbilled} if unbilled else {}))
         committed = bool((terminal or {}).get("committed"))
         if committed and (terminal or {}).get("charged") is not None:
             result["credits_charged"] = terminal["charged"]

@@ -28,6 +28,11 @@ import subprocess
 # the check and the fix can never disagree.
 TARGET_I = -14.0
 TARGET_TP = -2.0
+# The never-exceed ceiling on a delivered file (true_peak.CEILING_DBTP; kept
+# literal so this module stays import-light), and the reading over it that
+# is a finding — 0.1 dB of slack for loudnorm against ebur128 measurement.
+TP_CEILING_DBTP = -1.0
+TP_FINDING_DBTP = TP_CEILING_DBTP + 0.1
 
 # Louder/quieter than this from target = worth a finding. ±4 LU is far past
 # taste differences — it is "phone speakers at max still quiet" territory.
@@ -155,11 +160,27 @@ def measure(path, duration_s=None, master=None):
                 f"the mix is hot: {i:.1f} LUFS against the "
                 f"{TARGET_I:.0f} social target — platforms will turn it "
                 "down and squash it; set_master_loudness fixes it")
-        if tp is not None and tp > -0.3:
+        if tp is not None and tp > TP_FINDING_DBTP:
+            # The renderer's own guard (true_peak.guard) holds every
+            # delivered file at the ceiling, so this means the guard could
+            # not hold it — never advice to call set_master_loudness on a
+            # mix it already masters (project 2592: the editor re-ran it
+            # four times against a master that was on).
+            if master == "social":
+                fix = ("the render's peak guard could not hold the "
+                       f"{TP_CEILING_DBTP:.0f} dBTP ceiling — mastering is "
+                       "already on, so re-render (render_preview) and "
+                       "report it if it persists")
+            else:
+                fix = ("the render's peak guard could not hold the "
+                       f"{TP_CEILING_DBTP:.0f} dBTP ceiling — "
+                       "set_master_loudness masters the mix to "
+                       f"{TARGET_I:.0f} LUFS under a {TARGET_TP:.0f} dBTP "
+                       "target")
             findings.append(
-                f"true peak {tp:.1f} dBTP — effectively clipping; "
-                "upload transcodes will distort the loud moments "
-                "(set_master_loudness caps it at -2.0)")
+                f"true peak {tp:.1f} dBTP over the {TP_CEILING_DBTP:.0f} "
+                "dBTP delivery ceiling: upload transcodes will distort the "
+                f"loud moments; {fix}")
     dead = []
     dur = float(duration_s or 0.0)
     for s, e in silences:

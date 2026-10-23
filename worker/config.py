@@ -1802,6 +1802,18 @@ AGENT_TPM_HARD_CAP = int(os.getenv("AGENT_TPM_HARD_CAP", "200000"))
 # Tokens we assume a fresh first call will request. Admission waits until
 # last-60s burn + this fits under HARD_CAP.
 AGENT_TPM_CALL_RESERVE = int(os.getenv("AGENT_TPM_CALL_RESERVE", "55000"))
+# The caps above are a guess at the org's tier (200K in Aug 2026). When the
+# provider reports its own tokens-per-minute limit (OpenAI's
+# x-ratelimit-limit-tokens header, read on every Responses-lane call), the
+# fleet admission follows it instead: yield at this share of the reported
+# limit, never start a call past the whole of it. Studio project 2592 (22 Oct
+# 2026) sent ~123K-token prompts against the fixed 140K yield line — exactly
+# one model call per minute for the whole fleet, 4,711 s of waiting in one
+# turn, and not one provider 429 in the ten days around it.
+AGENT_TPM_OBSERVED_SHARE = min(0.95, max(0.3, float(
+    os.getenv("AGENT_TPM_OBSERVED_SHARE", "0.7"))))
+AGENT_TPM_OBSERVED_MAX_AGE_S = float(
+    os.getenv("AGENT_TPM_OBSERVED_MAX_AGE_S", "3600"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
 # Output budgets: defined once in read_tools (the backend's MCP fast path
 # runs the same read tools and must cut them identically).
@@ -2318,6 +2330,12 @@ MUSIC_TAIL_VERSION = 2
 # Natural (unmastered) EDLs keep their cache. Bump when the leveler or the
 # master chain changes what a mastered mix sounds like.
 MASTER_VERSION = 1
+
+# The delivered file's true peak (worker/true_peak.guard): every render's
+# encoded sound is measured and re-limited when the AAC encode overshot the
+# ceiling (-1 dBTP). Stamped as `tp_v`; renderer.true_peak_current renders
+# an older cached render again when its own audio QC measured it over.
+TRUE_PEAK_GUARD_VERSION = 1
 
 # Legibility of motion graphics and motion captions (worker/plate.py): the
 # renderer measures the program picture under every graphic and caption cue,

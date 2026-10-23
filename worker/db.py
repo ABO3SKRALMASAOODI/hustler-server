@@ -3482,23 +3482,50 @@ def user_is_paid(conn, user_id):
     return bool(row["is_subscribed"]) or plan not in ("", "free")
 
 
-def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
+# A metered turn charges at least this much (CLAUDE.md: "min 1 credit").
+# Applied where a charge leaves slices out (``exclude_job_ids``), so a turn
+# whose every slice repeated a blocker still bills the floor, never nothing
+# and never the loop.
+MIN_TURN_CREDITS = 1.0
+
+
+def _excluded_ids(exclude_job_ids):
+    out = []
+    for value in exclude_job_ids or ():
+        try:
+            out.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(out))
+
+
+def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0,
+                        exclude_job_ids=None):
     """Deduct this turn's model + executor cost from the user's credit pools.
     Returns the credits claimed for this job/turn (float). Repeated calls
     return the existing claim without another debit. Never raises the balance
     below 0 and never fails the turn — callers swallow exceptions.
+
+    ``exclude_job_ids``: execution slices of this logical turn that are not
+    billed — the stagnant slices of a turn the agent loop stopped because it
+    stopped making progress (agent_loop's repeated-blocker stop; studio
+    project 2592, 22 Oct 2026: 111 credits for three slices that churned the
+    same finding). Their model calls, and the compute of the jobs they
+    started (renders carry ``agent_job_id``), are left out; the remaining
+    work is metered as usual, at least MIN_TURN_CREDITS.
 
     ``extra_credits`` is a rolling-deploy fallback for executor results that do
     not yet carry cost telemetry. Current jobs charge their recorded Modal or
     Cloud Run ceiling instead, so Shorts compute is never double-counted.
     Applied only when the job had real model usage, so a run that produced
     nothing still charges nothing."""
+    excluded = _excluded_ids(exclude_job_ids)
     with conn.cursor() as cur:
         # Token cost is summed PER ROW at that row's own model price (see
         # model_prices.row_cost_sql). Summing tokens first and multiplying once
         # only works while every row is the same model, which stopped being true
         # the moment paying users were routed to a different one.
-        cur.execute("""SELECT COUNT(*) AS n,
+        usage_sql = """SELECT COUNT(*) AS n,
                               COALESCE(SUM(prompt_tokens),0) AS tin,
                               COALESCE(SUM(completion_tokens),0) AS tout,
                               COALESCE(SUM(""" + _ROW_COST_SQL + """), 0)
@@ -3516,9 +3543,27 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
                            WHERE id = %s
                               OR (type = 'agent_turn'
                                   AND payload->>'root_agent_job_id' = %s)
-                       )""", (job_id, str(job_id)))
+                       )
+                         AND NOT (job_id = ANY(%s::int[]))"""
+
+        def _used(r):
+            return bool(r and r["n"] and (
+                float(r["tin"] or 0) or float(r["tout"] or 0)
+                or float(r["n_images"] or 0) or float(r["gen_cost"] or 0)))
+
+        cur.execute(usage_sql, (job_id, str(job_id), excluded))
         row = cur.fetchone()
-        if not row["n"]:
+        floor_only = False
+        if excluded and not _used(row):
+            # Every metered call sat in an unbilled slice. The turn still
+            # bills the floor when it had real usage at all; one that got
+            # nothing back from the model still costs nothing.
+            cur.execute(usage_sql, (job_id, str(job_id), []))
+            if not _used(cur.fetchone()):
+                return 0.0
+            row = dict(row, n=0)
+            floor_only = True
+        if not row["n"] and not floor_only:
             # A turn that never reached the model costs nothing.
             return 0.0
         # ...and neither does a turn that reached it and got nothing back. The
@@ -3527,8 +3572,10 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
         # "n" alone would mistake provider failures for work that produced
         # no tokens, no image and no audio — while the chat tells the user it
         # didn't cost them anything. That message has to stay true.
-        if not (float(row["tin"] or 0) or float(row["tout"] or 0)
-                or float(row["n_images"] or 0) or float(row["gen_cost"] or 0)):
+        if not floor_only and not (
+                float(row["tin"] or 0) or float(row["tout"] or 0)
+                or float(row["n_images"] or 0)
+                or float(row["gen_cost"] or 0)):
             return 0.0
         # prompt_tokens stays the TRUE total on every row (so admin token views
         # remain honest); 'cached_in' is the slice of it the provider served
@@ -3551,15 +3598,21 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0):
                                       'gross_compute_usd_ceiling', '')::float,
                                   0), 0)), 0) AS compute_cost
                          FROM video_jobs
-                        WHERE id = %s
-                           OR payload->>'root_agent_job_id' = %s""",
-                    (job_id, str(job_id)))
+                        WHERE (id = %s
+                               OR payload->>'root_agent_job_id' = %s)
+                          AND NOT (id = ANY(%s::int[]))
+                          AND NOT (COALESCE(payload->>'agent_job_id', '')
+                                   = ANY(%s::text[]))""",
+                    (job_id, str(job_id), excluded,
+                     [str(x) for x in excluded]))
         compute_row = cur.fetchone() or {}
         compute_cost = float(compute_row.get("compute_cost") or 0)
         metered_cost = model_cost + compute_cost
         credits = model_prices.usd_to_credits(metered_cost, ndigits=2)
         if compute_cost <= 0:
             credits += max(0.0, float(extra_credits or 0.0))
+        if excluded:
+            credits = max(credits, MIN_TURN_CREDITS)
         credits = round(credits, 2)
         cur.execute("""SELECT credits_daily, credits_bonus, credits_monthly
                        FROM users WHERE id = %s FOR UPDATE""", (user_id,))
@@ -3642,7 +3695,8 @@ def patch_done_job_result(conn, job_id, patch=None, remove=()):
 
 def finish_accounted_job(conn, job_id, result, total_claims, user_id,
                          billable=False, extra_credits=0.0,
-                         qualify_subscribe=False, accounting_job_id=None):
+                         qualify_subscribe=False, accounting_job_id=None,
+                         exclude_job_ids=None):
     """Fence completion before charging, in one database transaction.
 
     A remote executor can return after its lease was cancelled or replaced.
@@ -3668,11 +3722,14 @@ def finish_accounted_job(conn, job_id, result, total_claims, user_id,
             cur.execute("SAVEPOINT terminal_billing")
         try:
             charged = charge_turn_credits(
-                conn, user_id, accounting_job_id, extra_credits)
+                conn, user_id, accounting_job_id, extra_credits,
+                **({"exclude_job_ids": _excluded_ids(exclude_job_ids)}
+                   if _excluded_ids(exclude_job_ids) else {}))
             patch_done_job_result(
                 conn, job_id, {"credits_charged": charged},
                 remove=("billing_pending", "billing_error",
-                        "billing_extra_credits", "billing_root_job_id"))
+                        "billing_extra_credits", "billing_root_job_id",
+                        "billing_unbilled_job_ids"))
             with conn.cursor() as cur:
                 cur.execute("RELEASE SAVEPOINT terminal_billing")
             outcome["charged"] = charged
@@ -3690,7 +3747,10 @@ def finish_accounted_job(conn, job_id, result, total_claims, user_id,
                 {"billing_pending": True, "billing_error": error,
                  "billing_root_job_id": accounting_job_id,
                  "billing_extra_credits": max(
-                     0.0, float(extra_credits or 0.0))})
+                     0.0, float(extra_credits or 0.0)),
+                 **({"billing_unbilled_job_ids":
+                     _excluded_ids(exclude_job_ids)}
+                    if _excluded_ids(exclude_job_ids) else {})})
             outcome["billing_error"] = error
 
     if qualify_subscribe:
@@ -3749,15 +3809,20 @@ def reconcile_pending_accounting(conn, limit=50):
             with conn.cursor() as cur:
                 cur.execute("SAVEPOINT reconcile_terminal_billing")
             try:
+                unbilled = _excluded_ids(
+                    result.get("billing_unbilled_job_ids")
+                    or result.get("unbilled_job_ids"))
                 charged = charge_turn_credits(
                     conn, row["user_id"],
                     int(result.get("billing_root_job_id") or job_id),
-                    float(result.get("billing_extra_credits") or 0.0))
+                    float(result.get("billing_extra_credits") or 0.0),
+                    **({"exclude_job_ids": unbilled} if unbilled else {}))
                 patch_done_job_result(
                     conn, job_id, {"credits_charged": charged},
                     remove=("billing_pending", "billing_error",
                             "billing_extra_credits",
-                            "billing_root_job_id"))
+                            "billing_root_job_id",
+                            "billing_unbilled_job_ids"))
                 with conn.cursor() as cur:
                     cur.execute("RELEASE SAVEPOINT reconcile_terminal_billing")
                 fixed.append("billing")
