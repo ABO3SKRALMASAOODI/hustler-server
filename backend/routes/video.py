@@ -4891,7 +4891,7 @@ def _versions_since(cur, project_id, base, current):
                          AND result->>'edl_version' ~ '^[0-9]+$'
                          AND (result->>'edl_version')::int > %s
                          AND (result->>'edl_version')::int <= %s
-                         AND COALESCE(result->>'edl_changed', 'true') <> 'false'
+                         AND result->>'edl_changed' = 'true'
                        ORDER BY id DESC LIMIT 6""",
                     (int(project_id), base_i, cur_i))
         rows = [r for r in (cur.fetchall() or []) if isinstance(r, dict)]
@@ -4903,6 +4903,10 @@ def _versions_since(cur, project_id, base, current):
             continue
         seen.add(r.get("v"))
         parts.append(f"{r['tool']} (job {r['id']}) wrote v{r['v']}")
+    rest = cur_i - base_i - len(parts)
+    if parts and rest > 0:
+        # the others: apply_edit_batch, Studio or an editor's own turn
+        parts.append(f"{rest} other write{'s' if rest != 1 else ''}")
     return (f" v{base_i} -> v{cur_i}" + (": " + "; ".join(parts) if parts
                                          else "") +
             f". Rebuild the batch on v{cur_i} (get_edl) so it keeps those "

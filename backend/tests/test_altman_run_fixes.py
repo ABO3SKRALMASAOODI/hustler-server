@@ -92,7 +92,14 @@ def test_the_version_conflict_names_what_wrote_the_newer_versions():
     assert text.index("add_motion_graphic (job 98588) wrote v17") < \
         text.index("set_motion_graphic (job 98592) wrote v18")
     assert "Rebuild the batch on v18" in text
+    assert "other write" not in text
     assert cur.sql[0][1] == (4595, 16, 18)
+    assert "edl_changed' = 'true'" in cur.sql[0][0]   # a read never 'wrote'
+    # versions no tool call wrote (apply_edit_batch, Studio) are counted
+    text = video._versions_since(
+        _Cur([{"id": 101507, "tool": "set_motion_graphic", "v": 34}]),
+        4595, 31, 34)
+    assert "set_motion_graphic (job 101507) wrote v34; 2 other writes" in text
     # nothing newer, or a failing read: the plain refusal stands
     assert video._versions_since(_Cur([]), 1, 5, 5) == ""
 
