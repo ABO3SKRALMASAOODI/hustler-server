@@ -491,3 +491,55 @@ def test_the_no_fit_refusal_skips_options_the_call_already_used():
     assert "editorial_serif" not in out and "side_column" not in out
     assert "depth front" not in out and "fewer words" in out
     assert "word_slam" in out
+
+
+def test_hoisting_survives_the_dispatcher_normalizing_the_payload_first():
+    # job 94714: skew_guard._mcp_problem normalized the payload on the
+    # dispatcher and filled the caller's params dict in place; the executor
+    # then saw 'tier' in params and at the top level, and refused.
+    norm = agent_tools._normalize_tool_call
+    payload_args = {"template": "word_slam", "start": 10.3, "end": 11.8,
+                    "tier": "display", "params": {"text": "*PIZZA*"}}
+    first = norm("add_motion_graphic", payload_args)[1]
+    assert payload_args["params"] == {"text": "*PIZZA*"}     # untouched
+    second = norm("add_motion_graphic", payload_args)[1]
+    assert first == second and "tier" not in second
+    assert second["params"] == {"text": "*PIZZA*", "tier": "display"}
+    # a stray that params already holds is dropped, params wins
+    got = norm("add_motion_graphic", {"template": "word_slam", "start": 0,
+                                      "tier": "hook",
+                                      "params": {"text": "A",
+                                                 "tier": "payoff"}})[1]
+    assert "tier" not in got and got["params"]["tier"] == "payoff"
+
+
+# ── add_depth_effect takes the focus names its schema offers ────────────
+# project 4425 jobs 94775/94781: focus="subject" (the schema's enum) was
+# refused "focus must be an object" on the first depth writes after the
+# render gates opened.
+
+from test_w4_review import ctx as depth_ctx  # noqa: E402,F401
+
+
+def test_a_focus_name_is_read_as_its_target(depth_ctx):
+    from tools_ext import depth_tools
+    out = depth_tools.add_depth_effect(depth_ctx, "dof", start=2.0, end=4.0,
+                                       focus="subject")
+    assert out.startswith("EDL "), out
+    item = [i for i in depth_ctx._edl["fx"] if i.get("kind") == "dof"][-1]
+    assert item["focus"]["on"] == "subject"
+    out = depth_tools.add_depth_effect(
+        depth_ctx, "rack_focus", word="growth", focus="subject",
+        focus_from="background")
+    assert out.startswith("EDL "), out
+    rack = [i for i in depth_ctx._edl["fx"]
+            if i.get("kind") == "rack_focus"][-1]
+    assert rack["focus_from"]["on"] == "background"
+
+
+def test_overlay_coordinates_sent_as_text_are_read():
+    assert agent_tools._parse_anim_float("0.215", "x") == (0.215, None)
+    got, err = agent_tools._parse_anim_float('[{"t":0,"v":0.8}]', "x")
+    assert err is None and got == [{"t": 0, "v": 0.8}]
+    assert agent_tools._parse_anim_float("left", "x")[1].startswith(
+        "REJECTED")

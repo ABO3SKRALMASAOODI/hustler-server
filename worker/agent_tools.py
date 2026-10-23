@@ -13328,6 +13328,16 @@ def _parse_anim_float(v, name):
         return float(v), None
     if isinstance(v, list):
         return v, None
+    if isinstance(v, str):
+        # a number or a keyframe list sent as text (x="0.215": project 4419
+        # job on 23 Oct, refused here, then resent as a number)
+        text = v.strip()
+        try:
+            return float(text), None
+        except ValueError:
+            parsed = _json_text(text)
+            if isinstance(parsed, list):
+                return parsed, None
     return None, (f"REJECTED: {name} must be a number (a fraction of the "
                   'frame) or a keyframe list like [{"t":0,"v":0.8}, '
                   '{"t":3,"v":0.2}] with t in seconds from the '
@@ -25462,10 +25472,16 @@ def _hoist_template_params(args, notes):
         params = {}
     if not isinstance(params, dict):
         return
+    # A copy: the dispatcher normalizes the same payload before it hands it
+    # to the executor (skew_guard._mcp_problem), and filling the caller's own
+    # params dict there left the executor a params that already held 'tier'
+    # beside a top-level 'tier' it then refused (job 94714, 23 Oct).
+    params = dict(params)
     moved = []
     for k in stray:
-        if k in spec_params and k not in params:
-            params[k] = args.pop(k)
+        if k in spec_params:
+            value = args.pop(k)
+            params.setdefault(k, value)       # a value in params wins
             moved.append(k)
     if moved:
         args["params"] = params

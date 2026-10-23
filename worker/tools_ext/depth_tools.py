@@ -85,6 +85,13 @@ def _obj(v, name):
     raise ValueError(f"{name} must be an object")
 
 
+def _focus_arg(v, name):
+    """A focus given as a name or as an object (JSON text included)."""
+    if isinstance(v, str) and v.strip() and v.strip()[:1] not in "[{":
+        return {"on": v.strip()}
+    return _obj(v, name)
+
+
 def _new_id(edl, prefix):
     used = {str(i.get("id")) for i in edl.get("fx") or []
             if isinstance(i, dict)}
@@ -259,8 +266,12 @@ def add_depth_effect(ctx, kind, start=None, end=None, word=None,
     held = kind in ("parallax", "ken_burns") and not asset_key
     try:
         move = _obj(move, "move")
-        focus = _obj(focus, "focus")
-        focus_from = _obj(focus_from, "focus_from")
+        # The schema offers focus as a name ('subject', 'background', 'near',
+        # 'far'); _obj refused every such call "focus must be an object"
+        # (project 4425 jobs 94775/94781, 23 Oct, the first depth writes
+        # after the render gates opened). A name is read as {"on": name}.
+        focus = _focus_arg(focus, "focus")
+        focus_from = _focus_arg(focus_from, "focus_from")
         if isinstance(focus, str):
             focus = {"on": focus}
         if isinstance(focus_from, str):
