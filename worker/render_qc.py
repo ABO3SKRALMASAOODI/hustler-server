@@ -2511,7 +2511,7 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
         res["skipped"].append(f"jumps: a {prog:.0f}s programme is past the "
                               f"{MAX_FULL_PASS_S:.0f}s frame pass")
     res["findings"] = findings(res, plan_)
-    res["advice"] = advice(res)
+    res["advice"] = advice(res) + source_limit_advice(res, plan_)
     return res
 
 
@@ -2649,6 +2649,8 @@ def findings(res, plan_):
         part = ('chin' if side == 'bottom' else 'hair' if side == 'top'
                 else side + ' side')
         over = max(o for _a, _b, o in runs)
+        if limit and over <= SOURCE_LIMIT_CUT_MAX:
+            continue          # source_limit_advice: the source's own window
         fix = (f" — and the source has NO picture past that edge (its own "
                "window ends there, e.g. a call window's border): re-aiming "
                "or re-solving the rect cannot show more of the head. A "
@@ -2690,6 +2692,8 @@ def findings(res, plan_):
         spans = ", ".join(f"{a:.1f}-{b:.1f}s" for a, b, _g in runs[:4]) + \
             (f" (+{len(runs) - 4} more)" if len(runs) > 4 else "")
         gap = min(g for _a, _b, g in runs)
+        if limit:
+            continue          # source_limit_advice: the source's own window
         out.append(
             f"FACE AT THE {side.upper()} EDGE {spans}: the speaker's face "
             f"comes within {100 * gap:.0f}% of the {where}'s {side} edge — "
@@ -2700,6 +2704,67 @@ def findings(res, plan_):
                "cut away"))
     out += measured_findings(res)
     return out[:MAX_FINDINGS]
+
+
+# A face at (or a little past) a picture card's edge where the SOURCE has
+# no picture past it -- a phone-call / picture-in-picture window that itself
+# ends at the face -- is the source's framing, not the edit's: no re-aim or
+# re-solved rect can show more. Diamandis x Musk (22-23 Oct, projects
+# 4413-4436): "FACE AT THE RIGHT EDGE" (0% margin) and "FACE CUT BY THE CARD
+# EDGE" (up to 7%) fired on every short and export_final refused every one
+# (verification_open) until each was justified by hand. Reported as an
+# advisory; a source-limited cut deeper than this share of the card still
+# blocks (a layout that loses a real part of the head is a choice to revisit).
+SOURCE_LIMIT_CUT_MAX = 0.10
+
+
+def source_limit_advice(res, plan_=None):
+    """The advisory lines for faces at or just past a card/frame edge where
+    the source's own picture ends (rows flagged limit), which findings()
+    leaves out."""
+    out = []
+    try:
+        cut_runs = res.get("cut") or []
+        cut = {}
+        for row in cut_runs:
+            t0, t1, side, over, where = row[:5]
+            if len(row) > 5 and bool(row[5]) and over <= SOURCE_LIMIT_CUT_MAX:
+                cut.setdefault((where, side), []).append((t0, t1, over))
+        for (where, side), runs in cut.items():
+            spans = ", ".join(f"{a:.1f}-{b:.1f}s" for a, b, _o in runs[:4]) + \
+                (f" (+{len(runs) - 4} more)" if len(runs) > 4 else "")
+            part = ('chin' if side == 'bottom' else 'hair' if side == 'top'
+                    else side + ' side')
+            over = max(o for _a, _b, o in runs)
+            out.append(
+                f"SOURCE LIMIT, FACE AT THE {where.upper()} EDGE {spans}: the "
+                f"speaker's {part} runs up to {100 * over:.0f}% of the {where}'s "
+                f"size past its {side} edge where the source itself has no picture "
+                "(its own window ends there, e.g. a call window's border) — not "
+                "blocking; a smaller face (a wider rect inside the window) shows "
+                "the whole head")
+        near = {}
+        for row in res.get("clipped") or []:
+            t0, t1, side, gap = row[:4]
+            if not (len(row) > 4 and bool(row[4])):
+                continue
+            if any(c[2] == side and c[0] <= t1 and t0 <= c[1] for c in cut_runs):
+                continue
+            where = ('card' if any(c[0] <= t0 < c[1]
+                                   for c in (plan_ or {}).get('cards') or [])
+                     else 'frame')
+            near.setdefault((where, side), []).append((t0, t1, gap))
+        for (where, side), runs in near.items():
+            spans = ", ".join(f"{a:.1f}-{b:.1f}s" for a, b, _g in runs[:4]) + \
+                (f" (+{len(runs) - 4} more)" if len(runs) > 4 else "")
+            gap = min(g for _a, _b, g in runs)
+            out.append(
+                f"SOURCE LIMIT, FACE NEAR THE {side.upper()} EDGE {spans}: the face "
+                f"comes within {100 * gap:.0f}% of the {where}'s {side} edge where the "
+                "source's own window ends — not blocking")
+    except Exception:  # noqa: BLE001 — a report never fails a render
+        return out
+    return out
 
 
 def measured_findings(res):

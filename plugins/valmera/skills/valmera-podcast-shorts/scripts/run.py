@@ -77,6 +77,11 @@ MUSIC_BRIEF = ("inherit", "on", "off")
 NEEDS_SONG = ("music on needs the owner's supplied or approved song for this run "
               "(run.py init --song '<file, link or Artist - Title>'); never choose one")
 CHECKS = ("hook", "payoff", "targets", "attention", "clean")
+# A preview has no end card; export_final adds Valmera's 5 s ending, and the
+# run's length cap (max_final_s, default 45) counts it. The Gates and
+# Diamandis runs (22 Oct) reached export at 45.25 s, 45.95 s and 48.0 s
+# because nothing warned at review: a 40.94 s preview + 5 s = 45.94 s.
+ENDING_S = 5.0
 TERMINAL = ("exported", "killed", "needs_user_review", "failed_technical")
 STATUSES = ("queued", "editing", "candidate", "fix", "approved") + TERMINAL
 ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}\Z")
@@ -596,16 +601,55 @@ def cmd_candidate(args: argparse.Namespace) -> dict:
                   "note": "\n".join(lines), "renders": args.renders,
                   "editor": item.get("editor"), "recorded_at": now()}
         local = Path(args.preview).expanduser()
+        programme = args.programme_s
         if "://" not in args.preview and local.is_file():
             record["preview"] = str(local.resolve())
             record["sha256"] = sha256(local)
+            if programme is None:
+                programme = probe(local).get("duration")
         if handback is not None:
             record["handback"] = handback
+            if programme is None:
+                for key in ("programme_s", "program_s", "preview_s"):
+                    if isinstance(handback.get(key), (int, float)):
+                        programme = float(handback[key])
+                        break
+        item.pop("length_warning", None)
+        if programme is not None:
+            programme = number(programme, "--programme-s")
+            final_s = round(programme + ENDING_S, 2)
+            record["programme_s"] = round(programme, 3)
+            record["final_s"] = final_s
+            warning = length_warning(state, final_s, programme)
+            if warning:
+                record["length_warning"] = item["length_warning"] = warning
+        else:
+            record["length_warning"] = item["length_warning"] = (
+                "length unknown: pass --programme-s (the preview's seconds; the "
+                f"final adds the {ENDING_S:g} s end card) so the run's "
+                f"{state['min_final_s']:g}-{state['max_final_s']:g} s cap is checked "
+                "before review")
         item["candidates"].append(record)
         item.update(status="candidate", editor=None, updated_at=now())
         event(state, "candidate", short_id=args.short_id,
               edl_version=args.edl_version)
         return item
+
+
+def length_warning(state: dict, final_s: float, programme_s: float) -> str:
+    """'' when a final of ``final_s`` fits the run's length window, else
+    what is over (or under) and by how much."""
+    cap, floor = float(state["max_final_s"]), float(state["min_final_s"])
+    if final_s > cap + 0.05:
+        return (f"OVER THE RUN CAP: the final will be {final_s:.2f} s "
+                f"({programme_s:.2f} s programme + the {ENDING_S:g} s end card) "
+                f"against the run's {cap:g} s cap; cut at least "
+                f"{final_s - cap + 0.1:.1f} s of body before review (export refuses it)")
+    if final_s < floor - 0.05:
+        return (f"UNDER THE RUN FLOOR: the final will be {final_s:.2f} s "
+                f"({programme_s:.2f} s + the {ENDING_S:g} s end card) against the "
+                f"run's {floor:g} s minimum")
+    return ""
 
 
 def parse_checks(text: str | None) -> dict:
@@ -637,6 +681,13 @@ def cmd_review(args: argparse.Namespace) -> dict:
                 raise StateError(
                     "ship needs a yes for every binary check; not yes: "
                     + ", ".join(missing) + " (use fix or kill instead)")
+            final_s = latest.get("final_s")
+            if isinstance(final_s, (int, float)) and \
+                    length_warning(state, float(final_s), final_s - ENDING_S):
+                raise StateError(
+                    "ship refused: " + length_warning(
+                        state, float(final_s), final_s - ENDING_S)
+                    + " (use fix with the trim, or exception to close it)")
             item["status"] = "approved"
         elif args.verdict == "fix":
             # No fix limit (owner, Oct 2026: a short with a concrete,
@@ -1042,18 +1093,98 @@ DELIVERY_ROOT = Path(os.environ.get(
     str(Path.home() / "Documents" / "Valmera" / "Podcast Shorts")))
 
 
-def delivery_name(meta: dict, count: int) -> str:
-    """'<Speaker> - <Title> (<year>) - <N> Finals', the owner's folder pattern."""
+# Words that only joined the speaker to the title ("Elon Musk on AGI
+# Safety ..."): once the speaker is lifted off the front they are dropped.
+LEADING_CONNECTIVES = ("on", "about", "with", "and", "x", "&", "vs", "vs.",
+                       "ft", "ft.", "feat", "feat.", "featuring")
+TITLE_MAX = 70
+
+
+def source_year(meta: dict, directory: Path | None = None) -> str:
+    """The source's upload year: the run's source_meta upload_date, else
+    source/acquisition-record.json (channel_upload_date, then upload_date).
+    '' when neither names one. The Diamandis run (22 Oct) delivered with no
+    year although its acquisition record had channel_upload_date."""
+    values = [meta.get("upload_date")]
+    if directory is not None:
+        try:
+            record = json.loads((Path(directory) / "source" /
+                                 "acquisition-record.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = {}
+        if isinstance(record, dict):
+            values += [record.get("channel_upload_date"), record.get("upload_date")]
+    for value in values:
+        m = re.match(r"\s*((?:19|20)\d\d)", str(value or ""))
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _balanced(text: str) -> bool:
+    depth = 0
+    for ch in text:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _trim_title(title: str, limit: int = TITLE_MAX) -> str:
+    """At most ``limit`` characters, cut at a word boundary, never inside a
+    parenthesis: a trailing (...) group that does not fit is dropped whole,
+    and a cut that would leave '(' open ends before it."""
+    title = " ".join(title.split())
+    if len(title) <= limit:
+        return title
+    # a trailing parenthetical / bracket that does not fit goes first
+    while True:
+        m = re.search(r"\s*[(\[][^()\[\]]*[)\]]\s*$", title)
+        if not m or not title[:m.start()].strip():
+            break
+        title = title[:m.start()].rstrip()
+        if len(title) <= limit:
+            return title
+    cut = title[:limit + 1]
+    cut = cut[:cut.rfind(" ")] if " " in cut else title[:limit]
+    while not _balanced(cut):
+        opens = max(cut.rfind("("), cut.rfind("["))
+        if opens <= 0:
+            cut = re.sub(r"[()\[\]]", "", cut)
+            break
+        cut = cut[:opens]
+    cut = cut.rstrip(" ,;:-–—|&")
+    words = cut.split()
+    while words and words[-1].lower() in LEADING_CONNECTIVES + ("the", "a", "of", "to", "in"):
+        words.pop()
+    return " ".join(words).rstrip(" ,;:-–—|&") or title[:limit].rstrip()
+
+
+def delivery_name(meta: dict, count: int, directory: Path | None = None) -> str:
+    """'<Speaker> - <Title> (<year>) - <N> Finals', the owner's folder pattern.
+    The title loses the speaker's name and the connective after it, is cut
+    at a word boundary (never mid-parenthesis) and keeps '#'; the year comes
+    from source_meta or the run's source/acquisition-record.json."""
     people = [p for p in (meta.get("people_verified") or []) if p]
     speaker = people[0] if people else (meta.get("channel") or "Podcast")
     speaker = re.sub(r"\s*[(;,].*$", "", str(speaker)).strip() or "Podcast"
-    title = (meta.get("title") or "Shorts").strip()
+    title = " ".join(str(meta.get("title") or "Shorts").split())
     if title.lower().startswith(speaker.lower()):
-        title = title[len(speaker):].lstrip(" :-–—|")
+        title = title[len(speaker):].lstrip(" :-–—|,")
+        words = title.split()
+        while words and words[0].lower().rstrip(":,") in LEADING_CONNECTIVES:
+            words.pop(0)
+        title = " ".join(words).lstrip(" :-–—|,")
     title = re.sub(r"\s*[|].*$", "", title).strip() or "Shorts"
-    year = str(meta.get("upload_date") or "")[:4]
-    name = f"{speaker} - {title[:70].rstrip()}"
-    if year.isdigit():
+    year = source_year(meta, directory)
+    if year:
+        # the year is added once, after the title
+        title = re.sub(rf"\s*\(\s*{year}\s*\)", "", title).strip() or "Shorts"
+    name = f"{speaker} - {_trim_title(title)}"
+    if year:
         name += f" ({year})"
     name += f" - {count} Finals"
     return re.sub(r'[\\/:*?"<>]', "", name).strip()
@@ -1123,7 +1254,8 @@ def cmd_deliver(args: argparse.Namespace) -> dict:
         unread = [r for r in tails if r.get("error")]
         if (held or unread) and not args.allow_held:
             raise StateError(held_refusal(held, unread))
-        name = args.name or delivery_name(state.get("source_meta") or {}, len(items))
+        name = args.name or delivery_name(state.get("source_meta") or {}, len(items),
+                                           directory)
         dest = Path(args.root or DELIVERY_ROOT).expanduser() / name
         dest.mkdir(parents=True, exist_ok=True)
         copied = []
@@ -1223,6 +1355,10 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--note-file")
     p.add_argument("--handback", help="optional JSON: music, broll, required_credits, "
                    "rights_note, headline, kept_transcript, kept_source_ranges_s")
+    p.add_argument("--programme-s", type=float,
+                   help="the preview's length in seconds (probed from a local preview "
+                   "file when omitted); the final adds the 5 s end card and must fit "
+                   "the run's cap")
     p.add_argument("--renders", type=int, default=1, help="previews rendered for it")
     p.add_argument("--editor", help="optional ownership check")
 

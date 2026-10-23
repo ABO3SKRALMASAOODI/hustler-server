@@ -326,7 +326,10 @@ Save the note as `candidates/<id>-note.txt` and the JSON as
 `candidates/<id>-handback.json` in the run folder (never a session
 scratchpad), then record it yourself: `run.py candidate --run-dir <run>
 --short-id <id> --editor <name> --preview <asset or job> --edl-version <n>
---renders <n> --note-file ... --handback ...`. It works whether or not you
+--renders <n> --programme-s <preview seconds> --note-file ... --handback ...`.
+A preview has no end card: the final is the preview + 5 s, and candidate
+answers `length_warning` (OVER THE RUN CAP) when that passes the run's cap
+(45 s by default); review refuses to ship it, so trim first. It works whether or not you
 were given a slot (`queued`) and for a fix pass (`fix`); never wait for a
 slot. A `blocked` handback is recorded the same way, its first line
 `BLOCKED: <call> -> <error>`, so the coordinator can file it.
@@ -337,7 +340,7 @@ slot. A `blocked` handback is recorded the same way, its first line
 | --- | --- |
 | a tool these docs name is not in YOUR tool list (e.g. `suggest_devices`, `proof_device`, `apply_format_pack`) | your client cached `tools/list` when it connected; the server has it. `expand_toolset(describe=['suggest_devices'])` returns its current schema, then `expand_toolset(call={'name': 'suggest_devices', 'arguments': {'project_id': <child id>, ...}})` runs it exactly like a direct call (same gates, errors and result). Never restart the session or rebuild the tool by hand |
 | a tool's schema in YOUR client lacks a parameter these docs name (e.g. `set_picture_card` `source`/`panels`/`follow`, `add_freeze_frame` audio_mode 'hold') | the cached schema is old; the server has them. `expand_toolset(describe=['set_picture_card'])` shows the current arguments; pass the parameter anyway, or make the call through `expand_toolset(call={...})` |
-| a close-up face fills the card to its foot: no room under the chin for the captions at your `anchor_y`, and a graphic holds the canvas around the card | the captions keep the anchor (pages of one line in the card's column) and the render and `audit_captions` name it, CAPTIONS ON THE MEASURED FACE; leave ~0.06 of the frame between the chin and the card's bottom edge (a looser source rect, a smaller zoom) or set `anchor_y` below the card |
+| a close-up face fills the card to its foot: no room under the chin for the captions at your `anchor_y`, and a graphic holds the canvas around the card | the captions keep the anchor (pages of one line in the card's column) and the render and `audit_captions` name it, CAPTIONS ON THE MEASURED FACE; leave ~0.06 of the frame between the chin and the card's bottom edge (a looser source rect, a smaller zoom) or set `anchor_y` below the card when a line fits between the card's foot and y 0.80 (the captions' safe foot: any anchor past it is laid at 0.80, so under a card that ends at ~0.795, as the call layout's does, the captions go inside the card, above its edge) |
 | a deliberate caption mute (a word the speaker swallows) is reported by the blocking CAPTION CHECK like any heard-but-unshown word | carry the word on a graphic, or keep the mute and say why in the handback |
 | write-time size and position estimates for lockups (`word_slam`, `phrase_build`, the payoff) run up to 2-3x off the render | size the payoff and band lockups from render 1's MEASURES line, never on estimates (the `headline` claim alone is measured at write) |
 | `erase_region` repaints only its box: a picture-in-picture's frame or shadow outside it stays visible | draw the box over the whole inset, border included; check the patch on rendered frames once |

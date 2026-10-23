@@ -28625,6 +28625,90 @@ def _batch_framing_advisories(ctx, before, after):
             for n in notes]
 
 
+def _matte_device_notes(ctx, before, after):
+    """One line per fx device this write added or changed that draws on the
+    person matte (its card needs matte.person): the matte is started measuring
+    over its window (interactive priority, never waited on), and the line
+    says whether it is measured, measuring, or cannot exist there: a window
+    that plays no main footage (an insert or still), or a source the index
+    saw no face in. Gates/Diamandis runs (22-23 Oct): world_negative,
+    room_dims, colour_kept and echo devices were written with no word about
+    the matte, and the audits then called them omitted."""
+    import fxgraph
+    old = {i.get("id"): i for i in (before or {}).get("fx") or []
+           if isinstance(i, dict)}
+    items = [i for i in (after or {}).get("fx") or []
+             if isinstance(i, dict) and i.get("device")
+             and old.get(i.get("id")) != i]
+    notes = []
+    for it in items[:6]:
+        try:
+            card = fxgraph._card(it.get("device")) or {}
+            if "matte.person" not in (((card.get("needs") or {}).get("sidecars"))
+                                      or []):
+                continue
+            if it.get("start") is not None and it.get("end") is not None:
+                a, b = float(it["start"]), float(it["end"])
+            elif it.get("at") is not None:
+                a, b = max(0.0, float(it["at"]) - 1.0), float(it["at"]) + 1.0
+            else:
+                continue
+            tl = Timeline(after.get("keep") or [], after.get("inserts") or [],
+                          after.get("speed") or [])
+            spans = [(x, y) for x, y in matte_track.program_to_source(tl, a, b)
+                     if y > x]
+            what = f"'{it.get('id')}' ({it.get('device')})"
+            if not spans:
+                notes.append(
+                    f"WARNING (person matte): {what} at {a:.2f}-{b:.2f}s plays over no "
+                    "main footage (an insert, still or card picture only), so no person "
+                    "matte can exist there and the render omits it. Move it onto the "
+                    "speaker's own shot.")
+                continue
+            if not getattr(ctx, "has_main_video", True):
+                notes.append(f"WARNING (person matte): {what} needs the main video's "
+                             "person matte, and this project has no main video.")
+                continue
+            src = _matte_source(ctx)
+            st = _program_matte_request(ctx, after, a, b, src)
+            if st.get("status") == "ready":
+                cov = st.get("coverage")
+                if isinstance(cov, (int, float)) and cov < 0.004:
+                    notes.append(f"WARNING (person matte): {what} — the measured matte "
+                                 f"covers {cov:.1%} of the frame at {a:.2f}-{b:.2f}s "
+                                 "(no person in shot): the device draws nothing there.")
+                else:
+                    notes.append(f"Person matte for {what}: measured over "
+                                 f"{a:.2f}-{b:.2f}s; the render draws it at full.")
+            else:
+                face = verify_tools_matte_person(ctx, after)
+                if face is False:
+                    notes.append(f"WARNING (person matte): {what} — the index saw no face "
+                                 "anywhere in this source, so the person matte may stay "
+                                 "empty and the device draw nothing.")
+                eta = st.get("estimate_s")
+                notes.append(
+                    f"Person matte for {what}: {st.get('status') or 'absent'} over "
+                    f"{a:.2f}-{b:.2f}s — "
+                    + ((("measuring it now" + (f" (~{eta} s)" if eta else "")))
+                       if _launchable(src) else "the first render measures it")
+                    + "; a preview rendered before it lands draws the device's substitute, "
+                    "the next render (and export_final, which waits up to 90 s) draws it.")
+        except Exception as e:  # noqa: BLE001 — advice never fails a write
+            print(f"[apply_edit_batch] matte note skipped: {str(e)[:160]}", flush=True)
+    return notes
+
+
+def verify_tools_matte_person(ctx, edl):
+    """verify_tools.matte_state's person flag (False: the index measured no
+    face anywhere), or None."""
+    try:
+        from tools_ext import verify_tools
+        return verify_tools.matte_state(ctx, edl).get("person")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def apply_edit_batch(ctx, base_version, operations, operation_id):
     """Validate all changes before the single fenced ToolContext write."""
     import edit_batch
@@ -28643,6 +28727,8 @@ def apply_edit_batch(ctx, base_version, operations, operation_id):
     if result.startswith("EDL v"):
         result += "".join("\n" + n for n in batch_notes)
         result += "".join("\n" + n for n in _batch_framing_advisories(
+            ctx, row["json"], updated))
+        result += "".join("\n" + n for n in _matte_device_notes(
             ctx, row["json"], updated))
         result += "\nReview scope: " + json.dumps(playback_plan.changed_work(row["json"], updated))
         result += "\nThe edit is saved; supported layers play directly in Studio. Inspect changed moments before a full approval preview; this receipt is not visual or audio proof."

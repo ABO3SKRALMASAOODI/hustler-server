@@ -897,21 +897,37 @@ def fetch(handle, dest_dir):
         return []
     out = []
     for c in handle.chunks:
-        try:
-            st, m, failed = _states_one(handle, c)
-            if st != "ready":
-                m = _fallback_manifest(store, handle, failed)
-            if not m:
-                continue
-            path = _download(store, handle, c if st == "ready" else None, m,
-                             dest_dir)
-            if path:
-                out.append({"key": c.key, "t0": c.t0, "t1": c.t1,
-                            "path": path, "meta": m})
-        except Exception as e:  # noqa: BLE001 — a missing chunk is inert
-            _log(f"fetch {c.key[:12]} failed ({str(e)[:120]})")
+        # One retry: a chunk whose status read ready a moment ago and then
+        # failed to download (a transient store error) left the render's
+        # matte device out ("the person matte vanished at emit", project
+        # 4396 job 92496, 23 Oct) although the same chunks rendered fine on
+        # the next job.
+        for attempt in range(FETCH_ATTEMPTS):
+            try:
+                st, m, failed = _states_one(handle, c)
+                if st != "ready":
+                    m = _fallback_manifest(store, handle, failed)
+                if not m:
+                    break
+                path = _download(store, handle, c if st == "ready" else None,
+                                 m, dest_dir)
+                if path:
+                    out.append({"key": c.key, "t0": c.t0, "t1": c.t1,
+                                "path": path, "meta": m})
+                    break
+                _log(f"fetch {c.key[:12]}: download came back empty "
+                     f"(attempt {attempt + 1})")
+            except Exception as e:  # noqa: BLE001 — a missing chunk is inert
+                _log(f"fetch {c.key[:12]} failed ({str(e)[:120]}; attempt "
+                     f"{attempt + 1})")
+            if attempt + 1 < FETCH_ATTEMPTS:
+                time.sleep(FETCH_RETRY_S)
     out.sort(key=lambda r: r["t0"])
     return out
+
+
+FETCH_ATTEMPTS = 2
+FETCH_RETRY_S = 0.5
 
 
 def _states_one(handle, chunk):

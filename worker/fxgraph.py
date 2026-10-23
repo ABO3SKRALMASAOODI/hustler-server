@@ -308,6 +308,89 @@ def job_report(edl_dict, collected, previous=None, previous_edl=None):
     return rows
 
 
+# Read-only sidecar status for a browserless audit (motion_qa.audit, the
+# critic's device rows). job_report(edl, []) decides a device's rung with NO
+# sidecar status, so every matte device read "matte.person absent" and was
+# reported "would render at rung omit" on every audit_motion and
+# critique_short of the Gates and Diamandis runs (22-23 Oct: world_negative
+# on 4365, room_dims on 4383/4387, colour_kept on 4396), while every render
+# of those versions drew it at rung full (jobs 90176-91084, 90977-95561,
+# 90866-95576). Editors then rebuilt or dropped devices that worked.
+NOT_MEASURED_NOTE = ("not measured yet over this window: a render measures "
+                     "it (a preview launches it and draws the next render "
+                     "with it; export_final waits up to 90 s for it)")
+
+
+def static_report(edl_dict, index=None, source=None):
+    """job_report(edl, []) for an EDL nobody is rendering, with each
+    device's sidecars READ (never launched) over the source its window
+    plays: a device whose matte is measured is reported at the rung a render
+    takes; one whose matte is not measured yet says so (a render measures
+    it) instead of predicting an omit. ``index``: the project index (the
+    source identity); without one, or where no sidecar store is readable,
+    the plain static decision."""
+    rows = job_report(edl_dict, [])
+    items = {i.get("id"): i for i in (edl_dict or {}).get("fx") or []
+             if isinstance(i, dict) and i.get("device")}
+    if not rows or not items:
+        return rows
+    try:
+        import matte_track
+        import sidecars
+        if sidecars._store() is None:
+            return rows
+        src = source or matte_track.read_source(index or {})
+        if src is None:
+            return rows
+        from timeline import Timeline
+        e = edl_dict or {}
+        tl = Timeline(e.get("keep") or [], e.get("inserts") or [],
+                      e.get("speed") or [])
+    except Exception:  # noqa: BLE001 — the plain static rows then
+        return rows
+
+    class _P:                       # what _source_ranges reads
+        pass
+    plan = _P()
+    plan.tl = tl
+    out = []
+    for r in rows:
+        it = items.get(r.get("id"))
+        if it is None or r.get("rung") == "full":
+            out.append(r)
+            continue
+        card = _card(it.get("device")) or {}
+        kinds = list(((card.get("needs") or {}).get("sidecars")) or [])
+        if not kinds:
+            out.append(r)
+            continue
+        try:
+            ranges = _source_ranges(it, plan)
+            status = {}
+            for kind in kinds:
+                if not ranges:
+                    status[kind] = "absent"
+                    continue
+                h = matte_track.read_handle(kind, src, sidecars.chunks_for(
+                    src.shots, src.duration_s, ranges))
+                status[kind] = sidecars.status(h)
+            d = _device_detail(it, status)
+            reason = d.get("reason") or d["rung"]
+            unmeasured = [k for k, v in status.items() if v != "ready"]
+            if not ranges:
+                reason = (f"{reason}: its window plays no main footage (an "
+                          "insert or still), so no person matte can exist there")
+            elif unmeasured and d["rung"] != "full":
+                reason = f"{', '.join(unmeasured)} {NOT_MEASURED_NOTE}"
+            row = dict(r, rung=d["rung"], reason=reason)
+            if unmeasured and ranges and d["rung"] != "full":
+                row["pending_measure"] = True
+            out.append(row)
+        except Exception:  # noqa: BLE001
+            out.append(r)
+    return out
+
+
 # ------------------------------------------------------------------ plan
 class FxPlan:
     """What one render does with its fx items: per-stage items, extra ffmpeg

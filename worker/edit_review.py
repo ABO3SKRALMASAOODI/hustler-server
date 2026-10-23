@@ -38,7 +38,7 @@ showcase shorts, and every one of them is visible in the EDL plus the index:
   captions wait until it exits) or a headline band — never type no bigger
   than the captions, and never a live caption stacked under it (Thiel's
   3%-high hook caps with '1960s technology' fading in beneath them).
-- PAYOFF. The punchline needs air before the end card (0.8-1.5 s after the
+- PAYOFF. The punchline needs air before the end card (0.6-1.5 s after the
   last word on LIVE footage: the source's own tail — never a freeze-frame or
   a slowed tail before the end card, which reads as the video stalling; a
   big payoff number ~2 s on screen)
@@ -137,7 +137,7 @@ SLAM_ONE_LINE_H = 0.25
 # ── payoff and ending ─────────────────────────────────────────────────────
 # Judges (round 7): Thiel's punchline got 0.5 s and Elon's laugh 0.55 s;
 # never cut to the end card less than 0.8 s after the last payoff word.
-PAYOFF_HOLD_MIN_S = 0.8
+PAYOFF_HOLD_MIN_S = 0.6           # the owner's floor (0.6-1.2 s of live footage)
 PAYOFF_HOLD_MAX_S = 1.5
 PAYOFF_HOLD_TARGET_S = 1.0    # what a fix aims for
 PAYOFF_NUMBER_HOLD_S = 2.0   # a big payoff number on screen before the end card

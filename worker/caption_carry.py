@@ -1518,6 +1518,19 @@ def plan(edl, index, tl, words, canvas=None):
                 prev_pick = None
                 continue
         lo, hi = max(safe[0], normal_y - CAP_HALF_H), min(safe[1], normal_y + CAP_HALF_H)
+        if lcards and home is None and hi - lo < 2 * CAP_HALF_H - 1e-6:
+            # The caption template keeps its block inside SAFE: an anchor
+            # past the safe foot (or head) is laid AT that edge, so that is
+            # the block a card's edges are judged against. Diamandis x Musk
+            # (22-23 Oct): anchor_y 0.89 under a 4:5 card ending at 0.795
+            # was judged as clear (its range came out empty) and rendered
+            # clamped to 0.80, across the card's foot (CAPTION CROSSES THE
+            # CARD EDGE on 4419, 4424, 4425, 4427, 4430), and every anchor
+            # past 0.80 rendered the same frames.
+            if normal_y + CAP_HALF_H > safe[1]:
+                lo, hi = max(safe[0], safe[1] - 2 * CAP_HALF_H), safe[1]
+            elif normal_y - CAP_HALF_H < safe[0]:
+                lo, hi = safe[0], min(safe[1], safe[0] + 2 * CAP_HALF_H)
         # the graphics that truly cover the caption's usual block (in a card:
         # the block the caption track lays out, in the card's column): only
         # they may mute it, and only they are named for words left on them

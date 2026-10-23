@@ -523,7 +523,20 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                 value = op.get("value")
                 if not isinstance(value, dict) or value.get("id", item_id) != item_id:
                     raise ValueError("An upsert requires an object with the same id.")
-                value = {**(items[at] if at is not None else {}), **value, "id": item_id}
+                prior = items[at] if at is not None else {}
+                merged = {**prior, **value, "id": item_id}
+                # "upsert patches one object by id": a template's params
+                # are patched key by key, as set_motion_graphic does. A
+                # partial params dict replaced the whole set (Gates run,
+                # 22 Oct: a motion upsert with params={'y': ...} dropped
+                # the text, tier and kicker, so the graphic re-rendered at
+                # its defaults). Every other key is replaced as before.
+                if isinstance(prior.get("params"), dict) and \
+                        isinstance(value.get("params"), dict) and \
+                        not value.get("replace_params"):
+                    merged["params"] = {**prior["params"], **value["params"]}
+                merged.pop("replace_params", None)
+                value = merged
                 if at is None:
                     items.append(value)
                 else:

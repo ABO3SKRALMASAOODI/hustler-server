@@ -273,6 +273,62 @@ class RunTests(unittest.TestCase):
             "title": "Joe Rogan Experience #2054 - Elon Musk", "upload_date": "20240627"}, 6)
         self.assertEqual(name, "Elon Musk - Joe Rogan Experience #2054 - Elon Musk (2024) - 6 Finals")
 
+    def test_delivery_name_strips_connectives_and_cuts_whole_words(self) -> None:
+        # w1022 Diamandis: "Elon Musk - on AGI Safety, ... (Peter H. Diamandis EP - 20 Finals"
+        meta = {"people_verified": ["Elon Musk", "Peter H. Diamandis"],
+                "title": "Elon Musk on AGI Safety, Superintelligence, and Neuralink "
+                         "(Peter H. Diamandis EP #91)"}
+        run_dir_ = self.root / "acq"
+        (run_dir_ / "source").mkdir(parents=True)
+        (run_dir_ / "source" / "acquisition-record.json").write_text(json.dumps(
+            {"channel_upload_date": "2024-03-25", "title": "x"}))
+        name = run.delivery_name(meta, 20, run_dir_)
+        self.assertEqual(
+            name, "Elon Musk - AGI Safety, Superintelligence, and Neuralink (2024) - 20 Finals")
+        self.assertEqual(run.delivery_name(meta, 20),
+                         "Elon Musk - AGI Safety, Superintelligence, and Neuralink - 20 Finals")
+        long = run.delivery_name({"people_verified": ["Ada Lovelace"], "title":
+                                  "Ada Lovelace about engines that weave algebraic patterns "
+                                  "(and much more #12 that never closes", "upload_date": "2015"},
+                                 3)
+        self.assertNotIn("(and", long)
+        self.assertTrue(long.startswith("Ada Lovelace - engines that weave"), long)
+        title = long[len("Ada Lovelace - "):long.rindex(" (2015)")]
+        self.assertLessEqual(len(title), run.TITLE_MAX)
+        self.assertEqual(title.count("("), title.count(")"))
+        keep = run.delivery_name({"people_verified": ["Lex"], "title":
+                                  "Lex with Guest: Podcast #431 (2024)", "upload_date": "2024-05-01"}, 2)
+        self.assertEqual(keep, "Lex - Guest Podcast #431 (2024) - 2 Finals")
+
+    def test_candidate_warns_and_ship_refuses_over_the_run_cap(self) -> None:
+        # Diamandis s16: a 40.94 s preview + the 5 s end card exported 45.95 s
+        self.add("s01", 11)
+        self.ok("assign", "--run-dir", self.dir, "--short-id", "s01",
+                "--brief", self.brief("s01"), "--editor", "e1")
+        out = json.loads(self.ok(
+            "candidate", "--run-dir", self.dir, "--short-id", "s01",
+            "--preview", "https://example.invalid/p.mp4", "--edl-version", "7",
+            "--note", "hook", "--programme-s", "40.94"))
+        self.assertIn("OVER THE RUN CAP", out["length_warning"])
+        self.assertEqual(out["candidates"][-1]["final_s"], 45.94)
+        self.fails("ship refused: OVER THE RUN CAP", "review", "--run-dir", self.dir,
+                   "--short-id", "s01", "--verdict", "ship", "--note", "ok",
+                   "--checks", CHECKS)
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s01", "--verdict", "fix",
+                "--note", "cut 1 s at 12 s")
+        out = json.loads(self.ok(
+            "candidate", "--run-dir", self.dir, "--short-id", "s01",
+            "--preview", "https://example.invalid/p.mp4", "--edl-version", "8",
+            "--note", "trimmed", "--programme-s", "39.6"))
+        self.assertNotIn("length_warning", out)
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s01", "--verdict", "ship",
+                "--note", "ok", "--checks", CHECKS)
+
+    def test_candidate_without_a_length_says_so(self) -> None:
+        self.add("s01", 11)
+        self.to_candidate("s01", "e1")
+        self.assertIn("--programme-s", self.state()["shorts"]["s01"]["length_warning"])
+
     def test_deliver_requires_a_finalized_run(self) -> None:
         self.add("s01", 11)
         self.fails("finalize the run before delivering", "deliver",

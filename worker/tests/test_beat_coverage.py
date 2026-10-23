@@ -403,12 +403,12 @@ def test_a_payoff_number_needs_about_two_seconds_and_the_line_point_eight():
     edl["keep"] = [[0.0, dur]]
     codes = {n["code"]: n for n in _notes(edl, words)}
     assert codes["payoff_number_hold"]["evidence"]["held_s"] == pytest.approx(1.4, abs=0.01)
-    assert "0.8-1.5 s" in codes["payoff_hold"]["fix"] or "0.8" in codes["payoff_hold"]["fix"]
+    assert "0.6-1.5 s" in codes["payoff_hold"]["fix"] or "0.6" in codes["payoff_hold"]["fix"]
     held = _edl([_mg("x", "word_slam", 6.0, 7.0, text="*then*"),
                  dict(pay, start=dur - 2.1)], dur=dur)
     held["keep"] = [[0.0, dur]]
     assert "payoff_number_hold" not in [n["code"] for n in _notes(held, words)]
-    assert edit_review.PAYOFF_HOLD_MIN_S == 0.8 and edit_review.PAYOFF_NUMBER_HOLD_S == 2.0
+    assert edit_review.PAYOFF_HOLD_MIN_S == 0.6 and edit_review.PAYOFF_NUMBER_HOLD_S == 2.0
 
 
 # ── 6. the counter's landing, written from the transcript ────────────────

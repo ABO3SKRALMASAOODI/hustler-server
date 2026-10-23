@@ -325,11 +325,16 @@ def test_a_browserless_estimate_is_named_only_past_its_own_error(monkeypatch):
                                           id="hook")
     item = ctx.latest_edl()["json"]["motion"][0]
     assert item["footprint"].get("estimated"), item.get("footprint")
-    assert "free-tier mark's zone" in out, out
+    # named and (since the Gates run, 23 Oct) moved off the mark inside the band
+    assert "KEEP-OUT (corner mark, estimated)" in out, out
+    assert "free-tier corner mark" in out, out
     out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.21})
-    assert "NOTE (band)" not in out, out
+    assert "NOTE (band)" not in out and "corner mark" not in out, out
     out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.12})
-    assert "NOTE (band): by its estimated box" in out and "feed header" in out, out
+    assert "KEEP-OUT (corner mark, estimated)" in out, out
+    import keepout
+    box = ctx.latest_edl()["json"]["motion"][0]["footprint"]["box"]
+    assert not keepout.on_mark(box, keepout.mark_zone(1080, 1920)), box
 
 
 def test_a_blur_backdrop_is_the_first_panels_footage_as_the_card_draws_it():

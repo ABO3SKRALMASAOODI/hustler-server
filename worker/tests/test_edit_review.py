@@ -359,7 +359,7 @@ def test_the_budget_names_the_restating_graphics_as_first_cuts():
 def test_a_punchline_without_air_before_the_end_card_is_flagged():
     words = _words(FILLER)                      # last word ends at 30.18
     note = _note(_edl(dur=30.5), "payoff_hold", {"words": words})
-    assert note["evidence"]["hold_s"] == 0.32 and "0.8-1.5 s" in note["fix"]
+    assert note["evidence"]["hold_s"] == 0.32 and "0.6-1.5 s" in note["fix"]
     assert "payoff_hold" not in _codes(_edl(dur=31.0), {"words": words})
     tail = _note(_edl(dur=34.0), "payoff_hold", {"words": words})
     assert "dead tail" in tail["message"]
@@ -383,9 +383,11 @@ def test_the_payoff_hold_fix_reads_how_much_tail_the_source_has():
     note = _note(_edl(dur=30.5), "payoff_hold", {"words": some})
     assert "extend the last keep to about 30.80s" in note["fix"]
     assert "audio_mode='hold'" not in note["fix"]
-    # 0.8 s of air is enough (judges: never less than 0.8 s)
+    # 0.6 s of air is enough (the owner's 0.6-1.2 s of live footage; the
+    # judges' earlier floor was 0.8 s)
     assert "payoff_hold" not in _codes(_edl(dur=31.0), {"words": words})
-    assert "payoff_hold" in _codes(_edl(dur=30.9), {"words": words})
+    assert "payoff_hold" not in _codes(_edl(dur=30.85), {"words": words})
+    assert "payoff_hold" in _codes(_edl(dur=30.7), {"words": words})
 
 
 def test_a_closing_reaction_under_a_second_is_flagged():

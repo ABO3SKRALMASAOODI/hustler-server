@@ -197,7 +197,9 @@ disagree, v9 wins on method and the brief wins on preferences.
    brief, then go further; build in batched calls; `proof_device` and
    `audit_motion` before rendering; render once, self-check with rendered
    `look_at` (editing.md step 5), fix the weakest moment, and hand back a note
-   of at most 10 lines with `run.py candidate --editor <name>`.
+   of at most 10 lines with `run.py candidate --editor <name> --programme-s
+   <preview s>` (the final adds the 5 s end card; over the run's cap it warns
+   and review refuses to ship).
 8. **Review** ([review.md](references/review.md)) candidates in small
    batches as editors hand them back (one reviewer reads review.md once and
    judges the batch; no reviewer waits idle for work). Use the evidence

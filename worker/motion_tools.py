@@ -1059,6 +1059,105 @@ def _mark_of(item, W, H, ctx=None, edl=None):
     return keepout.mark_zone(W, H)
 
 
+def _band_mark(item, W, H, ctx=None, edl=None):
+    """The corner mark's reserved box for a graphic _mark_of leaves to the
+    band machinery (one set over a picture card's or letterbox's band), or
+    None. The band note (_band_spill_note) only named a lockup rising into
+    the mark past the estimate's 0.05 tolerance and never moved it, and the
+    keep-out solver was given no mark there, so a face move could land a
+    graphic ON the mark: Gates s04 (4385 v26) shipped 'fifteen' from y 0.100
+    and 'payoff' from y 0.065 under the free-tier mark, the hook word_slam
+    was moved up to y 0.205 into it. Persistent band headlines stay
+    band_type's (laid out around the mark)."""
+    if motion_templates.persistent(item) or not keepout.portrait(W, H) \
+            or item.get("layer") == "behind_subject":
+        return None
+    if _mark_of(item, W, H, ctx, edl) is not None:
+        return None
+    return keepout.mark_zone(W, H)
+
+
+def _band_of(ctx, edl, item, W, H):
+    try:
+        video = (getattr(ctx, "index", None) or {}).get("video") or {}
+        src = ((video["width"], video["height"])
+               if video.get("width") and video.get("height")
+               and not edl.get("canvas") else None)
+        return headline_band(edl, float(item["start"]), float(item["end"]),
+                             W, H, src=src)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# An ESTIMATED box (no browser on the production lanes) runs a little taller
+# than the render: a band graphic is moved off the mark only when its
+# estimate reaches this far into the mark's box (Gates s04: 'fifteen' was
+# estimated 0.047 into it and rendered 0.027 into it; 'payoff' 0.06 / 0.062).
+MARK_EST_TOL = 0.02
+# A band-layout graphic on the mark may shrink this far to fit the band
+# beside/under the mark (the face keep-out's own steps stop at 75%).
+BAND_MARK_SHRINK = (0.9, 0.8, 0.7, 0.6)
+
+
+def _band_mark_fix(ctx, edl, item, spec, box, zone, W, H, pin, kw):
+    """(patch, box) that takes a band-layout graphic off the corner mark
+    while it stays in the free band above the card (y from the mark's floor
+    to the picture's top, within the estimate's tolerance) and off every
+    face, or None. Tries its own y/x first, then size steps the editor did
+    not pin (down to 60%)."""
+    band = _band_of(ctx, edl, item, W, H)
+    if not band or not box:
+        return None
+    top, bottom, _what = band
+    pic = bottom + HEADLINE_GAP
+    tol = BAND_SPILL_EST_TOL
+    template = item["template"]
+    params0 = dict(item.get("params") or {})
+    pspec = (spec or {}).get("params") or {}
+    sizer = next((k for k in ("width", "size", "scale")
+                  if (pspec.get(k) or {}).get("type") == "float"), None)
+    bases = [({}, params0, box, 0.0)]
+    if sizer and not pin:
+        sp = pspec[sizer]
+        cur = float(params0.get(sizer, sp.get("default", sp.get("max", 1.0))))
+        for f in BAND_MARK_SHRINK:
+            val = round(cur * f, 3)
+            if val < float(sp.get("min", 0.0)):
+                continue
+            pf = dict(params0, **{sizer: val})
+            bf = keepout.nominal_ink(template, spec, pf, frame=(W, H))
+            if bf:
+                bases.append(({sizer: val}, pf, _bridged(bf, item) or bf,
+                              keepout.SHRINK_COST * (1 - f)))
+    best = None
+    for patch0, pf, bf, c0 in bases:
+        cands = keepout.candidates(template, spec, pf, bf, [], kw.get("zones") or [],
+                                   W, H, mark=zone, pin_size=True,
+                                   mouths=kw.get("mouths") or (),
+                                   chins=kw.get("chins") or (),
+                                   captions=kw.get("captions") or (),
+                                   near_captions=kw.get("near_captions") or (),
+                                   scene=kw.get("scene") or ())
+        for cost, patch, nb in cands:
+            if nb[1] < top - keepout.EDGE_TOL or nb[3] > pic + tol:
+                continue
+            total = cost + c0
+            if best is None or total < best[0]:
+                best = (total, dict(patch0, **patch), nb)
+            break               # candidates are sorted: the first is its best
+    return (best[1], best[2]) if best else None
+
+
+def _mark_warning(item, box, zone, est):
+    return (f"WARNING (corner mark): {'by its estimated size ' if est else ''}"
+            f"'{item.get('id')}' draws from y {box[1]:.3f} into the free-tier corner "
+            f"mark's box (top-right, x {zone[0]:.2f}-{zone[2]:.2f}, down to y "
+            f"{zone[3]:.3f}), and no placement in the band above the picture clears it. "
+            "A free-tier final burns the mark over it and the render's picture check "
+            "names it: make it smaller or shorter, set it left of the mark, or move it "
+            "onto the picture (off the face).")
+
+
 def _what_hit(hit):
     return ("the speaker's mouth" if hit.get("mouth") else
             "the speaker's chin" if hit.get("chin") else "the speaker's face")
@@ -1099,6 +1198,7 @@ def _keep_out_estimated(ctx, edl, item):
     issues = ([i for i in keepout.safe_issues(box, W, H) if i in ("side", "rail")]
               if template in keepout.COLUMN_TEMPLATES else [])
     mark = _mark_of(item, W, H, ctx, edl)
+    bmark = None if mark is not None else _band_mark(item, W, H, ctx, edl)
     if keepout.on_mark(box, mark):
         issues.append("mark")
     pin = _pinned_size(spec, item)
@@ -1116,7 +1216,7 @@ def _keep_out_estimated(ctx, edl, item):
                   room=keepout.caption_room(bands, zones, W, H),
                   mouths=keepout.zones_of(track, keepout.mouth_zone),
                   chins=keepout.zones_of(track, keepout.chin_zone),
-                  mark=mark, pin_size=bool(pin),
+                  mark=mark if mark is not None else bmark, pin_size=bool(pin),
                   clear_penalty=keepout.CLEAR_PENALTY if face_bad else 0.0,
                   scene=_scene_boxes(ctx, edl, item))
         params0 = item.get("params") or {}
@@ -1174,6 +1274,36 @@ def _keep_out_estimated(ctx, edl, item):
         notes.append("NOTE (keep-out, estimated): kept as designed (allow_face_overlap), but by "
                      "the template's estimated size it "
                      + " and ".join(keepout.ISSUE_TEXT[i] for i in issues) + ".")
+    if bmark is not None and not allow and keepout.on_mark(
+            box, (bmark[0], bmark[1], bmark[2], bmark[3] - MARK_EST_TOL)):
+        kw_b = dict(zones=zones, mouths=keepout.zones_of(track, keepout.mouth_zone),
+                    chins=keepout.zones_of(track, keepout.chin_zone),
+                    captions=[keepout.caption_band(y) for y in bands],
+                    near_captions=[keepout.caption_obstacle(y) for y in bands],
+                    scene=_scene_boxes(ctx, edl, item))
+        fix = _band_mark_fix(ctx, edl, item, spec, box, bmark, W, H, pin, kw_b)
+        params = None
+        if fix:
+            try:
+                params = motion_templates.check_params(
+                    template, dict(item["params"], **fix[0]), html=item.get("html"))
+            except ValueError:
+                params = None
+        if params is not None:
+            old_p = item.get("params") or {}
+            pspec = spec.get("params") or {}
+            changes = ", ".join(
+                f"{k} {_fmt(old_p.get(k, _implicit(k, pspec.get(k) or {})))} → "
+                f"{_fmt(params.get(k))}" for k in sorted(fix[0]))
+            item["params"] = params
+            box = _bridged(keepout.nominal_ink(template, spec, params, frame=(W, H)),
+                           item) or fix[1]
+            notes.append(
+                f"KEEP-OUT (corner mark, estimated): by the template's estimated size it "
+                f"{keepout.ISSUE_TEXT['mark']}, so it moved inside the band above the "
+                f"picture ({changes}). Check the placement in the preview.")
+        else:
+            notes.append(_mark_warning(item, box, bmark, True))
     _set_footprint(item, box, zones, W, H, estimated=True, edl=edl)
     return "".join("\n" + n for n in notes), None
 
@@ -1203,6 +1333,7 @@ def _keep_out_inner(ctx, edl, item, rep):
     hit = keepout.assess(box, track)
     issues = keepout.safe_issues(box, W, H)
     mark = _mark_of(item, W, H, ctx, edl)
+    bmark = None if mark is not None else _band_mark(item, W, H, ctx, edl)
     if keepout.on_mark(box, mark):
         issues.append("mark")
     pin = _pinned_size(spec, item)
@@ -1227,7 +1358,7 @@ def _keep_out_inner(ctx, edl, item, rep):
                            [keepout.caption_obstacle(y, grow) for y in bands],
                            keepout.caption_room(bands, zones, W, H, grow)),
                           off_face=face_bad, scene=_scene_boxes(ctx, edl, item),
-                          mark=mark, pin=pin)
+                          mark=mark if mark is not None else bmark, pin=pin)
         if found:
             patch, real, params, rep = found
             old = item.get("params") or {}
@@ -1268,6 +1399,8 @@ def _keep_out_inner(ctx, edl, item, rep):
     elif allow and issues:
         notes.append("NOTE (keep-out): kept as designed (allow_face_overlap), but it "
                      + " and ".join(keepout.ISSUE_TEXT[i] for i in issues) + ".")
+    if bmark is not None and keepout.on_mark(box, bmark) and not allow:
+        notes.append(_mark_warning(item, box, bmark, False))
     _set_footprint(item, keepout.cover_box(rep, times) or box, zones, W, H, edl=edl)
     # the INK bounds (type and plates, not soft scrims) are what the safe
     # area and the face are compared with, so they are what the reply reports

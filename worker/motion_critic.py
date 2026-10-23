@@ -88,8 +88,10 @@ _BW_REFUSED = re.compile(r"\b(no|not|without|less|avoid|don'?t)\b[^.?!]{0,24}"
                          r"\b(black[- ]and[- ]white|b&w|monochrome|noir)", re.I)
 # Graphics covering more than this share of the runtime read as a wall.
 GRAPHICS_SHARE = 0.55
-# Payoff hold after the last word (s).
-PAYOFF_HOLD_S = 0.8
+# Payoff hold after the last word (s): the owner's 0.6-1.2 s of live footage
+# (review.md). It was 0.8, stricter than the review, and asked the Gates
+# run's editors to extend tails that were already in range (22 Oct).
+PAYOFF_HOLD_S = 0.6
 # A graphic box over this share of a face (chin band included) collides.
 FACE_SHARE = 0.15
 # The detector box's bottom vs the real chin: YuNet's box already reaches

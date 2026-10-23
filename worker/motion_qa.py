@@ -1303,6 +1303,46 @@ def summary_lines(result, limit=8):
     return "\n".join(lines)
 
 
+# ── the corner mark (Gates s04, 4385 v26: 'fifteen' and 'payoff' drew
+# into the free-tier mark's box; only the FINAL's picture check said so) ──
+
+def graphics_on_mark(edl):
+    """Advisory findings for every graphic whose stored footprint (the
+    keep-out's measured or estimated box) lays ink on the free-tier corner
+    mark's reserved box. Persistent band headlines are laid out around the
+    mark and full-frame picture templates are not type: neither is judged."""
+    out = []
+    try:
+        import caption_carry
+        import keepout
+        import motion_templates
+        import render_qc
+        for it in (edl or {}).get("motion") or []:
+            if not isinstance(it, dict) or motion_templates.persistent(it) \
+                    or it.get("layer") == "behind_subject" \
+                    or it.get("template") in render_qc.PICTURE_TEMPLATES:
+                continue
+            fp = it.get("footprint") or {}
+            box, ar = fp.get("box"), fp.get("ar")
+            if not box or not ar or float(ar) > 0.75:
+                continue            # no box, or not a portrait frame
+            W, H = 1080, int(round(1080 / float(ar)))
+            zone = keepout.mark_zone(W, H)
+            if zone and keepout.on_mark(box, zone):
+                est = " (estimated box)" if caption_carry.estimated(it) else ""
+                out.append({
+                    "code": "graphic_on_mark", "severity": "advisory",
+                    "id": it.get("id"),
+                    "message": (f"GRAPHIC ON THE CORNER MARK: '{it.get('id')}' draws from "
+                                f"y {float(box[1]):.3f}{est} into the free-tier mark's box "
+                                f"(top-right, down to y {zone[3]:.3f}); a free-tier final "
+                                "burns the mark over it: set it lower, narrower or left of "
+                                "the mark")})
+    except Exception:  # noqa: BLE001 — an audit never fails over a lens
+        return out
+    return out
+
+
 # ── audit (browserless) ─────────────────────────────────────────────────
 
 def audit(edl, index=None, *, intensity="designed", request_text=None,
@@ -1337,9 +1377,15 @@ def audit(edl, index=None, *, intensity="designed", request_text=None,
                                      "flashes in one second (limit "
                                      f"{flash['max_per_s']}): thin them or "
                                      "say the user asked for flashing")})
-    rows = fxgraph.job_report(edl, [])
+    rows = fxgraph.static_report(edl, index)
     for r in rows:
-        if r.get("rung") not in ("full", None):
+        if r.get("pending_measure"):
+            # not a degrade: the matte is measured by the next render
+            findings.append({"code": "device_measuring",
+                             "severity": "advisory", "id": r.get("id"),
+                             "message": f"{r.get('device') or r.get('id')}: "
+                                        f"{r.get('reason')}"})
+        elif r.get("rung") not in ("full", None):
             findings.append({"code": "device_degraded",
                              "severity": "advisory", "id": r.get("id"),
                              "message": f"{r.get('device') or r.get('id')} "
@@ -1432,6 +1478,7 @@ def audit(edl, index=None, *, intensity="designed", request_text=None,
                              "message": "STALL BEFORE END CARD: " + note})
     except Exception:  # noqa: BLE001 — an audit never fails over a lens
         pass
+    findings += graphics_on_mark(edl)
     zooms = len(((edl.get("effects") or {}).get("zooms")) or [])
     sfx = len(edl.get("sfx") or [])
     return {"ledger": ledger, "flash": flash, "devices": rows,
