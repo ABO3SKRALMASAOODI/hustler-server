@@ -201,6 +201,9 @@ def test_argument_spellings_from_the_23_oct_runs_are_read():
                                 "kind": "video"}]}
     assert norm("look_at", {"times": [1.0], "source": True})[1] == {
         "times": [1.0]}
+    # the MCP transport sends an unknown flag as text (job 100501)
+    assert norm("look_at", {"times": [1.0], "source": "true"})[1] == {
+        "times": [1.0]}
     assert norm("look_at", {"times": [1.0], "view": "source"})[1] == {
         "times": [1.0]}
     assert norm("look_at", {"output_times": [1.0], "view": "rendered"}

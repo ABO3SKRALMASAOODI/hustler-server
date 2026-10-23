@@ -25548,8 +25548,14 @@ def _argument_aliases(name, args, notes):
             notes.append(f"view '{view}' -> "
                          + ("times are source seconds" if view == "source"
                             else "rendered=true"))
-        if isinstance(args.get("source"), bool):
-            if args.pop("source"):
+        # a client's transport may send an unknown flag as text ('true')
+        flag = args.get("source")
+        if isinstance(flag, str) and flag.strip().lower() in (
+                "true", "false", "1", "0", "yes", "no"):
+            flag = flag.strip().lower() in ("true", "1", "yes")
+        if isinstance(flag, bool):
+            args.pop("source")
+            if flag:
                 notes.append("source=true -> times are source seconds")
     if name == "remove_typeset" and "ids" not in args and "id" in args:
         one = args.pop("id")
