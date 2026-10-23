@@ -3728,7 +3728,15 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                 raise EDLValidationError(f"{label}.id must be unique.")
             seen_mo.add(mo.id)
             mo.start, mo.end = _r(mo.start), _r(mo.end)
-            _check_span(label, mo.start, mo.end, prog_dur, min_len=0.2)
+            # A changed-section proof (stitch) clips a graphic to its window:
+            # a piece of a longer graphic may be a sliver. It was refused
+            # "motion[0]: span [0.0, 0.14] is 0.140s, shorter than 0.2s"
+            # (preview check 100293, project 4461 v25, 23 Oct) while the
+            # complete preview of the same version rendered.
+            piece = mo.full_duration_s is not None and \
+                float(mo.full_duration_s) >= 0.2 - 1e-9
+            _check_span(label, mo.start, mo.end, prog_dur,
+                        min_len=MIN_SPAN_S if piece else 0.2)
             try:
                 mo.params = _mt.normalize_params(mo.template, mo.params, html=mo.html)
             except ValueError as e:

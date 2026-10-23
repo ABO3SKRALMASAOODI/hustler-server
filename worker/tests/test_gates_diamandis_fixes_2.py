@@ -208,3 +208,20 @@ def test_argument_spellings_from_the_23_oct_runs_are_read():
         "times": [1.0]}
     assert norm("look_at", {"output_times": [1.0], "view": "rendered"}
                 )[1] == {"output_times": [1.0], "rendered": True}
+
+
+# ── a proof piece of a longer graphic may be a sliver ──────────────────
+
+def test_a_clipped_motion_piece_validates_and_a_short_graphic_does_not():
+    import schemas
+    edl = schemas.default_edl(10.0)
+    edl["keep"] = [[0.0, 10.0]]
+    piece = {"id": "hook", "template": "word_slam", "start": 0.0,
+             "end": 0.14, "params": {"text": "HOOK"},
+             "phase_s": 2.42, "full_duration_s": 2.56}
+    edl["motion"] = [piece]
+    schemas.validate_edl(edl, 10.0)          # preview check 100293
+    edl["motion"] = [{k: v for k, v in piece.items()
+                      if k not in ("phase_s", "full_duration_s")}]
+    with pytest.raises(schemas.EDLValidationError):
+        schemas.validate_edl(edl, 10.0)
