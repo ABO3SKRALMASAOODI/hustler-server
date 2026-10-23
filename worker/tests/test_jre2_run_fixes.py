@@ -461,3 +461,33 @@ def test_the_correction_preview_keeps_the_verdict_and_the_fixed_states():
     assert got["corrected_states"] == [
         {"start": 20.0, "end": 20.5, "text": "at sea level"}]
     assert "event_page" not in got and len(out) < 600
+
+
+# ── template parameters passed at the top level reach params ────────────
+# add_motion_graphic(tier='hook') was refused "unexpected keyword argument".
+
+def test_top_level_template_params_are_hoisted_into_params():
+    norm = agent_tools._normalize_tool_call
+    got = norm("add_motion_graphic", {"template": "word_slam", "start": 0,
+                                      "end": 1.6, "tier": "hook",
+                                      "params": {"text": "*FRAGILE*"}})[1]
+    assert got["params"] == {"text": "*FRAGILE*", "tier": "hook"}
+    assert "tier" not in got
+    # an unknown key is left for the tool to name; params win over strays
+    got = norm("add_motion_graphic", {"template": "word_slam", "start": 0,
+                                      "text": "A", "bogus": 1,
+                                      "params": {"text": "B"}})[1]
+    assert got["params"] == {"text": "B"} and got["bogus"] == 1
+
+
+# ── a typeset that fits nowhere is not told to try what it just tried ───
+
+def test_the_no_fit_refusal_skips_options_the_call_already_used():
+    from tools_ext import typeset_tools
+    tried = {"text": "really *any* cognitive task",
+             "voice": "editorial_serif", "layout": "side_column",
+             "depth": "front"}
+    out = typeset_tools._no_fit_options(tried, 21.19, 22.87)
+    assert "editorial_serif" not in out and "side_column" not in out
+    assert "depth front" not in out and "fewer words" in out
+    assert "word_slam" in out

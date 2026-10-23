@@ -441,15 +441,36 @@ def _compose(ctx, edl, mid, text, s, e, prog, pw, voice="auto",
             "purpose": "typeset lockup (replaces the captions for its words)"}
     item, doc, notes = solve_varied(ctx, edl, item, faces=faces)
     if item is None:
-        return (f"REJECTED: {notes} — try fewer words (the face moves "
-                "less in a shorter window), another voice (e.g. "
-                "editorial_serif for a long line), layout side_column, or "
-                "depth front")
+        return f"REJECTED: {notes} — " + _no_fit_options(params, s, e)
     if held is not None:
         notes = list(notes) + [f"held until {held:g}s, where the next "
                                "words are said (their captions need the "
                                "frame)"]
     return trims, item, doc, notes, reason
+
+
+def _no_fit_options(params, s, e):
+    """What to try when no typeset layout fits, leaving out what this call
+    already tried: the same three suggestions were repeated to editors who
+    had passed editorial_serif, side_column and depth front (project 4415
+    jobs 93821/93828, 4413 job 93795: 16 refusals in the week to 23 Oct)."""
+    p = params or {}
+    opts = []
+    words = len(str(p.get("text") or "").replace("*", "").split())
+    if words > 2:
+        opts.append("fewer words (the face moves less in a shorter window)")
+    if e - s > 1.6:
+        opts.append(f"a shorter window ({e - s:.1f}s now)")
+    if p.get("voice") != "editorial_serif":
+        opts.append("another voice (e.g. editorial_serif for a long line)")
+    if p.get("layout") != "side_column":
+        opts.append("layout side_column")
+    if p.get("depth") != "front":
+        opts.append("depth front")
+    opts.append("a moment where the face sits elsewhere, or a word_slam "
+                "lockup instead (it takes its own band)")
+    return "try " + ", ".join(opts[:-1]) + (", or " if len(opts) > 1
+                                            else "") + opts[-1]
 
 
 def _batch_voices(ctx):

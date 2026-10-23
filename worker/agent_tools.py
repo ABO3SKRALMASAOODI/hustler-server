@@ -25438,6 +25438,40 @@ _ARG_ALIASES = {
 }
 
 
+# add/set_motion_graphic's own arguments; any other key that names one of
+# the template's parameters was meant for params (add_motion_graphic(tier=
+# 'hook') was refused 'unexpected keyword argument' before any work).
+_MOTION_CALL_ARGS = frozenset({
+    "template", "start", "end", "params", "html", "layer", "box",
+    "mute_captions", "sfx", "id", "purpose", "allow_face_overlap"})
+
+
+def _hoist_template_params(args, notes):
+    stray = [k for k in args if k not in _MOTION_CALL_ARGS]
+    if not stray or not isinstance(args.get("template"), str):
+        return
+    try:
+        spec_params = motion_tools.motion_templates.spec(
+            args["template"]).get("params") or {}
+    except Exception:  # noqa: BLE001 — the tool names the bad template
+        return
+    params = args.get("params")
+    if isinstance(params, str):
+        params = _json_text(params)
+    if params is None:
+        params = {}
+    if not isinstance(params, dict):
+        return
+    moved = []
+    for k in stray:
+        if k in spec_params and k not in params:
+            params[k] = args.pop(k)
+            moved.append(k)
+    if moved:
+        args["params"] = params
+        notes.append(", ".join(moved) + " -> params")
+
+
 def _argument_aliases(name, args, notes):
     for alias, real in (_ARG_ALIASES.get(name) or {}).items():
         if alias in args and real not in args:
@@ -25446,6 +25480,8 @@ def _argument_aliases(name, args, notes):
     if name == "set_caption_fixes" and isinstance(args.get("replacements"),
                                                   str):
         args["replacements"] = _json_text(args["replacements"])
+    if name in ("add_motion_graphic", "set_motion_graphic"):
+        _hoist_template_params(args, notes)
     if name == "add_overlay" and "end" in args and "duration_s" not in args:
         try:
             dur = round(float(args["end"]) - float(args.get("start")), 2)
