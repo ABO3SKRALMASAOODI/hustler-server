@@ -339,6 +339,11 @@ def _f(v):
     return f"{v:.2f}s"
 
 
+# A hook-tier slam that starts this early is the opening title (cover.
+# COVER_START_S): number landing never moves it.
+HOOK_OPENS_S = 0.5
+
+
 def land(edl, index, item, prog):
     """Make a number graphic complete on its spoken number. Mutates ``item``
     (start/end/params) and returns (changed, note); note is '' when there
@@ -355,6 +360,17 @@ def land(edl, index, item, prog):
     if not targets:
         return False, ""
     s, e = float(item["start"]), float(item["end"])
+    if tpl == "word_slam" and params.get("tier") == "hook" and \
+            s <= HOOK_OPENS_S + 1e-6:
+        # The hook tier is the opening title on frame 0: moving it onto its
+        # spoken figure took the title off the opening and left the short to
+        # open bare (Altman 4576 v5 -> v6: the hook 'the last *10 days*' at
+        # 0-2.6 s was moved to 1.88-4.48 s, then told "the hook tier is the
+        # opening title"). It stays; the note says how to land the figure.
+        return False, (f"NOTE (number): the hook opens the short, so its "
+                       f"'{figure}' is on screen before it is said; it stays "
+                       "on frame 0 as the title. To land the figure on its "
+                       "word, put a display-tier slam of it where it is said.")
     try:
         spoken = [n for n in spoken_numbers(_words(edl, index, s, e)) if _match(n, targets)]
     except Exception as err:  # noqa: BLE001  (a lint never blocks the edit)

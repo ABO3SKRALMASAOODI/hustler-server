@@ -705,18 +705,96 @@ def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
         pw = [w for w in pw if not audit.silenced(w.get("s0"), w.get("s1"),
                                                   duck)]
     if pw and program_s:
-        hold = program_s - max(float(w["t1"]) for w in pw)
+        last_w = max(pw, key=lambda w: float(w["t1"]))
+        hold = program_s - float(last_w["t1"])
         if 0 < hold < PAYOFF_HOLD_S - 1e-3:
-            out.append(_f(
-                "fix", "words", "payoff_hold_short",
-                f"{hold:.2f}s after the last word before the end card "
-                f"(<{PAYOFF_HOLD_S}s): the payoff does not breathe.",
-                fix=f"hold {PAYOFF_HOLD_S - hold + 0.05:.2f}s more on LIVE "
-                    "footage: extend the final keep into the pause after the "
-                    "word (the layers that ran to the end follow it); with no "
-                    "live tail, end on the last word — never a freeze-frame "
-                    "or a slowed tail before the end card", t=program_s))
+            out.append(_payoff_hold_finding(edl, index, last_w, hold,
+                                            program_s))
     return out
+
+
+# The live tail a short-of-hold ending is extended to (inside the owner's
+# 0.6-1.2 s), and the margin kept before the source's next word.
+PAYOFF_TARGET_S = 0.8
+NEXT_WORD_MARGIN_S = 0.05
+
+
+def _source_tail_room(edl, index, last_w):
+    """Seconds of source after the last heard word before the next word
+    starts (any word, a filler too), when the programme ends on the footage
+    that word is in; None when that cannot be read."""
+    keep = (edl or {}).get("keep") or []
+    try:
+        s0, s1 = float(last_w["s0"]), float(last_w["s1"])
+        k0, k1 = float(keep[-1][0]), float(keep[-1][1])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    if not (k0 - 0.01 <= s1 <= k1 + 0.05):
+        return None
+    try:
+        import timeline as tl_mod
+        blocks = tl_mod.program_blocks(edl)
+        tail = blocks[-1] if blocks else None
+        if not tail or tail.get("kind") != "footage" or \
+                abs(float(tail.get("src_end", -1)) - k1) > 0.011:
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    later = [float(w["t0"]) for w in (index or {}).get("words") or []
+             if isinstance(w, dict) and w.get("t0") is not None
+             and float(w["t0"]) > s0 + 0.01 and float(w["t0"]) >= s1 - 0.02]
+    if later:
+        return max(0.0, min(later) - s1)
+    try:
+        dur = float(((index or {}).get("video") or {}).get("duration"))
+        return max(0.0, dur - s1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _payoff_hold_finding(edl, index, last_w, hold, program_s):
+    """The payoff holds 0.6-1.2 s of live footage after the last word, or
+    the short ends on its last word (the owner's ending rule, 22 Oct). Where
+    the source pauses long enough, the op extends the final keep into that
+    pause; where the next word follows at once there is no live tail to
+    give, and ending on the last word is the rule's other half — an
+    advisory, not a fix (Altman run, 23 Oct: s01, s09, s21, s22 and s23
+    were asked again and again to 'extend the keep' into a next word that
+    started 0.0-0.4 s after the last one)."""
+    room = _source_tail_room(edl, index, last_w)
+    s1 = float(last_w.get("s1") or 0.0)
+    if room is not None and room - NEXT_WORD_MARGIN_S < PAYOFF_HOLD_S:
+        return _f(
+            "advisory", "words", "payoff_hold_short",
+            f"{hold:.2f}s after the last word before the end card, and the "
+            f"source's next word starts {room:.2f}s after it: there is no "
+            "live tail to hold, so the short ends on its last word.",
+            fix="accept it (the ending rule: a 0.6-1.2 s live hold, or end "
+                "on the last word); never a freeze-frame, a slowed tail or "
+                "a still before the end card. Do not extend the keep into "
+                "the next word.", t=program_s)
+    op = None
+    fix = (f"hold {PAYOFF_HOLD_S - hold + 0.05:.2f}s more on LIVE footage: "
+           "extend the final keep into the pause after the word (the layers "
+           "that ran to the end follow it); with no live tail, end on the "
+           "last word — never a freeze-frame or a slowed tail before the "
+           "end card")
+    if room is not None:
+        keep = [list(k) for k in (edl or {}).get("keep") or []]
+        target = min(PAYOFF_TARGET_S, room - NEXT_WORD_MARGIN_S)
+        new_end = round(s1 + target, 2)
+        if keep and new_end > float(keep[-1][1]) + 0.01:
+            keep[-1][1] = new_end
+            op = {"action": "set", "layer": "keep", "value": keep}
+            fix = (f"extend the final keep to {new_end:.2f}s: the source "
+                   f"pauses {room:.2f}s after the word, so the payoff holds "
+                   f"{target:.2f}s of live footage (the layers that ran to "
+                   "the end follow it) — never a freeze-frame or a slowed "
+                   "tail before the end card")
+    return _f("fix", "words", "payoff_hold_short",
+              f"{hold:.2f}s after the last word before the end card "
+              f"(<{PAYOFF_HOLD_S}s): the payoff does not breathe.",
+              fix=fix, t=program_s, op=op)
 
 
 def lens_type(report):
@@ -1060,17 +1138,26 @@ def _box_px(box, w, h):
 
 
 def visual_onset(path, info, box, t_expect, *, before=0.4, after=0.9,
-                 width=270):
+                 width=270, lo=None, hi=None):
     """The program second where the picture inside ``box`` first changes
     like a reveal near ``t_expect`` (a change well above the box's own
-    motion before it), or None."""
+    motion before it), or None. ``lo``/``hi`` (program seconds) bound where
+    the reveal may be: the graphic's own entrance, never its exit or a later
+    word's reveal (the strongest change in the box is often one of those,
+    and the old half-of-the-peak rule then named it the landing)."""
     import numpy as np
     import qa_metrics
     fps = float(info.get("fps") or 30.0)
     W, H = info.get("width") or 1080, info.get("height") or 1920
     h = int(round(H * width / float(W) / 2)) * 2
+    lo_t = t_expect - before if lo is None else max(t_expect - before,
+                                                     float(lo))
+    hi_t = t_expect + after if hi is None else min(t_expect + after,
+                                                    float(hi))
+    if hi_t - lo_t < 2.0 / fps:
+        return None
     f0 = max(0, int(round((t_expect - before) * fps)))
-    f1 = int(round((t_expect + after) * fps))
+    f1 = int(round(hi_t * fps))
     idx, frames = qa_metrics.read_frames(path, size=(width, h), gray=True,
                                          frames=set(range(f0, f1 + 1)))
     if len(frames) < 4:
@@ -1081,19 +1168,74 @@ def visual_onset(path, info, box, t_expect, *, before=0.4, after=0.9,
     crop = [np.asarray(f, np.float32)[y0:y1, x0:x1] for f in frames]
     d = [float(np.abs(crop[i] - crop[i - 1]).mean())
          for i in range(1, len(crop))]
-    k_exp = int(round(t_expect * fps)) - idx[0]
+    # the box's own motion before the word (and before the window opens)
+    k_exp = int(round(min(t_expect, lo_t + 2.0 / fps) * fps)) - idx[0]
     base = d[:max(1, k_exp - 2)]
     floor = float(np.median(base)) if base else 0.0
-    peak = max(d) if d else 0.0
+    window = [(i, v) for i, v in enumerate(d)
+              if lo_t - 1e-6 <= idx[i + 1] / fps <= hi_t + 1e-6]
+    peak = max((v for _i, v in window), default=0.0)
     thr = max(2.5, 4.0 * floor, 0.5 * peak)
     if peak < max(2.5, 4.0 * floor):
         return None
-    for i, v in enumerate(d):
-        if idx[i + 1] / fps < t_expect - before + 1e-6:
-            continue
+    for i, v in window:
         if v >= thr:
             return idx[i + 1] / fps
     return None
+
+
+def _reveal_times(m):
+    """Program seconds at which a word-timed item draws its printed words
+    (a lockup's rows, a typeset's or marker_text's words on their spoken
+    onsets), sorted; [] for an item that draws whole at its start."""
+    try:
+        import caption_carry
+        r = caption_carry.lockup_reveals(m) or caption_carry.onset_reveals(m)
+        base = float(m["start"]) - float(m.get("phase_s") or 0.0)
+        return sorted(base + float(x) for x in r or [])
+    except Exception:  # noqa: BLE001 — the item then draws at its start
+        return []
+
+
+# A graphic whose word appears this long before the word is said was on
+# screen when it was said: nothing of it can land late on that word.
+ONSCREEN_BEFORE_S = 0.4
+# A landing is the first strong change within this long of the moment the
+# word is drawn (an entrance: pop, slam, a reveal's rise); a change later
+# than that is the box's own picture (a gesture, a later word, the exit).
+ENTRANCE_S = 0.3
+
+
+def landing_window(m, t_word, fps):
+    """(lo, hi) program seconds in which the graphic draws the matched word,
+    or None when it was already on screen when the word was said. lo is the
+    frame before the word appears (its start, or for a word-timed item the
+    reveal that draws it: the last one by the word's onset, else the first,
+    which is then late); hi
+    stops ENTRANCE_S after that, before the next word's reveal and before
+    the exit, so none of those (nor a hand moving through the box later) is
+    read as this word's landing (Altman run, 23 Oct: 54 late_word findings
+    on 26 finals, the typesets' later emphasis words, the slams' exit cuts
+    and a gesture named as late landings, and their ops moved the graphics
+    off their words)."""
+    fr = 1.0 / float(fps or 30.0)
+    start, end = float(m["start"]), float(m["end"])
+    reveals = _reveal_times(m)
+    appear, nxt = start, None
+    if reveals:
+        by_word = [r for r in reveals if r <= t_word + LATE_FRAMES / 30.0]
+        appear = by_word[-1] if by_word else reveals[0]
+        later = [r for r in reveals if r > appear + 2 * fr]
+        nxt = later[0] if later else None
+    if appear < t_word - ONSCREEN_BEFORE_S:
+        return None
+    lo = appear - fr
+    hi = min(end - 2 * fr, appear + ENTRANCE_S)
+    if nxt is not None:
+        hi = min(hi, nxt - fr)
+    if hi - lo < 3 * fr:
+        return None
+    return lo, hi
 
 
 def _program_cuts(edl, index):
@@ -1122,41 +1264,95 @@ def _program_cuts(edl, index):
 CUT_ONSET_FRAMES = 2.5
 
 
+_FAST_ENTRANCES = ("pop", "slam", "spring")
+
+
+def _fast_entrances(m):
+    """The template's own entrances that land at once (the critic named
+    'cut', which no template's entrance takes: add_motion_graphic refused
+    word_slam entrance='cut', 4586 in the Altman run)."""
+    try:
+        import motion_templates
+        p = (motion_templates.spec(m.get("template") or "").get("params")
+             or {}).get("entrance") or {}
+        vals = list(p.get("values") or [])
+    except Exception:  # noqa: BLE001
+        return []
+    cur = ((m.get("params") or {}).get("entrance"))
+    return [e for e in _FAST_ENTRANCES if e in vals and e != cur]
+
+
+def _as_rendered(edl, index):
+    """The EDL with each word-timed item's reading recomputed from the
+    speech, as the render recomputes it (motion_layer): a stored reading
+    can be stale after a re-cut, and its reveals would put the landing
+    window on the wrong frames. The stored EDL is never changed."""
+    if not index or not (edl or {}).get("motion"):
+        return edl
+    try:
+        import copy
+        import caption_carry
+        import timeline as tl_mod
+        timed = dict(edl, motion=copy.deepcopy(edl.get("motion")))
+        tl = tl_mod.Timeline(timed.get("keep") or [],
+                             timed.get("inserts") or [],
+                             timed.get("speed") or [])
+        caption_carry.attach_readings(timed, index, tl)
+        return timed
+    except Exception:  # noqa: BLE001 — the stored readings stand
+        return edl
+
+
 def lens_late_words(path, info, edl, plan, budget_s=20.0, index=None):
     out = []
     fps = float(info.get("fps") or 30.0)
     W, H = info.get("width") or 1080, info.get("height") or 1920
     deadline = time.monotonic() + budget_s
     cuts = _program_cuts(edl, index)
-    for m, t_word, word in landing_targets(edl, plan.get("words") or []):
+    timed = _as_rendered(edl, index)
+    for m, t_word, word in landing_targets(timed, plan.get("words") or []):
         if time.monotonic() > deadline:
             break
         box = _item_box(m, W, H)
         if not box:
             continue
-        seen = visual_onset(path, info, box, t_word)
+        try:
+            window = landing_window(m, t_word, fps)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if window is None:
+            continue      # on screen before the word was said
+        seen = visual_onset(path, info, box, t_word, lo=window[0],
+                            hi=window[1])
         if seen is None:
             continue
         if any(abs(seen - c) <= CUT_ONSET_FRAMES / fps for c in cuts):
             continue      # the picture cut under the box (Kamath gk 3798)
         late = int(round((seen - t_word) * fps))
-        if late > LATE_FRAMES:
+        # LATE_FRAMES is counted at 30 fps: a 59.94 fps final is held to
+        # the same 67 ms as its 30 fps preview
+        if seen - t_word > LATE_FRAMES / 30.0 + 1e-6 and late > LATE_FRAMES:
             start = round(float(m["start"]) - late / fps, 2)
             op, fix = None, (
                 f"start {m['id']} on the word: move it {late} frames "
                 "earlier (its landing should sit on the onset, a frame "
                 "early at most)")
             if start >= 0.0:
+                # only the start moves: the end is where its words finish,
+                # and an end moved with it cut the last word short or
+                # unmuted it (4592 ts_not, 4599 ts_local)
                 op = {"action": "upsert", "layer": "motion", "id": m["id"],
-                      "value": {"id": m["id"], "start": start,
-                                "end": round(float(m["end"]) - late / fps,
-                                             2)}}
+                      "value": {"id": m["id"], "start": start}}
             else:
                 # it already opens the short (kd 3805: the op asked for a
                 # start at -0.64 s): only a faster entrance lands it sooner
+                fast = _fast_entrances(m)
                 fix = (f"{m['id']} already starts at {float(m['start']):g}s, "
-                       "so it cannot move earlier: a faster entrance "
-                       "('cut' or 'slam') lands it on the word")
+                       "so it cannot move earlier: "
+                       + (f"a faster entrance ({' or '.join(repr(e) for e in fast)}) "
+                          "lands it on the word" if fast else
+                          "it lands as fast as its template draws; open on "
+                          "the word itself or accept it"))
             out.append(_f(
                 "fix", "motion", "late_word",
                 f"'{word}' is said at {t_word:.2f}s but graphic {m['id']} "

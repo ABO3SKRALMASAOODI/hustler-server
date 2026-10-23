@@ -116,6 +116,28 @@ class RunTests(unittest.TestCase):
         self.fails("belongs to run", "init", "--run-dir", self.dir,
                    "--run-id", "other", "--source", "x")
 
+    def test_inline_json_and_review_notes_in_status(self) -> None:
+        # Altman run (23 Oct): inline --handback JSON failed with Errno 63
+        # (read as a file name), and status hid the reviewer's fix note
+        self.add("s01", 11)
+        self.ok("assign", "--run-dir", self.dir, "--short-id", "s01",
+                "--brief", self.brief("s01"), "--editor", "e1")
+        self.ok("candidate", "--run-dir", self.dir, "--short-id", "s01",
+                "--preview", "https://example.invalid/preview.mp4",
+                "--edl-version", "7", "--note", "hook slam at 0.2s",
+                "--handback", json.dumps({"music": "none (off)", "broll": [],
+                                          "headline": "H " * 200}))
+        cand = self.state()["shorts"]["s01"]["candidates"][-1]
+        self.assertEqual(cand["handback"]["music"], "none (off)")
+        self.fails("not valid JSON", "candidate", "--run-dir", self.dir,
+                   "--short-id", "s01", "--preview", "https://example.invalid/p.mp4",
+                   "--edl-version", "8", "--note", "x", "--handback", "{broken")
+        self.ok("review", "--run-dir", self.dir, "--short-id", "s01",
+                "--verdict", "fix", "--note", "opens on a blink mid-sentence")
+        out = self.ok("status", "--run-dir", self.dir)
+        self.assertIn("review fix: opens on a blink mid-sentence", out)
+        self.assertEqual(run.read_json('["a: b"]', "not-selected list"), ["a: b"])
+
     def test_refuses_v7_runs(self) -> None:
         legacy = self.root / "legacy"
         legacy.mkdir()

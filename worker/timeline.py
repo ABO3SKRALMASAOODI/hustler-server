@@ -1908,13 +1908,36 @@ def remap_program_items(edl, old_tl, new_tl):
             kept_tx.append(tx)
         edl["texts"] = kept_tx
     if edl.get("vectors"):
-        # Vector graphics are PROGRAM-anchored, exactly like ordinary text.
-        # They are designed against the finished composition, not tied to a
-        # source frame, so upstream cuts do not slide them onto another beat;
-        # only a shortened program clips or removes their live window.
+        # A vector graphic is cued to what is said (a threshold line drawn
+        # on 'line', a cross over the b-roll it rejects): it follows its
+        # moment through a re-cut like a text callout or a motion graphic;
+        # one held over the whole programme is layout and keeps the
+        # programme. Altman run (w1023): vec2-vec4 on 4590 and 4587 stayed
+        # at their old program times after every keep change, with no note,
+        # and each editor re-timed them by hand.
         kept_vec = []
+        old_prog_vec = round(old_tl.out_duration, 2)
         for vec in edl["vectors"]:
             vec = dict(vec)
+            t0, t1 = float(vec["start"]), float(vec["end"])
+            if not (t0 <= RUNS_TO_END_S
+                    and t1 >= old_prog_vec - RUNS_TO_END_S):
+                win = _cued_window(t0, t1, old_prog_vec, 0.2)
+                if win == "gone":
+                    region_notes.append(
+                        f"note: vector {vec.get('id')} ({vec.get('kind')}) "
+                        "was removed — the moment it was cued to is no "
+                        "longer in the edit.")
+                    continue
+                if win is not None and (round(win[0], 2), round(win[1], 2)) \
+                        != (round(t0, 2), round(t1, 2)):
+                    ns, ne = round(win[0], 2), round(win[1], 2)
+                    if ne - ns < t1 - t0 - 1e-6:
+                        _clip_element_motion(vec, ne - ns)
+                    vec["start"], vec["end"] = ns, ne
+                    region_notes.append(
+                        f"note: vector {vec.get('id')} ({vec.get('kind')}) "
+                        f"moved to {ns:g}-{ne:g}s with its moment.")
             if float(vec["end"]) > prog:
                 if float(vec["start"]) >= prog - 0.3:
                     region_notes.append(

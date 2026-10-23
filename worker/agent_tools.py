@@ -13491,7 +13491,13 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
         except (TypeError, ValueError):
             return "REJECTED: opacity must be a number (0.05-1.0)."
     overlays = [dict(o) for o in (edl.get("overlays") or [])]
-    item = {"id": _next_item_id(overlays, "ov"), "asset_key": asset_key,
+    # a still animate_still turned into a moving still keeps its overlay id
+    # on the motion layer: a new overlay never reuses it (Altman run 4589:
+    # the next add_overlay was 'ov1' again, beside still_motion 'ov1', and
+    # every later call by id hit the wrong one)
+    item = {"id": _next_item_id(overlays + [
+                m for m in edl.get("motion") or [] if isinstance(m, dict)],
+                "ov"), "asset_key": asset_key,
             "kind": kind, "start": s, "duration_s": dur, "x": xv, "y": yv,
             "scale": sc, "fit": fitv, "opacity": op,
             "entrance": entrance, "exit": exit,

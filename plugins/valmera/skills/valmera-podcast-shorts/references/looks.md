@@ -361,7 +361,7 @@ that surprises and fits its story, never the move the previous short used
 (last week's lamp-lit captions are an example of the bar, not a style to
 repeat). Recipes are a floor: compose a fresh device when the story asks.
 
-Nothing punctuates the payoff hold (0.8-1.5 s after the payoff word); one
+Nothing punctuates the payoff hold (0.6-1.2 s of live footage after the payoff word); one
 device per moment; never the same device on consecutive shots; never more
 than 3 full-frame flashes in any second. Devices are silent and zoom-free:
 they never bring a sound or a camera move with them. Plan them with

@@ -180,6 +180,18 @@ def _check_row(where, row, clean, fields, types):
             raise ValueError(f"{where}.{f} must be one of {kind}, not '{val}'")
 
 
+def _row_text_field(fields):
+    """The field a row's printed line lives in, for a row given as plain
+    text: 'text' (list_build, phrase_build, checklist, chat_bubbles) or a
+    leading 'label' with no number beside it (timeline_steps); None where a
+    row needs more than its words (bar_compare's value, spec_sheet's x/y)."""
+    if "text" in fields:
+        return "text"
+    if fields and fields[0] == "label" and not {"value", "x", "y"} & set(fields):
+        return "label"
+    return None
+
+
 def _visible_text(v):
     """A template string as it reads on screen: without the *accent* stars,
     each ' / ' line break one space."""
@@ -283,10 +295,28 @@ def _coerce(name, key, p, v, strict):
         mx_items, mx = int(p.get("max_items", 6)), int(p.get("max", 60))
         if strict and len(v) > mx_items:
             raise ValueError(f"{where} has {len(v)} rows; maximum {mx_items}")
+        # A row given as plain text is that row's printed line (list_build
+        # rows=['NO LEADER', ...]: refused "rows must be objects" 6 times in
+        # the 24 h to 23 Oct, 4592 and 4595 in the Altman run).
+        text_field = _row_text_field(fields)
         out = []
         for j, row in enumerate(v[:mx_items]):
+            if isinstance(row, (str, int, float)) and not isinstance(row, bool) \
+                    and text_field:
+                row = {text_field: str(row)}
             if not isinstance(row, dict):
                 raise ValueError(f"{where} rows must be objects with {fields}")
+            if strict:
+                # the row's printed text is never cut short in silence: a
+                # 42-character list row was drawn as its first 32 (4583,
+                # 'TO STILL MAKE MISTAKES AND LEARN' with 'FROM THEM' gone)
+                for f in fields:
+                    shown = len(_visible_text(" ".join(str(row.get(f, "")).split())))
+                    if shown > mx:
+                        raise ValueError(
+                            f"{where}[{j}].{f} is {shown} characters on screen; "
+                            f"keep it to {mx} (the *stars* are not counted) — "
+                            "shorten it or split it across two rows")
             clean = {f: " ".join(str(row.get(f, "")).split())[:mx] for f in fields}
             if strict:
                 _check_row(f"{where}[{j}]", row, clean, fields, p.get("field_types") or {})

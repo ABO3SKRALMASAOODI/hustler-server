@@ -4869,6 +4869,46 @@ def _busy_jobs_text(cur, user_id, limit=4, types=None):
     return " (" + "; ".join(parts) + ")", rows[0]["id"]
 
 
+def _versions_since(cur, project_id, base, current):
+    """' v5 -> v7: add_motion_graphic (job N) wrote v6, ...' — which tool
+    calls wrote the versions after the batch's base. Altman run (23 Oct):
+    a background add_motion_graphic / set_typeset / apply_look answered
+    STILL RUNNING, wrote its version a few seconds later, and the editor's
+    next batch was refused with no word of what had changed. Never raises:
+    the plain refusal stands."""
+    try:
+        base_i, cur_i = int(base), int(current)
+    except (TypeError, ValueError):
+        return ""
+    if cur_i <= base_i:
+        return ""
+    try:
+        cur.execute("""SELECT id, payload->>'tool' AS tool,
+                              (result->>'edl_version')::int AS v
+                       FROM video_jobs
+                       WHERE project_id = %s AND type = 'mcp_tool'
+                         AND state = 'done'
+                         AND result->>'edl_version' ~ '^[0-9]+$'
+                         AND (result->>'edl_version')::int > %s
+                         AND (result->>'edl_version')::int <= %s
+                         AND COALESCE(result->>'edl_changed', 'true') <> 'false'
+                       ORDER BY id DESC LIMIT 6""",
+                    (int(project_id), base_i, cur_i))
+        rows = [r for r in (cur.fetchall() or []) if isinstance(r, dict)]
+    except Exception:  # noqa: BLE001
+        return ""
+    seen, parts = set(), []
+    for r in sorted(rows, key=lambda r: (r.get("v") or 0, r.get("id") or 0)):
+        if r.get("v") in seen or not r.get("tool"):
+            continue
+        seen.add(r.get("v"))
+        parts.append(f"{r['tool']} (job {r['id']}) wrote v{r['v']}")
+    return (f" v{base_i} -> v{cur_i}" + (": " + "; ".join(parts) if parts
+                                         else "") +
+            f". Rebuild the batch on v{cur_i} (get_edl) so it keeps those "
+            "changes.")
+
+
 def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
     """Authenticated caller, one transaction, one revision, no compute job."""
     try:
@@ -4899,7 +4939,9 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
             return {"error": "A subscription is required to edit this project."}, 402
         latest = _latest_edl(cur, project_id)
         if not latest or latest["version"] != base:
-            return {"error": "The edit changed. Read the current version before applying this batch.",
+            return {"error": "The edit changed. Read the current version before applying this batch."
+                             + _versions_since(cur, project_id, base,
+                                               latest["version"] if latest else None),
                     "current_version": latest["version"] if latest else None}, 409
         # Only a job that may WRITE this edit holds it: the agent's own
         # read-only calls (render_preview, look_at, audits: mutation=false,

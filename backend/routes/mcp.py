@@ -1328,6 +1328,55 @@ def _job_row(job_id, user_id):
 LONG_WAIT_SLOTS = max(1, int(os.getenv("MCP_LONG_WAIT_SLOTS", "5")))
 SHORT_WAIT_S = float(os.getenv("MCP_SHORT_WAIT_S", "3"))
 _long_waits = threading.BoundedSemaphore(LONG_WAIT_SLOTS)
+# A render (or another minutes-long job) may hold at most
+# LONG_WAIT_SLOTS - QUICK_WAIT_RESERVED of those waits; the rest stay free
+# for an edit, an audit or a stored report, which settle in seconds. Altman
+# run (23 Oct, 31 parallel editors): the render waits held every slot, so
+# edits got the 3 s short wait and answered STILL RUNNING (audit_motion and
+# critique_short 12-13% of calls, look_at 5%, add_motion_graphic and
+# keep_segments 2-4%), the editors' next apply_edit_batch then met the
+# version the finished job wrote ("The edit changed"), and a stored-report
+# read (render_preview report=true, 4-8 s) read as a new render. The
+# thread budget is unchanged: still at most LONG_WAIT_SLOTS long waits.
+QUICK_WAIT_RESERVED = max(0, min(LONG_WAIT_SLOTS - 1, int(os.getenv(
+    "MCP_QUICK_WAIT_RESERVED", "2"))))
+_slow_waits = threading.BoundedSemaphore(
+    max(1, LONG_WAIT_SLOTS - QUICK_WAIT_RESERVED))
+# Tool calls whose job routinely runs past half a minute (a render, a frame
+# by frame repaint, a media fetch, a reframe measure): they wait in the
+# slow share. Every other tool is quick.
+SLOW_WAIT_TOOLS = frozenset({
+    "render_preview", "erase_region", "erase_burned_text", "auto_reframe",
+    "add_stock_media", "source_broll", "research_broll", "enhance_video",
+    "separate_music", "render_variants", "deliver_aspects", "record_website",
+    "record_website_demo", "watch_video", "find_burned_text",
+    "make_variant_set", "showcase_demo", "download_url", "extract_audio",
+    "align_lyrics", "analyze_reference", "find_song", "export_final",
+})
+SLOW_WAIT_JOB_TYPES = frozenset({"preview", "preview_check", "final",
+                                 "index", "shorts_plan", "agent_turn",
+                                 "filmstrip"})
+
+
+def _slow_call(name, args):
+    """Does this tool call's wait belong to the slow share?"""
+    if name not in SLOW_WAIT_TOOLS:
+        return False
+    # report=true reads the stored report of a finished render (seconds)
+    return not (name == "render_preview" and isinstance(args, dict)
+                and args.get("report") not in (None, False, "false", 0))
+
+
+def _slow_job(row):
+    """Does waiting on this job row belong to the slow share?"""
+    if not isinstance(row, dict):
+        return False
+    if row.get("type") in SLOW_WAIT_JOB_TYPES:
+        return True
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) \
+        else {}
+    return row.get("type") == "mcp_tool" and _slow_call(
+        payload.get("tool"), payload.get("args"))
 SHUTTING_DOWN = threading.Event()
 _inflight = {}
 _inflight_lock = threading.Lock()
@@ -1362,19 +1411,29 @@ def inflight_report():
             "long_wait_slots": LONG_WAIT_SLOTS}
 
 
-def _wait(job_id, user_id, seconds=None):
+def _wait(job_id, user_id, seconds=None, slow=None):
     """Poll the job row until it settles or the budget runs out. A fresh
     connection per read: the alternative holds one open across the whole wait,
     which on 3 sync gunicorn workers is a connection idle-in-transaction for
-    as long as a render takes."""
+    as long as a render takes. A slow job's wait (a render: ``slow``, or read
+    from the row by _slow_job) takes a long wait only from the slow share;
+    QUICK_WAIT_RESERVED stay for quick calls."""
     started = time.time()
     budget = SYNC_WAIT_S if seconds is None else seconds
-    long_wait = _long_waits.acquire(blocking=False)
+    row = _job_row(job_id, user_id)
+    if not row or row["state"] not in ("queued", "running"):
+        return row
+    if slow is None:
+        slow = _slow_job(row)
+    slow_held = slow and _slow_waits.acquire(blocking=False)
+    long_wait = (slow_held or not slow) and _long_waits.acquire(blocking=False)
+    if slow_held and not long_wait:
+        _slow_waits.release()
+        slow_held = False
     if not long_wait:
         budget = min(budget, SHORT_WAIT_S)
     try:
         deadline = started + budget
-        row = _job_row(job_id, user_id)
         while row and row["state"] in ("queued", "running") \
                 and time.time() < deadline and not SHUTTING_DOWN.is_set():
             elapsed = time.time() - started
@@ -1386,13 +1445,31 @@ def _wait(job_id, user_id, seconds=None):
     finally:
         if long_wait:
             _long_waits.release()
+        if slow_held:
+            _slow_waits.release()
 
 
 def _still_running(row, what):
     pct = row.get("progress") or 0
-    return (f"STILL RUNNING — {what} is job {row['id']} "
+    text = (f"STILL RUNNING — {what} is job {row['id']} "
             f"({row['state']}, {pct}%). Nothing has failed; call "
             f"wait_for_job(job_id={row['id']}) to pick the result up.")
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) \
+        else {}
+    if row.get("type") == "mcp_tool" and payload.get("mutation") is True:
+        # the edit lands when the job finishes: a batch built on the version
+        # read now is then refused "The edit changed" (Altman run, 23 Oct)
+        before = payload.get("before_edl_version")
+        text += (" This edit writes the next EDL version"
+                 + (f" (after v{before})" if before else "")
+                 + " when it finishes: wait for it before the next edit "
+                 "of this project, then build on the version it reports.")
+    elif row.get("type") == "mcp_tool" and payload.get("tool") == \
+            "render_preview" and isinstance(payload.get("args"), dict) \
+            and payload["args"].get("report"):
+        text += (" report=true only reads the stored report: nothing is "
+                 "rendered.")
+    return text
 
 
 def _preview_policy_line(preview):

@@ -188,8 +188,23 @@ def number(value: object, label: str) -> float:
 
 
 def read_json(path_text: str, label: str) -> object:
-    path = Path(path_text).expanduser().resolve()
-    if not path.is_file():
+    """A JSON file's content, or the argument itself when it is inline JSON
+    (an object or a list). Altman run (23 Oct): `candidate --handback '{...}'`
+    and `finalize --not-selected '[...]'` failed with Errno 63 (file name too
+    long) because the inline JSON was opened as a path."""
+    text = str(path_text or "").strip()
+    if text[:1] in ("{", "["):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise StateError(f"{label} is not valid JSON: {exc}") from exc
+    try:
+        path = Path(text).expanduser().resolve()
+        exists = path.is_file()
+    except OSError as exc:
+        raise StateError(f"{label} is neither inline JSON nor a readable "
+                         f"file: {exc}") from exc
+    if not exists:
         raise StateError(f"{label} does not exist: {path}")
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -826,6 +841,11 @@ def summary(state: dict) -> dict:
             "fix_used": item["fix_used"], "title": item["title"],
             "music": (effective_music(state, item)[0]
                       if item.get("brief") else None),
+            # the latest verdict and its note: an editor picking up a fix
+            # read run.json for it (Altman run, 23 Oct: status hid it)
+            "review": ({"verdict": item["review"].get("verdict"),
+                        "note": item["review"].get("note")}
+                       if isinstance(item.get("review"), dict) else None),
         })
     rows.sort(key=lambda r: (r["status"] in TERMINAL, r["short_id"]))
     busy = editors_busy(state)
@@ -883,6 +903,11 @@ def format_status(value: dict) -> str:
         lines.append(f"  {row['short_id']:<8} {row['status']:<17} "
                      f"{(row['look'] or '-'):<15} {(row['structure'] or '-'):<30} "
                      f"music {(row['music'] or '-'):<4} {row['editor'] or ''}")
+        review = row.get("review") or {}
+        if review.get("note") and row["status"] not in TERMINAL:
+            note = " ".join(str(review["note"]).split())
+            lines.append(f"           review {review.get('verdict')}: "
+                         + (note if len(note) <= 240 else note[:237] + "..."))
     lines += [f"next: {n}" for n in value["next"]]
     return "\n".join(lines)
 
@@ -1353,7 +1378,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--edl-version", required=True, type=int)
     p.add_argument("--note", help=f"candidate note, at most {NOTE_MAX_LINES} lines")
     p.add_argument("--note-file")
-    p.add_argument("--handback", help="optional JSON: music, broll, required_credits, "
+    p.add_argument("--handback", help="optional JSON (a file or inline): music, broll, required_credits, "
                    "rights_note, headline, kept_transcript, kept_source_ranges_s")
     p.add_argument("--programme-s", type=float,
                    help="the preview's length in seconds (probed from a local preview "
@@ -1396,7 +1421,7 @@ def parser() -> argparse.ArgumentParser:
 
     p = command("finalize", cmd_finalize, "Write exports/manifest.json, "
                 "publishing-manifest.json and PUBLISHING.md.")
-    p.add_argument("--not-selected", help="JSON list of 'story (range): reason' strings")
+    p.add_argument("--not-selected", help="JSON list (a file or inline) of 'story (range): reason' strings")
     p.add_argument("--reindex-count", type=int, default=0)
 
     p = command("deliver", cmd_deliver, "Tail-check every final "

@@ -119,8 +119,9 @@ Order matters: cuts first (they move every later time; the child already
 starts 9:16 from the SOURCE LAYOUT), then the pilot's card (card end =
 program end), THEN `erase_region`, stock overlays and captions, then
 designed beats, camera, transitions and sound. If you must re-cut later,
-the cutaways (`add_overlay`), `add_text` callouts, motion graphics, cards
-and sounds follow the words they were cued to (the keep tool's notes say
+the cutaways (`add_overlay`), `add_text` callouts, vector graphics
+(`add_vector_graphic`), motion graphics, cards and sounds follow the words
+they were cued to (the keep tool's notes say
 where each moved; one held over the whole short keeps the short): read
 those notes and recheck the card's end, no hand re-timing.
 
@@ -285,7 +286,9 @@ unacknowledged one).
    change rate, hero count, picture area, sounds within budget and spacing
    (list each with its time, on-screen partner and level; `audit_audio_mix`
    reports each sound's level against the voice and its placement checks),
-   no digital silence, payoff held 0.8-1.5 s after the last word.
+   no digital silence, payoff held 0.6-1.2 s of live footage after the
+   last word (or the short ends on the last word when the source runs
+   straight into the next word).
 6. `critique_short` once (read-only; the verify department, when your
    client lists it): the render judged against the reference craft —
    cuts through words, flashes, type on a face, late words, dead
@@ -294,7 +297,10 @@ unacknowledged one).
    each with its exact apply_edit_batch op, plus up to three moments
    nothing marks and an idea this run has NOT used yet. Fix its blocking
    findings; when it says "house style", change the idea, not the
-   parameter.
+   parameter. A late_word finding measures the frames where the graphic
+   draws ITS word (a typeset's later words and a slam's exit are not its
+   landing); its op moves only the start, so the graphic still ends after
+   its last word.
 7. Read the render's VERIFICATION ADVISORIES (quote the ones you keep in the
    handback: reviewers cannot re-read them without re-rendering): the EARN ITS PLACE note lists
    a generic or spent hook, a fragment or jump-cut opening, graphics past
