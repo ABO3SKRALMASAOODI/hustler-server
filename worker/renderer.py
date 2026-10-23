@@ -52,6 +52,7 @@ import stitch
 import storage
 import timeline as timeline_mod
 import travel
+import true_peak
 from schemas import (clean_fingerprint, patch_fingerprint, patch_clip_key,
                      EDLValidationError,
                      is_canvas_program, keep_boundaries, master_loudness,
@@ -2227,6 +2228,29 @@ def audio_peak_current(meta, edl):
     # mixes need their cached render rebuilt on the next render request.
     return ((edl.get("master") or {}).get("loudness") == "social"
             or (meta or {}).get("audio_peak_v") == 1)
+
+
+def true_peak_current(meta):
+    """Does this cached render's sound hold the true-peak ceiling?
+
+    Every render since the post-encode guard (true_peak.guard, studio project
+    2592, 22 Oct 2026: +0.33 dBTP on a mastered preview) is stamped
+    ``tp_v``. An older render whose own audio QC measured it over the
+    ceiling is rendered again so the guard runs on it. One that was never
+    measured (finals carry no audio QC) is trusted, as caption_fp trusts
+    renders older than it: re-encoding every cached export on a ~1 vCPU box
+    for a peak nobody measured is not worth it.
+    """
+    meta = meta or {}
+    if (meta.get("tp_v") or 0) >= config.TRUE_PEAK_GUARD_VERSION:
+        return True
+    tp = (meta.get("audio_qc") or {}).get("tp")
+    if tp is None:
+        return True
+    try:
+        return float(tp) <= audio_qc.TP_FINDING_DBTP
+    except (TypeError, ValueError):
+        return True
 
 
 def master_current(meta, edl, src_w=None, src_h=None):
@@ -9113,6 +9137,7 @@ def _run_render_job(worker_db, job):
                       delivery_canvas_current(cached, variant)) \
                 and outro_current(cached.get("meta"), variant) \
                 and audio_peak_current(cached.get("meta"), edl_row["json"]) \
+                and true_peak_current(cached.get("meta")) \
                 and master_current(cached.get("meta"), edl_row["json"],
                                    *src_shape) \
                 and shaping_current(cached.get("meta"), edl_row["json"]) \
@@ -9247,7 +9272,8 @@ def _run_render_job(worker_db, job):
         active_stage[0] = {
             "download_s": "encode_s",
             "encode_s": "verify_s",
-            "verify_s": "sheet_s",
+            "verify_s": "true_peak_s",
+            "true_peak_s": "sheet_s",
             "sheet_s": "upload_s",
             "upload_s": "register_s",
         }.get(stage)
@@ -9553,6 +9579,26 @@ def _run_render_job(worker_db, job):
             _verify_render(edl_row["json"], out_local, out_dur, job_id,
                            variant, src_path=src_local, src_dur=src_dur)
         _mark("verify_s")
+        # The delivered sound holds the true-peak ceiling (true_peak): the
+        # master's limiter holds on the lossless mix, the AAC encode can
+        # overshoot it by several dB, so the encoded file itself is measured
+        # and, when over, its sound alone is re-limited (picture copied).
+        tp_guard = None
+        if not proof_only:
+            try:
+                tp_guard = true_peak.guard(
+                    out_local, bitrate=("128k" if variant == "preview"
+                                        else "192k"), workdir=workdir)
+            except Exception as tpe:  # noqa: BLE001 — never fails a render
+                print(f"[render {job_id}] true-peak guard skipped "
+                      f"({str(tpe)[:160]})", flush=True)
+                tp_guard = None
+            if tp_guard and tp_guard.get("passes"):
+                print(f"[render {job_id}] true peak {tp_guard['tp_in']} -> "
+                      f"{tp_guard['tp']} dBTP (limiter "
+                      f"{tp_guard['limit_dbfs']} dBFS, "
+                      f"{tp_guard['passes']} pass(es))", flush=True)
+        _mark("true_peak_s")
         try:
             fx_devices = fxgraph.job_report(
                 edl_row["json"], fx_rows,
@@ -9885,6 +9931,9 @@ def _run_render_job(worker_db, job):
                                else config.FINISH_VERSION),
                   "audio_peak_v": 1,
                   "master_v": config.MASTER_VERSION,
+                  **({"tp_v": config.TRUE_PEAK_GUARD_VERSION,
+                      "true_peak": tp_guard}
+                     if tp_guard is not None else {}),
                   "wm_v": (0 if proof_only else
                            watermark_version(variant, is_paid, wm_settings)),
                   "wm_p": (watermark_position(wm_settings)

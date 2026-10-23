@@ -96,6 +96,34 @@ MAX_QUALITY_REPAIR_PUSHBACKS = 1
 MAX_VERIFICATION_CONTINUATIONS = 1
 
 
+# Said whenever the repeated-blocker stop leaves its stagnant slices
+# unbilled (db.charge_turn_credits exclude_job_ids).
+_UNBILLED_NOTE = (" The repeated attempts at the end that made no progress "
+                  "are not charged.")
+
+
+def _stagnant_job_ids(state, job_id, stagnant):
+    """The execution slices of this logical turn, in order, that ended with
+    no objective progress since the turn last made some: ``stagnant`` True
+    adds this slice, False (it progressed) restarts the run, None keeps it.
+    The repeated-blocker stop leaves exactly these slices unbilled."""
+    previous = []
+    for value in (state or {}).get("stagnant_job_ids") or []:
+        try:
+            previous.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if stagnant is False:
+        return []
+    if stagnant:
+        try:
+            current = int(job_id)
+        except (TypeError, ValueError):
+            return previous
+        return previous + ([current] if current not in previous else [])
+    return previous
+
+
 def _continuation_work_slices(state, reason):
     """Count physical slices that performed or retried editorial work.
 
@@ -4304,8 +4332,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
 
     def _durable_continuation(reason, blocker_fingerprint=None,
                               blocker_repeats=0, progress_frontier=None,
-                              verification_slices=None):
-        """Checkpoint consequences, enqueue the next slice, post no reply."""
+                              verification_slices=None, stagnant=None):
+        """Checkpoint consequences, enqueue the next slice, post no reply.
+
+        ``stagnant``: True when this slice ends having made no objective
+        progress (it joins the run of slices the repeated-blocker stop leaves
+        unbilled), False when it made progress (the run restarts), None when
+        the boundary says nothing either way (platform drain, a verification
+        handoff)."""
         root_id = int(payload.get("root_agent_job_id") or job["id"])
         sequence = int(payload.get("continuation_sequence") or 0) + 1
         work_slices = _continuation_work_slices(_cont, reason)
@@ -4364,6 +4398,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             },
             "blocker_fingerprint": blocker_fingerprint,
             "blocker_repeats": int(blocker_repeats or 0),
+            "stagnant_job_ids": _stagnant_job_ids(_cont, job["id"], stagnant),
             # This is the strongest objective frontier reached by the whole
             # logical user turn, not merely this physical worker job.  Without
             # it, every continuation compared itself only with its own start
@@ -4427,8 +4462,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     # happened after the first wait helper). Continuations never wait here:
     # their clock is already running and mid-turn 429s use rate_limit_wait.
     if not _cont:
-        room = config.AGENT_TPM_HARD_CAP - config.AGENT_TPM_CALL_RESERVE
-        yield_line = min(config.AGENT_TPM_SOFT_CAP, room)
+        _soft_cap, _hard_cap = llm.tpm_caps(model)
+        room = _hard_cap - config.AGENT_TPM_CALL_RESERVE
+        yield_line = min(_soft_cap, room)
         for _adm in range(12):
             try:
                 burn = worker_db.run(dbx.recent_llm_tokens, 60)
@@ -4491,35 +4527,46 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 return _durable_continuation(
                     "execution slice boundary" if total_expired
                     else "productive work remains",
-                    progress_frontier=resolution["frontier"])
+                    progress_frontier=resolution["frontier"],
+                    stagnant=False)
             if resolution["action"] == "continue_recovery":
                 return _durable_continuation(
                     "recovering unresolved work",
                     resolution["blocker_fingerprint"],
                     resolution["blocker_repeats"],
-                    progress_frontier=resolution["frontier"])
+                    progress_frontier=resolution["frontier"],
+                    stagnant=True)
 
             # Three durable slices reached the same normalized state without
             # progress. This is a genuine blocker, not a time/step limit.
+            # Those slices are not billed (studio project 2592, 22 Oct 2026:
+            # 111 credits, most of them three slices circling one finding);
+            # the work before them is metered as usual.
+            unbilled = _stagnant_job_ids(_cont, job["id"], True)
             detail = "; ".join(str(row) for row in unresolved if row)
             blocker = ("I stopped because the edit was no longer making progress"
                        + (f": {detail}" if detail else
                           " toward a finished video")
                        + ". Any successful changes are saved. The remaining work "
-                         "is unfinished; this run will not keep repeating it.")
+                         "is unfinished; this run will not keep repeating it."
+                       + _UNBILLED_NOTE)
             if ctx.versions_written:
-                return _finalize(
+                result = _finalize(
                     ctx, worker_db, session_id, blocker, "blocked",
                     total_steps, timings, honesty,
+                    extra_meta={"unbilled_job_ids": unbilled},
                     turn_deadline=turn_deadline, job=job)
+                result["unbilled_job_ids"] = unbilled
+                return result
             outcome, billable = _turn_completion(ctx, "blocked")
             worker_db.run(dbx.add_message, session_id, "assistant", blocker,
                           {"error": "repeated_blocker",
+                           "unbilled_job_ids": unbilled,
                            **_outcome_meta(ctx, outcome)})
             _complete_adopted_steers(ctx, worker_db, job)
             return {"status": "blocked", "steps": total_steps,
                     "timings": timings, "outcome": outcome,
-                    "billable": billable}
+                    "billable": billable, "unbilled_job_ids": unbilled}
 
         seen_message_id = _adopt_steering_messages(
             ctx, worker_db, job, session_id, messages, seen_message_id)
@@ -4658,7 +4705,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             try:
                 wait = worker_db.run(
                     dbx.reserve_llm_tokens, estimate,
-                    config.AGENT_TPM_SOFT_CAP, config.AGENT_TPM_WINDOW_S,
+                    llm.tpm_caps(model)[0], config.AGENT_TPM_WINDOW_S,
                     reservation_id)
             except Exception as e:
                 print(f"[agent {job['id']}] TPM reservation unavailable "
@@ -4969,17 +5016,28 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             previous = _cont.get("blocker_fingerprint")
             repeats = (int(_cont.get("blocker_repeats") or 0) + 1
                        if previous == fingerprint else 1)
+            # A slice that moved the edit before the model went quiet is
+            # billed like any other; only one that made no progress joins
+            # the unbilled run.
+            no_progress = not _semantic_progressed(
+                semantic_start, _semantic_progress_marker(ctx))
             if repeats < 3:
                 return _durable_continuation(
-                    "empty model response recovery", fingerprint, repeats)
-            return _finalize(
+                    "empty model response recovery", fingerprint, repeats,
+                    stagnant=no_progress)
+            unbilled = _stagnant_job_ids(_cont, job["id"], no_progress)
+            result = _finalize(
                 ctx, worker_db, session_id,
                 "I couldn't complete this edit because the editing model "
                 "repeatedly returned no usable response before producing "
                 "an action. Nothing has been marked complete; any saved "
-                "timeline version remains available.",
+                "timeline version remains available."
+                + (_UNBILLED_NOTE if unbilled else ""),
                 "blocked", total_steps, timings, honesty,
+                extra_meta={"unbilled_job_ids": unbilled},
                 turn_deadline=turn_deadline, job=job)
+            result["unbilled_job_ids"] = unbilled
+            return result
 
         if not msg.tool_calls:
             body = (msg.content or "").strip()

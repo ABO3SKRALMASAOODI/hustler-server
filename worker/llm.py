@@ -111,6 +111,10 @@ def record(purpose, request, response, usage=None):
                 response['service_tier'] = (getattr(usage, 'service_tier', None)
                     or config.OPENAI_SERVICE_TIER or 'default')
                 response['cost_basis'] = 'reported_tokens_official_rates'
+        tpm_limit = getattr(usage, 'tpm_limit', None)
+        if isinstance(tpm_limit, int) and isinstance(response, dict):
+            # the org's real tier, queryable in SQL (llm_calls.response)
+            response = dict(response, tpm_limit=tpm_limit)
         fn(purpose, request, response, usage)
     except Exception as e:
         print(f"[llm] recorder failed: {e}", flush=True)
@@ -1182,6 +1186,51 @@ def _from_responses(payload):
 
 _responses_dead = set()
 
+# Provider-reported tokens-per-minute limits, per model: {model: (limit,
+# monotonic time seen)}. Read from the x-ratelimit-limit-tokens header of
+# every Responses-lane call (config.AGENT_TPM_OBSERVED_SHARE).
+_observed_tpm = {}
+_observed_tpm_lock = threading.Lock()
+
+
+def note_rate_limit_headers(model, headers):
+    """Remember the provider's reported TPM limit for ``model``; returns it
+    (int) or None. Never raises: a missing or odd header changes nothing."""
+    try:
+        raw = (headers or {}).get("x-ratelimit-limit-tokens")
+        limit = int(float(raw)) if raw not in (None, "") else 0
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if limit <= 0:
+        return None
+    import time as _time
+    with _observed_tpm_lock:
+        _observed_tpm[str(model)] = (limit, _time.monotonic())
+    return limit
+
+
+def observed_tpm_limit(model, max_age_s=None):
+    """The provider's last reported TPM limit for ``model`` within
+    ``max_age_s`` (config.AGENT_TPM_OBSERVED_MAX_AGE_S), or None."""
+    import time as _time
+    max_age = (config.AGENT_TPM_OBSERVED_MAX_AGE_S
+               if max_age_s is None else float(max_age_s))
+    with _observed_tpm_lock:
+        seen = _observed_tpm.get(str(model))
+    if not seen or _time.monotonic() - seen[1] > max_age:
+        return None
+    return int(seen[0])
+
+
+def tpm_caps(model):
+    """(yield line, hard ceiling) for the fleet's TPM admission: the
+    provider's reported limit when known, else the configured guess."""
+    observed = observed_tpm_limit(model)
+    if not observed:
+        return config.AGENT_TPM_SOFT_CAP, config.AGENT_TPM_HARD_CAP
+    share = config.AGENT_TPM_OBSERVED_SHARE
+    return max(10000, int(round(observed * share))), observed
+
 
 def mark_responses_dead(model):
     """Stop trying the lane for this model in this process."""
@@ -1361,6 +1410,8 @@ def responses_create(base_url, api_key, model, messages, tools,
     payload = r.json()
     result = _from_responses(payload)
     result.usage.service_tier = payload.get('service_tier')
+    result.usage.tpm_limit = note_rate_limit_headers(
+        model, getattr(r, "headers", None))
     return result
 
 
