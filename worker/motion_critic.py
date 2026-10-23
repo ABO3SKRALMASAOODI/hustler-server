@@ -728,11 +728,21 @@ def lens_type(report):
     measure = {}
     if caps.get("captions") is not None:
         measure["captions_cap"] = caps["captions"]
-        if float(caps["captions"]) < 0.025:
+        # judged at the reading size: a stack cue's small lines, not its
+        # one emphasised word (Earnings 4562 v36: 6.0% measured, ~2% read)
+        read = caps.get("captions_read")
+        if read is not None:
+            measure["captions_read_cap"] = read
+        small = float(read if read is not None else caps["captions"])
+        if small < 0.025:
             out.append(_f("fix", "type", "type_too_small",
-                          f"captions stand {100 * caps['captions']:.1f}% of "
-                          "the frame height (< 2.5%): unreadable on a phone.",
-                          fix="raise the caption size"))
+                          f"captions read at {100 * small:.1f}% of the frame "
+                          "height (< 2.5%)"
+                          + (f" (their largest line {100 * caps['captions']:.1f}%)"
+                             if read is not None else "")
+                          + ": unreadable on a phone.",
+                          fix="raise the caption size (set_caption_style "
+                              "size_scale)"))
     po = caps.get("payoff")
     if po and len(po) == 4:
         pid, pc, big, bc = po
@@ -741,8 +751,10 @@ def lens_type(report):
             out.append(_f("fix", "type", "payoff_not_largest",
                           f"the payoff '{pid}' ({100 * pc:.1f}%) is smaller "
                           f"than '{big}' ({100 * bc:.1f}%).",
-                          fix=f"make '{pid}' the largest lockup, or step "
-                              f"'{big}' down", id=pid))
+                          fix=f"make '{pid}' the largest lockup (a long "
+                              "single word is width-bound: role='condensed' "
+                              f"or a shorter word), or step '{big}' down",
+                          id=pid))
     hook = caps.get("hook")
     if hook and caps.get("captions") and hook[1] and \
             float(hook[1]) < 1.2 * float(caps["captions"]):

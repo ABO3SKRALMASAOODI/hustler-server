@@ -93,6 +93,17 @@ def device_items(edl, ids=None, window=None, previous_edl=None):
     if ids:
         want = [str(i) for i in ids]
         by_id = {d["id"]: d for d in out}
+        # A plain motion graphic NAMED by id is proved the same way (with /
+        # without, its landing, legibility, a face under it): 18 calls in
+        # the 24 h to 23 Oct named graphics (s45-hook, s23-agency-list...)
+        # and were refused "no device item".
+        for m in edl.get("motion") or []:
+            if isinstance(m, dict) and str(m.get("id")) in want \
+                    and str(m.get("id")) not in by_id:
+                by_id[str(m.get("id"))] = {
+                    "id": str(m.get("id")), "layer": "motion",
+                    "kind": "graphic", "type": "motion", "device": None,
+                    "item": m}
         return [by_id[i] for i in want if i in by_id]
     if previous_edl is not None:
         prev = {d["id"]: _canon(d["item"])
@@ -123,7 +134,7 @@ def ablate(edl, devs):
     out["fx"] = [i for i in out.get("fx") or []
                  if str(i.get("id")) not in gone_fx]
     comp = {d["id"] for d in devs if d["kind"] == "composite"}
-    behind = {d["id"] for d in devs if d["kind"] == "behind"}
+    behind = {d["id"] for d in devs if d["kind"] in ("behind", "graphic")}
     motion = []
     for m in out.get("motion") or []:
         mid = str(m.get("id"))
@@ -688,6 +699,8 @@ def _family(dev, cards):
         return "type_depth"
     if dev["kind"] == "composite":
         return "composite"
+    if dev["kind"] == "graphic":
+        return "layout"
     return {"accent": "punctuation", "strobe": "punctuation",
             "subject": "matte_fx", "background": "matte_fx",
             "region": "composite", "grade_window": "finish",

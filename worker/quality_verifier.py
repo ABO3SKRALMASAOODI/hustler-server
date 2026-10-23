@@ -54,7 +54,7 @@ ADVISORY_FINDINGS = {
     "scene_unaware_reframe", "duplicate_broll_window",
     "music_missing_treatment_purpose", "sfx_missing_trigger",
     "mechanical_sfx_pattern", "taste_advisory", "sound_off_gap",
-    "earn_its_place",
+    "earn_its_place", "speaker_stutter",
 }
 ADVISORY_LABEL = "advisory: keep if intentional"
 DEGRADED_FINDING = "device_degraded"
@@ -700,6 +700,64 @@ def _sound_off_findings(edl, index):
          "band"))]
 
 
+def _repeat_findings(edl, index):
+    """Words heard twice in a row in the kept programme (audit.
+    repeated_phrases). A repeated phrase ('you don't you don't') or a repeat
+    a cut made (the end of one kept span said again by the next: 'to be |
+    to be') is a defect the edit can remove: blocking. A single word the
+    speaker doubles inside one take ('we we') is an advisory: often too
+    tight to cut cleanly. Earnings run (w1023): 4563 v21's record said
+    passed over both of its restarts; 4562 shipped eight 'we we' / 'the the'
+    doubles in 30 s with nothing said."""
+    words = (index or {}).get("words") or []
+    keep = edl.get("keep") or []
+    if not words or not keep:
+        return []
+    try:
+        import audit
+        hits = audit.repeated_phrases(keep, words, audit.ducked_spans(edl))
+        tl = Timeline(keep, edl.get("inserts") or [], edl.get("speed") or [])
+    except Exception as exc:  # noqa: BLE001 — a check never breaks review
+        print(f"[verify] repeat check skipped: {type(exc).__name__}", flush=True)
+        return []
+
+    def at(h):
+        t = tl.src_to_out(float(h["first"][0]))
+        return f"{t:.2f}s" if t is not None else f"source {h['first'][0]:.2f}"
+
+    out = []
+    for h in hits:
+        if h["n"] < 2 and not h["across_join"]:
+            continue
+        if h["across_join"]:
+            fix = (f"the cut repeats it: end the kept span before "
+                   f"{h['first'][0]:.2f} (the first '{h['text'].split()[0]}') "
+                   f"or start the next after {h['second'][1]:.2f}")
+        else:
+            fix = (f"cut source {h['cut'][0]:.2f}-{h['cut'][1]:.2f} (the "
+                   "first saying) with cut_range or keep_segments")
+        out.append(_finding(
+            "repeated_phrase", "story",
+            (f"Repeated words: \"{h['text']}\" at {at(h)} (source "
+             f"{h['first'][0]:.2f}-{h['second'][1]:.2f}) — {fix}."),
+            {"repeat": h},
+            "cut one saying (check_speech names it), or justify a deliberate "
+            "repetition from the audio"))
+    single = [h for h in hits if h["n"] == 1 and not h["across_join"]]
+    if single:
+        shown = "; ".join(f"\"{h['text']}\" at {at(h)} (cut "
+                          f"{h['cut'][0]:.2f}-{h['cut'][1]:.2f})"
+                          for h in single[:6])
+        more = f" (+{len(single) - 6} more)" if len(single) > 6 else ""
+        out.append(_finding(
+            "speaker_stutter", "story",
+            (f"Speaker stutter: {len(single)} doubled word(s) heard — "
+             f"{shown}{more}. Cut the first saying where a quiet gap "
+             "allows it; a hook or payoff line should be clean."),
+            {"repeats": single[:12]}, ADVISORY_LABEL))
+    return out
+
+
 def _earn_its_place_findings(edl, index, request_text=None):
     """edit_review's advisory "earn its place" notes on a short (hook,
     graphic budget, payoff, identification, trim, restraint), folded into
@@ -871,7 +929,8 @@ def deterministic_findings(edl, index=None, request_text=None):
             + _audio_findings(edl)
             + _request_findings(edl, request_text)
             + _flash_findings(edl, index or {}, request_text)
-            + _earn_its_place_findings(edl, index or {}, request_text))
+            + _earn_its_place_findings(edl, index or {}, request_text)
+            + _repeat_findings(edl, index or {}))
 
 
 def build_verification_record(project_id, version, manifest, edl, index,

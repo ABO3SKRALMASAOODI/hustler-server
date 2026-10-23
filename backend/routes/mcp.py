@@ -2759,7 +2759,7 @@ _ADVISORY_FINDING_CODES = frozenset({
     "scene_unaware_reframe", "duplicate_broll_window",
     "music_missing_treatment_purpose", "sfx_missing_trigger",
     "mechanical_sfx_pattern", "taste_advisory", "sound_off_gap",
-    "earn_its_place",
+    "earn_its_place", "speaker_stutter",
 })
 
 

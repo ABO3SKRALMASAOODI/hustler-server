@@ -1874,7 +1874,13 @@ def type_pass(tplan, deadline):
             continue
         for text, t, m in zip(ref, prog_t, ms):
             if m and not m.get("error") and m.get("box"):
+                # a stack / lockup cue sets one word huge over small lines:
+                # its smallest line is what the viewer has to read
+                lc = [float(ln["cap"]) for ln in m.get("lines") or []
+                      if ln.get("cap")]
                 out["cues"].append({"t": round(t, 2), "cap": m.get("cap"),
+                                    "cap_min": round(min(lc), 4) if lc
+                                    else m.get("cap"),
                                     "box": m.get("box"), "text": text[:60]})
     return out
 
@@ -1895,6 +1901,15 @@ def type_findings(tres, tplan, cards):
     cue_caps = sorted(c["cap"] for c in (tres or {}).get("cues") or []
                       if c.get("cap"))
     caps = {"captions": cue_caps[len(cue_caps) // 2] if cue_caps else None}
+    # The captions' READING size: the median of each cue's smallest line. A
+    # stack look's emphasis word measured 6.0% on Earnings 4562 v36 while
+    # its other lines read at ~2% (size_scale 0.5); 'captions' (the largest
+    # line, what a hook competes with) said nothing of it.
+    read = sorted(c.get("cap_min") or c["cap"]
+                  for c in (tres or {}).get("cues") or [] if c.get("cap"))
+    if read and caps["captions"] and \
+            read[len(read) // 2] < 0.8 * caps["captions"]:
+        caps["captions_read"] = read[len(read) // 2]
     hook = (tplan or {}).get("hook")
     if hook in meas:
         caps["hook"] = (hook, meas[hook]["cap"])
@@ -2866,7 +2881,9 @@ def advice(res):
                 f"PAYOFF NOT THE LARGEST LOCKUP: '{pid}' sets its type at "
                 f"{100 * pc:.1f}% of the frame height and '{big}' at "
                 f"{100 * bc:.1f}% — the payoff is the short's largest lockup. "
-                f"Enlarge '{pid}' (width, fewer words) or bring '{big}' down")
+                f"Enlarge '{pid}' (width, fewer words; a long single word is "
+                "width-bound, so role='condensed' or a shorter word) or bring "
+                f"'{big}' down")
     # captions the plan could place nowhere clear (caption_carry.unplaced_lines)
     out += list(res.get("unplaced") or [])
     return out
@@ -2919,7 +2936,10 @@ def measures_line(res):
         tparts.append(f"band headline '{caps['band'][0]}' "
                       f"{100 * (caps['band'][1] or 0):.1f}%")
     if caps.get("captions"):
-        tparts.append(f"captions {100 * caps['captions']:.1f}%")
+        tparts.append(f"captions {100 * caps['captions']:.1f}%"
+                      + (f" (largest line; their other lines read at "
+                         f"{100 * caps['captions_read']:.1f}%)"
+                         if caps.get("captions_read") else ""))
     if caps.get("payoff"):
         pid, pc, big, bc = caps["payoff"]
         tparts.append(f"payoff '{pid}' {100 * pc:.1f}%"

@@ -320,7 +320,40 @@ def check_speech(ctx, start=None, end=None):
     edge_lines = _cut_edge_lines(ctx, edl, pieces, words, src)
     if len(lines) == 2:
         lines.append("no untranscribed sound, clipping or clicks")
-    return "\n".join(lines + edge_lines)
+    return "\n".join(lines + edge_lines + _repeat_lines(edl, pieces, words))
+
+
+def _repeat_lines(edl, pieces, words):
+    """Words heard twice in a row under the window (audit.repeated_phrases,
+    the verification's repeated_phrase / speaker_stutter rule), each with
+    the source cut that drops the first saying. Earnings run (w1023): 4563
+    v21 kept 'you don't you don't' and a cut made 'to be | To to be'; no
+    tool named either."""
+    import audit
+    keep = [[float(a), float(b)] for a, b in (edl or {}).get("keep") or []]
+    try:
+        hits = audit.repeated_phrases(keep, words, audit.ducked_spans(edl))
+    except Exception:  # noqa: BLE001 — a diagnostic never fails the read
+        return []
+    out = []
+    for h in hits:
+        t = float(h["first"][0])
+        hit = next(((p0 + (t - a) / f) for p0, _p1, a, b, f in pieces
+                    if a - 0.05 <= t <= b + 0.05), None)
+        if hit is None:
+            continue
+        if h["across_join"]:
+            fix = (f"the cut repeats it: end the kept span before "
+                   f"{h['first'][0]:g} or start the next after "
+                   f"{h['second'][1]:g}")
+        else:
+            fix = (f"cut source {h['cut'][0]:g}-{h['cut'][1]:g} to drop the "
+                   "first saying" + (" (a single doubled word: only where a "
+                                     "quiet gap allows a clean cut)"
+                                     if h["n"] == 1 else ""))
+        out.append(f"REPEATED WORDS: \"{h['text']}\" at {max(0.0, hit):.2f}s "
+                   f"-> {fix}")
+    return out
 
 
 def _cut_edge_lines(ctx, edl, pieces, words, src):

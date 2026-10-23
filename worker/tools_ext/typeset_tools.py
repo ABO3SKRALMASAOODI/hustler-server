@@ -22,6 +22,7 @@ import copy
 import difflib
 import hashlib
 import json
+import math
 import re
 
 from tools_ext import _write
@@ -66,6 +67,11 @@ def _next_id(items, prefix="ts"):
     return f"{prefix}{k}"
 
 
+# match_words: the share of the text's words a run must match to be where
+# the text is said (2 of 2, 2 of 3, 4 of 6)
+MATCH_SHARE = 0.6
+
+
 def match_words(text, pw):
     """Where ``text`` is said: (first program word, last program word,
     matched count) for the longest run of the text's tokens found in the
@@ -90,6 +96,12 @@ def match_words(text, pw):
             lo, n = b.a, n + b.size
         elif b.a > hi and b.a - hi <= 4:
             hi, n = b.a + b.size - 1, n + b.size
+    if n < math.ceil(MATCH_SHARE * len(want) - 1e-9):
+        # one shared word is not where a line is said: Earnings 4562 v42's
+        # editorial hook 'the chip secret Elon won't share' matched only
+        # 'chip' at 4.68 s, and add_typeset(0.1-2.7) moved its start there
+        # (job 100397: 'span [4.55, 2.7] is 0.000s')
+        return None
     return pw[lo], pw[hi], n
 
 
@@ -369,6 +381,9 @@ def _compose(ctx, edl, mid, text, s, e, prog, pw, voice="auto",
     items = edl.get("motion") or []
     held = None
     hit = match_words(text, pw) if pw else None
+    if hit and (float(hit[0]["t0"]) >= e - 1e-3
+                or float(hit[1]["t1"]) <= s + 1e-3):
+        hit = None          # said elsewhere: the window given is editorial
     if hit:
         # the hold after the last word ends where the next words are said:
         # a lockup held over them leaves their captions no band (they were

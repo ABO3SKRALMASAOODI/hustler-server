@@ -1068,6 +1068,9 @@ def nominal_ink(template, spec, params, frame=None):
         return _list_build_ink(params or {}, y, frame)
     if template == "word_slam" and (params or {}).get("tier") == "hook":
         return _hook_ink(params or {}, y, frame)
+    if template == "word_slam" and (params or {}).get("tier") == "payoff" \
+            and str((params or {}).get("text") or "").strip():
+        return _payoff_ink(params or {}, y, frame)
     if template == "word_slam" and (params or {}).get("tier") in TIER_INK:
         x0, top, x1, bottom = TIER_INK[params["tier"]]
         kw = min(1.0, k) if params["tier"] == "hero" else k
@@ -1165,6 +1168,72 @@ def _hook_ink(params, y, frame=None):
     fs, n, lead_fs, n_lead, w = hook_layout(params, aspect)
     kick = 0.045 if str(params.get("kicker") or "").strip() else 0.0
     h = n * fs * lh + n_lead * lead_fs * lh + kick
+    # the ink: the glyphs and their contact shadow
+    pad_y, pad_x = 0.1 * fs, 0.1 * fs / aspect
+    top = min(max(y - h / 2.0, 0.06), 0.86 - h)
+    x = num(params, "x", 0.5)
+    return (max(0.0, x - w / 2.0 - pad_x), max(0.0, top - pad_y),
+            min(1.0, x + w / 2.0 + pad_x), min(1.0, top + h + pad_y))
+
+
+# The payoff tier (word_slam.html layout): the copy's lines fitted to the
+# width inside the height budget (a single row of 2+ words stacks when that
+# sets it clearly bigger), every line of a stack justified to the width at
+# most PAYOFF_LINE of the frame height, the stack inside PAYOFF_STACK. The
+# fixed tier box this replaces (y +-0.165 whatever the copy) read a one-word
+# payoff five times taller than it draws: Earnings 4562 '*TERAWATT*' at
+# width 0.765 rendered a 6.3% cap (~0.1 of the height), was estimated
+# 0.49-0.78, and the keep-out and the caption plan avoided a third of the
+# frame for it.
+SLAM_H1, SLAM_HN = 0.25, 0.32           # heightOf: one line, a stack
+PAYOFF_LINE, PAYOFF_STACK = 0.26, 0.42
+
+
+def payoff_layout(params, aspect=9 / 16.0):
+    """([font size per line], widest line as a share of the width) of a
+    payoff-tier word_slam, as shares of the frame height — estimated like
+    the page lays it out."""
+    role = str(params.get("role") or "grotesk")
+    em, lh = EM_PER_CHAR.get(role, 0.61), LINE_H.get(role, 0.88)
+    width = num(params, "width", 0.85) or 0.85
+    rows = [_words_of(r) for r in str(params.get("text") or "")
+            .replace("\n", " / ").split("/")]
+    rows = [r for r in rows if r] or [["-"]]
+
+    def fit(groups):
+        widest = max(_chars(g) for g in groups)
+        budget = (SLAM_H1 if len(groups) == 1 else SLAM_HN) / (len(groups) * lh)
+        return min(width * aspect / (widest * em), budget)
+    groups = rows
+    if len(rows) == 1 and len(rows[0]) >= 2:
+        ws = rows[0]
+        cands = [[ws]] + [[ws[:i], ws[i:]] for i in range(1, len(ws))] + \
+            [[ws[:i], ws[i:j], ws[j:]] for i in range(1, len(ws))
+             for j in range(i + 1, len(ws))]
+        groups = max(cands, key=lambda c: fit(c) / 1.3 ** (len(c) - 1))
+    if len(groups) > 1:
+        sz = [min(width * aspect / (_chars(g) * em), PAYOFF_LINE)
+              for g in groups]
+        tot = sum(sz) * lh
+        if tot > PAYOFF_STACK:
+            sz = [v * PAYOFF_STACK / tot for v in sz]
+    else:
+        sz = [fit(groups)]
+    widest = max(_chars(g) * em * v / aspect for g, v in zip(groups, sz))
+    return sz, min(width, widest)
+
+
+def _payoff_ink(params, y, frame=None):
+    W, H = frame or (1080, 1920)
+    aspect = W / float(H)
+    role = str(params.get("role") or "grotesk")
+    lh = LINE_H.get(role, 0.88)
+    sz, w = payoff_layout(params, aspect)
+    fs = max(sz)
+    kick = 0.0
+    if str(params.get("kicker") or "").strip():
+        kick = min(max(0.3 * fs, 0.024), 0.035) * 1.15 + 0.06 * fs
+    h = sum(sz) * lh + kick
     # the ink: the glyphs and their contact shadow
     pad_y, pad_x = 0.1 * fs, 0.1 * fs / aspect
     top = min(max(y - h / 2.0, 0.06), 0.86 - h)
