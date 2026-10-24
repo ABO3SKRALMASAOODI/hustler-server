@@ -2541,6 +2541,44 @@ WATERMARK_VERSION = 6
 # do. Set WATERMARK_ENABLED=0 to switch the mark back off in one env var if
 # that needs to be undone in a hurry.
 WATERMARK_ENABLED = os.getenv("WATERMARK_ENABLED", "1") == "1"
+
+# A final at least 1080 px on its short side or 1920 on its long one
+# (renderer.delivery_canvas_current; stamped as `delivery_v`).
+DELIVERY_VERSION = 1
+# A limiter on every mix, social mastering or not
+# (renderer.audio_peak_current; stamped as `audio_peak_v`).
+AUDIO_PEAK_VERSION = 1
+# What renderer._caption_index_fp mixes into a transcript-caption render's
+# `caption_fp`. The cache compares fingerprints itself, but the backend only
+# hears about a change through this number: tests/test_render_rules.py pins
+# the fingerprint's literals, so changing them fails until this is bumped.
+CAPTION_FP_VERSION = 1
+
+# ── The render cache's rules, as the backend sees them ───────────────────
+# Every version a cached render must match to be served again for its own
+# EDL version (renderer.cache_rules_current, and every helper it calls).
+# Each render stamps them all as `rules` (renderer.render_rules) and every
+# render job's answer carries them, cached or fresh. The backend's final
+# gate (backend/routes/video.py _final_gate) learns the rules the deployed
+# pipeline writes from its newest renders, and hides a final that no worker
+# running those rules has rendered or vouched for, so a Download posts
+# /render/final and THIS cache decides: it re-encodes a stale final, or
+# answers `cached: true` for one that is still current.
+#
+# Without it each bump needed a hand-written backend mirror, and one that
+# had none (PATCH_CLOCK_VERSION, Oct 2026) left the pre-fix Gates s23 final
+# (project 4356, v36, asset 31550) downloadable with the orphan frame its
+# fix removed: the studio and export_final short-circuit to an existing
+# final, so this cache was never asked. tests/test_render_rules.py fails
+# when a version the cache check reads is missing here.
+RENDER_RULE_CONSTANTS = (
+    "OUTRO_VERSION", "GFX_SHAPING_VERSION", "TRANSITION_VERSION",
+    "MASTER_VERSION", "TRUE_PEAK_GUARD_VERSION", "MUSIC_TAIL_VERSION",
+    "LEGIBILITY_VERSION", "CAPTION_CARRY_VERSION", "FOLLOW_VERSION",
+    "CARD_LAYOUT_VERSION", "PATCH_CLOCK_VERSION", "HANDOFF_VERSION",
+    "WATERMARK_VERSION", "FINISH_VERSION", "DELIVERY_VERSION",
+    "AUDIO_PEAK_VERSION", "CAPTION_FP_VERSION",
+)
 # The mark's three lines (brandmark.py sets them; v6). Literals, not
 # .upper()'d at render time, so an operator override renders exactly as
 # typed. WATERMARK_TEXT is the whole attribution as one sentence (what the

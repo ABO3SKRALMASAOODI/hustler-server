@@ -839,7 +839,7 @@ def delivery_canvas_current(asset, variant):
     if variant != "final":
         return True
     meta = (asset or {}).get("meta") or {}
-    if meta.get("delivery_v") == 1:
+    if meta.get("delivery_v") == config.DELIVERY_VERSION:
         return True
     width, height = (asset or {}).get("width"), (asset or {}).get("height")
     # Unknown historical geometry stays compatible. The backend applies the
@@ -2227,7 +2227,7 @@ def audio_peak_current(meta, edl):
     # Social mastering already had a limiter. Only previously unmastered
     # mixes need their cached render rebuilt on the next render request.
     return ((edl.get("master") or {}).get("loudness") == "social"
-            or (meta or {}).get("audio_peak_v") == 1)
+            or (meta or {}).get("audio_peak_v") == config.AUDIO_PEAK_VERSION)
 
 
 def true_peak_current(meta):
@@ -8969,6 +8969,70 @@ def _matching_evidence_pages(previous, expected, field):
     return previous
 
 
+def render_rules():
+    """The cache rules this worker makes and judges renders under: every
+    version config.RENDER_RULE_CONSTANTS names. Stamped on every render as
+    `rules` and carried by every render job's answer (cached or fresh), so
+    the backend's final gate learns from the renders themselves when a rule
+    moved and asks this cache again (backend/routes/video.py
+    _deployed_render_rules) instead of mirroring each rule by hand."""
+    return {name: getattr(config, name)
+            for name in config.RENDER_RULE_CONSTANTS}
+
+
+def cache_rules_current(cached, edl, variant, *, src_shape=(None, None),
+                        is_paid=False, wm_settings=None, index_of=None):
+    """May this cached render be served again for its own EDL version?
+
+    Every render-correctness rule in one predicate: each *_current check the
+    cache has grown, plus the caption fingerprint. Every version it reads,
+    directly or through a helper, must be listed in
+    config.RENDER_RULE_CONSTANTS (tests/test_render_rules.py walks this
+    function and fails otherwise): that list is the only way the backend
+    hears that a rule moved, and a rule it never hears about leaves stale
+    finals downloadable, because the studio and export_final short-circuit to
+    an existing final and never ask this cache (PATCH_CLOCK_VERSION and the
+    Gates s23 orphan frame, Oct 2026).
+
+    `index_of()` returns the source's index; it is read only when a rule
+    needs it. The policy checks of a request (preview quality, audio review)
+    stay with the caller."""
+    edl = edl or {}
+    cached = cached or {}
+    meta = cached.get("meta") or {}
+    _index = index_of or (lambda: {})
+    caps = edl.get("captions")
+    stored_fp = meta.get("caption_fp")
+    # Grandfather renders made before fingerprinting existed (stored_fp is
+    # None): trust them rather than force-re-encode every cached preview AND
+    # final. Only a PRESENT fingerprint that no longer matches busts.
+    if isinstance(caps, dict) and caps.get("mode") == "from_transcript" \
+            and stored_fp is not None \
+            and _caption_index_fp(edl, _index() or {}) != stored_fp:
+        return False
+    tail_out = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                        edl.get("speed")).out_duration
+    return bool(
+        (is_canvas_program(edl) or delivery_canvas_current(cached, variant))
+        and outro_current(meta, variant)
+        and audio_peak_current(meta, edl)
+        and true_peak_current(meta)
+        and master_current(meta, edl, *src_shape)
+        and shaping_current(meta, edl)
+        and transitions_current(meta, edl)
+        and music_tail_current(meta, edl, tail_out)
+        and legibility_current(meta, edl)
+        and carry_current(meta, edl)
+        and follow_current(meta, edl)
+        and cards_current(meta, edl)
+        and patch_clock_current(meta, edl)
+        and (not handoff_may_matter(edl)
+             or handoff_current(meta, edl, _index() or {}))
+        and watermark_current(meta, variant, is_paid, wm_settings)
+        and finish_current(cached, variant)
+        and analysis_current(meta, edl, _index))
+
+
 def run_render_job(worker_db, job):
     quality = (job.get("payload") or {}).get("quality", "draft")
     if quality not in ("draft", "approval"):
@@ -9110,59 +9174,23 @@ def _run_render_job(worker_db, job):
                    (cached.get("meta") or {}).get("quality") == "approval") and \
             (cached.get("meta") or {}).get("src_sha256") == \
             src_sha and storage.exists(cached["storage_key"]):
-        caps = edl_row["json"].get("captions")
-        needs_fp = isinstance(caps, dict) and caps.get("mode") == "from_transcript"
-        stored_fp = (cached.get("meta") or {}).get("caption_fp")
-        fp_ok = True
-        # Grandfather renders made before fingerprinting existed (stored_fp is
-        # None): trust them rather than force-re-encode every cached preview AND
-        # final on this box (a long final re-render is minutes on ~1 vCPU). New
-        # renders all carry a fingerprint, so the stale-transcript guard applies
-        # going forward; only a PRESENT fingerprint that no longer matches busts.
-        if needs_fp and stored_fp is not None:
-            idx_c = worker_db.run(dbx.get_index_by_sha, original["sha256"])
-            want_fp = _caption_index_fp(edl_row["json"],
-                                        (idx_c or {}).get("json") or {})
-            fp_ok = (want_fp == stored_fp)
-        # The end card is a render-pipeline constant, so nothing about adding
-        # it moves the EDL version or the source sha — every already-rendered
-        # version would keep serving un-branded bytes forever. Grandfathering
-        # here must therefore be the OPPOSITE of caption_fp's above: a MISSING
-        # stamp means the render predates the card and must be re-encoded,
-        # where a missing caption fingerprint is trusted.
-        _tail_out = Timeline(edl_row["json"].get("keep") or [],
-                             edl_row["json"].get("inserts") or [],
-                             edl_row["json"].get("speed")).out_duration
-        if fp_ok and (is_canvas_program(edl_row["json"]) or
-                      delivery_canvas_current(cached, variant)) \
-                and outro_current(cached.get("meta"), variant) \
-                and audio_peak_current(cached.get("meta"), edl_row["json"]) \
-                and true_peak_current(cached.get("meta")) \
-                and master_current(cached.get("meta"), edl_row["json"],
-                                   *src_shape) \
-                and shaping_current(cached.get("meta"), edl_row["json"]) \
-                and transitions_current(cached.get("meta"), edl_row["json"]) \
-                and music_tail_current(cached.get("meta"), edl_row["json"],
-                                       _tail_out) \
-                and legibility_current(cached.get("meta"), edl_row["json"]) \
-                and carry_current(cached.get("meta"), edl_row["json"]) \
-                and follow_current(cached.get("meta"), edl_row["json"]) \
-                and cards_current(cached.get("meta"), edl_row["json"]) \
-                and patch_clock_current(cached.get("meta"), edl_row["json"]) \
-                and (not handoff_may_matter(edl_row["json"])
-                     or handoff_current(
-                         cached.get("meta"), edl_row["json"],
-                         (worker_db.run(dbx.get_index_by_sha,
-                                        original["sha256"]) or {})
-                         .get("json") or {})) \
-                and watermark_current(cached.get("meta"), variant, is_paid,
-                                      wm_settings) \
-                and finish_current(cached, variant) \
-                and analysis_current(
-                    cached.get("meta"), edl_row["json"],
-                    lambda: (worker_db.run(dbx.get_index_by_sha,
-                                           original["sha256"]) or {})
-                    .get("json") or {}) \
+        # The end card, the transitions, the patches... every one is a
+        # render-pipeline constant, so nothing about changing it moves the
+        # EDL version or the source sha: cache_rules_current holds every
+        # rule a cached render must still pass, and render_rules() tells the
+        # backend which rules this answer was given under.
+        _idx_memo = []
+
+        def _index_of():
+            if not _idx_memo:
+                _idx_memo.append(
+                    ((worker_db.run(dbx.get_index_by_sha, original["sha256"])
+                      or {}).get("json") or {})
+                    if original and original.get("sha256") else {})
+            return _idx_memo[0]
+        if cache_rules_current(cached, edl_row["json"], variant,
+                               src_shape=src_shape, is_paid=is_paid,
+                               wm_settings=wm_settings, index_of=_index_of) \
                 and _audio_model_review_cache_compatible(
                     audio_model_review, edl_row["json"], cached.get("meta")):
             cached_meta = cached.get("meta") or {}
@@ -9188,6 +9216,7 @@ def _run_render_job(worker_db, job):
                     "quality": ("final" if variant == "final" else
                                 cached_meta.get("quality", "draft")),
                     "sha256": cached.get("sha256"), "cached": True,
+                    "rules": render_rules(),
                     **({"motion_warnings": cached_meta["motion_warnings"]}
                        if cached_meta.get("motion_warnings") else {}),
                     **({"devices": cached_meta["devices"]}
@@ -9884,7 +9913,7 @@ def _run_render_job(worker_db, job):
                               if not proof_only and
                               outro_seconds(variant == "preview") else 0),
                   "gfx_shape_v": config.GFX_SHAPING_VERSION,
-                  "delivery_v": 1,
+                  "delivery_v": config.DELIVERY_VERSION,
                   "trans_v": config.TRANSITION_VERSION,
                   "cam_v": config.CAMERA_VERSION,
                   # A reused picture keeps the follow paths it was drawn with.
@@ -9929,8 +9958,12 @@ def _run_render_job(worker_db, job):
                   "finish_v": (reused_visual_meta.get("finish_v") or 0
                                if reused_visual_meta
                                else config.FINISH_VERSION),
-                  "audio_peak_v": 1,
+                  "audio_peak_v": config.AUDIO_PEAK_VERSION,
                   "master_v": config.MASTER_VERSION,
+                  # The cache rules this render was made under: what the
+                  # backend's final gate compares (config.RENDER_RULE_
+                  # CONSTANTS).
+                  "rules": render_rules(),
                   **({"tp_v": config.TRUE_PEAK_GUARD_VERSION,
                       "true_peak": tp_guard}
                      if tp_guard is not None else {}),
@@ -9982,7 +10015,8 @@ def _run_render_job(worker_db, job):
                 **({"devices": fx_devices} if fx_devices else {}),
                 "audio_qc": audio_qc_res, "listen_keys": listen_keys,
                 "picture_qc": picture_qc_res,
-                "audio_model_review": audio_model_review}
+                "audio_model_review": audio_model_review,
+                "rules": render_rules()}
     except Exception as exc:
         # Successful jobs have always returned stage timings. Failures used to
         # discard them, leaving a 50-minute export with only `total_s`. Attach

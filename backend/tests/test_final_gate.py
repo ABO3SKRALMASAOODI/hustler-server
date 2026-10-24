@@ -68,9 +68,16 @@ class _Cur:
     rewritten into something that no longer asks the same question."""
 
     def __init__(self, *, transition_versions=(), confirmed=(), paid=False,
-                 pipeline_emits=True, small_finals=()):
+                 pipeline_emits=True, small_finals=(), answers=(),
+                 rendered=()):
         self._tr = list(transition_versions)
-        self._conf = list(confirmed)
+        # `confirmed`: assets a final job answered `cached: true` for, by a
+        # worker that predates render rules. `answers`: full answer rows.
+        self._conf = [{"job_id": 1, "aid": a, "cached": True, "rules": None}
+                      for a in confirmed] + list(answers)
+        # The newest renders' (rules, render_job_id), newest first; none by
+        # default: an executor that writes no rules (the check is off).
+        self._rendered = list(rendered)
         self._paid = paid
         self._emits = pipeline_emits
         self._small_finals = small_finals
@@ -85,8 +92,10 @@ class _Cur:
         elif "'transition'" in sql:
             self._rows = [{"version": v, "has_transition": True}
                           for v in self._tr]
+        elif "meta -> 'rules'" in sql:        # the render rules probe
+            self._rows = [{"rules": r, "job": j} for r, j in self._rendered]
         elif "render_asset_id" in sql:
-            self._rows = [{"aid": a} for a in self._conf]
+            self._rows = list(self._conf)
         elif "FROM users" in sql:
             self._one = {"is_subscribed": 1 if self._paid else 0,
                          "plan": "ai" if self._paid else "free"}

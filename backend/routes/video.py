@@ -5382,7 +5382,7 @@ def _transitions_are_current(meta, edl_has_transition=True):
     Download down for every user on the platform. The worker only ever busts an
     EDL that actually carries a transition; this side demanded the stamp on
     EVERY final, so the moment renders stopped carrying it (a render image
-    older than round 48 — see _worker_confirmed_current) not one export in the
+    older than round 48 — see _worker_answers) not one export in the
     product was reported as current. The rule has to be the SAME rule on both
     sides, so the caller passes what the worker reads off the EDL. Grandfathers
     exactly what the worker grandfathers, and nothing more.
@@ -5469,8 +5469,12 @@ def _pipeline_emits(cur, key):
     return emits
 
 
-def _worker_confirmed_current(cur, project_id):
-    """Render assets the WORKER has already declared current, after being asked.
+def _worker_answers(cur, project_id):
+    """What the WORKER said about each final render of this project.
+
+    asset id -> {"cached": did any final job answer `cached: true` with it,
+                 "rules": the cache rules each answer was given under,
+                 "job": the newest final job that answered with it}.
 
     This is the loop-breaker, and it exists because the deadlock the
     _watermark_wanted docstring warns about has now shipped twice. The gates
@@ -5486,20 +5490,165 @@ def _worker_confirmed_current(cur, project_id):
     its own pipeline stamps, "this file is current". At that point the backend's
     opinion is stale metadata, not a fact, and re-rendering cannot help because
     the worker has already declined to. So the user wins: serve the file they
-    have. Worst case they download a render one pipeline revision old; the
-    alternative on offer is nothing, forever.
+    have. Deliberately keyed on `cached`, not merely on "a job produced this
+    asset": a legitimately stale render still gets re-encoded fresh exactly
+    once, which is what the gates are for. Only the SECOND identical answer is
+    the loop.
 
-    Deliberately keyed on `cached`, not merely on "a job produced this asset":
-    a legitimately stale render still gets re-encoded fresh exactly once, which
-    is what the gates are for. Only the SECOND identical answer is the loop.
+    An answer only speaks for the rules it was given under, though. `rules`
+    and `job` are what let _rules_vouched tell an answer given under today's
+    render rules from one given before they shipped (see
+    _deployed_render_rules) — "the worker once said this was current" is not
+    "the worker running today's rules says so".
+
+    One indexed read per poll, the same one the cached-only version made.
     """
-    cur.execute("""SELECT DISTINCT (result ->> 'render_asset_id')::int AS aid
+    cur.execute("""SELECT id AS job_id,
+                          (result ->> 'render_asset_id')::int AS aid,
+                          result ->> 'cached' = 'true' AS cached,
+                          result -> 'rules' AS rules
                    FROM video_jobs
                    WHERE project_id = %s AND type = 'final' AND state = 'done'
-                     AND result ->> 'cached' = 'true'
                      AND result ->> 'render_asset_id' ~ '^[0-9]+$'""",
                 (project_id,))
-    return {r["aid"] for r in cur.fetchall()}
+    answers = {}
+    for r in cur.fetchall():
+        aid = r.get("aid")
+        if aid is None:
+            continue
+        a = answers.setdefault(aid, {"cached": False, "rules": [], "job": 0})
+        a["cached"] = a["cached"] or bool(r.get("cached"))
+        if isinstance(r.get("rules"), dict):
+            a["rules"].append(r["rules"])
+        try:
+            a["job"] = max(a["job"], int(r.get("job_id") or 0))
+        except (TypeError, ValueError):
+            pass
+    return answers
+
+
+# ── the worker's own cache rules ─────────────────────────────────────────
+#
+# Mirroring each worker stamp here (OUTRO_VERSION, TRANSITION_VERSION,
+# WATERMARK_VERSION below) needs a hand-written backend rule for every bump,
+# and the bumps that had none were never asked about. PATCH_CLOCK_VERSION
+# (Oct 2026) fixed repaint patches that ran one frame late; the worker's cache
+# busts every render of an EDL with a patch that predates it, but the gate
+# knew nothing of `patch_v`, so the studio and export_final kept
+# short-circuiting to the pre-fix Gates s23 final (project 4356, v36, asset
+# 31550) with its orphan frame still in it. card_v, tp_v, master_v, carry_v
+# and the rest had the same hole.
+#
+# So the gate no longer guesses the rules. Every render stamps the rules it
+# was made under (`rules`: worker/config.RENDER_RULE_CONSTANTS), and every
+# final job's answer carries the rules it was given under, cached or fresh.
+# The deployed rules are learned the way _pipeline_emits learns a stamp: from
+# what the newest renders carry. A final that no worker running them has
+# rendered or vouched for is hidden, the studio posts /render/final, and the
+# worker's OWN cache decides — `cached: true` in seconds for a final that is
+# still current, a fresh encode for one that is not. A worker test fails when
+# a version its cache check reads is missing from the rules.
+_RULES_PROBE_KEY = "__render_rules__"
+
+
+def _is_rule_number(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _rules_cover(have, want):
+    """Was a render made (or vouched for) under `have` judged by every rule
+    of `want`? A number is a version: the same or a newer one covers it.
+    Anything else must match exactly. A rule `have` does not name was never
+    applied to it."""
+    if not isinstance(have, dict):
+        return False
+    for key, wanted in want.items():
+        got = have.get(key)
+        if _is_rule_number(wanted):
+            if not _is_rule_number(got) or got < wanted:
+                return False
+        elif got != wanted:
+            return False
+    return True
+
+
+def _deployed_render_rules(cur):
+    """(rules, since_job) the render pipeline judges finals by NOW, or None.
+
+    Learned from the newest renders, like _pipeline_emits, and for the same
+    reason: the executor is deployed separately and can sit behind (or, mid
+    rollout, beside) the backend, so the backend must never demand rules no
+    deployed worker writes. None — no recent render carries `rules` — turns
+    the check off until an executor that writes them renders something.
+
+    `rules` takes each version at its newest across the sample, so a rollout
+    that mixes two releases asks for the newer one. `since_job` is the oldest
+    render job in the sample made under those rules: any final job newer than
+    it was answered while those rules were live, which _rules_vouched treats
+    as final — re-asking an older lane that answered with older rules can only
+    get the same answer again (the loop _worker_answers exists to break).
+
+    Cached for the probe TTL: /state is polled every 2s per open studio, and
+    this is one small indexed read a minute per process, not one per poll.
+    """
+    hit = _pipeline_probe.get(_RULES_PROBE_KEY)
+    now = time.monotonic()
+    if hit and now - hit[0] < _PIPELINE_PROBE_TTL_S:
+        return hit[1]
+    try:
+        cur.execute("""SELECT meta -> 'rules' AS rules,
+                              meta ->> 'render_job_id' AS job
+                       FROM assets WHERE kind = 'render'
+                       ORDER BY id DESC LIMIT %s""",
+                    (_PIPELINE_PROBE_SAMPLE,))
+        rows = cur.fetchall() or []
+    except Exception as e:                                # pragma: no cover
+        current_app.logger.warning("render rules probe failed: %s", e)
+        return None
+    found = []
+    for r in rows:                                        # newest first
+        rules = r.get("rules")
+        if isinstance(rules, dict) and rules:
+            try:
+                job = int(r.get("job"))
+            except (TypeError, ValueError):
+                job = None
+            found.append((rules, job))
+    deployed = None
+    if found:
+        want = {}
+        for rules, _job in found:
+            for key, value in rules.items():
+                if key not in want:
+                    want[key] = value
+                elif _is_rule_number(value) and _is_rule_number(want[key]) \
+                        and value > want[key]:
+                    want[key] = value
+        jobs = [job for rules, job in found
+                if job is not None and _rules_cover(rules, want)]
+        deployed = (want, min(jobs) if jobs else None)
+    _pipeline_probe[_RULES_PROBE_KEY] = (now, deployed)
+    return deployed
+
+
+def _rules_vouched(meta, answer, deployed):
+    """Has a worker running the deployed rules made or vouched for this final?
+
+    Yes when the render itself was made under them (its `rules` stamp), when
+    any final job answered with it under them, or when a final job answered
+    with it after they went live (the mixed-rollout case: an older lane's
+    answer is the best the platform has right now, and asking again only
+    loops). A final the worker last looked at before today's rules shipped —
+    a pre-fix render nobody has asked about since — is not: it is hidden so
+    the next Download asks the worker's own cache."""
+    want, since = deployed
+    if _rules_cover((meta or {}).get("rules"), want):
+        return True
+    if not answer:
+        return False
+    if any(_rules_cover(r, want) for r in answer.get("rules") or []):
+        return True
+    return since is not None and int(answer.get("job") or 0) >= since
 
 
 # Mirrors worker/config.WATERMARK_VERSION — a worker test asserts they match.
@@ -5615,6 +5764,12 @@ def _final_gate(cur, project_id, user_id):
     nothing. They were two copies of the same three-way `and`; now they are one
     function, and a fourth stamp is added in one place.
 
+    Every other render-correctness rule is the worker's own: a final no
+    worker running the deployed render rules has made or vouched for is
+    hidden, so Download asks the worker's cache (_deployed_render_rules,
+    _rules_vouched). The hand-written stamp checks below stay for the rules
+    that move without a release (the watermark's plan and admin switches).
+
     Both callers have already run _project_for_user, so `user_id` is the
     project's owner and the watermark rule reads the right plan.
 
@@ -5623,7 +5778,8 @@ def _final_gate(cur, project_id, user_id):
     handful of indexed reads per poll (the pipeline probe is cached across
     them) and never becomes a query per render row.
     """
-    confirmed = _worker_confirmed_current(cur, project_id)
+    answers = _worker_answers(cur, project_id)
+    deployed = _deployed_render_rules(cur)
     is_paid = _user_is_paid(cur, user_id)
     wm = _watermark_settings(cur)
     # Only ask the EDLs which versions carry a transition when the answer can
@@ -5653,7 +5809,10 @@ def _final_gate(cur, project_id, user_id):
             return False
         if final_degraded_hold(meta):
             return False          # a degraded device nobody acknowledged
-        if asset_id in confirmed:
+        answer = answers.get(asset_id)
+        if deployed and not _rules_vouched(meta, answer, deployed):
+            return False          # no worker on today's rules has seen it
+        if answer and answer["cached"]:
             return True           # the worker has already declined to re-render
         return (_final_is_current(meta)
                 and _transitions_are_current(meta, version in with_transition)
