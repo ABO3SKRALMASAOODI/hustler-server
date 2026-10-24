@@ -65,13 +65,19 @@ def adb():
     the next refresh opened another. Mirror the video route's explicit vdb
     lifecycle so reads and admin writes both release their slot immediately.
     """
-    readonly = request.method == "GET"
+    try:
+        readonly = request.method == "GET"
+    except RuntimeError:
+        # No request: a background refresh of a GET report (admin cache).
+        readonly = admin_cache.in_background()
     # R5: every admin connection is time-limited. GET pages are read-only
     # autocommit (no admin page can hold a lock or leave a session idle in a
-    # transaction); writes keep a transaction with a generous limit.
-    options = ("-c statement_timeout=20000 -c lock_timeout=2000 "
+    # transaction); writes keep a transaction with a generous limit. A
+    # background refresh keeps the read-only rules with a longer limit.
+    options = ("-c statement_timeout=%d -c lock_timeout=2000 "
                "-c idle_in_transaction_session_timeout=30000 "
-               "-c default_transaction_read_only=on") if readonly else \
+               "-c default_transaction_read_only=on"
+               % admin_cache.statement_timeout_ms(20000)) if readonly else \
         ("-c statement_timeout=30000 "
          "-c idle_in_transaction_session_timeout=60000")
     conn = psycopg2.connect(current_app.config["DATABASE_URL"],
@@ -1527,16 +1533,21 @@ def video_projects():
     # ?fields=list skips the per-project tool-outcome scan (95% of this
     # query's 5–8 s); those counts belong on the project page (R2).
     light = request.args.get("fields") == "list"
+    # Three counts, each a WHERE the planner can answer from an index: the
+    # failure and refusal predicates are exactly the partial indexes of
+    # migration 039, so no tool result is decompressed. Classifying every
+    # result in a FILTER took 12 s for the latest 100 projects and hit the
+    # statement timeout (24 Oct 2026: "Projects failed to load").
+    family_jobs = f"""FROM ({_project_family_ids_sql('p')}) family
+                  JOIN video_jobs mt ON mt.project_id = family.id
+                 WHERE mt.type = 'mcp_tool'"""
     tool_lateral = "" if light else f"""
             LEFT JOIN LATERAL (
-                SELECT COUNT(*) AS tool_calls,
-                       COUNT(*) FILTER (
-                         WHERE {_mcp_non_success_sql('mt')}) AS tool_failed,
-                       COUNT(*) FILTER (
-                         WHERE {_mcp_refusal_sql('mt')}) AS tool_rejected
-                  FROM ({_project_family_ids_sql('p')}) family
-                  JOIN video_jobs mt ON mt.project_id = family.id
-                 WHERE mt.type = 'mcp_tool'
+                SELECT (SELECT COUNT(*) {family_jobs}) AS tool_calls,
+                       (SELECT COUNT(*) {family_jobs}
+                           AND {_mcp_non_success_sql('mt')}) AS tool_failed,
+                       (SELECT COUNT(*) {family_jobs}
+                           AND {_mcp_refusal_sql('mt')}) AS tool_rejected
             ) tool_activity ON TRUE"""
     tool_cols = ("NULL::bigint AS tool_calls, NULL::bigint AS tool_failed, "
                  "NULL::bigint AS tool_rejected" if light else
@@ -2802,7 +2813,8 @@ def video_users():
                         or request.args.get("limit", type=int) or 100))
     page = max(1, request.args.get("page", type=int) or 1)
     offset = (page - 1) * limit
-    with adb() as conn:
+
+    def compute(conn):
         cur = conn.cursor()
         cur.execute("""SELECT COUNT(*) AS n FROM users u
                         WHERE u.email ILIKE %s
@@ -2846,14 +2858,16 @@ def video_users():
             ), asset_agg AS (
                 SELECT p.user_id,
                        COUNT(*) FILTER (WHERE ast.kind IN %s
-                           AND NOT {_machine_made('ast')}) AS uploads,
-                       COUNT(*) FILTER (WHERE {_machine_made('ast')})
-                           AS generated,
+                           AND NOT mm.machine) AS uploads,
+                       COUNT(*) FILTER (WHERE mm.machine) AS generated,
                        SUM(ast.bytes)::bigint AS bytes,
                        MAX(ast.created_at) AS last
                 FROM active_users au
                 JOIN projects p ON p.user_id = au.id
                 JOIN assets ast ON ast.project_id = p.id
+                -- the provenance test once per asset, not once per count
+                CROSS JOIN LATERAL (
+                    SELECT {_machine_made('ast')} AS machine OFFSET 0) mm
                 GROUP BY p.user_id
             )
             SELECT u.id, u.email, u.created_at, u.plan,
@@ -2874,8 +2888,8 @@ def video_users():
             ORDER BY last_active DESC NULLS LAST
         """, (f"%{search}%", limit, offset, UPLOAD_KINDS))
         rows = cur.fetchall()
-    return jsonify({"total": total, "page": page, "per_page": limit,
-                    "users": [
+        return {"total": total, "page": page, "per_page": limit,
+                "users": [
         {"id": r["id"], "email": r["email"],
          "created_at": r["created_at"].isoformat(),
          "plan": r["plan"],
@@ -2890,7 +2904,13 @@ def video_users():
          "storage_bytes": int(r["storage_bytes"] or 0),
          "last_active": r["last_active"].isoformat()
              if r["last_active"] else None}
-        for r in rows]})
+        for r in rows]}
+
+    # Cached a minute per page and search, refreshed in the background
+    # (the same stale-while-revalidate cache as the Projects list).
+    return jsonify(_classic_view(
+        "people", {"search": search, "page": page, "per_page": limit},
+        60, compute))
 
 
 COHORT_STAGES = [
@@ -3172,6 +3192,9 @@ def video_cohorts():
     })
 
 
+USER_DETAIL_PROJECTS = 200
+
+
 @admin_video_bp.route("/admin/video/users/<int:user_id>", methods=["GET"])
 @admin_required
 def video_user_detail(user_id):
@@ -3185,7 +3208,16 @@ def video_user_detail(user_id):
         if not u:
             return jsonify({"error": "User not found"}), 404
 
+        # Newest USER_DETAIL_PROJECTS projects with their counts, and the
+        # true total beside them: the owner's own account has ~2,000 test
+        # projects, and counting every one of them took 20 s (24 Oct 2026).
+        cur.execute("SELECT COUNT(*) AS n FROM projects WHERE user_id = %s",
+                    (user_id,))
+        project_total = int((cur.fetchone() or {}).get("n") or 0)
         cur.execute(f"""
+            WITH recent AS MATERIALIZED (
+                SELECT id, title, created_at, chat_session_id FROM projects
+                 WHERE user_id = %s ORDER BY id DESC LIMIT %s)
             SELECT p.id, p.title, p.created_at,
                    (SELECT COUNT(*) FROM chat_messages cm
                     WHERE cm.session_id = p.chat_session_id
@@ -3211,9 +3243,9 @@ def video_user_detail(user_id):
                       WHERE v.project_id = p.id),
                      (SELECT MAX(a.created_at) FROM assets a
                       WHERE a.project_id = p.id)) AS last_activity
-            FROM projects p WHERE p.user_id = %s
+            FROM recent p
             ORDER BY p.id DESC
-        """, (user_id,))
+        """, (user_id, USER_DETAIL_PROJECTS))
         projects = cur.fetchall()
 
         cur.execute("""SELECT a.id, a.project_id, a.kind, a.storage_key,
@@ -3253,6 +3285,8 @@ def video_user_detail(user_id):
                              "daily_reset": u["credits_daily_reset"]
                                  .isoformat()
                                  if u["credits_daily_reset"] else None}},
+        "project_total": project_total,
+        "projects_shown": len(projects),
         "projects": [
             {"id": p["id"], "title": p["title"],
              "created_at": p["created_at"].isoformat(),
@@ -3689,28 +3723,31 @@ def _redesign_report(days):
                    COUNT(*) AS jobs,
                    COUNT(*) FILTER (WHERE state = 'done') AS done,
                    COUNT(*) FILTER (WHERE state = 'failed') AS failed,
-                   ROUND(AVG(NULLIF(result->'timings'->>'queue_wait_s','')
+                   ROUND(AVG(NULLIF(t->>'queue_wait_s','')
                        ::double precision)::numeric, 3) AS avg_queue_s,
-                   ROUND(AVG(NULLIF(result->'timings'->>'total_s','')
+                   ROUND(AVG(NULLIF(t->>'total_s','')
                        ::double precision)::numeric, 3) AS avg_total_s,
                    MAX(NULLIF(COALESCE(
-                       result->'timings'->>'container_memory_sampled_peak_mib',
-                       result->'timings'->>'container_memory_peak_mib'),'')
+                       t->>'container_memory_sampled_peak_mib',
+                       t->>'container_memory_peak_mib'),'')
                        ::double precision) AS peak_memory_mib,
-                   ROUND(AVG(NULLIF(result->'timings'->>'container_cpu_s','')
+                   ROUND(AVG(NULLIF(t->>'container_cpu_s','')
                        ::double precision)::numeric, 3) AS avg_cpu_s,
-                   SUM(COALESCE(NULLIF(result->'timings'->>'downloaded_bytes','')
+                   SUM(COALESCE(NULLIF(t->>'downloaded_bytes','')
                        ::bigint, 0)) AS downloaded_bytes,
-                   SUM(COALESCE(NULLIF(result->'timings'->>'uploaded_bytes','')
+                   SUM(COALESCE(NULLIF(t->>'uploaded_bytes','')
                        ::bigint, 0)) AS uploaded_bytes,
                    COUNT(*) FILTER (WHERE COALESCE(
-                       (result->'timings'->>'cache_hit')::boolean, false))
+                       (t->>'cache_hit')::boolean, false))
                        AS cache_hits,
                    ROUND(SUM(COALESCE(NULLIF(
-                       result->'timings'->>'gross_compute_usd_ceiling','')
+                       t->>'gross_compute_usd_ceiling','')
                        ::numeric, 0)), 6) AS compute_ceiling_usd,
-                   MAX(result->'timings'->>'compute_profile') AS profile_sample
+                   MAX(t->>'compute_profile') AS profile_sample
               FROM video_jobs
+              -- each job's result is decompressed once, not once per figure
+              CROSS JOIN LATERAL (
+                  SELECT video_jobs.result->'timings' AS t OFFSET 0) timing
              WHERE created_at >= NOW() - %s::interval
              GROUP BY type, policy, execution_class
              ORDER BY execution_class, type, policy

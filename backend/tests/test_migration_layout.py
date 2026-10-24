@@ -25,7 +25,7 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     numbers = {int(name.split("_", 1)[0]) for name in names}
 
-    assert numbers == set(range(39))
+    assert numbers == set(range(40))
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names
@@ -90,7 +90,8 @@ def test_base_migration_owns_legacy_runtime_relations():
 
 def test_concurrent_index_migrations_run_as_individual_autocommit_statements():
     for name, count in (("024_admin_observability_indexes.sql", 4),
-                        ("025_hot_path_indexes.sql", 15)):
+                        ("025_hot_path_indexes.sql", 15),
+                        ("039_admin_read_indexes.sql", 3)):
         source = (MIGRATIONS / name).read_text(encoding="utf-8")
         assert migration_requires_autocommit(source)
         statements = nontransactional_statements(source)

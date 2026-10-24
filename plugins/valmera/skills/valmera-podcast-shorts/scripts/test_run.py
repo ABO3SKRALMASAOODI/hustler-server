@@ -227,9 +227,60 @@ class RunTests(unittest.TestCase):
                          item["sha256"])
         for name in ("README.md", "CREDITS.md", "publishing-manifest.json"):
             self.assertTrue((folder / name).exists(), name)
-        again = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root", str(root)))
-        self.assertEqual(again["folder"], out["folder"])  # idempotent
         self.assertEqual(self.state()["delivered_to"], out["folder"])
+        self.assertEqual(set(self.state()["delivered_files"]), {final.name})
+        self.assertFalse([p for p in root.iterdir() if p.name.startswith(".")],
+                         "no staging folder is left beside the delivery")
+
+    def test_a_delivered_folder_is_never_added_to(self) -> None:
+        """Owner (24 Oct 2026): a podcast's folder is delivered once, complete.
+        The publishing agents post a folder as one set; a short added to it
+        later is never posted."""
+        final = self.shipped_run()
+        root = self.root / "Podcast Shorts"
+        out = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root", str(root)))
+        folder = Path(out["folder"])
+        before = sorted(p.name for p in folder.iterdir())
+        code, _out, err = call("deliver", "--run-dir", self.dir, "--root", str(root))
+        self.assertEqual(code, 2)
+        self.assertIn("already delivered to " + str(folder), err)
+        self.assertIn("--redeliver-replace", err)
+        self.assertIn("Nothing was copied", err)
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), before)
+        self.assertEqual(sum(1 for e in self.state()["events"]
+                             if e["type"] == "delivered"), 1)
+
+    def test_redeliver_replace_swaps_in_the_whole_folder(self) -> None:
+        final = self.shipped_run()
+        root = self.root / "Podcast Shorts"
+        out = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root", str(root)))
+        folder = Path(out["folder"])
+        (folder / "late-short.mp4").write_bytes(b"added after delivery")
+        again = json.loads(self.ok("deliver", "--run-dir", self.dir, "--root",
+                                   str(root), "--redeliver-replace"))
+        self.assertEqual(again["folder"], out["folder"])
+        names = sorted(p.name for p in folder.iterdir())
+        self.assertNotIn("late-short.mp4", names, "the folder is replaced, not merged")
+        self.assertIn(final.name, names)
+        self.assertEqual(len(again["replaced"]), 1)
+        kept = Path(again["replaced"][0])
+        self.assertTrue((kept / "late-short.mp4").exists(), "the old folder is kept")
+        self.assertEqual(kept.parent.resolve(), (Path(self.dir) / "delivery-replaced").resolve())
+        last = self.state()["events"][-1]
+        self.assertEqual((last["type"], last["replacement"]), ("delivered", True))
+        self.assertFalse([p for p in root.iterdir() if p.name.startswith(".")])
+
+    def test_deliver_refuses_an_existing_folder_it_did_not_make(self) -> None:
+        self.shipped_run()
+        root = self.root / "Podcast Shorts"
+        (root / "Mine").mkdir(parents=True)
+        (root / "Mine" / "keep.txt").write_text("owner's file")
+        code, _out, err = call("deliver", "--run-dir", self.dir, "--root", str(root),
+                               "--name", "Mine")
+        self.assertEqual(code, 2)
+        self.assertIn("already exists and is not empty", err)
+        self.assertEqual([p.name for p in (root / "Mine").iterdir()], ["keep.txt"])
+        self.assertNotIn("delivered_to", self.state())
 
     def shipped_run(self) -> Path:
         """One shipped, exported and finalized short (s01)."""

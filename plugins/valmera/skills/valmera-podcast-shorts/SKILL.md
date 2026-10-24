@@ -241,18 +241,27 @@ disagree, v9 wins on method and the brief wins on preferences.
 10. **Manifest.** `run.py finalize --not-selected <file>` writes
    `exports/manifest.json`, `publishing-manifest.json` and `PUBLISHING.md`
    in the format the publisher already reads.
-11. **Deliver.** Always run `run.py deliver --run-dir <run>` right after
-   finalize. It runs `scripts/tail_check.py` on every final first: if any
-   is `HELD` (a still picture before the end card) or cannot be measured,
-   it delivers nothing and lists them. Re-cut those shorts, export them
-   again, `run.py export` and finalize, then deliver again (if one cannot be
-   repaired, close it with `run.py exception` before finalize; never pass
-   `--allow-held` unless the owner asks). Then it copies every final
-   (sha256-checked), `README.md`, `CREDITS.md` and the manifests into the
-   owner's publishing folder, `~/Documents/Valmera/Podcast Shorts/<Speaker>
-   - <Title> (<year>) - <N> Finals/` (`--name` overrides the folder name).
-   End the run by telling the user that folder's path: their publishing
-   agents are pointed at it.
+11. **Deliver once, complete.** The owner hands the delivered folder to
+   publishing agents, which post it as one set; a short added to it later
+   is never posted (owner, 24 Oct 2026). So **every revival, re-cut, fix
+   pass, export, tail check and finalize comes before deliver**, and nothing
+   is ever added to a delivered folder. When the last short is accounted
+   for, run `run.py deliver --run-dir <run>` exactly once. It runs
+   `scripts/tail_check.py` on every final first: if any is `HELD` (a still
+   picture before the end card) or cannot be measured, it delivers nothing
+   and lists them. Re-cut those shorts, export them again, `run.py export`
+   and finalize, then deliver (if one cannot be repaired, close it with
+   `run.py exception` before finalize; never pass `--allow-held` unless the
+   owner asks). It builds the complete folder aside (every final
+   sha256-checked, `README.md`, `CREDITS.md` and the manifests) and moves it
+   into place in one step: `~/Documents/Valmera/Podcast Shorts/<Speaker> -
+   <Title> (<year>) - <N> Finals/` (`--name` overrides the folder name).
+   A run that was already delivered, or a folder that already exists, is
+   refused. Only when the owner asks for a delivered folder to be replaced,
+   pass `--redeliver-replace`: the whole folder is rebuilt and swapped in,
+   and the old one is kept in `<run>/delivery-replaced/`. Never copy a final
+   into a delivered folder by hand. End the run by telling the user that
+   folder's path, once: their publishing agents are pointed at it.
 
 ## Non-negotiables
 

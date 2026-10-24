@@ -22,6 +22,9 @@ _OPTIONS = ("-c statement_timeout={timeout} -c lock_timeout=2000 "
 
 
 def open_readonly(timeout_ms=READ_TIMEOUT_MS):
+    from admin_metrics import cache
+    if cache.in_background():          # nobody waits on a background refresh
+        timeout_ms = max(int(timeout_ms), cache.BACKGROUND_TIMEOUT_MS)
     conn = psycopg2.connect(current_app.config["DATABASE_URL"],
                             cursor_factory=RealDictCursor, connect_timeout=5,
                             options=_OPTIONS.format(timeout=int(timeout_ms)))

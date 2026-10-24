@@ -63,6 +63,9 @@ def _handle(e):
     if isinstance(e, HTTPException):
         code = "not_found" if e.code == 404 else "bad_request"
         return _error(e.code or 500, code, e.description or "Request failed.")
+    if isinstance(e, cache.ReportUnavailable):
+        return _error(503, "unavailable", str(e) + " Try again in a minute.",
+                      True)
     if isinstance(e, psycopg2.errors.QueryCanceled):
         return _error(503, "timeout", "This report took too long. Try again, "
                       "or choose a shorter period.", True)

@@ -114,6 +114,39 @@ bot"). `worker/ytaccess.py` is the whole story; the operator-facing facts:
   `code`) — `SELECT value FROM app_kv WHERE key = 'ytdlp_probe';` answers
   "is fetch working in prod" without the Render dashboard.
 
+## Admin probe (run it at the start and after every deploy)
+
+`backend/scripts/admin_probe.py` calls every endpoint the `/admin` tabs open
+(Overview, Projects, Subscribers, Subscriber Projects, Exports, Waits, People,
+Agent I/O, Redesign, Costs, Cohorts, Survey, Users, Traffic, Revenue,
+Newsletter, Live), locally, against the production database **read-only**,
+and prints per endpoint: PASS/FAIL, the time it would take next to the
+database (wall time from here minus this machine's extra network: connects
+and one round trip per statement), status, and a sanity note (users > 0 and
+equal to the customer count, subscribers equal to the billing flag, today's
+visitors not null, lists non-empty, lifetime payments > 0, heavy-report cache
+age). It exits non-zero on any error, implausible number, or endpoint over
+3 s (an over-budget endpoint is recomputed with `?fresh=1` twice before it is
+called slow: the database's speed swings 2-5x).
+
+    zsh /Users/masaoodi/Documents/Valmera/.valmera/admin_probe.sh             # latest main
+    ADMIN_PROBE_BACKEND=<worktree>/backend zsh .valmera/admin_probe.sh       # a branch
+    zsh .valmera/admin_probe.sh --only projects --json                       # one tab
+
+Safety: a minimal Flask app with only the admin blueprints (no `create_app`,
+so no scheduler starts), `default_transaction_read_only=on` forced onto every
+connection, GET only, a random local SECRET_KEY. The wrapper reads only
+`DATABASE_URL` from the main checkout's `backend/.env` and never prints it.
+Every fixer runs it at the start and after deploying, and fixes any admin
+endpoint that errors, returns empty or implausible data, or takes over 3 s.
+
+Rules it guards (24 Oct 2026): a failed admin request shows an explicit error
+and Retry, never 0 (`frontend lib/adminLoad.js`); 30-day reports go through
+`admin_metrics.cache.shared_report` (served at once, recomputed in the
+background); migration 039's partial indexes repeat `_mcp_non_success_sql('')`
+and `_mcp_refusal_sql('')` verbatim, so change both together
+(`tests/test_admin_read_paths.py` checks).
+
 ## Gotchas
 
 1. **CORS is manual** in `app.py` (`before_request`/`after_request`) — don't remove.

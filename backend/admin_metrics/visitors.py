@@ -81,13 +81,19 @@ def browsers_cte(cur, by_day=False, extra_where="", extra_cols="", extra_v=""):
          WHERE pv.analytics_id IS NOT NULL AND pv.device_id IS NOT NULL
            AND pv.visited_at >= %(start)s AND pv.visited_at < %(end)s
            {extra_where}
+      ), ua AS MATERIALIZED (
+        -- the robot test once per distinct browser name (about 400 a month)
+        -- instead of once per row, which was most of every visitor query;
+        -- MATERIALIZED, or the planner pulls the test back up into the join
+        SELECT names.user_agent, names.user_agent ~* %(robot_ua)s AS robot
+          FROM (SELECT DISTINCT v.user_agent FROM v) names
       ), ev AS (
         SELECT DISTINCT e.visit_id FROM website_events e
          WHERE e.created_at >= %(start)s
            AND NOT (e.kind = ANY(%(passive_events)s))
       ), d AS (
         SELECT {group},
-               bool_or(v.user_agent ~* %(robot_ua)s) AS robot,
+               bool_or(ua.robot) AS robot,
                bool_or(v.device_id = ANY(%(internal_ids)s)) AS internal,
                count(*) AS pages, max(v.scroll) AS scroll,
                max(v.active_s) AS active_s,
@@ -98,7 +104,8 @@ def browsers_cte(cur, by_day=False, extra_where="", extra_cols="", extra_v=""):
                bool_and(v.coded AND COALESCE(v.referrer, '')
                         = ANY(%(preview_refs)s)) AS preview_shape
                {extra_cols}
-          FROM v LEFT JOIN ev ON ev.visit_id = v.analytics_id
+          FROM v JOIN ua ON ua.user_agent = v.user_agent
+          LEFT JOIN ev ON ev.visit_id = v.analytics_id
          GROUP BY {group}
       )"""
 

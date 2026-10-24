@@ -1249,15 +1249,72 @@ def held_refusal(held: list, unread: list) -> str:
             "anyway (they are listed as held in the delivery result).")
 
 
+def already_delivered(state: dict) -> str:
+    """deliver's refusal for a run that already has a delivered folder."""
+    when = next((e.get("at") for e in reversed(state.get("events") or [])
+                 if e.get("type") == "delivered"), None)
+    return (f"This run was already delivered to {state['delivered_to']}"
+            + (f" ({when})" if when else "") + ". Owner rule (24 Oct 2026): a "
+            "podcast's folder is delivered ONCE, complete; the publishing agents "
+            "post a folder as one set, so a short added later is never posted. "
+            "Nothing was copied. Every revival, re-cut and check belongs before "
+            "deliver. If the owner asked to replace the delivered folder, run "
+            "deliver again with --redeliver-replace: it builds the complete new "
+            "folder first and swaps it in whole.")
+
+
+def _swap_dirs(new: Path, dest: Path) -> bool:
+    """Exchange two directories in one step (macOS renamex_np RENAME_SWAP).
+    False when the platform cannot."""
+    if sys.platform != "darwin":
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        fn = libc.renamex_np
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        return fn(os.fsencode(new), os.fsencode(dest), 0x2) == 0
+    except (AttributeError, OSError):
+        return False
+
+
+def _publish_folder(staging: Path, dest: Path, keep_old: Path) -> None:
+    """Put the complete `staging` folder at `dest`. A folder already at
+    `dest` is swapped out whole and kept at `keep_old` (never merged into)."""
+    if dest.exists() and not any(dest.iterdir()):
+        dest.rmdir()
+    if not dest.exists():
+        os.rename(staging, dest)
+        return
+    keep_old.parent.mkdir(parents=True, exist_ok=True)
+    if _swap_dirs(staging, dest):
+        shutil.move(str(staging), str(keep_old))     # staging now holds the old
+        return
+    aside = dest.with_name(f".{dest.name}.replaced-{os.getpid()}")
+    os.rename(dest, aside)
+    try:
+        os.rename(staging, dest)
+    except OSError:
+        os.rename(aside, dest)                       # never leave no folder
+        raise
+    shutil.move(str(aside), str(keep_old))
+
+
 def cmd_deliver(args: argparse.Namespace) -> dict:
-    """Copy a finalized run's finals into the owner's publishing folder.
+    """Copy a finalized run's finals into the owner's publishing folder, once.
     Every final is measured with scripts/tail_check.py first: a HELD one (a
     still picture before the end card) or an unmeasurable one stops the
-    delivery, which then copies nothing, unless --allow-held."""
+    delivery, which then copies nothing, unless --allow-held. A run that was
+    already delivered, or a folder that already exists, is refused unless
+    --redeliver-replace, which replaces the whole folder: the complete new
+    folder is built aside and swapped in, never added to (owner, 24 Oct 2026)."""
     directory = run_dir(args.run_dir)
     with locked(directory) as state:
         if state.get("stage") != "complete":
             raise StateError("finalize the run before delivering it")
+        replace = bool(getattr(args, "redeliver_replace", False))
+        if state.get("delivered_to") and not replace:
+            raise StateError(already_delivered(state))
         exports = directory / "exports"
         publishing = read_json(str(exports / "publishing-manifest.json"),
                                "publishing manifest")
@@ -1282,32 +1339,64 @@ def cmd_deliver(args: argparse.Namespace) -> dict:
         name = args.name or delivery_name(state.get("source_meta") or {}, len(items),
                                            directory)
         dest = Path(args.root or DELIVERY_ROOT).expanduser() / name
-        dest.mkdir(parents=True, exist_ok=True)
-        copied = []
-        for item, src in sources:
-            target = dest / src.name
-            if not (target.exists() and sha256(target) == item.get("sha256")):
+        previous = Path(state["delivered_to"]) if state.get("delivered_to") else None
+        if dest.exists() and any(dest.iterdir()) and not replace:
+            raise StateError(
+                f"{dest} already exists and is not empty. Nothing was copied: a "
+                "delivered folder is never added to. Pass --redeliver-replace to "
+                "replace it whole, or --name for a different folder.")
+        # Build the complete folder aside, then move it into place in one step.
+        stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        staging = dest.parent / f".{name}.delivering-{os.getpid()}"
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        try:
+            copied, digests = [], {}
+            for item, src in sources:
+                target = staging / src.name
                 shutil.copy2(src, target)
-            if item.get("sha256") and sha256(target) != item["sha256"]:
-                raise StateError(f"copy of {src.name} does not match its sha256")
-            copied.append(target.name)
-        for extra in ("publishing-manifest.json", "manifest.json"):
-            if (exports / extra).exists():
-                shutil.copy2(exports / extra, dest / extra)
-        readme = (exports / "PUBLISHING.md").read_text() if (exports / "PUBLISHING.md").exists() \
-            else publishing_markdown(publishing)
-        write_atomic(dest / "README.md", readme)
-        credits = [f"- **{it.get('title') or it.get('short_id')}**: " + "; ".join(it["required_credits"])
-                   for it in items if it.get("required_credits")]
-        write_atomic(dest / "CREDITS.md", "# Credits to paste into each post\n\n" + (
-            "\n".join(credits) if credits else "No third-party credits required.") + "\n")
+                digest = sha256(target)
+                if item.get("sha256") and digest != item["sha256"]:
+                    raise StateError(f"copy of {src.name} does not match its sha256")
+                copied.append(target.name)
+                digests[target.name] = digest
+            for extra in ("publishing-manifest.json", "manifest.json"):
+                if (exports / extra).exists():
+                    shutil.copy2(exports / extra, staging / extra)
+            readme = (exports / "PUBLISHING.md").read_text() \
+                if (exports / "PUBLISHING.md").exists() else publishing_markdown(publishing)
+            write_atomic(staging / "README.md", readme)
+            credits = [f"- **{it.get('title') or it.get('short_id')}**: "
+                       + "; ".join(it["required_credits"])
+                       for it in items if it.get("required_credits")]
+            write_atomic(staging / "CREDITS.md", "# Credits to paste into each post\n\n" + (
+                "\n".join(credits) if credits else "No third-party credits required.") + "\n")
+            replaced = []
+            keep = directory / "delivery-replaced"
+            _publish_folder(staging, dest, keep / f"{name}-{stamp}")
+            if (keep / f"{name}-{stamp}").exists():
+                replaced.append(str(keep / f"{name}-{stamp}"))
+            # A replacement under a new name (the count changed): the old
+            # folder goes aside too, so only one complete set is published.
+            if replace and previous and previous != dest and previous.exists():
+                old = keep / f"{previous.name}-{stamp}"
+                old.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(previous), str(old))
+                replaced.append(str(old))
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
         state["delivered_to"] = str(dest)
+        state["delivered_files"] = digests
         event(state, "delivered", folder=str(dest), files=len(copied),
               held=[r["file"] for r in held],
-              unmeasured=[r["file"] for r in unread])
+              unmeasured=[r["file"] for r in unread],
+              replacement=bool(previous or replaced), replaced=replaced)
         return {"folder": str(dest), "files": copied, "tail_check": tails,
                 "held": [r["file"] for r in held],
-                "unmeasured": [r["file"] for r in unread]}
+                "unmeasured": [r["file"] for r in unread],
+                "replaced": replaced}
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -1435,6 +1524,12 @@ def parser() -> argparse.ArgumentParser:
                    help="deliver even when tail_check measures a final HELD (a still "
                    "picture before the end card) or cannot measure one; by default "
                    "such a run delivers nothing and lists them")
+    p.add_argument("--redeliver-replace", action="store_true",
+                   help="only when the owner asks: replace an already delivered "
+                   "folder WHOLE (the complete new folder is built aside and swapped "
+                   "in; the old one is kept in <run>/delivery-replaced/). Without it "
+                   "a delivered run, or an existing non-empty folder, is refused: "
+                   "nothing is ever added to a delivered folder")
     return root
 
 

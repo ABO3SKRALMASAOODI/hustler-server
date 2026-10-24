@@ -109,6 +109,30 @@ def first_visit_day(cur):
     return db.cached_value("classic_first_visit_day", 3600, compute)
 
 
+def _concurrently(cur, tasks):
+    """{name: fn(cursor)} for [(name, fn)], on parallel read-only
+    connections (admin_metrics.db.parallel) inside the app, in order on `cur`
+    otherwise (tests, scripts). A task's error is raised, as it would be
+    sequentially."""
+    from flask import current_app
+    try:
+        enabled = current_app.config.get("ADMIN_PARALLEL_SECTIONS", True)
+    except RuntimeError:
+        enabled = False
+    if not enabled or len(tasks) < 2:
+        return {name: fn(cur) for name, fn in tasks}
+    from admin_metrics import cache
+    got = db.parallel(tasks, workers=len(tasks),
+                      timeout_ms=cache.statement_timeout_ms(db.READ_TIMEOUT_MS))
+    out = {}
+    for name, _fn in tasks:
+        ok, value = got[name]
+        if not ok:
+            raise value
+        out[name] = value
+    return out
+
+
 def visits_report(cur):
     """The "Page visits & signups" card, one row per admin-timezone day.
 
@@ -125,24 +149,71 @@ def visits_report(cur):
     whole = ranges.make_period("custom", first, today)
     p = whole.params()
     day_v = ranges.local_date_sql("visited_at", tz_aware=False)
-    cur.execute(f"""
+    views_sql = f"""
         SELECT {day_v} AS day, count(*) AS views,
                count(DISTINCT COALESCE(NULLIF(device_id, ''), ip)) AS browsers
           FROM analytics_page_visits
          WHERE visited_at >= %(start)s AND visited_at < %(end)s
-         GROUP BY 1""", p)
-    views = {r["day"]: r for r in cur.fetchall()}
-    day_u = ranges.local_date_sql("u.created_at", tz_aware=False)
-    cur.execute(f"""
-        SELECT {day_u} AS day, count(*) AS n FROM users u
-         WHERE {defs.customer('u')}
-           AND u.created_at >= %(start)s AND u.created_at < %(end)s
-         GROUP BY 1""", p)
-    signups = {r["day"]: int(r["n"]) for r in cur.fetchall()}
-    people_by_day = {}
-    if today >= tracked_from:
-        people_by_day = visitors.classify_by_day(
-            cur, ranges.make_period("custom", tracked_from, today))
+         GROUP BY 1"""
+
+    def legacy_views(c):
+        # Days before people were counted never change: read them once a
+        # process (6 h), and only the counted days on every refresh.
+        def compute():
+            c.execute(views_sql, ranges.make_period(
+                "custom", first, tracked_from - timedelta(days=1)).params())
+            return {r["day"]: dict(r) for r in c.fetchall()}
+        if first >= tracked_from:
+            return {}
+        return db.cached_value(
+            f"classic_legacy_views:{first.isoformat()}", 6 * 3600, compute)
+
+    def recent_views(c):
+        if today < tracked_from:
+            return {}
+        c.execute(views_sql, ranges.make_period(
+            "custom", max(first, tracked_from), today).params())
+        return {r["day"]: dict(r) for r in c.fetchall()}
+
+    def signups_by_day(c):
+        day_u = ranges.local_date_sql("u.created_at", tz_aware=False)
+        c.execute(f"""
+            SELECT {day_u} AS day, count(*) AS n FROM users u
+             WHERE {defs.customer('u')}
+               AND u.created_at >= %(start)s AND u.created_at < %(end)s
+             GROUP BY 1""", p)
+        return {r["day"]: int(r["n"]) for r in c.fetchall()}
+
+    def people_days(c):
+        if today < tracked_from:
+            return {}
+        return visitors.classify_by_day(
+            c, ranges.make_period("custom", tracked_from, today))
+
+    windows = {}    # key -> (period, memo); periods whose counted part is
+    seen = {}       # the same are asked once
+    for key, n in (("7", 7), ("30", 30), ("90", 90), ("all", None)):
+        start_day = first if n is None else today - timedelta(days=n - 1)
+        period = ranges.make_period("custom", max(start_day, first), today)
+        part = tracked_part(period)
+        memo = (part.start, part.end) if part is not None else None
+        windows[key] = (period, memo)
+        seen.setdefault(memo, period)
+    tasks = [("legacy", legacy_views), ("recent", recent_views),
+             ("signups", signups_by_day), ("people_days", people_days)]
+    memo_names = {}
+    for i, (memo, period) in enumerate(seen.items()):
+        memo_names[memo] = f"window{i}"
+        tasks.append((f"window{i}",
+                      lambda c, period=period: classify(c, period)))
+    # Independent questions on parallel read-only connections: the report
+    # costs its slowest query, not the sum of seven (4-5 s, 24 Oct 2026).
+    got = _concurrently(cur, tasks)
+    views = dict(got["legacy"])
+    views.update(got["recent"])
+    signups = got["signups"]
+    people_by_day = got["people_days"]
+    classified = {memo: got[name] for memo, name in memo_names.items()}
 
     rows = []
     for i in range((today - first).days + 1):
@@ -167,15 +238,8 @@ def visits_report(cur):
         })
 
     periods = {}
-    seen = {}       # periods whose counted part is the same are asked once
-    for key, n in (("7", 7), ("30", 30), ("90", 90), ("all", None)):
-        start_day = first if n is None else today - timedelta(days=n - 1)
-        period = ranges.make_period("custom", max(start_day, first), today)
-        part = tracked_part(period)
-        memo = (part.start, part.end) if part is not None else None
-        if memo not in seen:
-            seen[memo] = classify(cur, period)
-        cls = seen[memo]
+    for key, (period, memo) in windows.items():
+        cls = classified[memo]
         in_range = [r for r in rows if r["day"] >= period.from_day.isoformat()]
         tracked_rows = [r for r in in_range if r["unique_visitors"] is not None]
         tracked_signups = sum(r["signups"] or 0 for r in tracked_rows)

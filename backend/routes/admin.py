@@ -43,15 +43,18 @@ def get_db(readonly=None):
     limit. Without these limits a slow query kept running long after the
     browser and Vercel had given up.
     """
+    from admin_metrics import cache as _cache
     if readonly is None:
         try:
             readonly = request.method == 'GET'
         except RuntimeError:
-            readonly = False
+            # No request: a background refresh of a GET report.
+            readonly = _cache.in_background()
     if readonly:
-        options = ('-c statement_timeout=8000 -c lock_timeout=2000 '
+        options = ('-c statement_timeout=%d -c lock_timeout=2000 '
                    '-c idle_in_transaction_session_timeout=30000 '
-                   '-c default_transaction_read_only=on')
+                   '-c default_transaction_read_only=on'
+                   % _cache.statement_timeout_ms(8000))
     else:
         options = ('-c statement_timeout=30000 '
                    '-c idle_in_transaction_session_timeout=60000')
@@ -102,6 +105,10 @@ def legacy_error_response(e):
     from werkzeug.exceptions import HTTPException
     if isinstance(e, HTTPException):
         return e
+    from admin_metrics.cache import ReportUnavailable
+    if isinstance(e, ReportUnavailable):
+        return jsonify({'error': str(e) + ' Try again in a minute.',
+                        'code': 'unavailable', 'retryable': True}), 503
     if isinstance(e, psycopg2.errors.QueryCanceled):
         return jsonify({'error': 'This report took too long. Try again, or '
                                  'choose a shorter period.',
@@ -1379,8 +1386,12 @@ def top_users():
                    ROUND(COALESCE(SUM(jc.credits_used), 0)::numeric, 2)
                        AS credits_used,
                    COALESCE(SUM(jc.tokens_used), 0) AS tokens_used,
+                   -- GROUP BY keeps Postgres from turning MAX() into a
+                   -- backward walk of the global created_at index until it
+                   -- meets this user's newest job (140 ms a user, 2 s a page).
                    (SELECT MAX(vj.created_at) FROM video_jobs vj
-                     WHERE vj.user_id = u.id) AS last_active
+                     WHERE vj.user_id = u.id
+                     GROUP BY vj.user_id) AS last_active
               FROM users u
               LEFT JOIN job_credits jc ON jc.user_id = u.id
              WHERE u.is_verified = 1 AND """ + _scope('u') + """
