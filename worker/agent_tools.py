@@ -5143,6 +5143,8 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
             return "REJECTED: invalid correction: " + str(exc)[:300]
     unmatched = _unmatched_caption_fixes(ctx, edl, rules) \
         if operation != "clear" else []
+    notes = _caption_fix_notes(ctx, edl, rules) if operation != "clear" \
+        else []
     if operation == "append":
         def key(rule):
             return (" ".join(caplib._norm_word(t) for t in rule["from"].split()),
@@ -5162,6 +5164,8 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
     if result.startswith("EDL v"):
         if unmatched:
             result += "\nNOT APPLIED (no caption words match): " + "; ".join(unmatched)
+        for note in notes:
+            result += "\n" + note
         result += "\nACTIVE CORRECTIONS: " + json.dumps(rules)
         result += "\nCAPTION PREVIEW: " + _compact_caption_preview(
             audit_captions(ctx, limit=200), rules)
@@ -5199,6 +5203,68 @@ def _compact_caption_preview(audit_text, rules, max_states=8):
     out["corrected_states"] = states
     out["full_audit"] = "audit_captions() lists every caption state"
     return json.dumps(out, indent=1)
+
+
+def _caption_fix_notes(ctx, edl, rules):
+    """What a correction does that its words do not say (GTC Berlin run,
+    24 Oct, 4628 job 106788: ['CUDNN', 'cuDNN'] and ['CUDNN,', 'cuDNN,']
+    in one call kept only the second, which also wrote 'cuDNN,' onto the
+    bare 'CUDNN'). Matching ignores case and punctuation and a replacement
+    replaces the whole word, punctuation included: name rules of one call
+    that match the same words (the last wins) and words whose punctuation
+    the replacement changes. [] when there is nothing to say."""
+    out = []
+    groups = {}
+    for rule in rules or []:
+        key = (" ".join(caplib._norm_word(t) for t in rule["from"].split()),
+               rule.get("start"), rule.get("end"))
+        groups.setdefault(key, []).append(rule)
+    for same in groups.values():
+        if len(same) > 1:
+            out.append(
+                "SAME WORDS: " + ", ".join(repr(r["from"]) for r in same)
+                + " match the same caption words (case and punctuation are "
+                f"ignored): only '{same[-1]['from']}' -> '{same[-1]['to']}' "
+                "applies. Give each spelling its own start/end to correct "
+                "them differently")
+    try:
+        tl = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                      edl.get("speed") or [])
+        base = caplib.rejoin_split_words(caplib._mark_insert_breaks(
+            caplib.kept_program_words(ctx.index or {}, tl), tl))
+    except Exception:  # noqa: BLE001 — a receipt never fails the write
+        return out
+    for rule in rules or []:
+        src, dst = rule["from"].split(), rule["to"].split()
+        if not src or len(src) != len(dst):
+            continue
+        changed = []
+        for i in range(len(base) - len(src) + 1):
+            group = base[i:i + len(src)]
+            if not all(caplib._norm_word(w["w"]) == caplib._norm_word(t)
+                       for w, t in zip(group, src)):
+                continue
+            if rule.get("start") is not None and \
+                    group[0]["t0"] < rule["start"] - .001:
+                continue
+            if rule.get("end") is not None and \
+                    group[-1]["t1"] > rule["end"] + .001:
+                continue
+            for w, d in zip(group, dst):
+                lw, _c, tw = caplib._split_affixes(w["w"])
+                ld, _c2, td = caplib._split_affixes(d)
+                if (lw, tw) != (ld, td):
+                    changed.append((float(w["t0"]), w["w"], d))
+        if changed:
+            out.append(
+                f"PUNCTUATION: '{rule['from']}' -> '{rule['to']}' replaces "
+                "whole words, punctuation included: "
+                + "; ".join(f"'{w}' at {t:.2f}s now reads '{d}'"
+                            for t, w, d in changed[:3])
+                + (f" (+{len(changed) - 3} more)" if len(changed) > 3 else "")
+                + " — scope a rule to each spelling (start/end) so every "
+                "word keeps the punctuation it was said with")
+    return out
 
 
 def _unmatched_caption_fixes(ctx, edl, rules):
@@ -17735,6 +17801,15 @@ def set_picture_card(ctx, id, start, end, box=_CARD_UNSET, fit=_CARD_UNSET,
                 args["source"] = list(current["source"])
                 args["follow"] = False
                 kept.append("source rect")
+        elif "box" not in given and "panels" not in given \
+                and not current.get("panels"):
+            # A new framing (source / fit / follow) inside the SAME card:
+            # the card's place on the canvas is a layout choice of its own
+            # (GTC Berlin run, 24 Oct: 4654 c3 job 106772,
+            # set_picture_card(id, start, end, fit, source) moved the card
+            # from [0, .14, 1, .70] to the default [.06, .24, .94, .74]
+            # without a word; the next call had to name the box again)
+            keep(("box",) + (() if "fit" in given else ("fit",)))
     args.update(given)
     out = _set_picture_card(ctx, id, start, end, **args)
     if kept and isinstance(out, str) and out.startswith("EDL v"):
@@ -31786,7 +31861,9 @@ TOOLS = {
         "A complete render carries a PICTURE CHECK measured on its own frames: a face within ~6% "
         "of the frame's (or its card's) edge, a single-frame jump or pop that is not on a cut, a "
         "missing end card or watermark, captions that collide with a graphic or cross a card "
-        "edge; a CAPTION CHECK names heard words no caption or graphic shows (blocking). Repair "
+        "edge, a graphic whose measured ink covers the speaker's eyes or mouth (GRAPHIC ON THE "
+        "FACE, allow_face_overlap included); a CAPTION CHECK names heard words no caption or "
+        "graphic shows (blocking). Repair "
         "each one or keep it deliberately and say why. Its MEASURES line gives picture area vs "
         "the 0.54 card floor, upscale and cap heights; PICTURE MEASURES (advisory) name a hook "
         "smaller than the captions or a payoff that is not the largest lockup. report=true "

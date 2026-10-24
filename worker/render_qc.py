@@ -71,7 +71,7 @@ import os
 import subprocess
 import time
 
-QC_VERSION = 6              # v6: the black ending traced whole
+QC_VERSION = 7              # v7: graphics on the eyes or mouth, measured ink
                             # v5: the stall before the end card
                             # v4: card faces read on the source, type and picture measures
                             # v3: orphan shots, reframes off a cut, the hook frame
@@ -95,6 +95,12 @@ STALL_TAIL_S = 1.5          # programme seconds before the end card read for a s
 STALL_CARD_S = 0.3          # ...and the card's first seconds
 STALL_HELD_S = 0.1          # the same picture this long (repeats) is held
 STALL_HELD_DIFF = 0.02      # mean |diff| (0-255, 64 px) under which a frame repeats
+# A repeat the SOURCE itself carries (no freeze, still or slowed tail of the
+# edit's own) counts from this long: the GTC Berlin keynote stream repeats
+# a frame for 4 frames here and there, and 0.13 s 'held picture' runs on
+# live endings blocked 4637 v14-v26 and 4633 (render 106814) until a slow
+# push_in hid them (24 Oct). A third of a second still reads as a freeze.
+STALL_FOOTAGE_HELD_S = 0.3
 STALL_LIT = 26              # a pixel brighter than this (10% of 0-255) is lit...
 STALL_BLACK_SHARE = 0.02    # ...a programme frame with less than 2% lit is black
                             # (blackdetect's pic_th; the corner mark is < 1%)
@@ -181,6 +187,39 @@ BIG_LINE_X = 1.6
 SENTENCE_CASE_X = 1.3
 CAPTION_SAMPLES = 24
 COLLIDE_SHARE = .15         # a caption this much under a graphic's box
+# A graphic's INK over the speaker's eyes or mouth (GTC Berlin run, 24 Oct:
+# '$50B' over the eyes, '$40B' and the payoff over the mouth, slams and lists
+# over the mouth — PICTURE CHECK said clean on all of them and only native
+# frames showed it). The ink is a coarse occupancy grid of the composition
+# (INK_GRID cells, a cell inked from GRID_INK of its pixels): a box spans
+# the gap between a split's two halves, the grid does not. The faces are
+# read on the SOURCE frame (FACE_MOMENTS moments of the graphic's window,
+# one bounded read) and mapped through the edit's geometry
+# (keepout.Geometry): on the rendered frame the graphic hides the face it
+# covers. A face narrower than FACE_MIN_W of the frame is an audience member,
+# a robot on the stage screen or a speaker too small to be covered by type;
+# one wider than FACE_MAX_W is a false box (a slide's letter). A hit is the
+# same face covered in two moments and in half of them (graphic_faces). It
+# runs last, on what the check's budget leaves, for FACE_TRACK_BUDGET_S at
+# most. Calibrated on the run's own renders: it names the graphics the
+# reviewers sent back for covering eyes or mouth (4634 v21 '$50B' and the
+# payoff, 4656 v28 '10' and POOF, 4629 v26 MOORE'S LAW and three more;
+# shares 0.5-1.0) and is clean on their shipped versions (4634 v27, 4656
+# v35); of the 36 delivered finals it names 4, each type the reviews let
+# sit on the mouth or chin (s02 MOORE'S LAW and 'what we call' EXTREME
+# CO-DESIGN, s14 and s17 kickers at the chin, s24 FLYWHEEL). The chin band
+# alone is not judged: the face box's bottom swings across it.
+INK_GRID = (36, 64)         # columns, rows (30 px cells on 1080x1920)
+GRID_INK = .04
+EYES_INK = .25              # the upper face: forehead, eyes, nose
+MOUTH_INK = .25             # keepout's mouth band
+FACE_UPPER = .55            # the upper face ends this far down the face box
+FACE_MIN_W = .12
+FACE_MAX_W = .6
+FACE_TRACK_BUDGET_S = 15.0
+FACE_MOMENTS = 3            # measured moments per graphic (2 under 1.2 s)
+FACE_RUN_S = 2.5            # source moments this close are one read...
+FACE_RUN_FPS = 10.0         # ...decoded at this rate, the nearest frame kept
 EDGE_PAD = .004             # a caption this far past a card edge crosses it
 # Caption looks whose hero word is a poster lockup laid across the card by
 # design (motion_captions 'stack', 'lockup'): no line to keep inside it
@@ -520,7 +559,33 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
                                      float(program_s), others)
     except Exception:  # noqa: BLE001 — the rendered frames still answer
         card_samples = []
+    geo = []
+
+    def faces_at(t, measure):
+        """The faces on the source frame under programme second ``t``
+        where the viewer sees them (keepout.Geometry: the crop or card,
+        the camera's zoom): read under the graphics, which hide them on
+        the rendered frame. [] where the picture shows no face (an insert,
+        a covering cutaway), None where the frame could not be read."""
+        import keepout
+        video = (index or {}).get("video") or {}
+        if not edl.get("keep") or not video.get("width") \
+                or not video.get("height") or edl.get("canvas"):
+            return None
+        if not geo:
+            geo.append(keepout.Geometry(
+                edl, video, int(W), int(H), tl.out_duration,
+                zooms=keepout.camera_zooms(edl, index, tl)))
+        src = tl.out_to_src(t)
+        if src is None or any(a <= t < b
+                              for a, b in keepout._cover_windows(edl)):
+            return []
+        faces = measure(src)
+        if faces is None:
+            return None
+        return [m[:4] for f in faces for m in geo[0].to_outputs(t, src, f)]
     return {"program_s": float(program_s), "fps": fps, "W": int(W), "H": int(H),
+            "faces_at": faces_at, "src_of": tl.out_to_src,
             "src_wh": [video.get("width"), video.get("height")],
             "src_fps": float(src_fps or video.get("fps") or 30.0),
             "card_samples": card_samples,
@@ -1758,12 +1823,14 @@ def ink_lines(png_bytes, threshold=TYPE_INK):
     box = [round(float(xs.min()) / W, 4), round(float(ys.min()) / H, 4),
            round(float(xs.max() + 1) / W, 4), round(float(ys.max() + 1) / H, 4)]
     import cv2
+    grid = (cv2.resize(m.astype(np.float32), INK_GRID,
+                       interpolation=cv2.INTER_AREA) >= GRID_INK)
     n, _lab, st, _c = cv2.connectedComponentsWithStats(m, connectivity=8)
     comps = [(int(st[k, 0]), int(st[k, 1]), int(st[k, 2]), int(st[k, 3]),
               int(st[k, 4]))
              for k in range(1, n) if st[k, 4] >= 6 and st[k, 3] >= 3]
     if not comps:
-        return {"box": box, "lines": [], "cap": None}
+        return {"box": box, "lines": [], "cap": None, "grid": grid}
     med_h = float(np.median([c[3] for c in comps]))
     tol = max(2.0, .1 * med_h)
     comps.sort(key=lambda c: c[1] + c[3])
@@ -1814,7 +1881,7 @@ def ink_lines(png_bytes, threshold=TYPE_INK):
                    key=lambda x: x["cap"])["cap"]
         lines = [ln for ln in lines if ln["n"] >= max(2, .25 * most)
                  or ln["cap"] >= BIG_LINE_X * body]
-    return {"box": box, "lines": lines,
+    return {"box": box, "lines": lines, "grid": grid,
             "cap": max((ln["cap"] for ln in lines), default=None)}
 
 
@@ -1913,6 +1980,7 @@ def type_pass(tplan, deadline):
             if m and not m.get("error"):
                 out["items"][ref] = {"cap": _claim_cap(m, kickers.get(ref)),
                                      "box": m.get("box"),
+                                     "grid": m.get("grid"),
                                      "t": round(prog_t[0], 2)}
             continue
         for text, t, m in zip(ref, prog_t, ms):
@@ -1931,6 +1999,174 @@ def type_pass(tplan, deadline):
 def _overlap(a, b):
     return max(0.0, min(a[2], b[2]) - max(a[0], b[0])) * \
         max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+
+
+def _grid_share(grid, zone):
+    """The share of ``zone`` (frame fractions) the inked cells cover."""
+    import numpy as np
+    g = np.asarray(grid, dtype=bool)
+    rows, cols = g.shape
+    x0, y0, x1, y1 = (max(0.0, min(1.0, float(v))) for v in zone)
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    c0, c1 = int(x0 * cols), min(cols - 1, int(x1 * cols - 1e-9))
+    r0, r1 = int(y0 * rows), min(rows - 1, int(y1 * rows - 1e-9))
+    inked = 0.0
+    for r in range(r0, r1 + 1):
+        for c in range(c0, c1 + 1):
+            if g[r, c]:
+                inked += _overlap(zone, (c / cols, r / rows,
+                                         (c + 1) / cols, (r + 1) / rows))
+    return inked / ((x1 - x0) * (y1 - y0))
+
+
+def face_graphics(tplan):
+    """The type items graphic_faces judges: on screen over the picture —
+    not a persistent band, type behind the subject or a picture
+    (PICTURE_TEMPLATES)."""
+    return [it for it in (tplan or {}).get("items") or []
+            if not it["persistent"] and it["layer"] != "behind_subject"
+            and it.get("template") not in PICTURE_TEMPLATES
+            and float(it["end"]) - float(it["start"]) >= .3]
+
+
+def source_frames(src_path, src_times, workdir, deadline):
+    """{source second: jpg of that frame (480 px wide)} for ``src_times``:
+    the times within FACE_RUN_S of each other are one bounded read of the
+    source (one seek; frames at FACE_RUN_FPS, the nearest kept), so a
+    graphic's moments cost one decode, not one seek each."""
+    ts = sorted({round(float(t), 3) for t in src_times})
+    runs = []
+    for t in ts:
+        if runs and t - runs[-1][-1] <= FACE_RUN_S:
+            runs[-1].append(t)
+        else:
+            runs.append([t])
+    out = {}
+    for k, run in enumerate(runs):
+        if time.monotonic() > deadline - 1.0:
+            break
+        a, b = max(0.0, run[0] - .05), run[-1] + .1
+        pattern = os.path.join(workdir, f"run{k}_%04d.jpg")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-v", "error", "-nostdin", "-y", "-ss", f"{a:.3f}",
+                 "-t", f"{b - a:.3f}", "-i", src_path, "-an", "-sn",
+                 "-vf", f"fps={FACE_RUN_FPS:g},scale=480:-2",
+                 "-start_number", "0", pattern],
+                check=True, capture_output=True,
+                timeout=max(2.0, min(20.0, deadline - time.monotonic())))
+        except Exception:  # noqa: BLE001 — those moments stay unmeasured
+            continue
+        for t in run:
+            n = int(round((t - a) * FACE_RUN_FPS))
+            for m in (n, n - 1, n + 1):
+                fp = pattern % m
+                if m >= 0 and os.path.exists(fp):
+                    out[t] = fp
+                    break
+    return out
+
+
+def graphic_faces(tracks, tplan, tres):
+    """[(id, t0, t1, part, share, deliberate)]: graphics whose measured
+    ink covers the speaker's eyes or mouth. ``tracks``: {id: [(t, [face
+    boxes in output fractions])]}, the MEASURED moments of each item's
+    window (plan's faces_at: the faces where the viewer sees them, read on
+    the source under the graphic, which hides them on the rendered frame).
+    A hit is the same face covered in at least two moments and in at least
+    half of them (one false box — a knee, a robot on the stage screen —
+    is never the speaker). allow_face_overlap does not silence it: the GTC
+    Berlin editors set it on every graphic to stop the estimated keep-out
+    moving them (4634 v21: '$50B' on the eyes, '$40B' and the payoff on the
+    mouth), and a design that means it says why in one clause."""
+    import keepout
+    meas = (tres or {}).get("items") or {}
+    out = []
+    for it in face_graphics(tplan):
+        grid = (meas.get(it["id"]) or {}).get("grid")
+        if grid is None:
+            continue
+        a, b = float(it["start"]) + .15, float(it["end"]) - .05
+        rows = []
+        for t, boxes in (tracks or {}).get(it["id"]) or []:
+            if not a <= t < b:
+                continue
+            best = (0.0, 0.0, None)
+            for f in boxes or []:
+                if not FACE_MIN_W <= f[2] - f[0] <= FACE_MAX_W:
+                    continue
+                z = keepout.face_zone(f)
+                upper = (z[0], z[1], z[2], f[1] + FACE_UPPER * (f[3] - f[1]))
+                got = (_grid_share(grid, upper),
+                       _grid_share(grid, keepout.mouth_zone(f)), f)
+                if got[0] / EYES_INK + got[1] / MOUTH_INK > \
+                        best[0] / EYES_INK + best[1] / MOUTH_INK:
+                    best = got
+            rows.append((t, best))
+        hits = [(t, g) for t, g in rows if g[2] is not None
+                and (g[0] >= EYES_INK or g[1] >= MOUTH_INK)]
+        # the same face, covered again: a hit no other hit's box agrees
+        # with is a lone false box
+        hits = [(t, g) for t, g in hits
+                if any(u != t and keepout._agrees(g[2], h[2])
+                       for u, h in hits)]
+        if len(hits) < 2 or 2 * len(hits) < len(rows):
+            continue
+        med = [sorted(g[k] for _t, g in hits)[len(hits) // 2] for k in (0, 1)]
+        k = 1 if med[1] / MOUTH_INK >= med[0] / EYES_INK else 0
+        out.append((it["id"], round(min(t for t, _g in hits), 2),
+                    round(max(t for t, _g in hits), 2),
+                    "mouth" if k else "eyes", round(med[k], 2),
+                    bool((it.get("item") or {}).get("allow_face_overlap"))))
+    return out
+
+
+def _graphic_face_tracks(plan_, tplan, src_path, out_path, deadline):
+    """{item id: [(t, faces)]} for graphic_faces: FACE_MOMENTS evenly spaced
+    moments of each item's window, measured on the source the render read
+    (``src_path``: keepout.detect_faces, as the write-time keep-out
+    measures), within FACE_TRACK_BUDGET_S."""
+    faces_at, src_of = plan_.get("faces_at"), plan_.get("src_of")
+    items = face_graphics(tplan)
+    if not faces_at or not src_of or not items or not src_path:
+        return {}
+    import shutil
+    import tempfile
+    import keepout
+    deadline = min(deadline, time.monotonic() + FACE_TRACK_BUDGET_S)
+    when = {}
+    for it in items:
+        a, b = float(it["start"]) + .15, float(it["end"]) - .05
+        n = FACE_MOMENTS if b - a >= 1.2 else 2
+        when[it["id"]] = [round(a + (b - a) * (i + .5) / n, 3)
+                          for i in range(n)]
+    srcs = [src_of(t) for ts in when.values() for t in ts]
+    workdir = tempfile.mkdtemp(prefix="qcface_",
+                               dir=os.path.dirname(out_path) or None)
+    out = {it["id"]: [] for it in items}
+    try:
+        frames = source_frames(src_path, [x for x in srcs if x is not None],
+                               workdir, deadline)
+        seen = {}
+
+        def measure(src_t):
+            key = round(float(src_t), 3)
+            if key not in seen:
+                fp = frames.get(key)
+                try:
+                    seen[key] = keepout.detect_faces(fp) if fp else None
+                except Exception:  # noqa: BLE001
+                    seen[key] = None
+            return seen[key]
+        for it in items:
+            for t in when[it["id"]]:
+                faces = faces_at(t, measure)
+                if faces is not None:
+                    out[it["id"]].append((t, faces))
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return out
 
 
 def type_findings(tres, tplan, cards):
@@ -2415,7 +2651,10 @@ def boundary_stall(path, plan_, deadline):
             # the held picture first shows at times[i - 1]; a run that
             # starts inside the card is the card's own hold
             if j - i + 1 >= need and times[i - 1] < prog - eps:
-                add("held", times[i - 1], times[j] + 1 / fps)
+                a, b = times[i - 1], times[j] + 1 / fps
+                if b - a >= STALL_FOOTAGE_HELD_S - eps or \
+                        _stall_cause("held", a, b, plan_)[0] != "footage":
+                    add("held", a, b)
             i = j + 1
         else:
             i += 1
@@ -2629,6 +2868,7 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
         res["unshown"] = list(tplan["unshown"][:12])
     if tplan.get("unplaced"):
         res["unplaced"] = list(tplan["unplaced"][:2])
+    face_tres = None
     measurable = tplan.get("items") or tplan.get("captions")
     if measurable and prog > MAX_FULL_PASS_S:
         res["skipped"].append(f"type: a {prog:.0f}s programme is past the "
@@ -2645,6 +2885,7 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
             tres = type_pass(tplan, type_deadline)
             if tres:
                 res["type"] = type_findings(tres, tplan, plan_.get("cards"))
+                face_tres = tres
             elif type_deadline - time.monotonic() < 3.0:
                 res["skipped"].append("type: the check's time budget was spent")
             else:
@@ -2697,6 +2938,18 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
     else:
         res["skipped"].append(f"jumps: a {prog:.0f}s programme is past the "
                               f"{MAX_FULL_PASS_S:.0f}s frame pass")
+    if face_tres and res.get("type") is not None:
+        # last: the source frames under the graphics, on what the budget
+        # leaves (never at the cost of the passes above)
+        if deadline - time.monotonic() < 4.0:
+            res["skipped"].append("graphic faces: picture QC budget")
+        else:
+            try:
+                res["type"]["face"] = graphic_faces(
+                    _graphic_face_tracks(plan_, tplan, src_path, path,
+                                         deadline), tplan, face_tres)
+            except Exception as exc:  # noqa: BLE001
+                res["skipped"].append(f"graphic faces: {str(exc)[:80]}")
     res["findings"] = findings(res, plan_)
     res["advice"] = advice(res) + source_limit_advice(res, plan_)
     return res
@@ -2977,6 +3230,15 @@ def measured_findings(res):
             f"{'under' if how == 'under' else 'over'} '{gid}' (its measured "
             "box) — the words collide on screen; move the graphic off the "
             "caption band or carry those words on it")
+    for gid, t0, t1, part, share, deliberate in (tq.get("face") or [])[:3]:
+        out.append(
+            f"GRAPHIC ON THE FACE {t0:.1f}-{t1:.1f}s: '{gid}' inks "
+            f"{100 * share:.0f}% of the speaker's {part} (its measured ink "
+            "over the face measured on the source frame) — move it clear "
+            "(above the head or below the chin), shrink it, or put it behind "
+            "him (layer behind_subject)"
+            + ("; it carries allow_face_overlap: if the overlap is the "
+               "design, say why in one clause" if deliberate else ""))
     for gid, y0, floor in (tq.get("mark") or [])[:2]:
         out.append(
             f"GRAPHIC ON THE CORNER MARK: '{gid}' draws from y {y0:.3f}, "

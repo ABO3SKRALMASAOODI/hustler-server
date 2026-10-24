@@ -6444,12 +6444,10 @@ def _render_canvas_edl(edl_dict, out_path, workdir, preview, progress_cb=None,
     overlay_inputs = []
     for item in edl.get("overlays") or []:
         local = _fetch(item["asset_key"], "overlay", next_idx)
-        if item["kind"] == "image" or local.endswith(IMAGE_EXTS):
-            extra_inputs += ["-loop", "1", "-t", f"{item['duration_s']:.3f}",
-                             "-r", f"{fps:.3f}", "-i", local]
-        else:
-            extra_inputs += ["-i", local]
-        overlay_inputs.append((next_idx, item))
+        input_args, graph_item = _overlay_input(item, local, fps,
+                                                copy_timestamps=False)
+        extra_inputs += input_args
+        overlay_inputs.append((next_idx, graph_item))
         next_idx += 1
 
     card_idx = None
@@ -6857,6 +6855,25 @@ def _resolve_asset_local(key, asset_locals, fallback):
     if aliased and os.path.exists(aliased):
         return aliased
     return fallback(key)
+
+
+def _overlay_input(item, local, fps, *, copy_timestamps=False):
+    """Input options and graph item for one overlay: a still loops for its
+    window; a video is a BOUNDED read of its window, like an insert.
+
+    A plain ``-i`` made ffmpeg decode an overlay from the file's first frame
+    to its source_start_s before the overlay could emit anything, holding the
+    whole graph meanwhile: GTC Berlin preview 106663 (24 Oct 2026) overlaid
+    27 minutes into the project's own 92-minute original, spent 248 s
+    encoding and came back 24.73 s long for a 37.69 s edit (on Cloudflare
+    both files are streamed, and the starved main read ended early)."""
+    if item["kind"] == "image" or str(local).endswith(IMAGE_EXTS):
+        return (["-loop", "1", "-t", f"{item['duration_s']:.3f}",
+                 "-r", f"{fps:.3f}", "-i", local], item)
+    # the screen-takeover supply pad and the PIP clone tail read past the
+    # window; insert_input's one-second tail covers both
+    return render_plan.insert_input(item, local, fps,
+                                    copy_timestamps=copy_timestamps)
 
 
 def _render_asset_source(key, tag, idx, workdir, asset_locals=None):
@@ -7363,12 +7380,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     overlay_inputs = []
     for item in edl.get("overlays") or []:
         local = _fetch(item["asset_key"], "overlay", next_idx)
-        if item["kind"] == "image" or local.endswith(IMAGE_EXTS):
-            extra_inputs += ["-loop", "1", "-t", f"{item['duration_s']:.3f}",
-                             "-r", f"{fps:.3f}", "-i", local]
-        else:
-            extra_inputs += ["-i", local]
-        overlay_inputs.append((next_idx, item))
+        input_args, graph_item = _overlay_input(
+            item, local, fps, copy_timestamps=seek_main_source)
+        extra_inputs += input_args
+        overlay_inputs.append((next_idx, graph_item))
         next_idx += 1
 
     # Finals render from the ORIGINAL, previews from the proxy — and the proxy

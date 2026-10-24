@@ -139,7 +139,8 @@ def apply_recipe(ctx, name, at=None):
     if r.matte and matte is False:
         return (f"REJECTED: {name} draws on the person cut-out and this cut "
                 "shows no person.")
-    plan = _plan(ctx, edl)
+    plan = full_plan = _plan(ctx, edl)
+    t = None
     if at is not None:
         try:
             t = float(at)
@@ -160,23 +161,42 @@ def apply_recipe(ctx, name, at=None):
                 abs(float(m["t"]) - t), -float(m.get("strength") or 0)))
             pay = {"t": m["t"], "word": m.get("word"), "moment": m,
                    "hold_end": round(min(float(plan["program_s"]) - 0.05,
-                                         float(m["t"]) + 1.5), 3)}
+                                         float(m["t"]) + 1.5), 3),
+                   # the call's landing: never a hold that keeps the other
+                   # recipes off the very moment it names
+                   "named": True}
         plan = dict(plan, moments=near, payoff=pay)
     ids = {str(i.get("id")) for i in edl.get("fx") or []
            if isinstance(i, dict)}
     keys = None
     flash_ok = _flash_ok(ctx)
+
+    def _build(variant_keys):
+        got = recipes.build(name, plan, ids=ids, accent=_accent(edl),
+                            flash_ok=flash_ok, edl=edl,
+                            variant_keys=variant_keys)
+        if got[0] or t is None:
+            return got
+        # A move that reads a run of moments (negative_hits' build into
+        # the payoff, colour_drain's three steps) cannot be solved from
+        # the 3 s around `at`: solve it on the whole cut, as
+        # suggest_recipes did, and keep it when it lands where `at` says
+        # (GTC Berlin run, 24 Oct: what suggest_recipes ranked at a time,
+        # apply_recipe(at=that time) refused).
+        whole = recipes.build(name, full_plan, ids=ids, accent=_accent(edl),
+                              flash_ok=flash_ok, edl=edl,
+                              variant_keys=variant_keys)
+        if whole[0] and whole[1] is not None and \
+                abs(float(whole[1]["t"]) - t) <= 1.5:
+            return whole
+        return got
+
     if r.assets:
-        items, landing, why = recipes.build(
-            name, plan, ids=ids, accent=_accent(edl), flash_ok=flash_ok,
-            edl=edl, variant_keys=recipes.STILLS_PLACEHOLDER)
+        items, landing, why = _build(recipes.STILLS_PLACEHOLDER)
         if not items:
             return f"NO CHANGE: {name} does not fit here ({why})."
         keys = _variant_keys(ctx, edl, landing["t"])
-    items, landing, why = recipes.build(name, plan, ids=ids,
-                                        accent=_accent(edl),
-                                        variant_keys=keys,
-                                        flash_ok=flash_ok, edl=edl)
+    items, landing, why = _build(keys)
     if not items:
         return f"NO CHANGE: {name} does not fit here ({why})."
     ops = _ops(items)

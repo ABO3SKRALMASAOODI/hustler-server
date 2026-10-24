@@ -178,6 +178,15 @@ def _payoff_hold(plan):
 
 
 def _in_hold(plan, t):
+    """Inside the payoff's hold (kept for the payoff's own device). A payoff
+    that apply_recipe(at=) NAMED is the call's landing, not a reserved
+    hold: excluding it refused every non-payoff recipe on the very moment
+    suggest_recipes had ranked it on (GTC Berlin run, 24 Oct: 4629
+    lab_scan at=25.74 and 4628 lab_scan at=27.62 answered "no mechanism or
+    number word after the hook" on 'software' and '350')."""
+    p = plan.get("payoff") or {}
+    if p.get("named"):
+        return False
     h = _payoff_hold(plan)
     return bool(h and h[0] - 0.05 <= t <= h[1])
 

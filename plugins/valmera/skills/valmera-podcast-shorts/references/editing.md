@@ -217,7 +217,13 @@ after a short pause, then report it.
   `push_in` on every take; any zoom or sound you cannot name a reason for
   (they make the short look childish — leave the frame steady instead).
 - Graphics over the face for more than 1 s, under the corner brand mark,
-  or below y 0.80.
+  or below y 0.80. `allow_face_overlap` is for a design that is MEANT to sit
+  over the face, never a way to stop the estimated keep-out moving a
+  graphic: pass your own `y` instead (GTC run: it sat on every graphic, and
+  '$50B' landed on the eyes, '$40B' on the mouth). The PICTURE CHECK names
+  GRAPHIC ON THE FACE from the graphic's measured ink over the face read on
+  the source frame, with or without the flag: move it, or say why it is
+  the design.
 - A generic question hook; a hook that shows a word a later graphic slams;
   a broadcast lower third over a famous face; a product name set as
   "Name:"; a graphic that only re-typesets the words being heard; more than
