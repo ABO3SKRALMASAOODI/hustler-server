@@ -162,29 +162,51 @@ def test_the_end_it_at_advice_never_makes_a_flash(monkeypatch):
 # says so, from the same band the headline uses.
 
 def _band_probe(box):
+    box = [box[0], box[1] + S, box[2], box[3] + S]
     return lambda item, W_, H_, fps=30.0: {
         "errors": [], "visible_frames": 4, "samples": 4, "bboxes": [list(box)],
         "ink": [list(box)] * 4}
 
 
+# These bands were judged under the v6 corner mark (its reserved zone ended
+# at y 0.1272); the v7 brand slot's zone ends lower (keepout.mark_floor).
+# The same band -- the card, the lockups and their y -- is carried down by
+# the difference S, so every height in it is the judged one.
+def _s():
+    import keepout
+    return keepout.mark_floor(1080, 1920) - 0.1272
+
+
+S = _s()
+
+
+def _band_edl():
+    from test_headline_band import _card_edl
+    edl = _card_edl()
+    b = edl["effects"]["picture_cards"][0]["box"]
+    edl["effects"]["picture_cards"][0]["box"] = [b[0], round(b[1] + S, 4), b[2],
+                                                 round(b[3] + S, 4)]
+    return edl
+
+
 def test_a_lockup_spilling_out_of_the_band_is_named(monkeypatch):
-    from test_headline_band import _Ctx as BandCtx, _card_edl
+    from test_headline_band import _Ctx as BandCtx
     rows = [{"text": "no college student", "role": "sans", "size": "0.6", "at": "0.2"},
             {"text": "WITHOUT *ONE*", "role": "condensed", "size": "1.4", "at": "1.0"}]
-    ctx = BandCtx(_card_edl())
+    ctx = BandCtx(_band_edl())
     monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.062, 0.88, 0.335)))
     out = motion_tools.add_motion_graphic(ctx, "phrase_build", 20.0, 24.0,
-                                          params={"rows": rows, "y": 0.15}, id="paper")
+                                          params={"rows": rows, "y": 0.15 + S}, id="paper")
     assert "NOTE (band)" in out and "onto the top of the picture card" in out \
         and "rises into the feed header" in out, out
     # inside the band (below the free-tier mark's zone): nothing to say
     monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.135, 0.88, 0.285)))
-    out = motion_tools.set_motion_graphic(ctx, "paper", params={"width": 0.66, "y": 0.19})
+    out = motion_tools.set_motion_graphic(ctx, "paper", params={"width": 0.66, "y": 0.19 + S})
     assert "NOTE (band)" not in out, out
     # a graphic set ON the card is not a band graphic
     monkeypatch.setattr(motion_tools, "_probe_item", _band_probe((0.12, 0.40, 0.88, 0.55)))
     out = motion_tools.add_motion_graphic(ctx, "word_slam", 26.0, 27.0,
-                                          params={"text": "*one*", "y": 0.48}, id="slam")
+                                          params={"text": "*one*", "y": 0.48 + S}, id="slam")
     assert "NOTE (band)" not in out, out
 
 
@@ -314,23 +336,26 @@ def test_a_browserless_estimate_is_named_only_past_its_own_error(monkeypatch):
     # the hook as judged (y .18, estimated 0.054-0.306) is named; set lower
     # (y .21) its estimate is inside the band's own error — it must not be
     # told to shrink — and a block set grossly into the header still is
-    from test_headline_band import _Ctx as BandCtx, _card_edl
+    from test_headline_band import _Ctx as BandCtx
     rows = [{"text": "Steve Jobs, 1983", "role": "sans", "size": "0.45", "at": "0"},
             {"text": "computer fonts were", "role": "serif", "size": "0.8", "at": ""},
             {"text": "*GARBAGE*", "role": "condensed", "size": "1.5", "at": "0.3"}]
-    ctx = BandCtx(_card_edl())
+    ctx = BandCtx(_band_edl())
     monkeypatch.setattr(motion_tools, "_probe_item", lambda item, W_, H_, fps=30.0: None)
     out = motion_tools.add_motion_graphic(ctx, "phrase_build", 0.0, 4.2,
-                                          params={"rows": rows, "y": 0.18, "width": 0.82},
+                                          params={"rows": rows, "y": 0.18 + S, "width": 0.82},
                                           id="hook")
     item = ctx.latest_edl()["json"]["motion"][0]
     assert item["footprint"].get("estimated"), item.get("footprint")
     # named and (since the Gates run, 23 Oct) moved off the mark inside the band
     assert "KEEP-OUT (corner mark, estimated)" in out, out
     assert "free-tier corner mark" in out, out
-    out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.21})
+    # set a little higher than where the move put it (the judged run: y .21
+    # against the fix's .225), its estimate stays inside the band's error
+    fixed_y = float(ctx.latest_edl()["json"]["motion"][0]["params"]["y"])
+    out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": round(fixed_y - 0.015, 4)})
     assert "NOTE (band)" not in out and "corner mark" not in out, out
-    out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.12})
+    out = motion_tools.set_motion_graphic(ctx, "hook", params={"y": 0.12 + S})
     assert "KEEP-OUT (corner mark, estimated)" in out, out
     import keepout
     box = ctx.latest_edl()["json"]["motion"][0]["footprint"]["box"]

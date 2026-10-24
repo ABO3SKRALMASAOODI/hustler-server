@@ -314,8 +314,10 @@ def _watermark(W, H):
             return tuple(wm)
     except Exception:  # noqa: BLE001
         pass
-    return (0.0, 0.0, 0.42, 0.13) if H / max(1.0, W) >= 1.6 else \
-        (0.0, 0.0, 0.22, 0.17)
+    # the zone keepout.watermark_zone gives when it cannot be computed here:
+    # the v7 brand slot on a vertical feed, the v6 corner elsewhere
+    return (0.559, 0.115, 0.915, 0.193) if H / max(1.0, W) >= 1.6 else \
+        (0.827, 0.05, 0.954, 0.129)
 
 
 def solve_item(item, out_w, out_h, fps=30.0, faces=None):

@@ -41,7 +41,7 @@ The coordinator assigns one Look and one structure per short. The editor reads
 | Visual change | something changes every 0.3-0.6 s (caption cue, graphic, cut); a structural event (cut, graphic, B-roll) every 1.5-2.5 s. Zooms and sounds never fill this: they are optional, only where a moment earns them |
 | Hero moments | 2-4 designed beats on exact word cues (Kinetic Poster, Mono Noir, Creator Glow: 3-5), always inside the graphic budget |
 | Payoff | the largest accented lockup in the short, number and noun together ("140 / CHARACTERS"), rhyming with an earlier setup device where one exists (1960s vs TODAY pays off as FLYING CARS vs 140 CHARACTERS); type first, a sound or a camera move only when it earns one, the owner's song's button when music is on; held about 0.6-1.2 s after the last word on LIVE footage before the end card (the natural tail chosen at selection; never a freeze frame or a slowed tail, which reads as a stall; with no natural tail, end on the last word; a payoff number about 2 s on screen). Its cap height against every other lockup is in render 1's MEASURES line (pre-render size estimates for lockups run 2-3x off); a reaction button 1.0-1.5 s or none |
-| Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale and the plate is clean; otherwise a card on a designed backdrop covering at least 0.54 of the canvas (see Card geometry; measured once per source in the framing pilot, never assumed). A busy or washed-out plate (a bright projector screen, a cluttered set) commits to a frame — a card on a textured canvas or a letterbox with a headline band — and a grade: a taste call per short, not a default. Only Editorial Serif's square card may go down to 0.48 (gum-02), because its field carries the type |
+| Picture area | full-bleed (1.0) when the face crop needs at most 2x upscale and the plate is clean; otherwise a card on a designed backdrop covering at least 0.47 of the canvas (see Card geometry: since the v7 brand slot every card sits under the corner mark; measured once per source in the framing pilot, never assumed). A busy or washed-out plate (a bright projector screen, a cluttered set) commits to a frame — a card on a textured canvas or a letterbox with a headline band — and a grade: a taste call per short, not a default. Editorial Serif's square card (0.486, gum-02) is its own row, because its field carries the type |
 | Sound | optional: zero by default, at most 1-2 approved library sounds on structural on-screen moments, each with a visual partner, none on a payoff word's onset, no literal puns, never the same sound within ~3 s, levelled by the tool (see Sound); no digital silence longer than 0.3 s except a deliberate 50-280 ms stop-down before a reveal or a montage passage flagged for the owner's song (see Sound without music) |
 | Length | final 15-45 s including the 5 s native ending, so the editorial program is 10-40 s (montage editorial at most 25 s) |
 
@@ -113,7 +113,7 @@ The coordinator assigns one Look and one structure per short. The editor reads
   a sign) is still the first and best fix. Never add a `scrim` to fight a
   bright plate: it reads as a smudge.
 - Safe area on 9:16: x 60-1020 px (captions: 97-983, the feeds' ~9% side crop), y 8-80% of height. Keep the native corner
-  mark and the bottom 20% clear; no card, caption or graphic below y 0.80.
+  mark's brand slot (top-right, x 0.56-0.91, y 0.115-0.192) and the bottom 20% clear; no card, caption or graphic below y 0.80.
 
 ### Card geometry (1080x1920)
 
@@ -125,12 +125,17 @@ card's own footage blurred and darkened; `background_dim` about 0.5),
 Never the flat default colour.
 
 **What the engine enforces (Oct 2026; the earlier table ignored it and
-cost a whole run).** Band graphics never go above y 0.128: the free-tier
-mark's reserved zone (since Oct 2026 the mark sits top-RIGHT, x 0.55-0.91,
-y 0.05-0.128: "EDITED USING" / the robot and "Valmera AI" / "valmera.io",
-right-aligned; a full-width band is kept below it on every tier, and only a
-short line may sit beside it, left of it). The headline
-band therefore runs from y 0.128 to the card's top minus 0.012; the
+cost a whole run).** The free-tier corner mark ("EDITED USING" / the robot
+and "Valmera AI" / "valmera.io", right-aligned) sits in a FIXED BRAND SLOT
+on every 9:16 short since 25 Oct 2026: its ink from y 0.125 to 0.182, its
+right edge at x 0.905, the first clear band under the Shorts, TikTok and
+Reels top controls (they cover the top ~9-10%), where the owner's
+reference (David Senra's "PRESENTED BY ramp") sits and reads so well. Its
+reserved zone is x 0.56-0.91, y 0.115-0.192. The mark never moves for a
+layout; the layout moves. Band graphics never go above y 0.192: a
+full-width band is kept below the zone on every tier, and only a short
+line may sit beside it, left of it, on the mark's own row. The headline
+band therefore runs from y 0.192 to the card's top minus 0.012; the
 `headline` template refuses a band under 0.06 and otherwise fits its claim
 to the band (at most 84 px x `size`, size up to 1.4, two lines up to 50
 characters, three beyond). The write measures the claim from the font files
@@ -139,7 +144,8 @@ and names the card top that fixes it (with the largest card that band
 leaves against the floor), a shorter claim or kicker; and for params you
 did not pass it sets a short kicker (about 12 characters) on its own line
 beside the corner mark (`kicker_y`: left of it, left-aligned to the
-column), leaving the band to the claim. The old
+column, centred on the mark's row: one header row, the name on the left,
+the mark on the right), leaving the band to the claim. The old
 4:5 row ([0.06, 0.175, 0.94, 0.794], headline zone y 0.08-0.17) leaves a
 0.035 band: the template refuses it, and lowering the card to make room
 drops the picture below the floor (8 of 9 Oct shorts). Use these rows, and
@@ -147,15 +153,15 @@ let the framing pilot's measurement overrule them:
 
 | Layout | `box` | Area | Band above | Hook and name | Captions and hero words |
 | --- | --- | --- | --- | --- | --- |
-| No band, 4:5 at 81% (measured, Oct 2026 s08: a 460 px phone-call window with its picture-in-picture erased, ~1.9x) | [0.095, 0.13, 0.905, 0.795] | 0.54 | none | hook-tier `word_slam` on frame 0, name in its kicker | inside the card's lower band, y 0.70-0.78, clear of the chin; lockups in the card's face-free space |
-| Band + 1:1 at full width (16:9 modern sources, 4:3 archival) | [0, 0.24, 1, 0.794] | 0.55 | y 0.128-0.228: `onscreen_headline` of at most 36 characters, two lines, `size` 1.1-1.2, a kicker of at most ~12 characters (the write sets it beside the corner mark) or none | a hook-tier `word_slam` names the speaker unless the band's main line measured at least 1.2x the caption cap height | inside the card, y 0.62-0.76, face-free |
-| 1:1 at 92%, Editorial Serif only | [0.04, 0.135, 0.96, 0.652] | 0.48 | none | `phrase_build` hook in the field | in the field below the card, y 0.68-0.80 |
+| No band, 4:5 at 81% (measured, Oct 2026 s08: a 460 px phone-call window with its picture-in-picture erased, ~1.9x; its right edge is the mark's) | [0.095, 0.205, 0.905, 0.795] | 0.478 | none | hook-tier `word_slam` on frame 0, name in its kicker | inside the card's lower band, y 0.70-0.78, clear of the chin; lockups in the card's face-free space |
+| Band + full width (16:9 modern sources, 4:3 archival) | [0, 0.305, 1, 0.794] | 0.49 | y 0.192-0.293: `onscreen_headline` of at most 36 characters, two lines, `size` 1.1-1.2, a kicker of at most ~12 characters (the write sets it beside the corner mark, on its row) or none | a hook-tier `word_slam` names the speaker unless the band's main line measured at least 1.2x the caption cap height | inside the card, y 0.66-0.78, face-free |
+| 1:1 at 93%, Editorial Serif only | [0.035, 0.205, 0.965, 0.728] | 0.486 | none | `phrase_build` hook in the field | in the field below the card, y 0.74-0.80 |
 
 A kicker stacked above the band's claim costs about 0.035 of height (card
-top 0.265, area 0.53, under the floor): keep it short enough to sit beside
+top 0.34, area 0.45, under the floor): keep it short enough to sit beside
 the corner mark, or put the name in the hook's kicker instead. A
-4:3 card with `box` omitted gets the engine's window [0.06, 0.27, 0.94,
-0.70] (area 0.38, under the floor): always pass a box. A full-width 1:1 card
+4:3 card with `box` omitted gets the engine's window [0.06, 0.304, 0.94,
+0.70] (area 0.35, under the floor): always pass a box. A full-width 1:1 card
 needs a square crop around the speaker of at least 540 source pixels to
 stay at or under 2x; a narrower source (a phone call, a picture-in-picture
 guest) takes the no-band row.
@@ -171,7 +177,13 @@ headline yields to it and returns as it exits.
 
 Nothing designed goes below y 0.80, the band the platform covers: with
 these cards, captions and hero words sit inside the card. A card's top never
-rises into the mark's zone (y 0.128 on the right half).
+rises into the mark's zone (y 0.192 on the right half): a card write whose
+edge crosses the slot is NOTEd (corner mark), because such a short's
+free-tier export keeps the mark in the old corner, under the platforms'
+top controls (the GTC Berlin run's [0, 0.12, 1, 0.72] windows would). An
+EDL laid out before the slot (a band from y 0.128, a card from y 0.13)
+keeps the old corner on re-export so nothing collides; a new layout always
+takes the slot.
 
 ### Camera (`add_zoom`; read its schema before the first call)
 
@@ -479,23 +491,23 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   italic captions, piano bed whose bass enters on the punchline), gum-06 (the
   floor to beat), `.valmera/podcast-shorts/reference-library/20260909-headline-conversation/`.
 - **Base:** `apply_look('editorial')`.
-- **Canvas:** the band + full-width 1:1 card, `box` [0, 0.24, 1, 0.794]
-  (picture area 0.55), for 16:9 modern and 4:3 archival sources; on a
+- **Canvas:** the band + full-width card, `box` [0, 0.305, 1, 0.794]
+  (picture area 0.49), for 16:9 modern and 4:3 archival sources; on a
   narrow source (a phone call, a picture-in-picture guest) the no-band 4:5
-  card [0.095, 0.13, 0.905, 0.795] (0.54) with the hook and lockups inside
+  card [0.095, 0.205, 0.905, 0.795] (0.478) with the hook and lockups inside
   it (Card geometry). Backdrop `background_style='blur'`,
   `background_dim` about 0.5, grain and vignette. A modern 16:9
   single-speaker source may go full-bleed (face-aware `set_frame`) with the
   headline over clear space at the top. Card entrance `reveal` at 0.0.
 - **Headline:** the brief's `onscreen_headline` (at most 36 characters) in
-  the band y 0.128-0.228, `size` 1.1-1.2, two lines at most, no kicker;
+  the band y 0.192-0.293, `size` 1.1-1.2, two lines at most, no kicker;
   name in accent (periwinkle #9DB1FF or sand #F1CA97) when it is in the
   band, claim near-white, Inter Display 800. The hook on frame 0 is a
   hook-tier `word_slam` carrying the name in its kicker unless the pilot
   measured the band's main line at 1.2x the captions or more.
 - **Captions:** `motion_look` `editorial`; accent sand #F1CA97 or butter
   #F7E499; serif-italic emphasis on 1 word per phrase; inside the card's
-  lower third (y 0.62-0.76) in face-free space, never below the card and
+  lower third (y 0.66-0.78) in face-free space, never below the card and
   never over the mouth.
 - **Grade:** warm matte, light grain, soft vignette.
 - **Camera (optional, only where earned):** a `punch` on the 1-2 words the
@@ -524,8 +536,9 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
   strobe exits), gum-11 (sparse serif word in lowercase sans, sub boom at the
   end), orig-06 (fat serif in the scene), orig-14 (serif quote with script accents).
 - **Base:** `apply_look('editorial')`, captions `motion_look` `serif`.
-- **Canvas:** a 4:5 card at 88-92% width (area 0.54-0.59), or a 1:1 card at
-  92% width or more, `box` [0.04, 0.135, 0.96, 0.652] (area 0.48, gum-02),
+- **Canvas:** a 4:5 card at 81-84% width under the corner mark (area
+  0.48-0.50, top y 0.205), or a 1:1 card at 93% width, `box` [0.035, 0.205,
+  0.965, 0.728] (area 0.486, gum-02),
   with the type in the field below it; backdrop `background_style=
   'radial_gradient'` (olive-black #1F200C or warm charcoal) or `'blur'`, with
   grain and vignette. Or full-bleed when the shot has negative space. Type
@@ -594,8 +607,8 @@ A `custom-<slug>` Look is allowed when the brief spells out every field below.
 - **Base:** `apply_look('cinematic_doc')`, captions `motion_look` `clean`
   (sentence case) with serif hero words.
 - **Canvas:** full-bleed for modern sources; 4:3 archival on the band +
-  full-width 1:1 card [0, 0.24, 1, 0.794], or the no-band 4:5 card
-  [0.095, 0.13, 0.905, 0.795] when the type lives inside the card (Card
+  full-width card [0, 0.305, 1, 0.794], or the no-band 4:5 card
+  [0.095, 0.205, 0.905, 0.795] when the type lives inside the card (Card
   geometry), over a `background_style='blur'` backdrop with grain and
   vignette. The grade is the Look: check it is visible on render 1.
 - **Type:** Inter Tight captions; `glow_title` or `chapter_title` in Bodoni

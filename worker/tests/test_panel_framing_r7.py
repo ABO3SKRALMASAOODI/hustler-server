@@ -277,8 +277,9 @@ def test_an_archival_speaker_card_defaults_to_the_larger_window():
     assert card["fit"] == "crop" and "archival 4:3 speaker" in res
     k = (card["box"][2] - card["box"][0]) * W / ((card["source"][2] - card["source"][0]) * 646)
     assert k <= pc.FACE_UPSCALE_CAP + 1e-6
-    # taller than the judged full-width 4:3 card (37% of the frame)
-    assert card["box"][3] - card["box"][1] > (0.6758 - 0.3042) + .05
+    # taller than the judged full-width 4:3 card (37% of the frame; 43%
+    # before the v7 brand slot took 0.065 of the top)
+    assert card["box"][3] - card["box"][1] > (0.6758 - 0.3042) + .02
     # an explicit postage-stamp box is kept, with the larger one named
     ctx = T._Ctx(646, 480, samples)
     res = agent_tools.set_picture_card(ctx, "c", 0, 9, box=[0.06, 0.3042, 0.94, 0.6758],
@@ -297,8 +298,10 @@ def test_the_archival_window_keeps_both_bands():
     box = pc.ARCHIVAL_CARD_BOX
     top = motion_tools.band_top(W, H)
     assert top >= keepout.watermark_zone(W, H)[3] - 1e-6       # below the mark
-    # the band above holds the headline and hero lockups ...
-    assert box[1] - motion_tools.HEADLINE_GAP - top >= .13 - 1e-3
+    # the band above holds a two-line headline and the hero lockups (.13
+    # under the v6 corner; .10 under the v7 brand slot: keepout.card_top) ...
+    assert box[1] - motion_tools.HEADLINE_GAP - top >= .10 - 1e-3
+    assert box[1] >= keepout.card_top(W, H, band=0.10) - 1e-3
     # ... and below it a whole caption band above the feed's safe bottom
     bottom = caption_carry.safe_range(W, H)[1]
     assert bottom - (box[3] + caption_place.EDGE_PAD) >= caption_carry.MIN_BAND_H - 1e-6

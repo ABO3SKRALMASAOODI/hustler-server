@@ -233,11 +233,13 @@ def watermark_zone(W=1080, H=1920, anchor_y=None, pad=0.01):
     """The free-tier watermark's box on a W x H output, in fractions: the
     mark's ink (EDITED USING / the robot and Valmera AI / valmera.io,
     renderer.watermark_geometry -> brandmark.layout), padded by ``pad``. A
-    reserved zone for text placement (band planner, captions, graphics): a
-    free-tier final burns the mark there, TOP-RIGHT, over the program.
-    Read-only — the mark itself never moves for a layout. ``anchor_y``:
-    renderer.watermark_anchor_y (lower or scene placement), None for the
-    normal corner."""
+    reserved zone for text placement (band planner, captions, graphics,
+    cards): a free-tier final burns the mark there, over the program -- in
+    the BRAND SLOT on a vertical feed since v7 (top 12.5%, right edge at x
+    0.905: below the Shorts/TikTok/Reels top controls), the top-right corner
+    on other ratios. Read-only -- the mark itself never moves for a layout;
+    the layout moves. ``anchor_y``: renderer.watermark_anchor_y (lower,
+    scene or the legacy corner), None for the slot."""
     import renderer
     x0, y0, x1, y1 = renderer.watermark_geometry(int(W), int(H), anchor_y)["ink"]
     W, H = float(W), float(H)
@@ -245,10 +247,29 @@ def watermark_zone(W=1080, H=1920, anchor_y=None, pad=0.01):
             round(min(1.0, x1 / W + pad), 4), round(min(1.0, y1 / H + pad), 4)]
 
 
+# Clear space between the mark's reserved zone and a card (or a stack
+# panel) set below it: a card's top edge never meets the mark.
+CARD_GAP = 0.012
+
+
+def mark_floor(W=1080, H=1920):
+    """The lowest edge of the mark's reserved zone (frame fraction): the
+    highest a full-width band line, a card or a panel may start (the band
+    planner, the card rows, the stack and archival windows read it here)."""
+    z = mark_zone(W, H)
+    return float(z[3]) if z else 0.0
+
+
+def card_top(W=1080, H=1920, band=0.0):
+    """The highest a picture card's top may sit under the mark (and under a
+    headline band ``band`` tall above the card): mark_floor + band + gap."""
+    return round(mark_floor(W, H) + float(band) + CARD_GAP, 4)
+
+
 # A graphic may not lay ink on the free-tier corner mark's reserved box
-# (top-right since v6): the mark is burned over the program on a free-tier
-# final and stays exactly as it is, so type there collides with it (Oct 11
-# run, s06: a band lockup at y 0.178 rendered over the mark from y 0.076,
+# (the brand slot since v7): the mark is burned over the program on a free-
+# tier final and stays exactly as it is, so type there collides with it (Oct
+# 11 run, s06: a band lockup at y 0.178 rendered over the mark from y 0.076,
 # no warning).
 # Persistent band headlines are laid out around it by band_type and are not
 # judged here. MARK_HIT: share of the reserved box a graphic may cover.
@@ -271,6 +292,121 @@ def on_mark(box, zone):
     return bool(box and zone) and inter(box, zone) > MARK_HIT * area(zone)
 
 
+def _crosses(box, zone, margin=0.015):
+    """A window (card, panel) whose EDGE runs through the zone: it meets
+    the zone without holding it whole inside (with ``margin``)."""
+    if inter(box, zone) <= 1e-6:
+        return False
+    return not (box[0] <= zone[0] - margin and box[1] <= zone[1] - margin
+                and box[2] >= zone[2] + margin and box[3] >= zone[3] + margin)
+
+
+def slot_occupied(edl, W=1080, H=1920):
+    """What of this EDL's own layout occupies the brand slot ('' = nothing):
+    a band headline (its band or a kicker set beside the mark), a graphic's
+    stored footprint (the keep-out's box), or a picture card / stack panel
+    whose edge crosses it. Every layout written since v7 keeps clear of the
+    slot; an EDL laid out around the v6 corner (the band from y 0.128, a
+    4:5 card from y 0.13) keeps that corner on re-export
+    (renderer.watermark_anchor_y), so the mark never lands on its type."""
+    zone = mark_zone(W, H)
+    if not zone or not edl:
+        return ""
+    import motion_templates
+    ar = float(W) / float(H)
+    try:
+        import render_qc
+        picture = render_qc.PICTURE_TEMPLATES
+    except Exception:  # noqa: BLE001
+        picture = ()
+    for it in (edl.get("motion") or []):
+        if not isinstance(it, dict):
+            continue
+        p = it.get("params") or {}
+        if motion_templates.persistent(it):
+            try:
+                y, h = float(p["y"]), float(p["height"])
+                band = (0.06, y - h / 2.0, 0.94, y + h / 2.0)
+            except (KeyError, TypeError, ValueError):
+                band = None
+            boxes = [band] if band else []
+            try:
+                import band_type
+                kb = band_type.kicker_box(p, W, H)
+                if kb:
+                    boxes.append(tuple(kb))
+            except Exception:  # noqa: BLE001
+                pass
+            for b in boxes:
+                if on_mark(b, zone):
+                    return f"band headline '{it.get('id')}'"
+            continue
+        if it.get("layer") == "behind_subject" or it.get("template") in picture:
+            continue
+        fp = it.get("footprint") or {}
+        box, far = fp.get("box"), fp.get("ar")
+        try:
+            if box and far and abs(float(far) - ar) < 0.02 and on_mark(box, zone):
+                return f"graphic '{it.get('id')}'"
+        except (TypeError, ValueError):
+            continue
+    try:
+        import picture_cards
+        cards = ((edl.get("effects") or {}).get("picture_cards")) or []
+        for cd in cards:
+            if not isinstance(cd, dict):
+                continue
+            for b in picture_cards.card_boxes(cd):
+                if _crosses([float(v) for v in b], zone):
+                    return f"picture card '{cd.get('id') or 'card'}'"
+    except Exception:  # noqa: BLE001 — an unreadable card: judged clear
+        pass
+    return ""
+
+
+def card_slot_notes(edl, W, H, before=None):
+    """NOTEs for every picture card (or stack panel) whose edge runs
+    through the brand slot on a vertical-feed frame ([] when none, or when
+    ``before`` already had that card with the same box: only a write that
+    places or moves a card is told). A card crossing the slot makes a
+    free-tier export keep the mark in the old corner (slot_occupied)."""
+    zone = mark_zone(W, H)
+    if not zone or not portrait(W, H):
+        return []
+    try:
+        import picture_cards
+    except Exception:  # noqa: BLE001
+        return []
+    old = {}
+    for cd in (((before or {}).get("effects") or {}).get("picture_cards") or []):
+        if isinstance(cd, dict):
+            old[cd.get("id")] = picture_cards.card_boxes(cd)
+    out = []
+    for cd in (((edl or {}).get("effects") or {}).get("picture_cards") or []):
+        if not isinstance(cd, dict):
+            continue
+        try:
+            boxes = [[float(v) for v in b] for b in picture_cards.card_boxes(cd)]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if old.get(cd.get("id")) == boxes:
+            continue
+        hit = next((b for b in boxes if _crosses(b, zone)), None)
+        if hit is None:
+            continue
+        out.append(
+            f"NOTE (corner mark): card '{cd.get('id')}' runs its edge through the "
+            f"corner mark's brand slot (top-right, x {zone[0]:.2f}-{zone[2]:.2f}, y "
+            f"{zone[1]:.3f}-{zone[3]:.3f}; its box is "
+            f"[{', '.join(f'{v:g}' for v in hit)}]). A free-tier export then keeps "
+            "the mark in the old corner, under the platforms' top controls. Set its "
+            f"top at y {card_top(W, H):.3f} or lower (with a headline band, "
+            f"{card_top(W, H, band=0.10):.3f}), or a full-width card's top at y "
+            f"{max(0.0, zone[1] - 0.015):.2f} or higher with the mark inside the "
+            "picture. The mark never moves.")
+    return out
+
+
 def hud_mark_params(item, out_w, out_h, fps=None):
     """The HUD's ``mark`` param for this canvas (motion_templates.DERIVED):
     the reserved zone of the mark the render burns now, never the one the
@@ -278,14 +414,30 @@ def hud_mark_params(item, out_w, out_h, fps=None):
     return {"mark": [str(v) for v in watermark_zone(int(out_w), int(out_h))]}
 
 
-ISSUE_TEXT = {
-    "mark": "lay on the free-tier corner mark's reserved box (top-right, "
-            "x 0.55-0.91, above y 0.13)",
+def mark_issue_text(W=1080, H=1920):
+    z = mark_zone(W, H)
+    where = (f"x {z[0]:.2f}-{z[2]:.2f}, y {z[1]:.3f}-{z[3]:.3f}" if z
+             else "the top-right brand slot")
+    return f"lay on the free-tier corner mark's reserved box (top-right, {where})"
+
+
+class _IssueText(dict):
+    """ISSUE_TEXT with the mark's line read from the live zone, so the words
+    an agent reads never drift from the box the keep-out tests."""
+
+    def __getitem__(self, key):
+        if key == "mark":
+            return mark_issue_text()
+        return dict.__getitem__(self, key)
+
+
+ISSUE_TEXT = _IssueText({
+    "mark": "lay on the free-tier corner mark's reserved box",
     "side": "reached into the 6% side margins",
     "rail": "ran into the platform's right button rail (x > 0.88 between y 0.5 and 0.85)",
     "bottom": "sat in the bottom UI band (below y 0.80)",
     "top": "sat in the top UI band (above y 0.06)",
-}
+})
 
 
 # ── faces on a source frame ───────────────────────────────────────────────

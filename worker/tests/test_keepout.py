@@ -430,7 +430,9 @@ def test_caption_cues_step_off_a_graphic_footprint_and_off_the_face():
 
 def test_caption_items_carry_the_zone_to_the_template(monkeypatch):
     monkeypatch.setattr(motion_engine, "available", lambda: True)
-    fp = {"box": [0.1, 0.648, 0.8, 0.78], "ar": 0.5625, "faces": [[0.25, 0.2, 0.75, 0.55]]}
+    # (a face down to y 0.5: the band between the chin and the graphic holds
+    # the line; the band over the head is the brand slot's since v7)
+    fp = {"box": [0.1, 0.648, 0.8, 0.78], "ar": 0.5625, "faces": [[0.25, 0.2, 0.75, 0.5]]}
     items = motion_captions.items(*_caption_edl(fp), canvas=(1080, 1920))
     cues = [c for it in items for c in it["params"]["cues"]]
     assert any("z" in c for c in cues) and all(len(c["z"]) == 2 for c in cues if "z" in c)
@@ -869,17 +871,18 @@ def test_the_solver_leaves_the_captions_a_band_rather_than_making_them_touch():
 def test_the_watermark_zone_is_the_marks_top_right_box():
     # the free-tier mark (v6: EDITED USING / [robot] Valmera AI /
     # valmera.io, right-aligned at the top-right) is a reserved zone for
-    # text placement; the judged collision: band kickers at y 0.09-0.115
-    # under the mark. Its floor stays the v5 floor (y ~0.128), so the band
-    # layouts the runs measured keep their height; the left half is free.
+    # text placement. Since v7 it is the BRAND SLOT (owner, 24 Oct 2026):
+    # below the Shorts/TikTok/Reels top controls (~2.5-10.5% down), its
+    # top at 12.5% of the height, its right edge 9.5% in; the left is free.
     import keepout
     import renderer
     z = keepout.watermark_zone(1080, 1920)
-    assert z[2] == pytest.approx(0.91, abs=.005)          # the 10% right inset
-    assert z[1] == pytest.approx(0.05, abs=.015)
-    assert 0.45 < z[0] < 0.62 and 0.12 < z[3] <= 0.1285
-    assert keepout.inter(z, [0.2, 0.09, 0.8, 0.115]) > 0
-    assert keepout.inter(z, [0.06, 0.06, 0.45, 0.13]) == 0   # the left is free
+    assert z[2] == pytest.approx(0.915, abs=.005)         # the 9.5% right inset
+    assert z[1] == pytest.approx(0.115, abs=.005)         # top 12.5% - the pad
+    assert 0.45 < z[0] < 0.62 and 0.18 < z[3] <= 0.1935
+    assert z[1] > 0.105                                    # under the feeds' controls
+    assert keepout.inter(z, [0.2, 0.13, 0.8, 0.16]) > 0
+    assert keepout.inter(z, [0.06, 0.12, 0.45, 0.19]) == 0   # the left is free
     ink = renderer.watermark_geometry(1080, 1920)["ink"]
     assert z[0] < ink[0] / 1080 and z[2] > ink[2] / 1080 and z[3] > ink[3] / 1920
     low = keepout.watermark_zone(1080, 1920, anchor_y=400)

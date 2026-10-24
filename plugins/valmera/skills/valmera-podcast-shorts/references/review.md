@@ -155,7 +155,8 @@ problems. Fix them in the next briefs rather than reopening shipped shorts.
 ## Finals
 
 After `export_final` completes and the file is downloaded, watch the run's
-first final in full: the native corner mark is legible and clear of faces and
+first final in full: the native corner mark is legible in its brand slot
+(top-right, just under the platform's top controls) and clear of faces and
 type, the complete 5 s native Valmera ending is present, the audio plays
 through, and the duration matches. The final's PICTURE CHECK (the render
 result's `picture_check`) confirms the end card and, on free-tier exports,

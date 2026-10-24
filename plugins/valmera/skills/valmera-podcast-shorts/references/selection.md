@@ -229,8 +229,8 @@ when every short is full-bleed on a clean modern source. About 15 minutes:
    windows), headline band, caption `anchor_y`, the measured numbers, and
    the layouts that failed and why. Every brief copies it as `framing`.
 
-Decide from the measurement, not from the table: if the floor (0.54, or
-0.48 Editorial Serif) or a headline claim at 1.2x the captions is out of
+Decide from the measurement, not from the table: if the floor (0.47 since
+the v7 brand slot) or a headline claim at 1.2x the captions is out of
 reach with a headline band (the headline write's FIX names the card top it
 needs and the card that leaves), use the no-band layout (a hook-tier
 `word_slam` carries the hook and the name) and assign Looks and structures
@@ -294,7 +294,7 @@ The example shows the format only; never reuse its copy, cues or claims.
   "speaker": "Steve Jobs",
   "headline": "Steve Jobs: Every computer has used weird type",
   "onscreen_headline": "Every computer used *weird type*",
-  "framing": "selection/framing.json: no-band 4:5 card, box [0.095,0.13,0.905,0.795], source rect [...], erase [...]; measured area 0.54, 1.9x",
+  "framing": "selection/framing.json: no-band 4:5 card, box [0.095,0.205,0.905,0.795], source rect [...], erase [...]; measured area 0.48, 1.9x",
   "structure_reason": "he names concrete typefaces the viewer can see",
   "closest_alternative": "headline-pro: his delivery is strong but the fonts are the point",
   "story": {

@@ -5524,6 +5524,12 @@ check("watermark 9:16: the mark's right edge clears Instagram's ~9% side-crop",
       1080 - _g916["ink"][2] >= int(1080 * 0.095))
 check("watermark 9:16: the mark sits below the top UI band (>=4.5% of H)",
       _g916["top"] >= int(1920 * 0.045) and _g916["ink"][1] == _g916["top"])
+# v7, the brand slot (owner, 24 Oct 2026, after Senra's "PRESENTED BY ramp"):
+# below the Shorts/TikTok/Reels top controls (they reach ~9-10.5% down), at
+# 12.5% of the height -- the first clear band, the same on every short.
+check("watermark 9:16: the mark takes the brand slot under the feeds' top "
+      "controls (top at 12.5% of H)",
+      _g916["top"] == int(round(1920 * 0.125)) and _g916["top"] > int(1920 * 0.105))
 
 _lower_y = renderer.watermark_anchor_y(
     {}, 1080, 1920, 1080, 1920,
@@ -5532,8 +5538,8 @@ _glower = renderer.watermark_geometry(1080, 1920, _lower_y)
 check("watermark lower: preserves the original horizontal alignment",
       _glower["ink"][0] == _g916["ink"][0] and _glower["ink"][2] == _g916["ink"][2]
       and _glower["rx"] == _g916["rx"])
-check("watermark lower: moves down from 6% to 11% of frame height",
-      _glower["top"] == int(round(1920 * 0.11))
+check("watermark lower: moves down by 5% of frame height (12.5% -> 17.5%)",
+      _glower["top"] == int(round(1920 * 0.125)) + int(round(1920 * 0.05))
       and _glower["top"] > _g916["top"]
       and _glower["ink"][3] < 1920)
 

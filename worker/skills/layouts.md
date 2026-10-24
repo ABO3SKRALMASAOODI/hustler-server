@@ -29,7 +29,8 @@ second), never stock.
   `breakout` lifts the part of the UI the line is about out of the screen.
 - **HUD** (`add_hud`): furniture that runs through a whole piece — venue,
   date, chapter, REC, timecode, brackets. Small and steady; it never
-  enters the corner-mark zone (the verb measures it per aspect).
+  enters the corner-mark zone (the verb measures it per aspect: on 9:16
+  the brand slot, x 0.56-0.91, y 0.115-0.192).
 - **Breakdown** (`add_breakdown`): the edit's own timeline with a live
   playhead and the true device names. A "how this was made" beat; it is
   truthful because it is drawn from the EDL at render.

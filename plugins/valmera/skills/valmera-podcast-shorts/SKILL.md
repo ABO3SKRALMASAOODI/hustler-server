@@ -278,9 +278,10 @@ disagree, v9 wins on method and the brief wins on preferences.
   in the headline or the hook's kicker, so a famous speaker needs no
   broadcast lower third. If identity is uncertain, omit the name; never
   borrow one from a reference or earlier run.
-- **Branding.** Every final keeps the native corner watermark (top-right
-  since Oct 2026: "EDITED USING" / the robot and "Valmera AI" /
-  "valmera.io", right-aligned) and the complete 5-second native Valmera end card
+- **Branding.** Every final keeps the native corner watermark ("EDITED
+  USING" / the robot and "Valmera AI" / "valmera.io", right-aligned; since
+  25 Oct 2026 in the fixed brand slot on 9:16, y 0.125-0.182, right edge x
+  0.905, just under the platforms' top controls) and the complete 5-second native Valmera end card
   exactly as Valmera renders them: never cropped, covered, trimmed,
   shortened, moved or replaced. They are the owner's marketing. The final is
   15-45 s including that ending.

@@ -148,13 +148,14 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   feed header AND the free-tier watermark's zone). The write measures the
   claim from the font files against the captions (HEADLINE TYPE): it
   refuses a claim smaller than the captions and names what fixes it — the
-  card top (with the largest card that band leaves against the 0.54
+  card top (with the largest card that band leaves against the 0.47
   picture floor), the claim length or the kicker — and says what lifts one
   under 1.2x. For params you did not pass it first sets a short kicker
   (about 12 characters) on its own line beside the corner mark (kicker_y:
-  the mark covers the top-RIGHT only, x 0.55-0.91 down to y 0.128, so the
-  kicker sits left of it, left-aligned to the column, and the band is the
-  claim's) and a larger size. A headline that opens
+  the mark covers the top-RIGHT only — on 9:16 its fixed brand slot, x
+  0.56-0.91, y 0.115-0.192, just under the feeds' top controls — so the
+  kicker sits left of it on the mark's own row, left-aligned to the column,
+  and the band below is the claim's) and a larger size. A headline that opens
   the program is the hook on frame 0, the thumbnail: the write sets it
   complete there (entrance 'none') unless you pass an entrance. It holds the band and
   YIELDS on its own at render time — gone on the frame any graphic that
@@ -176,7 +177,9 @@ CHOOSING A TEMPLATE — confirm names and params with `list_motion_templates()`:
   that band (with or without a headline) is NOTEd (band) when it spills out
   of it — onto the top of the card or up into the feed header / the
   watermark's zone (top-right, where a free-tier final burns the mark) —
-  narrow it or move its y. Without a
+  narrow it or move its y. The mark never moves for a layout: on 9:16 it is
+  the same brand slot on every short (since v7, 25 Oct 2026), so the band,
+  the card, a hook slam or a cover headline moves out of it instead. Without a
   browser at write time the box is the template's estimate, which runs a
   little tall: only a clear spill is named there, and a preview measures it.
 - Structure: `chapter_title` at a real section turn ("The problem", "Step

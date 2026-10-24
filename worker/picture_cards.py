@@ -109,16 +109,17 @@ FACE_UPSCALE_CAP = 3.0
 # (a 646x480 talk in a full-width 4:3 window) was 37% of the frame height on
 # a soft source — a postage stamp in a 9:16 frame. A low-resolution 4:3
 # speaker card defaults to a full-width, squarer window, ARCHIVAL_CARD_BOX:
-# as tall as the two bands around it allow (43% of the frame height) —
-# above it the band for the headline and the hero lockups (.13 below the
-# free-tier mark's zone, keepout.watermark_zone ~.128), below it a whole
+# as tall as the two bands around it allow (40% of the frame height) —
+# above it the band for the headline and the hero lockups (a two-line band,
+# .10, below the free-tier mark's reserved zone and its gap: keepout.
+# card_top(band=0.10), .3043 since the v7 brand slot), below it a whole
 # caption band (caption_carry.MIN_BAND_H .085 clear of the card edge's pad,
 # above the 9:16 safe area's bottom, keepout.SAFE_Y1 .80 — a shorter band
 # sends the captions into the card, over the speaker's headroom). The face
 # keeps its share of the card (face_share), so the enlargement stays where
 # it was (~2.5x on 480p) and the larger window shows more of the speaker,
 # never a softer picture.
-ARCHIVAL_CARD_BOX = [0.06, 0.27, 0.94, 0.70]
+ARCHIVAL_CARD_BOX = [0.06, 0.304, 0.94, 0.70]
 ARCHIVAL_MAX_ASPECT = 1.6
 
 

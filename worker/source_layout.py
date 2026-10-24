@@ -95,12 +95,15 @@ PIP_MIN = (0.10, 0.07)     # self-view box size bounds (window shares)
 PIP_MAX = (0.60, 0.50)
 BORDER_INSET = 0.004       # source share trimmed inside a window's border
 # Cards on a 9:16 canvas (worker/plugins looks.md "Card geometry"): under the
-# free-tier mark's zone, above the band the platform covers.
+# free-tier mark's reserved zone (the brand slot since v7: keepout.card_top,
+# its floor y 0.1923 + the 0.012 gap; with a two-line headline band, 0.10
+# more), above the band the platform covers. tests/test_mark_slot.py holds
+# these to keepout's live zone.
 UPSCALE_CAP = 2.0          # picture_cards.SOURCE_UPSCALE_CAP
-CARD_TOP = 0.13
-CARD_TOP_BAND = 0.24
+CARD_TOP = 0.205
+CARD_TOP_BAND = 0.305
 CARD_BOTTOM = 0.795
-PICTURE_FLOOR = 0.54       # the Looks' picture-area floor
+PICTURE_FLOOR = 0.47       # the Looks' picture-area floor (render_qc.PICTURE_FLOOR)
 HAIR_ABOVE = 0.40          # face-heights of hair above a detector box
 CHIN_BELOW = 0.12
 SIDE_PAD = 0.15

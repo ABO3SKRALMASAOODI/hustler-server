@@ -2435,8 +2435,9 @@ HEADLINE_TYPE_KEYS = frozenset(("text", "kicker", "kicker_y", "size", "width", "
 # size as them (reviewers flag "no bigger than the captions").
 HEADLINE_OWNS_RATIO = band_type.OWNS_RATIO
 # The picture-area floor the card advice is checked against (looks: a card
-# covers at least 0.54 of the canvas).
-CARD_FLOOR = 0.54
+# covers at least 0.47 of the canvas under the brand slot; render_qc.
+# PICTURE_FLOOR).
+CARD_FLOOR = 0.47
 # A kicker set beside the mark sits right above the claim: the claim's top
 # within this of the strip's bottom.
 KICKER_ASIDE_REACH = 0.035

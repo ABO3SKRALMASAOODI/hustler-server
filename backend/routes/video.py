@@ -5672,7 +5672,9 @@ def _rules_vouched(meta, answer, deployed):
 # The free-tier mark is burned into FINAL renders only (see the worker's
 # renderer.wants_watermark), so this is the backend half of the same rule.
 # 6 = the v6 sponsor-style mark at the top-right (worker/brandmark.py).
-WATERMARK_VERSION = 6
+# 7 = the same mark in the platform-safe brand slot on 9:16 (top 12.5%,
+# right edge 9.5% in: below the Shorts/TikTok/Reels top controls).
+WATERMARK_VERSION = 7
 
 
 def _user_is_paid(cur, user_id):

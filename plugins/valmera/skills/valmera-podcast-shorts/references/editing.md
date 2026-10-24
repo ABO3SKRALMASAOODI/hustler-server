@@ -162,7 +162,8 @@ after a short pause, then report it.
 ### Do
 
 - Fill the frame: full-bleed when the face crop needs at most 2x upscale;
-  otherwise a card from **Card geometry** (at least 0.54 of the canvas; the
+  otherwise a card from **Card geometry** (at least 0.47 of the canvas, its
+  top under the corner mark's brand slot at y 0.205 or lower; the
   card's bottom at or above y 0.80) on a `blur` or gradient backdrop.
   Archival footage is accepted as is; type stays sharp.
 - Captions with a cap height of 3-4% of frame height, in face-free space
@@ -216,7 +217,8 @@ after a short pause, then report it.
   between punches); a zoom across a cut; a landing on every cut or a
   `push_in` on every take; any zoom or sound you cannot name a reason for
   (they make the short look childish — leave the frame steady instead).
-- Graphics over the face for more than 1 s, under the corner brand mark,
+- Graphics over the face for more than 1 s, under the corner brand mark
+  (its slot: top-right, y 0.115-0.192),
   or below y 0.80. `allow_face_overlap` is for a design that is MEANT to sit
   over the face, never a way to stop the estimated keep-out moving a
   graphic: pass your own `y` instead (GTC run: it sat on every graphic, and
@@ -342,7 +344,7 @@ Hook: hook-tier word_slam by 1.1s ("Every computer has used weird type", kicker 
 Heroes: 6.4 garbage slam; 14.8 Apple Lisa photo + label; 18.6 counter 30–40 fonts; 26.9 "Let's get…" list_build
 Payoff: 33.6 "writing a paper / WITHOUT ONE" lockup, held 0.8s after the last word
 Camera/sound: no zoom, no sound; music off (no owner song)
-Measured (render MEASURES): card 0.54 (1.9x); hook cap 7.2% vs captions 3.1%; payoff 9% > slam 6%; longest beatless 5.8s
+Measured (render MEASURES): card 0.48 (1.9x); hook cap 7.2% vs captions 3.1%; payoff 9% > slam 6%; longest beatless 5.8s
 Targets: change ~0.4s, 3 heroes, graphics ~30% of runtime
 Weakest: 9-13s "the fonts were…" setup with only captions (the next pass: an image of an early screen)
 Assets: Lisa photo (Wikimedia, CC BY-SA 4.0, credit in handback)

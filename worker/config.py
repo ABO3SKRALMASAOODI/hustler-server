@@ -2530,7 +2530,16 @@ FINISH_VERSION = 1
 # USING / [robot] Valmera AI / valmera.io, right-aligned on one edge, soft
 # shades instead of an outline (brandmark.py). The bump re-encodes cached
 # free-tier finals with the new mark on their next download.
-WATERMARK_VERSION = 6
+# 7 = the platform-safe BRAND SLOT (owner, 24 Oct 2026, after David Senra's
+# "PRESENTED BY ramp" Shorts): on a vertical-feed frame (9:16) the same v6
+# drawing sits with its ink top at 12.5% of the height and its right edge
+# 9.5% in (x 0.905), the first clear band BELOW the
+# Shorts/TikTok/Reels top controls (they cover ~2.5-9%; at 6% the v6 mark
+# hid under them). Fixed for every short: the layouts move around it, never
+# the mark (keepout.watermark_zone is the one box they all read). An EDL
+# laid out before the slot whose type or card edge occupies it keeps the v6
+# corner on re-export (renderer.watermark_anchor_y), so nothing collides.
+WATERMARK_VERSION = 7
 # ON by owner's decision (the tradeoff was raised and taken deliberately).
 #
 # KNOWN OUTSTANDING: 44 public pages (58 occurrences) plus public/llms.txt and
@@ -2602,10 +2611,26 @@ WATERMARK_FONT_NAME = "Plus Jakarta Sans ExtraBold"
 # 9:16, 16:9, 1:1 and 4:5 without a per-ratio asset.
 WATERMARK_MARGIN_X_FRAC = float(os.getenv("WATERMARK_MARGIN_X_FRAC", "0.10"))
 WATERMARK_MARGIN_Y_FRAC = float(os.getenv("WATERMARK_MARGIN_Y_FRAC", "0.06"))
+# The BRAND SLOT on a vertical-feed frame (v7; H / W >= WATERMARK_FEED_
+# ASPECT, i.e. 9:16): where the mark sits on every Short, Reel and TikTok.
+# Measured on the owner's Senra screenshots (Shorts player 512x910): the
+# ramp mark's top at 12.5% of the height, its right edge ~7% in, two lines;
+# the platforms' top controls end ~9% down (Reels' and TikTok's headers on a
+# tall phone ~10.5%). Our right edge stays 9.5% in (x 0.905), not Senra's
+# 7%: v3's rule (Instagram's full-screen cover zoom crops ~9% off each side
+# on the tallest phones and once ate the mark), and the line the 4:5 card's
+# right edge and the caption column share. The other ratios (16:9, 1:1,
+# 4:5) have no feed chrome over the picture and keep the v6 corner above.
+WATERMARK_FEED_ASPECT = 1.6
+WATERMARK_SLOT_TOP_FRAC = float(os.getenv("WATERMARK_SLOT_TOP_FRAC", "0.125"))
+WATERMARK_SLOT_RIGHT_FRAC = float(os.getenv("WATERMARK_SLOT_RIGHT_FRAC", "0.095"))
 # The third admin position preserves the established horizontal alignment and
-# only lowers the mark by another 5% of frame height.
-WATERMARK_LOWER_MARGIN_Y_FRAC = float(os.getenv(
-    "WATERMARK_LOWER_MARGIN_Y_FRAC", "0.11"))
+# only lowers the mark by another 5% of frame height (below the slot's top
+# on a vertical feed, below the corner's elsewhere).
+WATERMARK_LOWER_STEP_FRAC = float(os.getenv("WATERMARK_LOWER_STEP_FRAC", "0.05"))
+# The scene-aware admin position: the mark's top this share of the
+# letterboxed picture's height inside the picture's top edge.
+WATERMARK_SCENE_INSET_FRAC = 0.06
 # Aspect of brand/robot.png (1467x2157). A worker test asserts this matches
 # the bundled file: a regenerated asset with another shape changes the
 # mark's lockup, which must be a deliberate (version-bumped) change.

@@ -604,7 +604,11 @@ def test_a_chart_series_is_drawn_not_printed_so_its_numbers_stay_captioned():
 def test_the_plan_steps_around_the_face_zones_the_keep_out_measured():
     # the keep-out measured the face LOW in this window (a push-in), while
     # the index only saw it high: the captions clear the measured zone
-    low_face = [0.25, 0.35, 0.75, 0.6]
+    # (the room above the head as judged under the v6 corner, whose zone
+    # ended at y 0.1272: the face sits as far below the v7 brand slot)
+    import keepout
+    drop = keepout.mark_floor(1080, 1920) - 0.1272
+    low_face = [0.25, round(0.35 + drop, 4), 0.75, round(0.6 + drop, 4)]
     slam = _slam(1.9, 3.0, "*140*", box=(0.1, 0.62, 0.9, 0.82))
     slam["footprint"]["faces"] = [low_face]
     edl = _edl([slam])

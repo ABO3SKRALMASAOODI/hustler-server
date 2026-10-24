@@ -433,14 +433,28 @@ def edge_zones(rects, col):
 _WM = {}
 
 
-def watermark_box(W, H):
-    """The free-tier mark's reserved box (keepout.watermark_zone at the
-    normal corner), or None when it cannot be worked out."""
-    key = (int(W), int(H))
+def watermark_box(W, H, edl=None):
+    """The free-tier mark's reserved box (keepout.watermark_zone: the brand
+    slot on a vertical feed), or None when it cannot be worked out. With
+    ``edl``: the box of the mark this EDL's render burns -- the v6 corner
+    for a layout made before the slot that occupies it (keepout.
+    slot_occupied, renderer.watermark_anchor_y), so its captions keep to
+    the room that layout was designed with."""
+    corner = False
+    if edl is not None:
+        try:
+            import keepout
+            corner = bool(keepout.slot_occupied(edl, int(W), int(H)))
+        except Exception:  # noqa: BLE001 — unmeasurable: the slot
+            corner = False
+    key = (int(W), int(H), corner)
     if key not in _WM:
         try:
             import keepout
-            _WM[key] = tuple(float(v) for v in keepout.watermark_zone(int(W), int(H)))
+            import renderer
+            anchor = renderer.WATERMARK_CORNER if corner else None
+            _WM[key] = tuple(float(v) for v in keepout.watermark_zone(
+                int(W), int(H), anchor))
         except Exception:  # noqa: BLE001 — no box: nothing reserved
             _WM[key] = None
     return _WM[key]

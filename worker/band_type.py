@@ -33,9 +33,10 @@ captions and say what makes it legible:
   size, and the largest card box left under that band with its area against
   a picture floor.
 * ``mark_strip`` is the free strip BESIDE the free-tier mark: the mark
-  covers the top-right only (keepout.watermark_zone, x 0.55-0.91, since the
-  v6 sponsor-style mark), so a short kicker can sit LEFT of it, above the
-  band, left-aligned to the column, and leave the whole band to the claim.
+  covers the top-right only (keepout.watermark_zone: the v7 brand slot, x
+  0.56-0.91, y 0.115-0.192 on 9:16), so a short kicker can sit LEFT of it
+  on the mark's own row (centred on it), above the band, left-aligned to
+  the column, and leave the whole band to the claim.
 
 Everything here is read-only geometry; it never changes a render by itself.
 """
@@ -614,13 +615,15 @@ def mark_strip(W, H, top=None):
     """[x0, y0, x1, y1] (frame fractions) of the free strip beside the
     free-tier mark, above the band (the mark sits top-RIGHT only: the strip
     is left of it), or None. ``top`` is the highest a band graphic may
-    reach (the feed header)."""
+    reach (the feed header). The strip spans the mark's own rows (from its
+    zone's top, never above ``top``), so a kicker set there is centred on
+    the mark: one header row, the name on the left, the mark on the right."""
     import keepout
     try:
         mark = keepout.watermark_zone(int(W), int(H))
     except Exception:  # noqa: BLE001
         return None
-    y0 = float(top if top is not None else keepout.SAFE_Y0)
+    y0 = max(float(top if top is not None else keepout.SAFE_Y0), float(mark[1]))
     y1 = float(mark[3])
     x0, x1 = keepout.SAFE_X0, float(mark[0]) - STRIP_GAP
     if y1 - y0 < 0.02 or x1 - x0 < 0.15:

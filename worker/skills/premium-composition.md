@@ -71,10 +71,11 @@ LAYOUTS FOR 9:16:
   shot gets its own framing); a source below
   720p is never a 3.7x crop that cuts the head: one 4:3 archival speaker
   (box omitted; a two-shot stays whole) gets a full-width, near-square window framed on the face
-  (y .27-.70, ~43% of the frame, ~2.5x — the 37% 4:3 card read as a
-  postage stamp) with the headline band above it and a whole caption band
-  below; fit='pad' shows the whole stage (~1.6x). That band is ~13% of the
-  frame: a graphic there fits by its width (word_slam down to 0.3) or size
+  (y .304-.70, ~40% of the frame, ~2.5x — the 37% 4:3 card read as a
+  postage stamp) with the headline band above it (under the corner mark's
+  brand slot) and a whole caption band below; fit='pad' shows the whole
+  stage (~1.6x). That band is ~10% of the frame: a graphic there fits by
+  its width (word_slam down to 0.3) or size
   (counter down to 0.4), and a two-line typewriter without its plate. A thin band of a pillar
   or frame edge along the card's edge is slid off (EDGE SLIVER names one
   it cannot clear). Give it rounded corners, a

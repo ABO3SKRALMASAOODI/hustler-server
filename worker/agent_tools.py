@@ -8982,10 +8982,11 @@ FRAMING_CHECK_STEP_S = 0.25
 # measured it.
 FRAMING_CHECK_MEASURE_S = 120.0
 # Canvas boxes of the suggested speaker + screen stack (9:16): the speaker
-# below the free-tier mark's zone (keepout.watermark_zone), a gutter of
-# STACK_CAPTION_GAP between the panels (captions: a free band, never it).
-STACK_SPEAKER_BOX = [0.04, 0.13, 0.96, 0.475]
-STACK_SCREEN_BOX = [0.04, 0.54, 0.96, 0.93]
+# below the free-tier mark's reserved zone (keepout.card_top: the brand slot
+# since v7), a gutter of STACK_CAPTION_GAP between the panels (captions: a
+# free band, never it).
+STACK_SPEAKER_BOX = [0.04, 0.205, 0.96, 0.52]
+STACK_SCREEN_BOX = [0.04, 0.585, 0.96, 0.93]
 
 
 def _inset_boxes(ctx, windows):
@@ -17852,6 +17853,7 @@ def _set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
         return "REJECTED: fit must be 'crop' or 'pad'."
     fit = str(fit) if fit is not None else None
     edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    edl_before = json.loads(json.dumps(edl))
     has_video = bool(edl.get("keep")) and getattr(ctx, "has_main_video", True)
     if isinstance(source, str):
         source = source.strip().lower() or None
@@ -18145,6 +18147,15 @@ def _set_picture_card(ctx, id, start, end, box=None, fit=None, radius=.045,
                 "background_style) or near-black with grain is the finish "
                 "references use for archival footage.")
     res += "".join("\n" + n for n in _source_card_notes(ctx, row))
+    try:
+        import keepout
+        import motion_tools
+        if isinstance(res, str) and res.startswith("EDL v"):
+            new = ctx.latest_edl()["json"]
+            W, H = motion_tools._canvas_size(ctx, new)
+            res += "".join("\n" + n for n in keepout.card_slot_notes(new, W, H, edl_before))
+    except Exception:  # noqa: BLE001 — a note never fails a write
+        pass
     if source == "inset" and not row.get("panels"):
         try:
             res += _faceless_card_note(ctx, edl, id, float(row["start"]),
@@ -28889,6 +28900,14 @@ def apply_edit_batch(ctx, base_version, operations, operation_id):
     result = ctx.write_edl(updated, f"applied {len(operations)} edits as one batch")
     if result.startswith("EDL v"):
         result += "".join("\n" + n for n in batch_notes)
+        try:
+            import keepout
+            import motion_tools
+            W, H = motion_tools._canvas_size(ctx, updated)
+            result += "".join("\n" + n for n in keepout.card_slot_notes(
+                updated, W, H, row["json"]))
+        except Exception:  # noqa: BLE001 — a note never fails a write
+            pass
         result += "".join("\n" + n for n in _batch_framing_advisories(
             ctx, row["json"], updated))
         result += "".join("\n" + n for n in _matte_device_notes(
@@ -31865,7 +31884,7 @@ TOOLS = {
         "FACE, allow_face_overlap included); a CAPTION CHECK names heard words no caption or "
         "graphic shows (blocking). Repair "
         "each one or keep it deliberately and say why. Its MEASURES line gives picture area vs "
-        "the 0.54 card floor, upscale and cap heights; PICTURE MEASURES (advisory) name a hook "
+        "the 0.47 card floor, upscale and cap heights; PICTURE MEASURES (advisory) name a hook "
         "smaller than the captions or a payoff that is not the largest lockup. report=true "
         "re-reads that stored report for the existing preview without rendering anything.",
         {"complete": {"type": "boolean"},

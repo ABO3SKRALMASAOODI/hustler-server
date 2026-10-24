@@ -321,7 +321,7 @@ def test_picture_area_is_measured_against_the_floor():
     assert w["id"] == "c" and abs(w["area"] - .72 * .559) < 1e-3
     assert 1.6 < w["upscale"] < 1.9              # on the 1080x1920 delivery
     line = render_qc.advice({"picture": pic})[0]
-    assert line.startswith("PICTURE AREA 0.40 BELOW THE 0.54 FLOOR")
+    assert line.startswith(f"PICTURE AREA 0.40 BELOW THE {render_qc.PICTURE_FLOOR:.2f} FLOOR")
     assert "MEASURES: picture area 0.40 ('c', 1.8x" in \
         render_qc.measures_line({"picture": pic})
 

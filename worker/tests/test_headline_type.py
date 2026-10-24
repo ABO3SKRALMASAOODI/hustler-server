@@ -30,6 +30,22 @@ import motion_tools  # noqa: E402
 from schemas import default_edl, validate_edl  # noqa: E402
 
 W, H = 1080, 1920
+# The card tops below were measured on the Diamandis run under the v6 corner
+# mark (its reserved zone ended at y 0.1272). The v7 brand slot's zone ends
+# lower (keepout.mark_floor); the same bands sit under it, so each top is
+# carried down by the difference: every band height is the run's.
+V6_FLOOR = 0.1272
+SHIFT = keepout.mark_floor(W, H) - V6_FLOOR
+
+
+def _top(v6_top):
+    return round(v6_top + SHIFT, 4)
+
+
+def _ky():
+    """A kicker's line centre on the mark's own row (the strip beside it)."""
+    z = keepout.watermark_zone(W, H)
+    return round((z[1] + z[3]) / 2.0, 4)
 
 
 def _browser_ok():
@@ -157,11 +173,13 @@ def test_caption_cap_heights_follow_the_track():
 def test_the_strip_beside_the_mark_and_the_kickers_that_fit_it():
     mark = keepout.watermark_zone(W, H)
     strip = band_type.mark_strip(W, H, top=motion_tools.feed_top(W, H))
-    # the v6 mark sits top-RIGHT: the strip is left of it
-    assert strip[2] < mark[0] and strip[1] == motion_tools.HEADLINE_SAFE_TOP
+    # the mark sits top-RIGHT: the strip is left of it, on the mark's own
+    # rows (a kicker set there is centred on the mark: one header row)
+    assert strip[2] < mark[0] and strip[1] == max(motion_tools.HEADLINE_SAFE_TOP, mark[1])
     assert strip[3] == pytest.approx(mark[3]) and strip[0] >= keepout.SAFE_X0
     ok, ky = band_type.kicker_beside_fits(_p(text="x y z", kicker="ELON MUSK"), W, H, strip)
     assert ok and strip[1] < ky < strip[3]
+    assert ky == pytest.approx((mark[1] + mark[3]) / 2.0, abs=1e-3)
     assert not band_type.kicker_beside_fits(_p(text="x", kicker=ELON), W, H, strip)[0]
     assert not band_type.kicker_beside_fits(_p(text="x", kicker="ELON MUSK", align="left"),
                                             W, H, strip)[0]
@@ -255,7 +273,7 @@ def _probe(item, W_, H_, fps=30.0):
     return {"errors": [], "visible_frames": 4, "samples": 4, "bboxes": [box], "ink": [box] * 4}
 
 
-def _edl(card_top=0.24, look="clean", size="m", source=None):
+def _edl(card_top=_top(0.24), look="clean", size="m", source=None):
     edl = default_edl(60.0)
     edl["keep"] = [[0.0, 30.0]]
     edl["frame"] = {"ratio": "9:16", "mode": "crop"}
@@ -280,7 +298,7 @@ def _no_browser_probe(monkeypatch):
 
 def test_a_claim_smaller_than_the_captions_is_refused_with_the_fix():
     # the run's s06 (3447): a long kicker over a 0.095 band, clean captions
-    ctx = _Ctx(_edl(card_top=0.235, source=[0.40, 0.25, 0.62, 0.70]))
+    ctx = _Ctx(_edl(card_top=_top(0.235), source=[0.40, 0.25, 0.62, 0.70]))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "Kurzweil may have been *too conservative* on AI", "kicker": ELON,
         "size": 1.4}, id="hl")
@@ -296,7 +314,7 @@ def test_a_claim_smaller_than_the_captions_is_refused_with_the_fix():
 
 
 def test_the_fix_it_names_is_accepted():
-    ctx = _Ctx(_edl(card_top=0.235))
+    ctx = _Ctx(_edl(card_top=_top(0.235)))
     params = {"text": "Kurzweil may have been *too conservative* on AI", "kicker": ELON,
               "size": 1.4}
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params=dict(params), id="hl")
@@ -308,7 +326,7 @@ def test_the_fix_it_names_is_accepted():
 
 
 def test_a_kicker_that_fits_beside_the_mark_is_set_there():
-    ctx = _Ctx(_edl(card_top=0.235))
+    ctx = _Ctx(_edl(card_top=_top(0.235)))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "Kurzweil may have been *too conservative* on AI", "kicker": "ELON MUSK",
         "size": 1.4}, id="hl")
@@ -326,7 +344,7 @@ def test_a_kicker_that_fits_beside_the_mark_is_set_there():
 
 
 def test_a_passed_kicker_y_is_the_editors():
-    ctx = _Ctx(_edl(card_top=0.235))
+    ctx = _Ctx(_edl(card_top=_top(0.235)))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "Kurzweil may have been *too conservative* on AI", "kicker": "ELON MUSK",
         "size": 1.4, "kicker_y": 0}, id="hl")
@@ -334,14 +352,14 @@ def test_a_passed_kicker_y_is_the_editors():
     assert out.startswith("REJECTED") and "SMALLER than" in out, out
     # a kicker set aside onto the free-tier mark is refused
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
-        "text": "Kurzweil was *too conservative*", "kicker": ELON, "kicker_y": 0.1066},
+        "text": "Kurzweil was *too conservative*", "kicker": ELON, "kicker_y": _ky()},
         id="hl")
     assert out.startswith("REJECTED") and "free-tier mark's zone" in out, out
     assert "characters fit there" in out
 
 
 def test_a_size_capped_claim_is_raised_to_own_its_band():
-    ctx = _Ctx(_edl(card_top=0.31, look="editorial"))
+    ctx = _Ctx(_edl(card_top=_top(0.31), look="editorial"))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "The case for *beautiful* type on computers"}, id="hl")
     assert out.startswith("EDL v1") and "Set for it: size" in out, out
@@ -353,7 +371,7 @@ def test_a_size_capped_claim_is_raised_to_own_its_band():
     smaller = band_type.headline_layout(dict(p, size=p["size"] - 0.01), W, H)
     assert smaller["claim_cap"] < motion_tools.HEADLINE_OWNS_RATIO * target
     # a size the editor passed is kept
-    ctx = _Ctx(_edl(card_top=0.31, look="editorial"))
+    ctx = _Ctx(_edl(card_top=_top(0.31), look="editorial"))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "The case for *beautiful* type on computers", "size": 1.0}, id="hl")
     assert out.startswith("EDL v1") and _stored(ctx)["size"] == 1.0
@@ -361,17 +379,19 @@ def test_a_size_capped_claim_is_raised_to_own_its_band():
 
 
 def test_a_card_under_the_floor_is_told_the_largest_card_its_band_leaves():
-    edl = _edl(card_top=0.30)
-    edl["effects"]["picture_cards"][0]["box"] = [0.2, 0.30, 0.8, 0.794]
+    edl = _edl(card_top=_top(0.30))
+    edl["effects"]["picture_cards"][0]["box"] = [0.2, _top(0.30), 0.8, 0.794]
     ctx = _Ctx(edl)
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "The case for *beautiful* type"}, id="hl")
     assert out.startswith("EDL v1"), out
-    assert "NOTE (card): the picture card covers 0.30 of the frame" in out
-    assert "the largest card is [0.0, 0.3, 1.0, 0.794], area 0.49 (also under it)" in out
+    top = _top(0.30)
+    assert f"NOTE (card): the picture card covers {0.6 * (0.794 - top):.2f} of the frame" in out
+    assert (f"the largest card is [0.0, {round(top, 3):g}, 1.0, 0.794], area "
+            f"{0.794 - top:.2f} (also under it)") in out
     # a card that meets the floor hears nothing
-    edl = _edl(card_top=0.24)
-    edl["effects"]["picture_cards"][0]["box"] = [0.0, 0.24, 1.0, 0.794]
+    edl = _edl(card_top=_top(0.24))
+    edl["effects"]["picture_cards"][0]["box"] = [0.0, _top(0.24), 1.0, 0.794]
     ctx = _Ctx(edl)
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "The case for *beautiful* type"}, id="hl")
@@ -379,7 +399,7 @@ def test_a_card_under_the_floor_is_told_the_largest_card_its_band_leaves():
 
 
 def test_without_captions_the_measure_is_a_note():
-    ctx = _Ctx(_edl(card_top=0.235, look=None))
+    ctx = _Ctx(_edl(card_top=_top(0.235), look=None))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "Kurzweil may have been *too conservative* on AI", "kicker": ELON,
         "size": 1.4}, id="hl")
@@ -388,11 +408,11 @@ def test_without_captions_the_measure_is_a_note():
 
 
 def test_an_edit_that_leaves_the_type_alone_is_only_noted():
-    edl = _edl(card_top=0.235)
+    edl = _edl(card_top=_top(0.235))
     # an old EDL's headline, written before the measure (the run's s06)
     edl["motion"] = [{"id": "hl", "template": "headline", "start": 0.0, "end": 30.0,
                       "params": _p(text="Kurzweil may have been *too conservative* on AI",
-                                   kicker=ELON, size=1.4, y=0.1756, height=0.0948)}]
+                                   kicker=ELON, size=1.4, y=_top(0.1756), height=0.0948)}]
     ctx = _Ctx(edl)
     out = motion_tools.set_motion_graphic(ctx, "hl", end=29.0)
     assert out.startswith("EDL v1") and "NOTE (headline type)" in out, out
@@ -412,7 +432,7 @@ def test_an_edit_that_leaves_the_type_alone_is_only_noted():
 
 
 def test_a_thin_band_is_refused_with_the_measured_fix():
-    ctx = _Ctx(_edl(card_top=0.195))
+    ctx = _Ctx(_edl(card_top=_top(0.195)))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "Forcing an AI to *lie* is how 2001 went wrong", "kicker": ELON,
         "size": 1.3, "width": 0.88}, id="hl")
@@ -426,7 +446,7 @@ def test_every_fix_named_measures_at_the_captions():
     # the run's s01 (3442) over a 0.075 band: with the kicker beside the mark
     # the claim still sets two lines far under the 'l' captions, so a shorter
     # kicker is no fix; no kicker and a one-line claim is
-    ctx = _Ctx(_edl(card_top=0.215, size="l"))
+    ctx = _Ctx(_edl(card_top=_top(0.215), size="l"))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "Forcing an AI to *lie* is how 2001 went wrong", "kicker": ELON,
         "size": 1.3, "width": 0.88}, id="hl")
@@ -443,10 +463,10 @@ def test_every_fix_named_measures_at_the_captions():
 
 
 def test_a_wrapped_kicker_set_aside_onto_the_mark_is_refused():
-    ctx = _Ctx(_edl(card_top=0.30))
+    ctx = _Ctx(_edl(card_top=_top(0.30)))
     out = motion_tools.add_motion_graphic(ctx, "headline", 0.0, params={
         "text": "Founders should *write*", "kicker": LONG_KICKER, "width": 0.6,
-        "x": 0.62, "kicker_y": 0.1066}, id="hl")
+        "x": 0.62, "kicker_y": _ky()}, id="hl")
     assert out.startswith("REJECTED") and "free-tier mark's zone" in out, out
 
 
@@ -459,7 +479,7 @@ def test_the_editorial_headline_is_measured_against_the_captions():
     # 9:16 render, 0.08 a 52 px one — two thirds of clean captions' 0.0265
     assert band_type.ass_text_cap(0.052, W, H) == pytest.approx(0.0177, abs=4e-4)
     assert band_type.ass_text_cap(0.08, W, H) == pytest.approx(0.0271, abs=6e-4)
-    ctx = _Ctx(_edl(card_top=0.30))
+    ctx = _Ctx(_edl(card_top=_top(0.30)))
     out = agent_tools.set_editorial_graphic(
         ctx, "hl", "headline", "Kurzweil was too conservative", 0.0, 8.0,
         speaker="Elon Musk", box=[0.08, 0.1, 0.92, 0.27])
@@ -470,13 +490,13 @@ def test_the_editorial_headline_is_measured_against_the_captions():
     target = band_type.caption_cap(ctx.latest_edl()["json"])[0]
     assert band_type.ass_text_cap(need, W, H) >= target > band_type.ass_text_cap(need - 0.001, W, H)
     # 'l' captions: no font_size the tool allows reaches them
-    ctx = _Ctx(_edl(card_top=0.30, size="l"))
+    ctx = _Ctx(_edl(card_top=_top(0.30), size="l"))
     out = agent_tools.set_editorial_graphic(
         ctx, "hl", "headline", "Kurzweil was too conservative", 0.0, 8.0,
         speaker="Elon Musk", box=[0.08, 0.1, 0.92, 0.27], font_size=0.085)
     assert "no font_size up to 0.085 reaches them" in out, out
     # no captions: nothing to hold it to
-    ctx = _Ctx(_edl(card_top=0.30, look=None))
+    ctx = _Ctx(_edl(card_top=_top(0.30), look=None))
     out = agent_tools.set_editorial_graphic(
         ctx, "hl", "headline", "Kurzweil was too conservative", 0.0, 8.0,
         speaker="Elon Musk", box=[0.08, 0.1, 0.92, 0.27])

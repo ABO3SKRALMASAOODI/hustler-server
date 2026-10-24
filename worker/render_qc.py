@@ -163,9 +163,12 @@ DEAD_SHARE = .8
 SRC_FACE_SIDE_IN = .10
 SRC_FACE_CHIN_IN = .06
 # The picture area every Look sets for a card layout (the podcast-shorts
-# skill's looks.md Card geometry: "a card on a designed backdrop covering at
-# least 0.54 of the canvas"; Editorial Serif's square card may go to 0.48).
-PICTURE_FLOOR = .54
+# skill's looks.md Card geometry). 0.54 until v7; the brand slot (the mark's
+# reserved zone now ends at y 0.192, not 0.128) takes 0.064 of every card
+# layout's height: the band card under a two-line claim covers 0.49 ([0,
+# 0.305, 1, 0.794]), the no-band 4:5 at 81% 0.478 ([0.095, 0.205, 0.905,
+# 0.795]), Editorial's square at 93% 0.486 ([0.035, 0.205, 0.965, 0.728]).
+PICTURE_FLOOR = .47
 # Type, measured on the compositions themselves (motion_engine.probe at
 # full design size): ink at INK_ALPHA, letters standing on one baseline,
 # cap height = the tall letters' median. Bounded by its own budget, inside
@@ -546,10 +549,20 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
     except Exception:
         bands = []
     wm = None
+    wm_slot = None
     if want_wm:
         g = renderer.watermark_geometry(int(W), int(H), wm_anchor_y)
         wm = {"x": g["rx"], "y": g["ry"], "w": g["rw"], "h": g["rh"],
               "robot": renderer.robot_path()}
+        if wm_anchor_y == renderer.WATERMARK_CORNER:
+            # a layout made before the brand slot keeps the v6 corner: say
+            # what holds the slot, so the next edit can hand it back
+            try:
+                import keepout
+                wm_slot = {"what": keepout.slot_occupied(edl, int(W), int(H)),
+                           "floor": round(keepout.mark_floor(int(W), int(H)), 3)}
+            except Exception:  # noqa: BLE001 — a report never fails a render
+                wm_slot = None
     endcard = None
     if outro_s and outro_s > 0:
         endcard = {"path": renderer.endcard_path(), "s": float(outro_s)}
@@ -596,7 +609,8 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
             # the programme's last frame cuts to the end card (or the loop)
             "end_frame": end_frame,
             "cut_frames": cut_frames, "events": events, "cards": cards,
-            "others": others, "watermark": wm, "endcard": endcard,
+            "others": others, "watermark": wm, "wm_slot": wm_slot,
+            "endcard": endcard,
             "layout": layout, "still": still, "bands": bands,
             "softened": softened,
             "trans_windows": trans_windows, "reframes": reframes,
@@ -2863,6 +2877,8 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
         res["skipped"].append(f"faces: {str(exc)[:80]}")
     if plan_.get("picture"):
         res["picture"] = plan_["picture"]
+    if plan_.get("wm_slot"):
+        res["wm_slot"] = plan_["wm_slot"]
     tplan = plan_.get("type") or {}
     if tplan.get("unshown"):
         res["unshown"] = list(tplan["unshown"][:12])
@@ -3272,6 +3288,15 @@ def advice(res):
     estimating them) and kept as advisories. Also the opening blink whose
     only clean start costs the hook's first words (hook_eyes_advisory)."""
     out = []
+    slot = res.get("wm_slot") or {}
+    if slot.get("what"):
+        out.append(
+            f"CORNER MARK IN THE OLD CORNER: this edit's {slot['what']} occupies "
+            "the brand slot (top-right, just under the platforms' top controls, "
+            f"down to y {float(slot.get('floor') or 0):.3f}), so this free-tier "
+            "export keeps the v6 corner, under those controls. Move it below the "
+            "slot (a band or card top under it, a graphic lower) and the mark "
+            "takes its slot; never move the mark")
     if hook_eyes_advisory(res):
         fps = float(res.get("hook_fps") or 30.0)
         a, n, _opened = res["hook_eyes"]

@@ -31,7 +31,7 @@
   const k = (P.scale ?? 1) * Math.min(W, H) / 1080, m = 46 * k, fs = 24 * k;
   const root = MG.$('#hr'); root.style.setProperty('--fs', fs + 'px'); root.style.setProperty('--c', P.colour || '#F2F2F2');
   const cv = MG.$('#hc'); cv.width = W; cv.height = H; const ctx = cv.getContext('2d');
-  const mk = (P.mark && P.mark.length === 4) ? P.mark.map(Number) : [0.55, 0.05, 0.91, 0.13];
+  const mk = (P.mark && P.mark.length === 4) ? P.mark.map(Number) : [0.559, 0.115, 0.915, 0.193];
   // the furniture on the corner mark's side (top-right since the v6 mark)
   // starts below its zone; the other top corner keeps the frame's inset
   const markRight = (mk[0] + mk[2]) / 2 > 0.5;

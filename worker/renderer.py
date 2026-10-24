@@ -2768,8 +2768,43 @@ def watermark_current(meta, variant, is_paid, settings=None):
         watermark_position(settings)
 
 
+# watermark_anchor_y's answer for an EDL whose own layout occupies the brand
+# slot (laid out before v7): the v6 corner, top 6% / right 10% of the short
+# side, the place that layout was designed around.
+WATERMARK_CORNER = "corner"
+
+
+def watermark_feed(W, H):
+    """A vertical-feed frame (9:16 and taller): the Shorts/TikTok/Reels
+    player draws its controls over the top of it, so the mark takes the
+    brand slot below them."""
+    return float(H) / max(1.0, float(W)) >= config.WATERMARK_FEED_ASPECT
+
+
+def watermark_corner(W, H):
+    """(right, top) px of the v6 corner: the ink's right edge 10% of the
+    short side in, its top 6% down. The mark's place on 16:9, 1:1 and 4:5
+    (no feed chrome over those pictures) and on a legacy layout."""
+    margin_x = max(10, int(round(min(W, H) * config.WATERMARK_MARGIN_X_FRAC)))
+    return (int(W) - margin_x,
+            max(10, int(round(H * config.WATERMARK_MARGIN_Y_FRAC))))
+
+
+def watermark_slot(W, H):
+    """(right, top) px of the mark's ink on a W x H output: the BRAND SLOT
+    on a vertical feed (v7: top 12.5% of the height, right edge 9.5% of
+    the width in -- the first clear band under the platforms' top controls,
+    the same place on every short), the v6 corner elsewhere."""
+    if not watermark_feed(W, H):
+        return watermark_corner(W, H)
+    return (int(W) - max(10, int(round(W * config.WATERMARK_SLOT_RIGHT_FRAC))),
+            max(10, int(round(H * config.WATERMARK_SLOT_TOP_FRAC))))
+
+
 def watermark_anchor_y(edl, src_w, src_h, W, H, settings=None):
-    """Optional top edge for lower/scene placement; None is the normal corner.
+    """Where this render's mark goes when it is not the brand slot: a top
+    edge in px (the admin's lower and scene placements), WATERMARK_CORNER
+    (a legacy layout, below), or None -- the slot.
 
     Lower is a pure Y-axis move, preserving the established X (the mark's
     right edge). The scene-aware position is intentionally narrow: a
@@ -2778,12 +2813,32 @@ def watermark_anchor_y(edl, src_w, src_h, W, H, settings=None):
     by frame_fit_filter, so the mark sits just inside the scene's top edge
     rather than high in the portrait bars/backdrop. Crop layouts already fill
     the frame and all other ratios retain the established position.
+
+    The slot is fixed: every layout written since v7 keeps clear of it
+    (keepout.watermark_zone). An EDL laid out before it -- a band headline
+    under the old corner, a card whose top edge crosses the slot, a graphic
+    placed there (keepout.slot_occupied) -- keeps the v6 corner it was
+    designed around, so a re-export never burns the mark over its type.
     """
     position = watermark_position(settings)
+    _right, slot_top = watermark_slot(W, H)
     if position == "lower":
-        return max(10, int(round(H * config.WATERMARK_LOWER_MARGIN_Y_FRAC)))
-    if position != "scene":
-        return None
+        return slot_top + max(10, int(round(H * config.WATERMARK_LOWER_STEP_FRAC)))
+    if position == "scene":
+        top = _watermark_scene_top(edl, src_w, src_h, W, H)
+        if top is not None:
+            return top
+    if watermark_feed(W, H):
+        try:
+            import keepout
+            if keepout.slot_occupied(edl, W, H):
+                return WATERMARK_CORNER
+        except Exception:  # noqa: BLE001 -- unmeasurable: the slot
+            pass
+    return None
+
+
+def _watermark_scene_top(edl, src_w, src_h, W, H):
     frame = (edl or {}).get("frame") or {}
     if frame.get("ratio") != "9:16" or (not frame.get("picture") and
             frame.get("mode") not in ("pad", "pad_blur")):
@@ -2803,7 +2858,7 @@ def watermark_anchor_y(edl, src_w, src_h, W, H, settings=None):
     content_h = max(1, content_bottom - content_top)
     ink = watermark_geometry(W, H)["ink"]
     mark_h = ink[3] - ink[1]
-    inset = max(10, int(round(content_h * config.WATERMARK_MARGIN_Y_FRAC)))
+    inset = max(10, int(round(content_h * config.WATERMARK_SCENE_INSET_FRAC)))
     return max(content_top, min(content_top + inset,
                                 content_bottom - mark_h - 10))
 
@@ -2818,21 +2873,23 @@ def watermark_geometry(W, H, anchor_y=None):
     One function, so the overlay, keepout.watermark_zone (the box every
     layout keeps clear) and render_qc's crop can never drift apart.
 
-    Top-RIGHT since v6 (the sponsor-mark signature). The offsets are per
-    axis: Instagram's full-screen "cover" zoom crops ~9% off each side of a
-    9:16 reel and overlays its header on the top strip, so the right edge
-    clears the side-crop (10% of the width on vertical) and the top drops
-    below the UI band (6% of the height). ``anchor_y`` (watermark_anchor_y,
-    the lower and scene placements) moves only the top."""
-    margin_x = max(10, int(round(min(W, H) * config.WATERMARK_MARGIN_X_FRAC)))
-    top = (max(10, int(round(H * config.WATERMARK_MARGIN_Y_FRAC)))
-           if anchor_y is None else max(0, int(round(anchor_y))))
+    Top-RIGHT since v6 (the sponsor-mark signature); in the BRAND SLOT on a
+    vertical feed since v7 (watermark_slot: below the platforms' top
+    controls, the same place on every short). ``anchor_y``
+    (watermark_anchor_y): a top in px moves only the top (the lower and
+    scene placements); WATERMARK_CORNER puts it in the v6 corner."""
+    if anchor_y == WATERMARK_CORNER:
+        right, top = watermark_corner(W, H)
+    else:
+        right, top = watermark_slot(W, H)
+        if anchor_y is not None:
+            top = max(0, int(round(float(anchor_y))))
     import brandmark
-    g = brandmark.layout(int(W), int(H), right=int(W) - margin_x, top=top)
+    g = brandmark.layout(int(W), int(H), right=right, top=top)
     rx, ry, rw, rh = g["robot"]
     return {"ink": g["ink"], "image": g["image"], "rows": g["rows"],
             "rx": rx, "ry": ry, "rw": rw, "rh": rh,
-            "right": int(W) - margin_x, "top": top, "margin_x": margin_x}
+            "right": right, "top": top, "margin_x": int(W) - right}
 
 
 def watermark_image(workdir, W, H):

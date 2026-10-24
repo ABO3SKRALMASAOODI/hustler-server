@@ -1,5 +1,5 @@
 """The v6 free-tier corner mark (owner, Oct 2026): a sponsor-style
-signature at the TOP-RIGHT — "EDITED USING" in small tracked caps, the robot
+signature at the TOP-RIGHT (in the v7 brand slot on 9:16 since 24 Oct) — "EDITED USING" in small tracked caps, the robot
 and "Valmera AI" in the brand face, "valmera.io" — on one right edge, read
 on any footage through soft shades (no box, no outline).
 
@@ -26,20 +26,47 @@ import renderer  # noqa: E402
 FFMPEG = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="no ffmpeg")
 
 
-def test_the_mark_is_pinned_top_right_at_1080x1920():
+def test_the_mark_is_pinned_in_the_brand_slot_at_1080x1920():
+    """v7 (owner, 24 Oct 2026, after David Senra's "PRESENTED BY ramp"
+    Shorts): the same drawing in the BRAND SLOT, the first clear band under
+    the Shorts/TikTok/Reels top controls (they cover ~2.5-9%, ~10.5% on a
+    tall phone): ink top at 12.5% of the height, right edge 9.5% in."""
     g = renderer.watermark_geometry(1080, 1920)
     # the design (px of a 1080x1920 final; +-2 px for another platform's
-    # glyph rasteriser): ink right edge at the 10% inset, top at 6%
-    assert g["ink"][2] == 972 and g["ink"][1] == 115
-    assert g["ink"] == pytest.approx([610, 115, 972, 225], abs=2)
-    assert [g["rx"], g["ry"], g["rw"], g["rh"]] == pytest.approx([610, 124, 60, 88], abs=2)
+    # glyph rasteriser): ink right edge at the 9.5% inset, top at 12.5%
+    assert g["ink"][2] == 977 and g["ink"][1] == 240
+    assert g["ink"] == pytest.approx([615, 240, 977, 350], abs=2)
+    assert [g["rx"], g["ry"], g["rw"], g["rh"]] == pytest.approx([615, 249, 60, 88], abs=2)
     rows = g["rows"]
-    assert rows["kick"] == pytest.approx([752, 115, 972, 134], abs=2)
-    assert rows["name"] == pytest.approx([685, 146, 973, 191], abs=2)
-    assert rows["url"] == pytest.approx([826, 204, 972, 225], abs=2)
-    # its floor stays the v5 mark's (y 0.128): the band layouts the runs
-    # measured keep their height; only the side moved
-    assert g["ink"][3] / 1920 <= 0.1185
+    assert rows["kick"] == pytest.approx([757, 240, 977, 259], abs=2)
+    assert rows["name"] == pytest.approx([690, 271, 978, 316], abs=2)
+    assert rows["url"] == pytest.approx([831, 329, 977, 350], abs=2)
+    # below the feeds' top controls, the mark's ink ends above y 0.183
+    assert g["ink"][1] / 1920 > 0.105 and g["ink"][3] / 1920 <= 0.1825
+    # the same drawing as v6 (only the place moved): the v6 corner, kept for
+    # legacy layouts, is the v6 geometry to the pixel
+    c = renderer.watermark_geometry(1080, 1920, renderer.WATERMARK_CORNER)
+    assert c["ink"] == pytest.approx([610, 115, 972, 225], abs=2)
+    assert [c["ink"][2] - c["ink"][0], c["ink"][3] - c["ink"][1]] == \
+        [g["ink"][2] - g["ink"][0], g["ink"][3] - g["ink"][1]]
+
+
+@pytest.mark.parametrize("W,H", [(1080, 1920), (720, 1280), (1440, 2560)])
+def test_every_vertical_feed_size_takes_the_same_slot(W, H):
+    """The slot is a share of the frame, so a 720p, 1080p or 1440p final
+    puts the mark in the same place (within a pixel of rounding)."""
+    g = renderer.watermark_geometry(W, H)
+    assert g["top"] == round(H * 0.125)
+    assert W - g["right"] == round(W * 0.095)
+    assert g["ink"][1] == g["top"] and g["ink"][2] == g["right"]
+
+
+@pytest.mark.parametrize("W,H", [(1920, 1080), (1080, 1080), (1080, 1350)])
+def test_other_ratios_keep_the_v6_corner(W, H):
+    """No feed chrome over a 16:9, 1:1 or 4:5 picture: the corner stays."""
+    g = renderer.watermark_geometry(W, H)
+    assert g["top"] == max(10, round(H * 0.06))
+    assert W - g["right"] == max(10, round(min(W, H) * 0.10))
 
 
 @pytest.mark.parametrize("W,H", [(1080, 1920), (720, 1280), (1920, 1080), (1080, 1350)])

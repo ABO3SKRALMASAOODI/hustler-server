@@ -190,7 +190,7 @@ def add_hud(ctx, start=None, end=None, tl=None, tr=None, bl=None, br=None,
     try:
         mark = keepout.watermark_zone(W, H)
     except Exception:  # noqa: BLE001
-        mark = [0.55, 0.05, 0.91, 0.13]
+        mark = [0.559, 0.115, 0.915, 0.193]
     params = {"mark": [str(x) for x in mark]}
     for k, val in (("tl", tl), ("tr", tr), ("bl", bl), ("br", br),
                    ("colour", colour), ("accent", accent)):
