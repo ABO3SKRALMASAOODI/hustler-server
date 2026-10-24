@@ -190,6 +190,8 @@ HERO_CAPTION_LOOKS = ("stack", "lockup")
 # any other fx item is whole-window deliberate only when this short
 FX_WHOLE_TYPES = ("accent", "strobe", "junction")
 FX_WHOLE_S = 1.0
+# A band's yield to the cover or a hook fades in and out around its window.
+YIELD_FADE_S = .3
 BAND_EDGE_S = .65           # ...except at the band's very start or end:
                             # a graphic landing (leaving) this close to the
                             # headline's own edge takes the band from (to)
@@ -490,8 +492,18 @@ def plan(edl, index, *, W, H, fps, outro_s=0.0, want_wm=False,
                 import motion_layer
                 box = motion_layer._band_box(m, int(W), int(H))
             if box:
+                try:
+                    import motion_layer
+                    # where the band hands its zone to another title (the
+                    # cover, a hook): blank there by design
+                    yields = motion_layer.yield_windows(
+                        m, [x for x in edl.get("motion") or []
+                            if isinstance(x, dict)], int(W), int(H))
+                except Exception:  # noqa: BLE001 — judged without them
+                    yields = []
                 bands.append({"t0": float(m["start"]), "t1": float(m["end"]),
-                              "box": [float(v) for v in box], "id": m.get("id")})
+                              "box": [float(v) for v in box], "id": m.get("id"),
+                              "yields": [[float(a), float(b)] for a, b in yields]})
     except Exception:
         bands = []
     wm = None
@@ -1499,16 +1511,39 @@ def band_ink(path, band, W, H, deadline, fps=None):
     return out
 
 
-def band_gaps(ink, fps=30.0):
+def band_gaps(ink, fps=30.0, yields=()):
     """[(t0, t1)] runs of frames with no ink (under BAND_INK) longer than
     BAND_EMPTY_S — the headline band standing empty. A run at the band's
     very start or end under BAND_EDGE_S is the headline's own yield to a
     graphic landing (leaving) at its edge (motion_layer.yield_windows: a
-    headline shown for a moment there is a flash), not a dropped layer."""
+    headline shown for a moment there is a flash), not a dropped layer;
+    so is any part of a run inside one of its ``yields`` windows (padded by
+    YIELD_FADE_S for the fades): the band handing its zone to the cover or
+    a hook. CHM 2013 run (23 Oct 2026, jobs 101986, 102023, 102095): a
+    band under the cover headline read EMPTY HEADLINE BAND 0.23-1.17 s and
+    2.20-2.47 s while it yielded to the cover by design."""
     out, run = [], None
     step = 1.0 / float(fps or 30.0)
     first = ink[0][0] if ink else 0.0
     last = ink[-1][0] if ink else 0.0
+    held = sorted([float(a) - YIELD_FADE_S, float(b) + YIELD_FADE_S]
+                  for a, b in yields or ())
+
+    def outside(a, b):
+        """Parts of [a, b) no yield window covers."""
+        parts = [[a, b]]
+        for y0, y1 in held:
+            nxt = []
+            for p0, p1 in parts:
+                if y1 <= p0 or y0 >= p1:
+                    nxt.append([p0, p1])
+                    continue
+                if p0 < y0:
+                    nxt.append([p0, y0])
+                if y1 < p1:
+                    nxt.append([y1, p1])
+            parts = nxt
+        return parts
 
     def close(r):
         if not r:
@@ -1519,7 +1554,9 @@ def band_gaps(ink, fps=30.0):
         if length < BAND_EDGE_S and (r[0] <= first + 1e-6
                                      or r[1] >= last - 1e-6):
             return
-        out.append((round(r[0], 2), round(r[1] + step, 2)))
+        for a, b in outside(r[0], r[1] + step):
+            if b - a > BAND_EMPTY_S + 1e-6:
+                out.append((round(a, 2), round(b, 2)))
     for t, share in ink or []:
         if share < BAND_INK:
             run = [run[0], t] if run else [t, t]
@@ -2653,7 +2690,8 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
         for band in plan_.get("bands") or []:
             try:
                 res["band"] += [list(g) + [band.get("id")] for g in band_gaps(
-                    band_ink(path, band, W, H, deadline, fps), fps)]
+                    band_ink(path, band, W, H, deadline, fps), fps,
+                    band.get("yields") or ())]
             except Exception as exc:
                 res["skipped"].append(f"band: {str(exc)[:80]}")
     else:
@@ -3044,15 +3082,30 @@ def _owns_ratio():
 def unshown_line(res):
     """The blocking caption line: heard words no caption and no graphic
     shows ('' when every heard word reaches the screen)."""
-    gaps = (res or {}).get("unshown") or []
-    if not gaps:
+    rows = (res or {}).get("unshown") or []
+    if not rows:
         return ""
-    shown = "; ".join(
-        f"{g['start']:.2f}-{g['end']:.2f}s \"{g['said']}\" ({g['cause']}: "
-        f"{g['fix']})" for g in gaps[:4])
-    more = f" (+{len(gaps) - 4} more)" if len(gaps) > 4 else ""
-    return (f"WORDS HEARD BUT NEVER SHOWN (blocking: every heard word reaches "
-            f"the screen once): {len(gaps)} span(s) — {shown}{more}")
+    # a hidden negation leads (caption_carry.hidden_negations): the screen
+    # says the opposite of what was said — the owner's faithful-claims rule
+    negs = [g for g in rows if g.get("negation_hidden")]
+    gaps = [g for g in rows if not g.get("negation_hidden")]
+    out = []
+    if negs:
+        out.append(
+            "NEGATION HIDDEN (blocking: faithful claims): " + "; ".join(
+                f"{g['start']:.2f}-{g['end']:.2f}s said \"{g['said']}\" but "
+                f"the screen shows \"{g['reads']}\" without '{g['negation']}' "
+                f"({g['cause'].split(' — ', 1)[-1]}: {g['fix']})"
+                for g in negs[:3]))
+    if gaps:
+        shown = "; ".join(
+            f"{g['start']:.2f}-{g['end']:.2f}s \"{g['said']}\" ({g['cause']}: "
+            f"{g['fix']})" for g in gaps[:4])
+        more = f" (+{len(gaps) - 4} more)" if len(gaps) > 4 else ""
+        out.append(f"WORDS HEARD BUT NEVER SHOWN (blocking: every heard word "
+                   f"reaches the screen once): {len(gaps)} span(s) — "
+                   f"{shown}{more}")
+    return " ".join(out)
 
 
 def measures_line(res):

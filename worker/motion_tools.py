@@ -3113,7 +3113,16 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             motion_templates.spec(hit["template"]), params, allow_face_overlap)
     except ValueError:
         pass
-    merged = dict(hit.get("params") or {}) if template is None else {}
+    # replace_params is apply_edit_batch's upsert switch (72627d0b), and
+    # editors pass it here inside params: 'phrase_build has no parameter(s)
+    # ['replace_params']' (2 refusals on 23-24 Oct, last job 104970). True
+    # replaces the whole set, as there; false is this tool's own merge.
+    replace = False
+    if isinstance(params, dict) and "replace_params" in params:
+        params = dict(params)
+        replace = bool(params.pop("replace_params"))
+    merged = dict(hit.get("params") or {}) if template is None and not replace \
+        else {}
     merged.update(params or {})
     if html is not None:
         hit["html"] = html

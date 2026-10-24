@@ -2257,17 +2257,66 @@ def _on_screen(edl, tl):
     return out
 
 
-def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
+def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S, vis=None):
     """Spoken spans longer than ``min_gap`` that neither a caption nor an
     on-screen graphic/text shows. [{start, end, duration_s, said, cause,
     owner, fix}] in program order; [] when captions are not transcript
-    captions (no caption track is a separate, louder finding)."""
+    captions (no caption track is a separate, louder finding). ``vis`` is
+    a _visibility reading already made for this EDL."""
+    v = vis if vis is not None else _visibility(edl, index, tl)
+    if v is None:
+        return []
+    spoken, shown, carried, room, screen = (
+        v["spoken"], v["shown"], v["carried"], v["room"], v["screen"])
+    kept_under, hooks, toks = v["kept_under"], v["hooks"], v["toks"]
+    key = said_key
+    state = []                         # covered / neutral / uncovered per word
+    for w, ts in zip(spoken, toks):
+        k = key(w)
+        mid = _mid(w)
+        on = [lab for s, e, tset, lab in screen if s <= mid <= e and tset & set(ts)]
+        content = any(is_content(t) for t in ts)
+        if (k in shown and k not in kept_under) or k in carried or (on and content) or \
+                any(s <= mid <= e for s, e in hooks):
+            state.append("covered")
+        elif not content:
+            state.append("neutral")
+        else:
+            state.append("uncovered")
+    gaps, run = [], []
+
+    def flush():
+        hard = [i for i in run if state[i] == "uncovered"]
+        if hard:
+            a, b = spoken[hard[0]], spoken[hard[-1]]
+            dur = float(b["t1"]) - float(a["t0"])
+            if dur > min_gap:
+                gaps.append(_gap(edl, spoken, hard[0], hard[-1], dur, room, key))
+    for i, st in enumerate(state):
+        if run and (st == "covered" or
+                    float(spoken[i]["t0"]) - float(spoken[run[-1]]["t1"]) >
+                    max(min_gap, SOUND_OFF_GAP_S)):
+            flush()
+            run = []
+        if st != "covered":
+            run.append(i)
+    flush()
+    return gaps
+
+
+def _visibility(edl, index, tl):
+    """What the screen shows of the heard words: the kept programme's
+    spoken words (set_volume-silenced ones dropped), their comparison
+    tokens, the said keys the captions show, the ones a graphic carries,
+    the ones muted for want of room (owner, why), the ones kept under a
+    graphic that draws over them, the on-screen text labels and the
+    hook-zone windows. None when captions are not transcript captions."""
     import captions as caplib
     caps = edl.get("captions")
     if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript"):
-        return []
+        return None
     if not (index or {}).get("words"):
-        return []
+        return None
     spoken = caplib.transcript_words(edl, index, tl)
     duck = audit.ducked_spans(edl)
     if duck:
@@ -2303,45 +2352,193 @@ def sound_off_gaps(edl, index, tl, min_gap=SOUND_OFF_GAP_S):
     # what is said under it is the hook's moment, not a lost caption
     hooks = caplib.hook_zone_spans(edl)
     toks = _token_rows([w.get("w") for w in spoken])
-    state = []                         # covered / neutral / uncovered per word
-    for w, ts in zip(spoken, toks):
-        k = key(w)
-        mid = _mid(w)
-        on = [lab for s, e, tset, lab in screen if s <= mid <= e and tset & set(ts)]
-        content = any(is_content(t) for t in ts)
-        if (k in shown and k not in kept_under) or k in carried or (on and content) or \
-                any(s <= mid <= e for s, e in hooks):
-            state.append("covered")
-        elif not content:
-            state.append("neutral")
-        else:
-            state.append("uncovered")
-    gaps, run = [], []
-
-    def flush():
-        hard = [i for i in run if state[i] == "uncovered"]
-        if hard:
-            a, b = spoken[hard[0]], spoken[hard[-1]]
-            dur = float(b["t1"]) - float(a["t0"])
-            if dur > min_gap:
-                gaps.append(_gap(edl, spoken, hard[0], hard[-1], dur, room, key))
-    for i, st in enumerate(state):
-        if run and (st == "covered" or
-                    float(spoken[i]["t0"]) - float(spoken[run[-1]]["t1"]) >
-                    max(min_gap, SOUND_OFF_GAP_S)):
-            flush()
-            run = []
-        if st != "covered":
-            run.append(i)
-    flush()
-    return gaps
+    return {"spoken": spoken, "toks": toks, "shown": shown,
+            "carried": carried, "room": room, "kept_under": kept_under,
+            "screen": screen, "hooks": hooks}
 
 
 def heard_unshown(edl, index, tl):
     """Every heard content word no caption and no graphic or text shows,
     however short the run (the owner's rule: every heard word reaches the
-    screen once) — sound_off_gaps with no minimum length."""
-    return sound_off_gaps(edl, index, tl, min_gap=0.0)
+    screen once) — sound_off_gaps with no minimum length — led by every
+    hidden negation (hidden_negations), which replaces a run it falls in."""
+    v = _visibility(edl, index, tl)
+    if v is None:
+        return []
+    gaps = sound_off_gaps(edl, index, tl, min_gap=0.0, vis=v)
+    try:
+        negs = hidden_negations(edl, index, tl, vis=v)
+    except Exception:  # noqa: BLE001 — the sound-off reading stands
+        negs = []
+    if not negs:
+        return gaps
+    at = [n["at"] for n in negs]
+    return negs + [g for g in gaps if not any(
+        g["start"] - 0.01 <= t <= g["end"] + 0.01 for t in at)]
+
+
+# ── faithful claims: a hidden negation ───────────────────────────────────
+# A negation the captions do not show, in a sentence whose other words do
+# reach the screen, shows the opposite of what was said. CHM 2013 run
+# (23 Oct 2026, s09 project 4505 EDL v31): the hook-tier slam 'FAILURE IS
+# *BAD*' owned the captions 0-2.18 s, so 'Um, I don't think' was muted and
+# the first caption after it read "it's good." for "I don't think it's
+# good". audit_captions, the CAPTION CHECK and critique_short all passed it:
+# words under a hook zone count as the hook's moment, and 'not' / 'no' are
+# function words the sound-off reading never reports.
+NEGATION_WORDS = frozenset((
+    "not no never nothing nobody none neither nor cannot nowhere without "
+    "dont doesnt didnt isnt arent wasnt werent cant couldnt wont wouldnt "
+    "shouldnt hasnt havent hadnt aint mustnt").split())
+# Words this far apart are two sentences even with no stop between them.
+SENTENCE_GAP_S = 0.8
+# A negation governs the next few words: a shown run starting further on
+# is another part of the sentence.
+NEGATION_REACH = 3
+_STOP_RE = re.compile(r"[.?!…]+[\"”')\]]*$")
+_PUNCT_END_RE = re.compile(r"[,.;:!?…]+[\"”')\]]*$")
+
+
+def is_negation(raw, tok):
+    """Is comparison token ``tok`` (of the spoken word ``raw``) a negation?
+    'No,' / 'No.' answering a question is not: the claim after it stands."""
+    t = str(tok or "").replace("’", "'")
+    if t.endswith("n't"):
+        return True
+    if t == "no":
+        return not _PUNCT_END_RE.search(str(raw or "").strip())
+    return t in NEGATION_WORDS
+
+
+def _sentences(spoken):
+    out, cur = [], []
+    for i, w in enumerate(spoken):
+        if cur:
+            prev = spoken[cur[-1]]
+            if _STOP_RE.search(str(prev.get("w") or "").strip()) or \
+                    float(w["t0"]) - float(prev["t1"]) > SENTENCE_GAP_S:
+                out.append(cur)
+                cur = []
+        cur.append(i)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _negation_cause(edl, mid, k, v, sent_t0, first_word):
+    """(cause, owner, fix) for a negation hidden at program second ``mid``."""
+    import captions as caplib
+    for m in edl.get("motion") or []:
+        if not caplib.hook_owns_zone(m):
+            continue
+        try:
+            s, e = float(m["start"]), float(m["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if s <= mid <= e:
+            owner = m.get("id")
+            lead = round(sent_t0 - 0.02, 2)
+            if lead >= OPENING_TITLE_MIN_S:
+                fix = (f"end '{owner}' at {lead:.2f}s, before '{first_word}' "
+                       "(the whole sentence then captions), or set "
+                       f"mute_captions=false on '{owner}' so it hides only "
+                       "the words it shows")
+            else:
+                fix = (f"set mute_captions=false on '{owner}' so it hides only "
+                       "the words it shows, or put the negation in its text")
+            return (f"{m.get('template')} '{owner}' owns the captions "
+                    f"{s:g}-{e:g}s (a hook-tier opening title)", owner, fix)
+    for t in edl.get("texts") or []:
+        try:
+            inside = float(t["start"]) <= mid <= float(t["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if inside and t.get("mute_captions"):
+            return (f"text '{t.get('id')}' mutes the captions", t.get("id"),
+                    f"set '{t.get('id')}' mute_captions=false, or put the "
+                    "negation on it")
+    for m0, m1 in edl.get("caption_mutes") or []:
+        try:
+            if float(m0) <= mid <= float(m1):
+                return (f"set_caption_mutes window {float(m0):g}-{float(m1):g}s",
+                        None, f"end that caption mute before {sent_t0:.2f}s "
+                              f"('{first_word}'), or remove it")
+        except (TypeError, ValueError):
+            continue
+    if k in v["room"]:
+        owner, _why = v["room"][k]
+        return (f"motion graphic '{owner}' leaves no caption band clear of it",
+                owner, f"carry the negation on '{owner}' or move '{owner}' off "
+                       "the caption band")
+    return ("no caption shows it", None, "caption the whole sentence")
+
+
+# A hook may be shortened to end before the sentence only when it still
+# reads (the opening title's minimum).
+OPENING_TITLE_MIN_S = 0.8
+
+
+def hidden_negations(edl, index, tl, vis=None):
+    """Negations heard but not shown while the rest of their sentence is:
+    [{start, end, duration_s, at, said, reads, negation, cause, owner, fix,
+    negation_hidden: True}] in program order — the heard_unshown shape, so
+    the CAPTION CHECK, audit_captions and the verification all carry it.
+    A hook zone does not cover a negation: what reaches the screen of its
+    sentence is a claim, and without the negation it is the opposite one."""
+    v = vis if vis is not None else _visibility(edl, index, tl)
+    if v is None:
+        return []
+    spoken, toks = v["spoken"], v["toks"]
+    key = said_key
+
+    def visible(i):
+        k = key(spoken[i])
+        if (k in v["shown"] and k not in v["kept_under"]) or k in v["carried"]:
+            return True
+        mid, ts = _mid(spoken[i]), set(toks[i])
+        return any(s <= mid <= e and tset & ts for s, e, tset, _l in v["screen"])
+
+    out = []
+    for sent in _sentences(spoken):
+        vis = {i: visible(i) for i in sent}
+        for j, i in enumerate(sent):
+            w = spoken[i]
+            neg = next((t for t in toks[i] if is_negation(w.get("w"), t)), None)
+            if neg is None or vis[i]:
+                continue
+            # the claim the screen shows: what follows the negation inside
+            # its reach (NEGATION_REACH words), two words or more with a
+            # content word ('it's good'). A lone word at a cover's edge, or
+            # the far end of a long sentence ('... on the Internet'), is a
+            # fragment, not the opposite claim.
+            after = [x for x in sent[j + 1:] if vis[x]]
+            if not after or sent.index(after[0]) - j > NEGATION_REACH or \
+                    len(after) < 2 or not any(
+                        is_content(t) for x in after for t in toks[x]):
+                continue
+            first = spoken[sent[0]]
+            cause, owner, fix = _negation_cause(
+                edl, _mid(w), key(w), v, float(first["t0"]),
+                _said([first]))
+            # the stretch around the negation, not a whole long sentence
+            win = sent[max(0, j - 4):j + NEGATION_REACH + 6]
+            lead_dots = "…" if win[0] != sent[0] else ""
+            tail_dots = "…" if win[-1] != sent[-1] else ""
+            reads = lead_dots + _said([spoken[x] for x in win if vis[x]]) + tail_dots
+            said = lead_dots + _said([spoken[x] for x in win]) + tail_dots
+            word = _said([w])
+            out.append({
+                "start": round(float(first["t0"]), 2),
+                "end": round(float(spoken[sent[-1]]["t1"]), 2),
+                "duration_s": round(float(w["t1"]) - float(w["t0"]), 2),
+                "at": round(_mid(w), 2), "said": said[:120], "reads": reads[:120],
+                "negation": word, "owner": owner, "negation_hidden": True,
+                "cause": (f"NEGATION HIDDEN: '{word}' is not shown but "
+                          f"\"{reads}\" is, so the screen says the opposite "
+                          f"— {cause}"),
+                "fix": fix})
+            break                      # one finding per sentence
+    return out
 
 
 def _gap(edl, spoken, i0, i1, dur, room, key):

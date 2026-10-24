@@ -2256,6 +2256,21 @@ def _t_upload_finish(tok, args):
     if status >= 400:
         return _session_error(
             f"Upload could not be finished: {payload.get('error')}")
+    repaired = payload.get("parts_repaired") or []
+    if repaired:
+        # a copy slip in the parts list, completed from storage's own ETags
+        # (storage.finish_multipart): said once, then the usual answer
+        note = (f"Note: the ETag listed for part(s) "
+                f"{', '.join(map(str, repaired[:20]))} did not match the one "
+                "storage computed when that part was PUT; the parts list "
+                "named exactly the parts storage holds, so the upload was "
+                "assembled from storage's own ETags (the bytes you sent).\n")
+        answer = _t_upload_finish_answer(payload, role)
+        return note + answer if isinstance(answer, str) else answer
+    return _t_upload_finish_answer(payload, role)
+
+
+def _t_upload_finish_answer(payload, role):
     if payload.get("index_job_state") == "failed":
         return _session_error(
             f"Upload is saved (asset {payload['asset_id']}), but analysis "

@@ -1854,6 +1854,37 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
     return result, 200
 
 
+def _finish_multipart(user_id, project_id, key, upload_id, parts, detail,
+                      repaired_out=None):
+    """Complete a multipart upload through storage.finish_multipart, which
+    never aborts it. None when the object is assembled (now, or by an
+    earlier complete this call retries); otherwise the (payload, 400) to
+    answer, which says how to retry with the same upload_id or, when the
+    id is gone, that a new upload_start is needed."""
+    res = storage.finish_multipart(key, upload_id, parts)
+    if res.get("ok"):
+        if res.get("repaired"):
+            if repaired_out is not None:
+                repaired_out.extend(res["repaired"])
+            record_client_event(user_id, project_id, "upload_parts_repaired",
+                                detail={**detail,
+                                        "parts": res["repaired"][:50]},
+                                origin="server")
+        return None
+    if storage.head_bytes(key) is not None:
+        return None                      # a retry of a complete that landed
+    text = storage.finish_failure_text(res)
+    record_client_event(user_id, project_id, "upload_failed",
+                        detail={**detail, "reason": text[:300],
+                                "code": res.get("code"),
+                                "kept": not res.get("gone")},
+                        origin="server")
+    return ({"error": f"Upload could not be finalized: {text}",
+             "upload_kept": not res.get("gone"),
+             "missing_parts": res.get("missing") or [],
+             "unlisted_parts": res.get("unlisted") or []}, 400)
+
+
 def complete_upload_core(user_id, project_id, data):
     """Turn a finished direct-to-storage upload into an asset (+ an index job
     for a main video). Returns (payload_dict, http_status).
@@ -1897,17 +1928,11 @@ def complete_upload_core(user_id, project_id, data):
             if not _project_for_user(conn.cursor(), project_id, user_id):
                 return {"error": "Project not found"}, 404
         if upload_id:
-            try:
-                storage.complete_multipart(key, upload_id, parts)
-            except Exception as e:
-                if storage.head_bytes(key) is None:
-                    storage.abort_multipart(key, upload_id)
-                    record_client_event(user_id, project_id, "upload_failed",
-                                        detail={"reason": str(e)[:300],
-                                                "kind": "proxy",
-                                                "stage": "complete_multipart"},
-                                        origin="server")
-                    return {"error": f"Upload could not be finalized: {e}"}, 400
+            failed = _finish_multipart(user_id, project_id, key, upload_id,
+                                       parts, {"kind": "proxy",
+                                               "stage": "complete_multipart"})
+            if failed:
+                return failed
         nbytes = storage.head_bytes(key)
         if nbytes is None:
             return {"error": "Prepared video not found in storage"}, 400
@@ -1984,21 +2009,18 @@ def complete_upload_core(user_id, project_id, data):
             user_id, project_id, key, filename, declared, client_proxy_key,
             proxy_bytes, data)
 
+    repaired_parts = []
     if upload_id:
-        try:
-            storage.complete_multipart(key, upload_id, parts)
-        except Exception as e:
-            # A retried complete can hit an already-consumed upload_id. If
-            # the assembled object EXISTS, the first complete succeeded and
-            # this is that retry — proceed. Only abort when it truly failed.
-            if storage.head_bytes(key) is None:
-                storage.abort_multipart(key, upload_id)
-                record_client_event(user_id, project_id, "upload_failed",
-                                    detail={"reason": str(e)[:300],
-                                            "filename": filename, "kind": kind,
-                                            "stage": "complete_multipart"},
-                                    origin="server")
-                return {"error": f"Upload could not be finalized: {e}"}, 400
+        # A retried complete can hit an already-consumed upload_id: when the
+        # assembled object EXISTS the first complete succeeded and this is
+        # that retry — proceed. A failure never aborts the upload (one
+        # mistyped ETag cost the CHM 2013 run a 437 MB re-upload).
+        failed = _finish_multipart(user_id, project_id, key, upload_id, parts,
+                                   {"filename": filename, "kind": kind,
+                                    "stage": "complete_multipart"},
+                                   repaired_out=repaired_parts)
+        if failed:
+            return failed
 
     nbytes = storage.head_bytes(key)
     if nbytes is None:
@@ -2122,6 +2144,8 @@ def complete_upload_core(user_id, project_id, data):
     }, origin="server")
     result = {"asset_id": asset_id, "index_job_id": job_id,
               "kind": asset_kind, "staged": staged}
+    if repaired_parts:
+        result["parts_repaired"] = repaired_parts
     if message_id is not None:
         result.update(_upload_subscription_payload(asset_id, message_id))
         record_client_event(
@@ -2607,18 +2631,11 @@ def original_upload_ready(user_id, project_id):
         key = a["storage_key"]
 
     if upload_id:
-        try:
-            storage.complete_multipart(key, upload_id, parts)
-        except Exception as e:
-            if storage.head_bytes(key) is None:
-                storage.abort_multipart(key, upload_id)
-                record_client_event(user_id, project_id, "upload_failed",
-                                    detail={"reason": str(e)[:300],
-                                            "kind": "original",
-                                            "stage": "original_ready"},
-                                    origin="server")
-                return jsonify({"error": f"Upload could not be finalized: {e}"
-                                }), 400
+        failed = _finish_multipart(user_id, project_id, key, upload_id, parts,
+                                   {"kind": "original",
+                                    "stage": "original_ready"})
+        if failed:
+            return jsonify(failed[0]), failed[1]
 
     nbytes = storage.head_bytes(key)
     if nbytes is None:
@@ -6336,6 +6353,10 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       # traffic the direct path is broken for a population, and
                       # this count is how that becomes visible.
                       "upload_relayed",
+                      # A multipart complete whose parts list carried a
+                      # mistyped ETag, completed from storage's own ETags
+                      # (storage.finish_multipart) instead of aborted.
+                      "upload_parts_repaired",
                       # Mid-transfer, the measured link was so slow the studio
                       # switched to building + sending a 540p proxy instead of
                       # making the user wait out the original (round 70 — a

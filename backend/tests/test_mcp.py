@@ -618,6 +618,23 @@ def test_upload_finish_passes_reference_metadata_and_says_it_is_not_media(
     assert "or offered as placeable media" in body
 
 
+def test_upload_finish_names_the_parts_whose_etag_slipped(client, monkeypatch):
+    # CHM 2013 run (23 Oct 2026): one mistyped ETag destroyed a 437 MB
+    # upload; storage.finish_multipart now completes from storage's ETags
+    monkeypatch.setattr(
+        mcpmod, "complete_upload_core",
+        lambda *a: ({"asset_id": 31607, "index_job_id": 95806,
+                     "kind": "original", "parts_repaired": [7]}, 200))
+    body = text_of(rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_finish",
+        "arguments": {"project_id": 3, "storage_key": "originals/3/talk.mp4",
+                      "upload_id": "u1",
+                      "parts": [{"part_number": 1, "etag": "e1"}]},
+    }))
+    assert "part(s) 7 did not match" in body
+    assert "Uploaded (asset 31607). Analysis queued as job 95806" in body
+
+
 def test_create_podcast_shorts_project_persists_its_kind(client):
     body = text_of(rpc(client, "tools/call", STATIC_TOKEN,
                        {"name": "create_project",

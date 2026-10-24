@@ -66,7 +66,9 @@ corner mark: branding is checked on the final. Then answer:
 4. **Attention:** with the famous name hidden, is the idea still worth
    finishing?
 5. **Clean:** faithful claims and qualifiers, accurate readable captions
-   (none muted over a punchline's setup), speakers named (in the kicker or
+   (none muted over a punchline's setup, and never a negation hidden while
+   the rest of its sentence shows: read the first caption after the hook or
+   cover against the heard line; NEGATION HIDDEN is blocking), speakers named (in the kicker or
    headline band, no broadcast lower third over a famous face), graphics
    that mean what is said and each add what the captions cannot (about one
    per 6-8 s at most, under ~50% of the runtime, at most 3 type roles and

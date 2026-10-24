@@ -453,6 +453,145 @@ def complete_multipart(key, upload_id, parts):
     )
 
 
+def error_code(exc):
+    """The S3 error code of a botocore ClientError ('InvalidPart',
+    'NoSuchUpload', ...), or None for anything else (a timeout, a reset)."""
+    try:
+        return str(exc.response["Error"]["Code"])
+    except (AttributeError, KeyError, TypeError):
+        return None
+
+
+def list_parts(key, upload_id):
+    """[{part_number, etag, size}] of the parts storage holds for an open
+    multipart upload, in part order (every page). Raises like the client
+    does, NoSuchUpload included, when the upload id is gone."""
+    c = client()
+    out, marker = [], None
+    for _page in range(20):                 # 10,000 parts at most
+        kw = {"Bucket": bucket(), "Key": key, "UploadId": upload_id,
+              "MaxParts": 1000}
+        if marker:
+            kw["PartNumberMarker"] = marker
+        page = c.list_parts(**kw)
+        for p in page.get("Parts") or []:
+            out.append({"part_number": int(p["PartNumber"]),
+                        "etag": str(p.get("ETag") or ""),
+                        "size": int(p.get("Size") or 0)})
+        marker = page.get("NextPartNumberMarker")
+        if not page.get("IsTruncated") or not marker:
+            break
+    return sorted(out, key=lambda p: p["part_number"])
+
+
+def _etag(value):
+    return str(value or "").strip().strip('"').lower()
+
+
+# Errors the caller repairs with the SAME upload id: a mistyped or stale
+# ETag, a part list out of order or missing a part. Storage keeps every
+# uploaded part until the upload is completed or aborted, so none of them
+# is a reason to throw the parts away.
+REPAIRABLE_COMPLETE_ERRORS = frozenset((
+    "InvalidPart", "InvalidPartOrder", "EntityTooSmall", "MalformedXML"))
+
+
+def finish_multipart(key, upload_id, parts):
+    """Complete a multipart upload WITHOUT ever aborting it (CHM 2013 run,
+    23 Oct 2026: one mistyped ETag in a 16-part, 437 MB upload_finish
+    answered InvalidPart, the failure path aborted the upload, the retry
+    with the corrected list answered NoSuchUpload and every part was PUT
+    again). Returns a dict:
+
+    - {"ok": True, "repaired": [n, ...]}: completed. ``repaired`` names the
+      parts whose listed ETag did not match the one storage computed when
+      that part was PUT (a copy slip): the list named exactly the parts
+      storage holds, so the upload is completed from storage's own ETags
+      — the bytes are the ones the caller sent either way.
+    - {"ok": False, "gone": True, ...}: the upload id no longer exists
+      (completed already, aborted, or expired) — only a new upload_start
+      helps, unless the object is already assembled (the caller checks).
+    - {"ok": False, "gone": False, "missing": [...], "unlisted": [...],
+      "stored": n, ...}: the upload is kept with every part it holds; the
+      message says what to PUT or list and the retry uses the same
+      upload_id.
+
+    An incomplete upload left behind costs storage until the bucket's
+    lifecycle rule clears it; aborting one cost the whole transfer."""
+    try:
+        complete_multipart(key, upload_id, parts)
+        return {"ok": True, "repaired": []}
+    except Exception as exc:  # noqa: BLE001 — classified below
+        first = exc
+    code = error_code(first)
+    if code == "NoSuchUpload":
+        return {"ok": False, "gone": True, "code": code,
+                "message": str(first)[:300]}
+    try:
+        stored = list_parts(key, upload_id)
+    except Exception as exc:  # noqa: BLE001
+        if error_code(exc) == "NoSuchUpload":
+            return {"ok": False, "gone": True, "code": code or "NoSuchUpload",
+                    "message": str(first)[:300]}
+        return {"ok": False, "gone": False, "code": code,
+                "message": str(first)[:300], "missing": [], "unlisted": [],
+                "stored": None}
+    have = {p["part_number"]: p for p in stored}
+    sent = {}
+    for p in parts or []:
+        try:
+            sent[int(p["part_number"])] = p.get("etag")
+        except (KeyError, TypeError, ValueError):
+            continue
+    missing = sorted(set(sent) - set(have))
+    unlisted = sorted(set(have) - set(sent))
+    if have and not missing and not unlisted and \
+            sorted(have) == list(range(1, len(have) + 1)):
+        repaired = sorted(n for n, tag in sent.items()
+                          if _etag(tag) != _etag(have[n]["etag"]))
+        try:
+            complete_multipart(key, upload_id, [
+                {"part_number": n, "etag": have[n]["etag"]}
+                for n in sorted(have)])
+            return {"ok": True, "repaired": repaired}
+        except Exception as exc:  # noqa: BLE001
+            first, code = exc, error_code(exc) or code
+    return {"ok": False, "gone": False, "code": code,
+            "message": str(first)[:300], "missing": missing,
+            "unlisted": unlisted, "stored": len(have),
+            "gaps": sorted(set(range(1, max(set(have) | set(sent) or {0}) + 1))
+                           - set(have))}
+
+
+def finish_failure_text(res):
+    """One sentence for a finish_multipart failure: what happened and the
+    retry that works."""
+    if res.get("gone"):
+        return ("the multipart upload id no longer exists (it was completed, "
+                "aborted or expired): start a new upload with upload_start "
+                f"({res.get('code') or 'NoSuchUpload'})")
+    bits = []
+    if res.get("missing"):
+        bits.append("storage holds no upload for part(s) "
+                    + ", ".join(map(str, res["missing"][:20]))
+                    + " — PUT them to their URLs from upload_start")
+    gaps = [n for n in res.get("gaps") or [] if n not in (res.get("missing") or [])]
+    if gaps:
+        bits.append("part(s) " + ", ".join(map(str, gaps[:20]))
+                    + " were never uploaded — PUT them")
+    if res.get("unlisted"):
+        bits.append("part(s) " + ", ".join(map(str, res["unlisted"][:20]))
+                    + " are uploaded but missing from the parts list — "
+                      "list every part")
+    held = (f"the upload is KEPT with the {res['stored']} part(s) storage "
+            "holds" if res.get("stored") is not None else "the upload is KEPT")
+    return (f"storage refused to assemble it ({res.get('code') or 'error'}: "
+            f"{res.get('message') or ''}); " + held
+            + ("; " + "; ".join(bits) if bits else "")
+            + " — then retry upload_finish with the SAME storage_key and "
+              "upload_id (no new upload_start)")
+
+
 def abort_multipart(key, upload_id):
     try:
         client().abort_multipart_upload(

@@ -122,8 +122,13 @@ designed beats, camera, transitions and sound. If you must re-cut later,
 the cutaways (`add_overlay`), `add_text` callouts, vector graphics
 (`add_vector_graphic`), motion graphics, cards and sounds follow the words
 they were cued to (the keep tool's notes say
-where each moved; one held over the whole short keeps the short): read
-those notes and recheck the card's end, no hand re-timing.
+where each moved; one held over the whole short keeps the short; a card,
+graphic or cutaway that opened the short still opens it, and the cover
+headline keeps frame 0 even when the footage under it is cut): read
+those notes and recheck the card's end, no hand re-timing. `apply_edit_batch`
+is the exception: its times describe the resulting timeline, so a batch
+that sets `keep` moves nothing it does not name — re-cut with
+`keep_segments` / `cut_range` / `restore_range` when the rest should follow.
 
 | Step | Calls | Notes |
 | --- | --- | --- |
@@ -260,7 +265,12 @@ unacknowledged one).
 3. `audit_captions` once (heard-but-unshown words are defects, not
    advisories; so is a word shown twice, `doubled_words`, and read every
    caption line for ASR nonsense such as 'at service' for 'sea level' —
-   no check catches that, fix it with `set_caption_fixes`) and
+   no check catches that, fix it with `set_caption_fixes`; a NEGATION
+   HIDDEN line is blocking: a hook, cover, mute or graphic hid 'don't' /
+   'not' / 'no one' while the rest of the sentence reached the screen, so
+   it reads as the opposite claim — CHM run s09 showed "it's good." for "I
+   don't think it's good"; apply its fix, usually ending the hook before
+   the sentence) and
    `audit_audio_mix`; read the render's warnings. For WHICH
    words are audible, or an "um" or half a word the transcript lacks at a
    join, use `check_speech` (program seconds; up to 60 s, so one call reads
@@ -358,6 +368,7 @@ slot. A `blocked` handback is recorded the same way, its first line
 | a tool's schema in YOUR client lacks a parameter these docs name (e.g. `set_picture_card` `source`/`panels`/`follow`, `add_freeze_frame` audio_mode 'hold') | the cached schema is old; the server has them. `expand_toolset(describe=['set_picture_card'])` shows the current arguments; pass the parameter anyway, or make the call through `expand_toolset(call={...})` |
 | a close-up face fills the card to its foot: no room under the chin for the captions at your `anchor_y`, and a graphic holds the canvas around the card | the captions keep the anchor (pages of one line in the card's column) and the render and `audit_captions` name it, CAPTIONS ON THE MEASURED FACE; leave ~0.06 of the frame between the chin and the card's bottom edge (a looser source rect, a smaller zoom) or set `anchor_y` below the card when a line fits between the card's foot and y 0.80 (the captions' safe foot: any anchor past it is laid at 0.80, so under a card that ends at ~0.795, as the call layout's does, the captions go inside the card, above its edge) |
 | a deliberate caption mute (a word the speaker swallows) is reported by the blocking CAPTION CHECK like any heard-but-unshown word | carry the word on a graphic, or keep the mute and say why in the handback |
+| a hook-tier title or the cover owns the captions for its window, so the words said under it are muted; a sentence that crosses its exit loses its start ("Um, I don't think" under the hook, "it's good." captioned after it) | the CAPTION CHECK, `audit_captions` and `critique_short` name it NEGATION HIDDEN (blocking) with the fix: end the hook just before the sentence (the op does it), set `mute_captions=false` on it, or put the negation in its text; write the hook from the line heard under it |
 | write-time size and position estimates for lockups (`word_slam`, `phrase_build`, the payoff) run up to 2-3x off the render | size the payoff and band lockups from render 1's MEASURES line, never on estimates (the `headline` claim alone is measured at write) |
 | a long single word in `word_slam` (SUPERINTELLIGENCE, SHAREHOLDERS) or a long `versus_split` label is width-bound: `width`/`size` cannot raise it past about 5-6% cap height (Earnings run, Oct 2026) | for a payoff that must be the largest lockup, use `role='condensed'` (about 45% taller at the same width), a shorter word, or a number with its noun ('*1,000x* / agents'); step the other lockups down rather than fighting the width |
 | MEASURES `captions 6.0% (largest line; their other lines read at 1.9%)` on a stack or lockup caption look | the reading size is the second number: under 2.5% is unreadable (`type_too_small`); raise `size_scale` |

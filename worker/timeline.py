@@ -801,6 +801,9 @@ def _cut_step_lost(z, ns, ne, old_tl, new_tl):
 # with the backend, which does not load the motion registry; a test keeps
 # the two in step.
 PINNED_MOTION_TEMPLATES = ("headline",)
+# Opening titles cued to frame 0 rather than to the words under them: the
+# cover headline (worker/cover.py). Named here for the same reason.
+OPENING_TITLE_TEMPLATES = ("cover_headline",)
 # An item ending this close to the programme's end ran to the end (a payoff,
 # the last card): after a re-cut it still ends on the new end.
 RUNS_TO_END_S = 0.05
@@ -1409,6 +1412,15 @@ def remap_program_items(edl, old_tl, new_tl):
                         f"note: picture card {card['id']} was removed — the "
                         "footage it was framed on is no longer in the edit.")
                     continue
+                if moved is not None and s0 <= RUNS_TO_END_S \
+                        and moved[0] > 0.0:
+                    # A card that opened the programme still opens it, like
+                    # a motion graphic or a cutaway that did: restoring
+                    # 0.05-0.34 s at the head moved the card to start there
+                    # and the first frames played full-frame (CHM 2013 run,
+                    # 23 Oct: 4508 v27 card1 0.05 s, v29 0.34 s, 4505 v19
+                    # 0.05 s: ORPHAN FRAMES; set by hand back to 0 each time).
+                    moved = (0.0, moved[1])
                 if moved is not None and moved != (s0, e0):
                     card["start"], card["end"] = moved
                     if card.get("full_duration_s") is not None:
@@ -1959,6 +1971,7 @@ def remap_program_items(edl, old_tl, new_tl):
         # cuts, like behind-subject text. Over spliced media they ride the
         # insert's shift; otherwise they clamp like vectors.
         kept_mo = []
+        cover_kept = []                 # (old end, new end) of a kept cover
         old_prog = round(old_tl.out_duration, 2)
         for mo in edl["motion"]:
             mo = dict(mo)
@@ -2026,6 +2039,23 @@ def remap_program_items(edl, old_tl, new_tl):
                 continue
             if on_footage:
                 moved = remap_program_span(old_tl, new_tl, s0, e0m)
+                if (moved is None or moved[1] - moved[0] < 0.3) and \
+                        mo.get("template") in OPENING_TITLE_TEMPLATES and \
+                        s0 <= RUNS_TO_END_S and prog - (e0 - s0) >= 0.3:
+                    # The cover headline is the short's title, cued to frame
+                    # 0, not to the words under it: cutting the head footage
+                    # it opened on keeps it opening the programme (CHM 2013
+                    # run, 23 Oct: cut_output_range on 4498 v38 -> v39
+                    # removed 'cover' and the band took frame 0).
+                    mo["start"], mo["end"] = 0.0, round(e0 - s0, 2)
+                    cover_kept.append((e0, mo["end"]))
+                    region_notes.append(
+                        f"note: motion graphic {mo.get('id')} "
+                        f"({mo.get('template')}) keeps the opening "
+                        f"0-{mo['end']:g}s — the footage it opened on was "
+                        "cut, and it is the short's title.")
+                    kept_mo.append(mo)
+                    continue
                 if moved is None or moved[1] - moved[0] < 0.3:
                     region_notes.append(
                         f"note: motion graphic {mo.get('id')} "
@@ -2072,6 +2102,18 @@ def remap_program_items(edl, old_tl, new_tl):
                     continue
                 mo["end"] = round(prog, 2)
             kept_mo.append(mo)
+        for old_end, new_end in cover_kept:
+            # the band that followed the cover still starts where it ends
+            for mo in kept_mo:
+                if mo.get("template") in PINNED_MOTION_TEMPLATES and \
+                        any(abs(float(o.get("start") or 0) - old_end) <= 0.05
+                            for o in edl["motion"] if o.get("id") == mo.get("id")) \
+                        and float(mo["start"]) < new_end and \
+                        float(mo["end"]) - new_end >= 0.3:
+                    mo["start"] = new_end
+                    region_notes.append(
+                        f"note: motion graphic {mo.get('id')} starts at "
+                        f"{new_end:g}s, where the cover ends.")
         edl["motion"] = kept_mo
     if edl.get("caption_mutes"):
         # CONTENT-anchored: a mute exists to keep captions off a particular

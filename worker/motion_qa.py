@@ -1433,7 +1433,13 @@ def audit(edl, index=None, *, intensity="designed", request_text=None,
                                         f"({payoff['t']:.2f}-"
                                         f"{payoff['hold_end']:.2f}s): let "
                                         "the payoff breathe"})
-        if not it.get("bind"):
+        if not it.get("bind") and edl.get("music"):
+            # Only a song swap re-times a device by its moment (a re-cut
+            # moves every fx item with its footage, bound or not, and a new
+            # aspect keeps its times). With no music
+            # the note was noise on every hand-written grade window (CHM
+            # 2013 run, 23 Oct: grey_old, grey_95, grey_crush,
+            # mono_roulette... on every short; editors logged it "expected").
             findings.append({"code": "unbound_device",
                              "severity": "advisory", "id": it["id"],
                              "message": f"{it['id']} is bound to no "

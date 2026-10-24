@@ -25,6 +25,9 @@ ROLES = ("payload", "number", "negation", "accent", "emotion", "quote",
 # Roles set at the hero rung of the ladder.
 HERO_ROLES = ("payload", "number", "negation", "accent", "profanity")
 _STAR = re.compile(r"\*([^*]+)\*")
+# Punctuation set outside a star pair: '"*no*', '*good*?', '*now*.'
+_LEAD_PUNCT = re.compile(r"^([\"'“‘(\[¿¡]+)(?=\*)")
+_TRAIL_PUNCT = re.compile(r"(?<=\*)([\"'”’.,!?;:…)\]%]+)$")
 _STRIP = "\"'“”‘’.,!?;:…()[]"
 
 
@@ -82,12 +85,25 @@ def tokens(text):
         word, star_any = "", False
         for k in g:
             raw = raws[k]
+            # punctuation outside a star pair belongs to the word: '*good*?'
+            # and '"*no*' (CHM 2013 run, 23 Oct: job 101975 drew the star
+            # of '*no*?' literally; the open star also starred every word
+            # after it)
+            lead = _LEAD_PUNCT.match(raw)
+            if lead and len(raw) > lead.end():
+                raw = raw[lead.end():]
+            trail = _TRAIL_PUNCT.search(raw)
+            if trail and trail.start() > 0:
+                raw = raw[:trail.start()]
             open_ = raw.startswith("*")
             close = raw.endswith("*") and len(raw) > 1
             if open_:
                 starred = True
             star_any = star_any or starred or (open_ and close)
-            word += raw.strip("*")
+            word += ((lead.group(1) if lead and len(raws[k]) > lead.end()
+                      else "") + raw.strip("*")
+                     + (trail.group(1) if trail and trail.start() > 0
+                        else ""))
             if close or (open_ and close):
                 starred = False
         if word:

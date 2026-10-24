@@ -22091,10 +22091,19 @@ def audit_captions(ctx, offset=0, limit=80):
                 f"{len(sound_off)} spoken span(s) over "
                 f"{caption_carry.SOUND_OFF_GAP_S:g}s have no caption and no graphic "
                 "showing them (sound_off_gaps)")
-        if len(unshown) > len(sound_off):
+        negations = [g for g in unshown if g.get("negation_hidden")]
+        for g in negations[:3]:
+            # blocking: the owner's faithful-claims rule (the verification's
+            # negation_hidden finding says the same)
             warnings.append(
-                f"{len(unshown)} heard span(s) never reach the screen, however short "
-                "(heard_unshown: every heard word should, once)")
+                f"NEGATION HIDDEN at {g['at']:.2f}s: said \"{g['said']}\" but the "
+                f"screen shows \"{g['reads']}\" without '{g['negation']}' — "
+                f"{g['fix']}")
+        if len(unshown) - len(negations) > len(sound_off):
+            warnings.append(
+                f"{len(unshown) - len(negations)} heard span(s) never reach the "
+                "screen, however short (heard_unshown: every heard word "
+                "should, once)")
     density_violations = [
         {"start": state["start"], "end": state["end"],
          "word_count": state["word_count"],
@@ -22217,6 +22226,7 @@ def audit_captions(ctx, offset=0, limit=80):
         "uncovered_word_count": len(uncovered),
         "sound_off_gaps": sound_off[:10],
         "heard_unshown": unshown[:20],
+        "negation_hidden": [g for g in unshown if g.get("negation_hidden")][:5],
         "graphic_text": graphic_text[:20],
         "captions_under_graphics": under_graphics[:10],
         "captions_unplaced": unplaced[:10],
@@ -25464,6 +25474,9 @@ _ARG_ALIASES = {
     "apply_look": {"look": "name"},
     "set_caption_fixes": {"fixes": "replacements",
                           "corrections": "replacements"},
+    # 23 Oct (jobs 99193, 99442): find_silences(min_duration=0.3)
+    "find_silences": {"min_duration": "min_seconds",
+                      "min_duration_s": "min_seconds"},
 }
 
 
@@ -25563,6 +25576,22 @@ def _argument_aliases(name, args, notes):
             args.pop("source")
             if flag:
                 notes.append("source=true -> times are source seconds")
+    # get_kept_transcript reads the whole kept programme; a window asked
+    # of it (jobs 100640, 101653) was refused before any work. The whole
+    # transcript answers it.
+    if name == "get_kept_transcript":
+        window = [k for k in ("start", "end") if k in args]
+        for k in window:
+            args.pop(k)
+        if window:
+            notes.append("start/end ignored: the whole kept transcript is "
+                         "returned (program seconds)")
+    # add_text names its own item (tx1, tx2, ...): add_text(id='tx_name')
+    # (job 99946) was refused before any work
+    if name == "add_text" and "id" in args:
+        args.pop("id")
+        notes.append("id ignored: add_text names the text item itself "
+                     "(the reply gives its id)")
     # remove_ui_scene(id='requests') (Earnings run 4574, job 99222) paid a
     # refusal the same way remove_typeset(id) once did
     if name in ("remove_typeset", "remove_ui_scene") and "ids" not in args \

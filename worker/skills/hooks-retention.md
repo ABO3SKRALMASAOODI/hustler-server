@@ -66,7 +66,10 @@ THE HOOK — 0 to 1.5 s:
   the captions wait until it exits, so the first seconds have one reading
   task. A headline band is the other way. Never hook type no bigger than
   the captions with the live caption fading in under it: two sentences at
-  once in the first second.
+  once in the first second. End it before a sentence that would cross its
+  exit: muting "I don't think" and captioning "it's good." after it shows
+  the opposite of what was said (NEGATION HIDDEN, blocking — its fix ends
+  the hook before the sentence).
 - THE COVER HEADLINE (some shorts, never every one): when the short's
   title is a strong curiosity title ("The ruthless focus of *Mark
   Zuckerberg*", "Why Thiel never hires from Harvard"), open on it as the

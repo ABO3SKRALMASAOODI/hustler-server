@@ -691,7 +691,8 @@ def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
         if prev and nxt:
             p = prev[-1]
             gap = float(nxt[0]["t0"]) - float(p["t1"])
-            if gap < 0.25 and not re.search(r"[.?!]$", str(p.get("w") or "")):
+            if gap < 0.25 and not re.search(r"[.?!]$", str(p.get("w") or "")) \
+                    and not _restarts(prev, nxt):
                 out.append(_f(
                     "fix", "words", "opens_mid_sentence",
                     f"the short opens on '{nxt[0].get('w')}' {gap:.2f}s after "
@@ -699,6 +700,7 @@ def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
                     "its start.",
                     fix="start on the sentence's first word, or open on a "
                         "line that stands alone", t=0.0))
+    out += _negation_findings(edl, index)
     pw = plan.get("words") or []
     if duck:
         # a word set_volume silences is not the last word heard
@@ -717,6 +719,53 @@ def lens_words(edl, index, plan, program_s, path=None, cut_level=None):
 # 0.6-1.2 s), and the margin kept before the source's next word.
 PAYOFF_TARGET_S = 0.8
 NEXT_WORD_MARGIN_S = 0.05
+
+
+def _word_key(w):
+    return re.sub(r"[^\w']", "", str((w or {}).get("w") or "")
+                  .replace("’", "'")).casefold()
+
+
+def _restarts(before, after):
+    """Does the short open on the speaker restarting the phrase said just
+    before the cut ('I think | I think failure is bad', 'Three | three
+    quite interesting')? The restart is where the sentence starts again:
+    no mid-sentence opening (CHM 2013 run, 23 Oct 2026: 4500 and 4505 were
+    told they open mid-sentence on such a restart)."""
+    a = [_word_key(w) for w in before[-3:]]
+    b = [_word_key(w) for w in after[:3]]
+    return any(len(a) >= k and len(b) >= k and a[-k:] == b[:k] and all(a[-k:])
+               for k in (3, 2, 1))
+
+
+def _negation_findings(edl, index):
+    """caption_carry.hidden_negations as critic findings: a negation the
+    screen drops while the rest of its sentence shows reads as the opposite
+    claim (CHM 2013, 4505 v31: "it's good." for "I don't think it's
+    good"). Where a hook-tier title's caption zone hides it and the hook
+    can end before the sentence, the op ends it there."""
+    try:
+        import caption_carry
+        import timeline as tl_mod
+        tl = tl_mod.Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                             edl.get("speed") or [])
+        negs = caption_carry.hidden_negations(edl, index, tl)
+    except Exception:  # noqa: BLE001 — a lens never breaks the critique
+        return []
+    out = []
+    for g in negs:
+        op = None
+        m = re.match(r"end '([^']+)' at ([0-9.]+)s", g.get("fix") or "")
+        if m and m.group(1) == g.get("owner"):
+            op = {"action": "upsert", "layer": "motion", "id": m.group(1),
+                  "value": {"id": m.group(1), "end": float(m.group(2))}}
+        out.append(_f(
+            "blocking", "words", "negation_hidden",
+            f"said \"{g['said']}\" but the screen shows \"{g['reads']}\" "
+            f"without '{g['negation']}': it reads as the opposite claim "
+            f"({g['cause'].split(' — ', 1)[-1]}).",
+            fix=g["fix"], t=g["at"], id=g.get("owner"), op=op))
+    return out
 
 
 def _source_tail_room(edl, index, last_w):

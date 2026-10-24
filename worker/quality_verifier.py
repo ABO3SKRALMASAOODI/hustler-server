@@ -700,6 +700,33 @@ def _sound_off_findings(edl, index):
          "band"))]
 
 
+def _negation_findings(edl, index):
+    """A negation heard but hidden while the rest of its sentence reaches
+    the screen (caption_carry.hidden_negations): the screen says the
+    opposite of what was said, so it blocks like any unfaithful claim.
+    CHM 2013 run (23 Oct 2026, 4505 v31): a hook-tier slam owned the
+    captions over 'Um, I don't think' and the next caption read "it's
+    good." for "I don't think it's good"; every audit passed it."""
+    caps = edl.get("captions")
+    if not (isinstance(caps, dict) and caps.get("mode") == "from_transcript") \
+            or not (index or {}).get("words") or not edl.get("keep"):
+        return []
+    try:
+        import caption_carry
+        timeline = Timeline(edl.get("keep") or [], edl.get("inserts") or [],
+                            edl.get("speed") or [])
+        negs = caption_carry.hidden_negations(edl, index, timeline)
+    except Exception as exc:  # noqa: BLE001 — a check never breaks review
+        print(f"[verify] negation check skipped: {type(exc).__name__}", flush=True)
+        return []
+    return [_finding(
+        "negation_hidden", "captions",
+        (f"Negation hidden at {g['at']:.2f}s: said \"{g['said']}\" but the "
+         f"screen shows \"{g['reads']}\" without '{g['negation']}' — "
+         f"{g['cause'].split(' — ', 1)[-1]}."),
+        {"negation": g}, g["fix"]) for g in negs]
+
+
 def _repeat_findings(edl, index):
     """Words heard twice in a row in the kept programme (audit.
     repeated_phrases). A repeated phrase ('you don't you don't') or a repeat
@@ -921,6 +948,7 @@ def deterministic_findings(edl, index=None, request_text=None):
     return (_text_corruption_findings(edl)
             + _caption_findings(edl)
             + _sound_off_findings(edl, index or {})
+            + _negation_findings(edl, index or {})
             + _motion_findings(edl)
             + _zoom_findings(edl, index or {})
             + _reframe_findings(edl, index or {})
