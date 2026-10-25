@@ -267,11 +267,23 @@ _INFRA_TEXT = (
     "could not be recovered", "executor is draining",
 )
 # Re-running these from scratch is idempotent: each writes one artifact for
-# one EDL version. Mutating jobs (agent turns, MCP edits, shorts plans) keep
-# their own retry rules.
+# one EDL version.
 INFRA_RETRY_TYPES = frozenset({"index", "preview", "preview_check", "final",
-                               "filmstrip"})
+                               "filmstrip", "agent_turn", "mcp_tool"})
+# Agent turns and MCP tools mutate the timeline, so they are retried quietly
+# only while their mutation_receipt shows no committed write (main.
+# _quiet_infra_retry re-reads it); an agent turn that already wrote resumes
+# as a continuation from its last committed EDL instead. Before 25 Oct these
+# were excluded: 10 requests of 5 users ended on "shard is busy", a lost
+# lease or a sidecar shutdown, and 16 MCP calls failed the same way in the
+# last 30 days.
+MUTATING_RETRY_TYPES = frozenset({"agent_turn", "mcp_tool"})
+# Whether the remote is still executing is unknown: never replayed for a
+# mutating job (its reply or write could land twice).
+AMBIGUOUS_OWNERSHIP_KINDS = frozenset({"remote_ownership_unconfirmed"})
 INFRA_RETRY_WINDOW_S = 600
+# A Studio turn may have run for a while before its container went away.
+INFRA_RETRY_WINDOW_BY_TYPE = {"agent_turn": 1800}
 INFRA_RETRY_MAX = 3
 
 
@@ -299,7 +311,8 @@ def infra_retry_delay(job, now_ts, attempt):
         age = now_ts - created.timestamp()
     except AttributeError:
         return None
-    remaining = INFRA_RETRY_WINDOW_S - age
+    remaining = INFRA_RETRY_WINDOW_BY_TYPE.get(
+        str(job.get("type") or ""), INFRA_RETRY_WINDOW_S) - age
     if remaining <= 0:
         return None
     return max(5.0, min(remaining, 10.0 * (2 ** attempt), 40.0))

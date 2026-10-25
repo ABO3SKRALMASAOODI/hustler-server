@@ -49,7 +49,16 @@ _CONTEXT_MAX_CHARS = 16000
 NEVER_BLOCK_CATEGORIES = {
     "pacing_rhythm", "motion_path", "motion_trigger", "motion_settle",
     "effect",
+    # Every delivered render already passed the deterministic black-frame
+    # check (a failing render raises), so a still-based "black frame" is
+    # disproved by measurement unless a metric corroborates it: request
+    # 39634 was held on the black side margins of a vertical frame.
+    "black_frame",
 }
+# Relevance stays a real defect for footage the EDITOR chose (a generic
+# skyline where the product should be). The customer's own footage is theirs
+# to choose: the critic is told so in its context, and a relevance complaint
+# that comes back after one repair advises (request_scope.demote_recurring).
 # A finding blocks delivery only as a blocker (at the base confidence) or as
 # a major at this confidence or above.
 MAJOR_BLOCK_CONFIDENCE = 0.90

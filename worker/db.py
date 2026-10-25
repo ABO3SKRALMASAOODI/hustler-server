@@ -3349,16 +3349,22 @@ def customer_request_before_repair(conn, session_id, message_id, repair_prefix):
 
     Bound by session and message id so a later steer or another project can
     never replace the brief of the repair currently being executed.
+    ``repair_prefix``: one generated prefix or a sequence of them (Repair
+    edit and Improve it).
     """
+    prefixes = ([repair_prefix] if isinstance(repair_prefix, str)
+                else list(repair_prefix or []))
+    # The prefixes are fixed product strings without LIKE wildcards.
+    patterns = [p + '%' for p in prefixes if p]
     with conn.cursor() as cur:
         cur.execute("""SELECT id, content FROM chat_messages
             WHERE session_id = %s AND id < %s AND role = 'user'
               AND BTRIM(COALESCE(content, '')) <> ''
-              AND BTRIM(content) NOT LIKE %s
+              AND NOT (BTRIM(content) LIKE ANY(%s::text[]))
               AND LOWER(BTRIM(content, ' .!')) NOT IN
                   ('continue', 'keep going', 'go on', 'resume', 'carry on')
             ORDER BY id DESC LIMIT 1""",
-                    (session_id, message_id, repair_prefix + '%'))
+                    (session_id, message_id, patterns))
         return cur.fetchone()
 
 
