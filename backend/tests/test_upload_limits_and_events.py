@@ -66,16 +66,26 @@ def test_an_hour_of_4k_fits():
     assert storage.max_upload_bytes() >= 30e6 / 8 * 3600
 
 
-def test_the_cap_stays_within_what_the_executor_can_stage():
-    """The cap and the machine are a PAIR, exactly like the executor timeouts.
+def test_the_cap_stays_within_what_the_pipeline_streams():
+    """The cap and the machine are still a PAIR, but the machine changed.
 
-    32 GiB of workdir / 2.2x headroom = 14.5 GB. A cap above that accepts an
-    upload the render service cannot process — the refusal just moves to after
-    the user has spent 40 minutes sending it, which is the worst place for it.
+    14 GB was 32 GiB of Cloud Run workdir / 2.2x headroom, for DOWNLOADING
+    the whole source. Indexing now range-reads large originals from storage
+    (worker/config.index_source_should_stream covers every size up to the
+    worker's own MAX_UPLOAD_GB) and renders range-read originals of 512 MB or
+    more, so the bound is the multipart protocol: at most 10,000 parts of at
+    most 5 GiB, and a presign response of at most MAX_TRANSFER_PARTS URLs.
     """
-    executor_workdir_gb = 32.0          # Cloud Run --memory on valmera-executor
-    headroom = 2.2                      # worker/config.WORKDIR_HEADROOM
-    assert storage.MAX_UPLOAD_GB <= executor_workdir_gb / headroom
+    nbytes = storage.max_upload_bytes()
+    ps = storage.part_size_for(nbytes)
+    assert ps <= storage.MAX_S3_PART_SIZE
+    assert (nbytes + ps - 1) // ps <= min(10_000, storage.MAX_TRANSFER_PARTS)
+    worker_cfg = open(os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "worker",
+        "config.py")).read()
+    assert f'"MAX_UPLOAD_GB", "{storage.MAX_UPLOAD_GB:g}"' in worker_cfg, (
+        "the worker's MAX_UPLOAD_GB default must match the backend's, or "
+        "the index stream ceiling refuses what the presign accepted")
 
 
 def test_an_hour_of_ordinary_1080p_fits():
@@ -302,12 +312,12 @@ def test_upload_presigns_outlive_a_slow_upload():
     """A presign is validated when a request STARTS. At the old 15 minutes,
     any part first attempted after minute 15 — or any retry of a slow single
     PUT — got a non-retryable 403 and killed the whole transfer. The window
-    must cover the biggest allowed file on a modest 4 Mbps uplink."""
-    slowest_plausible_s = storage.max_upload_bytes() * 8 / 4e6
-    assert storage.PRESIGN_UPLOAD_EXPIRY >= slowest_plausible_s, (
-        f"{storage.PRESIGN_UPLOAD_EXPIRY}s cannot cover a "
-        f"{storage.MAX_UPLOAD_GB} GB upload at 4 Mbps "
-        f"({slowest_plausible_s:.0f}s)")
+    covers a 14 GB file on a 4 Mbps uplink and the 100 GB cap at 20 Mbps;
+    anything slower re-presigns its remaining parts through /uploads/resume
+    (tests/test_upload_resume.py), so expiry never ends a transfer."""
+    assert storage.PRESIGN_UPLOAD_EXPIRY >= 14 * 1024 ** 3 * 8 / 4e6
+    assert storage.PRESIGN_UPLOAD_EXPIRY >= \
+        storage.max_upload_bytes() * 8 / 20e6
 
 
 def test_the_slow_rescue_and_transfer_beacons_are_accepted():

@@ -1173,7 +1173,12 @@ def project_execution_shape(conn, project_id, asset_id=None, job_type=None, payl
         return execution_inputs.job_shape(rows, edl_row['json'], job_type, payload)
     with conn.cursor() as cur:
         if asset_id is not None:
-            cur.execute("""SELECT COALESCE(bytes, 0) AS total_bytes,
+            # A pasted-link original has no bytes until its index job
+            # fetches them (indexer._import_link_source); route it as a
+            # known, small download rather than an unknown size.
+            cur.execute("""SELECT COALESCE(bytes, CASE WHEN meta ? 'link_src'
+                                                 THEN 1 ELSE 0 END)
+                                    AS total_bytes,
                                   COALESCE(bytes, 0) AS max_bytes,
                                   COALESCE(duration_s, 0) AS max_duration_s,
                                   COALESCE(width, 0) AS max_width,
@@ -3371,6 +3376,8 @@ def pending_user_message(conn, project_id, session_id):
             SELECT m.id, m.content, m.meta FROM chat_messages m
             WHERE m.session_id = %s AND m.role = 'user'
               AND COALESCE(m.meta->>'subscribe_gated', 'false') <> 'true'
+              -- A bare pasted link became the main video; it asks nothing.
+              AND COALESCE(m.meta->>'link_only', 'false') <> 'true'
               AND NOT EXISTS (
                   SELECT 1 FROM video_jobs j
                   WHERE j.project_id = %s AND j.type = 'agent_turn'
@@ -3454,6 +3461,20 @@ def has_newer_agent_turn(conn, project_id, after_job_id):
                          AND id > %s
                        LIMIT 1""", (project_id, after_job_id))
         return cur.fetchone() is not None
+
+
+def asset_link_imported(conn, asset_id, nbytes, filename=None):
+    """A main video fetched from a pasted link has landed at its key: record
+    its real size (streaming and capacity decisions read assets.bytes) and
+    mark it ready, keeping the link it came from."""
+    patch = {"upload_state": "ready", "upload_progress": 1.0,
+             "link_imported": True}
+    if filename:
+        patch["filename"] = str(filename)[:200]
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE assets SET bytes = %s, meta = meta || %s
+                       WHERE id = %s""",
+                    (int(nbytes), Json(patch), asset_id))
 
 
 def asset_upload_ready(conn, asset_id):

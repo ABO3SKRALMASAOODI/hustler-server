@@ -31,8 +31,11 @@ PRESIGN_EXPIRY = 900          # short-lived links (admin GETs lean on this)
 # the whole transfer died. The measured 4 GB uploads were finishing in ~13
 # minutes; they were one congestion event away from total loss. A real user on
 # 2026-07-31 PUT 45 MB for 15m30s — had that one PUT blipped near the end, the
-# retry would have found its URL expired. 12h covers the 14 GB cap at 4 Mbps
-# with room; the URL is still minted per-key behind the owner's auth, and
+# retry would have found its URL expired. 12h covers a 14 GB file at 4 Mbps
+# and the 100 GB cap at 20 Mbps; anything slower re-presigns its remaining
+# parts through /uploads/resume (resume_multipart below), which is also how a
+# reloaded tab or a woken laptop carries on. The URL is still minted per-key
+# behind the owner's auth, and
 # leaking one only lets someone overwrite the single key it names.
 PRESIGN_UPLOAD_EXPIRY = int(os.getenv("PRESIGN_UPLOAD_EXPIRY", "43200"))
 # Playback GETs live much longer: the studio fetches ONE url per asset and the
@@ -61,6 +64,11 @@ SINGLE_PUT_LIMIT = 16 * 1024 * 1024
 MIN_PART_SIZE = 8 * 1024 * 1024
 MAX_PART_SIZE = 16 * 1024 * 1024
 TARGET_PARTS = 128
+# One presign response carries one URL per part, so very large files grow
+# their parts instead of their URL list: up to ~15.6 GiB nothing changes
+# (16 MiB parts); a 60 GB OBS recording gets ~60 MiB parts and the same
+# 1,000-URL response a 15 GB file always had.
+MAX_TRANSFER_PARTS = 1000
 
 
 def part_size_for(nbytes):
@@ -68,7 +76,10 @@ def part_size_for(nbytes):
     raw = (int(nbytes) + TARGET_PARTS - 1) // TARGET_PARTS
     mib = 1024 * 1024
     rounded = ((raw + mib - 1) // mib) * mib
-    return max(MIN_PART_SIZE, min(MAX_PART_SIZE, rounded))
+    size = max(MIN_PART_SIZE, min(MAX_PART_SIZE, rounded))
+    floor = (int(nbytes) + MAX_TRANSFER_PARTS - 1) // MAX_TRANSFER_PARTS
+    floor = ((floor + mib - 1) // mib) * mib
+    return max(size, floor)
 
 # Only these get presigned for upload. Everything else is rejected before a
 # URL is ever minted.
@@ -95,7 +106,13 @@ ALLOWED_IMAGE_EXT = {
 
 # High-resolution campaign/product JPEGs routinely land in the 20-40 MiB
 # range. This remains bounded well below video uploads.
-MUSIC_MAX_BYTES = 50 * 1024 * 1024
+#
+# Audio is 500 MB: uncompressed WAV is how voice-overs and masters leave a
+# DAW (44.1 kHz stereo 16-bit is 10 MB a minute), and the old 50 MB refused a
+# paying customer's 81.6 MB voice-over and another user's 58.5 MB song
+# (7 and 9 Oct 2026). 500 MB is about 47 minutes of CD-quality WAV; the
+# indexer reads music down to a 16-kHz mono track either way.
+MUSIC_MAX_BYTES = int(float(os.getenv("MUSIC_MAX_MB", "500")) * 1024 * 1024)
 IMAGE_MAX_BYTES = 50 * 1024 * 1024
 
 # A browser-built 540p proxy. Our own proxies average 0.70 Mbps across 202
@@ -201,26 +218,23 @@ def client(public=False, fast=False):
 #
 # It was 2 GB, which contradicted the 3-hour duration limit it shipped beside:
 # 2 GiB over 3 hours is 1.6 Mbps, and even ONE hour only fit under 4.7 Mbps.
-# So the advertised "up to 2GB or 3 hours" could not both be true, and an
-# ordinary 1-hour 1080p recording (~8-20 Mbps) was refused by a platform whose
-# own copy said it took 3-hour videos. What actually costs us is DURATION —
-# it drives index time and render time — and that is bounded separately by
-# MAX_DURATION_S. Bytes only cost storage and the user's own upload time, so
-# this number just has to be big enough to stop being the thing that says no.
+# What actually costs us is DURATION — it drives index time and render time —
+# and that is bounded separately by MAX_DURATION_S. Bytes only cost storage
+# and the user's own upload time, so this number just has to be big enough to
+# stop being the thing that says no.
 #
-# 14 GB is not a round number, it is a MEASURED one. The executor's workdir is
-# sized by its Cloud Run `--memory` (32 GiB), and a job needs room for the
-# source plus what it writes beside it (config.WORKDIR_HEADROOM, 2.2x — a final
-# can export at roughly the source's own size). 32 / 2.2 = 14.5, confirmed by
-# the executor's /health `max_source_gb`. Raising this without raising that
-# first just moves the refusal later, to after the user has spent 40 minutes
-# uploading.
-#
-# It covers 1 hour of 4K at 30 Mbps, 10 minutes of 4K at 195 Mbps, and 3 hours
-# of 1080p. It does NOT cover an hour of 4K60 at 50 Mbps (22 GB) — that needs a
-# volume mounted for WORKER_TMP_DIR, since 32 GiB is Cloud Run's per-instance
-# maximum.
-MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "14"))
+# It was then 14 GB, sized for DOWNLOADING the whole source into a 32-GiB
+# Cloud Run executor (32 / 2.2x headroom). That is no longer how a large
+# source is processed: indexing range-reads originals from storage above
+# worker/config.INDEX_STREAM_MIN_BYTES (scratch is computed from duration,
+# not size), and renders range-read any original of 512 MB or more
+# (CLOUDFLARE_STREAM_SOURCE_MIN_BYTES). Meanwhile 8 users in 60 days were
+# refused real footage at 15-60 GB (OBS and game recordings, a 17.8 GB
+# wedding, a paying customer's 24 GB camera file); four never got any video
+# in. 100 GB covers an hour of 4K60 at 200 Mbps and three hours of 1080p60
+# at 70 Mbps. The multipart protocol allows far more (part_size_for grows
+# the parts past 15.6 GiB, S3 allows 10,000 parts of up to 5 GiB).
+MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "100"))
 
 # Mirrors worker/config.MAX_DURATION_S. Enforced for real in the indexer (it
 # needs a probe); carried here so the API and the studio can refuse a 5-hour
@@ -439,6 +453,143 @@ def presign_upload(key, nbytes, content_type, max_parts=None):
     return {"mode": "multipart", "storage_key": key, "upload_id": upload_id,
             "part_size": part_size, "part_urls": urls,
             "content_type": content_type}
+
+
+def multipart_part_size(nbytes, part_size=None):
+    """The part size an upload of ``nbytes`` was presigned with.
+
+    A resuming client reports the size it was given; it is accepted only if
+    it is a size this module could have issued (whole MiB, within S3's 5 MiB
+    - 5 GiB part range and its 10,000-part limit), otherwise today's
+    part_size_for(nbytes) is the answer."""
+    mib = 1024 * 1024
+    try:
+        size = int(part_size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    n = int(nbytes)
+    if (size >= 5 * mib and size <= MAX_S3_PART_SIZE and size % mib == 0
+            and (n + size - 1) // size <= 10_000):
+        return size
+    return part_size_for(n)
+
+
+def expected_part_bytes(nbytes, part_size, part_number):
+    """Bytes part ``part_number`` (1-based) of an ``nbytes`` upload holds."""
+    start = (int(part_number) - 1) * int(part_size)
+    return max(0, min(int(part_size), int(nbytes) - start))
+
+
+class UploadGone(Exception):
+    """The multipart upload id no longer exists (completed, aborted or
+    expired by the bucket's lifecycle rule)."""
+
+
+def resume_multipart(key, upload_id, nbytes, content_type=None,
+                     part_size=None):
+    """Carry on an open multipart upload from the parts storage already holds.
+
+    51 users in 60 days started a video upload that never landed: a closed
+    tab, a sleeping laptop, a locked phone. Every part they had sent was
+    still sitting in the bucket under the same upload id, and the studio
+    started again from byte zero (33 users restarted the same file). Storage
+    is the authority on what arrived, so this lists the parts it holds,
+    keeps every one whose size is exactly right, and presigns fresh URLs
+    for only the rest (a part of the wrong size is simply sent again, which
+    overwrites it). Fresh URLs also outlive a transfer slower than
+    PRESIGN_UPLOAD_EXPIRY.
+
+    Returns the same shape presign_upload does for multipart, plus
+    ``completed_parts`` [{part_number, etag}] and ``resumed: True``. When the
+    upload id is gone but the object is already assembled at the right size
+    (the tab died between the last part and /uploads/complete), returns
+    {"assembled": True}. Raises UploadGone otherwise."""
+    n = int(nbytes)
+    size = multipart_part_size(n, part_size)
+    n_parts = (n + size - 1) // size
+    try:
+        stored = list_parts(key, upload_id)
+    except Exception as exc:  # noqa: BLE001 — classified below
+        if error_code(exc) != "NoSuchUpload":
+            raise
+        if head_bytes(key) == n:
+            return {"mode": "multipart", "storage_key": key,
+                    "upload_id": None, "assembled": True,
+                    "part_size": size, "part_urls": [],
+                    "completed_parts": [], "content_type": content_type}
+        raise UploadGone(str(exc)[:300]) from exc
+    have = {}
+    for p in stored:
+        num = int(p["part_number"])
+        if 1 <= num <= n_parts and \
+                int(p.get("size") or 0) == expected_part_bytes(n, size, num):
+            have[num] = {"part_number": num, "etag": p["etag"]}
+    c = client(public=True)
+    urls = []
+    for i in range(1, n_parts + 1):
+        if i in have:
+            urls.append({"part_number": i, "url": None, "done": True})
+            continue
+        urls.append({"part_number": i, "url": c.generate_presigned_url(
+            "upload_part",
+            Params={"Bucket": bucket(), "Key": key, "UploadId": upload_id,
+                    "PartNumber": i},
+            ExpiresIn=PRESIGN_UPLOAD_EXPIRY)})
+    return {"mode": "multipart", "storage_key": key, "upload_id": upload_id,
+            "part_size": size, "part_urls": urls,
+            "completed_parts": [have[i] for i in sorted(have)],
+            "content_type": content_type, "resumed": True,
+            "bytes_done": sum(expected_part_bytes(n, size, i) for i in have)}
+
+
+def find_multipart_upload(key):
+    """The newest open multipart upload id for exactly ``key``, or None.
+
+    A proxy-first original's key lives on its asset row, but its upload id
+    lived only in the tab that started it. When that tab is gone (closed,
+    reloaded, another device), this recovers the id from storage itself so
+    the parts already sent are kept."""
+    try:
+        res = client().list_multipart_uploads(Bucket=bucket(), Prefix=key)
+    except Exception:  # noqa: BLE001 — unsupported or transient: start fresh
+        return None
+    ups = [u for u in res.get("Uploads") or [] if u.get("Key") == key]
+    if not ups:
+        return None
+    ups.sort(key=lambda u: str(u.get("Initiated") or ""))
+    return ups[-1].get("UploadId")
+
+
+def relay_part(key, upload_id, part_number, stream, declared_bytes=None):
+    """Write ONE part of an open multipart upload from a request body.
+
+    The browser-cannot-reach-storage fallback used to relay a whole file
+    through this service, capped at 64 MB, so a blocked 62 MB upload already
+    failed it (2109) and nothing bigger ever had a way in. A part is at most
+    a few dozen MiB whatever the file weighs, so relaying part by part has
+    no file-size ceiling and keeps the same upload id, the same completion
+    and the parts already sent directly. The body is spooled (memory up to
+    8 MiB, then disk) because upload_part needs a seekable body; it is
+    still bounded by RELAY_MAX_BYTES. Returns the part's ETag."""
+    import tempfile
+    if declared_bytes is not None and declared_bytes > RELAY_MAX_BYTES:
+        raise RelayTooLarge(
+            f"part is larger than the {_size_label(RELAY_MAX_BYTES)} limit "
+            f"for uploads routed through our servers")
+    reader = _capped_reader(stream, RELAY_MAX_BYTES)
+    with tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024) as body:
+        while True:
+            chunk = reader.read(1024 * 1024)
+            if not chunk:
+                break
+            body.write(chunk)
+        if body.tell() <= 0:
+            raise ValueError("empty part body")
+        body.seek(0)
+        res = client().upload_part(Bucket=bucket(), Key=key,
+                                   UploadId=upload_id,
+                                   PartNumber=int(part_number), Body=body)
+    return str(res.get("ETag") or "")
 
 
 def complete_multipart(key, upload_id, parts):

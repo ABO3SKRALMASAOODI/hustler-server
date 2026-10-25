@@ -481,9 +481,14 @@ WHISPER_COMPRESSION_RATIO_THRESHOLD = (
 
 # Quotas / limits
 # Mirrors backend/storage.MAX_UPLOAD_GB — the backend is what enforces it at
-# presign; this copy exists for the worker's own sanity checks. Raised from 2,
-# which contradicted MAX_DURATION_S below: 2 GiB over 3 hours is 1.6 Mbps.
-MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "14"))
+# presign; this copy bounds the streamed index path (index_source_should_
+# stream) and the worker's own sanity checks. Raised from 2 (which
+# contradicted MAX_DURATION_S below: 2 GiB over 3 hours is 1.6 Mbps), then
+# from 14 (sized for downloading the whole source; large sources are now
+# range-read from storage) to 100 for the 15-60 GB recordings 8 users were
+# refused in Sep-Oct 2026. backend/tests/test_upload_limits_and_events.py
+# keeps the two defaults equal.
+MAX_UPLOAD_GB = float(os.getenv("MAX_UPLOAD_GB", "100"))
 MAX_DURATION_S = float(os.getenv("MAX_DURATION_S", str(3 * 3600)))
 
 # Fetching media from a URL the user pasted (worker/url_media.py).
@@ -724,6 +729,16 @@ YTDLP_FALLBACK_CLIENTS = [
 # stack full download timeouts and eat the agent turn.
 FETCH_RETRY_BUDGET_S = float(os.getenv("FETCH_RETRY_BUDGET_S", "75"))
 FETCH_MAX_DURATION_S = float(os.getenv("FETCH_MAX_DURATION_S", "3600"))
+# A link pasted as the project's MAIN video (url_media.main_video_limits;
+# indexer._import_link_source). It downloads into the batch lane's scratch
+# (12.7 GB free) and is uploaded to storage before indexing starts, so the
+# bytes bound is that disk with room; a 3-hour 1080p YouTube video is 2-4 GB.
+# Anything longer than MAX_DURATION_S is indexed for its first MAX_DURATION_S.
+LINK_IMPORT_MAX_BYTES = int(float(os.getenv("LINK_IMPORT_MAX_GB", "8"))
+                            * 1024 ** 3)
+LINK_IMPORT_MAX_DURATION_S = float(os.getenv(
+    "LINK_IMPORT_MAX_DURATION_S", str(6 * 3600)))
+LINK_IMPORT_TIMEOUT_S = float(os.getenv("LINK_IMPORT_TIMEOUT_S", "2400"))
 # Resolution cap for extracted video. A 4K source is a ~10x bigger download
 # and a slower render for a clip that gets composited into a 1080p timeline.
 FETCH_MAX_HEIGHT = int(os.getenv("FETCH_MAX_HEIGHT", "1080"))

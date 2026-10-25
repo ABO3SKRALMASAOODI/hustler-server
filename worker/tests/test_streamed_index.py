@@ -63,7 +63,11 @@ def test_cancelled_hash_closes_storage_connection(monkeypatch):
     ("music", 9 * 1024 ** 3, False),
     (None, 9 * 1024 ** 3, False),
     ("original", 20 * 1024 ** 3, True),
-    ("original", 20 * 1024 ** 3 + 1, False),
+    # Above INDEX_STREAM_MAX_GB the product's upload cap is the ceiling:
+    # a 60 GB OBS recording (1922) streams too (25 Oct 2026).
+    ("original", 20 * 1024 ** 3 + 1, True),
+    ("original", int(config.MAX_UPLOAD_GB * 1024 ** 3), True),
+    ("original", int(config.MAX_UPLOAD_GB * 1024 ** 3) + 1, False),
     ("original", 0, False),
 ])
 def test_only_known_bounded_video_uploads_use_streaming_admission(
@@ -86,11 +90,24 @@ def test_streaming_still_refuses_insufficient_scratch_before_reading(monkeypatch
         indexer._stream_index_source(None, {"id": 1}, {"storage_key": "key"}, ".")
 
 
-def test_streaming_duration_limit_precedes_full_read(monkeypatch):
+def test_streaming_a_longer_source_plans_for_the_first_three_hours(monkeypatch):
+    """Over the limit is no longer a refusal (2530: 3.16 h, four attempts):
+    the index covers the first MAX_DURATION_S, and scratch is planned for
+    that span, before anything is read in full."""
     monkeypatch.setattr(storage, "presign_get", lambda *a, **kw: "https://example.invalid")
-    monkeypatch.setattr(media, "probe", lambda src: {"duration": config.MAX_DURATION_S + 1})
-    with pytest.raises(RuntimeError, match="limit"):
-        indexer._stream_index_source(None, {"id": 1}, {"storage_key": "key"}, ".")
+    monkeypatch.setattr(media, "probe", lambda src: {
+        "duration": config.MAX_DURATION_S + 600, "has_audio": True})
+    planned = []
+    monkeypatch.setattr(indexer, "_streamed_scratch_plan",
+                        lambda duration, has_audio, workdir:
+                        planned.append(duration) or (4000, 1))
+    monkeypatch.setattr(storage, "sha256_object", lambda *a, **kw: "sha")
+    src, sha, info, kbps = indexer._stream_index_source(
+        None, {"id": 1}, {"storage_key": "key", "bytes": 1}, ".")
+    assert planned == [config.MAX_DURATION_S]
+    assert info["duration"] == config.MAX_DURATION_S
+    assert info["limit_s"] == config.MAX_DURATION_S
+    assert info["source_duration"] == config.MAX_DURATION_S + 600
 
 
 def test_signed_media_urls_are_removed_before_failure_logs_are_truncated():
