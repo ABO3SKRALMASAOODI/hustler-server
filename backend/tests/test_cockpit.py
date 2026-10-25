@@ -243,11 +243,14 @@ def test_wrong_plan_stuck_setup_and_paid_no_result():
     assert r["results"]["total"] == 1
     assert "PAID_NO_RESULT_24H" not in r["flags"]
     assert "STUCK_SETUP" not in r["flags"]
-    # Plus includes the Studio editor since D1: never a wrong plan.
+    # Plus follows the Studio gate itself (D1 moves it in or out).
+    from routes import video
     f["jobs"] = {}
     f["payments"] = {1: [_pay(1, 3, plan="plus_2026")]}
     r = _row(_acct(1, plan="plus_2026", billing_plan="plus_2026"), f)
-    assert "WRONG_PLAN" not in r["flags"]
+    assert ("WRONG_PLAN" in r["flags"]) == \
+        ("plus_2026" in video.MCP_ONLY_PLANS)
+    assert cockpit.mcp_only_plans() == tuple(video.MCP_ONLY_PLANS)
 
 
 def test_error_loop_unfinished_charged_long_source_and_result_before_paying():

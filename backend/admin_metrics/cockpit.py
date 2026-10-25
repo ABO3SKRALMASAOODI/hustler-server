@@ -28,9 +28,17 @@ INTERNAL_IDS = tuple(sorted({22, 28, 29, 45, 46, 49, 53, 60, 61, 62, 68, 108,
     int(x) for x in os.getenv("COCKPIT_EXTRA_INTERNAL_IDS", "").split(",")
     if x.strip().isdigit()}))
 OWNER_ID = infra_cost.OWNER_ID
-# Plans that cannot use the Studio editor. Plus ($15) includes it since D1
-# shipped on 25 Oct 2026 (7fbab465), so only MCP Connect is wrong-plan now.
-MCP_ONLY_PLANS = ("mcp_connect",)
+# Plans the Studio editor refuses: whatever the gate itself says
+# (routes.video.MCP_ONLY_PLANS; D1 moves Plus in or out of it).
+_MCP_ONLY_FALLBACK = ("mcp_connect", "plus_2026")
+
+
+def mcp_only_plans():
+    try:
+        from routes.video import MCP_ONLY_PLANS
+        return tuple(MCP_ONLY_PLANS)
+    except Exception:
+        return _MCP_ONLY_FALLBACK
 # First cut / trial events (track B). Read here, never written.
 KEEP_KINDS = ("free_result_keep_clicked", "first_cut_keep_clicked",
               "trial_keep_clicked")
@@ -438,8 +446,9 @@ def build_row(acct, f, journey, now):
     # MCP use.
     mcp_jobs = [j for j in jobs if j["type"] == "mcp_tool"]
     mcp7 = sum(1 for j in mcp_jobs if _utc(j["created_at"]) >= d7)
+    mcp_only = mcp_only_plans()
     mcp_paid = next((_utc(p["at"]) for p in ok
-                     if p["plan"] in MCP_ONLY_PLANS), None)
+                     if p["plan"] in mcp_only), None)
     hour = timedelta(hours=1)
     mcp_first_hour = (sum(1 for j in mcp_jobs if mcp_paid - hour <=
                           _utc(j["created_at"]) <= mcp_paid + hour)
@@ -518,7 +527,7 @@ def build_row(acct, f, journey, now):
         flags.append("PAID_NO_RESULT_24H")
     if unfinished_credits > 0:
         flags.append("UNFINISHED_CHARGED")
-    if plan in MCP_ONLY_PLANS and mcp_paid and has_access and not results \
+    if plan in mcp_only and mcp_paid and has_access and not results \
             and (refusals or mcp_first_hour == 0):
         flags.append("WRONG_PLAN")
     setup_stuck = (mcp_user and not landed and not results and any(
