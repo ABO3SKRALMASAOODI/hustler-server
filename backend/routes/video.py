@@ -710,10 +710,11 @@ def vdb(db_url=None):
         conn.close()
 
 
-# Plans whose subscription does not include the Studio AI editor: MCP Connect
-# and Plus ($15, 500 credits). Owner decision D1 (Plus includes the Studio)
-# is on hold since 25 Oct 2026, so Plus stays an MCP-only plan.
-MCP_ONLY_PLANS = frozenset({"mcp_connect", "plus_2026"})
+# Plans whose subscription does not include the Studio AI editor. Plus
+# ($15, 500 credits) includes it from 25 Oct 2026 (owner decision D1): 12 of
+# 12 October buyers bought an MCP-only plan from the Studio and were refused
+# the editor they were looking at. MCP Connect stays MCP-only.
+MCP_ONLY_PLANS = frozenset({"mcp_connect"})
 
 
 def studio_ai_included(plan):
