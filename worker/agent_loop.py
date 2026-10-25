@@ -1821,6 +1821,16 @@ def _customer_verification_request(worker_db, session_id, message, continuation)
 def run_agent_job(worker_db, job):
     project = worker_db.run(dbx.get_project, job["project_id"])
     session_id = project["chat_session_id"]
+    if (job.get("payload") or {}).get("first_cut"):
+        # The automatic First cut (PLAN.md P2, owner decision D2): a fixed
+        # tool chain, no agent loop and no user message to answer.
+        import first_cut
+        original = worker_db.run(dbx.latest_asset, job["project_id"],
+                                 "original")
+        index_row = (original and original.get("sha256")
+                     and worker_db.run(dbx.get_index_by_sha,
+                                       original["sha256"])) or None
+        return first_cut.run(worker_db, job, project, index_row)
 
     def _get_msg(conn):
         with conn.cursor() as cur:
@@ -2046,13 +2056,15 @@ def run_agent_job(worker_db, job):
             first_turn = False
     # THE CLAUDE-FUNDED TRIAL LANE (owner decision D2, 25 Oct 2026). Paid,
     # admin and operator-repair turns resolve exactly as before. A never-paid
-    # account inside the trial runs ONLY on Claude, metered against its own
-    # $1 (claude_trial). A closed lane, a spent pool or a spent $1 ends here
+    # account's turn on its ADMITTED free-trial project (backend free_trial)
+    # runs ONLY on Claude, metered against its own budget (claude_trial). A
+    # closed lane, the credit switch, a spent pool or a spent budget ends here
     # on the plan cards: never a raw error, never the paid OpenAI wallet.
     trial = claude_trial.resolve(
         worker_db, job.get("user_id"), subscribed,
         project_id=job.get("project_id"), via="agent_turn",
-        operator_repair=payload.get("operator_repair") is True)
+        operator_repair=payload.get("operator_repair") is True,
+        continuing=bool(continuation_state))
     ctx.claude_trial = (trial.scope if trial.kind == claude_trial.Decision.ACTIVE
                         else None)
     if trial.kind in (claude_trial.Decision.EXHAUSTED,
@@ -2060,6 +2072,7 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
         return _claude_trial_stop(worker_db, ctx, job, session_id,
                                   user_message, trial)
+    ctx.claude_paid = None
     if ctx.claude_trial is not None:
         ctx.claude_trial.job_id = job.get("id")
         ctx.agent_lanes = [claude_lane.lane(ctx.claude_trial.model)]
@@ -2076,6 +2089,24 @@ def run_agent_job(worker_db, job):
     else:
         ctx.agent_lanes = llm.agent_lanes_for(
             subscribed, plan, first_turn=first_turn)
+        # NEW SUBSCRIBERS ON THE CLAUDE LANE (owner, 25 Oct 2026; flag
+        # app_kv.studio_for_all_plans, default off). Accounts that subscribed
+        # after the release cutoff run their Studio agent on Claude with the
+        # plan's model, their existing OpenAI lanes kept BEHIND it: an
+        # Anthropic billing refusal moves the same turn onto them
+        # (_switch_quota_lane) and alerts the admin. Grandfathered
+        # subscribers, a closed lane or the credit switch off: today's lanes.
+        paid_claude = _claude_paid_lane(worker_db, job, subscribed, plan,
+                                        payload)
+        if paid_claude is not None:
+            ctx.claude_paid = paid_claude
+            ctx.agent_lanes = [paid_claude["lane"]] + list(ctx.agent_lanes or [])
+            if paid_claude.get("credit_model"):
+                ctx.credit_price_aliases = {
+                    paid_claude["lane"]["model"]: paid_claude["credit_model"]}
+            print(f"[agent] job {job['id']}: new-subscriber Claude lane "
+                  f"{paid_claude['lane']['model']} (plan {plan}; OpenAI lanes "
+                  f"kept as failover)", flush=True)
         if ctx.agent_lanes:
             ctx.llm_client = ctx.agent_lanes[0]["client"]
             ctx.agent_model = ctx.agent_lanes[0]["model"]
@@ -2152,6 +2183,9 @@ def run_agent_job(worker_db, job):
                       getattr(usage, "prompt_tokens", None) if usage else None,
                       getattr(usage, "completion_tokens", None) if usage else None)
     llm.set_recorder(_llm_recorder)
+    if getattr(ctx, "credit_price_aliases", None):
+        # Credit parity for a new subscriber's Claude lane (llm.record).
+        _llm_recorder.credit_price_aliases = dict(ctx.credit_price_aliases)
     if ctx.claude_trial is not None:
         claude_trial.activate(ctx.claude_trial, recorder=_llm_recorder)
     try:
@@ -2282,6 +2316,34 @@ def run_agent_job(worker_db, job):
         llm.clear_turn_plan()
         claude_trial.deactivate(_llm_recorder)
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
+    """{"lane", "credit_model"} when THIS subscriber's Studio turn runs on
+    the Claude lane, else None (today's lanes, exactly). Never raises."""
+    if not subscribed or payload.get("operator_repair") is True:
+        return None
+    try:
+        import claude_plans
+        flag = worker_db.run(claude_plans.read_flag)
+        if not (flag["on"] or int(job.get("user_id") or 0)
+                in flag["test_user_ids"]) or not flag["claude_lane"]:
+            return None
+        if not claude_lane.available():
+            return None
+        if not claude_trial.credit_status(worker_db).get("on"):
+            return None
+        if not worker_db.run(claude_plans.applies, job.get("user_id"),
+                             subscribed, flag):
+            return None
+        model = claude_plans.lane_model(flag, plan)
+        return {"lane": claude_lane.lane(model, name="claude_paid"),
+                "credit_model": (claude_plans.contracted_model(plan)
+                                 if flag["credit_parity"] else None)}
+    except Exception as exc:  # noqa: BLE001 - today's lanes on any doubt
+        print(f"[agent] job {job.get('id')}: new-subscriber lane lookup "
+              f"failed ({str(exc)[:160]}); contracted lanes", flush=True)
+        return None
 
 
 def _claude_trial_extras(ctx):

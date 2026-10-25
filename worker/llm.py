@@ -183,6 +183,18 @@ def record(purpose, request, response, usage=None):
                     scope = None
                 if scope is not None:
                     response['claude_trial_user_id'] = scope.user_id
+                else:
+                    # A subscriber's Claude-lane call under credit parity
+                    # (claude_plans): the credits are charged at the plan's
+                    # contracted OpenAI rates, so the allowance lasts as long
+                    # as on the OpenAI lane. provider_cost_usd stays the true
+                    # Anthropic cost for every report.
+                    alias = (getattr(fn, 'credit_price_aliases', None)
+                             or {}).get(str((request or {}).get('model') or ''))
+                    if alias:
+                        response['credit_price_model'] = alias
+                        response['credit_cost_usd'] = credit_parity_cost_usd(
+                            usage, alias)
         tpm_limit = getattr(usage, 'tpm_limit', None)
         if isinstance(tpm_limit, int) and isinstance(response, dict):
             # the org's real tier, queryable in SQL (llm_calls.response)
@@ -190,6 +202,24 @@ def record(purpose, request, response, usage=None):
         fn(purpose, request, response, usage)
     except Exception as e:
         print(f"[llm] recorder failed: {e}", flush=True)
+
+
+def credit_parity_cost_usd(usage, model):
+    """What a call with this usage would cost at ``model``'s rates (the
+    plan's contracted OpenAI model): the credit basis of a parity call."""
+    import model_prices
+    p = model_prices.price_for(model, config.PRICE_FALLBACK)
+    details = getattr(usage, 'prompt_tokens_details', None) or {}
+    get = (details.get if isinstance(details, dict)
+           else (lambda k, d=0: getattr(details, k, d)))
+    prompt = max(0, int(getattr(usage, 'prompt_tokens', 0) or 0))
+    cached = min(prompt, max(0, int(get('cached_tokens', 0) or 0)))
+    written = min(prompt - cached, max(0, int(get('cache_write_tokens', 0) or 0)))
+    out = max(0, int(getattr(usage, 'completion_tokens', 0) or 0))
+    return round(((prompt - cached - written) * p['in']
+                  + cached * p['cached_in']
+                  + written * p.get('cache_write_in', p['in'])
+                  + out * p['out']) / 1e6, 8)
 
 
 def client():

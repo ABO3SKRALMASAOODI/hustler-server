@@ -1,0 +1,41 @@
+name: claude-credit-probe
+
+# The automatic credit switch for the Claude lane (owner, 25 Oct 2026;
+# backend/claude_credit.py). Every 3 hours: while the switch is ON this makes
+# NO Anthropic call (it only switches OFF if the cycle's recorded spend is
+# past the line); while it is OFF it makes one minimal call and switches the
+# lane back ON when that succeeds in a new billing cycle. It writes only the
+# app_kv row claude_credit_state and, on a switch, one admin alert row.
+on:
+  schedule:
+    - cron: "23 */3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: claude-credit-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install the Anthropic SDK and the database driver
+        run: |
+          python -m pip install --disable-pip-version-check \
+            anthropic==1.13.0 psycopg2-binary==2.9.10
+
+      - name: probe
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: python backend/scripts/claude_credit_probe.py

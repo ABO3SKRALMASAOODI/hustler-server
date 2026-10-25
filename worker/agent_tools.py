@@ -482,9 +482,14 @@ class ToolContext:
         Falls back to the flat totals when nothing has been recorded per model —
         that path only runs for callers that poke the counters directly."""
         cost = 0.0
+        # Credit parity (claude_plans): a new subscriber's Claude-lane usage
+        # is charged at the plan's contracted OpenAI model's rates, the same
+        # basis db.charge_turn_credits uses (llm_calls credit_cost_usd).
+        aliases = getattr(self, "credit_price_aliases", None) or {}
         if self.model_usage:
             for model, u in self.model_usage.items():
-                p = model_prices.price_for(model, config.PRICE_FALLBACK)
+                p = model_prices.price_for(aliases.get(model, model),
+                                           config.PRICE_FALLBACK)
                 audio_in = min(max(u.get("audio_in", 0), 0), u["in"])
                 audio_out = min(max(u.get("audio_out", 0), 0), u["out"])
                 cached = min(max(u["cached"], 0), u["in"] - audio_in)

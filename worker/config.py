@@ -225,6 +225,21 @@ FRONTIER_API_KEY = (
 # later is one edit and no new branch.
 FRONTIER_PLANS = {"ai_max"}
 
+# FIRST CUT (owner decision D2, track B; worker/first_cut.py): the automatic
+# finished result on an admitted project's first upload. Its one model call
+# (the long-source scout) runs on the Claude trial lane (claude_lane /
+# claude_trial, below) and is metered against the account's trial budget; it
+# never uses the paid OpenAI wallet, and without the lane it falls back to a
+# deterministic speech-density pick.
+# Caps (PLAN.md P2, C2.4): at most this much wall time and these many renders,
+# and at most the first FIRST_CUT_MAX_SOURCE_S of a long source are read by
+# its one scout call. Sources up to FIRST_CUT_SHORT_SOURCE_S are finished
+# whole; longer ones become their best 20-60 s story.
+FIRST_CUT_MAX_S = float(os.getenv("FIRST_CUT_MAX_S", "480"))
+FIRST_CUT_MAX_RENDERS = int(os.getenv("FIRST_CUT_MAX_RENDERS", "6"))
+FIRST_CUT_MAX_SOURCE_S = float(os.getenv("FIRST_CUT_MAX_SOURCE_S", "1800"))
+FIRST_CUT_SHORT_SOURCE_S = float(os.getenv("FIRST_CUT_SHORT_SOURCE_S", "90"))
+
 # All subscribing editors use Luna on the standard OpenAI client. Keep the
 # rollback explicit: stale EDITOR_MODEL / PAID_* / FRONTIER_* environment
 # settings must not silently put paid editing back onto Grok.

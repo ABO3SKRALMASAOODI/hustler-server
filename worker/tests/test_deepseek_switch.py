@@ -265,8 +265,11 @@ def test_the_db_charge_uses_the_same_three_part_formula():
     src = inspect.getsource(db.charge_turn_credits)
     assert "cached_in" in src
     # The three-part split now lives in the shared per-row expression that the
-    # charge SUMs, so assert on THAT rather than on inlined constants.
-    assert "_ROW_COST_SQL" in src
+    # charge SUMs, so assert on THAT rather than on inlined constants. The
+    # charge sums _CHARGE_COST_SQL: _ROW_COST_SQL except a credit-parity row
+    # (a new subscriber's Claude-lane call priced at the contracted rate).
+    assert "_CHARGE_COST_SQL" in src
+    assert db._ROW_COST_SQL in db._CHARGE_COST_SQL
     assert "cached_in" in db._ROW_COST_SQL
     assert "reasoning_out" in db._ROW_COST_SQL
     assert str(config.LLM_PRICE_IN_PER_M) in db._ROW_COST_SQL

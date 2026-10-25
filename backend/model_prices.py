@@ -147,8 +147,10 @@ MODEL_PRICES = {
         "in": 0.10, "cached_in": 0.01, "cache_write_in": 0.125, "out": 0.50,
         "reasoning_separate": False,
     },
+    # Sonnet 5.5 cache reads are $0.20 per 1M (Claude API docs, cached
+    # 6 Oct 2026), not the 0.1x of the other cards.
     "claude-sonnet-5-5": {
-        "in": 2.00, "cached_in": 0.10, "cache_write_in": 2.50, "out": 10.00,
+        "in": 2.00, "cached_in": 0.20, "cache_write_in": 2.50, "out": 10.00,
         "reasoning_separate": False,
     },
     "claude-opus-5-5": {

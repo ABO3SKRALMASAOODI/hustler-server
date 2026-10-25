@@ -236,13 +236,15 @@ def lane(monkeypatch):
     claude_lane.reopen()
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(claude_lane, "anthropic", object())
-    metered, refused = [], []
+    metered, refused, paid = [], [], []
     monkeypatch.setattr(claude_trial, "meter",
                         lambda model, usd, kind="llm": metered.append(usd))
+    monkeypatch.setattr(claude_trial, "meter_paid",
+                        lambda model, usd: paid.append(usd))
     monkeypatch.setattr(claude_trial, "provider_refused",
                         lambda kind, exc: refused.append(kind))
     monkeypatch.setattr(claude_lane.time, "sleep", lambda s: None)
-    yield SimpleNamespace(metered=metered, refused=refused,
+    yield SimpleNamespace(metered=metered, refused=refused, paid=paid,
                           use=lambda sdk: monkeypatch.setattr(
                               claude_lane, "_sdk", lambda: sdk))
     claude_lane.reopen()
@@ -264,7 +266,21 @@ def test_the_shim_is_a_drop_in_client_and_meters_each_call(lane):
     assert body["max_tokens"] == 4000
     assert body["output_config"] == {"effort": "low"}
     assert "temperature" not in body and "service_tier" not in body
+    # no trial scope on this thread: a subscriber's call, metered into the
+    # credit cycle's ledger (claude_credit), never into a trial budget
+    assert lane.metered == [] and len(lane.paid) == 1 and lane.paid[0] > 0
+    scope = claude_trial.Scope(5, 1.0, 0.0, "claude-haiku-5-5")
+    claude_trial.activate(scope)
+    try:
+        lane.use(_FakeSdk([_message([SimpleNamespace(type="text", text="ok")],
+                                    stop="end_turn")]))
+        client.chat.completions.create(
+            model="claude-haiku-5-5",
+            messages=[{"role": "user", "content": "hi"}])
+    finally:
+        claude_trial.deactivate()
     assert len(lane.metered) == 1 and lane.metered[0] > 0
+    assert len(lane.paid) == 1
 
 
 def test_billing_refusal_closes_the_lane_and_alerts(lane):

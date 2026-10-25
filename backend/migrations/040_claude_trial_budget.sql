@@ -3,7 +3,9 @@
 -- A never-paid account gets $1.00 of Anthropic (Claude) API usage for the
 -- in-app agent, from the ~$200 of Anthropic credit in the owner's
 -- subscription. Additive only: three new tables, no change to any existing
--- table or row. Safe to re-run (IF NOT EXISTS everywhere).
+-- table or row. Safe to re-run (IF NOT EXISTS everywhere). The same ledger
+-- also carries subscribers' Claude-lane spend (paid_usd) for the automatic
+-- credit switch (owner, 25 Oct 2026).
 --
 -- trial_budgets — THE per-account running total both tracks read.
 --   One row per granted account (one grant per account, ever). spent_usd is
@@ -20,7 +22,7 @@
 --   count cap (default 40) and the daily USD cap all read it.
 --
 -- trial_alerts — durable admin alerts (pool at 50/80/95 %, Anthropic billing
---   or auth refusals). The worker queues; the backend sends to the admin
+--   or auth refusals, and every automatic credit-switch flip). The worker queues; the backend sends to the admin
 --   address through the existing transactional sender. Never customers.
 
 BEGIN;
@@ -47,11 +49,18 @@ CREATE INDEX IF NOT EXISTS idx_trial_budgets_device
     ON trial_budgets (device_id, granted_at)
     WHERE device_id IS NOT NULL;
 
+-- The automatic credit switch (claude_credit.py) reads the WHOLE Anthropic
+-- spend of a billing cycle from this one ledger: the trial's Anthropic part
+-- (spent_usd - extras_usd; extras are its non-Anthropic generations) plus the
+-- subscribers' Claude lane (paid_usd, paid_calls).
 CREATE TABLE IF NOT EXISTS trial_budget_days (
     day         DATE PRIMARY KEY,
     spent_usd   NUMERIC(14, 6) NOT NULL DEFAULT 0,
     grants      INTEGER NOT NULL DEFAULT 0,
     calls       INTEGER NOT NULL DEFAULT 0,
+    extras_usd  NUMERIC(14, 6) NOT NULL DEFAULT 0,
+    paid_usd    NUMERIC(14, 6) NOT NULL DEFAULT 0,
+    paid_calls  INTEGER NOT NULL DEFAULT 0,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 

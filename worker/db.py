@@ -3292,6 +3292,22 @@ def resolve_pending_auto_resume(conn, project_id, session_id, user_id,
             return {"state": "consumed", "job_id": None}
 
     if gated:
+        # The account's free-trial project (owner decision D2): the saved
+        # brief runs as a trial turn on the Claude lane while the trial
+        # budget lasts, instead of meeting the wall.
+        import claude_lane
+        import first_cut
+        admission = first_cut.project_admission(conn, project_id)
+        if (admission and admission.get("kind") == "trial"
+                and claude_lane.available()
+                and first_cut.trial_requests_on(conn, user_id)
+                and first_cut.trial_remaining_usd(conn, user_id) > 0.002):
+            job_payload = dict(payload or {})
+            job_payload.update({"message_id": int(message_id),
+                                "auto_resumed": True, "trial_lane": True})
+            job_id = enqueue_job(
+                conn, project_id, user_id, "agent_turn", job_payload)
+            return {"state": "enqueued", "job_id": job_id, "trial": True}
         mark_message_subscribe_gated(conn, message_id)
         return {"state": "gated", "job_id": None}
 
@@ -3550,6 +3566,14 @@ IMAGE_PRICE_USD = float(os.getenv("IMAGE_PRICE_USD", "0.055"))
 # row's own `model` column. Contains no percent sign — psycopg2 scans the whole
 # statement for placeholders, so one in here would raise before Postgres saw it.
 _ROW_COST_SQL = model_prices.row_cost_sql(config.PRICE_FALLBACK)
+# What a row CHARGES in credits: its true cost, except a new subscriber's
+# Claude-lane call under credit parity (claude_plans), which carries the cost
+# at the plan's contracted OpenAI rates as credit_cost_usd. Reports keep
+# reading _ROW_COST_SQL (the real provider spend).
+_CHARGE_COST_SQL = (
+    "(CASE WHEN jsonb_typeof(response->'credit_cost_usd') = 'number' "
+    "AND (response->>'credit_cost_usd')::float >= 0 "
+    "THEN (response->>'credit_cost_usd')::float ELSE " + _ROW_COST_SQL + " END)")
 
 
 def video_settings(conn):
@@ -3665,7 +3689,7 @@ def charge_turn_credits(conn, user_id, job_id, extra_credits=0.0,
         usage_sql = """SELECT COUNT(*) AS n,
                               COALESCE(SUM(prompt_tokens),0) AS tin,
                               COALESCE(SUM(completion_tokens),0) AS tout,
-                              COALESCE(SUM(""" + _ROW_COST_SQL + """), 0)
+                              COALESCE(SUM(""" + _CHARGE_COST_SQL + """), 0)
                                   AS token_cost,
                               COUNT(*) FILTER (
                                   WHERE purpose IN ('image_gen','image_edit')

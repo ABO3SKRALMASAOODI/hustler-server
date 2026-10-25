@@ -781,6 +781,22 @@ def subscription_state():
         "monthly_credit_limit": float(
             row.get("credits_monthly_limit") or 0),
     }
+    if out["is_subscribed"] and out["plan"] == "plus_2026":
+        # D1 for NEW subscribers (claude_plans; key present only when true):
+        # purchase-success sends this buyer back to the Studio project.
+        try:
+            import claude_plans
+            c2 = psycopg2.connect(os.environ['DATABASE_URL'],
+                                  cursor_factory=RealDictCursor)
+            try:
+                if claude_plans.safe(c2, claude_plans.studio_included,
+                                     int(user_id), "plus_2026", True,
+                                     default=False):
+                    out["studio_ai_included"] = True
+            finally:
+                c2.close()
+        except Exception as e:
+            print(f"⚠️ studio_ai_included lookup failed: {e}")
     sub_id = row.get("subscription_id")
     if not sub_id:
         return jsonify(out)

@@ -32,9 +32,14 @@ def world(monkeypatch):
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "k")
     monkeypatch.setattr(claude_lane, "anthropic", object())
     state = SimpleNamespace(
-        flag={"on": True}, admin=False, budget=None,
+        flag={"on": True}, admin=False, budget=None, admitted=True,
+        credit={"on": True, "reason": None},
         totals={"pool": 0.0, "month": 0.0, "today": 0.0, "grants_today": 0},
         grants=[])
+    monkeypatch.setattr(claude_trial, "project_admitted",
+                        lambda conn, project_id: state.admitted)
+    monkeypatch.setattr(claude_trial, "credit_status",
+                        lambda worker_db, max_age_s=20.0: state.credit)
     monkeypatch.setattr(claude_trial, "read_flag",
                         lambda conn: claude_trial.parse_flag(state.flag))
     monkeypatch.setattr(claude_trial, "_is_admin", lambda conn, uid: state.admin)
@@ -43,7 +48,9 @@ def world(monkeypatch):
     monkeypatch.setattr(claude_trial, "get_budget",
                         lambda conn, uid: state.budget)
 
-    def fake_grant(conn, uid, project_id, via, flag, pending=0.0, test=False):
+    def fake_grant(conn, uid, project_id, via, flag, pending=0.0, test=False,
+                   admitted=False):
+        assert admitted is True       # resolve only grants admitted projects
         state.grants.append((uid, via, test))
         state.budget = {"cap_usd": flag["per_account_usd_cap"],
                         "spent_usd": pending}
@@ -123,13 +130,49 @@ def test_index_scope_is_pending_until_the_upload_indexes(world):
 
 
 def test_internal_test_accounts_bypass_the_switch_not_the_pool(world):
-    world.flag = {"on": False, "test_user_ids": [60]}
-    d = claude_trial.resolve(_Db(), 60, True)
+    world.flag = {"on": False, "test_user_ids": [29]}
+    d = claude_trial.resolve(_Db(), 29, False)
     assert d.kind == "active" and d.scope.is_test
-    assert world.grants == [(60, "agent_turn", True)]
+    assert world.grants == [(29, "agent_turn", True)]
     claude_trial.reset_flag_cache()
+    # a subscribed test account keeps its paid lanes (claude_plans decides)
+    assert claude_trial.resolve(_Db(), 29, True).kind == "not_trial"
     world.totals = dict(world.totals, pool=500.0)
-    assert claude_trial.resolve(_Db(), 60, True).reason == "pool_spent"
+    assert claude_trial.resolve(_Db(), 29, False).reason == "pool_spent"
+    claude_trial.reset_flag_cache()
+    # anyone else is untouched while the flag is off
+    assert claude_trial.resolve(_Db(), 30, False).reason == "flag_off"
+
+
+def test_only_the_admitted_trial_project_runs_on_claude(world):
+    world.admitted = False
+    d = claude_trial.resolve(_Db(), 5, False, project_id=9)
+    assert d.kind == "not_trial" and d.reason == "not_admitted"
+    assert world.grants == []
+
+
+def test_the_credit_switch_closes_new_turns_and_lets_a_running_one_finish(world):
+    world.credit = {"on": False, "reason": "budget"}
+    d = claude_trial.resolve(_Db(), 5, False, project_id=9)
+    assert d.kind == "unavailable" and d.reason.startswith("credit_switch_off")
+    # a later slice of a request that already started finishes (budget only)
+    d = claude_trial.resolve(_Db(), 5, False, project_id=9, continuing=True)
+    assert d.kind == "active"
+    # a billing refusal cannot be finished on: plan cards
+    world.credit = {"on": False, "reason": "billing_error"}
+    d = claude_trial.resolve(_Db(), 5, False, project_id=9, continuing=True)
+    assert d.kind == "unavailable"
+
+
+def test_an_unreadable_credit_switch_reads_as_off(monkeypatch):
+    claude_trial.reset_flag_cache()
+
+    class _Boom:
+        def run(self, fn, *a):
+            raise RuntimeError("db down")
+
+    assert claude_trial.credit_status(_Boom())["on"] is False
+    claude_trial.reset_flag_cache()
 
 
 def test_disposable_domains_are_refused():
@@ -146,7 +189,7 @@ class _Meter:
         self.pool = pool
 
     def run(self, fn, *args):
-        if fn is claude_trial.add_spend:
+        if fn is claude_trial._meter_tx:
             uid, usd, granted = args[:3]
             self.rows.append((uid, round(usd, 6), granted))
             self.pool += usd
@@ -155,6 +198,9 @@ class _Meter:
         if fn is claude_trial.queue_alert:
             self.alerts.append(args[0])
             return True
+        import claude_credit
+        if fn is claude_credit.read_config:
+            return claude_credit.parse_config(None)
         raise AssertionError(fn)
 
 
@@ -172,7 +218,8 @@ def test_meter_writes_the_one_running_total_and_alerts_once(monkeypatch):
         claude_trial.deactivate()
     assert meter.rows == [(5, 0.25, True), (5, 1.5, True), (5, 0.25, True)]
     assert scope.spent_usd == pytest.approx(2.0)
-    assert meter.alerts == ["pool_50_of_200"]
+    # one alert per threshold per credit cycle (no rollover)
+    assert meter.alerts == ["pool_50_of_200_2026-11-08"]
 
 
 def test_pending_scope_accrues_to_the_pool_and_carries_into_the_grant(monkeypatch):
@@ -232,9 +279,21 @@ def test_provider_refusal_alert_never_contains_the_key(monkeypatch):
     queued = []
     monkeypatch.setattr(claude_trial, "_alert",
                         lambda key, kind, subject, html: queued.append(html))
+    switched = []
+
+    class _SwitchDb:
+        def run(self, fn, *args):
+            switched.append((fn.__name__, args))
+            return True
+
+    monkeypatch.setattr(claude_trial, "_metering_db", lambda: _SwitchDb())
     claude_trial.provider_refused(
         "auth", Exception("bad key sk-ant-api03-SECRETSECRET-xyz"))
     assert queued and "sk-ant-" not in queued[0] and "[REDACTED]" in queued[0]
+    # the refusal flips the automatic credit switch, without the key either
+    assert switched and switched[0][0] == "switch_off"
+    assert switched[0][1][0] == "auth_error"
+    assert "sk-ant-" not in switched[0][1][1]
 
 
 class _Cur:

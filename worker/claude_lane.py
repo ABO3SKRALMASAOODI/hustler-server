@@ -571,7 +571,13 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
                 continue
             raise
     result = from_anthropic(message, model)
-    claude_trial.meter(model, result.usage.provider_cost_usd)
+    if claude_trial.current() is not None:
+        claude_trial.meter(model, result.usage.provider_cost_usd)
+    else:
+        # A subscriber's Studio agent on the Claude lane (claude_plans): the
+        # call is metered into the credit cycle's ledger, which the automatic
+        # credit switch reads (the user's own credits are charged as usual).
+        claude_trial.meter_paid(model, result.usage.provider_cost_usd)
     return result
 
 
@@ -609,9 +615,9 @@ class ClaudeLaneClient:
         return ClaudeLaneClient(timeout=self.timeout, effort=effort)
 
 
-def lane(model=None):
+def lane(model=None, name="claude_trial"):
     """The agent-loop lane dict for this provider (no key inside)."""
-    return {"name": "claude_trial", "provider": PROVIDER,
+    return {"name": name, "provider": PROVIDER,
             "client": ClaudeLaneClient(),
             "model": model or config.CLAUDE_TRIAL_MODEL,
             "base_url": BASE_URL, "api_key": "anthropic"}

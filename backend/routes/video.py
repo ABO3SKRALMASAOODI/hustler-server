@@ -839,10 +839,24 @@ def studio_ai_included(plan):
     return plan not in MCP_ONLY_PLANS
 
 
+def _new_subscriber_studio(cur, user_id, plan):
+    """Owner decision D1 for NEW subscribers (claude_plans, app_kv
+    studio_for_all_plans, default off): a Plus account that subscribed after
+    the release cutoff has the Studio AI editor. Grandfathered accounts, MCP
+    Connect, the flag off or any doubt: False (today's rule)."""
+    conn = getattr(cur, "connection", None)
+    if conn is None:
+        return False
+    import claude_plans
+    return bool(claude_plans.safe(conn, claude_plans.studio_included,
+                                  user_id, plan, True, default=False))
+
+
 def _studio_ai_gate(cur, user_id):
     cur.execute("SELECT plan, is_subscribed FROM users WHERE id = %s", (user_id,))
     account = cur.fetchone() or {}
-    if account.get("plan") in MCP_ONLY_PLANS and account.get("is_subscribed"):
+    if account.get("plan") in MCP_ONLY_PLANS and account.get("is_subscribed") \
+            and not _new_subscriber_studio(cur, user_id, account.get("plan")):
         return jsonify({"error": "You’re on the MCP plan. Upgrade to use the Valmera AI editor.",
                         "code": "mcp_only", "connect_url": "/mcp/connect",
                         "upgrade_url": "/subscribe"}), 403
@@ -890,6 +904,142 @@ def _subscribe_gate_applies(cur, user_id):
 
 # Older tests monkeypatch this name.
 _trial_gate_applies = _subscribe_gate_applies
+
+
+def _trial_admission(cur, user_id, project_id, live_only=True):
+    """This account's free-trial project admission (free_trial.py), or None.
+    ``live_only`` (the upload and edit gates): only while the trial runs for
+    the account; the automatic credit switch or the kill switch off returns
+    the project to today's pre-edit wall. The export paywall passes False.
+    Read-only; never raises (a lookup failure keeps today's wall)."""
+    try:
+        cur.execute("SAVEPOINT free_trial_lookup")
+        import free_trial
+        admission = free_trial.trial_project(cur, user_id, project_id,
+                                             live_only=live_only)
+        cur.execute("RELEASE SAVEPOINT free_trial_lookup")
+        return admission
+    except Exception as e:                                  # pragma: no cover
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT free_trial_lookup")
+            cur.execute("RELEASE SAVEPOINT free_trial_lookup")
+        except Exception:
+            pass
+        print(f"[free_trial] lookup failed for project {project_id}: {e}",
+              flush=True)
+        return None
+
+
+def _trial_status(cur, user_id, project_id, subscribed):
+    try:
+        cur.execute("SAVEPOINT free_trial_status")
+        import free_trial
+        status = free_trial.status_for_studio(cur, user_id, project_id,
+                                              subscribed)
+        cur.execute("RELEASE SAVEPOINT free_trial_status")
+        return status
+    except Exception as e:                                  # pragma: no cover
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT free_trial_status")
+            cur.execute("RELEASE SAVEPOINT free_trial_status")
+        except Exception:
+            pass
+        print(f"[free_trial] status failed for project {project_id}: {e}",
+              flush=True)
+        return None
+
+
+def _trial_request(cur, user_id, project_id):
+    """{"allowed", "reason"} for an unsubscribed account's request here."""
+    # The Claude key lives with the executors (the GitHub secret), not
+    # necessarily with this process: a trial request without a working lane
+    # is answered by the worker with the plan cards (claude_trial), and the
+    # automatic credit switch is checked here (free_trial.request_allowance).
+    try:
+        cur.execute("SAVEPOINT free_trial_request")
+        import free_trial
+        out = free_trial.request_allowance(cur, user_id, project_id)
+        cur.execute("RELEASE SAVEPOINT free_trial_request")
+        return out
+    except Exception as e:                                  # pragma: no cover
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT free_trial_request")
+            cur.execute("RELEASE SAVEPOINT free_trial_request")
+        except Exception:
+            pass
+        print(f"[free_trial] request check failed: {e}", flush=True)
+        return {"allowed": False, "reason": "error"}
+
+
+def _trial_url_first_cut(cur, user_id, project_id, message_id):
+    """Owner decision D2 / PLAN.md P3: a blank-canvas request with a website
+    URL from an account the free trial admits becomes the First cut of that
+    URL (record_website_demo + showcase_demo), instead of the plans. Returns
+    the job id, or None (the ordinary wall then answers)."""
+    try:
+        cur.execute("SAVEPOINT free_trial_url")
+        import free_trial
+        text = _message_text(cur, message_id)
+        url = None
+        match = re.search(r"https?://[^\s<>\"')]+", text or "", re.I)
+        if match:
+            url = match.group(0).rstrip(".,;:")
+        job_id = None
+        if url:
+            admission = free_trial.admit_upload(cur, user_id, project_id,
+                                                subscribed=False)
+            if admission and admission.get("kind") == "trial":
+                cur.execute("""SELECT 1 FROM video_jobs
+                               WHERE project_id = %s AND type = 'agent_turn'
+                                 AND state IN ('queued', 'running')
+                               LIMIT 1""", (project_id,))
+                if not cur.fetchone():
+                    job_id = _enqueue(cur, project_id, user_id, "agent_turn",
+                                      {"first_cut": True, "trial_lane": True,
+                                       "url": url[:2000],
+                                       "message_id": int(message_id)})
+        cur.execute("RELEASE SAVEPOINT free_trial_url")
+        return job_id
+    except Exception as e:                                  # pragma: no cover
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT free_trial_url")
+            cur.execute("RELEASE SAVEPOINT free_trial_url")
+        except Exception:
+            pass
+        print(f"[free_trial] URL first cut failed: {e}", flush=True)
+        return None
+
+
+def _upload_wall(cur, user_id, project_id, nbytes=None):
+    """Whether a Studio main-video upload meets the subscribe wall.
+
+    Owner decision D2: an account's first Studio upload, while the free trial
+    is switched on and within budget, is admitted instead (free_trial.py):
+    it is analysed and gets the automatic First cut, and an unsubscribed
+    account may edit it on the trial budget (export stays behind a plan).
+    Payers' first project gets the First cut too. Called under the project
+    lock; a failure keeps today's behaviour."""
+    gated = _subscribe_gate_applies(cur, user_id)
+    admission = None
+    try:
+        cur.execute("SAVEPOINT free_trial_admit")
+        import free_trial
+        admission = free_trial.admit_upload(cur, user_id, project_id,
+                                            subscribed=not gated,
+                                            nbytes=nbytes)
+        cur.execute("RELEASE SAVEPOINT free_trial_admit")
+    except Exception as e:                                  # pragma: no cover
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT free_trial_admit")
+            cur.execute("RELEASE SAVEPOINT free_trial_admit")
+        except Exception:
+            pass
+        print(f"[free_trial] admission failed for project {project_id}: {e}",
+              flush=True)
+        admission = None
+    if gated and admission and admission.get("kind") == "trial":
+        return False
+    return gated
 
 
 _UPLOAD_SUBSCRIPTION_MESSAGE = (
@@ -976,7 +1126,9 @@ def _record_plans_message(cur, session_id, surface, request_message_id=None,
     last = cur.fetchone()
     if (last and last.get("role") == "assistant"
             and (last.get("meta") or {}).get("kind") == "subscription_plans"):
-        if blocked_prompt and blocked_prompt.get("text"):
+        if blocked_prompt and (blocked_prompt.get("text")
+                               or blocked_prompt.get("export_version")
+                               is not None):
             cur.execute("""UPDATE chat_messages
                            SET meta = COALESCE(meta, '{}'::jsonb) || %s
                            WHERE id = %s""",
@@ -987,7 +1139,8 @@ def _record_plans_message(cur, session_id, surface, request_message_id=None,
     meta = {"kind": "subscription_plans", "subscribe_required": True,
             "subscribe_gate": True, "surface": surface,
             "subscription_offer": _subscribe_offer_body()}
-    if blocked_prompt and blocked_prompt.get("text"):
+    if blocked_prompt and (blocked_prompt.get("text")
+                           or blocked_prompt.get("export_version") is not None):
         meta["blocked_prompt"] = blocked_prompt
     if request_message_id is not None:
         meta["request_message_id"] = request_message_id
@@ -2102,7 +2255,8 @@ _ORIGINAL_DRIFT_TOLERANCE_S = 5.0
 
 def _duplicate_upload_result(cur, project_id, user_id, project, asset):
     """Called under the project lock shared with index self-healing."""
-    gated = _subscribe_gate_applies(cur, user_id)
+    gated = (_subscribe_gate_applies(cur, user_id)
+             and not _trial_admission(cur, user_id, project_id))
     can_retry = not gated
     if asset["kind"] == "original":
         active = _active_original(cur, project_id)
@@ -2163,7 +2317,7 @@ def _register_deferred_original(user_id, project_id, key, filename, declared,
                            "client_proxy_bytes": proxy_bytes,
                            "declared_bytes": declared})))
         asset_id = cur.fetchone()["id"]
-        subscribe_gated = _subscribe_gate_applies(cur, user_id)
+        subscribe_gated = _upload_wall(cur, user_id, project_id, declared)
         message_id = None
         if subscribe_gated:
             message_id = _record_upload_subscription_lock(
@@ -2226,7 +2380,7 @@ def _finish_multipart(user_id, project_id, key, upload_id, parts, detail,
              "unlisted_parts": res.get("unlisted") or []}, 400)
 
 
-def complete_upload_core(user_id, project_id, data):
+def complete_upload_core(user_id, project_id, data, studio=False):
     """Turn a finished direct-to-storage upload into an asset (+ an index job
     for a main video). Returns (payload_dict, http_status).
 
@@ -2459,7 +2613,13 @@ def complete_upload_core(user_id, project_id, data):
                      Json(meta)))
         asset_id = cur.fetchone()["id"]
         job_id = None
-        account_gated = _subscribe_gate_applies(cur, user_id)
+        # Only the Studio's own upload can be admitted to the free trial; an
+        # MCP upload (routes/mcp.py) keeps the ordinary gate.
+        account_gated = (_upload_wall(cur, user_id, project_id, nbytes)
+                         if studio and kind == "original" and not staged
+                         else (_subscribe_gate_applies(cur, user_id)
+                               and not (studio and _trial_admission(
+                                   cur, user_id, project_id))))
         message_id = None
         if kind == "original" and not staged and account_gated:
             message_id = _record_upload_subscription_lock(
@@ -2500,7 +2660,8 @@ def complete_upload_core(user_id, project_id, data):
 @token_required
 def complete_upload(user_id, project_id):
     payload, status = complete_upload_core(user_id, project_id,
-                                           request.get_json() or {})
+                                           request.get_json() or {},
+                                           studio=True)
     return jsonify(payload), status
 
 
@@ -2756,7 +2917,10 @@ def tray_submit(user_id, project_id):
         promoted, promoted_idx = None, -1
         main_index_job = None
         locked_message_id = None
-        account_gated = _subscribe_gate_applies(cur, user_id)
+        account_gated = (_upload_wall(cur, user_id, project_id)
+                         if not original else
+                         (_subscribe_gate_applies(cur, user_id)
+                          and not _trial_admission(cur, user_id, project_id)))
         if not original:
             promoted_idx, promoted = next(
                 ((i, a) for i, a in enumerate(ordered)
@@ -3310,8 +3474,11 @@ def project_state(user_id, project_id):
         original = _active_original(cur, project_id)
         idx_row = _index_row(cur, original["sha256"]) if original else None
         indexed = bool(idx_row)
+        account_walled = bool(original and _subscribe_gate_applies(cur, user_id))
         subscription_locked = bool(
-            original and _subscribe_gate_applies(cur, user_id))
+            account_walled and not _trial_admission(cur, user_id, project_id))
+        trial_status = _trial_status(cur, user_id, project_id,
+                                     subscribed=not account_walled)
         # The retention sweep removed the active original's file: nothing can
         # be re-indexed or re-rendered from it, so neither self-heal below may
         # queue a job that can only fail, and the Studio shows a notice.
@@ -3649,7 +3816,12 @@ def project_state(user_id, project_id):
         "media_purged": source_purged,
         "subscribe_gated": subscription_locked,
         "subscription_offer": (_subscribe_offer_body()
-                               if subscription_locked else None),
+                               if subscription_locked
+                               or (trial_status or {}).get(
+                                   "export_requires_plan") else None),
+        # Owner decision D2: this project's free-trial / First-cut state,
+        # only for an admitted project (absent otherwise: today's payload).
+        **({"free_trial": trial_status} if trial_status else {}),
         "jobs": jobs,
         "messages": [
             {"id": r["id"], "role": r["role"], "content": r["content"],
@@ -3783,7 +3955,27 @@ def replay_blocked(user_id, project_id):
                    and meta.get("kind") == "subscription_plans"
                    and bool(last.get("recent"))
                    and not meta.get("replayed_at")
-                   and (blocked.get("text") or blocked.get("message_id")))
+                   and (blocked.get("text") or blocked.get("message_id")
+                        or blocked.get("export_version") is not None))
+        if pending and blocked.get("export_version") is not None:
+            # The wall stopped a download (free trial, D2): start it now.
+            version = int(blocked["export_version"])
+            out = _request_final(cur, user_id, project_id, version,
+                                 reuse_existing=True)
+            response, status = out if isinstance(out, tuple) else (out, 200)
+            cur.execute("""UPDATE chat_messages
+                           SET meta = COALESCE(meta, '{}'::jsonb) || %s
+                           WHERE id = %s""",
+                        (Json({"replayed_at":
+                               datetime.now(timezone.utc).isoformat()}),
+                         last["id"]))
+            record_client_event(user_id, project_id, "blocked_prompt_replayed",
+                                detail={"surface": "export",
+                                        "version": version,
+                                        "status": status}, origin="server")
+            return jsonify({"replay": "export", "version": version,
+                            "status": status,
+                            **(response.get_json(silent=True) or {})})
         cur.execute("""SELECT 1 FROM video_jobs
                        WHERE project_id = %s AND type = 'agent_turn'
                          AND state IN ('queued','running') LIMIT 1""",
@@ -3936,19 +4128,28 @@ def post_message(user_id, project_id):
         # reply carrying the plans (meta.blocked_prompt), reused rather than
         # repeated while the conversation has not moved on, so that after
         # checkout /replay-blocked can send it in this same project.
+        trial = None
         if original and _subscribe_gate_applies(cur, user_id):
-            record_client_event(user_id, project_id, "trial_gate_shown",
-                                detail={"message_chars": len(text),
-                                        "prompt": text[:300],
-                                        "subscribe_offer": True,
-                                        "surface": "chat"},
-                                origin="server")
-            body = dict(_subscribe_offer_body())
-            body["subscription_message"] = _record_plans_message(
-                cur, p["chat_session_id"], "chat",
-                blocked_prompt=_blocked_prompt(text, attachment_ids,
-                                               client_msg_id))
-            return jsonify(body), 402
+            # Owner decision D2: on the account's free-trial project a
+            # request runs on the trial budget (Claude lane) instead.
+            trial = _trial_request(cur, user_id, project_id)
+            if not trial.get("allowed"):
+                record_client_event(user_id, project_id, "trial_gate_shown",
+                                    detail={"message_chars": len(text),
+                                            "prompt": text[:300],
+                                            "subscribe_offer": True,
+                                            "surface": "chat",
+                                            "trial_reason": trial.get("reason")},
+                                    origin="server")
+                body = dict(_subscribe_offer_body())
+                if trial.get("reason") == "trial_spent":
+                    body["trial_spent"] = True
+                body["subscription_message"] = _record_plans_message(
+                    cur, p["chat_session_id"], "chat",
+                    blocked_prompt=_blocked_prompt(text, attachment_ids,
+                                                   client_msg_id))
+                return jsonify(body), 402
+        trial_lane = bool(trial and trial.get("allowed"))
 
         # After the wall, never before it: the retention sweep removed this
         # project's upload (a never-paid account that later subscribed). No
@@ -3998,15 +4199,15 @@ def post_message(user_id, project_id):
         # Pre-index chat is the concierge: cheap, rate-limited above, and never
         # charged. Let it answer. The gate closes the moment there is an index,
         # which is also the moment the card has something true to say.
-        if indexed and plan_gate.needs_plan(conn, user_id):
+        if indexed and not trial_lane and plan_gate.needs_plan(conn, user_id):
             return plan_gate.gate_response(jsonify)
 
         # Credits gate — same condition, different question: the plan gate
         # above answers for anyone with NO plan (their free 50 are spent), this
         # one answers for everybody else — a spent trial slice, or a subscriber
         # who has burned this cycle's pool.
-        if indexed and not check_and_reserve(conn, user_id,
-                                             min_credits=1.0):
+        if indexed and not trial_lane and not check_and_reserve(
+                conn, user_id, min_credits=1.0):
             info = get_balance(conn, user_id)
             spent = info.get("free_trial_exhausted")
             # FOUR walls now, four different true things to say. A refused card
@@ -4210,7 +4411,10 @@ def post_message(user_id, project_id):
             }
 
         elif indexed:
-            if not os.getenv("OPENAI_API_KEY"):
+            # A free-trial turn runs on the Claude lane in the executors and
+            # needs no OpenAI key here; without the Claude lane the worker
+            # answers it with the plan cards itself.
+            if not os.getenv("OPENAI_API_KEY") and not trial_lane:
                 cur.execute("""INSERT INTO chat_messages (session_id, role,
                                                           content)
                                VALUES (%s, 'assistant',
@@ -4254,7 +4458,9 @@ def post_message(user_id, project_id):
                     job_id = row["id"]
             if job_id is None:
                 job_id = _enqueue(cur, project_id, user_id, "agent_turn",
-                                  {"message_id": message_id})
+                                  {"message_id": message_id,
+                                   **({"trial_lane": True}
+                                      if trial_lane else {})})
                 _queue_depth_notice(cur, p["chat_session_id"], user_id,
                                     job_id)
 
@@ -4392,7 +4598,16 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                 # charges credits per turn exactly like any edit, so reserve
                 # first and fail honestly if they're tapped out or already busy.
                 info = get_balance(conn, ctx["user_id"])
+                trial_url_job = None
                 if info.get("subscribe_gated") and not info.get("payment_failed"):
+                    trial_url_job = _trial_url_first_cut(
+                        cur, ctx["user_id"], project_id, ctx["message_id"])
+                if trial_url_job:
+                    _say("I'm recording your website and making a first cut "
+                         "now: a vertical demo you can watch here in about a "
+                         "minute.", {"kind": "concierge", "act": True,
+                                     "first_cut_job_id": trial_url_job})
+                elif info.get("subscribe_gated") and not info.get("payment_failed"):
                     # A website recording or blank-canvas build is an edit
                     # attempt too. New accounts have no free grant to exhaust;
                     # send the same offer as the uploaded-video path.
@@ -6464,8 +6679,35 @@ def _flash_flag(edl_json):
 def _request_final(cur, user_id, project_id, version, render_group=None,
                    reuse_existing=False):
     """One export gate shared by individual and explicit batch requests."""
-    if not _project_for_user(cur, project_id, user_id):
+    p = _project_for_user(cur, project_id, user_id)
+    if not p:
         return jsonify({"error": "Project not found"}), 404
+    # THE PAYWALL SITS ON EXPORT (owner decision D2): an unsubscribed account
+    # watches its free-trial project (First cut and trial edits) in the
+    # Studio and subscribes to export or download it. Only the trial project:
+    # a lapsed subscriber's earlier projects export exactly as before. The
+    # plans reply keeps the export, so checkout returns and starts it.
+    admission = (_trial_admission(cur, user_id, project_id, live_only=False)
+                 if _subscribe_gate_applies(cur, user_id) else None)
+    if admission:
+        record_client_event(
+            user_id, project_id, "export_blocked",
+            detail={"code": "subscription_required", "version": version,
+                    "free_trial": True}, origin="server")
+        record_client_event(
+            user_id, project_id, "free_result_keep_clicked",
+            detail={"version": version, "surface": "export"},
+            origin="server")
+        body = dict(_subscribe_offer_body())
+        body["code"] = "subscription_required"
+        body["error"] = "Choose a plan to download this video."
+        if p.get("chat_session_id"):
+            body["subscription_message"] = _record_plans_message(
+                cur, p["chat_session_id"], "export",
+                blocked_prompt={"export_version": int(version),
+                                "text": "",
+                                "at": datetime.now(timezone.utc).isoformat()})
+        return jsonify(body), 402
     cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
     cur.execute("SELECT version, json FROM edls "
                 "WHERE project_id = %s AND version = %s",

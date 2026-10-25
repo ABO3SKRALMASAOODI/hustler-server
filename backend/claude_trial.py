@@ -80,21 +80,46 @@ def account_status(cur, user_id):
             "exhausted": bool(_v(row, "exhausted_at", 2)) or spent >= cap - 0.005}
 
 
+def _cycle(cur):
+    """The Anthropic credit cycle the pool belongs to (claude_credit.py): the
+    credit has no rollover, so the pool and its alerts restart each cycle."""
+    import claude_credit
+    conn = getattr(cur, "connection", None)
+    cfg = None
+    if conn is not None:
+        try:
+            cur.execute("SAVEPOINT claude_trial_cycle")
+            cfg = claude_credit.read_config(conn)
+            cur.execute("RELEASE SAVEPOINT claude_trial_cycle")
+        except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT claude_trial_cycle")
+                cur.execute("RELEASE SAVEPOINT claude_trial_cycle")
+            except Exception:
+                pass
+            cfg = None
+    return claude_credit.cycle_window(cfg or claude_credit.parse_config(None))
+
+
 def pool_status(cur, pool_usd=None):
     pool_usd = float(pool_usd or POOL_USD_DEFAULT)
+    start, end = _cycle(cur)
     cur.execute("""SELECT
-          COALESCE(SUM(spent_usd), 0) AS spent,
+          COALESCE(SUM(spent_usd) FILTER (
+              WHERE day >= %(start)s AND day < %(end)s), 0) AS spent,
           COALESCE(SUM(spent_usd) FILTER (
               WHERE day >= date_trunc('month', (NOW() AT TIME ZONE 'UTC'))::date), 0) AS month,
           COALESCE(SUM(spent_usd) FILTER (
               WHERE day = (NOW() AT TIME ZONE 'UTC')::date), 0) AS today,
-          COALESCE(SUM(grants), 0) AS grants,
+          COALESCE(SUM(grants) FILTER (
+              WHERE day >= %(start)s AND day < %(end)s), 0) AS grants,
           COALESCE(SUM(grants) FILTER (
               WHERE day = (NOW() AT TIME ZONE 'UTC')::date), 0) AS grants_today
-        FROM trial_budget_days""")
+        FROM trial_budget_days""", {"start": start.date(), "end": end.date()})
     row = cur.fetchone()
     spent = float(_v(row, "spent", 0) or 0)
     return {"pool_usd": pool_usd, "spent_usd": round(spent, 4),
+            "cycle_start": start.isoformat(), "cycle_end": end.isoformat(),
             "pct": round(100.0 * spent / pool_usd, 1) if pool_usd else None,
             "month_usd": round(float(_v(row, "month", 1) or 0), 4),
             "today_usd": round(float(_v(row, "today", 2) or 0), 4),
@@ -152,7 +177,8 @@ def queue_threshold_alerts(cur, pool_usd=None):
                                                      html_content)
                            VALUES (%s, 'pool_threshold', %s, %s)
                            ON CONFLICT (dedupe_key) DO NOTHING""",
-                        (f"pool_{mark}_of_{int(round(status['pool_usd']))}",
+                        (f"pool_{mark}_of_{int(round(status['pool_usd']))}"
+                         f"_{status['cycle_end'][:10]}",
                          f"Claude trial pool at {mark}%: "
                          f"${status['spent_usd']:.2f} of "
                          f"${status['pool_usd']:.0f}",

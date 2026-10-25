@@ -33,6 +33,14 @@ daily_usd_cap, model, test_user_ids}``. Only ``on`` is required; every cap
 defaults to the owner's numbers in config. ``test_user_ids`` routes internal
 test accounts to the trial lane even while ``on`` is false (never
 customers), which is how the lane is proven in production before the flip.
+
+INTEGRATION (claude/agent-trial-release-1025): track B's backend admits the
+project (``projects.meta.free_result.kind == "trial"``, backend/free_trial.py)
+and this module only runs a never-paid account's job on Claude for an
+ADMITTED project: anything else keeps today's lanes exactly. The pool is the
+current Anthropic billing cycle's trial spend (claude_credit.cycle_window),
+and the automatic credit switch (claude_credit.py) closes the lane for new
+turns when the cycle's credit is used up or Anthropic refuses for billing.
 """
 
 import json
@@ -146,6 +154,8 @@ def flag(worker_db, max_age_s=20.0):
 def reset_flag_cache():
     with _flag_lock:
         _flag_cache.update(value=None, at=0.0)
+        if "_credit_cache" in globals():
+            _credit_cache.update(value=None, at=0.0)
 
 
 # ------------------------------------------------------------------ #
@@ -176,17 +186,21 @@ def get_budget(conn, user_id):
 
 
 def pool_totals(conn):
-    """{'pool': all-time, 'month': this UTC month, 'today': today, 'grants'}"""
+    """{'pool': this credit cycle, 'month': this UTC month, 'today': today,
+    'grants_today'}. The credit has no rollover, so the pool is per cycle."""
+    import claude_credit
+    start, end = claude_credit.cycle_window(claude_credit.read_config(conn))
     with conn.cursor() as cur:
         cur.execute("""SELECT
-              COALESCE(SUM(spent_usd), 0) AS pool,
+              COALESCE(SUM(spent_usd) FILTER (
+                  WHERE day >= %s AND day < %s), 0) AS pool,
               COALESCE(SUM(spent_usd) FILTER (
                   WHERE day >= date_trunc('month', (NOW() AT TIME ZONE 'UTC'))::date), 0) AS month,
               COALESCE(SUM(spent_usd) FILTER (
                   WHERE day = (NOW() AT TIME ZONE 'UTC')::date), 0) AS today,
               COALESCE(SUM(grants) FILTER (
                   WHERE day = (NOW() AT TIME ZONE 'UTC')::date), 0) AS grants_today
-            FROM trial_budget_days""")
+            FROM trial_budget_days""", (start.date(), end.date()))
         row = cur.fetchone()
     return {"pool": float(_v(row, "pool", 0) or 0),
             "month": float(_v(row, "month", 1) or 0),
@@ -223,6 +237,17 @@ def _account(conn, user_id):
     return user, paid, device
 
 
+def project_admitted(conn, project_id):
+    """Track B's admission: this project is an account's free-trial project
+    (backend/free_trial.admit_upload wrote projects.meta.free_result)."""
+    if project_id is None:
+        return False
+    with conn.cursor() as cur:
+        cur.execute("""SELECT meta->'free_result'->>'kind' AS kind
+                         FROM projects WHERE id = %s""", (int(project_id),))
+        return _v(cur.fetchone(), "kind", 0) == "trial"
+
+
 def email_is_disposable(email):
     domain = str(email or "").rsplit("@", 1)[-1].strip().lower()
     if not domain or "." not in domain:
@@ -233,7 +258,7 @@ def email_is_disposable(email):
 
 
 def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
-          is_test=False):
+          is_test=False, admitted=False):
     """Grant the account its trial once, under every D2 limit.
 
     Returns ``{"granted": bool, "row": row|None, "reason": str}``. Idempotent:
@@ -257,7 +282,11 @@ def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
             return {"granted": False, "row": None, "reason": "paid_account"}
         if email_is_disposable(email):
             return {"granted": False, "row": None, "reason": "disposable_email"}
-        if device and config.CLAUDE_TRIAL_ACCOUNTS_PER_DEVICE > 0:
+        # An admitted project already passed the device limit (track B counts
+        # admissions per signup device); counting grants again would refuse an
+        # account the backend has just let in.
+        if device and config.CLAUDE_TRIAL_ACCOUNTS_PER_DEVICE > 0 \
+                and not admitted:
             with conn.cursor() as cur:
                 cur.execute("""SELECT COUNT(*) AS n FROM trial_budgets
                                 WHERE device_id = %s
@@ -272,11 +301,12 @@ def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
         return {"granted": False, "row": None, "reason": "pool_spent"}
     if totals["month"] >= flag_value["monthly_usd_cap"]:
         return {"granted": False, "row": None, "reason": "monthly_cap"}
-    if not is_test:
+    if not is_test and not admitted:
+        # Admission counted the day's new trial accounts already.
         if totals["grants_today"] >= flag_value["daily_count_cap"]:
             return {"granted": False, "row": None, "reason": "daily_count_cap"}
-        if totals["today"] >= flag_value["daily_usd_cap"]:
-            return {"granted": False, "row": None, "reason": "daily_usd_cap"}
+    if not is_test and totals["today"] >= flag_value["daily_usd_cap"]:
+        return {"granted": False, "row": None, "reason": "daily_usd_cap"}
     cap = float(flag_value["per_account_usd_cap"])
     spent = max(0.0, float(pending_usd or 0.0))
     with conn.cursor() as cur:
@@ -299,10 +329,14 @@ def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
             "reason": "granted" if inserted else "existing"}
 
 
-def add_spend(conn, user_id, usd, granted=True, calls=1):
+def add_spend(conn, user_id, usd, granted=True, calls=1, extras=False):
     """Atomically add one cost to the account total and the day ledger.
-    Returns (account_spent or None, pool_total)."""
+    ``extras`` marks a non-Anthropic generation (images, sfx): it counts
+    against the account's $1 and the pool, not against the Anthropic credit.
+    Returns (account_spent or None, pool_total for this credit cycle)."""
     usd = max(0.0, float(usd or 0.0))
+    import claude_credit
+    with_extras = claude_credit.ledger_ready(conn)
     spent = None
     with conn.cursor() as cur:
         if granted and user_id is not None:
@@ -318,16 +352,35 @@ def add_spend(conn, user_id, usd, granted=True, calls=1):
                         RETURNING spent_usd""",
                         (usd, int(calls), usd, int(user_id)))
             spent = _v(cur.fetchone(), "spent_usd", 0)
-        cur.execute("""INSERT INTO trial_budget_days (day, spent_usd, calls)
-                       VALUES ((NOW() AT TIME ZONE 'UTC')::date, %s, %s)
-                       ON CONFLICT (day) DO UPDATE
-                       SET spent_usd = trial_budget_days.spent_usd + EXCLUDED.spent_usd,
-                           calls = trial_budget_days.calls + EXCLUDED.calls,
-                           updated_at = NOW()""", (usd, int(calls)))
-        cur.execute("SELECT COALESCE(SUM(spent_usd), 0) AS pool "
-                    "FROM trial_budget_days")
-        pool = float(_v(cur.fetchone(), "pool", 0) or 0)
+        if with_extras:
+            cur.execute("""INSERT INTO trial_budget_days
+                             (day, spent_usd, calls, extras_usd)
+                           VALUES ((NOW() AT TIME ZONE 'UTC')::date, %s, %s, %s)
+                           ON CONFLICT (day) DO UPDATE
+                           SET spent_usd = trial_budget_days.spent_usd + EXCLUDED.spent_usd,
+                               calls = trial_budget_days.calls + EXCLUDED.calls,
+                               extras_usd = trial_budget_days.extras_usd
+                                            + EXCLUDED.extras_usd,
+                               updated_at = NOW()""",
+                        (usd, int(calls), usd if extras else 0.0))
+        else:
+            cur.execute("""INSERT INTO trial_budget_days (day, spent_usd, calls)
+                           VALUES ((NOW() AT TIME ZONE 'UTC')::date, %s, %s)
+                           ON CONFLICT (day) DO UPDATE
+                           SET spent_usd = trial_budget_days.spent_usd + EXCLUDED.spent_usd,
+                               calls = trial_budget_days.calls + EXCLUDED.calls,
+                               updated_at = NOW()""", (usd, int(calls)))
+    pool = pool_totals(conn)["pool"]
     return (float(spent) if spent is not None else None), pool
+
+
+def _meter_tx(conn, user_id, usd, granted, extras):
+    """One metered cost and, in the same transaction, the credit line."""
+    import claude_credit
+    spent, pool = add_spend(conn, user_id, usd, granted, extras=extras)
+    if usd > 0 and not extras:
+        claude_credit.check_line(conn)
+    return spent, pool
 
 
 def queue_alert(conn, dedupe_key, kind, subject, html):
@@ -458,7 +511,8 @@ def meter(model, usd, kind="llm"):
             scope.pending_usd += usd
         try:
             spent, pool = _metering_db().run(
-                add_spend, scope.user_id, usd, scope.granted)
+                _meter_tx, scope.user_id, usd, scope.granted,
+                kind == "extras")
             if spent is not None:
                 scope.spent_usd = max(scope.spent_usd, float(spent))
         except Exception as exc:  # noqa: BLE001 - the live scope still caps
@@ -468,6 +522,24 @@ def meter(model, usd, kind="llm"):
             return None
     _pool_alerts(pool, scope.pool_cap)
     return scope.spent_usd
+
+
+def _paid_tx(conn, usd):
+    import claude_credit
+    claude_credit.record_paid_spend(conn, usd)
+    if usd > 0:
+        claude_credit.check_line(conn)
+
+
+def meter_paid(model, usd):
+    """A subscriber's Claude-lane call: the credit cycle's ledger and line.
+    Never raises (the turn is the customer's; metering is ours)."""
+    usd = max(0.0, float(usd or 0.0))
+    try:
+        _metering_db().run(_paid_tx, usd)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[claude-lane] paid meter write failed ({model}): "
+              f"{str(exc)[:160]}", flush=True)
 
 
 def meter_extras(scope, total_extras_usd):
@@ -509,9 +581,18 @@ def _pool_alerts(pool, pool_cap):
     if not pool_cap or pool_cap <= 0:
         return
     pct = 100.0 * float(pool) / float(pool_cap)
+    if pct < _POOL_ALERT_PCTS[0]:
+        return
+    try:
+        import claude_credit
+        cycle = claude_credit.cycle_window(_metering_db().run(
+            claude_credit.read_config))[1].strftime("%Y-%m-%d")
+    except Exception:  # pragma: no cover
+        cycle = ""
     for mark in _POOL_ALERT_PCTS:
         if pct >= mark:
-            _alert(f"pool_{mark}_of_{int(round(pool_cap))}", "pool_threshold",
+            _alert(f"pool_{mark}_of_{int(round(pool_cap))}_{cycle}",
+                   "pool_threshold",
                    f"Claude trial pool at {mark}%: ${pool:.2f} of "
                    f"${pool_cap:.0f}",
                    f"<p>The Claude-funded trial has spent <b>${pool:.2f}</b> "
@@ -523,9 +604,21 @@ def _pool_alerts(pool, pool_cap):
 
 
 def provider_refused(kind, exc):
-    """Anthropic refused for billing or auth: alert the admin (hourly)."""
+    """Anthropic refused for billing or auth: flip the automatic credit
+    switch OFF (claude_credit; one alert per switch) and alert the admin
+    (hourly per process)."""
     hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
     detail = re.sub(r"sk-ant-[A-Za-z0-9_\-]+", "[REDACTED]", str(exc))[:400]
+    try:
+        import claude_credit
+        _metering_db().run(
+            claude_credit.switch_off,
+            claude_credit.REASON_BILLING if kind == "billing"
+            else claude_credit.REASON_AUTH, detail)
+        reset_flag_cache()
+    except Exception as switch_exc:  # noqa: BLE001 - never breaks a turn
+        print(f"[claude-trial] credit switch write failed: "
+              f"{str(switch_exc)[:160]}", flush=True)
     _alert(f"provider_{kind}_{hour}", f"provider_{kind}",
            f"Claude trial lane closed: Anthropic {kind} refusal",
            f"<p>Anthropic refused a trial-lane call ({kind}). The lane is "
@@ -563,36 +656,75 @@ def _is_admin(conn, user_id):
     return str(_v(row, "email", 0) or "").strip().lower() == ADMIN_EMAIL
 
 
+_credit_cache = {"value": None, "at": 0.0}
+
+
+def credit_status(worker_db, max_age_s=20.0):
+    """The automatic credit switch (claude_credit.status), cached briefly per
+    process. Any read error reads as OFF: the lane fails closed."""
+    with _flag_lock:
+        if (_credit_cache["value"] is not None
+                and time.monotonic() - _credit_cache["at"] < max_age_s):
+            return _credit_cache["value"]
+    try:
+        import claude_credit
+        value = worker_db.run(claude_credit.status)
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        print(f"[claude-trial] credit switch read failed "
+              f"({str(exc)[:120]}) — off", flush=True)
+        value = {"on": False, "reason": "unreadable"}
+    with _flag_lock:
+        _credit_cache.update(value=value, at=time.monotonic())
+    return value
+
+
 def resolve(worker_db, user_id, subscribed, project_id=None,
-            via="agent_turn", operator_repair=False, allow_grant=True):
-    """Which lane a job for this account runs on. Never raises."""
+            via="agent_turn", operator_repair=False, allow_grant=True,
+            continuing=False):
+    """Which lane a job for this account runs on. Never raises.
+
+    NOT_TRIAL (today's behaviour, exactly) unless ALL of: the flag is on (or
+    the account is an internal test account), the account has no plan, and
+    the project is its admitted free-trial project. ``continuing`` is a later
+    slice of a request that already started: when the credit switch went off
+    only because the cycle reached its line, that request still finishes."""
     if operator_repair or user_id is None:
         return Decision(Decision.NOT_TRIAL, reason="operator_or_anonymous")
     value = flag(worker_db)
     is_test = int(user_id) in value["test_user_ids"]
-    if not is_test:
-        if not value["on"]:
-            return Decision(Decision.NOT_TRIAL, reason="flag_off")
-        if subscribed:
-            return Decision(Decision.NOT_TRIAL, reason="subscribed")
-        try:
-            if worker_db.run(_is_admin, user_id):
-                return Decision(Decision.NOT_TRIAL, reason="admin")
-        except Exception:
-            return Decision(Decision.UNAVAILABLE, reason="account_lookup")
+    if not value["on"] and not is_test:
+        return Decision(Decision.NOT_TRIAL, reason="flag_off")
+    if subscribed:
+        return Decision(Decision.NOT_TRIAL, reason="subscribed")
+    try:
+        if not worker_db.run(project_admitted, project_id):
+            return Decision(Decision.NOT_TRIAL, reason="not_admitted")
+        if not is_test and worker_db.run(_is_admin, user_id):
+            return Decision(Decision.NOT_TRIAL, reason="admin")
+    except Exception:
+        return Decision(Decision.UNAVAILABLE, reason="account_lookup")
     import claude_lane
     if not claude_lane.configured():
         return Decision(Decision.UNAVAILABLE, reason="no_anthropic_key")
     if not claude_lane.available():
         return Decision(Decision.UNAVAILABLE,
                         reason="provider_closed: " + claude_lane.closed_reason())
+    credit = credit_status(worker_db)
+    if not credit.get("on"):
+        import claude_credit
+        finishing = continuing and credit.get("reason") == \
+            claude_credit.REASON_BUDGET
+        if not finishing:
+            return Decision(Decision.UNAVAILABLE,
+                            reason="credit_switch_off: "
+                                   + str(credit.get("reason") or ""))
     try:
         if not worker_db.run(tables_ready):
             return Decision(Decision.UNAVAILABLE, reason="migration_040_missing")
         totals = worker_db.run(pool_totals)
-        if totals["pool"] >= value["pool_usd_cap"]:
+        if totals["pool"] >= value["pool_usd_cap"] and not continuing:
             return Decision(Decision.UNAVAILABLE, reason="pool_spent")
-        if totals["month"] >= value["monthly_usd_cap"]:
+        if totals["month"] >= value["monthly_usd_cap"] and not continuing:
             return Decision(Decision.UNAVAILABLE, reason="monthly_cap")
         row = worker_db.run(get_budget, user_id)
         if row is None:
@@ -602,7 +734,7 @@ def resolve(worker_db, user_id, subscribed, project_id=None,
                     value["model"], granted=False, is_test=is_test,
                     pool_cap=value["pool_usd_cap"]), reason="pending_grant")
             got = worker_db.run(grant, user_id, project_id, via, value,
-                                0.0, is_test)
+                                0.0, is_test, True)
             if not got["granted"]:
                 return Decision(Decision.UNAVAILABLE,
                                 reason="not_granted: " + got["reason"])
@@ -629,7 +761,7 @@ def settle_grant(worker_db, scope, project_id, via="index"):
     try:
         value = flag(worker_db)
         got = worker_db.run(grant, scope.user_id, project_id, via, value,
-                            scope.pending_usd, scope.is_test)
+                            scope.pending_usd, scope.is_test, True)
     except Exception as exc:  # noqa: BLE001
         print(f"[claude-trial] grant after index failed for "
               f"{scope.user_id}: {str(exc)[:160]}", flush=True)
@@ -651,7 +783,8 @@ def settle_grant(worker_db, scope, project_id, via="index"):
 FIRST_RESULT_NOTE = (
     "FREE TRIAL — FIRST RESULT. This account is trying Valmera on a small, "
     "one-time budget, and this reply is what decides whether they keep "
-    "using it. Deliver ONE finished, polished result in this turn. Do not "
+    "using it. Deliver ONE finished, polished result in this turn; "
+    "read_skill('first-requests') gives this request's default chain. Do not "
     "ask questions unless the request is impossible to start: choose "
     "sensible defaults yourself and say in your reply what you chose. "
     "Defaults when the user did not say otherwise: a social-ready 9:16 "

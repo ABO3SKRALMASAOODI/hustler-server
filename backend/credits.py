@@ -121,7 +121,46 @@ SUB_DAILY_CREDITS   = 20    # subscribers keep their daily top-up on top of the
 INITIAL_BONUS       = FREE_GRANT_CREDITS   # legacy name, same number
 
 
-def subscribe_offer_body():
+_D1_FLAG_CACHE = {"value": None, "expires": 0.0}
+
+
+def _studio_for_all_plans_on(conn=None):
+    """app_kv studio_for_all_plans is on (D1 for new subscribers): the plan
+    cards then say that Plus includes the Studio AI editor. Off, missing or
+    unreadable: False, and the cards are exactly today's. Cached 30 s."""
+    import time as _time
+    if _D1_FLAG_CACHE["value"] is not None \
+            and _time.monotonic() < _D1_FLAG_CACHE["expires"]:
+        return _D1_FLAG_CACHE["value"]
+    value = _read_studio_for_all_plans(conn)
+    _D1_FLAG_CACHE.update(value=value, expires=_time.monotonic() + 30)
+    return value
+
+
+def _read_studio_for_all_plans(conn=None):
+    try:
+        import claude_plans
+        if conn is not None:
+            flag = claude_plans.safe(conn, claude_plans.read_flag, default=None)
+        else:
+            from flask import has_app_context
+            if not has_app_context():
+                return False
+            import psycopg2
+            from database_config import preferred_database_url
+            c = psycopg2.connect(preferred_database_url(), connect_timeout=3,
+                                 options="-c default_transaction_read_only=on "
+                                         "-c statement_timeout=1500")
+            try:
+                flag = claude_plans.read_flag(c)
+            finally:
+                c.close()
+        return bool(flag and flag["on"] and "plus_2026" in flag["studio_plans"])
+    except Exception:
+        return False
+
+
+def subscribe_offer_body(conn=None):
     """402 / credits payload for the Studio upgrade cards."""
     import billing
     names = {"plus_2026": "Plus", "pro_2026": "Pro", "max_2026": "Max"}
@@ -138,12 +177,20 @@ def subscribe_offer_body():
             "monthly": prices.get("monthly"),
             "yearly": prices.get("yearly"),
             "credits": PLAN_MONTHLY_LIMITS.get(pid)})
-    return {
+    body = {
         "error": "Subscribe to start editing. Cancel anytime.",
         "code": "subscribe_required", "trial_offer": True,
         "subscribe_offer": True, "trial_days": 0, "plans": plans,
         # Old clients only read plans and must never offer unavailable checkout.
         "comparison_plans": [dict(p) for p in COMPARISON_ONLY_PLANS] if held else []}
+    if not held and _studio_for_all_plans_on(conn):
+        # D1 for new subscribers: every card here includes the Studio AI
+        # editor (the frontend reads these keys when present; prices and
+        # credits are unchanged).
+        body["studio_ai_plan_ids"] = ["plus_2026", "pro_2026", "max_2026"]
+        body["plan_notes"] = {
+            "plus_2026": "Valmera AI edits in Studio. Includes MCP."}
+    return body
 
 # ── Core conversion (model-aware) ─────────────────────────────────────────────
 
@@ -352,8 +399,16 @@ def get_balance(conn, user_id: int) -> dict:
         "free_trial_exhausted": (not is_subscribed) and empty,
         "trial_cap_reached": trialing and empty,
     }
+    # Owner decision D1 for NEW subscribers (claude_plans, app_kv
+    # studio_for_all_plans, default off): only present when it is true, so
+    # with the flag off this payload is exactly today's.
+    if is_subscribed and plan == "plus_2026":
+        import claude_plans
+        if claude_plans.safe(conn, claude_plans.studio_included, user_id,
+                             plan, True, default=False):
+            out["studio_ai_included"] = True
     if subscribe_gated:
-        out["subscribe_offer"] = subscribe_offer_body()
+        out["subscribe_offer"] = subscribe_offer_body(conn)
     return out
 
 
