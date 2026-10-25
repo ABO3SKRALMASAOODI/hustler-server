@@ -1799,6 +1799,18 @@ AGENT_TURN_TOTAL_TIMEOUT_S = min(
 # then hand the user the latest saved preview instead of iterating forever.
 AGENT_MAX_PRODUCTIVE_SLICES = min(
     24, max(2, int(os.getenv("AGENT_MAX_PRODUCTIVE_SLICES", "8"))))
+# ONE STUDIO REQUEST IS BOUNDED (P4, 25 Oct 2026). Partial requests averaged
+# 46 preview renders and 71 minutes (60 d); 37% of requests were fulfilled and
+# 77% of credits were charged on unfinished work. After this many preview
+# renders (complete or changed-section proofs; the turn-end render counts) or
+# this much wall time since the request's first slice started, the editor
+# stops iterating and delivers the best rendered version: the critics' open
+# findings become advice beside "Improve it" and an export button, instead of
+# holding the turn or the export. Flash safety still blocks. 0 disables a bound.
+AGENT_REQUEST_MAX_PREVIEWS = max(
+    0, int(os.getenv("AGENT_REQUEST_MAX_PREVIEWS", "6")))
+AGENT_REQUEST_MAX_S = max(
+    0.0, float(os.getenv("AGENT_REQUEST_MAX_S", "600")))
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))

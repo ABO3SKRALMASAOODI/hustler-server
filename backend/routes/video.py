@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
@@ -709,10 +710,21 @@ def vdb(db_url=None):
         conn.close()
 
 
+# Plans whose subscription does not include the Studio AI editor. Plus
+# ($15, 500 credits) includes it from 25 Oct 2026 (owner decision D1): 12 of
+# 12 October buyers bought an MCP-only plan from the Studio and were refused
+# the editor they were looking at. MCP Connect stays MCP-only.
+MCP_ONLY_PLANS = frozenset({"mcp_connect"})
+
+
+def studio_ai_included(plan):
+    return plan not in MCP_ONLY_PLANS
+
+
 def _studio_ai_gate(cur, user_id):
     cur.execute("SELECT plan, is_subscribed FROM users WHERE id = %s", (user_id,))
     account = cur.fetchone() or {}
-    if account.get("plan") in {"mcp_connect", "plus_2026"} and account.get("is_subscribed"):
+    if account.get("plan") in MCP_ONLY_PLANS and account.get("is_subscribed"):
         return jsonify({"error": "You’re on the MCP plan. Upgrade to use the Valmera AI editor.",
                         "code": "mcp_only", "connect_url": "/mcp/connect",
                         "upgrade_url": "/subscribe"}), 403
@@ -808,13 +820,36 @@ def _message_out(row):
             else created}
 
 
-def _record_plans_message(cur, session_id, surface, request_message_id=None):
+def _blocked_prompt(text, attachment_ids=None, client_msg_id=None):
+    """The request a wall refused, kept so checkout can return the user to
+    this project and send it for them (PLAN.md P1, 25 Oct 2026: 210 blocked
+    first prompts in 14 days were discarded)."""
+    return {"text": str(text or "")[:4000],
+            "attachments": [int(a) for a in (attachment_ids or [])][:4],
+            "client_msg_id": (str(client_msg_id)[:64] if client_msg_id
+                              else None),
+            "at": datetime.now(timezone.utc).isoformat()}
+
+
+def _message_text(cur, message_id):
+    try:
+        cur.execute("SELECT content FROM chat_messages WHERE id = %s",
+                    (int(message_id),))
+        return str((cur.fetchone() or {}).get("content") or "")[:4000]
+    except Exception:                                   # pragma: no cover
+        return ""
+
+
+def _record_plans_message(cur, session_id, surface, request_message_id=None,
+                          blocked_prompt=None):
     """Persist the plans reply once and return it as a chat message.
 
-    A blocked send is never stored, so when the newest conversation message is
-    already this reply, a repeated send reuses it instead of stacking another
-    set of plan cards. Prices are not frozen here as the source of truth: the
-    Studio prefers the account's current offer and falls back to this copy.
+    A blocked send is not stored as a chat message, so when the newest
+    conversation message is already this reply, a repeated send reuses it
+    instead of stacking another set of plan cards (its blocked request is
+    replaced by the newest one). Prices are not frozen here as the source of
+    truth: the Studio prefers the account's current offer and falls back to
+    this copy.
     """
     cur.execute("""SELECT id, role, content, meta, created_at
                    FROM chat_messages
@@ -823,10 +858,19 @@ def _record_plans_message(cur, session_id, surface, request_message_id=None):
     last = cur.fetchone()
     if (last and last.get("role") == "assistant"
             and (last.get("meta") or {}).get("kind") == "subscription_plans"):
+        if blocked_prompt and blocked_prompt.get("text"):
+            cur.execute("""UPDATE chat_messages
+                           SET meta = COALESCE(meta, '{}'::jsonb) || %s
+                           WHERE id = %s""",
+                        (Json({"blocked_prompt": blocked_prompt}), last["id"]))
+            last = dict(last, meta=dict(last.get("meta") or {},
+                                        blocked_prompt=blocked_prompt))
         return _message_out(last)
     meta = {"kind": "subscription_plans", "subscribe_required": True,
             "subscribe_gate": True, "surface": surface,
             "subscription_offer": _subscribe_offer_body()}
+    if blocked_prompt and blocked_prompt.get("text"):
+        meta["blocked_prompt"] = blocked_prompt
     if request_message_id is not None:
         meta["request_message_id"] = request_message_id
     cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
@@ -3385,6 +3429,108 @@ def get_messages(user_id, project_id):
     ]})
 
 
+# How long after the wall a purchase still replays the refused request. 20 of
+# 24 era-C payers paid within an hour of the wall; a request from days ago is
+# no longer something the user is waiting on.
+REPLAY_BLOCKED_WINDOW_H = int(os.getenv("REPLAY_BLOCKED_WINDOW_H", "48"))
+
+
+@video_bp.route("/projects/<int:project_id>/replay-blocked", methods=["POST"])
+@token_required
+def replay_blocked(user_id, project_id):
+    """After checkout, pick up exactly where the wall stopped this project.
+
+    - The wall refused a typed request (chat): return it so the Studio sends
+      it through the ordinary send path with ``client_msg_id`` =
+      ``replay-<plans message id>``. That path applies every gate, resumes
+      the index and dedupes a retried send; once it lands the conversation
+      has moved past the plans reply, so nothing replays twice.
+    - The wall refused a blank-canvas request that is already a chat message
+      (a website recording): run it now as an agent turn.
+    - Only an upload was walled: start its analysis now instead of waiting
+      for a first prompt.
+    Always 200; ``replay`` is null with a ``reason`` when there is nothing to
+    do. Plans cards are never shown from here.
+    """
+    with vdb() as conn:
+        cur = conn.cursor()
+        p = _project_for_user(cur, project_id, user_id)
+        if not p:
+            return jsonify({"error": "Project not found"}), 404
+        if _subscribe_gate_applies(cur, user_id):
+            return jsonify({"replay": None, "reason": "subscription_required"})
+        if _studio_ai_gate(cur, user_id):
+            return jsonify({"replay": None, "reason": "mcp_only"})
+        cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
+        cur.execute("""SELECT id, role, meta,
+                              created_at > NOW() - make_interval(hours => %s)
+                                  AS recent
+                       FROM chat_messages
+                       WHERE session_id = %s AND role IN ('user', 'assistant')
+                       ORDER BY id DESC LIMIT 1""",
+                    (REPLAY_BLOCKED_WINDOW_H, p["chat_session_id"]))
+        last = cur.fetchone() or {}
+        meta = last.get("meta") or {}
+        blocked = meta.get("blocked_prompt") or {}
+        pending = (last.get("role") == "assistant"
+                   and meta.get("kind") == "subscription_plans"
+                   and bool(last.get("recent"))
+                   and not meta.get("replayed_at")
+                   and (blocked.get("text") or blocked.get("message_id")))
+        cur.execute("""SELECT 1 FROM video_jobs
+                       WHERE project_id = %s AND type = 'agent_turn'
+                         AND state IN ('queued','running') LIMIT 1""",
+                    (project_id,))
+        agent_live = bool(cur.fetchone())
+        if pending and blocked.get("message_id") \
+                and meta.get("surface") == "blank_canvas":
+            if agent_live:
+                return jsonify({"replay": None, "reason": "busy"})
+            if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
+                return jsonify({"replay": None, "reason": "busy_capacity"})
+            if not check_and_reserve(conn, user_id, min_credits=1.0):
+                return jsonify({"replay": None, "reason": "insufficient_credits"})
+            job_id = _enqueue(cur, project_id, user_id, "agent_turn",
+                              {"message_id": int(blocked["message_id"]),
+                               "replayed_blocked": True})
+            cur.execute("""UPDATE chat_messages
+                           SET meta = COALESCE(meta, '{}'::jsonb) || %s
+                           WHERE id = %s""",
+                        (Json({"replayed_at":
+                               datetime.now(timezone.utc).isoformat(),
+                               "replay_job_id": job_id}), last["id"]))
+            conn.commit()
+            record_client_event(user_id, project_id, "blocked_prompt_replayed",
+                                detail={"surface": "blank_canvas",
+                                        "job_id": job_id}, origin="server")
+            return jsonify({"replay": "enqueued", "job_id": job_id,
+                            "message_id": int(blocked["message_id"])})
+        if pending and blocked.get("text"):
+            record_client_event(user_id, project_id, "blocked_prompt_replayed",
+                                detail={"surface": meta.get("surface") or "chat",
+                                        "prompt_chars": len(blocked["text"])},
+                                origin="server")
+            return jsonify({
+                "replay": "send", "text": blocked["text"],
+                "attachments": blocked.get("attachments") or [],
+                "client_msg_id": f"replay-{last['id']}"})
+        original = _active_original(cur, project_id)
+        if original and not _index_row(cur, original["sha256"]):
+            cur.execute("""SELECT id FROM video_jobs
+                           WHERE project_id = %s AND type = 'index'
+                             AND state IN ('queued','running') LIMIT 1""",
+                        (project_id,))
+            if cur.fetchone():
+                return jsonify({"replay": None, "reason": "indexing"})
+            if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
+                return jsonify({"replay": None, "reason": "busy_capacity"})
+            job_id = _enqueue(cur, project_id, user_id, "index",
+                              {"asset_id": original["id"],
+                               "subscription_unlocked": True})
+            return jsonify({"replay": "indexing", "job_id": job_id})
+        return jsonify({"replay": None, "reason": "nothing_blocked"})
+
+
 @video_bp.route("/projects/<int:project_id>/messages", methods=["POST"])
 @token_required
 def post_message(user_id, project_id):
@@ -3474,20 +3620,24 @@ def post_message(user_id, project_id):
         indexed = bool(original and _index_row(cur, original["sha256"]))
 
         # THE SUBSCRIBE GATE — empty projects keep the lightweight concierge;
-        # the wall becomes authoritative once a main upload exists. The
-        # blocked text is intentionally not persisted (the Studio returns it to
-        # the composer) and no model or executor work is started. The answer
-        # IS persisted: one agent reply carrying the plans, reused rather than
-        # repeated while the conversation has not moved on.
+        # the wall becomes authoritative once a main upload exists. No model
+        # or executor work is started and the text is not a chat message (the
+        # Studio returns it to the composer). It IS kept on the one agent
+        # reply carrying the plans (meta.blocked_prompt), reused rather than
+        # repeated while the conversation has not moved on, so that after
+        # checkout /replay-blocked can send it in this same project.
         if original and _subscribe_gate_applies(cur, user_id):
             record_client_event(user_id, project_id, "trial_gate_shown",
                                 detail={"message_chars": len(text),
+                                        "prompt": text[:300],
                                         "subscribe_offer": True,
                                         "surface": "chat"},
                                 origin="server")
             body = dict(_subscribe_offer_body())
             body["subscription_message"] = _record_plans_message(
-                cur, p["chat_session_id"], "chat")
+                cur, p["chat_session_id"], "chat",
+                blocked_prompt=_blocked_prompt(text, attachment_ids,
+                                               client_msg_id))
             return jsonify(body), 402
 
         # The account may have upgraded after uploading. No index job existed
@@ -3901,7 +4051,10 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                     # send the same offer as the uploaded-video path.
                     _record_plans_message(
                         cur, ctx["session_id"], "blank_canvas",
-                        request_message_id=ctx["message_id"])
+                        request_message_id=ctx["message_id"],
+                        blocked_prompt={"message_id": ctx["message_id"],
+                                        "text": _message_text(
+                                            cur, ctx["message_id"])})
                     subscription_blocked = True
                 elif float(info.get("balance") or 0) < 1.0:
                     spent = info.get("free_trial_exhausted")
@@ -6401,7 +6554,15 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       # video_jobs row. Store only their tool name when they
                       # refuse/fail so operations can count the otherwise
                       # invisible error surface without retaining arguments.
-                      "mcp_error_response", "checkout_stage", "campaign_visit"}
+                      "mcp_error_response", "checkout_stage", "campaign_visit",
+                      # After checkout the Studio returned to the project and
+                      # the request the wall refused was sent for the user.
+                      "blocked_prompt_replayed",
+                      # First cut (PLAN.md P2): the automatic first result on
+                      # a first upload, its delivery, how much of it was
+                      # watched, and the "Keep it" click at the export gate.
+                      "free_result_started", "free_result_delivered",
+                      "free_result_watched_pct", "free_result_keep_clicked"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these
