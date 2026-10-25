@@ -662,8 +662,12 @@ def context(s, cur=None, presign=None):
         "cancelled": any(k.startswith("subscription_") for k in kinds)
         or "cancel_feedback" in kinds,
         "came_back_at": _iso(came_back),
-        "left": bool(not came_back and (not last_seen or last_seen
-                                        <= end + timedelta(minutes=10))),
+        # Left = nothing at all after the session: no later work, no
+        # export/download/checkout later, no browser activity after it.
+        "left": bool(not came_back
+                     and not any(e["at"] and e["at"] > _iso(end) for e in nxt)
+                     and (not last_seen
+                          or last_seen <= end + timedelta(minutes=10))),
         "user_last_seen_at": _iso(last_seen),
     }
     out = {

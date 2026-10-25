@@ -691,3 +691,19 @@ def test_signed_urls_never_reach_a_context_file():
     raw = json.dumps(sessions.context(s))
     assert "X-Amz" not in raw and "deadbeef" not in raw
     assert "?<signed-url>" in raw
+
+
+def test_a_later_download_is_not_leaving():
+    data = _data()
+    data["users"][7]["last_seen_at"] = T0 - timedelta(days=1)
+    data["messages"] = data["messages"][:2]          # no later request
+    data["jobs"] = data["jobs"][:3]                  # no other project
+    data["projects"].pop(11)
+    data["events"][0]["created_at"] = T0 + timedelta(minutes=80)
+    found, _ = _discover(data)
+    ctx = sessions.context(found[0])
+    assert ctx["next_summary"]["downloaded"] is True
+    assert ctx["next_summary"]["left"] is False
+    data["events"] = []
+    found, _ = _discover(data)
+    assert sessions.context(found[0])["next_summary"]["left"] is True
