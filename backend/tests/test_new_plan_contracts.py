@@ -27,7 +27,7 @@ def test_new_plans_enable_verified_mcp_and_keep_annual_margin(monkeypatch,plan):
     full_month_cost=(PLANS_LIVE[plan]['monthly_credits'] + 31*20)*.005
     assert (annual_revenue-full_month_cost)/annual_revenue >= .4
 
-@pytest.mark.parametrize('plan,blocked',[('mcp_connect',True),('advanced',False),('ai',False),('mcp',False)])
+@pytest.mark.parametrize('plan,blocked',[('mcp_connect',True),('plus_2026',False),('pro_2026',False),('advanced',False),('ai',False),('mcp',False)])
 def test_mcp_only_blocks_hosted_ai_but_legacy_is_untouched(plan,blocked):
     class Cursor:
         def execute(self,*args):pass

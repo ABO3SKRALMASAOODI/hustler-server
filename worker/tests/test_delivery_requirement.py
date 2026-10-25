@@ -20,7 +20,10 @@ def test_one_verified_edit_does_not_fulfill_five_requested_videos(monkeypatch):
     monkeypatch.setattr(agent_loop,'_quality_handoff',lambda _: {'export_ready':True})
     ctx=SimpleNamespace(user_message='Create 5 short vertical videos.',
         versions_written=[14],rendered_versions={14},last_preview={'cached':False},
-        turn_tool_outcomes=[],write_attempts=3,latest_edl=lambda:{'version':14},
+        turn_tool_outcomes=[],write_attempts=3,
+        latest_edl=lambda:{'version':14,'json':{'keep':[[0,4]]}},
+        turn_start_edl={'version':1,'json':{'keep':[[0,9]]}},
+        turn_baseline_digest=None,failed_preview_versions={},
         db=SimpleNamespace(run=lambda *a:1),project_id=2464,project={'user_id':1931})
     assert agent_loop._turn_completion(ctx)==('partial',True)
     assert ctx.delivery_requirement == {'requested_videos':5,'playable_projects':1,'complete':False}
