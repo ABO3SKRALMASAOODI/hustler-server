@@ -27,7 +27,7 @@ def test_new_plans_enable_verified_mcp_and_keep_annual_margin(monkeypatch,plan):
     full_month_cost=(PLANS_LIVE[plan]['monthly_credits'] + 31*20)*.005
     assert (annual_revenue-full_month_cost)/annual_revenue >= .4
 
-@pytest.mark.parametrize('plan,blocked',[('mcp_connect',True),('plus_2026',False),('pro_2026',False),('advanced',False),('ai',False),('mcp',False)])
+@pytest.mark.parametrize('plan,blocked',[('mcp_connect',True),('plus_2026',True),('pro_2026',False),('max_2026',False),('advanced',False),('ai',False),('mcp',False)])
 def test_mcp_only_blocks_hosted_ai_but_legacy_is_untouched(plan,blocked):
     class Cursor:
         def execute(self,*args):pass
@@ -67,17 +67,18 @@ def test_annual_guard_does_not_change_legacy_or_monthly_switches(plan,period):
     assert paddle._annual_contract_change_error({'plan':plan},sub) is None
 
 
+@pytest.mark.parametrize("plan", ["mcp_connect", "plus_2026"])
 @pytest.mark.parametrize("route,args", [
     (video.post_message, {"project_id":3}),
     (video.start_shorts, {"project_id":3}),
     (video.start_short_editor, {"project_id":3,"child_project_id":4}),
 ])
-def test_mcp_hosted_ai_routes_refuse_before_project_or_queue_mutation(monkeypatch, route, args):
+def test_mcp_hosted_ai_routes_refuse_before_project_or_queue_mutation(monkeypatch, route, args, plan):
     from contextlib import contextmanager
     class Cursor:
         def execute(self, sql, *args):
             assert "SELECT plan, is_subscribed FROM users" in sql
-        def fetchone(self): return {"plan":"mcp_connect","is_subscribed":True}
+        def fetchone(self): return {"plan":plan,"is_subscribed":True}
     class Connection:
         def cursor(self): return Cursor()
     @contextmanager
