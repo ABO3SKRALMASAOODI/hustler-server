@@ -186,15 +186,29 @@ const WORKER_FEATURES = ["custom_filter", "stems", "skew_guard", "fence", "alt_s
 // Durable Object independently refuses until the call has been disconnected
 // for at least this long, so a brief transport blip is never treated as death.
 const ABANDON_MIN_DISCONNECTED_MS = 120 * 1000;
-// Model think time between MCP calls is p50 11 s and p90 198 s; previews of
-// one project arrive minutes apart. Sixty seconds of idle grace destroyed
-// these containers (and their ToolContext/proxy caches, ~180 MB per session)
-// between almost every pair of calls. Keep them for four minutes. Idle
-// standard-1 costs ~$0.0019 and standard-3 ~$0.0038 per extra 180 s of
-// provisioned memory and disk (CPU is billed only when used), against a
-// ~8 s cold start plus an 18-23 s proxy re-download on the next call.
-// Batch, Studio-agent and Shorts lanes keep the 60-second default.
-const MODEL_GAP_SLEEP_AFTER = "240s";
+// Idle grace before an awake container is destroyed. Cloudflare bills the
+// PROVISIONED memory and disk of every awake second, so each lane keeps only
+// the tail its traffic actually reuses (cost review, 25 Oct 2026, measured
+// on 7 days of remote_executions):
+//  * MCP 90 s. Model think time between MCP calls is p50 11 s, p90 198 s.
+//    240 s kept 4 GiB awake for 59% of the lane's awake time (523 idle h in
+//    19 days); 90 s raises cold MCP calls from ~10% to ~16% (an ~8 s start
+//    plus an 18-23 s proxy re-download on that call) and removes most of
+//    that idle tail (about -22% of the whole bill together with the lanes
+//    below, modeled on the job ledger). render_preview no longer waits inside this
+//    container (the MCP server waits on the render job instead), so a
+//    preview's minutes of polling no longer hold it awake either.
+//  * Interactive 30 s. 240 s bought almost nothing: 35% of preview calls
+//    were cold even at 240 s, because one project's previews arrive minutes
+//    apart. 8 GiB idle for four minutes after every render was the cost.
+//  * Batch, Studio-agent and Shorts 30 s: index, final and filmstrip work is
+//    minutes long and arrives in bursts that a 30 s grace still bridges.
+// An in-flight call always renews the timer (@cloudflare/containers counts
+// inflight requests), and onActivityExpired below never destroys a
+// container while a provider lease is active, so a long render is never
+// cut short by a short grace.
+const MODEL_GAP_SLEEP_AFTER = "90s";
+const RENDER_SLEEP_AFTER = "30s";
 // Job types whose lost executor leaves an unknown outcome. A Shorts plan is
 // not one: run_shorts_plan resumes its own saved clips on a re-claim and
 // adopts children through materialization keys, so a retry is safe (and is
@@ -369,7 +383,7 @@ async function matchesCompletedJob(callId: string, job: ExecutorJob): Promise<bo
 
 abstract class ValmeraContainer extends Container<Env> {
   defaultPort = 8080;
-  sleepAfter = "60s";
+  sleepAfter = RENDER_SLEEP_AFTER;
   enableInternet = true;
   protected abstract readonly containerProfile: "standard-1" | "standard-3" | "standard-4";
   protected abstract readonly workerRole:
@@ -422,7 +436,7 @@ abstract class ValmeraContainer extends Container<Env> {
       EXECUTOR_PROVIDER: "cloudflare",
       CLOUDFLARE_CONTAINER_PROFILE: this.containerProfile,
       // Cost telemetry prices the configured idle tail after each call.
-      CLOUDFLARE_IDLE_TAIL_S: String(parseInt(String(this.sleepAfter), 10) || 60),
+      CLOUDFLARE_IDLE_TAIL_S: String(parseInt(String(this.sleepAfter), 10) || 30),
       // Orchestration containers call synchronous media tools. Route every
       // child back through this Worker so Cloudflare remains the physical
       // compute owner all the way down the call tree.
@@ -1470,7 +1484,6 @@ abstract class ValmeraContainer extends Container<Env> {
 
 export class ValmeraInteractive extends ValmeraContainer {
   protected override readonly registryLane = "interactive" as const;
-  override sleepAfter = MODEL_GAP_SLEEP_AFTER;
   protected readonly containerProfile = "standard-3" as const;
   protected readonly workerRole = "executor" as const;
 }

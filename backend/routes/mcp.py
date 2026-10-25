@@ -1449,6 +1449,99 @@ def _wait(job_id, user_id, seconds=None, slow=None):
             _slow_waits.release()
 
 
+# ── Parked renders (cost review, 25 Oct 2026) ──────────────────────────────
+# render_preview used to poll for its render for minutes INSIDE the 4 GiB MCP
+# container, which Cloudflare bills by the awake second while another
+# container renders: 126 of the MCP lane's 210 busy hours in the week to
+# 25 Oct. Now the call asks the worker for a short wait (``render_park_s``).
+# If the render is still going, the worker PARKS the call: the row finishes
+# with ``parked_render`` naming the render job, this web process waits on
+# that job (a DB poll, no container), then puts the same row back in the
+# queue with ``adopt_render_job_id``; its second run adopts the finished
+# render and returns the full review in the row's place. The caller's
+# contract is unchanged: one synchronous render_preview, or STILL RUNNING
+# with this row's id for wait_for_job, which follows the park the same way.
+RENDER_PARK = os.getenv("MCP_RENDER_PARK", "1").strip().lower() not in (
+    "0", "false", "no", "off")
+RENDER_PARK_S = max(0.0, min(30.0, float(os.getenv("MCP_RENDER_PARK_S", "3"))))
+
+
+def _parks_render(name, args):
+    """Should this tool call ask the worker to park on its render?"""
+    if not RENDER_PARK or name != "render_preview":
+        return False
+    return not (isinstance(args, dict)
+                and args.get("report") not in (None, False, "false", 0))
+
+
+def _parked_render(row):
+    """The render job a finished mcp_tool row parked on, else None."""
+    if not isinstance(row, dict) or row.get("type") != "mcp_tool" \
+            or row.get("state") != "done":
+        return None
+    parked = (row.get("result") or {}).get("parked_render")
+    if not isinstance(parked, dict):
+        return None
+    job_id = parked.get("job_id")
+    if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id < 1:
+        return None
+    return parked
+
+
+def _resume_parked(job_id, user_id, render_job_id):
+    """Requeue a parked row to adopt its finished render. Atomic: of several
+    waiters (the original request, a wait_for_job) exactly one requeues it;
+    the rest keep waiting on the same row. The attempt is handed back (the
+    MCP lane claims a row once per attempt) and the next claim gets a new
+    execution lease and call identity (total_claims), as after a deploy."""
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """UPDATE video_jobs
+                  SET state = 'queued', progress = 0, error = NULL,
+                      attempts = GREATEST(attempts - 1, 0),
+                      heartbeat_at = NULL, updated_at = NOW(),
+                      payload = (payload - 'render_park_s'
+                                 - 'cloudflare_busy_deferred'
+                                 - 'prerequisite_wait')
+                                || jsonb_build_object(
+                                     'adopt_render_job_id', %s::int)
+                WHERE id = %s AND user_id = %s AND type = 'mcp_tool'
+                  AND state = 'done'
+                  AND result->'parked_render'->>'job_id' = %s""",
+            (int(render_job_id), int(job_id), int(user_id),
+             str(int(render_job_id))))
+        return cur.rowcount > 0
+
+
+def _settle(job_id, user_id, seconds=None, slow=None):
+    """_wait for a job row, following a parked render to its real answer.
+
+    Returns the row that answers: the finished (or failed) row after its
+    resumed run, or, when the budget runs out first, the parked row shown as
+    still running (with the render's progress), so the caller is told to
+    wait_for_job on this same id. Rows that never park are _wait exactly."""
+    budget = SYNC_WAIT_S if seconds is None else seconds
+    deadline = time.time() + budget
+    share = {} if slow is None else {"slow": slow}
+    row = _wait(job_id, user_id, budget, **share)
+    # A resumed run adopts the finished render and never parks again; the
+    # bound only guards against a release mismatch looping.
+    for _ in range(3):
+        parked = _parked_render(row)
+        if parked is None:
+            return row
+        remaining = max(0.0, deadline - time.time())
+        render = _wait(parked["job_id"], user_id, remaining, slow=True)
+        if render and render.get("state") in ("queued", "running"):
+            return dict(row, state="running",
+                        progress=render.get("progress") or 0)
+        _resume_parked(job_id, user_id, parked["job_id"])
+        remaining = max(0.0, deadline - time.time())
+        row = _wait(job_id, user_id, remaining, **share)
+    return row
+
+
 def _still_running(row, what):
     pct = row.get("progress") or 0
     text = (f"STILL RUNNING — {what} is job {row['id']} "
@@ -1793,11 +1886,14 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
             version_row = cur.fetchone() or {}
             before_version = version_row.get("version")
             call_ref = secrets.token_hex(8)
+            job_payload = {"tool": name, "args": args,
+                           "mutation": mutation,
+                           "before_edl_version": before_version,
+                           "mcp_call_id": call_ref}
+            if _parks_render(name, args):
+                job_payload["render_park_s"] = RENDER_PARK_S
             job_id = _enqueue(cur, project_id, tok["user_id"], "mcp_tool",
-                              {"tool": name, "args": args,
-                               "mutation": mutation,
-                               "before_edl_version": before_version,
-                               "mcp_call_id": call_ref})
+                              job_payload)
     if wait_for_index:
         waited = _await_index(project_id, wait_budget)
         return _run_tool_job(tok, name, args, raw=raw, project_id=project_id,
@@ -1808,9 +1904,9 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
              "__media__": "Fetching the video"}.get(name, name)
     # One HTTP budget: time already spent waiting for analysis comes out of
     # the job wait, keeping a call near MCP_SYNC_WAIT_S overall.
-    row = _wait(job_id, tok["user_id"],
-                max(15.0, SYNC_WAIT_S - _index_waited_s)
-                if _index_waited_s else None)
+    row = _settle(job_id, tok["user_id"],
+                  max(15.0, SYNC_WAIT_S - _index_waited_s)
+                  if _index_waited_s else None)
     if not row:
         return _out(_session_error(
             f"Tool call {name} vanished from the queue — try it again."))
@@ -2658,7 +2754,7 @@ def _t_wait_for_job(tok, args):
         job_id = int(args.get("job_id"))
     except (TypeError, ValueError):
         return _session_error("job_id must be an integer.")
-    row = _wait(job_id, tok["user_id"])
+    row = _settle(job_id, tok["user_id"])
     if not row:
         return _session_error(f"No job {job_id} on this account.")
     job_status = {"job_id": job_id, "state": row["state"], "type": row["type"],

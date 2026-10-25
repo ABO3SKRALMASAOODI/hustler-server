@@ -86,7 +86,9 @@ def test_adapter_comment_no_longer_claims_a_26_minute_lease():
                                 "cloudflare", "src", "index.ts")).read()
     assert "26-minute" not in adapter
     assert 'override sleepAfter = MODEL_GAP_SLEEP_AFTER' in adapter
-    assert 'const MODEL_GAP_SLEEP_AFTER = "240s"' in adapter
+    # cost review 25 Oct 2026: MCP 90 s, every other lane 30 s
+    assert 'const MODEL_GAP_SLEEP_AFTER = "90s"' in adapter
+    assert 'const RENDER_SLEEP_AFTER = "30s"' in adapter
 
 
 # --------------------------------------------- busy id-less child calls ---
