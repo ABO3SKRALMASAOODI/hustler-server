@@ -370,6 +370,14 @@ class ToolContext:
         # creating a second physical job for the same immutable version.
         self.spec_preview_jobs = {}
         self.autorendered = False     # loop set: model skipped render_preview
+        # P4 request budget. The agent loop sets the cap (None everywhere
+        # else: MCP callers own their own iteration) and carries the count
+        # across execution slices; render_preview counts each physical render.
+        self.request_preview_cap = None
+        self.request_previews = 0
+        # Set once the request budget (or its repair allowance) is spent: the
+        # critics' open findings advise, they no longer hold the export.
+        self.critics_advisory = False
         # Round 91 grade contact strips: iterating a color against ~2s strips
         # instead of full renders. last_strip_chain is the grade chain the
         # most recent strip showed — asking to render the SAME colors again
@@ -23060,6 +23068,39 @@ def _stored_render_report(ctx, row):
     return "\n".join(lines)
 
 
+def _count_request_preview(ctx):
+    """One physical preview render (complete or a changed-section proof) in
+    this request (P4). Only the agent loop sets a cap; MCP never counts."""
+    if getattr(ctx, "request_preview_cap", None):
+        ctx.request_previews = int(getattr(ctx, "request_previews", 0) or 0) + 1
+
+
+def request_preview_refusal(ctx):
+    """The P4 request budget: once a Studio request has rendered its
+    previews, the editor delivers instead of rendering again. The turn-end
+    render that shows the user the latest saved version is never refused."""
+    cap = getattr(ctx, "request_preview_cap", None)
+    if not cap or getattr(ctx, "autorendering", False):
+        return None
+    if int(getattr(ctx, "request_previews", 0) or 0) < int(cap):
+        return None
+    return (f"REQUEST BUDGET: this request has used its {int(cap)} preview "
+            "renders. Do not render or edit again in this request. Reply now: "
+            "say what the latest preview delivers and, briefly, what is still "
+            "open. The user can press Improve it to continue.")
+
+
+def request_budget_line(ctx):
+    cap = getattr(ctx, "request_preview_cap", None)
+    if not cap:
+        return ""
+    used = int(getattr(ctx, "request_previews", 0) or 0)
+    left = max(0, int(cap) - used)
+    return (f" REQUEST BUDGET: {used} of {int(cap)} preview renders used"
+            + ("; this was the last one, so reply with this version next."
+               if not left else f"; {left} left."))
+
+
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                    report=False):
     if report:
@@ -23083,6 +23124,9 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
     prior_failure = ctx.failed_preview_versions.get(version)
     if prior_failure:
         return _failed_preview_message(version, prior_failure, repeated=True)
+    refused = request_preview_refusal(ctx)
+    if refused:
+        return refused
     strip = None if complete else _grade_strip_shortcut(ctx, row)
     if strip:
         return strip
@@ -23097,7 +23141,9 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         if ranges:
             if requested_complete:
                 _metric(ctx, "complete_previews_routed_to_proof")
-            return _run_changed_preview_check(ctx, row, plan, ranges)
+            _count_request_preview(ctx)
+            return (_run_changed_preview_check(ctx, row, plan, ranges)
+                    + request_budget_line(ctx))
         if requested_complete:
             _metric(ctx, "full_preview_requests_deferred")
         return (f"EDL v{version} has no changed-section render to return. "
@@ -23135,6 +23181,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             ctx.job["user_id"], payload)
         if quality == "draft":
             ctx.spec_preview_jobs[version] = job_id
+    _count_request_preview(ctx)
     # Explicit/model tool calls retain the normal render wait. The terminal
     # honesty pass can pass the turn's remaining absolute lifetime here: the
     # render job is still enqueued, but a late encode must not turn a 10-minute
@@ -23495,7 +23542,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                     "repair. Do not begin another taste-only variation. "
                     f"Blueprint state={state['state']}."
                 )
-            return note
+            return note + request_budget_line(ctx)
         if j["state"] == "failed":
             failure = dict(((j.get("result") or {}).get("failure") or {}))
             failure.setdefault("error", j.get("error") or "unknown render error")

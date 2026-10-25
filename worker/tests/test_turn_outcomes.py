@@ -12,6 +12,20 @@ import agent_loop  # noqa: E402
 from schemas import edl_signature  # noqa: E402
 
 
+_BEFORE = {"keep": [[0.0, 10.0]]}
+_AFTER = {"keep": [[0.0, 4.0]]}
+
+
+def _changed(ctx, version=2):
+    """A request whose latest timeline differs from its baseline (P4: the
+    deliverable changed, so normal metering applies)."""
+    ctx.turn_start_edl = {"version": 1, "json": _BEFORE}
+    ctx.turn_baseline_digest = None
+    ctx.latest_edl = lambda: {"version": version, "json": _AFTER}
+    ctx.failed_preview_versions = {}
+    return ctx
+
+
 def _ctx(**overrides):
     base = dict(
         versions_written=[], images_generated=[], videos_generated=[],
@@ -61,10 +75,30 @@ def test_prerequisite_only_reply_is_blocked_and_free():
 
 
 def test_saved_edit_with_pending_prerequisite_is_partial_but_billable():
-    ctx = _ctx(versions_written=[2], turn_tool_outcomes=[
+    ctx = _changed(_ctx(versions_written=[2], turn_tool_outcomes=[
         {"tool": "render_preview", "kind": "prerequisite"}],
-        write_attempts=1)
+        write_attempts=1))
     assert agent_loop._turn_completion(ctx) == ("partial", True)
+
+
+def test_partial_request_that_changed_nothing_deliverable_is_free():
+    # P4 (25 Oct 2026): versions churned back to the baseline timeline.
+    ctx = _ctx(versions_written=[2, 3], turn_tool_outcomes=[
+        {"tool": "render_preview", "kind": "prerequisite"}],
+        write_attempts=2)
+    ctx.turn_start_edl = {"version": 1, "json": _BEFORE}
+    ctx.turn_baseline_digest = None
+    ctx.latest_edl = lambda: {"version": 3, "json": dict(_BEFORE)}
+    ctx.failed_preview_versions = {}
+    assert agent_loop._turn_completion(ctx) == ("partial", False)
+
+
+def test_partial_request_whose_latest_version_failed_to_render_is_free():
+    ctx = _changed(_ctx(versions_written=[2], write_attempts=1,
+                        turn_tool_outcomes=[
+                            {"tool": "render_preview", "kind": "failed"}]))
+    ctx.failed_preview_versions = {2: {"error": "black frames"}}
+    assert agent_loop._turn_completion(ctx) == ("partial", False)
 
 
 @pytest.mark.parametrize('ready,other_pending,expected', [
@@ -73,9 +107,8 @@ def test_saved_edit_with_pending_prerequisite_is_partial_but_billable():
 ])
 def test_finished_job_resolves_only_its_wait_and_keeps_quality_gate(
         monkeypatch, ready, other_pending, expected):
-    ctx = _ctx(versions_written=[2], rendered_versions={2},
-               last_preview={'edl_version': 2}, write_attempts=1)
-    ctx.latest_edl = lambda: {'version': 2, 'json': {}}
+    ctx = _changed(_ctx(versions_written=[2], rendered_versions={2},
+                        last_preview={'edl_version': 2}, write_attempts=1))
     agent_loop._record_outer_tool_outcome(
         ctx, 'render_preview', 'PREREQUISITE: complete preview is running as job 77.')
     if other_pending:
@@ -117,7 +150,7 @@ def test_saved_edit_with_open_quality_review_is_partial_and_metered():
             "status": "repair_required", "unresolved_findings": [{
                 "message": "replace the empty section"}]}}
     )
-    ctx.latest_edl = lambda: {"version": 2}
+    _changed(ctx)
     assert agent_loop._turn_completion(ctx) == ("partial", True)
 
 
