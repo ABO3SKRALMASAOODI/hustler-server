@@ -20,6 +20,9 @@ _WRITE_RE = re.compile(
 CAUSE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
 SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
 KEY_TTL = timedelta(hours=8)
+# Verdict and score must tell the same story (REVIEWER.md, step 4).
+SCORE_BANDS = {"delivered_good": (6, 10), "delivered_poor": (3, 6),
+               "not_delivered": (1, 3)}
 
 
 class StoreError(ValueError):
@@ -112,6 +115,10 @@ def write_verdict(cur, session, verdict, score, reasoning, evidence,
         raise StoreError("score must be a whole number from 1 to 10")
     if not 1 <= score <= 10:
         raise StoreError("score must be from 1 to 10")
+    lo, hi = SCORE_BANDS[verdict]
+    if not lo <= score <= hi:
+        raise StoreError(f"a {verdict} verdict scores {lo}-{hi} (got {score}); "
+                         "pick the verdict that matches the score")
     if session["surface"] not in SURFACES:
         raise StoreError(f"unknown surface {session['surface']!r}")
     if not session.get("settled"):

@@ -333,6 +333,11 @@ def test_a_verdict_needs_pictures_under_the_sessions_own_folder():
         store.write_verdict(cur, s, "delivered_poor", 3, "bad", _evidence(s))
     with pytest.raises(store.StoreError, match="score"):
         store.write_verdict(cur, s, "delivered_good", 11, "x", _evidence(s))
+    with pytest.raises(store.StoreError, match="scores 6-10"):
+        store.write_verdict(cur, s, "delivered_good", 4, "x", _evidence(s))
+    with pytest.raises(store.StoreError, match="scores 1-3"):
+        store.write_verdict(cur, s, "not_delivered", 8, "x", _evidence(s),
+                            root_cause="r")
     row = store.write_verdict(cur, s, "delivered_poor", 3, "cuts the payoff",
                               _evidence(s, 2), root_cause="story selection")
     assert row == {"id": 1, "review_count": 1}
@@ -642,3 +647,47 @@ def test_digest_facts_pick_one_picture_per_session_problems_first():
     assert [p["url"] for p in got["thumbnails"]] == \
         ["u:ops/evidence/a/1.jpg", "u:ops/evidence/b/1.jpg"]
     assert got["day"]["rate_pct"] == 50.0
+
+
+def test_opening_a_project_neither_starts_nor_extends_a_session():
+    data = _data()
+    j = dict(data["jobs"][2], id=40, type="filmstrip",
+             created_at=NOW - timedelta(minutes=5),
+             updated_at=NOW - timedelta(minutes=4), render_asset_id=None)
+    data["jobs"].append(j)
+    found, _ = _discover(data)
+    s = [x for x in found if x["key"] == sessions.session_key(10, T0)][0]
+    assert s["settled"]                      # the filmstrip did not extend it
+    ctx = sessions.context(s)
+    assert any(e["kind"] == "project_reopened" for e in ctx["next"])
+    assert ctx["next_summary"]["came_back_at"] is not None
+    assert ctx["next_summary"]["left"] is False
+
+
+def test_mcp_ask_user_is_not_an_error_and_a_download_url_is_a_delivery():
+    data = _data()
+    data["jobs"].append(dict(data["jobs"][0], id=23, tool="ask_user",
+                             is_error=True, tool_status=None,
+                             text="PREREQUISITE: ASK THE USER YOURSELF"))
+    data["jobs"].append(dict(data["jobs"][0], id=24, tool="download_url",
+                             created_at=T0 + timedelta(minutes=40),
+                             updated_at=T0 + timedelta(minutes=40),
+                             text=None))
+    data["events"] = []
+    found, _ = _discover(data)
+    s = [x for x in found if x["key"] == sessions.session_key(10, T0)][0]
+    ctx = sessions.context(s)
+    assert [t["tool"] for t in ctx["timeline"] if t["error"]] == ["look_at"]
+    assert ctx["next_summary"]["exported"] and ctx["next_summary"]["downloaded"]
+
+
+def test_signed_urls_never_reach_a_context_file():
+    data = _data()
+    data["jobs"][1]["text"] = ("no frame at 580 s of x.mp4?X-Amz-Algorithm="
+                               "AWS4&X-Amz-Credential=abc%2F2026&X-Amz-"
+                               "Signature=deadbeef). The clip can")
+    found, _ = _discover(data)
+    s = [x for x in found if x["key"] == sessions.session_key(10, T0)][0]
+    raw = json.dumps(sessions.context(s))
+    assert "X-Amz" not in raw and "deadbeef" not in raw
+    assert "?<signed-url>" in raw

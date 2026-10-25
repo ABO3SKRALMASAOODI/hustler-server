@@ -559,6 +559,10 @@ def main(argv=None):
     a = parser().parse_args(argv)
     try:
         return a.fn(a)
+    except FileNotFoundError as e:
+        print(f"ops_review: no such file: {e.filename} (paths are relative "
+              f"to {os.getcwd()})", file=sys.stderr)
+        return 2
     except CliError as e:
         print(f"ops_review: {e}", file=sys.stderr)
         return 2
