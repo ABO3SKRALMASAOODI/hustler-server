@@ -21,6 +21,11 @@ def _result_is_billable(job, result):
     favour.  Shorts keeps its historical default for rolling deploys.
     """
     payload = job.get("payload") or {}
+    if job.get("_claude_trial") is not None or (
+            isinstance(result, dict) and result.get("claude_trial")):
+        # The Claude-funded trial is metered in USD on its own ledger
+        # (claude_trial); an account with no plan is never charged credits.
+        return False
     if payload.get("operator_repair") is True:
         # Production recovery jobs correct work the product previously
         # delivered incorrectly or failed to finish.  They are created only

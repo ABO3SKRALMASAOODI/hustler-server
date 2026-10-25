@@ -28,6 +28,7 @@ import time
 from concurrent import futures
 
 import audit
+import claude_trial
 import config
 import db as dbx
 import llm
@@ -333,6 +334,56 @@ def _stream_index_source(worker_db, job, asset, workdir):
     return src, sha, info, proxy_kbps
 
 
+class _TrialRecorder:
+    """A no-op llm recorder that carries the Claude trial scope into the
+    index's pool threads (they install the caller's recorder)."""
+
+    def __init__(self, scope):
+        self.claude_trial_scope = scope
+
+    def __call__(self, purpose, request, response, usage):
+        return None
+
+
+def _claude_trial_index_scope(worker_db, job):
+    """A trial account's upload indexes on the Claude lane (D2: the first
+    cut runs inside the same $1), so its captions and greeting never reach
+    the paid OpenAI wallet. Paid, admin and flag-off accounts, and a closed
+    lane, keep today's providers. Returns (scope, recorder) or (None, None)."""
+    try:
+        subscribed = bool(worker_db.run(dbx.user_billing, job["user_id"])[0])
+        decision = claude_trial.resolve(
+            worker_db, job.get("user_id"), subscribed,
+            project_id=job.get("project_id"), via="index", allow_grant=False)
+    except Exception as exc:  # noqa: BLE001 - indexing never fails on this
+        print(f"[index {job.get('id')}] trial lookup skipped: "
+              f"{str(exc)[:120]}", flush=True)
+        return None, None
+    if decision.kind != claude_trial.Decision.ACTIVE:
+        return None, None
+    scope = decision.scope
+    scope.job_id = job.get("id")
+    recorder = llm.get_recorder()
+    if recorder is None:
+        recorder = _TrialRecorder(scope)
+        llm.set_recorder(recorder)
+    claude_trial.activate(scope, recorder)
+    print(f"[index {job.get('id')}] Claude trial lane for user "
+          f"{scope.user_id} ({'granted' if scope.granted else 'grant on index'})",
+          flush=True)
+    return scope, recorder
+
+
+def _claude_trial_indexed(worker_db, job, scope):
+    """The first upload indexed: the grant happens now (D2), before the
+    first cut or greeting runs, and carries what indexing already spent."""
+    if scope is not None and not scope.granted:
+        got = claude_trial.settle_grant(worker_db, scope, job.get("project_id"),
+                                        via="index")
+        print(f"[index {job.get('id')}] trial grant: "
+              f"{(got or {}).get('reason', 'error')}", flush=True)
+
+
 def run_index_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     asset = worker_db.run(dbx.get_asset, job["payload"].get("asset_id"))
@@ -410,6 +461,7 @@ def run_index_job(worker_db, job):
         print(f"[index {job_id}] original has landed — indexing from it "
               f"rather than the browser proxy", flush=True)
 
+    trial_scope, trial_recorder = _claude_trial_index_scope(worker_db, job)
     try:
         warnings_pre = []
         if from_client_proxy:
@@ -495,6 +547,7 @@ def run_index_job(worker_db, job):
                           ready_proxy=src if from_client_proxy else None,
                           **proxy_kwargs)
             _ensure_audio(worker_db, project_id, sha, info)
+            _claude_trial_indexed(worker_db, job, trial_scope)
             _finish_setup(worker_db, project_id, session_id, info,
                           cached["json"], job["user_id"],
                           reindex=bool(job["payload"].get("reindex")),
@@ -800,6 +853,7 @@ def run_index_job(worker_db, job):
             visual_storyboard=visual_storyboard,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
+        _claude_trial_indexed(worker_db, job, trial_scope)
         _finish_setup(worker_db, project_id, session_id, info, index,
                       job["user_id"],
                       reindex=bool(job["payload"].get("reindex")),
@@ -832,6 +886,11 @@ def run_index_job(worker_db, job):
                 "language": language, "warnings": warnings,
                 "timings": timings}
     finally:
+        if trial_scope is not None:
+            claude_trial.deactivate(trial_recorder)
+            if isinstance(trial_recorder, _TrialRecorder) and \
+                    llm.get_recorder() is trial_recorder:
+                llm.set_recorder(None)
         shutil.rmtree(workdir, ignore_errors=True)
 
 

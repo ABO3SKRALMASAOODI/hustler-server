@@ -25,9 +25,9 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     numbers = {int(name.split("_", 1)[0]) for name in names}
 
-    # 040 is reserved for the Claude trial budget (branch
-    # claude/claude-trial-1025, on hold); 041 is the outcome loop.
-    assert numbers == set(range(40)) | {41}
+    # 040 is the Claude trial budget and credit ledger (this branch); 041
+    # is the outcome loop.
+    assert numbers == set(range(42))
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names
@@ -51,6 +51,19 @@ def test_admin_rebuild_migrations_are_additive_and_lock_bounded():
     estimate = (MIGRATIONS / "033_estimated_early_signup_sources.sql").read_text()
     assert "tracking = 'estimated_from_referrer'" in estimate
     assert "ws.attribution IS NULL AND ws.tracking IS NULL" in estimate
+
+
+def test_claude_trial_budget_migration_is_additive_and_lock_bounded():
+    source = (MIGRATIONS / "040_claude_trial_budget.sql").read_text(
+        encoding="utf-8")
+    assert "SET LOCAL lock_timeout" in source
+    assert "BEGIN;" in source and "COMMIT;" in source
+    for table in ("trial_budgets", "trial_budget_days", "trial_alerts"):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in source
+    sql = "\n".join(line for line in source.splitlines()
+                    if not line.lstrip().startswith("--"))
+    assert "DROP " not in sql and "ALTER TABLE" not in sql
+    assert "UPDATE " not in sql and "DELETE FROM" not in sql
 
 
 def test_web_startup_does_not_create_or_migrate_schema():

@@ -90,6 +90,9 @@ interface Env {
   IMAGE_BASE_URL?: string;
   IMAGE_GEN_MODEL?: string;
   FAL_KEY?: string;
+  // The Claude-funded trial lane (worker/claude_lane.py). Optional: absent,
+  // the lane fails closed and trial users see the plan cards.
+  ANTHROPIC_API_KEY?: string;
   DEEPGRAM_API_KEY?: string;
   PEXELS_API_KEY?: string;
   PIXABAY_API_KEY?: string;
@@ -479,6 +482,7 @@ abstract class ValmeraContainer extends Container<Env> {
       IMAGE_BASE_URL: optional(this.env.IMAGE_BASE_URL),
       IMAGE_GEN_MODEL: optional(this.env.IMAGE_GEN_MODEL),
       FAL_KEY: optional(this.env.FAL_KEY),
+      ANTHROPIC_API_KEY: optional(this.env.ANTHROPIC_API_KEY),
       DEEPGRAM_API_KEY: optional(this.env.DEEPGRAM_API_KEY),
       PEXELS_API_KEY: optional(this.env.PEXELS_API_KEY),
       PIXABAY_API_KEY: optional(this.env.PIXABAY_API_KEY),

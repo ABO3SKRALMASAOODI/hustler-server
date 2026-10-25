@@ -131,6 +131,42 @@ MODEL_PRICES = {
         "long_context_tokens": 200000, "long_context_multiplier": 2,
         "reasoning_separate": True,
     },
+    # Anthropic Claude: the Claude-funded trial lane (worker/claude_lane.py,
+    # owner decision D2, 25 Oct 2026). Rates from
+    # https://platform.claude.com/docs/en/about-claude/pricing (read 25 Oct
+    # 2026): base input / 5-minute cache write / cache hit / output, per 1M.
+    # Thinking is billed as output and is INSIDE output_tokens, so reasoning
+    # is folded. The Claude lane records the exact per-call cost as
+    # provider_cost_usd (claude_usage_cost below), which the SQL prefers; the
+    # token rates here are the fallback for a row without it.
+    #
+    # Haiku 5.5 has TWO rate cards: a request whose whole prompt (input +
+    # cache reads + cache writes) is over 100,000 tokens pays 5x on every
+    # category. CLAUDE_LONG_PROMPT holds that card.
+    "claude-haiku-5-5": {
+        "in": 0.10, "cached_in": 0.01, "cache_write_in": 0.125, "out": 0.50,
+        "reasoning_separate": False,
+    },
+    "claude-sonnet-5-5": {
+        "in": 2.00, "cached_in": 0.10, "cache_write_in": 2.50, "out": 10.00,
+        "reasoning_separate": False,
+    },
+    "claude-opus-5-5": {
+        "in": 4.00, "cached_in": 0.20, "cache_write_in": 5.00, "out": 20.00,
+        "reasoning_separate": False,
+    },
+    "claude-haiku-4-5": {
+        "in": 1.00, "cached_in": 0.10, "cache_write_in": 1.25, "out": 5.00,
+        "reasoning_separate": False,
+    },
+}
+
+# Prompt-length rate cards (Claude Haiku 5.5 only, as of 25 Oct 2026).
+CLAUDE_LONG_PROMPT = {
+    "claude-haiku-5-5": {
+        "threshold": 100000,
+        "in": 0.50, "cached_in": 0.05, "cache_write_in": 0.625, "out": 2.50,
+    },
 }
 
 _FIELDS = ("in", "cached_in", "out", "audio_in", "audio_out")
@@ -201,6 +237,33 @@ def luna6_usage_cost(tokens_in, tokens_out, cached=0, cache_write=0,
         output_cost *= 1.5
     tier = {'priority': 2, 'fast': 2, 'flex': .5, 'batch': .5}.get(service_tier, 1)
     return (input_cost + output_cost) * tier / 1e6
+
+
+def claude_usage_cost(model, input_tokens, output_tokens, cache_read=0,
+                      cache_write=0):
+    """Exact USD for one Anthropic Messages call, from its own usage block.
+
+    Anthropic reports the three input categories separately and DISJOINTLY:
+    ``input_tokens`` is only the uncached remainder after the last cache
+    breakpoint, ``cache_read_input_tokens`` the prefix served from cache and
+    ``cache_creation_input_tokens`` the prefix written to it. The prompt
+    length that picks Haiku 5.5's rate card is their sum. Unknown claude-*
+    models price at Sonnet 5.5 rates (over-charging the trial meter is the
+    safer error), never at zero.
+    """
+    key = normalize(model)
+    card = dict(MODEL_PRICES.get(key) or MODEL_PRICES["claude-sonnet-5-5"])
+    tin = max(int(input_tokens or 0), 0)
+    read = max(int(cache_read or 0), 0)
+    write = max(int(cache_write or 0), 0)
+    out = max(int(output_tokens or 0), 0)
+    long_card = CLAUDE_LONG_PROMPT.get(key)
+    if long_card and tin + read + write > long_card["threshold"]:
+        card.update({k: long_card[k]
+                     for k in ("in", "cached_in", "cache_write_in", "out")})
+    return (tin * card["in"] + read * card["cached_in"]
+            + write * card.get("cache_write_in", card["in"])
+            + out * card["out"]) / 1e6
 
 
 def usd_to_credits(usd, ndigits=2):
@@ -308,6 +371,7 @@ def row_cost_sql(fallback, model_col="model", response_col="response",
     # Prefer the recorded per-request cost, including cache/tier/context
     # rates (provider invoice for xAI, reported tokens at official Luna rates). Historical rows without it retain deterministic token pricing.
     return (f"(CASE WHEN (left(lower(COALESCE({model_col}, '')), 5) = 'grok-' "
+            f"OR left(lower(COALESCE({model_col}, '')), 7) = 'claude-' "
             f"OR lower(COALESCE({model_col}, '')) IN ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol')) "
             f"AND jsonb_typeof({response_col}->'provider_cost_usd') = 'number' "
             f"THEN CASE WHEN ({response_col}->>'provider_cost_usd')::float >= 0 "

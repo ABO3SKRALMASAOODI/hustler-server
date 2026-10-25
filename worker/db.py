@@ -2770,6 +2770,8 @@ def _capped_payload(obj):
         s = s.replace(config.IMAGE_API_KEY, "[REDACTED]")
     if config.VISION_API_KEY:
         s = s.replace(config.VISION_API_KEY, "[REDACTED]")
+    if getattr(config, "ANTHROPIC_API_KEY", ""):
+        s = s.replace(config.ANTHROPIC_API_KEY, "[REDACTED]")
     if len(s) > LLM_PAYLOAD_CAP:
         return {"_truncated": True, "_original_bytes": len(s),
                 "_prefix": s[:LLM_PAYLOAD_CAP] + "…[truncated]"}

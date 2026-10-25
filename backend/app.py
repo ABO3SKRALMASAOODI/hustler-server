@@ -326,6 +326,14 @@ def create_app():
     except Exception as e:
         app.logger.error("could not start cockpit alert scheduler: %s", e)
 
+    # Claude-funded trial (D2): pool 50/80/95 % and Anthropic billing/auth
+    # refusals reach the admin address only. A no-op until migration 040.
+    try:
+        from claude_trial import start_scheduler as start_trial_alerts
+        start_trial_alerts(app)
+    except Exception as e:
+        app.logger.error("could not start claude trial alerts: %s", e)
+
     return app
 
 

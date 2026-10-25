@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 
 import agent_tools
 import audit
+import claude_trial
 import config
 import db as dbx
 import llm
@@ -1297,7 +1298,19 @@ def run_shorts_plan(worker_db, job):
     except Exception:
         subscribed, plan, trialing = False, "free", False
     balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
-    if balance < 1.0:
+    # The Claude-funded trial (D2): a trial account's story scout runs on the
+    # Claude lane inside its $1 instead of the credit wall. Flag off, paid or
+    # admin accounts resolve to NOT_TRIAL, so nothing here changes for them.
+    trial = claude_trial.resolve(
+        worker_db, job.get("user_id"), subscribed, project_id=project_id,
+        via="shorts", operator_repair=(job.get("payload") or {}).get(
+            "operator_repair") is True)
+    trial_scope = (trial.scope if trial.kind == claude_trial.Decision.ACTIVE
+                   else None)
+    if trial_scope is not None:
+        trial_scope.job_id = job_id
+        job["_claude_trial"] = trial_scope
+    if balance < 1.0 and trial_scope is None:
         shorts_meta.update({"status": "gated", "plan_job_id": job_id,
                             "gated_at": _now_iso()})
         worker_db.run(_save_shorts_meta, project_id, shorts_meta)
@@ -1330,6 +1343,8 @@ def run_shorts_plan(worker_db, job):
 
     llm.set_recorder(_recorder)
     llm.set_turn_plan(plan if subscribed else "")
+    if trial_scope is not None:
+        claude_trial.activate(trial_scope, _recorder)
     try:
         worker_db.run(dbx.set_progress, job_id, 8)
 
@@ -1466,4 +1481,6 @@ def run_shorts_plan(worker_db, job):
     finally:
         llm.set_recorder(None)
         llm.clear_turn_plan()
+        if trial_scope is not None:
+            claude_trial.deactivate(_recorder)
         shutil.rmtree(workdir, ignore_errors=True)

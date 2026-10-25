@@ -230,6 +230,56 @@ FRONTIER_PLANS = {"ai_max"}
 # settings must not silently put paid editing back onto Grok.
 EDITOR_MODEL = "gpt-6-luna"
 
+# ── The Claude-funded trial lane (owner decision D2, 25 Oct 2026) ────────────
+#
+# A never-paid account gets $1.00 of Anthropic API usage to make the edit it
+# wants with the in-app agent, funded from the ~$200 of Anthropic credit that
+# comes with the owner's subscription. Export/download stay behind the plan
+# (track B owns that gate and flips the whole trial on through
+# app_kv.free_result). This lane:
+#   * runs the SAME agent loop, tools, skills and verification on Claude
+#     through the Messages API (worker/claude_lane.py presents it to the loop
+#     as an OpenAI-shaped client, so nothing downstream branches);
+#   * meters every call's exact cost into ONE per-account running total
+#     (trial_budgets.spent_usd, migration 040) and the daily ledger;
+#   * FAILS CLOSED: a missing key, an empty Anthropic balance or a spent
+#     budget ends the turn on the plan cards. It never falls back to the paid
+#     OpenAI wallet for a free user.
+# The key is read ONLY from ANTHROPIC_API_KEY and never logged or recorded
+# (db._capped_payload redacts it like every other provider key).
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "").strip()
+# Chosen from the 25 Oct trial-lane fixtures (cost and quality per request);
+# app_kv.free_result.model overrides it without a deploy.
+CLAUDE_TRIAL_MODEL = os.getenv("CLAUDE_TRIAL_MODEL", "claude-haiku-5-5").strip()
+# output_config.effort for the planning step (iteration 0) and the dispatch
+# steps after it. Effort is the main cost/quality lever on Claude 5.5 models;
+# thinking is adaptive and is billed as output.
+CLAUDE_TRIAL_PLAN_EFFORT = os.getenv("CLAUDE_TRIAL_PLAN_EFFORT", "high").strip()
+CLAUDE_TRIAL_EFFORT = os.getenv("CLAUDE_TRIAL_EFFORT", "medium").strip()
+CLAUDE_TRIAL_TIMEOUT_S = float(os.getenv("CLAUDE_TRIAL_TIMEOUT_S", "300"))
+# Owner's design defaults; every one can be overridden in app_kv.free_result
+# ({on, per_account_usd_cap, pool_usd_cap, monthly_usd_cap, daily_count_cap,
+# daily_usd_cap, model, test_user_ids}).
+CLAUDE_TRIAL_FLAG_KEY = "free_result"
+CLAUDE_TRIAL_PER_ACCOUNT_USD = float(
+    os.getenv("CLAUDE_TRIAL_PER_ACCOUNT_USD", "1.00"))
+CLAUDE_TRIAL_POOL_USD = float(os.getenv("CLAUDE_TRIAL_POOL_USD", "200"))
+CLAUDE_TRIAL_DAILY_COUNT = int(os.getenv("CLAUDE_TRIAL_DAILY_COUNT", "40"))
+CLAUDE_TRIAL_DAILY_USD = float(os.getenv("CLAUDE_TRIAL_DAILY_USD", "40"))
+# At most this many trial accounts per device_id per 30 days (D2).
+CLAUDE_TRIAL_ACCOUNTS_PER_DEVICE = int(
+    os.getenv("CLAUDE_TRIAL_ACCOUNTS_PER_DEVICE", "2"))
+# How long an Anthropic billing/auth refusal keeps the lane closed in this
+# process before one call is allowed to probe it again.
+CLAUDE_TRIAL_OUTAGE_LATCH_S = float(
+    os.getenv("CLAUDE_TRIAL_OUTAGE_LATCH_S", "600"))
+# Haiku 5.5 bills a whole request at 5x once its prompt passes 100K tokens.
+# Below this estimate (chars/4 units) the loop keeps the history append-only
+# for the cache; above it, it compacts old tool results and look frames first.
+CLAUDE_HISTORY_COMPACT_TOKENS = int(
+    os.getenv("CLAUDE_HISTORY_COMPACT_TOKENS", "60000"))
+
 # reasoning_effort for the agent's tool-dispatch steps.
 #
 # grok-4.5 defaults to "high" and has never been told otherwise: on a measured

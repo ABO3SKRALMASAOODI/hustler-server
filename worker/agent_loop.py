@@ -13,6 +13,8 @@ import time
 import uuid
 
 import agent_tools
+import claude_lane
+import claude_trial
 import config
 import db as dbx
 import director
@@ -1407,6 +1409,10 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             {"role": "system", "content": capabilities}]
     _component("editor_kernel", kernel)
     _component("capability_directory", capabilities)
+    if getattr(ctx, "claude_trial", None) is not None:
+        msgs.append({"role": "system",
+                     "content": claude_trial.FIRST_RESULT_NOTE})
+        _component("claude_trial_first_result", claude_trial.FIRST_RESULT_NOTE)
 
     storyboard_text = visual_index.compact_text(
         (getattr(ctx, "index", None) or {}).get("visual_storyboard") or {})
@@ -2038,14 +2044,44 @@ def run_agent_job(worker_db, job):
                                            job["user_id"], job["id"])
         except Exception:
             first_turn = False
-    ctx.agent_lanes = llm.agent_lanes_for(
-        subscribed, plan, first_turn=first_turn)
-    if ctx.agent_lanes:
+    # THE CLAUDE-FUNDED TRIAL LANE (owner decision D2, 25 Oct 2026). Paid,
+    # admin and operator-repair turns resolve exactly as before. A never-paid
+    # account inside the trial runs ONLY on Claude, metered against its own
+    # $1 (claude_trial). A closed lane, a spent pool or a spent $1 ends here
+    # on the plan cards: never a raw error, never the paid OpenAI wallet.
+    trial = claude_trial.resolve(
+        worker_db, job.get("user_id"), subscribed,
+        project_id=job.get("project_id"), via="agent_turn",
+        operator_repair=payload.get("operator_repair") is True)
+    ctx.claude_trial = (trial.scope if trial.kind == claude_trial.Decision.ACTIVE
+                        else None)
+    if trial.kind in (claude_trial.Decision.EXHAUSTED,
+                      claude_trial.Decision.UNAVAILABLE):
+        shutil.rmtree(workdir, ignore_errors=True)
+        return _claude_trial_stop(worker_db, ctx, job, session_id,
+                                  user_message, trial)
+    if ctx.claude_trial is not None:
+        ctx.claude_trial.job_id = job.get("id")
+        ctx.agent_lanes = [claude_lane.lane(ctx.claude_trial.model)]
         ctx.llm_client = ctx.agent_lanes[0]["client"]
-        ctx.agent_model = ctx.agent_lanes[0]["model"]
-    else:  # The route already rejects an unconfigured standard provider.
-        ctx.llm_client, ctx.agent_model = llm.agent_client_for(
+        ctx.agent_model = ctx.claude_trial.model
+        # The turn spends what the trial has left, in the same credit units
+        # the in-turn cap already counts (cumulative across slices).
+        ctx.credit_budget = ctx.running_credits() + model_prices.usd_to_credits(
+            ctx.claude_trial.remaining_usd)
+        ctx.claude_trial.extras_metered_usd = _claude_trial_extras(ctx)
+        print(f"[agent] job {job['id']}: Claude trial lane "
+              f"{ctx.claude_trial.model} (${ctx.claude_trial.spent_usd:.4f} of "
+              f"${ctx.claude_trial.cap_usd:.2f} spent)", flush=True)
+    else:
+        ctx.agent_lanes = llm.agent_lanes_for(
             subscribed, plan, first_turn=first_turn)
+        if ctx.agent_lanes:
+            ctx.llm_client = ctx.agent_lanes[0]["client"]
+            ctx.agent_model = ctx.agent_lanes[0]["model"]
+        else:  # The route already rejects an unconfigured standard provider.
+            ctx.llm_client, ctx.agent_model = llm.agent_client_for(
+                subscribed, plan, first_turn=first_turn)
     # Vision is reached from eight places that know nothing about plans, so the
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).
@@ -2116,6 +2152,8 @@ def run_agent_job(worker_db, job):
                       getattr(usage, "prompt_tokens", None) if usage else None,
                       getattr(usage, "completion_tokens", None) if usage else None)
     llm.set_recorder(_llm_recorder)
+    if ctx.claude_trial is not None:
+        claude_trial.activate(ctx.claude_trial, recorder=_llm_recorder)
     try:
         attachment_note = _attachment_context(worker_db, ctx, user_message)
         if operator_instruction:
@@ -2138,9 +2176,12 @@ def run_agent_job(worker_db, job):
                 "off mid-work on our side. Everything you already changed "
                 "is saved in the project state — do NOT redo it; finish "
                 "what remains of the request and reply.]")
-        return _run_loop(ctx, worker_db, job, session_id, user_message,
-                         attachment_note,
-                         _cont=(continuation_state or None))
+        result = _run_loop(ctx, worker_db, job, session_id, user_message,
+                           attachment_note,
+                           _cont=(continuation_state or None))
+        if ctx.claude_trial is not None:
+            _claude_trial_settle(ctx, result)
+        return result
     except dbx.JobLeaseLost:
         raise  # A stopped/replaced execution must never create another slice.
     except agent_tools.AskUser:
@@ -2239,7 +2280,81 @@ def run_agent_job(worker_db, job):
         # Worker threads are reused across jobs — a plan left on this thread
         # would give the NEXT user's turn this user's vision provider.
         llm.clear_turn_plan()
+        claude_trial.deactivate(_llm_recorder)
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _claude_trial_extras(ctx):
+    """Non-LLM generations this logical turn bought (USD)."""
+    return (float(getattr(ctx, "gen_extra_cost_usd", 0.0) or 0.0)
+            + len(getattr(ctx, "images_generated", None) or [])
+            * config.IMAGE_PRICE_USD)
+
+
+def _claude_trial_settle(ctx, result):
+    """End of a trial slice: meter its generations, never charge credits.
+
+    The trial is metered in USD on its own ledger (claude_trial); the credit
+    pools of an account that has none are not touched."""
+    scope = ctx.claude_trial
+    try:
+        claude_trial.meter_extras(scope, _claude_trial_extras(ctx))
+    except Exception as exc:  # noqa: BLE001 - metering never breaks a reply
+        print(f"[claude-trial] extras meter failed: {str(exc)[:160]}",
+              flush=True)
+    if isinstance(result, dict):
+        result["billable"] = False
+        result["claude_trial"] = scope.as_dict()
+
+
+def _trial_lane_refused(ctx, exc):
+    return (getattr(ctx, "claude_trial", None) is not None
+            and claude_trial.is_lane_refusal(exc))
+
+
+def _trial_lane_stop(ctx, worker_db, session_id, job, user_message,
+                     total_steps, timings, honesty, turn_deadline):
+    """Anthropic refused mid-turn (balance, key) or the $1 ran out under a
+    critic: deliver what is saved, then the plan cards. Never a raw error."""
+    spent = ctx.claude_trial.spent_usd >= ctx.claude_trial.cap_usd - 0.005
+    kind = (claude_trial.Decision.EXHAUSTED if spent
+            else claude_trial.Decision.UNAVAILABLE)
+    return _finalize(
+        ctx, worker_db, session_id,
+        claude_trial.EXHAUSTED_TEXT if spent else (
+            "The free trial editor paused before I could finish — everything "
+            "I already did is saved. Pick a plan to keep going on this "
+            "project; your request picks up right here."),
+        "budget", total_steps, timings, honesty,
+        extra_meta=claude_trial.stop_meta(
+            kind, (user_message or {}).get("id"),
+            {"trial_reason": "provider_refused"}),
+        turn_deadline=turn_deadline, job=job)
+
+
+def _claude_trial_stop(worker_db, ctx, job, session_id, user_message,
+                       decision, text=None):
+    """A trial turn that cannot start: the plan cards, with the facts."""
+    kind = decision.kind
+    if text is None:
+        text = (claude_trial.EXHAUSTED_BEFORE_TEXT
+                if kind == claude_trial.Decision.EXHAUSTED
+                else claude_trial.UNAVAILABLE_TEXT)
+    print(f"[agent] job {job.get('id')}: Claude trial {kind} "
+          f"({decision.reason}) — plan cards, no model call", flush=True)
+    try:
+        version = ctx.latest_edl()["version"]
+    except Exception:
+        version = None
+    meta = claude_trial.stop_meta(
+        kind, (user_message or {}).get("id"),
+        {"trial_reason": str(decision.reason)[:120],
+         **({"edl_version": version} if version is not None else {})})
+    worker_db.run(dbx.add_message, session_id, "assistant", text, meta)
+    return {"status": "budget", "steps": 0, "timings": {},
+            "outcome": "blocked", "billable": False,
+            "claude_trial": {"decision": kind,
+                             "reason": str(decision.reason)[:120]}}
 
 
 _EXPLICIT_MICRO_EDIT = re.compile(
@@ -4735,6 +4850,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                   f"{ctx.running_credits()} >= {ctx.credit_budget} credits",
                   flush=True)
             honesty["budget_stop"] = True
+            if getattr(ctx, "claude_trial", None) is not None:
+                # The trial's $1 is spent: finish on what this step already
+                # saved (auto-rendered), then the plan cards with "keep going".
+                return _finalize(
+                    ctx, worker_db, session_id, claude_trial.EXHAUSTED_TEXT,
+                    "budget", total_steps, timings, honesty,
+                    extra_meta=claude_trial.stop_meta(
+                        claude_trial.Decision.EXHAUSTED,
+                        user_message.get("id")),
+                    turn_deadline=turn_deadline, job=job)
             # credit_budget = balance + grace, so over_budget() can only fire
             # when the turn tried to spend essentially the whole wallet. For a
             # free user that IS "out of credits" — and the next message WILL
@@ -4810,7 +4935,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # after an unrelated write invalidated the last rendered version.
         # This neither locks tools nor treats old pixels as a current pass.
         if not visual_handoff and not budget["spent"]:
-            finishing_review.refresh(ctx, messages, preserve_prefix=model.startswith("grok-"))
+            finishing_review.refresh(
+                ctx, messages, preserve_prefix=llm.append_only_history(model))
         progress = (85 if ctx.rendered_versions else
                     55 if ctx.versions_written else
                     20 if getattr(ctx, "edit_plan", None) else 5)
@@ -4821,10 +4947,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # paying for. New Advanced contracts use high on every editing step;
         # existing contracts retain their configured planning/dispatch split.
         step_effort = llm.editor_reasoning_effort(ctx.plan, iteration)
+        if claude_lane.is_claude_model(model):
+            step_effort = (config.CLAUDE_TRIAL_PLAN_EFFORT if iteration == 0
+                           else config.CLAUDE_TRIAL_EFFORT)
         def _chat_request(active_model):
             active_extra = {}
             if step_effort and iteration > 0 \
                     and not llm.reasoning_effort_rejected(active_model):
+                active_extra["reasoning_effort"] = step_effort
+            elif step_effort and claude_lane.is_claude_model(active_model):
+                # Claude takes output_config.effort on the planning step too.
                 active_extra["reasoning_effort"] = step_effort
             if llm.tools_need_effort_none(active_model):
                 active_extra["reasoning_effort"] = "none"
@@ -4846,7 +4978,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # boundary. Reserve generous headroom for image/tokenizer variance.
         # A fresh slice uses saved plans, observations and exact EDL state;
         # never throw away unread tool images before the editor sees them.
-        if model.startswith("grok-") and estimate >= 150000 and not unread_tool_images:
+        boundary = (150000 if model.startswith("grok-") else
+                    90000 if model.startswith("claude-haiku-5") else None)
+        if boundary and estimate >= boundary and not unread_tool_images:
             if iteration > 0:
                 return _durable_continuation("prompt context checkpoint")
             return _finalize(ctx, worker_db, session_id,
@@ -4857,7 +4991,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         capacity_expired = False
         reservation_id = (f"{job['id']}:{iteration}:"
                           f"{uuid.uuid4().hex[:10]}")
-        while True:
+        while not claude_lane.is_claude_model(model):
             try:
                 wait = worker_db.run(
                     dbx.reserve_llm_tokens, estimate,
@@ -5093,6 +5227,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         "messages": _messages_for_record(messages[-2:]),
                         "tools": [t["function"]["name"] for t in tools]},
                        {"error": f"{type(e).__name__}: {str(e)[:400]}"}, None)
+            if _trial_lane_refused(ctx, e):
+                return _trial_lane_stop(ctx, worker_db, session_id, job,
+                                        user_message, total_steps, timings,
+                                        honesty, turn_deadline)
             raise
         timings["llm_s"] = round(timings["llm_s"] + time.monotonic() - t0, 2)
         timings["llm_calls"] += 1
@@ -5506,8 +5644,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # Keep the growing Grok prefix byte-stable while it is comfortably
         # below the pricing boundary. Editing earlier messages on every step
         # discards cache hits; compact in larger batches under real pressure.
-        compact_history = (not model.startswith("grok-") or
-            _agent_request_token_estimate(messages, tools, max_tokens) >= 100000)
+        compact_history = (not llm.append_only_history(model) or
+            _agent_request_token_estimate(messages, tools, max_tokens) >= (
+                100000 if model.startswith("grok-")
+                else config.CLAUDE_HISTORY_COMPACT_TOKENS))
         if batch_committed_edl and compact_history:
             released = _compact_consumed_look_frames(
                 messages, before_index=visible_message_boundary)

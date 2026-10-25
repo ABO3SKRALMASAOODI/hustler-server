@@ -108,7 +108,23 @@ def note_quota_error(exc, model=None, base_url=None):
 
 
 def provider_cost_usd(usage, model):
-    """xAI invoice ticks, or Luna 6 cost from reported token categories."""
+    """xAI invoice ticks, Luna 6 cost from reported token categories, or the
+    Claude lane's exact per-call cost (claude_lane._Usage)."""
+    if str(model or "").lower().startswith("claude-") and usage is not None:
+        recorded = getattr(usage, "provider_cost_usd", None)
+        if isinstance(recorded, (int, float)) and math.isfinite(recorded) \
+                and recorded >= 0:
+            return float(recorded)
+        import model_prices
+        details = getattr(usage, "prompt_tokens_details", None) or {}
+        get = (details.get if isinstance(details, dict)
+               else (lambda k, d=0: getattr(details, k, d)))
+        cached = int(get("cached_tokens", 0) or 0)
+        written = int(get("cache_write_tokens", 0) or 0)
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        return model_prices.claude_usage_cost(
+            model, max(0, prompt - cached - written),
+            int(getattr(usage, "completion_tokens", 0) or 0), cached, written)
     if model in ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol') and usage is not None:
         import model_prices
         get = lambda obj, key, default=None: (obj.get(key, default)
@@ -151,6 +167,22 @@ def record(purpose, request, response, usage=None):
                 response['service_tier'] = (getattr(usage, 'service_tier', None)
                     or config.OPENAI_SERVICE_TIER or 'default')
                 response['cost_basis'] = 'reported_tokens_official_rates'
+            elif str((request or {}).get('model') or '').lower().startswith('claude-'):
+                # The trial lane: whose $1 this call spent, and the cache
+                # write slice (Anthropic bills it at its own 1.25x rate).
+                details = getattr(usage, 'prompt_tokens_details', {}) or {}
+                response['cache_write_in'] = (
+                    details.get('cache_write_tokens', 0)
+                    if isinstance(details, dict) else 0)
+                response['provider'] = 'anthropic'
+                response['cost_basis'] = 'anthropic_usage_official_rates'
+                try:
+                    import claude_trial
+                    scope = claude_trial.current()
+                except Exception:   # pragma: no cover
+                    scope = None
+                if scope is not None:
+                    response['claude_trial_user_id'] = scope.user_id
         tpm_limit = getattr(usage, 'tpm_limit', None)
         if isinstance(tpm_limit, int) and isinstance(response, dict):
             # the org's real tier, queryable in SQL (llm_calls.response)
@@ -351,7 +383,12 @@ def agent_client_for(subscribed, plan=None, first_turn=False):
 
     Free first-turn experiments remain separate. Missing paid credentials are
     an operational failure, never permission to silently downgrade quality.
+    A job running on the Claude trial lane (claude_trial scope on this
+    thread) answers on that lane — never the paid OpenAI wallet.
     """
+    trial = claude_trial_lane()
+    if trial is not None:
+        return trial
     if subscribed:
         lanes = paid_editor_lanes(plan)
         if not lanes:
@@ -545,10 +582,36 @@ def config_report():
     }
 
 
+def claude_trial_lane():
+    """(client, model) when THIS thread's job runs on the Claude trial lane,
+    else None. The trial's vision, critics and short text calls go to the
+    same funded lane as its agent — never the paid OpenAI wallet."""
+    try:
+        import claude_trial
+        scope = claude_trial.current()
+    except Exception:  # pragma: no cover - import failure means no lane
+        return None
+    if scope is None:
+        return None
+    import claude_lane
+    return claude_lane.ClaudeLaneClient(), scope.model
+
+
+def append_only_history(model):
+    """Providers whose prompt cache rewards a byte-stable history (Grok, and
+    the Claude lane, whose cache reads cost 5-10% of a miss)."""
+    m = str(model or "").lower()
+    return m.startswith("grok-") or m.startswith("claude-")
+
+
 def vision_client_for(plan):
     """Paid visual reviews use the account’s contracted editing model.
     Free uploads retain their configured shared vision/fallback provider.
+    A Claude trial turn looks with its own Claude lane.
     """
+    trial = claude_trial_lane()
+    if trial is not None:
+        return trial
     if paid_editor_plan(plan):
         return agent_client_for(True, plan)
     if shared_vision_configured():
@@ -1345,7 +1408,7 @@ _RETRY_IN_RE = re.compile(
 _QUOTA_MARKERS = (
     "insufficient_quota", "no credits remaining",
     "used all available credits", "exceeded your current quota",
-    "spending limit", "credit balance", "billing/",
+    "spending limit", "credit balance", "billing/", "billing_error",
 )
 
 
@@ -1577,6 +1640,9 @@ def vision_available(plan=None):
     blind, because it is a different endpoint with a different key.
     """
     plan = turn_plan() if plan is None else plan
+    if claude_trial_lane() is not None:
+        import claude_lane
+        return claude_lane.available()
     if paid_editor_plan(plan):
         return bool(paid_editor_lanes())
     # ...and when the shared VISION_* provider is unconfigured or has latched
@@ -1751,13 +1817,20 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
     """One plain-text completion using the current plan’s editor model. Returns
     {"text", "model", "prompt_tokens", "completion_tokens"} or None on any
     failure — callers must keep a non-LLM fallback."""
-    if not config.OPENAI_API_KEY and not paid_editor_plan(turn_plan()):
+    trial = claude_trial_lane()
+    if trial is None and not config.OPENAI_API_KEY \
+            and not paid_editor_plan(turn_plan()):
         return None
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
-    model = config.EDITOR_MODEL if paid_editor_plan(turn_plan()) else config.AGENT_MODEL
+    model = (trial[1] if trial is not None else
+             config.EDITOR_MODEL if paid_editor_plan(turn_plan())
+             else config.AGENT_MODEL)
     try:
-        text_client, model = agent_client_for(True, turn_plan()) if paid_editor_plan(turn_plan()) else (client(), model)
+        text_client, model = (trial if trial is not None else
+                              agent_client_for(True, turn_plan())
+                              if paid_editor_plan(turn_plan())
+                              else (client(), model))
         extra = {}
         if reasoning_effort and not reasoning_effort_rejected(model):
             extra["reasoning_effort"] = reasoning_effort
