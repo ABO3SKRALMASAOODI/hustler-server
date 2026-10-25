@@ -19,6 +19,7 @@ VideoIndex -> seed EDL + greet. Steps (clip): the same lanes minus the
 proxy encode/EDL/greeting — clips are perception-only.
 """
 
+import math
 import os
 import re
 import shutil
@@ -194,8 +195,62 @@ def _build_and_upload_tiles(job_id, project_id, sha, src_path, duration,
     return keys, step, spatial_sidecar
 
 
+def _streamed_scratch_plan(duration, has_audio, workdir):
+    """(proxy_kbps, need_bytes) for indexing a source that stays in storage.
+
+    The need is what this job WRITES (index_stream_scratch_bytes), with a
+    small measurement margin, not a multiple of the source: the source is
+    never on local disk. Cloud Run's guard is kept: on a memory-backed
+    workdir the same bytes are RAM, so a reserve for the decoders, encoder
+    and transcription model is added, and check_workdir_capacity measures
+    against the container's memory there.
+
+    Room is made before anything is refused: the executor's source cache is
+    an optimisation (renderer._cached_source) and is dropped first. If the
+    default proxy rate still does not fit, the proxy's bitrate ceiling is
+    lowered (never below INDEX_STREAM_PROXY_MIN_KBPS) so a long recording
+    still fits the lane. Raises storage.WorkdirTooSmall when even that
+    cannot fit.
+    """
+    margin = max(1.0, float(config.INDEX_STREAM_SCRATCH_MARGIN))
+    reserve = (config.INDEX_STREAM_RAM_RESERVE_BYTES
+               if storage.workdir_fstype(workdir) == "tmpfs" else 0)
+    top = int(config.INDEX_STREAM_PROXY_MAXRATE_KBPS)
+    floor = min(top, int(config.INDEX_STREAM_PROXY_MIN_KBPS))
+
+    def need(kbps):
+        return int(config.index_stream_scratch_bytes(
+            duration, has_audio, kbps) * margin) + reserve
+
+    free = storage.free_workdir_bytes(workdir)
+    if free is not None and free < need(top):
+        freed = storage.evict_source_cache()
+        if freed:
+            print(f"[index] dropped {freed / 1024 ** 3:.1f} GB of cached "
+                  f"render sources to make index scratch", flush=True)
+            free = storage.free_workdir_bytes(workdir)
+    kbps = top
+    if free is not None and free < need(top):
+        # need(k) is linear in k: solve need(k) <= free for the proxy rate.
+        per_kbps = need(top + 1) - need(top)
+        if per_kbps > 0:
+            kbps = math.floor(top - (need(top) - free) / per_kbps) - 1
+        kbps = max(floor, min(top, kbps))
+        print(f"[index] {duration / 3600:.2f}h source: proxy ceiling "
+              f"lowered to {kbps} kbps to fit {free / 1024 ** 3:.1f} GB of "
+              f"free scratch", flush=True)
+    required = need(kbps)
+    storage.check_workdir_capacity(required, workdir, headroom=1.0)
+    return kbps, required
+
+
 def _stream_index_source(worker_db, job, asset, workdir):
-    """Keep large originals in storage and reserve scratch for bounded outputs."""
+    """Keep large originals in storage and reserve scratch for bounded outputs.
+
+    Returns (presigned source URL, sha256, probe, proxy ceiling in kbps).
+    Nothing is read in full before the duration limit and the scratch plan
+    have both passed.
+    """
     src = storage.presign_get(
         asset["storage_key"], expires=config.cloudflare_timeout_for("index") + 3600)
     info = media.probe(src)
@@ -203,12 +258,11 @@ def _stream_index_source(worker_db, job, asset, workdir):
         raise RuntimeError(
             f"Video is {info['duration']/3600:.1f}h — the limit is "
             f"{config.MAX_DURATION_S/3600:.0f}h")
-    # Capped H.264 + AAC, mono 16 kHz PCM, plus tile/metadata overhead.
-    # The normal headroom also covers faststart's temporary second copy.
-    scratch_bytes = (info["duration"] * (
-        (config.INDEX_STREAM_PROXY_MAXRATE_KBPS + 128) * 1000 / 8 + 32000)
-        + 256 * 1024 ** 2)
-    storage.check_workdir_capacity(scratch_bytes, workdir)
+    proxy_kbps, need = _streamed_scratch_plan(
+        info["duration"], info.get("has_audio", True), workdir)
+    print(f"[index {job['id']}] streaming {int(asset.get('bytes') or 0) / 1e9:.2f}"
+          f" GB source from storage; scratch need {need / 1e9:.2f} GB, proxy "
+          f"<= {proxy_kbps} kbps", flush=True)
     last = [0.0]
 
     def progress(fraction):
@@ -220,7 +274,7 @@ def _stream_index_source(worker_db, job, asset, workdir):
     sha = storage.sha256_object(
         asset["storage_key"], int(asset["bytes"]), progress_cb=progress,
         cancelled_cb=lambda: _cancelled(worker_db))
-    return src, sha, info
+    return src, sha, info, proxy_kbps
 
 
 def run_index_job(worker_db, job):
@@ -279,8 +333,8 @@ def run_index_job(worker_db, job):
         not storage.exists(asset["storage_key"])
     streamed_source = not from_client_proxy and config.index_source_should_stream(
         asset["kind"], asset.get("bytes"))
-    proxy_kwargs = ({"maxrate_kbps": config.INDEX_STREAM_PROXY_MAXRATE_KBPS}
-                    if streamed_source else {})
+    # Set from the scratch plan once the streamed source is probed.
+    proxy_kwargs = {}
     if client_proxy_key and not from_client_proxy:
         print(f"[index {job_id}] original has landed — indexing from it "
               f"rather than the browser proxy", flush=True)
@@ -330,7 +384,9 @@ def run_index_job(worker_db, job):
                 "vfr": False,          # adopt_client_proxy guarantees CFR
             }
         elif streamed_source:
-            src, sha, info = _stream_index_source(worker_db, job, asset, workdir)
+            src, sha, info, proxy_kbps = _stream_index_source(
+                worker_db, job, asset, workdir)
+            proxy_kwargs = {"maxrate_kbps": proxy_kbps}
             _mark("stream_sha256_s")
         else:
             # 1. Pull original + hash it
@@ -726,8 +782,10 @@ def _run_clip_index(worker_db, job, asset):
     try:
         streamed_source = config.index_source_should_stream(
             asset["kind"], asset.get("bytes"))
+        proxy_kbps = None
         if streamed_source:
-            src, sha, info = _stream_index_source(worker_db, job, asset, workdir)
+            src, sha, info, proxy_kbps = _stream_index_source(
+                worker_db, job, asset, workdir)
         else:
             src = os.path.join(workdir,
                                "src" + os.path.splitext(asset["storage_key"])[1])
@@ -766,7 +824,7 @@ def _run_clip_index(worker_db, job, asset):
                 duration=info["duration"],
                 progress_cb=_stage_progress(worker_db, job_id, 20, 25),
                 cancelled_cb=lambda: _cancelled(worker_db),
-                maxrate_kbps=config.INDEX_STREAM_PROXY_MAXRATE_KBPS)
+                maxrate_kbps=proxy_kbps)
             src = proxy
         wav_local = None
         if info["has_audio"]:

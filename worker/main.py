@@ -16,6 +16,7 @@ then failed by the reaper.
 """
 
 import os
+import re
 import shutil
 import signal
 import threading
@@ -408,6 +409,19 @@ INFRA_FAIL_NOTES = {
               "again in a few minutes."),
 }
 
+# An upload the service could not analyze for a reason on OUR side (no
+# capacity, no executor, a processing limit of ours). Kind and true: the file
+# is fine, it is our problem, we are on it, and nothing the customer can do
+# would help, so we ask for nothing. Owners are alerted to every such note
+# (cockpit_alerts "Paying customer saw a service error"). Posted once per
+# upload, however many retries fail (add_job_failure_message).
+INDEX_SERVICE_FAIL_NOTE = (
+    "Your video uploaded safely, and nothing is wrong with your file. Our "
+    "processing service couldn't analyze it this time. That's on our side, "
+    "not yours, and we're on it. You don't need to upload it again.")
+# indexer's own duration refusal ("Video is 4.5h — the limit is 3h").
+_TOO_LONG = re.compile(r"Video is ([0-9.]+)h \S+ the limit is ([0-9.]+)h")
+
 FAIL_NOTES = {
     # agent_turn posts its own apology inside run_agent_job — not repeated.
     "final": ("The final export failed ({err}). Your edit is saved. "
@@ -515,9 +529,15 @@ def _notify_failure(worker_db, job, err):
                                 else "media"]
     elif job["type"] == "index" and decision.kind in {
             "executor_unavailable", "executor_capacity", "provider_budget_exhausted"}:
-        note = ("Your upload is saved, but our processing service could not "
-                "analyze it. This needs a service-side fix; uploading the same "
-                "file again or changing its format will not resolve it.")
+        note = INDEX_SERVICE_FAIL_NOTE
+    elif job["type"] == "index" and _TOO_LONG.match(str(err)):
+        # The one index refusal the customer CAN act on. "Try uploading it
+        # again, or a different format" could never help a long recording.
+        hours, limit = _TOO_LONG.match(str(err)).groups()
+        note = ("This video runs about {h} hours, and the longest video I "
+                "can analyze is {l} hours, so I couldn't start on it. Your "
+                "upload is safe. Trim it, or split it into parts of up to "
+                "{l} hours each and upload those.").format(h=hours, l=limit)
     elif note and job["type"] in {"preview", "preview_check", "final"} and (
             decision.kind in {"render_budget_exceeded", "executor_memory"}
             and not decision.agent_repairable
@@ -533,9 +553,22 @@ def _notify_failure(worker_db, job, err):
         if project and project.get("chat_session_id"):
             worker_db.run(
                 dbx.add_job_failure_message, project["chat_session_id"],
-                note.format(err=reason), job["id"])
+                note.format(err=reason), job["id"],
+                *_index_note_scope(job, "job_failed"))
     except Exception as e2:
         print(f"[notify] {e2}", flush=True)
+
+
+def _index_note_scope(job, error_kind):
+    """Extra add_job_failure_message args that make an index failure note one
+    per upload (its asset), so self-heal retries never repeat it."""
+    if job.get("type") != "index":
+        return ()
+    try:
+        asset_id = int((job.get("payload") or {}).get("asset_id"))
+    except (TypeError, ValueError):
+        return ()
+    return (error_kind, asset_id)
 
 
 def lane(name, types, max_attempts, poll_interval=None):
@@ -724,7 +757,8 @@ def reaper():
                         worker_db.run(
                             dbx.add_job_failure_message,
                             project["chat_session_id"], note, row["id"],
-                            "job_died")
+                            *(_index_note_scope(row, "job_died")
+                              or ("job_died",)))
                 except Exception as e:
                     print(f"[reaper] notify failed: {e}", flush=True)
         except Exception as e:

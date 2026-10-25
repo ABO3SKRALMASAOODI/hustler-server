@@ -513,6 +513,24 @@ def _proxy_vf(h, pad_s=0.0):
     return vf
 
 
+# A streamed index reads a multi-GB original over one presigned HTTP
+# connection for as long as the proxy encode takes (tens of minutes on a
+# multi-hour source). A dropped connection or a stalled socket must resume
+# from the byte it reached (HTTP Range), not fail or hang the index.
+HTTP_INPUT_ARGS = ["-reconnect", "1", "-reconnect_streamed", "1",
+                   "-reconnect_on_network_error", "1",
+                   "-reconnect_delay_max", "30",
+                   "-rw_timeout", "120000000"]
+
+
+def input_args(src):
+    """ffmpeg input options for `src`: resilient reads for an HTTP(S) URL."""
+    src = str(src)
+    if src.startswith(("http://", "https://")):
+        return HTTP_INPUT_ARGS + ["-i", src]
+    return ["-i", src]
+
+
 def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
                   expected_out_s=None, cancelled_cb=None, maxrate_kbps=None):
     # DO NOT SLICE THIS ENCODE ACROSS CORES. It was tried and MEASURED, on a
@@ -539,7 +557,7 @@ def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
     # indexing dramatically faster means not decoding 4K on a CPU at all —
     # hardware decode, or a proxy produced by the client's own GPU before
     # upload — not a cleverer arrangement of this loop.
-    cmd = ["ffmpeg", "-y", "-i", src, "-vf",
+    cmd = ["ffmpeg", "-y", *input_args(src), "-vf",
            _proxy_vf(config.PROXY_HEIGHT, pad_s),
            "-c:v", "libx264", "-preset", config.PROXY_PRESET,
            "-crf", str(config.PROXY_CRF), "-pix_fmt", "yuv420p"]
@@ -690,7 +708,7 @@ def extract_wav(src, dst, cancelled_cb=None):
     fills/trims discontinuities without stretching ordinary speech.
     """
     cancel_kw = ({"cancelled_cb": cancelled_cb} if cancelled_cb else {})
-    run(["ffmpeg", "-y", "-i", src, "-map", "0:a:0", "-vn",
+    run(["ffmpeg", "-y", *input_args(src), "-map", "0:a:0", "-vn",
          "-af", "aresample=async=1:min_hard_comp=0.001:first_pts=0",
          "-ac", "1", "-ar", "16000",
          "-c:a", "pcm_s16le", dst], **cancel_kw)

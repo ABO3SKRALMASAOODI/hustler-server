@@ -62,7 +62,8 @@ def test_cancelled_hash_closes_storage_connection(monkeypatch):
     ("video_clip", 14 * 1024 ** 3, True),
     ("music", 9 * 1024 ** 3, False),
     (None, 9 * 1024 ** 3, False),
-    ("original", 14 * 1024 ** 3 + 1, False),
+    ("original", 20 * 1024 ** 3, True),
+    ("original", 20 * 1024 ** 3 + 1, False),
     ("original", 0, False),
 ])
 def test_only_known_bounded_video_uploads_use_streaming_admission(

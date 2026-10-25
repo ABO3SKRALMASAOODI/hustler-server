@@ -1341,19 +1341,82 @@ CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
 # enabling an otherwise retired provider or moving compute onto Render.
 CLOUDFLARE_MAX_INDEX_INPUT_BYTES = max(1, int(os.getenv(
     "CLOUDFLARE_MAX_INDEX_INPUT_BYTES", str(8 * 1024 ** 3))))
-# Larger videos stay in object storage. Only the bounded proxy and waveform
-# occupy scratch; the original's full SHA is still verified in a bounded read.
+# INDEX SCRATCH (25 Oct 2026, project 4746). A downloaded original costs its
+# own size times WORKDIR_HEADROOM (2.2x: the copy plus the proxy and wav
+# beside it). The 8-GiB stream threshold above assumed that a standard-4's
+# 20 GB disk is all scratch, but the batch image itself occupies about 8 GB:
+# a fresh batch container reports 11.8 GB free. Everything from ~5.0 to
+# 8 GiB was therefore too big to download and too small to stream, and a
+# paying customer's 7.6-GB stream VOD failed three times in 20 seconds
+# ("needs about 15.5 GB ... only 11.8 GB is free").
+#
+# Large videos now stay in object storage from INDEX_STREAM_MIN_BYTES up:
+# ffmpeg range-reads the presigned original, and scratch holds only what the
+# index writes (the bounded proxy, the 16-kHz wav and its FLAC, tiles and
+# frames), computed from the probed duration rather than from the source's
+# size. A download of a source below the threshold needs at most 2.2 x 2 GiB
+# = 4.7 GB, which fits every media lane.
+INDEX_STREAM_MIN_BYTES = max(1, int(float(os.getenv(
+    "INDEX_STREAM_MIN_GB", "2")) * 1024 ** 3))
+# Indexing never stages the source above the threshold, so its own size is
+# no longer what bounds it (duration is: MAX_DURATION_S). The upload cap
+# (MAX_UPLOAD_GB) is the product's limit; this is what the index path is
+# built and tested for.
+INDEX_STREAM_MAX_BYTES = max(1, int(float(os.getenv(
+    "INDEX_STREAM_MAX_GB", "20")) * 1024 ** 3))
+# Proxy video bitrate ceiling for a streamed source (kbps), and the floor the
+# indexer may lower it to when a long source would not otherwise fit the
+# lane's free scratch. 540p at 1.5 Mbps is still a clean player and preview
+# proxy; finals always render from the original.
 INDEX_STREAM_PROXY_MAXRATE_KBPS = 4000
+INDEX_STREAM_PROXY_MIN_KBPS = 1500
+INDEX_STREAM_PROXY_AUDIO_KBPS = 128
+# Filmstrip tiles, spatial samples and transcription scratch: bounded by
+# sample budgets, not by duration.
+INDEX_STREAM_FIXED_SCRATCH_BYTES = 512 * 1024 ** 2
+# Visual-evidence frames (640 px JPEGs, about three per shot and one per
+# sentence) and their contact sheets DO grow with duration: a 66-min stream
+# clip (job 108932) decoded 3,300 frames into 416 sheets, roughly 0.3 GB an
+# hour. Budget them at 512 MiB an hour.
+INDEX_STREAM_FRAME_BYTES_PER_HOUR = 512 * 1024 ** 2
+# A computed need is a measurement, not a multiple of the source, so its
+# margin is small (VBV overshoot, container overhead).
+INDEX_STREAM_SCRATCH_MARGIN = 1.2
+# On a MEMORY-backed workdir (Cloud Run's tmpfs) every scratch byte is RAM
+# that ffmpeg's decoders, the encoder and the transcription model also need.
+INDEX_STREAM_RAM_RESERVE_BYTES = 3 * 1024 ** 3
 
 
 def index_source_should_stream(kind, source_bytes):
+    """Index this upload from object storage instead of a local copy."""
     try:
         size = int(source_bytes or 0)
     except (TypeError, ValueError):
         return False
-    return (kind in {"original", "video_clip"}
-            and CLOUDFLARE_MAX_INDEX_INPUT_BYTES < size
-            <= MAX_UPLOAD_GB * 1024 ** 3)
+    # An operator who lowers the download ceiling below the threshold still
+    # gets streaming above it (never a refusal in between).
+    threshold = min(INDEX_STREAM_MIN_BYTES, CLOUDFLARE_MAX_INDEX_INPUT_BYTES)
+    ceiling = max(INDEX_STREAM_MAX_BYTES, int(MAX_UPLOAD_GB * 1024 ** 3))
+    return kind in {"original", "video_clip"} and threshold < size <= ceiling
+
+
+def index_stream_scratch_bytes(duration_s, has_audio=True, proxy_kbps=None):
+    """Scratch bytes a streamed index writes, from what it actually writes.
+
+    The proxy is bounded by its encoder (-maxrate, -bufsize = 2x maxrate),
+    plus 128-kbps AAC. The wav is 16-kHz mono s16 (32,000 B/s) and the FLAC
+    sent to transcription is never larger (it falls back to the wav when it
+    would be). Evidence frames and sheets scale with duration; tiles and
+    spatial samples do not. faststart moves the moov atom in place, so the
+    proxy is never held twice. Margins are applied by the caller.
+    """
+    seconds = max(0.0, float(duration_s or 0))
+    kbps = float(proxy_kbps or INDEX_STREAM_PROXY_MAXRATE_KBPS)
+    audio_kbps = INDEX_STREAM_PROXY_AUDIO_KBPS if has_audio else 0
+    proxy = seconds * (kbps + audio_kbps) * 1000 / 8 + 2 * kbps * 1000 / 8
+    wav = 2 * seconds * 32000 if has_audio else 0
+    frames = seconds / 3600 * INDEX_STREAM_FRAME_BYTES_PER_HOUR
+    return int(proxy + wav + frames + INDEX_STREAM_FIXED_SCRATCH_BYTES)
 
 
 # Long sources are usually edited into short, sparse output ranges. Feeding

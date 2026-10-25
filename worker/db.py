@@ -2942,7 +2942,7 @@ def insert_llm_call(conn, project_id, job_id, purpose, model, request,
 
 
 def add_job_failure_message(conn, session_id, content, job_id,
-                            error_kind="job_failed"):
+                            error_kind="job_failed", index_asset_id=None):
     """Insert one user-facing failure note for a terminal queue job.
 
     Job completion and chat notification necessarily use separate transactions:
@@ -2950,12 +2950,60 @@ def add_job_failure_message(conn, session_id, content, job_id,
     are best-effort UX. A worker crash between them must be repairable without a
     later reaper producing duplicate apologies. The transaction-scoped advisory
     lock makes the NOT EXISTS check safe across dispatcher and guardian threads.
+
+    `index_asset_id` makes the note one per failed UPLOAD ANALYSIS rather than
+    one per job. The studio's self-heal re-runs a failed index on the next
+    state poll (up to twice per 6 h), so one upload that cannot be analyzed
+    produced three identical apologies within 20 seconds (project 4746, jobs
+    108884-108886, a customer who had paid two minutes earlier). A note that
+    already told this chat the same thing about an index job of the same
+    asset covers every retry of it; a retry that fails for a different
+    reason (one the customer can act on) still says so, once.
     """
     job_id = int(job_id)
     error_kind = (str(error_kind or "job_failed")
                   if error_kind in ("job_failed", "job_died")
                   else "job_failed")
     meta = {"error": error_kind, "job": job_id}
+    if index_asset_id is not None:
+        asset = str(int(index_asset_id))
+        with conn.cursor() as cur:
+            cur.execute("""WITH locked AS (
+                             SELECT pg_advisory_xact_lock(
+                               hashtextextended(
+                                 'index-failure-message:' || %s || ':' || %s,
+                                 0))
+                           )
+                           INSERT INTO chat_messages
+                             (session_id, role, content, meta)
+                           SELECT %s, 'assistant', %s, %s
+                             FROM locked
+                            WHERE NOT EXISTS (
+                              SELECT 1 FROM chat_messages existing
+                               WHERE existing.session_id = %s
+                                 AND existing.role = 'assistant'
+                                 AND existing.meta->>'error'
+                                     IN ('job_failed', 'job_died')
+                                 AND existing.meta->>'job' = %s)
+                              AND NOT EXISTS (
+                              SELECT 1 FROM chat_messages existing
+                                JOIN video_jobs sibling
+                                  ON sibling.id = CASE
+                                     WHEN existing.meta->>'job' ~ '^[0-9]+$'
+                                     THEN (existing.meta->>'job')::bigint END
+                               WHERE existing.session_id = %s
+                                 AND existing.role = 'assistant'
+                                 AND existing.meta->>'error'
+                                     IN ('job_failed', 'job_died')
+                                 AND existing.content = %s
+                                 AND sibling.type = 'index'
+                                 AND sibling.payload->>'asset_id' = %s)
+                           RETURNING id""",
+                        (str(session_id), asset, session_id, content,
+                         Json(meta), session_id, str(job_id), session_id,
+                         content, asset))
+            row = cur.fetchone()
+            return row["id"] if row else None
     with conn.cursor() as cur:
         cur.execute("""WITH locked AS (
                          SELECT pg_advisory_xact_lock(
@@ -3011,6 +3059,22 @@ def unnotified_terminal_failures(conn, limit=100):
                                AND notified.meta->>'error'
                                    IN ('job_failed', 'job_died')
                                AND notified.meta->>'job' = j.id::text)
+                          AND (j.type <> 'index' OR NOT EXISTS (
+                            -- One note per failed upload analysis: a retry
+                            -- of an asset whose failure was already told is
+                            -- not owed a second apology (add_job_failure_message).
+                            SELECT 1 FROM chat_messages sibling_note
+                              JOIN video_jobs sibling
+                                ON sibling.id = CASE
+                                   WHEN sibling_note.meta->>'job' ~ '^[0-9]+$'
+                                   THEN (sibling_note.meta->>'job')::bigint END
+                             WHERE sibling_note.session_id = p.chat_session_id
+                               AND sibling_note.role = 'assistant'
+                               AND sibling_note.meta->>'error'
+                                   IN ('job_failed', 'job_died')
+                               AND sibling.type = 'index'
+                               AND sibling.payload->>'asset_id'
+                                   = j.payload->>'asset_id'))
                           AND (j.type <> 'shorts_plan' OR NOT EXISTS (
                             SELECT 1 FROM video_jobs newer_agent
                              WHERE newer_agent.project_id = j.project_id

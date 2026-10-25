@@ -151,6 +151,39 @@ def check_workdir_capacity(need_bytes, path=None, headroom=None):
         f"worker/DEPLOY_EXECUTOR.md.")
 
 
+def evict_source_cache(cache_dir=None):
+    """Drop the executor's optional render-source cache; bytes released.
+
+    renderer._cached_source keeps recent sources in TMP_DIR/srccache (up to
+    SOURCE_CACHE_MAX_BYTES) on the same disk an index stages into. That cache
+    is an optimisation and never a reservation, so a job that is short of
+    scratch reclaims it before refusing. A render that is using a cached
+    source holds its own hardlink, so unlinking the cache name cannot pull
+    an input from under it (those bytes are not counted as released), and
+    in-progress downloads (".part") are left alone.
+    """
+    cache_dir = cache_dir or os.path.join(config.TMP_DIR, "srccache")
+    try:
+        names = os.listdir(cache_dir)
+    except OSError:
+        return 0
+    released = 0
+    for name in names:
+        if ".part" in name:
+            continue
+        path = os.path.join(cache_dir, name)
+        try:
+            st = os.stat(path)
+            if not os.path.isfile(path):
+                continue
+            os.remove(path)
+        except OSError:
+            continue
+        if st.st_nlink <= 1:
+            released += st.st_size
+    return released
+
+
 def download_to(key, path, check_capacity=True):
     """Stream one object to local scratch, refusing up front if it cannot fit."""
     if check_capacity:
