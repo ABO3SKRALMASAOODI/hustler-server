@@ -27,6 +27,7 @@ import music_search
 import preview_critic
 import preference_memory
 import quality_verifier
+import request_scope
 import read_tools
 import reference_profile
 import remote
@@ -87,13 +88,17 @@ _NON_PRODUCTIVE_CONTINUATION_REASONS = {
     "awaiting complete preview",
 }
 
-# Verification-driven repair is bounded to ONE pass per logical turn: one
-# in-slice repair pushback and at most one durable continuation slice whose
-# only reason is an unresolved verification record. Only real defects reach
-# verification now (taste notes are advisory), and anything still open after
-# that pass is disclosed in the reply and keeps the Studio export gate shut.
-MAX_QUALITY_REPAIR_PUSHBACKS = 1
-MAX_VERIFICATION_CONTINUATIONS = 1
+# A request keeps working until it is fulfilled (owner, 25 Oct 2026: "is
+# that the product we want to build?" about a one-try-then-stop policy). What
+# bounds verification-driven repair is evidence of being STUCK, not a count:
+# a reviewer category that recurs after one repair becomes advisory
+# (request_scope.demote_recurring), and a verification continuation whose
+# unresolved set is exactly the one the previous slice already failed on is
+# not started again (_verification_stuck). These counts are the backstop for
+# a reviewer that finds something NEW on every version; the logical turn's
+# AGENT_MAX_PRODUCTIVE_SLICES still bounds the whole request.
+MAX_QUALITY_REPAIR_PUSHBACKS = 3
+MAX_VERIFICATION_CONTINUATIONS = 4
 
 
 # Said whenever the repeated-blocker stop leaves its stagnant slices
@@ -1482,6 +1487,18 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
                 "into a longer video merely to resolve a cut or crop.")})
     request_contract = request_intent.request_contract(
         user_message["content"] or "")
+    # What the customer's brief explicitly fixes (length, captions off, every
+    # clip, order, silence), from the brief itself — never from Repair/Improve
+    # button prose. Each is checked deterministically before delivery
+    # (quality_verifier._request_findings), so the editor sees the same
+    # contract it is judged by. 1918 asked "Make a 10 minute wedding video"
+    # and "Use all 50 clips" and got a 12-second montage.
+    brief = quality_verifier.request_text_for(ctx)
+    contract = request_scope.contract_lines(
+        brief, quality_verifier.requested_duration_target(brief))
+    if contract:
+        request_contract += ("\nTHIS BRIEF FIXES:\n- "
+                             + "\n- ".join(contract))
     msgs.append({"role": "system", "content": request_contract})
     current_request = (user_message["content"][:4000] + attachment_note
                        + _reply_language_note(user_texts))
@@ -1806,7 +1823,7 @@ def _customer_verification_request(worker_db, session_id, message, continuation)
     if request_intent.is_review_repair(text):
         original = worker_db.run(
             dbx.customer_request_before_repair, session_id,
-            message["id"], request_intent.REVIEW_REPAIR_PREFIX)
+            message["id"], request_intent.REVIEW_REPAIR_PREFIXES)
         if original:
             return str(original["content"])[:4000]
     return text
@@ -1940,6 +1957,7 @@ def run_agent_job(worker_db, job):
     ctx.user_message = (user_message.get("content") or "")[:4000]
     ctx.verification_request = _customer_verification_request(
         worker_db, session_id, user_message, continuation_state)
+    ctx.request_media_keys = _request_media_keys(worker_db, ctx)
     if operator_instruction:
         ctx.user_message = (ctx.user_message + "\n\n" +
                             operator_instruction[:8000])
@@ -2442,24 +2460,29 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
     or a reviewer that finds something new on every repaired version, cannot
     trap the model in render-repair loops.
     """
-    # One repair pass per logical turn (Oct 2026). Each pushback asked for
-    # another write + complete render (~2 minutes with its reviewers), and a
-    # reviewer that found something new on every version kept the editor in
-    # a loop. After one targeted pass the remaining real defects are carried
-    # by the finishing directive and disclosed in the handoff instead.
+    # Each pushback asks for another write + complete render (~2 minutes
+    # with its reviewers). A reviewer category that comes back after its
+    # repair is demoted to advisory in the version's verification record
+    # (request_scope.demote_recurring), so only NEW blocking findings are
+    # pushed; MAX_QUALITY_REPAIR_PUSHBACKS is the backstop for a reviewer
+    # that finds something new on every version.
     if len(pushed_versions) >= MAX_QUALITY_REPAIR_PUSHBACKS:
         return False
-    report = getattr(ctx, "last_visual_critic", None) or {}
-    findings = preview_critic.repair_lines(report)
-    findings.extend(story_critic.repair_lines(
-        getattr(ctx, "last_story_review", None) or {}))
-    audio_review = getattr(ctx, "last_audio_review", None) or {}
-    if agent_tools.audio_review_blocks(audio_review) and \
-            audio_review.get("text"):
-        findings.append(
-            "independent actual-audio review: "
-            + str(audio_review["text"])[:700])
     _latest, verification = _latest_verification(ctx)
+    findings = []
+    if not verification:
+        # No durable record for this exact version (it is written on every
+        # complete render): fall back to the reviewers' own blocking lines.
+        report = getattr(ctx, "last_visual_critic", None) or {}
+        findings = preview_critic.repair_lines(report)
+        findings.extend(story_critic.repair_lines(
+            getattr(ctx, "last_story_review", None) or {}))
+        audio_review = getattr(ctx, "last_audio_review", None) or {}
+        if agent_tools.audio_review_blocks(audio_review) and \
+                audio_review.get("text"):
+            findings.append(
+                "independent actual-audio review: "
+                + str(audio_review["text"])[:700])
     for row in verification.get("unresolved_findings") or []:
         line = (f"{row.get('finding_id') or row.get('code')}: "
                 f"{row.get('message') or row}")
@@ -2785,22 +2808,100 @@ def _latest_verification(ctx):
                     .get(latest) or {})
 
 
+def _open_request_findings(ctx, latest_row=None):
+    """The customer's own explicit constraints the latest EDL still misses
+    (programme length, captions off, ...): the request contract. Advisory
+    readings (an unclear duration) never hold a finished edit."""
+    try:
+        latest_row = latest_row or ctx.latest_edl()
+    except Exception:
+        return []
+    if not isinstance(latest_row.get("json"), dict):
+        return []
+    return [row for row in quality_verifier._request_findings(
+                latest_row["json"], quality_verifier.request_text_for(ctx),
+                getattr(ctx, "request_media_keys", None))
+            if quality_verifier.is_blocking(row)]
+
+
+def _request_media_keys(worker_db, ctx):
+    """The customer's supplied clips/photos, read once per slice and only
+    when the brief asks to use all of them (the coverage contract)."""
+    text = quality_verifier.request_text_for(ctx)
+    every, _n = request_scope.wants_all_clips(text)
+    if not every:
+        return None
+    low = str(text or "").lower()
+    photos = bool(re.search(r"\b(?:photos?|pictures?|images?|stills?)\b", low))
+    clips = bool(re.search(r"\b(?:clips?|videos?|footage|shots?)\b", low))
+    kinds = (["image_ref"] if photos and not clips else
+             ["video_clip"] if clips and not photos else
+             ["video_clip", "image_ref"])
+    try:
+        import read_tools
+        rows = worker_db.run(read_tools.assets_by_kinds, ctx.project_id,
+                             kinds) or []
+    except Exception as exc:
+        print(f"[contract] supplied-media read skipped: {exc}", flush=True)
+        return None
+    keys = []
+    for row in rows:
+        meta = row.get("meta") or {}
+        if meta.get("role") in ("edit_reference", "shorts_reference") \
+                or meta.get("staged") in (True, "true"):
+            continue
+        if row.get("storage_key"):
+            keys.append(row["storage_key"])
+    return keys or None
+
+
+def _verification_stuck(ctx, cont):
+    """A verification continuation already ran a full slice on exactly this
+    unresolved set and it came back unchanged: another slice would repeat
+    it, so the request is delivered with the findings as notes instead.
+    Different findings (real progress, or a new defect) keep it working."""
+    cont = cont or {}
+    if cont.get("why") != "verification repair remains":
+        return False
+    _version, verification = _latest_verification(ctx)
+    fingerprint, _state = _objective_blocker_fingerprint(
+        getattr(ctx, "edit_plan", None), verification)
+    if not (cont.get("blocker_fingerprint")
+            and cont.get("blocker_fingerprint") == fingerprint):
+        return False
+    # The customer's contract moving toward its target (a 12 s cut now
+    # 7 minutes of a 10-minute ask, 30 of 50 clips placed) is progress even
+    # when the reviewers' set reads the same.
+    return (cont.get("contract_signature") or []) == _contract_signature(ctx)
+
+
+def _contract_signature(ctx):
+    """Where the open request contract stands, coarsely: programme seconds
+    and placed clips per open finding."""
+    out = []
+    for row in _open_request_findings(ctx):
+        evidence = row.get("evidence") or {}
+        out.append([str(row.get("code")),
+                    round(float(evidence.get("actual_s") or 0.0)),
+                    int(evidence.get("used") or 0)])
+    return sorted(out)
+
+
 def _verification_complete(ctx):
     latest, record = _latest_verification(ctx)
     if latest is None:
         return False
     latest_row = ctx.latest_edl()
-    if isinstance(latest_row.get("json"), dict) and quality_verifier._request_findings(
-            latest_row["json"], quality_verifier.request_text_for(ctx)):
+    if _open_request_findings(ctx, latest_row):
         return False
     return (record.get("status") in {"passed", "justified"}
             and not record.get("unresolved_findings"))
 
 
-# Findings that stay blocking even after the request budget: the flash safety
-# limit (owner decision, Wave 0) protects viewers, and corrupt glyphs are text
-# that visibly cannot ship. Everything else a critic or verifier raises
-# advises once the request's budget or repair allowance is spent.
+# Findings that keep holding the export once the request's repairs are done:
+# the flash safety limit (owner decision, Wave 0) protects viewers, and
+# corrupt glyphs are text that visibly cannot ship. Everything else a critic
+# or verifier raises advises once the request's repairs are spent.
 _HOLDS_AFTER_BUDGET = frozenset({quality_verifier.FLASH_FINDING,
                                  "corrupt_glyph"})
 
@@ -2815,19 +2916,24 @@ def _safety_hold(ctx):
 def _quality_handoff(ctx):
     """The durable quality gate for the exact immutable EDL version.
 
-    Once the request's budget or repair allowance is spent (P4,
-    ``ctx.critics_advisory``), the critics' open findings ADVISE: the version
-    is delivered with them listed beside "Improve it" and an export button,
-    instead of a closed export the user can only reopen by paying for
-    another request. Flash safety still holds the export."""
+    Once the request's repairs are spent (``ctx.critics_advisory``: the
+    turn is ending), the critics' open findings ADVISE: the version is
+    delivered with them as notes beside an export button, instead of a
+    closed export the user can only reopen by asking again. When the
+    customer's own contract (programme length, captions off, ...) is met,
+    ``contract_met`` is True and the request counts as fulfilled; "Improve
+    it" is then an optional extra. Flash safety still holds the export."""
     quality = _strict_quality_handoff(ctx)
     if (getattr(ctx, "critics_advisory", False)
             and quality.get("quality_status") == "repair_required"
             and not _safety_hold(ctx)):
+        contract = [row["message"] for row in _open_request_findings(ctx)]
+        notes = contract + [line for line in quality.get("quality_findings")
+                            or [] if line not in contract]
         return {"quality_status": "advisory",
-                "quality_findings": list(quality.get("quality_findings")
-                                         or [])[:4],
-                "export_ready": True, "improve_it": True}
+                "quality_findings": notes[:4],
+                "export_ready": True, "improve_it": True,
+                "contract_met": not contract}
     return quality
 
 
@@ -2841,12 +2947,10 @@ def _strict_quality_handoff(ctx):
     # A passed version can predate a new instruction adopted into this turn.
     # Recheck explicit customer constraints before trusting its cached pass;
     # the pixels are unchanged, but what the user requested may have changed.
-    if isinstance(latest_row.get("json"), dict):
-        request_findings = quality_verifier._request_findings(
-            latest_row["json"], quality_verifier.request_text_for(ctx))
-        if request_findings:
-            return {"quality_status": "repair_required", "export_ready": False,
-                    "quality_findings": [r["message"] for r in request_findings]}
+    request_findings = _open_request_findings(ctx, latest_row)
+    if request_findings:
+        return {"quality_status": "repair_required", "export_ready": False,
+                "quality_findings": [r["message"] for r in request_findings]}
     preview = getattr(ctx, "last_preview", None) or {}
     if preview.get("edl_version") != latest:
         return {"quality_status": "unchecked",
@@ -2865,6 +2969,20 @@ def _strict_quality_handoff(ctx):
             and not verification.get("unresolved_findings"):
         return {"quality_status": verification["status"],
                 "quality_findings": [], "export_ready": True}
+    if verification.get("unresolved_findings") is not None \
+            and verification.get("status"):
+        # The version's durable record already adjudicated every reviewer
+        # line (request-scoped audio, recurring categories demoted to
+        # advisory). Re-reading the raw critic reports here resurrected
+        # findings the record had settled.
+        open_rows = [str(row.get("message") or row) if isinstance(row, dict)
+                     else str(row)
+                     for row in verification.get("unresolved_findings") or []]
+        if open_rows:
+            return {"quality_status": "repair_required",
+                    "quality_findings": open_rows[:4], "export_ready": False}
+        return {"quality_status": "passed", "quality_findings": [],
+                "export_ready": True}
 
     findings = []
     report = getattr(ctx, "last_visual_critic", None) or {}
@@ -2933,11 +3051,16 @@ def _disclose_outstanding_quality(ctx, text):
     """Disclose the concrete blocker on legitimate terminal boundaries."""
     quality = _quality_handoff(ctx)
     if quality.get("quality_status") == "advisory":
+        if quality.get("contract_met"):
+            # Fulfilled: the reviewers' remaining notes travel in the
+            # message meta (the Studio lists them under "review notes");
+            # the reply is the editor's own, not a disclaimer.
+            return text
         first = (quality.get("quality_findings") or ["a review note"])[0]
         return (text.rstrip() +
-                "\n\nNot improved yet (review note, not a blocker): "
-                + str(first)[:360].rstrip(".") + ". Press Improve it to "
-                "keep refining, or export this version as it is.")
+                "\n\nStill open from your request: "
+                + str(first)[:360].rstrip(".") + ". This version is saved "
+                "and can be exported; ask me to keep going on it.")
     if quality.get("quality_status") != "repair_required":
         return text
     first = quality.get("quality_findings", ["a quality issue remains"])[0]
@@ -3733,7 +3856,8 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         has_edit_deliverable and getattr(ctx, "versions_written", None)
         and callable(getattr(ctx, "latest_edl", None))
         and (quality.get("export_ready") is not True
-             or quality.get("quality_status") == "advisory"))
+             or (quality.get("quality_status") == "advisory"
+                 and not quality.get("contract_met"))))
     import fulfillment
     delivery = fulfillment.delivery_requirement(ctx) if has_edit_deliverable else None
     ctx.delivery_requirement = delivery
@@ -3744,8 +3868,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         outcome = "internal_error"
     elif not has_value and (blank_canvas_no_value or refused or prerequisite
                             or attempted_edit
-                            or status in {"budget", "awaiting_user",
-                                          "request_budget"}):
+                            or status in {"budget", "awaiting_user"}):
         outcome = "blocked"
     elif has_value and (status != "replied" or fail_note or failed
                         or prerequisite or unfinished_edit):
@@ -3759,7 +3882,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     terminal_without_deliverable = (
         not has_edit_deliverable
         and (status in {"timeout", "shutdown", "budget", "awaiting_user",
-                        "no_index", "request_budget"}
+                        "no_index"}
              or (attempted_edit and (failed or refused or truncated))))
     # Saved editing work uses normal metered billing even when its quality
     # review remains open. Quality status must not silently waive API usage.
@@ -3770,11 +3893,11 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
             or prerequisite
             or truncated
             or status in {"timeout", "shutdown", "budget", "awaiting_user",
-                          "no_index", "request_budget"}
+                          "no_index"}
         ))
     )
     # No charge for an unfinished request that changed nothing deliverable
-    # (P4, 25 Oct 2026; CLAUDE.md credit rules). 77% of credits in the 30
+    # (25 Oct 2026; CLAUDE.md credit rules). 77% of credits in the 30
     # days before were charged on partial/blocked requests, many of which
     # only churned versions that ended where they began or never rendered.
     if billable and outcome in {"partial", "blocked"} \
@@ -4129,7 +4252,8 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
     merged into the message meta so the studio can react to it (e.g. render an
     Upgrade CTA on the out-of-credits stop instead of a dead-end 402 later)."""
     # Every system-authored stop is terminal for this request: what it saved
-    # is delivered, and the critics' open findings advise (P4).
+    # is delivered with an export button, and the critics' open findings
+    # advise instead of holding it.
     ctx.critics_advisory = True
     latest, fail_note = _auto_render_if_needed(ctx, worker_db, session_id,
                                                timings, turn_deadline)
@@ -4403,57 +4527,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     _responses_warned = False      # say the lane fell back ONCE, not per step
     unread_tool_images = False
     visual_handoff = False
-    # P4: one request is bounded by preview renders and wall time, both
-    # carried across its execution slices. Company-funded operator repairs
-    # keep their own envelope.
-    operator_run = payload.get("operator_repair") is True
-    ctx.request_preview_cap = (None if operator_run else
-                               (config.AGENT_REQUEST_MAX_PREVIEWS or None))
-    try:
-        ctx.request_previews = max(0, int(_cont.get("request_previews") or 0))
-    except (TypeError, ValueError):
-        ctx.request_previews = 0
-    try:
-        request_t0 = float(_cont.get("request_t0") or 0.0) or time.time()
-    except (TypeError, ValueError):
-        request_t0 = time.time()
-    budget = {"spent": None, "reply_steps": 0}
-
-    def _request_budget_reason():
-        if operator_run:
-            return None
-        cap = ctx.request_preview_cap
-        if cap and int(ctx.request_previews or 0) >= int(cap):
-            return f"{int(cap)} preview renders"
-        # Shared provider-capacity waits are latency we caused, not work the
-        # request did; the existing turn clocks exclude them the same way.
-        waited = float(timings.get("tpm_wait_s") or 0.0)
-        if config.AGENT_REQUEST_MAX_S and time.time() - request_t0 - waited \
-                >= config.AGENT_REQUEST_MAX_S:
-            minutes = config.AGENT_REQUEST_MAX_S / 60.0
-            return (f"{minutes:g} minutes" if minutes >= 1
-                    else f"{config.AGENT_REQUEST_MAX_S:g} seconds")
-        return None
-
-    def _budget_delivery():
-        """Deliver what this request saved, in our words, when the model's
-        own budget-time reply did not arrive (P4)."""
-        reason = budget["spent"] or "its budget"
-        if ctx.versions_written:
-            text = (f"This request reached its limit ({reason}), so I "
-                    "stopped here. The best version I made is saved and "
-                    "previewed. Press Improve it to keep refining it, or "
-                    "export it as it is.")
-        else:
-            text = (f"This request reached its limit ({reason}) before I "
-                    "changed the edit. Nothing new was saved. Try a "
-                    "narrower request, or send it again to continue.")
-        return _finalize(
-            ctx, worker_db, session_id, text, "request_budget", total_steps,
-            timings, honesty,
-            extra_meta={"request_budget": reason, "improve_it": True},
-            turn_deadline=turn_deadline, job=job)
-
     def _durable_continuation(reason, blocker_fingerprint=None,
                               blocker_repeats=0, progress_frontier=None,
                               verification_slices=None, stagnant=None):
@@ -4464,18 +4537,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         unbilled), False when it made progress (the run restarts), None when
         the boundary says nothing either way (platform drain, a verification
         handoff)."""
-        if budget["spent"] and reason != "platform drain":
-            # A spent request is delivered, never carried into another slice.
-            return _budget_delivery()
         root_id = int(payload.get("root_agent_job_id") or job["id"])
         sequence = int(payload.get("continuation_sequence") or 0) + 1
         work_slices = _continuation_work_slices(_cont, reason)
         if work_slices >= config.AGENT_MAX_PRODUCTIVE_SLICES:
             return _finalize(
                 ctx, worker_db, session_id,
-                "Your draft and latest preview are saved, but I couldn't "
-                "finish the remaining quality repairs. This editing run "
-                "has stopped; the draft is not marked complete.",
+                "Your edit and its latest preview are saved and can be "
+                "exported. I stopped refining it after several passes; "
+                "what is still open is listed with the preview.",
                 "blocked", total_steps, timings, honesty,
                 extra_meta={"error": "productive_slice_limit",
                             "productive_slices": work_slices},
@@ -4525,9 +4595,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             },
             "blocker_fingerprint": blocker_fingerprint,
             "blocker_repeats": int(blocker_repeats or 0),
+            "contract_signature": _contract_signature(ctx),
             "stagnant_job_ids": _stagnant_job_ids(_cont, job["id"], stagnant),
-            "request_t0": request_t0,
-            "request_previews": int(ctx.request_previews or 0),
             # This is the strongest objective frontier reached by the whole
             # logical user turn, not merely this physical worker job.  Without
             # it, every continuation compared itself only with its own start
@@ -4619,31 +4688,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # outcomes. The next durable job rebuilds from the current EDL and
             # blueprint; the user sees one final answer only when work closes.
             return _durable_continuation("platform drain")
-        if budget["spent"] is None:
-            spent = _request_budget_reason()
-            if spent:
-                budget["spent"] = spent
-                ctx.critics_advisory = True
-                ctx.editing_metrics["request_budget"] = {
-                    "reason": spent,
-                    "previews": int(ctx.request_previews or 0),
-                    "elapsed_s": round(time.time() - request_t0, 1)}
-                print(f"[job {job['id']}] request budget reached ({spent}) "
-                      "— delivering the best rendered version", flush=True)
-                tools = []
-                max_tokens = min(max_tokens, 3000)
-                messages.append({"role": "user", "content": (
-                    f"[system: REQUEST BUDGET REACHED ({spent}). Stop "
-                    "editing: no more tools in this request. Write the reply "
-                    "to the user now, in their language: what the latest "
-                    "preview delivers, then at most three short points you "
-                    "would still improve. Do not claim anything is fixed "
-                    "that the latest preview does not show. The user can "
-                    "press Improve it to continue, or export this version.]")})
-        if budget["spent"]:
-            budget["reply_steps"] += 1
-            if budget["reply_steps"] > 3:
-                return _budget_delivery()
         total_expired = (time.monotonic() - turn_started
                          > config.AGENT_TURN_TOTAL_TIMEOUT_S)
         # A slow visual tool may return after the execution window. Consume
@@ -4652,7 +4696,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # This is a tools-disabled summary, not another research iteration.
         visual_handoff = bool(
             unread_tool_images and not total_expired and not ctx.over_budget()
-            and not budget["spent"]
             and time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S)
         if visual_handoff:
             tools = []
@@ -4667,8 +4710,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 'internal note will be saved; it is not a customer reply.')})
         if (total_expired or
                 time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S) \
-                and not ctx.over_budget() and not visual_handoff \
-                and not budget["spent"]:
+                and not ctx.over_budget() and not visual_handoff:
             # Productive work refreshes the inactivity window. The total wall
             # is only the durable execution-envelope backstop; tool calls are
             # synchronous, so a call already running is not killed halfway
@@ -4809,7 +4851,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # Keep exact-current repair evidence in the next decision, including
         # after an unrelated write invalidated the last rendered version.
         # This neither locks tools nor treats old pixels as a current pass.
-        if not visual_handoff and not budget["spent"]:
+        if not visual_handoff:
             finishing_review.refresh(ctx, messages, preserve_prefix=model.startswith("grok-"))
         progress = (85 if ctx.rendered_versions else
                     55 if ctx.versions_written else
@@ -5234,13 +5276,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                                                        session_id, timings,
                                                        turn_deadline)
             if ctx.versions_written and latest["version"] not in \
-                    ctx.rendered_versions and not ctx.last_preview_failure \
-                    and not budget["spent"]:
+                    ctx.rendered_versions and not ctx.last_preview_failure:
                 # A platform/render wait boundary is not completion. Resume
                 # under the same root and reconnect to the idempotent preview
                 # job; never ship a "still rendering" technical stop.
                 return _durable_continuation("awaiting complete preview")
-            if not budget["spent"] and _preview_repair_pushback(
+            if _preview_repair_pushback(
                     ctx, messages, t_start, preview_repair_pushed,
                     turn_started=turn_started):
                 preview_repair_pushed = True
@@ -5265,7 +5306,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     "instead of leaving a broken version active.)")
                 if restored_note:
                     fail_note += restored_note
-            if not budget["spent"] and _quality_repair_pushback(
+            if _quality_repair_pushback(
                     ctx, messages, t_start, quality_repair_versions,
                     turn_started=turn_started):
                 print(f"[job {job['id']}] preview v{latest['version']} has "
@@ -5275,16 +5316,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     messages.append({"role": "assistant", "content": body})
                 continue
             if ctx.versions_written and not _verification_complete(ctx) \
-                    and not budget["spent"] \
                     and int(_cont.get("verification_slices") or 0) \
-                    < MAX_VERIFICATION_CONTINUATIONS:
+                    < MAX_VERIFICATION_CONTINUATIONS \
+                    and not _verification_stuck(ctx, _cont):
                 # A model draft is not completion while the current immutable
                 # version still has an unresolved quality record. Checkpoint
-                # the consequences and resume ONCE; never make the user ask
-                # again because a provider/runtime slice ended between repair
-                # steps. A second unresolved pass is not retried in another
-                # slice: the reply below discloses the open finding and the
-                # handoff keeps export closed (MAX_VERIFICATION_CONTINUATIONS).
+                # the consequences and keep working in another slice; never
+                # make the user ask again because a slice ended between
+                # repair steps. A slice that came back with exactly the same
+                # unresolved set is not repeated (_verification_stuck): the
+                # reply below delivers it with the findings as notes.
                 _verification_version, verification = _latest_verification(ctx)
                 fingerprint, _blocker_state = \
                     _objective_blocker_fingerprint(
@@ -5297,8 +5338,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     verification_slices=int(
                         _cont.get("verification_slices") or 0) + 1)
             if ctx.versions_written and not _verification_complete(ctx):
-                # Every repair this request allows has been spent: deliver
-                # the best version with the open findings as advice (P4).
+                # The repairs are done (or the same findings came back after
+                # a full repair slice): deliver the best version with an
+                # export button and the open findings as notes.
                 ctx.critics_advisory = True
             draft = body
             if not draft:
@@ -5339,8 +5381,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "preview": ctx.last_preview,
                 **quality,
                 **_outcome_meta(ctx, outcome),
-                **({"request_budget": budget["spent"], "improve_it": True}
-                   if budget["spent"] else {}),
             }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           message_meta)
@@ -5386,16 +5426,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if args is None:
                 result = ("REJECTED: arguments were not valid JSON. "
                           "Send a proper JSON object.")
-            elif name in agent_tools.WRITE_TOOLS and ctx.request_preview_cap \
-                    and int(ctx.request_previews or 0) \
-                    >= int(ctx.request_preview_cap):
-                # The last preview of this request is what gets delivered;
-                # an edit after it could never be shown (P4).
-                result = ("REJECTED: REQUEST BUDGET — this request has used "
-                          f"its {int(ctx.request_preview_cap)} preview "
-                          "renders, so no further edit can be previewed. "
-                          "Reply now with the latest preview; the user can "
-                          "press Improve it to continue.")
             else:
                 t0 = time.monotonic()
                 try:
@@ -5582,8 +5612,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # Speculative verification is a bounded changed-section proof only.
         # A complete preview is reserved for the turn-end honesty pass, so an
         # edit that takes five model steps cannot buy five full-length files.
-        if ctx.versions_written and not SHUTDOWN.is_set() \
-                and _request_budget_reason() is None:
+        if ctx.versions_written and not SHUTDOWN.is_set():
             try:
                 agent_tools.speculative_preview(ctx)
             except Exception:

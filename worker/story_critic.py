@@ -826,6 +826,48 @@ def review(edl, index, family, user_request="", plan=None,
     return report
 
 
+def scope_to_source(report, edl):
+    """An "abrupt open" on the creator's own first words is not an editing
+    defect: when the programme starts where the source itself starts, the
+    opening is theirs (1924's Hungarian intro "ebben a mai videóban a" held
+    two runs). Such findings are kept as minor notes; everything else is
+    unchanged. Returns a new report (or the same None)."""
+    if not report or not isinstance(edl, dict):
+        return report
+    starts = []
+    for row in edl.get("keep") or []:
+        try:
+            starts.append(float(row["start"] if isinstance(row, dict)
+                                else row[0]))
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    if not starts:
+        return report
+    first = min(starts)
+    opens_on_insert = any(
+        isinstance(row, dict) and not row.get("mute")
+        and float(row.get("at_output_s") or 0.0) <= 0.05
+        for row in edl.get("inserts") or [])
+    if first > 1.0 or opens_on_insert:
+        return report
+    out = []
+    changed = False
+    for finding in report.get("findings") or []:
+        if finding.get("category") == "abrupt_open" and \
+                finding.get("severity") in {"blocker", "major"}:
+            finding = dict(finding, severity="minor",
+                           scoped="the programme opens on the source's own "
+                                  "first words")
+            changed = True
+        out.append(finding)
+    if not changed:
+        return report
+    report = dict(report, findings=out)
+    if report.get("verdict") == "repair" and not repair_lines(report):
+        report["verdict"] = "pass"
+    return report
+
+
 def repair_lines(report):
     """High-confidence semantic defects eligible for one repair decision."""
     if not report:

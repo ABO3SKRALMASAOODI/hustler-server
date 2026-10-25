@@ -23,6 +23,7 @@ import schemas as _schemas_mod
 import tools_ext
 
 import audio_qc
+import request_scope
 import render_qc
 import audit
 import broll_judge
@@ -370,12 +371,7 @@ class ToolContext:
         # creating a second physical job for the same immutable version.
         self.spec_preview_jobs = {}
         self.autorendered = False     # loop set: model skipped render_preview
-        # P4 request budget. The agent loop sets the cap (None everywhere
-        # else: MCP callers own their own iteration) and carries the count
-        # across execution slices; render_preview counts each physical render.
-        self.request_preview_cap = None
-        self.request_previews = 0
-        # Set once the request budget (or its repair allowance) is spent: the
+        # Set once the request's repairs are done (the turn is ending): the
         # critics' open findings advise, they no longer hold the export.
         self.critics_advisory = False
         # Round 91 grade contact strips: iterating a color against ~2s strips
@@ -7813,7 +7809,30 @@ def set_volume(ctx, start, end, gain_db):
         action += f"; replaced {replaced} overlapping setting"
         if replaced != 1:
             action += "s"
-    return ctx.write_edl(edl, action)
+    # A whole-programme level change must survive mastering. Social loudness
+    # (the default on 9:16/4:5/1:1) re-normalises the finished mix to -14
+    # LUFS AFTER this automation, so "lower the volume to 20%" was undone
+    # six requests in a row for one customer (1799: "-14.2 LUFS" each time).
+    # The mix then ships at its natural level, as asked.
+    natural_note = ""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    if g <= -0.5 and request_scope.volume_coverage(
+            {"keep": edl.get("keep") or [],
+             "volume": [{"start": s, "end": e, "gain_db": g}]}, -0.5) >= 0.9 \
+            and master_loudness(edl, video.get("width"),
+                                video.get("height")) == "social":
+        edl["master"] = {"loudness": "natural"}
+        action += "; master loudness natural so the lowered level ships"
+        natural_note = (
+            "\nMASTERING: this lowers the whole programme, so social loudness "
+            "mastering is now OFF (natural) — otherwise the -14 LUFS master "
+            "would turn it straight back up. The audio check will not call "
+            "the deliberately lower mix 'quiet'. set_master_loudness("
+            "enabled=true) re-masters only if the user asks for that.")
+    res = ctx.write_edl(edl, action)
+    if natural_note and isinstance(res, str) and res.startswith("EDL v"):
+        res += natural_note
+    return res
 
 
 def _behind_framing_note(ctx, res):
@@ -23068,39 +23087,6 @@ def _stored_render_report(ctx, row):
     return "\n".join(lines)
 
 
-def _count_request_preview(ctx):
-    """One physical preview render (complete or a changed-section proof) in
-    this request (P4). Only the agent loop sets a cap; MCP never counts."""
-    if getattr(ctx, "request_preview_cap", None):
-        ctx.request_previews = int(getattr(ctx, "request_previews", 0) or 0) + 1
-
-
-def request_preview_refusal(ctx):
-    """The P4 request budget: once a Studio request has rendered its
-    previews, the editor delivers instead of rendering again. The turn-end
-    render that shows the user the latest saved version is never refused."""
-    cap = getattr(ctx, "request_preview_cap", None)
-    if not cap or getattr(ctx, "autorendering", False):
-        return None
-    if int(getattr(ctx, "request_previews", 0) or 0) < int(cap):
-        return None
-    return (f"REQUEST BUDGET: this request has used its {int(cap)} preview "
-            "renders. Do not render or edit again in this request. Reply now: "
-            "say what the latest preview delivers and, briefly, what is still "
-            "open. The user can press Improve it to continue.")
-
-
-def request_budget_line(ctx):
-    cap = getattr(ctx, "request_preview_cap", None)
-    if not cap:
-        return ""
-    used = int(getattr(ctx, "request_previews", 0) or 0)
-    left = max(0, int(cap) - used)
-    return (f" REQUEST BUDGET: {used} of {int(cap)} preview renders used"
-            + ("; this was the last one, so reply with this version next."
-               if not left else f"; {left} left."))
-
-
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                    report=False):
     if report:
@@ -23124,9 +23110,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
     prior_failure = ctx.failed_preview_versions.get(version)
     if prior_failure:
         return _failed_preview_message(version, prior_failure, repeated=True)
-    refused = request_preview_refusal(ctx)
-    if refused:
-        return refused
     strip = None if complete else _grade_strip_shortcut(ctx, row)
     if strip:
         return strip
@@ -23141,9 +23124,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         if ranges:
             if requested_complete:
                 _metric(ctx, "complete_previews_routed_to_proof")
-            _count_request_preview(ctx)
-            return (_run_changed_preview_check(ctx, row, plan, ranges)
-                    + request_budget_line(ctx))
+            return _run_changed_preview_check(ctx, row, plan, ranges)
         if requested_complete:
             _metric(ctx, "full_preview_requests_deferred")
         return (f"EDL v{version} has no changed-section render to return. "
@@ -23181,7 +23162,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             ctx.job["user_id"], payload)
         if quality == "draft":
             ctx.spec_preview_jobs[version] = job_id
-    _count_request_preview(ctx)
     # Explicit/model tool calls retain the normal render wait. The terminal
     # honesty pass can pass the turn's remaining absolute lifetime here: the
     # render job is still enqueued, but a late encode must not turn a 10-minute
@@ -23381,7 +23361,15 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             # actual mix without asking a second model to listen on the
             # editor's behalf.
             aq = result.get("audio_qc") or {}
-            aqf = aq.get("findings") or []
+            # Scoped to the request: a silent or quiet mix the customer asked
+            # for ("strip all original audio"), an EDL silent by design (no
+            # music supplied, the original muted) or a level lowered on
+            # purpose is not a defect to repair (request_scope).
+            aqf, aq_scoped = request_scope.split_audio_qc(
+                aq.get("findings") or [], row.get("json") or {},
+                quality_verifier.request_text_for(ctx),
+                source_has_audio=((ctx.index or {}).get("video") or {}).get(
+                    "has_audio"))
             ctx.last_audio_qc_findings = list(aqf[:4])
             if aqf:
                 ctx.last_taste.extend(
@@ -23389,6 +23377,13 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                 note += (" AUDIO CHECK: " + "; ".join(aqf[:4])
                          + " — fix these, or keep one deliberately and say "
                            "why in one clause.")
+            if aq_scoped:
+                ctx.last_taste_advisory = list(
+                    getattr(ctx, "last_taste_advisory", None) or []) + [
+                    "audio QC (matches the request; not a defect): " + line
+                    for line in aq_scoped[:3]]
+                note += (" AUDIO CHECK (as the request intends, no repair "
+                         "needed): " + "; ".join(aq_scoped[:3]) + ".")
             note += audio_qc.summary_line(aq)
             # The PICTURE side (render_qc): the rendered frames themselves —
             # a face at the frame's or card's edge, a single-frame jump off
@@ -23497,7 +23492,9 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                 audio_findings=audio_record_findings,
                 story_findings=story_record_findings,
                 request_text=quality_verifier.request_text_for(ctx),
-                advisory_findings=advisory_record_findings)
+                advisory_findings=advisory_record_findings,
+                prior_records=getattr(ctx, "verification_records", None),
+                media_keys=getattr(ctx, "request_media_keys", None))
             if not hasattr(ctx, "verification_records"):
                 ctx.verification_records = {}
             ctx.verification_records[version] = verification
@@ -23518,9 +23515,22 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                          + "; ".join(lines)
                          + ". Repair the concrete findings and verify the "
                            "new EDL version; completion remains open.")
+            recurring = sorted({
+                request_scope.finding_key(row)
+                for row in verification.get("advisories") or []
+                if (row.get("evidence") or {}).get("recurring_after_repair")})
+            if recurring:
+                note += (" ALREADY REPAIRED ONCE (advisory now): the "
+                         "reviewers raised " + ", ".join(recurring[:6])
+                         + " again after this request's repair of them. They "
+                           "no longer block delivery or export; do not spend "
+                           "another pass on them unless the customer asked "
+                           "for exactly that.")
             craft_notes = [row["message"] for row in
                            verification.get("advisories") or []
-                           if row.get("code") != "taste_advisory"]
+                           if row.get("code") != "taste_advisory"
+                           and not (row.get("evidence") or {}).get(
+                               "recurring_after_repair")]
             if craft_notes:
                 note += (" VERIFICATION ADVISORIES ("
                          + quality_verifier.ADVISORY_LABEL + "; they do not "
@@ -23542,7 +23552,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                     "repair. Do not begin another taste-only variation. "
                     f"Blueprint state={state['state']}."
                 )
-            return note + request_budget_line(ctx)
+            return note
         if j["state"] == "failed":
             failure = dict(((j.get("result") or {}).get("failure") or {}))
             failure.setdefault("error", j.get("error") or "unknown render error")
@@ -24061,9 +24071,11 @@ def _review_program_story(ctx, row):
     reviewed.add(version)
     report = story_critic.review(
         edl, getattr(ctx, "index", None), family,
-        user_request=getattr(ctx, "user_message", None),
+        # The customer's brief, not a Repair/Improve button's critic prose.
+        user_request=quality_verifier.request_text_for(ctx),
         plan=getattr(ctx, "edit_plan", None),
         asset_indexes=asset_indexes)
+    report = story_critic.scope_to_source(report, edl)
     if report is None:
         return None
     report = dict(report, edl_version=version, editorial_family=family)
@@ -24382,7 +24394,14 @@ def _independent_preview_review(ctx, result, plan=None,
         "high confidence. Event-aware screening pages sample authored cuts, "
         "B-roll, text, motion and framing plus the whole clock; evidence that "
         "is not present remains not_judged rather than a repair order.",
-        f"User request: {(ctx.user_message or '')[:1000]}",
+        # The customer's brief (verification_request), not the Repair/
+        # Improve button's critic prose: a reviewer judging against its own
+        # earlier findings re-raised them on every pass (1769).
+        f"User request: {str(quality_verifier.request_text_for(ctx) or '')[:1000]}",
+        "The footage, people, clothing and scenes the customer uploaded are "
+        "THEIR material: printed lettering on clothing or props is not burned "
+        "text, and their own footage is not off-topic. Judge the edit, not "
+        "what they filmed.",
         f"Output duration: {result.get('duration_s')}s; raw source: "
         f"{getattr(ctx, 'duration', None)}s.",
         _frame_context(edl),

@@ -31,6 +31,7 @@ import math
 import re
 from datetime import date, datetime
 
+import request_scope
 from schemas import program_duration
 from timeline import Timeline
 
@@ -42,6 +43,8 @@ NON_JUSTIFIABLE_FINDINGS = {
     "corrupt_glyph", "music_starts_after_program", "invalid_music_span",
     "requested_duration_outside_target", "invisible_manual_caption",
     "requested_transitions_missing", "invisible_motion_graphic",
+    "captions_against_request", "requested_clips_unused",
+    "order_against_request",
 }
 
 # Craft heuristics, not defects. They stay in the durable record (and in the
@@ -496,11 +499,69 @@ def request_text_for(ctx):
     return customer if customer is not None else getattr(ctx, "user_message", "")
 
 
-def _program_duration_context(text, match):
-    """Require a program-length instruction, not a scene/placement cue.
+# Nouns a duration can describe when it is the SOURCE, not the requested
+# programme: "from this 4.5-minute talking-head video", "Cut this 45 minute
+# podcast", "I have a 10 minute video". Production read every one of those as
+# a hard programme length (1105's real prompt became 264.6-275.4 s; "a 30
+# second reel from this 10 minute video" became 588-612 s) and then forced
+# repair_required with "rebuild the story to the requested duration".
+_SOURCE_NOUN = (r"(?:video|videos|podcast|stream|livestream|live|interview|"
+                r"recording|clip|clips|footage|talk|episode|vlog|source|"
+                r"session|webinar|lecture|movie|film|match|game|gameplay|"
+                r"upload|file|conversation|presentation|speech|sermon|class|"
+                r"meeting|call|show|broadcast|wedding|ceremony|vod)")
+_PROGRAM_NOUN = (r"(?:video|reel|ad|advertisement|film|montage|short|edit|"
+                 r"program|programme|runtime|duration|trailer|teaser|"
+                 r"highlight|highlights|recap|cut|version|clip|story|tiktok)")
+# Elements inside a programme whose own length is not the programme's.
+_ELEMENT_NOUN = (r"\b(?:intro|outro|title|titles|shot|shots|scene|scenes|"
+                 r"segment|segments|section|sections|transition|transitions|"
+                 r"hook|caption|captions|text|zoom|zooms|music|song|track|"
+                 r"sfx|logo|card|pause|gap|freeze|slow[- ]?mo|each|every|"
+                 r"per)\b")
+_CREATE_VERB = (r"\b(?:make|making|made|create|creating|cut|cutting|trim|"
+                r"shorten|keep|turn|edit|produce|give|want|need|build|render|"
+                r"export|condense|compress|reduce|bring|get|deliver|assemble|"
+                r"put together|compile)\b")
+
+
+def _describes_source(before, after):
+    """Whether a duration is the length of what the user HAS, not wants."""
+    # "a trailer of this interview of 4 minutes": the interview is 4 minutes.
+    if re.search(r"\b(?:interview|podcast|stream|livestream|recording|"
+                 r"footage|talk|episode|lecture|webinar|match|game|meeting|"
+                 r"call|speech|sermon|session|vod|conversation)\s+"
+                 r"(?:of|that is|which is|lasting|running|that runs|"
+                 r"that lasts)\s+(?:about\s+|around\s+|roughly\s+)?$", before):
+        return True
+    followed_by_source = re.match(
+        r"\s*[-–]?\s*(?:long\s+)?(?:[\w/&'-]+\s+){0,3}" + _SOURCE_NOUN + r"\b",
+        after)
+    if not followed_by_source:
+        return False
+    det = (r"(?:this|that|these|those|my|our|his|her|their|your|the|a|an|"
+           r"one|two|three|four|five|several)")
+    adj = r"(?:(?:whole|entire|full|original|raw|long|full-length|recorded)\s+)"
+    if re.search(r"\b(?:this|that|these|those|my|our|his|her|their|your)\s+"
+                 + adj + r"?$", before):
+        return True
+    if re.search(r"\b(?:from|out of|of|in|on|into|inside|through|across|"
+                 r"over)\s+(?:" + det + r"\s+)?" + adj + r"?$", before):
+        return True
+    return bool(re.search(
+        r"\b(?:have|has|had|got|uploaded|upload|recorded|record|shot|filmed|"
+        r"attached|sent|gave|given|is|was|it's|its|there's)\s+(?:"
+        + det + r"\s+)?" + adj + r"?$", before))
+
+
+def _program_duration_strength(text, match):
+    """None (not a programme length), "strong" or "weak".
 
     Deliberately prefer no deterministic constraint over inventing one from
-    ambiguous prose. The editorial reviewer still receives the full brief.
+    ambiguous prose. The editorial reviewer still receives the full brief. A
+    "weak" reading (a programme noun after the number with no make/cut verb
+    and no explicit length cue in the clause) is recorded as advice, never a
+    hard repair requirement.
     """
     before = re.split(r"[\n.!?;]", text[:match.start()])[-1].lower()
     after = re.split(r"[\n.!?;]", text[match.end():])[0].lower()
@@ -510,52 +571,93 @@ def _program_duration_context(text, match):
     # belong to the editorial reviewer, never a fabricated hard constraint.
     if re.search(r"\b(?:do not|don't|never|avoid|must not|should not|cannot)\b", before) \
             or re.search(r"\bno\s*$", before):
-        return False
+        return None
     if re.search(r"\b(?:at|by|after|before|from|first|last|within)\s+"
                  r"(?:(?:around|about|roughly|the)\s+)*$", before):
-        return False
-    program = r"(?:video|reel|ad|advertisement|film|montage|short|edit|program|runtime|duration)"
-    if re.match(r"\s*[-–]?\s*(?:(?:vertical|horizontal|final|total|long|instagram|tiktok|youtube|gaming|wedding|podcast|story/reel|story|9:16|16:9)\s+){0,6}"
-                + program + r"\b", after):
-        return True
+        return None
+    if _describes_source(before, after):
+        return None
+    clause = re.split(r"[,:]", before)[-1] if not re.search(
+        r"\b(?:length|duration|runtime|run[\s-]?time)\s*[:=-]?\s*$",
+        before) else before
+    element = re.search(_ELEMENT_NOUN, clause)
+    verb = re.search(_CREATE_VERB, before)
+    program = _PROGRAM_NOUN
+    approx = r"(?:(?:about|around|roughly|approximately|approx\.?|~)\s*)?"
+    ceiling = r"(?:" + _DURATION_CEILING + r"\s+)?"
+    # "Target length: 60-90 seconds", "Length should be about 60 seconds",
+    # "duration 45s", "runtime of 10 minutes".
+    if not element and re.search(
+            r"\b(?:length|duration|runtime|run[\s-]?time)\s*"
+            r"(?:(?:should|must|will|needs? to|has to|has got to)\s+be\s+|"
+            r"is\s+|of\s+|:\s*|=\s*|-\s*|–\s*|to\s+be\s+)?"
+            + approx + ceiling + r"$", before):
+        return "strong"
+    if re.match(r"\s*[-–]?\s*(?:(?:vertical|horizontal|final|total|long|"
+                r"instagram|tiktok|youtube|gaming|wedding|podcast|story/reel|"
+                r"story|9:16|16:9|cinematic|highlight|promo|promotional|"
+                r"social|travel|product)\s+){0,6}" + program + r"\b", after):
+        if element and not verb:
+            return None
+        return "strong" if verb else "weak"
+    if not element and re.match(r"\s*(?:long|in length|total|max(?:imum)?)\b",
+                                after):
+        return "strong"
     if re.search(r"\b" + program + r"\b[^,;]{0,35}"
-                 r"(?:to|of|is|be|last|length|:|=)\s*"
-                 r"(?:(?:about|around|roughly|approximately)\s+)?"
-                 r"(?:" + _DURATION_CEILING + r"\s+)?$", before):
-        return True
+                 r"(?:to|of|is|be|last|length|:|=)\s*" + approx + ceiling
+                 + r"$", before) and not element:
+        return "strong"
     if re.search(r"\b(?:make|cut|trim|shorten|keep)\s+"
-                 r"(?:(?:this|the|my|a)\s+)?" + program + r"\s*"
-                 r"(?:" + _DURATION_CEILING + r"\s+)?$", before):
-        return True
+                 r"(?:(?:this|the|my|a)\s+)?" + program + r"\s*" + ceiling
+                 + r"$", before):
+        return "strong"
     if re.search(r"\b" + program + r"\s+" + _DURATION_CEILING + r"\s+$", before):
-        return True
-    return bool(re.search(
-        r"\b(?:make|cut|trim|shorten|keep)\s+(?:it|this|the whole thing)\s*"
-        r"(?:to\s+)?(?:(?:about|around|roughly|approximately)\s+)?"
-        r"(?:" + _DURATION_CEILING + r"\s+)?$", before))
+        return "strong"
+    if re.search(
+            r"\b(?:make|cut|trim|shorten|keep|bring|get|want|need|like|"
+            r"prefer)\s+(?:it|this|the whole thing|the (?:video|edit|reel|"
+            r"film|final(?: video)?))\s*(?:to\s+be\s+|be\s+)?"
+            r"(?:(?:down\s+)?to\s+)?" + approx + ceiling + r"$", before):
+        return "strong"
+    return None
+
+
+def _program_duration_context(text, match):
+    """Kept for callers that only need a yes/no."""
+    return _program_duration_strength(text, match) is not None
 
 
 def requested_duration_target(request_text):
     """Return an explicit requested program-duration envelope, if present.
 
-    This intentionally ignores bare timestamps such as "at 18 seconds".  It
-    only recognizes a duration range or language that asks to make/cut a
-    video to a named length, so an effect placement does not become a false
-    whole-program constraint.
+    This intentionally ignores bare timestamps such as "at 18 seconds" and
+    the length of the source ("from this 10 minute video"). It only
+    recognizes a duration range or language that asks to make/cut a video to
+    a named length, so an effect placement does not become a false
+    whole-program constraint. The latest strong instruction wins ("Make a
+    30-40 second ad. Actually make it 25 seconds."); ``advisory`` is True
+    when only a weak reading exists.
     """
     text = str(request_text or "")
-    matches = [m for m in _PROGRAM_DURATION_RE.finditer(text)
-               if _program_duration_context(text, m)]
-    if not matches:
+    strong, weak = [], []
+    for m in _PROGRAM_DURATION_RE.finditer(text):
+        strength = _program_duration_strength(text, m)
+        if strength == "strong":
+            strong.append(m)
+        elif strength == "weak":
+            weak.append(m)
+    if not strong and not weak:
         return None
-    match = matches[-1]
+    match = (strong or weak)[-1]
+    advisory = not strong
     unit = match.group(3).lower()
     multiplier = 3600 if unit.startswith('h') else 60 if unit.startswith('min') else 1
     if match.group(2):
         lo, hi = float(match.group(1)) * multiplier, float(match.group(2)) * multiplier
         if 0.2 <= lo <= 86400 and 0.2 <= hi <= 86400:
             return {"min_s": min(lo, hi), "max_s": max(lo, hi),
-                    "approximate": False, "request": match.group(0)}
+                    "approximate": False, "request": match.group(0),
+                    "advisory": advisory}
         return None
     target = float(match.group(1)) * multiplier
     if not 0.2 <= target <= 86400:
@@ -566,14 +668,17 @@ def requested_duration_target(request_text):
         # thought up to the limit. Only frame-rounding tolerance applies in
         # _request_findings, never the +/- 2% exact-target envelope below.
         return {"min_s": 0.2, "max_s": target,
-                "approximate": False, "request": match.group(0)}
+                "approximate": False, "request": match.group(0),
+                "advisory": advisory}
     nearby = text[max(0, match.start() - 24):match.end() + 10].lower()
     approximate = any(word in nearby for word in
-                      ("about", "around", "roughly", "approximately", "like"))
+                      ("about", "around", "roughly", "approximately", "like",
+                       "approx", "~"))
     tolerance = max(1.5, target * 0.10) if approximate else max(0.35, target * .02)
     return {"min_s": max(0.2, target - tolerance),
             "max_s": target + tolerance, "target_s": target,
-            "approximate": approximate, "request": match.group(0)}
+            "approximate": approximate, "request": match.group(0),
+            "advisory": advisory}
 
 
 def _requested_transitions(request_text):
@@ -585,8 +690,30 @@ def _requested_transitions(request_text):
     particular style does not cancel an explicit request for another style.
     """
     requested = False
-    clauses = re.split(r"[.!?;\n,]+|\b(?:but|however)\b",
-                       str(request_text or "").lower())
+    # A negation governs the whole comma list that follows it in its
+    # sentence: "Do not change the color, add any transitions, add music, or
+    # alter the footage" (1794, request 36118) is a list of things NOT to do;
+    # splitting it at the commas read "add any transitions" as a request.
+    sentences = re.split(r"[.!?;\n]+|\b(?:but|however)\b",
+                         str(request_text or "").lower())
+    clauses = []
+    for sentence in sentences:
+        neg = re.search(r"\b(?:do not|don't|dont|never|must not|mustn't|"
+                        r"should not|shouldn't|without|avoid|nothing like)\b",
+                        sentence)
+        if neg and re.search(r"\btransitions?\b", sentence[neg.end():]) \
+                and "," in sentence[neg.end():]:
+            head = sentence[:neg.start()]
+            clauses.extend(re.split(r",+", head))
+            # the governed list: only a blanket "any/all transitions" in it
+            # is a refusal; nothing in it is a request
+            governed = sentence[neg.start():]
+            if re.search(r"\b(?:any|all)\s+transitions?\b|"
+                         r"\b(?:add|use|include|apply)\s+transitions?\b",
+                         governed):
+                clauses.append("no transitions")
+            continue
+        clauses.extend(re.split(r",+", sentence))
     for clause in clauses:
         if not re.search(r"\btransitions?\b", clause):
             continue
@@ -605,25 +732,66 @@ def _requested_transitions(request_text):
     return requested
 
 
-def _request_findings(edl, request_text):
+def _request_findings(edl, request_text, media_keys=None):
+    """The customer's own explicit constraints (the request contract).
+
+    ``media_keys``: the customer's supplied clips/photos, passed only when
+    the brief asks to use all of them (agent_loop._request_media_keys)."""
     findings = []
     target = requested_duration_target(request_text)
     if target:
         actual = float(program_duration(edl) or 0.0)
         if not target["min_s"] - .02 <= actual <= target["max_s"] + .02:
+            # A weak reading (no make/cut verb, no length cue) advises; it
+            # never forces a rebuild of a finished edit to a guessed length.
             findings.append(_finding(
-                "requested_duration_outside_target", "story",
-                (f"The program is {actual:.2f}s, outside the user's explicit "
-                 f"duration target ({target['min_s']:.2f}-"
+                ("requested_duration_unclear" if target.get("advisory")
+                 else "requested_duration_outside_target"), "story",
+                (f"The program is {actual:.2f}s, outside the user's "
+                 + ("possible" if target.get("advisory") else "explicit")
+                 + f" duration target ({target['min_s']:.2f}-"
                  f"{target['max_s']:.2f}s)."),
                 {"actual_s": round(actual, 3), "target": target},
-                "rebuild the story to the requested duration and render-check it"))
+                "rebuild the story to the requested duration and render-check it",
+                severity="advisory" if target.get("advisory") else None))
 
     # A visual pass can say a montage looks clean while a concrete requested
     # treatment is simply absent. This happened on a paid user's ferry edit:
     # the complete preview passed even though the EDL contained no transition
     # at all. Keep the detector deliberately narrow and honor explicit
     # negation; this is contract fulfillment, not style preference.
+    # "Use all 50 clips" (1918) / "out of all the clips I gave you, trimmed
+    # one" (1912): coverage of the supplied media is part of the contract.
+    every, _n = request_scope.wants_all_clips(request_text)
+    if every and media_keys:
+        used, available = request_scope.clip_coverage(edl, media_keys)
+        if available and used < max(1, int(available * 0.9 + 0.999)) \
+                and available - used >= 1:
+            findings.append(_finding(
+                "requested_clips_unused", "story",
+                (f"The user asked to use every supplied clip, but the edit "
+                 f"uses {used} of {available}."),
+                {"used": used, "available": available},
+                "place the unused clips (list_assets shows them) so every "
+                "one appears, then render-check it"))
+    if request_scope.wants_chronological(request_text) \
+            and not request_scope.keep_in_source_order(edl):
+        findings.append(_finding(
+            "order_against_request", "story",
+            "The user asked for the footage in its original order, but the "
+            "kept segments are reordered.",
+            {"keep": list((edl.get("keep") or [])[:20])},
+            "restore source order for the kept segments and render-check it"))
+    # "no subtitles" (1924: "not shorts but everything, in order, not
+    # jumbled, and no subtitles" after a captioned, reordered cut).
+    if edl.get("captions") and request_scope.wants_no_captions(request_text):
+        findings.append(_finding(
+            "captions_against_request", "captions",
+            "The user asked for no subtitles/captions, but the latest EDL "
+            "has captions on.",
+            {"request_excerpt": str(request_text or "")[:300]},
+            "turn captions off (add_captions mode='off') and render-check "
+            "it"))
     ask = str(request_text or "").lower()
     if _requested_transitions(ask) \
             and not ((edl.get("effects") or {}).get("transition")):
@@ -944,7 +1112,8 @@ def _flash_findings(edl, index=None, request_text=None):
             "contains_flashing"))]
 
 
-def deterministic_findings(edl, index=None, request_text=None):
+def deterministic_findings(edl, index=None, request_text=None,
+                           media_keys=None):
     return (_text_corruption_findings(edl)
             + _caption_findings(edl)
             + _sound_off_findings(edl, index or {})
@@ -955,7 +1124,7 @@ def deterministic_findings(edl, index=None, request_text=None):
             + _media_findings(edl)
             + _cleanup_findings(edl)
             + _audio_findings(edl)
-            + _request_findings(edl, request_text)
+            + _request_findings(edl, request_text, media_keys)
             + _flash_findings(edl, index or {}, request_text)
             + _earn_its_place_findings(edl, index or {}, request_text)
             + _repeat_findings(edl, index or {}))
@@ -966,12 +1135,20 @@ def build_verification_record(project_id, version, manifest, edl, index,
                               visual_findings=None, audio_findings=None,
                               story_findings=None, repairs=None,
                               justified=None, request_text=None,
-                              advisory_findings=None):
+                              advisory_findings=None, prior_records=None,
+                              media_keys=None):
     """Version-stamped verification. ``visual/audio/story_findings`` are
     review lines that already passed their reviewer's blocking bar; taste
     notes and other craft observations go in ``advisory_findings`` and are
-    recorded without ever making the version ``repair_required``."""
-    findings = deterministic_findings(edl, index, request_text=request_text)
+    recorded without ever making the version ``repair_required``.
+
+    ``prior_records``: this request's records for earlier versions. A
+    reviewer category they already asked the editor to repair is advisory
+    here (request_scope.demote_recurring): one repair per category, so a
+    reviewer that re-raises the same complaint after every repair cannot
+    hold a finished edit open."""
+    findings = deterministic_findings(edl, index, request_text=request_text,
+                                      media_keys=media_keys)
     for department, rows in (("visual_review", visual_findings or []),
                              ("audio_review", audio_findings or []),
                              ("story_review", story_findings or [])):
@@ -983,6 +1160,7 @@ def build_verification_record(project_id, version, manifest, edl, index,
         findings.append(_finding(
             "taste_advisory", "craft", str(row)[:1000],
             severity="advisory", repair=ADVISORY_LABEL))
+    findings = request_scope.demote_recurring(findings, prior_records, version)
     preview = preview or {}
     findings += device_findings(preview)
     complete_preview = (int(preview.get("edl_version") or -1) == int(version)

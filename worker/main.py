@@ -365,12 +365,79 @@ def process_one(worker_db, job):
         dbx.untrack_job(job_id)
 
 
+def _committed_mutation(worker_db, job):
+    """The job's mutation_receipt as committed in the queue row now (a
+    write during this claim updates the row, not the claimed copy)."""
+    try:
+        row = worker_db.run(dbx.get_job, job["id"]) or {}
+    except Exception:
+        return {"committed": True}       # unknown: treat as written
+    receipt = (row.get("payload") or {}).get("mutation_receipt") or {}
+    return receipt if receipt.get("committed") else None
+
+
+def _resume_agent_after_infra(worker_db, job, err, lease_claim):
+    """An agent turn whose container failed AFTER it committed a write
+    continues from its last committed EDL as the next slice of the same
+    request (the reaper's death resume, bounded the same way), instead of
+    ending the request on our infrastructure failure."""
+    payload = dict(job.get("payload") or {})
+    count = int(payload.get("death_resume_count") or 0) + 1
+    if count > 3 or job.get("user_id") is None:
+        return False
+    root_id = int(payload.get("root_agent_job_id") or job["id"])
+    sequence = int(payload.get("continuation_sequence") or 0) + 1
+    resume_payload = dict(
+        payload, death_resume=count, death_resume_count=count,
+        root_agent_job_id=root_id, logical_turn_continuation=True,
+        continuation_sequence=sequence)
+    try:
+        next_id = worker_db.run(
+            dbx.enqueue_agent_continuation, job["project_id"],
+            job["user_id"], root_id, sequence, resume_payload, job["id"],
+            lease_claim)
+        result = {"status": "continued", "outcome": "in_progress",
+                  "billable": False, "root_agent_job_id": root_id,
+                  "continued_job_id": next_id,
+                  "continuation_sequence": sequence,
+                  "infra_resume": {"error": str(err)[:300],
+                                   "kind": failure_policy.decision_for(
+                                       err, "agent_turn").kind}}
+        job_completion.finalize_success(worker_db, job, result, lease_claim)
+    except Exception as exc:
+        print(f"[job {job['id']}] infrastructure resume failed "
+              f"({str(exc)[:160]})", flush=True)
+        return False
+    worker_db.run(dbx.bump_metric, "infra_agent_resumed")
+    print(f"[job {job['id']}] infrastructure failure after a committed "
+          f"write; continuing root {root_id} as job {next_id} "
+          f"({count}/3): {str(err)[:160]}", flush=True)
+    return True
+
+
 def _quiet_infra_retry(worker_db, job, err, decision, lease_claim):
     """Wait a little and hand an infrastructure failure back to the queue
     without spending its attempt. False when it is not one, or its window
-    or retries are used up (the ordinary policy then decides)."""
+    or retries are used up (the ordinary policy then decides). A Studio turn
+    or MCP tool is requeued only when it committed no write; a Studio turn
+    that did continues from its last committed EDL."""
     if not failure_policy.is_infrastructure(err, decision):
         return False
+    if job.get("type") in failure_policy.MUTATING_RETRY_TYPES:
+        if decision.kind in failure_policy.AMBIGUOUS_OWNERSHIP_KINDS:
+            # The remote may still be running it: a second run could post a
+            # second reply. Leave it to the lease reaper's death resume.
+            return False
+        if failure_policy.infra_retry_delay(
+                job, time.time(),
+                int((job.get("payload") or {}).get(
+                    "infra_retry_deferrals") or 0)) is None:
+            return False
+        if _committed_mutation(worker_db, job):
+            if job.get("type") == "agent_turn":
+                return _resume_agent_after_infra(
+                    worker_db, job, err, lease_claim)
+            return False     # an MCP write landed; its caller decides
     payload = job.get("payload") or {}
     try:
         done = int(payload.get("infra_retry_deferrals") or 0)

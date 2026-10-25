@@ -21,7 +21,8 @@ ADVISORY_LIMIT = 3
 
 def _deterministic(ctx, edl, index):
     return quality_verifier.deterministic_findings(
-        edl, index, request_text=quality_verifier.request_text_for(ctx))
+        edl, index, request_text=quality_verifier.request_text_for(ctx),
+        media_keys=getattr(ctx, "request_media_keys", None))
 
 
 def current_findings(ctx, row):

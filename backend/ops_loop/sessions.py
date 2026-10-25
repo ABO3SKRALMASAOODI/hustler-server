@@ -19,6 +19,7 @@ Only reads. Every query is bounded by time and by project family.
 """
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from admin_metrics import defs
@@ -28,6 +29,12 @@ GAP = timedelta(hours=3)
 SETTLE = timedelta(minutes=30)
 PAD = timedelta(days=7)          # how far back a session's start is looked for
 WORK_JOBS = ("agent_turn", "mcp_tool", "shorts_plan")
+# Made by the product when someone merely OPENS a project (the timeline
+# strip, a preview self-check): they neither start nor extend a session, so
+# browsing never keeps one unsettled; they show up as "reopened" instead.
+PASSIVE_JOBS = ("filmstrip", "preview_check")
+# MCP tools that hand the user the result.
+MCP_DELIVERY_TOOLS = ("download_url", "export_final", "deliver_aspects")
 RENDER_JOBS = ("preview", "final")
 NEXT_KINDS = ("export_clicked", "download_triggered", "mcp_export_delivered",
               "export_blocked", "checkout_stage", "cancel_feedback",
@@ -193,7 +200,9 @@ def load(cur, roots, since, now):
     out["jobs"] = [dict(r) for r in cur.fetchall()]
     cur.execute("""SELECT DISTINCT project_id FROM video_jobs
                     WHERE project_id = ANY(%(pids)s)
-                      AND state IN ('queued', 'running')""", {"pids": pids})
+                      AND state IN ('queued', 'running')
+                      AND type <> ALL(%(passive)s)""",
+                {"pids": pids, "passive": list(PASSIVE_JOBS)})
     out["live"] = {out["projects"][r["project_id"]]["root"]
                    for r in cur.fetchall()}
     cur.execute("""
@@ -251,7 +260,7 @@ def _spans(data, root):
         if m["project_id"] in fam:
             spans.append((m["created_at"], m["created_at"], "m", m))
     for j in data["jobs"]:
-        if j["project_id"] in fam:
+        if j["project_id"] in fam and j["type"] not in PASSIVE_JOBS:
             spans.append((_aware(j["created_at"]), _aware(j["updated_at"]),
                           "j", j))
     spans.sort(key=lambda s: (s[0], s[1]))
@@ -450,7 +459,18 @@ def request_ids(s):
 
 
 def _tool_error(status):
-    return status not in (None, "", "success")
+    # "prerequisite" is ask_user over MCP working as designed: the tool hands
+    # the question to the user's own AI app. Not a failure.
+    return status not in (None, "", "success", "prerequisite")
+
+
+PRESIGNED = re.compile(r"\?X-Amz-[^\s)\"']*")
+
+
+def _redact(text):
+    """No signed URL query (credential id, signature) in a context file."""
+    return PRESIGNED.sub("?<signed-url>", text) if isinstance(text, str) \
+        else text
 
 
 def context(s, cur=None, presign=None):
@@ -502,17 +522,21 @@ def context(s, cur=None, presign=None):
         timeline.append({"at": _iso(m["created_at"]), "via": "studio",
                          "tool": m.get("tool"), "status": m.get("tool_status"),
                          "error": _tool_error(m.get("tool_status")),
-                         "args": m.get("args"), "text": m["content"]})
+                         "args": m.get("args"), "text": _redact(m["content"])})
     for j in jobs:
         if j["type"] != "mcp_tool":
             continue
         timeline.append({"at": _iso(j["created_at"]), "via": "mcp",
                          "job_id": j["id"], "tool": j.get("tool"),
                          "status": j.get("tool_status") or j["state"],
-                         "error": bool(j.get("is_error")) or j["state"] == "failed"
+                         "error": (bool(j.get("is_error"))
+                                   and j.get("tool_status") != "prerequisite"
+                                   and not str(j.get("text") or "")
+                                   .startswith("PREREQUISITE"))
+                         or j["state"] == "failed"
                          or _tool_error(j.get("tool_status")),
                          "args": j.get("args"),
-                         "text": j.get("text") or j.get("error")})
+                         "text": _redact(j.get("text") or j.get("error"))})
     timeline.sort(key=lambda t: t["at"] or "")
     if len(timeline) > TIMELINE_CAP:
         keep = [t for t in timeline if t["error"]]
@@ -547,7 +571,7 @@ def context(s, cur=None, presign=None):
                   "detail": r["text"][:300]}
                  for r in replies if r["error"]]
               + [{"at": t["at"], "what": f"tool {t['tool']} {t['status']}",
-                  "detail": (t["text"] or "")[:300]}
+                  "detail": _redact(t["text"] or "")[:300]}
                  for t in timeline if t["error"]])
     # Renders delivered in the window, with the worker's own contact sheets.
     lo = s["started_at"] - timedelta(minutes=2)
@@ -600,24 +624,50 @@ def context(s, cur=None, presign=None):
              "detail": h.get("event_type")}
             for h in getattr(s, "next_subscription", [])]
     nxt.sort(key=lambda e: e["at"] or "")
+    # Opening the project again (passive jobs) and any later work anywhere.
+    end = s["ended_at"]
+    later = [_aware(j["created_at"]) for j in data["jobs"]
+             if j["user_id"] == s["user_id"]
+             and _aware(j["created_at"]) > end + timedelta(minutes=5)]
+    later += [m["created_at"] for m in data["messages"]
+              if data["projects"].get(m["project_id"], {}).get("user_id")
+              == s["user_id"] and m["role"] == "user"
+              and m["created_at"] > end + timedelta(minutes=5)]
+    for j in data["jobs"]:
+        if j["project_id"] in fam and j["type"] in PASSIVE_JOBS \
+                and _aware(j["created_at"]) > end:
+            nxt.append({"at": _iso(j["created_at"]),
+                        "kind": "project_reopened",
+                        "detail": f"{j['type']} job {j['id']}"})
+            break
+    nxt.sort(key=lambda e: e["at"] or "")
+    came_back = min(later) if later else getattr(s, "next_session_at", None)
+    delivered_mcp = any(j["type"] == "mcp_tool" and j["state"] == "done"
+                        and j.get("tool") in MCP_DELIVERY_TOOLS
+                        for j in jobs)
     kinds = {e["kind"] for e in nxt}
     last_seen = _aware(user.get("last_seen_at"))
     summary = {
         "exported": bool(kinds & {"export_clicked", "mcp_export_delivered"})
+        or delivered_mcp
         or any(r["type"] == "final" and r["state"] == "done"
                for r in job_rows),
         "downloaded": bool(kinds & {"download_triggered",
-                                    "mcp_export_delivered"}),
+                                    "mcp_export_delivered"})
+        or delivered_mcp,
         "thumbs_up": any(r["feedback"] == "up" for r in replies),
         "thumbs_down": any(r["feedback"] == "down" for r in replies),
         "checkout": "checkout_stage" in kinds,
         "paid": any(e["kind"] == "payment" for e in nxt),
         "cancelled": any(k.startswith("subscription_") for k in kinds)
         or "cancel_feedback" in kinds,
-        "came_back_at": _iso(getattr(s, "next_session_at", None)),
-        "left": bool(last_seen and last_seen <= s["ended_at"]
-                     + timedelta(minutes=10)
-                     and not getattr(s, "next_session_at", None)),
+        "came_back_at": _iso(came_back),
+        # Left = nothing at all after the session: no later work, no
+        # export/download/checkout later, no browser activity after it.
+        "left": bool(not came_back
+                     and not any(e["at"] and e["at"] > _iso(end) for e in nxt)
+                     and (not last_seen
+                          or last_seen <= end + timedelta(minutes=10))),
         "user_last_seen_at": _iso(last_seen),
     }
     out = {

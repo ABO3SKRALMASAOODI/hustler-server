@@ -1,10 +1,11 @@
-"""Oct 2026: quality gates block real defects only, and only for one pass.
+"""Oct 2026: quality gates block real defects only.
 
 Taste heuristics, subjective listening opinions and motion judged from stills
 used to make a premium reel repair_required, push repair after repair and
 spawn up to three continuation slices before refusing export. These tests pin
-the new contract: advisories are visible but never gate, and verification-
-driven repair is bounded to one pass per logical turn.
+the contract: advisories are visible but never gate; a request keeps working
+on NEW findings and stops only when the same findings come back after a full
+repair slice (25 Oct: no preview/time cap on a request).
 """
 import json
 import time
@@ -65,7 +66,7 @@ def test_audio_verification_findings_keep_only_objective_defects():
     assert len(agent_tools._audio_verification_findings(ctx)) == 1
 
 
-def test_quality_repair_pushback_is_one_pass_per_logical_turn():
+def test_quality_repair_pushback_is_once_per_version_with_a_backstop():
     report = {"verdict": "repair", "findings": [{
         "severity": "major", "category": "caption_collision", "time_s": 2.0,
         "target_id": None, "motion_motif": None,
@@ -78,11 +79,15 @@ def test_quality_repair_pushback_is_one_pass_per_logical_turn():
     messages, pushed = [], set()
     assert agent_loop._quality_repair_pushback(
         ctx, messages, time.monotonic(), pushed)
-    version["v"] = 7
-    ctx.last_preview = {"edl_version": 7}
+    # The same version is never pushed twice.
     assert not agent_loop._quality_repair_pushback(
         ctx, messages, time.monotonic(), pushed)
-    assert len(messages) == 1
+    for v in range(7, 7 + agent_loop.MAX_QUALITY_REPAIR_PUSHBACKS + 1):
+        version["v"] = v
+        ctx.last_preview = {"edl_version": v}
+        agent_loop._quality_repair_pushback(
+            ctx, messages, time.monotonic(), pushed)
+    assert len(messages) == agent_loop.MAX_QUALITY_REPAIR_PUSHBACKS
 
 
 def _loop_ctx(monkeypatch):
@@ -146,7 +151,7 @@ def _loop_ctx(monkeypatch):
     return ctx, db, posted, checkpoint
 
 
-def test_unresolved_real_defect_gets_one_continuation_slice(monkeypatch):
+def test_unresolved_real_defect_gets_a_continuation_slice(monkeypatch):
     ctx, db, posted, checkpoint = _loop_ctx(monkeypatch)
     result = agent_loop._run_loop(
         ctx, db, {'id': 3, 'project_id': 9, 'user_id': 8, 'payload': {}},
@@ -159,14 +164,36 @@ def test_unresolved_real_defect_gets_one_continuation_slice(monkeypatch):
     assert posted == []
 
 
-def test_second_verification_pass_discloses_instead_of_another_slice(
+def test_new_findings_after_a_repair_slice_keep_working(monkeypatch):
+    ctx, db, posted, checkpoint = _loop_ctx(monkeypatch)
+    cont = {'why': 'verification repair remains', 'verification_slices': 1,
+            'blocker_fingerprint': 'a different unresolved set',
+            'work_slices': 1, 'n': 1, 'steps': 0, 'start_version': 72,
+            'quality_repair_versions': [72, 73]}
+    result = agent_loop._run_loop(
+        ctx, db, {'id': 4, 'project_id': 9, 'user_id': 8, 'payload': {}},
+        2, {'id': 1, 'content': ctx.user_message}, _cont=cont)
+    assert result['status'] == 'continued'
+    assert checkpoint['verification_slices'] == 2
+    assert posted == []
+
+
+def _stuck_cont(ctx, **extra):
+    fingerprint, _state = agent_loop._objective_blocker_fingerprint(
+        getattr(ctx, 'edit_plan', None), ctx.verification_records[73])
+    cont = {'why': 'verification repair remains', 'verification_slices': 1,
+            'blocker_fingerprint': fingerprint, 'blocker_repeats': 1,
+            'work_slices': 1, 'n': 1, 'steps': 0, 'start_version': 72,
+            'quality_repair_versions': [72, 73]}
+    cont.update(extra)
+    return cont
+
+
+def test_same_findings_after_a_repair_slice_hold_only_for_safety(
         monkeypatch):
     ctx, db, posted, checkpoint = _loop_ctx(monkeypatch)
-    # The previous slice already spent the turn's one repair pushback (on
-    # v72) and its one verification continuation.
-    cont = {'why': 'verification repair remains', 'verification_slices': 1,
-            'work_slices': 1, 'n': 1, 'steps': 0, 'start_version': 72,
-            'quality_repair_versions': [72]}
+    # The previous slice repaired and came back with exactly this set.
+    cont = _stuck_cont(ctx)
     result = agent_loop._run_loop(
         ctx, db, {'id': 4, 'project_id': 9, 'user_id': 8, 'payload': {}},
         2, {'id': 1, 'content': ctx.user_message}, _cont=cont)
@@ -197,8 +224,9 @@ def test_finishing_directive_labels_taste_lines_advisory():
     assert json.dumps(finishing_review.current_findings(ctx, row)) == '[]'
 
 
-# P4 (25 Oct 2026): a request is bounded; once its budget or its repair
-# allowance is spent the critics advise and the best version is delivered.
+# 25 Oct 2026: no preview/time cap on a request. When the same findings come
+# back after a full repair slice, the best version is delivered with an open
+# export; the request is fulfilled when the customer's own contract is met.
 
 def _advisory_loop_ctx(monkeypatch, capture=None):
     ctx, db, posted, checkpoint = _loop_ctx(monkeypatch)
@@ -218,73 +246,54 @@ def _advisory_loop_ctx(monkeypatch, capture=None):
     return ctx, db, posted, checkpoint
 
 
-def test_spent_repair_allowance_delivers_with_advice_and_open_export(
+def test_stuck_reviewer_notes_deliver_a_fulfilled_request_with_export(
         monkeypatch):
     ctx, db, posted, checkpoint = _advisory_loop_ctx(monkeypatch)
-    cont = {'why': 'verification repair remains', 'verification_slices': 1,
-            'work_slices': 1, 'n': 1, 'steps': 0, 'start_version': 72,
-            'quality_repair_versions': [72]}
     result = agent_loop._run_loop(
         ctx, db, {'id': 4, 'project_id': 9, 'user_id': 8, 'payload': {}},
-        2, {'id': 1, 'content': ctx.user_message}, _cont=cont)
+        2, {'id': 1, 'content': ctx.user_message}, _cont=_stuck_cont(ctx))
     assert result['status'] == 'replied'
     assert checkpoint == {}
     assert result['export_ready'] is True
     text, meta = posted[-1]
-    assert 'Not improved yet' in text and 'Improve it' in text
+    assert text == 'Here is your reel.'          # no disclaimer
     assert meta['quality_status'] == 'advisory'
-    assert meta['quality_findings'] and meta['improve_it'] is True
+    assert meta['contract_met'] is True
+    assert meta['quality_findings'] == ['The middle beat drags.']
+    assert result['outcome'] == 'fulfilled'
+
+
+def test_unmet_customer_contract_is_named_and_partial(monkeypatch):
+    ctx, db, posted, checkpoint = _advisory_loop_ctx(monkeypatch)
+    ctx.verification_request = 'Make a 45 second reel'
+    result = agent_loop._run_loop(
+        ctx, db, {'id': 4, 'project_id': 9, 'user_id': 8, 'payload': {}},
+        2, {'id': 1, 'content': ctx.user_message},
+        _cont=_stuck_cont(ctx, verification_slices=4))
+    assert result['status'] == 'replied'
+    text, meta = posted[-1]
+    assert 'Still open from your request' in text
+    assert 'duration target' in meta['quality_findings'][0]
+    assert meta['contract_met'] is False and meta['export_ready'] is True
     assert result['outcome'] == 'partial'
 
 
-def test_preview_budget_spent_replies_without_tools(monkeypatch):
+def test_no_preview_or_time_cap_on_a_request(monkeypatch):
     calls = []
     ctx, db, posted, checkpoint = _advisory_loop_ctx(monkeypatch, calls)
+    # A long request: 40 previews and two hours in. Older checkpoints may
+    # still carry the removed budget counters; they change nothing.
     cont = {'why': 'productive work remains', 'work_slices': 1, 'n': 1,
-            'steps': 3, 'start_version': 72, 'request_previews': 6,
-            'request_t0': time.time() - 30}
-    result = agent_loop._run_loop(
+            'steps': 3, 'start_version': 72, 'request_previews': 40,
+            'request_t0': time.time() - 7200}
+    agent_loop._run_loop(
         ctx, db, {'id': 5, 'project_id': 9, 'user_id': 8, 'payload': {}},
         2, {'id': 1, 'content': ctx.user_message}, _cont=cont)
-    assert result['status'] == 'replied'
-    assert checkpoint == {}           # never another slice
-    assert calls and not calls[-1].get('tools')
-    assert any('REQUEST BUDGET REACHED (6 preview renders)'
-               in str(m.get('content')) for m in calls[-1]['messages'])
-    text, meta = posted[-1]
-    assert meta['request_budget'] == '6 preview renders'
-    assert meta['quality_status'] == 'advisory'
-    assert result['export_ready'] is True
-
-
-def test_time_budget_spent_replies_without_tools(monkeypatch):
-    calls = []
-    ctx, db, posted, checkpoint = _advisory_loop_ctx(monkeypatch, calls)
-    cont = {'why': 'productive work remains', 'work_slices': 1, 'n': 1,
-            'steps': 3, 'start_version': 72, 'request_previews': 1,
-            'request_t0': time.time() - 700}
-    result = agent_loop._run_loop(
-        ctx, db, {'id': 6, 'project_id': 9, 'user_id': 8, 'payload': {}},
-        2, {'id': 1, 'content': ctx.user_message}, _cont=cont)
-    assert result['status'] == 'replied'
-    assert checkpoint == {}
-    assert not calls[-1].get('tools')
-    assert posted[-1][1]['request_budget'] == '10 minutes'
-
-
-def test_operator_repairs_keep_their_own_envelope(monkeypatch):
-    calls = []
-    ctx, db, posted, checkpoint = _advisory_loop_ctx(monkeypatch, calls)
-    cont = {'why': 'productive work remains', 'work_slices': 1, 'n': 1,
-            'steps': 3, 'start_version': 72, 'request_previews': 9,
-            'request_t0': time.time() - 7000, 'verification_slices': 1,
-            'quality_repair_versions': [72]}
-    agent_loop._run_loop(
-        ctx, db, {'id': 7, 'project_id': 9, 'user_id': 8,
-                  'payload': {'operator_repair': True}},
-        2, {'id': 1, 'content': ctx.user_message}, _cont=cont)
+    assert calls and calls[0].get('tools')
     assert all('REQUEST BUDGET' not in str(m.get('content'))
                for m in calls[-1]['messages'])
+    assert not hasattr(agent_tools, 'request_preview_refusal')
+    assert not hasattr(agent_loop.config, 'AGENT_REQUEST_MAX_PREVIEWS')
 
 
 def test_flash_and_corrupt_glyph_findings_still_hold_export():
@@ -297,17 +306,3 @@ def test_flash_and_corrupt_glyph_findings_still_hold_export():
                 "unresolved_findings": [{"code": code, "message": "x"}]}})
         assert agent_loop._quality_handoff(ctx)["quality_status"] \
             == "repair_required"
-
-
-def test_render_preview_refuses_past_the_request_budget():
-    ctx = NS(request_preview_cap=6, request_previews=6, autorendering=False)
-    assert agent_tools.request_preview_refusal(ctx).startswith(
-        "REQUEST BUDGET")
-    ctx.autorendering = True       # the turn-end render is never refused
-    assert agent_tools.request_preview_refusal(ctx) is None
-    ctx = NS(request_preview_cap=None, request_previews=40)   # MCP
-    assert agent_tools.request_preview_refusal(ctx) is None
-    ctx = NS(request_preview_cap=6, request_previews=5)
-    agent_tools._count_request_preview(ctx)
-    assert ctx.request_previews == 6
-    assert "this was the last one" in agent_tools.request_budget_line(ctx)
