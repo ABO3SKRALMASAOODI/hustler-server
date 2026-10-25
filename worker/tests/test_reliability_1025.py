@@ -84,7 +84,9 @@ def test_an_infrastructure_failure_goes_back_to_the_queue_quietly(monkeypatch):
     waits = []
     monkeypatch.setattr(worker_main.DRAINING, "wait", waits.append)
     db = _QueueDb()
-    job = {"id": 5, "type": "preview", "created_at": NOW - timedelta(minutes=2),
+    # The real clock: _quiet_infra_retry measures age with time.time().
+    job = {"id": 5, "type": "preview",
+           "created_at": datetime.now(timezone.utc) - timedelta(minutes=2),
            "payload": {"infra_retry_deferrals": 1}}
     err = RuntimeError("Cloudflare Container shard is busy")
     decision = failure_policy.decision_for(err, "preview")
@@ -100,11 +102,13 @@ def test_a_real_edit_failure_or_an_old_job_is_not_retried_quietly(monkeypatch):
     monkeypatch.setattr(worker_main.DRAINING, "wait", lambda s: None)
     db = _QueueDb()
     bad = RuntimeError("ffmpeg failed (exit 1): Invalid argument")
-    job = {"id": 5, "type": "final", "created_at": NOW, "payload": {}}
+    job = {"id": 5, "type": "final", "created_at": datetime.now(timezone.utc),
+           "payload": {}}
     assert not worker_main._quiet_infra_retry(
         db, job, bad, failure_policy.decision_for(bad, "final"), 1)
     infra = RuntimeError("Cloudflare Container shard is busy")
-    old = dict(job, created_at=NOW - timedelta(minutes=12))
+    old = dict(job, created_at=datetime.now(timezone.utc)
+               - timedelta(minutes=12))
     assert not worker_main._quiet_infra_retry(
         db, old, infra, failure_policy.decision_for(infra, "final"), 1)
     assert db.calls == []
