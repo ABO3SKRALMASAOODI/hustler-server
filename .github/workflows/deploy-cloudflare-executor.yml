@@ -115,7 +115,21 @@ jobs:
           npm ci
           npm run check
 
+      # R3 (25 Oct 2026): at most two executor releases a day. A run with a
+      # newer main already waiting behind it skips its publish (the waiting
+      # run releases both); a third release in 24 h is a loud warning; a
+      # release waits up to 15 min for no customer job to be running.
+      # worker/cloudflare/release_budget.py explains why it never blocks.
+      - name: executor release budget
+        id: budget
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # read-only: waits for a moment with no customer job running
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: python worker/cloudflare/release_budget.py
+
       - name: publish Worker and Container images
+        if: steps.budget.outputs.release == 'true'
         working-directory: worker/cloudflare
         env:
           # The ValmeraVision lane is DARK (worker/devices/INTERFACES.md §2.6):
@@ -194,6 +208,7 @@ jobs:
           done
 
       - name: install runtime secrets
+        if: steps.budget.outputs.release == 'true'
         working-directory: worker/cloudflare
         env:
           EXECUTOR_SECRET: ${{ secrets.REMOTE_EXECUTOR_SECRET }}
@@ -247,6 +262,7 @@ jobs:
           npx wrangler secret bulk "$secret_file"
 
       - name: verify provider identity and code
+        if: steps.budget.outputs.release == 'true'
         env:
           EXECUTOR_URL: ${{ secrets.CLOUDFLARE_EXECUTOR_URL }}
           EXECUTOR_SECRET: ${{ secrets.REMOTE_EXECUTOR_SECRET }}

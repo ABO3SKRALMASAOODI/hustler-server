@@ -90,8 +90,8 @@ def annotate_request(timings, seconds, role=None, service=None):
         except (TypeError, ValueError):
             egress_bytes = 0
         egress_cost = (egress_bytes / (1024 ** 3)) * CLOUDFLARE_EGRESS_GB
-        # The Worker passes each lane's sleepAfter (60 s, or 240 s on the
-        # MCP and interactive lanes that bridge model think time).
+        # The Worker passes each lane's sleepAfter (30 s, or 90 s on the MCP
+        # lane that bridges model think time; cloudflare/src/index.ts).
         try:
             tail_s = max(0, int(os.getenv("CLOUDFLARE_IDLE_TAIL_S", "60")))
         except ValueError:

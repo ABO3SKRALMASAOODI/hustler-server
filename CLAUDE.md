@@ -40,6 +40,28 @@ git add <files> && git commit -m "description" && git push origin main
 
 Frontend deploys via Vercel (~1–2 min — check the dashboard, SSR issues fail builds). Backend deploys via Render (~3–5 min). Cloudflare deploys on relevant `worker/` changes and verifies every lane's exact deployed source fingerprint. Modal and Cloud Run are manual fallback workflows only; ordinary releases must not publish or warm them.
 
+## Executor releases (at most 2 a day)
+
+Every push that touches `worker/**` is an executor release: both images are
+rebuilt, all five Cloudflare lanes are probed, and every warm container is
+replaced (warm MCP sessions and preview media are lost, so the next calls
+start cold). October 2026 had 76 releases, 16 on one day. The rule:
+
+- **At most two executor releases a day.** Batch worker changes into as few
+  pushes as possible; backend-only, skill (`plugins/`) and frontend pushes do
+  not release the executor.
+- **Coalescing is automatic:** a deploy run with a newer `main` already
+  waiting behind it skips its publish and the waiting run releases both
+  (`worker/cloudflare/release_budget.py`); a third release in 24 h is a
+  workflow warning. It never blocks, because Render deploys the dispatcher
+  (and its MCP tool catalog) on every push.
+- **Drained, never killed:** SIGTERM drains an executor (`worker/http_server.py`),
+  the rollout grace is 300-900 s per lane, and work a deploy interrupts before
+  it ran is handed back unspent and relaunched (`worker/CLOUDFLARE_EXECUTOR.md`,
+  "Deploy handoffs"). Do not deploy during a customer's long export when it
+  can wait; check `video_jobs` for running `final`/`index` rows of real users
+  first.
+
 ## Database Access
 
 ```bash
