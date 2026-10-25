@@ -22662,6 +22662,68 @@ def _motion_warning_line(result):
               "so instead of approving these frames as the finished design.")
 
 
+def _mcp_render_park_s(ctx):
+    """Seconds this MCP call may wait for its render before parking, or None.
+
+    Cost review (25 Oct 2026): an MCP render_preview used to poll Postgres
+    for its render for up to PREVIEW_WAIT_TIMEOUT_S INSIDE the 4 GiB MCP
+    container, which Cloudflare bills by the awake second while a different
+    (interactive) container did the rendering: 126 h of the lane's 210 busy
+    hours in one week. The MCP server (backend/routes/mcp.py) now asks for a
+    short wait (payload ``render_park_s``); when the render is still going,
+    the call PARKS: it returns the render job, the server waits on that job
+    in its web process, and then re-runs this same call, which adopts the
+    finished render (``_mcp_adopted_render``) and reviews it exactly as
+    before. The caller sees one synchronous render_preview. Only mcp_exec
+    sets the attribute; the in-house agent and every other caller keep the
+    normal wait (None)."""
+    value = getattr(ctx, "mcp_render_park_s", None)
+    if value is None:
+        return None
+    try:
+        return max(0.0, min(float(value), 30.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _park_render(ctx, job_id, job_type, version, extra=None):
+    """Record that this MCP call parked on a running render; its answer."""
+    ctx.mcp_parked_render = dict(
+        {"job_id": int(job_id), "type": job_type,
+         "edl_version": int(version)}, **(extra or {}))
+    label = ("changed-section proof" if job_type == "preview_check"
+             else "complete preview")
+    return (f"RENDER QUEUED: the {label} of EDL v{version} is render job "
+            f"{job_id}. The MCP server waits for it outside the editor "
+            "container and then completes this same render_preview call "
+            "with the full render result.")
+
+
+def _mcp_adopted_render(ctx, job_type, version, match):
+    """The render job a resumed MCP call parked on, when it is still the
+    exact work this call would request (same project, type and EDL version,
+    and ``match(payload)``); else None and the call proceeds normally."""
+    job_id = getattr(ctx, "mcp_adopt_render_job_id", None)
+    if not job_id:
+        return None
+    try:
+        job = ctx.db.run(dbx.get_job, int(job_id))
+    except Exception:  # noqa: BLE001 — the normal path still renders
+        return None
+    if not job or job.get("type") != job_type \
+            or job.get("project_id") != ctx.project_id:
+        return None
+    body = job.get("payload") or {}
+    try:
+        if int(body.get("edl_version")) != int(version):
+            return None
+    except (TypeError, ValueError):
+        return None
+    if not match(body):
+        return None
+    return int(job["id"])
+
+
 def _run_changed_preview_check(ctx, row, plan, ranges):
     """Render every logical proof page in one source-reusing queue job."""
     version = int(row["version"])
@@ -22686,13 +22748,19 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
             if any(a <= t <= b for a, b in all_requested)]
     job_id = getattr(ctx, "spec_preview_check_jobs", {}).get(version)
     if not job_id:
+        job_id = _mcp_adopted_render(
+            ctx, "preview_check", version,
+            lambda body: body.get("check_ranges") == all_requested)
+    if not job_id:
         job_id, _created = ctx.db.run(
             dbx.get_or_enqueue_preview_check_job, ctx.project_id,
             ctx.job["user_id"], payload)
-        if not hasattr(ctx, 'spec_preview_check_jobs'):
-            ctx.spec_preview_check_jobs = {}
-        ctx.spec_preview_check_jobs[version] = job_id
-    deadline = time.time() + min(config.PREVIEW_WAIT_TIMEOUT_S, 300.0)
+    if not hasattr(ctx, 'spec_preview_check_jobs'):
+        ctx.spec_preview_check_jobs = {}
+    ctx.spec_preview_check_jobs[version] = job_id
+    park_s = _mcp_render_park_s(ctx)
+    deadline = time.time() + (min(config.PREVIEW_WAIT_TIMEOUT_S, 300.0)
+                              if park_s is None else park_s)
     while time.time() < deadline:
         time.sleep(1)
         job = ctx.db.run(dbx.get_job, job_id)
@@ -22745,6 +22813,8 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
                 "job has exhausted its safe attempts. Do not rewrite the edit "
                 "or retry blindly; tell the user the exact failure and that "
                 "proof cannot complete from the unchanged inputs.")
+    if park_s is not None:
+        return _park_render(ctx, job_id, "preview_check", version)
     return (f"PREREQUISITE: the {len(pages)}-page changed-section proof batch "
             f"is still running as job {job_id}. Call wait_for_job(job_id={job_id}).")
 
@@ -23098,6 +23168,14 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         payload["screening_frames"] = sequence_frames
     job_id = ctx.spec_preview_jobs.get(version) if quality == "draft" else None
     if not job_id:
+        job_id = _mcp_adopted_render(
+            ctx, "preview", version,
+            lambda body: (body.get("quality", "draft") == quality
+                          and (body.get("audio_model_review", True)
+                               is not False) == bool(audio_model_review)))
+        if job_id and quality == "draft":
+            ctx.spec_preview_jobs[version] = job_id
+    if not job_id:
         job_id, _created = ctx.db.run(
             dbx.get_or_enqueue_preview_job, ctx.project_id,
             ctx.job["user_id"], payload)
@@ -23108,6 +23186,9 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
     # honesty pass can pass the turn's remaining absolute lifetime here: the
     # render job is still enqueued, but a late encode must not turn a 10-minute
     # agent ceiling into another independent 15-minute wait.
+    park_s = _mcp_render_park_s(ctx) if _wait_timeout_s is None else None
+    if park_s is not None:
+        _wait_timeout_s = park_s
     wait_s = (config.PREVIEW_WAIT_TIMEOUT_S if _wait_timeout_s is None else
               min(config.PREVIEW_WAIT_TIMEOUT_S,
                   max(0.0, float(_wait_timeout_s))))
@@ -23473,6 +23554,9 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1.0, remaining))
+    if park_s is not None:
+        return _park_render(ctx, job_id, "preview", version,
+                            {"quality": quality})
     return (f"PREREQUISITE: complete preview for EDL v{version} "
             f"is still running as job {job_id}. "
             f"Call wait_for_job(job_id={job_id}), then render_preview(complete=true) "

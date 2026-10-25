@@ -294,6 +294,17 @@ def create_app():
     except Exception as e:
         app.logger.error("could not start billing sync scheduler: %s", e)
 
+    # R2 retention (owner decision D4, 25 Oct 2026): a daily DB-driven sweep
+    # of never-paid accounts' inactive media and the owner's old approval
+    # previews (r2_retention.py). Advisory-locked across workers; never in
+    # tests (SKIP_DB_INIT).
+    if os.getenv("SKIP_DB_INIT") != "1":
+        try:
+            from r2_retention import start_scheduler as start_r2_retention
+            start_r2_retention(app)
+        except Exception as e:
+            app.logger.error("could not start r2 retention scheduler: %s", e)
+
     # New paid-subscriber alerts are persisted before Brevo is called. The
     # fast path sends immediately; this small scheduler recovers a Render
     # recycle or temporary email outage without touching billing state.

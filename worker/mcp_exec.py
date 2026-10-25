@@ -226,6 +226,44 @@ def _drain_images(ctx):
     return out, len(page)
 
 
+def _arm_render_park(ctx, tool, payload):
+    """Let render_preview park on its render (agent_tools._mcp_render_park_s).
+
+    The MCP server asks for it with payload ``render_park_s`` and resumes a
+    parked call with ``adopt_render_job_id``; both apply to render_preview
+    only, and never outlive this call on the cached context."""
+    _disarm_render_park(ctx)
+    if tool != "render_preview":
+        return
+    park = payload.get("render_park_s")
+    if park is not None and not isinstance(park, bool):
+        try:
+            ctx.mcp_render_park_s = max(0.0, min(float(park), 30.0))
+        except (TypeError, ValueError):
+            ctx.mcp_render_park_s = None
+    adopt = payload.get("adopt_render_job_id")
+    if isinstance(adopt, int) and not isinstance(adopt, bool) and adopt > 0:
+        ctx.mcp_adopt_render_job_id = adopt
+
+
+def _disarm_render_park(ctx):
+    ctx.mcp_render_park_s = None
+    ctx.mcp_adopt_render_job_id = None
+    ctx.mcp_parked_render = None
+
+
+def _parked_result(ctx, text, edl_version, parked):
+    """A parked render_preview's job result: not an answer yet. The MCP
+    server sees ``parked_render``, waits for that render job and requeues
+    this row, whose next run returns the real result in its place. It
+    carries no ``metered_contract``: the job is accounted once, by the run
+    that answers (job_completion.finalize_success), exactly as before."""
+    out = {"text": text, "edl_version": edl_version, "edl_changed": False,
+           "parked_render": dict(parked)}
+    out.update(_tool_result_contract(ctx, text))
+    return out
+
+
 def _tool_result_contract(ctx, text):
     """Expose deterministic refusals/failures as MCP errors.
 
@@ -592,6 +630,7 @@ def run_mcp_job(worker_db, job):
             # A cached MCP context outlives individual calls. Never let one
             # call inherit the preceding tool's structured refusal metadata.
             ctx.last_structured_tool_outcome = None
+            _arm_render_park(ctx, tool, payload)
             try:
                 text = agent_tools.execute(ctx, tool, args)
             except agent_tools.AskUser as e:
@@ -602,6 +641,12 @@ def run_mcp_job(worker_db, job):
                         "changed. "
                         f"Question: {e.question}")
             after = ctx.latest_edl()["version"]
+            parked = getattr(ctx, "mcp_parked_render", None)
+            if parked:
+                # The render is still going: hand it to the MCP server, which
+                # waits for it outside this container and re-runs this call
+                # (the activity feed records the call once, when it answers).
+                return _parked_result(ctx, text, after, parked)
 
             agent_loop._activity(worker_db, project["chat_session_id"],
                                  tool, args, text, source="mcp",
@@ -661,6 +706,7 @@ def run_mcp_job(worker_db, job):
                     for item in getattr(ctx, "last_preview_checks", [])]
             return out
         finally:
+            _disarm_render_park(ctx)
             ctx.end_call_edl_cache()
             llm.set_recorder(None)
             llm.clear_turn_plan()

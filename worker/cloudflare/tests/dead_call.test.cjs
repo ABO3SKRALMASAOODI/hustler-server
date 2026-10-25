@@ -386,19 +386,24 @@ test('abandon API is authenticated and routed to the named shard', async () => {
   assert.equal(seen[0][2], 'POST');
 });
 
-test('MCP and interactive containers outlive model think time; batch lanes stay lean', async () => {
+test('MCP containers bridge model think time; render lanes sleep after 30 s', async () => {
+  // Cost review, 25 Oct 2026: provisioned memory is billed for every awake
+  // second, so only the MCP lane keeps a (90 s) tail for the next tool call.
   const sleep = (cls) => fixture({ cls }).adapter.sleepAfter;
-  assert.equal(sleep('ValmeraMcp'), '240s');
-  assert.equal(sleep('ValmeraInteractive'), '240s');
-  assert.equal(sleep('ValmeraBatch'), '60s');
-  assert.equal(sleep('ValmeraAgent'), '60s');
-  assert.equal(sleep('ValmeraShorts'), '60s');
+  assert.equal(sleep('ValmeraMcp'), '90s');
+  assert.equal(sleep('ValmeraInteractive'), '30s');
+  assert.equal(sleep('ValmeraBatch'), '30s');
+  assert.equal(sleep('ValmeraAgent'), '30s');
+  assert.equal(sleep('ValmeraShorts'), '30s');
   const mcp = fixture({ cls: 'ValmeraMcp' }).adapter;
   mcp.env = {};
-  assert.equal(mcp.environment().CLOUDFLARE_IDLE_TAIL_S, '240');
+  assert.equal(mcp.environment().CLOUDFLARE_IDLE_TAIL_S, '90');
   const batch = fixture({ cls: 'ValmeraBatch' }).adapter;
   batch.env = {};
-  assert.equal(batch.environment().CLOUDFLARE_IDLE_TAIL_S, '60');
+  assert.equal(batch.environment().CLOUDFLARE_IDLE_TAIL_S, '30');
+  const interactive = fixture({ cls: 'ValmeraInteractive' }).adapter;
+  interactive.env = {};
+  assert.equal(interactive.environment().CLOUDFLARE_IDLE_TAIL_S, '30');
 });
 
 test('face-track calls hold at most two batch shards; other batch work spreads', async () => {

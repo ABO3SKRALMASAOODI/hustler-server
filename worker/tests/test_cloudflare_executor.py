@@ -1061,7 +1061,8 @@ def test_cloudflare_config_is_provider_complete_without_modal():
     assert "const TERMINAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000" \
         in adapter
     assert "pruneTerminalCalls" in adapter
-    assert 'sleepAfter = "60s"' in adapter
+    assert 'sleepAfter = RENDER_SLEEP_AFTER' in adapter
+    assert 'const RENDER_SLEEP_AFTER = "30s"' in adapter
     assert "override async onActivityExpired" in adapter
     assert 'txn.get<ActiveCall>("active")' in adapter
     assert "Idle timeout expired with no active provider lease" in adapter
