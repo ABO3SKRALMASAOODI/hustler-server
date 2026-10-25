@@ -47,6 +47,7 @@ import cv2
 import numpy as np
 
 import config
+import http_inputs
 import media
 
 # Text-line geometry, as fractions of frame height/width. A burned caption is
@@ -105,7 +106,7 @@ def _grab(path, t, width, height):
     cmd = ["ffmpeg", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", path,
            "-frames:v", "1", "-vf", f"scale={width}:{height}",
            "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+    proc = subprocess.run(http_inputs.resilient(cmd), stdout=subprocess.PIPE,
                           stderr=subprocess.DEVNULL,
                           timeout=config.FFMPEG_TIMEOUT_S)
     need = width * height * 3
@@ -777,10 +778,10 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
     frame_bytes = W * H * 3
     expected = max(1, int(round(dur * fps)))
 
-    dec = subprocess.Popen(
+    dec = subprocess.Popen(http_inputs.resilient(
         ["ffmpeg", "-v", "error", "-i", src,
          "-vf", f"scale={W}:{H},fps={fps:.5f}",
-         "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"],
+         "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]),
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         # Capped, not proportional: `frame_bytes * 4` is 44 MB of Python-side
         # buffer at 4K, on the smallest box in the fleet, for no throughput
@@ -803,8 +804,9 @@ def clean_video(src, regions, out_full, out_proxy=None, *, progress_cb=None,
                "-x264-params", x264p,
                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                "-movflags", "+faststart", out_full]
-    enc = subprocess.Popen(enc_cmd, stdin=subprocess.PIPE,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    enc = subprocess.Popen(http_inputs.resilient(enc_cmd),
+                           stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.PIPE)
 
     touched = 0
     i = 0
@@ -948,11 +950,11 @@ def build_patch(src, regions, window, out_path, *, crf=23, preset="veryfast",
 
     frame_bytes = W * H * 3
     expected = max(1, int(round((pe - ps) * fps)))
-    dec = subprocess.Popen(
+    dec = subprocess.Popen(http_inputs.resilient(
         ["ffmpeg", "-v", "error", "-ss", f"{ps:.6f}", "-i", src,
          "-t", f"{pe - ps:.6f}",
          "-vf", f"scale={W}:{H},fps={fps:.5f}",
-         "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"],
+         "-pix_fmt", "bgr24", "-f", "rawvideo", "pipe:1"]),
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         bufsize=min(frame_bytes * 4, 8 << 20))
     x264p = f"rc-lookahead={config.CLEAN_X264_LOOKAHEAD}:sync-lookahead=0"

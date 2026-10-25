@@ -11,6 +11,8 @@ import threading
 import time
 
 import config
+import http_inputs
+from http_inputs import HTTP_INPUT_ARGS, input_args  # noqa: F401
 
 
 class MediaError(RuntimeError):
@@ -180,7 +182,11 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
     bounded reads), which on a 4K source can take longer than the preview
     lanes' ten minutes. A final keeps the wall-clock, silence, overrun and
     cancellation watchdogs.
+
+    An HTTP(S) input gets resumable-read options (http_inputs.resilient):
+    without them a dropped connection ends the read early with exit 0.
     """
+    cmd = http_inputs.resilient(cmd)
     timeout = timeout or config.FFMPEG_TIMEOUT_S
     oom_before = _oom_kill_count()
     if progress_cb and expected_out_s:
@@ -513,24 +519,6 @@ def _proxy_vf(h, pad_s=0.0):
     return vf
 
 
-# A streamed index reads a multi-GB original over one presigned HTTP
-# connection for as long as the proxy encode takes (tens of minutes on a
-# multi-hour source). A dropped connection or a stalled socket must resume
-# from the byte it reached (HTTP Range), not fail or hang the index.
-HTTP_INPUT_ARGS = ["-reconnect", "1", "-reconnect_streamed", "1",
-                   "-reconnect_on_network_error", "1",
-                   "-reconnect_delay_max", "30",
-                   "-rw_timeout", "120000000"]
-
-
-def input_args(src):
-    """ffmpeg input options for `src`: resilient reads for an HTTP(S) URL."""
-    src = str(src)
-    if src.startswith(("http://", "https://")):
-        return HTTP_INPUT_ARGS + ["-i", src]
-    return ["-i", src]
-
-
 def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
                   expected_out_s=None, cancelled_cb=None, maxrate_kbps=None):
     # DO NOT SLICE THIS ENCODE ACROSS CORES. It was tried and MEASURED, on a
@@ -799,10 +787,10 @@ def audio_has_signal(path):
     Decode only audio; do not sample just the opening (which may be silent).
     """
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(http_inputs.resilient(
             ["ffmpeg", "-hide_banner", "-nostats", "-i", path,
              "-map", "0:a:0", "-vn", "-sn", "-af", "volumedetect",
-             "-f", "null", "-"], capture_output=True, text=True, timeout=180)
+             "-f", "null", "-"]), capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired as exc:
         raise MediaError("audio presence analysis timed out") from exc
     peaks = re.findall(r"max_volume:\s*(-?[\d.]+|[-+]?inf)\s*dB", proc.stderr)
@@ -878,8 +866,8 @@ def black_seconds(path, duration=None):
     cmd += ["-vf", "fps=4,scale=64:-2,blackdetect=d=0.1:pix_th=0.10",
             "-an", "-f", "null", "-"]
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True,
-                           errors="replace",
+        p = subprocess.run(http_inputs.resilient(cmd), capture_output=True,
+                           text=True, errors="replace",
                            timeout=config.FFMPEG_TIMEOUT_S)
     except Exception:
         return 0.0

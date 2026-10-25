@@ -39,6 +39,8 @@ import subprocess
 
 import numpy as np
 
+import http_inputs
+
 METRICS = {}
 # §4.5 default bars: (op, value). Missing -> no default (pass is None).
 DEFAULT_BARS = {
@@ -154,10 +156,10 @@ def evaluate(name, bar=None, **inputs):
 
 def probe(path):
     """{width, height, fps, frames (estimate), duration, has_audio}."""
-    out = subprocess.run(
+    out = subprocess.run(http_inputs.resilient(
         ["ffprobe", "-v", "error", "-show_entries",
          "stream=codec_type,width,height,r_frame_rate,nb_frames,"
-         "start_time:format=duration,start_time", "-of", "json", path],
+         "start_time:format=duration,start_time", "-of", "json", path]),
         capture_output=True, check=True).stdout
     j = json.loads(out)
     info = {"width": None, "height": None, "fps": None, "frames": None,

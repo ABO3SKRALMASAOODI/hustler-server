@@ -68,6 +68,7 @@ import time
 from collections import OrderedDict
 
 import camera
+import http_inputs
 
 
 # ── measurement ──────────────────────────────────────────────────────────
@@ -492,7 +493,8 @@ def _decode_gray(path, a, b, fps, width, height, timeout):
            "-an", "-sn", "-dn", "-map", "0:v:0",
            "-vf", f"fps={fps:.4f},scale={width}:{height},format=gray",
            "-f", "rawvideo", "-pix_fmt", "gray", "-"]
-    r = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    r = subprocess.run(http_inputs.resilient(cmd), capture_output=True,
+                       timeout=timeout)
     if r.returncode != 0:
         return []
     size = width * height
@@ -724,7 +726,8 @@ def _stream_gray(path, a, b, fps, width, height, deadline, cancel=None,
     state.update(frames=0, rc=None, stderr="", killed=False)
     err = tempfile.TemporaryFile()
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err,
+        proc = subprocess.Popen(http_inputs.resilient(cmd),
+                                stdout=subprocess.PIPE, stderr=err,
                                 stdin=subprocess.DEVNULL)
     except Exception:
         err.close()

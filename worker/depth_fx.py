@@ -46,6 +46,7 @@ import numpy as np
 
 import faultinject
 import fxprims
+import http_inputs
 
 KINDS = ("parallax", "ken_burns", "dof", "rack_focus", "fog", "light",
          "point_cloud", "push_through")
@@ -184,7 +185,8 @@ def _decode_frame(path, t, W=None, H=None):
     cmd += ["-i", path, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt",
             "rgb24", "-"]
     try:
-        raw = subprocess.run(cmd, capture_output=True, timeout=60).stdout
+        raw = subprocess.run(http_inputs.resilient(cmd), capture_output=True,
+                             timeout=60).stdout
     except Exception:  # noqa: BLE001
         return None
     if len(raw) < w * h * 3:
@@ -557,11 +559,11 @@ class GuideClip:
         h = int(round((sh or 9) * w / float(sw or 16) / 2)) * 2
         a, b = float(rng[0]), float(rng[1])
         try:
-            raw = subprocess.run(
+            raw = subprocess.run(http_inputs.resilient(
                 ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{a:.3f}",
                  "-t", f"{b - a:.3f}", "-i", path, "-an", "-vf",
                  f"fps={float(fps):.6f},scale={w}:{h}:flags=area,"
-                 "format=gray", "-f", "rawvideo", "-"],
+                 "format=gray", "-f", "rawvideo", "-"]),
                 capture_output=True, timeout=120).stdout
         except Exception:  # noqa: BLE001
             raw = b""

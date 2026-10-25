@@ -44,6 +44,8 @@ import time
 
 import numpy as np
 
+import http_inputs
+
 LIVE = True
 # Plane decals fill this share of the place rect (a margin inside it).
 PLANE_FILL = 0.92
@@ -855,10 +857,10 @@ def _print_polarity(item, clip, ctx, plan, quad, ok, good_t, notes):
 
 def _source_luma(ctx, t):
     """The source frame's luma (0..1, 320 px wide) at sidecar second t."""
-    proc = subprocess.run(
+    proc = subprocess.run(http_inputs.resilient(
         ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{max(0.0, t):.3f}",
          "-i", ctx.src_path, "-frames:v", "1", "-vf",
-         "scale=320:-2:flags=area,format=gray", "-f", "rawvideo", "-"],
+         "scale=320:-2:flags=area,format=gray", "-f", "rawvideo", "-"]),
         capture_output=True, check=False)
     sw, sh = ctx.src_size
     w = 320
@@ -1487,11 +1489,11 @@ class _ShadowSource:
         if hit is not None:
             return hit
         ph, pw = self.plate.shape
-        proc = subprocess.run(
+        proc = subprocess.run(http_inputs.resilient(
             ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{t:.3f}", "-i",
              self.ctx.src_path, "-frames:v", "1", "-vf",
              f"scale={pw}:{ph}:flags=area", "-f", "rawvideo", "-pix_fmt",
-             "gray", "pipe:1"], capture_output=True, check=False)
+             "gray", "pipe:1"]), capture_output=True, check=False)
         if len(proc.stdout) < pw * ph:
             return None
         lum = np.frombuffer(proc.stdout[:pw * ph], np.uint8).reshape(

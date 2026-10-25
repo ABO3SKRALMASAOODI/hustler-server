@@ -664,6 +664,7 @@ def grab_frame(path, t, max_side=None):
     """One RGB frame (PIL) of a video or image at second ``t``, or None."""
     import subprocess
     from PIL import Image
+    import http_inputs
     try:
         ext = os.path.splitext(str(path))[1].lower()
         if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
@@ -675,11 +676,11 @@ def grab_frame(path, t, max_side=None):
         if max_side:
             vf = (f"scale='if(gt(iw,ih),min({int(max_side)},iw),-2)':"
                   f"'if(gt(iw,ih),-2,min({int(max_side)},ih))',{vf}")
-        r = subprocess.run([ffmpeg_bin(), "-v", "error", "-ss",
-                            f"{max(0.0, float(t)):.3f}", "-i", str(path),
-                            "-frames:v", "1", "-vf", vf, "-f", "image2pipe",
-                            "-c:v", "png", "-"], capture_output=True,
-                           timeout=60, check=False)
+        r = subprocess.run(http_inputs.resilient(
+            [ffmpeg_bin(), "-v", "error", "-ss", f"{max(0.0, float(t)):.3f}",
+             "-i", str(path), "-frames:v", "1", "-vf", vf, "-f", "image2pipe",
+             "-c:v", "png", "-"]), capture_output=True, timeout=60,
+            check=False)
         if r.returncode != 0 or not r.stdout:
             return None
         import io
