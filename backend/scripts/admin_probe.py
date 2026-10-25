@@ -145,11 +145,13 @@ def build_app():
     from routes.admin import admin_bp
     from routes.admin_video import admin_video_bp
     from routes.admin_v2 import admin_v2_bp
+    from routes.admin_ops import admin_ops_bp
     from routes.onboarding import onboarding_bp
     from routes.marketing_preferences import marketing_bp
     app.register_blueprint(admin_bp, url_prefix="/admin")
     app.register_blueprint(admin_video_bp)
     app.register_blueprint(admin_v2_bp)
+    app.register_blueprint(admin_ops_bp)
     app.register_blueprint(onboarding_bp)
     app.register_blueprint(marketing_bp, url_prefix="/newsletter")
     return app
@@ -212,6 +214,24 @@ def ground_truth(dsn):
             row = cur.fetchone()
             out["renewing_subscriptions"] = row["renewing"]
             out["past_due_subscriptions"] = row["past_due"]
+            # The Overview SIGNUPS strip, counted independently: verified
+            # customers since the admin-timezone midnight 29 days ago.
+            from admin_metrics import ranges
+            from ops_loop import EXCLUDED_USER_IDS
+            first = ranges.local_today() - timedelta(days=29)
+            cur.execute(f"""SELECT COUNT(*) AS n FROM users u
+                             WHERE {defs.customer('u')}
+                               AND NOT (u.id = ANY(%s))
+                               AND u.created_at >= %s""",
+                        (list(EXCLUDED_USER_IDS),
+                         ranges.naive(ranges.local_midnight(first))))
+            out["signups_30d"] = cur.fetchone()["n"]
+            cur.execute("SELECT to_regclass('public.session_reviews') AS t")
+            if cur.fetchone()["t"]:
+                cur.execute("SELECT COUNT(*) AS n FROM session_reviews")
+                out["session_reviews"] = cur.fetchone()["n"]
+                cur.execute("SELECT COUNT(*) AS n FROM tickets")
+                out["tickets"] = cur.fetchone()["n"]
     except Exception as e:                       # truth is advisory
         out["error"] = f"{type(e).__name__}: {str(e)[:160]}"
     finally:
@@ -424,6 +444,64 @@ def check_costs(b, t):
             f"R2 {_get(b, 'infra', 'r2', 'total_gb')} GB")
 
 
+def check_ops_summary(b, t):
+    s = b.get("signups") or {}
+    daily = s.get("daily") or []
+    need(len(daily) == 30, f"{len(daily)} signup days, expected 30")
+    need(all(_num(s.get(k)) for k in ("today", "yesterday", "d7", "d30")),
+         f"signup numbers missing: {s}")
+    need(0 <= s["today"] <= s["d7"] <= s["d30"],
+         f"signups out of order: today {s['today']} 7d {s['d7']} "
+         f"30d {s['d30']}")
+    need(s["d30"] == sum(d["signups"] for d in daily), "30d != daily sum")
+    need(s["d7"] == sum(d["signups"] for d in daily[-7:]), "7d != daily sum")
+    if t.get("signups_30d") is not None:
+        need(s["d30"] == t["signups_30d"],
+             f"signups 30d {s['d30']} != table count {t['signups_30d']}")
+    note = (f"signups today {s['today']} · yesterday {s['yesterday']} · "
+            f"7d {s['d7']} · 30d {s['d30']}")
+    if b.get("loop_ready"):
+        o, k = b.get("outcomes") or {}, b.get("tickets") or {}
+        rate = _get(o, "d7", "rate_pct")
+        need(rate is None or 0 <= rate <= 100, f"outcome rate {rate}")
+        if t.get("session_reviews") is not None:
+            need(o.get("all_time") == t["session_reviews"],
+                 f"reviews {o.get('all_time')} != {t['session_reviews']}")
+        note += (f" · outcome 7d {rate}% of {_get(o, 'd7', 'reviewed')}"
+                 f" · tickets open {k.get('open')} fixed 7d {k.get('fixed_7d')}")
+    else:
+        note += " · loop tables missing (migration 041)"
+    return note
+
+
+def check_ops_sessions(b, t):
+    rows = b.get("sessions")
+    need(isinstance(rows, list), "no sessions list")
+    if b.get("loop_ready") and t.get("session_reviews"):
+        need(b.get("total", 0) <= t["session_reviews"], "more cards than "
+             "reviews")
+    for r in rows:
+        need(r.get("verdict") in ("delivered_good", "delivered_poor",
+                                  "not_delivered"), f"verdict {r.get('verdict')}")
+        need(isinstance(r.get("evidence"), list) and r["evidence"],
+             f"review {r.get('id')} has no evidence")
+    return f"{len(rows)} cards · total {b.get('total')} · mix {b.get('counts')}"
+
+
+def check_ops_tickets(b, t):
+    groups = b.get("groups")
+    need(isinstance(groups, list), "no groups")
+    n = sum(len(g["tickets"]) for g in groups)
+    if b.get("loop_ready") and t.get("tickets") is not None:
+        need(n == t["tickets"], f"{n} tickets shown, table has {t['tickets']}")
+    for g in groups:
+        for x in g["tickets"]:
+            if x["status"] == "fixed":
+                need(x.get("fix_sha") and x.get("regression_check"),
+                     f"fixed ticket {x['id']} without fix sha or check")
+    return f"{len(groups)} root causes · {n} tickets"
+
+
 def check_users(b, t):
     rows = b.get("users") or []
     need(rows, "no users")
@@ -437,6 +515,7 @@ def check_users(b, t):
 # (tab, path, check). `{project}` / `{user}` / `{job}` / `{version}` are filled
 # from earlier answers.
 ENDPOINTS = [
+    ("Overview", "/admin/video/ops/summary", check_ops_summary),
     ("Overview", "/admin/video/overview?summary=1", check_video_overview),
     ("Overview", "/admin/video/overview", check_video_overview),
     ("Overview", "/admin/video/upload_failures?days=30&limit=100", check_dict),
@@ -448,6 +527,8 @@ ENDPOINTS = [
     ("Overview", "/admin/charts/mrr", check_rows("data", label="days")),
     ("Overview", "/admin/top-users", check_rows("users")),
     ("Overview", "/admin/activity", check_rows("events")),
+    ("Sessions", "/admin/video/ops/sessions?days=30&page=1&per_page=30", check_ops_sessions),
+    ("Tickets", "/admin/video/ops/tickets?status=all", check_ops_tickets),
     ("Projects", "/admin/video/projects?search=&fields=list", check_rows("projects")),
     ("Projects", "/admin/video/projects?search=", check_rows("projects")),
     ("Projects", "/admin/video/projects/{project}?lean=1", check_dict),

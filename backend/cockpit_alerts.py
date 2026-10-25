@@ -361,7 +361,88 @@ def funnel_yesterday(rcur, now):
     return out
 
 
-def digest_email(board, funnel, now):
+EVIDENCE_LINK_S = 6 * 24 * 3600     # R2 presigned URLs live at most 7 days
+
+
+def _evidence_link(key):
+    """A long-lived picture link for the email (the admin inbox may open it
+    days later)."""
+    try:
+        import storage
+        if not key or not storage.is_configured():
+            return None
+        return storage.presign_get(key, expires=EVIDENCE_LINK_S)
+    except Exception:
+        return None
+
+
+def outcome_facts(rcur, funnel, now, presign=_evidence_link):
+    """The outcome loop's part of the digest (None before migration 041).
+    Never raises: the digest must go out even if this part cannot."""
+    try:
+        from ops_loop import views
+        facts = views.digest_facts(rcur, funnel["start"], funnel["end"],
+                                   presign=presign)
+        if facts is None:
+            return None
+        daily = views.signups(rcur, now)["daily"]
+        upto = [d for d in daily if d["day"] <= funnel["day"]]
+        facts["signups_7d"] = sum(d["signups"] for d in upto[-7:])
+        return facts
+    except Exception as e:
+        print(f"⚠️ [cockpit] digest outcome section failed: "
+              f"{type(e).__name__}: {e}", flush=True)
+        return None
+
+
+def _rate_text(part):
+    if not part or not part.get("reviewed"):
+        return "no sessions reviewed"
+    return (f"{part['rate_pct']:.0f}% good ({part['good']} of "
+            f"{part['reviewed']})")
+
+
+def outcome_lines(facts, funnel):
+    """(signups+outcomes lines, ticket lines, thumbnail line)."""
+    if not facts:
+        return ([f"Signups {funnel['signups']} · the outcome loop is not "
+                 "live yet (migration 041)"], [], None)
+    head = [f"<b>Signups {_e(funnel['signups'])}</b> yesterday · "
+            f"{_e(facts.get('signups_7d'))} in the last 7 days",
+            f"Outcome rate yesterday {_rate_text(facts['day'])} · 7 days "
+            f"{_rate_text(facts['week'])}",
+            f"Sessions reviewed yesterday: {_e(facts['reviewed'])} · tickets "
+            f"still open: {_e(facts['still_open'])}"]
+    tickets = []
+    for t in facts["opened"]:
+        tickets.append(f"Opened #{t['id']} <b>[{_e(t['severity'])}]</b> "
+                       f"{_e(t['title'])} · <code>{_e(t['cause_key'])}</code>"
+                       + (f" · recurred ×{t['recurrence_count']}"
+                          if t.get("recurrence_count") else ""))
+    for t in facts["fixed"]:
+        cause = (t.get("root_cause") or "").strip().splitlines()[0][:160] \
+            if t.get("root_cause") else ""
+        tickets.append(f"Fixed #{t['id']} {_e(t['title'])}: {_e(cause)} · "
+                       f"fix <code>{_e((t.get('fix_sha') or '')[:12])}</code>"
+                       f" · guarded by {_e(t.get('regression_check'))}")
+    pics = facts.get("thumbnails") or []
+    thumbs = None
+    if pics:
+        cells = "".join(
+            f'<a href="{ADMIN_URL}?tab=sessions" style="display:inline-block;'
+            f'margin:0 8px 8px 0;text-decoration:none;vertical-align:top;'
+            f'width:140px"><img src="{html.escape(p["url"], quote=True)}" '
+            f'width="140" alt="{_e(p.get("caption"))}" style="display:block;'
+            f'width:140px;border-radius:8px;border:1px solid #26262e"><span '
+            f'style="display:block;color:#9a9aa5;font-size:11px;'
+            f'line-height:1.35;margin-top:4px">{_e(p["verdict"])} · '
+            f'{_e(p["score"])}/10 · {_e((p.get("caption") or "")[:90])}'
+            f'</span></a>' for p in pics[:4])
+        thumbs = cells
+    return head, tickets, thumbs
+
+
+def digest_email(board, funnel, now, outcomes=None):
     s = board.get("strip") or {}
     rows = board.get("rows") or []
     start, end = funnel["start"], funnel["end"]
@@ -380,6 +461,7 @@ def digest_email(board, funnel, now):
     fac = board.get("factory") or {}
     urgent = [r for r in rows if r["health"] == "red"] + \
         [r for r in rows if r["health"] == "amber"]
+    o_head, o_tickets, o_thumbs = outcome_lines(outcomes, funnel)
     funnel_line = (
         f"{funnel['signups']} signups → {funnel['uploaders']} uploaded → "
         f"{funnel['first_cuts']} First cuts → {funnel['watched_half']} "
@@ -387,6 +469,9 @@ def digest_email(board, funnel, now):
         f"{funnel['checkouts']} opened checkout → {len(payers)} paid "
         f"({with_result} saw a result first)")
     sections = [
+        ("Signups and outcomes", o_head),
+        ("Tickets (the Reviewer and the Fixer)", o_tickets),
+        ("Proof from yesterday's sessions", [o_thumbs] if o_thumbs else []),
         ("Funnel, " + funnel["day"], [funnel_line,
                                       f"Renewal turned off in the last 7 "
                                       f"days: {len(offs)}"]),
@@ -415,7 +500,11 @@ def digest_email(board, funnel, now):
             f"and {_e(fac.get('full_renders_per_short'))} full renders per "
             f"short · ${_e(fac.get('usd_per_short'))} per short"]),
     ]
-    subject = (f"Valmera daily · {funnel['day']} · MRR "
+    rate = ((outcomes or {}).get("day") or {}).get("rate_pct")
+    subject = (f"Valmera daily · {funnel['day']} · {funnel['signups']} "
+               f"signup{'s' if funnel['signups'] != 1 else ''} · "
+               + (f"outcomes {rate:.0f}% good · " if rate is not None else "")
+               + f"MRR "
                f"${(s.get('committed_mrr') or {}).get('value')} · "
                f"{len(payers)} new payer{'s' if len(payers) != 1 else ''}")
     return subject, _shell(f"Yesterday at Valmera ({funnel['day']})",
@@ -518,7 +607,9 @@ def maybe_digest(r, w, now, board, send):
         if board is None:
             from admin_metrics import cockpit
             board = cockpit.compute(r, now)
-        subject, body = digest_email(board, funnel_yesterday(r, now), now)
+        funnel = funnel_yesterday(r, now)
+        subject, body = digest_email(board, funnel, now,
+                                     outcomes=outcome_facts(r, funnel, now))
         if send(subject, body):
             return True
     except Exception as e:
@@ -536,7 +627,9 @@ def preview(rcur, now=None):
     board = cockpit.compute(rcur, now)
     items = event_alerts(rcur, now - timedelta(days=1), now) + \
         daily_alerts(board, now)
-    subject, _ = digest_email(board, funnel_yesterday(rcur, now), now)
+    funnel = funnel_yesterday(rcur, now)
+    subject, _ = digest_email(board, funnel, now,
+                              outcomes=outcome_facts(rcur, funnel, now))
     return {"alerts": [{"key": k, "section": s, "line": l}
                        for k, s, l in items], "digest_subject": subject}
 

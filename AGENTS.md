@@ -183,6 +183,21 @@ background); migration 039's partial indexes repeat `_mcp_non_success_sql('')`
 and `_mcp_refusal_sql('')` verbatim, so change both together
 (`tests/test_admin_read_paths.py` checks).
 
+## Outcome loop (25 Oct 2026)
+
+Claude Code sessions (Opus, on the owner's Mac) judge and fix; the backend
+never calls a model for it. The Reviewer (hourly) runs
+`backend/scripts/ops_review.py pending`, looks at each settled session of a
+real user frame by frame, uploads picture evidence (R2 `ops/evidence/<session>/`)
+and writes `session_reviews` and one `tickets` row per cause (migration 041).
+The Fixer (daily 03:00 Dubai, at once on a P0) fixes causes, guards each with
+a test or journey and closes tickets with `fix_sha` and `regression_check`.
+`ops_review.py` is the agents' ONLY production write path and writes only the
+four outcome tables (`ops_loop/store.guard`). Views: admin Overview strip
+(signups, outcome rate, tickets), Sessions and Tickets tabs
+(`routes/admin_ops.py`), and the 08:00 digest. Runbooks:
+`/Users/masaoodi/Documents/Valmera/.valmera/ops-loop/` (REVIEWER.md, FIXER.md).
+
 ## Gotchas
 
 1. **CORS is manual** in `app.py` (`before_request`/`after_request`) — don't remove.
