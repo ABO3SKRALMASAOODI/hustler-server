@@ -127,6 +127,7 @@ def compute(cur):
                COALESCE(SUM(a.bytes), 0) AS bytes
           FROM assets a LEFT JOIN projects p ON p.id = a.project_id
           LEFT JOIN users u ON u.id = p.user_id
+         WHERE NOT (COALESCE(a.meta, '{{}}'::jsonb) ? 'r2_purged_at')
          GROUP BY 1""")
     storage_split = {bool(r["owner"]): int(r["bytes"] or 0)
                      for r in cur.fetchall()}

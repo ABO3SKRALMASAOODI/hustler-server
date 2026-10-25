@@ -433,6 +433,61 @@ _SECRETISH = ("password", "passwd", "secret", "token", "api_key", "apikey",
               "credit card", "cvv")
 
 
+_STEP_ALIASES = ("action", "step", "kind", "op", "command", "type")
+
+
+def _canonical_step(raw):
+    """Accept the unambiguous spellings models write for a step.
+
+    Tolerant tool-call handling: {"action": "scroll", "amount": 400},
+    {"type": "goto", "url": ...} and the one-key shorthand {"wait": 2},
+    {"goto": "https://…"}, {"click": "Pricing"} all mean exactly one step.
+    Anything still ambiguous falls through to the validator's sentence."""
+    if raw.get("do"):
+        step = dict(raw)
+    else:
+        step = dict(raw)
+        for alias in _STEP_ALIASES:
+            value = str(raw.get(alias) or "").strip().lower()
+            if value in STEP_KINDS and not (
+                    alias == "type" and value == "type" and "do" in raw):
+                step["do"] = value
+                step.pop(alias, None)
+                break
+        else:
+            named = [k for k in raw if str(k).lower() in STEP_KINDS]
+            if len(named) == 1:
+                kind = str(named[0]).lower()
+                value = raw[named[0]]
+                step = {k: v for k, v in raw.items() if k != named[0]}
+                step["do"] = kind
+                if kind == "goto":
+                    step.setdefault("url", value)
+                elif kind == "wait":
+                    step.setdefault("seconds", value)
+                elif kind == "scroll":
+                    if isinstance(value, (int, float)) or str(value).lstrip(
+                            "-").replace(".", "", 1).isdigit():
+                        step.setdefault("by", value)
+                    else:
+                        step.setdefault("to", value)
+                elif kind in ("click", "hover", "type"):
+                    step.setdefault("text", value)
+                elif kind == "press":
+                    step.setdefault("key", value)
+    if step.get("do") == "scroll" and "by" not in step and "to" not in step:
+        for key in ("amount", "pixels", "distance", "y"):
+            if step.get(key) is not None:
+                step["by"] = step[key]
+                break
+    if step.get("do") == "wait" and "seconds" not in step:
+        for key in ("duration", "duration_s", "time", "s"):
+            if step.get(key) is not None:
+                step["seconds"] = step[key]
+                break
+    return step
+
+
 def _norm_steps(steps):
     """Validate the agent's script into a list of dicts, or raise
     WebRecordError with a sentence the agent can repeat to the user."""
@@ -446,10 +501,14 @@ def _norm_steps(steps):
     for i, raw in enumerate(steps, 1):
         if not isinstance(raw, dict):
             raise WebRecordError(f"step {i} is not an object")
+        raw = _canonical_step(raw)
         do = str(raw.get("do") or "").strip().lower()
         if do not in STEP_KINDS:
             raise WebRecordError(
-                f"step {i}: '{do or '(missing)'}' is not a step — use one of "
+                f"step {i}: '{do or '(missing)'}' is not a step. Each step is "
+                "an object whose `do` names it, e.g. {\"do\": \"scroll\", "
+                "\"by\": 800}, {\"do\": \"click\", \"text\": \"Pricing\"}, "
+                "{\"do\": \"wait\", \"seconds\": 1.5} — `do` is one of "
                 + ", ".join(STEP_KINDS))
         step = {"do": do}
         for key in ("text", "selector", "url", "to", "key", "label"):

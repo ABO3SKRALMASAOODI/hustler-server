@@ -13,7 +13,8 @@ the way the Worker spends it (strategy-1025 costs §1.2, red team split.py):
 * the ledger misses synchronous child calls, deploy probes and idle CPU in
   awake containers, so the modeled compute is multiplied by CALIBRATION
   (1.43: $136.9 modeled against $140.5 of dashboard compute, 7-24 Oct 2026);
-* R2 is the stored bytes of distinct live asset keys, accrued per day.
+* R2 is the stored bytes of distinct live asset keys, accrued per day;
+  keys the retention sweep deleted (meta.r2_purged_at) stop at their purge.
 
 The admin's old "executor ceiling" summed per-job telemetry and showed $71.58
 for 30 days against about $190 of real spend; this model is within 3% of the
@@ -179,54 +180,142 @@ def fetch_rows(cur, since):
              r["user_id"], r["cpu_s"]) for r in cur.fetchall()]
 
 
+# One row per storage key (Shorts children and re-uploads share keys). A key
+# the retention sweep deleted (r2_retention.py marks every row that points at
+# it ``meta.r2_purged_at``) is no longer stored: it leaves the stored total,
+# stops accruing on its purge time, and its bytes count as REMOVED in the week
+# it was swept. "Added" is every key created in a window, swept since or not,
+# so last week's upload volume does not shrink because the sweep ran later.
 R2_SQL = """
-    WITH keys AS (
-      SELECT DISTINCT ON (a.storage_key) a.storage_key, a.bytes,
-             a.created_at, p.user_id
+    WITH rows AS (
+      SELECT a.id, a.storage_key, COALESCE(a.bytes, 0) AS bytes,
+             a.created_at, p.user_id,
+             COALESCE(a.meta, '{}'::jsonb) ? 'r2_purged_at' AS purged,
+             CASE WHEN a.meta->>'r2_purged_at'
+                       ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T'
+                  THEN (a.meta->>'r2_purged_at')::timestamptz END
+                 AS purged_at
         FROM assets a LEFT JOIN projects p ON p.id = a.project_id
-       WHERE a.storage_key IS NOT NULL
-       ORDER BY a.storage_key, a.id),
+       WHERE a.storage_key IS NOT NULL AND a.storage_key <> ''),
+    keys AS (
+      SELECT storage_key,
+             (ARRAY_AGG(bytes ORDER BY id))[1] AS bytes,
+             MIN(created_at) AS created_at,
+             (ARRAY_AGG(user_id ORDER BY id))[1] AS user_id,
+             BOOL_OR(purged) AS purged,
+             MIN(purged_at) AS purged_at
+        FROM rows GROUP BY storage_key),
     payers AS (SELECT DISTINCT p.user_id FROM payments p
                 WHERE p.status IN ('completed','paid') AND p.amount_cents > 0)
     SELECT CASE WHEN k.user_id = %(owner)s THEN 'owner'
                 WHEN k.user_id IN (SELECT user_id FROM payers) THEN 'payers'
                 ELSE 'never_paid' END AS population,
-           COALESCE(SUM(k.bytes), 0) AS bytes,
+           COALESCE(SUM(k.bytes) FILTER (WHERE NOT k.purged), 0) AS bytes,
+           COUNT(*) FILTER (WHERE NOT k.purged) AS keys,
            COALESCE(SUM(k.bytes) FILTER (
                WHERE k.created_at >= %(week)s), 0) AS bytes_7d,
            COALESCE(SUM(k.bytes) FILTER (
                WHERE k.created_at >= %(prev)s AND k.created_at < %(week)s),
                0) AS bytes_prev_7d,
-           COALESCE(SUM(k.bytes * EXTRACT(EPOCH FROM (
-               %(now)s - GREATEST(k.created_at, %(cycle)s))) / 86400.0)
+           COALESCE(SUM(k.bytes) FILTER (
+               WHERE k.purged AND k.purged_at >= %(week)s), 0)
+               AS purged_7d,
+           COALESCE(SUM(k.bytes) FILTER (
+               WHERE k.purged AND k.purged_at >= %(prev)s
+                 AND k.purged_at < %(week)s), 0) AS purged_prev_7d,
+           COALESCE(SUM(k.bytes) FILTER (WHERE k.purged), 0) AS purged_total,
+           COALESCE(SUM(k.bytes * GREATEST(0, EXTRACT(EPOCH FROM (
+               CASE WHEN k.purged
+                    THEN LEAST(COALESCE(k.purged_at, k.created_at),
+                               %(now)s)
+                    ELSE %(now)s END
+               - GREATEST(k.created_at, %(cycle)s))) / 86400.0))
                FILTER (WHERE k.created_at < %(now)s), 0) AS byte_days_cycle
       FROM keys k GROUP BY 1"""
 
+POPULATIONS = ("never_paid", "owner", "payers")
+
+
+def _gb(value):
+    return round(float(value or 0) / 1e9, 1)
+
 
 def r2(cur, now, cycle_start):
+    """Stored GB by population (live keys only), and the week's growth as
+    added minus removed by the retention sweep."""
     cur.execute(R2_SQL, {"owner": OWNER_ID, "now": now,
                          "week": now - timedelta(days=7),
                          "prev": now - timedelta(days=14),
                          "cycle": cycle_start})
-    pops = {}
+    pops, byte_days = {}, 0.0
     for r in cur.fetchall():
+        added, removed = float(r["bytes_7d"]), float(r["purged_7d"])
+        added_prev = float(r["bytes_prev_7d"])
+        removed_prev = float(r["purged_prev_7d"])
         pops[r["population"]] = {
-            "gb": round(float(r["bytes"]) / 1e9, 1),
-            "added_7d_gb": round(float(r["bytes_7d"]) / 1e9, 1),
-            "added_prev_7d_gb": round(float(r["bytes_prev_7d"]) / 1e9, 1),
-            "gb_days_cycle": float(r["byte_days_cycle"]) / 1e9}
-    total = sum(p["gb"] for p in pops.values())
-    gb_months = sum(p.pop("gb_days_cycle") for p in pops.values()) / 30.0
-    return {"total_gb": round(total, 1),
-            "added_7d_gb": round(sum(p["added_7d_gb"] for p in pops.values()), 1),
-            "added_prev_7d_gb": round(sum(p["added_prev_7d_gb"]
-                                          for p in pops.values()), 1),
+            "gb": _gb(r["bytes"]), "keys": int(r["keys"] or 0),
+            "added_7d_gb": _gb(added), "removed_7d_gb": _gb(removed),
+            "net_7d_gb": _gb(added - removed),
+            "added_prev_7d_gb": _gb(added_prev),
+            "removed_prev_7d_gb": _gb(removed_prev),
+            "net_prev_7d_gb": _gb(added_prev - removed_prev),
+            "removed_total_gb": _gb(r["purged_total"])}
+        byte_days += float(r["byte_days_cycle"] or 0)
+    for name in POPULATIONS:
+        pops.setdefault(name, {
+            "gb": 0.0, "keys": 0, "added_7d_gb": 0.0, "removed_7d_gb": 0.0,
+            "net_7d_gb": 0.0, "added_prev_7d_gb": 0.0,
+            "removed_prev_7d_gb": 0.0, "net_prev_7d_gb": 0.0,
+            "removed_total_gb": 0.0})
+
+    def total(field):
+        return round(sum(p[field] for p in pops.values()), 1)
+    stored = total("gb")
+    gb_months = byte_days / 1e9 / 30.0
+    return {"total_gb": stored,
+            "added_7d_gb": total("added_7d_gb"),
+            "removed_7d_gb": total("removed_7d_gb"),
+            "net_7d_gb": total("net_7d_gb"),
+            "added_prev_7d_gb": total("added_prev_7d_gb"),
+            "removed_prev_7d_gb": total("removed_prev_7d_gb"),
+            "net_prev_7d_gb": total("net_prev_7d_gb"),
+            "removed_total_gb": total("removed_total_gb"),
             "by_population": pops,
+            "last_sweep": last_sweep(cur),
             "monthly_usd_at_current_size": round(
-                max(0.0, total - R2_FREE_GB) * R2_USD_PER_GB_MONTH, 2),
+                max(0.0, stored - R2_FREE_GB) * R2_USD_PER_GB_MONTH, 2),
             "cycle_gb_months": round(gb_months, 1),
             "cycle_usd": round(max(0.0, gb_months - R2_FREE_GB)
-                               * R2_USD_PER_GB_MONTH, 2)}
+                               * R2_USD_PER_GB_MONTH, 2),
+            "method": ("distinct live asset keys; keys the retention sweep "
+                       "deleted (meta.r2_purged_at) are not stored and are "
+                       "counted as removed in the week they were swept")}
+
+
+def last_sweep(cur):
+    """The retention sweep's own summary (app_kv r2_retention_last): when it
+    ran and what it kept and deleted, beside the board's own count."""
+    import json
+    try:
+        cur.execute("SELECT value, updated_at FROM app_kv WHERE key = %s",
+                    ("r2_retention_last",))
+        row = cur.fetchone()
+    except Exception:
+        return None
+    if not row:
+        return None
+    try:
+        value = json.loads(row["value"]) if isinstance(row["value"], str) \
+            else dict(row["value"] or {})
+    except (TypeError, ValueError):
+        return None
+    return {"at": value.get("at"), "mode": value.get("mode"),
+            "deleted_gb": value.get("deleted_gb"),
+            "deleted_keys": value.get("deleted_keys"),
+            "kept_gb": value.get("kept_gb"),
+            "selected_gb": value.get("selected_gb"),
+            "refused": value.get("refused"),
+            "errors": value.get("errors")}
 
 
 def _sum(days, start, end):

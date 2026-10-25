@@ -45,6 +45,9 @@ from video_services.project_state import (
     index_row as _index_row,
     latest_edl as _latest_edl,
     project_for_user as _project_for_user,
+    is_purged as _is_purged,
+    media_purged as _media_purged,
+    purged_message as _purged_message,
 )
 from video_services.upload import (
     clean_dimension as _clean_dim,
@@ -1349,6 +1352,7 @@ def get_project(user_id, project_id):
         "assets": [_asset_out(a) for a in assets],
         "video": _asset_out(original) if original else None,
         "indexed": indexed,
+        "media_purged": _media_purged(original),
         "latest_edl": ({"version": edl["version"], "json": edl["json"],
                         "created_by": edl["created_by"]} if edl else None),
         "jobs": jobs,
@@ -3014,6 +3018,10 @@ def project_state(user_id, project_id):
         indexed = bool(idx_row)
         subscription_locked = bool(
             original and _subscribe_gate_applies(cur, user_id))
+        # The retention sweep removed the active original's file: nothing can
+        # be re-indexed or re-rendered from it, so neither self-heal below may
+        # queue a job that can only fail, and the Studio shows a notice.
+        source_purged = _media_purged(original)
         edl = _latest_edl(cur, project_id)
 
         # SELF-HEAL: the current edit must always have a render on the way.
@@ -3081,7 +3089,7 @@ def project_state(user_id, project_id):
             on_demand = cur.fetchone() is not None
         if edl:
             edl["preview_on_demand"] = on_demand
-        if (not subscription_locked and not on_demand
+        if (not subscription_locked and not on_demand and not source_purged
                 and _should_heal_preview(edl, indexed, drafting,
                                          agent_orphaned)):
             cur.execute("""SELECT 1 FROM video_jobs
@@ -3198,7 +3206,7 @@ def project_state(user_id, project_id):
             # state poll after Paddle activates the account releases exactly
             # one analysis job without asking the user to re-upload.
             heal_reason = "subscription unlocked; analysis not started"
-        if heal_reason and not idx_active:
+        if heal_reason and not idx_active and not source_purged:
             # Serialize with concurrent polls (two tabs on one project): both
             # could pass the checks above and burn the whole heal budget on
             # duplicate enqueues. Lock the project row, re-check under it.
@@ -3247,6 +3255,8 @@ def project_state(user_id, project_id):
                        WHERE project_id = %s
                          AND kind IN ('render', 'music', 'proxy',
                                       'video_clip', 'image_ref')
+                         AND NOT (COALESCE(meta, '{}'::jsonb)
+                                  ? 'r2_purged_at')
                        ORDER BY id DESC LIMIT 300""", (project_id,))
         extra = cur.fetchall()
         _gate = _final_gate(cur, project_id, user_id)
@@ -3339,6 +3349,10 @@ def project_state(user_id, project_id):
         "video": _asset_out(original) if original else None,
         "proxy_asset_id": proxy["id"] if proxy else None,
         "indexed": indexed,
+        # {purged_at, asset_id, filename, message} when the retention sweep
+        # removed the active original's file; None otherwise. Swept renders,
+        # proxies and clips are already left out of every list above.
+        "media_purged": source_purged,
         "subscribe_gated": subscription_locked,
         "subscription_offer": (_subscribe_offer_body()
                                if subscription_locked else None),
@@ -3514,6 +3528,9 @@ def replay_blocked(user_id, project_id):
                 "attachments": blocked.get("attachments") or [],
                 "client_msg_id": f"replay-{last['id']}"})
         original = _active_original(cur, project_id)
+        if _media_purged(original):
+            # The upload was swept; there is nothing left to analyse.
+            return jsonify({"replay": None, "reason": "media_purged"})
         if original and not _index_row(cur, original["sha256"]):
             cur.execute("""SELECT id FROM video_jobs
                            WHERE project_id = %s AND type = 'index'
@@ -3638,6 +3655,16 @@ def post_message(user_id, project_id):
                 blocked_prompt=_blocked_prompt(text, attachment_ids,
                                                client_msg_id))
             return jsonify(body), 402
+
+        # After the wall, never before it: the retention sweep removed this
+        # project's upload (a never-paid account that later subscribed). No
+        # turn, index or render can run on a file that is gone, so say so
+        # now instead of failing a turn minutes later. The text goes back to
+        # the composer, as for every other refusal here.
+        purged = _media_purged(original)
+        if purged:
+            return jsonify({"error": purged["message"], "code": "media_purged",
+                            "media_purged": purged}), 409
 
         # The account may have upgraded after uploading. No index job existed
         # while it was locked, so the first post-upgrade request becomes the
@@ -5110,6 +5137,10 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
             return {**receipt, "edl": saved["json"], "replayed": True}, 200
         if _subscribe_gate_applies(cur, user_id):
             return {"error": "A subscription is required to edit this project."}, 402
+        purged = _media_purged(_active_original(cur, project_id))
+        if purged:
+            return {"error": purged["message"], "code": "media_purged",
+                    "media_purged": purged}, 409
         latest = _latest_edl(cur, project_id)
         if not latest or latest["version"] != base:
             return {"error": "The edit changed. Read the current version before applying this batch."
@@ -5261,7 +5292,9 @@ def playback_endpoint(user_id, project_id):
         sources = {}
         for key in sorted(keys):
             asset = source if key == "source" else lookup.get(key)
-            if not asset:
+            # A swept file has no bytes behind its key: leave it out, and the
+            # Studio's composition player stays off rather than failing.
+            if not asset or _is_purged(asset):
                 continue
             sources[key] = dict(asset_id=asset["id"], url=storage.presign_get(asset["storage_key"]),
                                 duration=asset.get("duration_s"), width=asset.get("width"),
@@ -5325,6 +5358,11 @@ def user_edl_write(user_id, project_id):
         source_duration = float((original or {}).get("duration_s") or 0) or None
         if not canvas and not source_duration:
             return jsonify({"error": "Upload a video first"}), 400
+        # The retention sweep removed the upload: an edit could not render.
+        purged = None if canvas else _media_purged(original)
+        if purged:
+            return jsonify({"error": purged["message"], "code": "media_purged",
+                            "media_purged": purged}), 409
         # EDL writes must not race the agent
         cur.execute("""SELECT id FROM video_jobs
                        WHERE project_id = %s AND type = 'agent_turn'
@@ -7446,6 +7484,11 @@ def filmstrip(user_id, project_id):
         if not cur.fetchone():
             return jsonify(payload or {"available": False,
                                        "state": "no_video"})
+        # The retention sweep removed the source: a build could only fail.
+        # Artwork made before the sweep is still served.
+        if _media_purged(_active_original(cur, project_id)):
+            return jsonify(payload or {"available": False,
+                                       "state": "media_removed"})
         try:
             cur.execute("""INSERT INTO video_jobs
                              (project_id, user_id, type, state, payload)
@@ -7489,6 +7532,11 @@ def asset_url(user_id, asset_id):
         a = cur.fetchone()
         if not a:
             return jsonify({"error": "Asset not found"}), 404
+    if _is_purged(a):
+        # The retention sweep deleted the file; a presigned link would only
+        # be a dead link. Say what happened instead.
+        return jsonify({"error": _purged_message(a),
+                        "code": "media_purged"}), 410
     name = None
     if download:
         meta = a.get("meta") or {}

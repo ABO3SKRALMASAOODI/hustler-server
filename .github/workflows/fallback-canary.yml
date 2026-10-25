@@ -1,0 +1,47 @@
+name: fallback-canary
+
+# Weekly: can the Modal fallback run a trivial job at the current code
+# version? (strategy 1025, PLAN.md C2.9). One `__warm` input on the deployed
+# `probe` function (no job row, no customer data), then one app_kv row,
+# `fallback_canary`, which the Health board reads. It never deploys Modal:
+# a failing canary says what to redeploy, the operator decides.
+on:
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/fallback-canary.yml"
+      - "backend/scripts/fallback_canary.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fallback-canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: install the Modal client and the database driver
+        run: |
+          python -m pip install --disable-pip-version-check \
+            modal==1.5.4 psycopg2-binary==2.9.10
+
+      - name: run one trivial job on Modal and record the result
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          PRODUCTION_DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+        run: python backend/scripts/fallback_canary.py --write

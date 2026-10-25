@@ -22,6 +22,7 @@ from flask import Blueprint, request, jsonify, current_app
 from routes.admin import (admin_required, _scope, METRICS_EPOCH,
                           legacy_error_response, gzip_large_json)
 from video_services.jobs import enqueue as _enqueue
+from video_services.project_state import media_purged
 from admin_metrics import cache as admin_cache
 from admin_metrics.projects import (PROJECT_TIMINGS as _PROJECT_TIMINGS,
                                     TIMING_COLS as _TIMING_COLS,
@@ -2270,7 +2271,12 @@ def _video_project_detail(shared_conn, project_id, lean=False):
         "project": {"id": p["id"], "title": p["title"], "email": p["email"],
                     "user_id": p["user_id"],
                     "kind": p.get("kind"),
-                    "created_at": iso(p["created_at"])},
+                    "created_at": iso(p["created_at"]),
+                    # The retention sweep removed the upload: what the
+                    # Studio shows this person instead of a player.
+                    "media_purged": media_purged(next(
+                        (a for a in assets if a["kind"] == "original"),
+                        None))},
         "children": children,
         "parent": parent,
         "shorts_board": shorts_board,

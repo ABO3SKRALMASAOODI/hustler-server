@@ -85,3 +85,41 @@ def edl_at(cur, project_id, version):
         (project_id, version),
     )
     return cur.fetchone()
+
+
+# The R2 retention sweep (r2_retention.py, owner decision D4) deletes a
+# never-paid account's uploads 7 days after its last activity and marks each
+# asset row ``meta.r2_purged_at``: the row still describes the file, the bytes
+# are gone. Everything the Studio would load from such a row is a dead link,
+# so it is told plainly instead. The project, its chat and its transcript (the
+# index is keyed by the video's sha256 and is never swept) stay as they are.
+MEDIA_PURGED_MESSAGE = ("Your uploaded video was removed after 7 days without "
+                        "activity. Upload it again to keep editing.")
+PURGED_RENDER_MESSAGE = ("This render was removed after a period without "
+                         "activity, so it can no longer be played or "
+                         "downloaded.")
+
+
+def is_purged(asset):
+    """True when the retention sweep removed this asset's file."""
+    meta = (asset or {}).get("meta") or {}
+    return isinstance(meta, dict) and bool(meta.get("r2_purged_at"))
+
+
+def purged_message(asset):
+    """The sentence for any swept asset: a render or the uploaded media."""
+    if (asset or {}).get("kind") == "render":
+        return PURGED_RENDER_MESSAGE
+    return MEDIA_PURGED_MESSAGE
+
+
+def media_purged(original):
+    """The Studio's notice for an active original whose file was swept, else
+    None. A re-upload becomes the active original, which clears it."""
+    if not original or not is_purged(original):
+        return None
+    meta = original.get("meta") or {}
+    return {"purged_at": str(meta.get("r2_purged_at")),
+            "asset_id": original["id"],
+            "filename": meta.get("filename"),
+            "message": MEDIA_PURGED_MESSAGE}
