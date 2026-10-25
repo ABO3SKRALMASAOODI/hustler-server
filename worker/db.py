@@ -3171,6 +3171,22 @@ def resolve_pending_auto_resume(conn, project_id, session_id, user_id,
             return {"state": "consumed", "job_id": None}
 
     if gated:
+        # The account's free-trial project (owner decision D2): the saved
+        # brief runs as a trial turn on the Claude lane while the trial
+        # budget lasts, instead of meeting the wall.
+        import claude_lane
+        import first_cut
+        admission = first_cut.project_admission(conn, project_id)
+        if (admission and admission.get("kind") == "trial"
+                and claude_lane.available()
+                and first_cut.trial_requests_on(conn)
+                and first_cut.trial_remaining_usd(conn, user_id) > 0.002):
+            job_payload = dict(payload or {})
+            job_payload.update({"message_id": int(message_id),
+                                "auto_resumed": True, "trial_lane": True})
+            job_id = enqueue_job(
+                conn, project_id, user_id, "agent_turn", job_payload)
+            return {"state": "enqueued", "job_id": job_id, "trial": True}
         mark_message_subscribe_gated(conn, message_id)
         return {"state": "gated", "job_id": None}
 

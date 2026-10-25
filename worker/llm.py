@@ -68,7 +68,11 @@ def _note_error(e):
 
 
 def provider_cost_usd(usage, model):
-    """xAI invoice ticks, or Luna 6 cost from reported token categories."""
+    """xAI invoice ticks, Luna 6 cost from reported token categories, or the
+    exact Anthropic cost of a trial-lane call (claude_lane.usage_cost_usd)."""
+    if str(model or "").startswith("claude-") and usage is not None:
+        import claude_lane
+        return claude_lane.usage_cost_usd(usage, model)
     if model in ('gpt-6-luna', 'gpt-6-sol', 'gpt-6.1-sol') and usage is not None:
         import model_prices
         get = lambda obj, key, default=None: (obj.get(key, default)
@@ -476,7 +480,13 @@ def config_report():
 def vision_client_for(plan):
     """Paid visual reviews use the account’s contracted editing model.
     Free uploads retain their configured shared vision/fallback provider.
+    A free-trial turn (owner decision D2) looks through the same Claude lane
+    it edits on, never the paid OpenAI wallet.
     """
+    if plan == config.TRIAL_PLAN:
+        import claude_lane
+        if claude_lane.available():
+            return claude_lane.client(), config.TRIAL_AGENT_MODEL
     if paid_editor_plan(plan):
         return agent_client_for(True, plan)
     if shared_vision_configured():

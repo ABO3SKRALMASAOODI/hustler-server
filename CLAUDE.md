@@ -55,19 +55,19 @@ psql $DATABASE_URL -c "SQL"   # from the Render Shell tab, or use the external U
 Three pools, hidden from users — they see one balance (`credits_balance` = daily + bonus + monthly). Spend order: daily → bonus → monthly.
 
 - **Daily**: 20/day, resets daily, never accumulates.
-- **Bonus** (`credits.FREE_GRANT_CREDITS` = 50): one-time free grant at registration, never refilled.
+- **Bonus** (`credits.FREE_GRANT_CREDITS`): 0 since 19 Aug 2026 (no free credits; the free trial below is separate and runs on its own budget).
 - **Monthly**: set on subscribe, wiped+refreshed each renewal via Paddle webhook, clawed back to 0 on cancel/refund.
 
 Columns on `users`: `credits_daily`, `credits_bonus`, `credits_monthly`, `credits_balance`, `credits_daily_reset`, `credits_monthly_limit`. The worker charges after each agent turn (min 1 credit). `model_prices.USD_PER_CREDIT` = **$0.005** — a credit is billed at 2x model cost; that constant is the margin.
 
-| Plan | Price | Credits/mo |
+| Plan (shopfront, `plan_catalog.NEW_PLANS`) | Price | Credits/mo |
 |---|---|---|
-| Free | $0 | 50 one-time bonus only |
-| Creator (`ai`) | $15/mo, $150/yr | 1,000 |
-| Pro (`ai_pro`) | $30/mo, $300/yr | 2,000 |
-| Frontier (`ai_max`) | $50/mo, $500/yr | 5,000 — only plan on the `FRONTIER_*` model |
+| Free | $0 | 0 (free trial on the first project only, see below) |
+| Plus (`plus_2026`) | $15/mo, $150/yr | 500 — MCP only (owner decision D1, "Plus includes the Studio AI editor", is on hold) |
+| Pro (`pro_2026`) | $50/mo, $500/yr | 1,500 |
+| Max (`max_2026`) | $100/mo, $1,000/yr | 4,000 |
 
-Retired but grandfathered: Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,000 / Ace 30,000, and `mcp`. When changing plan credits, change **four places together**: `backend/routes/paddle.py` `PLANS`, `backend/routes/paddle_webhook.py` `PLAN_CREDITS`, `backend/credits.py` `PLAN_MONTHLY_LIMITS`, and all frontend/SEO copy quoting numbers. `worker/tests/test_model_prices.py` asserts ≥40% margin on every plan.
+MCP Connect (`mcp_connect`, $25, 1,500, MCP-only). Grandfathered: Creator/Pro/Frontier (`ai`/`ai_pro`/`ai_max`), Advanced, Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,000 / Ace 30,000, and `mcp`. When changing plan credits, change **four places together**: `backend/routes/paddle.py` `PLANS`, `backend/routes/paddle_webhook.py` `PLAN_CREDITS`, `backend/credits.py` `PLAN_MONTHLY_LIMITS`, and all frontend/SEO copy quoting numbers. `worker/tests/test_model_prices.py` asserts ≥40% margin on every plan.
 
 ### Trials & billing rules
 
@@ -77,7 +77,10 @@ Retired but grandfathered: Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,
 - Check `FAILING_STATUSES` before any credit grant — `subscription.updated` keeps arriving during dunning with the paid price id and would otherwise re-fund the pool.
 - Grace on failed payment is graded by history: never paid → pool lifted immediately; has paid → `PAID_GRACE_DAYS` (3). `lift_paid_credits` strips credits but keeps `subscription_id` so later retry events still find the user.
 - `billing_sync.py` reconciles against Paddle hourly (`POST /admin/billing/sync`); it never downgrades on silence, and a Paddle 404 goes to the admin contradiction list, not auto-action.
-- **Subscribe gate** (`routes/video._subscribe_gate_applies`): one free real edit, then the ask. After an unsubscribed account has a done `agent_turn` that moved the timeline past v1 (or a shorts run that rendered clips), the next prompt shows subscription cards — not a new trial. The first indexed turn still runs. Active trials pass because they are subscribed. **Plan gate** (`plan_gate.needs_plan`) remains the credits-empty wall. Both fail open on DB errors. Credit numbers always quoted from the server, never hardcoded in the frontend.
+- **Subscribe gate** (`routes/video._subscribe_gate_applies`): there is no free edit. An unsubscribed account's upload is walled (no index) and its requests get the plans reply; the refused request is kept on that reply (`meta.blocked_prompt`) and `POST /projects/<id>/replay-blocked` sends it (or starts the walled analysis / export) after checkout. **Plan gate** (`plan_gate.needs_plan`) remains the credits-empty wall. Both fail open on DB errors. Credit numbers always quoted from the server, never hardcoded in the frontend.
+- **Free trial** (`backend/free_trial.py`, owner decision D2, 25 Oct 2026 — ON HOLD, ships OFF): an account's first Studio upload (or website-tile URL) is admitted only while `app_kv.free_result` is on (default off), past `start_at` and within budget (`projects.meta.free_result`): it is analysed, gets the deterministic First cut (`worker/first_cut.py`, an `agent_turn` with `payload.first_cut`), and an unsubscribed account may edit that project on a per-account trial budget (`per_account_usd_cap`, $1.00) that runs ONLY on Claude through the Anthropic API (`worker/claude_lane.py`, `payload.trial_lane`, never the OpenAI wallet, never charged; spend is `result.trial_usd`). Export/download is the paywall (`_request_final` → 402). Kill switch: `app_kv` `free_result` = `{"on": false}`; it also stops by itself at `pool_usd_cap` / `monthly_usd_cap` / `daily_count_cap`. Track D's `trial_budgets` total (`claude_trial.account_status`) is the per-account meter once merged. MCP uploads are never admitted. The "your cut is ready" email is a draft only (`free_trial.ready_email`), not wired to a sender.
+- **Bounded requests** (P4): one Studio request gets at most `AGENT_REQUEST_MAX_PREVIEWS` (6) preview renders and `AGENT_REQUEST_MAX_S` (600 s) across its slices; then it delivers the best version with critic findings as `quality_status: "advisory"` (export open, "Improve it"). A partial/blocked request whose deliverable did not change is not charged.
+- **Plans:** `routes/video.MCP_ONLY_PLANS` = {`mcp_connect`, `plus_2026`} block the Studio AI editor (D1, Plus includes it, is on hold).
 - **Offers** (`backend/offers.py`): one 50%-off per account ever (`UNIQUE (user_id, kind)` on `user_offers` + `mint()` refuses after any `used_at`), monthly plans only, first period only, Frontier never discountable. `used_at` is set only by the Paddle webhook.
 
 ## Required production env (Render)
@@ -86,6 +89,11 @@ Retired but grandfathered: Plus 800 / Pro-legacy 2,400 / Ultra 5,000 / Titan 10,
   Paddle retries after configuration is restored.
 - **`PADDLE_API_KEY`** — required to verify the payer identity for first
   purchases; provider lookup failures return 503 and never trust browser data.
+- **`ANTHROPIC_API_KEY`** — the free-trial Claude lane. On Render it lets the
+  backend admit trial requests; the executors receive it from the GitHub
+  secret of the same name through `deploy-cloudflare-executor.yml` (optional:
+  without it trial requests meet the plans and the First cut's long-source
+  scout uses its deterministic pick).
 - **`SECRET_KEY`** — required for stable JWT/session signing and must contain
   at least 32 non-placeholder characters. If absent or weak, the process uses
   an unpredictable ephemeral key and `/healthz` stays degraded, so the release

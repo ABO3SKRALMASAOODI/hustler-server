@@ -83,6 +83,8 @@ interface Env {
   S3_REGION?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
+  // Free-trial Claude lane (owner decision D2, worker/claude_lane.py).
+  ANTHROPIC_API_KEY?: string;
   VISION_API_KEY?: string;
   VISION_BASE_URL?: string;
   VISION_MODEL?: string;
@@ -458,6 +460,7 @@ abstract class ValmeraContainer extends Container<Env> {
       S3_REGION: optional(this.env.S3_REGION) || "auto",
       OPENAI_API_KEY: optional(this.env.OPENAI_API_KEY),
       OPENAI_BASE_URL: optional(this.env.OPENAI_BASE_URL) || "https://api.openai.com/v1",
+      ANTHROPIC_API_KEY: optional(this.env.ANTHROPIC_API_KEY),
       VISION_API_KEY: optional(this.env.VISION_API_KEY),
       VISION_BASE_URL: optional(this.env.VISION_BASE_URL),
       VISION_MODEL: optional(this.env.VISION_MODEL),

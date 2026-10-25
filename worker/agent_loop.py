@@ -1815,6 +1815,16 @@ def _customer_verification_request(worker_db, session_id, message, continuation)
 def run_agent_job(worker_db, job):
     project = worker_db.run(dbx.get_project, job["project_id"])
     session_id = project["chat_session_id"]
+    if (job.get("payload") or {}).get("first_cut"):
+        # The automatic First cut (PLAN.md P2, owner decision D2): a fixed
+        # tool chain, no agent loop and no user message to answer.
+        import first_cut
+        original = worker_db.run(dbx.latest_asset, job["project_id"],
+                                 "original")
+        index_row = (original and original.get("sha256")
+                     and worker_db.run(dbx.get_index_by_sha,
+                                       original["sha256"])) or None
+        return first_cut.run(worker_db, job, project, index_row)
 
     def _get_msg(conn):
         with conn.cursor() as cur:
@@ -2050,6 +2060,39 @@ def run_agent_job(worker_db, job):
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).
     llm.set_turn_plan(plan if subscribed else "", project_id=ctx.project_id)
+    # A free-trial turn (owner decision D2): the account's trial project, on
+    # the Claude lane only (never the paid OpenAI wallet), bounded by what is
+    # left of the account's trial budget, never charged to the user. The
+    # spend is recorded on the terminal slice as trial_usd.
+    trial_turn = bool(payload.get("trial_lane")) and not subscribed
+    if trial_turn:
+        import claude_lane
+        import first_cut
+        lane = claude_lane.trial_lane()
+        try:
+            remaining = float(worker_db.run(first_cut.trial_remaining_usd,
+                                            job["user_id"]))
+        except Exception:
+            remaining = 0.0
+        if not lane or remaining <= 0.002:
+            worker_db.run(
+                dbx.add_message, session_id, "assistant",
+                ("The free trial edits on this project are used up. Choose a "
+                 "plan to keep editing and to download your video."
+                 if lane else
+                 "Editing on the free trial isn't available right now. Your "
+                 "video is saved; choose a plan to keep editing and to "
+                 "download it."),
+                {"kind": "subscription_required", "subscribe_required": True,
+                 "subscribe_gate": True, "trial_spent": bool(lane),
+                 "trial_lane_unavailable": not lane, "outcome": "blocked"})
+            return {"status": "blocked", "outcome": "blocked",
+                    "billable": False, "trial_spent": bool(lane)}
+        ctx.agent_lanes = [lane]
+        ctx.llm_client, ctx.agent_model = lane["client"], lane["model"]
+        ctx.credit_budget = model_prices.usd_to_credits(remaining)
+        ctx.trial_turn = True
+        llm.set_turn_plan(config.TRIAL_PLAN, project_id=ctx.project_id)
     if ctx.agent_model != config.AGENT_MODEL:
         print(f"[agent] job {job['id']}: plan {plan} -> {ctx.agent_model}",
               flush=True)
@@ -2138,9 +2181,17 @@ def run_agent_job(worker_db, job):
                 "off mid-work on our side. Everything you already changed "
                 "is saved in the project state — do NOT redo it; finish "
                 "what remains of the request and reply.]")
-        return _run_loop(ctx, worker_db, job, session_id, user_message,
-                         attachment_note,
-                         _cont=(continuation_state or None))
+        result = _run_loop(ctx, worker_db, job, session_id, user_message,
+                           attachment_note,
+                           _cont=(continuation_state or None))
+        if trial_turn and isinstance(result, dict):
+            result["billable"] = False
+            if result.get("status") != "continued":
+                # Cumulative over the logical turn (usage is carried across
+                # slices), so it is recorded once, on the terminal slice.
+                result["trial_usd"] = round(
+                    ctx.running_credits() * model_prices.USD_PER_CREDIT, 6)
+        return result
     except dbx.JobLeaseLost:
         raise  # A stopped/replaced execution must never create another slice.
     except agent_tools.AskUser:

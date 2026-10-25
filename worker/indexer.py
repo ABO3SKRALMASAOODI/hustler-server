@@ -1350,6 +1350,21 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         except Exception as e:
             print(f"[index] auto-resume check failed: {e}", flush=True)
 
+    # FIRST CUT (PLAN.md P2, owner decision D2): an admitted project's first
+    # analysis starts the automatic finished result, unless the user already
+    # sent a request (that request is the brief and runs instead).
+    first_cut_job = None
+    if session_id and user_id and not quiet and not pending \
+            and not awaiting_shorts_brief:
+        try:
+            import first_cut
+            admission = worker_db.run(first_cut.project_admission, project_id)
+            if admission and admission.get("first_cut"):
+                first_cut_job = worker_db.run(first_cut.enqueue, project_id,
+                                              user_id)
+        except Exception as e:
+            print(f"[index] first cut enqueue failed: {e}", flush=True)
+
     dur_txt = _dur_text(info["duration"])
     n_shots = len(index.get("shots", []))
     n_words = len(index.get("words", []))
@@ -1385,6 +1400,13 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
             summary += ("Tell me what kind of shorts you want — how many, "
                         "the moments or topics to prioritize, target length, "
                         "and the caption or pacing style.")
+    elif first_cut_job:
+        summary = (f"Your video is ready — {stats}. I'm making your first cut "
+                   "now: a finished vertical version you can watch here in "
+                   "about two minutes.")
+        if subscribe_gated:
+            summary += (" I found the request you sent too; to have it done "
+                        "as well, choose a plan.")
     else:
         summary = f"Your video is ready to edit — {stats}. "
         if pending:
@@ -1424,7 +1446,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         # The Shorts greeting is product state, not creative copy: it must
         # explicitly ask for the missing brief. A generic LLM greeting can
         # accidentally sound as though clip selection already started.
-        drafted = (None if awaiting_shorts_brief or subscribe_gated else
+        drafted = (None if awaiting_shorts_brief or subscribe_gated
+                   or first_cut_job else
                    _greet_via_llm(worker_db, project_id, stats, pending,
                                   out_of_credits, index))
         if drafted:
@@ -1439,6 +1462,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         if session_id:
             meta = {"kind": "index_ready", "auto_resume": bool(pending),
                     "llm_authored": bool(drafted)}
+            if first_cut_job:
+                meta["first_cut_job_id"] = first_cut_job
             if subscribe_gated:
                 meta.update(_subscribe_gate_meta())
             if asset_id is not None:

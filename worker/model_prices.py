@@ -71,6 +71,15 @@ MODEL_PRICES = {
     "gpt-6.1-sol": {"in": 2.0, "cached_in": 0.1, "cache_write_in": 2.5, "out": 10.0, "reasoning_separate": False},
     # https://developers.openai.com/api/docs/models/gpt-6-sol (2026-09-28).
     "gpt-6-sol": {"in": 2.0, "cached_in": 0.2, "cache_write_in": 2.5, "out": 10.0, "reasoning_separate": False},
+    # Claude Haiku 5.5, the free-trial lane (owner decision D2, 25 Oct 2026;
+    # worker/claude_lane.py). Anthropic first-party rates: $0.10 in / $0.50
+    # out per 1M for prompts of 100K tokens or fewer, 5x both above that;
+    # cache reads 0.1x and 5-minute cache writes 1.25x of the input rate.
+    "claude-haiku-5-5": {
+        "in": 0.10, "cached_in": 0.01, "cache_write_in": 0.125, "out": 0.50,
+        "long_context_tokens": 100000, "long_context_multiplier": 5,
+        "reasoning_separate": False,
+    },
     # https://developers.openai.com/api/docs/models/gpt-6-luna (2026-09-23).
     # Cache writes replace ordinary input pricing; they are not additive.
     "gpt-6-luna": {

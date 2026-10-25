@@ -2,6 +2,11 @@ psycopg2-binary==2.9.10
 boto3==1.35.99
 pydantic==2.9.2
 openai==1.59.9
+# The free-trial Claude lane (worker/claude_lane.py, owner decision D2): the
+# official Anthropic SDK, 1.x (httpx2-based, so it does not touch the openai
+# SDK's httpx). 1.13.0 (released 2026-10-09) takes the top-level
+# cache_control, thinking and output_config parameters the lane sends.
+anthropic==1.13.0
 faster-whisper==1.1.1
 scenedetect==0.6.4
 opencv-python-headless==4.10.0.84

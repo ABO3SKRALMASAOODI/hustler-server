@@ -218,6 +218,27 @@ FRONTIER_API_KEY = (
 # later is one edit and no new branch.
 FRONTIER_PLANS = {"ai_max"}
 
+# THE FREE-TRIAL LANE (owner decision D2, 25 Oct 2026): trial model usage runs
+# on Claude through the Anthropic API, funded by the owner's Anthropic credit,
+# never on the paid OpenAI wallet (worker/claude_lane.py). Without the key the
+# lane is off: trial accounts still get the deterministic First cut, and their
+# typed requests meet the plans instead of running on another wallet.
+# The model name must be in model_prices.MODEL_PRICES.
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+TRIAL_AGENT_MODEL = os.getenv("TRIAL_AGENT_MODEL", "claude-haiku-5-5").strip()
+TRIAL_AGENT_EFFORT = os.getenv("TRIAL_AGENT_EFFORT", "medium").strip()
+# The plan name the trial publishes to the thread (llm.set_turn_plan) so the
+# vision helpers and critics inside a trial turn use the same lane.
+TRIAL_PLAN = "trial"
+# First cut (PLAN.md P2 caps, C2.4): at most this much wall time and these
+# many renders, and at most the first FIRST_CUT_MAX_SOURCE_S of a long source
+# are read by its one scout call. Sources up to FIRST_CUT_SHORT_SOURCE_S are
+# finished whole; longer ones become their best 20-60 s story.
+FIRST_CUT_MAX_S = float(os.getenv("FIRST_CUT_MAX_S", "480"))
+FIRST_CUT_MAX_RENDERS = int(os.getenv("FIRST_CUT_MAX_RENDERS", "6"))
+FIRST_CUT_MAX_SOURCE_S = float(os.getenv("FIRST_CUT_MAX_SOURCE_S", "1800"))
+FIRST_CUT_SHORT_SOURCE_S = float(os.getenv("FIRST_CUT_SHORT_SOURCE_S", "90"))
+
 # All subscribing editors use Luna on the standard OpenAI client. Keep the
 # rollback explicit: stale EDITOR_MODEL / PAID_* / FRONTIER_* environment
 # settings must not silently put paid editing back onto Grok.
