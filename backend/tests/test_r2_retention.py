@@ -28,7 +28,8 @@ def test_the_policy_is_the_owners():
     assert set(r2.SOURCE_KINDS) == {"original", "video_clip", "proxy",
                                     "audio"}
     assert r2.RENDER_KINDS == ("render",)
-    assert r2.DEFAULT_MODE in r2.MODES
+    # live since 25 Oct 2026, after two matching dry runs (D4)
+    assert r2.DEFAULT_MODE == "live"
 
 
 def test_the_selection_protects_every_customer_trace():

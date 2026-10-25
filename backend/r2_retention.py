@@ -30,9 +30,12 @@ WHAT "NEVER TOUCH" MEANS HERE, conservatively:
     keeps the object.
   * Rows already purged (``meta.r2_purged_at``) are skipped.
 
-MODES (env R2_RETENTION_MODE): ``off``; ``dry_run`` (the default) selects
-and writes the manifest (local file in the CLI, R2 + app_kv when scheduled)
-and deletes nothing; ``live`` deletes the selected objects in batches of
+MODES (env R2_RETENTION_MODE): ``off``; ``dry_run`` selects and writes the
+manifest (local file in the CLI, R2 + app_kv when scheduled) and deletes
+nothing; ``live`` (the default since 25 Oct 2026, after the read-only dry
+run and the scheduled dry run selected the same 683 GB in 7,750 keys,
+manifest retention/manifests/2026-10-25T113926-dry_run.json.gz) deletes
+the selected objects in batches of
 1,000, marks their asset rows ``meta.r2_purged_at`` (the files are gone, the
 row still describes them) and writes the manifest of deleted keys to R2
 (`retention/manifests/`) and a summary to app_kv `r2_retention_last`.
@@ -68,7 +71,7 @@ KV_KEY = "r2_retention_last"
 LOCK_ID = 918273651
 BATCH = 1000
 MODES = ("off", "dry_run", "live")
-DEFAULT_MODE = "dry_run"
+DEFAULT_MODE = "live"
 
 
 def mode():
