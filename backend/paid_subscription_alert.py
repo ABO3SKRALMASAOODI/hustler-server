@@ -115,6 +115,56 @@ def _user_facts(conn, user_id):
     return {"email": row[0], "created_at": row[1], "auth_provider": row[2]}
 
 
+def _journey_facts(conn, user_id):
+    """What the new payer was making and whether they had seen a finished
+    result of their own before paying (strategy 1025 §4.4). Best effort: an
+    error here must never cost the alert."""
+    if not user_id:
+        return {}
+    cur = None
+    savepoint = False
+    try:
+        cur = conn.cursor()
+        # A savepoint, so a failed lookup never rolls back the webhook's
+        # own uncommitted work.
+        cur.execute("SAVEPOINT paid_alert_journey")
+        savepoint = True
+        cur.execute("""
+            SELECT (SELECT m.content FROM projects p
+                      JOIN chat_messages m ON m.session_id = p.chat_session_id
+                     WHERE p.user_id = %s AND m.role = 'user'
+                     ORDER BY m.id LIMIT 1) AS first_prompt,
+                   EXISTS (SELECT 1 FROM client_events ce
+                            WHERE ce.user_id = %s
+                              AND ce.kind IN ('download_triggered',
+                                              'mcp_export_delivered',
+                                              'free_result_delivered',
+                                              'first_cut_delivered'))
+                       AS saw_result""", (user_id, user_id))
+        row = cur.fetchone()
+        cur.execute("RELEASE SAVEPOINT paid_alert_journey")
+        if not row:
+            return {}
+        if not isinstance(row, dict):
+            row = {"first_prompt": row[0], "saw_result": row[1]}
+        prompt = " ".join(str(row.get("first_prompt") or "").split())
+        return {"first_prompt": prompt[:200] or None,
+                "saw_result": bool(row.get("saw_result"))}
+    except Exception:
+        if savepoint and cur is not None:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT paid_alert_journey")
+            except Exception:
+                pass
+        return {}
+    finally:
+        if cur is not None:
+            try:
+                cur.close()
+            except Exception:
+                pass
+
+
 def _fmt_time(value):
     if not value:
         return None
@@ -153,6 +203,10 @@ def _alert_content(user_id, plan, period, cents, currency, data, event_type,
         ("Paid at", _safe(_fmt_time(data.get("billed_at") or data.get("updated_at")
                                       or data.get("created_at")))),
         ("Signup method", _safe(facts.get("auth_provider"))),
+        ("First prompt", _safe(facts.get("first_prompt") or "none yet")),
+        ("Result before paying", _safe(
+            None if facts.get("saw_result") is None
+            else ("yes" if facts["saw_result"] else "no"))),
         ("Signed up", _safe(_fmt_time(facts.get("created_at")))),
         ("Subscription", _safe(data.get("subscription_id"))),
         ("Transaction", _safe(data.get("id"))),
@@ -182,6 +236,7 @@ def enqueue(conn, user_id, plan, data, event_type):
 
         period = _billing_period(data)
         facts = _user_facts(conn, user_id)
+        facts.update(_journey_facts(conn, user_id))
         subject, content = _alert_content(
             user_id, plan, period, cents, currency, data, event_type, facts)
         cur = conn.cursor()

@@ -192,6 +192,93 @@ def transaction_amount(data):
                    or data.get('currency_code') or 'USD')
 
 
+# Paddle adjustment actions that move money, and how the ledger records them.
+# A refund lands only once Paddle approves it; until then it is a 0-cent row
+# (visible, but no money moved). A chargeback debits at once; its reversal
+# credits the money back. Account credits are not money and stay out.
+ADJUSTMENT_LEDGER = {
+    "refund": "refunded",
+    "chargeback": "chargeback",
+    "chargeback_reverse": "chargeback_reversed",
+    "chargeback_warning": "chargeback_warning",
+}
+
+
+def adjustment_entry(data):
+    """(status, amount_cents, currency) for a Paddle adjustment, or None.
+
+    Negative cents are money returned to the customer; refunds and
+    chargebacks keep the defs.success() rule (status completed/paid, amount
+    > 0) untouched, so they never count as revenue."""
+    action = (data.get("action") or "").lower()
+    status = ADJUSTMENT_LEDGER.get(action)
+    if not status:
+        return None
+    totals = data.get("totals") or {}
+    try:
+        cents = abs(int(float(totals.get("total") or totals.get(
+            "grand_total") or 0)))
+    except (TypeError, ValueError):
+        cents = 0
+    currency = (totals.get("currency_code") or data.get("currency_code")
+                or "USD")
+    state = (data.get("status") or "").lower()
+    if action == "refund":
+        if state != "approved":
+            return f"refund_{state or 'pending'}"[:40], 0, currency
+        return status, -cents, currency
+    if action == "chargeback":
+        return status, -cents, currency
+    if action == "chargeback_reverse":
+        return status, cents, currency
+    return status, 0, currency                     # a warning moves nothing
+
+
+def record_adjustment(conn, user_id, data, commit=True):
+    """Ledger one Paddle refund/chargeback adjustment in `payments`.
+
+    Keyed by the adjustment id (`adj_…`), upserted so Paddle's
+    pending → approved transition updates the same row. Never raises: the
+    webhook's entitlement handling must not depend on bookkeeping."""
+    try:
+        entry = adjustment_entry(data or {})
+        adj_id = (data or {}).get("id")
+        if not entry or not adj_id or not columns_ready(conn):
+            return False
+        status, cents, currency = entry
+        occurred = (_naive_utc(data.get("updated_at"))
+                    or _naive_utc(data.get("created_at")))
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO payments (user_id, transaction_id, subscription_id,
+                                  plan, status, amount_cents, currency,
+                                  origin, error_code, occurred_at)
+            VALUES (%s, %s, %s,
+                    (SELECT plan FROM payments WHERE transaction_id = %s
+                      LIMIT 1),
+                    %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (transaction_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                amount_cents = EXCLUDED.amount_cents,
+                currency = EXCLUDED.currency,
+                error_code = EXCLUDED.error_code,
+                occurred_at = EXCLUDED.occurred_at,
+                updated_at = NOW()""",
+                    (user_id, adj_id, data.get("subscription_id"),
+                     data.get("transaction_id"), status, cents, currency,
+                     "adjustment", (data.get("reason") or None) and
+                     str(data.get("reason"))[:120], occurred))
+        cur.close()
+        if commit:
+            conn.commit()
+        return True
+    except Exception as e:                                  # pragma: no cover
+        _safe_rollback(conn)
+        print(f"⚠️ [billing] adjustment {(data or {}).get('id')} not "
+              f"ledgered: {e}", flush=True)
+        return False
+
+
 def payment_error_code(data):
     """Why the card was refused, from the transaction's payment attempts.
 

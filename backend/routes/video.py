@@ -7339,3 +7339,32 @@ def asset_url(user_id, asset_id):
             user_id, a["project_id"], "download_url_ready", asset_id=asset_id,
             detail={"asset_kind": a["kind"]}, origin="server")
     return jsonify({"url": url, "expires_in": storage.PRESIGN_GET_EXPIRY})
+
+
+# ------------------------------------------------------------------ #
+#  Health cockpit instrumentation (strategy 1025 §4.6)                #
+# ------------------------------------------------------------------ #
+# Kept at the end of the module so the gate and the event list above stay
+# exactly as other changes leave them.
+CLIENT_EVENT_KINDS.update({
+    # The Studio refused an MCP-only plan (403 mcp_only). Server-recorded:
+    # until now these refusals were invisible, so a wrong-plan buyer looked
+    # like someone who simply never tried.
+    "mcp_only_refused",
+    # An AI app was handed the download link of a finished export
+    # (MCP download_url kind=final): the MCP twin of download_triggered.
+    "mcp_export_delivered",
+    # The optional "what didn't work?" answer on /cancel.
+    "cancel_feedback",
+})
+
+_studio_ai_gate_unrecorded = _studio_ai_gate
+
+
+def _studio_ai_gate(cur, user_id):
+    """_studio_ai_gate, plus one mcp_only_refused event per refusal."""
+    refused = _studio_ai_gate_unrecorded(cur, user_id)
+    if refused is not None:
+        record_client_event(user_id, None, "mcp_only_refused",
+                            detail={"surface": "studio"}, origin="server")
+    return refused

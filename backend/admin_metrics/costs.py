@@ -140,16 +140,41 @@ def compute(cur):
     cash_30d = defs.usd((cur.fetchone() or {}).get("cents"))
 
     model_30d = sum(float(r["est_cost"] or 0) for r in by_model)
-    executor_30d = sum(compute_split.values())
+    ceiling_30d = sum(compute_split.values())
     storage_bytes = sum(storage_split.values())
     storage_gb = storage_bytes / 1_000_000_000.0
     storage_month = storage_gb * storage_rate
+    # The executor fleet as Cloudflare bills it (shard-union model × 1.43,
+    # within 3% of the dashboard), not the per-job ceiling, which left out
+    # idle tails, synchronous calls and Durable Objects and read ~2.7x low.
+    from admin_metrics import infra_cost
+    try:
+        infra = infra_cost.report(cur)
+    except Exception:                     # the model never takes costs down
+        infra = None
+    if infra:
+        executor_30d = float(infra["last_30d_compute_usd"])
+        compute_split = {True: float(infra["last_30d_owner_usd"]),
+                         False: float(infra["last_30d_customers_usd"])}
+        storage_gb = float((infra.get("r2") or {}).get("total_gb")
+                           or storage_gb)
+        storage_bytes = int(storage_gb * 1e9)
+        storage_month = max(0.0, storage_gb - infra_cost.R2_FREE_GB) \
+            * storage_rate
+    else:
+        executor_30d = ceiling_30d
     total_30d = model_30d + executor_30d + storage_month + fixed_usd
     cash_margin = ((cash_30d - total_30d) / cash_30d * 100.0
                    if cash_30d > 0 else None)
 
     owner_storage = storage_split.get(True, 0) / 1e9 * storage_rate
     customer_storage = storage_split.get(False, 0) / 1e9 * storage_rate
+    pops = ((infra or {}).get("r2") or {}).get("by_population") or {}
+    if pops:
+        # Distinct live keys (rows share keys), as R2 stores them.
+        owner_gb = float((pops.get("owner") or {}).get("gb") or 0)
+        owner_storage = owner_gb * storage_rate
+        customer_storage = max(0.0, storage_gb - owner_gb) * storage_rate
     customers_cost = (model_split.get(False, 0) + compute_split.get(False, 0)
                       + customer_storage + fixed_usd)
     margin_excl = ((cash_30d - customers_cost) / cash_30d * 100.0
@@ -175,7 +200,8 @@ def compute(cur):
         "economics_30d": {
             "cash_revenue_usd": round(cash_30d, 2),
             "model_usd": round(model_30d, 4),
-            "executor_ceiling_usd": round(executor_30d, 4),
+            "executor_ceiling_usd": round(ceiling_30d, 4),
+            "infra_modeled_usd": (round(executor_30d, 2) if infra else None),
             "storage_bytes": storage_bytes,
             "storage_gb": round(storage_gb, 3),
             "storage_usd": round(storage_month, 4),
@@ -186,9 +212,11 @@ def compute(cur):
             "cash_gross_margin_pct": (round(cash_margin, 1)
                                       if cash_margin is not None else None),
             "note": "Cash revenue is successful payments in the last 30 days "
-                    "(your and test accounts excluded). Executor is the "
-                    "conservative job telemetry ceiling. Database storage "
-                    "assumes 5 GB at $0.30/GB.",
+                    "(your and test accounts excluded). Editing servers are "
+                    "the Cloudflare shard-union model × 1.43, calibrated to "
+                    "the dashboard (the old per-job ceiling is shown beside "
+                    "it). R2 is stored live keys × $0.015/GB-month after 10 "
+                    "GB free. Database storage assumes 5 GB at $0.30/GB.",
         },
         "split": {
             "model_customers_usd": round(model_split.get(False, 0), 4),
@@ -200,6 +228,7 @@ def compute(cur):
             "margin_excl_owner_pct": (round(margin_excl, 1)
                                       if margin_excl is not None else None),
         },
+        "infra": infra,
         "plan_scenarios": plan_scenarios,
         "daily": [_day(r) for r in daily],
         "by_purpose": [{**r, "est_cost": round(float(r["est_cost"] or 0), 4)}
@@ -220,6 +249,7 @@ def revenue_costs(report):
             "model_customers_usd": round(s.get("model_customers_usd") or 0, 2),
             "model_owner_usd": round(s.get("model_owner_usd") or 0, 2),
             "compute_ceiling_usd": round(e.get("executor_ceiling_usd") or 0, 2),
+            "compute_modeled_usd": e.get("infra_modeled_usd"),
             "storage_customers_usd_month":
                 round(s.get("storage_customers_usd_month") or 0, 2),
             "storage_owner_usd_month":

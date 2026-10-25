@@ -124,16 +124,26 @@ def test_billing_period_comes_from_paddle_price_not_client_hint():
 
 
 def test_enqueue_is_one_atomic_insert_with_both_dedupe_dimensions():
-    # Cursor 1: user facts. Cursor 2: INSERT ... RETURNING.
+    # Cursor 1: user facts. Cursor 2: first prompt and result-before-paying
+    # (inside a savepoint). Cursor 3: INSERT ... RETURNING.
     conn = Conn(
         [("buyer@example.com", None, "google")],
+        [("make a wedding  highlight reel", False)],
         [("sub:sub_123",)],
     )
     key = alerts.enqueue(conn, 7, "ai_pro", _transaction(),
                          "transaction.completed")
     assert key == "sub:sub_123"
     assert conn.committed == 1
-    sql, params = conn.used[1].executed[0]
+    assert conn.rolled_back == 0
+    journey = [q for q, _ in conn.used[1].executed]
+    assert journey[0] == "SAVEPOINT paid_alert_journey"
+    assert journey[-1] == "RELEASE SAVEPOINT paid_alert_journey"
+    sql, params = conn.used[2].executed[0]
+    html_body = params[11]
+    assert "First prompt" in html_body
+    assert "make a wedding highlight reel" in html_body
+    assert "Result before paying" in html_body and ">no<" in html_body
     assert "INSERT INTO founder_subscription_alerts" in sql
     assert "ON CONFLICT DO NOTHING" in sql
     assert params[0] == "sub:sub_123"
@@ -148,10 +158,12 @@ def test_paid_then_completed_or_a_renewal_does_not_kick_a_second_send(monkeypatc
     monkeypatch.setattr(alerts, "kick", kicked.append)
 
     paid = Conn()
-    first = Conn([("buyer@example.com", None, "email")],
+    first = Conn([("buyer@example.com", None, "email")], [(None, False)],
                  [("sub:sub_123",)])
-    duplicate = Conn([("buyer@example.com", None, "email")], [])
-    renewal = Conn([("buyer@example.com", None, "email")], [])
+    duplicate = Conn([("buyer@example.com", None, "email")], [(None, False)],
+                     [])
+    renewal = Conn([("buyer@example.com", None, "email")], [(None, False)],
+                   [])
 
     # Paddle emits paid before completed. It is deliberately ignored; the
     # final completed event is the one that creates the durable alert.
@@ -653,3 +665,20 @@ def test_migration_suppresses_existing_subscriptions_and_enforces_uniqueness():
         "022_founder_alert_subscription_required.sql")
     required_sql = open(required_path, encoding="utf-8").read()
     assert "ALTER COLUMN subscription_id SET NOT NULL" in required_sql
+
+
+def test_a_failed_journey_lookup_never_rolls_back_the_webhook():
+    class Boom(Cursor):
+        def execute(self, sql, params=None):
+            super().execute(sql, params)
+            if sql.lstrip().startswith("SELECT (SELECT m.content"):
+                raise RuntimeError("lookup failed")
+    conn = Conn([("buyer@example.com", None, "google")], [],
+                [("sub:sub_123",)])
+    conn.cursors[1] = Boom()
+    key = alerts.enqueue(conn, 7, "ai_pro", _transaction(),
+                         "transaction.completed")
+    assert key == "sub:sub_123"
+    assert conn.rolled_back == 0
+    assert conn.used[1].executed[-1][0] == \
+        "ROLLBACK TO SAVEPOINT paid_alert_journey"

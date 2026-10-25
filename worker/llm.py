@@ -17,6 +17,7 @@ import mimetypes
 import math
 import re
 import threading
+import time
 from types import SimpleNamespace
 
 import requests
@@ -65,6 +66,45 @@ def last_error():
 
 def _note_error(e):
     _tls.last_error = f"{type(e).__name__}: {str(e)[:400]}"
+    note_quota_error(e)
+
+
+# ── R5 (strategy 1025): the LLM balance watch ────────────────────────────
+_quota_lock = threading.Lock()
+_quota_last = {}
+QUOTA_ALARM_THROTTLE_S = 600
+
+
+def note_quota_error(exc, model=None, base_url=None):
+    """A provider wallet is empty (HTTP 429 insufficient_quota and its
+    cousins). Tell the owner at once, through the cockpit's alert tick: on
+    26 Sep six paying turns failed this way before anyone knew. Throttled
+    per provider per process; never raises. Returns whether it was one."""
+    if not is_quota_error(exc):
+        return False
+    host = _host(base_url or config.OPENAI_BASE_URL) or "provider"
+    now = time.monotonic()
+    with _quota_lock:
+        if now - _quota_last.get(host, -1e9) < QUOTA_ALARM_THROTTLE_S:
+            return True
+        _quota_last[host] = now
+    failover = (f"paying users fail over to {_host(config.PAID_FAILOVER_BASE_URL)}"
+                if paid_failover_available() else
+                "no second provider is configured for paying users")
+    try:
+        import db as dbx
+        probe = dbx.Db()
+        try:
+            probe.run(dbx.note_owner_alarm, "llm_balance",
+                      f"{host} returned insufficient credit for "
+                      f"{model or 'a model call'}: {str(exc)[:200]} "
+                      f"({failover}). Top up the provider.",
+                      provider=host, model=model)
+        finally:
+            probe.reset()
+    except Exception as e:
+        print(f"[llm] quota alarm not recorded ({str(e)[:120]})", flush=True)
+    return True
 
 
 def provider_cost_usd(usage, model):
@@ -233,13 +273,45 @@ def is_frontier(plan):
     return (plan or "") in config.FRONTIER_PLANS
 
 
+_paid_failover_client = None
+
+
+def paid_failover_available():
+    return bool(config.PAID_FAILOVER_BASE_URL and config.PAID_FAILOVER_API_KEY
+                and config.PAID_FAILOVER_MODEL)
+
+
+def paid_failover_client():
+    global _paid_failover_client
+    if _paid_failover_client is None:
+        _paid_failover_client = OpenAI(
+            base_url=config.PAID_FAILOVER_BASE_URL,
+            api_key=config.PAID_FAILOVER_API_KEY,
+            timeout=config.LLM_TIMEOUT_S, max_retries=config.LLM_MAX_RETRIES)
+    return _paid_failover_client
+
+
 def paid_editor_lanes(plan=None):
-    """New Advanced contracts use Sol; all grandfathered routes stay unchanged."""
+    """New Advanced contracts use Sol; all grandfathered routes stay unchanged.
+
+    R5: a configured, separately funded failover lane follows the contracted
+    one, so a paying user's turn finishes when the primary wallet is empty
+    (the agent loop switches lanes only on insufficient_quota)."""
     if not config.OPENAI_API_KEY:
         return []
-    return [dict(name="standard", client=client(), model=("gpt-6.1-sol" if plan in {"advanced", "pro_2026", "max_2026"} else config.EDITOR_MODEL),
-                 base_url=config.OPENAI_BASE_URL,
-                 api_key=config.OPENAI_API_KEY)]
+    lanes = [dict(name="standard", client=client(), model=("gpt-6.1-sol" if plan in {"advanced", "pro_2026", "max_2026"} else config.EDITOR_MODEL),
+                  base_url=config.OPENAI_BASE_URL,
+                  api_key=config.OPENAI_API_KEY)]
+    if paid_failover_available() and (
+            config.PAID_FAILOVER_BASE_URL.rstrip("/"),
+            config.PAID_FAILOVER_API_KEY) != (
+            str(config.OPENAI_BASE_URL or "").rstrip("/"),
+            config.OPENAI_API_KEY):
+        lanes.append(dict(name="paid_failover", client=paid_failover_client(),
+                          model=config.PAID_FAILOVER_MODEL,
+                          base_url=config.PAID_FAILOVER_BASE_URL,
+                          api_key=config.PAID_FAILOVER_API_KEY))
+    return lanes
 
 
 def editor_reasoning_effort(plan, iteration=0):

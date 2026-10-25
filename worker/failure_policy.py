@@ -247,3 +247,75 @@ def decision_for(error, job_type=None):
             int(getattr(error, "max_attempts", 0)),
             bool(getattr(error, "agent_repairable", False)))
     return classify(error, job_type)
+
+
+# ── Infrastructure failures the user never sees (strategy 1025 R1) ────────
+# Kinds and texts that describe OUR fleet, not the customer's edit: nothing
+# about the job is wrong, so the honest move is to try again quietly for a
+# while (on a new claim: a different shard, a fresh container) and only then
+# say, in plain words, that the problem is on our side.
+INFRA_KINDS = frozenset({
+    "transient_infrastructure", "provider_capacity_unavailable",
+    "executor_unavailable", "remote_ownership_unconfirmed",
+    "provider_rollout_pending", "provider_start_abandoned", "stalled_io",
+})
+_INFRA_TEXT = (
+    "lost the executor", "container exited", "readiness mismatch",
+    "sidecar is shutting down", "source version does not match",
+    "deploy in progress", "switching to a new release", "shard is busy",
+    "no remote executor is configured", "modal or cloudflare is required",
+    "could not be recovered", "executor is draining",
+)
+# Re-running these from scratch is idempotent: each writes one artifact for
+# one EDL version. Mutating jobs (agent turns, MCP edits, shorts plans) keep
+# their own retry rules.
+INFRA_RETRY_TYPES = frozenset({"index", "preview", "preview_check", "final",
+                               "filmstrip"})
+INFRA_RETRY_WINDOW_S = 600
+INFRA_RETRY_MAX = 3
+
+
+def is_infrastructure(error, decision=None):
+    decision = decision or decision_for(error)
+    if decision.kind in INFRA_KINDS:
+        return True
+    text = str(error).lower()
+    return decision.kind == "unknown" and any(t in text for t in _INFRA_TEXT)
+
+
+def infra_retry_delay(job, now_ts, attempt):
+    """Seconds to wait before the next quiet retry, or None when the job is
+    outside its 10-minute window (or out of retries)."""
+    if str(job.get("type") or "") not in INFRA_RETRY_TYPES:
+        return None
+    if attempt >= INFRA_RETRY_MAX:
+        return None
+    created = job.get("created_at")
+    if created is None:
+        return None
+    try:
+        age = now_ts - created.timestamp()
+    except AttributeError:
+        return None
+    remaining = INFRA_RETRY_WINDOW_S - age
+    if remaining <= 0:
+        return None
+    return max(5.0, min(remaining, 15.0 * (2 ** attempt), 60.0))
+
+
+def user_reason(error, decision=None):
+    """The words a customer may see for a failure. Never the raw text: raw
+    executor, ffmpeg and provider messages reached 16 of 28 paying
+    customers (95 messages) before this existed."""
+    decision = decision or decision_for(error)
+    if decision.kind == "input_limit_exceeded":
+        return "the video is longer than this plan can process"
+    if decision.kind == "invalid_media":
+        return "the file has no video track we could read"
+    if decision.kind in ("invalid_edl", "deterministic_input",
+                         "deterministic_ffmpeg"):
+        return "this version could not be rendered as it stands"
+    if decision.kind in ("render_budget_exceeded", "executor_memory",
+                         "executor_capacity"):
+        return "this version needs more processing than one render allows"
+    return "a problem on our side, not with your video"

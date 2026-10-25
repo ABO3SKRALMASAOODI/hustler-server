@@ -650,6 +650,9 @@ def handle_webhook():
         _record_discount_use(user_id, data)
 
     elif event_type in REFUND_EVENTS:
+        # Refunds and chargebacks are money: ledger them as negative rows
+        # first (strategy 1025 §4.6), whatever the entitlement does next.
+        billing.record_adjustment(get_db(), user_id, data)
         if (data.get('action') or '').lower() != 'refund':
             return 'OK', 200            # credit/chargeback adjustments ignored
         update_user_subscription_status(user_id, False, None, None, 'free', 0)

@@ -164,6 +164,13 @@ VISION_API_KEY = (
 
 # Historical provider settings remain readable for compatibility. Editing
 # no longer uses these xAI credentials, including as an automatic fallback.
+# R5 (strategy 1025): an explicitly funded second provider that paying
+# users' turns fail over to when the primary wallet returns
+# insufficient_quota. All three must be set; nothing is ever inferred from
+# another lane's key (the old xAI wallets are not spending fallbacks).
+PAID_FAILOVER_BASE_URL = os.getenv("PAID_FAILOVER_BASE_URL", "").strip()
+PAID_FAILOVER_API_KEY = os.getenv("PAID_FAILOVER_API_KEY", "").strip()
+PAID_FAILOVER_MODEL = os.getenv("PAID_FAILOVER_MODEL", "").strip()
 PAID_BASE_URL = os.getenv("PAID_BASE_URL", "https://api.x.ai/v1").strip()
 PAID_AGENT_MODEL = os.getenv("PAID_AGENT_MODEL", "grok-4.5").strip()
 PAID_API_KEY = (

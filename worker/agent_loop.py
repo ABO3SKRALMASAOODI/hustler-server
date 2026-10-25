@@ -4784,7 +4784,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             def _switch_quota_lane(exc):
                 nonlocal lane_index, client, step_client, model
                 nonlocal active_base_url, active_api_key, kw, extra
-                if not llm.is_quota_error(exc):
+                if not llm.note_quota_error(exc, model, active_base_url):
                     return False
                 if lane_index + 1 >= len(lanes):
                     return False

@@ -303,6 +303,14 @@ def create_app():
     except Exception as e:
         app.logger.error("could not start paid alert scheduler: %s", e)
 
+    # Health cockpit: owner alerts and the 08:00 (+04:00) digest, to the
+    # admin inbox only (strategy 1025 §4.4-4.5). One worker scans per tick.
+    try:
+        from cockpit_alerts import start_scheduler as start_cockpit_alerts
+        start_cockpit_alerts(app)
+    except Exception as e:
+        app.logger.error("could not start cockpit alert scheduler: %s", e)
+
     return app
 
 

@@ -201,6 +201,17 @@ def ground_truth(dsn):
             cur.execute("""SELECT COUNT(*) AS n FROM page_visits
                             WHERE visited_at >= NOW() - INTERVAL '2 days'""")
             out["page_visits_48h"] = cur.fetchone()["n"]
+            # Health board ground truth, straight from Paddle's snapshots:
+            # subscriptions that will charge again, and past-due ones.
+            cur.execute("""SELECT
+                  COUNT(*) FILTER (WHERE status = 'active'
+                                   AND scheduled_action IS NULL
+                                   AND next_billed_at IS NOT NULL) AS renewing,
+                  COUNT(*) FILTER (WHERE status = 'past_due') AS past_due
+                  FROM admin_subscription_snapshots""")
+            row = cur.fetchone()
+            out["renewing_subscriptions"] = row["renewing"]
+            out["past_due_subscriptions"] = row["past_due"]
     except Exception as e:                       # truth is advisory
         out["error"] = f"{type(e).__name__}: {str(e)[:160]}"
     finally:
@@ -318,6 +329,101 @@ def check_dict(b, t):
     return f"{len(b)} keys"
 
 
+# PLAN.md §4.3 (strategy 1025, written 25 Oct 2026 09:00 UTC): the accounts
+# each list-type flag named that morning. Printed beside what the board
+# flags now; states move (a card retry, a cancellation), so a difference is
+# reported, and only a board that finds none of them fails.
+PLAN_FLAGS_1025 = {
+    "CHARGED_NO_USE": {1532, 1103, 1931},
+    "CHARGE_SOON_NO_USE": {2007},
+    "RENEWAL_OFF_STILL_ACTIVE": {1970, 2097, 2123, 2398, 2439},
+    "UNFINISHED_CHARGED": {1970},
+    "WRONG_PLAN": {2092, 2100, 2380, 2439},
+    "STUCK_SETUP": {2484, 2439},
+    "PAST_DUE_DORMANT": {1567, 1621, 1924},
+    "REPEAT_ASK": {1799, 1621},
+}
+
+
+def check_health_board(b, t):
+    strip = b.get("strip") or {}
+    rows = b.get("rows")
+    need(isinstance(rows, list), "no rows")
+    if t.get("ever_paid"):
+        need(len(rows) >= t["ever_paid"] * 0.8,
+             f"{len(rows)} rows for {t['ever_paid']} payers")
+    committed = _get(strip, "committed_mrr", "value")
+    engaged = _get(strip, "engaged_committed_mrr", "value")
+    paddle = _get(strip, "paddle_active_mrr", "value")
+    need(_num(committed) and _num(engaged) and _num(paddle),
+         f"MRR numbers missing: {committed!r} {engaged!r} {paddle!r}")
+    need(0 <= engaged <= committed <= paddle,
+         f"MRR order wrong: engaged {engaged} committed {committed} "
+         f"paddle {paddle}")
+    if t.get("renewing_subscriptions") is not None:
+        need(_get(strip, "committed_mrr", "subscriptions") ==
+             t["renewing_subscriptions"],
+             f"committed MRR counts {_get(strip, 'committed_mrr', 'subscriptions')}"
+             f" subscriptions, snapshots say {t['renewing_subscriptions']}")
+    by_id = {r["id"]: r for r in rows}
+    flags = {f["key"]: set(f["ids"]) for f in b.get("flags") or []}
+    for key, ids in flags.items():
+        need(ids <= set(by_id), f"{key} flags ids with no row")
+    for uid in flags.get("CHARGED_NO_USE", ()):
+        need(by_id[uid]["charges"] >= 2, f"CHARGED_NO_USE {uid}: 1 charge")
+    for uid in flags.get("RENEWAL_OFF_STILL_ACTIVE", ()):
+        need(by_id[uid]["renewal"]["state"] == "cancelled",
+             f"RENEWAL_OFF_STILL_ACTIVE {uid} is not cancelled")
+    for uid in flags.get("PAST_DUE_DORMANT", ()):
+        need(by_id[uid]["renewal"]["state"] == "past_due",
+             f"PAST_DUE_DORMANT {uid} is not past due")
+    for r in rows:
+        need(r["health"] in ("red", "amber", "green", "ended"),
+             f"health {r['health']!r}")
+        if r["health"] == "red":
+            need(any(f in ("CHARGED_NO_USE", "CHARGE_SOON_NO_USE",
+                           "PAST_DUE_DORMANT", "ERROR_LOOP")
+                     for f in r["flags"]), f"red row {r['id']} without "
+                                            "a red flag")
+    if t.get("past_due_subscriptions") is not None:
+        need(sum(1 for r in rows if r["renewal"]["state"] == "past_due")
+             <= t["past_due_subscriptions"],
+             "more past-due rows than past-due subscriptions")
+    found = sum(len(flags.get(k, set()) & v) for k, v in PLAN_FLAGS_1025.items())
+    named = sum(len(v) for v in PLAN_FLAGS_1025.values())
+    need(found > 0, "none of the PLAN §4.3 accounts is flagged")
+    diff = []
+    for k, v in PLAN_FLAGS_1025.items():
+        got = flags.get(k, set())
+        if got != v:
+            diff.append(f"{k} +{sorted(got - v)} -{sorted(v - got)}")
+    fac = b.get("factory") or {}
+    per = fac.get("full_renders_per_short")
+    need(per is None or 0 < per < 50, f"full renders per short {per}")
+    infra = _get(strip, "infra", "cycle_projected_usd")
+    need(infra is None or 0 <= infra < 5000, f"infra projection {infra}")
+    r2 = (b.get("r2") or {}).get("total_gb")
+    need(r2 is None or r2 > 0, f"R2 {r2} GB")
+    return (f"{len(rows)} rows · committed ${committed} engaged ${engaged} "
+            f"paddle ${paddle} · red {sum(1 for r in rows if r['health'] == 'red')}"
+            f" · PLAN §4.3 {found}/{named} still flagged"
+            + (f" · differs: {'; '.join(diff)}" if diff else ""))
+
+
+def check_costs(b, t):
+    e = b.get("economics_30d") or {}
+    need(_num(e.get("infra_modeled_usd")), "no modeled infra cost")
+    need(_num(e.get("executor_ceiling_usd")), "no executor ceiling")
+    need(e["infra_modeled_usd"] >= e["executor_ceiling_usd"] * 0.8,
+         f"modeled ${e['infra_modeled_usd']} below the per-job ceiling "
+         f"${e['executor_ceiling_usd']}")
+    cycle = _get(b, "infra", "cycle", "projected_usd")
+    need(_num(cycle) and cycle > 0, f"cycle projection {cycle!r}")
+    return (f"infra 30d ${e['infra_modeled_usd']} (ceiling "
+            f"${e['executor_ceiling_usd']}) · cycle projected ${cycle} · "
+            f"R2 {_get(b, 'infra', 'r2', 'total_gb')} GB")
+
+
 def check_users(b, t):
     rows = b.get("users") or []
     need(rows, "no users")
@@ -347,6 +453,7 @@ ENDPOINTS = [
     ("Projects", "/admin/video/projects/{project}?lean=1", check_dict),
     ("Projects", "/admin/video/projects/{project}/llm_calls?page=1", check_dict),
     ("Projects", "/admin/video/projects/{project}/index", None),
+    ("Subscribers", "/admin/video/health-board", check_health_board),
     ("Subscribers", "/admin/video/subscribers?search=&status=all&page=1&per_page=50", check_subscribers),
     ("Subscriber Projects", "/admin/video/subscriber-projects?search=&page=1&per_page=50", check_rows("projects", "rows")),
     ("Exports", "/admin/video/exports?days=30&page=1&per_page=50&search=", check_dict),
@@ -356,7 +463,7 @@ ENDPOINTS = [
     ("People", "/admin/v2/customers/{user}", check_dict),
     ("Agent I/O", "/admin/video/projects", check_rows("projects")),
     ("Redesign", "/admin/video/redesign-observability?days=30", check_dict),
-    ("Costs", "/admin/video/costs", check_dict),
+    ("Costs", "/admin/video/costs", check_costs),
     ("Cohorts", "/admin/video/cohorts?period=week", check_dict),
     ("Survey", "/admin/onboarding", check_dict),
     ("Survey", "/admin/plan-intents", check_dict),

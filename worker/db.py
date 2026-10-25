@@ -885,7 +885,10 @@ def requeue_job(conn, job_id, error, total_claims=None):
 
 _DEFERRAL_COUNTERS = {"cloudflare_busy_deferrals",
                       "cloudflare_rollout_deferrals",
-                      "cloudflare_capacity_deferrals"}
+                      "cloudflare_capacity_deferrals",
+                      # Quiet retries of an infrastructure failure inside
+                      # its 10-minute window (failure_policy.INFRA_*).
+                      "infra_retry_deferrals"}
 
 
 def defer_unlaunched_cloudflare_busy(conn, job_id, total_claims, error,
@@ -1041,6 +1044,53 @@ def stamp_execution_provider(conn, job_id, total_claims, provider,
                      job_id, total_claims, total_claims))
         row = cur.fetchone()
         return row and row.get("provider")
+
+
+def replace_local_execution_provider(conn, job_id, total_claims, provider,
+                                     execution_shape=None):
+    """Move a current lease off a stale 'local' stamp (strategy 1025 R2).
+
+    'local' means no provider was ever chosen, so no remote call exists to
+    fence; only the current lease may move, and only from 'local'."""
+    if provider not in {"modal", "cloudflare", "cloud_run"}:
+        raise ValueError("invalid execution provider")
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET payload = jsonb_set(
+                             jsonb_set(COALESCE(payload, '{}'::jsonb),
+                                       '{execution_provider}',
+                                       to_jsonb(%s::text), true),
+                             '{execution_shape}', %s, true),
+                           updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND (%s::integer IS NULL OR total_claims = %s)
+                         AND COALESCE(payload->>'execution_provider', '')
+                             IN ('', 'local')
+                       RETURNING payload->>'execution_provider' AS provider""",
+                    (provider, Json(_json_safe(execution_shape or {})),
+                     job_id, total_claims, total_claims))
+        row = cur.fetchone()
+        return row and row.get("provider")
+
+
+def note_owner_alarm(conn, key, text, **extra):
+    """Park one alarm for the owner's cockpit alerts in app_kv.
+
+    The backend's alert tick (cockpit_alerts) emails anything newer than its
+    last scan to the admin inbox. Keys: 'executor_routing_alarm',
+    'llm_balance'. Never raises into the caller's work."""
+    if key not in {"executor_routing_alarm", "llm_balance"}:
+        raise ValueError("unknown owner alarm")
+    value = dict(extra)
+    from datetime import datetime, timezone
+    value.update({"alarm_at": datetime.now(timezone.utc).isoformat(),
+                  "alarm": str(text)[:400]})
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO app_kv (key, value, updated_at)
+                       VALUES (%s, %s, NOW())
+                       ON CONFLICT (key) DO UPDATE
+                         SET value = EXCLUDED.value, updated_at = NOW()""",
+                    (key, json.dumps(value, default=str)))
 
 
 def replace_execution_provider_before_launch(conn, job_id, total_claims,

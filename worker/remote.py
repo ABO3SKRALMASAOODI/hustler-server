@@ -19,6 +19,7 @@ import random
 import re
 import threading
 import time
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -337,6 +338,172 @@ def desired_execution_provider(job):
     return "cloud_run" if _executor_url(job.get("type")) else "local"
 
 
+# ── R2 (strategy 1025): a production job never resolves to "local" ───────
+# "local" means no selector accepted the job: a failed shape probe, or a
+# source bigger than one selector's limit while the others are off. With a
+# remote fleet configured that used to raise "no remote executor is
+# configured" (33 customer failures, 6 Sep-19 Oct, one minutes after a
+# payment). Now: wait, look again, and if still nothing, hand the job to the
+# configured fleet (whose own capacity checks answer clearly) and alert.
+REROUTE_WAIT_S = float(os.getenv("PROVIDER_REROUTE_WAIT_S", "30"))
+USER_JOB_TYPES = ("index", "preview", "preview_check", "final", "filmstrip",
+                  "agent_turn", "mcp_tool", "shorts_plan")
+_alarm_lock = threading.Lock()
+_alarm_last = {}
+
+
+def remote_configured():
+    return bool((config.CLOUDFLARE_EXECUTOR_ENABLED
+                 and config.CLOUDFLARE_EXECUTOR_URL)
+                or config.MODAL_EXECUTOR_ENABLED or config.REMOTE_EXECUTOR_URL)
+
+
+def fallback_provider(job):
+    """The configured fleet that may take a job no selector accepted."""
+    job_type = str(job.get("type") or "")
+    if config.CLOUDFLARE_EXECUTOR_ENABLED and config.CLOUDFLARE_EXECUTOR_URL \
+            and job_type in config.CLOUDFLARE_EXECUTOR_TYPES:
+        return "cloudflare"
+    if config.MODAL_EXECUTOR_ENABLED and job_type in \
+            config.MODAL_EXECUTOR_TYPES:
+        return "modal"
+    if _executor_url(job_type):
+        return "cloud_run"
+    return None
+
+
+def owner_alarm(key, text, throttle_s=600, **extra):
+    """Best-effort alarm for the owner's cockpit, at most one per key per
+    throttle window per process. Never raises."""
+    now = time.monotonic()
+    with _alarm_lock:
+        if now - _alarm_last.get(key, -1e9) < throttle_s:
+            return False
+        _alarm_last[key] = now
+    probe = None
+    try:
+        probe = dbx.Db()
+        probe.run(dbx.note_owner_alarm, key, text, **extra)
+        return True
+    except Exception as exc:
+        print(f"[dispatcher] owner alarm not recorded ({str(exc)[:120]})",
+              flush=True)
+        return False
+    finally:
+        if probe is not None:
+            try:
+                probe.reset()
+            except Exception:
+                pass
+
+
+def version_skew(body, mine=None):
+    """The executor's code differs from this dispatcher's (R7). Unknown on
+    either side is not skew: an unreachable or older executor has its own
+    failure path, and guessing would refuse working capacity."""
+    mine = mine or version.code_version()
+    theirs = str((body or {}).get("source_version")
+                 or (body or {}).get("code_version") or "unknown")
+    return mine != "unknown" and theirs != "unknown" and mine != theirs
+
+
+def fallback_version_ok(provider, job=None):
+    """R7: route a fallback only to an executor running this release.
+
+    A fallback that runs other code is how "source version does not match"
+    reached customers (12 failures, 18-20 Sep). The health answer is cached;
+    an unreachable fallback is allowed through (its launch fails on its own
+    terms) because refusing on a timeout would guess."""
+    try:
+        body = executor_health(timeout=15, job_type=(job or {}).get("type")) \
+            if provider != "modal" else _modal_health_cached()
+    except Exception:
+        return True
+    if version_skew(body):
+        print(f"[dispatcher] not falling back to {provider}: it runs "
+              f"{body.get('source_version') or body.get('code_version')}, "
+              f"this dispatcher {version.code_version()}", flush=True)
+        return False
+    return True
+
+
+def _modal_health_cached(timeout=15):
+    key = "modal:health"
+    now = time.monotonic()
+    with _health_lock:
+        cached = _health_cache.get(key)
+        if cached and now - cached[0] < _HEALTH_CACHE_S:
+            return cached[1]
+        body = _modal_health(timeout=timeout)
+        _health_cache[key] = (now, body)
+    return body
+
+
+def _reresolve_local(worker_db, job):
+    """A job that resolved to "local" while a fleet is configured: wait,
+    re-probe its shape once, then fall back to the fleet (and alarm)."""
+    job_type = str(job.get("type") or "")
+    time.sleep(REROUTE_WAIT_S)
+    try:
+        if job.get("id") is not None and not worker_db.run(
+                dbx.lease_is_current, job["id"], job.get("total_claims")):
+            raise dbx.JobLeaseLost("job lease changed during re-routing")
+        shape = worker_db.run(
+            dbx.project_execution_shape, job.get("project_id"),
+            (job.get("payload") or {}).get("asset_id"), job_type,
+            job.get("payload") or {}, True)
+        if shape:
+            job["_execution_shape"] = dbx._json_safe(shape)
+    except dbx.JobLeaseLost:
+        raise
+    except Exception as exc:
+        print(f"[dispatcher] re-probe for job {job.get('id')} failed: "
+              f"{str(exc)[:160]}", flush=True)
+    provider = desired_execution_provider(job)
+    if provider != "local":
+        print(f"[dispatcher] job {job.get('id')} re-resolved to {provider}",
+              flush=True)
+        return provider
+    fallback = fallback_provider(job)
+    owner_alarm(
+        "executor_routing_alarm",
+        f"{job_type} job {job.get('id')} (user {job.get('user_id')}) "
+        f"matched no executor (shape "
+        f"{json.dumps(job.get('_execution_shape') or {}, default=str)[:200]}"
+        f"); sent to {fallback or 'nothing: no fleet takes this type'}",
+        throttle_s=60)
+    return fallback or "local"
+
+
+def routing_self_check():
+    """Boot check: every user job type resolves to a remote provider for an
+    ordinary source. Returns the problems (and alarms when there are any)."""
+    problems = []
+    on_render = bool(os.getenv("RENDER"))
+    if not remote_configured():
+        if on_render:
+            problems.append("no remote executor is configured at all")
+    else:
+        shape = {"assets": 1, "total_bytes": 50 * 1024 ** 2,
+                 "staged_bytes": 50 * 1024 ** 2, "original_bytes": 50 * 1024 ** 2,
+                 "max_bytes": 50 * 1024 ** 2, "shape_version": 2,
+                 "max_duration_s": 60.0, "asset_kind": "original"}
+        for job_type in USER_JOB_TYPES:
+            job = {"id": 0, "type": job_type, "project_id": 0, "payload": {},
+                   "_execution_shape": shape}
+            if desired_execution_provider(job) == "local" and \
+                    fallback_provider(job) is None:
+                problems.append(f"{job_type} has no executor")
+    if problems:
+        text = "Routing self-check at boot: " + "; ".join(problems)
+        print(f"[dispatcher] *** {text} ***", flush=True)
+        owner_alarm("executor_routing_alarm", text, throttle_s=0)
+    else:
+        print("[dispatcher] routing self-check: every user job type has an "
+              "executor", flush=True)
+    return problems
+
+
 def stamp_execution_provider(worker_db, job):
     """Fence rollout changes from moving an already-claimed job."""
     if job.get("id") is None:
@@ -364,6 +531,9 @@ def stamp_execution_provider(worker_db, job):
                   f"{job.get('id')}: {str(exc)[:160]}; checking configured alternatives",
                   flush=True)
     provider = desired_execution_provider(job)
+    if provider == "local" and not stamped and remote_configured() \
+            and fallback_provider(job):
+        provider = _reresolve_local(worker_db, job)
     persisted = worker_db.run(
         dbx.stamp_execution_provider, job["id"], job.get("total_claims"),
         provider, job.get("_execution_shape") or {})
@@ -2671,9 +2841,34 @@ def _run_cloudflare_with_capacity_wait(job):
                 probe.reset()
 
 
+def _move_stale_local(job):
+    """A job stamped "local" by an older release, now that a fleet exists."""
+    fallback = fallback_provider(job)
+    if not fallback or job.get("id") is None:
+        return None
+    probe = dbx.Db()
+    try:
+        moved = probe.run(dbx.replace_local_execution_provider, job["id"],
+                          job.get("total_claims"), fallback,
+                          job.get("_execution_shape") or {})
+    finally:
+        probe.reset()
+    if not moved:
+        return None
+    payload = dict(job.get("payload") or {})
+    payload["execution_provider"] = moved
+    job["payload"] = payload
+    owner_alarm("executor_routing_alarm",
+                f"{job.get('type')} job {job.get('id')} was stamped 'local'; "
+                f"moved to {moved}", throttle_s=60)
+    return moved
+
+
 def _run_remote(job, url_override=None, modal_function=None):
     provider = desired_execution_provider(job) if url_override is None \
         else "cloud_run"
+    if provider == "local" and url_override is None and remote_configured():
+        provider = _move_stale_local(job) or "local"
     if provider == "cloudflare":
         try:
             return _run_cloudflare_with_capacity_wait(job)
@@ -2681,7 +2876,8 @@ def _run_remote(job, url_override=None, modal_function=None):
             if not (config.CLOUDFLARE_MODAL_FALLBACK
                     and config.MODAL_EXECUTOR_ENABLED
                     and str(job.get("type") or "") in
-                    config.MODAL_EXECUTOR_TYPES):
+                    config.MODAL_EXECUTOR_TYPES
+                    and fallback_version_ok("modal", job)):
                 raise
             print(f"[dispatcher] {exc}; launching the same fenced job on "
                   "Modal before any Cloudflare call was accepted",
@@ -2718,7 +2914,8 @@ def _run_remote(job, url_override=None, modal_function=None):
                     and config.MODAL_EXECUTOR_ENABLED
                     and str(job.get("type") or "") in
                     config.MODAL_EXECUTOR_TYPES
-                    and fallback_allowed):
+                    and fallback_allowed
+                    and fallback_version_ok("modal", job)):
                 raise
             # An id-less synchronous call has no queue lease to replace. The
             # named Durable Object is already terminal, which is the complete

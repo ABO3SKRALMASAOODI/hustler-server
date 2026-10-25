@@ -325,6 +325,11 @@ def process_one(worker_db, job):
                       f"retry budget ({e})", flush=True)
                 return
         decision = failure_policy.decision_for(e, job["type"])
+        # R1 (strategy 1025): a failure of OUR fleet (executor missing, shard
+        # busy, version skew, a deploy, a lost container) is retried quietly
+        # for up to 10 minutes on a fresh claim instead of reaching the user.
+        if _quiet_infra_retry(worker_db, job, e, decision, lease_claim):
+            return
         if failure_policy.defer_prerequisite(
                 worker_db, job, e, decision, lease_claim):
             worker_db.run(dbx.bump_metric, "prerequisite_deferred")
@@ -358,6 +363,50 @@ def process_one(worker_db, job):
     finally:
         dbx.untrack_job(job_id)
 
+
+def _quiet_infra_retry(worker_db, job, err, decision, lease_claim):
+    """Wait a little and hand an infrastructure failure back to the queue
+    without spending its attempt. False when it is not one, or its window
+    or retries are used up (the ordinary policy then decides)."""
+    if not failure_policy.is_infrastructure(err, decision):
+        return False
+    payload = job.get("payload") or {}
+    try:
+        done = int(payload.get("infra_retry_deferrals") or 0)
+    except (TypeError, ValueError):
+        done = 0
+    delay = failure_policy.infra_retry_delay(job, time.time(), done)
+    if delay is None:
+        return False
+    print(f"[job {job['id']}] infrastructure failure ({decision.kind}); "
+          f"retrying quietly in {delay:.0f}s ({done + 1}/"
+          f"{failure_policy.INFRA_RETRY_MAX}): {str(err)[:160]}", flush=True)
+    DRAINING.wait(delay)
+    try:
+        deferred = worker_db.run(
+            dbx.defer_unlaunched_cloudflare_busy, job["id"], lease_claim, err,
+            failure_policy.INFRA_RETRY_MAX, counter="infra_retry_deferrals")
+    except Exception as exc:
+        print(f"[job {job['id']}] quiet retry could not requeue "
+              f"({str(exc)[:120]})", flush=True)
+        return False
+    if deferred:
+        worker_db.run(dbx.bump_metric, "infra_retry_deferred")
+    return bool(deferred)
+
+
+# The customer's words for an infrastructure failure that outlasted its
+# quiet retries. Plain, honest, no internal text (R1).
+INFRA_FAIL_NOTES = {
+    "index": ("Your upload is saved, but our processing service had a "
+              "problem on our side and could not analyze it, even after "
+              "retrying for several minutes. Nothing is wrong with your "
+              "file; re-open the project in a few minutes to try again."),
+    "media": ("Your edit is saved, but our rendering service had a problem "
+              "on our side and could not finish this version, even after "
+              "retrying for several minutes. Your timeline is fine; try "
+              "again in a few minutes."),
+}
 
 FAIL_NOTES = {
     # agent_turn posts its own apology inside run_agent_job — not repeated.
@@ -451,7 +500,20 @@ def _notify_failure(worker_db, job, err):
         elif payload.get("source") == "user_edit":
             note = USER_PREVIEW_FAIL_NOTE
     decision = failure_policy.decision_for(err, job["type"])
-    if job["type"] == "index" and decision.kind in {
+    # Product-written refusals (the shorts planner's own reasons) may be
+    # quoted; anything else is described, never pasted (R1).
+    quotable = job["type"] == "shorts_plan" and any(
+        k in str(err) for k in ("shorts need a longer source",
+                                "no transcribed speech",
+                                "clip-worthy moments"))
+    reason = str(err)[:160] if quotable else \
+        failure_policy.user_reason(err, decision)
+    if failure_policy.is_infrastructure(err, decision) and job["type"] in (
+            "index", "preview", "preview_check", "final") and (
+            note or job["type"] == "index"):
+        note = INFRA_FAIL_NOTES["index" if job["type"] == "index"
+                                else "media"]
+    elif job["type"] == "index" and decision.kind in {
             "executor_unavailable", "executor_capacity", "provider_budget_exhausted"}:
         note = ("Your upload is saved, but our processing service could not "
                 "analyze it. This needs a service-side fix; uploading the same "
@@ -471,7 +533,7 @@ def _notify_failure(worker_db, job, err):
         if project and project.get("chat_session_id"):
             worker_db.run(
                 dbx.add_job_failure_message, project["chat_session_id"],
-                note.format(err=str(err)[:160]), job["id"])
+                note.format(err=reason), job["id"])
     except Exception as e2:
         print(f"[notify] {e2}", flush=True)
 
@@ -873,6 +935,14 @@ def _on_shutdown(signum, _frame):
     os._exit(0)
 
 
+def _routing_self_check():
+    try:
+        remote.routing_self_check()
+    except Exception as e:
+        print(f"[dispatcher] routing self-check error: {str(e)[:200]}",
+              flush=True)
+
+
 def main():
     config.require_core()
     os.makedirs(config.TMP_DIR, exist_ok=True)
@@ -904,6 +974,11 @@ def main():
           f"vision={config.VISION_MODEL or 'off'}"
           f"@{config.VISION_BASE_URL if config.VISION_API_KEY else 'NO KEY'}",
           flush=True)
+    # R2: say at boot, and alarm the owner, if any user job type would find
+    # no executor. Threaded and best effort: a diagnostic never stops a boot.
+    threading.Thread(target=_routing_self_check, daemon=True,
+                     name="routing-self-check").start()
+
     # Publish the MCP tool catalog for the backend to serve on tools/list.
     # Best effort by design — a missing table (migration not applied yet) must
     # never stop the worker from booting — and retried by the reaper until it

@@ -2743,6 +2743,25 @@ def video_costs():
         logger=current_app.logger))
 
 
+@admin_video_bp.route("/admin/video/health-board", methods=["GET"])
+@admin_required
+def video_health_board():
+    """The Subscribers tab's Health board (strategy 1025 §4): the top strip,
+    one row per paying / past-due / checkout / keep-it account with flags and
+    a next action, the owner's factory line, R2 by population and the trial
+    spend. Shared through app_kv like Costs (computed in the background at
+    most every 10 minutes; `?fresh=1` recomputes, rate limited)."""
+    from admin_metrics import cockpit
+
+    def compute():
+        with adb() as conn:
+            return cockpit.compute(conn.cursor())
+    return jsonify(admin_cache.shared_report(
+        "/admin/video/health-board", {}, compute,
+        fresh=request.args.get("fresh") == "1",
+        logger=current_app.logger))
+
+
 UPLOAD_KINDS = ("original", "music", "image_ref", "video_clip")
 # Repainted copies of a source (round 39 erase). Deliberately NOT in
 # UPLOAD_KINDS — nobody uploaded them — but they are full-size video objects,

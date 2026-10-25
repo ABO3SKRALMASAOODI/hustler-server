@@ -3086,6 +3086,11 @@ def _t_download_url(tok, args):
                 "structuredContent": {"preview_receipt": receipt},
                 "isError": False}
     receipt["url"] = url
+    # The finished video reached the AI app: the MCP twin of a Studio
+    # download, for the Health board and the funnel (strategy 1025 §4.6).
+    record_client_event(
+        tok["user_id"], project_id, "mcp_export_delivered",
+        detail={"edl_version": ver, "asset_id": row["id"]}, origin="mcp")
     # Run report C16: a final could not be inspected inside Valmera. Its
     # storage key is what watch_video(kind='asset') opens (renders allowed).
     receipt["asset_key"] = row["storage_key"]

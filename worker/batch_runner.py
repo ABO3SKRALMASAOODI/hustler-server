@@ -45,7 +45,7 @@ def _notify_failure(worker_db, job, error):
         if project and project.get("chat_session_id"):
             worker_db.run(
                 dbx.add_message, project["chat_session_id"], "assistant",
-                note.format(err=str(error)[:160]),
+                note.format(err=failure_policy.user_reason(error)),
                 {"error": "job_failed", "job": job["id"],
                  "executor": "cloud_run_job"})
     except Exception as exc:
