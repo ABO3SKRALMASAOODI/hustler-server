@@ -37,6 +37,8 @@ mitigation, not elimination. The real fix is egress policy on the worker, which
 does not exist today.
 """
 
+import contextlib
+import contextvars
 import glob
 import hashlib
 import json
@@ -102,6 +104,33 @@ KIND_MAX_BYTES = {
 
 KIND_LABEL = {KIND_VIDEO: "video clip", KIND_AUDIO: "audio",
               KIND_IMAGE: "image"}
+
+# A link pasted as the project's MAIN video (25 Oct 2026: nine users pasted a
+# YouTube or Drive link instead of uploading, and none got a video in) is a
+# whole recording, not a clip for the edit: it gets the main video's limits
+# for the duration of one fetch (see main_video_limits).
+_LIMITS = contextvars.ContextVar("url_media_limits", default=None)
+
+
+def _limit(name, default):
+    limits = _LIMITS.get() or {}
+    value = limits.get(name)
+    return default if value is None else value
+
+
+@contextlib.contextmanager
+def main_video_limits():
+    """Within this block, fetch() takes a main video: up to
+    config.LINK_IMPORT_MAX_BYTES and LINK_IMPORT_MAX_DURATION_S (the index
+    analyses the first MAX_DURATION_S of anything longer), with
+    LINK_IMPORT_TIMEOUT_S for the download."""
+    token = _LIMITS.set({"max_bytes": config.LINK_IMPORT_MAX_BYTES,
+                         "max_duration_s": config.LINK_IMPORT_MAX_DURATION_S,
+                         "timeout_s": config.LINK_IMPORT_TIMEOUT_S})
+    try:
+        yield
+    finally:
+        _LIMITS.reset(token)
 
 _EXT_FOR_KIND = {KIND_VIDEO: ".mp4", KIND_AUDIO: ".mp3", KIND_IMAGE: ".png"}
 
@@ -272,7 +301,8 @@ def _extract(url, workdir, prefer=None, client_override=None,
     more aggressively than on the tv/mweb clients, so a bot-walled first
     attempt earns ONE retry with alternate clients (see fetch below). This
     is best-effort — when YouTube blocks both, the honest error stands."""
-    max_bytes = config.FETCH_MAX_BYTES
+    max_bytes = _limit("max_bytes", config.FETCH_MAX_BYTES)
+    timeout_s = _limit("timeout_s", config.FETCH_TIMEOUT_S)
     # Cap the resolution rather than taking "best": a 4K source is a ~10x
     # bigger download and a slower render for a clip that gets composited into
     # a 1080p timeline anyway.
@@ -355,7 +385,7 @@ def _extract(url, workdir, prefer=None, client_override=None,
     except FileNotFoundError:
         raise FetchMediaError("the link extractor is not installed")
     try:
-        out, err = proc.communicate(timeout=config.FETCH_TIMEOUT_S)
+        out, err = proc.communicate(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -366,7 +396,7 @@ def _extract(url, workdir, prefer=None, client_override=None,
         except Exception:
             pass
         raise FetchMediaError(
-            f"that link took longer than {config.FETCH_TIMEOUT_S:.0f}s to "
+            f"that link took longer than {timeout_s:.0f}s to "
             "download")
 
     info = {}
@@ -492,8 +522,8 @@ def _download_direct(url, workdir):
     ext = _url_ext(url) or ".bin"
     out = os.path.join(workdir, f"dl{ext}")
     _, final_url = net_fetch.download(
-        url, out, max_bytes=config.FETCH_MAX_BYTES,
-        timeout_s=config.FETCH_TIMEOUT_S)
+        url, out, max_bytes=_limit("max_bytes", config.FETCH_MAX_BYTES),
+        timeout_s=_limit("timeout_s", config.FETCH_TIMEOUT_S))
     return out, final_url
 
 
@@ -627,6 +657,8 @@ def fetch(url, workdir, prefer=None):
 
     nbytes = os.path.getsize(path)
     limit = KIND_MAX_BYTES.get(kind, config.FETCH_MAX_BYTES)
+    if kind == KIND_VIDEO:
+        limit = _limit("max_bytes", limit)
     if nbytes > limit and kind == KIND_IMAGE:
         # A photo over the cap is already here: a 4K JPEG of it fits and
         # loses nothing a 1080x1920 frame can show (the owner's PG run, 13 Oct:
@@ -642,10 +674,11 @@ def fetch(url, workdir, prefer=None):
             f"the {limit >> 20} MB limit for {KIND_LABEL.get(kind, 'media')}")
 
     duration = probed.get("duration_s")
-    if duration and duration > config.FETCH_MAX_DURATION_S:
+    max_duration = _limit("max_duration_s", config.FETCH_MAX_DURATION_S)
+    if duration and duration > max_duration:
         raise FetchMediaError(
             f"that media is {duration / 60:.0f} minutes long, over the "
-            f"{config.FETCH_MAX_DURATION_S / 60:.0f}-minute limit")
+            f"{max_duration / 60:.0f}-minute limit")
 
     out = {"path": path, "kind": kind, "bytes": nbytes,
            "filename": _title_from(url, info, kind, path),

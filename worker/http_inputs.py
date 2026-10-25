@@ -32,14 +32,6 @@ def is_url(path):
     return isinstance(path, str) and path.startswith(("http://", "https://"))
 
 
-def input_args(src):
-    """ffmpeg input options for `src`: resilient reads for an HTTP(S) URL."""
-    src = str(src)
-    if is_url(src):
-        return HTTP_INPUT_ARGS + ["-i", src]
-    return ["-i", src]
-
-
 def resilient(cmd):
     """``cmd`` with HTTP_INPUT_ARGS ahead of each URL input that does not
     set -reconnect itself.
