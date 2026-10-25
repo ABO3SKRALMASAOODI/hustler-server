@@ -523,16 +523,22 @@ HTTP_INPUT_ARGS = ["-reconnect", "1", "-reconnect_streamed", "1",
                    "-rw_timeout", "120000000"]
 
 
-def input_args(src):
-    """ffmpeg input options for `src`: resilient reads for an HTTP(S) URL."""
+def input_args(src, limit_s=None):
+    """ffmpeg input options for `src`: resilient reads for an HTTP(S) URL.
+
+    limit_s reads only the first `limit_s` seconds (an input-side -t: the
+    rest of the file is never decoded or fetched)."""
     src = str(src)
+    head = (["-t", f"{float(limit_s):.3f}"]
+            if limit_s and float(limit_s) > 0 else [])
     if src.startswith(("http://", "https://")):
-        return HTTP_INPUT_ARGS + ["-i", src]
-    return ["-i", src]
+        return HTTP_INPUT_ARGS + head + ["-i", src]
+    return head + ["-i", src]
 
 
 def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
-                  expected_out_s=None, cancelled_cb=None, maxrate_kbps=None):
+                  expected_out_s=None, cancelled_cb=None, maxrate_kbps=None,
+                  limit_s=None):
     # DO NOT SLICE THIS ENCODE ACROSS CORES. It was tried and MEASURED, on a
     # 90s 3840x2160 95Mbps file (the profile of the customer upload that spent
     # 386.8s of a 493s index right here):
@@ -557,7 +563,7 @@ def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
     # indexing dramatically faster means not decoding 4K on a CPU at all —
     # hardware decode, or a proxy produced by the client's own GPU before
     # upload — not a cleverer arrangement of this loop.
-    cmd = ["ffmpeg", "-y", *input_args(src), "-vf",
+    cmd = ["ffmpeg", "-y", *input_args(src, limit_s), "-vf",
            _proxy_vf(config.PROXY_HEIGHT, pad_s),
            "-c:v", "libx264", "-preset", config.PROXY_PRESET,
            "-crf", str(config.PROXY_CRF), "-pix_fmt", "yuv420p"]
@@ -611,7 +617,7 @@ def client_proxy_gap_tolerance(declared_duration):
 
 
 def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None,
-               cancelled_cb=None, maxrate_kbps=None):
+               cancelled_cb=None, maxrate_kbps=None, limit_s=None):
     """Downscaled H.264 proxy, +faststart. VFR sources are normalized to CFR
     here so every downstream timestamp is stable.
 
@@ -634,6 +640,8 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None,
     cancel_kw = ({"cancelled_cb": cancelled_cb} if cancelled_cb else {})
     if maxrate_kbps:
         cancel_kw["maxrate_kbps"] = maxrate_kbps
+    if limit_s:
+        cancel_kw["limit_s"] = limit_s
     _encode_proxy(src, dst, fps, vfr, has_audio, progress_cb=progress_cb,
                   expected_out_s=duration, **cancel_kw)
     if not duration or duration <= 0:
@@ -696,7 +704,7 @@ def adopt_client_proxy(src, dst, warnings=None):
     return probe(dst)
 
 
-def extract_wav(src, dst, cancelled_cb=None):
+def extract_wav(src, dst, cancelled_cb=None, limit_s=None):
     """Decode the ASR waveform on the media clock, including gaps/overlaps.
 
     WAV has no packet timestamps. Plain decoding packs every AAC frame next
@@ -708,7 +716,7 @@ def extract_wav(src, dst, cancelled_cb=None):
     fills/trims discontinuities without stretching ordinary speech.
     """
     cancel_kw = ({"cancelled_cb": cancelled_cb} if cancelled_cb else {})
-    run(["ffmpeg", "-y", *input_args(src), "-map", "0:a:0", "-vn",
+    run(["ffmpeg", "-y", *input_args(src, limit_s), "-map", "0:a:0", "-vn",
          "-af", "aresample=async=1:min_hard_comp=0.001:first_pts=0",
          "-ac", "1", "-ar", "16000",
          "-c:a", "pcm_s16le", dst], **cancel_kw)

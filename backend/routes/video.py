@@ -255,6 +255,112 @@ def _url_fetch_enabled():
     return os.getenv("URL_FETCH_ENABLED", "1") == "1"
 
 
+# A video link pasted where an upload was expected (25 Oct 2026): nine users
+# pasted a YouTube or Drive link into a project with no video, were told links
+# could not be imported, and never got a video in — while 114 of 114 real
+# link fetches through the editor succeeded. Hosts whose links are VIDEOS;
+# audio-only services stay with the editor's own fetch_url.
+_PASTED_LINK_RE = re.compile(r"https?://[^\s<>\"'\])]+", re.I)
+_VIDEO_LINK_HOSTS = (
+    "youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "instagram.com",
+    "facebook.com", "fb.watch", "x.com", "twitter.com", "twitch.tv",
+    "loom.com", "streamable.com", "dailymotion.com", "drive.google.com",
+    "dropbox.com", "rumble.com", "kick.com", "linkedin.com", "v.redd.it",
+    "reddit.com", "wistia.com", "frame.io", "wetransfer.com",
+)
+_VIDEO_FILE_PATH_RE = re.compile(r"\.(mp4|mov|m4v|webm|mkv)$", re.I)
+
+
+def _pasted_video_link(text):
+    """(url, None) for the first link in ``text`` that is a video; (None,
+    'folder') for a shared FOLDER (which has no single video to import);
+    (None, None) otherwise."""
+    from urllib.parse import urlparse
+    for raw in _PASTED_LINK_RE.findall(text or ""):
+        url = raw.rstrip(".,;:!?")
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            continue
+        host = (parsed.hostname or "").lower()
+        path = parsed.path or ""
+        if host.endswith("drive.google.com") and "/folders/" in path:
+            return None, "folder"
+        if host.endswith("dropbox.com") and (
+                path.startswith("/sh/") or path.startswith("/scl/fo/")):
+            return None, "folder"
+        if any(host == h or host.endswith("." + h) for h in _VIDEO_LINK_HOSTS) \
+                or _VIDEO_FILE_PATH_RE.search(path):
+            return url, None
+    return None, None
+
+
+_LINK_FILLER = frozenset((
+    "edit", "this", "that", "please", "pls", "here", "heres", "here's", "is",
+    "my", "the", "a", "video", "link", "it", "can", "you", "could", "check",
+    "for", "me", "hi", "hello", "hey", "thanks", "of", "and", "upload",
+))
+
+
+def _link_only(text, url):
+    """Is the message nothing but the link (plus filler like "edit this
+    please")? Then there is no request to run once the video is in; the
+    analysis greeting asks what to make."""
+    rest = (text or "").replace(url, " ").lower()
+    words = re.findall(r"[\w']+", rest)
+    return len(words) <= 6 and all(w in _LINK_FILLER for w in words)
+
+
+def _register_link_original(cur, project, project_id, user_id, url, text):
+    """Make a pasted link the project's main video, exactly as an upload.
+
+    The asset row is the deferred-original shape (upload_state 'pending',
+    meta.link_src) and the index job fetches the bytes into its key first
+    (worker/indexer._import_link_source). A subscribe-gated account gets the
+    same chat wall an uploaded first video gets and no job, unchanged: the
+    state poll's "subscription unlocked; analysis not started" heal starts
+    the index (and with it the fetch) after checkout. Returns a dict for the
+    response, or None when the project already has a main video."""
+    cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                (project_id,))
+    cur.execute("""SELECT 1 FROM assets WHERE project_id = %s
+                   AND kind = 'original' LIMIT 1""", (project_id,))
+    if cur.fetchone():
+        return None
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "link").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    key = storage.new_original_key(project_id, ".mp4", "original")
+    cur.execute("""INSERT INTO assets (project_id, kind, storage_key, bytes,
+                                       meta)
+                   VALUES (%s, 'original', %s, NULL, %s) RETURNING id""",
+                (project_id, key,
+                 Json({"filename": f"Video from {host}",
+                       "upload_state": "pending", "link_src": url,
+                       "source": "link"})))
+    asset_id = cur.fetchone()["id"]
+    gated = _subscribe_gate_applies(cur, user_id)
+    out = {"asset_id": asset_id, "subscribe_gated": bool(gated),
+           "index_job_id": None}
+    if gated:
+        out["message_id"] = _record_upload_subscription_lock(
+            cur, project["chat_session_id"], asset_id)
+        return out
+    out["index_job_id"] = _enqueue(cur, project_id, user_id, "index",
+                                   {"asset_id": asset_id})
+    cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
+                   VALUES (%s, 'assistant', %s, %s)""",
+                (project["chat_session_id"],
+                 "Importing your video from that link now. I'll analyze it "
+                 "as soon as it's in"
+                 + ("." if _link_only(text, url) else
+                    ", then start on your request automatically — no need "
+                    "to send it again."),
+                 Json({"kind": "link_import", "asset_id": asset_id})))
+    return out
+
+
 def _image_edit_enabled():
     """Restyling an existing frame/image needs DashScope's native endpoint;
     the OpenAI-compatible /images/generations backend (xAI) can only GENERATE
@@ -451,6 +557,16 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                ", and you canNOT generate moving VIDEO footage")
             + ". If they ask about something not covered here, say you're not "
             "sure it's supported rather than promising it.")
+        if _url_fetch_enabled():
+            facts.append(
+                "They can bring their video by pasting its LINK into this "
+                "chat instead of uploading (YouTube, Vimeo, TikTok, "
+                "Instagram, X, Twitch, Loom, a Google Drive or Dropbox FILE "
+                "link, or a direct .mp4/.mov link): it is imported as their "
+                "main video and analyzed automatically. Never say links "
+                "can't be imported. A shared FOLDER link (Google Drive or "
+                "Dropbox folder) has no single video in it: ask them to paste "
+                "each file's own link, or to upload the files.")
     else:
         # The can-do list is EXHAUSTIVE by contract (the closing sentence
         # says so), so every round-35 capability the agent actually has must
@@ -1595,6 +1711,184 @@ def create_upload(user_id, project_id):
             "n_parts": len(out.get("part_urls") or [])}
            if out.get("mode") == "multipart" else {})}, origin="server")
     return jsonify(out)
+
+
+def _upload_key_for_project(key, kind, project_id):
+    """The prefix check create_upload's keys pass (and nothing else)."""
+    prefix = storage.KEY_PREFIX.get(kind, "originals")
+    return bool(key) and key.startswith(f"{prefix}/{project_id}/") \
+        and ".." not in key
+
+
+def _gate_refuses_more_uploads(cur, project_id, user_id, key):
+    """create_upload's wall, unchanged: once a project holds an original, a
+    subscribe-gated account mints no further transfers. A transfer that IS
+    that original (a pending proxy-first original, same key) carries on."""
+    cur.execute("""SELECT storage_key FROM assets
+                   WHERE project_id = %s AND kind = 'original'""",
+                (project_id,))
+    keys = [r["storage_key"] for r in cur.fetchall() or []]
+    if not keys or key in keys:
+        return False
+    return bool(_subscribe_gate_applies(cur, user_id))
+
+
+@video_bp.route("/projects/<int:project_id>/uploads/resume", methods=["POST"])
+@token_required
+def resume_upload(user_id, project_id):
+    """Carry on a multipart upload from the parts storage already holds.
+
+    The studio keeps {storage_key, upload_id, part_size} for every transfer
+    it starts. After a reload, a closed tab, a sleeping laptop or a dropped
+    network it asks here instead of starting over; storage.resume_multipart
+    lists what arrived and presigns only the rest (with fresh URLs, so a
+    transfer slower than the presign window also carries on). 51 users in 60
+    days started a video upload that never landed, and 33 restarted the same
+    file from zero.
+
+    Answers 410 {gone: true} when the upload id no longer exists: the studio
+    then starts a fresh upload of the same file, exactly what it did before.
+    """
+    if not storage.is_configured():
+        return jsonify({"error": "Video storage is not configured yet"}), 503
+    data = request.get_json() or {}
+    key = str(data.get("storage_key") or "")
+    upload_id = str(data.get("upload_id") or "").strip()
+    kind = data.get("kind") or "original"
+    filename = data.get("filename") or ""
+    nbytes = data.get("bytes")
+    if kind not in ("original", "music", "image", "clip", "proxy"):
+        return jsonify({"error": "unsupported kind"}), 400
+    if not _upload_key_for_project(key, kind, project_id):
+        return jsonify({"error": "storage_key does not belong to this "
+                                 "project"}), 400
+    staged = bool(data.get("staged"))
+    try:
+        _ext, content_type = storage.validate_upload(
+            filename, nbytes, "original" if (staged and kind == "clip")
+            else kind)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    with vdb() as conn:
+        cur = conn.cursor()
+        if not _project_for_user(cur, project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+        if _gate_refuses_more_uploads(cur, project_id, user_id, key):
+            body = dict(_subscribe_offer_body())
+            body["error"] = _UPLOAD_SUBSCRIPTION_MESSAGE
+            body["subscribe_gated"] = True
+            return jsonify(body), 402
+        pending = None
+        if not upload_id:
+            # Only a proxy-first original still waiting for its bytes may be
+            # resumed without its upload id: its key is on the asset row,
+            # the id was only in the tab that is gone.
+            cur.execute("""SELECT id, bytes, meta FROM assets
+                           WHERE project_id = %s AND kind = 'original'
+                             AND storage_key = %s
+                           ORDER BY id DESC LIMIT 1""", (project_id, key))
+            pending = cur.fetchone()
+            if not pending or (pending.get("meta") or {}).get(
+                    "upload_state") != "pending":
+                return jsonify({"error": "upload_id is required"}), 400
+            if pending.get("bytes") and int(pending["bytes"]) != int(nbytes):
+                return jsonify({
+                    "error": "That is a different file from the one this "
+                             "project is waiting for (the sizes differ). "
+                             "Select the original you uploaded.",
+                    "code": "different_file"}), 409
+    def _fresh_to_same_key():
+        # Nothing of it is left in storage (never sent, or the bucket expired
+        # the parts): a fresh transfer to the SAME key, which the deferred
+        # original's /uploads/original-ready completes as usual.
+        if storage.head_bytes(key) == int(nbytes):
+            return {"mode": "multipart", "storage_key": key,
+                    "upload_id": None, "assembled": True, "part_urls": [],
+                    "completed_parts": [], "content_type": content_type}
+        fresh = storage.presign_upload(key, int(nbytes), content_type)
+        fresh["resumed"] = False
+        fresh["completed_parts"] = []
+        return fresh
+
+    try:
+        if pending is not None:
+            upload_id = storage.find_multipart_upload(key)
+        if not upload_id:
+            out = _fresh_to_same_key()
+        else:
+            try:
+                out = storage.resume_multipart(
+                    key, upload_id, int(nbytes), content_type,
+                    part_size=data.get("part_size"))
+            except storage.UploadGone:
+                if pending is None:
+                    raise
+                out = _fresh_to_same_key()
+    except storage.UploadGone:
+        return jsonify({"error": "That upload can no longer be resumed; "
+                                 "starting it again.", "gone": True}), 410
+    except Exception as e:
+        current_app.logger.exception("resume failed")
+        return jsonify({"error": f"Could not resume the upload: {e}"}), 502
+    out["kind"] = kind
+    out["relay_max_bytes"] = storage.RELAY_MAX_BYTES
+    record_client_event(user_id, project_id, "upload_resumed", detail={
+        "filename": filename, "bytes": nbytes, "kind": kind,
+        "assembled": bool(out.get("assembled")),
+        "parts_done": len(out.get("completed_parts") or []),
+        "n_parts": len(out.get("part_urls") or []),
+        "bytes_done": out.get("bytes_done")}, origin="server")
+    return jsonify(out)
+
+
+@video_bp.route("/projects/<int:project_id>/uploads/relay-part",
+                methods=["POST"])
+@token_required
+def relay_upload_part(user_id, project_id):
+    """One part of a multipart upload, through our servers.
+
+    For a browser that cannot reach the storage host at all (no HTTP status
+    on any PUT). The whole-file relay below is capped at 64 MB, so a blocked
+    upload bigger than that had no way in: relaying part by part has no file
+    ceiling, keeps the upload id (and any parts that did go direct) and ends
+    in the ordinary /uploads/complete. Same key ownership check as the
+    whole-file relay; one part is at most RELAY_MAX_BYTES."""
+    if not storage.is_configured():
+        return jsonify({"error": "Video storage is not configured yet"}), 503
+    key = request.args.get("key") or ""
+    kind = request.args.get("kind") or "original"
+    upload_id = (request.args.get("upload_id") or "").strip()
+    try:
+        part_number = int(request.args.get("part_number") or 0)
+    except (TypeError, ValueError):
+        part_number = 0
+    if kind not in ("original", "music", "image", "clip", "proxy"):
+        return jsonify({"error": "unsupported kind"}), 400
+    if not upload_id or not 1 <= part_number <= 10_000:
+        return jsonify({"error": "upload_id and part_number are required"}), 400
+    if not _upload_key_for_project(key, kind, project_id):
+        return jsonify({"error": "storage_key does not belong to this "
+                                 "project"}), 400
+    with vdb() as conn:
+        if not _project_for_user(conn.cursor(), project_id, user_id):
+            return jsonify({"error": "Project not found"}), 404
+    try:
+        etag = storage.relay_part(key, upload_id, part_number, request.stream,
+                                  declared_bytes=request.content_length)
+    except storage.RelayTooLarge as e:
+        return jsonify({"error": str(e)}), 413
+    except Exception as e:
+        code = storage.error_code(e)
+        if code == "NoSuchUpload":
+            return jsonify({"error": "That upload can no longer be resumed; "
+                                     "starting it again.", "gone": True}), 410
+        current_app.logger.exception("relay part failed")
+        return jsonify({"error": f"Could not save the upload: {e}"}), 502
+    if part_number == 1:
+        # One row per relayed transfer, not per part.
+        record_client_event(user_id, project_id, "upload_relayed", detail={
+            "kind": kind, "per_part": True}, origin="server")
+    return jsonify({"ok": True, "part_number": part_number, "etag": etag})
 
 
 # Recognizing a re-upload (round 67d). The two halves must compute the SAME
@@ -3866,6 +4160,33 @@ def post_message(user_id, project_id):
                         (p["chat_session_id"],))
             _stage = _concierge_stage(idx_job["state"] if idx_job else None)
             _history = list(reversed(cur.fetchall()))
+            _link, _link_why = (_pasted_video_link(text)
+                                if _stage == "no_video" and _url_fetch_enabled()
+                                else (None, None))
+            _imported = None
+            if _link:
+                _imported = _register_link_original(cur, p, project_id,
+                                                    user_id, _link, text)
+            if _imported is not None:
+                if _link_only(text, _link):
+                    # Nothing to run once the video is in: the analysis
+                    # greeting answers it (pending_user_message skips it).
+                    meta["link_only"] = True
+                    cur.execute("UPDATE chat_messages SET meta = %s "
+                                "WHERE id = %s", (Json(meta), message_id))
+                record_client_event(user_id, project_id, "upload_started",
+                                    detail={"kind": "original",
+                                            "source": "link",
+                                            "host": _link.split("/")[2][:80]},
+                                    origin="server")
+                if _imported.get("subscribe_gated"):
+                    record_client_event(
+                        user_id, project_id, "subscription_upload_locked",
+                        detail={"asset_id": _imported["asset_id"],
+                                "surface": "link"}, origin="server")
+                return jsonify({"queued": bool(_imported.get("index_job_id")),
+                                "message_id": message_id,
+                                "link_import": _imported})
             # Round 84: uploads sitting unsubmitted in the tray are the one
             # thing the stage machine can't see — the honest reply to "edit
             # my clips" is "press Submit on the tray", not "upload a video".
@@ -6532,6 +6853,10 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       "player_recovered", "attach_failed",
                       "upload_started", "upload_rejected", "upload_failed",
                       "upload_deduped",
+                      # A transfer carried on from the parts storage already
+                      # held (reload, sleep, dropped network) instead of
+                      # starting from zero (/uploads/resume).
+                      "upload_resumed",
                       # Proxy-first upload: the browser built a 540p proxy and
                       # sent that first. Recorded as its own kind so the split
                       # between the fast path and the legacy whole-file path is

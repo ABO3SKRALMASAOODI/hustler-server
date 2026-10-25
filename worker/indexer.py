@@ -244,6 +244,66 @@ def _streamed_scratch_plan(duration, has_audio, workdir):
     return kbps, required
 
 
+def _import_link_source(worker_db, asset, url, workdir):
+    """Fetch a pasted link into the original's storage key (see above)."""
+    import url_media
+    dl = os.path.join(workdir, "link")
+    os.makedirs(dl, exist_ok=True)
+    try:
+        with url_media.main_video_limits():
+            got = url_media.fetch(url, dl, prefer=url_media.KIND_VIDEO)
+    except url_media.FetchMediaError as exc:
+        # The link's own answer (private, removed, region-locked, not a
+        # video) is final for this link; the user can paste another one or
+        # upload the file.
+        raise dbx.PermanentJobError(
+            f"Couldn't import the video from that link: {exc}") from exc
+    if got.get("kind") != url_media.KIND_VIDEO:
+        raise dbx.PermanentJobError(
+            "That link is not a video (it is "
+            f"{url_media.KIND_LABEL.get(got.get('kind'), 'another file')}). "
+            "Paste a link to the video itself, or upload the file.")
+    path = got["path"]
+    nbytes = os.path.getsize(path)
+    storage.upload_file(path, asset["storage_key"],
+                        url_media.content_type(path))
+    try:
+        os.remove(path)            # the index streams or re-downloads it
+    except OSError:
+        pass
+    title = got.get("title") or got.get("filename")
+    worker_db.run(dbx.asset_link_imported, asset["id"], nbytes,
+                  f"{title}.mp4" if title and "." not in title[-5:] else title)
+    print(f"[index] imported {nbytes / 1e6:.0f} MB from a pasted link "
+          f"({got.get('extractor') or 'direct'})", flush=True)
+
+
+def clamp_to_duration_limit(info):
+    """Analyse the first MAX_DURATION_S of a longer video instead of refusing it.
+
+    A 3.16-hour stream VOD was refused four times in one evening (2530, 24
+    Oct 2026) and a 3.3-hour recording on 3 Oct (2038); neither user ever got
+    a video in. Duration is the limit that costs us (index and render time),
+    so the index covers the first three hours: the proxy and the transcript
+    audio read only that span (an input-side -t), the asset and index carry
+    the clamped duration, so every cut, preview and export stays inside it,
+    and the full file stays in storage untouched. Idempotent; mutates and
+    returns ``info`` with ``limit_s`` and ``source_duration`` set when it
+    clamped."""
+    limit = float(config.MAX_DURATION_S or 0)
+    duration = float(info.get("duration") or 0)
+    if limit <= 0 or duration <= limit or info.get("limit_s"):
+        return info
+    info["source_duration"] = duration
+    info["duration"] = limit
+    if info.get("video_duration"):
+        info["video_duration"] = min(float(info["video_duration"]), limit)
+    info["limit_s"] = limit
+    print(f"[index] {duration / 3600:.2f}h source: analysing the first "
+          f"{limit / 3600:.0f}h", flush=True)
+    return info
+
+
 def _stream_index_source(worker_db, job, asset, workdir):
     """Keep large originals in storage and reserve scratch for bounded outputs.
 
@@ -253,11 +313,7 @@ def _stream_index_source(worker_db, job, asset, workdir):
     """
     src = storage.presign_get(
         asset["storage_key"], expires=config.cloudflare_timeout_for("index") + 3600)
-    info = media.probe(src)
-    if info["duration"] > config.MAX_DURATION_S:
-        raise RuntimeError(
-            f"Video is {info['duration']/3600:.1f}h — the limit is "
-            f"{config.MAX_DURATION_S/3600:.0f}h")
+    info = clamp_to_duration_limit(media.probe(src))
     proxy_kbps, need = _streamed_scratch_plan(
         info["duration"], info.get("has_audio", True), workdir)
     print(f"[index {job['id']}] streaming {int(asset.get('bytes') or 0) / 1e9:.2f}"
@@ -295,6 +351,21 @@ def run_index_job(worker_db, job):
         nonlocal _t
         timings[stage] = round(time.monotonic() - _t, 2)
         _t = time.monotonic()
+
+    # A LINK PASTED AS THE MAIN VIDEO (25 Oct 2026). Nine users pasted a
+    # YouTube or Drive link instead of uploading and were told links can't be
+    # imported; none got a video in. The backend registers the link as the
+    # project's original (meta.link_src, a key with no bytes yet), and the
+    # bytes are fetched HERE, on the batch lane that has yt-dlp and the
+    # PO-token provider, before anything reads the key. Idempotent: a retry
+    # that finds the object skips the fetch. A self-heal job carries only
+    # asset_id, which is why the link lives on the asset.
+    upload_meta = asset.get("meta") or {}
+    link_src = (upload_meta.get("link_src") or "").strip()
+    if link_src and not storage.exists(asset["storage_key"]):
+        _set_progress(worker_db, job_id, 1)
+        _import_link_source(worker_db, asset, link_src, workdir)
+        asset = worker_db.run(dbx.get_asset, asset["id"]) or asset
 
     # DEDUP UPLOADS (round 67d). The browser recognized bytes this user
     # already uploaded (backend /uploads/dedup) and never transferred them:
@@ -401,10 +472,13 @@ def run_index_job(worker_db, job):
             # 2. Probe (also enforces the duration quota)
             info = media.probe(src)
 
-        if info["duration"] > config.MAX_DURATION_S:
-            raise RuntimeError(
-                f"Video is {info['duration']/3600:.1f}h — the limit is "
-                f"{config.MAX_DURATION_S/3600:.0f}h")
+        clamp_to_duration_limit(info)
+        if info.get("limit_s"):
+            proxy_kwargs = dict(proxy_kwargs, limit_s=info["limit_s"])
+            warnings_pre.append(
+                f"this video is {info['source_duration'] / 3600:.1f} hours; "
+                f"the first {info['limit_s'] / 3600:.0f} hours were analysed "
+                "and can be edited")
         worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
                       info["width"], info["height"], info["fps"], sha)
         _set_progress(worker_db, job_id, 12)
@@ -590,7 +664,8 @@ def run_index_job(worker_db, job):
                 wav_local = os.path.join(workdir, "audio.wav")
                 media.extract_wav(
                     src, wav_local,
-                    cancelled_cb=lambda: _cancelled(worker_db))
+                    cancelled_cb=lambda: _cancelled(worker_db),
+                    limit_s=info.get("limit_s"))
             state["wav_local"] = wav_local
             state["wav_done_at"] = time.monotonic()
             _lane_progress("sound", 0.12)
@@ -931,7 +1006,7 @@ def _run_clip_index(worker_db, job, asset):
 
 
 def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
-                  workdir, ready_proxy=None, maxrate_kbps=None):
+                  workdir, ready_proxy=None, maxrate_kbps=None, limit_s=None):
     """Cache hits still need a proxy asset for THIS project (the player and
     preview renders read it). Reuse the stored object when possible.
 
@@ -954,6 +1029,8 @@ def _ensure_proxy(worker_db, project_id, sha, proxy_key, src_local, info,
     proxy_local = ready_proxy or os.path.join(workdir, "proxy.mp4")
     if not ready_proxy:
         proxy_kwargs = ({"maxrate_kbps": maxrate_kbps} if maxrate_kbps else {})
+        if limit_s:
+            proxy_kwargs["limit_s"] = limit_s
         media.make_proxy(src_local, proxy_local, info["fps"], info["vfr"],
                          info["has_audio"], duration=info["duration"], **proxy_kwargs)
     storage.upload_file(proxy_local, proxy_key, "video/mp4")
