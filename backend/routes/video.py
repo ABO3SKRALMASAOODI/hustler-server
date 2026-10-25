@@ -1010,6 +1010,37 @@ def _trial_url_first_cut(cur, user_id, project_id, message_id):
         return None
 
 
+TRIAL_URL_FIRST_CUT_REPLY = (
+    "I'm recording your website and making a first cut now: a vertical demo "
+    "you can watch here in about a minute.")
+_URL_RE = re.compile(r"https?://[^\s<>\"')]+", re.I)
+
+
+def _trial_url_direct(cur, user_id, project_id, message_id, text, concierge):
+    """A walled account's blank-canvas message with a website URL starts the
+    free trial's URL First cut at once, without waiting for the concierge
+    model. That call is OpenAI-funded and degrades to a template on any model
+    failure, which silently walled the most common first request whenever the
+    wallet or the model failed (bake-off 25 Oct, the local key returned
+    credit_balance_exhausted). Returns the First cut job id or None (then the
+    concierge answers exactly as before)."""
+    if not concierge or not concierge.get("can_act"):
+        return None
+    if not _URL_RE.search(text or ""):
+        return None
+    if not _subscribe_gate_applies(cur, user_id):
+        return None
+    job_id = _trial_url_first_cut(cur, user_id, project_id, message_id)
+    if job_id:
+        cur.execute("""INSERT INTO chat_messages (session_id, role, content,
+                                                  meta)
+                       VALUES (%s, 'assistant', %s, %s)""",
+                    (concierge["session_id"], TRIAL_URL_FIRST_CUT_REPLY,
+                     Json({"kind": "concierge", "act": True,
+                           "first_cut_job_id": job_id})))
+    return job_id
+
+
 def _upload_wall(cur, user_id, project_id, nbytes=None):
     """Whether a Studio main-video upload meets the subscribe wall.
 
@@ -4346,6 +4377,7 @@ def post_message(user_id, project_id):
                             "message_id": row["id"] if row else None})
 
         concierge = None
+        trial_url_job = None
         if not indexed and not defer_until_index:
             # Gather context inside the transaction, but make the LLM call
             # AFTER it commits — a model call must never hold a DB
@@ -4409,6 +4441,12 @@ def post_message(user_id, project_id):
                 "user_id": user_id,
                 "message_id": message_id,
             }
+            # Inside the transaction (the cursor closes with it): a walled
+            # account's website request starts the trial's URL First cut now.
+            trial_url_job = _trial_url_direct(cur, user_id, project_id,
+                                              message_id, text, concierge)
+            if trial_url_job:
+                concierge = None
 
         elif indexed:
             # A free-trial turn runs on the Claude lane in the executors and
@@ -4470,6 +4508,10 @@ def post_message(user_id, project_id):
             detail={"message_id": message_id, "indexed": indexed,
                     "stacked": stacked, "message_chars": len(text)},
             origin="server")
+
+    if trial_url_job:
+        return jsonify({"queued": True, "job_id": trial_url_job,
+                        "message_id": message_id, "first_cut": True})
 
     if concierge is not None:
         # The model call runs in a thread with its own DB connection — the
@@ -4603,10 +4645,9 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                     trial_url_job = _trial_url_first_cut(
                         cur, ctx["user_id"], project_id, ctx["message_id"])
                 if trial_url_job:
-                    _say("I'm recording your website and making a first cut "
-                         "now: a vertical demo you can watch here in about a "
-                         "minute.", {"kind": "concierge", "act": True,
-                                     "first_cut_job_id": trial_url_job})
+                    _say(TRIAL_URL_FIRST_CUT_REPLY,
+                         {"kind": "concierge", "act": True,
+                          "first_cut_job_id": trial_url_job})
                 elif info.get("subscribe_gated") and not info.get("payment_failed"):
                     # A website recording or blank-canvas build is an edit
                     # attempt too. New accounts have no free grant to exhaust;
