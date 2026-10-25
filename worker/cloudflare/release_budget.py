@@ -151,9 +151,8 @@ def main():
     me = int(os.environ["GITHUB_RUN_ID"])
     event = os.environ.get("GITHUB_EVENT_NAME", "push")
     release, note, count = True, "budget check unavailable: release", None
+    workflow = os.environ.get("WORKFLOW_FILE", "deploy-cloudflare-executor.yml")
     try:
-        workflow = os.environ.get("WORKFLOW_FILE",
-                                  "deploy-cloudflare-executor.yml")
         runs = _get(f"/repos/{repo}/actions/workflows/{workflow}/runs"
                     "?per_page=60").get("workflow_runs") or []
         since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)
@@ -176,6 +175,15 @@ def main():
                      f"{waited:.0f} s: released anyway (SIGTERM drains them)")
         elif waited >= 1:
             note += f"; waited {waited:.0f} s for customer jobs to finish"
+        if waited >= 1 and event != "workflow_dispatch":
+            # a newer push may have queued while this run waited
+            try:
+                runs = _get(f"/repos/{repo}/actions/workflows/{workflow}"
+                            "/runs?per_page=60").get("workflow_runs") or []
+                if newer_waiting_run(runs, me) is not None:
+                    release, note = decide(runs, me, count or 0, event)
+            except Exception:  # noqa: BLE001 — keep the decision made
+                pass
     level = "notice"
     if release and count is not None and count >= DAILY_RULE:
         level = "warning"

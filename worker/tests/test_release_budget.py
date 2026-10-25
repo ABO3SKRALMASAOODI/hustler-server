@@ -132,3 +132,24 @@ def test_the_owner_factory_is_never_waited_for():
     assert 60 in budget.INTERNAL_USER_IDS
     assert "NOT (user_id = ANY(%s))" in budget.CUSTOMER_JOBS_SQL
     assert "state = 'running'" in budget.CUSTOMER_JOBS_SQL
+
+
+def test_a_push_that_queues_during_the_customer_wait_takes_over(monkeypatch,
+                                                                tmp_path):
+    out = tmp_path / "out"
+    for name, value in (("GITHUB_REPOSITORY", "o/r"), ("GITHUB_RUN_ID", "1"),
+                        ("GH_TOKEN", "t"), ("GITHUB_OUTPUT", str(out)),
+                        ("DATABASE_URL", "postgres://x")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    listings = [[_run(1, 151)], [_run(2, 152, "pending"), _run(1, 151)]]
+
+    def fake_get(path):
+        if path.endswith("/jobs"):
+            return {"jobs": []}
+        return {"workflow_runs": listings.pop(0)}
+
+    monkeypatch.setattr(budget, "_get", fake_get)
+    monkeypatch.setattr(budget, "drain_customers", lambda *_a: (120.0, []))
+    assert budget.main() == 0
+    assert out.read_text() == "release=false\n"
