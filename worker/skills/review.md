@@ -175,6 +175,28 @@ current-version visual and
 audio review, repairs or justifications for every finding, and one complete
 Studio preview.
 
+THE SELF-REVIEW IN SIX STEPS (every short, in this order):
+1. Read the complete render's PICTURE CHECK, CAPTION CHECK, MEASURES line
+   and VERIFICATION ADVISORIES (the EARN ITS PLACE note included).
+2. ONE `look_at(rendered=true, output_times=[...])`: 0, 0.3 s and 1.0 s
+   (the hook), every hero moment, the densest caption page and the payoff,
+   up to 8 times in that one call; then `native_resolution=true` frames at
+   the hook and the payoff. Check in the pixels that each designed beat
+   shows what you meant, nothing sits on a face or jaw, and the payoff is
+   the largest lockup.
+3. `audit_captions`: every heard word shown once; fix every NEGATION
+   HIDDEN line and every doubled word; read each caption line for ASR
+   nonsense.
+4. `check_speech` across the joins: no half word, no repeated phrase a cut
+   made, a clean first word, the payoff complete with live footage after
+   it.
+5. `critique_short` once, when the verify department is loaded: fix its
+   blocking findings; "house style" means change the idea, not the
+   parameter.
+6. Fix the real defects and the single weakest designed moment, re-render,
+   and look again only at what changed. A zoom or a sound is never the fix
+   for a weak beat.
+
 ## Repair ladder
 
 Localize the finding → apply the narrowest repair → prove the changed

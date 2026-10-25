@@ -18,6 +18,21 @@ one coherent treatment.
 - One caption system per video; designed graphics take over the words for
   their own windows instead of stacking a second system.
 
+FAITHFUL TEXT — the words on screen are the words spoken, every one of
+them, once:
+- Every heard word reaches the screen exactly once (in a caption or on the
+  graphic that shows it); a word shown twice or a heard word never shown is
+  a defect, not an advisory.
+- Never hide a negation: a hook, cover, mute or graphic that drops "not",
+  "don't", "never" or "no one" while the rest of the sentence shows says
+  the opposite of what was said (`audit_captions` reports NEGATION HIDDEN,
+  blocking; end the graphic before that sentence or carry the whole clause).
+- Correct ASR mistakes (`set_caption_fixes`) only to what the speaker
+  actually said, read from the transcript's context or the source's own
+  captions; never invent a number, a name or a quote, and never fix a
+  heard stutter in the text (the audio still says it: cut it instead).
+- Qualifiers and hedges stay on screen ("I think", "probably").
+
 ## Evidence to inspect
 
 Inspect complete surviving transcript coverage (`get_kept_transcript`),
@@ -258,6 +273,8 @@ ones are the erase case.
   the words muted because no band was left — move the graphic off the
   caption band.)
 - Swapping a rejected colour for another colour.
+- A dropped negation or qualifier that flips or hardens the speaker's claim;
+  an ASR "fix" that invents a word the speaker did not say.
 
 ## Verification procedure
 

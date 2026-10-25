@@ -1,0 +1,4 @@
+{
+  "_doc": "claude/agent-trial-release-1025: the in-app agent's new playbooks join read_skill's name enum (first-requests, story-selection); nothing else in the core catalog changes.",
+  "skills": ["first-requests", "story-selection"]
+}
