@@ -54,14 +54,15 @@ def test_user_reason_never_pastes_the_raw_error(text):
 
 def test_quiet_retry_window_is_ten_minutes_for_idempotent_media_only():
     job = {"type": "index", "created_at": NOW - timedelta(minutes=1)}
-    assert failure_policy.infra_retry_delay(job, NOW.timestamp(), 0) == 15
-    assert failure_policy.infra_retry_delay(job, NOW.timestamp(), 2) == 60
+    assert failure_policy.infra_retry_delay(job, NOW.timestamp(), 0) == 10
+    assert failure_policy.infra_retry_delay(job, NOW.timestamp(), 2) == 40
     assert failure_policy.infra_retry_delay(
         job, NOW.timestamp(), failure_policy.INFRA_RETRY_MAX) is None
     old = dict(job, created_at=NOW - timedelta(minutes=11))
     assert failure_policy.infra_retry_delay(old, NOW.timestamp(), 0) is None
-    near = dict(job, created_at=NOW - timedelta(minutes=9, seconds=50))
-    assert failure_policy.infra_retry_delay(near, NOW.timestamp(), 0) == 10
+    near = dict(job, created_at=NOW - timedelta(minutes=9, seconds=53))
+    assert failure_policy.infra_retry_delay(near, NOW.timestamp(), 1) == \
+        pytest.approx(7, abs=0.5)
     for kind in ("agent_turn", "mcp_tool", "shorts_plan"):
         assert failure_policy.infra_retry_delay(
             dict(job, type=kind), NOW.timestamp(), 0) is None
@@ -88,7 +89,7 @@ def test_an_infrastructure_failure_goes_back_to_the_queue_quietly(monkeypatch):
     err = RuntimeError("Cloudflare Container shard is busy")
     decision = failure_policy.decision_for(err, "preview")
     assert worker_main._quiet_infra_retry(db, job, err, decision, 3)
-    assert waits == [30]
+    assert waits == [20]
     fn, args, kw = db.calls[0]
     assert fn is dbx.defer_unlaunched_cloudflare_busy
     assert args[:2] == (5, 3) and kw["counter"] == "infra_retry_deferrals"

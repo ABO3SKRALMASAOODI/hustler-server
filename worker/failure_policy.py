@@ -285,7 +285,9 @@ def is_infrastructure(error, decision=None):
 
 def infra_retry_delay(job, now_ts, attempt):
     """Seconds to wait before the next quiet retry, or None when the job is
-    outside its 10-minute window (or out of retries)."""
+    outside its 10-minute window (or out of retries). The requeued row then
+    also waits CLOUDFLARE_BUSY_RETRY_DELAY_S before it can be claimed, so the
+    lane itself is held only briefly (10, 20, 40 s)."""
     if str(job.get("type") or "") not in INFRA_RETRY_TYPES:
         return None
     if attempt >= INFRA_RETRY_MAX:
@@ -300,7 +302,7 @@ def infra_retry_delay(job, now_ts, attempt):
     remaining = INFRA_RETRY_WINDOW_S - age
     if remaining <= 0:
         return None
-    return max(5.0, min(remaining, 15.0 * (2 ** attempt), 60.0))
+    return max(5.0, min(remaining, 10.0 * (2 ** attempt), 40.0))
 
 
 def user_reason(error, decision=None):

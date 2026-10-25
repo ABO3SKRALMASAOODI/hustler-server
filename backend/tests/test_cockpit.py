@@ -528,12 +528,16 @@ def test_record_adjustment_upserts_by_adjustment_id(monkeypatch):
     ok = billing.record_adjustment(Conn(), 7, {
         "id": "adj_9", "action": "refund", "status": "approved",
         "transaction_id": "txn_1", "subscription_id": "sub_1",
+        "reason": "requested_by_customer",
         "totals": {"total": "4500"}, "updated_at": "2026-10-25T10:00:00Z"})
     assert ok and Conn.committed == 1
     sql, params = executed[0]
     assert "ON CONFLICT (transaction_id) DO UPDATE" in sql
     assert params[1] == "adj_9" and params[4] == "refunded" and \
         params[5] == -4500
+    # Never read back as a card decline.
+    assert params[7] == "adjustment:requested_by_customer"
+    assert params[8] is None
     # Negative and non-'completed' rows can never count as revenue.
     from admin_metrics import defs
     assert "amount_cents > 0" in defs.success("p")

@@ -287,7 +287,8 @@ def _shell(title, sections, footer=None):
     for name, lines in sections:
         if not lines:
             continue
-        items = "".join(f'<li style="margin:0 0 6px">{line}</li>'
+        # A newline after each item keeps the plain-text part one per line.
+        items = "".join(f'<li style="margin:0 0 6px">{line}</li>\n'
                         for line in lines)
         parts.append(f'<h2 style="margin:18px 0 8px;font-size:14px;'
                      f'color:#fff">{_e(name)}</h2><ul style="margin:0;'

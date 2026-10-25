@@ -264,10 +264,13 @@ def record_adjustment(conn, user_id, data, commit=True):
                 error_code = EXCLUDED.error_code,
                 occurred_at = EXCLUDED.occurred_at,
                 updated_at = NOW()""",
+                    # The reason rides on origin, never error_code: billing
+                    # reads error_code as the latest card decline.
                     (user_id, adj_id, data.get("subscription_id"),
                      data.get("transaction_id"), status, cents, currency,
-                     "adjustment", (data.get("reason") or None) and
-                     str(data.get("reason"))[:120], occurred))
+                     ("adjustment:" + str(data.get("reason")))[:80]
+                     if data.get("reason") else "adjustment", None,
+                     occurred))
         cur.close()
         if commit:
             conn.commit()
