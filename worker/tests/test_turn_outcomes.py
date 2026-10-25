@@ -297,3 +297,17 @@ def test_unused_fetched_music_is_disclosed():
     ctx.latest_edl = lambda: {"json": {
         "music": [{"storage_key": "music/1/track.mp3"}]}}
     assert agent_loop._unused_fetched_audio_note(ctx) == ""
+
+
+def test_blank_canvas_capture_never_placed_is_partial_not_fulfilled():
+    # Bake-off 25 Oct: "record a demo of https://stripe.com" recorded the
+    # page but never placed it; the reply was counted as a fulfilled demo.
+    ctx = _ctx(has_main_video=False, web_recordings=["fetched/45/x.mp4"],
+               turn_tool_outcomes=[{"tool": "record_website", "kind": "success"}])
+    outcome, _billable = agent_loop._turn_completion(ctx)
+    assert outcome == "partial"
+    # once placed and rendered on the canvas it is a deliverable as before
+    placed = _ctx(has_main_video=False, web_recordings=["fetched/45/x.mp4"],
+                  versions_written=[2], rendered_versions={2},
+                  last_preview={"url": "https://p.example/x.mp4", "cached": False})
+    assert agent_loop._turn_completion(placed)[0] != "blocked"

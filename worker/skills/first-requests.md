@@ -17,7 +17,10 @@ Defaults whenever the user did not say otherwise:
   once, quoting the transcript (read captions for the faithful-text rules).
 - Dead air and fillers trimmed on speech; never a cut through a word.
 - One committed look (`apply_look`), restrained and readable.
-- No music unless the user asks or supplies it; never pick a track.
+- No music unless the user asks or supplies it; never pick a track. A
+  source with no sound (a website capture, a silent clip) stays silent:
+  deliver the picture-only result and offer music in one line; never stop
+  the request to ask about it.
 - ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
   restraint is the default. Reach for a zoom or a sound only when a
   specific moment needs it — a key word, a reveal, a genuinely jarring

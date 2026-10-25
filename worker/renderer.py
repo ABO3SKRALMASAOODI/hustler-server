@@ -9180,6 +9180,49 @@ def _source_not_ready(worker_db, project_id, original, missing_text):
         "before rendering.")
 
 
+def _insert_asset_meta(worker_db, project_id, storage_key):
+    """assets.meta of one inserted file of this project ({} when unknown)."""
+    if not storage_key:
+        return {}
+
+    def _q(conn):
+        with conn.cursor() as cur:
+            cur.execute("""SELECT meta FROM assets
+                           WHERE project_id = %s AND storage_key = %s
+                           ORDER BY id DESC LIMIT 1""",
+                        (project_id, storage_key))
+            row = cur.fetchone()
+        if not row:
+            return {}
+        return (row.get("meta") if isinstance(row, dict) else row[0]) or {}
+    return worker_db.run(_q)
+
+
+def silent_by_design(edl, index, insert_meta):
+    """True when nothing in this program carries sound, so a silent mix is
+    the faithful result: no music, effects or voice-over authored, the main
+    source has no audio track (or there is none: a canvas program), and every
+    unmuted video insert is a website capture (record_website* clips are
+    always silent). Anything unknown reads as "has sound" (today's check)."""
+    edl = edl or {}
+    if edl.get("music") or edl.get("sfx") or edl.get("voiceover"):
+        return False
+    if not edl.get("canvas"):
+        video = (index or {}).get("video") or {}
+        if video.get("has_audio") is not False:
+            return False
+    for ins in edl.get("inserts") or []:
+        if ins.get("kind") != "video" or ins.get("mute"):
+            continue
+        try:
+            meta = insert_meta(ins.get("asset_key")) or {}
+        except Exception:  # noqa: BLE001 - unknown reads as sound
+            return False
+        if not meta.get("recorded"):
+            return False
+    return True
+
+
 def _run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     # Which run of this job we are. The dispatcher ships it (remote._job_payload)
@@ -9887,7 +9930,11 @@ def _run_render_job(worker_db, job):
                 audio_qc_res = audio_qc.measure(
                     out_local, duration_s=out_dur,
                     master=(master_loudness(edl_row["json"], *src_shape)
-                            or _explicit))
+                            or _explicit),
+                    silent_by_design=silent_by_design(
+                        edl_row["json"], index,
+                        lambda key: _insert_asset_meta(
+                            worker_db, project_id, key)))
             except Exception:
                 audio_qc_res = None
             authored = edl_row["json"]

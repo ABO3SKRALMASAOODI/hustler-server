@@ -1390,6 +1390,22 @@ def _reply_language_note(user_texts):
             "reply language.]")
 
 
+# The new-subscriber Claude lane's one standing note (bake-off 25 Oct: without
+# it Haiku read screen-takeover for "record a demo of <url>" and delivered a
+# passive scroll, and stopped silent highlights to ask about music). Byte-
+# identical on every turn so it rides the cached prefix.
+CLAUDE_PAID_FIRST_REQUESTS = (
+    "FIRST REQUESTS. For a website or product demo, clean-up, a vertical "
+    "short with captions, highlights, gaming footage or shorts from a long "
+    "talk, read_skill('first-requests') before the first edit: it gives the "
+    "request's default chain, its done bar and the one self-review. Deliver "
+    "one finished, watchable result with sensible defaults and say what you "
+    "chose; ask only when the request cannot start. A website demo is "
+    "record_website_demo (clicks on visible buttons) then showcase_demo, "
+    "never a passive scroll. No music unless the user asks; a source with "
+    "no sound stays silent and is still delivered.")
+
+
 def _build_messages(ctx, worker_db, user_message, attachment_note="",
                     include_visual_overview=True):
     def _component(name, value):
@@ -1413,6 +1429,11 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
         msgs.append({"role": "system",
                      "content": claude_trial.FIRST_RESULT_NOTE})
         _component("claude_trial_first_result", claude_trial.FIRST_RESULT_NOTE)
+    elif getattr(ctx, "claude_paid", None) is not None:
+        # New subscribers on the Claude lane (D1) get the same first-request
+        # chains as the trial; grandfathered lanes are untouched.
+        msgs.append({"role": "system", "content": CLAUDE_PAID_FIRST_REQUESTS})
+        _component("claude_paid_first_requests", CLAUDE_PAID_FIRST_REQUESTS)
 
     storyboard_text = visual_index.compact_text(
         (getattr(ctx, "index", None) or {}).get("visual_storyboard") or {})
@@ -3895,6 +3916,13 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     has_value = bool(has_edit_deliverable or _turn_has_asset_progress(ctx))
     blank_canvas_no_value = (
         not has_value and getattr(ctx, "has_main_video", True) is False)
+    # A blank-canvas request ("record a demo of <url>") whose only progress
+    # is a created asset that never reached the timeline has nothing to
+    # watch: it is partial, never fulfilled (bake-off 25 Oct: a website
+    # capture left unplaced was reported as a fulfilled demo).
+    blank_canvas_asset_only = bool(
+        has_value and not has_edit_deliverable
+        and getattr(ctx, "has_main_video", True) is False)
     kinds = [row.get("kind") for row in ctx.turn_tool_outcomes
              if not row.get("resolved")]
     failed = "failed" in kinds
@@ -3925,7 +3953,8 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
                                           "request_budget"}):
         outcome = "blocked"
     elif has_value and (status != "replied" or fail_note or failed
-                        or prerequisite or unfinished_edit):
+                        or prerequisite or unfinished_edit
+                        or blank_canvas_asset_only):
         outcome = "partial"
     else:
         outcome = "fulfilled"

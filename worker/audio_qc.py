@@ -86,7 +86,7 @@ def _parse(stderr_text):
     return loud, silences
 
 
-def measure(path, duration_s=None, master=None):
+def measure(path, duration_s=None, master=None, silent_by_design=False):
     """The QC record for one rendered file, or None when analysis failed.
 
     {"i": integrated LUFS, "tp": true peak dBTP, "lra": loudness range,
@@ -98,6 +98,13 @@ def measure(path, duration_s=None, master=None):
     EDL's explicit 'natural'): a loudness finding must not prescribe
     set_master_loudness for a mix that is already mastered, or quietly
     overrule a user who asked for the natural level.
+
+    `silent_by_design`: nothing in this program carries sound (a source with
+    no audio track, or a website capture, and no music, effects or voice-over
+    authored). A silent mix is then the faithful result, not a fault: the
+    SILENT finding would push the editor to ask for music nobody requested
+    (owner policy: never pick a track) and to report a finished edit as
+    unfinished. The measurement itself is kept.
     """
     err = _run_ffmpeg(path)
     if err is None:
@@ -132,7 +139,9 @@ def measure(path, duration_s=None, master=None):
             tp = None
         if lra is not None and not math.isfinite(lra):
             lra = None
-    if i is not None and i < -70.0:
+    if i is not None and i < -70.0 and silent_by_design:
+        pass
+    elif i is not None and i < -70.0:
         findings.append("the mix is essentially SILENT (integrated "
                         f"{i:.1f} LUFS) — every audio layer is muted or "
                         "missing")

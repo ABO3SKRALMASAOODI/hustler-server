@@ -455,6 +455,14 @@ def probe(path):
     r, avg = _rate("r_frame_rate"), _rate("avg_frame_rate")
     fps = avg or r or 30.0
     vfr = bool(r and avg and abs(r - avg) > 0.5)
+    if vfr and fps < VFR_MIN_FPS:
+        # A screen recorder writes a frame only when pixels change, so a
+        # mostly static recording averages 3-15 fps. That average is not a
+        # playback rate: normalizing to it made a 2.8 fps proxy, preview and
+        # export (scrolls became a slideshow) and section renders came back
+        # a frame long. Normalize to the stream's own nominal rate instead
+        # (24-60), else 30.
+        fps = r if VFR_MIN_FPS <= r <= 60.0 else 30.0
     w, h = int(v.get("width") or 0), int(v.get("height") or 0)
     if abs(rotation_of(v)) % 180 == 90:
         w, h = h, w
@@ -503,6 +511,11 @@ def probe(path):
         "has_audio": a is not None,
         "vfr": vfr,
     }
+
+
+# Below this average rate a VFR stream is a frames-on-change recording, not
+# footage shot at that rate (probe() normalizes it to its nominal rate).
+VFR_MIN_FPS = 23.5
 
 
 def _proxy_vf(h, pad_s=0.0):
