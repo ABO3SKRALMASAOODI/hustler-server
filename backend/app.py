@@ -35,6 +35,7 @@ from routes.marketing_preferences import marketing_bp
 from routes.video import video_bp
 from routes.admin_video import admin_video_bp
 from routes.admin_v2 import admin_v2_bp
+from routes.admin_ops import admin_ops_bp
 from routes.onboarding import onboarding_bp
 from routes.mcp import mcp_bp
 from routes.mcp_oauth import mcp_oauth_bp
@@ -249,6 +250,9 @@ def create_app():
     app.register_blueprint(admin_video_bp)
     # The rebuilt admin API (/admin/v2/*): read-only, time-limited, JSON errors.
     app.register_blueprint(admin_v2_bp)
+    # The outcome loop: Sessions/Tickets views and the ops CLI's storage
+    # helpers (ops_loop/, scripts/ops_review.py).
+    app.register_blueprint(admin_ops_bp)
     # No url_prefix: this blueprint owns routes under BOTH /onboarding and
     # /admin, so the prefixes live on the routes themselves.
     app.register_blueprint(onboarding_bp)

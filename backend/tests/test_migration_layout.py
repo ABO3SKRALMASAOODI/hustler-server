@@ -25,7 +25,9 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     numbers = {int(name.split("_", 1)[0]) for name in names}
 
-    assert numbers == set(range(40))
+    # 040 is reserved for the Claude trial budget (branch
+    # claude/claude-trial-1025, on hold); 041 is the outcome loop.
+    assert numbers == set(range(40)) | {41}
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names
