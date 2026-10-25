@@ -44,6 +44,11 @@ TAIL_SCHEDULE = (
     (datetime(2026, 7, 1, tzinfo=timezone.utc),
      {"interactive": 240, "mcp": 240, "batch": 60, "agent": 60,
       "shorts": 60}),
+    # d09b55ac (strategy 1025 cost cuts): MCP 90 s, every other lane 30 s;
+    # its executor release rolled out about 12:00 UTC on 25 Oct 2026.
+    (datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc),
+     {"interactive": 30, "mcp": 90, "batch": 30, "agent": 30,
+      "shorts": 30}),
 )
 # The Cloudflare billing cycle renews on this day of the month.
 CYCLE_DAY = 7

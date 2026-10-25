@@ -609,3 +609,20 @@ def test_llm_credit_spend_against_what_was_loaded(monkeypatch):
     board = {"rows": [], "strip": {"first_cut": {"llm_credit": out}}}
     keys = [k for k, _, _ in alerts.daily_alerts(board, NOW)]
     assert keys == ["llmcredit:anthropic:80:2026-10-25T00:00:00Z"]
+
+
+def test_the_tail_in_force_follows_each_release():
+    before = datetime(2026, 10, 24, tzinfo=timezone.utc).timestamp()
+    after = datetime(2026, 10, 26, tzinfo=timezone.utc).timestamp()
+    assert infra_cost.tail_for("mcp", before) == 240
+    assert infra_cost.tail_for("mcp", after) == 90
+    assert infra_cost.tail_for("interactive", after) == 30
+    # The Worker's own constants (sleepAfter) must match the newest row.
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "worker", "cloudflare", "src",
+        "index.ts")
+    if os.path.exists(src):
+        text = open(src).read()
+        newest = infra_cost.TAIL_SCHEDULE[-1][1]
+        assert f'MODEL_GAP_SLEEP_AFTER = "{newest["mcp"]}s"' in text
+        assert f'RENDER_SLEEP_AFTER = "{newest["interactive"]}s"' in text
