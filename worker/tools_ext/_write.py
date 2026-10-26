@@ -43,8 +43,16 @@ def commit(ctx, operations, summary):
     try:
         keys = ctx.db.run(edit_batch.project_media_keys,
                           ctx.project_id) or set()
-        updated = edit_batch.apply_batch(row["json"], operations,
-                                         ctx.duration or None, keys)
+        # The 64-operation cap guards batches an AGENT writes. A Valmera tool
+        # that builds its own operations (set_junction on a long programme
+        # with 35+ cuts) must not be refused by it: apply them in chunks of
+        # 64 onto the same in-memory EDL, then write once (a paying MCP
+        # user's set_junction was refused this way on 25 Oct 2026).
+        ops = list(operations or [])
+        updated = row["json"]
+        for i in range(0, len(ops) or 1, 64):
+            updated = edit_batch.apply_batch(updated, ops[i:i + 64],
+                                             ctx.duration or None, keys)
     except (ValueError, TypeError) as exc:
         return f"REJECTED (EDL v{row['version']} unchanged): {exc}"
     return ctx.write_edl(updated, summary)

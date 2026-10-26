@@ -258,6 +258,9 @@ def phone_status():
                   FROM client_events ce
                   JOIN users u ON u.id = ce.user_id
                  WHERE ce.kind IN ('upload_rejected', 'upload_failed')
+                   -- an upload accepted with a note (over the duration cap,
+                   -- first part analysed) is not a failure
+                   AND COALESCE(ce.detail->>'accepted', 'false') <> 'true'
                    AND ce.created_at >= %s AND ce.created_at <= %s
                    AND {scope}
             """, (starts_at, now_utc))

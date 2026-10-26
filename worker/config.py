@@ -1660,7 +1660,13 @@ REMOTE_EXECUTOR_TIMEOUTS = {
     # Changed-section proof reels are bounded to a few seconds of output and
     # should fail fast enough that the agent can choose another verification
     # route instead of occupying an interactive executor for 25 minutes.
-    "preview_check": int(os.getenv("REMOTE_TIMEOUT_PREVIEW_CHECK_S", "300")),
+    # A preview_check renders every window the agent asks to verify; a
+    # 150 s program checked in ~25 windows ran past 300 s on the 2-vCPU
+    # interactive lane and was killed twice for a paying MCP user (jobs
+    # 110314, 110863, 25 Oct 2026). 900 s gives it room; the stall, overrun
+    # and lost-lease watchdogs still stop unproductive work early, and
+    # preview_check is not a synchronous child, so the MCP floor is unchanged.
+    "preview_check": int(os.getenv("REMOTE_TIMEOUT_PREVIEW_CHECK_S", "900")),
     # Stem separation (round 97): demucs on CPU runs near realtime, the
     # source is capped at STEMS_MAX_SOURCE_S, and the result is cached per
     # source forever — so this bounds ONE first-ever separation per video.
