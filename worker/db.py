@@ -891,6 +891,31 @@ _DEFERRAL_COUNTERS = {"cloudflare_busy_deferrals",
                       "infra_retry_deferrals"}
 
 
+def escalate_render_lane(conn, job_id, total_claims, error, lane):
+    """Requeue an out-of-memory render ONCE onto a larger executor lane.
+
+    The interactive lane (8 GiB) OOM-killed a paying user's long draft
+    preview (job 111131, 26 Oct 2026); the same graph fits the 12 GiB batch
+    lane. The attempt is refunded, ``payload.force_lane`` pins the next
+    dispatch, and the guard on its absence makes this a one-shot.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET state = 'queued',
+                           attempts = GREATEST(0, attempts - 1),
+                           error = %s,
+                           payload = jsonb_set(COALESCE(payload, '{}'::jsonb),
+                                               '{force_lane}', to_jsonb(%s::text),
+                                               true),
+                           updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND total_claims = %s
+                         AND COALESCE(payload->>'force_lane', '') = ''""",
+                    (error_text.excerpt(error, 2000), lane, job_id,
+                     total_claims))
+        return cur.rowcount == 1
+
+
 def defer_unlaunched_cloudflare_busy(conn, job_id, total_claims, error,
                                      max_deferrals,
                                      counter="cloudflare_busy_deferrals"):

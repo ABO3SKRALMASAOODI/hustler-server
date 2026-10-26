@@ -1460,7 +1460,13 @@ def _cloudflare_lane(job_type):
 
 
 def _cloudflare_lane_for(job):
-    """The lane this dispatch uses: its home lane unless it failed over."""
+    """The lane this dispatch uses: its home lane unless it failed over, or
+    a render the worker escalated to a larger lane after an OOM kill
+    (``payload.force_lane``, only ever a valid failover lane)."""
+    forced = (job.get("payload") or {}).get("force_lane")
+    if forced and forced in _cloudflare_failover_lanes(job) \
+            and not job.get("_cloudflare_lane"):
+        return forced
     return job.get("_cloudflare_lane") or _cloudflare_lane(job.get("type"))
 
 
@@ -2489,8 +2495,10 @@ def _capacity_route(job, retry):
     whose container class has its own instance pool. Later retries alternate
     between them, cycling identities, until the bounded budget ends.
     """
-    home = _cloudflare_lane(job.get("type"))
-    lanes = (home,) + tuple(_cloudflare_failover_lanes(job))
+    home = _cloudflare_lane_for(job) if (job.get("payload") or {}).get(
+        "force_lane") else _cloudflare_lane(job.get("type"))
+    lanes = (home,) + tuple(l for l in _cloudflare_failover_lanes(job)
+                            if l != home)
     if retry == 1 or len(lanes) == 1:
         return home, retry % 3
     if retry % 2 == 0:

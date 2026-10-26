@@ -329,6 +329,8 @@ def process_one(worker_db, job):
         # R1 (strategy 1025): a failure of OUR fleet (executor missing, shard
         # busy, version skew, a deploy, a lost container) is retried quietly
         # for up to 10 minutes on a fresh claim instead of reaching the user.
+        if _escalate_oom_render(worker_db, job, e, decision, lease_claim):
+            return
         if _quiet_infra_retry(worker_db, job, e, decision, lease_claim):
             return
         if failure_policy.defer_prerequisite(
@@ -413,6 +415,32 @@ def _resume_agent_after_infra(worker_db, job, err, lease_claim):
           f"write; continuing root {root_id} as job {next_id} "
           f"({count}/3): {str(err)[:160]}", flush=True)
     return True
+
+
+OOM_ESCALATE_TYPES = {"preview", "preview_check", "filmstrip", "frames"}
+
+
+def _escalate_oom_render(worker_db, job, err, decision, lease_claim):
+    """An encode the kernel OOM-killed on the 8 GiB interactive lane runs
+    again ONCE on the 12 GiB batch lane instead of failing (job 111131,
+    26 Oct 2026). Re-running the same graph on the same lane would fail the
+    same way; the batch image is a superset of the interactive one."""
+    if decision.kind != "executor_memory" \
+            or job.get("type") not in OOM_ESCALATE_TYPES \
+            or (job.get("payload") or {}).get("force_lane"):
+        return False
+    try:
+        moved = worker_db.run(dbx.escalate_render_lane, job["id"],
+                              lease_claim, err, "batch")
+    except Exception as exc:
+        print(f"[job {job['id']}] OOM escalation could not requeue "
+              f"({str(exc)[:120]})", flush=True)
+        return False
+    if moved:
+        worker_db.run(dbx.bump_metric, "oom_render_escalated")
+        print(f"[job {job['id']}] out of memory on its lane; requeued once on "
+              "the batch lane (12 GiB)", flush=True)
+    return bool(moved)
 
 
 def _quiet_infra_retry(worker_db, job, err, decision, lease_claim):
