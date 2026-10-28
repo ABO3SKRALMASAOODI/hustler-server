@@ -187,6 +187,15 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
     without them a dropped connection ends the read early with exit 0.
     """
     cmd = http_inputs.resilient(cmd)
+    if not timeout and expected_out_s:
+        # A whole-source encode (the index proxy) scales with the source:
+        # the flat 3000 s cap killed a 2.1 h upload's proxy at 63-87% three
+        # times (jobs 114997, 115548, 115549, 28 Oct 2026) while it ran at a
+        # healthy 1.6-2.2x. The stall, progress-stall and overrun watchdogs
+        # still stop a broken encode early; the lane lease still bounds it.
+        timeout = max(config.FFMPEG_TIMEOUT_S,
+                      min(config.FINAL_FFMPEG_TIMEOUT_MAX_S,
+                          int(float(expected_out_s) * 1.5 + 600)))
     timeout = timeout or config.FFMPEG_TIMEOUT_S
     oom_before = _oom_kill_count()
     if progress_cb and expected_out_s:
