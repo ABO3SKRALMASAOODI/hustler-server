@@ -201,12 +201,23 @@ def container_name(slot):
 
 def container_info(name):
     out = sh(["docker", "inspect", "-f",
-              "{{.Config.Image}}|{{.State.Running}}|{{.Created}}", name],
+              "{{.Config.Image}}|{{.State.Running}}|{{.Created}}|"
+              "{{range $p, $b := .HostConfig.PortBindings}}"
+              "{{range $b}}{{.HostPort}}{{end}}{{end}}", name],
              check=False)
     if out.returncode != 0:
         return None
-    image, running, created = out.stdout.strip().split("|", 2)
-    return {"image": image, "running": running == "true", "created": created}
+    image, running, created, port = (out.stdout.strip().split("|", 3)
+                                     + [""])[:4]
+    return {"image": image, "running": running == "true", "created": created,
+            "port": port.strip()}
+
+
+def _slot_drifted(slot, info, source):
+    """Missing, stopped, on another image, or published on another port."""
+    return (info is None or not info["running"]
+            or info["image"] != slot_image(slot, source)
+            or (info.get("port") and info["port"] != str(slot["port"])))
 
 
 def _bytes(size):
@@ -369,8 +380,7 @@ def stale_slots(source):
     out = []
     for slot in config().get("slots", []):
         info = container_info(container_name(slot))
-        if env_changed or info is None or not info["running"] or \
-                info["image"] != slot_image(slot, source):
+        if env_changed or _slot_drifted(slot, info, source):
             out.append(slot)
     return out
 
@@ -446,8 +456,7 @@ def stale_slots_without_env(source):
     out = []
     for slot in config().get("slots", []):
         info = container_info(container_name(slot))
-        if info is None or not info["running"] or \
-                info["image"] != slot_image(slot, source):
+        if _slot_drifted(slot, info, source):
             out.append(slot)
     return out
 
