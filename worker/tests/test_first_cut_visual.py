@@ -483,3 +483,11 @@ def test_a_screen_ends_live_with_the_runon_muted():
     fin = idx["words"][-1]
     ctx.edl["keep"] = [[0.0, fin["t1"] + 0.35]]
     assert fcv.muted_tail(ctx, [], 0.0, run) is None and not calls
+
+
+def test_screen_captions_keep_the_c2_look():
+    style = {"preset": "reels", "motion_look": "editorial", "size_scale": 1.45}
+    got, n = fcv.caption_style(style, talking=False, screen=True, vertical=False)
+    assert got == style and n == 2
+    got, n = fcv.caption_style(style, talking=True, screen=False, vertical=True)
+    assert got["motion_look"] == "serif" and got["single_line"] and n == 3

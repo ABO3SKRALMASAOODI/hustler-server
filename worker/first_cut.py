@@ -1479,16 +1479,12 @@ def video_chain(ctx, worker_db, started, spend):
     y = chest_y(faces, bands) if (talking and vertical_out) else None
     hook, hook_end = getattr(ctx, "first_cut_hook", None), HOOK_S
     hook_y, mute_under = y, True
-    if talking and q1 and hook and vertical_out:
-        # Q1: the scout's 2-5 word promise as a poster ABOVE the head (the
-        # judges: "a self-contained claim above or behind the head, not the
-        # spoken 'Since...' clause on the chest"); the captions run under it
-        import first_cut_visual as fcv
-        hook_y = fcv.title_y(ctx.index, bands)
-        hook_end = HOOK_S
-        mute_under = hook_y is None
-        hook_y = hook_y if hook_y is not None else y
-    elif talking:
+    # (Q1 tried the scout's promise above the head: the band above a
+    # vertical talking head is the brand corner mark's (y 0.115-0.192), and
+    # the corner-mark guard removed every such title, scoring hook 2.5-4.
+    # The spoken line stays the title, at the chest; the scout's opening
+    # rule keeps it a self-contained claim.)
+    if talking:
         opening = spoken_opening(ctx)
         hook, hook_end = opening if opening else (None, HOOK_S)
         # the references hold the opening title 2.5-3.5 s (C2: it left at

@@ -225,6 +225,9 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None):
         prog = float(schemas.program_duration(edl))
     except Exception:
         return []
+    print(f"[first_cut] b-roll at program s: "
+          f"{[(None if tl.src_to_out(m[0]) is None else round(tl.src_to_out(m[0]), 1), m[2]) for m in moments or []]}",
+          flush=True)
     wins = broll_windows(moments, tl, prog, hook_end)
     print(f"[first_cut] b-roll: {len(moments or [])} scout moments, "
           f"{len(wins)} windows", flush=True)
@@ -363,6 +366,10 @@ def caption_style(style, talking, screen, vertical):
     emphasis word turns gold serif italic in place: the slams' two
     families and accent); a screen or an animation (white snow) gets the
     phrase pill so it reads on any picture, at one steady band."""
+    if screen:
+        # a screen keeps the C2 look (judges: editorial 6-7 over the docs;
+        # the serif line "dissolves into the doc text", 4-4.5)
+        return dict(style), 2
     out = dict(style, size_scale=CAPTION_SCALE, motion_look="serif",
                single_line=True)
     if not talking:
@@ -462,27 +469,6 @@ OPENING_RULE = (
     "Never START on a sentence that opens with a subordinate clause "
     "(\"Since...\", \"Because...\", \"If...\", \"When...\"): start "
     "where the claim stands on its own. ")
-
-
-def title_y(index, bands=None):
-    """Where a talking head's title sits: in the band ABOVE the face (the
-    judges, every talking-head round: "above or behind the head, not on the
-    chest"), its centre above the face box's top, never over the eyes;
-    None without faces."""
-    samples = ((index or {}).get("spatial") or {}).get("samples") or []
-    tops = []
-    for smp in samples:
-        faces = [f for f in smp.get("faces") or [] if len(f) >= 4]
-        if faces:
-            f = max(faces, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
-            tops.append(f[1])
-    if not tops:
-        return None
-    tops.sort()
-    top = tops[len(tops) // 2]
-    if bands:
-        top = (top - bands[0]) / max(1e-6, bands[1] - bands[0])
-    return round(min(max(top - 0.13, 0.12), 0.22), 3)
 
 
 # --------------------------------------------------------------------------
