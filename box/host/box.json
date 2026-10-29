@@ -23,8 +23,8 @@
     "owner": 150
   },
   "max_wait_s": 170,
-  "mem_budget_gib": 28.0,
-  "mem_reserve_gib": 3.0,
+  "mem_budget_gib": 40.0,
+  "mem_reserve_gib": 3.5,
   "strict_source": true,
   "disk_min_free_gib": 20,
   "disk_low_water_gib": 40,
