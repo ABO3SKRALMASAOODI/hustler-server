@@ -523,3 +523,25 @@ def test_the_band_crop_spans_the_whole_source_before_any_cut(monkeypatch):
     assert names.index("deband") < names.index("keep_segments")
     assert order[names.index("deband")][1] == [[0.0, ctx.duration]]
     assert names.count("deband") == 1
+
+
+def test_the_band_crop_is_relaid_over_the_whole_program():
+    ctx = _EdlCtx(_talk_index())
+    ctx.edl["keep"] = [[0.0, 20.0]]
+    ctx.edl["effects"] = {"zooms": [
+        {"id": "zm1", "start": 0.0, "end": 19.6, "strength": 0.43,
+         "cx": 0.5, "cy": 0.2, "purpose": fcv.BAND_PURPOSE + " (rows 0.15-0.85)"},
+        {"id": "zm2", "start": 3.0, "end": 5.0, "strength": 0.3}]}
+    calls = []
+
+    def run(c, steps, name, args, started):
+        calls.append((name, args))
+        return "EDL v3"
+    assert fcv.refresh_band_crop(ctx, [], 0.0, run) is True
+    assert calls[0] == ("remove_zoom", {"id": "zm1"})
+    assert calls[1][0] == "add_zoom" and calls[1][1]["start"] == 0.0 \
+        and calls[1][1]["end"] == 20.0 and calls[1][1]["strength"] == 0.43
+    # already whole: nothing to do
+    ctx.edl["effects"]["zooms"][0]["end"] = 20.0
+    calls.clear()
+    assert fcv.refresh_band_crop(ctx, [], 0.0, run) is False and not calls

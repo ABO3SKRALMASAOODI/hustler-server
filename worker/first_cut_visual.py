@@ -445,6 +445,43 @@ def drop_tail_words(ctx, steps, started, run):
                                               "operation": "append"}, started)
 
 
+BAND_PURPOSE = "crop the source's own static bands"
+
+
+def refresh_band_crop(ctx, steps, started, run):
+    """The band crop is one zoom over the program; a zoom stays anchored to
+    the footage it covered, so a cut that later EXTENDS the program (the
+    live tail, a request that restores earlier footage) leaves the new
+    seconds uncropped and the bars show (judges, trial phone/phonehook:
+    "the first frame and the last 0.5 s in a small, banded layout"). After
+    the last cut the crop is re-laid over the whole program. Returns True
+    when it was re-laid."""
+    import schemas
+    try:
+        edl = ctx.latest_edl()["json"]
+        prog = float(schemas.program_duration(edl))
+    except Exception:
+        return False
+    zooms = ((edl.get("effects") or {}).get("zooms") or [])
+    band = [z for z in zooms if isinstance(z, dict)
+            and str(z.get("purpose") or "").startswith(BAND_PURPOSE)]
+    if len(band) != 1:
+        return False
+    z = band[0]
+    if float(z.get("start") or 0) <= 0.01 and float(z.get("end") or 0) >= prog - 0.01:
+        return False
+    if run(ctx, steps, "remove_zoom", {"id": z["id"]}, started) is None:
+        return False
+    args = {"start": 0.0, "end": round(prog, 2),
+            "strength": z.get("strength"), "mode": "punch", "ramp_s": 0.0,
+            "purpose": z.get("purpose")}
+    for k in ("cx", "cy"):
+        if z.get(k) is not None:
+            args[k] = z[k]
+    run(ctx, steps, "add_zoom", args, started)
+    return True
+
+
 EXPLAINER_MAX_SPEECH_S = 60.0
 
 

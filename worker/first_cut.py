@@ -1563,6 +1563,9 @@ def video_chain(ctx, worker_db, started, spend):
                        sorted(ctx.first_cut_cards or []), (0.5, 0.5),
                        max(hook_end, 1.0), levels=fcv.CUT_IN_SOFT):
             applied.append("closer framings at the turns")
+    if q1 and bands:
+        import first_cut_visual as fcv
+        fcv.refresh_band_crop(ctx, steps, started, _run)
     if speech:
         style = {"preset": "reels", "motion_look": "editorial",
                  "size_scale": CAPTION_SCALE}
