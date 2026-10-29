@@ -1417,6 +1417,9 @@ def video_chain(ctx, worker_db, started, spend):
         shape_ends(ctx, steps, started)
     faces = _faces(ctx.index)
     talking = bool(speech and faces and faces["share"] >= 0.5)
+    if q1 and speech and not talking:
+        import first_cut_visual as fcv
+        fcv.muted_tail(ctx, steps, started, _run)
     vertical_source = _orientation(ctx.index) == "vertical"
     vertical_out = vertical_source
     screen_kept = False

@@ -168,6 +168,8 @@ def broll_spans(index, by_id, items):
         word = " ".join(str(w["w"]).strip(" ,.;:!?\"'") for w in found)
         out.append((first_cut._wt(found[0], "t0"),
                     first_cut._wt(found[-1], "t1"), word, query))
+    print(f"[first_cut] b-roll picks: {len(items or [])} named, "
+          f"{len(out)} said word for word", flush=True)
     return out
 
 
@@ -220,6 +222,8 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None):
     except Exception:
         return []
     wins = broll_windows(moments, tl, prog, hook_end)
+    print(f"[first_cut] b-roll: {len(moments or [])} scout moments, "
+          f"{len(wins)} windows", flush=True)
     if not wins:
         return []
     # video where a keyed library is live (production: Pexels), photos
@@ -362,6 +366,53 @@ def caption_style(style, talking, screen, vertical):
         out["motion_look"] = "box"
         out["anchor_y"] = 0.66 if vertical else 0.86
     return out, 3
+
+
+TAIL_S = 0.45           # live picture after the last word (refs 0.2-0.7)
+
+
+def muted_tail(ctx, steps, started, run):
+    """A screen or an animation (no mouth on screen) ends on TAIL_S of live
+    picture after its last word even when the narrator runs straight on
+    (vfr ended 0.0 s after "copy": judges, twice): the program runs on
+    TAIL_S, and that tail's sound and captions are muted. None when the cut
+    already has a live tail."""
+    import schemas
+    try:
+        edl = ctx.latest_edl()["json"]
+        keep = [[float(a), float(b)] for a, b in edl.get("keep") or []]
+    except Exception:
+        return None
+    words = [w for w in (ctx.index or {}).get("words") or []
+             if isinstance(w, dict) and w.get("w") is not None
+             and w.get("t0") is not None and w.get("t1") is not None]
+    if not keep or not words:
+        return None
+    s1, e1 = keep[-1]
+    spoken = [w for w in words if s1 <= float(w["t0"]) < e1]
+    if not spoken:
+        return None
+    last_end = float(spoken[-1]["t1"])
+    new_e = min(float(ctx.duration or e1), last_end + TAIL_S)
+    if e1 - last_end >= 0.3 or new_e - e1 < 0.1:
+        return None
+    keep[-1][1] = round(new_e, 3)
+    res = run(ctx, steps, "keep_segments", {"segments": keep,
+                                            "snap_to_words": False}, started)
+    if res is None or str(res).lstrip().upper().startswith(
+            ("REJECTED", "FAILED", "CORRECTION", "NO CHANGE")):
+        return None
+    run(ctx, steps, "set_volume", {"start": round(last_end + 0.03, 3),
+                                   "end": round(new_e + 0.05, 3),
+                                   "gain_db": -60.0}, started)
+    try:
+        prog = float(schemas.program_duration(ctx.latest_edl()["json"]))
+        run(ctx, steps, "set_caption_mutes", {"spans": [[
+            round(prog - (new_e - last_end) + 0.03, 3), round(prog, 3)]]},
+            started)
+    except Exception:
+        pass
+    return res
 
 
 EXPLAINER_MAX_SPEECH_S = 60.0

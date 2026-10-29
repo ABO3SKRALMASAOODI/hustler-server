@@ -449,3 +449,27 @@ def test_off_topic_cutaways_are_removed_after_one_look(monkeypatch, tmp_path):
     ctx.edl["fx"].append({"id": "br3", "type": "broll", "start": 12.0,
                           "end": 14.0, "source": {"asset_key": "a/3.jpg"}})
     assert fcv.verify_broll(ctx, [], 0.0, run, spend) == [(4.0, 6.0), (12.0, 14.0)]
+
+
+def test_a_screen_ends_live_with_the_runon_muted():
+    idx = _talk_index(20.0)
+    ctx = _EdlCtx(idx)
+    last = [w for w in idx["words"] if w["t0"] < 12.0][-1]
+    ctx.edl["keep"] = [[0.0, last["t1"]]]
+    calls = []
+
+    def run(c, steps, name, args, started):
+        calls.append((name, args))
+        if name == "keep_segments":
+            c.edl["keep"] = args["segments"]
+        return "EDL v2"
+    fcv.muted_tail(ctx, [], 0.0, run)
+    names = [n for n, _a in calls]
+    assert names == ["keep_segments", "set_volume", "set_caption_mutes"]
+    assert abs(calls[0][1]["segments"][-1][1] - (last["t1"] + fcv.TAIL_S)) < 1e-3
+    assert calls[1][1]["gain_db"] <= -40 and calls[1][1]["start"] > last["t1"]
+    # a cut that already ends live is left alone
+    calls.clear()
+    fin = idx["words"][-1]
+    ctx.edl["keep"] = [[0.0, fin["t1"] + 0.35]]
+    assert fcv.muted_tail(ctx, [], 0.0, run) is None and not calls
