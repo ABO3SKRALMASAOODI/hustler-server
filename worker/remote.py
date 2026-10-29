@@ -3337,6 +3337,35 @@ def fetch_bytes_available():
                                                             for s in states)
 
 
+def _youtube_egress_override(job):
+    """The owner's temporary YouTube exception for the box, OFF by default.
+
+    YouTube bot-walls the box's network for most uploads (E1, 30 Oct 2026:
+    the customers' 30-day sample, every player client, PO tokens, IPv4 and
+    the whole IPv6 /64). With app_kv box_routing ``"youtube_egress":
+    "cloudflare"`` (owner decision (c)), a fetch child whose URL is a YouTube
+    page leaves through the Cloudflare executor instead, even where its stage
+    runs on the box. Searches work from the box and stay there; every other
+    fetch stays on the box. It needs a Cloudflare URL in this process (box
+    slots get CLOUDFLARE_EXECUTOR_URL from box-provision; it is inert while
+    CLOUDFLARE_EXECUTOR_ENABLED=0). The other two decisions need no routing:
+    (a) cookies are the app_kv row ytdlp_cookies, (b) a proxy is the
+    YTDLP_PROXY secret, both used by yt-dlp on the box itself.
+    """
+    if str(job.get("type") or "") != "fetch" \
+            or not config.CLOUDFLARE_EXECUTOR_URL:
+        return False
+    try:
+        mode = str((box_routing.routing() or {}).get("youtube_egress")
+                   or "box").strip().lower()
+    except Exception:
+        return False
+    if mode != "cloudflare":
+        return False
+    import ytaccess
+    return ytaccess.is_youtube_url((job.get("payload") or {}).get("url"))
+
+
 def _run_across_media_egress(job):
     """Run a safe stateless media operation through independent providers.
 
@@ -3347,25 +3376,38 @@ def _run_across_media_egress(job):
     Transport failure also earns the other provider, because no successful
     response means the caller has no usable storage key (a possible orphan is
     reclaimed with ordinary scratch/fetched-object lifecycle cleanup).
+
+    The render box is the ONLY provider for a child its routing selects
+    (always, inside a box slot): no Cloudflare or Modal fallback, by the
+    owner's rule. Before this, a box slot (CLOUDFLARE_EXECUTOR_ENABLED=0,
+    no Modal, no Cloud Run) had no provider at all, so every fetch_url,
+    search and add_stock_media there answered "no alternate media-fetch
+    executor is set". The single exception is the owner's YouTube switch
+    (_youtube_egress_override), off by default.
     """
+    youtube_cf = _youtube_egress_override(job)
     providers = []
-    cloudflare_primary = _cloudflare_selected(job)
-    if cloudflare_primary:
-        # Same admission policy as every other id-less child: a provably
-        # unaccepted busy shard retries on a fresh identity before failing.
-        providers.append(("cloudflare",
-                          lambda: _run_cloudflare_with_capacity_wait(job)))
-    if config.MODAL_EXECUTOR_ENABLED and (
-            not cloudflare_primary or config.CLOUDFLARE_MODAL_FALLBACK):
-        providers.append(("modal", lambda: _run_modal(
-            job, function_override="egress")))
-    # Keep the old endpoint only as an explicitly enabled rollback; never pay
-    # its latency before the selected provider.
-    if config.REMOTE_EXECUTOR_URL \
-            and config.execution_policy_for(job) != "redesign" and (
-            not config.MODAL_EXECUTOR_ENABLED
-            or config.MODAL_CLOUD_RUN_FALLBACK):
-        providers.append(("cloud_run", lambda: _run_cloud(job)))
+    if box_routing.selected(job) and not youtube_cf:
+        # Waits in box admission (never fails for capacity); nothing else.
+        providers.append(("box", lambda: _run_box_with_wait(job)))
+    else:
+        cloudflare_primary = youtube_cf or _cloudflare_selected(job)
+        if cloudflare_primary:
+            # Same admission policy as every other id-less child: a provably
+            # unaccepted busy shard retries on a fresh identity first.
+            providers.append(("cloudflare",
+                              lambda: _run_cloudflare_with_capacity_wait(job)))
+        if config.MODAL_EXECUTOR_ENABLED and (
+                not cloudflare_primary or config.CLOUDFLARE_MODAL_FALLBACK):
+            providers.append(("modal", lambda: _run_modal(
+                job, function_override="egress")))
+        # Keep the old endpoint only as an explicitly enabled rollback; never
+        # pay its latency before the selected provider.
+        if config.REMOTE_EXECUTOR_URL \
+                and config.execution_policy_for(job) != "redesign" and (
+                not config.MODAL_EXECUTOR_ENABLED
+                or config.MODAL_CLOUD_RUN_FALLBACK):
+            providers.append(("cloud_run", lambda: _run_cloud(job)))
     if not providers:
         raise RemoteExecutorError("no alternate media-fetch executor is set")
 
