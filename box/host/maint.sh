@@ -34,9 +34,13 @@ case "${1:-status}" in
   reboot)
     log "maint: draining admission for a planned reboot"
     drain true
+    # Never leave the box drained by accident: any error from here on
+    # un-drains before the script exits.
+    trap 'drain false || true; log "maint: error, un-drained"' ERR
     deadline=$(( $(date +%s) + IDLE_WAIT ))
     while true; do
-      busy=$(adm "$ADMIN/admin/state" | field 'd["slots"]["busy"]')
+      busy=$(adm "$ADMIN/admin/state" | field 'd["slots"]["busy"]') \
+        || busy=unknown
       [[ "$busy" == "0" ]] && break
       if (( $(date +%s) > deadline )); then
         drain false
@@ -49,6 +53,7 @@ case "${1:-status}" in
     echo $(( $(date +%s) + WINDOW )) > "$DATA/maint-until"
     python3 /opt/valmera/box/health_report.py || true
     log "maint: idle and drained; rebooting (window ${WINDOW}s)"
+    trap - ERR
     sync
     systemctl reboot
     ;;
