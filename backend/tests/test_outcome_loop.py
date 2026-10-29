@@ -613,8 +613,8 @@ def _facts():
             "unhandled": [{"id": 3, "title": "index job failed",
                            "waiting_min": 41, "url": views.TICKET_URL + "3"}],
             "open": 2, "fixing": 1, "p0_active": 1},
-        "people": {"signups": 23, "active": 31},
-        "people_7d": {"signups": 164, "active": 120},
+        "people": {"signups": 23, "active": 31, "returning": 4},
+        "people_7d": {"signups": 164, "active": 120, "returning": 3},
         "infra": {"queue": {"queued": 0, "running": 2,
                             "oldest_queued_min": None, "jobs_24h": 410,
                             "failed_24h": 5, "p90_wait_s_24h": 12.0},
@@ -653,6 +653,7 @@ def test_digest_answers_the_four_questions_in_plain_words():
     assert "Waiting for a person" in body and "41 min" in body
     # People and infrastructure.
     assert "23 signups" in body and "31 active customers" in body
+    assert "4 of them signed up earlier" in body and "3 returning" in body
     assert "load 2.5/8 CPUs" in body and "0 waiting, 2 running" in body
     assert "$3.1 yesterday" in body
     # Cut: money, funnel, urgent accounts, trial spend, the factory.

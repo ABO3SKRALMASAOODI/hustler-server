@@ -459,10 +459,17 @@ def people_between(cur, start, end):
                    AS signups,
                (SELECT count(*) FROM act JOIN users u ON u.id = act.user_id
                  WHERE {defs.customer('u')}
-                   AND NOT (u.id = ANY(%(internal)s))) AS active""", p)
+                   AND NOT (u.id = ANY(%(internal)s))) AS active,
+               (SELECT count(*) FROM act JOIN users u ON u.id = act.user_id
+                 WHERE {defs.customer('u')}
+                   AND NOT (u.id = ANY(%(internal)s))
+                   AND u.created_at < %(sn)s) AS returning""", p)
     r = cur.fetchone() or {}
     return {"signups": int(r.get("signups") or 0),
-            "active": int(r.get("active") or 0)}
+            "active": int(r.get("active") or 0),
+            # Active customers who signed up before the window: the ones
+            # who came back (29 Oct: 3 of 123 in 7 days).
+            "returning": int(r.get("returning") or 0)}
 
 
 def queue_now(cur, now):

@@ -337,9 +337,11 @@ def digest_sections(f):
     # 3. People.
     people = [f"<b>{ppl.get('signups', '—')} signups</b> · "
               f"{ppl.get('active', '—')} active customers (sent a request, "
-              f"uploaded, ran an edit or an MCP call)",
+              f"uploaded, ran an edit or an MCP call), "
+              f"{ppl.get('returning', '—')} of them signed up earlier",
               f"Last 7 days: {ppl7.get('signups', '—')} signups · "
-              f"{ppl7.get('active', '—')} active customers."]
+              f"{ppl7.get('active', '—')} active customers, "
+              f"{ppl7.get('returning', '—')} returning."]
     # 4. Infrastructure.
     q = infra.get("queue") or {}
     boxes = infra.get("boxes")
