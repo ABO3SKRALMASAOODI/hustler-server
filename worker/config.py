@@ -1348,6 +1348,27 @@ CLOUDFLARE_DEAD_CALL_CONFIRM_S = max(30.0, min(600.0, float(os.getenv(
     "CLOUDFLARE_DEAD_CALL_CONFIRM_S", "90"))))
 CLOUDFLARE_MODAL_FALLBACK = os.getenv(
     "CLOUDFLARE_MODAL_FALLBACK", "0") == "1"
+
+# ── The owner's render box (box/admission.py; routing: box_routing.py) ─────
+# No fallback provider: a box job waits for room and is never failed for
+# capacity. It waits inside its claim this long (lease re-checked, dispatcher
+# heartbeats), then returns to the durable queue unspent (db.defer_box_wait)
+# and is claimed again in queue order.
+# Inside the box's slot containers (box/host/slot.env): every synchronous
+# child returns to the box's own admission (box_routing.route_all).
+_BOX_ROUTE_ALL = (os.getenv("BOX_ROUTE_ALL") == "1"
+                  and bool(os.getenv("BOX_EXECUTOR_URL", "").strip()))
+BOX_INCLAIM_WAIT_S = max(60.0, float(os.getenv("BOX_INCLAIM_WAIT_S", "1800")))
+# How long one launch may wait in admission's own priority queue before it
+# answers "no room yet" (below the 180-s launch observation, so the answer
+# arrives on the launch request; the dispatcher asks again at once).
+BOX_ADMISSION_WAIT_S = max(5.0, min(170.0, float(os.getenv(
+    "BOX_ADMISSION_WAIT_S", "150"))))
+# One owner alarm when a single job has waited this long for a box slot.
+BOX_ALARM_AFTER_S = float(os.getenv("BOX_ALARM_AFTER_S", "600"))
+# Stops only a pathological loop: 2,000 in-claim waits is weeks of waiting.
+BOX_MAX_WAIT_DEFERRALS = max(1, int(os.getenv(
+    "BOX_MAX_WAIT_DEFERRALS", "2000")))
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
     "CLOUDFLARE_MAX_INPUT_BYTES", str(4 * 1024 ** 3)))
 # Indexing uses standard-4 (20 GiB disk), not the interactive render tier.
@@ -2816,6 +2837,9 @@ def require_core():
             "search", "stock_acquire", "ytprobe", "mcp_media",
         }
         covered = set()
+        if _BOX_ROUTE_ALL:
+            # Inside the render box every call routes to its admission.
+            covered.update(required)
         if CLOUDFLARE_EXECUTOR_ENABLED and CLOUDFLARE_EXECUTOR_URL:
             covered.update(CLOUDFLARE_EXECUTOR_TYPES)
             covered.update(CLOUDFLARE_SYNCHRONOUS_TYPES)
@@ -2832,6 +2856,7 @@ def require_core():
     if WORKER_ROLE in ("agent", "agent_executor", "mcp_executor",
                        "shorts_executor") \
             and not REMOTE_EXECUTOR_URL and not MODAL_EXECUTOR_ENABLED \
+            and not _BOX_ROUTE_ALL \
             and not (CLOUDFLARE_EXECUTOR_ENABLED and
                      CLOUDFLARE_EXECUTOR_URL):
         raise SystemExit(

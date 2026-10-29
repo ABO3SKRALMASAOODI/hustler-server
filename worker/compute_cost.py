@@ -68,6 +68,26 @@ def request_profile(role=None, service=None):
 
 def annotate_request(timings, seconds, role=None, service=None):
     provider = os.getenv("EXECUTOR_PROVIDER", "")
+    if provider == "box":
+        # The owner's render box is a fixed monthly price: a job adds no
+        # marginal compute cost. Record what it used so capacity can be
+        # planned in the fixed steps the owner buys.
+        try:
+            measured_cpu_s = max(0.0, float(timings.get("container_cpu_s")))
+        except (TypeError, ValueError):
+            measured_cpu_s = None
+        timings.update({
+            "compute_provider": "box",
+            "compute_profile": (
+                f"box-{os.getenv('BOX_SLOT', 'slot')}-"
+                f"{os.getenv('BOX_SLOT_CPUS', '?')}vcpu"),
+            "compute_fixed_cost": True,
+            "gross_compute_usd_ceiling": 0.0,
+            "gross_compute_usd_with_tail_ceiling": 0.0,
+        })
+        if measured_cpu_s is not None:
+            timings["compute_cpu_measured_s"] = round(measured_cpu_s, 3)
+        return timings
     if provider == "cloudflare":
         profile = os.getenv(
             "CLOUDFLARE_CONTAINER_PROFILE", "standard-4")

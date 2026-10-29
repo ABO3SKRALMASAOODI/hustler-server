@@ -5,11 +5,15 @@ The claim transaction takes one short advisory lock before counting running
 jobs, so concurrent dispatchers cannot all admit against the same free slot.
 No lock survives the database commit or wraps a remote execution.
 """
+import box_routing
 import config
 
 
 def policies():
-    if not config._CLOUDFLARE_REMOTE_EXEC:
+    # The render box serves the same lanes with fewer slots; its admission
+    # orders calls by class, and these account shares keep one account from
+    # holding every dispatcher slot while others wait.
+    if not (config._CLOUDFLARE_REMOTE_EXEC or box_routing.enabled()):
         return ()
     return (
         (("mcp_tool",), 20, 6),

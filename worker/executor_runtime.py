@@ -146,7 +146,7 @@ def _confirm_provider_ownership(db, job):
     call_id = job.get("provider_call_id")
     provider = os.getenv("EXECUTOR_PROVIDER", "cloud_run")
     if job_id is None or claim is None or not call_id \
-            or provider not in {"modal", "cloudflare"}:
+            or provider not in {"modal", "cloudflare", "box"}:
         return
     deadline = time.monotonic() + config.REMOTE_HANDOFF_CONFIRM_S
     while True:
@@ -241,7 +241,8 @@ def execute(job, runners):
     io_finished = False
     resource_start = resource_usage.snapshot()
     vm_start = (resource_usage.vm_snapshot()
-                if os.getenv("EXECUTOR_PROVIDER") == "cloudflare" else None)
+                if os.getenv("EXECUTOR_PROVIDER") in {"cloudflare", "box"}
+                else None)
     try:
         memory_sampler = resource_usage.MemorySampler()
     except Exception:

@@ -193,7 +193,7 @@ _PROVIDER_CALL_RUNNERS = frozenset({
     remote.run_index_remote, remote.run_agent_remote,
     remote.run_mcp_remote, remote.run_shorts_remote,
 })
-_PROVIDER_CALL_PROVIDERS = frozenset({"cloudflare", "modal"})
+_PROVIDER_CALL_PROVIDERS = frozenset({"cloudflare", "modal", "box"})
 
 
 def process_one(worker_db, job):
@@ -282,6 +282,17 @@ def process_one(worker_db, job):
             print(f"[job {job_id}] detached from batch execution: {e}",
                   flush=True)
             return
+        if isinstance(e, remote.BoxWaiting):
+            # The render box had no room for this job's whole in-claim wait
+            # and nothing ran. The owner's rule: never fail it, never send it
+            # elsewhere. Back to the queue unspent, claim ceiling extended.
+            deferred = worker_db.run(dbx.defer_box_wait, job_id, lease_claim,
+                                     e)
+            if deferred:
+                worker_db.run(dbx.bump_metric, "box_wait_deferred")
+                print(f"[job {job_id}] render box had no room; returned to "
+                      f"the queue unspent ({e})", flush=True)
+                return
         if isinstance(e, remote.CloudflareCapacityBusy):
             deferred = worker_db.run(
                 dbx.defer_unlaunched_cloudflare_busy, job_id, lease_claim, e,

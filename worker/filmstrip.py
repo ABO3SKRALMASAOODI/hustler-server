@@ -375,7 +375,7 @@ def _local_for_ref(ref, workdir, tag):
     ext = os.path.splitext(ref)[1].lower()[:6] or ".bin"
     local = os.path.join(workdir, f"{tag}{ext}")
     try:
-        if (os.getenv('EXECUTOR_PROVIDER') == 'cloudflare'
+        if (os.getenv('EXECUTOR_PROVIDER') in ('cloudflare', 'box')
                 and execution_inputs.streams_asset(ref, storage.object_bytes(ref))):
             return storage.presign_get(ref, expires=21600)
         storage.download_to(ref, local)
@@ -608,7 +608,7 @@ def run_filmstrip_job(worker_db, job):
         have_local = False
         if not cached or not main_wave_hit:
             try:
-                if (os.getenv('EXECUTOR_PROVIDER') == 'cloudflare'
+                if (os.getenv('EXECUTOR_PROVIDER') in ('cloudflare', 'box')
                         and execution_inputs.streams_source(row)):
                     local = storage.presign_get(row['storage_key'], expires=21600)
                 else:

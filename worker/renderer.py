@@ -6955,7 +6955,7 @@ def _render_asset_source_impl(key, tag, idx, workdir, asset_locals=None):
         if leased:
             os.utime(leased, None)
             return leased
-    if (os.getenv("EXECUTOR_PROVIDER") == "cloudflare"
+    if (os.getenv("EXECUTOR_PROVIDER") in ("cloudflare", "box")
             and tag in ("insert", "overlay")
             and os.path.splitext(key)[1].lower() not in IMAGE_EXTS):
         size = storage.object_bytes(key)
@@ -7954,10 +7954,13 @@ def _render_ffmpeg_timeout(preview, expected_out_s):
     continue to stop unproductive work independently of this ceiling.
     """
     provider = os.getenv("EXECUTOR_PROVIDER", "")
-    if provider not in {"cloudflare", "modal"} or (preview and provider == "modal"):
+    if provider not in {"cloudflare", "modal", "box"} or (
+            preview and provider == "modal"):
         return config.FFMPEG_TIMEOUT_S
     kind = _RENDER_JOB_TYPE.get() or ("preview" if preview else "final")
-    envelope = (config.cloudflare_timeout_for(kind) if provider == "cloudflare"
+    # The box serves the Cloudflare call contract and its lease envelopes.
+    envelope = (config.cloudflare_timeout_for(kind)
+                if provider in {"cloudflare", "box"}
                 else config.modal_timeout_for(kind))
     requested = max(config.FFMPEG_TIMEOUT_S,
                     int(float(expected_out_s or 0.0) * 2.0 + 600.0))
@@ -8274,7 +8277,7 @@ def _stream_cloudflare_source(asset):
     startup tax; every consumer on this path is ffmpeg-family and already
     supports the presigned-URL fallback used for oversized workdirs.
     """
-    if os.getenv("EXECUTOR_PROVIDER") != "cloudflare":
+    if os.getenv("EXECUTOR_PROVIDER") not in ("cloudflare", "box"):
         return False
     return execution_inputs.streams_source(asset)
 

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 import psycopg2
 import requests
 
+import box_routing
 import config
 import db as dbx
 import error_text
@@ -158,6 +159,22 @@ class _CloudflareNeverAdopted(_CloudflareRefused):
             # call: retry like a capacity refusal, on another identity.
             "capacity_unavailable": True,
         })
+
+
+class BoxWaiting(CloudflareCapacityUnavailable):
+    """The render box could not take this queue job during its whole
+    in-claim wait (busy, updating, or briefly unreachable); nothing ran.
+
+    The owner's rule: no fallback provider and no failure for capacity. The
+    dispatcher returns the job to the durable queue unspent
+    (db.defer_box_wait, which also extends its claim ceiling) and it asks
+    again; it keeps its place by queue order and admission priority.
+    """
+
+    failure_kind = "provider_capacity_unavailable"
+    retryable = True
+    max_attempts = 1
+    agent_repairable = False
 
 
 class CloudflareTerminalFailure(RemoteExecutorError):
@@ -329,8 +346,10 @@ def desired_execution_provider(job):
     """Return the immutable provider choice for one queue-backed job."""
     stamped = str(((job.get("payload") or {}).get(
         "execution_provider") or "")).strip().lower()
-    if stamped in {"cloudflare", "modal", "cloud_run", "local"}:
+    if stamped in {"box", "cloudflare", "modal", "cloud_run", "local"}:
         return stamped
+    if box_routing.selected(job):
+        return "box"
     if _cloudflare_selected(job):
         return "cloudflare"
     if _modal_selected(job):
@@ -355,7 +374,8 @@ _alarm_last = {}
 def remote_configured():
     return bool((config.CLOUDFLARE_EXECUTOR_ENABLED
                  and config.CLOUDFLARE_EXECUTOR_URL)
-                or config.MODAL_EXECUTOR_ENABLED or config.REMOTE_EXECUTOR_URL)
+                or config.MODAL_EXECUTOR_ENABLED or config.REMOTE_EXECUTOR_URL
+                or box_routing.enabled())
 
 
 def fallback_provider(job):
@@ -608,6 +628,11 @@ def _modal_health(timeout=20):
 
 def executor_health(timeout=20, job_type=None):
     """GET /health on the executor. Returns the parsed body, or raises."""
+    if box_routing.route_all() or (
+            box_routing.enabled() and not (
+                config.CLOUDFLARE_EXECUTOR_ENABLED
+                and config.CLOUDFLARE_EXECUTOR_URL)):
+        return _cloudflare_preflight(timeout=timeout, target="box")
     if config.CLOUDFLARE_EXECUTOR_ENABLED \
             and config.CLOUDFLARE_EXECUTOR_URL \
             and (job_type is None
@@ -794,7 +819,8 @@ def executor_supports(feature, timeout=8):
     """
     if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED \
             and not (config.CLOUDFLARE_EXECUTOR_ENABLED and
-                     config.CLOUDFLARE_EXECUTOR_URL):
+                     config.CLOUDFLARE_EXECUTOR_URL) \
+            and not box_routing.enabled():
         return True
     try:
         body = executor_health(timeout=timeout)
@@ -1119,7 +1145,7 @@ def reconcile_remote_execution(worker_db, row):
     "dead" there is how duplicate paid renders are born.
     """
     provider = row.get("provider")
-    if provider not in {"modal", "cloudflare"}:
+    if provider not in {"modal", "cloudflare", "box"}:
         return {"status": "unsupported_provider", "row": row}
     job_id = row["job_id"]
     claim = row["total_claims"]
@@ -1148,10 +1174,12 @@ def reconcile_remote_execution(worker_db, row):
                     # Its container was gone as /run was sent and no
                     # executor ever adopted it; now none can. Nothing ran.
                     refusal = _CloudflareNeverAdopted(status)
-                    deferred = worker_db.run(
+                    deferred = (worker_db.run(
+                        dbx.defer_box_wait, job_id, claim, str(refusal))
+                        if provider == "box" else worker_db.run(
                         dbx.defer_unlaunched_cloudflare_busy, job_id, claim,
                         str(refusal), config.CLOUDFLARE_CAPACITY_MAX_DEFERRALS,
-                        counter="cloudflare_capacity_deferrals")
+                        counter="cloudflare_capacity_deferrals"))
                     if deferred:
                         return {"status": "requeued", "job": job,
                                 "error": refusal}
@@ -1193,7 +1221,7 @@ def reconcile_remote_execution(worker_db, row):
             return {"status": "visibility_pending", "job": job,
                     "error": exc}
         if ((provider == "modal" and _modal_transport_error(exc))
-                or (provider == "cloudflare"
+                or (provider in {"cloudflare", "box"}
                     and isinstance(exc, requests.RequestException))
                 or isinstance(exc, (psycopg2.OperationalError,
                                     psycopg2.InterfaceError))):
@@ -1254,6 +1282,11 @@ def reconcile_remote_execution(worker_db, row):
             # (a relaunch), so this ended call says nothing about the job.
             return {"status": "superseded", "job": job, "error": exc}
         counter = _orphan_unspent_counter(job, exc, decision)
+        if counter and closed and provider == "box":
+            # The box never fails a job that ran nothing: back to the queue
+            # unspent, however many times (its claim ceiling grows too).
+            if worker_db.run(dbx.defer_box_wait, job_id, claim, exc):
+                return {"status": "requeued", "job": job, "error": exc}
         if counter and closed:
             # The dispatcher that launched this call is gone (a Render deploy
             # swapped it) and the call ended without running anything: a
@@ -1446,6 +1479,37 @@ def _run_modal(job, function_override=None):
     return result
 
 
+# ── Box target: the Cloudflare call contract at another address ─────────────
+# box/admission.py speaks the Worker's named-call protocol exactly, so the box
+# reuses this module's launch, reconnect, fence, liveness and ledger code. A
+# call id names its target: "bx-" calls live on the box, "cf-" on Cloudflare.
+# Only the waiting differs (_run_box_with_wait): no shard hopping, no other
+# provider, and no failure for capacity.
+_BOX_PREFIX = "bx-"
+
+
+def _call_target(call_id):
+    return "box" if str(call_id or "").startswith(_BOX_PREFIX) \
+        else "cloudflare"
+
+
+def _job_target(job):
+    if job.get("_executor_target") == "box":
+        return "box"
+    stamped = str(((job.get("payload") or {}).get(
+        "execution_provider") or "")).strip().lower()
+    return "box" if stamped == "box" else "cloudflare"
+
+
+def _target_url(target):
+    return box_routing.url() if target == "box" \
+        else config.CLOUDFLARE_EXECUTOR_URL
+
+
+def _call_url(call_id):
+    return _target_url(_call_target(call_id))
+
+
 def _cloudflare_lane(job_type):
     if job_type in {"preview", "preview_check", "filmstrip", "frames",
                     "mcp_media"}:
@@ -1549,6 +1613,13 @@ _LEGACY_ALT_SLOTS = 2
 
 
 def _cloudflare_call_id(job):
+    call_id = _cloudflare_call_id_cf(job)
+    if _job_target(job) == "box":
+        return _BOX_PREFIX + call_id[len("cf-"):]
+    return call_id
+
+
+def _cloudflare_call_id_cf(job):
     if job.get("id") is None:
         # Scratch frame keys are consumed and deleted by the caller, so two
         # later identical looks must not reuse a week-old terminal envelope.
@@ -1612,7 +1683,7 @@ def _interpret_cloudflare_terminal(data, job):
             try:
                 ledger.run(dbx.finish_remote_execution, job["id"],
                            job["total_claims"], "failed", exc,
-                           "cloudflare", _cloudflare_call_id(job))
+                           _job_target(job), _cloudflare_call_id(job))
             except Exception as close_error:
                 # The guardian observes queued leases too, so a failed
                 # bookkeeping write can recover without launching twice.
@@ -1636,7 +1707,7 @@ def _cloudflare_headers():
     return headers
 
 
-def _cloudflare_preflight(timeout=10):
+def _cloudflare_preflight(timeout=10, target="cloudflare"):
     """Authenticated positive readiness cache for the Container router.
 
     The first eligible job validates provider identity and the shared secret.
@@ -1644,14 +1715,21 @@ def _cloudflare_preflight(timeout=10):
     no safety: a missing route is still proven by the named POST's 404. Only
     successes are cached, and the URL is part of the key.
     """
-    key = f"cloudflare:{config.CLOUDFLARE_EXECUTOR_URL}"
+    base = _target_url(target)
+    if not base:
+        raise CloudflarePreflightUnavailable(
+            f"no {target} executor address is configured")
+    key = f"{target}:{base}"
     now = time.monotonic()
+    # The box reports releases switching under a rolling update; recheck it
+    # often. Cloudflare's skew guard makes a 5-minute cache harmless there.
+    ttl = _BOX_HEALTH_CACHE_S if target == "box" else _HEALTH_CACHE_S
     with _health_lock:
         cached = _health_cache.get(key)
-        if cached and now - cached[0] < _HEALTH_CACHE_S:
+        if cached and now - cached[0] < ttl:
             return cached[1]
         response = requests.get(
-            f"{config.CLOUDFLARE_EXECUTOR_URL}/health",
+            f"{base}/health",
             headers=_cloudflare_headers(), timeout=timeout)
         if response.status_code == 404 or response.status_code == 429 \
                 or response.status_code >= 500:
@@ -1668,11 +1746,15 @@ def _cloudflare_preflight(timeout=10):
         except ValueError as exc:
             raise CloudflarePreflightUnavailable(
                 "Cloudflare preflight returned non-JSON") from exc
-        if body.get("provider") != "cloudflare":
+        if body.get("provider") != target:
             raise CloudflareLaunchUnavailable(
-                "Cloudflare preflight reached the wrong service")
+                f"{target} preflight reached the wrong service")
         remote_source = str(body.get("source_version") or "unknown")
         local_source = version.code_version()
+        if target == "box":
+            _box_release_check(body, local_source)
+            _health_cache[key] = (now, body)
+            return body
         if remote_source != "unknown" and local_source != "unknown" and \
                 remote_source != local_source and \
                 not _skew_tolerant(body):
@@ -1684,6 +1766,32 @@ def _cloudflare_preflight(timeout=10):
                 f"({remote_source} != {local_source})")
         _health_cache[key] = (now, body)
         return body
+
+
+_BOX_HEALTH_CACHE_S = 20.0
+
+
+def _box_release_check(body, local_source):
+    """Hold (never refuse) a launch the box cannot run on this release.
+
+    "hold" (the owner's rule): the box must report a ready slot running this
+    dispatcher's exact fingerprint. "guard": an older box release whose
+    containers carry the skew guard may serve what that guard accepts."""
+    if body.get("status") == "draining":
+        raise CloudflareRolloutPending("the render box is draining")
+    if local_source == "unknown":
+        return
+    releases = body.get("code_versions")
+    releases = set(releases) if isinstance(releases, list) else set()
+    releases.add(str(body.get("source_version") or "unknown"))
+    if local_source in releases:
+        return
+    if box_routing.skew_mode() == "guard" and _skew_tolerant(body):
+        return
+    raise CloudflareRolloutPending(
+        "the render box does not run this release yet "
+        f"({', '.join(sorted(r for r in releases if r != 'unknown')) or 'unknown'}"
+        f" != {local_source})")
 
 
 def _skew_tolerant(body):
@@ -1700,10 +1808,10 @@ def _skew_tolerant(body):
     return isinstance(features, list) and "skew_guard" in features
 
 
-def _cloudflare_features():
+def _cloudflare_features(target="cloudflare"):
     """The Worker's advertised features ([] when unknown). Never raises."""
     try:
-        body = _cloudflare_preflight(timeout=10)
+        body = _cloudflare_preflight(timeout=10, target=target)
     except Exception:
         return []
     features = body.get("features") if isinstance(body, dict) else None
@@ -1712,7 +1820,7 @@ def _cloudflare_features():
 
 def _cloudflare_status(call_id, lane, timeout=10):
     response = requests.get(
-        f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}",
+        f"{_call_url(call_id)}/calls/{lane}/{call_id}",
         headers=_cloudflare_headers(), timeout=timeout)
     if response.status_code == 404:
         return {"status": "missing"}
@@ -1734,11 +1842,11 @@ def _reconcile_completed_cloudflare_call(call_id, lane):
     probe = dbx.Db()
     try:
         completed = probe.run(dbx.completed_remote_call,
-                              "cloudflare", call_id, lane)
+                              _call_target(call_id), call_id, lane)
         if not isinstance(completed, dict):
             return False
         response = requests.post(
-            f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}/complete",
+            f"{_call_url(call_id)}/calls/{lane}/{call_id}/complete",
             json={"job": {key: completed[key] for key in
                           ("id", "type", "project_id", "total_claims")},
                   "envelope": {"result": dbx._json_safe(completed["result"]),
@@ -1811,7 +1919,7 @@ def _cloudflare_dead_call_reason(row, job, call_id):
         return f"its queue job is {state}"
     if row.get("remote_provider") is not None:
         if not (row.get("remote_claims") == claim
-                and row.get("remote_provider") == "cloudflare"
+                and row.get("remote_provider") == _call_target(call_id)
                 and str(row.get("remote_call_id")) == str(call_id)):
             return "another provider call owns its claim"
         if row.get("remote_state") in {"failed", "cancelled"}:
@@ -1871,7 +1979,7 @@ def _abandon_cloudflare_call(call_id, lane, job, reason):
     """Ask the shard to fence and fail one dead call; its envelope or None."""
     try:
         response = requests.post(
-            f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}/abandon",
+            f"{_call_url(call_id)}/calls/{lane}/{call_id}/abandon",
             json={"job": {key: job.get(key) for key in
                           ("id", "type", "project_id", "total_claims")},
                   "reason": reason},
@@ -1976,7 +2084,7 @@ def _fence_unadopted(job, call_id, status):
     try:
         fenced = probe.run(
             dbx.fence_unadopted_remote_execution, job["id"],
-            job.get("total_claims"), "cloudflare", call_id,
+            job.get("total_claims"), _call_target(call_id), call_id,
             (status or {}).get("error"))
     except Exception as exc:
         print(f"[dispatcher] Cloudflare call {call_id} ownership fence "
@@ -2143,11 +2251,11 @@ def _fence_cloudflare_call(call_id, lane, job, launch_id):
     or whatever terminal state the call reached meanwhile), or None when
     the Worker cannot fence or the call turned out to be alive.
     """
-    if "fence" not in _cloudflare_features():
+    if "fence" not in _cloudflare_features(_call_target(call_id)):
         return None
     try:
         response = requests.post(
-            f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}/fence",
+            f"{_call_url(call_id)}/calls/{lane}/{call_id}/fence",
             json={"job": {key: job.get(key) for key in
                           ("id", "type", "project_id", "total_claims")},
                   "launch_id": launch_id},
@@ -2181,7 +2289,7 @@ def _refused_before_run(job, call_id, lane, status_code, body):
             ledger.run(dbx.finish_remote_execution, job["id"],
                        job.get("total_claims"), "cancelled",
                        body.get("error") or "Cloudflare launch refused",
-                       "cloudflare", call_id)
+                       _call_target(call_id), call_id)
         except Exception:
             pass
         finally:
@@ -2241,6 +2349,7 @@ def _worker_release_differs():
 
 
 def _run_cloudflare(job):
+    target = _job_target(job)
     queue_backed = job.get("id") is not None
     if (queue_backed and job.get("total_claims") is None) or (
             not queue_backed and str(job.get("type") or "") not in
@@ -2252,7 +2361,7 @@ def _run_cloudflare(job):
     # network trip is still real latency and must not disappear from the gate.
     job["_dispatch_submitted_at"] = time.time()
     try:
-        _cloudflare_preflight(timeout=10)
+        _cloudflare_preflight(timeout=10, target=target)
     except requests.RequestException as exc:
         # No launch request was sent, so Modal fallback is unambiguous, and
         # without one this is a retry (a Worker publish, a network blip),
@@ -2263,6 +2372,10 @@ def _run_cloudflare(job):
     call_id = _cloudflare_call_id(job)
     lane = _cloudflare_lane_for(job)
     timeout_s = config.cloudflare_timeout_for(job.get("type")) + 60
+    # The box's execution lease starts when a slot takes the call, after up
+    # to BOX_ADMISSION_WAIT_S in its admission queue: observe that long more.
+    queue_allowance_s = (config.BOX_ADMISSION_WAIT_S + 30
+                         if target == "box" else 0)
     if queue_backed and dbx.mark_remote_owned(job["id"]) is False:
         raise DispatcherDraining(
             "dispatcher shutdown began before Cloudflare submission; "
@@ -2271,7 +2384,8 @@ def _run_cloudflare(job):
         ledger = dbx.Db()
         try:
             _record_remote_execution_with_retry(
-                ledger, job, "cloudflare", call_id, lane, timeout_s)
+                ledger, job, target, call_id, lane,
+                timeout_s + queue_allowance_s)
         except Exception as exc:
             print(f"[dispatcher] Cloudflare call {call_id} ledger write "
                   f"failed ({str(exc)[:160]}); deterministic call id still "
@@ -2279,7 +2393,7 @@ def _run_cloudflare(job):
         finally:
             ledger.reset()
 
-    deadline = time.monotonic() + timeout_s
+    deadline = time.monotonic() + timeout_s + queue_allowance_s
     # Names this one launch request, so a reconnect can tell its own refusal
     # from an older refusal of the same call id.
     launch_id = uuid.uuid4().hex
@@ -2293,11 +2407,16 @@ def _run_cloudflare(job):
             # failed before /run, exactly like an immediate 503.
             _refused_before_run(job, call_id, lane, 503, refused.body)
 
+    launch_body = {"job": _job_payload(job), "timeout_s": timeout_s,
+                   "launch_id": launch_id}
+    if target == "box":
+        # Admission's queue order: customers, trial, then the owner factory.
+        launch_body["priority_class"] = box_routing.priority_class(job)
+        launch_body["max_wait_s"] = config.BOX_ADMISSION_WAIT_S
     try:
         response = requests.post(
-            f"{config.CLOUDFLARE_EXECUTOR_URL}/calls/{lane}/{call_id}",
-            json={"job": _job_payload(job), "timeout_s": timeout_s,
-                  "launch_id": launch_id},
+            f"{_target_url(target)}/calls/{lane}/{call_id}",
+            json=launch_body,
             headers=_cloudflare_headers(),
             # The named call remains recoverable after this observation
             # request ends. Reconnect early enough to detect a rollout-
@@ -2319,7 +2438,7 @@ def _run_cloudflare(job):
                     ledger.run(dbx.finish_remote_execution, job["id"],
                                job.get("total_claims"), "cancelled",
                                "Cloudflare route was not deployed",
-                               "cloudflare", call_id)
+                               target, call_id)
                 except Exception:
                     pass
                 finally:
@@ -2481,8 +2600,8 @@ def _next_rollout_slot(job):
     """
     current = job.get("_cloudflare_admission_slot", 0)
     current = current if isinstance(current, int) else 0
-    ceiling = (_MAX_ALT_SLOT if "alt_slots_32" in _cloudflare_features()
-               else _LEGACY_ALT_SLOTS)
+    ceiling = (_MAX_ALT_SLOT if "alt_slots_32" in _cloudflare_features(
+        _job_target(job)) else _LEGACY_ALT_SLOTS)
     nxt = current + 1
     return nxt if nxt <= ceiling else None
 
@@ -2616,7 +2735,10 @@ _DRAINING_REFUSAL_TEXT = "is shutting down for a new release"
 # The Worker's envelopes for an executor it lost while a call ran
 # (cloudflare/src/index.ts abandonedEnvelope / expireExecutorLease).
 _LOST_EXECUTOR_TEXT = ("Cloudflare lost the executor during this",
-                       "Cloudflare container exited during")
+                       "Cloudflare container exited during",
+                       # box/admission.py abandoned_envelope
+                       "Box lost the executor during this",
+                       "Box container exited during")
 
 
 def _executor_was_draining(exc):
@@ -2849,6 +2971,114 @@ def _run_cloudflare_with_capacity_wait(job):
                 probe.reset()
 
 
+# Outcomes of a box launch that prove nothing ran: hold the job and ask again.
+_BOX_NOTHING_RAN_KINDS = frozenset({
+    "provider_rollout_pending", "provider_start_abandoned",
+    "provider_capacity_unavailable"})
+
+
+def _box_backoff(attempt_s, streak):
+    """A refusal that waited in admission's own queue (the box was full)
+    asks again at once, keeping its place; a fast refusal (unreachable,
+    updating, draining) backs off 2 s doubling to 30 s, jittered."""
+    if attempt_s >= 20.0:
+        return random.uniform(0.2, 0.8)
+    return min(30.0, 2.0 * (2 ** min(streak, 4))) * random.uniform(0.75, 1.25)
+
+
+def _run_box_with_wait(job):
+    """Run one call on the owner's render box; wait, never fail, for room.
+
+    The owner's rule for the box: no Cloudflare (or any) fallback, and a job
+    is never failed because capacity was busy, the box was updating, or it
+    was briefly unreachable. Every outcome handled here is proven pre-/run
+    (a refusal, a fenced lost launch, a skew-guard or drain refusal), so
+    asking again can never run anything twice:
+
+    * a queue job waits inside its claim (lease re-checked, heartbeats from
+      the dispatcher) for up to BOX_INCLAIM_WAIT_S, then goes back to the
+      durable Postgres queue unspent (BoxWaiting -> db.defer_box_wait),
+      keeping its queue order;
+    * a synchronous child (frames, a capture) waits within the margin its
+      parent's lease reserves, then reports "no capacity" to that parent
+      like any child failure;
+    * a read-only MCP call whose container the box lost mid-run is run
+      again under a fresh identity (a read changes nothing).
+
+    Box admission orders waiting calls customers > trial > owner factory.
+    """
+    job["_executor_target"] = "box"
+    queued = job.get("id") is not None
+    started = time.monotonic()
+    window = (config.BOX_INCLAIM_WAIT_S if queued else
+              max(30.0, config.CLOUDFLARE_MCP_CHILD_MARGIN_S - 60))
+    streak = 0
+    refusals = 0
+    lost_reads = 0
+    alarmed = False
+    while True:
+        attempt_started = time.monotonic()
+        try:
+            return _run_cloudflare(job)
+        except CloudflareLaunchUnavailable as exc:
+            reason = exc
+        except CloudflareTerminalFailure as exc:
+            kind = getattr(exc, "failure_kind", None)
+            if kind in _BOX_NOTHING_RAN_KINDS:
+                reason = exc
+            elif queued and _lost_read_only_call(job, exc) \
+                    and lost_reads < _LOST_READ_RELAUNCHES:
+                slot = _next_rollout_slot(job) or (lost_reads + 1)
+                lost_reads += 1
+                dbx.unmark_remote_owned(job["id"])
+                print(f"[dispatcher] box {job.get('type')} {job.get('id')}: "
+                      f"{_short_reason_detail(exc, 160)}; read-only, "
+                      f"relaunching as bx-alt{slot}", flush=True)
+                time.sleep(random.uniform(0.5, 1.5))
+                _require_current_lease(job, "lost-read relaunch")
+                job["_cloudflare_rollout_spread"] = True
+                job["_cloudflare_admission_slot"] = slot
+                continue
+            else:
+                raise
+        attempt_s = time.monotonic() - attempt_started
+        refusals += 1
+        streak = 0 if attempt_s >= 20.0 else streak + 1
+        if queued:
+            dbx.unmark_remote_owned(job["id"])
+        elapsed = time.monotonic() - started
+        delay = _box_backoff(attempt_s, streak)
+        if elapsed + delay > window:
+            what = str(job.get("type") or "job")
+            if queued:
+                raise BoxWaiting(
+                    f"The render box had no room for this {what} for "
+                    f"{elapsed:.0f}s ({_short_reason_detail(reason, 140)}); "
+                    "nothing ran. It waits in the queue and starts as soon "
+                    "as the box has room.") from reason
+            raise CloudflareCapacityUnavailable(
+                f"The render box had no room for this {what} within "
+                f"{elapsed:.0f}s ({_short_reason_detail(reason, 140)}); "
+                "nothing ran and nothing changed; it is safe to retry.") \
+                from reason
+        if not alarmed and elapsed >= config.BOX_ALARM_AFTER_S:
+            alarmed = True
+            owner_alarm(
+                "box_wait_alarm",
+                f"Render box: {job.get('type')} job {job.get('id')} (user "
+                f"{job.get('user_id')}) has waited {elapsed:.0f}s for a "
+                f"slot: {_short_reason_detail(reason, 160)}",
+                throttle_s=900)
+        if refusals == 1 or refusals % 10 == 0:
+            print(f"[dispatcher] box {job.get('type')} {job.get('id')}: "
+                  f"{_short_reason_detail(reason, 140)}; nothing ran, "
+                  f"waiting (asked {refusals}x over {elapsed:.0f}s)",
+                  flush=True)
+        time.sleep(delay)
+        if queued:
+            _require_current_lease(job, "box wait")
+
+
 def _move_stale_local(job):
     """A job stamped "local" by an older release, now that a fleet exists."""
     fallback = fallback_provider(job)
@@ -2877,6 +3107,9 @@ def _run_remote(job, url_override=None, modal_function=None):
         else "cloud_run"
     if provider == "local" and url_override is None and remote_configured():
         provider = _move_stale_local(job) or "local"
+    if provider == "box":
+        # No fallback, by the owner's rule: the box path only ever waits.
+        return _run_box_with_wait(job)
     if provider == "cloudflare":
         try:
             return _run_cloudflare_with_capacity_wait(job)
@@ -3042,7 +3275,7 @@ def capture_available():
     single-box deployment; it is only the LARGE dispatcher-plus-executor
     deployment where the browser has to move.
     """
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+    return box_routing.enabled() or bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  "capture" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
@@ -3063,7 +3296,7 @@ def run_capture_remote(project_id, payload, user_id=None):
 
 def fetch_available():
     """Whether a different executor egress can acquire a blocked URL."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+    return box_routing.enabled() or bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  {"fetch", "search"}.issubset(
@@ -3165,7 +3398,7 @@ def run_search_remote(project_id, payload, user_id=None):
 
 
 def stock_acquire_available():
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+    return box_routing.enabled() or bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  "stock_acquire" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
@@ -3186,7 +3419,7 @@ def frames_available():
     shipped before — correct for that deployment, fatal only beside a
     dispatcher whose job is to stay light.
     """
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+    return box_routing.enabled() or bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  "frames" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
@@ -3209,7 +3442,7 @@ def track_available():
     window of what is usually a user's 4K original — the job class that has
     OOM-killed the dispatcher four times — so with no executor the caller
     keeps the static pin rather than attempting it locally."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+    return box_routing.enabled() or bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  "track" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
@@ -3231,7 +3464,7 @@ def matte_available():
     but the person model's forward passes are CPU compute the dispatcher
     cannot afford beside agent turns — with no executor the caller builds the
     photometric mask locally, which is exactly what shipped before."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+    return box_routing.enabled() or bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  "matte" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
@@ -3253,7 +3486,7 @@ def faces_available():
     Cloudflare containers, and a stale Render/Modal/Cloud Run type list must
     never route it somewhere that does not run follow.run_faces_job. False
     simply means the caller's own (cheaper, bounded) pass is the only one."""
-    return bool(config.CLOUDFLARE_EXECUTOR_ENABLED
+    return box_routing.enabled() or bool(config.CLOUDFLARE_EXECUTOR_ENABLED
                 and config.CLOUDFLARE_EXECUTOR_URL
                 and "faces" in config.CLOUDFLARE_SYNCHRONOUS_TYPES)
 
@@ -3266,6 +3499,8 @@ def run_faces_remote(project_id, payload, user_id=None):
     relies on its own pass), never falls back to another provider."""
     job = {"id": None, "type": "faces", "project_id": project_id,
            "user_id": user_id, "attempts": 0, "payload": payload}
+    if desired_execution_provider(job) == "box":
+        return _run_box_with_wait(job)
     if desired_execution_provider(job) != "cloudflare":
         raise RemoteExecutorError(
             "the face track runs remotely only on Cloudflare")
@@ -3279,7 +3514,7 @@ def sidecar_available():
     models with CPU to spare. False means sidecars.ensure runs the job in
     this process only where no remote compute is configured at all (a
     single-box development setup); production never computes locally."""
-    return bool(config.CLOUDFLARE_EXECUTOR_ENABLED
+    return box_routing.enabled() or bool(config.CLOUDFLARE_EXECUTOR_ENABLED
                 and config.CLOUDFLARE_EXECUTOR_URL
                 and "sidecar" in config.CLOUDFLARE_SYNCHRONOUS_TYPES)
 
@@ -3329,6 +3564,9 @@ def run_sidecar_remote(project_id, payload, user_id=None):
                              "reports other sidecar code")
     job = {"id": None, "type": "sidecar", "project_id": project_id,
            "user_id": user_id, "attempts": 0, "payload": payload}
+    if desired_execution_provider(job) == "box":
+        # One box batch pool: no vision lane and no shard slot to pick.
+        return _run_box_with_wait(job)
     if desired_execution_provider(job) != "cloudflare":
         # Nothing was sent anywhere: a refusal, not a lost chunk. The
         # launcher leaves the chunks absent instead of spending both attempts
@@ -3356,7 +3594,7 @@ def smatch_available():
     (round 65d) Same contract as track_available — SIFT on 2048px frames of
     a user original OOM-killed the dispatcher the one time it ran there, so
     with no executor the caller refines on its small local frames only."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+    return box_routing.enabled() or bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  "smatch" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
@@ -3378,7 +3616,7 @@ def clean_available():
     of the job class that has OOM-killed the dispatcher repeatedly — so with
     an executor configured it never runs locally, and a remote failure is an
     honest refusal, never a local retry."""
-    return bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
+    return box_routing.enabled() or bool(config.REMOTE_EXECUTOR_URL or config.MODAL_EXECUTOR_ENABLED or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  "clean" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
@@ -3404,7 +3642,8 @@ def stems_available():
     unreachable) follows the round-53 rule: unknown is not "no"."""
     if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED \
             and not (config.CLOUDFLARE_EXECUTOR_ENABLED and
-                     config.CLOUDFLARE_EXECUTOR_URL):
+                     config.CLOUDFLARE_EXECUTOR_URL) \
+            and not box_routing.enabled():
         import stems
         return stems.available()
     return executor_supports("stems")
@@ -3419,7 +3658,8 @@ def run_stems_remote(project_id, payload, user_id=None):
            "user_id": user_id, "attempts": 0, "payload": payload}
     if not config.REMOTE_EXECUTOR_URL and not config.MODAL_EXECUTOR_ENABLED \
             and not (config.CLOUDFLARE_EXECUTOR_ENABLED and
-                     config.CLOUDFLARE_EXECUTOR_URL):
+                     config.CLOUDFLARE_EXECUTOR_URL) \
+            and not box_routing.enabled():
         import stems
         return stems.run_stems_job(None, job)
     return _run_remote(job)
@@ -3428,7 +3668,7 @@ def run_stems_remote(project_id, payload, user_id=None):
 def run_render_remote(worker_db, job):      # signature matches run_render_job
     provider = desired_execution_provider(job)
     if job.get("type") == "final" and provider not in {"cloudflare",
-                                                        "modal"}:
+                                                        "modal", "box"}:
         try:
             return _launch_batch_and_wait(worker_db, job)
         except BatchUnavailable as exc:
@@ -3447,7 +3687,7 @@ def run_filmstrip_remote(worker_db, job):
     production execution target.
     """
     provider = desired_execution_provider(job)
-    if provider == "cloudflare":
+    if provider in {"cloudflare", "box"}:
         return _run_remote(job)
     if not config.MODAL_EXECUTOR_ENABLED:
         raise ModalLaunchUnavailable(
@@ -3459,7 +3699,7 @@ def run_filmstrip_remote(worker_db, job):
 
 def mcp_media_available():
     """Whether video bytes can be encoded away from the dispatcher."""
-    return bool(config.MODAL_EXECUTOR_ENABLED or config.REMOTE_EXECUTOR_URL or
+    return box_routing.enabled() or bool(config.MODAL_EXECUTOR_ENABLED or config.REMOTE_EXECUTOR_URL or
                 (config.CLOUDFLARE_EXECUTOR_ENABLED and
                  config.CLOUDFLARE_EXECUTOR_URL and
                  "mcp_media" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
@@ -3483,6 +3723,8 @@ def run_mcp_media_remote(project_id, payload, user_id=None):
             "a media executor must encode MCP media itself, not re-dispatch it")
     job = {"id": None, "type": "mcp_media", "project_id": project_id,
            "user_id": user_id, "attempts": 0, "payload": payload}
+    if box_routing.selected(job):
+        return _run_box_with_wait(job)
     if _cloudflare_selected(job):
         try:
             return _run_remote(job)
@@ -3507,7 +3749,7 @@ def run_mcp_media_remote(project_id, payload, user_id=None):
 
 def run_index_remote(worker_db, job):       # signature matches run_index_job
     provider = desired_execution_provider(job)
-    if provider not in {"cloudflare", "modal"}:
+    if provider not in {"cloudflare", "modal", "box"}:
         try:
             return _launch_batch_and_wait(worker_db, job)
         except BatchUnavailable as exc:
@@ -3519,6 +3761,9 @@ def run_index_remote(worker_db, job):       # signature matches run_index_job
 def _run_request_with_capacity_fallback(job):
     """Use the fast 16-GiB lane, preserving 32-GiB upload compatibility."""
     primary = _executor_url(job.get("type"))
+    if desired_execution_provider(job) == "box":
+        # The box has one pool per lane and no other provider behind it.
+        return _run_remote(job)
     try:
         return _run_remote(job)
     except Exception as error:
@@ -3582,6 +3827,8 @@ def run_probe_remote(payload=None):
     """Launch the real-byte egress probe without using dispatcher network."""
     job = {"id": None, "type": "ytprobe", "project_id": None,
            "user_id": None, "attempts": 0, "payload": payload or {}}
+    if box_routing.selected(job):
+        return _run_box_with_wait(job)
     if _cloudflare_selected(job):
         return _run_remote(job)
     if config.MODAL_EXECUTOR_ENABLED:
