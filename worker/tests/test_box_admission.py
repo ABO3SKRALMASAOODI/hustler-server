@@ -22,6 +22,7 @@ def _load(name, tmp_path, monkeypatch):
     monkeypatch.setenv("BOX_STEAL_LOG", str(tmp_path / "steal.log"))
     monkeypatch.setenv("BOX_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("BOX_ENV_FILE", str(tmp_path / "executor.env"))
+    monkeypatch.setenv("BOX_CONFIG", str(tmp_path / "box.json"))
     spec = importlib.util.spec_from_file_location(
         f"box_{name}_{time.monotonic_ns()}", os.path.join(BOX_DIR,
                                                           f"{name}.py"))
@@ -213,6 +214,39 @@ def test_health_reports_capacity_steal_memory_and_releases(adm):
     assert "committed_gib" in health["memory"]
     assert "depth" in health["queue"] and "oldest_wait_s" in health["queue"]
     assert "last_60s" in health["cpu"]
+
+
+def test_free_slot_on_the_least_busy_cpu_set_wins(adm):
+    box = _box(adm, slots=[
+        {"name": "a", "lane": "interactive", "port": 1, "cpuset": "0-1"},
+        {"name": "b", "lane": "interactive", "port": 2, "cpuset": "0-1"},
+        {"name": "c", "lane": "interactive", "port": 3, "cpuset": "2-3"}])
+    first = _submit(box, "bx-preview-p1-a", at=1.0)
+    _assign(box)
+    assert first["slot"] in {"a", "b"} or first["slot"] == "c"
+    taken = box.by_name[first["slot"]].cpuset
+    second = _submit(box, "bx-preview-p2-b", at=2.0)
+    _assign(box)
+    # Never the slot sharing the busy slot's two CPUs while others are idle.
+    assert box.by_name[second["slot"]].cpuset.isdisjoint(taken)
+    assert adm.parse_cpuset("0-1,4") == {0, 1, 4}
+    assert adm.parse_cpuset("") is None
+
+
+def test_box_json_scalar_settings_reload_live(adm, tmp_path):
+    box = _box(adm)
+    path = tmp_path / "box.json"
+    path.write_text(json.dumps({"mem_budget_gib": 17.0}))
+    assert box.reload_config() is False          # first sight: baseline
+    raw = {"mem_budget_gib": 9.5, "owner_max_by_lane": {"interactive": 2},
+           "slots": [{"name": "other", "lane": "mcp", "port": 1}]}
+    path.write_text(json.dumps(raw))
+    os.utime(path, (time.time() + 5, time.time() + 5))
+    assert box.reload_config() is True
+    assert box.cfg.mem_budget_gib == 9.5
+    assert box.cfg.owner_max_by_lane == {"interactive": 2}
+    # Slots are never swapped live (that needs boxctl and a restart).
+    assert [s.name for s in box.slots] == ["i1", "i2", "look1", "m1"]
 
 
 # ── provisioning: GitHub OIDC only ─────────────────────────────────────────
