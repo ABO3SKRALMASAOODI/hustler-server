@@ -28,6 +28,7 @@ switch and no job ever runs on other code.
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,10 @@ SLOT_ENV_PATH = os.getenv("BOX_SLOT_ENV_FILE", "/etc/valmera/slot.env")
 ADMIN_TOKEN_PATH = os.getenv("BOX_ADMIN_TOKEN_FILE",
                              "/etc/valmera/admin.token")
 LOCK_PATH = "/run/valmera-boxctl.lock"
+# Which of the repository's slot plans (box/host/box*.json) this host runs:
+# the first box runs box.json (no file), a second box the plan its install
+# named (box/host/add_box.sh writes this file, e.g. "box-h2.json").
+PLAN_NAME_PATH = os.getenv("BOX_PLAN_NAME_FILE", "/etc/valmera/plan")
 CHANGED_FLAG = os.path.join(DATA_DIR, "env-changed")
 LOG_PATH = "/var/log/valmera/boxctl.log"
 NETWORK = "valmera"
@@ -92,6 +97,16 @@ def write_json(path, obj):
 
 def config():
     return load_json(CONFIG_PATH, {})
+
+
+def plan_name():
+    """This host's slot plan file in box/host ("box.json" by default)."""
+    try:
+        with open(PLAN_NAME_PATH, encoding="utf-8") as fh:
+            name = fh.read().strip()
+    except OSError:
+        name = ""
+    return name if re.fullmatch(r"box[a-z0-9-]*\.json", name) else "box.json"
 
 
 def release():
@@ -594,8 +609,9 @@ def restart_services(changed):
             open(flag, "w").close()
         else:
             units.append("valmera-admission")
+    plan = os.path.join(BOX_HOME, "host", plan_name())
     try:
-        with open(os.path.join(BOX_HOME, "host", "box.json"), "rb") as fh:
+        with open(plan, "rb") as fh:
             repo_plan = fh.read()
         with open(CONFIG_PATH, "rb") as fh:
             live_plan = fh.read()
@@ -607,12 +623,11 @@ def restart_services(changed):
         # while calls are in flight, like a code change).
         before = [(s.get("name"), s.get("lane")) for s in
                   config().get("slots", [])]
-        shutil.copyfile(os.path.join(BOX_HOME, "host", "box.json"),
-                        CONFIG_PATH + ".tmp")
+        shutil.copyfile(plan, CONFIG_PATH + ".tmp")
         os.replace(CONFIG_PATH + ".tmp", CONFIG_PATH)
         after = [(s.get("name"), s.get("lane")) for s in
                  config().get("slots", [])]
-        log("installed box.json from the repository")
+        log(f"installed {plan_name()} from the repository")
         if before != after and "valmera-admission" not in units:
             state = admission_state() or {}
             if (state.get("slots") or {}).get("busy", 0) or \
