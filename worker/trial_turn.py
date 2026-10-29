@@ -325,12 +325,14 @@ def lift_static(ctx, steps, most=None):
     placed = punched = slammed = 0
     for a, b in gaps:
         # a long stretch gets one event per ~LIFT_GAP_S of it
+        # (disjoint windows: two added events are at least 2 x
+        # LIFT_MIN_EDGE_S apart)
         n = max(1, int((b - a) // (LIFT_GAP_S + 0.4)))
-        cuts = [a + (b - a) * k / (n + 1) for k in range(n + 2)]
+        cuts = [a + (b - a) * k / n for k in range(n + 1)]
         for k in range(n):
             if placed >= most:
                 break
-            lo, hi = cuts[k], cuts[k + 2]
+            lo, hi = cuts[k], cuts[k + 1]
             pick = _word_pick(ctx, tl, lo, hi)
             if not pick:
                 continue
