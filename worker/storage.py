@@ -4,6 +4,7 @@ Media bytes only ever live on the worker's ephemeral disk during a job."""
 import hashlib
 import os
 import shutil
+import threading
 
 import boto3
 from botocore.config import Config
@@ -57,7 +58,7 @@ def _fetch_routing_row():
 
 _router = routing.Router(fetch=_fetch_routing_row)
 _locator = routing.Locator()
-_next_lock = __import__("threading").Lock()
+_next_lock = threading.Lock()
 _next_cached = {}
 
 
