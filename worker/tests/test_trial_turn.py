@@ -366,3 +366,46 @@ def test_a_screen_recording_gets_a_reading_zoom_on_its_text(monkeypatch):
     assert not trial_turn.lift_screen(_Proj(edl2, [], [], duration=18.0),
                                       trial_turn.Steps(ctx))
     assert not calls
+
+
+def test_the_note_names_the_delivered_shape():
+    ctx = _Proj({"keep": [[0, 10]]}, [], [])
+    ctx.index["video"] = {"width": 1280, "height": 800}
+    assert trial_turn.shape_words(ctx).startswith("landscape")
+    assert "not vertical" in trial_turn.shape_words(ctx)
+    ctx.edl["frame"] = {"ratio": "9:16"}
+    assert trial_turn.shape_words(ctx) == "vertical 9:16"
+    ctx2 = _Proj({"keep": [[0, 10]]}, [], [])          # a 720x1280 phone clip
+    assert trial_turn.shape_words(ctx2) == "vertical 9:16"
+
+
+def test_a_prepared_trial_turn_takes_no_critic_repair_pass(monkeypatch):
+    ctx = _lane_ctx("trial")
+    ctx.trial_prep = {"intent": "generic"}
+    ctx.last_visual_critic = {"verdict": "fix"}
+    assert agent_loop._prepared_trial(ctx)
+    assert agent_loop._quality_repair_pushback(ctx, [], 0, set()) is False
+    # its reply carries no review-note appendix (the notes stay in the meta)
+    monkeypatch.setattr(agent_loop, "_quality_handoff", lambda c: {
+        "quality_status": "advisory", "quality_findings": ["opens mid-word"]})
+    assert agent_loop._disclose_outstanding_quality(ctx, "Done.") == "Done."
+
+
+@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
+def test_unprepared_turns_keep_the_review_appendix(kind, monkeypatch):
+    ctx = _lane_ctx(kind)              # no head start ran
+    assert not agent_loop._prepared_trial(ctx)
+    monkeypatch.setattr(agent_loop, "_quality_handoff", lambda c: {
+        "quality_status": "advisory", "quality_findings": ["opens mid-word"]})
+    out = agent_loop._disclose_outstanding_quality(ctx, "Done.")
+    assert out.startswith("Done.") and "opens mid-word" in out
+
+
+def test_the_head_start_switches_the_second_opinions_off(monkeypatch):
+    monkeypatch.setattr(trial_turn, "prepare", lambda *a, **k: {
+        "intent": "generic", "whole": False, "applied": [], "s": 0.0,
+        "note": "\n[system: TRIAL TURN PREPARED.]", "steps": []})
+    ctx = _lane_ctx("trial")
+    agent_loop._trial_head_start(ctx, None, 1, {"content": "a short"})
+    assert ctx.second_opinions_off is True
+    assert agent_tools._review_program_story(ctx, {"version": 13}) is None

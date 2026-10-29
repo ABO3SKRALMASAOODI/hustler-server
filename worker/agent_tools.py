@@ -24079,6 +24079,9 @@ def _parse_render_audio_review(answer, edl_version, clips,
 
 def _review_program_story(ctx, row):
     """Independent semantic review of one immutable final EDL version."""
+    if getattr(ctx, "second_opinions_off", False):
+        # a prepared trial turn (agent_loop._trial_head_start)
+        return None
     if getattr(ctx, "sight_out", False):
         # An MCP editing model owns its judgment and receives the transcript
         # tools directly; do not make the product pay for a duplicate critic.
@@ -24343,7 +24346,7 @@ def _independent_preview_review(ctx, result, plan=None,
     tool-free call with an adversarial rubric. Missing storage or vision is an
     honest no-review, never a failed preview.
     """
-    if not llm.vision_available():
+    if not llm.vision_available() or getattr(ctx, "second_opinions_off", False):
         return None
     images, labels = [], []
 

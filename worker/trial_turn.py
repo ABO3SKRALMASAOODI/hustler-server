@@ -575,6 +575,30 @@ def whole_cleanup(ctx, worker_db, steps):
     return True
 
 
+def shape_words(ctx):
+    """The delivered frame in words, from the EDL's frame or the source's
+    own shape (C2/Q3: a reply called a 1280x800 screen recording "an
+    18-second vertical cut" and the judges marked it down for the claim)."""
+    try:
+        frame = ctx.latest_edl()["json"].get("frame") or {}
+    except Exception:  # noqa: BLE001
+        frame = {}
+    ratio = str(frame.get("ratio") or "").replace(" ", "")
+    if ratio:
+        return {"9:16": "vertical 9:16", "1:1": "square 1:1", "4:5": "4:5 portrait",
+                "16:9": "landscape 16:9"}.get(ratio, ratio)
+    video = (ctx.index or {}).get("video") or {}
+    try:
+        w, h = float(video["width"]), float(video["height"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if h / w >= 1.6:
+        return "vertical 9:16"
+    if abs(h / w - 1.0) < 0.05:
+        return "square"
+    return f"landscape, the source's own {int(w)}x{int(h)} shape (not vertical)"
+
+
 def prepare(ctx, worker_db, session_id, text, post=None):
     """The deterministic head start for a generic first request on top of an
     untouched First cut. Returns {"intent", "applied", "note", "steps"} or
@@ -631,15 +655,22 @@ def prepare(ctx, worker_db, session_id, text, post=None):
     else:
         done = ("The First cut already answers this request; nothing needed "
                 "adding.")
+    shape = shape_words(ctx)
     note = (
         "\n[system: TRIAL TURN PREPARED. " + done
+        + (f" The video's frame is {shape}: describe it as that." if shape else "")
         + (" The whole take is now cut with the First cut's craft (clean "
            "ends, pauses, fillers, framing, hook title, slams, captions)."
            if whole else "")
         + " Your job now: render_preview once, look at the result, fix only "
         "a MAJOR defect you can see (a face cut off, a caption over the "
         "face, a fragment at the start or end), then reply in two or three "
-        "sentences saying what the video now is. Do not render again unless "
-        "you changed something. Do not ask a question.]")
+        "sentences saying what the video now is. Do not move, resize or "
+        "restyle the hook title, the slams or the captions, and do not "
+        "change the framing: the render's automatic notes about them (a "
+        "title near the face, the head near the top of a full-height crop, "
+        "a held last frame) are known and kept, so do not act on them or "
+        "list them. Do not render again unless you changed something. Do "
+        "not ask a question.]")
     return {"intent": kind, "whole": whole, "applied": applied, "note": note,
             "steps": steps.rows, "s": elapsed}

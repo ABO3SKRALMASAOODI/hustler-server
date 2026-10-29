@@ -2382,6 +2382,11 @@ def _trial_lane(ctx):
     return getattr(ctx, "claude_trial", None) is not None
 
 
+def _prepared_trial(ctx):
+    """A trial turn whose main work code already did (trial_turn.prepare)."""
+    return _trial_lane(ctx) and bool(getattr(ctx, "trial_prep", None))
+
+
 def _trial_preview_cap(ctx, cap, operator_run=False):
     """The request's preview cap. A trial request renders at most
     CLAUDE_TRIAL_MAX_PREVIEWS (one look, one repair; Q3, 30 Oct: C1/C2
@@ -2434,6 +2439,10 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
         return ""
     ctx.trial_prep = prep
     ctx.prep_start_version = before
+    # no paid second-opinion critics on top of a deterministic build: their
+    # notes drove repairs that undid the First cut's craft (see
+    # _quality_repair_pushback), and each cost 10-20 s per render
+    ctx.second_opinions_off = True
     ctx.editing_metrics["trial_head_start"] = {
         "intent": prep["intent"], "whole": prep["whole"],
         "applied": prep["applied"], "s": prep["s"]}
@@ -2719,6 +2728,13 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
     # a loop. After one targeted pass the remaining real defects are carried
     # by the finishing directive and disclosed in the handoff instead.
     if len(pushed_versions) >= MAX_QUALITY_REPAIR_PUSHBACKS:
+        return False
+    if _prepared_trial(ctx):
+        # Q3 (30 Oct): on a trial turn that code already built (the First
+        # cut plus the head start), a repair pass chasing review notes about
+        # the First cut's own design moved the hook behind the speaker and
+        # off both frame edges (phone: 7.0 -> 5.0). The editor's own look at
+        # the render decides; the notes stay advisory.
         return False
     report = getattr(ctx, "last_visual_critic", None) or {}
     findings = preview_critic.repair_lines(report)
@@ -3203,6 +3219,12 @@ def _unused_fetched_audio_note(ctx):
 def _disclose_outstanding_quality(ctx, text):
     """Disclose the concrete blocker on legitimate terminal boundaries."""
     quality = _quality_handoff(ctx)
+    if _prepared_trial(ctx) and quality.get("quality_status") == "advisory":
+        # advisory review notes stay in the message meta (quality_findings)
+        # for the admin; the trial reply says what the video is (Q3: a
+        # disclosed note "starts mid-sentence" on a First cut the judges
+        # passed became a hard fault in the turn's judgement)
+        return text
     if quality.get("quality_status") == "advisory":
         first = (quality.get("quality_findings") or ["a review note"])[0]
         return (text.rstrip() +
@@ -4968,8 +4990,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     f"[system: REQUEST BUDGET REACHED ({spent}). Stop "
                     "editing: no more tools in this request. Write the reply "
                     "to the user now, in their language: what the latest "
-                    "preview delivers, then at most three short points you "
-                    "would still improve. Do not claim anything is fixed "
+                    "preview delivers"
+                    + (", in two or three sentences, ending on a statement"
+                       if _trial_lane(ctx) else
+                       ", then at most three short points you would still "
+                       "improve")
+                    + ". Do not claim anything is fixed "
                     "that the latest preview does not show. The user can "
                     "press Improve it to continue, or export this version.]")})
         if budget["spent"]:
