@@ -63,6 +63,7 @@ def test_keys_one_box_then_named_boxes():
     assert hr.key_for({}) == "box_health"
     assert hr.key_for({"name": "box1"}) == "box_health"
     assert hr.key_for({"name": "box2"}) == "box_health:box2"
+    assert hr.key_for({"box_id": "h2"}) == "box_health:h2"
     assert hr.key_for({"health_key": "x"}) == "x"
 
 

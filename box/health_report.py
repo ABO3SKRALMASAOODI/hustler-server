@@ -109,7 +109,7 @@ def build(cfg, state, mem=None, disk=None, load=None, cpus=None,
     total, avail = mem.get("MemTotal"), mem.get("MemAvailable")
     gb = 1024 ** 3
     doc = {
-        "name": str(cfg.get("name") or "box1"),
+        "name": str(cfg.get("name") or cfg.get("box_id") or "box1"),
         "load1": round(float(load[0]), 2),
         "cpus": int(cpus or 0),
         "mem_used_pct": (round(100.0 * (total - avail) / total, 1)
@@ -151,11 +151,11 @@ def build(cfg, state, mem=None, disk=None, load=None, cpus=None,
 
 def key_for(cfg):
     """'box_health' for the first box; 'box_health:<name>' for any other
-    (box.json "health_key" overrides)."""
+    (the plan's "name" or E2's "box_id", e.g. h2; "health_key" overrides)."""
     explicit = cfg.get("health_key")
     if explicit:
         return str(explicit)
-    name = str(cfg.get("name") or "box1")
+    name = str(cfg.get("name") or cfg.get("box_id") or "box1")
     return "box_health" if name == "box1" else f"box_health:{name}"
 
 
