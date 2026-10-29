@@ -106,7 +106,7 @@ def _state(monkeypatch, src, gated=False, stale_index=True):
     cursor = Cursor([
         ("FROM chat_messages WHERE session_id = %s AND role = 'activity'",
          None),
-        ("SELECT DISTINCT ON (type) id, type, state", []),
+        ("SELECT DISTINCT ON (jtype) id, jtype AS type, state", []),
         ("SELECT id FROM projects WHERE id = %s FOR UPDATE", {"id": 9}),
         ("SELECT id, role, content, meta, created_at FROM chat_messages",
          [{"id": 3, "role": "user", "content": "cut the pauses",

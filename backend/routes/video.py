@@ -2733,6 +2733,7 @@ def _asset_meta_patch(cur, asset_id, patch):
 def _index_job_for_asset(cur, project_id, asset_id):
     cur.execute("""SELECT id FROM video_jobs
                    WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
                      AND (payload->>'asset_id')::int = %s
                      AND state IN ('queued', 'running', 'done')
                    ORDER BY id DESC LIMIT 1""", (project_id, asset_id))
@@ -3291,6 +3292,7 @@ def index_status(user_id, project_id):
         indexed = bool(original and _index_row(cur, original["sha256"]))
         cur.execute("""SELECT id, state, progress, error FROM video_jobs
                        WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
                        ORDER BY id DESC LIMIT 1""", (project_id,))
         job = cur.fetchone()
     return jsonify({
@@ -3439,6 +3441,7 @@ def edit_transcript(user_id, project_id):
         # Block edits mid-index — the worker would overwrite them on completion.
         cur.execute("""SELECT 1 FROM video_jobs
                        WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
                          AND state IN ('queued','running') LIMIT 1""",
                     (project_id,))
         if cur.fetchone():
@@ -3632,11 +3635,19 @@ def project_state(user_id, project_id):
                          {"edl_version": edl["version"],
                           "source": "user_edit", "self_heal": True})
 
+        # A proxy-only job (upload_proxy.py) is an index row but not an
+        # analysis: the Studio sees it as "upload_proxy", never as "index"
+        # (its progress bar and "Analyzing" copy belong to a real analysis).
         cur.execute("""
-            SELECT DISTINCT ON (type) id, type, state, progress, error,
-                   updated_at
-            FROM video_jobs WHERE project_id = %s
-            ORDER BY type, id DESC
+            SELECT DISTINCT ON (jtype) id, jtype AS type, state, progress,
+                   error, updated_at
+            FROM (SELECT id, state, progress, error, updated_at,
+                         CASE WHEN type = 'index'
+                                   AND COALESCE(payload->>'proxy_only', '')
+                                       = 'true'
+                              THEN 'upload_proxy' ELSE type END AS jtype
+                    FROM video_jobs WHERE project_id = %s) j
+            ORDER BY jtype, id DESC
         """, (project_id,))
         jobs = {r["type"]: {
             "id": r["id"], "state": r["state"], "progress": r["progress"],
@@ -4050,6 +4061,7 @@ def replay_blocked(user_id, project_id):
         if original and not _index_row(cur, original["sha256"]):
             cur.execute("""SELECT id FROM video_jobs
                            WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
                              AND state IN ('queued','running') LIMIT 1""",
                         (project_id,))
             if cur.fetchone():
@@ -4197,6 +4209,7 @@ def post_message(user_id, project_id):
         if original and not indexed:
             cur.execute("""SELECT id FROM video_jobs
                            WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
                              AND state IN ('queued','running')
                            ORDER BY id DESC LIMIT 1""", (project_id,))
             live_index = cur.fetchone()
@@ -4383,6 +4396,7 @@ def post_message(user_id, project_id):
             # transaction (and the user's message must survive regardless).
             cur.execute("""SELECT state, error FROM video_jobs
                            WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
                            ORDER BY id DESC LIMIT 1""", (project_id,))
             idx_job = cur.fetchone()
             cur.execute("""SELECT role, content FROM chat_messages
@@ -4628,6 +4642,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
             # ready notice (the auto-resumed agent turn answers instead).
             cur.execute("""SELECT state FROM video_jobs
                            WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
                            ORDER BY id DESC LIMIT 1""", (project_id,))
             row = cur.fetchone()
             stage_now = _concierge_stage(row["state"] if row else None)
@@ -7206,7 +7221,10 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       # a first upload, its delivery, how much of it was
                       # watched, and the "Keep it" click at the export gate.
                       "free_result_started", "free_result_delivered",
-                      "free_result_watched_pct", "free_result_keep_clicked"}
+                      "free_result_watched_pct", "free_result_keep_clicked",
+                      # A walled upload the browser could not decode got a
+                      # proxy-only job on the render box (upload_proxy.py).
+                      "upload_server_proxy"}
 
 # The kinds that mean "a user tried to give us a video and we did not take it".
 # Surfaced in admin on their own rather than mixed into the rest, because these
@@ -7899,7 +7917,47 @@ def client_event(user_id, project_id):
     if kind not in CLIENT_EVENT_KINDS:
         return jsonify({"ok": True, "ignored": True})
     stored = record_client_event(user_id, project_id, kind, asset_id, detail)
-    return jsonify({"ok": True, "stored": stored})
+    out = {"ok": True, "stored": stored}
+    if kind == "player_error" and asset_id is not None:
+        proxy_job = _server_proxy_for_player_error(user_id, project_id,
+                                                   asset_id, detail)
+        if proxy_job:
+            out["proxy_job_id"] = proxy_job
+    return jsonify(out)
+
+
+def _server_proxy_for_player_error(user_id, project_id, asset_id, detail):
+    """A walled upload the browser cannot decode gets a playable copy built
+    on the render box (upload_proxy.py). Returns the job id or None; never
+    raises (the beacon's answer must not depend on it)."""
+    try:
+        asset_id = int(asset_id)
+    except (TypeError, ValueError):
+        return None
+    try:
+        import upload_proxy
+        with vdb() as conn:
+            cur = conn.cursor()
+            if not _project_for_user(cur, project_id, user_id):
+                return None
+            cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+                        (project_id,))
+            gated = (_subscribe_gate_applies(cur, user_id)
+                     and not _trial_admission(cur, user_id, project_id))
+            job_id, reason = upload_proxy.maybe_enqueue(
+                cur, user_id, project_id, asset_id, detail, gated, _enqueue)
+        if job_id:
+            print(f"[upload_proxy] project {project_id}: asset {asset_id} "
+                  f"undecodable in the browser; proxy job {job_id} queued "
+                  "for the render box", flush=True)
+            record_client_event(user_id, project_id, "upload_server_proxy",
+                                asset_id, {"job_id": job_id},
+                                origin="server")
+        return job_id
+    except Exception as exc:                                # pragma: no cover
+        print(f"[upload_proxy] not queued for project {project_id}: {exc}",
+              flush=True)
+        return None
 
 
 @video_bp.route("/client-event", methods=["POST"])

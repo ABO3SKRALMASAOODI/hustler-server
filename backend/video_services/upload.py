@@ -18,6 +18,7 @@ def completed_upload_index(cur, project_id, user_id, asset_id, *, can_retry):
     """
     cur.execute("""SELECT id, state, error, payload, result FROM video_jobs
                    WHERE project_id = %s AND type = 'index'
+                     AND COALESCE(payload->>'proxy_only', '') <> 'true'
                      AND payload->>'asset_id' = %s
                    ORDER BY id DESC LIMIT 1""", (project_id, str(asset_id)))
     job = cur.fetchone()

@@ -3138,6 +3138,7 @@ def unnotified_terminal_failures(conn, limit=100):
                         WHERE j.state = 'failed'
                           AND j.updated_at >= NOW() - INTERVAL '24 hours'
                           AND p.chat_session_id IS NOT NULL
+                          AND COALESCE(j.payload->>'proxy_only', '') <> 'true'
                           AND (
                             j.type IN ('final', 'index', 'shorts_plan')
                             OR (j.type = 'preview' AND (

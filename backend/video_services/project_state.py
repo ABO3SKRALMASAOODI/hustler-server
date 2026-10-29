@@ -56,6 +56,7 @@ def index_job_state(cur, project_id, asset_id):
                WHERE created_at > NOW() - INTERVAL '6 hours') AS recent_count
            FROM video_jobs
           WHERE project_id = %s AND type = 'index'
+            AND COALESCE(payload->>'proxy_only', '') <> 'true'
             AND payload->>'asset_id' = %s""",
         (project_id, str(asset_id)),
     )

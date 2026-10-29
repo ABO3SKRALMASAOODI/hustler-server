@@ -34,6 +34,7 @@ PROJECT_TIMINGS = """
                (vj.result->>'cached') AS cached
         FROM video_jobs vj
         WHERE vj.project_id = p.id AND vj.type = 'index' AND vj.state = 'done'
+          AND COALESCE(vj.payload->>'proxy_only', '') <> 'true'
         ORDER BY vj.id ASC LIMIT 1) ij ON TRUE
     LEFT JOIN LATERAL (
         SELECT percentile_cont(0.5) WITHIN GROUP (

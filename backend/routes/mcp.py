@@ -1756,6 +1756,7 @@ def _index_ready(cur, project_id):
         # Legacy rows without an asset_id in their payload.
         cur.execute("""SELECT id, state, progress FROM video_jobs
                        WHERE project_id = %s AND type = 'index'
+                         AND COALESCE(payload->>'proxy_only', '') <> 'true'
                        ORDER BY id DESC LIMIT 1""", (project_id,))
         row = cur.fetchone() or {}
         analysis = {"id": row.get("id"), "state": row.get("state"),
@@ -2431,6 +2432,7 @@ def _t_index_status(tok, args):
                                 AS age_s
                        FROM video_jobs
                        WHERE project_id = %s AND type = 'index'
+                         AND COALESCE(payload->>'proxy_only', '') <> 'true'
                          AND payload->>'asset_id' = %s
                        ORDER BY id DESC LIMIT 1""", (project_id, str(original["id"])))
         job = cur.fetchone()
@@ -2514,7 +2516,8 @@ def _index_queue(cur, job_id, user_id):
                                 AND j.id < %s)))
                        AS ahead
             FROM video_jobs j LEFT JOIN users u ON u.id = j.user_id
-            WHERE j.type = 'index' AND j.state IN ('running', 'queued')""",
+            WHERE j.type = 'index' AND j.state IN ('running', 'queued')
+              AND COALESCE(j.payload->>'proxy_only', '') <> 'true'""",
                     (job_id, mine, mine, job_id))
         row = cur.fetchone() or {}
         cur.execute("RELEASE SAVEPOINT index_queue")

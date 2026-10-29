@@ -277,8 +277,11 @@ CLAUDE_TRIAL_TIMEOUT_S = float(os.getenv("CLAUDE_TRIAL_TIMEOUT_S", "300"))
 # ({on, per_account_usd_cap, pool_usd_cap, monthly_usd_cap, daily_count_cap,
 # daily_usd_cap, model, test_user_ids}).
 CLAUDE_TRIAL_FLAG_KEY = "free_result"
+# "Just enough" for one complete edit and the export paywall: the C2
+# calibration (29 Oct 2026, Haiku 5.5 p90 $0.034 an edit) is $0.12, the
+# same default as backend/free_trial.DEFAULTS.
 CLAUDE_TRIAL_PER_ACCOUNT_USD = float(
-    os.getenv("CLAUDE_TRIAL_PER_ACCOUNT_USD", "1.00"))
+    os.getenv("CLAUDE_TRIAL_PER_ACCOUNT_USD", "0.12"))
 CLAUDE_TRIAL_POOL_USD = float(os.getenv("CLAUDE_TRIAL_POOL_USD", "200"))
 CLAUDE_TRIAL_DAILY_COUNT = int(os.getenv("CLAUDE_TRIAL_DAILY_COUNT", "40"))
 CLAUDE_TRIAL_DAILY_USD = float(os.getenv("CLAUDE_TRIAL_DAILY_USD", "40"))

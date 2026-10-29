@@ -557,7 +557,18 @@ FORCED_PREVIEW_FAIL_NOTE = (
     "browser.")
 
 
+def _proxy_only(job):
+    """A proxy-only index job (backend/upload_proxy.py): the playable copy of
+    a walled upload. Its failure is the ops loop's to see (video_jobs, the
+    automatic intake), never a chat note: the account asked for no analysis,
+    and the Studio keeps its own "couldn't play" notice."""
+    return job.get("type") == "index" and bool(
+        (job.get("payload") or {}).get("proxy_only"))
+
+
 def _notify_failure(worker_db, job, err):
+    if _proxy_only(job):
+        return
     if job["type"] == "shorts_plan":
         try:
             # The later chat turn is authoritative and runs immediately after
@@ -848,7 +859,8 @@ def reaper():
                     except Exception as e:
                         print(f"[reaper] could not resume agent turn "
                               f"{row['id']}: {e}", flush=True)
-                note = REAPER_NOTES.get(row["type"])
+                note = (None if _proxy_only(row)
+                        else REAPER_NOTES.get(row["type"]))
                 # Same distinction as _notify_failure: a died forced re-render
                 # is a playback recovery, and the generic preview note would
                 # send the user off to re-edit something that was never wrong.

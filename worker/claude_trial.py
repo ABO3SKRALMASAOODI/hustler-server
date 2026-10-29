@@ -70,6 +70,7 @@ mail.tm mail.gw linshiyouxiang.net 33mail.com getairmail.com
 """.split())
 
 _POOL_ALERT_PCTS = (50, 80, 95)
+POOL_ALERTS_ENABLED = False
 
 
 # ------------------------------------------------------------------ #
@@ -578,7 +579,11 @@ def _alert(key, kind, subject, html):
 
 
 def _pool_alerts(pool, pool_cap):
-    if not pool_cap or pool_cap <= 0:
+    # Owner, 29 Oct 2026 (B_RELIABILITY.md): alerts are only "a customer is
+    # blocked" and "a model provider is out of credit". The 50/80/95 % pool
+    # mails were noise: the admin's trial card shows the spend, and the
+    # automatic credit switch sends its one OFF alert. Kept as a no-op.
+    if not POOL_ALERTS_ENABLED or not pool_cap or pool_cap <= 0:
         return
     pct = 100.0 * float(pool) / float(pool_cap)
     if pct < _POOL_ALERT_PCTS[0]:
@@ -607,7 +612,8 @@ def provider_refused(kind, exc):
     """Anthropic refused for billing or auth: flip the automatic credit
     switch OFF (claude_credit; one alert per switch) and alert the admin
     (hourly per process)."""
-    hour = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    # At most one provider alert a day (owner: only the owner can pay).
+    hour = datetime.now(timezone.utc).strftime("%Y%m%d")
     detail = re.sub(r"sk-ant-[A-Za-z0-9_\-]+", "[REDACTED]", str(exc))[:400]
     try:
         import claude_credit

@@ -57,10 +57,13 @@ DEFAULTS = {
     "on": False,
     # Optional rollout time once switched on (ISO 8601); None = immediately.
     "start_at": None,
-    # D2 (owner's final design): a $1.00 ceiling of Claude usage per trial
-    # account, First cut included; stop granting at the $200 pool or at 40
-    # new trial accounts a day.
-    "per_account_usd_cap": 1.0,
+    # D2: "just enough" Claude usage per trial account, First cut included,
+    # calibrated from the measured cost of a good first outcome (owner, 25
+    # Oct: not an arbitrary $1). C2 (29 Oct): Haiku 5.5 p90 $0.034 an edit,
+    # worst turns $0.066-0.074, so $0.12 covers a First cut plus 2-3
+    # requests. Stop granting at the $200 pool or at 40 new trial accounts a
+    # day.
+    "per_account_usd_cap": 0.12,
     "pool_usd_cap": 200.0,
     "monthly_usd_cap": 200.0,
     "daily_count_cap": 40,
@@ -349,6 +352,24 @@ def _account_reason(cur, cfg, user_id):
     return None
 
 
+def _new_subscriber(cur, user_id):
+    """A subscriber who joined after the release cutoff (claude_plans).
+    Any failure reads as grandfathered: today's behaviour."""
+    try:
+        import claude_plans
+        cur.execute("SAVEPOINT free_trial_new_subscriber")
+        try:
+            out = bool(claude_plans.applies(cur.connection, user_id, True))
+            cur.execute("RELEASE SAVEPOINT free_trial_new_subscriber")
+        except Exception:
+            cur.execute("ROLLBACK TO SAVEPOINT free_trial_new_subscriber")
+            cur.execute("RELEASE SAVEPOINT free_trial_new_subscriber")
+            out = False
+        return out
+    except Exception:
+        return False
+
+
 def project_admission(cur, project_id):
     cur.execute("SELECT meta FROM projects WHERE id = %s", (int(project_id),))
     meta = (cur.fetchone() or {}).get("meta") or {}
@@ -381,6 +402,13 @@ def admit_upload(cur, user_id, project_id, subscribed, nbytes=None):
     except (TypeError, ValueError):
         return None
     if subscribed and not cfg.get("payer_first_cut", True):
+        return None
+    if subscribed and not _new_subscriber(cur, user_id):
+        # D1 grandfathering (DECISIONS.md, 25 Oct): EXISTING subscribers keep
+        # exactly today's behaviour, so no automatic First cut on their next
+        # upload. Only subscribers who joined after the release cutoff
+        # (claude_plans: studio_for_all_plans on, no payment or Paddle start
+        # before cutoff_at) get it. Found by the T1 gating proof (30 Oct).
         return None
     if nbytes and int(nbytes) > int(cfg.get("max_upload_bytes") or 0) > 0:
         return None

@@ -65,7 +65,8 @@ def world(monkeypatch):
 def test_flag_defaults_are_the_owner_numbers():
     f = claude_trial.parse_flag('{"on": true}')
     assert f["on"] is True
-    assert f["per_account_usd_cap"] == 1.0
+    # "Just enough", calibrated (C2, 29 Oct): $0.12, as in the backend
+    assert f["per_account_usd_cap"] == 0.12
     assert f["pool_usd_cap"] == 200
     assert f["daily_count_cap"] == 40
     assert f["model"] == config.CLAUDE_TRIAL_MODEL
@@ -96,7 +97,7 @@ def test_flag_off_paid_admin_and_operator_turns_are_untouched(world):
 def test_a_new_account_is_granted_once_and_runs_on_claude(world):
     d = claude_trial.resolve(_Db(), 5, False, project_id=9)
     assert d.kind == "active"
-    assert d.scope.cap_usd == 1.0 and d.scope.remaining_usd == 1.0
+    assert d.scope.cap_usd == 0.12 and d.scope.remaining_usd == 0.12
     assert d.scope.model == config.CLAUDE_TRIAL_MODEL
     assert world.grants == [(5, "agent_turn", False)]
     again = claude_trial.resolve(_Db(), 5, False, project_id=9)
@@ -218,7 +219,16 @@ def test_meter_writes_the_one_running_total_and_alerts_once(monkeypatch):
         claude_trial.deactivate()
     assert meter.rows == [(5, 0.25, True), (5, 1.5, True), (5, 0.25, True)]
     assert scope.spent_usd == pytest.approx(2.0)
-    # one alert per threshold per credit cycle (no rollover)
+    # No pool-percentage mails (owner, 29 Oct: alerts only for a blocked
+    # customer or a provider out of credit); the credit switch alerts once.
+    assert meter.alerts == []
+    monkeypatch.setattr(claude_trial, "POOL_ALERTS_ENABLED", True)
+    claude_trial.activate(scope)
+    try:
+        claude_trial.meter("claude-haiku-5-5", 0.25)
+    finally:
+        claude_trial.deactivate()
+    # one alert per threshold per credit cycle (no rollover) when enabled
     assert meter.alerts == ["pool_50_of_200_2026-11-08"]
 
 

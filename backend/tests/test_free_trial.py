@@ -22,7 +22,8 @@ class DB:
     def __init__(self, user=None, device_others=0, other_admission=False,
                  month_usd=0.0, today=0, account_usd=None, stored=None,
                  admission=None, all_usd=0.0, ledger=True, credit_state=None,
-                 cycle_usd=0.0, paid_before=False, account_cap=0.15):
+                 cycle_usd=0.0, paid_before=False, account_cap=0.15,
+                 studio=None):
         self.user = user or {"email": "a@gmail.com", "is_verified": 1}
         self.device_others = device_others
         self.other_admission = other_admission
@@ -32,6 +33,7 @@ class DB:
         self.ledger, self.credit_state = ledger, credit_state
         self.cycle_usd, self.paid_before = cycle_usd, paid_before
         self.account_cap = account_cap
+        self.studio = studio
         self.updates = []
         self._row = None
         self.rowcount = 0
@@ -57,7 +59,8 @@ class DB:
         elif q.startswith("SELECT value FROM app_kv"):
             key = (params or ["free_result"])[0]
             value = {"free_result": self.stored,
-                     "claude_credit_state": self.credit_state}.get(key)
+                     "claude_credit_state": self.credit_state,
+                     "studio_for_all_plans": self.studio}.get(key)
             self._row = {"value": value} if value else None
         elif q.startswith("SELECT to_regclass"):
             self._row = ({"a": "t", "b": "t", "t": "t"} if self.ledger
@@ -72,6 +75,8 @@ class DB:
             self._row = (None if self.account_usd is None else
                          {"cap_usd": self.account_cap,
                           "spent_usd": self.account_usd, "exhausted_at": None})
+        elif q.startswith("SELECT 1 FROM admin_subscription_snapshots"):
+            self._row = None
         elif q.startswith("SELECT 1 FROM payments"):
             self._row = {"x": 1} if self.paid_before else None
         elif q.startswith("SELECT meta FROM projects"):
@@ -114,7 +119,8 @@ def test_it_ships_off_with_the_owners_caps():
     # Owner override (25 Oct): D2 on hold, the wall stays as it is.
     d = free_trial.DEFAULTS
     assert free_trial.KEY == "free_result" and d["on"] is False
-    assert d["per_account_usd_cap"] == 1.0 and d["pool_usd_cap"] == 200.0
+    # "Just enough", calibrated (C2, 29 Oct): $0.12, the worker's default too
+    assert d["per_account_usd_cap"] == 0.12 and d["pool_usd_cap"] == 200.0
     assert d["daily_count_cap"] == 40 and d["trial_requests"] is True
     assert 60 in d["excluded_user_ids"] and 60 not in d["internal_user_ids"]
     # internal test accounts are configured at release, never by default
@@ -147,7 +153,20 @@ def test_admission_marks_the_project_once_and_payers_get_the_first_cut():
     assert free_trial.admit_upload(db, 777, 9, subscribed=False) == first
     assert len(db.updates) == 1
     _fresh()
-    payer = free_trial.admit_upload(DB(stored=_on()), 778, 10, subscribed=True)
+    # D1 grandfathering: an EXISTING subscriber's next upload is today's
+    # (no automatic First cut) with every trial flag on ...
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    studio = json.dumps({"on": True, "cutoff_at": cutoff})
+    assert free_trial.admit_upload(DB(stored=_on()), 778, 10,
+                                   subscribed=True) is None
+    _fresh()
+    assert free_trial.admit_upload(DB(stored=_on(), studio=studio,
+                                      paid_before=True), 778, 10,
+                                   subscribed=True) is None
+    # ... and only a subscriber who joined after the cutoff gets it.
+    _fresh()
+    payer = free_trial.admit_upload(DB(stored=_on(), studio=studio), 778, 10,
+                                    subscribed=True)
     assert payer["kind"] == "payer"
 
 

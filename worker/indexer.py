@@ -391,6 +391,8 @@ def run_index_job(worker_db, job):
         raise RuntimeError("Original asset not found")
     if asset["kind"] in ("video_clip", "music"):
         return _run_clip_index(worker_db, job, asset)
+    if (job.get("payload") or {}).get("proxy_only"):
+        return run_proxy_only_job(worker_db, job, asset)
     project = worker_db.run(dbx.get_project, project_id)
     session_id = project["chat_session_id"]
 
@@ -1060,6 +1062,65 @@ def _run_clip_index(worker_db, job, asset):
                     (visual_storyboard or {}).get("distinct_clusters") or 0),
                 "language": language, "warnings": warnings,
                 "timings": timings}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def run_proxy_only_job(worker_db, job, asset):
+    """Only the playable proxy of a walled upload (backend/upload_proxy.py).
+
+    A free account's upload that its browser cannot decode (HEVC, 4K .mov)
+    is never analysed before the account pays, so it had no proxy and the
+    Studio showed "This browser couldn't play the preview". This builds the
+    SAME 540p H.264 proxy the full analysis builds, at the same key and with
+    the same streaming and duration rules (_ensure_proxy), and stops: no
+    transcript, no index row, no First cut, no chat message, no model call.
+    The full analysis after checkout re-uses nothing from here except the
+    stored probe; it remains exactly today's path.
+    """
+    job_id, project_id = job["id"], job["project_id"]
+    if asset.get("kind") != "original":
+        raise RuntimeError("a proxy-only job takes the project's original")
+    if asset.get("sha256"):
+        have = worker_db.run(
+            lambda conn: dbx.asset_by_key(
+                conn, project_id, f"proxies/{project_id}/{asset['sha256']}.mp4"))
+        if have:
+            return {"proxy_only": True, "skipped": "proxy exists",
+                    "sha256": asset["sha256"]}
+    workdir = os.path.join(config.TMP_DIR, f"proxy_{job_id}")
+    os.makedirs(workdir, exist_ok=True)
+    timings, t0 = {}, time.monotonic()
+    try:
+        proxy_kwargs = {}
+        if config.index_source_should_stream(asset["kind"], asset.get("bytes")):
+            src, sha, info, proxy_kbps = _stream_index_source(
+                worker_db, job, asset, workdir)
+            proxy_kwargs["maxrate_kbps"] = proxy_kbps
+        else:
+            src = os.path.join(
+                workdir, "src" + os.path.splitext(asset["storage_key"])[1])
+            storage.download_to(asset["storage_key"], src)
+            _set_progress(worker_db, job_id, 10)
+            sha = media.sha256_file(src)
+            info = clamp_to_duration_limit(media.probe(src))
+        if info.get("limit_s"):
+            proxy_kwargs["limit_s"] = info["limit_s"]
+        timings["source_s"] = round(time.monotonic() - t0, 2)
+        worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
+                      info["width"], info["height"], info["fps"], sha)
+        _set_progress(worker_db, job_id, 20)
+        proxy_key = f"proxies/{project_id}/{sha}.mp4"
+        t1 = time.monotonic()
+        _ensure_proxy(worker_db, project_id, sha, proxy_key, src, info,
+                      workdir, **proxy_kwargs)
+        timings["proxy_s"] = round(time.monotonic() - t1, 2)
+        _set_progress(worker_db, job_id, 100)
+        print(f"[index {job_id}] proxy only: {info['duration']:.1f}s "
+              f"{info['width']}x{info['height']} source -> {proxy_key} in "
+              f"{timings['proxy_s']}s", flush=True)
+        return {"proxy_only": True, "sha256": sha, "proxy_key": proxy_key,
+                "duration_s": info["duration"], "timings": timings}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 

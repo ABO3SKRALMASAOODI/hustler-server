@@ -27,6 +27,7 @@ except ImportError:                                      # pragma: no cover
 
 POOL_USD_DEFAULT = float(os.getenv("CLAUDE_TRIAL_POOL_USD", "200"))
 ALERT_PCTS = (50, 80, 95)
+POOL_ALERTS_ENABLED = False
 MAX_BATCH = 10
 STALE_CLAIM_MINUTES = 15
 
@@ -210,7 +211,11 @@ def send_due(limit=MAX_BATCH, sender=None):
             if not _v(cur.fetchone(), "t", 0):
                 conn.rollback()
                 return {"due": 0, "sent": 0, "ready": False}
-            queue_threshold_alerts(cur)
+            # No 50/80/95 % pool mails (owner, 29 Oct: only "customer
+            # blocked" and "provider out of credit" alerts); the credit
+            # switch's own OFF alert is the one that reaches the admin.
+            if POOL_ALERTS_ENABLED:
+                queue_threshold_alerts(cur)
             cur.execute(f"""
                 UPDATE trial_alerts
                    SET status = 'sending', attempt_count = attempt_count + 1,
