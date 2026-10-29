@@ -264,10 +264,29 @@ def slot_image(slot, source):
     return exec_image if slot["lane"] in EXEC_LANES else agent_image
 
 
+def free_port(port, name):
+    """Remove another IDLE slot container still publishing ``port`` (a slot
+    plan re-numbered the ports); a busy one keeps it until a later run."""
+    out = sh(["docker", "ps", "-a", "--filter", f"publish={int(port)}",
+              "--format", "{{.Names}}|{{.Label \"valmera.slot\"}}"],
+             check=False)
+    state = None
+    for line in out.stdout.split():
+        other, _, other_slot = line.partition("|")
+        if other == name or not other_slot:
+            continue
+        state = state or admission_state() or {}
+        if slot_busy(state, other_slot):
+            raise RuntimeError(f"port {port} is held by busy slot {other}")
+        sh(["docker", "rm", "-f", other], check=False)
+        log(f"removed {other}: it held port {port} of the new slot plan")
+
+
 def run_slot(slot, source):
     """(Re)create one slot container on ``source``'s image."""
     name = container_name(slot)
     sh(["docker", "rm", "-f", name], check=False)
+    free_port(slot["port"], name)
     scratch = os.path.join(DATA_DIR, "slots", slot["name"])
     shutil.rmtree(scratch, ignore_errors=True)
     os.makedirs(scratch, exist_ok=True)
