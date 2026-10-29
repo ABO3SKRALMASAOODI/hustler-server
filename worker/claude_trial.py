@@ -791,12 +791,11 @@ FIRST_RESULT_NOTE = (
     "captions). Change what the request asks and keep the rest; never "
     "reset_edit, and never remove its hook, slams, captions or framing "
     "unless the user asked. When the First cut already "
-    "does what was asked, say so and fix only MAJOR defects. A request to "
-    "clean up the whole video when the First cut kept one moment: "
-    "keep_segments([[0, <source end>]]) first, then clean it, then drop a "
-    "throwaway opening (a mic check, a greeting) and a garbled or cut-off "
-    "last line; when the opening words change, set the hook_title's text to "
-    "the new opening line or remove it.\n"
+    "does what was asked, say so and fix only MAJOR defects. A [system: "
+    "TRIAL TURN PREPARED] note means code already did the request's main "
+    "work (a whole-take clean-up included): follow it, and never redo that "
+    "work by hand. A highlight montage is already cut to its strongest "
+    "shots: never keep_segments over it.\n"
     "THE CRAFT BAR (the owner's reference reels): 1) Hook: speech at 0.0 s "
     "on a complete line (never 'and', 'so', 'um'), and a poster title over "
     "the first 2-3 s (add_motion_graphic template='hook_title', the opening "
@@ -819,7 +818,7 @@ FIRST_RESULT_NOTE = (
     "the start or end, a face cut off, unreadable text) and render once "
     "more at most. A picture finding still there after one repair is the "
     "footage's own: keep it and say so in one clause; do not loop. Reply "
-    "briefly with what you made.")
+    "briefly with what you made, and end on a statement, never a question.")
 
 EXHAUSTED_TEXT = (
     "That used up your free trial — everything I finished is saved and you "

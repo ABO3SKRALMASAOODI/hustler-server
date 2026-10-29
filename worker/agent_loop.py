@@ -2236,6 +2236,10 @@ def run_agent_job(worker_db, job):
                 "off mid-work on our side. Everything you already changed "
                 "is saved in the project state — do NOT redo it; finish "
                 "what remains of the request and reply.]")
+        if ctx.claude_trial is not None and not continuation_state \
+                and not (job.get("payload") or {}).get("death_resume"):
+            attachment_note += _trial_head_start(ctx, worker_db, session_id,
+                                                 user_message)
         result = _run_loop(ctx, worker_db, job, session_id, user_message,
                            attachment_note,
                            _cont=(continuation_state or None))
@@ -2370,6 +2374,70 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
         print(f"[agent] job {job.get('id')}: new-subscriber lane lookup "
               f"failed ({str(exc)[:160]}); contracted lanes", flush=True)
         return None
+
+
+def _trial_lane(ctx):
+    """The free trial's Claude lane (claude_trial ACTIVE). Grandfathered
+    subscribers and new subscribers on the Claude lane are never on it."""
+    return getattr(ctx, "claude_trial", None) is not None
+
+
+def _trial_preview_cap(ctx, cap, operator_run=False):
+    """The request's preview cap. A trial request renders at most
+    CLAUDE_TRIAL_MAX_PREVIEWS (one look, one repair; Q3, 30 Oct: C1/C2
+    measured 3-7 renders and 170-445 s per trial turn, the extra renders
+    chasing critic findings without a gain). Every other lane: unchanged."""
+    if not _trial_lane(ctx) or operator_run \
+            or not config.CLAUDE_TRIAL_MAX_PREVIEWS:
+        return cap
+    return min(int(cap or config.CLAUDE_TRIAL_MAX_PREVIEWS),
+               int(config.CLAUDE_TRIAL_MAX_PREVIEWS))
+
+
+def _fresh_turn_yields_to_fleet(model):
+    """A fresh turn's first call waits for the fleet's TPM burn to fall
+    under the OpenAI org's ceiling. Not on a Claude lane (the trial, new
+    subscribers): another provider and organisation, whose limit that burn
+    says nothing about; the mid-turn reservation already skips Claude (Q3,
+    30 Oct: 100-120 s of a 175-290 s trial turn was this wait). Every OpenAI
+    or xAI lane, which is every grandfathered subscriber's, still yields."""
+    return not claude_lane.is_claude_model(model)
+
+
+def _trial_head_start(ctx, worker_db, session_id, user_message):
+    """The trial turn's deterministic head start on a generic first request
+    (trial_turn.prepare): '' when there is none. TRIAL LANE ONLY: the
+    caller gates on ctx.claude_trial, so grandfathered subscribers and the
+    new-subscriber Claude lane never run it. Its steps appear in the
+    activity feed like the agent's own and count as this turn's writes; the
+    turn's start version stays the First cut's (_run_loop)."""
+    if getattr(ctx, "claude_trial", None) is None:
+        return ""
+    import trial_turn
+    try:
+        before = int(ctx.latest_edl()["version"])
+    except Exception:  # noqa: BLE001
+        return ""
+
+    def post(name, args, result):
+        _activity(worker_db, session_id, name, args, result,
+                  edl_version=(ctx.versions_written[-1]
+                               if ctx.versions_written else before))
+    try:
+        prep = trial_turn.prepare(ctx, worker_db, session_id,
+                                  user_message.get("content") or "", post=post)
+    except Exception as e:  # noqa: BLE001 — the turn runs as before
+        print(f"[trial_turn] head start failed: {type(e).__name__}: "
+              f"{str(e)[:200]}", flush=True)
+        prep = None
+    if not prep:
+        return ""
+    ctx.trial_prep = prep
+    ctx.prep_start_version = before
+    ctx.editing_metrics["trial_head_start"] = {
+        "intent": prep["intent"], "whole": prep["whole"],
+        "applied": prep["applied"], "s": prep["s"]}
+    return prep["note"]
 
 
 def _claude_trial_extras(ctx):
@@ -4649,6 +4717,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     honesty = _cont.get("honesty") or \
         {"false_claims": 0, "corrective_note": False}
     start_version = int(_cont.get("start_version")
+                        or getattr(ctx, "prep_start_version", None)
                         or ctx.latest_edl()["version"])
     # Completion budget for this step, and how many times a truncated step has
     # already been retried with a bigger one. See _TRUNCATED_NUDGE.
@@ -4670,6 +4739,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     operator_run = payload.get("operator_repair") is True
     ctx.request_preview_cap = (None if operator_run else
                                (config.AGENT_REQUEST_MAX_PREVIEWS or None))
+    ctx.request_preview_cap = _trial_preview_cap(ctx, ctx.request_preview_cap,
+                                                 operator_run)
     try:
         ctx.request_previews = max(0, int(_cont.get("request_previews") or 0))
     except (TypeError, ValueError):
@@ -4851,7 +4922,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     # just three times and then slams in (that is how 5 TPM deaths still
     # happened after the first wait helper). Continuations never wait here:
     # their clock is already running and mid-turn 429s use rate_limit_wait.
-    if not _cont:
+    if not _cont and _fresh_turn_yields_to_fleet(model):
         _soft_cap, _hard_cap = llm.tpm_caps(model)
         room = _hard_cap - config.AGENT_TPM_CALL_RESERVE
         yield_line = min(_soft_cap, room)
@@ -5560,6 +5631,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 continue
             if ctx.versions_written and not _verification_complete(ctx) \
                     and not budget["spent"] \
+                    and not _trial_lane(ctx) \
                     and int(_cont.get("verification_slices") or 0) \
                     < MAX_VERIFICATION_CONTINUATIONS:
                 # A model draft is not completion while the current immutable

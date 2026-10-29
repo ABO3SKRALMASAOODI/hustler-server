@@ -1954,6 +1954,10 @@ AGENT_REQUEST_MAX_PREVIEWS = max(
     0, int(os.getenv("AGENT_REQUEST_MAX_PREVIEWS", "6")))
 AGENT_REQUEST_MAX_S = max(
     0.0, float(os.getenv("AGENT_REQUEST_MAX_S", "600")))
+# The free trial's request renders at most this many previews (Q3, 30 Oct
+# 2026): one look and one repair. 0 = the general cap above.
+CLAUDE_TRIAL_MAX_PREVIEWS = max(
+    0, int(os.getenv("CLAUDE_TRIAL_MAX_PREVIEWS", "2")))
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))
