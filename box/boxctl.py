@@ -232,21 +232,26 @@ def sync_limits():
     for slot in config().get("slots", []):
         name = container_name(slot)
         out = sh(["docker", "inspect", "-f",
-                  "{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}", name],
-                 check=False)
+                  "{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}|"
+                  "{{.HostConfig.CpusetCpus}}", name], check=False)
         if out.returncode != 0:
             continue
-        nano, mem = (int(x or 0) for x in out.stdout.strip().split("|"))
+        nano, mem, cpuset = (out.stdout.strip().split("|") + ["", "", ""])[:3]
+        nano, mem = int(nano or 0), int(mem or 0)
         want_nano = int(float(slot.get("cpus", 1)) * 1e9)
         want_mem = _bytes(slot.get("memory", "2g"))
-        if nano == want_nano and mem == want_mem:
+        want_set = str(slot.get("cpuset") or "")
+        if nano == want_nano and mem == want_mem and cpuset == want_set:
             continue
-        res = sh(["docker", "update", "--cpus", str(slot.get("cpus", 1)),
-                  "--memory", str(slot.get("memory", "2g")),
-                  "--memory-swap", str(slot.get("memory", "2g")), name],
-                 check=False)
+        args = ["docker", "update", "--cpus", str(slot.get("cpus", 1)),
+                "--memory", str(slot.get("memory", "2g")),
+                "--memory-swap", str(slot.get("memory", "2g"))]
+        if want_set or cpuset:
+            args += ["--cpuset-cpus", want_set or f"0-{os.cpu_count() - 1}"]
+        res = sh(args + [name], check=False)
         log(f"limits {name}: cpus {nano / 1e9:g}->{want_nano / 1e9:g}, "
-            f"memory {mem >> 20}->{want_mem >> 20} MiB "
+            f"memory {mem >> 20}->{want_mem >> 20} MiB, cpuset "
+            f"{cpuset or 'all'}->{want_set or 'all'} "
             f"({'ok' if res.returncode == 0 else res.stderr.strip()[:160]})")
 
 
@@ -299,6 +304,8 @@ def run_slot(slot, source):
         "--network", NETWORK,
         "-p", f"127.0.0.1:{int(slot['port'])}:8080",
         "--cpus", str(slot.get("cpus", 1)),
+        *(["--cpuset-cpus", str(slot["cpuset"])] if slot.get("cpuset")
+          else []),
         "--memory", mem, "--memory-swap", mem,
         "--pids-limit", str(slot.get("pids", 4096)),
         "--cpu-shares", "1024",

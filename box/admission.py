@@ -324,6 +324,18 @@ def refusal_envelope(job_type, message, capacity=True, rollout=False):
 
 
 # ── Slots ───────────────────────────────────────────────────────────────────
+def parse_cpuset(text):
+    """"0-1,4" -> {0, 1, 4}; empty means every CPU (None)."""
+    if not text:
+        return None
+    cpus = set()
+    for part in str(text).split(","):
+        lo, _, hi = part.strip().partition("-")
+        if lo.isdigit():
+            cpus.update(range(int(lo), int(hi or lo) + 1))
+    return cpus or None
+
+
 class Slot:
     def __init__(self, spec):
         self.name = spec["name"]
@@ -333,6 +345,7 @@ class Slot:
         # A quick slot serves only synchronous children (a frame look, a
         # capture): an agent's look_at never queues behind 3-minute renders.
         self.quick = bool(spec.get("quick", False))
+        self.cpuset = parse_cpuset(spec.get("cpuset"))
         self.shares = None        # the cgroup CPU weight last applied
         self.container = spec.get("container") or f"vbox-{self.name}"
         self.role = LANE_ROLES.get(self.lane, "executor")
@@ -687,10 +700,15 @@ class Box:
                         else min(blocked_rank, rank)
                     continue
                 # Nothing runs at all: a lone oversized call still starts.
-            # Prefer a quick slot for a child, this project's warm slot,
-            # then the least recently used.
+            # Prefer a quick slot for a child, then the slot whose CPU set
+            # the running calls use least, this project's warm slot, then
+            # the least recently used.
+            busy_sets = [o[0].cpuset for o in occupying
+                         if o[0].cpuset is not None]
             free.sort(key=lambda s: (
                 0 if waiter.get("child") and s.quick else 1,
+                sum(len(s.cpuset & b) for b in busy_sets)
+                if s.cpuset is not None else 0,
                 0 if waiter.get("affinity") and
                 s.last_affinity == waiter["affinity"] else 1,
                 s.last_used))

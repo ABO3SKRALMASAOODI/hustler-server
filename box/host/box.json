@@ -1,5 +1,5 @@
 {
-  "_comment": "Valmera render box admission + slots. 8 shared vCPU / 24 GB. Each slot's --cpus is a ceiling for ONE job (a lone preview may use 4 cores, a final 6), not a reservation: the slots oversubscribe the CPU on purpose and per-call cgroup CPU weights (customers 4x the owner factory) divide it under contention. Memory limits are the measured p95 with headroom. The owner factory (user 60) is capped per lane so customers always find a slot: interactive 3 of 6, batch 2 of 3, mcp 6 of 8. Quick slots serve synchronous children only.",
+  "_comment": "Valmera render box admission + slots. 8 shared vCPU / 24 GB. Each slot's --cpus is a ceiling for ONE job (a lone preview may use 4 cores, a final 6), not a reservation: the slots oversubscribe the CPU on purpose and per-call cgroup CPU weights (customers 4x the owner factory) divide it under contention. Memory limits are the measured p95 with headroom. The owner factory (user 60) is capped per lane so customers always find a slot: interactive 3 of 6, batch 2 of 3, mcp 6 of 8. Quick slots serve synchronous children only. Parity: interactive slots see 2 CPUs and batch slots 4 (cpusets), exactly what Cloudflare's standard-3/standard-4 lanes expose, because x264's thread count follows the visible CPUs: with that the box renders bit-identical files (29 Oct parity gate); admission picks the free slot whose CPU set is least busy.",
   "listen_host": "127.0.0.1",
   "listen_port": 8090,
   "extra_listen_hosts": [
@@ -37,43 +37,49 @@
       "name": "interactive1",
       "lane": "interactive",
       "port": 9101,
-      "cpus": 4.0,
-      "memory": "5g"
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "0-1"
     },
     {
       "name": "interactive2",
       "lane": "interactive",
       "port": 9102,
-      "cpus": 4.0,
-      "memory": "5g"
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "2-3"
     },
     {
       "name": "interactive3",
       "lane": "interactive",
       "port": 9103,
-      "cpus": 4.0,
-      "memory": "5g"
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "4-5"
     },
     {
       "name": "interactive4",
       "lane": "interactive",
       "port": 9104,
-      "cpus": 4.0,
-      "memory": "5g"
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "6-7"
     },
     {
       "name": "interactive5",
       "lane": "interactive",
       "port": 9105,
-      "cpus": 4.0,
-      "memory": "5g"
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "0-1"
     },
     {
       "name": "interactive6",
       "lane": "interactive",
       "port": 9106,
-      "cpus": 4.0,
-      "memory": "5g"
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "4-5"
     },
     {
       "name": "look1",
@@ -95,22 +101,25 @@
       "name": "batch1",
       "lane": "batch",
       "port": 9109,
-      "cpus": 6.0,
-      "memory": "10g"
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "0-3"
     },
     {
       "name": "batch2",
       "lane": "batch",
       "port": 9110,
-      "cpus": 6.0,
-      "memory": "10g"
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "4-7"
     },
     {
       "name": "batch3",
       "lane": "batch",
       "port": 9111,
-      "cpus": 6.0,
-      "memory": "10g"
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "0-3"
     },
     {
       "name": "bquick1",
