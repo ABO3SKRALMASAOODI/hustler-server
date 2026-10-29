@@ -2491,3 +2491,53 @@ def test_export_gate_on_an_older_version_does_not_offer_justification(
     text = result["content"][0]["text"]
     assert "not the newest version (v12)" in text
     assert "justify_verification_findings(project_id=" not in text
+
+
+def test_download_without_kind_hands_out_the_finished_export(client,
+                                                             monkeypatch):
+    """Ticket #4 (27-28 Oct 2026): two paying MCP users received 270x480 and
+    854x480 drafts as their video because download_url defaulted to the
+    draft preview. Without kind it now returns the finished export when one
+    exists, and any preview link says it is a draft, not the deliverable."""
+    DB["render_assets"] = [
+        {"id": 50, "project_id": 3, "storage_key": "media/3/p9.mp4",
+         "duration_s": 26.5, "width": 270, "height": 480,
+         "meta": {"variant": "preview", "edl_version": 9,
+                  "audio_model_review": False, "render_job_id": 95}},
+        {"id": 51, "project_id": 3, "storage_key": "media/3/f9.mp4",
+         "duration_s": 26.5, "width": 1080, "height": 1920,
+         "meta": {"variant": "final", "edl_version": 9,
+                  "render_job_id": 96}}]
+    monkeypatch.setattr(mcpmod.storage, "presign_get",
+                        lambda key: f"https://cdn.example/{key}?sig=1")
+    monkeypatch.setattr(mcpmod, "_final_gate",
+                        lambda cur, pid, uid: (lambda aid, meta, v: True))
+    monkeypatch.setattr(mcpmod, "_record_download_receipt",
+                        lambda tok, pid, receipt: {})
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+    assert got["isError"] is False
+    receipt = got["structuredContent"]["download_receipt"]
+    assert receipt["asset_id"] == 51 and receipt["render_type"] == \
+        "final_export"
+    # No final yet: the draft comes back, and says what it is.
+    DB["render_assets"] = DB["render_assets"][:1]
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+    text = got["content"][0]["text"]
+    assert "DRAFT PREVIEW (270x480)" in text and "NOT the finished video" \
+        in text
+    assert "export_final(project_id=3, edl_version=9)" in text
+    assert got["structuredContent"]["preview_receipt"]["deliverable"] is \
+        False
+    # An explicit preview request is still served (the editors' evidence),
+    # with the same label.
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {"project_id": 3,
+                                              "kind": "preview"},
+    }).get_json()["result"]
+    assert "DRAFT PREVIEW" in got["content"][0]["text"]
+    tool = next(t for t in mcpmod.SESSION_TOOLS if t["name"] == "download_url")
+    assert "never the user's finished video" in tool["description"]
