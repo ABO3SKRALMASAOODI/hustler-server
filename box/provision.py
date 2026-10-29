@@ -62,6 +62,10 @@ ALLOWED = (
     "VISION_MODEL", "IMAGE_API_KEY", "IMAGE_BASE_URL", "IMAGE_GEN_MODEL",
     "FAL_KEY", "DEEPGRAM_API_KEY", "PEXELS_API_KEY", "PIXABAY_API_KEY",
     "ANTHROPIC_API_KEY",
+    # The replacement object store while media moves off R2 (optional;
+    # worker/storage_routing.py). Absent = the executor uses S3_* alone.
+    "S3_NEXT_ENDPOINT", "S3_NEXT_ACCESS_KEY_ID", "S3_NEXT_SECRET_ACCESS_KEY",
+    "S3_NEXT_BUCKET", "S3_NEXT_REGION",
 )
 # Without these the executor cannot run a single job; refuse a partial set.
 REQUIRED = ("REMOTE_EXECUTOR_SECRET", "DATABASE_URL", "S3_ENDPOINT",
