@@ -35,10 +35,12 @@ import json
 import re
 import time
 
-LIFT_GAP_S = 4.6           # a talking head never holds one look longer
+LIFT_GAP_S = 4.0           # a talking head never holds one look longer
 LIFT_MIN_EDGE_S = 1.8      # an added event stays this clear of its neighbours
-PUNCH_STRENGTH = 0.16      # 100% -> ~116%: a visible second framing
-PUNCH_MIN_ROOM = 0.12      # below this a punch is invisible: slam instead
+PUNCH_STRENGTH = 0.2       # 100% -> 120%: a second framing the eye reads
+PUNCH_MIN_ROOM = 0.15      # below this a punch is invisible: slam instead
+VISIBLE_ZOOM = 0.15        # the judges read no change in a smaller step (C2
+                           # phone: a 0.12 cut step inside "11 s of one look")
 PUNCH_HOLD_S = (1.4, 2.6)  # one phrase, then a hard cut back out
 WHOLE_KEPT_SHARE = 0.6     # a First cut keeping less than this of the take
                            # is a "moment", not the user's whole footage
@@ -109,9 +111,9 @@ def first_cut_state(conn, session_id):
 
 def visible_events(edl, prog):
     """Program seconds where the picture visibly changes: graphics and cards
-    landing or leaving, inserts, overlays, a zoom of strength >= 0.1 starting
-    or ending (a framing that covers the whole program, the band crop, is not
-    an event), and concealed jump cuts (a framing step)."""
+    landing or leaving, inserts, overlays, a zoom of strength >= VISIBLE_ZOOM
+    starting or ending (a framing that covers the whole program, the band
+    crop, is not an event; nor is a shallower push or cut step)."""
     ev = [0.0, float(prog)]
     for m in edl.get("motion") or []:
         for f in ("start", "end"):
@@ -142,7 +144,7 @@ def visible_events(edl, prog):
             continue
         if s <= 0.05 and e >= prog - 0.05:
             continue                      # a framing, not an event
-        if z.get("cut_step") or float(z.get("strength") or 0) >= 0.1:
+        if float(z.get("strength") or 0) >= VISIBLE_ZOOM:
             ev += [s, e]
     return sorted(set(round(t, 2) for t in ev if 0.0 <= t <= prog + 1e-6))
 
@@ -341,7 +343,10 @@ def lift_static(ctx, steps, most=None):
             end = _phrase_end(ctx, tl, word, pt, b - 0.4)
             cur = ctx.latest_edl()["json"]
             room, _base, _stacked = agent_tools._zoom_room(ctx, cur, start, end)
-            if end - start >= PUNCH_HOLD_S[0] and (
+            # alternate the two events (a punch, then a word in big type)
+            # so a long talk never repeats one device
+            want_punch = (punched <= slammed)
+            if want_punch and end - start >= PUNCH_HOLD_S[0] and (
                     room is None or room >= PUNCH_MIN_ROOM):
                 args = {"start": start, "end": end, "mode": "punch",
                         "strength": PUNCH_STRENGTH,

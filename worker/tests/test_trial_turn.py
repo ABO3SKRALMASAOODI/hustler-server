@@ -63,11 +63,11 @@ FC_EDL = {   # the phone First cut (C2 c2g): band crop, 3 shallow punches,
 def test_visible_events_ignore_the_band_crop_and_invisible_pushes():
     ev = trial_turn.visible_events(FC_EDL, 27.14)
     assert 0.0 in ev and 27.14 in ev
-    assert 17.22 in ev and 19.25 in ev          # a concealed cut is a step
-    assert 7.02 not in ev and 22.2 not in ev    # 0.08 pushes do not read
+    # the judges read no change in 0.08 pushes or a 0.12 cut step
+    assert 7.02 not in ev and 22.2 not in ev and 17.22 not in ev
     # the judges' "16-27 s: about 11 s of one composition"
     gaps = trial_turn.static_gaps(FC_EDL, 27.14)
-    assert (19.25, 27.14) in gaps and (8.78, 14.22) in gaps
+    assert (15.59, 27.14) in gaps and (8.78, 14.22) in gaps
 
 
 # ── the head start's steps, on a fake project ─────────────────────────────
@@ -144,16 +144,23 @@ def test_lift_fills_each_static_stretch_with_one_event(fake_tools, monkeypatch):
                                  "t1": words[-1]["t1"], "text": SPEECH}])
     steps = trial_turn.Steps(ctx)
     n = trial_turn.lift_static(ctx, steps)
-    added = [a for name, a in ctx.calls if name == "add_zoom"]
-    assert n == len(added) >= 2
-    for a in added:
-        assert a["mode"] == "punch" and a["strength"] == trial_turn.PUNCH_STRENGTH
-        assert a["end"] - a["start"] >= trial_turn.PUNCH_HOLD_S[0] - 1e-6
-        assert (a["cx"], a["cy"]) == (0.456, 0.433)   # the First cut's aim
-    # never inside the hook, never in the last 0.6 s, never two in one gap
-    assert all(a["start"] >= 2.9 and a["end"] <= 27.14 - 0.4 for a in added)
-    assert ctx.write_calls == ["add_zoom"] * n
-    assert steps.applied and "punch-in" in steps.applied[0]
+    added = [(name, a) for name, a in ctx.calls
+             if name in ("add_zoom", "add_motion_graphic")]
+    assert n == len(added) >= 3
+    # the devices alternate: a punch, a word in big type, a punch ...
+    assert [name for name, _ in added][:3] == [
+        "add_zoom", "add_motion_graphic", "add_zoom"]
+    for name, a in added:
+        assert a["start"] >= 2.9 and a["end"] <= 27.14 - 0.3
+        if name == "add_zoom":
+            assert a["mode"] == "punch" and a["strength"] == trial_turn.PUNCH_STRENGTH
+            assert a["end"] - a["start"] >= trial_turn.PUNCH_HOLD_S[0] - 1e-6
+            assert (a["cx"], a["cy"]) == (0.456, 0.433)   # the First cut's aim
+    starts = sorted(a["start"] for _, a in added)
+    assert all(b - a >= 2 * trial_turn.LIFT_MIN_EDGE_S - 0.2
+               for a, b in zip(starts, starts[1:]))       # sparse by rule
+    assert len(ctx.write_calls) == n
+    assert any("punch-in" in x for x in steps.applied)
     # idempotent: the stretches are filled, a second pass adds nothing
     assert trial_turn.lift_static(ctx, trial_turn.Steps(ctx)) == 0
 
