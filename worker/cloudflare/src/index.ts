@@ -81,6 +81,12 @@ interface Env {
   S3_SECRET_ACCESS_KEY: string;
   S3_BUCKET: string;
   S3_REGION?: string;
+  // The replacement store while media moves off R2 (worker/storage_routing.py).
+  S3_NEXT_ENDPOINT?: string;
+  S3_NEXT_ACCESS_KEY_ID?: string;
+  S3_NEXT_SECRET_ACCESS_KEY?: string;
+  S3_NEXT_BUCKET?: string;
+  S3_NEXT_REGION?: string;
   OPENAI_API_KEY?: string;
   OPENAI_BASE_URL?: string;
   VISION_API_KEY?: string;
@@ -473,6 +479,11 @@ abstract class ValmeraContainer extends Container<Env> {
       S3_SECRET_ACCESS_KEY: this.env.S3_SECRET_ACCESS_KEY,
       S3_BUCKET: this.env.S3_BUCKET,
       S3_REGION: optional(this.env.S3_REGION) || "auto",
+      S3_NEXT_ENDPOINT: optional(this.env.S3_NEXT_ENDPOINT),
+      S3_NEXT_ACCESS_KEY_ID: optional(this.env.S3_NEXT_ACCESS_KEY_ID),
+      S3_NEXT_SECRET_ACCESS_KEY: optional(this.env.S3_NEXT_SECRET_ACCESS_KEY),
+      S3_NEXT_BUCKET: optional(this.env.S3_NEXT_BUCKET),
+      S3_NEXT_REGION: optional(this.env.S3_NEXT_REGION),
       OPENAI_API_KEY: optional(this.env.OPENAI_API_KEY),
       OPENAI_BASE_URL: optional(this.env.OPENAI_BASE_URL) || "https://api.openai.com/v1",
       VISION_API_KEY: optional(this.env.VISION_API_KEY),

@@ -915,9 +915,11 @@ SESSION_TOOLS = [
     {"name": "download_url",
      "description": "A temporary URL for watching or downloading a render of "
                     "an explicit project, with a durable receipt. asset_id recovers a historical render. "
-                    "kind 'preview' (complete draft/approval), 'preview_check' (changed sections), or "
-                    "'final' (a completed export). This tool "
-                    "cannot create a final export.",
+                    "Without kind it returns the finished export when one exists, else the draft. "
+                    "kind 'preview' (complete draft/approval: LOW-RESOLUTION, for checking the edit, "
+                    "never the user's finished video), 'preview_check' (changed sections), or "
+                    "'final' (a completed full-quality export). This tool cannot create a final "
+                    "export: for the video the user keeps, call export_final first.",
      "inputSchema": {"type": "object", "properties": {
          "project_id": {"type": "integer"},
          "kind": {"type": "string", "enum": ["preview", "preview_check", "final"]},
@@ -3086,7 +3088,8 @@ def _t_download_url(tok, args):
     project_id, error = _required_project_id(args)
     if error:
         return _session_error(error)
-    kind = args.get("kind") or "preview"
+    explicit_kind = args.get("kind")
+    kind = explicit_kind or "preview"
     if kind not in ("preview", "preview_check", "final"):
         return _session_error("kind must be preview, preview_check, or final.")
     try:
@@ -3099,9 +3102,35 @@ def _t_download_url(tok, args):
         if not project:
             return _session_error(
                 f"Project {project_id} does not exist on this account.")
+        # No kind and no asset: the caller wants "the download", i.e. the
+        # finished video when one exists (ticket #4, 27-28 Oct: two paying
+        # MCP users received 270x480 / 854x480 drafts as their video because
+        # the default was the draft preview). A preview is still returned
+        # when no final exists, labelled as a draft below.
+        gate = None
+        if not explicit_kind and args.get("asset_id") is None:
+            fsql = """SELECT id, storage_key, duration_s, sha256, meta, width,
+                             height FROM assets
+                       WHERE project_id = %s AND kind = 'render'
+                         AND meta->>'variant' = %s"""
+            fparams = [project_id, "final"]
+            if args.get("edl_version") is not None:
+                try:
+                    fparams.append(int(args["edl_version"]))
+                except (TypeError, ValueError):
+                    return _session_error("edl_version must be an integer.")
+                fsql += " AND (meta->>'edl_version')::int = %s"
+            cur.execute(fsql + " ORDER BY id DESC LIMIT 1", fparams)
+            frow = cur.fetchone()
+            if frow:
+                gate = _final_gate(cur, project_id, tok["user_id"])
+                if gate(frow["id"], frow.get("meta") or {},
+                        (frow.get("meta") or {}).get("edl_version")):
+                    kind = "final"
         # Renders are assets of kind 'render'; the variant and the EDL version
         # they were made from live in meta.
-        sql = """SELECT id, storage_key, duration_s, sha256, meta FROM assets
+        sql = """SELECT id, storage_key, duration_s, sha256, meta, width,
+                        height FROM assets
                  WHERE project_id = %s AND kind = 'render'
                    AND meta->>'variant' = %s"""
         params = [project_id, kind]
@@ -3123,7 +3152,9 @@ def _t_download_url(tok, args):
         sql += " ORDER BY id DESC LIMIT 1"
         cur.execute(sql, params)
         row = cur.fetchone()
-        if row and kind == "final" and not _final_gate(cur, project_id, tok["user_id"])(
+        if row and kind == "final" and gate is None:
+            gate = _final_gate(cur, project_id, tok["user_id"])
+        if row and kind == "final" and not gate(
                 row["id"], row.get("meta") or {}, (row.get("meta") or {}).get("edl_version")):
             held = final_degraded_hold(row.get("meta") or {})
             if held:
@@ -3172,10 +3203,12 @@ def _t_download_url(tok, args):
         return _text("The asset exists, but the download receipt could not be saved. Retry download_url.", True)
     if kind in ("preview", "preview_check"):
         receipt["url"] = url
+        receipt["deliverable"] = False
         identity = (f"PROJECT {project_id} — "
                     f"\"{project.get('title') or 'Untitled'}\"")
         text = (f"{identity}\n{kind} of EDL v{ver} (link valid a few "
-                f"hours):\n{url}\n\nPREVIEW RECEIPT: "
+                f"hours):\n{url}\n\n" + _draft_notice(row, project_id, ver)
+                + "\n\nPREVIEW RECEIPT: "
                 + json.dumps(receipt, sort_keys=True)
                 + _preview_policy_line(receipt))
         return {"content": [{"type": "text", "text": text}],
@@ -3195,6 +3228,19 @@ def _t_download_url(tok, args):
     return {"content": [{"type": "text",
                          "text": f"{kind} of EDL v{ver}:\n{url}{inspect}"}],
             "structuredContent": {"download_receipt": receipt}, "isError": False}
+
+
+def _draft_notice(row, project_id, version):
+    """What a preview link IS, in words an AI app passes on: a low-
+    resolution draft for checking the edit, not the video to keep."""
+    w, h = (row or {}).get("width"), (row or {}).get("height")
+    size = f" ({w}x{h})" if w and h else ""
+    return (f"DRAFT PREVIEW{size}: a low-resolution check of the edit, NOT "
+            "the finished video. Do not hand this link to the user as their "
+            "video: for the full-quality MP4 call export_final(project_id="
+            f"{project_id}, edl_version={version}), wait_for_job, then "
+            f"download_url(project_id={project_id}, kind='final', "
+            f"edl_version={version}).")
 
 
 def _t_watch_video(tok, args):
@@ -3405,8 +3451,38 @@ def _text(s, is_error=False):
     return {"content": [{"type": "text", "text": s}], "isError": is_error}
 
 
+_ERR_URL = re.compile(r"https?://\S+")
+_ERR_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+_ERR_QUOTED = re.compile(r"(\"[^\"]*\"|'[^']*'|“[^”]*”|‘[^’]*’)")
+# Our own failures (not the AI app's corrections, which may quote the
+# customer's words back): only these keep a sentence for the outcome loop.
+OWN_FAILURE_CATEGORIES = {"internal_error", "unclassified", "timeout",
+                          "upload_error", "executor_version_mismatch"}
+OWN_FAILURE_OUTCOMES = {"transient_failure", "unavailable", "unsafe"}
+# Structured codes of the product's own gates (export_final's QC hold, the
+# held tail, analysis not ready, the plan gate).
+GATE_CODES = {"verification_open": "prerequisite", "held_tail": "prerequisite",
+              "index_not_ready": "prerequisite",
+              "mcp_plan_required": "plan_gate"}
+
+
+def _error_message(text, limit=300):
+    """Our own error sentence, bounded, with links (signed URLs), email
+    addresses and anything quoted removed: what the automatic intake and the
+    Fixer need to find the cause, never the customer's contents."""
+    text = _ERR_URL.sub("<url>", text or "")
+    text = _ERR_EMAIL.sub("<email>", text)
+    text = _ERR_QUOTED.sub("<text>", text)
+    text = " ".join(text.split())
+    return text[:limit] or None
+
+
 def _public_error_detail(name, result):
-    """Persist diagnostic categories, never tool arguments or raw response text."""
+    """Persist diagnostic categories, never tool arguments. For OUR failures
+    (internal, unclassified, timeout, upload, transient, unavailable) also a
+    bounded sentence with links, emails and quoted text removed, so the
+    outcome loop can see why it failed; a correction the AI app must make
+    keeps no text (it can quote the customer's own words)."""
     text = "\n".join(str(b.get("text", "")) for b in result.get("content", []) if isinstance(b, dict) and b.get("type") == "text")
     lower = text.lower()
     category = "unclassified"
@@ -3425,7 +3501,20 @@ def _public_error_detail(name, result):
             break
     detail = {"tool": str(name or "unknown")[:100], "category": category,
               "error_fingerprint": hashlib.sha256(text.encode()).hexdigest()[:16]}
+
     structured = result.get("structuredContent") or {}
+    code = None
+    if isinstance(structured, dict):
+        code = structured.get("code") if isinstance(structured.get("code"), str) \
+            else next((v["code"] for v in structured.values()
+                       if isinstance(v, dict) and isinstance(v.get("code"), str)),
+                      None)
+    if code:
+        detail["code"] = code[:40]
+        # The product's own gates answering as designed: the caller must
+        # repair, wait or subscribe; not a failure of ours.
+        if category == "unclassified" and code in GATE_CODES:
+            category = detail["category"] = GATE_CODES[code]
     outcome = structured.get("tool_outcome") if isinstance(structured, dict) else None
     if isinstance(outcome, dict) and outcome.get("status") in {
             "correction_needed", "prerequisite", "transient_failure", "unavailable", "unsafe"}:
@@ -3434,6 +3523,11 @@ def _public_error_detail(name, result):
     reference = re.search(r"Reference ([a-f0-9]{16})\.", text)
     if reference:
         detail["reference"] = reference.group(1)
+    if category in OWN_FAILURE_CATEGORIES or \
+            detail.get("outcome") in OWN_FAILURE_OUTCOMES:
+        message = _error_message(text)
+        if message:
+            detail["message"] = message
     return detail
 
 

@@ -16,6 +16,7 @@ import os
 import numpy as np
 
 import fxprims
+import http_inputs
 
 FILTERS = ("split", "trim", "setpts", "settb", "format", "scale", "overlay",
            "nullsink")
@@ -76,7 +77,8 @@ class _Frames:
         cmd += ["-i", path, "-frames:v", str(n), "-vf",
                 f"fps={fps:.4f},scale={self._w}:{self._h}", "-f", "rawvideo",
                 "-pix_fmt", "rgb24", "-"]
-        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+        self._proc = subprocess.Popen(http_inputs.resilient(cmd),
+                                      stdout=subprocess.PIPE,
                                       stderr=subprocess.DEVNULL)
         if self._read() is not None:
             self.frames = [self._last]       # non-empty: the clip is readable

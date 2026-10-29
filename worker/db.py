@@ -272,7 +272,10 @@ def claim_job(conn, types, max_attempts):
     has_claims = claims_column_ready(conn)
     has_remote_ledger = has_claims and remote_executions_table_ready(conn)
     claims_set = ", total_claims = COALESCE(total_claims, 0) + 1" if has_claims else ""
-    claims_where = "AND COALESCE(total_claims, 0) < %s" if has_claims else ""
+    # Claims a box job spent only WAITING for room (db.defer_box_wait, an
+    # unlaunched deploy release) never count against the physical ceiling.
+    claims_where = ("AND COALESCE(total_claims, 0) < %s + " + BOX_WAIT_CLAIMS_SQL
+                    if has_claims else "")
     remote_where = "" if not has_remote_ledger else """
                   AND NOT EXISTS (
                     SELECT 1 FROM remote_executions remote_live
@@ -484,7 +487,7 @@ def fail_ceilinged_jobs(conn):
             SET state = 'failed', updated_at = NOW(),
                 error = COALESCE(error, 'This job was restarted too many times '
                                         'and has been stopped. Please try again.')
-            WHERE COALESCE(total_claims, 0) >= %s
+            WHERE COALESCE(total_claims, 0) >= %s + {BOX_WAIT_CLAIMS_SQL}
               AND (state = 'queued'
                    OR (state = 'running'
                        AND heartbeat_at < NOW() - make_interval(secs => %s)))
@@ -574,9 +577,19 @@ def release_unlaunched_jobs(conn, claims):
         for job_id, claim in claims.items():
             if claim is None:
                 continue
+            # A box job that was only waiting for room spent nothing: its
+            # claim extends the ceiling (BOX_WAIT_CLAIMS_SQL) as well.
             cur.execute("""UPDATE video_jobs
                            SET state = 'queued', progress = 0,
                                attempts = GREATEST(0, attempts - 1),
+                               payload = CASE
+                                 WHEN payload->>'execution_provider' = 'box'
+                                 THEN jsonb_set(COALESCE(payload, '{}'::jsonb),
+                                   '{box_wait_claims}', to_jsonb(CASE
+                                     WHEN payload->>'box_wait_claims' ~ '^[0-9]+$'
+                                     THEN (payload->>'box_wait_claims')::int + 1
+                                     ELSE 1 END), true)
+                                 ELSE payload END,
                                updated_at = NOW()
                            WHERE id = %s AND state = 'running'
                              AND total_claims = %s
@@ -883,12 +896,86 @@ def requeue_job(conn, job_id, error, total_claims=None):
         return cur.rowcount > 0
 
 
+# The claims a render-box job spent only waiting for room (never running):
+# added to MAX_CLAIMS_ABSOLUTE wherever the ceiling is applied.
+BOX_WAIT_CLAIMS_SQL = """(CASE WHEN video_jobs.payload->>'box_wait_claims'
+                                   ~ '^[0-9]+$'
+                              THEN (video_jobs.payload->>'box_wait_claims')::int
+                              ELSE 0 END)"""
+
+
+def defer_box_wait(conn, job_id, total_claims, error):
+    """Return a render-box job that ran nothing to the queue, unspent.
+
+    The owner's rule for the box: a job is never failed because capacity was
+    busy, the box was updating or briefly unreachable. Like the Cloudflare
+    deferral the attempt is refunded and ``total_claims`` is not (a new claim
+    is a new call identity), but this claim is also recorded in
+    ``box_wait_claims``, which claim_job and fail_ceilinged_jobs add to
+    MAX_CLAIMS_ABSOLUTE: waiting never exhausts the physical-run ceiling.
+    BOX_MAX_WAIT_DEFERRALS only stops a pathological endless loop (each
+    deferral follows an in-claim wait of up to BOX_INCLAIM_WAIT_S).
+    """
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET state = 'queued',
+                           attempts = GREATEST(0, attempts - 1),
+                           error = %s,
+                           payload = jsonb_set(jsonb_set(jsonb_set(
+                             COALESCE(payload, '{}'::jsonb),
+                             '{cloudflare_busy_deferred}', 'true'::jsonb,
+                             true),
+                             '{box_wait_deferrals}', to_jsonb(CASE
+                               WHEN payload->>'box_wait_deferrals' ~ '^[0-9]+$'
+                               THEN (payload->>'box_wait_deferrals')::int + 1
+                               ELSE 1 END), true),
+                             '{box_wait_claims}', to_jsonb(CASE
+                               WHEN payload->>'box_wait_claims' ~ '^[0-9]+$'
+                               THEN (payload->>'box_wait_claims')::int + 1
+                               ELSE 1 END), true),
+                           updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND total_claims = %s
+                         AND CASE WHEN payload->>'box_wait_deferrals'
+                                         ~ '^[0-9]+$'
+                                  THEN (payload->>'box_wait_deferrals')::int
+                                  ELSE 0 END < %s""",
+                    (error_text.excerpt(error, 2000), job_id, total_claims,
+                     max(1, int(config.BOX_MAX_WAIT_DEFERRALS))))
+        return cur.rowcount > 0
+
+
 _DEFERRAL_COUNTERS = {"cloudflare_busy_deferrals",
                       "cloudflare_rollout_deferrals",
                       "cloudflare_capacity_deferrals",
                       # Quiet retries of an infrastructure failure inside
                       # its 10-minute window (failure_policy.INFRA_*).
                       "infra_retry_deferrals"}
+
+
+def escalate_render_lane(conn, job_id, total_claims, error, lane):
+    """Requeue an out-of-memory render ONCE onto a larger executor lane.
+
+    The interactive lane (8 GiB) OOM-killed a paying user's long draft
+    preview (job 111131, 26 Oct 2026); the same graph fits the 12 GiB batch
+    lane. The attempt is refunded, ``payload.force_lane`` pins the next
+    dispatch, and the guard on its absence makes this a one-shot.
+    """
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE video_jobs
+                       SET state = 'queued',
+                           attempts = GREATEST(0, attempts - 1),
+                           error = %s,
+                           payload = jsonb_set(COALESCE(payload, '{}'::jsonb),
+                                               '{force_lane}', to_jsonb(%s::text),
+                                               true),
+                           updated_at = NOW()
+                       WHERE id = %s AND state = 'running'
+                         AND total_claims = %s
+                         AND COALESCE(payload->>'force_lane', '') = ''""",
+                    (error_text.excerpt(error, 2000), lane, job_id,
+                     total_claims))
+        return cur.rowcount == 1
 
 
 def defer_unlaunched_cloudflare_busy(conn, job_id, total_claims, error,
@@ -991,7 +1078,7 @@ def requeue_provider_fallback(conn, job_id, total_claims, from_provider,
     ``total_claims`` is not refunded: the next claim remains visible in the
     absolute physical-handoff budget even though no /run occurred here.
     """
-    if to_provider not in {"modal", "cloudflare", "cloud_run"}:
+    if to_provider not in {"modal", "cloudflare", "cloud_run", "box"}:
         raise ValueError("invalid fallback provider")
     with conn.cursor() as cur:
         cur.execute("""UPDATE video_jobs j
@@ -1024,7 +1111,7 @@ def get_job(conn, job_id):
 def stamp_execution_provider(conn, job_id, total_claims, provider,
                              execution_shape=None):
     """Persist provider + comparison shape under the current queue lease."""
-    if provider not in {"modal", "cloudflare", "cloud_run", "local"}:
+    if provider not in {"modal", "cloudflare", "cloud_run", "local", "box"}:
         raise ValueError("invalid execution provider")
     with conn.cursor() as cur:
         cur.execute("""UPDATE video_jobs
@@ -3372,16 +3459,22 @@ def customer_request_before_repair(conn, session_id, message_id, repair_prefix):
 
     Bound by session and message id so a later steer or another project can
     never replace the brief of the repair currently being executed.
+    ``repair_prefix``: one generated prefix or a sequence of them (Repair
+    edit and Improve it).
     """
+    prefixes = ([repair_prefix] if isinstance(repair_prefix, str)
+                else list(repair_prefix or []))
+    # The prefixes are fixed product strings without LIKE wildcards.
+    patterns = [p + '%' for p in prefixes if p]
     with conn.cursor() as cur:
         cur.execute("""SELECT id, content FROM chat_messages
             WHERE session_id = %s AND id < %s AND role = 'user'
               AND BTRIM(COALESCE(content, '')) <> ''
-              AND BTRIM(content) NOT LIKE %s
+              AND NOT (BTRIM(content) LIKE ANY(%s::text[]))
               AND LOWER(BTRIM(content, ' .!')) NOT IN
                   ('continue', 'keep going', 'go on', 'resume', 'carry on')
             ORDER BY id DESC LIMIT 1""",
-                    (session_id, message_id, repair_prefix + '%'))
+                    (session_id, message_id, patterns))
         return cur.fetchone()
 
 

@@ -62,6 +62,38 @@ start cold). October 2026 had 76 releases, 16 on one day. The rule:
   can wait; check `video_jobs` for running `final`/`index` rows of real users
   first.
 
+## The render box (owner's server, 29 Oct 2026)
+
+The owner's Contabo server (13.140.241.231, Seattle, 8 shared vCPU / 24 GB;
+root key `~/.ssh/valmera_box_ed25519`) is an execution provider,
+`execution_provider = "box"`, replacing Cloudflare stage by stage. **No
+fallback, by the owner's rule:** a box job never goes to Cloudflare or Modal
+and is never failed because the box is busy, updating or briefly down; it
+waits in its claim and then in the Postgres queue (`remote._run_box_with_wait`,
+`db.defer_box_wait`; waiting never spends the `MAX_CLAIMS_ABSOLUTE` ceiling).
+
+- **Routing:** app_kv `box_routing` (JSON; absent = off), read every 15 s by
+  `worker/box_routing.py`: `{"enabled", "url", "stages": {"owner", "mcp",
+  "trial", "free", "paying"}, "owner_user_ids": [60], "skew": "hold"}`. The
+  stamp is immutable: turning a stage off moves only unstamped jobs.
+- **Box side** (`box/`): `admission.py` speaks the Cloudflare named-call
+  contract (`bx-` call ids), orders calls customers > trial > owner factory,
+  caps the owner per lane, gives synchronous children quick slots, sets each
+  slot's cgroup CPU weight per call, and runs a call only on a slot whose
+  code fingerprint equals the dispatcher's. `boxctl.py` (timer, 2 min) pulls
+  main, builds the Cloudflare lanes' images at the worker fingerprint and
+  rolls slots in drained waves; `clean` (15 min) keeps the disk bounded.
+  `provision.py` receives GitHub secrets from `.github/workflows/box-provision.yml`
+  with a GitHub OIDC token (no shared credential). Caddy terminates TLS at
+  `https://13-140-241-231.sslip.io`. Config: `/etc/valmera/box.json`
+  (reloaded live), state `/var/lib/valmera/`, logs `/var/log/valmera/`.
+- **Health:** `GET /health` (bearer `REMOTE_EXECUTOR_SECRET`) or on the box
+  `curl -H "X-Admin-Token: $(cat /etc/valmera/admin.token)"
+  localhost:8090/admin/state`: code versions, free slots, queue depth and
+  oldest wait, CPU steal (60 s, 15 min), memory.
+- A worker push updates the box within minutes (no CI gate, like Render);
+  the executor-release budget above is about Cloudflare's lanes.
+
 ## Database Access
 
 ```bash
@@ -188,13 +220,30 @@ never calls a model for it. The Reviewer (hourly) runs
 `backend/scripts/ops_review.py pending`, looks at each settled session of a
 real user frame by frame, uploads picture evidence (R2 `ops/evidence/<session>/`)
 and writes `session_reviews` and one `tickets` row per cause (migration 041).
-The Fixer (daily 03:00 Dubai, at once on a P0) fixes causes, guards each with
+The Fixer (daily 03:10 Dubai, within 10 minutes on a P0) fixes causes, guards each with
 a test or journey and closes tickets with `fix_sha` and `regression_check`.
 `ops_review.py` is the agents' ONLY production write path and writes only the
 four outcome tables (`ops_loop/store.guard`). Views: admin Overview strip
 (signups, outcome rate, tickets), Sessions and Tickets tabs
 (`routes/admin_ops.py`), and the 08:00 digest. Runbooks:
 `/Users/masaoodi/Documents/Valmera/.valmera/ops-loop/` (REVIEWER.md, FIXER.md).
+
+**Automatic intake and awareness (29 Oct 2026).** Every new customer failure
+(failed job, error reply, unfulfilled request, upload / player failure, our
+own MCP error) is filed as a ticket within a minute by
+`ops_loop/intake.py` (a 1-minute advisory-locked tick in the web process;
+cause keys `auto-*`; P0 = a customer is blocked, P1 = device-side or a gated
+free account). The Mac's P0 watch (`check_fixer.sh p0`, every 10 minutes,
+also catches a backend or database outage) starts the Fixer. The owner gets
+ONE alert kind: a P0 nobody marked 'fixing' within 30 minutes (plus a model
+provider out of credit), and ONE daily email answering four questions:
+results judged, failures and what was fixed (links), signups and active
+customers, box / queue / spend; the same four answers top the admin
+(`GET /admin/video/ops/today`). No billing advice anywhere: no flag, alert or
+digest line may suggest a refund, pause, cancellation, credit or plan change
+(`tests/test_cockpit.py::test_no_flag_gives_billing_advice`). MCP error
+events keep a bounded sentence (links, emails, quoted text removed) only for
+our own failures, never for a caller's correction.
 
 ## Gotchas
 

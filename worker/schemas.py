@@ -2934,7 +2934,11 @@ def _check_span(name, s, e, max_end, min_len=MIN_SPAN_S, clamp_slack=0.0):
     if s < 0 or e < 0:
         raise EDLValidationError(f"{name}: negative time ({s}, {e}). "
                                  "Times are seconds from 0.")
-    if max_end is not None and e > max_end + 0.01:
+    # Compare in centisecond ticks: in binary floats 7.47 + 0.01 is
+    # 7.4799999…, so a 7.48 end (inside the intended one-centisecond
+    # tolerance) was rejected and a paying user's preview_check failed
+    # (job 110299, 25 Oct 2026: "texts[0]: end 7.48 exceeds the limit 7.47s").
+    if max_end is not None and round(e * 100) > round(max_end * 100) + 1:
         if clamp_slack > 0 and e <= max_end + clamp_slack \
                 and max_end - s >= min_len:
             e = _r(max_end)

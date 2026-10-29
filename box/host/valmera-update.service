@@ -1,0 +1,10 @@
+[Unit]
+Description=Valmera box pull-based update (fetch main, build, drain and roll slots)
+After=docker.service valmera-admission.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/valmera/box/boxctl.py update
+TimeoutStartSec=6h
+Nice=10

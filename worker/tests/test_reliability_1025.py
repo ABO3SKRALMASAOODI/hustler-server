@@ -63,9 +63,18 @@ def test_quiet_retry_window_is_ten_minutes_for_idempotent_media_only():
     near = dict(job, created_at=NOW - timedelta(minutes=9, seconds=53))
     assert failure_policy.infra_retry_delay(near, NOW.timestamp(), 1) == \
         pytest.approx(7, abs=0.5)
-    for kind in ("agent_turn", "mcp_tool", "shorts_plan"):
+    # Shorts plans keep their own rules. Studio turns and MCP tools are
+    # retried too, but only while no write was committed (main.
+    # _quiet_infra_retry); a Studio turn gets a 30-minute window.
+    assert failure_policy.infra_retry_delay(
+        dict(job, type="shorts_plan"), NOW.timestamp(), 0) is None
+    for kind in ("agent_turn", "mcp_tool"):
         assert failure_policy.infra_retry_delay(
-            dict(job, type=kind), NOW.timestamp(), 0) is None
+            dict(job, type=kind), NOW.timestamp(), 0) == 10
+    late = dict(job, type="agent_turn", created_at=NOW - timedelta(minutes=25))
+    assert failure_policy.infra_retry_delay(late, NOW.timestamp(), 0) == 10
+    assert failure_policy.infra_retry_delay(
+        dict(late, type="mcp_tool"), NOW.timestamp(), 0) is None
 
 
 class _QueueDb:

@@ -25,9 +25,10 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
     names = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
     numbers = {int(name.split("_", 1)[0]) for name in names}
 
-    # 040 is the Claude trial budget and credit ledger (this branch); 041
-    # is the outcome loop.
-    assert numbers == set(range(42))
+    # 040 is the Claude trial budget and credit ledger (the trial branch);
+    # 041 is the outcome loop; 042 adds the render box provider to the
+    # ownership ledger.
+    assert numbers == set(range(43))
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names

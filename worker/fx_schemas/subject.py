@@ -19,7 +19,7 @@ its own package only (the backend loads schemas.py by path).
 
 from typing import ClassVar, List, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import (FxColour, FxItemBase, FxRegion, FxSource, live,
                region_check, source_check)
@@ -100,6 +100,16 @@ class SubjectFx(FxItemBase):
     keep_footage: bool = True
     radius: Optional[float] = Field(default=None, ge=0.002, le=0.15,
                                     allow_inf_nan=False)
+
+    @field_validator("radius", mode="before")
+    @classmethod
+    def _radius_in_pixels(cls, v):
+        # The radius is a fraction of the frame height, but agents write it
+        # in pixels (radius: 30 was refused with a pydantic error, 25 Oct
+        # 2026). A value above 1 is pixels of a 1080p frame, kept in range.
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 1:
+            return max(0.002, min(0.15, float(v) / 1080.0))
+        return v
     width_px: Optional[float] = Field(default=None, ge=0.5, le=24.0,
                                       allow_inf_nan=False)
     ev: Optional[float] = Field(default=None, ge=-4.0, le=4.0,

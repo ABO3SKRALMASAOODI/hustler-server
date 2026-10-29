@@ -348,7 +348,8 @@ def run(conn, mode_, storage_mod=None, now=None, write_manifest=None,
         return summary
     deleted, errors = None, []
     if mode_ == "live":
-        client, bucket = storage_mod.client(), storage_mod.bucket()
+        targets = _delete_targets(storage_mod)
+        (_name, client, bucket), others = targets[0], targets[1:]
         category_of = {r["storage_key"]: r["category"] for r in selected}
         deleted = []
         keys = [r["storage_key"] for r in selected]
@@ -362,6 +363,19 @@ def run(conn, mode_, storage_mod=None, now=None, write_manifest=None,
                                         f"{str(exc)[:200]}"})
                 break
             errors.extend(failed)
+            # While media moves between providers (storage_routing.py) a key
+            # may also sit in the other store; it goes from there too, or a
+            # fallback read would bring the purged file back.
+            for other, o_client, o_bucket in others:
+                try:
+                    _o_done, o_failed = _delete_batch(o_client, o_bucket,
+                                                      batch)
+                except Exception as exc:  # noqa: BLE001
+                    o_failed = [{"batch": i // BATCH, "store": other,
+                                 "error": f"{type(exc).__name__}: "
+                                          f"{str(exc)[:200]}"}]
+                summary.setdefault("secondary_errors", 0)
+                summary["secondary_errors"] += len(o_failed)
             if done:
                 _mark_purged(conn, done, category_of, now)
                 deleted.extend(done)
@@ -384,14 +398,28 @@ def run(conn, mode_, storage_mod=None, now=None, write_manifest=None,
 
 # ── Scheduled run (web process) ─────────────────────────────────────────────
 
+def _delete_targets(storage_mod):
+    """[(name, client, bucket)], primary first: every store a purged key
+    may live in (one, unless storage is mid-move between providers)."""
+    if hasattr(storage_mod, "delete_targets"):
+        targets = list(storage_mod.delete_targets())
+        if targets:
+            return targets
+    return [("legacy", storage_mod.client(), storage_mod.bucket())]
+
+
 def _r2_manifest_writer(storage_mod):
     def write(doc):
         stamp = doc["generated_at"].replace(":", "").replace("+", "Z")[:17]
         key = f"{MANIFEST_PREFIX}/{stamp}-{doc['mode']}.json.gz"
         body = gzip.compress(json.dumps(doc, default=str).encode("utf-8"))
-        storage_mod.client().put_object(
-            Bucket=storage_mod.bucket(), Key=key, Body=body,
-            ContentType="application/json", ContentEncoding="gzip")
+        if hasattr(storage_mod, "put_bytes"):
+            storage_mod.put_bytes(key, body, "application/json",
+                                  content_encoding="gzip")
+        else:
+            storage_mod.client().put_object(
+                Bucket=storage_mod.bucket(), Key=key, Body=body,
+                ContentType="application/json", ContentEncoding="gzip")
         return key
     return write
 

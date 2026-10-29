@@ -71,6 +71,8 @@ import os
 import subprocess
 import time
 
+import http_inputs
+
 QC_VERSION = 7              # v7: graphics on the eyes or mouth, measured ink
                             # v5: the stall before the end card
                             # v4: card faces read on the source, type and picture measures
@@ -1025,7 +1027,8 @@ def _stream(cmd, w, h, deadline):
     """Yield grey frames (h x w uint8) from an ffmpeg rawvideo pipe."""
     import numpy as np
     size = w * h
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(http_inputs.resilient(cmd), stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
     try:
         while True:
             if time.monotonic() > deadline:
@@ -2156,11 +2159,11 @@ def source_frames(src_path, src_times, workdir, deadline):
         a, b = max(0.0, run[0] - .05), run[-1] + .1
         pattern = os.path.join(workdir, f"run{k}_%04d.jpg")
         try:
-            subprocess.run(
+            subprocess.run(http_inputs.resilient(
                 ["ffmpeg", "-v", "error", "-nostdin", "-y", "-ss", f"{a:.3f}",
                  "-t", f"{b - a:.3f}", "-i", src_path, "-an", "-sn",
                  "-vf", f"fps={FACE_RUN_FPS:g},scale=480:-2",
-                 "-start_number", "0", pattern],
+                 "-start_number", "0", pattern]),
                 check=True, capture_output=True,
                 timeout=max(2.0, min(20.0, deadline - time.monotonic())))
         except Exception:  # noqa: BLE001 — those moments stay unmeasured

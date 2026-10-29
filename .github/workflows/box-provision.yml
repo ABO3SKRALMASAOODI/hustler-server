@@ -1,0 +1,117 @@
+name: box-provision
+
+# Delivers the executor's runtime secrets to the owner's render box
+# (box/provision.py) without any shared credential: the box accepts only a
+# GitHub OIDC token minted for THIS workflow on main. Values never appear in
+# logs (GitHub masks secrets; the box answers with names and lengths only).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "box/**"
+      - ".github/workflows/box-provision.yml"
+  schedule:
+    # Daily, so a rotated GitHub secret reaches the box within a day.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: box-provision
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BOX_URL: https://13-140-241-231.sslip.io
+    steps:
+      - name: deliver executor secrets to the box
+        env:
+          REMOTE_EXECUTOR_SECRET: ${{ secrets.REMOTE_EXECUTOR_SECRET }}
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          S3_ENDPOINT: ${{ secrets.S3_ENDPOINT }}
+          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_BUCKET: ${{ secrets.S3_BUCKET }}
+          S3_REGION: ${{ secrets.S3_REGION }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          VISION_API_KEY: ${{ secrets.VISION_API_KEY }}
+          VISION_BASE_URL: ${{ secrets.VISION_BASE_URL }}
+          VISION_MODEL: ${{ secrets.VISION_MODEL }}
+          IMAGE_API_KEY: ${{ secrets.IMAGE_API_KEY }}
+          IMAGE_BASE_URL: ${{ secrets.IMAGE_BASE_URL }}
+          IMAGE_GEN_MODEL: ${{ secrets.IMAGE_GEN_MODEL }}
+          FAL_KEY: ${{ secrets.FAL_KEY }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          S3_NEXT_ENDPOINT: ${{ secrets.S3_NEXT_ENDPOINT }}
+          S3_NEXT_ACCESS_KEY_ID: ${{ secrets.S3_NEXT_ACCESS_KEY_ID }}
+          S3_NEXT_SECRET_ACCESS_KEY: ${{ secrets.S3_NEXT_SECRET_ACCESS_KEY }}
+          S3_NEXT_BUCKET: ${{ secrets.S3_NEXT_BUCKET }}
+          S3_NEXT_REGION: ${{ secrets.S3_NEXT_REGION }}
+        run: |
+          set -euo pipefail
+          for name in REMOTE_EXECUTOR_SECRET DATABASE_URL S3_ENDPOINT S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_BUCKET; do
+            test -n "${!name}" || { echo "::error::missing GitHub secret for $name"; exit 1; }
+          done
+          token=$(curl -sS --fail -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=valmera-box" | jq -r .value)
+          echo "::add-mask::$token"
+          body=$(mktemp)
+          trap 'rm -f "$body"' EXIT
+          jq -n \
+            --arg REMOTE_EXECUTOR_SECRET "$REMOTE_EXECUTOR_SECRET" \
+            --arg DATABASE_URL "$DATABASE_URL" \
+            --arg S3_ENDPOINT "$S3_ENDPOINT" \
+            --arg S3_ACCESS_KEY_ID "$S3_ACCESS_KEY_ID" \
+            --arg S3_SECRET_ACCESS_KEY "$S3_SECRET_ACCESS_KEY" \
+            --arg S3_BUCKET "$S3_BUCKET" \
+            --arg S3_REGION "${S3_REGION:-auto}" \
+            --arg OPENAI_API_KEY "$OPENAI_API_KEY" \
+            --arg OPENAI_BASE_URL "${OPENAI_BASE_URL:-https://api.openai.com/v1}" \
+            --arg VISION_API_KEY "$VISION_API_KEY" \
+            --arg VISION_BASE_URL "$VISION_BASE_URL" \
+            --arg VISION_MODEL "$VISION_MODEL" \
+            --arg IMAGE_API_KEY "$IMAGE_API_KEY" \
+            --arg IMAGE_BASE_URL "$IMAGE_BASE_URL" \
+            --arg IMAGE_GEN_MODEL "${IMAGE_GEN_MODEL:-grok-imagine-image-quality}" \
+            --arg FAL_KEY "$FAL_KEY" \
+            --arg DEEPGRAM_API_KEY "$DEEPGRAM_API_KEY" \
+            --arg PEXELS_API_KEY "$PEXELS_API_KEY" \
+            --arg PIXABAY_API_KEY "$PIXABAY_API_KEY" \
+            --arg ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY" \
+            --arg S3_NEXT_ENDPOINT "$S3_NEXT_ENDPOINT" \
+            --arg S3_NEXT_ACCESS_KEY_ID "$S3_NEXT_ACCESS_KEY_ID" \
+            --arg S3_NEXT_SECRET_ACCESS_KEY "$S3_NEXT_SECRET_ACCESS_KEY" \
+            --arg S3_NEXT_BUCKET "$S3_NEXT_BUCKET" \
+            --arg S3_NEXT_REGION "$S3_NEXT_REGION" \
+            '{env: {REMOTE_EXECUTOR_SECRET:$REMOTE_EXECUTOR_SECRET,DATABASE_URL:$DATABASE_URL,S3_ENDPOINT:$S3_ENDPOINT,S3_ACCESS_KEY_ID:$S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY:$S3_SECRET_ACCESS_KEY,S3_BUCKET:$S3_BUCKET,S3_REGION:$S3_REGION,OPENAI_API_KEY:$OPENAI_API_KEY,OPENAI_BASE_URL:$OPENAI_BASE_URL,VISION_API_KEY:$VISION_API_KEY,VISION_BASE_URL:$VISION_BASE_URL,VISION_MODEL:$VISION_MODEL,IMAGE_API_KEY:$IMAGE_API_KEY,IMAGE_BASE_URL:$IMAGE_BASE_URL,IMAGE_GEN_MODEL:$IMAGE_GEN_MODEL,FAL_KEY:$FAL_KEY,DEEPGRAM_API_KEY:$DEEPGRAM_API_KEY,PEXELS_API_KEY:$PEXELS_API_KEY,PIXABAY_API_KEY:$PIXABAY_API_KEY,ANTHROPIC_API_KEY:$ANTHROPIC_API_KEY,S3_NEXT_ENDPOINT:$S3_NEXT_ENDPOINT,S3_NEXT_ACCESS_KEY_ID:$S3_NEXT_ACCESS_KEY_ID,S3_NEXT_SECRET_ACCESS_KEY:$S3_NEXT_SECRET_ACCESS_KEY,S3_NEXT_BUCKET:$S3_NEXT_BUCKET,S3_NEXT_REGION:$S3_NEXT_REGION} | with_entries(select(.value != ""))}' \
+            > "$body"
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -sS -o response.json -w '%{http_code}' --max-time 30 \
+              -X POST "$BOX_URL/provision/secrets" \
+              -H "Authorization: Bearer $token" \
+              -H "Content-Type: application/json" \
+              --data-binary @"$body" || echo 000)
+            if [ "$code" = "200" ]; then
+              jq '{ok, changed, names}' response.json
+              exit 0
+            fi
+            echo "box answered $code: $(jq -r .error response.json 2>/dev/null || true)"
+            if [ "$code" = "401" ] || [ "$code" = "400" ]; then exit 1; fi
+            # A token is single-use; mint a fresh one for the retry.
+            sleep $((attempt * 10))
+            token=$(curl -sS --fail -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+              "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=valmera-box" | jq -r .value)
+            echo "::add-mask::$token"
+          done
+          echo "::error::the box did not accept the secrets"
+          exit 1

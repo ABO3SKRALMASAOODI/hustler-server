@@ -26,6 +26,7 @@ so a slow result can be told apart from a slow network.
 import argparse
 import json
 import os
+import re
 import secrets
 import sys
 import time
@@ -353,14 +354,13 @@ def check_dict(b, t):
 # each list-type flag named that morning. Printed beside what the board
 # flags now; states move (a card retry, a cancellation), so a difference is
 # reported, and only a board that finds none of them fails.
+# The billing-advice flags (CHARGED_NO_USE, CHARGE_SOON_NO_USE,
+# PAST_DUE_DORMANT, WRONG_PLAN) were removed on 29 Oct 2026 (owner: "not
+# your business"); UNFINISHED_CHARGED became UNFINISHED_REQUEST.
 PLAN_FLAGS_1025 = {
-    "CHARGED_NO_USE": {1532, 1103, 1931},
-    "CHARGE_SOON_NO_USE": {2007},
     "RENEWAL_OFF_STILL_ACTIVE": {1970, 2097, 2123, 2398, 2439},
-    "UNFINISHED_CHARGED": {1970},
-    "WRONG_PLAN": {2092, 2100, 2380, 2439},
+    "UNFINISHED_REQUEST": {1970},
     "STUCK_SETUP": {2484, 2439},
-    "PAST_DUE_DORMANT": {1567, 1621, 1924},
     "REPEAT_ASK": {1799, 1621},
 }
 
@@ -389,22 +389,19 @@ def check_health_board(b, t):
     flags = {f["key"]: set(f["ids"]) for f in b.get("flags") or []}
     for key, ids in flags.items():
         need(ids <= set(by_id), f"{key} flags ids with no row")
-    for uid in flags.get("CHARGED_NO_USE", ()):
-        need(by_id[uid]["charges"] >= 2, f"CHARGED_NO_USE {uid}: 1 charge")
+    for f in b.get("flags") or []:
+        need(not re.search(r"refund|pause|cancel the|credit the|switch plan",
+                           f.get("action") or "", re.I),
+             f"{f['key']} gives billing advice: {f.get('action')}")
     for uid in flags.get("RENEWAL_OFF_STILL_ACTIVE", ()):
         need(by_id[uid]["renewal"]["state"] == "cancelled",
              f"RENEWAL_OFF_STILL_ACTIVE {uid} is not cancelled")
-    for uid in flags.get("PAST_DUE_DORMANT", ()):
-        need(by_id[uid]["renewal"]["state"] == "past_due",
-             f"PAST_DUE_DORMANT {uid} is not past due")
     for r in rows:
         need(r["health"] in ("red", "amber", "green", "ended"),
              f"health {r['health']!r}")
         if r["health"] == "red":
-            need(any(f in ("CHARGED_NO_USE", "CHARGE_SOON_NO_USE",
-                           "PAST_DUE_DORMANT", "ERROR_LOOP")
-                     for f in r["flags"]), f"red row {r['id']} without "
-                                            "a red flag")
+            need("ERROR_LOOP" in r["flags"], f"red row {r['id']} without "
+                                             "a red flag")
     if t.get("past_due_subscriptions") is not None:
         need(sum(1 for r in rows if r["renewal"]["state"] == "past_due")
              <= t["past_due_subscriptions"],
@@ -474,6 +471,33 @@ def check_ops_summary(b, t):
     return note
 
 
+def check_ops_today(b, t):
+    """The top of the admin: four answers, each present or explicitly
+    missing (never a silent 0)."""
+    need(not b.get("errors"), f"parts failed: {b.get('errors')}")
+    ppl = b.get("people") or {}
+    need(_num(ppl.get("signups")) and _num(ppl.get("active")),
+         f"people missing: {ppl}")
+    q = _get(b, "infra", "queue") or {}
+    need(_num(q.get("queued")) and _num(q.get("running")),
+         f"queue missing: {q}")
+    note = (f"signups {ppl['signups']} · active {ppl['active']} · queue "
+            f"{q['queued']}/{q['running']}")
+    if b.get("loop_ready"):
+        res, fail = b.get("results") or {}, b.get("failures") or {}
+        need(_num(res.get("judged")), f"results missing: {res}")
+        need(_num(fail.get("total")), f"failures missing: {fail}")
+        for x in fail.get("by_ticket") or []:
+            need(x.get("url", "").startswith("https://valmera.io/admin"),
+                 f"ticket {x.get('id')} without a link")
+        note += (f" · judged {res['judged']} · failures {fail['total']} "
+                 f"of {fail.get('customers')} customers · unhandled "
+                 f"{len(fail.get('unhandled') or [])}")
+    costs = _get(b, "infra", "costs")
+    note += " · costs " + ("ready" if costs else "computing")
+    return note
+
+
 def check_ops_sessions(b, t):
     rows = b.get("sessions")
     need(isinstance(rows, list), "no sessions list")
@@ -516,6 +540,7 @@ def check_users(b, t):
 # from earlier answers.
 ENDPOINTS = [
     ("Overview", "/admin/video/ops/summary", check_ops_summary),
+    ("Overview", "/admin/video/ops/today", check_ops_today),
     ("Overview", "/admin/video/overview?summary=1", check_video_overview),
     ("Overview", "/admin/video/overview", check_video_overview),
     ("Overview", "/admin/video/upload_failures?days=30&limit=100", check_dict),

@@ -193,7 +193,7 @@ _PROVIDER_CALL_RUNNERS = frozenset({
     remote.run_index_remote, remote.run_agent_remote,
     remote.run_mcp_remote, remote.run_shorts_remote,
 })
-_PROVIDER_CALL_PROVIDERS = frozenset({"cloudflare", "modal"})
+_PROVIDER_CALL_PROVIDERS = frozenset({"cloudflare", "modal", "box"})
 
 
 def process_one(worker_db, job):
@@ -282,6 +282,17 @@ def process_one(worker_db, job):
             print(f"[job {job_id}] detached from batch execution: {e}",
                   flush=True)
             return
+        if isinstance(e, remote.BoxWaiting):
+            # The render box had no room for this job's whole in-claim wait
+            # and nothing ran. The owner's rule: never fail it, never send it
+            # elsewhere. Back to the queue unspent, claim ceiling extended.
+            deferred = worker_db.run(dbx.defer_box_wait, job_id, lease_claim,
+                                     e)
+            if deferred:
+                worker_db.run(dbx.bump_metric, "box_wait_deferred")
+                print(f"[job {job_id}] render box had no room; returned to "
+                      f"the queue unspent ({e})", flush=True)
+                return
         if isinstance(e, remote.CloudflareCapacityBusy):
             deferred = worker_db.run(
                 dbx.defer_unlaunched_cloudflare_busy, job_id, lease_claim, e,
@@ -329,6 +340,8 @@ def process_one(worker_db, job):
         # R1 (strategy 1025): a failure of OUR fleet (executor missing, shard
         # busy, version skew, a deploy, a lost container) is retried quietly
         # for up to 10 minutes on a fresh claim instead of reaching the user.
+        if _escalate_oom_render(worker_db, job, e, decision, lease_claim):
+            return
         if _quiet_infra_retry(worker_db, job, e, decision, lease_claim):
             return
         if failure_policy.defer_prerequisite(
@@ -365,12 +378,105 @@ def process_one(worker_db, job):
         dbx.untrack_job(job_id)
 
 
+def _committed_mutation(worker_db, job):
+    """The job's mutation_receipt as committed in the queue row now (a
+    write during this claim updates the row, not the claimed copy)."""
+    try:
+        row = worker_db.run(dbx.get_job, job["id"]) or {}
+    except Exception:
+        return {"committed": True}       # unknown: treat as written
+    receipt = (row.get("payload") or {}).get("mutation_receipt") or {}
+    return receipt if receipt.get("committed") else None
+
+
+def _resume_agent_after_infra(worker_db, job, err, lease_claim):
+    """An agent turn whose container failed AFTER it committed a write
+    continues from its last committed EDL as the next slice of the same
+    request (the reaper's death resume, bounded the same way), instead of
+    ending the request on our infrastructure failure."""
+    payload = dict(job.get("payload") or {})
+    count = int(payload.get("death_resume_count") or 0) + 1
+    if count > 3 or job.get("user_id") is None:
+        return False
+    root_id = int(payload.get("root_agent_job_id") or job["id"])
+    sequence = int(payload.get("continuation_sequence") or 0) + 1
+    resume_payload = dict(
+        payload, death_resume=count, death_resume_count=count,
+        root_agent_job_id=root_id, logical_turn_continuation=True,
+        continuation_sequence=sequence)
+    try:
+        next_id = worker_db.run(
+            dbx.enqueue_agent_continuation, job["project_id"],
+            job["user_id"], root_id, sequence, resume_payload, job["id"],
+            lease_claim)
+        result = {"status": "continued", "outcome": "in_progress",
+                  "billable": False, "root_agent_job_id": root_id,
+                  "continued_job_id": next_id,
+                  "continuation_sequence": sequence,
+                  "infra_resume": {"error": str(err)[:300],
+                                   "kind": failure_policy.decision_for(
+                                       err, "agent_turn").kind}}
+        job_completion.finalize_success(worker_db, job, result, lease_claim)
+    except Exception as exc:
+        print(f"[job {job['id']}] infrastructure resume failed "
+              f"({str(exc)[:160]})", flush=True)
+        return False
+    worker_db.run(dbx.bump_metric, "infra_agent_resumed")
+    print(f"[job {job['id']}] infrastructure failure after a committed "
+          f"write; continuing root {root_id} as job {next_id} "
+          f"({count}/3): {str(err)[:160]}", flush=True)
+    return True
+
+
+OOM_ESCALATE_TYPES = {"preview", "preview_check", "filmstrip", "frames"}
+
+
+def _escalate_oom_render(worker_db, job, err, decision, lease_claim):
+    """An encode the kernel OOM-killed on the 8 GiB interactive lane runs
+    again ONCE on the 12 GiB batch lane instead of failing (job 111131,
+    26 Oct 2026). Re-running the same graph on the same lane would fail the
+    same way; the batch image is a superset of the interactive one."""
+    if decision.kind != "executor_memory" \
+            or job.get("type") not in OOM_ESCALATE_TYPES \
+            or (job.get("payload") or {}).get("force_lane"):
+        return False
+    try:
+        moved = worker_db.run(dbx.escalate_render_lane, job["id"],
+                              lease_claim, err, "batch")
+    except Exception as exc:
+        print(f"[job {job['id']}] OOM escalation could not requeue "
+              f"({str(exc)[:120]})", flush=True)
+        return False
+    if moved:
+        worker_db.run(dbx.bump_metric, "oom_render_escalated")
+        print(f"[job {job['id']}] out of memory on its lane; requeued once on "
+              "the batch lane (12 GiB)", flush=True)
+    return bool(moved)
+
+
 def _quiet_infra_retry(worker_db, job, err, decision, lease_claim):
     """Wait a little and hand an infrastructure failure back to the queue
     without spending its attempt. False when it is not one, or its window
-    or retries are used up (the ordinary policy then decides)."""
+    or retries are used up (the ordinary policy then decides). A Studio turn
+    or MCP tool is requeued only when it committed no write; a Studio turn
+    that did continues from its last committed EDL."""
     if not failure_policy.is_infrastructure(err, decision):
         return False
+    if job.get("type") in failure_policy.MUTATING_RETRY_TYPES:
+        if decision.kind in failure_policy.AMBIGUOUS_OWNERSHIP_KINDS:
+            # The remote may still be running it: a second run could post a
+            # second reply. Leave it to the lease reaper's death resume.
+            return False
+        if failure_policy.infra_retry_delay(
+                job, time.time(),
+                int((job.get("payload") or {}).get(
+                    "infra_retry_deferrals") or 0)) is None:
+            return False
+        if _committed_mutation(worker_db, job):
+            if job.get("type") == "agent_turn":
+                return _resume_agent_after_infra(
+                    worker_db, job, err, lease_claim)
+            return False     # an MCP write landed; its caller decides
     payload = job.get("payload") or {}
     try:
         done = int(payload.get("infra_retry_deferrals") or 0)
@@ -1012,6 +1118,26 @@ def main():
     # no executor. Threaded and best effort: a diagnostic never stops a boot.
     threading.Thread(target=_routing_self_check, daemon=True,
                      name="routing-self-check").start()
+
+    # Which object store(s) this dispatcher reads and writes (the move off
+    # R2, storage_routing.py). It has no health route, so it says so in
+    # app_kv 'storage_probe_dispatcher'; storage_migrate.py's switch refuses
+    # 'next' until this row reports the next store. Hosts only, never a key.
+    def _storage_probe():
+        try:
+            import json as _json
+            import storage as _storage
+            st = dict(_storage.routing_status())
+            st["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            st["code_version"] = version.code_version()
+            dbx.Db().run(dbx.kv_put, "storage_probe_dispatcher",
+                         _json.dumps(st, sort_keys=True))
+        except Exception as e:
+            print(f"[storage] probe row not written: {str(e)[:200]}",
+                  flush=True)
+
+    threading.Thread(target=_storage_probe, daemon=True,
+                     name="storage-probe").start()
 
     # Publish the MCP tool catalog for the backend to serve on tools/list.
     # Best effort by design — a missing table (migration not applied yet) must

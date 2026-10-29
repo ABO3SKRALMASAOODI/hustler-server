@@ -3,6 +3,9 @@
 Admin (admin_required, read-only connections):
   GET /admin/video/ops/summary    the Overview strip: signups, outcome rate,
                                   tickets open / fixed this week
+  GET /admin/video/ops/today      the top of the admin: today's results,
+                                  failures and auto-fixes, signups and active
+                                  customers, queue / box / spend
   GET /admin/video/ops/sessions   reviewed sessions with evidence pictures
   GET /admin/video/ops/tickets    tickets grouped by root cause
 
@@ -74,6 +77,37 @@ def ops_summary():
     conn = _connect()
     try:
         return jsonify(views.summary(conn.cursor()))
+    finally:
+        conn.close()
+
+
+@admin_ops_bp.route("/admin/video/ops/today", methods=["GET"])
+@admin_required
+def ops_today():
+    """The top of the admin: today so far in four plain answers (results,
+    failures and what was fixed, signups and active customers, infra). The
+    spend part comes from the shared report cache (it scans a month of
+    executor calls); everything else is read live."""
+    from admin_metrics import cache as admin_cache
+
+    def compute_costs():
+        conn = _connect()
+        try:
+            return views.cost_facts(conn.cursor(), datetime.now(timezone.utc))
+        finally:
+            conn.close()
+
+    def costs():
+        got = admin_cache.shared_report("/admin/video/ops/costs-now", {},
+                                        compute_costs,
+                                        logger=current_app.logger)
+        if got.get("pending") or got.get("error"):
+            return None
+        return {k: v for k, v in got.items()
+                if k not in ("computed_at", "cache_age_s", "refreshing")}
+    conn = _connect()
+    try:
+        return jsonify(views.today(conn.cursor(), costs=costs))
     finally:
         conn.close()
 
@@ -234,10 +268,9 @@ def ops_evidence():
         return jsonify({"error": "the body is not a PNG, JPEG or WebP "
                                  "image matching the file name"}), 400
     key = f"{EVIDENCE_PREFIX}{slug}/{name}"
-    storage.client().put_object(
-        Bucket=storage.bucket(), Key=key, Body=data,
-        ContentType=CONTENT_TYPES[ext],
-        Metadata={"uploaded": datetime.now(timezone.utc)
+    storage.put_bytes(
+        key, data, CONTENT_TYPES[ext],
+        metadata={"uploaded": datetime.now(timezone.utc)
                   .strftime("%Y%m%dT%H%M%SZ"), "via": "ops_review"})
     return jsonify({"storage_key": key, "bytes": len(data),
                     "url": storage.presign_get(key, expires=3600)})

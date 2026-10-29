@@ -167,25 +167,32 @@ def _row(acct, facts, state="renews", **journey):
                              NOW)
 
 
-def test_renewal_with_no_use_is_charged_no_use_and_red():
+def test_no_flag_gives_billing_advice():
+    # Owner, 29 Oct 2026: "subscriber hasn't used it, cancel or refund" is
+    # "not your business". No flag may suggest a refund, a pause, a
+    # cancellation, a credit or a plan change.
+    for gone in ("CHARGED_NO_USE", "CHARGE_SOON_NO_USE", "PAST_DUE_DORMANT",
+                 "WRONG_PLAN", "UNFINISHED_CHARGED"):
+        assert gone not in cockpit.FLAGS
+    for key, (_sev, rule, action) in cockpit.FLAGS.items():
+        assert not cockpit.BILLING_ADVICE.search(action), (key, action)
+    # A renewal charged with no use since is not a flag any more.
     f = _facts(payments={1: [_pay(1, 61), _pay(1, 31), _pay(1, 0.3)]},
                jobs={1: [_job(1, "agent_turn", 60)]},
-               snapshots={"sub_1": {"next_billed_at": NOW + timedelta(30)}})
+               snapshots={"sub_1": {"next_billed_at": NOW + timedelta(2)}})
     r = _row(_acct(1), f)
-    assert "CHARGED_NO_USE" in r["flags"] and r["health"] == "red"
-    assert r["next_action"].startswith("Refund or pause")
-    # Used it the week before the charge: not flagged.
-    f["jobs"][1].append(_job(1, "mcp_tool", 3, jid=2))
-    assert "CHARGED_NO_USE" not in _row(_acct(1), f)["flags"]
-
-
-def test_charge_soon_counts_calendar_days():
-    f = _facts(payments={1: [_pay(1, 25)]},
+    assert r["health"] != "red"
+    assert not {"CHARGED_NO_USE", "CHARGE_SOON_NO_USE"} & set(r["flags"])
+    assert not cockpit.BILLING_ADVICE.search(r["next_action"] or "")
+    # A dormant past-due account still shows its billing facts, no advice.
+    acct = _acct(1, last_seen_at=NOW - timedelta(days=40),
+                 billing_status="past_due")
+    f = _facts(payments={1: [_pay(1, 60)]},
                snapshots={"sub_1": {"next_billed_at":
-                                    NOW + timedelta(days=5, hours=3)}})
-    r = _row(_acct(1), f)
-    assert "CHARGE_SOON_NO_USE" in r["flags"]
-    assert "(30 Oct)" in r["next_action"]
+                                    NOW + timedelta(days=3)}})
+    r = _row(acct, f, state="past_due")
+    assert r["billing"]["next_retry_at"].startswith("2026-10-28")
+    assert not cockpit.BILLING_ADVICE.search(r["next_action"] or "")
 
 
 def test_renewal_off_still_active_and_quick_cancel():
@@ -199,8 +206,8 @@ def test_renewal_off_still_active_and_quick_cancel():
              plan_ends_at=(NOW + timedelta(days=27)).isoformat())
     assert {"RENEWAL_OFF_STILL_ACTIVE", "QUICK_CANCEL"} <= set(r["flags"])
     assert r["renewal"]["off_minutes_after_paying"] == pytest.approx(20, abs=1)
-    assert "27 days left" in r["next_action"] or \
-        "26 days left" in r["next_action"]
+    assert r["next_action"].startswith("Open the chat")
+    assert "Save" not in r["next_action"]
 
 
 def test_paddle_ending_a_past_due_subscription_is_not_a_renewal_off():
@@ -215,27 +222,15 @@ def test_paddle_ending_a_past_due_subscription_is_not_a_renewal_off():
     assert r["health"] == "ended"
 
 
-def test_past_due_dormant_shows_the_next_retry():
-    f = _facts(payments={1: [_pay(1, 60)]},
-               snapshots={"sub_1": {"next_billed_at":
-                                    NOW + timedelta(days=3)}})
-    acct = _acct(1, last_seen_at=NOW - timedelta(days=40),
-                 billing_status="past_due")
-    r = _row(acct, f, state="past_due")
-    assert "PAST_DUE_DORMANT" in r["flags"]
-    assert "next retry 28 Oct" in r["next_action"]
-    assert r["billing"]["next_retry_at"].startswith("2026-10-28")
-
-
-def test_wrong_plan_stuck_setup_and_paid_no_result():
+def test_stuck_setup_and_paid_no_result():
     f = _facts(payments={1: [_pay(1, 3, plan="mcp_connect")]},
                grants={1: [{"created_at": NOW - timedelta(days=2),
                             "last_used_at": NOW - timedelta(days=1),
                             "calls": 4, "revoked_at": None,
                             "client_name": "Claude"}]})
     r = _row(_acct(1, plan="mcp_connect", billing_plan="mcp_connect"), f)
-    assert {"WRONG_PLAN", "STUCK_SETUP", "PAID_NO_RESULT_24H"} <= \
-        set(r["flags"])
+    assert {"STUCK_SETUP", "PAID_NO_RESULT_24H"} <= set(r["flags"])
+    assert "WRONG_PLAN" not in r["flags"]
     assert r["client"] == "MCP via Claude"
     # An export delivered to the AI app is a finished result.
     f["jobs"] = {1: [_job(1, "mcp_tool", 1, receipt="final_export")]}
@@ -243,17 +238,12 @@ def test_wrong_plan_stuck_setup_and_paid_no_result():
     assert r["results"]["total"] == 1
     assert "PAID_NO_RESULT_24H" not in r["flags"]
     assert "STUCK_SETUP" not in r["flags"]
-    # Plus follows the Studio gate itself (D1 moves it in or out).
+    # The MCP-only plan list still follows the Studio gate itself.
     from routes import video
-    f["jobs"] = {}
-    f["payments"] = {1: [_pay(1, 3, plan="plus_2026")]}
-    r = _row(_acct(1, plan="plus_2026", billing_plan="plus_2026"), f)
-    assert ("WRONG_PLAN" in r["flags"]) == \
-        ("plus_2026" in video.MCP_ONLY_PLANS)
     assert cockpit.mcp_only_plans() == tuple(video.MCP_ONLY_PLANS)
 
 
-def test_error_loop_unfinished_charged_long_source_and_result_before_paying():
+def test_error_loop_unfinished_request_long_source_and_result_before_paying():
     msgs = [{"session_id": 5, "role": "assistant", "content": "x",
              "created_at": NOW - timedelta(hours=h), "kind": None,
              "error": "job_failed", "job": "1"} for h in (1, 2)]
@@ -269,8 +259,9 @@ def test_error_loop_unfinished_charged_long_source_and_result_before_paying():
         projects={1: [{"id": 9, "title": "Gaming", "created_at": NOW,
                        "source_s": 104 * 60}]})
     r = _row(_acct(1), f)
-    assert {"ERROR_LOOP", "UNFINISHED_CHARGED", "LONG_SOURCE"} <= \
+    assert {"ERROR_LOOP", "UNFINISHED_REQUEST", "LONG_SOURCE"} <= \
         set(r["flags"])
+    assert r["next_action"].startswith(cockpit.TICKET_ACTION)
     assert r["friction"]["error_classes_7d"] == ["executor_missing"]
     assert r["requests"]["unfinished_credits_30d"] == 111
     assert r["result_before_paying"] is True
@@ -280,7 +271,7 @@ def test_error_loop_unfinished_charged_long_source_and_result_before_paying():
 def test_rows_sort_red_first_then_soonest_due():
     a = {"health": "amber", "flags": ["QUICK_CANCEL"], "_sort_due": 10,
          "id": 1}
-    b = {"health": "red", "flags": ["CHARGED_NO_USE"], "_sort_due": 99,
+    b = {"health": "red", "flags": ["ERROR_LOOP"], "_sort_due": 99,
          "id": 2}
     c = {"health": "amber", "flags": ["QUICK_CANCEL"], "_sort_due": 5,
          "id": 3}
@@ -363,18 +354,21 @@ class KvConn:
         pass
 
 
-def _tick(monkeypatch, kv, now, events=(), daily=(), send_ok=True,
-          locked=False):
+def _tick(monkeypatch, kv, now, events=(), send_ok=True, locked=False):
     sent = []
     monkeypatch.setattr(alerts, "event_alerts", lambda r, since, n: list(events))
-    monkeypatch.setattr(alerts, "daily_alerts", lambda b, n: list(daily))
-    monkeypatch.setattr(alerts, "funnel_yesterday", lambda r, n: {
-        "day": "2026-10-24", "start": n - timedelta(days=1), "end": n,
-        "signups": 20, "uploaders": 10, "first_cuts": 0, "watched_half": 0,
-        "keep_clicks": 0, "checkouts": 2, "cash_cents": 1500})
-    monkeypatch.setattr(cockpit, "compute", lambda r, n=None: {
-        "strip": {"committed_mrr": {"value": 100.0}}, "rows": [],
-        "factory": {}})
+    monkeypatch.setattr(alerts, "digest_facts", lambda r, n, presign=None: {
+        "day": "2026-10-24", "loop_ready": True,
+        "results": {"judged": 2, "good": 1, "poor": 1, "not_delivered": 0,
+                    "rate_pct": 50.0, "avg_score": 6.0},
+        "results_7d": {"judged": 2, "good": 1, "rate_pct": 50.0},
+        "failures": {"total": 0, "customers": 0, "by_ticket": [],
+                     "fixed": [], "unhandled": [], "open": 0, "fixing": 0,
+                     "p0_active": 0},
+        "people": {"signups": 20, "active": 9},
+        "people_7d": {"signups": 90, "active": 40},
+        "infra": {"queue": {"queued": 0, "running": 0}, "boxes": None,
+                  "costs": None}, "thumbnails": []})
 
     def send(subject, body):
         sent.append((subject, body))
@@ -454,27 +448,58 @@ def test_alerts_only_ever_go_to_the_admin_inbox(monkeypatch):
     assert alerts.ADMIN_TO == "thevalmera@gmail.com"
 
 
-def test_daily_alerts_from_the_board():
-    board = {"rows": [
-        {"id": 2007, "email": "e@x", "flags": ["CHARGE_SOON_NO_USE"],
-         "renewal": {"days_left": 3, "next_charge_at": "2026-10-28T13:36:17Z",
-                     "next_charge_usd": 25.0},
-         "billing": {}},
-        {"id": 1621, "email": "l@x", "flags": ["PAST_DUE_DORMANT"],
-         "renewal": {}, "billing": {"next_retry_at": "2026-10-26T05:20:41Z"}},
-        {"id": 1924, "email": "g@x", "flags": ["PAST_DUE_DORMANT"],
-         "renewal": {}, "billing": {"next_retry_at": "2026-11-21T14:58:08Z"}}],
-        "strip": {"infra": {"yesterday_usd": 12.71,
-                            "cycle_projected_usd": 245.0},
-                  "first_cut": {"used_pct": 82, "budget_usd": 200,
-                                "month_usd": 30}}}
-    keys = [k for k, _, _ in alerts.daily_alerts(board, NOW)]
-    assert "chargesoon:2007:2026-10-28T13:36:17Z" in keys
-    assert "pastdue:1621:2026-10-26" in keys
-    assert not any(k.startswith("pastdue:1924") for k in keys)
-    assert "infra:20261024" in keys
-    assert "trial:50:202610" in keys and "trial:80:202610" in keys
-    assert not any(k.startswith("trial:95") for k in keys)
+class AlertCur:
+    """Answers the two alert reads: unhandled P0 tickets, provider credit."""
+
+    def __init__(self, tickets=(), quota=None):
+        self.tickets, self.quota, self.sql = list(tickets), quota, []
+
+    def execute(self, sql, params=None):
+        self.sql.append(" ".join(sql.split()))
+
+    def fetchone(self):
+        last = self.sql[-1]
+        if "to_regclass" in last:
+            return {"t": "tickets"}
+        if "insufficient_quota" in last:
+            return self.quota or {"n": 0}
+        return None
+
+    def fetchall(self):
+        return list(self.tickets)
+
+
+def test_alerts_are_only_a_blocked_customer_nobody_handled():
+    opened = NOW - timedelta(minutes=45)
+    fresh = NOW - timedelta(minutes=5)
+    cur = AlertCur(tickets=[
+        {"id": 7, "cause_key": "auto-job-index-oom", "title": "index failed",
+         "severity": "P0", "status": "open", "occurrences": 2,
+         "recurrence_count": 0, "first_seen": opened, "last_seen": opened,
+         "created_at": opened, "updated_at": opened, "opened_at": opened,
+         "users": 1},
+        {"id": 8, "cause_key": "auto-job-final-oom", "title": "final failed",
+         "severity": "P0", "status": "open", "occurrences": 1,
+         "recurrence_count": 0, "first_seen": fresh, "last_seen": fresh,
+         "created_at": fresh, "updated_at": fresh, "opened_at": fresh,
+         "users": 1}])
+    items = alerts.event_alerts(cur, NOW - timedelta(minutes=5), NOW)
+    keys = [k for k, _, _ in items]
+    # Ticket 8 is 5 minutes old: the Fixer still has time; 7 waited 45.
+    assert keys == [f"unhandled:7:{opened:%Y%m%dT%H%M}"]
+    assert "the Fixer has not started" in items[0][2]
+    assert "ticket=7" in items[0][2]
+    # Only the owner can pay a provider: one alert a day while it lasts.
+    cur = AlertCur(quota={"n": 3, "users": 2, "error": "insufficient_quota"})
+    items = alerts.event_alerts(cur, NOW - timedelta(minutes=5), NOW)
+    assert [k for k, _, _ in items] == [f"llmquota:{NOW:%Y%m%d}"]
+    # Nothing about money, renewals, refunds, infra spend or trial budgets.
+    import inspect
+    src = inspect.getsource(alerts)
+    for gone in ("daily_alerts", "Renewal turned off", "Money returned",
+                 "pause or refund", "cancel the retry",
+                 "Infrastructure over budget", "Trial budget"):
+        assert gone not in src, gone
 
 
 def test_scheduler_never_starts_without_a_real_database(monkeypatch):
@@ -606,9 +631,6 @@ def test_llm_credit_spend_against_what_was_loaded(monkeypatch):
                     "remaining_usd": 30.0, "used_pct": 85.0}]
     assert "LIKE 'claude%%'" in cur.sql      # psycopg2 turns %% into %
     assert cockpit.llm_credit(cur, None) == []
-    board = {"rows": [], "strip": {"first_cut": {"llm_credit": out}}}
-    keys = [k for k, _, _ in alerts.daily_alerts(board, NOW)]
-    assert keys == ["llmcredit:anthropic:80:2026-10-25T00:00:00Z"]
 
 
 def test_the_tail_in_force_follows_each_release():

@@ -56,6 +56,7 @@ import time
 from concurrent import futures
 from contextvars import ContextVar
 
+import http_inputs
 import motion_engine
 
 # Bump when the grid's meaning changes (cells, geometry, statistic): it is
@@ -276,7 +277,8 @@ def decode_gray(path, times, width=DECODE_W, deadline=None):
         left = DECODE_TIMEOUT_S if deadline is None else \
             max(1.0, min(DECODE_TIMEOUT_S, deadline - time.monotonic()))
         try:
-            r = subprocess.run(cmd, capture_output=True, timeout=left)
+            r = subprocess.run(http_inputs.resilient(cmd),
+                               capture_output=True, timeout=left)
         except Exception:  # noqa: BLE001 — unmeasured, never fatal
             return
         if r.returncode != 0 or not r.stdout:

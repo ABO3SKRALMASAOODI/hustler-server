@@ -209,6 +209,13 @@ def create_app():
             payload["mcp"] = inflight_report()
         except Exception:
             pass
+        # Which object store(s) this process reads and writes (the move off
+        # R2, storage_routing.py): hosts and the mode, never a key.
+        try:
+            import storage as _storage
+            payload["storage"] = _storage.routing_status()
+        except Exception:
+            pass
         # Release certification must observe this process and this database,
         # not a stale edge/proxy response from before a deploy or outage.
         return (
@@ -333,6 +340,15 @@ def create_app():
         start_trial_alerts(app)
     except Exception as e:
         app.logger.error("could not start claude trial alerts: %s", e)
+    # The outcome loop's automatic intake (29 Oct 2026): every new customer
+    # failure (failed job, error reply, unfulfilled request, upload or
+    # player failure, our own MCP error) is filed as a ticket within a
+    # minute; the Mac's P0 watch starts the Fixer on it.
+    try:
+        from ops_loop.intake import start_scheduler as start_ops_intake
+        start_ops_intake(app)
+    except Exception as e:
+        app.logger.error("could not start ops intake scheduler: %s", e)
 
     return app
 

@@ -56,6 +56,8 @@ import subprocess
 import tempfile
 import time
 
+import http_inputs
+
 REACH_S = 0.08          # how far an edge may move (the judges' ±80 ms)
 CROSSFADE_S = 0.012     # what renderer.JOIN_XFADE_S mixes at a cut
 # The level AT a cut is read over a little more than the crossfade: a
@@ -608,8 +610,8 @@ def fetch(source, windows, timeout=30.0, ffmpeg="ffmpeg"):
                 cmd += ["-map", f"{j}:a:0", "-ac", "1", "-ar", str(SR),
                         "-f", "f32le", p]
             try:
-                subprocess.run(cmd, capture_output=True, timeout=left,
-                               check=False)
+                subprocess.run(http_inputs.resilient(cmd),
+                               capture_output=True, timeout=left, check=False)
             except Exception:
                 continue
             for w, p in zip(chunk, paths):
