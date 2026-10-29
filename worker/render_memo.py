@@ -34,13 +34,14 @@ import json
 import os
 import tempfile
 import threading
+import time
 
 VERSION = 1
 MAX_FILES = int(os.getenv("RENDER_MEMO_MAX_FILES", "200000") or 200000)
-PRUNE_EVERY = 500               # puts between two bound checks (per process)
+PRUNE_EVERY_S = 1800.0         # a process checks the bound at most this often
 
 _lock = threading.Lock()
-_puts = [0]
+_last_prune = [None]
 _code_digests = {}
 _stats = {"hits": 0, "misses": 0, "puts": 0}
 
@@ -158,10 +159,14 @@ def put(namespace, k, answer):
             json.dump({"v": VERSION, "a": answer}, f,
                       separators=(",", ":"))
         os.replace(tmp, p)
+        now = time.monotonic()
         with _lock:
             _stats["puts"] += 1
-            _puts[0] += 1
-            due = _puts[0] % PRUNE_EVERY == 0
+            if _last_prune[0] is None:
+                _last_prune[0] = now     # the first check waits a period
+            due = now - _last_prune[0] >= PRUNE_EVERY_S
+            if due:
+                _last_prune[0] = now
         if due:
             prune()
         return True
