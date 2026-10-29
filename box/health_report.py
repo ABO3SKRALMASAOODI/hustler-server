@@ -175,10 +175,12 @@ def write(key, doc):
     url = database_url()
     if not url:
         raise RuntimeError("DATABASE_URL is not provisioned yet")
-    conn = psycopg2.connect(url, connect_timeout=10,
-                            options="-c statement_timeout=10000")
+    # The production URL goes through a pooler (port 6432) that refuses the
+    # `options` startup parameter; the timeout is set per transaction.
+    conn = psycopg2.connect(url, connect_timeout=10)
     try:
         with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = 10000")
             cur.execute(
                 """INSERT INTO app_kv (key, value, updated_at)
                    VALUES (%s, %s, NOW())
