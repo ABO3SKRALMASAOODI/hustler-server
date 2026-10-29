@@ -432,13 +432,19 @@ class LocalStore:
 
 
 class R2Store:
-    """The product bucket (R2 over the S3 API), with SHORT timeouts: a
-    status read on an agent lane must cost milliseconds, never a turn."""
+    """The product bucket over the S3 API, with SHORT timeouts: a status
+    read on an agent lane must cost milliseconds, never a turn.
+
+    Store-aware (storage_routing.py): while media moves between providers,
+    reads try the routing mode's stores in order, writes land in its write
+    stores and deletes reach every store that may hold the key. In the
+    default mode that is the legacy bucket alone, through ``client()``."""
     name = "r2"
 
     def __init__(self, connect_timeout=3, read_timeout=20, attempts=2):
         self._opts = (connect_timeout, read_timeout, attempts)
         self._client = None
+        self._next = None
         self._lock = threading.Lock()
 
     def client(self):
@@ -459,19 +465,58 @@ class R2Store:
                                   retries={"max_attempts": att}))
             return self._client
 
+    def _next_client(self):
+        import storage_routing as routing
+        cfg = routing.store_config(routing.NEXT)
+        if cfg is None:
+            raise RuntimeError("the next store (S3_NEXT_*) is not configured")
+        with self._lock:
+            if self._next is None or self._next[0] != cfg:
+                import boto3
+                from botocore.config import Config
+                ct, rt, att = self._opts
+                self._next = (cfg, boto3.client(
+                    "s3", endpoint_url=cfg["endpoint"],
+                    aws_access_key_id=cfg["access_key_id"],
+                    aws_secret_access_key=cfg["secret_access_key"],
+                    region_name=cfg["region"],
+                    config=Config(**routing.botocore_config_kwargs(
+                        cfg, connect_timeout=ct, read_timeout=rt,
+                        retries={"max_attempts": att}))))
+            return self._next[1]
+
+    def _c(self, store):
+        return self._next_client() if store == "next" else self.client()
+
+    def _b(self, store):
+        if store == "next":
+            import storage_routing as routing
+            return routing.store_config(routing.NEXT)["bucket"]
+        return self.bucket
+
+    @staticmethod
+    def _plan():
+        try:
+            import storage
+            return storage._plan()
+        except Exception:  # noqa: BLE001 — no router here: the legacy bucket
+            import storage_routing as routing
+            return routing.plan_for("legacy")
+
     @property
     def bucket(self):
         import config
         return config.S3_BUCKET
 
-    def list(self, prefix):
+    def _list_in(self, store, prefix):
         out = {}
         token = None
         while True:
-            kw = {"Bucket": self.bucket, "Prefix": prefix, "MaxKeys": 1000}
+            kw = {"Bucket": self._b(store), "Prefix": prefix,
+                  "MaxKeys": 1000}
             if token:
                 kw["ContinuationToken"] = token
-            r = self.client().list_objects_v2(**kw)
+            r = self._c(store).list_objects_v2(**kw)
             for o in r.get("Contents") or []:
                 lm = o.get("LastModified")
                 out[o["Key"]] = {"size": int(o.get("Size") or 0),
@@ -480,60 +525,98 @@ class R2Store:
                 return out
             token = r.get("NextContinuationToken")
 
+    def list(self, prefix):
+        stores = self._plan().read
+        if len(stores) == 1:
+            return self._list_in(stores[0], prefix)
+        out, first_error, answered = {}, None, False
+        for store in reversed(stores):          # the first store wins a key
+            try:
+                out.update(self._list_in(store, prefix))
+                answered = True
+            except Exception as e:  # noqa: BLE001
+                first_error = first_error or e
+        if not answered and first_error is not None:
+            raise first_error
+        return out
+
+    def _read(self, fn):
+        """fn(store) over the read stores: the first found answer; None when
+        every store says missing; the first real error otherwise."""
+        error = None
+        for store in self._plan().read:
+            try:
+                return fn(store)
+            except Exception as e:  # noqa: BLE001
+                if _missing(e):
+                    continue
+                error = error or e
+        if error is not None:
+            raise error
+        return None
+
     def get_bytes(self, key):
-        try:
-            return self.client().get_object(
-                Bucket=self.bucket, Key=key)["Body"].read()
-        except Exception as e:  # noqa: BLE001
-            if _missing(e):
-                return None
-            raise
+        return self._read(lambda store: self._c(store).get_object(
+            Bucket=self._b(store), Key=key)["Body"].read())
+
+    def _write(self, fn):
+        for i, store in enumerate(self._plan().write):
+            try:
+                fn(store)
+            except Exception:  # noqa: BLE001 — the primary must succeed
+                if i == 0:
+                    raise
 
     def put_bytes(self, key, data, content_type="application/json"):
-        self.client().put_object(Bucket=self.bucket, Key=key, Body=data,
-                                 ContentType=content_type)
+        self._write(lambda store: self._c(store).put_object(
+            Bucket=self._b(store), Key=key, Body=data,
+            ContentType=content_type))
 
     def put_file(self, key, path, content_type="application/octet-stream"):
-        with open(path, "rb") as f:
-            self.client().put_object(Bucket=self.bucket, Key=key, Body=f,
-                                     ContentType=content_type)
+        def one(store):
+            with open(path, "rb") as f:
+                self._c(store).put_object(Bucket=self._b(store), Key=key,
+                                          Body=f, ContentType=content_type)
+        self._write(one)
 
     def get_file(self, key, dest):
-        try:
-            self.client().download_file(self.bucket, key, dest)
+        def one(store):
+            self._c(store).download_file(self._b(store), key, dest)
             return True
-        except Exception as e:  # noqa: BLE001
-            if _missing(e):
-                return False
-            raise
+        return bool(self._read(one))
 
     def delete(self, key):
-        try:
-            self.client().delete_object(Bucket=self.bucket, Key=key)
-        except Exception:  # noqa: BLE001 — a stale marker only costs a read
-            pass
+        for store in self._plan().delete:
+            try:
+                self._c(store).delete_object(Bucket=self._b(store), Key=key)
+            except Exception:  # noqa: BLE001 — a stale marker only costs a read
+                pass
 
     def delete_many(self, keys):
         keys = list(keys)
-        for i in range(0, len(keys), 1000):
-            try:
-                self.client().delete_objects(
-                    Bucket=self.bucket,
-                    Delete={"Objects": [{"Key": k} for k in keys[i:i + 1000]],
-                            "Quiet": True})
-            except Exception:  # noqa: BLE001
-                pass
+        for store in self._plan().delete:
+            for i in range(0, len(keys), 1000):
+                try:
+                    self._c(store).delete_objects(
+                        Bucket=self._b(store),
+                        Delete={"Objects": [{"Key": k}
+                                            for k in keys[i:i + 1000]],
+                                "Quiet": True})
+                except Exception:  # noqa: BLE001
+                    pass
 
     def touch(self, key):
         """Refresh LastModified (copy in place) for the lifecycle rule
-        "90 days since last use". Best effort."""
-        try:
-            self.client().copy_object(
-                Bucket=self.bucket, Key=key,
-                CopySource={"Bucket": self.bucket, "Key": key},
-                MetadataDirective="REPLACE")
-        except Exception:  # noqa: BLE001
-            pass
+        "90 days since last use", in every read store that holds it. Best
+        effort."""
+        for store in self._plan().read:
+            try:
+                self._c(store).copy_object(
+                    Bucket=self._b(store), Key=key,
+                    CopySource={"Bucket": self._b(store), "Key": key},
+                    MetadataDirective="REPLACE")
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def _missing(exc):

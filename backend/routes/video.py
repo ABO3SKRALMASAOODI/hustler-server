@@ -2691,8 +2691,7 @@ def tray_remove(user_id, project_id):
             return jsonify({"error": "Not in the tray"}), 404
         cur.execute("DELETE FROM assets WHERE id = %s", (aid,))
     try:
-        storage.client().delete_object(Bucket=storage.bucket(),
-                                       Key=a["storage_key"])
+        storage.delete_key(a["storage_key"])
     except Exception:
         pass
     return jsonify({"ok": True})

@@ -234,10 +234,9 @@ def ops_evidence():
         return jsonify({"error": "the body is not a PNG, JPEG or WebP "
                                  "image matching the file name"}), 400
     key = f"{EVIDENCE_PREFIX}{slug}/{name}"
-    storage.client().put_object(
-        Bucket=storage.bucket(), Key=key, Body=data,
-        ContentType=CONTENT_TYPES[ext],
-        Metadata={"uploaded": datetime.now(timezone.utc)
+    storage.put_bytes(
+        key, data, CONTENT_TYPES[ext],
+        metadata={"uploaded": datetime.now(timezone.utc)
                   .strftime("%Y%m%dT%H%M%SZ"), "via": "ops_review"})
     return jsonify({"storage_key": key, "bytes": len(data),
                     "url": storage.presign_get(key, expires=3600)})

@@ -209,6 +209,13 @@ def create_app():
             payload["mcp"] = inflight_report()
         except Exception:
             pass
+        # Which object store(s) this process reads and writes (the move off
+        # R2, storage_routing.py): hosts and the mode, never a key.
+        try:
+            import storage as _storage
+            payload["storage"] = _storage.routing_status()
+        except Exception:
+            pass
         # Release certification must observe this process and this database,
         # not a stale edge/proxy response from before a deploy or outage.
         return (
