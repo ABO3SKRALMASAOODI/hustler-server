@@ -299,11 +299,23 @@ def test_provider_refusal_alert_never_contains_the_key(monkeypatch):
     monkeypatch.setattr(claude_trial, "_metering_db", lambda: _SwitchDb())
     claude_trial.provider_refused(
         "auth", Exception("bad key sk-ant-api03-SECRETSECRET-xyz"))
-    assert queued and "sk-ant-" not in queued[0] and "[REDACTED]" in queued[0]
-    # the refusal flips the automatic credit switch, without the key either
+    # the refusal flips the automatic credit switch, without the key either;
+    # the switch queues the event's ONE alert, so no second mail from here
     assert switched and switched[0][0] == "switch_off"
     assert switched[0][1][0] == "auth_error"
     assert "sk-ant-" not in switched[0][1][1]
+    assert queued == []
+
+    class _BrokenDb:
+        def run(self, fn, *args):
+            raise RuntimeError("database down")
+
+    # only when the switch cannot be written is this process's alert the
+    # signal, and it never carries the key
+    monkeypatch.setattr(claude_trial, "_metering_db", lambda: _BrokenDb())
+    claude_trial.provider_refused(
+        "auth", Exception("bad key sk-ant-api03-SECRETSECRET-xyz"))
+    assert queued and "sk-ant-" not in queued[0] and "[REDACTED]" in queued[0]
 
 
 class _Cur:
