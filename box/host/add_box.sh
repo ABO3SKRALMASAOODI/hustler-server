@@ -117,8 +117,9 @@ except ValueError:
     print("no-state"); raise SystemExit
 detail = s.get("slot_detail") or []
 ok = [d for d in detail if d.get("ready") and d.get("release") == want]
-print("ready" if detail and len(ok) == len(detail) and s.get("box_id") == box_id
-      else f"{len(ok)}/{len(detail)} slots on {want}, box_id={s.get(\"box_id\")}")' "$want" "$id")
+seen = s.get("box_id")
+print("ready" if detail and len(ok) == len(detail) and seen == box_id
+      else "%d/%d slots on %s, box_id=%s" % (len(ok), len(detail), want, seen))' "$want" "$id")
   [ "$ready" = ready ] && break
   [ $((i % 6)) = 0 ] && echo "  $ready"
   sleep 30
