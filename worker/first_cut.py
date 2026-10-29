@@ -189,6 +189,16 @@ _HOOK_RULE = (
     "say, numbers written as words exactly as spoken), with exactly ONE "
     "word wrapped in *stars* for the accent, e.g. "
     "\"The *real* cost of AI\". ")
+# C2 (29 Oct): the references change the picture every 2-3 s; on a single
+# take the cheapest faithful event is the spoken key phrase slammed in big
+# type (R09, R10, R14). The scout names them in the same call.
+_BEATS_RULE = (
+    "BEATS: up to 4 phrases from inside your span (not its first sentence) "
+    "that a top editor would slam on screen in huge type as they are said: "
+    "a spoken number with its noun, a named thing, or the word the point "
+    "turns on. Each is 1 to 3 CONSECUTIVE words copied EXACTLY as written "
+    "in one sentence, the beats spread over the span about 5 seconds apart "
+    "(give 3 or 4 when the span allows). ")
 SCOUT_SYSTEM = (
     "You pick the single best moment of a long video for one vertical short. "
     "Choose ONE continuous run of whole sentences, 20 to 60 seconds long, "
@@ -196,10 +206,11 @@ SCOUT_SYSTEM = (
     "complete claim or question, never one starting with \"and\", \"so\" "
     "or a filler), the last one lands a payoff (an answer, a twist, a strong "
     "line). Prefer a concrete story or claim over small talk, intros and "
-    "sponsor reads. " + _HOOK_RULE +
+    "sponsor reads. " + _HOOK_RULE + _BEATS_RULE +
     "Answer with JSON only, copying the sentence ids exactly as written "
     "(for example \"s12\"): {\"start_id\": \"<id>\", \"end_id\": \"<id>\", "
-    "\"title\": \"<5-8 word title>\", \"hook\": \"<2-5 words>\"}.")
+    "\"title\": \"<5-8 word title>\", \"hook\": \"<2-5 words>\", "
+    "\"beats\": [{\"id\": \"<sentence id>\", \"words\": \"<1-3 words>\"}]}.")
 TRIM_SYSTEM = (
     "You trim the two ends of a short video for a vertical reel and keep "
     "everything in between. START: the first sentence a new viewer should "
@@ -209,9 +220,10 @@ TRIM_SYSTEM = (
     "answer, a strong claim), keeping the result 20 to 60 seconds long when "
     "the video is longer; drop what follows it when that is thanks, "
     "chit-chat, a sign-off, a trailing fragment or garbled speech. "
-    + _HOOK_RULE +
+    + _HOOK_RULE + _BEATS_RULE +
     "Answer with JSON only, copying the sentence ids exactly as written: "
-    "{\"start_id\": \"<id>\", \"end_id\": \"<id>\", \"hook\": \"<2-5 words>\"}.")
+    "{\"start_id\": \"<id>\", \"end_id\": \"<id>\", \"hook\": \"<2-5 words>\", "
+    "\"beats\": [{\"id\": \"<sentence id>\", \"words\": \"<1-3 words>\"}]}.")
 
 
 def _sentences(index, limit_s):
@@ -290,6 +302,7 @@ def scout_range(ctx, worker_db, spend):
             text = resp.choices[0].message.content or ""
             usage = resp.usage
             spend["usd"] += float(getattr(usage, "provider_cost_usd", 0) or 0)
+            print(f"[first_cut] scout pick: {text.strip()[:300]}", flush=True)
             llm.record("first_cut_scout",
                        {"model": model, "sentences": len(lines)},
                        {"content": text}, usage)
@@ -302,6 +315,8 @@ def scout_range(ctx, worker_db, spend):
                 if 12.0 <= end - start <= 75.0:
                     ctx.first_cut_hook = clean_hook(pick.get("hook"),
                                                     ctx.index)
+                    ctx.first_cut_beats = beat_spans(ctx.index, by_id,
+                                                     pick.get("beats"))
                     return start, end, pick.get("title"), "scout"
         except Exception as exc:  # noqa: BLE001 — the fallback is the point
             print(f"[first_cut] scout failed: {type(exc).__name__}: "
@@ -331,8 +346,17 @@ _JUNK_OPENING = re.compile(
     re.I)
 TAIL_LIVE_S = 0.5          # live picture after the last word (refs 0.2-0.7)
 TAIL_NEXT_GAP_S = 0.08     # never into the next word
-PAUSE_CUT_S = 0.35         # every pause over this inside speech is cut
-HOOK_S = 2.6               # the hook title's time on screen
+PAUSE_CUT_S = 0.30         # every pause over this inside speech is cut
+PAUSE_PAD_S = 0.08         # what each side of a cut pause keeps
+HOOK_S = 3.0               # the hook title's time on screen (refs 2.5-3.5)
+HOOK_MIN_S = 2.9           # a spoken-line hook holds at least this
+HOOK_MAX_S = 3.3           # and at most this
+CAPTION_SCALE = 1.45       # chest captions (judge: "about 30% bigger", C2)
+CAPTION_WORDS = 2          # 1-2 words at a time (references: one word)
+BEAT_GAP_S = 4.5           # slams at least this far apart
+BEAT_MAX = 5
+BEAT_ACCENT = "#FFD23F"    # the one accent colour of the slams
+BEAT_CARD = "#0E1A33"      # every other slam cuts to a flat card (R10, R14)
 _FILLERS = frozenset(("um", "umm", "uh", "uhh", "uhm", "er", "erm", "ah",
                       "ahh", "hmm"))
 
@@ -464,6 +488,8 @@ def trim_range(ctx, worker_db, spend):
                     8.0, 0.5 * duration):
                 first, last, how = a, b, "scout"
             hook = clean_hook(pick.get("hook"), ctx.index)
+            ctx.first_cut_beats = beat_spans(ctx.index, by_id,
+                                             pick.get("beats"))
         except Exception as exc:  # noqa: BLE001 — the rules are the fallback
             print(f"[first_cut] trim scout failed: {type(exc).__name__}: "
                   f"{str(exc)[:200]}", flush=True)
@@ -668,6 +694,43 @@ def deband(ctx, steps, started):
     return res, bands
 
 
+def screen_focus(ctx, steps, started):
+    """A screen recording kept in its own shape is cropped to its content:
+    the column its text actually occupies (the index's text boxes, 10th-90th
+    percentile) fills the frame, so the text reads (playbook 2.8: screens
+    are zoomed to the area being discussed, never tiny and whole; C2 judge:
+    "the code and headings fill the frame"). One static camera zoom, like
+    the band crop. None when the text already spans the frame."""
+    samples = ((ctx.index or {}).get("spatial") or {}).get("samples") or []
+    boxes = [b for smp in samples for b in (smp.get("text") or []) if len(b) >= 4]
+    if len(boxes) < 8:
+        return None
+    n = len(boxes)
+    x0 = sorted(float(b[0]) for b in boxes)[int(0.1 * n)]
+    x1 = sorted(float(b[2]) for b in boxes)[int(0.9 * n) - 1]
+    y0 = sorted(float(b[1]) for b in boxes)[int(0.1 * n)]
+    width = min(1.0, (x1 - x0) + 0.05)
+    if width > 0.8 or width <= 0.2:
+        return None
+    k = min(1.0 / width, 1.55)
+    w = 1.0 / k
+    left = min(max((x0 + x1) / 2.0 - w / 2.0, 0.0), 1.0 - w)
+    top = min(max(y0 - 0.04, 0.0), 1.0 - w)
+    try:
+        import schemas
+        prog = float(schemas.program_duration(ctx.latest_edl()["json"]))
+    except Exception:
+        return None
+    return _run(ctx, steps, "add_zoom",
+                {"start": 0.0, "end": round(prog, 2), "strength": round(k - 1.0, 3),
+                 "mode": "punch", "ramp_s": 0.0,
+                 "cx": round(left / max(1e-6, 1.0 - w), 3),
+                 "cy": round(top / max(1e-6, 1.0 - w), 3),
+                 "purpose": "crop the screen to its content column "
+                            f"(x {x0:.2f}-{x1:.2f}) so the text reads"},
+                started)
+
+
 def chest_y(faces, bands=None):
     """The caption and hook band on a vertical talking head: just under the
     face (references: y 0.50-0.70), clear of the platform's bottom UI."""
@@ -676,7 +739,8 @@ def chest_y(faces, bands=None):
     bottom = faces["bottom"]
     if bands:
         bottom = (bottom - bands[0]) / max(1e-6, bands[1] - bands[0])
-    return round(min(max(bottom + 0.10, 0.60), 0.80), 3)
+    # C2 judge: "raise the caption baseline to about y 0.60-0.65"
+    return round(min(max(bottom + 0.08, 0.58), 0.70), 3)
 
 
 _TAIL_STOP = frozenset((
@@ -739,14 +803,370 @@ def spoken_opening(ctx, most_s=2.6, most_words=7):
 
 def hook_params(text, y=None, vertical=True):
     # slam: the title is whole by ~0.3 s (references); blur out, never a
-    # cut, which the picture QC reads as a one-frame pop
+    # cut, which the picture QC reads as a one-frame pop. A 1-3 word title
+    # sets bigger (references: 60-90% of the width; C2: "ROCKET RETURNS"
+    # spanned 45% at 1.3)
+    words = len(str(text or "").replace("/", " ").split())
+    size = (1.6 if words <= 3 else 1.3) if vertical else (1.2 if words <= 3 else 0.9)
+    # pop: every word is whole by ~0.25 s (C2 judge: the slam's stagger
+    # showed "WA WORKING" mid-animation at 0.3 s, the mask "half-formed")
     params = {"text": text, "font": "Anton", "uppercase": True,
-              "treatment": "serif", "accent": "#FFFFFF", "entrance": "slam",
-              "exit": "blur", "size": 1.3 if vertical else 0.9,
+              "treatment": "serif", "accent": "#FFFFFF", "entrance": "pop",
+              "exit": "blur", "size": size,
               "scrim": 0.35}
     if y is not None:
         params["y"] = y
     return params
+
+
+_NUMBERISH = re.compile(
+    r"^(?:\d[\d,.]*(?:%|x|k|m)?|hundred|thousand|million|millions|billion|"
+    r"billions|trillion|trillionth|millionth|billionth|thousandth|hundredth|"
+    r"percent|twice|double|triple|half|zero|"
+    r"first|one|two|three|four|five|six|seven|eight|nine|ten|twenty|"
+    r"thirty|forty|fifty|hundreds|thousands)$")
+
+
+def _tok(word):
+    """A word for matching: lower case, letters, digits and apostrophes
+    (_norm drops digits, which turned the beat "30 feet" into "feet")."""
+    return re.sub(r"[^a-z0-9'%]", "", str(word or "").lower())
+
+
+def _phrase_words(index, row, phrase):
+    """The index words of ``phrase`` (1-3 consecutive words, compared
+    without punctuation or case) inside sentence ``row``; None when the
+    phrase is not said there word for word."""
+    toks = [_tok(t) for t in str(phrase or "").replace("*", " ").split()]
+    toks = [t for t in toks if t]
+    if not 1 <= len(toks) <= 4:
+        return None
+    t0, t1 = float(row["t0"]) - 0.05, float(row["t1"]) + 0.05
+    words = [w for w in (index or {}).get("words") or []
+             if w.get("w") is not None and t0 <= _wt(w, "t0") <= t1]
+    norm = [_tok(w["w"]) for w in words]
+    for i in range(len(words) - len(toks) + 1):
+        if norm[i:i + len(toks)] == toks:
+            return words[i:i + len(toks)]
+    return None
+
+
+def beat_spans(index, by_id, beats):
+    """[(src_t0, src_t1, text)] for the scout's beats that are said word
+    for word in their sentence (anything else is dropped: a slam is the
+    speaker's own words, never a paraphrase)."""
+    out = []
+    for beat in (beats or [])[:6]:
+        if not isinstance(beat, dict):
+            continue
+        row = by_id.get(str(beat.get("id")))
+        if row is None:
+            row = by_id.get(re.sub(r"\D", "", str(beat.get("id"))))
+        if row is None:
+            continue
+        found = _phrase_words(index, row, beat.get("words"))
+        if not found:
+            continue
+        text = " ".join(str(w["w"]).strip(" ,.;:!?\"'") for w in found)
+        out.append((_wt(found[0], "t0"), _wt(found[-1], "t1"), text))
+    return out
+
+
+def number_beats(index):
+    """Deterministic beats without the scout: a spoken number with the word
+    before or after it ("a trillionth", "50 percent")."""
+    words = [w for w in (index or {}).get("words") or [] if w.get("w") is not None]
+    out = []
+    for i, w in enumerate(words):
+        if not _NUMBERISH.match(_tok(w["w"]) or "-"):
+            continue
+        if _tok(w["w"]) in ("one", "first", "two") and i + 1 < len(words) \
+                and not _NUMBERISH.match(_tok(words[i + 1]["w"]) or "-"):
+            continue    # "one of", "first time": not a figure
+        group = [w]
+        if i + 1 < len(words) and _norm(words[i + 1]["w"]) not in _TAIL_STOP \
+                and _wt(words[i + 1], "t0") - _wt(w, "t1") < 0.3:
+            group.append(words[i + 1])
+        elif i > 0 and _norm(words[i - 1]["w"]) in ("a", "an", "the") \
+                and _wt(w, "t0") - _wt(words[i - 1], "t1") < 0.3:
+            group.insert(0, words[i - 1])
+        text = " ".join(str(x["w"]).strip(" ,.;:!?\"'") for x in group)
+        out.append((_wt(group[0], "t0"), _wt(group[-1], "t1"), text))
+    return out
+
+
+def _star(text):
+    words = text.split()
+    if len(words) == 1:
+        return f"*{words[0]}*"
+    nums = [x for x in words if _NUMBERISH.match(_tok(x) or "-")]
+    num = max(nums, key=len) if nums else None
+    content = [x for x in words if _norm(x) not in _TAIL_STOP]
+    pick = num or (max(reversed(content), key=len) if content else words[-1])
+    return re.sub(r"(?<!\S)" + re.escape(pick) + r"(?!\S)", f"*{pick}*",
+                  text, count=1)
+
+
+def beat_slams(ctx, steps, started, beats, hook_end, y):
+    """Slam the beats on screen as they are said (word_slam, display tier:
+    huge type, the spoken words, captions drop exactly those words). At
+    least BEAT_GAP_S apart, clear of the hook and the last second, two type
+    families alternating, one accent. Returns how many landed."""
+    keep = _keep(ctx)
+    if not keep or not beats:
+        return 0
+    from timeline import Timeline
+    try:
+        tl = Timeline(keep, [], None)
+        import schemas
+        prog = float(schemas.program_duration(ctx.latest_edl()["json"]))
+    except Exception:
+        return 0
+    placed, earliest = 0, hook_end + 0.6
+    print(f"[first_cut] beats: {[(round(a, 1), t) for a, _b, t in beats][:8]}",
+          flush=True)
+    for t0, t1, text in sorted(beats):
+        if placed >= BEAT_MAX:
+            break
+        a, b = tl.src_to_out(t0), tl.src_to_out(t1)
+        if a is None or b is None or b < a:
+            continue
+        start = round(max(0.0, a - 0.2), 2)
+        end = round(min(max(b + 0.45, start + 1.0), start + 1.6), 2)
+        if start < earliest or end > prog - 0.8:
+            continue
+        card = placed % 2 == 1
+        params = {"text": _star(text), "tier": "display", "entrance": "pop",
+                  "exit": "cut", "accent": BEAT_ACCENT, "width": 0.82,
+                  "role": "serif" if card else "condensed"}
+        if card:
+            # a graphic insert: the picture cuts to a flat card with the
+            # line in huge type while the voice runs on (the references'
+            # chapter and stat cards; C2 judge: "B-roll or graphic inserts")
+            if not _ok(_run(ctx, steps, "add_vector_graphic", {
+                    "kind": "rectangle", "start": start, "end": end,
+                    "x": 0.5, "y": 0.5, "width": 1.0, "height": 1.0,
+                    "color": BEAT_CARD, "opacity": 1.0}, started)):
+                card = False
+                params["role"] = "condensed"
+        if card:
+            params["y"] = 0.5
+        elif y is not None:
+            params["y"] = y
+        res = _run(ctx, steps, "add_motion_graphic",
+                   {"template": "word_slam", "start": start, "end": end,
+                    "params": params,
+                    "purpose": "the spoken key phrase slammed as it is said "
+                               "(references: a visual event every 2-3 s)"},
+                   started)
+        if _ok(res):
+            placed += 1
+            earliest = start + BEAT_GAP_S
+    return placed
+
+
+# --------------------------------------------------------------------------
+#  Silent footage: a highlight montage (playbook recipe D, C2 29 Oct)
+# --------------------------------------------------------------------------
+
+MONTAGE_MIN_SOURCE_S = 20.0     # shorter silent clips keep their whole take
+MONTAGE_TARGET_S = 13.0         # references: 7-15 s; up to ~30 for an event
+MONTAGE_SHOT_S = 0.5            # the body's shots (references: 0.2-0.8 s)
+MONTAGE_OPEN_S = 0.8            # the first change lands by 1 s (the title
+                                # holds over the cuts)
+MONTAGE_CLOSE_S = 1.0           # the payoff shot ends on live motion
+_MONTAGE_TITLE_SYSTEM = (
+    "The numbered frames are the shots of a highlight reel cut from one "
+    "video, in order. 1) TITLE: the poster title a top editor would put "
+    "over its opening: 1 to 3 words naming what is visibly happening "
+    "(\"LAUNCH *DAY*\", \"Game *winner*\"), nothing you cannot see, no brand "
+    "or name unless legible on screen, exactly one word in *stars*. 2) END: "
+    "the number of the shot the reel should END on: its payoff (the "
+    "landing, the goal, the reveal), late in the order; later shots are "
+    "dropped. 3) DROP: the numbers of shots that are broken (heavy "
+    "pixelation, blur, black), tiny or off-topic. Answer with JSON only: "
+    "{\"title\": \"<1-3 words>\", \"end\": <n>, \"drop\": [<n>, ...]}.")
+
+
+def _motion_curve(ctx, fps=4.0, width=64):
+    """(times, frame change, mean luma) over the whole proxy at ``fps``."""
+    import subprocess
+    import numpy as np
+    try:
+        path = ctx.proxy_path()
+        video = (ctx.index or {}).get("video") or {}
+        h = int(round(width * float(video["height"]) / float(video["width"])))
+    except Exception:
+        return None
+    h = max(2, h + h % 2)
+    try:
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-an", "-vf",
+             f"fps={fps},scale={width}:{h},format=gray", "-f", "rawvideo",
+             "-pix_fmt", "gray", "-"], capture_output=True, timeout=180).stdout
+    except Exception:
+        return None
+    n = len(raw) // (width * h)
+    if n < 8:
+        return None
+    frames = np.frombuffer(raw[:n * width * h], np.uint8).reshape(
+        n, h, width).astype(np.float32)
+    diff = np.zeros(n, np.float32)
+    diff[1:] = np.abs(frames[1:] - frames[:-1]).mean(axis=(1, 2))
+    luma = frames.mean(axis=(1, 2))
+    times = np.arange(n, dtype=np.float32) / fps
+    return times, diff, luma
+
+
+def montage_windows(curve, shots, duration, target=MONTAGE_TARGET_S):
+    """[[start, end]] source windows for a highlight: the strongest moving
+    moment of each shot (long shots in 3 s pieces), never a black or frozen
+    one, the best ones until ``target`` seconds, in source order; the first
+    window long enough to read the title, the last ending on motion."""
+    import numpy as np
+    times, diff, luma = curve
+    spans = []
+    for k, sh in enumerate(shots or []):
+        try:
+            a, b = float(sh["start"]), float(sh["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # a long shot is read in 3 s pieces, but gives ONE window (C2
+        # judge: four adjacent windows of one shot made a 4 s static hold)
+        while b - a > 3.2:
+            spans.append((a, a + 3.0, k))
+            a += 3.0
+        spans.append((a, b, k))
+    if not spans:
+        t = 0.0
+        while t < duration - 0.5:
+            spans.append((t, min(duration, t + 3.0), int(t // 3)))
+            t += 3.0
+    cands = []
+    for a, b, shot in spans:
+        if b - a < 0.45:
+            continue
+        sel = (times >= a) & (times < b)
+        if sel.sum() < 2:
+            continue
+        if float(np.median(luma[sel])) < 14.0:
+            continue                    # black or nearly black
+        d = diff[sel]
+        score = float(np.percentile(d, 75))
+        if score < 0.6:
+            continue                    # a frozen or static stretch
+        peak = float(times[sel][int(np.argmax(d))])
+        span = min(b - a, MONTAGE_SHOT_S)
+        w0 = min(max(peak - 0.4 * span, a), b - span)
+        cands.append({"score": score, "w": [w0, w0 + span], "span": (a, b),
+                      "shot": shot})
+    if len(cands) < 4:
+        return None
+    cands.sort(key=lambda c: -c["score"])
+    chosen, total, used = [], 0.0, set()
+    for c in cands:
+        if total >= target or len(chosen) >= 28:
+            break
+        if c["shot"] in used:
+            continue
+        used.add(c["shot"])
+        chosen.append(c)
+        total += c["w"][1] - c["w"][0]
+    chosen.sort(key=lambda c: c["w"][0])
+    first, last = chosen[0], chosen[-1]
+    a, b = first["span"]
+    first["w"] = [first["w"][0], min(b, first["w"][0] + MONTAGE_OPEN_S)]
+    if first["w"][1] - first["w"][0] < MONTAGE_OPEN_S - 0.05:
+        first["w"][0] = max(a, first["w"][1] - MONTAGE_OPEN_S)
+    a, b = last["span"]
+    last["w"] = [max(a, min(last["w"][0], b - MONTAGE_CLOSE_S)),
+                 min(b, max(last["w"][1], last["w"][0] + MONTAGE_CLOSE_S))]
+    out = []
+    for c in chosen:
+        w0, w1 = round(c["w"][0], 2), round(c["w"][1], 2)
+        if out and w0 <= out[-1][1] + 0.05:
+            w0 = round(out[-1][1] + 0.05, 2)     # never one long hold
+        if w1 - w0 >= 0.3:
+            out.append([w0, w1])
+    return out if len(out) >= 4 else None
+
+
+def montage_scout(ctx, windows, spend, title_only=False):
+    """(windows, title) after the trial model's look at one frame of every
+    picked window: the poster title (1-3 words, faithful to what is
+    visible), the payoff shot to end on, the broken or off-topic shots to
+    drop. The windows unchanged and no title without the lane or a usable
+    answer."""
+    import base64
+    import subprocess
+    import claude_lane
+    model = getattr(ctx, "first_cut_model", None)
+    if not model or not claude_lane.available():
+        return windows, None
+    try:
+        path = ctx.proxy_path()
+    except Exception:
+        return windows, None
+    parts = []
+    for n, (a, b) in enumerate(windows, 1):
+        try:
+            jpg = subprocess.run(
+                ["ffmpeg", "-v", "error", "-nostdin", "-ss",
+                 f"{(a + b) / 2:.2f}", "-i", path, "-frames:v", "1", "-vf",
+                 "scale=256:-2", "-f", "image2", "-c:v", "mjpeg", "-q:v", "6",
+                 "-"], capture_output=True, timeout=30).stdout
+        except Exception:
+            jpg = b""
+        if not jpg:
+            continue
+        parts.append({"type": "text", "text": f"Shot {n}:"})
+        parts.append({"type": "image_url", "image_url": {
+            "url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}})
+    if len(parts) < (6 if title_only else 8):
+        return windows, None
+    try:
+        resp = claude_lane.create(
+            model, [{"role": "system", "content": _MONTAGE_TITLE_SYSTEM},
+                    {"role": "user", "content": parts}],
+            max_tokens=3000, effort="low")
+        text = resp.choices[0].message.content or ""
+        spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0) or 0)
+        llm.record("first_cut_montage_scout", {"model": model,
+                                                "shots": len(windows)},
+                   {"content": text}, resp.usage)
+        print(f"[first_cut] montage scout: {text.strip()[:240]}", flush=True)
+        match = re.search(r"\{.*\}", text, re.S)
+        pick = json.loads(match.group(0)) if match else {}
+    except Exception as exc:  # noqa: BLE001 — no title is the fallback
+        print(f"[first_cut] montage scout failed: {type(exc).__name__}: "
+              f"{str(exc)[:160]}", flush=True)
+        return windows, None
+    out = list(windows)
+    try:
+        end = 0 if title_only else int(pick.get("end") or 0)
+    except (TypeError, ValueError):
+        end = 0
+    drop = set()
+    for d in pick.get("drop") or []:
+        try:
+            drop.add(int(d))
+        except (TypeError, ValueError):
+            continue
+    if end >= max(4, int(0.6 * len(windows))):
+        keep = [w for n, w in enumerate(windows, 1) if n <= end and n not in drop]
+        if len(keep) >= 4:
+            out = keep
+            a, b = out[-1]
+            out[-1] = [a, round(max(b, a + MONTAGE_CLOSE_S), 2)]
+    t = " ".join(str(pick.get("title") or "").split()).strip(" .\"'")
+    words = t.replace("*", "").split()
+    if not 1 <= len(words) <= 3 or len(t) > 32 or re.search(r"\d", t):
+        return out, None
+    if t.count("*") != 2:
+        t = t.replace("*", "")
+        longest = max(reversed(t.split()), key=len)
+        t = t.replace(longest, f"*{longest}*", 1)
+    return out, t
 
 
 # --------------------------------------------------------------------------
@@ -780,8 +1200,60 @@ def _orientation(index):
     return "vertical" if h / w >= 1.6 else "other"
 
 
+def _clean_word(w):
+    """A transcribed token that reads as a word in some script: letters
+    (and their combining marks) with inner apostrophes or hyphens, not one
+    character repeated ("ʰʰʰʰ"), no modifier-letter runs."""
+    import unicodedata
+    t = str(w or "").strip().strip(".,!?;:…\"'“”«»")
+    if not t or len(t) > 24:
+        return False
+    letters = 0
+    for ch in t:
+        cat = unicodedata.category(ch)
+        if cat in ("Lu", "Ll", "Lt", "Lo"):
+            letters += 1
+        elif cat.startswith("M") or ch in "'’-":
+            continue
+        else:
+            return False
+    return letters >= 1 and (len(t) <= 2 or len(set(t.lower())) > 1)
+
+
 def _speech(index):
-    return len((index or {}).get("words") or []) >= 8
+    """Real speech: at least 8 words, most of the longer tokens words (C2: a
+    music promo's song transcribed as "ʰʰʰʰ", "ლ" was trimmed to a 2 s
+    fragment and captioned with garbage glyphs). One-character tokens count
+    for neither side."""
+    words = [str(w.get("w") or "").strip() for w in (index or {}).get("words") or []]
+    if len(words) < 8:
+        return False
+    longer = [w for w in words if len(w.strip(".,!?;:…")) >= 2]
+    if not longer:
+        return False
+    return sum(1 for w in longer if _clean_word(w)) >= 0.6 * len(longer)
+
+
+def _music_piece(index, duration):
+    """An already-finished piece over a song (a music promo, an animated
+    invitation, a lyric edit): the audio has a beat and what is heard is
+    sung or not speech at all (fewer than 1.2 words a second). The First
+    cut keeps it whole (C2: a 39 s wedding invitation was trimmed to 21 s,
+    ending before the names and the date)."""
+    perception = (index or {}).get("perception") or {}
+    try:
+        bpm = float(perception.get("bpm") or 0)
+    except (TypeError, ValueError):
+        bpm = 0.0
+    if bpm <= 0 and not perception.get("beats"):
+        return False
+    words = (index or {}).get("words") or []
+    if not _speech(index):
+        return bool(words)
+    # sung, not spoken: slow words over a beat in a short piece (C2: a 100 s
+    # narrated vlog with long pauses over room noise is NOT one)
+    return float(duration or 0) <= 60.0 and \
+        len(words) / max(1.0, float(duration or 0)) < 1.2
 
 
 def video_chain(ctx, worker_db, started, spend):
@@ -790,7 +1262,47 @@ def video_chain(ctx, worker_db, started, spend):
     picked = None
     speech = _speech(ctx.index)
     ctx.first_cut_hook = None
-    if duration > config.FIRST_CUT_SHORT_SOURCE_S:
+    ctx.first_cut_beats = None
+    if _music_piece(ctx.index, duration) and duration <= 120:
+        # a finished piece over a song: whole, unchanged in time, no title
+        # or captions over its own design; only a non-vertical frame is
+        # fitted to 9:16 (crop for footage, never bands around a speaker)
+        applied.append("kept whole (it already plays as a finished piece "
+                       "over its song)")
+        if _orientation(ctx.index) != "vertical" and not _screen_like(ctx.index):
+            if _ok(_run(ctx, steps, "auto_reframe", {"ratio": "9:16"}, started)):
+                applied.append("reframed to 9:16")
+        return steps, applied, {"how": "finished_piece"}
+    _f = _faces(ctx.index)
+    montage = (not speech and duration >= MONTAGE_MIN_SOURCE_S
+               and (not _f or _f["share"] < 0.35)
+               and not _screen_like(ctx.index))
+    if montage:
+        # Silent footage (an event, gameplay, b-roll): the references cut
+        # it to its strongest moving moments (recipe D), never the whole take
+        curve = _motion_curve(ctx)
+        windows = montage_windows(curve, (ctx.index or {}).get("shots"),
+                                  duration) if curve else None
+        title = None
+        if windows:
+            windows, title = montage_scout(ctx, windows, spend)
+        if windows and _ok(_run(ctx, steps, "keep_segments",
+                                {"segments": windows, "snap_to_words": False},
+                                started)):
+            applied.append("its strongest moments cut into a highlight")
+            picked = {"how": "motion", "shots": len(windows),
+                      "s": round(sum(b - a for a, b in windows), 2)}
+            ctx.first_cut_hook = title
+    elif not speech and duration >= 3.0:
+        # a short silent clip keeps its whole take and gets a poster title
+        # from the trial model's look (C2: a 15 s gym clip and a 17 s walk
+        # in the snow got "I couldn't finish an automatic first cut")
+        step = duration / 6.0
+        _w, title = montage_scout(ctx, [[k * step, (k + 1) * step]
+                                        for k in range(6)], spend,
+                                  title_only=True)
+        ctx.first_cut_hook = title
+    elif duration > config.FIRST_CUT_SHORT_SOURCE_S:
         start, end, title, how = scout_range(ctx, worker_db, spend)
         picked = {"start_s": round(start, 2), "end_s": round(end, 2),
                   "title": title, "how": how}
@@ -813,7 +1325,7 @@ def video_chain(ctx, worker_db, started, spend):
                         started)):
                 applied.append("a clean opening and ending")
     if speech:
-        args = {"min_silence_s": PAUSE_CUT_S, "padding_s": 0.1}
+        args = {"min_silence_s": PAUSE_CUT_S, "padding_s": PAUSE_PAD_S}
         if _talk_density(ctx) >= 1.2:
             # Narration over room tone or street sound is still speech with
             # pauses (the vlog fixture: every gap "non-quiet", nothing cut);
@@ -828,11 +1340,15 @@ def video_chain(ctx, worker_db, started, spend):
     talking = bool(speech and faces and faces["share"] >= 0.5)
     vertical_source = _orientation(ctx.index) == "vertical"
     vertical_out = vertical_source
+    screen_kept = False
     if not vertical_source:
         if _screen_like(ctx.index) and not talking:
             # Screen text at 9:16 is unreadable (bake-off vfr runs); the
             # references keep tutorials landscape (R07, R11).
             applied.append("the screen's own shape kept so its text reads")
+            screen_kept = True
+            if _ok(screen_focus(ctx, steps, started)):
+                applied.append("pushed in on its content")
         else:
             # Footage with no face and no speech (a montage, an event, a
             # landscape) fills the frame like the references' montages
@@ -843,6 +1359,10 @@ def video_chain(ctx, worker_db, started, spend):
             if _ok(_run(ctx, steps, "auto_reframe", args, started)):
                 applied.append("reframed to 9:16")
                 vertical_out = True
+    if speech and not vertical_out:
+        # 9:16 is mastered by default; a kept landscape/screen shape is not
+        # (C2: the screen recording measured -17.1 LUFS; references -14)
+        _run(ctx, steps, "set_master_loudness", {"enabled": True}, started)
     bands = None
     if vertical_out and talking:
         res, bands = deband(ctx, steps, started)
@@ -852,43 +1372,104 @@ def video_chain(ctx, worker_db, started, spend):
             applied.append("the source's bars cropped")
     if talking and len(_keep(ctx) or []) > 1:
         _run(ctx, steps, "conceal_jump_cuts", {}, started)
-    if talking and not bands:
-        # (never on top of the band crop: stacked on its 1.4x zoom a punch
-        # pushed the chin out of frame, "FACE AT THE BOTTOM EDGE", C1)
+    if talking:
         # The references change the picture every 2-3 s; on a single take
-        # the cheapest honest event is a punch on a stressed word, kept
-        # sparse (about one per 9 s; the owner: restraint, never one per
-        # cut).
+        # the honest events are a punch on a stressed word and the key
+        # phrase slammed in type (beat_slams), kept sparse (a punch about
+        # every 7 s; the owner: restraint, never one per cut). On top of the
+        # band crop the punch is shallow: stacked on its 1.4x zoom a full
+        # punch pushed the chin out of frame (C1).
         prog = sum(e - s for s, e in (_keep(ctx) or []))
         if prog >= 12:
-            _run(ctx, steps, "punch_in_on_emphasis",
-                 {"count": max(2, int(prog // 9))}, started)
+            args = {"count": max(2, int(prog // 7))}
+            if bands:
+                args["strength"] = 0.08
+            _run(ctx, steps, "punch_in_on_emphasis", args, started)
     y = chest_y(faces, bands) if (talking and vertical_out) else None
     hook, hook_end = getattr(ctx, "first_cut_hook", None), HOOK_S
     if talking:
         opening = spoken_opening(ctx)
         hook, hook_end = opening if opening else (None, HOOK_S)
+        # the references hold the opening title 2.5-3.5 s (C2: it left at
+        # 1.6 s on a fast speaker); it owns its zone, the captions wait
+        hook_end = round(min(max(hook_end + 0.15, HOOK_MIN_S), HOOK_MAX_S), 2)
     if hook:
         args = {"template": "hook_title", "start": 0.0, "end": hook_end,
                 "params": hook_params(hook, y, vertical_out),
+                # one reading task in the first seconds (captions.
+                # hook_owns_zone): no caption stacked under the title
+                "mute_captions": True,
                 "purpose": "the opening line as a poster title (references: "
-                           "a poster-scale title by 0.3 s)"}
+                           "a poster-scale title by 0.3 s, held 2.5-3.5 s)"}
         if _ok(_run(ctx, steps, "add_motion_graphic", args, started)):
             applied.append("a hook title")
+    else:
+        hook_end = 0.0
+    if speech and not screen_kept:
+        beats = list(getattr(ctx, "first_cut_beats", None) or [])
+        if len(beats) < 3:
+            # the scout's beats first, the spoken figures after them
+            beats += [b for b in number_beats(ctx.index)
+                      if all(abs(b[0] - a[0]) > 2.0 for a in beats)]
+        if beat_slams(ctx, steps, started, beats, hook_end, y):
+            applied.append("key lines in big type")
     if speech:
         style = {"preset": "reels", "motion_look": "editorial",
-                 "size_scale": 1.2}
+                 "size_scale": CAPTION_SCALE}
         if y is not None:
             style["anchor_y"] = y
         if _ok(_run(ctx, steps, "add_captions",
                     {"mode": "from_transcript", "style": style,
-                     "max_words_per_caption": 3},
+                     "max_words_per_caption": CAPTION_WORDS},
                     started)):
             applied.append("captions")
     return steps, applied, picked
 
 
-TOUR_STEPS = [{"do": "wait", "seconds": 0.8}, {"do": "tour", "by": 2}]
+TOUR_STEPS = [{"do": "wait", "seconds": 0.8}, {"do": "tour", "by": 3, "seconds": 18}]
+DEMO_ZOOM = 0.25           # showcase push-ins on a phone-layout capture
+DEMO_TITLE_S = 2.6         # the opening title over the live hero
+DEMO_END_PUSH_S = 2.2      # the last seconds: a slow push, never a held page
+
+
+def blank_spans(path, fps=10.0, width=48, least_s=0.2):
+    """[[start, end]] seconds of a capture where the picture is one flat
+    colour (a page loading white or black between pages; C2 judge: "a blank
+    white screen around 4.8-5.6 s"). Never the first or last half second."""
+    import subprocess
+    import numpy as np
+    try:
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-an", "-vf",
+             f"fps={fps},scale={width}:-2,format=gray", "-f", "rawvideo",
+             "-pix_fmt", "gray", "-"], capture_output=True, timeout=120).stdout
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30).stdout.strip().split(",")
+        h = int(round(width * int(probe[1]) / int(probe[0])))
+        h += h % 2
+    except Exception:
+        return []
+    n = len(raw) // (width * h)
+    if n < 10:
+        return []
+    frames = np.frombuffer(raw[:n * width * h], np.uint8).reshape(n, h, width)
+    flat = frames.reshape(n, -1).std(axis=1) < 6.0
+    dur = n / fps
+    out, k = [], 0
+    while k < n:
+        if not flat[k]:
+            k += 1
+            continue
+        j = k
+        while j < n and flat[j]:
+            j += 1
+        a, b = k / fps, j / fps
+        if b - a >= least_s and a > 0.5 and b < dur - 0.5:
+            out.append([round(a, 2), round(b, 2)])
+        k = j
+    return out
 
 
 def _site_hook(rec, url):
@@ -900,18 +1481,81 @@ def _site_hook(rec, url):
         host = urlparse(url).hostname or ""
         brand = host.replace("www.", "").split(".")[0].capitalize()
     h1 = " ".join(str((rec or {}).get("h1") or "").split())
-    words = [w for w in h1.split() if w]
     if not brand:
         return None
-    line = " ".join(words[:6]) if 2 <= len(words) <= 9 else ""
-    return f"*{brand}*" + (f" / {line}" if line else "")
+    # the site's name as a two-family poster ("MEET" heavy sans, the name in
+    # italic serif), never its <h1>: the hero shows that headline itself, so
+    # the title doubled it (C2 judge, five runs)
+    return f"Meet / *{brand}*"
 
 
-def url_chain(ctx, worker_db, url, started):
+_SCROLL_ASK = re.compile(r"\bscroll", re.I)
+_WHOLE_PAGE = re.compile(r"top to bottom|from the top|to the bottom|whole page|entire page|"
+                         r"full page|de cima|hasta abajo|до низу", re.I)
+_LANDSCAPE = re.compile(r"\b(landscape|horizontal|16:9|widescreen)\b", re.I)
+_SECONDS = re.compile(r"(\d{2,3})\s*[- ]?\s*(?:seconds?|secs?|segundos?|s\b)", re.I)
+
+
+def url_hints(text):
+    """What a website request asks for, read deterministically from its
+    words (C2, 29 Oct: real requests carry them; the First cut ignored
+    them): the orientation, a top-to-bottom scroll instead of clicks into
+    sections, a longer piece, and words the tour should prefer among the
+    site's own links. {} for none."""
+    text = str(text or "")
+    out = {}
+    land = _LANDSCAPE.search(text)
+    port = re.search(r"9\s*:\s*16|vertical|portrait", text, re.I)
+    if land and (not port or land.start() < port.start()):
+        # the first shape named is the one asked for ("a 16:9 promo, 9:16
+        # optional"; C2 real request)
+        out["orientation"] = "landscape"
+    if _SCROLL_ASK.search(text) and _WHOLE_PAGE.search(text):
+        out["mode"] = "scroll"
+    secs = [int(m.group(1)) for m in _SECONDS.finditer(text)]
+    if secs and 10 <= secs[0] <= 180:
+        out["seconds"] = secs[0]
+    words = re.sub(r"https?://\S+", " ", text)
+    words = [w for w in re.findall(r"[^\W\d_]{4,}", words)]
+    if words:
+        out["prefer"] = " ".join(words)[:600]
+    return out
+
+
+_TILE = re.compile(r"^\s*record my website\b.*polished showcase", re.I | re.S)
+
+
+def is_brief(text):
+    """A website request with its own creative brief (sections to open, a
+    length, an ending), not the tile's template or a bare URL: the First cut
+    shows a demo at once and the trial agent then works through the brief
+    (C2: real requests scored 3.5-5 as "not what the user asked")."""
+    text = str(text or "")
+    if not text or _TILE.search(text):
+        return False
+    words = re.sub(r"https?://\S+", " ", text).split()
+    return len(words) >= 20
+
+
+def tour_steps(hints):
+    tour = {"do": "tour", "by": 3,
+            "seconds": min(max(float((hints or {}).get("seconds") or 18), 12.0), 60.0)}
+    if (hints or {}).get("mode") == "scroll":
+        tour["mode"] = "scroll"
+    if (hints or {}).get("seconds", 0) >= 35:
+        tour["by"] = 3
+    if (hints or {}).get("prefer"):
+        tour["prefer"] = hints["prefer"]
+    return [{"do": "wait", "seconds": 0.8}, tour]
+
+
+def url_chain(ctx, worker_db, url, started, text=None):
     steps, applied = [], []
+    hints = url_hints(text)
+    tour = tour_steps(hints) if text else TOUR_STEPS
     result = _run(ctx, steps, "record_website_demo",
-                  {"url": url, "orientation": "portrait",
-                   "steps": TOUR_STEPS}, started)
+                  {"url": url, "orientation": hints.get("orientation", "portrait"),
+                   "steps": tour}, started)
     key, rec = None, None
     for asset in reversed(getattr(ctx, "web_recordings", None) or []):
         key = (asset.get("storage_key") if isinstance(asset, dict)
@@ -925,19 +1569,47 @@ def url_chain(ctx, worker_db, url, started):
     if _ok(result):
         applied.append("website recorded")
     if key:
+        # 0.25, not 0.4: the phone layout's text runs edge to edge, and a
+        # deeper push cut its lines at both sides (C2 judge: "our video with
+        # AI.", "pad video")
         if _ok(_run(ctx, steps, "showcase_demo",
-                    {"asset_key": key, "zoom_strength": 0.4}, started)):
+                    {"asset_key": key, "zoom_strength": DEMO_ZOOM}, started)):
             applied.append("placed as a vertical demo")
+            try:
+                import media_cache
+                local = media_cache.lease(key, ctx.workdir, "capture.mp4")
+            except Exception:
+                local = None
+            for a, b in reversed(blank_spans(local) if local else []):
+                _run(ctx, steps, "cut_output_range",
+                     {"start": a, "end": b}, started)
+            try:
+                import schemas
+                prog = float(schemas.program_duration(ctx.latest_edl()["json"]))
+            except Exception:
+                prog = 0.0
+            if prog > DEMO_END_PUSH_S + 6:
+                _run(ctx, steps, "add_zoom", {
+                    "start": round(prog - DEMO_END_PUSH_S, 2), "end": round(prog, 2),
+                    "strength": 0.12, "mode": "push_in",
+                    "purpose": "the ending keeps moving (no held page before "
+                               "the end card)"}, started)
             hook = _site_hook(rec, url)
-            if hook and _ok(_run(ctx, steps, "add_motion_graphic", {
-                    "template": "hook_title", "start": 0.0, "end": HOOK_S,
-                    # under the site's own hero headline (top third on a
-                    # phone layout), on a stronger scrim: the judge saw the
-                    # title collide with the page's headline at y 0.36
-                    "params": dict(hook_params(hook, 0.66, True), scrim=0.6),
-                    "purpose": "the opening title: the site and its "
-                               "promise"}, started)):
-                applied.append("a title")
+            if hook:
+                # The opening is ONE reading task: the site dims under a
+                # poster title, then comes alive (the judge saw the title
+                # collide with the site's own headline at every placement)
+                # over the live hero on its own soft scrim (C2 judge: a
+                # full-frame dim read as "a title on black", a hard band as
+                # "a black rectangle")
+                if _ok(_run(ctx, steps, "add_motion_graphic", {
+                        "template": "hook_title", "start": 0.0, "end": DEMO_TITLE_S,
+                        "params": dict(hook_params(hook, 0.46, True),
+                                       size=1.6, scrim=0.95),
+                        "mute_captions": True,
+                        "purpose": "the opening title: the site and its "
+                                   "promise"}, started)):
+                    applied.append("a title")
     return steps, applied
 
 
@@ -950,6 +1622,25 @@ def _summary(applied, duration_s, url=None):
         else (parts[0] if parts else "")
     shape = "" if any("own shape" in p for p in applied) else "vertical "
     return f"a {length}{shape}version" + (f": {detail}" if detail else "")
+
+
+def _message_text(worker_db, message_id):
+    """The request's own words (the website tile's message), or None."""
+    if not message_id:
+        return None
+
+    def read(conn):
+        with conn.cursor() as cur:
+            cur.execute("SELECT content FROM chat_messages WHERE id = %s",
+                        (int(message_id),))
+            row = cur.fetchone()
+        if not row:
+            return None
+        return row.get("content") if isinstance(row, dict) else row[0]
+    try:
+        return worker_db.run(read)
+    except Exception:
+        return None
 
 
 def run(worker_db, job, project, index_row):
@@ -1012,13 +1703,16 @@ def run(worker_db, job, project, index_row):
     llm.set_turn_plan(plan if subscribed else "", project_id=project["id"])
     try:
         if url:
-            steps, applied = url_chain(ctx, worker_db, url, started)
+            steps, applied = url_chain(ctx, worker_db, url, started,
+                                       _message_text(worker_db,
+                                                     payload.get("message_id")))
             picked = None
         else:
             steps, applied, picked = video_chain(ctx, worker_db, started,
                                                  spend)
         render = None
-        if ctx.versions_written:
+        keep_whole = bool(picked and picked.get("how") == "finished_piece")
+        if ctx.versions_written or keep_whole:
             render = agent_tools.execute(
                 ctx, "render_preview", {"quality": "approval"})
             steps.append({"tool": "render_preview",
@@ -1050,6 +1744,15 @@ def run(worker_db, job, project, index_row):
         "steps": steps, "elapsed_s": elapsed, "picked": picked,
         "renders": int(ctx.request_previews or 0),
         "model_usd": round(spend["usd"], 5)}}
+    follow_up = None
+    if delivered and url and is_brief(_message_text(worker_db, payload.get("message_id"))):
+        try:
+            follow_up = worker_db.run(dbx.enqueue_job, job["project_id"],
+                                      job["user_id"], "agent_turn",
+                                      {"message_id": int(payload["message_id"]),
+                                       "after_first_cut": True})
+        except Exception as exc:  # noqa: BLE001 — the First cut stands alone
+            print(f"[first_cut] brief follow-up not queued: {exc}", flush=True)
     if delivered:
         duration = float(preview.get("duration_s") or 0)
         summary = _summary(applied, duration, url)
@@ -1057,7 +1760,8 @@ def run(worker_db, job, project, index_row):
         trial = bool(admission and admission.get("kind") == "trial")
         text = (f"Here's your first cut: {summary}. It's playing on the "
                 "right."
-                + " Tell me what to change."
+                + (" Now I'm working through the rest of your brief."
+                   if follow_up else " Tell me what to change.")
                 + (" To download it, choose a plan." if trial else ""))
         # Deterministic and unreviewed by critics: "unchecked", but the
         # version is deliverable (the export gate for a trial account is the

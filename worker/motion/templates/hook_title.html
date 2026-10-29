@@ -11,7 +11,7 @@
   "y": {"type": "float", "min": 0.08, "max": 0.92, "default": 0.42, "hint": "vertical centre as frame fraction"},
   "size": {"type": "float", "min": 0.5, "max": 1.6, "default": 1.0},
   "align": {"type": "enum", "values": ["center", "left"], "default": "center"},
-  "entrance": {"type": "enum", "values": ["spring", "slam", "rise", "blur", "mask"], "default": "spring"},
+  "entrance": {"type": "enum", "values": ["spring", "slam", "rise", "blur", "mask", "pop"], "default": "spring", "hint": "pop = whole by 0.25 s (a fast fade-scale, tiny stagger)"},
   "exit": {"type": "enum", "values": ["blur", "drop", "none", "cut"], "default": "blur"},
   "shadow": {"type": "float", "min": 0, "max": 1, "default": 0.55},
   "scrim": {"type": "float", "min": 0, "max": 1, "default": 0.5, "hint": "soft dark glow behind the block so it reads over bright footage; 0 = none"}
@@ -153,7 +153,8 @@
   MG.ready = Promise.all([`900 100px '${P.font}'`, `italic 400 100px 'Instrument Serif'`, `italic 800 100px 'Playfair Display'`]
     .map(f => document.fonts.load(f).catch(() => 0))).then(() => document.fonts.ready).then(layout);
 
-  const D = MG.duration, each = Math.min(0.075, 0.55 / Math.max(words.length, 1));
+  const D = MG.duration, each = P.entrance === 'pop' ? Math.min(0.025, 0.12 / Math.max(words.length, 1))
+    : Math.min(0.075, 0.55 / Math.max(words.length, 1));
   const exitDur = P.exit === 'none' || P.exit === 'cut' ? 0 : Math.min(0.32, D * 0.18);
   const enterEnd = each * words.length + 0.7;
   MG.active([[0, Math.min(D, enterEnd)], [Math.max(0, D - exitDur - 0.02), D]]);
@@ -178,6 +179,10 @@
       } else if (P.entrance === 'rise') {
         const p = MG.ease.outExpo(MG.range(t, t0, 0.6));
         s = { y: (1 - p) * 90, opacity: MG.range(t, t0, 0.25) };
+      } else if (P.entrance === 'pop') {
+        // whole by ~0.25 s: the references' title is read by 0.3 s
+        const p = MG.ease.outCubic(MG.range(t, t0, 0.14));
+        s = { opacity: p, scale: 1.06 - 0.06 * p };
       } else if (P.entrance === 'blur') {
         const p = MG.ease.outCubic(MG.range(t, t0, 0.5));
         s = { opacity: p, blur: (1 - p) * 26, scale: 1.08 - 0.08 * p };

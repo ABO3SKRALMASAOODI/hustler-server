@@ -2852,16 +2852,22 @@ HOOK_ZONE_START_S = 1.5
 
 def hook_owns_zone(item):
     """Is ``item`` the opening title that owns its zone (word_slam
-    tier='hook', or the cover headline (worker/cover.py), starting by
+    tier='hook', the cover headline (worker/cover.py), or a hook_title
+    written with mute_captions=true, starting by
     HOOK_ZONE_START_S, mute_captions not false)? The captions wait until it
     exits: the judged hooks had the live caption fade in right under the
     title, two sentences at once in the first second."""
     if not isinstance(item, dict):
         return False
     template = item.get("template")
-    if template not in ("word_slam", "cover_headline"):
+    if template not in ("word_slam", "cover_headline", "hook_title"):
         return False
     if item.get("mute_captions") is False:
+        return False
+    # hook_title owns its zone only when it opts in (the First cut's poster
+    # hook, C2 29 Oct: the references hold the opening title 2.5-3.5 s with
+    # one reading task; older edits keep their captions beside it)
+    if template == "hook_title" and item.get("mute_captions") is not True:
         return False
     if template == "word_slam" and \
             str((item.get("params") or {}).get("tier") or "") != "hook":

@@ -15,7 +15,7 @@ def _index(duration, width=1920, height=1080, words=40):
                           "text": "Word " + "word " * (10 if 300 < t < 345 else 4) + "end."})
         t += 5.0
     return {"video": {"duration": duration, "width": width, "height": height},
-            "words": [{"w": "x", "s": i, "e": i + 0.3} for i in range(words)],
+            "words": [{"w": "word", "s": i, "e": i + 0.3} for i in range(words)],
             "sentences": sentences}
 
 
@@ -50,12 +50,12 @@ def test_short_landscape_talk_gets_the_whole_clean_chain(monkeypatch):
     assert [c[0] for c in calls] == [
         "cut_silences", "remove_filler_words", "auto_reframe",
         "add_motion_graphic", "add_captions"]
-    assert calls[0][1] == {"min_silence_s": first_cut.PAUSE_CUT_S, "padding_s": 0.1}
+    assert calls[0][1] == {"min_silence_s": first_cut.PAUSE_CUT_S, "padding_s": first_cut.PAUSE_PAD_S}
     assert calls[2][1] == {"ratio": "9:16"}
     hook = calls[3][1]
     assert hook["template"] == "hook_title" and hook["start"] == 0.0
     assert hook["params"]["font"] == "Anton" and "*" in hook["params"]["text"]
-    assert calls[4][1]["max_words_per_caption"] == 3
+    assert calls[4][1]["max_words_per_caption"] == first_cut.CAPTION_WORDS
     assert picked["how"] == "rules"
     assert "captions" in applied and "reframed to 9:16" in applied
     assert "a hook title" in applied
@@ -188,8 +188,12 @@ def test_url_records_a_tour_then_showcases_it_under_the_site_title(monkeypatch):
     assert calls[0][1]["orientation"] == "portrait"
     assert calls[0][1]["steps"] == first_cut.TOUR_STEPS
     assert calls[1][1]["asset_key"] == "web/9/capture.mp4"
-    assert calls[2][1]["params"]["text"] == (
-        "*Acme* / Financial infrastructure to grow your revenue")
+    assert calls[1][1]["zoom_strength"] == first_cut.DEMO_ZOOM
+    # the site's name as a two-family poster, never its own <h1> (which the
+    # hero already shows), on a soft scrim over the live site
+    assert calls[2][1]["params"]["text"] == "Meet / *Acme*"
+    assert calls[2][1]["end"] == first_cut.DEMO_TITLE_S
+    assert calls[2][1]["mute_captions"] is True
 
 
 def test_failed_steps_are_not_claimed(monkeypatch):
@@ -216,9 +220,9 @@ def test_the_capture_key_is_read_from_the_tool_reply(monkeypatch):
     monkeypatch.setattr(agent_tools, "execute", execute)
     first_cut.url_chain(ctx, None, "https://valmera.io/", _clock())
     assert calls[1] == ("showcase_demo", {"asset_key": "fetched/4695/40a996fb2036.mp4",
-                                          "zoom_strength": 0.4})
+                                          "zoom_strength": first_cut.DEMO_ZOOM})
     # the site's own name from its host when the capture carries no title
-    assert calls[2][1]["params"]["text"] == "*Valmera*"
+    assert calls[2][1]["params"]["text"] == "Meet / *Valmera*"
 
 
 def test_summary_says_what_was_done():
@@ -434,9 +438,10 @@ def test_static_bands_are_found_only_around_a_live_picture():
 
 def test_captions_and_hook_sit_under_the_face():
     faces = {"bottom": 0.58, "width": 0.4, "share": 0.9}
-    assert first_cut.chest_y(faces) == 0.68
-    assert first_cut.chest_y(faces, [0.15, 0.85]) == 0.714          # after debanding
-    assert first_cut.chest_y({"bottom": 0.3, "width": .2, "share": 1}) == 0.60
+    assert first_cut.chest_y(faces) == 0.66
+    assert first_cut.chest_y(faces, [0.15, 0.85]) == 0.694          # after debanding
+    assert first_cut.chest_y({"bottom": 0.3, "width": .2, "share": 1}) == 0.58
+    assert first_cut.chest_y({"bottom": 0.75, "width": .2, "share": 1}) == 0.70
     assert first_cut.chest_y(None) is None
 
 
@@ -464,3 +469,115 @@ def test_an_unfinished_last_line_walks_back_to_a_complete_one():
             {"id": "s4", "t0": 10, "t1": 13, "text": "to me when you've roasted beyond so"}]
     assert first_cut._complete_end(rows, rows[0], rows[3])["id"] == "s2"
     assert first_cut._complete_end(rows, rows[3], rows[3])["id"] == "s4"
+
+
+def test_website_request_hints_are_read_from_its_words():
+    tile = ("Record my website https://www.sparklenloop.com/ as a 20-second "
+            "vertical (9:16) demo: scroll the page from top to bottom at a "
+            "steady pace, then make it a polished showcase video.")
+    h = first_cut.url_hints(tile)
+    assert h["mode"] == "scroll" and h["seconds"] == 20
+    assert "orientation" not in h
+    assert first_cut.tour_steps(h)[1]["mode"] == "scroll"
+    h = first_cut.url_hints("Record a demo of https://x.dev in landscape: wait "
+                            "2 seconds, scroll down to the bottom.")
+    assert h["orientation"] == "landscape" and h["mode"] == "scroll"
+    h = first_cut.url_hints("Create a premium 60-second cinematic promotional "
+                            "video for https://osai.ie. Open the Pricing page.")
+    assert "mode" not in h and first_cut.tour_steps(h)[1]["by"] == 3
+    assert "pricing" in first_cut.tour_steps(h)[1]["prefer"].lower()
+    assert first_cut.url_hints(None) == {}
+
+
+def test_montage_windows_pick_moving_shots_one_each_in_order():
+    import numpy as np
+    fps = 4.0
+    n = 240                               # 60 s
+    times = np.arange(n) / fps
+    diff = np.full(n, 0.2, np.float32)    # mostly static
+    luma = np.full(n, 90.0, np.float32)
+    shots = [{"start": float(a), "end": float(a + 5)} for a in range(0, 60, 5)]
+    for k, sh in enumerate(shots):
+        if k % 2 == 0:                    # every other shot moves
+            sel = (times >= sh["start"]) & (times < sh["end"])
+            diff[sel] = 3.0 + k
+    luma[(times >= 20) & (times < 25)] = 3.0     # a black shot (moving)
+    diff[(times >= 20) & (times < 25)] = 9.0
+    out = first_cut.montage_windows((times, diff, luma), shots, 60.0, target=4.0)
+    assert out and out == sorted(out)
+    # never inside the black shot, never two windows in one shot
+    assert all(not (20 <= a < 25) for a, _b in out)
+    owners = [int(a // 5) for a, _b in out]
+    assert len(owners) == len(set(owners))
+    assert all(int(a // 5) % 2 == 0 for a, _b in out)
+
+
+def test_beats_are_the_speakers_own_words_and_land_apart(monkeypatch):
+    index = {"words": [{"w": w, "t0": t * 0.32, "t1": t * 0.32 + 0.3} for t, w in
+                       enumerate("we use a million times more power than "
+                                 "one millionth of the sun".split())],
+             "sentences": [{"id": "s1", "t0": 0, "t1": 12,
+                            "text": "we use a million times more power"}]}
+    by_id = {"s1": index["sentences"][0]}
+    spans = first_cut.beat_spans(index, by_id, [
+        {"id": "s1", "words": "a million times"},
+        {"id": "s1", "words": "a billion"},          # never said: dropped
+        {"id": "s9", "words": "power"}])             # unknown id: dropped
+    assert [t for _a, _b, t in spans] == ["a million times"]
+    assert first_cut._star("a million times") == "a *million* times"
+    assert first_cut._star("one millionth") == "one *millionth*"
+    assert first_cut._star("pretty magnificent") == "pretty *magnificent*"
+    nums = [t for _a, _b, t in first_cut.number_beats(index)]
+    assert "a million" in nums or "million times" in nums
+
+
+def test_a_beat_keeps_its_spoken_number():
+    index = {"words": [{"w": w, "t0": k * 0.3, "t1": k * 0.3 + 0.28} for k, w in
+                       enumerate("the engineer is 30 feet away".split())]}
+    row = {"id": "s1", "t0": 0, "t1": 2}
+    spans = first_cut.beat_spans(index, {"s1": row}, [{"id": "s1", "words": "30 feet"}])
+    assert [t for _a, _b, t in spans] == ["30 feet"]
+    assert first_cut._star("30 feet") == "*30* feet"
+    assert [t for _a, _b, t in first_cut.number_beats(index)] == ["30 feet"]
+
+
+def test_a_real_brief_gets_the_agent_after_the_first_cut():
+    tile = ("Record my website https://www.sparklenloop.com/ as a 20-second "
+            "vertical (9:16) demo: scroll the page from top to bottom at a "
+            "steady pace, then make it a polished showcase video.")
+    assert not first_cut.is_brief(tile)
+    assert not first_cut.is_brief("https://stoepandsite.co.za/")
+    assert not first_cut.is_brief("record a demo of https://stripe.com")
+    assert first_cut.is_brief(
+        "https://klosmo-store.com/ Create a premium fashion e-commerce "
+        "promotional video using https://klosmo-store.com. Navigate through "
+        "the homepage, open the designer brands section, explore selected "
+        "fashion collections, and end on a Discover KLOSMO call to action.")
+
+
+def test_a_song_is_not_speech_and_a_finished_piece_stays_whole():
+    garbage = {"words": [{"w": w, "t0": k, "t1": k + 0.5} for k, w in
+                         enumerate(["ʰʰʰʰʰʰʰʰ", "ლ", "ლ", "ʰʰʰ"] * 5)],
+               "perception": {"bpm": 83.4, "beats": [0.3, 1.0, 1.8]}}
+    assert not first_cut._speech(garbage)
+    assert first_cut._music_piece(garbage, 32.0)
+    sung = {"words": [{"w": "هنيئاً", "t0": k * 1.2, "t1": k * 1.2 + 1} for k in range(30)],
+            "perception": {"bpm": 169.9, "beats": []}}
+    assert first_cut._speech(sung) and first_cut._music_piece(sung, 39.0)
+    talk = {"words": [{"w": "word", "t0": k * 0.3, "t1": k * 0.3 + 0.25} for k in range(120)],
+            "perception": {"bpm": 140.9, "beats": []}}
+    assert first_cut._speech(talk) and not first_cut._music_piece(talk, 40.0)
+    assert not first_cut._music_piece({"words": [], "perception": {}}, 15.0)
+
+
+def test_the_first_shape_named_wins():
+    assert first_cut.url_hints("a 60 s 16:9 promo of https://osai.ie (a 9:16 "
+                               "version is optional)")["orientation"] == "landscape"
+    assert "orientation" not in first_cut.url_hints(
+        "a vertical (9:16) demo of https://x.io, not landscape")
+
+
+def test_a_long_slow_narration_over_noise_is_not_a_finished_piece():
+    vlog = {"words": [{"w": "word", "t0": k * 1.0, "t1": k * 1.0 + 0.3} for k in range(90)],
+            "perception": {"bpm": 120.0, "beats": [1.0, 1.5]}}
+    assert first_cut._speech(vlog) and not first_cut._music_piece(vlog, 100.0)
