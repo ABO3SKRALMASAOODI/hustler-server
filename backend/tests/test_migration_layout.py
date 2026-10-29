@@ -26,8 +26,9 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
     numbers = {int(name.split("_", 1)[0]) for name in names}
 
     # 040 is reserved for the Claude trial budget (branch
-    # claude/claude-trial-1025, on hold); 041 is the outcome loop.
-    assert numbers == set(range(40)) | {41}
+    # claude/claude-trial-1025, on hold); 041 is the outcome loop; 042 adds
+    # the render box provider to the ownership ledger.
+    assert numbers == set(range(40)) | {41, 42}
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names

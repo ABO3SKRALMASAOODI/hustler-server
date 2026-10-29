@@ -1,0 +1,35 @@
+# Valmera render box: TLS (Let's Encrypt, TLS-ALPN on 443; port 80 stays
+# closed) in front of admission (127.0.0.1:8090) and provisioning (:8091).
+# /admin/* is localhost-only and never proxied.
+{
+	admin localhost:2019
+}
+
+13-140-241-231.sslip.io {
+	encode zstd gzip
+	request_body {
+		max_size 16MB
+	}
+	handle /admin/* {
+		respond "not found" 404
+	}
+	handle /provision/* {
+		reverse_proxy 127.0.0.1:8091
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8090 {
+			flush_interval -1
+			transport http {
+				read_timeout 7h
+				write_timeout 7h
+				dial_timeout 5s
+			}
+		}
+	}
+	log {
+		output file /var/log/caddy/valmera-access.log {
+			roll_size 50MiB
+			roll_keep 5
+		}
+	}
+}
