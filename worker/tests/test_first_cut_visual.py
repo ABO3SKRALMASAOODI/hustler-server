@@ -491,3 +491,35 @@ def test_screen_captions_keep_the_c2_look():
     assert got == style and n == 2
     got, n = fcv.caption_style(style, talking=True, screen=False, vertical=True)
     assert got["motion_look"] == "serif" and got["single_line"] and n == 3
+
+
+def test_the_band_crop_spans_the_whole_source_before_any_cut(monkeypatch):
+    """Written before the trim, the band crop's zoom covers every source
+    second, so a later request that restores footage keeps it (trial phone:
+    bars on the first frame and the last 0.5 s)."""
+    order = []
+
+    def deband(ctx, steps, started):
+        order.append(("deband", [list(k) for k in ctx.edl["keep"]]))
+        return "EDL v2 ok", [0.15, 0.85]
+    monkeypatch.setattr(first_cut, "deband", deband)
+    ctx = _EdlCtx(_talk_index())
+    ctx.first_cut_q1 = True
+
+    def execute(c, name, args):
+        order.append((name, None))
+        c.versions_written.append(1)
+        if name == "keep_segments":
+            c.edl["keep"] = args["segments"]
+        return "EDL v2 ok"
+    monkeypatch.setattr(agent_tools, "execute", execute)
+
+    def trim(c, worker_db, spend):
+        c.first_cut_hook = "The *sun* gives"
+        return 5.0, 30.0, "rules"
+    monkeypatch.setattr(first_cut, "trim_range", trim)
+    first_cut.video_chain(ctx, None, _clock(), {"usd": 0})
+    names = [n for n, _k in order]
+    assert names.index("deband") < names.index("keep_segments")
+    assert order[names.index("deband")][1] == [[0.0, ctx.duration]]
+    assert names.count("deband") == 1

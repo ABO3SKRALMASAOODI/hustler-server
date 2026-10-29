@@ -423,9 +423,13 @@ def muted_tail(ctx, steps, started, run):
         tail_at = prog - (new_e - mute_from)
         # the run-on words are dropped from the captions once they exist
         # (judges: a dangling "And" captioned in the tail)
+        # scoped from the tail to well past the end: a later request that
+        # restores earlier footage shifts the tail later (trial vfr: the
+        # "And" came back), never earlier than the cut it was made on
         ctx.first_cut_tail_words = [
             {"from": str(w["w"]).strip(), "to": "",
-             "start": round(max(0.0, tail_at - 0.3), 2), "end": round(prog, 2)}
+             "start": round(max(0.0, tail_at - 0.3), 2),
+             "end": round(prog + 600.0, 2)}
             for w in runon if str(w.get("w") or "").strip()]
     except Exception:
         pass

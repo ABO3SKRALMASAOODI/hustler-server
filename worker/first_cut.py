@@ -1336,6 +1336,19 @@ def video_chain(ctx, worker_db, started, spend):
     q1 = bool(getattr(ctx, "first_cut_q1", False))
     ctx.first_cut_broll = None
     ctx.first_cut_cards = []
+    early_bands = None
+    if q1 and _speech(ctx.index) and _orientation(ctx.index) == "vertical" \
+            and not _music_piece(ctx.index, duration, robust=True):
+        f0 = _faces(ctx.index)
+        if f0 and f0["share"] >= 0.5:
+            # Q1: the band crop is written while the program is the whole
+            # source, so its zoom spans every second of it; written after
+            # the trim, a trial request that restored earlier footage fell
+            # outside it and showed the bars (judges: "a small, banded
+            # layout on the first frame and the last 0.5 s", twice)
+            res, early_bands = deband(ctx, steps, started)
+            if not _ok(res):
+                early_bands = None
     if _music_piece(ctx.index, duration, robust=q1) and duration <= 120:
         # a finished piece over a song: whole, unchanged in time, no title
         # or captions over its own design; only a non-vertical frame is
@@ -1454,8 +1467,10 @@ def video_chain(ctx, worker_db, started, spend):
         # 9:16 is mastered by default; a kept landscape/screen shape is not
         # (C2: the screen recording measured -17.1 LUFS; references -14)
         _run(ctx, steps, "set_master_loudness", {"enabled": True}, started)
-    bands = None
-    if vertical_out and talking:
+    bands = early_bands
+    if early_bands:
+        applied.append("the source's bars cropped")
+    elif vertical_out and talking:
         res, bands = deband(ctx, steps, started)
         if not _ok(res):
             bands = None
