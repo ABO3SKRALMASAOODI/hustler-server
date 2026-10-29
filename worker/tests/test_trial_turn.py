@@ -348,15 +348,18 @@ def test_a_screen_recording_gets_a_reading_zoom_on_its_text(monkeypatch):
     (name, args), = calls
     assert name == "add_zoom_path"
     keys = args["keyframes"]
-    assert keys[0]["strength"] == 0.0 and keys[0]["t"] < 2.9   # eases in
-    framed = [k for k in keys if k.get("rect")]
-    assert framed and all(0.0 < k["strength"] <= trial_turn.SCREEN_MAX_STRENGTH
-                          for k in framed)
+    # eases in from the untouched frame, already aimed at the first block
+    assert keys[0]["strength"] == 0.0 and keys[0]["t"] < 2.9
+    assert keys[0]["rect"] == keys[1]["rect"]
+    framed = keys[1:]
+    # the column (0.62 wide) fills the frame: ~1.4-1.5x, readable
+    assert all(0.35 <= k["strength"] <= trial_turn.SCREEN_MAX_STRENGTH
+               for k in framed)
     for k in framed:      # the column, at the output's own aspect
         x0, y0, x1, y1 = k["rect"]
         assert x0 <= 0.27 and x1 >= 0.89
         assert abs((x1 - x0) / (y1 - y0) - 1280 / 800) < 0.05
-    assert keys[-1]["t"] >= 18.0 - 0.06                          # to the end
+    assert keys[-1]["t"] == 18.0                                 # to the end
     # a program that already has its own framing is left alone
     calls.clear()
     edl2 = dict(edl, frame={"ratio": "9:16"})

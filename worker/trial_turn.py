@@ -382,6 +382,40 @@ def lift_static(ctx, steps, most=None):
 
 SCREEN_WINDOW_S = 4.0      # the reading zoom re-aims about this often
 SCREEN_MAX_STRENGTH = 0.8  # at most 1.8x on a screen capture
+SCREEN_MIN_STRENGTH = 0.2  # a smaller push does not make text readable
+
+
+def _text_column(boxes):
+    """(x0, x1) of the column the text mass sits in: boxes around the
+    area-weighted median centre (a docs page's left navigation is another
+    column and is left out), its 10th-90th percentile edges."""
+    rows = []
+    for b in boxes:
+        try:
+            bx0, by0, bx1, by1 = (float(v) for v in b[:4])
+        except (TypeError, ValueError):
+            continue
+        area = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
+        if area > 0:
+            rows.append(((bx0 + bx1) / 2.0, area, bx0, bx1))
+    if len(rows) < 8:
+        return None
+    rows.sort()
+    half, acc, mid = sum(r[1] for r in rows) / 2.0, 0.0, rows[0][0]
+    for c, a, _l, _r in rows:
+        acc += a
+        if acc >= half:
+            mid = c
+            break
+    main = [r for r in rows if abs(r[0] - mid) <= 0.3]
+    if len(main) < 5:
+        return None
+    lefts = sorted(r[2] for r in main)
+    rights = sorted(r[3] for r in main)
+    x0 = lefts[int(0.15 * len(lefts))]
+    x1 = rights[max(0, int(0.85 * len(rights)) - 1)]
+    x0, x1 = max(0.0, x0 - 0.02), min(1.0, x1 + 0.02)
+    return (x0, x1) if x1 - x0 >= 0.2 else None
 
 
 def _reading_rect(boxes, col, aspect):
@@ -429,10 +463,10 @@ def lift_screen(ctx, steps):
     boxes = [b for smp in samples for b in smp["text"] if len(b) >= 4]
     if len(boxes) < 8:
         return False
-    n = len(boxes)
-    x0 = sorted(float(b[0]) for b in boxes)[int(0.1 * n)]
-    x1 = sorted(float(b[2]) for b in boxes)[int(0.9 * n) - 1]
-    x0, x1 = max(0.0, x0 - 0.02), min(1.0, x1 + 0.02)
+    col = _text_column(boxes)
+    if col is None:
+        return False
+    x0, x1 = col
     video = (ctx.index or {}).get("video") or {}
     try:
         aspect = float(video["width"]) / float(video["height"])
@@ -445,7 +479,7 @@ def lift_screen(ctx, steps):
     hook_end = max([float(m.get("end") or 0) for m in edl.get("motion") or []
                     if m.get("template") == "hook_title"] or [0.0])
     t, keys = max(0.6, min(hook_end, 2.0)), []
-    keys.append({"t": round(t - 0.6, 2), "strength": 0.0})
+    entry_t = round(t - 0.6, 2)
     while t < prog - 0.8:
         src = tl.out_to_src(min(t + SCREEN_WINDOW_S / 2.0, prog - 0.1))
         if src is None:
@@ -455,23 +489,34 @@ def lift_screen(ctx, steps):
         rect = _reading_rect(smp["text"], (x0, x1), aspect)
         if rect:
             keys.append({"t": round(t, 2), "rect": rect})
-            keys.append({"t": round(min(t + SCREEN_WINDOW_S - 0.7, prog - 0.05), 2),
+            keys.append({"t": round(min(t + SCREEN_WINDOW_S - 0.7, prog), 2),
                          "rect": rect})
         t += SCREEN_WINDOW_S
-    if len(keys) < 3:
+    if len(keys) < 2:
         return False
-    if keys[-1]["t"] < prog - 0.05:
+    # the entry eases in from the untouched frame, already aimed at the
+    # first block (a strength-0 keyframe still needs an aim)
+    keys.insert(0, {"t": entry_t, "rect": keys[0]["rect"], "strength": 0.0})
+    if keys[-1]["t"] < prog - 0.01:
+        # held to the last frame: no step back out before the end card
         last = dict(keys[-1])
-        last["t"] = round(prog - 0.05, 2)
+        last["t"] = round(prog, 2)
         keys.append(last)
     # the solver fits each rect; hold it inside the screen's resolution
     import agent_tools
     for k in keys:
-        if k.get("rect"):
+        if k.get("rect") and k.get("strength") != 0.0:
             err, fit, _cx, _cy, _r = agent_tools._solve_zoom_rect(k["rect"])
             if err:
                 return False
-            k["strength"] = round(min(float(fit or 0.0), SCREEN_MAX_STRENGTH), 3)
+            # the column fills the width (the solver's own fit keeps a
+            # margin that left a 1.2x push: not readable)
+            r0, _r1, r2, _r3 = k["rect"]
+            fill = 0.94 / max(0.05, float(r2) - float(r0)) - 1.0
+            k["strength"] = round(min(max(float(fit or 0.0), fill),
+                                      SCREEN_MAX_STRENGTH), 3)
+    if max(float(k.get("strength") or 0) for k in keys) < SCREEN_MIN_STRENGTH:
+        return False             # the text already fills the frame
     if steps.run("add_zoom_path", {
             "keyframes": keys, "ease": "cubic_in_out",
             "purpose": "a reading zoom that frames the text being shown, so "
