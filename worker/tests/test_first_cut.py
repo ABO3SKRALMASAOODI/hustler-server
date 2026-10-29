@@ -12,7 +12,7 @@ def _index(duration, width=1920, height=1080, words=40):
     sentences, t = [], 0.0
     for i in range(int(duration // 5)):
         sentences.append({"id": f"s{i}", "t0": t, "t1": t + 4.5,
-                          "text": "word " * (12 if 300 < t < 345 else 6)})
+                          "text": "Word " + "word " * (10 if 300 < t < 345 else 4) + "end."})
         t += 5.0
     return {"video": {"duration": duration, "width": width, "height": height},
             "words": [{"w": "x", "s": i, "e": i + 0.3} for i in range(words)],
@@ -49,11 +49,16 @@ def test_short_landscape_talk_gets_the_whole_clean_chain(monkeypatch):
     steps, applied, picked = first_cut.video_chain(ctx, None, _clock(), {"usd": 0})
     assert [c[0] for c in calls] == [
         "cut_silences", "remove_filler_words", "auto_reframe",
-        "apply_format_pack", "add_captions"]
+        "add_motion_graphic", "add_captions"]
+    assert calls[0][1] == {"min_silence_s": first_cut.PAUSE_CUT_S, "padding_s": 0.1}
     assert calls[2][1] == {"ratio": "9:16"}
-    assert calls[3][1] == {"pack": "auto", "intensity": "calm"}
-    assert picked is None
+    hook = calls[3][1]
+    assert hook["template"] == "hook_title" and hook["start"] == 0.0
+    assert hook["params"]["font"] == "Anton" and "*" in hook["params"]["text"]
+    assert calls[4][1]["max_words_per_caption"] == 3
+    assert picked["how"] == "rules"
     assert "captions" in applied and "reframed to 9:16" in applied
+    assert "a hook title" in applied
 
 
 def test_vertical_phone_video_without_speech_skips_speech_and_reframe(
@@ -61,7 +66,19 @@ def test_vertical_phone_video_without_speech_skips_speech_and_reframe(
     ctx = Ctx(_index(40, width=1080, height=1920, words=0))
     calls = _record(monkeypatch, ctx)
     first_cut.video_chain(ctx, None, _clock(), {"usd": 0})
-    assert [c[0] for c in calls] == ["apply_format_pack"]
+    assert [c[0] for c in calls] == []
+
+
+def test_a_screen_recording_keeps_its_shape(monkeypatch):
+    index = _index(50)
+    index["spatial"] = {"samples": [{"t": i, "faces": [], "dense_ui": True,
+                                     "text": []} for i in range(10)]}
+    ctx = Ctx(index)
+    calls = _record(monkeypatch, ctx)
+    _steps, applied, _p = first_cut.video_chain(ctx, None, _clock(), {"usd": 0})
+    assert "auto_reframe" not in [c[0] for c in calls]
+    assert any("own shape" in a for a in applied)
+    assert first_cut._summary(applied, 30) .startswith("a 30-second version")
 
 
 def test_long_source_cuts_to_one_scouted_story_first(monkeypatch):
@@ -150,16 +167,29 @@ def test_a_late_chain_skips_edits_and_keeps_time_for_the_render(monkeypatch):
     assert all(step.get("skipped") == "time" for step in steps)
 
 
-def test_url_records_then_showcases_the_capture(monkeypatch):
+def test_url_records_a_tour_then_showcases_it_under_the_site_title(monkeypatch):
     ctx = Ctx({"video": {"duration": 0}})
     ctx.index = {}
-    calls = _record(monkeypatch, ctx)
+    calls = []
+
+    def execute(c, name, args):
+        calls.append((name, args))
+        if name == "record_website_demo":
+            c.web_recordings.append({
+                "storage_key": "web/9/capture.mp4",
+                "page_title": "Acme | Payments infrastructure for the internet",
+                "h1": "Financial infrastructure to grow your revenue"})
+        return "EDL v2 ok"
+    monkeypatch.setattr(agent_tools, "execute", execute)
     steps, applied = first_cut.url_chain(ctx, None, "https://example.com/",
                                          _clock())
-    assert [c[0] for c in calls] == ["record_website_demo", "showcase_demo"]
+    assert [c[0] for c in calls] == ["record_website_demo", "showcase_demo",
+                                     "add_motion_graphic"]
     assert calls[0][1]["orientation"] == "portrait"
-    assert calls[0][1]["steps"] == first_cut.DEFAULT_SCROLL_STEPS
+    assert calls[0][1]["steps"] == first_cut.TOUR_STEPS
     assert calls[1][1]["asset_key"] == "web/9/capture.mp4"
+    assert calls[2][1]["params"]["text"] == (
+        "*Acme* / Financial infrastructure to grow your revenue")
 
 
 def test_failed_steps_are_not_claimed(monkeypatch):
@@ -187,6 +217,8 @@ def test_the_capture_key_is_read_from_the_tool_reply(monkeypatch):
     first_cut.url_chain(ctx, None, "https://valmera.io/", _clock())
     assert calls[1] == ("showcase_demo", {"asset_key": "fetched/4695/40a996fb2036.mp4",
                                           "zoom_strength": 0.4})
+    # the site's own name from its host when the capture carries no title
+    assert calls[2][1]["params"]["text"] == "*Valmera*"
 
 
 def test_summary_says_what_was_done():
@@ -318,3 +350,117 @@ def test_a_graphic_in_the_corner_mark_is_removed_and_rerendered(monkeypatch):
     assert ("remove_typeset", {"ids": ["ts1"]}) in calls
     assert ("remove_motion_graphic", {"id": "mg2"}) in calls
     assert first_cut._clear_corner_mark(ctx, [], "Preview v6 rendered, clean") is False
+
+
+# ---- craft defaults (REFERENCE_PLAYBOOK.md, C1 29 Oct 2026) ----------------
+
+def test_the_hook_is_faithful_short_and_accented():
+    index = {"words": [{"w": "a"}, {"w": "million"}, {"w": "times"}]}
+    assert first_cut.clean_hook("The *real* cost of AI") == "The *real* cost of AI"
+    assert first_cut.clean_hook("Growing the economy") == "Growing the *economy*"
+    assert first_cut.clean_hook("10x the economy", index) is None    # never said
+    assert first_cut.clean_hook("one", index) is None
+    assert first_cut.clean_hook("So uh the *big* tour") == "So the *big* tour"
+    assert first_cut.clean_hook("a b c d e f g h") is None
+    assert first_cut._opening_hook([{"text": "And so we built the thing."}]) \
+        == "we built the *thing*"
+
+
+def test_the_opening_skips_mic_checks_and_fragments():
+    rows = [{"id": "s1", "t0": 2.1, "t1": 4.0, "text": "Okay, is this recording?"},
+            {"id": "s2", "t0": 4.5, "t1": 5.5, "text": "Okay, cool."},
+            {"id": "s3", "t0": 7.9, "t1": 11.5, "text": "This is the Python tutorial."},
+            {"id": "s4", "t0": 12.0, "t1": 14.0, "text": "Thanks for watching."}]
+    first, last = first_cut._trim_pick(rows, 15.0)
+    assert first["id"] == "s3" and last["id"] == "s4"
+    frag = [{"id": "s1", "t0": 0.0, "t1": 2.8, "text": "economy by a factor of ten."},
+            {"id": "s2", "t0": 3.9, "t1": 6.8, "text": "So since we're small"}]
+    first, last = first_cut._trim_pick(frag, 6.9)
+    assert first["id"] == "s2" and last["id"] == "s2"
+
+
+class _EdlCtx(Ctx):
+    def __init__(self, index, keep):
+        super().__init__(index)
+        self.keep = keep
+
+    def latest_edl(self):
+        return {"json": {"keep": self.keep}}
+
+
+def test_the_ends_start_on_a_real_word_and_run_on_live(monkeypatch):
+    words = [{"w": "And", "t0": 1.0, "t1": 1.2}, {"w": "this", "t0": 1.25, "t1": 1.5},
+             {"w": "works.", "t0": 1.55, "t1": 2.0}, {"w": "Last", "t0": 8.0, "t1": 8.4},
+             {"w": "line.", "t0": 8.45, "t1": 9.0}, {"w": "Next", "t0": 9.4, "t1": 9.8}]
+    ctx = _EdlCtx({"video": {"duration": 12.0}, "words": words},
+                  [[0.5, 2.1], [7.9, 9.1]])
+    calls = _record(monkeypatch, ctx)
+    first_cut.shape_ends(ctx, [], _clock())
+    name, args = calls[0]
+    assert name == "keep_segments" and args["snap_to_words"] is False
+    (s0, _e0), (_s1, e1) = args["segments"]
+    assert s0 == 1.21                              # on "this", not "And"
+    assert e1 == round(9.4 - first_cut.TAIL_NEXT_GAP_S, 3)   # live, short of "Next"
+    ctx2 = _EdlCtx({"video": {"duration": 9.2}, "words": words[1:5]},
+                   [[1.21, 2.1], [7.9, 9.15]])
+    calls = _record(monkeypatch, ctx2)
+    first_cut.shape_ends(ctx2, [], _clock())
+    assert calls[0][1]["segments"][-1][1] == 9.2   # the source ends first
+
+
+def _frames(top=0, bottom=0, h=100, w=60, n=10, still=False):
+    import numpy as np
+    rng = np.random.default_rng(3)
+    out = []
+    for k in range(n):
+        f = np.full((h, w), 20, np.uint8)
+        pic = rng.integers(40, 220, (h - top - bottom, w), dtype=np.uint8)
+        if still:
+            pic = np.full_like(pic, 120)
+        f[top:h - bottom] = pic
+        if top:
+            f[top // 2] = 200                       # a static line inside the bar
+        out.append(f)
+    return out
+
+
+def test_static_bands_are_found_only_around_a_live_picture():
+    assert first_cut.static_bands(_frames(top=14, bottom=16)) == [0.14, 0.84]
+    assert first_cut.static_bands(_frames()) is None              # no bars
+    assert first_cut.static_bands(_frames(top=14)) is None        # one bar only
+    assert first_cut.static_bands(_frames(top=14, bottom=16, still=True)) is None
+    assert first_cut.static_bands(_frames(top=45, bottom=45)) is None  # a strip
+
+
+def test_captions_and_hook_sit_under_the_face():
+    faces = {"bottom": 0.58, "width": 0.4, "share": 0.9}
+    assert first_cut.chest_y(faces) == 0.68
+    assert first_cut.chest_y(faces, [0.15, 0.85]) == 0.714          # after debanding
+    assert first_cut.chest_y({"bottom": 0.3, "width": .2, "share": 1}) == 0.60
+    assert first_cut.chest_y(None) is None
+
+
+def test_the_spoken_opening_becomes_a_poster_line():
+    words = [{"w": w, "t0": 0.3 * k, "t1": 0.3 * k + 0.25} for k, w in enumerate(
+        "So since we're a trillionth of the sun's energy, if you".split())]
+    ctx = _EdlCtx({"video": {"duration": 30.0}, "words": words}, [[0.0, 20.0]])
+    text, end = first_cut.spoken_opening(ctx)
+    assert text == "since we're a *trillionth* of the sun's energy"
+    assert 1.2 <= end <= 3.2
+
+
+def test_without_a_clause_end_the_poster_line_is_six_content_words():
+    words = [{"w": w, "t0": 0.3 * k, "t1": 0.3 * k + 0.25} for k, w in enumerate(
+        "And we built the biggest rocket in the history of the world today".split())]
+    ctx = _EdlCtx({"video": {"duration": 30.0}, "words": words}, [[0.0, 20.0]])
+    text, _end = first_cut.spoken_opening(ctx)
+    assert text == "we built the *biggest* rocket"
+
+
+def test_an_unfinished_last_line_walks_back_to_a_complete_one():
+    rows = [{"id": "s1", "t0": 0, "t1": 5, "text": "This is the opening line here."},
+            {"id": "s2", "t0": 5, "t1": 9, "text": "And I do enjoy your unrelenting optimism."},
+            {"id": "s3", "t0": 9, "t1": 10, "text": "Yeah, exactly."},
+            {"id": "s4", "t0": 10, "t1": 13, "text": "to me when you've roasted beyond so"}]
+    assert first_cut._complete_end(rows, rows[0], rows[3])["id"] == "s2"
+    assert first_cut._complete_end(rows, rows[3], rows[3])["id"] == "s4"

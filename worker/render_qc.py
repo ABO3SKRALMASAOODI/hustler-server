@@ -1122,6 +1122,99 @@ def orphans(changes, plan_):
     return out
 
 
+class SourceChanges:
+    """Which whole-picture changes of the render the FOOTAGE itself carries.
+
+    A jump or orphan off the edit's cuts is the edit's fault only when the
+    source does not change there too. Handheld footage whips, a website
+    capture loads its next page, a frames-on-change screen recording steps to
+    its next frame, and a source's own camera cut the index missed: each is
+    a global change with no cut of the edit under it. Re-cutting cannot
+    remove any of them, and reporting them as "framing pops" sent the trial
+    agent into repair loops (bake-off 26 Oct 2026: four add/remove-zoom
+    cycles and a 570 s turn on a screen recording; "framing pop" on a
+    handheld vlog). So a change is the source's own when:
+      * it falls inside a spliced insert or a cover cutaway (that clip's own
+        picture: a capture's page change, B-roll motion), clear of the
+        window's edges; or
+      * the source frames under it (decoded at the frame-pass size) change
+        globally within a frame or two of the mapped source second.
+    Only main-footage frames are decoded; a check that runs out of budget
+    keeps every row (unfiltered is the conservative answer)."""
+
+    EDGE_F = 3              # frames from an insert edge still the edit's join
+    REACH_S = 0.09          # source seconds either side of the mapped frame
+    SHARE = 0.5             # of GLOBAL_SHARE / GLOBAL_LEVEL: the source's
+                            # change is read on the WHOLE source frame, the
+                            # render's on a crop of it
+
+    def __init__(self, plan_, src_path, deadline):
+        self.plan, self.src, self.deadline = plan_, src_path, deadline
+        self.fps = float(plan_.get("fps") or 30.0)
+        self.cache = {}
+
+    def _inside_other(self, t):
+        pad = self.EDGE_F / self.fps
+        return any(a + pad < t < b - pad
+                   for a, b in self.plan.get("others") or [])
+
+    def _source_jumps_at(self, src_t):
+        key = round(src_t, 2)
+        if key in self.cache:
+            return self.cache[key]
+        hit = False
+        if self.src and os.path.exists(self.src) and \
+                time.monotonic() < self.deadline - 2.0:
+            import numpy as np
+            sw, sh = self.plan.get("src_wh") or [None, None]
+            w = DIFF_W
+            h = _tiny_h(int(sw or 16), int(sh or 9), w)
+            cmd = ["ffmpeg", "-v", "error", "-nostdin",
+                   "-ss", f"{max(0.0, src_t - self.REACH_S):.3f}", "-i", self.src,
+                   "-t", f"{2 * self.REACH_S + 0.01:.3f}",
+                   "-an", "-sn", "-dn", "-map", "0:v:0",
+                   "-vf", f"scale={w}:{h}:flags=area,format=gray",
+                   "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+            prev = None
+            for f in _stream(cmd, w, h, self.deadline):
+                f = f.astype(np.int16)
+                if prev is not None:
+                    d = np.abs(f - prev)
+                    if float(d.mean()) >= GLOBAL_LEVEL * self.SHARE and \
+                            float((d > PIXEL_STEP).mean()) >= GLOBAL_SHARE * self.SHARE:
+                        hit = True
+                        break
+                prev = f
+        self.cache[key] = hit
+        return hit
+
+    def owned(self, frames):
+        """True when every frame in ``frames`` (programme frame numbers)
+        changes because the footage under it does."""
+        src_of = self.plan.get("src_of")
+        for fr in frames:
+            t = float(fr) / self.fps
+            if self._inside_other(t):
+                continue
+            src = src_of(t) if callable(src_of) else None
+            if src is None:
+                return False
+            if not self._source_jumps_at(float(src)):
+                return False
+        return True
+
+    def split(self, rows, frames_of, most=12):
+        """(the edit's rows, the source's own rows); at most ``most`` rows
+        are probed, the rest stay the edit's."""
+        mine, theirs = [], []
+        for k, row in enumerate(rows or []):
+            if k < most and self.owned(frames_of(row)):
+                theirs.append(row)
+            else:
+                mine.append(row)
+        return mine, theirs
+
+
 def reframes_off_cut(plan_):
     """Crop switches the edit places off the picture's cuts (plan only):
     [(kind, frame, cut frame or None, source second, what)] — 'off' when a
@@ -2593,7 +2686,11 @@ def _stall_cause(kind, t0, t1, plan_):
         return ("join", "the programme's last frame repeats into the card's "
                 "start — a gap at the renderer's join; report it")
     return ("footage", "the footage itself does not move there (a static "
-            "shot or duplicated source frames) — end on a moving moment")
+            "shot, a still web page or duplicated source frames) — end on a "
+            "moving moment, or, when the source has none (a screen recording, "
+            "a locked-off shot), ONE slow push over the last seconds: "
+            f"add_zoom(start={max(0.0, prog - 2.0):.2f}, end={prog:.2f}, "
+            "mode='push_in', strength=0.08). Do not trim or re-cut for it")
 
 
 def boundary_stall(path, plan_, deadline):
@@ -2941,6 +3038,16 @@ def check(path, plan_, budget_s=BUDGET_S, src_path=None):
             changes = frame_changes(path, prog, W, H, deadline, lumas=lumas)
             res["jumps"] = [list(j) for j in jumps(changes, plan_)]
             res["orphans"] = [list(o) for o in orphans(changes, plan_)]
+            if res["jumps"] or res["orphans"]:
+                try:
+                    owned = SourceChanges(plan_, src_path, deadline)
+                    res["jumps"], res["source_jumps"] = owned.split(
+                        res["jumps"], lambda r: [r[1]])
+                    res["orphans"], src_orph = owned.split(
+                        res["orphans"], lambda r: [r[0], r[0] + r[1]])
+                    res["source_jumps"] += src_orph
+                except Exception as exc:  # noqa: BLE001 — judged unfiltered
+                    res["skipped"].append(f"source jumps: {str(exc)[:80]}")
             res["layout"] = [list(g) for g in layout_glitches(lumas, plan_)]
         except Exception as exc:
             res["skipped"].append(f"jumps: {str(exc)[:80]}")

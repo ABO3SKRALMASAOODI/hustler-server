@@ -1400,10 +1400,15 @@ CLAUDE_PAID_FIRST_REQUESTS = (
     "talk, read_skill('first-requests') before the first edit: it gives the "
     "request's default chain, its done bar and the one self-review. Deliver "
     "one finished, watchable result with sensible defaults and say what you "
-    "chose; ask only when the request cannot start. A website demo is "
-    "record_website_demo (clicks on visible buttons) then showcase_demo, "
-    "never a passive scroll. No music unless the user asks; a source with "
-    "no sound stays silent and is still delivered.")
+    "chose; ask only when the request cannot start. The craft bar: speech "
+    "at 0.0 s on a complete line with a poster hook title over the first "
+    "2-3 s; a complete last sentence with 0.3-0.6 s of live picture after "
+    "it; cut_silences(min_silence_s=0.35) and remove_filler_words on "
+    "speech; a 9:16 face crop for a talking head; captions of 1-3 words at "
+    "chest height. A website demo is record_website_demo (clicks on visible "
+    "buttons, or {do:'tour', by:2} for a site you have not seen) then "
+    "showcase_demo, never a passive scroll. No music unless the user asks; "
+    "a source with no sound stays silent and is still delivered.")
 
 
 def _build_messages(ctx, worker_db, user_message, attachment_note="",
@@ -2452,7 +2457,7 @@ _PREVIEW_CHECKPOINT_FIELDS = (
     "last_preview", "last_visual_critic", "last_story_review",
     "last_audio_review", "last_audio_qc_findings",
     "last_picture_qc_findings", "last_taste",
-    "last_taste_version", "last_taste_advisory",
+    "last_taste_version", "last_taste_advisory", "pq_seen",
 )
 
 

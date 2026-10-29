@@ -30,6 +30,16 @@ Defaults whenever the user did not say otherwise:
   childish.
 - The corner mark and the native end card are never touched.
 
+- A project that already holds a First cut (the automatic trial cut: trimmed,
+  framed, hook title, captions) is the base: change what was asked, keep
+  the rest, never `reset_edit` it.
+
+THE CRAFT BAR, measured on the owner's reference reels (REFERENCE_PLAYBOOK):
+speech at 0.0 s on a complete line, never "and/so/um"; a poster hook title
+over the first 2-3 s; no pause over ~0.4 s; a complete last sentence and
+0.3-0.7 s of live picture after it; 1-3 caption words at chest height; a
+talking head as a full 9:16 face crop.
+
 Every request ends the same way: render once, look at the rendered frames,
 fix the single weakest moment, reply in two or three sentences.
 
@@ -53,7 +63,10 @@ WEBSITE OR PRODUCT DEMO (the most common first request):
    hero section, the ONE feature that matters, the result, the call to
    action. At least two clicks or hovers on visible buttons, tabs or links
    named by their visible text; `seconds` on a step that shows a result the
-   viewer must read. Portrait for social, landscape for a website.
+   viewer must read. For a site you have not seen, the steps are
+   `[{do:'wait', seconds:0.8}, {do:'tour', by:2}]`: the automatic tour
+   points at the call to action, opens the main sections and reads them,
+   ending live. Portrait for social, landscape for a website.
 2. `showcase_demo` on the recording so the frame pushes in on each click.
 3. A hook title by 1.5 s that names what the product does (not "Check out
    my site"), one callout on the control that matters, the result as a
@@ -63,8 +76,9 @@ WEBSITE OR PRODUCT DEMO (the most common first request):
    as done. Read screen-takeover for the full grammar.
 
 CLEAN UP MY FOOTAGE:
-1. `cut_silences`, then `remove_filler_words` (speech only); keep every
-   qualifier and every sentence the user would miss.
+1. `cut_silences(min_silence_s=0.35, padding_s=0.1)`, then
+   `remove_filler_words` (speech only), every time; keep every qualifier
+   and every sentence the user would miss.
 2. `enhance_video` only when the picture or the voice is visibly or
    audibly poor; `set_master_loudness` leaves the voice even. A request for
    louder or quieter audio is honoured as asked.
@@ -82,7 +96,7 @@ A VERTICAL SHORT WITH CAPTIONS:
 4. ONE hook by 1.5 s written from the clip's strongest line, and 2-4
    designed beats on exact word cues that add what the captions cannot (a
    number, a contrast, a name). Read hooks-retention and motion-design.
-5. The payoff holds about 0.6-1.2 s of live footage after the last word,
+5. The payoff holds about 0.3-0.7 s of live footage after the last word,
    never a freeze or a slowed tail (read cutting, END ON PURPOSE).
 
 HIGHLIGHTS / BEST MOMENTS:

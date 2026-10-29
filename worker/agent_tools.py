@@ -8193,6 +8193,23 @@ def _spatial_face_points(sidecar, windows):
     return points, len(points) / max(1, len(samples))
 
 
+# A talking head: one face, in most kept samples, at least this wide (share
+# of the source width). The detail heuristic (CROP_DETAIL_KEEP_MIN) exists
+# for screens, games and wide compositions; on a speaker it fitted the whole
+# room over blurred bands and left the face small (bake-off 26 Oct: "16:9
+# talking heads become small blurred-band cards"). Every vertical talking
+# head in the owner's references is a full-bleed face crop.
+TALKING_FACE_MIN_W = 0.07
+TALKING_FACE_MIN_COVERAGE = 0.5
+
+
+def _talking_head(boxes, coverage):
+    if not boxes or float(coverage or 0) < TALKING_FACE_MIN_COVERAGE:
+        return False
+    widths = sorted(float(b[2]) - float(b[0]) for b in boxes)
+    return widths[len(widths) // 2] >= TALKING_FACE_MIN_W
+
+
 def _spatial_face_boxes(sidecar, windows):
     """Every single-face box the sidecar measured inside the windows."""
     boxes = []
@@ -9822,7 +9839,8 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
         # has low GLOBAL detail retention: the first shot must fit while the
         # second can crop. Returning a global pad here before building the
         # mixed track made the close-up stay tiny inside the wide-shot bars.
-        if mode == "auto":
+        if mode == "auto" and not _talking_head(
+                _spatial_face_boxes(sidecar, keep), spatial_coverage):
             keep_score = _kept(pt)
             if keep_score is not None and keep_score < CROP_DETAIL_KEEP_MIN:
                 return _fit_instead(
@@ -21457,7 +21475,9 @@ def _store_capture(ctx, url, got, kind_word):
                      "page_title": got.get("page_title"),
                      "demo_events": got.get("events") or []})
     ctx.web_recordings.append({"storage_key": key, "url": url,
-                               "events": got.get("events") or []})
+                               "events": got.get("events") or [],
+                               "page_title": got.get("page_title") or "",
+                               "h1": got.get("h1") or ""})
     return key, (got.get("page_title") or domain), None
 
 
@@ -21497,6 +21517,26 @@ def record_website(ctx, url, duration_s=None, orientation=None, scroll=True):
             "footage with add_overlay (fit='cover' for a full-frame "
             "cutaway while the speech continues). The capture is SILENT."
             + trouble)
+
+
+PQ_PERSIST_RENDERS = 3
+_PQ_NUM = re.compile(r"\d+(?:\.\d+)?")
+
+
+def _persisting_picture_findings(ctx, findings):
+    """(blocking findings, persisted findings). A picture-QC finding whose
+    kind (its text with every number masked) appeared on this many renders
+    of the request is the third time unchanged: it moves to the advisories."""
+    seen = getattr(ctx, "pq_seen", None)
+    if not isinstance(seen, dict):
+        seen = {}
+    keep, persisted = [], []
+    for line in findings or []:
+        key = _PQ_NUM.sub("#", str(line))[:90]
+        seen[key] = int(seen.get(key, 0)) + 1
+        (persisted if seen[key] >= PQ_PERSIST_RENDERS else keep).append(line)
+    ctx.pq_seen = seen
+    return keep, persisted
 
 
 def record_website_demo(ctx, url, steps, orientation=None):
@@ -21732,7 +21772,9 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
     # Positioned clicks drive a TRAVELLING zoom. Positionless clicks never
     # drive a zoom: timing is not spatial evidence, and a center punch can
     # magnify empty UI while the actual interaction sits at an edge.
-    clicks = [e for e in events if e.get("kind") == "click"
+    # A hover is a pointed-at target too (the automatic tour points at a
+    # call to action it never submits): it gets the same push-in.
+    clicks = [e for e in events if e.get("kind") in ("click", "hover")
               and "x" in e and "y" in e]
     blind_clicks = [e for e in events if e.get("kind") == "click"
                     and not ("x" in e and "y" in e)]
@@ -23402,6 +23444,20 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             # each one or keeps it deliberately and says why.
             pq = result.get("picture_qc") or {}
             pqf = pq.get("findings") or []
+            # A finding that survives repair after repair is the footage's
+            # own, or a measurement the edit cannot move: after
+            # PQ_PERSIST_RENDERS renders it is kept as an advisory, so a
+            # request can finish instead of looping on it (bake-off 26 Oct:
+            # four add/remove-zoom cycles on one 'stall', a 570 s turn).
+            pqf, persisted = _persisting_picture_findings(ctx, pqf)
+            if persisted:
+                ctx.last_taste_advisory = list(
+                    getattr(ctx, "last_taste_advisory", None) or []) + [
+                    f"picture QC (persisted after {PQ_PERSIST_RENDERS} "
+                    f"renders; kept as advisory): {line}" for line in persisted]
+                note += (" PICTURE CHECK (unchanged after "
+                         f"{PQ_PERSIST_RENDERS} renders, now advisory; do "
+                         "not repair it again): " + "; ".join(persisted) + ".")
             ctx.last_picture_qc_findings = list(pqf[:render_qc.MAX_FINDINGS])
             if pqf:
                 ctx.last_taste.extend(
@@ -30503,7 +30559,11 @@ TOOLS = {
         "{do:'type', selector:'input[type=email]', text:'you@example.com'}, "
         "{do:'scroll', to:'Pricing'} or {do:'scroll', by:800}, "
         "{do:'hover', text:'Plans'}, {do:'press', key:'Enter'}, "
-        "{do:'wait', seconds:1.5}, {do:'goto', url:'…'}. Add "
+        "{do:'wait', seconds:1.5}, {do:'goto', url:'…'}, and "
+        "{do:'tour', by:2} — the automatic tour for a site you have not "
+        "seen: it points at the call to action, opens up to `by` main "
+        "sections from the navigation (Pricing, Features…) and reads each, "
+        "then travels the home page by its headings, ending live. Add "
         "`seconds` to any step to hold longer after it. It returns an EVENT "
         "TRACK — every click, scroll and keystroke timestamped with its "
         "position in the frame — then place it with showcase_demo, which "

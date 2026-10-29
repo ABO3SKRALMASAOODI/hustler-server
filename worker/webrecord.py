@@ -75,6 +75,7 @@ import base64
 import json
 import os
 import subprocess
+import re
 import time
 from urllib.parse import urlparse
 
@@ -123,6 +124,12 @@ _VIEWPORTS = {
     "portrait": (1080, 1920),
     "square": (1080, 1080),
 }
+# Portrait renders the site's PHONE layout (C1, 29 Oct 2026): a 432x768 CSS
+# viewport drawn at 2.5x is still 1080x1920 pixels, but every site's own
+# responsive design makes its text and buttons phone-sized and readable in a
+# 9:16 frame. At 1080 CSS px the desktop layout's body text was ~1% of the
+# frame height (the judge: "unreadable at phone size").
+_CSS_VIEWPORTS = {"portrait": (432, 768, 2.5)}
 
 
 def _guard_router(cache):
@@ -423,7 +430,48 @@ class _Screencast:
 #  Step vocabulary                                                   #
 # ---------------------------------------------------------------- #
 
-STEP_KINDS = ("click", "type", "scroll", "hover", "wait", "press", "goto")
+STEP_KINDS = ("click", "type", "scroll", "hover", "wait", "press", "goto",
+              "tour")
+
+# The automatic tour ({do: 'tour', by: <sections>}): what a person shows first
+# on an unknown site (C1, 29 Oct 2026: the owner's references and the
+# bake-off's passive scrolls). Section links are opened in this order of
+# preference; the call to action is pointed at, never submitted.
+TOUR_SECTIONS = ("pricing", "features", "product", "how it works", "solutions",
+                 "use cases", "customers", "showcase", "examples", "templates",
+                 "integrations", "platform", "tools", "explore")
+TOUR_CTA = ("get started", "start free", "try it", "try for free", "try free",
+            "start for free", "sign up", "book a demo", "get a demo",
+            "request a demo", "start now", "join", "create", "download",
+            "contact sales", "try")
+TOUR_AVOID = ("log in", "login", "sign in", "cookie", "accept", "reject",
+              "privacy", "terms", "careers", "jobs", "blog", "docs",
+              "documentation", "support", "status", "legal", "skip to")
+_TOUR_JS = r"""() => {
+  const H = window.innerHeight, W = window.innerWidth, out = [];
+  for (const el of document.querySelectorAll('a,button,[role=button],[role=tab],summary')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 12 || r.height < 10 || r.bottom < 0 || r.top > H || r.right < 0 || r.left > W) continue;
+    const st = getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') < 0.2) continue;
+    const t = (el.innerText || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+    if (!t || t.length > 32) continue;
+    const href = el.getAttribute('href') || '';
+    let ext = false;
+    try { ext = !!href && !href.startsWith('#') && new URL(href, location.href).hostname !== location.hostname; } catch (e) {}
+    out.push({t, x: (r.left + r.width / 2) / W, y: (r.top + r.height / 2) / H,
+              area: (r.width * r.height) / (W * H), ext,
+              aria: (el.getAttribute('aria-label') || '').toLowerCase(),
+              button: el.tagName === 'BUTTON' || /btn|button|cta/i.test(el.className || '')});
+  }
+  const heads = [];
+  for (const h of document.querySelectorAll('h2')) {
+    const r = h.getBoundingClientRect();
+    const t = (h.innerText || '').trim();
+    if (t && r.height > 8) heads.push({t: t.slice(0, 60), top: r.top + window.scrollY});
+  }
+  return {items: out, heads};
+}"""
 
 # Words that must never be typed into a page we are filming. Recording a
 # real credential into a video the customer then publishes is a footgun no
@@ -678,7 +726,23 @@ class _Session:
                 "button", name=label, exact=False).or_(
                 page.get_by_role("link", name=label, exact=False)).or_(
                 page.get_by_text(label, exact=False))
-        return loc.first
+        # The first VISIBLE match: a responsive site keeps its hidden
+        # desktop nav ahead of the open phone menu in the DOM, and `.first`
+        # was that hidden link ("could not find PRICING", C1 29 Oct).
+        # And one that is on TOP where it sits: an open phone menu covers the
+        # page's own links, which stay "visible" underneath it, and a click
+        # at their spot lands on whatever the menu shows there.
+        visible = []
+        try:
+            for k in range(min(loc.count(), 8)):
+                cand = loc.nth(k)
+                if cand.is_visible():
+                    visible.append(cand)
+                    if cand.evaluate(_ON_TOP_JS):
+                        return cand
+        except Exception:
+            pass
+        return visible[0] if visible else loc.first
 
     def target_box(self, step, what):
         loc = self.locate(step)
@@ -714,6 +778,20 @@ class _Session:
         # clicked — the single biggest difference between a screen recording
         # that teaches and one that just moves.
         self.sleep(0.35)
+        # The target may have moved while the pointer travelled (an opening
+        # menu still sliding in: the stripe.com phone menu's "Pricing" click
+        # landed on "Sign in", C1 29 Oct). Measure again and follow it.
+        try:
+            again = self.locate(step).bounding_box(timeout=800)
+        except Exception:
+            again = None
+        if again and again.get("width", 0) >= 1:
+            nx = again["x"] + again["width"] / 2
+            ny = again["y"] + again["height"] / 2
+            if abs(nx - cx) > 3 or abs(ny - cy) > 3:
+                box, cx, cy = again, nx, ny
+                self.move_to(cx, cy, seconds=0.25)
+                self.sleep(0.15)
         label = step.get("label") or step.get("text") or step.get("selector")
         self.note("click", cx, cy, label or "", box=box)
         try:
@@ -859,10 +937,213 @@ class _Session:
             self.problems.append(f"{url[:60]} did not finish loading")
         self.sleep(float(step.get("seconds") or 1.2))
 
+    # ---- the automatic tour ----
+
+    def _tour_items(self):
+        try:
+            info = self.page.evaluate(_TOUR_JS) or {}
+        except Exception:
+            info = {}
+        items = [i for i in info.get("items") or []
+                 if not i.get("ext") and not any(
+                     a in str(i.get("t", "")).lower() for a in TOUR_AVOID)]
+        return items, info.get("heads") or []
+
+    @staticmethod
+    def _section_rank(text):
+        low = str(text or "").strip().lower()
+        for k, word in enumerate(TOUR_SECTIONS):
+            if low == word or (word in low and len(low) <= len(word) + 12):
+                return k
+        return None
+
+    def _sections(self, items, top_only=True):
+        found, seen = [], set()
+        for i in items:
+            rank = self._section_rank(i.get("t"))
+            if rank is None or (top_only and i.get("y", 1) > 0.16):
+                continue
+            key = str(i["t"]).lower()
+            if key not in seen:
+                seen.add(key)
+                found.append((rank, i))
+        return [i for _r, i in sorted(found, key=lambda x: x[0])]
+
+    def _cta(self, items):
+        best, score = None, 0.0
+        for i in items:
+            low = str(i.get("t", "")).lower()
+            if not any(low == c or low.startswith(c) for c in TOUR_CTA):
+                continue
+            sc = float(i.get("area") or 0) * (2.0 if i.get("button") else 1.0)
+            if 0.03 < float(i.get("y") or 0) < 0.92 and sc > score:
+                best, score = i, sc
+        return best
+
+    def drift(self, seconds=1.2):
+        """Keep the last frames LIVE: the pointer glides a short way, so the
+        capture never ends on a held picture (a still page before the end
+        card reads as a freeze)."""
+        x = min(max(self.mx + self.W * 0.08, self.W * 0.2), self.W * 0.8)
+        y = min(max(self.my - self.H * 0.04, self.H * 0.2), self.H * 0.8)
+        self.move_to(x, y, seconds=max(0.3, float(seconds)))
+
+    def _settle(self, most_s=3.0):
+        """Until the page has painted its content (a navigation shows a blank
+        page while its scripts load; scroll-triggered sections stay at
+        opacity 0 until something scrolls), at most ``most_s``."""
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < most_s and self.deadline - time.monotonic() > 4:
+            try:
+                ready = self.page.evaluate(
+                    "() => document.readyState === 'complete' && "
+                    "(document.body ? document.body.innerText.trim().length : 0) > 120")
+            except Exception:
+                ready = False
+            if ready:
+                break
+            self.sleep(0.25)
+        try:
+            self.page.evaluate("() => window.scrollBy(0, 1)")
+        except Exception:
+            pass
+        self.sleep(0.3)
+
+    def _painted(self):
+        """Whether the viewport shows content: text, an image, a video or a
+        canvas under at least 3 of 15 sampled points."""
+        try:
+            return bool(self.page.evaluate(_PAINTED_JS))
+        except Exception:
+            return True
+
+    def _read_page(self):
+        """Read the page a click opened: travel to its first section below
+        the fold and point at what it offers (its call to action or card
+        button), so the push-in lands on something readable."""
+        items, heads = self._tour_items()
+        try:
+            y0 = float(self.page.evaluate("() => window.scrollY") or 0)
+        except Exception:
+            y0 = 0.0
+        below = [h for h in heads if float(h["top"]) > y0 + self.H * 0.25]
+        if below:
+            self.note("scroll")
+            self._glide_scroll(max(0.0, float(below[0]["top"]) - self.H * 0.15),
+                               1.2)
+        else:
+            self.do_scroll({"by": self.H * 0.3, "seconds": 1.0})
+        self.sleep(0.5)
+        items, _heads = self._tour_items()
+        cta = self._cta(items)
+        if cta:
+            self.do_hover({"text": cta["t"], "seconds": 1.1})
+        else:
+            self.sleep(0.8)
+
+    def _home(self, url):
+        """Back to the page the tour started on."""
+        try:
+            if self.page.url.rstrip("/") == str(url).rstrip("/"):
+                self._glide_scroll(0, 0.7)
+                return
+            self.note("nav", label="back")
+            self.page.go_back(wait_until="load",
+                              timeout=min(8.0, self.left()) * 1000)
+            self.sleep(0.6)
+            self._glide_scroll(0, 0.5)
+        except Exception:
+            pass
+
+    def do_tour(self, step):
+        """Show the site the way a person demos it: point at the main call
+        to action, travel the home page by its own headings, then open up to
+        `by` section pages from the navigation (or the phone menu) and read
+        each (its first section, its call to action), ending live on the
+        last one. A section that leads to a sign-in, another site or a blank
+        page is left at once. Nothing is ever submitted."""
+        want = max(1, min(int(step.get("by") or 2), 3))
+        start = self.page.url
+        items, heads = self._tour_items()
+        cta = self._cta(items)
+        if cta:
+            self.do_hover({"text": cta["t"], "seconds": 1.1})
+        nav = self._sections(items)
+        menu_mode = False
+        # The home page first, section by section by its own headings, then
+        # the sections the navigation offers, ending live ON the last one
+        # (the judge: end on pricing or the CTA, not back on the hero).
+        if self.now() < config.WEB_DEMO_MAX_DURATION_S - 14:
+            for head in heads[:2]:
+                if self.deadline - time.monotonic() <= 12:
+                    break
+                self.note("scroll")
+                self._glide_scroll(max(0.0, float(head["top"]) - self.H * 0.15),
+                                   1.2)
+                self.sleep(0.9)
+            self._glide_scroll(0, 0.7)
+            items, heads = self._tour_items()
+            nav = self._sections(items) or nav
+        if not nav:
+            menu = next((i for i in items if i.get("y", 1) < 0.12 and (
+                "menu" in str(i.get("aria", "")) or
+                str(i.get("t", "")).strip().lower() in ("menu", "\u2630"))), None)
+            if menu:
+                self.do_click({"text": menu["t"], "seconds": 0.9})
+                items, heads = self._tour_items()
+                nav = self._sections(items, top_only=False)
+                menu_mode = True
+        opened = 0
+        for item in nav[:want]:
+            if self.deadline - time.monotonic() <= 10 or \
+                    self.now() >= config.WEB_DEMO_MAX_DURATION_S - 10:
+                break
+            if opened:
+                self._home(start)
+                self._settle()
+                if menu_mode:
+                    break           # the phone menu closed on the way back
+                items, _h = self._tour_items()
+                fresh = [i for i in self._sections(items) if i["t"] == item["t"]]
+                item = fresh[0] if fresh else item
+            before = len(self.problems)
+            self.do_click({"text": item["t"], "seconds": 1.2})
+            if len(self.problems) > before:
+                continue
+            self._settle()
+            if _off_tour(start, self.page.url):
+                self.problems.append(f"\"{item['t']}\" led to a sign-in or "
+                                     "another site, so the tour went back")
+                self._home(start)
+                continue
+            if not self._painted():
+                # a page that stays blank (a menu overlay ate the click, a
+                # script-gated page) is not shown: back home at once
+                self.problems.append(f"\"{item['t']}\" opened a blank page, "
+                                     "so the tour went back")
+                self._home(start)
+                continue
+            opened += 1
+            self._read_page()
+        if not opened:
+            _items, heads = self._tour_items()
+            for head in heads[:3]:
+                if self.deadline - time.monotonic() <= 6:
+                    break
+                self.note("scroll")
+                self._glide_scroll(max(0.0, float(head["top"]) - self.H * 0.15),
+                                   1.2)
+                self.sleep(1.0)
+            if cta and self.deadline - time.monotonic() > 5:
+                self._glide_scroll(0, 0.8)
+                self.do_hover({"text": cta["t"], "seconds": 0.6})
+        self.drift(1.0)
+
     def run(self, steps):
         handlers = {"click": self.do_click, "hover": self.do_hover,
                     "type": self.do_type, "press": self.do_press,
-                    "scroll": self.do_scroll, "goto": self.do_goto}
+                    "scroll": self.do_scroll, "goto": self.do_goto,
+                    "tour": self.do_tour}
         for step in steps:
             if self.deadline - time.monotonic() <= 3:
                 self.problems.append(
@@ -914,6 +1195,67 @@ def _transcode(list_path, workdir):
     return out
 
 
+_OFF_TOUR = re.compile(r"(^|[/.])(log-?in|sign-?in|sign-?up|register|auth|"
+                       r"account|dashboard|checkout|cart)([/.?#-]|$)", re.I)
+
+
+def _off_tour(start, url):
+    """A page a demo tour must not show: a sign-in or checkout flow, or
+    another site (a subdomain like dashboard.example.com counts)."""
+    try:
+        a = (urlparse(start).hostname or "").lower().removeprefix("www.")
+        b = (urlparse(url).hostname or "").lower().removeprefix("www.")
+        path = (urlparse(url).hostname or "") + (urlparse(url).path or "")
+    except Exception:
+        return False
+    return (a and b and a != b) or bool(_OFF_TOUR.search(path))
+
+
+_ON_TOP_JS = r"""(el) => {
+  const r = el.getBoundingClientRect();
+  const x = r.left + r.width / 2, y = r.top + r.height / 2;
+  if (x < 0 || y < 0 || x > window.innerWidth || y > window.innerHeight) return true;
+  const top = document.elementFromPoint(x, y);
+  return !!top && (el === top || el.contains(top) || top.contains(el));
+}"""
+
+
+_PAINTED_JS = r"""() => {
+  const W = window.innerWidth, H = window.innerHeight; let hits = 0;
+  for (let i = 1; i <= 3; i++) for (let j = 1; j <= 5; j++) {
+    const el = document.elementFromPoint(W * i / 4, H * j / 6);
+    if (!el) continue;
+    const tag = el.tagName;
+    if (['IMG', 'VIDEO', 'CANVAS', 'SVG', 'svg', 'PICTURE'].includes(tag) ||
+        ((el.innerText || '').trim().length > 0 && el !== document.body &&
+         el !== document.documentElement)) hits++;
+  }
+  return hits >= 3;
+}"""
+
+
+_DECLINE_JS = r"""() => {
+  const want = /^(reject all|reject|decline|decline all|deny|only necessary|necessary only|use necessary cookies only|reject non-essential)$/i;
+  for (const el of document.querySelectorAll('button,[role=button],a')) {
+    const t = (el.innerText || el.getAttribute('aria-label') || '').trim();
+    const r = el.getBoundingClientRect();
+    if (want.test(t) && r.width > 0 && r.height > 0) { el.click(); return t; }
+  }
+  return '';
+}"""
+
+
+def _decline_consent(page):
+    """A cookie banner covers the page a demo is about. Before frame zero,
+    take its privacy-preserving choice (reject / necessary only) when it
+    offers one; a banner with only an accept button is left alone."""
+    try:
+        if page.evaluate(_DECLINE_JS):
+            page.wait_for_timeout(500)
+    except Exception:
+        pass
+
+
 def _probe_out(out, extra):
     import media
     try:
@@ -945,10 +1287,12 @@ def _record(url, workdir, orientation, wall_s, cursor, body):
 
     W, H = _VIEWPORTS.get(orientation or "landscape",
                           _VIEWPORTS["landscape"])
+    # CSS size and pixel density: the frames are W x H pixels either way
+    CW, CH, DPR = _CSS_VIEWPORTS.get(orientation or "landscape", (W, H, 1.0))
     deadline = time.monotonic() + wall_s
 
     session = None
-    title, final_url = "", url
+    title, final_url, h1 = "", url, ""
     browser = None
     list_path, cast_len = None, 0.0
     try:
@@ -956,9 +1300,11 @@ def _record(url, workdir, orientation, wall_s, cursor, body):
             browser = p.chromium.launch(args=[
                 "--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu",
                 "--mute-audio", "--hide-scrollbars",
-            ])
+            ] + ([f"--force-device-scale-factor={DPR:g}"] if DPR != 1.0
+                 else []))       # the screencast is CSS-sized without it
             context = browser.new_context(
-                viewport={"width": W, "height": H},
+                viewport={"width": CW, "height": CH},
+                device_scale_factor=DPR,
                 user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                             "AppleWebKit/537.36 (KHTML, like Gecko) "
                             "Chrome/126.0 Safari/537.36 ValmeraCapture"),
@@ -990,7 +1336,9 @@ def _record(url, workdir, orientation, wall_s, cursor, body):
                 except Exception:
                     pass
             context.on("page", _on_page)
-            session = _Session(page, deadline, (W, H))
+            # the session works in CSS pixels: pointer moves and event
+            # positions are fractions of the viewport either way
+            session = _Session(page, deadline, (CW, CH))
             cast = _Screencast(page, context, workdir, W, H)
             cast.start()
             try:
@@ -1007,9 +1355,17 @@ def _record(url, workdir, orientation, wall_s, cursor, body):
             # HERE, and write_concat drops the earlier frames — so the file
             # starts at the same instant every reported timestamp is measured
             # from, rather than being trimmed to it afterwards.
+            _decline_consent(page)
             session.t_zero = time.time()
             title = (page.title() or "")[:120]
             final_url = page.url or url
+            try:
+                h1 = page.evaluate(
+                    "() => { const h = document.querySelector('h1');"
+                    " return h ? h.innerText.trim().replace(/\\s+/g, ' ')"
+                    ".slice(0, 160) : ''; }") or ""
+            except Exception:
+                h1 = ""
             if cursor:
                 # Put the pointer on screen before anything moves, or the
                 # first gesture appears to fly in from a corner.
@@ -1054,7 +1410,7 @@ def _record(url, workdir, orientation, wall_s, cursor, body):
 
     out = _transcode(list_path, workdir)
     return _probe_out(out, {
-        "final_url": final_url, "page_title": title,
+        "final_url": final_url, "page_title": title, "h1": h1,
         "events": session.events if session else [],
         "problems": session.problems if session else [],
     })
@@ -1112,8 +1468,14 @@ def record_demo(url, workdir, steps, orientation="landscape"):
         s.sleep(0.9)
         s.run(plan)
         # And a beat at the end, so the last state is readable and the editor
-        # has frames to cut on rather than ending mid-gesture.
-        s.sleep(1.0)
+        # has frames to cut on rather than ending mid-gesture. The pointer
+        # keeps moving through it: a still page here is a freeze before the
+        # end card (C1, 29 Oct 2026).
+        s.sleep(0.3)
+        try:
+            s.drift(0.9)
+        except Exception:
+            s.sleep(0.7)
 
     return _record(url, workdir, orientation, config.WEB_DEMO_WALL_S,
                    True, body)
