@@ -147,9 +147,9 @@ def test_lift_fills_each_static_stretch_with_one_event(fake_tools, monkeypatch):
     added = [(name, a) for name, a in ctx.calls
              if name in ("add_zoom", "add_motion_graphic")]
     assert n == len(added) >= 3
-    # the devices alternate: a punch, a word in big type, a punch ...
-    assert [name for name, _ in added][:3] == [
-        "add_zoom", "add_motion_graphic", "add_zoom"]
+    # the devices alternate: a punch, then a word in big type (a punch that
+    # would land on another move becomes a word too)
+    assert [name for name, _ in added][:2] == ["add_zoom", "add_motion_graphic"]
     for name, a in added:
         assert a["start"] >= 2.9 and a["end"] <= 27.14 - 0.3
         if name == "add_zoom":
@@ -416,3 +416,42 @@ def test_the_head_start_switches_the_second_opinions_off(monkeypatch):
     agent_loop._trial_head_start(ctx, None, 1, {"content": "a short"})
     assert ctx.second_opinions_off is True
     assert agent_tools._review_program_story(ctx, {"version": 13}) is None
+
+
+def test_a_prepared_trial_turn_cannot_undo_the_first_cuts_craft():
+    ctx = _lane_ctx("trial")
+    ctx.trial_prep = {"intent": "generic"}
+    ctx.trial_kept_ids = {"motion": {"mg1", "mg2"}, "zoom": {"zm5"},
+                          "vector": {"vec1"}}
+    for name, args in (("set_motion_graphic", {"id": "mg1", "params": {"y": 0.2}}),
+                       ("remove_motion_graphic", {"id": "mg2"}),
+                       ("remove_zoom", {"id": "zm5"}),
+                       ("remove_vector_graphic", {"id": "vec1"})):
+        out = agent_loop._kept_craft_refusal(ctx, name, args)
+        assert out and out.startswith("REJECTED: KEPT")
+    # what the editor added itself this turn stays editable
+    assert agent_loop._kept_craft_refusal(
+        ctx, "remove_zoom", {"id": "zm9"}) is None
+    assert agent_loop._kept_craft_refusal(
+        ctx, "cut_range", {"start": 1, "end": 2}) is None
+
+
+@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
+def test_the_craft_guard_is_off_without_a_head_start(kind):
+    ctx = _lane_ctx(kind)              # no trial_turn.prepare on this turn
+    ctx.trial_kept_ids = {"motion": {"mg1"}}
+    assert agent_loop._kept_craft_refusal(
+        ctx, "set_motion_graphic", {"id": "mg1"}) is None
+
+
+def test_a_punch_never_lands_on_another_move(fake_tools, monkeypatch):
+    monkeypatch.setattr(agent_tools, "_zoom_room",
+                        lambda ctx, edl, s, e: (0.3, 1.2, 0.0))
+    words = _words(SPEECH)
+    ctx = _Proj(FC_EDL, words, [])
+    trial_turn.lift_static(ctx, trial_turn.Steps(ctx))
+    mine = [a for n, a in ctx.calls if n == "add_zoom"]
+    theirs = [z for z in FC_EDL["effects"]["zooms"] if z["id"] != "zm1"]
+    for a in mine:
+        for z in theirs:
+            assert a["end"] + 0.1 <= z["start"] or a["start"] - 0.1 >= z["end"]

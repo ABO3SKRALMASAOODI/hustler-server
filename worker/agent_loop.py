@@ -2387,6 +2387,34 @@ def _prepared_trial(ctx):
     return _trial_lane(ctx) and bool(getattr(ctx, "trial_prep", None))
 
 
+_KEPT_CRAFT_TOOLS = {
+    "set_motion_graphic": "motion", "remove_motion_graphic": "motion",
+    "remove_zoom": "zoom", "remove_zoom_path": "zoom",
+    "remove_vector_graphic": "vector", "set_vector_graphic": "vector",
+}
+
+
+def _kept_craft_refusal(ctx, name, args):
+    """On a prepared trial turn the First cut's hook, slams and cards and
+    the head start's own events are final: a refusal text for a call that
+    would move, restyle or remove one, else None. Q3 (30 Oct), measured:
+    every such edit on the trial lane chased a review note and lowered the
+    judged result (the hook moved behind the speaker ran off both edges,
+    phonehook 7.25 -> 5.75; a slam moved behind the speaker left a blank
+    card, talk10best 6.5 -> 5.0; punch-ins removed as 'pops'). Only the
+    trial lane after trial_turn.prepare: every other turn is unchanged."""
+    kind = _KEPT_CRAFT_TOOLS.get(name)
+    if kind is None or not _prepared_trial(ctx):
+        return None
+    kept = getattr(ctx, "trial_kept_ids", None) or {}
+    target = str((args or {}).get("id") or "")
+    if target and target in kept.get(kind, ()):
+        return ("REJECTED: KEPT — this is part of the finished First cut "
+                f"({kind} {target}); on this request it stays exactly as it "
+                "is. Do not retry it; reply with what the video is.")
+    return None
+
+
 def _trial_preview_cap(ctx, cap, operator_run=False):
     """The request's preview cap. A trial request renders at most
     CLAUDE_TRIAL_MAX_PREVIEWS (one look, one repair; Q3, 30 Oct: C1/C2
@@ -2439,6 +2467,18 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
         return ""
     ctx.trial_prep = prep
     ctx.prep_start_version = before
+    try:
+        cur = ctx.latest_edl()["json"]
+        ctx.trial_kept_ids = {
+            "motion": {str(m.get("id")) for m in cur.get("motion") or []
+                       if m.get("id")},
+            "zoom": {str(z.get("id")) for z in
+                     (cur.get("effects") or {}).get("zooms") or [] if z.get("id")},
+            "vector": {str(v.get("id")) for v in cur.get("vectors") or []
+                       if v.get("id")},
+        }
+    except Exception:  # noqa: BLE001 — no guard, the turn runs
+        ctx.trial_kept_ids = {}
     # no paid second-opinion critics on top of a deterministic build: their
     # notes drove repairs that undid the First cut's craft (see
     # _quality_repair_pushback), and each cost 10-20 s per render
@@ -5768,6 +5808,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if args is None:
                 result = ("REJECTED: arguments were not valid JSON. "
                           "Send a proper JSON object.")
+            elif _kept_craft_refusal(ctx, name, args):
+                result = _kept_craft_refusal(ctx, name, args)
             elif name in agent_tools.WRITE_TOOLS and ctx.request_preview_cap \
                     and int(ctx.request_previews or 0) \
                     >= int(ctx.request_preview_cap):

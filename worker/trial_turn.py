@@ -343,11 +343,19 @@ def lift_static(ctx, steps, most=None):
             end = _phrase_end(ctx, tl, word, pt, b - 0.4)
             cur = ctx.latest_edl()["json"]
             room, _base, _stacked = agent_tools._zoom_room(ctx, cur, start, end)
+            # never on top of another move: stacked zooms render one-frame
+            # pops the picture check flags (and the editor then removed)
+            overlap = any(
+                float(z.get("start") or 0) < end + 0.1
+                and float(z.get("end") or 0) > start - 0.1
+                and not (float(z.get("start") or 0) <= 0.05
+                         and float(z.get("end") or 0) >= prog - 0.05)
+                for z in (cur.get("effects") or {}).get("zooms") or [])
             # alternate the two events (a punch, then a word in big type)
             # so a long talk never repeats one device
             want_punch = (punched <= slammed)
-            if want_punch and end - start >= PUNCH_HOLD_S[0] and (
-                    room is None or room >= PUNCH_MIN_ROOM):
+            if want_punch and not overlap and end - start >= PUNCH_HOLD_S[0] \
+                    and (room is None or room >= PUNCH_MIN_ROOM):
                 args = {"start": start, "end": end, "mode": "punch",
                         "strength": PUNCH_STRENGTH,
                         "purpose": "a second, closer framing for one phrase "
@@ -673,9 +681,11 @@ def prepare(ctx, worker_db, session_id, text, post=None):
         "sentences saying what the video now is. Do not move, resize or "
         "restyle the hook title, the slams or the captions, and do not "
         "change the framing: the render's automatic notes about them (a "
-        "title near the face, the head near the top of a full-height crop, "
-        "a held last frame) are known and kept, so do not act on them or "
-        "list them. Do not render again unless you changed something. Do "
-        "not ask a question.]")
+        "title near the face, a caption near a slam, a framing step, the "
+        "head near the top of a full-height crop, a held last frame) are "
+        "known and kept, so do not act on them. The reply says what the "
+        "video is, never a list of open items or review notes. Do not "
+        "render again unless you changed something. Do not ask a "
+        "question.]")
     return {"intent": kind, "whole": whole, "applied": applied, "note": note,
             "steps": steps.rows, "s": elapsed}
