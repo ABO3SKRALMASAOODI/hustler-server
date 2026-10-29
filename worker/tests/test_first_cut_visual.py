@@ -321,7 +321,9 @@ def test_broll_windows_land_after_the_hook_apart_and_clear_of_the_end():
         assert a1 >= b0 + fcv.BROLL_GAP_S - 1e-6
     assert all(b <= 30.0 - fcv.BROLL_TAIL_S + 1e-6 for _a, b, *_ in wins)
     assert sum(b - a for a, b, *_ in wins) <= fcv.BROLL_SHARE * 30.0 + 1e-6
-    assert 3 <= len(wins) <= 6
+    assert 4 <= len(wins) <= 8
+    # a cutaway shortens (never under BROLL_MIN_S) to let the next one in
+    assert all(b - a >= fcv.BROLL_MIN_S - 1e-6 for a, b, *_ in wins)
 
 
 def test_broll_moments_are_the_speakers_own_words():
@@ -465,9 +467,17 @@ def test_a_screen_ends_live_with_the_runon_muted():
         return "EDL v2"
     fcv.muted_tail(ctx, [], 0.0, run)
     names = [n for n, _a in calls]
-    assert names == ["keep_segments", "set_volume", "set_caption_mutes"]
+    assert names == ["keep_segments", "set_volume"]
     assert abs(calls[0][1]["segments"][-1][1] - (last["t1"] + fcv.TAIL_S)) < 1e-3
-    assert calls[1][1]["gain_db"] <= -40 and calls[1][1]["start"] > last["t1"]
+    nxt = [w for w in idx["words"] if w["t0"] >= last["t1"] - 0.01][0]
+    assert calls[1][1]["gain_db"] <= -40
+    assert last["t1"] - 0.02 <= calls[1][1]["start"] <= nxt["t0"]
+    # the run-on word is dropped from the captions once they exist
+    assert [f["from"] for f in ctx.first_cut_tail_words][0] == nxt["w"]
+    calls.clear()
+    fcv.drop_tail_words(ctx, [], 0.0, run)
+    assert calls[0][0] == "set_caption_fixes" and \
+        calls[0][1]["replacements"][0]["to"] == ""
     # a cut that already ends live is left alone
     calls.clear()
     fin = idx["words"][-1]

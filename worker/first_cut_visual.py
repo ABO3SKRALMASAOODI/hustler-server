@@ -191,14 +191,18 @@ def broll_windows(moments, tl, prog, hook_end):
             cands.append((float(a), word, query))
     cands.sort()
     out, used, last = [], 0.0, None
-    for a, word, query in cands:
+    cands = [c for c in cands if c[0] >= hook_end + 0.15]
+    for k, (a, word, query) in enumerate(cands):
         start = round(a, 2)
-        if start < hook_end + 0.15:
-            continue
         if last is not None and start < last + BROLL_GAP_S:
             continue
-        end = round(min(start + BROLL_S, prog - BROLL_TAIL_S), 2)
-        if end - start < BROLL_MIN_S:
+        end = min(start + BROLL_S, prog - BROLL_TAIL_S)
+        # shorten to let the next named thing have its own cutaway
+        nxt = [c[0] for c in cands[k + 1:] if c[0] >= start + BROLL_MIN_S + BROLL_GAP_S]
+        if nxt and nxt[0] - BROLL_GAP_S < end:
+            end = max(start + BROLL_MIN_S, nxt[0] - BROLL_GAP_S)
+        end = round(end, 2)
+        if end - start < BROLL_MIN_S - 1e-6:
             continue
         if used + (end - start) > BROLL_SHARE * prog:
             break
@@ -359,11 +363,11 @@ def caption_style(style, talking, screen, vertical):
     emphasis word turns gold serif italic in place: the slams' two
     families and accent); a screen or an animation (white snow) gets the
     phrase pill so it reads on any picture, at one steady band."""
-    out = dict(style, size_scale=CAPTION_SCALE)
-    if talking:
-        out["motion_look"] = "serif"
-    else:
-        out["motion_look"] = "box"
+    out = dict(style, size_scale=CAPTION_SCALE, motion_look="serif",
+               single_line=True)
+    if not talking:
+        # one steady band (judges: captions hopping top to bottom); the
+        # look's own legibility (dark ink, a glyph scrim) on bright plates
         out["anchor_y"] = 0.66 if vertical else 0.86
     return out, 3
 
@@ -396,23 +400,38 @@ def muted_tail(ctx, steps, started, run):
     new_e = min(float(ctx.duration or e1), last_end + TAIL_S)
     if e1 - last_end >= 0.3 or new_e - e1 < 0.1:
         return None
+    runon = [w for w in words if last_end - 0.01 <= float(w["t0"]) < new_e]
+    mute_from = min([last_end + 0.02] + [float(w["t0"]) - 0.01 for w in runon])
     keep[-1][1] = round(new_e, 3)
     res = run(ctx, steps, "keep_segments", {"segments": keep,
                                             "snap_to_words": False}, started)
     if res is None or str(res).lstrip().upper().startswith(
             ("REJECTED", "FAILED", "CORRECTION", "NO CHANGE")):
         return None
-    run(ctx, steps, "set_volume", {"start": round(last_end + 0.03, 3),
+    run(ctx, steps, "set_volume", {"start": round(mute_from, 3),
                                    "end": round(new_e + 0.05, 3),
                                    "gain_db": -60.0}, started)
     try:
         prog = float(schemas.program_duration(ctx.latest_edl()["json"]))
-        run(ctx, steps, "set_caption_mutes", {"spans": [[
-            round(prog - (new_e - last_end) + 0.03, 3), round(prog, 3)]]},
-            started)
+        tail_at = prog - (new_e - mute_from)
+        # the run-on words are dropped from the captions once they exist
+        # (judges: a dangling "And" captioned in the tail)
+        ctx.first_cut_tail_words = [
+            {"from": str(w["w"]).strip(), "to": "",
+             "start": round(max(0.0, tail_at - 0.3), 2), "end": round(prog, 2)}
+            for w in runon if str(w.get("w") or "").strip()]
     except Exception:
         pass
     return res
+
+
+def drop_tail_words(ctx, steps, started, run):
+    """After the captions exist: delete the muted run-on words of the live
+    tail from them (set_caption_fixes, scoped to the tail)."""
+    fixes = getattr(ctx, "first_cut_tail_words", None) or []
+    if fixes:
+        run(ctx, steps, "set_caption_fixes", {"replacements": fixes,
+                                              "operation": "append"}, started)
 
 
 EXPLAINER_MAX_SPEECH_S = 60.0
@@ -439,6 +458,33 @@ def conclusion_end(rows, first, last, ends_thought):
     return rows[k] if speech <= EXPLAINER_MAX_SPEECH_S else last
 
 
+OPENING_RULE = (
+    "Never START on a sentence that opens with a subordinate clause "
+    "(\"Since...\", \"Because...\", \"If...\", \"When...\"): start "
+    "where the claim stands on its own. ")
+
+
+def title_y(index, bands=None):
+    """Where a talking head's title sits: in the band ABOVE the face (the
+    judges, every talking-head round: "above or behind the head, not on the
+    chest"), its centre above the face box's top, never over the eyes;
+    None without faces."""
+    samples = ((index or {}).get("spatial") or {}).get("samples") or []
+    tops = []
+    for smp in samples:
+        faces = [f for f in smp.get("faces") or [] if len(f) >= 4]
+        if faces:
+            f = max(faces, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+            tops.append(f[1])
+    if not tops:
+        return None
+    tops.sort()
+    top = tops[len(tops) // 2]
+    if bands:
+        top = (top - bands[0]) / max(1e-6, bands[1] - bands[0])
+    return round(min(max(top - 0.13, 0.12), 0.22), 3)
+
+
 # --------------------------------------------------------------------------
 #  Cut-ins: a closer camera on the same take at phrase turns
 # --------------------------------------------------------------------------
@@ -447,8 +493,9 @@ CUT_IN_TARGET_S = 2.4   # a framing lasts about this long (refs: 2-3 s)
 CUT_IN_MIN_S = 1.3
 CUT_IN_MAX_S = 3.5
 CUT_IN_FIRST_S = 1.5    # the first change lands under the hook title
-CUT_IN_STRENGTH = (0.30, 0.42)      # close, tighter (no bands)
-CUT_IN_BANDED = (0.20, 0.30)        # on top of a band crop's own zoom
+CUT_IN_STRENGTH = (0.38, 0.52)      # close, tighter (no bands): 1.4-1.5x
+CUT_IN_BANDED = (0.32, 0.44)        # over a band crop's own zoom: ~1.25-1.3x
+CUT_IN_SOFT = (0.16, 0.24)          # an animation's crop (no face to frame)
 _TURN = re.compile(r"[,.;:!?]$")
 
 
@@ -533,7 +580,8 @@ def face_aim(index, bands=None, vertical_source=True):
     return round(min(max(cx, 0.2), 0.8), 3), round(min(max(cy, 0.3), 0.72), 3)
 
 
-def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False):
+def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
+            levels=None):
     """Write the close framings (add_zoom punch, ramp 0: a hard cut to a
     tighter camera and a hard cut back). Returns how many landed."""
     import device_planner
@@ -558,7 +606,7 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False):
     first = min(near, key=lambda p: abs(p - CUT_IN_FIRST_S)
                 - (0.3 if p in turns else 0.0)) if near else hook_end
     segs = plan_cut_ins(points, busy, first, prog, preferred=turns)
-    levels = CUT_IN_BANDED if bands else CUT_IN_STRENGTH
+    levels = levels or (CUT_IN_BANDED if bands else CUT_IN_STRENGTH)
     cx, cy = aim or (0.5, 0.4)
     n = 0
     for a, b, close in segs:

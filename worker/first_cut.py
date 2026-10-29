@@ -233,7 +233,7 @@ def _with_broll(system):
     import first_cut_visual as fcv
     head, sep, tail = system.partition("Answer with JSON only")
     tail = tail.replace("}]}.", "}]" + fcv.BROLL_JSON + "}.", 1)
-    return head + fcv.ENDING_RULE + fcv.BROLL_RULE + sep + tail
+    return head + fcv.OPENING_RULE + fcv.ENDING_RULE + fcv.BROLL_RULE + sep + tail
 
 
 def _sentences(index, limit_s):
@@ -1478,14 +1478,24 @@ def video_chain(ctx, worker_db, started, spend):
             _run(ctx, steps, "punch_in_on_emphasis", args, started)
     y = chest_y(faces, bands) if (talking and vertical_out) else None
     hook, hook_end = getattr(ctx, "first_cut_hook", None), HOOK_S
-    if talking:
+    hook_y, mute_under = y, True
+    if talking and q1 and hook and vertical_out:
+        # Q1: the scout's 2-5 word promise as a poster ABOVE the head (the
+        # judges: "a self-contained claim above or behind the head, not the
+        # spoken 'Since...' clause on the chest"); the captions run under it
+        import first_cut_visual as fcv
+        hook_y = fcv.title_y(ctx.index, bands)
+        hook_end = HOOK_S
+        mute_under = hook_y is None
+        hook_y = hook_y if hook_y is not None else y
+    elif talking:
         opening = spoken_opening(ctx)
         hook, hook_end = opening if opening else (None, HOOK_S)
         # the references hold the opening title 2.5-3.5 s (C2: it left at
         # 1.6 s on a fast speaker); it owns its zone, the captions wait
         hook_end = round(min(max(hook_end + 0.15, HOOK_MIN_S), HOOK_MAX_S), 2)
     if hook:
-        params = hook_params(hook, y, vertical_out)
+        params = hook_params(hook, hook_y, vertical_out)
         if q1 and screen_kept:
             # judges: the title on the busy docs page was low-contrast
             params["scrim"] = 0.85
@@ -1493,7 +1503,7 @@ def video_chain(ctx, worker_db, started, spend):
                 "params": params,
                 # one reading task in the first seconds (captions.
                 # hook_owns_zone): no caption stacked under the title
-                "mute_captions": True,
+                "mute_captions": mute_under,
                 "purpose": "the opening line as a poster title (references: "
                            "a poster-scale title by 0.3 s, held 2.5-3.5 s)"}
         if _ok(_run(ctx, steps, "add_motion_graphic", args, started)):
@@ -1534,6 +1544,14 @@ def video_chain(ctx, worker_db, started, spend):
             applied.append("a closer camera at the turns")
         if len(_keep(ctx) or []) > 1:
             _run(ctx, steps, "conceal_jump_cuts", {}, started)
+    elif q1 and speech and not screen_kept and vertical_out:
+        # Q1: a narrated animation's long shots get the same rhythm, softer
+        # (judges: "one cut every 4.5 s across long camera moves")
+        import first_cut_visual as fcv
+        if fcv.cut_ins(ctx, steps, started, _run,
+                       sorted(ctx.first_cut_cards or []), (0.5, 0.5),
+                       max(hook_end, 1.0), levels=fcv.CUT_IN_SOFT):
+            applied.append("closer framings at the turns")
     if speech:
         style = {"preset": "reels", "motion_look": "editorial",
                  "size_scale": CAPTION_SCALE}
@@ -1550,6 +1568,9 @@ def video_chain(ctx, worker_db, started, spend):
                      "max_words_per_caption": words_per},
                     started)):
             applied.append("captions")
+            if q1:
+                import first_cut_visual as fcv
+                fcv.drop_tail_words(ctx, steps, started, _run)
     return steps, applied, picked
 
 
