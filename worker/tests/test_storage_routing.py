@@ -13,6 +13,32 @@ import storage
 import storage_routing as routing
 from s3_fake import FakeS3
 
+# Script-style suites (test_index_lanes, test_round95_image_senses) replace
+# storage.download_to / upload_file / exists at import time, for the whole
+# run. These tests need the real functions, bound to the real module.
+_ROUTED = ("download_to", "upload_file", "exists", "object_bytes",
+           "copy_object", "presign_get", "delete_keys", "sha256_object",
+           "locate", "_stream_copy", "_head")
+
+
+def _real_functions():
+    import types
+    ns = {"__name__": "_storage_pristine", "__file__": storage.__file__}
+    with open(storage.__file__, encoding="utf-8") as f:
+        exec(compile(f.read(), storage.__file__, "exec"), ns)
+    return {n: types.FunctionType(ns[n].__code__, storage.__dict__, n,
+                                  ns[n].__defaults__, ns[n].__closure__)
+            for n in _ROUTED}
+
+
+_REAL = _real_functions()
+
+
+@pytest.fixture(autouse=True)
+def _pristine_storage(monkeypatch):
+    for name, fn in _REAL.items():
+        monkeypatch.setattr(storage, name, fn)
+
 NEXT_ENV = {
     "S3_NEXT_ENDPOINT": "https://s3.us-west-004.backblazeb2.com",
     "S3_NEXT_ACCESS_KEY_ID": "next-id",
