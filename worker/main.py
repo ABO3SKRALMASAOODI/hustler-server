@@ -1119,6 +1119,26 @@ def main():
     threading.Thread(target=_routing_self_check, daemon=True,
                      name="routing-self-check").start()
 
+    # Which object store(s) this dispatcher reads and writes (the move off
+    # R2, storage_routing.py). It has no health route, so it says so in
+    # app_kv 'storage_probe_dispatcher'; storage_migrate.py's switch refuses
+    # 'next' until this row reports the next store. Hosts only, never a key.
+    def _storage_probe():
+        try:
+            import json as _json
+            import storage as _storage
+            st = dict(_storage.routing_status())
+            st["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            st["code_version"] = version.code_version()
+            dbx.Db().run(dbx.kv_put, "storage_probe_dispatcher",
+                         _json.dumps(st, sort_keys=True))
+        except Exception as e:
+            print(f"[storage] probe row not written: {str(e)[:200]}",
+                  flush=True)
+
+    threading.Thread(target=_storage_probe, daemon=True,
+                     name="storage-probe").start()
+
     # Publish the MCP tool catalog for the backend to serve on tools/list.
     # Best effort by design — a missing table (migration not applied yet) must
     # never stop the worker from booting — and retried by the reaper until it

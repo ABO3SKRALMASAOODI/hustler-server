@@ -46,6 +46,12 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
     # This worker's MCP load rides beside the checks (Oct 2026).
     mcp = body.pop("mcp")
     assert mcp["inflight"] == 0 and mcp["long_wait_slots"] >= 1
+    # So does the storage routing (the move off R2): hosts and mode only,
+    # and it never decides whether the release is certified.
+    st = body.pop("storage")
+    assert st["mode"] in ("legacy", "copy", "dual_write", "next",
+                          "rollback", "next_only")
+    assert not any("secret" in k for k in st)
 
     assert response.status_code == 503
     assert response.headers["Cache-Control"] == "no-store, max-age=0"

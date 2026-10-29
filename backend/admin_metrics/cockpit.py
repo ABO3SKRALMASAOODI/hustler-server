@@ -83,36 +83,34 @@ ERROR_CLASS_LABELS = {
     "other": "Other"}
 
 # ── Flags: rule, action, severity (§4.3) ─────────────────────────────────
+# Product reliability and growth only (owner, 29 Oct 2026: billing advice
+# such as "charged, no use: refund or pause" is "not your business"). No flag
+# here may suggest a refund, a pause, a cancellation, a credit or a plan
+# change; tests/test_cockpit.py::test_no_flag_gives_billing_advice holds it.
 RED, AMBER, WATCH = "red", "amber", "watch"
+TICKET_ACTION = "Filed automatically as a ticket: see Tickets"
 FLAGS = {
-    "CHARGED_NO_USE": (RED, "Renewal charged in the last 35 days, with 0 "
-                       "edits since it or in the 14 days before it",
-                       "Refund or pause"),
-    "CHARGE_SOON_NO_USE": (RED, "Next charge within 5 days (by date) and 0 "
-                           "edits in 30 days",
-                           "Pause or refund before the charge"),
-    "PAST_DUE_DORMANT": (RED, "Past due and inactive 14+ days",
-                         "Cancel the retry"),
     "ERROR_LOOP": (RED, "2+ service errors in 24 h, or one job type failing "
-                   "3 times in 7 days", "Fix, then credit the account"),
-    "RENEWAL_OFF_STILL_ACTIVE": (AMBER, "Renewal off and active in the last "
-                                 "7 days", "Save: they are still using it"),
+                   "3 times in 7 days", TICKET_ACTION),
+    "UNFINISHED_REQUEST": (AMBER, "A request ended partial or blocked in the "
+                           "last 14 days", TICKET_ACTION),
     "PAID_NO_RESULT_24H": (AMBER, "Paid more than 24 h ago and 0 finished "
-                           "results", "Finish their first video"),
-    "UNFINISHED_CHARGED": (AMBER, "Credits charged on a partial or blocked "
-                           "request in the last 14 days",
-                           "Refund the credits"),
-    "WRONG_PLAN": (AMBER, "MCP-only plan with access and no result, plus an "
-                   "mcp_only refusal or no MCP connection within 1 h of "
-                   "paying for it", "Switch plans"),
+                           "results", "Open the chat: what stops the first "
+                           "result"),
     "STUCK_SETUP": (AMBER, "MCP connected with no upload after 24 h, or an "
-                    "upload that never landed", "Hand-hold the setup"),
+                    "upload that never landed", "Open the chat: where the "
+                    "setup stopped"),
     "REPEAT_ASK": (AMBER, "The same instruction 3+ times in one session",
                    "Agent miss: review the chat"),
+    "RENEWAL_OFF_STILL_ACTIVE": (AMBER, "Renewal off and active in the last "
+                                 "7 days", "Open the chat: what they still "
+                                 "make"),
     "QUICK_CANCEL": (AMBER, "Renewal off within 60 min of paying",
                      "Read the chat"),
     "LONG_SOURCE": (WATCH, "Longest source over 30 min", "Watch it"),
 }
+BILLING_ADVICE = re.compile(r"refund|pause|cancel the|credit the|switch "
+                            r"plan|charge", re.I)
 SEVERITY_RANK = {RED: 0, AMBER: 1, WATCH: 2}
 HEALTH_RANK = {"red": 0, "amber": 1, "green": 2, "ended": 3}
 
@@ -439,8 +437,8 @@ def build_row(acct, f, journey, now):
     waits7 = sorted(r["wait_min"] for r in req7)
     unfinished = [r for r in requests
                   if r["outcome"] in ("partial", "blocked")
-                  and r["start"] >= now - timedelta(days=14)
-                  and r["credits"] > 0]
+                  and r["start"] >= now - timedelta(days=14)]
+    unfinished_requests = len(unfinished)
     unfinished_credits = round(sum(r["credits"] for r in unfinished), 1)
 
     # MCP use.
@@ -509,27 +507,14 @@ def build_row(acct, f, journey, now):
 
     # Flags.
     flags = []
-    if last_charge and prev_charge and last_charge >= now - timedelta(days=35) \
-            and not any(e > last_charge - timedelta(days=14) for e in edits):
-        flags.append("CHARGED_NO_USE")
-    if next_charge and next_charge >= now and \
-            (next_charge.date() - now.date()).days <= 5 and \
-            not any(e >= now - timedelta(days=30) for e in edits):
-        flags.append("CHARGE_SOON_NO_USE")
-    if state == "past_due" and (not last_active or
-                                last_active < now - timedelta(days=14)):
-        flags.append("PAST_DUE_DORMANT")
     if len(err24) >= 2 or any(n >= 3 for n in failed7.values()):
         flags.append("ERROR_LOOP")
     if state == "cancelled" and last_active and last_active >= d7:
         flags.append("RENEWAL_OFF_STILL_ACTIVE")
     if first_paid and first_paid < d1 and not results:
         flags.append("PAID_NO_RESULT_24H")
-    if unfinished_credits > 0:
-        flags.append("UNFINISHED_CHARGED")
-    if plan in mcp_only and mcp_paid and has_access and not results \
-            and (refusals or mcp_first_hour == 0):
-        flags.append("WRONG_PLAN")
+    if unfinished_requests:
+        flags.append("UNFINISHED_REQUEST")
     setup_stuck = (mcp_user and not landed and not results and any(
         _utc(g["created_at"]) < d1 for g in grants)) or (
         uploads_started and not landed)
@@ -555,12 +540,6 @@ def build_row(acct, f, journey, now):
     actions = []
     for k in flags:
         a = FLAGS[k][2]
-        if k == "RENEWAL_OFF_STILL_ACTIVE" and access_end:
-            a += f" ({max(0, (access_end - now).days)} days left)"
-        if k == "CHARGE_SOON_NO_USE" and next_charge:
-            a += f" ({next_charge.strftime('%d %b')})"
-        if k == "PAST_DUE_DORMANT" and next_retry:
-            a += f" (next retry {next_retry.strftime('%d %b')})"
         if a not in actions:
             actions.append(a)
     return {

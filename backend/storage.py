@@ -1,5 +1,6 @@
 """
-S3-compatible object storage access (default: Cloudflare R2).
+S3-compatible object storage access (any provider by env; today Cloudflare
+R2, moving to another S3 endpoint through storage_routing.py's modes).
 
 Media bytes NEVER pass through this API server: browsers upload directly to
 the bucket via presigned URLs minted here, and download via presigned GETs.
@@ -22,6 +23,8 @@ import uuid
 
 import boto3
 from botocore.config import Config
+
+import storage_routing as routing
 
 PRESIGN_EXPIRY = 900          # short-lived links (admin GETs lean on this)
 # UPLOAD presigns must OUTLIVE THE SLOWEST PLAUSIBLE UPLOAD, because a presign
@@ -214,6 +217,167 @@ def client(public=False, fast=False):
         return cached
 
 
+# ── Which store (storage_routing: the provider-neutral move off R2) ─────────
+#
+# Every function below asks the router which store(s) an operation uses. In
+# the default "legacy" mode, and in any process without S3_NEXT_*, that is
+# client()/bucket() exactly as before; the router never touches the database
+# unless the next store is configured.
+
+def _fetch_routing_row():
+    import psycopg2
+    url = os.environ.get("DIRECT_DATABASE_URL") or os.environ.get(
+        "DATABASE_URL")
+    if not url:
+        return None
+    conn = psycopg2.connect(url, connect_timeout=3,
+                            options="-c statement_timeout=3000")
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM app_kv WHERE key = %s",
+                        (routing.KV_KEY,))
+            row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+_router = routing.Router(fetch=_fetch_routing_row)
+_locator = routing.Locator()
+
+
+def router():
+    return _router
+
+
+def routing_status():
+    return _router.status()
+
+
+def _next_client(public=False, fast=False):
+    cfg = routing.store_config(routing.NEXT)
+    if cfg is None:
+        raise RuntimeError("the next store (S3_NEXT_*) is not configured")
+    endpoint = cfg["public_endpoint"] if public else cfg["endpoint"]
+    key = ("next", endpoint, cfg["access_key_id"],
+           hashlib.sha256(cfg["secret_access_key"].encode()).hexdigest(),
+           cfg["region"], cfg["addressing_style"], boto3.client, bool(fast))
+    with _clients_lock:
+        cached = _clients.get(key)
+        if cached is None:
+            cached = boto3.client(
+                "s3", endpoint_url=endpoint,
+                aws_access_key_id=cfg["access_key_id"],
+                aws_secret_access_key=cfg["secret_access_key"],
+                region_name=cfg["region"],
+                config=Config(**routing.botocore_config_kwargs(
+                    cfg,
+                    connect_timeout=5.0 if fast else S3_CONNECT_TIMEOUT_S,
+                    read_timeout=15.0 if fast else S3_READ_TIMEOUT_S,
+                    retries={"max_attempts": 2 if fast else S3_MAX_ATTEMPTS,
+                             "mode": "standard"},
+                    max_pool_connections=32)))
+            if len(_clients) >= 8:
+                _clients.clear()
+            _clients[key] = cached
+        return cached
+
+
+def store_client(name, public=False, fast=False):
+    if name == routing.NEXT:
+        return _next_client(public=public, fast=fast)
+    return client(public=public, fast=fast)
+
+
+def store_bucket(name):
+    if name == routing.NEXT:
+        return routing.store_config(routing.NEXT)["bucket"]
+    return bucket()
+
+
+def _plan():
+    return _router.plan()
+
+
+def _log(msg):
+    print(f"[storage] {msg}", flush=True)
+
+
+def _upload_order():
+    """Stores an open multipart upload may live in: the one browser uploads
+    go to now first, then the other (an upload started before a switch)."""
+    plan = _plan()
+    rest = [s for s in plan.read if s != plan.presign]
+    return [plan.presign] + rest
+
+
+def _locate(key, fast=False):
+    """The store holding ``key`` among the read stores, or the first read
+    store when none answers (then the caller behaves as it always did)."""
+    plan = _plan()
+    if len(plan.read) == 1:
+        return plan.read[0]
+    hit = _locator.get(plan.mode, key)
+    if hit:
+        return hit
+    for name in plan.read:
+        try:
+            store_client(name, fast=fast).head_object(
+                Bucket=store_bucket(name), Key=key)
+        except Exception:  # noqa: BLE001 — missing or unreachable here
+            continue
+        _locator.put(plan.mode, key, name)
+        return name
+    return plan.read[0]
+
+
+def _read_first(fn):
+    """fn(store_name) over the read stores; the first non-None answer."""
+    for name in _plan().read:
+        out = fn(name)
+        if out is not None:
+            return out
+    return None
+
+
+def put_bytes(key, data, content_type="application/octet-stream",
+              content_encoding=None, metadata=None):
+    """A small object into every write store (the first one must succeed)."""
+    extra = {"ContentEncoding": content_encoding} if content_encoding else {}
+    if metadata:
+        extra["Metadata"] = dict(metadata)
+    for i, name in enumerate(_plan().write):
+        try:
+            store_client(name).put_object(
+                Bucket=store_bucket(name), Key=key, Body=data,
+                ContentType=content_type, **extra)
+        except Exception as exc:  # noqa: BLE001
+            if i == 0:
+                raise
+            _log(f"secondary write to {name} failed for {key}: {exc}")
+    return key
+
+
+def delete_key(key):
+    """Delete one object from every store that may hold it."""
+    _locator.forget(key)
+    for i, name in enumerate(_plan().delete):
+        try:
+            store_client(name).delete_object(Bucket=store_bucket(name),
+                                             Key=key)
+        except Exception as exc:  # noqa: BLE001
+            if i == 0:
+                raise
+            _log(f"secondary delete in {name} failed for {key}: {exc}")
+
+
+def delete_targets():
+    """[(store name, client, bucket)] a bulk delete must reach, primary
+    first (the retention sweeper's batches)."""
+    return [(name, store_client(name), store_bucket(name))
+            for name in _plan().delete]
+
+
 # THE MAIN VIDEO'S CAP IS AN ABUSE GUARD, NOT THE PRODUCT LIMIT.
 #
 # It was 2 GB, which contradicted the 3-hour duration limit it shipped beside:
@@ -395,8 +559,9 @@ def relay_upload(key, stream, content_type, declared_bytes=None):
         raise RelayTooLarge(
             f"file is larger than the {_size_label(RELAY_MAX_BYTES)} limit "
             f"for uploads routed through our servers")
-    client().upload_fileobj(
-        _capped_reader(stream, RELAY_MAX_BYTES), bucket(), key,
+    name = _plan().presign
+    store_client(name).upload_fileobj(
+        _capped_reader(stream, RELAY_MAX_BYTES), store_bucket(name), key,
         ExtraArgs={"ContentType": content_type or "application/octet-stream"})
 
 
@@ -421,19 +586,21 @@ def presign_upload(key, nbytes, content_type, max_parts=None):
 
     Returns a dict the browser can act on directly. ``max_parts`` caps the
     number of parts (larger parts) for a plan that travels in a tool reply.
+    The store is the one browser uploads go to in the current routing mode.
     """
-    c = client(public=True)
+    name = _plan().presign
+    c, b = store_client(name, public=True), store_bucket(name)
     if nbytes <= SINGLE_PUT_LIMIT:
         url = c.generate_presigned_url(
             "put_object",
-            Params={"Bucket": bucket(), "Key": key, "ContentType": content_type},
+            Params={"Bucket": b, "Key": key, "ContentType": content_type},
             ExpiresIn=PRESIGN_UPLOAD_EXPIRY,
         )
         return {"mode": "single", "storage_key": key, "url": url,
                 "content_type": content_type}
 
     mpu = c.create_multipart_upload(
-        Bucket=bucket(), Key=key, ContentType=content_type)
+        Bucket=b, Key=key, ContentType=content_type)
     upload_id = mpu["UploadId"]
     part_size = (part_size_for_parts(nbytes, max_parts) if max_parts
                  else part_size_for(nbytes))
@@ -443,7 +610,7 @@ def presign_upload(key, nbytes, content_type, max_parts=None):
             "part_number": i,
             "url": c.generate_presigned_url(
                 "upload_part",
-                Params={"Bucket": bucket(), "Key": key,
+                Params={"Bucket": b, "Key": key,
                         "UploadId": upload_id, "PartNumber": i},
                 ExpiresIn=PRESIGN_UPLOAD_EXPIRY,
             ),
@@ -507,8 +674,9 @@ def resume_multipart(key, upload_id, nbytes, content_type=None,
     n = int(nbytes)
     size = multipart_part_size(n, part_size)
     n_parts = (n + size - 1) // size
+    store = _upload_store(key, upload_id)
     try:
-        stored = list_parts(key, upload_id)
+        stored = list_parts(key, upload_id, store=store)
     except Exception as exc:  # noqa: BLE001 — classified below
         if error_code(exc) != "NoSuchUpload":
             raise
@@ -524,7 +692,7 @@ def resume_multipart(key, upload_id, nbytes, content_type=None,
         if 1 <= num <= n_parts and \
                 int(p.get("size") or 0) == expected_part_bytes(n, size, num):
             have[num] = {"part_number": num, "etag": p["etag"]}
-    c = client(public=True)
+    c, b = store_client(store, public=True), store_bucket(store)
     urls = []
     for i in range(1, n_parts + 1):
         if i in have:
@@ -532,7 +700,7 @@ def resume_multipart(key, upload_id, nbytes, content_type=None,
             continue
         urls.append({"part_number": i, "url": c.generate_presigned_url(
             "upload_part",
-            Params={"Bucket": bucket(), "Key": key, "UploadId": upload_id,
+            Params={"Bucket": b, "Key": key, "UploadId": upload_id,
                     "PartNumber": i},
             ExpiresIn=PRESIGN_UPLOAD_EXPIRY)})
     return {"mode": "multipart", "storage_key": key, "upload_id": upload_id,
@@ -548,16 +716,42 @@ def find_multipart_upload(key):
     A proxy-first original's key lives on its asset row, but its upload id
     lived only in the tab that started it. When that tab is gone (closed,
     reloaded, another device), this recovers the id from storage itself so
-    the parts already sent are kept."""
-    try:
-        res = client().list_multipart_uploads(Bucket=bucket(), Prefix=key)
-    except Exception:  # noqa: BLE001 — unsupported or transient: start fresh
-        return None
-    ups = [u for u in res.get("Uploads") or [] if u.get("Key") == key]
-    if not ups:
-        return None
-    ups.sort(key=lambda u: str(u.get("Initiated") or ""))
-    return ups[-1].get("UploadId")
+    the parts already sent are kept. Every store an upload may live in is
+    searched, the one browser uploads go to now first."""
+    for name in _upload_order():
+        try:
+            res = store_client(name).list_multipart_uploads(
+                Bucket=store_bucket(name), Prefix=key)
+        except Exception:  # noqa: BLE001 — unsupported or transient
+            continue
+        ups = [u for u in res.get("Uploads") or [] if u.get("Key") == key]
+        if not ups:
+            continue
+        ups.sort(key=lambda u: str(u.get("Initiated") or ""))
+        return ups[-1].get("UploadId")
+    return None
+
+
+def _upload_store(key, upload_id):
+    """The store that holds the open multipart upload ``upload_id``.
+
+    An upload id belongs to the store that issued it, and an upload started
+    before a routing switch finishes after it. With one store this is that
+    store, with no request; otherwise the first store whose ListParts
+    accepts the id, else the current upload store (whose NoSuchUpload then
+    reads as it always did)."""
+    order = _upload_order()
+    if len(order) == 1 or not upload_id:
+        return order[0]
+    for name in order:
+        try:
+            store_client(name).list_parts(
+                Bucket=store_bucket(name), Key=key, UploadId=upload_id,
+                MaxParts=1)
+            return name
+        except Exception:  # noqa: BLE001 — not this store's upload
+            continue
+    return order[0]
 
 
 def relay_part(key, upload_id, part_number, stream, declared_bytes=None):
@@ -586,17 +780,19 @@ def relay_part(key, upload_id, part_number, stream, declared_bytes=None):
         if body.tell() <= 0:
             raise ValueError("empty part body")
         body.seek(0)
-        res = client().upload_part(Bucket=bucket(), Key=key,
-                                   UploadId=upload_id,
-                                   PartNumber=int(part_number), Body=body)
+        store = _upload_store(key, upload_id)
+        res = store_client(store).upload_part(
+            Bucket=store_bucket(store), Key=key, UploadId=upload_id,
+            PartNumber=int(part_number), Body=body)
     return str(res.get("ETag") or "")
 
 
-def complete_multipart(key, upload_id, parts):
+def complete_multipart(key, upload_id, parts, store=None):
     """parts: [{"part_number": int, "etag": str}] from the browser."""
     ordered = sorted(parts, key=lambda p: int(p["part_number"]))
-    client().complete_multipart_upload(
-        Bucket=bucket(), Key=key, UploadId=upload_id,
+    store = store or _upload_store(key, upload_id)
+    store_client(store).complete_multipart_upload(
+        Bucket=store_bucket(store), Key=key, UploadId=upload_id,
         MultipartUpload={"Parts": [
             {"PartNumber": int(p["part_number"]), "ETag": p["etag"]}
             for p in ordered
@@ -613,14 +809,15 @@ def error_code(exc):
         return None
 
 
-def list_parts(key, upload_id):
+def list_parts(key, upload_id, store=None):
     """[{part_number, etag, size}] of the parts storage holds for an open
     multipart upload, in part order (every page). Raises like the client
     does, NoSuchUpload included, when the upload id is gone."""
-    c = client()
+    store = store or _upload_store(key, upload_id)
+    c, b = store_client(store), store_bucket(store)
     out, marker = [], None
     for _page in range(20):                 # 10,000 parts at most
-        kw = {"Bucket": bucket(), "Key": key, "UploadId": upload_id,
+        kw = {"Bucket": b, "Key": key, "UploadId": upload_id,
               "MaxParts": 1000}
         if marker:
             kw["PartNumberMarker"] = marker
@@ -669,8 +866,9 @@ def finish_multipart(key, upload_id, parts):
 
     An incomplete upload left behind costs storage until the bucket's
     lifecycle rule clears it; aborting one cost the whole transfer."""
+    store = _upload_store(key, upload_id)
     try:
-        complete_multipart(key, upload_id, parts)
+        complete_multipart(key, upload_id, parts, store=store)
         return {"ok": True, "repaired": []}
     except Exception as exc:  # noqa: BLE001 — classified below
         first = exc
@@ -679,7 +877,7 @@ def finish_multipart(key, upload_id, parts):
         return {"ok": False, "gone": True, "code": code,
                 "message": str(first)[:300]}
     try:
-        stored = list_parts(key, upload_id)
+        stored = list_parts(key, upload_id, store=store)
     except Exception as exc:  # noqa: BLE001
         if error_code(exc) == "NoSuchUpload":
             return {"ok": False, "gone": True, "code": code or "NoSuchUpload",
@@ -703,7 +901,7 @@ def finish_multipart(key, upload_id, parts):
         try:
             complete_multipart(key, upload_id, [
                 {"part_number": n, "etag": have[n]["etag"]}
-                for n in sorted(have)])
+                for n in sorted(have)], store=store)
             return {"ok": True, "repaired": repaired}
         except Exception as exc:  # noqa: BLE001
             first, code = exc, error_code(exc) or code
@@ -745,30 +943,35 @@ def finish_failure_text(res):
 
 def abort_multipart(key, upload_id):
     try:
-        client().abort_multipart_upload(
-            Bucket=bucket(), Key=key, UploadId=upload_id)
+        store = _upload_store(key, upload_id)
+        store_client(store).abort_multipart_upload(
+            Bucket=store_bucket(store), Key=key, UploadId=upload_id)
     except Exception:
         pass
 
 
 def head_bytes(key, fast=False):
-    """Size of an object, or None if it doesn't exist."""
-    try:
-        return client(fast=fast).head_object(
-            Bucket=bucket(), Key=key)["ContentLength"]
-    except Exception:
-        return None
+    """Size of an object, or None if it doesn't exist (in any read store)."""
+    def one(name):
+        try:
+            return store_client(name, fast=fast).head_object(
+                Bucket=store_bucket(name), Key=key)["ContentLength"]
+        except Exception:
+            return None
+    return _read_first(one)
 
 
 def get_range(key, nbytes=64):
     """First nbytes of an object (for magic-byte sniffing). None on failure."""
-    try:
-        obj = client().get_object(
-            Bucket=bucket(), Key=key,
-            Range=f"bytes=0-{max(0, int(nbytes) - 1)}")
-        return obj["Body"].read()
-    except Exception:
-        return None
+    def one(name):
+        try:
+            obj = store_client(name).get_object(
+                Bucket=store_bucket(name), Key=key,
+                Range=f"bytes=0-{max(0, int(nbytes) - 1)}")
+            return obj["Body"].read()
+        except Exception:
+            return None
+    return _read_first(one)
 
 
 def get_range_at(key, offset, length):
@@ -780,13 +983,16 @@ def get_range_at(key, offset, length):
     """
     if length <= 0:
         return b""
-    try:
-        obj = client().get_object(
-            Bucket=bucket(), Key=key,
-            Range=f"bytes={int(offset)}-{int(offset) + int(length) - 1}")
-        return obj["Body"].read()
-    except Exception:
-        return None
+
+    def one(name):
+        try:
+            obj = store_client(name).get_object(
+                Bucket=store_bucket(name), Key=key,
+                Range=f"bytes={int(offset)}-{int(offset) + int(length) - 1}")
+            return obj["Body"].read()
+        except Exception:
+            return None
+    return _read_first(one)
 
 
 def get_object_whole(key, max_bytes, fast=True):
@@ -801,14 +1007,22 @@ def get_object_whole(key, max_bytes, fast=True):
     Every caller embeds bytes in a reply that also carries a link, so the
     fast client is the default: a slow read degrades to the link instead of
     holding the request thread."""
-    n = head_bytes(key, fast=fast)
-    if n is None or n > int(max_bytes):
-        return None
-    try:
-        return client(fast=fast).get_object(
-            Bucket=bucket(), Key=key)["Body"].read()
-    except Exception:
-        return None
+    def one(name):
+        try:
+            c = store_client(name, fast=fast)
+            n = c.head_object(Bucket=store_bucket(name),
+                              Key=key)["ContentLength"]
+        except Exception:
+            return None
+        if n is None or n > int(max_bytes):
+            return False                    # found, too big: stop looking
+        try:
+            return c.get_object(Bucket=store_bucket(name),
+                                Key=key)["Body"].read()
+        except Exception:
+            return None
+    out = _read_first(one)
+    return out if isinstance(out, (bytes, bytearray)) else None
 
 
 def content_matches_kind(head, kind):
@@ -862,10 +1076,27 @@ DELETE_PREFIXES = ("originals", "proxies", "audio", "thumbs", "sheets",
 
 def delete_project_objects(project_id):
     """Delete every stored object belonging to a project across all prefixes.
-    Returns the number of objects deleted. Idempotent (missing keys are a
-    no-op) so it is safe to re-run."""
-    c = client()
-    b = bucket()
+    Returns the number of objects deleted (in the primary delete store; the
+    others are wiped too, best effort). Idempotent (missing keys are a no-op)
+    so it is safe to re-run."""
+    total = 0
+    for i, name in enumerate(_plan().delete):
+        try:
+            n = _delete_project_objects_in(store_client(name),
+                                           store_bucket(name), project_id)
+        except Exception as exc:  # noqa: BLE001
+            if i == 0:
+                raise
+            _log(f"secondary wipe of project {project_id} in {name} "
+                 f"failed: {exc}")
+            continue
+        if i == 0:
+            total = n
+    _locator.clear()
+    return total
+
+
+def _delete_project_objects_in(c, b, project_id):
     total = 0
     for prefix in DELETE_PREFIXES:
         token = None
@@ -887,9 +1118,12 @@ def delete_project_objects(project_id):
 
 
 def presign_get(key, expires=None, download_name=None):
+    """A presigned GET on the store that holds ``key`` (one HEAD per new key
+    while two stores are read; none in the default single-store mode)."""
     expires = expires or PRESIGN_GET_EXPIRY
-    params = {"Bucket": bucket(), "Key": key}
+    name = _locate(key)
+    params = {"Bucket": store_bucket(name), "Key": key}
     if download_name:
         params["ResponseContentDisposition"] = f'attachment; filename="{download_name}"'
-    return client(public=True).generate_presigned_url(
+    return store_client(name, public=True).generate_presigned_url(
         "get_object", Params=params, ExpiresIn=expires)

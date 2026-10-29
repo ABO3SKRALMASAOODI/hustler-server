@@ -4,6 +4,7 @@ Media bytes only ever live on the worker's ephemeral disk during a job."""
 import hashlib
 import os
 import shutil
+import threading
 
 import boto3
 from botocore.config import Config
@@ -11,6 +12,7 @@ from boto3.s3.transfer import TransferConfig
 
 import config
 import io_telemetry
+import storage_routing as routing
 
 
 TRANSFER_CONFIG = TransferConfig(
@@ -34,13 +36,112 @@ def client():
     )
 
 
-def object_bytes(key):
-    """Size of one object, or None if it cannot be read."""
+# ── Which store (storage_routing.py: the provider-neutral move off R2) ─────
+#
+# client()/config.S3_BUCKET are the legacy store and stay exactly as they
+# were. Every function below asks the router which store(s) an operation
+# uses; in the default "legacy" mode, and in any process without S3_NEXT_*,
+# that is the legacy store alone and the router never reads the database.
+
+def _fetch_routing_row():
+    import db
+    conn = db.connect()
     try:
-        return int(client().head_object(
-            Bucket=config.S3_BUCKET, Key=key)["ContentLength"])
+        return db.kv_get(conn, routing.KV_KEY)
+    finally:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+_router = routing.Router(fetch=_fetch_routing_row)
+_locator = routing.Locator()
+_next_lock = threading.Lock()
+_next_cached = {}
+
+
+def router():
+    return _router
+
+
+def routing_status():
+    return _router.status()
+
+
+def _next_client():
+    cfg = routing.store_config(routing.NEXT)
+    if cfg is None:
+        raise RuntimeError("the next store (S3_NEXT_*) is not configured")
+    key = (cfg["endpoint"], cfg["access_key_id"],
+           hashlib.sha256(cfg["secret_access_key"].encode()).hexdigest(),
+           cfg["region"], cfg["addressing_style"], boto3.client)
+    with _next_lock:
+        c = _next_cached.get(key)
+        if c is None:
+            c = boto3.client(
+                "s3", endpoint_url=cfg["endpoint"],
+                aws_access_key_id=cfg["access_key_id"],
+                aws_secret_access_key=cfg["secret_access_key"],
+                region_name=cfg["region"],
+                config=Config(**routing.botocore_config_kwargs(
+                    cfg, retries={"max_attempts": 3})))
+            _next_cached.clear()
+            _next_cached[key] = c
+        return c
+
+
+def store_client(name):
+    return _next_client() if name == routing.NEXT else client()
+
+
+def store_bucket(name):
+    if name == routing.NEXT:
+        return routing.store_config(routing.NEXT)["bucket"]
+    return config.S3_BUCKET
+
+
+def _plan():
+    return _router.plan()
+
+
+def _log(msg):
+    print(f"[storage] {msg}", flush=True)
+
+
+def _head(name, key):
+    """ContentLength of ``key`` in store ``name``, or None."""
+    try:
+        return int(store_client(name).head_object(
+            Bucket=store_bucket(name), Key=key)["ContentLength"])
     except Exception:
         return None
+
+
+def locate(key):
+    """The read store that holds ``key``, or the first read store when none
+    answers (the caller then fails exactly as it always did)."""
+    plan = _plan()
+    if len(plan.read) == 1:
+        return plan.read[0]
+    hit = _locator.get(plan.mode, key)
+    if hit:
+        return hit
+    for name in plan.read:
+        if _head(name, key) is not None:
+            _locator.put(plan.mode, key, name)
+            return name
+    return plan.read[0]
+
+
+def object_bytes(key):
+    """Size of one object, or None if it cannot be read (in any read store)."""
+    for name in _plan().read:
+        n = _head(name, key)
+        if n is not None:
+            return n
+    return None
 
 
 def workdir_fstype(path=None):
@@ -186,9 +287,13 @@ def evict_source_cache(cache_dir=None):
 
 def download_to(key, path, check_capacity=True):
     """Stream one object to local scratch, refusing up front if it cannot fit."""
+    name = locate(key)
     if check_capacity:
-        check_workdir_capacity(object_bytes(key), os.path.dirname(path) or None)
-    client().download_file(config.S3_BUCKET, key, path, Config=TRANSFER_CONFIG)
+        check_workdir_capacity(_head(name, key) if len(_plan().read) > 1
+                               else object_bytes(key),
+                               os.path.dirname(path) or None)
+    store_client(name).download_file(store_bucket(name), key, path,
+                                     Config=TRANSFER_CONFIG)
     try:
         io_telemetry.add_downloaded(os.path.getsize(path))
     except OSError:
@@ -196,20 +301,34 @@ def download_to(key, path, check_capacity=True):
 
 
 def upload_file(path, key, content_type):
-    client().upload_file(path, config.S3_BUCKET, key,
-                         ExtraArgs={"ContentType": content_type},
-                         Config=TRANSFER_CONFIG)
-    try:
-        io_telemetry.add_uploaded(os.path.getsize(path))
-    except OSError:
-        pass
+    """Into every write store of the routing mode; the first must succeed,
+    a second (dual_write) is best effort: the copier's next pass repairs a
+    miss."""
+    for i, name in enumerate(_plan().write):
+        try:
+            store_client(name).upload_file(
+                path, store_bucket(name), key,
+                ExtraArgs={"ContentType": content_type},
+                Config=TRANSFER_CONFIG)
+        except Exception as exc:  # noqa: BLE001
+            if i == 0:
+                raise
+            _log(f"secondary upload to {name} failed for {key}: {exc}")
+            continue
+        if i == 0:
+            try:
+                io_telemetry.add_uploaded(os.path.getsize(path))
+            except OSError:
+                pass
 
 
 def sha256_object(key, expected_bytes, progress_cb=None, cancelled_cb=None):
     """Hash a complete immutable upload without staging it on local disk."""
     if cancelled_cb and cancelled_cb():
         raise RuntimeError("job was cancelled or handed to another worker")
-    response = client().get_object(Bucket=config.S3_BUCKET, Key=key)
+    name = locate(key)
+    response = store_client(name).get_object(Bucket=store_bucket(name),
+                                             Key=key)
     body = response["Body"]
     total, digest = 0, hashlib.sha256()
     try:
@@ -235,10 +354,13 @@ def sha256_object(key, expected_bytes, progress_cb=None, cancelled_cb=None):
 def presign_get(key, expires=3600):
     """A temporary public GET URL for one object — used to hand an asset to an
     external generation provider (e.g. fal.ai image-to-video) that must fetch
-    it directly. Short-lived by default; the provider downloads it immediately."""
-    return client().generate_presigned_url(
+    it directly, and to let ffmpeg range-read a long source. Short-lived by
+    default; the provider downloads it immediately. Signed by the store that
+    holds the object."""
+    name = locate(key)
+    return store_client(name).generate_presigned_url(
         "get_object",
-        Params={"Bucket": config.S3_BUCKET, "Key": key},
+        Params={"Bucket": store_bucket(name), "Key": key},
         ExpiresIn=int(expires))
 
 
@@ -247,30 +369,87 @@ def copy_object(src_key, dst_key):
     CopyObject for small objects and switches itself to multipart
     (UploadPartCopy) past its threshold — a plain CopyObject caps at 5 GB,
     and the dedup path (round 67d) copies originals up to the 16 GB upload
-    limit without the bytes ever leaving the bucket."""
-    client().copy({"Bucket": config.S3_BUCKET, "Key": src_key},
-                  config.S3_BUCKET, dst_key, Config=TRANSFER_CONFIG)
+    limit without the bytes ever leaving the bucket.
+
+    Across stores (storage_routing): each write store copies server-side
+    when it holds the source. When the PRIMARY write store does not (the
+    source predates a switch and the backlog copy has not reached it), the
+    bytes stream from the store that has it, part by part, never staged on
+    disk. A secondary write store without the source is skipped: the
+    copier's next pass brings the destination over."""
+    plan = _plan()
+    for i, name in enumerate(plan.write):
+        c, b = store_client(name), store_bucket(name)
+        if len(plan.write) == 1 and len(plan.read) == 1:
+            c.copy({"Bucket": b, "Key": src_key}, b, dst_key,
+                   Config=TRANSFER_CONFIG)
+            return
+        if _head(name, src_key) is not None:
+            try:
+                c.copy({"Bucket": b, "Key": src_key}, b, dst_key,
+                       Config=TRANSFER_CONFIG)
+            except Exception as exc:  # noqa: BLE001
+                if i == 0:
+                    raise
+                _log(f"secondary copy in {name} failed for {dst_key}: {exc}")
+            continue
+        if i > 0:
+            continue
+        src_store = next((s for s in plan.read
+                          if s != name and _head(s, src_key) is not None),
+                         None)
+        if src_store is None:
+            # Nowhere else either: the error the copy itself raises.
+            c.copy({"Bucket": b, "Key": src_key}, b, dst_key,
+                   Config=TRANSFER_CONFIG)
+            return
+        _stream_copy(src_store, src_key, name, dst_key)
+
+
+def _stream_copy(src_store, src_key, dst_store, dst_key):
+    """One object from one store into another, through memory only."""
+    obj = store_client(src_store).get_object(Bucket=store_bucket(src_store),
+                                             Key=src_key)
+    extra = {"ContentType": obj.get("ContentType")
+             or "application/octet-stream"}
+    try:
+        store_client(dst_store).upload_fileobj(
+            obj["Body"], store_bucket(dst_store), dst_key,
+            ExtraArgs=extra, Config=TRANSFER_CONFIG)
+    finally:
+        try:
+            obj["Body"].close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def exists(key):
-    try:
-        client().head_object(Bucket=config.S3_BUCKET, Key=key)
-        return True
-    except Exception:
-        return False
+    for name in _plan().read:
+        try:
+            store_client(name).head_object(Bucket=store_bucket(name), Key=key)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def delete_keys(keys):
     """Best-effort delete. Returns how many were requested; never raises —
     callers use this to reclaim superseded artifacts, and failing to free
-    space must never fail the job that produced the new one."""
+    space must never fail the job that produced the new one. Reaches every
+    store the key may live in, so a fallback read cannot resurrect it."""
     keys = [k for k in (keys or []) if k]
     if not keys:
         return 0
-    try:
-        client().delete_objects(
-            Bucket=config.S3_BUCKET,
-            Delete={"Objects": [{"Key": k} for k in keys], "Quiet": True})
-    except Exception:
-        return 0
-    return len(keys)
+    ok = False
+    for name in _plan().delete:
+        try:
+            store_client(name).delete_objects(
+                Bucket=store_bucket(name),
+                Delete={"Objects": [{"Key": k} for k in keys], "Quiet": True})
+            ok = True
+        except Exception:
+            continue
+    for k in keys:
+        _locator.forget(k)
+    return len(keys) if ok else 0

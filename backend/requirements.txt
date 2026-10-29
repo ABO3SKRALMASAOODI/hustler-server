@@ -26,7 +26,7 @@ itsdangerous==2.2.0
 Jinja2==3.1.6
 jiter==0.13.0
 MarkupSafe==2.1.4
-msgpack==1.2.2
+msgpack==1.2.3
 multidict==6.4.3
 # Must stay >= the worker's pin (worker/requirements.txt). 1.39.0's
 # Completions.create() has NO max_completion_tokens parameter, so the

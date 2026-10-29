@@ -281,6 +281,15 @@ class Handler(BaseHTTPRequestHandler):
                 }
             except Exception as e:
                 body["workdir_error"] = str(e)[:200]
+            # WHICH OBJECT STORE(S). The move off R2 (storage_routing.py)
+            # switches stores by an app_kv mode, and the switch is only safe
+            # once every executor reports the next store configured: hosts
+            # and the mode here, never a key.
+            try:
+                import storage as _storage
+                body["storage"] = _storage.routing_status()
+            except Exception as e:
+                body["storage_error"] = str(e)[:200]
             self._send(200, body)
         else:
             self._send(404, {"error": "not found"})

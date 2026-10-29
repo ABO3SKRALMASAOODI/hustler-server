@@ -277,6 +277,138 @@ def _worst(a, b):
     return a if SEVERITY_RANK[a] <= SEVERITY_RANK[b] else b
 
 
+# ── Automatic intake (ops_loop.intake): a failure without a review yet ───
+
+FAILURE_REFS_KEPT = 60       # history keeps this many failure refs a ticket
+AUTO_PREFIX = "auto-"
+
+
+def record_failure(cur, f):
+    """File one production failure on the ticket of its cause.
+
+    `f` comes from intake.scan: ref, source, at, user_id, project_id,
+    severity, cause_key, title, detail. Idempotent per ref (a ref already in
+    the ticket's history is a duplicate). Opens the ticket, attaches to an
+    open one (escalating severity), reopens a FIXED one when the failure
+    happened after the fix was closed (recurrence + 1), and only counts it on
+    a won't-fix one. Returns (ticket, action)."""
+    key = (f.get("cause_key") or "").strip().lower()
+    if not CAUSE_RE.match(key):
+        raise StoreError(f"bad cause key {key!r}")
+    severity = f.get("severity") or "P0"
+    if severity not in SEVERITIES:
+        raise StoreError(f"severity must be one of {', '.join(SEVERITIES)}")
+    at = f["at"] if f["at"].tzinfo else f["at"].replace(tzinfo=timezone.utc)
+    ref = str(f["ref"])[:80]
+    entry = {"event": "failure", "ref": ref, "source": f.get("source"),
+             "user": f.get("user_id"), "project": f.get("project_id"),
+             "at": at.isoformat(timespec="seconds"),
+             "detail": (f.get("detail") or "")[:400] or None}
+    if f.get("job_id"):
+        entry["job"] = f["job_id"]
+    title = _clean((f.get("title") or key)[:200], 200, "title",
+                   required=True)
+    summary = _auto_summary(f, 1, 1)
+    _w(cur, """INSERT INTO tickets (cause_key, title, severity, status,
+                   summary, first_seen, last_seen, occurrences, history)
+               VALUES (%s, %s, %s, 'open', %s, %s, %s, 1, %s)
+               ON CONFLICT (cause_key) DO NOTHING RETURNING *""",
+       (key, title, severity, summary, at, at,
+        json.dumps([{"event": "opened", "at": _now().isoformat(
+            timespec="seconds"), "severity": severity, "auto": True,
+            "ref": ref}, entry], default=str)))
+    row = cur.fetchone()
+    if row:
+        return dict(row), "opened"
+    cur.execute("SELECT * FROM tickets WHERE cause_key = %s FOR UPDATE",
+                (key,))
+    t = dict(cur.fetchone())
+    cur.execute("""SELECT EXISTS (SELECT 1 FROM jsonb_array_elements(history)
+                                   h WHERE h->>'ref' = %s) AS seen
+                     FROM tickets WHERE id = %s""", (ref, t["id"]))
+    if (cur.fetchone() or {}).get("seen"):
+        return t, "duplicate"
+    action = decide(t, at, severity)
+    refs = sum(1 for h in (t.get("history") or [])
+               if isinstance(h, dict) and h.get("event") == "failure")
+    users = {h.get("user") for h in (t.get("history") or [])
+             if isinstance(h, dict) and h.get("event") == "failure"}
+    users.add(f.get("user_id"))
+    events = [entry] if refs < FAILURE_REFS_KEPT else []
+    sev = t["severity"]
+    status_sql = ""
+    if action == "reopen":
+        events.insert(0, {"event": "recurred", "at": _now().isoformat(
+            timespec="seconds"), "ref": ref, "auto": True,
+            "previous_fix_sha": t["fix_sha"],
+            "previous_root_cause": t["root_cause"],
+            "previous_regression_check": t["regression_check"],
+            "previous_closed_at": t["closed_at"]})
+        sev = _worst(t["severity"], severity)
+        status_sql = """, status = 'open', recurrence_count =
+                         recurrence_count + 1, fix_sha = NULL,
+                         regression_check = NULL, closed_at = NULL"""
+        action = "reopened"
+    elif action == "escalate":
+        events.insert(0, {"event": "escalated", "at": _now().isoformat(
+            timespec="seconds"), "severity": severity, "ref": ref})
+        sev = severity
+        action = "attached"
+    elif action == "attach_closed":
+        action = "attached_to_closed"
+    else:
+        action = "attached"
+    _w(cur, f"""UPDATE tickets SET occurrences = occurrences + 1,
+                    last_seen = GREATEST(last_seen, %s),
+                    first_seen = LEAST(first_seen, %s), severity = %s,
+                    summary = CASE WHEN cause_key LIKE 'auto-%%' THEN %s
+                                   ELSE summary END,
+                    history = history || %s, updated_at = NOW()
+                    {status_sql}
+                WHERE id = %s""",
+       (at, at, sev, _auto_summary(f, int(t["occurrences"] or 0) + 1,
+                                   len(users - {None})),
+        json.dumps(events, default=str), t["id"]))
+    cur.execute("SELECT * FROM tickets WHERE id = %s", (t["id"],))
+    return dict(cur.fetchone()), action
+
+
+def _auto_summary(f, occurrences, users):
+    at = f["at"]
+    when = at.strftime("%Y-%m-%d %H:%M UTC") if hasattr(at, "strftime") \
+        else str(at)
+    return (f"Auto-filed from production ({f.get('source')}). Latest: "
+            f"{f.get('ref')} for user #{f.get('user_id')}"
+            + (f", project {f.get('project_id')}" if f.get("project_id")
+               else "")
+            + f" at {when}: {(f.get('detail') or '')[:600]} · "
+            f"{occurrences} failure{'s' if occurrences != 1 else ''} from "
+            f"{users} customer{'s' if users != 1 else ''} so far.")[:3000]
+
+
+# The intake's own bookkeeping row in app_kv (its watermark). Nothing else
+# in app_kv is ever written from here.
+STATE_KEYS = ("ops_intake_watermark",)
+
+
+def guard_state(sql, key):
+    """The one app_kv write: an upsert of one of STATE_KEYS."""
+    m = _WRITE_RE.match(sql)
+    if not m or m.group(1).upper() != "INSERT INTO" or \
+            m.group(2).lower() != "app_kv":
+        raise StoreError("the outcome loop's state is an app_kv upsert")
+    if key not in STATE_KEYS:
+        raise StoreError(f"app_kv key {key!r} is not the outcome loop's")
+    return sql
+
+
+def put_state(cur, key, value):
+    cur.execute(guard_state("""INSERT INTO app_kv (key, value, updated_at)
+                   VALUES (%s, %s, NOW()) ON CONFLICT (key) DO UPDATE
+                   SET value = EXCLUDED.value, updated_at = NOW()""", key),
+                (key, json.dumps(value, default=str)))
+
+
 def set_fixing(cur, ticket_id, note=None):
     cur.execute("SELECT status FROM tickets WHERE id = %s", (int(ticket_id),))
     row = cur.fetchone()
