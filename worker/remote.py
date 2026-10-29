@@ -1818,6 +1818,13 @@ def _cloudflare_features(target="cloudflare"):
     return list(features) if isinstance(features, list) else []
 
 
+def _features_for(target):
+    """Advertised features of the call's target ([] when unknown)."""
+    if target == "cloudflare":
+        return _cloudflare_features()
+    return _cloudflare_features(target)
+
+
 def _cloudflare_status(call_id, lane, timeout=10):
     response = requests.get(
         f"{_call_url(call_id)}/calls/{lane}/{call_id}",
@@ -2251,7 +2258,7 @@ def _fence_cloudflare_call(call_id, lane, job, launch_id):
     or whatever terminal state the call reached meanwhile), or None when
     the Worker cannot fence or the call turned out to be alive.
     """
-    if "fence" not in _cloudflare_features(_call_target(call_id)):
+    if "fence" not in _features_for(_call_target(call_id)):
         return None
     try:
         response = requests.post(
@@ -2361,7 +2368,10 @@ def _run_cloudflare(job):
     # network trip is still real latency and must not disappear from the gate.
     job["_dispatch_submitted_at"] = time.time()
     try:
-        _cloudflare_preflight(timeout=10, target=target)
+        if target == "cloudflare":
+            _cloudflare_preflight(timeout=10)
+        else:
+            _cloudflare_preflight(timeout=10, target=target)
     except requests.RequestException as exc:
         # No launch request was sent, so Modal fallback is unambiguous, and
         # without one this is a retry (a Worker publish, a network blip),
@@ -2600,7 +2610,7 @@ def _next_rollout_slot(job):
     """
     current = job.get("_cloudflare_admission_slot", 0)
     current = current if isinstance(current, int) else 0
-    ceiling = (_MAX_ALT_SLOT if "alt_slots_32" in _cloudflare_features(
+    ceiling = (_MAX_ALT_SLOT if "alt_slots_32" in _features_for(
         _job_target(job)) else _LEGACY_ALT_SLOTS)
     nxt = current + 1
     return nxt if nxt <= ceiling else None
