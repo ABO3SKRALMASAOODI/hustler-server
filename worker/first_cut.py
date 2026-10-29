@@ -1719,7 +1719,7 @@ def run(worker_db, job, project, index_row):
                           "ok": not _failed(render),
                           "note": str(render or "")[:160]})
             if _clear_corner_mark(ctx, steps, render) \
-                    and int(ctx.request_previews or 0) < config.FIRST_CUT_MAX_RENDERS:
+                    and _renders_done(steps) < config.FIRST_CUT_MAX_RENDERS:
                 render = agent_tools.execute(
                     ctx, "render_preview", {"quality": "approval"})
                 steps.append({"tool": "render_preview",
@@ -1742,7 +1742,7 @@ def run(worker_db, job, project, index_row):
                      and preview.get("edl_version") == latest.get("version"))
     meta = {"kind": "first_cut", "first_cut": {
         "steps": steps, "elapsed_s": elapsed, "picked": picked,
-        "renders": int(ctx.request_previews or 0),
+        "renders": _renders_done(steps),
         "model_usd": round(spend["usd"], 5)}}
     follow_up = None
     if delivered and url and is_brief(_message_text(worker_db, payload.get("message_id"))):
@@ -1775,7 +1775,7 @@ def run(worker_db, job, project, index_row):
                           job["project_id"], "free_result_delivered",
                           {"job_id": job["id"], "elapsed_s": elapsed,
                            "duration_s": duration,
-                           "renders": int(ctx.request_previews or 0),
+                           "renders": _renders_done(steps),
                            "model_usd": round(spend["usd"], 5),
                            "source": "url" if url else "video"})
         except Exception:
@@ -1801,6 +1801,18 @@ class _ScopeRecorder:
 
     def __call__(self, purpose, request, response, usage):
         return None
+
+
+def _renders_done(steps):
+    """Preview renders this First cut ran, from its own step log.
+
+    It read ``ctx.request_previews``, a per-request preview counter that
+    main removed on 25 Oct (19489348: requests work until fulfilled, no
+    preview cap). After the trial branch merged main, every First cut died
+    on that missing attribute (T1 harness, 30 Oct); the step log is the
+    First cut's own record and needs nothing from ToolContext."""
+    return sum(1 for step in steps or ()
+               if isinstance(step, dict) and step.get("tool") == "render_preview")
 
 
 def project_admission_safe(worker_db, project_id):

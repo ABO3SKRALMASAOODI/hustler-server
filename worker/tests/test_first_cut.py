@@ -25,7 +25,8 @@ class Ctx:
         self.duration = index["video"]["duration"]
         self.versions_written = []
         self.web_recordings = []
-        self.request_previews = 0
+        # No request_previews: main removed it from ToolContext (19489348),
+        # and a fake that kept it hid that every real First cut crashed.
         self.last_preview = None
 
 
@@ -581,3 +582,19 @@ def test_a_long_slow_narration_over_noise_is_not_a_finished_piece():
     vlog = {"words": [{"w": "word", "t0": k * 1.0, "t1": k * 1.0 + 0.3} for k in range(90)],
             "perception": {"bpm": 120.0, "beats": [1.0, 1.5]}}
     assert first_cut._speech(vlog) and not first_cut._music_piece(vlog, 100.0)
+
+
+def test_the_first_cut_needs_nothing_main_removed_from_the_tool_context():
+    """T1 (30 Oct): after the trial branch merged main, every First cut died
+    on ``ctx.request_previews`` (main's 19489348 removed the per-request
+    preview counter). The First cut now counts its own renders."""
+    import inspect
+    import agent_tools
+    src = inspect.getsource(first_cut)
+    assert "ctx.request_previews or" not in src
+    assert "self.request_previews" not in inspect.getsource(
+        agent_tools.ToolContext.__init__)
+    steps = [{"tool": "cut_silences"}, {"tool": "render_preview"},
+             {"tool": "render_preview", "ok": False}, "noise"]
+    assert first_cut._renders_done(steps) == 2
+    assert first_cut._renders_done(None) == 0
