@@ -176,13 +176,30 @@ never calls a model for it. The Reviewer (hourly) runs
 `backend/scripts/ops_review.py pending`, looks at each settled session of a
 real user frame by frame, uploads picture evidence (R2 `ops/evidence/<session>/`)
 and writes `session_reviews` and one `tickets` row per cause (migration 041).
-The Fixer (daily 03:00 Dubai, at once on a P0) fixes causes, guards each with
+The Fixer (daily 03:10 Dubai, within 10 minutes on a P0) fixes causes, guards each with
 a test or journey and closes tickets with `fix_sha` and `regression_check`.
 `ops_review.py` is the agents' ONLY production write path and writes only the
 four outcome tables (`ops_loop/store.guard`). Views: admin Overview strip
 (signups, outcome rate, tickets), Sessions and Tickets tabs
 (`routes/admin_ops.py`), and the 08:00 digest. Runbooks:
 `/Users/masaoodi/Documents/Valmera/.valmera/ops-loop/` (REVIEWER.md, FIXER.md).
+
+**Automatic intake and awareness (29 Oct 2026).** Every new customer failure
+(failed job, error reply, unfulfilled request, upload / player failure, our
+own MCP error) is filed as a ticket within a minute by
+`ops_loop/intake.py` (a 1-minute advisory-locked tick in the web process;
+cause keys `auto-*`; P0 = a customer is blocked, P1 = device-side or a gated
+free account). The Mac's P0 watch (`check_fixer.sh p0`, every 10 minutes,
+also catches a backend or database outage) starts the Fixer. The owner gets
+ONE alert kind: a P0 nobody marked 'fixing' within 30 minutes (plus a model
+provider out of credit), and ONE daily email answering four questions:
+results judged, failures and what was fixed (links), signups and active
+customers, box / queue / spend; the same four answers top the admin
+(`GET /admin/video/ops/today`). No billing advice anywhere: no flag, alert or
+digest line may suggest a refund, pause, cancellation, credit or plan change
+(`tests/test_cockpit.py::test_no_flag_gives_billing_advice`). MCP error
+events keep a bounded sentence (links, emails, quoted text removed) only for
+our own failures, never for a caller's correction.
 
 ## Gotchas
 

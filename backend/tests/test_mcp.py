@@ -474,7 +474,15 @@ def test_every_public_tool_error_records_bounded_diagnostics(client, monkeypatch
         {"tool": "get_transcript"}, {"tool": "load_tools"},
         {"tool": "create_project"}, {"tool": "stale_tool_name"},
     ]
-    assert all(set(event["detail"]) == {"tool", "category", "error_fingerprint"} for event in events)
+    assert all(set(event["detail"]) <= {"tool", "category", "error_fingerprint",
+                                         "message", "code"} for event in events)
+    # A sentence is kept only for OUR failures, bounded (the outcome loop's
+    # automatic intake reads it to find the cause).
+    for event in events:
+        d = event["detail"]
+        if "message" in d:
+            assert d["category"] in mcpmod.OWN_FAILURE_CATEGORIES
+            assert len(d["message"]) <= 300
     assert all(len(event["detail"]["error_fingerprint"]) == 16 for event in events)
     assert all(event["kind"] == "mcp_error_response" for event in events)
     assert all(event["project_id"] is None and event["asset_id"] is None
@@ -2117,6 +2125,40 @@ def test_mcp_workflow_teaches_the_premium_short_form_finish():
     assert "strength is magnification minus 1" in flat
 
 
+def test_our_own_failures_keep_a_bounded_sentence_without_contents():
+    result = mcpmod._text("export_final could not start: the render for "
+                          "project 4911 needs a complete preview of v12 "
+                          "('My wedding cut' by bride@example.com) "
+                          "https://r2.example/x?X-Amz-Signature=abc", True)
+    detail = mcpmod._public_error_detail("export_final", result)
+    assert detail["category"] == "unclassified"
+    msg = detail["message"]
+    assert msg.startswith("export_final could not start: the render for "
+                          "project 4911 needs a complete preview of v12")
+    for leaked in ("wedding", "bride@", "Signature", "https://"):
+        assert leaked not in msg
+    long = mcpmod._public_error_detail("open_project",
+                                       mcpmod._text("x" * 900, True))
+    assert len(long["message"]) == 300
+    # An AI app's correction keeps no text: it can quote the customer.
+    fix = mcpmod._public_error_detail("set_caption", mcpmod._text(
+        "REJECTED: the caption 'meet me at 5' must be under 2 lines", True))
+    assert fix["category"] == "invalid_request" and "message" not in fix
+    # The product's own gates (export_final's QC hold) are not failures.
+    held = mcpmod._public_error_detail("export_final", {
+        "content": [{"type": "text", "text": "PROJECT 5219: EDL v28 still "
+                     "has 2 unresolved verification finding(s), so no "
+                     "export was started"}],
+        "structuredContent": {"export": {"code": "verification_open"}},
+        "isError": True})
+    assert held["code"] == "verification_open"
+    assert held["category"] == "prerequisite" and "message" not in held
+    # The intake files the same set of our own failures.
+    from ops_loop import intake
+    assert set(intake.MCP_OURS) == mcpmod.OWN_FAILURE_CATEGORIES
+    assert set(intake.MCP_OURS_OUTCOMES) == mcpmod.OWN_FAILURE_OUTCOMES
+
+
 def test_error_diagnostics_do_not_retain_customer_contents():
     result = mcpmod._text("REJECTED: private transcript secret@example.com https://private/path?token=secret", True)
     detail = mcpmod._public_error_detail("apply_edit_batch", result)
@@ -2449,3 +2491,53 @@ def test_export_gate_on_an_older_version_does_not_offer_justification(
     text = result["content"][0]["text"]
     assert "not the newest version (v12)" in text
     assert "justify_verification_findings(project_id=" not in text
+
+
+def test_download_without_kind_hands_out_the_finished_export(client,
+                                                             monkeypatch):
+    """Ticket #4 (27-28 Oct 2026): two paying MCP users received 270x480 and
+    854x480 drafts as their video because download_url defaulted to the
+    draft preview. Without kind it now returns the finished export when one
+    exists, and any preview link says it is a draft, not the deliverable."""
+    DB["render_assets"] = [
+        {"id": 50, "project_id": 3, "storage_key": "media/3/p9.mp4",
+         "duration_s": 26.5, "width": 270, "height": 480,
+         "meta": {"variant": "preview", "edl_version": 9,
+                  "audio_model_review": False, "render_job_id": 95}},
+        {"id": 51, "project_id": 3, "storage_key": "media/3/f9.mp4",
+         "duration_s": 26.5, "width": 1080, "height": 1920,
+         "meta": {"variant": "final", "edl_version": 9,
+                  "render_job_id": 96}}]
+    monkeypatch.setattr(mcpmod.storage, "presign_get",
+                        lambda key: f"https://cdn.example/{key}?sig=1")
+    monkeypatch.setattr(mcpmod, "_final_gate",
+                        lambda cur, pid, uid: (lambda aid, meta, v: True))
+    monkeypatch.setattr(mcpmod, "_record_download_receipt",
+                        lambda tok, pid, receipt: {})
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+    assert got["isError"] is False
+    receipt = got["structuredContent"]["download_receipt"]
+    assert receipt["asset_id"] == 51 and receipt["render_type"] == \
+        "final_export"
+    # No final yet: the draft comes back, and says what it is.
+    DB["render_assets"] = DB["render_assets"][:1]
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {"project_id": 3},
+    }).get_json()["result"]
+    text = got["content"][0]["text"]
+    assert "DRAFT PREVIEW (270x480)" in text and "NOT the finished video" \
+        in text
+    assert "export_final(project_id=3, edl_version=9)" in text
+    assert got["structuredContent"]["preview_receipt"]["deliverable"] is \
+        False
+    # An explicit preview request is still served (the editors' evidence),
+    # with the same label.
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {"project_id": 3,
+                                              "kind": "preview"},
+    }).get_json()["result"]
+    assert "DRAFT PREVIEW" in got["content"][0]["text"]
+    tool = next(t for t in mcpmod.SESSION_TOOLS if t["name"] == "download_url")
+    assert "never the user's finished video" in tool["description"]
