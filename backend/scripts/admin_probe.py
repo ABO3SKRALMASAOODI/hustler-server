@@ -350,6 +350,20 @@ def check_dict(b, t):
     return f"{len(b)} keys"
 
 
+def check_trial_switch(b, t):
+    """The owner's free-trial card (trial_toggle.py): a known state, the
+    model, and spend/accounts that are numbers or an explicit unknown."""
+    need(isinstance(b, dict) and b, "empty body")
+    need(b.get("state") in ("on", "off", "auto_off"), f"state {b.get('state')!r}")
+    need(str(b.get("model") or "").startswith("claude-"), "no Claude model")
+    spend = b.get("spend") or {}
+    need(spend.get("budget_usd") is not None, "no cycle budget")
+    reason = f" ({b.get('reason')})" if b.get("reason") else ""
+    return (f"{b['state']}{reason} · ${spend.get('spent_usd')} of "
+            f"${spend.get('budget_usd')} · ledger "
+            f"{'ready' if b.get('ledger_ready') else 'missing (040)'}")
+
+
 # PLAN.md §4.3 (strategy 1025, written 25 Oct 2026 09:00 UTC): the accounts
 # each list-type flag named that morning. Printed beside what the board
 # flags now; states move (a card retry, a cancellation), so a difference is
@@ -541,6 +555,7 @@ def check_users(b, t):
 ENDPOINTS = [
     ("Overview", "/admin/video/ops/summary", check_ops_summary),
     ("Overview", "/admin/video/ops/today", check_ops_today),
+    ("Overview", "/admin/video/trial", check_trial_switch),
     ("Overview", "/admin/video/overview?summary=1", check_video_overview),
     ("Overview", "/admin/video/overview", check_video_overview),
     ("Overview", "/admin/video/upload_failures?days=30&limit=100", check_dict),
