@@ -3371,6 +3371,67 @@ def _nearest_alternative(user_text):
     return None
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+# "The current cut is still v12", "the edit remains unchanged": a stale-state
+# claim is as false as a denial on a turn that wrote a new version.
+_STALE_STATE = re.compile(
+    r"(?i)\b(?:still|remains?|stays?|kept at)\b[^.\n]{0,40}\bv(?:ersion)?\s?\d+\b"
+    r"|\bunchanged\b|\bas it was\b|\bleft (?:it|the (?:edit|cut|video)) "
+    r"(?:as it (?:is|was)|alone|unchanged)\b")
+
+
+def _agreeing_sentences(text, wrote, previewed):
+    """The draft without the sentences that contradict the turn facts: a
+    denial or a stale-state claim when the edit changed, an edit claim when
+    it did not, a render claim when nothing was rendered."""
+    paragraphs = []
+    for para in re.split(r"\n\s*\n", text or ""):
+        kept = []
+        for sent in _SENTENCE_SPLIT.split(para.strip()):
+            if not sent.strip():
+                continue
+            if wrote and (DENY_CLAIM.search(sent) or _STALE_STATE.search(sent)):
+                continue
+            if not wrote:
+                m = next((mm for mm in EDIT_CLAIM.finditer(sent)
+                          if not _negated_claim(sent, mm)
+                          and not _offered_claim(sent, mm)), None)
+                if m is not None:
+                    continue
+            if not previewed and RENDER_CLAIM.search(sent):
+                continue
+            kept.append(sent.strip())
+        if kept:
+            paragraphs.append(" ".join(kept))
+    return "\n\n".join(paragraphs)
+
+
+def _facts_reply(ctx, start_version, draft, wrote, previewed):
+    """The user's reply for a turn that did real work but whose model drafts
+    (twice) misreported it: one plain sentence from the turn facts, then the
+    draft's sentences that agree with them. Never an internal note."""
+    if wrote:
+        latest = ctx.latest_edl()["version"]
+        lead = (f"I changed the edit in this turn: it is now version "
+                f"{latest} (it was version {start_version})")
+        preview = getattr(ctx, "last_preview", None) or {}
+        if previewed and str(preview.get("edl_version")) == str(latest):
+            lead += ", and the preview on the right shows it"
+        lead += ". Each change is listed in the editing steps above."
+    else:
+        made = []
+        if ctx.urls_fetched:
+            made.append("the linked media was downloaded")
+        if ctx.images_generated:
+            made.append("an image was generated")
+        if getattr(ctx, "audio_extracted", None):
+            made.append("the audio was taken out of the video you uploaded")
+        lead = ("I didn't change the edit in this turn, but "
+                + " and ".join(made) + ", and it is saved to your project.")
+    rest = _agreeing_sentences(draft, wrote, previewed)
+    return lead + ("\n\n" + rest if rest else "")
+
+
 def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
                      honesty, user_text=""):
     """Deterministic check of the drafted reply against the turn facts.
@@ -3432,29 +3493,18 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     if wrote or ctx.images_generated or ctx.urls_fetched \
             or getattr(ctx, "audio_extracted", None):
         # Real work happened, so the reply is corrected rather than discarded.
-        # The note has to say WHICH work, though: routing a fetch-only turn
-        # into the fallback below told the user nothing happened and that we
-        # cannot fetch links, while their downloaded file sat in the project —
-        # a lie in the opposite direction to the one being guarded against.
-        # Equally, "DID modify the edit" is false when only an asset was
-        # created, so each case gets its own wording.
-        if wrote:
-            note = ("this turn DID modify the edit — see the editing steps "
-                    "above")
-        else:
-            made = []
-            if ctx.urls_fetched:
-                made.append("the linked media WAS downloaded")
-            if ctx.images_generated:
-                made.append("an image WAS generated")
-            if getattr(ctx, "audio_extracted", None):
-                made.append("the audio WAS taken out of the video you "
-                            "uploaded")
-            note = ("this turn did NOT change the edit, but "
-                    + " and ".join(made) + " and saved to the project")
+        # It has to say WHICH work, though: routing a fetch-only turn into the
+        # fallback below told the user nothing happened and that we cannot
+        # fetch links, while their downloaded file sat in the project. And it
+        # is the USER's reply: until 30 Oct 2026 this prepended
+        # "*(system: this turn DID modify the edit ...)*" to a draft that
+        # still said "Nothing was changed", and the customer read both. The
+        # reply now leads with the turn facts in plain words and keeps only
+        # the draft's sentences that agree with them (_facts_reply).
         print(f"[honesty] job {ctx.job['id']}: regeneration still misreports "
-              "real work — posting a corrective note", flush=True)
-        return f"*(system: {note})*\n\n" + (redraft or draft)
+              "real work — replying from the turn facts", flush=True)
+        return _facts_reply(ctx, start_version, redraft or draft,
+                            wrote, previewed)
     # Zero-write fabrication that survived regeneration: never publish it.
     honesty["fallback_reply"] = True
     print(f"[honesty] job {ctx.job['id']}: regeneration still fabricates — "
