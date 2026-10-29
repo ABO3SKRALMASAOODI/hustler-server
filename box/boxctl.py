@@ -478,7 +478,14 @@ def restart_services(changed):
             open(flag, "w").close()
         else:
             units.append("valmera-admission")
-    if "host/box.json" in changed:
+    try:
+        with open(os.path.join(BOX_HOME, "host", "box.json"), "rb") as fh:
+            repo_plan = fh.read()
+        with open(CONFIG_PATH, "rb") as fh:
+            live_plan = fh.read()
+    except OSError:
+        repo_plan = live_plan = b""
+    if repo_plan and repo_plan != live_plan:
         # The repository's slot plan is the source of truth. Scalar settings
         # reload live; a new slot list needs admission restarted (deferred
         # while calls are in flight, like a code change).
@@ -524,7 +531,7 @@ def cmd_update():
     changed = install_box_tooling()
     if changed:
         log(f"box tooling changed: {', '.join(sorted(changed))}")
-        restart_services(changed)
+    restart_services(changed)
     pending_admission_restart()
     build_images(source)
     converge(source, commit, float(cfg.get("drain_timeout_s", 7200)))
