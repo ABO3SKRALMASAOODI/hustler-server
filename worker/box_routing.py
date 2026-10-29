@@ -29,10 +29,36 @@ way Cloudflare containers route their children through the Worker.
 ``skew`` "hold" (default, the owner's rule): a job runs only on box code
 whose fingerprint equals the dispatcher's; until the box reports it, the job
 waits. "guard" lets an older box release run what its skew guard accepts.
+
+Two (or more) boxes: an optional ``boxes`` list replaces ``url``::
+
+    "boxes": [{"id": "h1", "url": "https://13-140-241-231.sslip.io",
+               "classes": ["customer", "trial"]},
+              {"id": "h2", "url": "https://<box 2>.sslip.io",
+               "classes": ["owner"]}],
+    "overflow_wait_s": 30
+
+Each box has a stable id (``h1`` .. ``h99``; the first box is ``h1``) that
+its call ids carry (``bx-h2-...``; ``h1`` calls keep today's untagged
+``bx-...`` ids), so a reconnect, completion or abandonment after any restart
+reaches the box that holds the call. ``classes`` are the admission classes a
+box is HOME for; ``accepts`` (default: every class) are the classes it also
+takes as overflow. A job asks its home box first (admission's full wait), and
+when that box refuses with proof that nothing ran it asks the next box at
+once under that box's own identity (the overflow wait), round after round,
+until its in-claim window ends and it goes back to the queue unspent. Every
+box keeps its own priority queue. Children never move: inside a slot
+``BOX_ROUTE_ALL`` sends them to that box's own admission. Without ``boxes``
+there is one box, ``h1``, and everything is exactly the single-box path.
+
+A box is removed in two steps: first ``"classes": [], "accepts": []`` (no
+new work; its calls stay reachable), then, once it is idle, the entry.
+Never give a listed id another host.
 """
 
 import json
 import os
+import re
 import threading
 import time
 
@@ -99,13 +125,140 @@ def set_routing_for_tests(value):
         _users.clear()
 
 
+PRIMARY = "h1"
+CLASSES = ("customer", "trial", "owner")
+_BOX_ID = re.compile(r"^h[1-9][0-9]?$")
+_CALL_TAG = re.compile(r"^bx-(h[1-9][0-9]?)-")
+OVERFLOW_WAIT_S = 30.0
+
+
 def url():
+    """The primary box's address (``h1``; the only box without ``boxes``)."""
     explicit = os.getenv("BOX_EXECUTOR_URL", "").strip().rstrip("/")
     if explicit:
         return explicit
     if route_all():
         return ""
+    listed = _listed_boxes()
+    for box in listed:
+        if box["id"] == PRIMARY:
+            return box["url"]
+    if listed:
+        return listed[0]["url"]
     return str(routing().get("url") or DEFAULT_URL).strip().rstrip("/")
+
+
+def _class_set(value, default):
+    if not isinstance(value, list):
+        return frozenset(default)
+    return frozenset(str(c) for c in value if str(c) in CLASSES)
+
+
+def _listed_boxes():
+    """The routing document's ``boxes`` entries, validated, in its order."""
+    raw = routing().get("boxes")
+    if not isinstance(raw, list):
+        return []
+    out, seen = [], set()
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            continue
+        box_id = str(entry.get("id") or (PRIMARY if index == 0 else "")
+                     ).strip().lower()
+        address = str(entry.get("url") or "").strip().rstrip("/")
+        if not _BOX_ID.match(box_id) or not address or box_id in seen:
+            continue
+        seen.add(box_id)
+        classes = _class_set(entry.get("classes"), CLASSES)
+        accepts = _class_set(entry.get("accepts"), CLASSES) | classes
+        out.append({"id": box_id, "url": address, "classes": classes,
+                    "accepts": accepts})
+    return out
+
+
+def boxes():
+    """Every box the dispatcher may use: [{id, url, classes, accepts}].
+
+    Without a ``boxes`` list this is the single box ``h1`` at url(), home of
+    every class: today's routing exactly. Inside a slot it is that box's own
+    admission only."""
+    if not route_all():
+        listed = _listed_boxes()
+        if listed:
+            return listed
+    primary = url()
+    return [{"id": PRIMARY, "url": primary, "classes": frozenset(CLASSES),
+             "accepts": frozenset(CLASSES)}] if primary else []
+
+
+def multi_box():
+    return len(boxes()) > 1
+
+
+def box_url(box_id):
+    """The address of box ``box_id`` ("" when it is not configured).
+
+    Inside a slot every call goes to that box's own admission."""
+    if route_all():
+        return url()
+    box_id = str(box_id or PRIMARY)
+    for box in _listed_boxes():
+        if box["id"] == box_id:
+            return box["url"]
+    return url() if box_id == PRIMARY else ""
+
+
+def call_box(call_id):
+    """The box a ``bx-`` call id lives on: its tag, else the primary."""
+    m = _CALL_TAG.match(str(call_id or ""))
+    return m.group(1) if m else PRIMARY
+
+
+def call_tag(box_id):
+    """The call-id tag of a box: none for the primary (today's ids)."""
+    box_id = str(box_id or PRIMARY)
+    return "" if box_id == PRIMARY or not _BOX_ID.match(box_id) \
+        else f"{box_id}-"
+
+
+def box_id_for_url(address):
+    """The configured id of the box at ``address`` (None if unlisted)."""
+    address = str(address or "").strip().rstrip("/")
+    for box in boxes():
+        if box["url"] == address:
+            return box["id"]
+    return None
+
+
+def overflow_wait_s():
+    try:
+        value = float(routing().get("overflow_wait_s", OVERFLOW_WAIT_S))
+    except (TypeError, ValueError):
+        value = OVERFLOW_WAIT_S
+    return max(5.0, value)
+
+
+def candidates(job):
+    """[(box id, home)] in the order this job asks: its home boxes first,
+    then the boxes that take its class as overflow. One box: [("h1", True)].
+
+    An owner-account job may pin itself to one box (``payload.box_pin``,
+    the add-box parity smoke); no other job can."""
+    listed = boxes()
+    if not listed:
+        return [(PRIMARY, True)]
+    if route_all() or len(listed) == 1:
+        return [(listed[0]["id"], True)]
+    if user_class(job.get("user_id")) == "owner":
+        pin = str((job.get("payload") or {}).get("box_pin") or "")
+        if pin and any(b["id"] == pin for b in listed):
+            return [(pin, True)]
+    klass = priority_class(job)
+    home = [(b["id"], True) for b in listed if klass in b["classes"]]
+    over = [(b["id"], False) for b in listed
+            if klass not in b["classes"] and klass in b["accepts"]]
+    # A class no box takes is a configuration slip: never strand the job.
+    return (home + over) or [(listed[0]["id"], True)]
 
 
 def enabled():

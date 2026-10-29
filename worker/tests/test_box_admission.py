@@ -285,3 +285,149 @@ def test_provision_writes_only_listed_names_private(prov, tmp_path):
     assert (tmp_path / "env-changed").exists()
     with pytest.raises(ValueError, match="missing required"):
         prov.write_env({"DATABASE_URL": "x"})
+
+
+# ── two boxes: each admission knows which box it is ────────────────────────
+def test_box_id_defaults_to_the_first_box_and_is_reported(adm):
+    assert _box(adm).health()["box_id"] == "h1"
+    assert _box(adm, box_id="h2").health()["box_id"] == "h2"
+    assert _box(adm, box_id="evil").health()["box_id"] == "h1"
+
+
+def test_tagged_call_ids_match_their_job_and_keep_project_affinity(adm):
+    import hashlib as _h
+    job = {"id": 41, "type": "mcp_tool", "project_id": 9, "total_claims": 3}
+    digest = _h.sha256(b"mcp_tool:41:3").hexdigest()[:20]
+    for call_id in (f"bx-mcp-p9-{digest}", f"bx-h2-mcp-p9-{digest}",
+                    f"bx-h2-alt4-mcp_tool-p9-{digest}"):
+        assert adm.matches_job(call_id, job), call_id
+    assert not adm.matches_job(f"bx-h2-mcp-p8-{digest}", job)
+    assert adm.affinity_key("bx-h2-mcp-p9-x") == "project:9"
+    assert adm.affinity_key("bx-mcp-p9-x") == "project:9"
+    assert adm.affinity_key("bx-h2-render-g12-1-x") == "group:12-1"
+
+
+def _serve(adm, box):
+    import threading
+    from http.server import ThreadingHTTPServer
+    server = ThreadingHTTPServer(("127.0.0.1", 0), adm.make_handler(
+        box, adm.RateLimiter(1000, 1000)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def _request(server, method, path, box_header=None, body=None):
+    import http.client
+    conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1],
+                                      timeout=10)
+    headers = {"Authorization": "Bearer s3cret",
+               "Content-Type": "application/json"}
+    if box_header:
+        headers["X-Valmera-Box"] = box_header
+    conn.request(method, path, body=json.dumps(body or {}), headers=headers)
+    resp = conn.getresponse()
+    out = (resp.status, json.loads(resp.read() or b"{}"))
+    conn.close()
+    return out
+
+
+def test_a_call_meant_for_another_box_is_refused_and_never_stored(
+        adm, monkeypatch):
+    monkeypatch.setenv("REMOTE_EXECUTOR_SECRET", "s3cret")
+    box = _box(adm, box_id="h2")
+    server = _serve(adm, box)
+    try:
+        launch = {"job": {"id": 1, "type": "preview", "project_id": 1,
+                          "total_claims": 1, "dispatcher_source": "v1"},
+                  "launch_id": "launch-aaaa", "timeout_s": 600}
+        code, body = _request(server, "POST",
+                              "/calls/interactive/bx-preview-p1-abcdef",
+                              box_header="h1", body=launch)
+        assert code == 429 and body["box_wait"] is True
+        assert body["safe_to_fallback"] is True and "h2" in body["error"]
+        assert box.get("bx-preview-p1-abcdef") is None
+        code, body = _request(server, "GET",
+                              "/calls/interactive/bx-preview-p1-abcdef",
+                              box_header="h1")
+        assert code == 421 and body["wrong_box"] is True
+        for action in ("complete", "abandon", "fence"):
+            code, _b = _request(
+                server, "POST",
+                f"/calls/interactive/bx-preview-p1-abcdef/{action}",
+                box_header="h1", body={"job": launch["job"]})
+            assert code == 421, action
+        # Its own name, or no name (an older dispatcher, a slot's child):
+        code, body = _request(server, "GET",
+                              "/calls/interactive/bx-h2-preview-p1-abcdef",
+                              box_header="h2")
+        assert code == 404 and body == {"status": "missing"}
+        code, body = _request(server, "GET",
+                              "/calls/interactive/bx-preview-p1-abcdef")
+        assert code == 404 and body == {"status": "missing"}
+    finally:
+        server.shutdown()
+
+
+def test_box_two_plan_is_a_valid_factory_home():
+    plan = json.load(open(os.path.join(BOX_DIR, "host", "box-h2.json")))
+    one = json.load(open(os.path.join(BOX_DIR, "host", "box.json")))
+    assert plan["box_id"] == "h2" and "box_id" not in one
+    names = [s["name"] for s in plan["slots"]]
+    ports = [s["port"] for s in plan["slots"]]
+    assert len(set(names)) == len(names) and len(set(ports)) == len(ports)
+    lanes = {s["lane"] for s in plan["slots"]}
+    assert lanes == {"interactive", "batch", "mcp", "agent", "shorts"}
+    for slot in plan["slots"]:
+        if slot.get("cpuset"):
+            cpus = set()
+            for part in slot["cpuset"].split(","):
+                a, _, b = part.partition("-")
+                cpus |= set(range(int(a), int(b or a) + 1))
+            assert max(cpus) < 16 and len(cpus) == slot["cpus"]
+        # Cloudflare parity: x264 sees exactly the lane's CPUs.
+        if slot["lane"] == "interactive" and not slot.get("quick"):
+            assert slot["cpus"] == 2.0
+        if slot["lane"] == "batch" and not slot.get("quick"):
+            assert slot["cpus"] == 4.0
+    by_lane = {}
+    for slot in plan["slots"]:
+        if not slot.get("quick"):
+            by_lane[slot["lane"]] = by_lane.get(slot["lane"], 0) + 1
+    caps = plan["owner_max_by_lane"]
+    # The factory's home, with room left in every shared lane for customers.
+    for lane in ("interactive", "batch", "mcp"):
+        assert caps[lane] < by_lane[lane]
+        assert caps[lane] > one["owner_max_by_lane"][lane]
+
+
+def _add_box(tmp_path, monkeypatch):
+    return _load("add_box", tmp_path, monkeypatch)
+
+
+def test_add_box_registers_smoke_only_then_promotes_and_demotes(
+        tmp_path, monkeypatch):
+    tool = _add_box(tmp_path, monkeypatch)
+    today = {"enabled": True, "url": "https://13-140-241-231.sslip.io",
+             "stages": {"owner": True}, "owner_user_ids": [60],
+             "skew": "hold"}
+    smoke = tool.with_box(today, "h2", "https://1-2-3-4.sslip.io", "smoke")
+    assert smoke["stages"] == today["stages"] and "url" not in smoke
+    assert smoke["boxes"] == [
+        {"id": "h1", "url": "https://13-140-241-231.sslip.io"},
+        {"id": "h2", "url": "https://1-2-3-4.sslip.io", "classes": [],
+         "accepts": []}]
+    home = tool.with_box(smoke, "h2", "", "home")
+    assert home["boxes"][0]["classes"] == ["customer", "trial"]
+    assert home["boxes"][1]["classes"] == ["owner"]
+    assert set(home["boxes"][0]["accepts"]) == {"customer", "trial",
+                                                "owner"}
+    assert home["overflow_wait_s"] == 30
+    off = tool.with_box(home, "h2", "", "off")
+    assert off["boxes"][1]["classes"] == [] == off["boxes"][1]["accepts"]
+    assert "classes" not in off["boxes"][0]       # h1 home of everyone
+    with pytest.raises(SystemExit):               # never re-home an id
+        tool.with_box(home, "h2", "https://9-9-9-9.sslip.io", "home")
+    with pytest.raises(SystemExit):
+        tool.with_box(today, "h1", "https://x.sslip.io", "smoke")
+    with pytest.raises(SystemExit):               # one host, one id
+        tool.with_box(smoke, "h3", "https://1-2-3-4.sslip.io", "smoke")

@@ -1,0 +1,383 @@
+{
+  "_comment": "Valmera render box 2 (h2): the owner factory's home. Contabo Cloud VPS 16: 16 shared vCPU / 64 GB / 250 GB NVMe, US West. Same contract as box.json (box 1): each slot's --cpus is a ceiling for ONE job, slots oversubscribe the CPU on purpose and per-call cgroup CPU weights (customers 4x the owner factory) divide it under contention; memory limits are the measured p95 with headroom. As the factory's home the owner caps are high (interactive 10 of 12, batch 5 of 6, mcp 14 of 16, agent 4, shorts 3), which still leaves customers who overflow here a slot in every lane; customers always rank first in the queue. Parity: interactive slots see 2 CPUs and batch slots 4 (cpusets), exactly Cloudflare's standard-3/standard-4 lanes and box 1, so renders are bit-identical across boxes. Selected on this host by /etc/valmera/plan (box/host/add_box.sh).",
+  "box_id": "h2",
+  "listen_host": "127.0.0.1",
+  "listen_port": 8090,
+  "extra_listen_hosts": [
+    "172.30.0.1"
+  ],
+  "owner_user_ids": [
+    60
+  ],
+  "owner_max_slots": 40,
+  "owner_max_cpus": 99.0,
+  "owner_max_by_lane": {
+    "interactive": 10,
+    "batch": 5,
+    "mcp": 14,
+    "agent": 4,
+    "shorts": 3
+  },
+  "wait_s": {
+    "customer": 150,
+    "trial": 150,
+    "owner": 150
+  },
+  "max_wait_s": 170,
+  "mem_budget_gib": 100.0,
+  "mem_reserve_gib": 6.0,
+  "strict_source": true,
+  "disk_min_free_gib": 20,
+  "disk_low_water_gib": 60,
+  "rate_per_s": 200,
+  "rate_burst": 400,
+  "queue_max": 256,
+  "drain_timeout_s": 7200,
+  "slots": [
+    {
+      "name": "interactive1",
+      "lane": "interactive",
+      "port": 9101,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "0-1"
+    },
+    {
+      "name": "interactive2",
+      "lane": "interactive",
+      "port": 9102,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "2-3"
+    },
+    {
+      "name": "interactive3",
+      "lane": "interactive",
+      "port": 9103,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "4-5"
+    },
+    {
+      "name": "interactive4",
+      "lane": "interactive",
+      "port": 9104,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "6-7"
+    },
+    {
+      "name": "interactive5",
+      "lane": "interactive",
+      "port": 9105,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "8-9"
+    },
+    {
+      "name": "interactive6",
+      "lane": "interactive",
+      "port": 9106,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "10-11"
+    },
+    {
+      "name": "interactive7",
+      "lane": "interactive",
+      "port": 9107,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "12-13"
+    },
+    {
+      "name": "interactive8",
+      "lane": "interactive",
+      "port": 9108,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "14-15"
+    },
+    {
+      "name": "interactive9",
+      "lane": "interactive",
+      "port": 9109,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "0-1"
+    },
+    {
+      "name": "interactive10",
+      "lane": "interactive",
+      "port": 9110,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "4-5"
+    },
+    {
+      "name": "interactive11",
+      "lane": "interactive",
+      "port": 9111,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "8-9"
+    },
+    {
+      "name": "interactive12",
+      "lane": "interactive",
+      "port": 9112,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "12-13"
+    },
+    {
+      "name": "look1",
+      "lane": "interactive",
+      "port": 9113,
+      "cpus": 2.0,
+      "memory": "3g",
+      "quick": true
+    },
+    {
+      "name": "look2",
+      "lane": "interactive",
+      "port": 9114,
+      "cpus": 2.0,
+      "memory": "3g",
+      "quick": true
+    },
+    {
+      "name": "look3",
+      "lane": "interactive",
+      "port": 9115,
+      "cpus": 2.0,
+      "memory": "3g",
+      "quick": true
+    },
+    {
+      "name": "batch1",
+      "lane": "batch",
+      "port": 9116,
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "0-3"
+    },
+    {
+      "name": "batch2",
+      "lane": "batch",
+      "port": 9117,
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "4-7"
+    },
+    {
+      "name": "batch3",
+      "lane": "batch",
+      "port": 9118,
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "8-11"
+    },
+    {
+      "name": "batch4",
+      "lane": "batch",
+      "port": 9119,
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "12-15"
+    },
+    {
+      "name": "batch5",
+      "lane": "batch",
+      "port": 9120,
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "0-3"
+    },
+    {
+      "name": "batch6",
+      "lane": "batch",
+      "port": 9121,
+      "cpus": 4.0,
+      "memory": "10g",
+      "cpuset": "8-11"
+    },
+    {
+      "name": "bquick1",
+      "lane": "batch",
+      "port": 9122,
+      "cpus": 3.0,
+      "memory": "6g",
+      "quick": true
+    },
+    {
+      "name": "bquick2",
+      "lane": "batch",
+      "port": 9123,
+      "cpus": 3.0,
+      "memory": "6g",
+      "quick": true
+    },
+    {
+      "name": "mcp1",
+      "lane": "mcp",
+      "port": 9124,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp2",
+      "lane": "mcp",
+      "port": 9125,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp3",
+      "lane": "mcp",
+      "port": 9126,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp4",
+      "lane": "mcp",
+      "port": 9127,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp5",
+      "lane": "mcp",
+      "port": 9128,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp6",
+      "lane": "mcp",
+      "port": 9129,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp7",
+      "lane": "mcp",
+      "port": 9130,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp8",
+      "lane": "mcp",
+      "port": 9131,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp9",
+      "lane": "mcp",
+      "port": 9132,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp10",
+      "lane": "mcp",
+      "port": 9133,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp11",
+      "lane": "mcp",
+      "port": 9134,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp12",
+      "lane": "mcp",
+      "port": 9135,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp13",
+      "lane": "mcp",
+      "port": 9136,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp14",
+      "lane": "mcp",
+      "port": 9137,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp15",
+      "lane": "mcp",
+      "port": 9138,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "mcp16",
+      "lane": "mcp",
+      "port": 9139,
+      "cpus": 2.0,
+      "memory": "2g"
+    },
+    {
+      "name": "agent1",
+      "lane": "agent",
+      "port": 9140,
+      "cpus": 1.5,
+      "memory": "2g"
+    },
+    {
+      "name": "agent2",
+      "lane": "agent",
+      "port": 9141,
+      "cpus": 1.5,
+      "memory": "2g"
+    },
+    {
+      "name": "agent3",
+      "lane": "agent",
+      "port": 9142,
+      "cpus": 1.5,
+      "memory": "2g"
+    },
+    {
+      "name": "agent4",
+      "lane": "agent",
+      "port": 9143,
+      "cpus": 1.5,
+      "memory": "2g"
+    },
+    {
+      "name": "shorts1",
+      "lane": "shorts",
+      "port": 9144,
+      "cpus": 1.5,
+      "memory": "2g"
+    },
+    {
+      "name": "shorts2",
+      "lane": "shorts",
+      "port": 9145,
+      "cpus": 1.5,
+      "memory": "2g"
+    },
+    {
+      "name": "shorts3",
+      "lane": "shorts",
+      "port": 9146,
+      "cpus": 1.5,
+      "memory": "2g"
+    }
+  ]
+}
