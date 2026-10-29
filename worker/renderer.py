@@ -7990,6 +7990,33 @@ def _stream_report(path):
     return " ".join(bits)
 
 
+def _picture_gap(path):
+    """Seconds by which the audio stream outlasts the video stream of a
+    rendered file (0 or less when the picture covers the sound), or None
+    when either stream or its length is missing or the probe fails: a
+    diagnostic gap must never be the thing that fails a render."""
+    try:
+        out = media.run(["ffprobe", "-v", "error", "-print_format", "json",
+                         "-show_streams", path], timeout=60)
+        streams = json.loads(out).get("streams", [])
+    except Exception:
+        return None
+
+    def length(kind):
+        for st in streams:
+            if st.get("codec_type") == kind:
+                try:
+                    v = float(st.get("duration"))
+                except (TypeError, ValueError):
+                    return None
+                return v if v > 0 else None
+        return None
+    video, audio = length("video"), length("audio")
+    if video is None or audio is None:
+        return None
+    return round(audio - video, 3)
+
+
 def picture_qc(edl_json, index, out_path, out_info, variant, want_wm,
                wm_settings=None, src_shape=None, job_id=None, budget_s=None,
                src_path=None):
@@ -8071,6 +8098,22 @@ def _verify_render(edl_json, out_path, out_dur, job_id, variant,
             f"{variant} render duration check failed: output is "
             f"{out_dur:.2f}s but the edit is {expected:.2f}s "
             f"(tolerance {tol:.2f}s) — the render is the wrong length")
+    gap = _picture_gap(out_path)
+    if gap is not None and gap > tol:
+        # The PICTURE must cover the sound. The length check above reads the
+        # container, i.e. the longer stream, so a video stream that stopped
+        # early passed it: a streamed input cut off mid-read looks like end
+        # of file to ffmpeg, and on 22-25 Oct three delivered renders showed
+        # no picture for their last 34-60 s (video 566.9 s against audio
+        # 601.3 s; ticket render-video-ends-before-audio). Retryable on
+        # purpose: a fresh read usually completes; if it fails again the job
+        # fails and the outcome loop files it, never a silent broken export.
+        print(f"[render {job_id}] PICTURE SHORT {variant}: "
+              f"{_stream_report(out_path)} | gap {gap:.2f}s", flush=True)
+        raise media.MediaError(
+            f"{variant} render picture check failed: the video stream ends "
+            f"{gap:.2f}s before the sound (tolerance {tol:.2f}s) — the "
+            "picture was cut short")
     if out_dur > 1.0:
         # Measure the PROGRAMME only. The end card is black by design, and the
         # source it is compared against has none, so counting it is pure
