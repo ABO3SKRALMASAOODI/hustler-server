@@ -33,6 +33,13 @@
   "rate_burst": 400,
   "queue_max": 256,
   "drain_timeout_s": 7200,
+  "shared_cache": {
+    "_comment": "E3 (30 Oct 2026): as on box 1 (box.json): one host directory shared by every slot for the content-addressed motion clips, plate moments and picture-check answers.",
+    "dir": "/var/lib/valmera/cache",
+    "motion_max_gib": 12,
+    "memo": true,
+    "max_age_days": 4
+  },
   "slots": [
     {
       "name": "interactive1",
