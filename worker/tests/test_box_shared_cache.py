@@ -7,6 +7,10 @@ mounts one host directory into every slot (box.json "shared_cache"), points
 MOTION_CACHE_DIR there and turns RENDER_MEMO on; a slot created without the
 current setup counts as drifted and is replaced by the next drained roll.
 Without the setting nothing changes.
+
+The box change ships box-only (claude/render-cache-box-1030); these tests
+skip on a checkout whose boxctl predates it, so the worker bundle and the
+box push can land in either order.
 """
 
 import importlib.util
@@ -31,6 +35,8 @@ def boxctl(tmp_path, monkeypatch):
         f"boxctl_{time.monotonic_ns()}", os.path.join(BOX_DIR, "boxctl.py"))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    if not hasattr(module, "cache_args"):
+        pytest.skip("this checkout's boxctl predates the shared cache")
     module._cfg_path = cfg
     return module
 
@@ -95,7 +101,7 @@ def test_clean_ages_out_only_untouched_entries(boxctl, tmp_path):
     assert boxctl.clean_shared_cache(None, tight=True, now=now) == 0
 
 
-def test_the_repository_plan_turns_the_shared_cache_on():
+def test_the_repository_plan_turns_the_shared_cache_on(boxctl):
     with open(os.path.join(BOX_DIR, "host", "box.json")) as fh:
         plan = json.load(fh)
     shared = plan.get("shared_cache") or {}
