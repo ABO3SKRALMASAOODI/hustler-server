@@ -220,6 +220,86 @@ def install_box_tooling():
     return changed
 
 
+# Host files the repository owns, kept in place by every update run (E1,
+# 30 Oct 2026): a box-only push changes the box's units and host config with
+# no hands on it. Destination -> source under BOX_HOME/host.
+HOST_FILES = {
+    "/etc/needrestart/conf.d/valmera.conf": "needrestart-valmera.conf",
+    "/etc/systemd/journald.conf.d/valmera.conf": "journald-valmera.conf",
+    "/etc/logrotate.d/valmera": "logrotate-valmera",
+}
+UNIT_DIR = "/etc/systemd/system"
+# Long-running services: a changed unit file is reloaded, never restarted
+# here (restart_services owns their restarts, deferred while calls run).
+_LONG_RUNNING = {"valmera-admission.service", "valmera-provision.service"}
+
+
+def _write_if_changed(src, dest, mode=0o644):
+    with open(src, "rb") as fh:
+        new = fh.read()
+    try:
+        with open(dest, "rb") as fh:
+            if fh.read() == new:
+                return False
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest + ".tmp", "wb") as fh:
+        fh.write(new)
+    os.chmod(dest + ".tmp", mode)
+    os.replace(dest + ".tmp", dest)
+    return True
+
+
+def install_host_files():
+    """Install changed systemd units and host config from BOX_HOME/host.
+
+    New timers are enabled and started; a changed oneshot or timer is picked
+    up by daemon-reload; admission and provisioning are never restarted
+    here. Returns the destinations that changed."""
+    host = os.path.join(BOX_HOME, "host")
+    changed, units = [], []
+    try:
+        names = sorted(os.listdir(host))
+    except OSError:
+        return changed
+    for name in names:
+        if name.startswith("valmera-") and name.endswith(
+                (".service", ".timer")):
+            dest = os.path.join(UNIT_DIR, name)
+            if _write_if_changed(os.path.join(host, name), dest):
+                changed.append(dest)
+                units.append(name)
+    for dest, name in HOST_FILES.items():
+        src = os.path.join(host, name)
+        if os.path.exists(src) and _write_if_changed(src, dest):
+            changed.append(dest)
+    if units:
+        sh(["systemctl", "daemon-reload"], check=False)
+    for name in units:
+        if name.endswith(".timer"):
+            sh(["systemctl", "enable", "--now", name], check=False)
+        elif name == "valmera-resume.service":
+            sh(["systemctl", "enable", name], check=False)
+        elif name not in _LONG_RUNNING:
+            pass  # oneshots run from their timers
+    if any(d.startswith("/etc/systemd/journald") for d in changed):
+        sh(["systemctl", "restart", "systemd-journald"], check=False)
+    if changed:
+        log("host files installed: " + ", ".join(changed))
+    return changed
+
+
+def ensure_host_packages():
+    """python3-psycopg2 for health_report.py (installed once, if missing)."""
+    if sh(["dpkg", "-s", "python3-psycopg2"], check=False).returncode == 0:
+        return
+    out = sh(["apt-get", "install", "-y", "-q", "python3-psycopg2"],
+             check=False, timeout=600)
+    log("installed python3-psycopg2" if out.returncode == 0 else
+        "python3-psycopg2 install failed (apt busy?); retry next run")
+
+
 # ── slot containers ────────────────────────────────────────────────────────
 def container_name(slot):
     return slot.get("container") or f"vbox-{slot['name']}"
@@ -587,6 +667,11 @@ def cmd_update():
         log(f"box tooling changed: {', '.join(sorted(changed))}")
     restart_services(changed)
     pending_admission_restart()
+    try:
+        ensure_host_packages()
+        install_host_files()
+    except Exception as exc:  # noqa: BLE001 - never blocks a release
+        log(f"host files: {type(exc).__name__}: {str(exc)[:200]}")
     build_images(source)
     converge(source, commit, float(cfg.get("drain_timeout_s", 7200)))
     sync_limits()
@@ -665,7 +750,11 @@ def cmd_clean():
                         pass
                 removed += 1
     rel = release()
-    keep = {rel.get("source"), rel.get("previous_source")}
+    # Under the low-water mark the previous release's images go too (the
+    # current one always stays): the disk guard must never let admission
+    # reach its refusal line (disk_min_free_gib) because of old layers.
+    keep = {rel.get("source")} if tight else \
+        {rel.get("source"), rel.get("previous_source")}
     images = sh(["docker", "images", "--format",
                  "{{.Repository}}:{{.Tag}}"]).stdout.split()
     in_use = {(container_info(container_name(s)) or {}).get("image")
@@ -677,8 +766,8 @@ def cmd_clean():
             sh(["docker", "rmi", image], check=False)
             log(f"removed image {image}")
     sh(["docker", "image", "prune", "-f"], check=False)
-    sh(["docker", "builder", "prune", "-f", "--keep-storage", "20GB"],
-       check=False, timeout=600)
+    sh(["docker", "builder", "prune", "-f", "--keep-storage",
+        "5GB" if tight else "20GB"], check=False, timeout=600)
     log(f"clean: removed {removed} scratch entries; "
         f"{free_gb():.1f} GB free{' (was tight)' if tight else ''}")
 

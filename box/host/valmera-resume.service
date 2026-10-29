@@ -1,0 +1,12 @@
+[Unit]
+Description=Valmera box: un-drain admission after a planned reboot (box/host/maint.sh)
+After=network-online.target valmera-admission.service
+Wants=valmera-admission.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/valmera/box/host/maint.sh resume
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

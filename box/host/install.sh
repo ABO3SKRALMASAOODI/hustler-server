@@ -38,16 +38,28 @@ docker network inspect valmera >/dev/null 2>&1 || docker network create \
 ufw allow in on vbox0 from 172.30.0.0/24 to 172.30.0.1 port 8090 proto tcp \
   comment 'slot containers -> admission' >/dev/null
 
+# health_report.py writes app_kv box_health with the provisioned DATABASE_URL.
+dpkg -s python3-psycopg2 >/dev/null 2>&1 || apt-get install -y -q python3-psycopg2
+
 sed "s/13-140-241-231\.sslip\.io/$host/" "$here/host/Caddyfile" > /etc/caddy/Caddyfile.valmera
 install -m 0644 /etc/caddy/Caddyfile.valmera /etc/caddy/Caddyfile
 rm -f /etc/caddy/Caddyfile.valmera
 for unit in valmera-admission.service valmera-provision.service \
     valmera-update.service valmera-update.timer valmera-clean.service \
-    valmera-clean.timer; do
+    valmera-clean.timer valmera-health.service valmera-health.timer \
+    valmera-resume.service; do
   install -m 0644 "$here/host/$unit" "/etc/systemd/system/$unit"
 done
+# Host config (boxctl update keeps these current too): updates never restart
+# services by themselves, a bounded journal, rotated box logs.
+install -d -m 0755 /etc/needrestart/conf.d /etc/systemd/journald.conf.d
+install -m 0644 "$here/host/needrestart-valmera.conf" /etc/needrestart/conf.d/valmera.conf
+install -m 0644 "$here/host/journald-valmera.conf" /etc/systemd/journald.conf.d/valmera.conf
+install -m 0644 "$here/host/logrotate-valmera" /etc/logrotate.d/valmera
+systemctl restart systemd-journald
 systemctl daemon-reload
 systemctl enable --now valmera-provision.service valmera-admission.service
-systemctl enable --now valmera-update.timer valmera-clean.timer
+systemctl enable --now valmera-update.timer valmera-clean.timer valmera-health.timer
+systemctl enable valmera-resume.service
 systemctl reload caddy || systemctl restart caddy
 echo "install: ok"
