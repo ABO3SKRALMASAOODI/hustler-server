@@ -149,7 +149,10 @@ class Config:
         self.owner_user_ids = {int(u) for u in raw.get("owner_user_ids", [60])}
         self.trial_user_ids = {int(u) for u in raw.get("trial_user_ids", [])}
         self.owner_max_slots = int(raw.get("owner_max_slots", 12))
-        self.owner_max_cpus = float(raw.get("owner_max_cpus", 6))
+        # Off by default: slot quotas oversubscribe the box, so summing them
+        # blocked light MCP calls behind renders. Per-lane caps and the
+        # per-call CPU weight bound the owner factory instead.
+        self.owner_max_cpus = float(raw.get("owner_max_cpus", 99))
         self.owner_max_by_lane = {str(k): int(v) for k, v in (
             raw.get("owner_max_by_lane") or {}).items()}
         self.queue_max = int(raw.get("queue_max", 256))
@@ -160,8 +163,11 @@ class Config:
         self.wait_s.update({k: float(v) for k, v in
                             (raw.get("wait_s") or {}).items()})
         self.max_wait_s = float(raw.get("max_wait_s", 170))
-        self.mem_reserve_gib = float(raw.get("mem_reserve_gib", 2.0))
-        self.mem_budget_gib = float(raw.get("mem_budget_gib", 17.0))
+        # Sums of per-type p95s overstate concurrent use (the 29 Oct load
+        # test: 23 GiB "committed" while 14 GiB stayed available), so the
+        # budget oversubscribes and MemAvailable keeps the real reserve.
+        self.mem_reserve_gib = float(raw.get("mem_reserve_gib", 3.0))
+        self.mem_budget_gib = float(raw.get("mem_budget_gib", 28.0))
         self.mem_estimate = dict(MEM_ESTIMATE_GIB)
         self.mem_estimate.update({str(k): float(v) for k, v in (
             raw.get("mem_estimate_gib") or {}).items()})
@@ -433,6 +439,7 @@ class Box:
         row = self.db.execute(
             "SELECT value FROM kv WHERE key='draining'").fetchone()
         self.draining = bool(row and row["value"] == "1")
+        self._config_mtime = None
         self._recover_after_restart()
 
     # ── persistence helpers (call under self.lock) ──
@@ -1189,10 +1196,44 @@ class Box:
             self._assign()
             self.cond.notify_all()
 
+    def reload_config(self):
+        """Apply box.json's scalar settings without a restart (a restart
+        orphans every in-flight /run handler). Slot changes need boxctl and
+        a restart; they are reported, not applied."""
+        try:
+            mtime = os.stat(CONFIG_PATH).st_mtime
+        except OSError:
+            return False
+        if self._config_mtime is None:
+            self._config_mtime = mtime
+            return False
+        if mtime == self._config_mtime:
+            return False
+        self._config_mtime = mtime
+        raw = load_json(CONFIG_PATH, None)
+        if not isinstance(raw, dict):
+            log("box.json unreadable; keeping the running configuration")
+            return False
+        cfg = Config(raw)
+        with self.lock:
+            if [(x.get("name"), x.get("lane")) for x in cfg.slots] != \
+                    [(x.name, x.lane) for x in self.slots]:
+                log("box.json changed its slots: restart admission to apply "
+                    "them (scalar settings applied now)")
+            cfg.slots = self.cfg.slots
+            self.cfg = cfg
+            self.cond.notify_all()
+        log("box.json reloaded")
+        return True
+
     def background(self):
         last_log = 0.0
         while True:
             self.cpu.sample()
+            try:
+                self.reload_config()
+            except Exception as exc:  # noqa: BLE001
+                log(f"config reload failed: {exc}")
             try:
                 self.poll_slots()
             except Exception as exc:  # noqa: BLE001

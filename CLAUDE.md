@@ -62,6 +62,38 @@ start cold). October 2026 had 76 releases, 16 on one day. The rule:
   can wait; check `video_jobs` for running `final`/`index` rows of real users
   first.
 
+## The render box (owner's server, 29 Oct 2026)
+
+The owner's Contabo server (13.140.241.231, Seattle, 8 shared vCPU / 24 GB;
+root key `~/.ssh/valmera_box_ed25519`) is an execution provider,
+`execution_provider = "box"`, replacing Cloudflare stage by stage. **No
+fallback, by the owner's rule:** a box job never goes to Cloudflare or Modal
+and is never failed because the box is busy, updating or briefly down; it
+waits in its claim and then in the Postgres queue (`remote._run_box_with_wait`,
+`db.defer_box_wait`; waiting never spends the `MAX_CLAIMS_ABSOLUTE` ceiling).
+
+- **Routing:** app_kv `box_routing` (JSON; absent = off), read every 15 s by
+  `worker/box_routing.py`: `{"enabled", "url", "stages": {"owner", "mcp",
+  "trial", "free", "paying"}, "owner_user_ids": [60], "skew": "hold"}`. The
+  stamp is immutable: turning a stage off moves only unstamped jobs.
+- **Box side** (`box/`): `admission.py` speaks the Cloudflare named-call
+  contract (`bx-` call ids), orders calls customers > trial > owner factory,
+  caps the owner per lane, gives synchronous children quick slots, sets each
+  slot's cgroup CPU weight per call, and runs a call only on a slot whose
+  code fingerprint equals the dispatcher's. `boxctl.py` (timer, 2 min) pulls
+  main, builds the Cloudflare lanes' images at the worker fingerprint and
+  rolls slots in drained waves; `clean` (15 min) keeps the disk bounded.
+  `provision.py` receives GitHub secrets from `.github/workflows/box-provision.yml`
+  with a GitHub OIDC token (no shared credential). Caddy terminates TLS at
+  `https://13-140-241-231.sslip.io`. Config: `/etc/valmera/box.json`
+  (reloaded live), state `/var/lib/valmera/`, logs `/var/log/valmera/`.
+- **Health:** `GET /health` (bearer `REMOTE_EXECUTOR_SECRET`) or on the box
+  `curl -H "X-Admin-Token: $(cat /etc/valmera/admin.token)"
+  localhost:8090/admin/state`: code versions, free slots, queue depth and
+  oldest wait, CPU steal (60 s, 15 min), memory.
+- A worker push updates the box within minutes (no CI gate, like Render);
+  the executor-release budget above is about Cloudflare's lanes.
+
 ## Database Access
 
 ```bash

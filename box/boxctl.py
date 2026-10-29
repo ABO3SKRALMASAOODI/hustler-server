@@ -209,6 +209,36 @@ def container_info(name):
     return {"image": image, "running": running == "true", "created": created}
 
 
+def _bytes(size):
+    size = str(size).strip().lower()
+    mult = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}.get(size[-1:], 1)
+    return int(float(size.rstrip("kmg")) * mult)
+
+
+def sync_limits():
+    """Apply box.json's per-slot CPU and memory limits to running slots in
+    place (docker update): a limit change needs no drain or restart."""
+    for slot in config().get("slots", []):
+        name = container_name(slot)
+        out = sh(["docker", "inspect", "-f",
+                  "{{.HostConfig.NanoCpus}}|{{.HostConfig.Memory}}", name],
+                 check=False)
+        if out.returncode != 0:
+            continue
+        nano, mem = (int(x or 0) for x in out.stdout.strip().split("|"))
+        want_nano = int(float(slot.get("cpus", 1)) * 1e9)
+        want_mem = _bytes(slot.get("memory", "2g"))
+        if nano == want_nano and mem == want_mem:
+            continue
+        res = sh(["docker", "update", "--cpus", str(slot.get("cpus", 1)),
+                  "--memory", str(slot.get("memory", "2g")),
+                  "--memory-swap", str(slot.get("memory", "2g")), name],
+                 check=False)
+        log(f"limits {name}: cpus {nano / 1e9:g}->{want_nano / 1e9:g}, "
+            f"memory {mem >> 20}->{want_mem >> 20} MiB "
+            f"({'ok' if res.returncode == 0 else res.stderr.strip()[:160]})")
+
+
 def ensure_network():
     if sh(["docker", "network", "inspect", NETWORK],
           check=False).returncode == 0:
@@ -439,6 +469,27 @@ def restart_services(changed):
             open(flag, "w").close()
         else:
             units.append("valmera-admission")
+    if "host/box.json" in changed:
+        # The repository's slot plan is the source of truth. Scalar settings
+        # reload live; a new slot list needs admission restarted (deferred
+        # while calls are in flight, like a code change).
+        before = [(s.get("name"), s.get("lane")) for s in
+                  config().get("slots", [])]
+        shutil.copyfile(os.path.join(BOX_HOME, "host", "box.json"),
+                        CONFIG_PATH + ".tmp")
+        os.replace(CONFIG_PATH + ".tmp", CONFIG_PATH)
+        after = [(s.get("name"), s.get("lane")) for s in
+                 config().get("slots", [])]
+        log("installed box.json from the repository")
+        if before != after and "valmera-admission" not in units:
+            state = admission_state() or {}
+            if (state.get("slots") or {}).get("busy", 0) or \
+                    (state.get("queue") or {}).get("depth", 0):
+                open(os.path.join(DATA_DIR, "admission-restart-pending"),
+                     "w").close()
+                log("slot list changed; admission restart deferred")
+            else:
+                units.append("valmera-admission")
     for unit in units:
         sh(["systemctl", "restart", unit], check=False)
         log(f"restarted {unit}")
@@ -468,6 +519,7 @@ def cmd_update():
     pending_admission_restart()
     build_images(source)
     converge(source, commit, float(cfg.get("drain_timeout_s", 7200)))
+    sync_limits()
     rel = release()
     if rel.get("source") != source or rel.get("commit") != commit:
         rel.update({"source": source, "commit": commit})
@@ -486,6 +538,7 @@ def cmd_apply():
         rel.update({"source": source, "commit": commit})
     converge(source, rel.get("commit"), float(
         config().get("drain_timeout_s", 7200)))
+    sync_limits()
 
 
 # ── disk hygiene ───────────────────────────────────────────────────────────
