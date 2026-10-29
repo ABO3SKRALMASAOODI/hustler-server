@@ -1482,15 +1482,30 @@ def _run_modal(job, function_override=None):
 # ── Box target: the Cloudflare call contract at another address ─────────────
 # box/admission.py speaks the Worker's named-call protocol exactly, so the box
 # reuses this module's launch, reconnect, fence, liveness and ledger code. A
-# call id names its target: "bx-" calls live on the box, "cf-" on Cloudflare.
-# Only the waiting differs (_run_box_with_wait): no shard hopping, no other
-# provider, and no failure for capacity.
+# call id names its target: "bx-" calls live on a box, "cf-" on Cloudflare;
+# a box other than the primary is named in the id too ("bx-h2-...",
+# box_routing.call_tag), so every later request about a call reaches the box
+# that holds it. Only the waiting differs (_run_box_with_wait): no shard
+# hopping, no other provider, and no failure for capacity; with two boxes a
+# proven refusal moves the claim to the other box under its own identity.
 _BOX_PREFIX = "bx-"
 
 
 def _call_target(call_id):
     return "box" if str(call_id or "").startswith(_BOX_PREFIX) \
         else "cloudflare"
+
+
+def _job_box(job):
+    """The box this dispatch of a box job asks (``h1`` unless it moved)."""
+    return str(job.get("_box_id") or box_routing.PRIMARY)
+
+
+def _job_url(job):
+    """The executor address of this dispatch: its box's, or Cloudflare's."""
+    if _job_target(job) == "box":
+        return box_routing.box_url(_job_box(job))
+    return config.CLOUDFLARE_EXECUTOR_URL
 
 
 def _job_target(job):
@@ -1507,7 +1522,9 @@ def _target_url(target):
 
 
 def _call_url(call_id):
-    return _target_url(_call_target(call_id))
+    if _call_target(call_id) == "box":
+        return box_routing.box_url(box_routing.call_box(call_id))
+    return _target_url("cloudflare")
 
 
 def _cloudflare_lane(job_type):
@@ -1615,7 +1632,8 @@ _LEGACY_ALT_SLOTS = 2
 def _cloudflare_call_id(job):
     call_id = _cloudflare_call_id_cf(job)
     if _job_target(job) == "box":
-        return _BOX_PREFIX + call_id[len("cf-"):]
+        return (_BOX_PREFIX + box_routing.call_tag(_job_box(job))
+                + call_id[len("cf-"):])
     return call_id
 
 
@@ -1700,22 +1718,32 @@ def _interpret_cloudflare_terminal(data, job):
         raise terminal from exc
 
 
-def _cloudflare_headers():
+def _cloudflare_headers(call_id=None):
     headers = {"Content-Type": "application/json"}
     if config.REMOTE_EXECUTOR_SECRET:
         headers["Authorization"] = f"Bearer {config.REMOTE_EXECUTOR_SECRET}"
+    if call_id is not None and _call_target(call_id) == "box" \
+            and not box_routing.route_all():
+        # The box the call id names: admission refuses a call meant for
+        # another box (a routing edit that gave an address to another id),
+        # so a reconnect can never mistake "missing here" for "lost".
+        headers[BOX_ID_HEADER] = box_routing.call_box(call_id)
     return headers
 
 
-def _cloudflare_preflight(timeout=10, target="cloudflare"):
+BOX_ID_HEADER = "X-Valmera-Box"
+
+
+def _cloudflare_preflight(timeout=10, target="cloudflare", base=None):
     """Authenticated positive readiness cache for the Container router.
 
     The first eligible job validates provider identity and the shared secret.
     Repeating that cross-region request on every proof reel adds latency but
     no safety: a missing route is still proven by the named POST's 404. Only
-    successes are cached, and the URL is part of the key.
+    successes are cached, and the URL is part of the key. ``base`` is one
+    box's address (default: the target's primary address).
     """
-    base = _target_url(target)
+    base = base or _target_url(target)
     if not base:
         raise CloudflarePreflightUnavailable(
             f"no {target} executor address is configured")
@@ -1752,6 +1780,7 @@ def _cloudflare_preflight(timeout=10, target="cloudflare"):
         remote_source = str(body.get("source_version") or "unknown")
         local_source = version.code_version()
         if target == "box":
+            _box_identity_check(body, base)
             _box_release_check(body, local_source)
             _health_cache[key] = (now, body)
             return body
@@ -1769,6 +1798,19 @@ def _cloudflare_preflight(timeout=10, target="cloudflare"):
 
 
 _BOX_HEALTH_CACHE_S = 20.0
+
+
+def _box_identity_check(body, base):
+    """The address answers as the box the routing names (an admission
+    without ``box_id`` is the primary). Nothing is launched otherwise."""
+    if box_routing.route_all():
+        return
+    expected = box_routing.box_id_for_url(base)
+    reported = str(body.get("box_id") or box_routing.PRIMARY)
+    if expected is not None and reported != expected:
+        raise CloudflareLaunchUnavailable(
+            f"the render box at {base} is {reported}, but the routing names "
+            f"it {expected}; nothing was launched")
 
 
 def _box_release_check(body, local_source):
@@ -1808,27 +1850,34 @@ def _skew_tolerant(body):
     return isinstance(features, list) and "skew_guard" in features
 
 
-def _cloudflare_features(target="cloudflare"):
+def _cloudflare_features(target="cloudflare", base=None):
     """The Worker's advertised features ([] when unknown). Never raises."""
     try:
-        body = _cloudflare_preflight(timeout=10, target=target)
+        if base:
+            body = _cloudflare_preflight(timeout=10, target=target,
+                                         base=base)
+        else:
+            body = _cloudflare_preflight(timeout=10, target=target)
     except Exception:
         return []
     features = body.get("features") if isinstance(body, dict) else None
     return list(features) if isinstance(features, list) else []
 
 
-def _features_for(target):
-    """Advertised features of the call's target ([] when unknown)."""
+def _features_for(target, base=None):
+    """Advertised features of the call's target ([] when unknown); ``base``
+    names one box's address."""
     if target == "cloudflare":
         return _cloudflare_features()
+    if base:
+        return _cloudflare_features(target, base=base)
     return _cloudflare_features(target)
 
 
 def _cloudflare_status(call_id, lane, timeout=10):
     response = requests.get(
         f"{_call_url(call_id)}/calls/{lane}/{call_id}",
-        headers=_cloudflare_headers(), timeout=timeout)
+        headers=_cloudflare_headers(call_id), timeout=timeout)
     if response.status_code == 404:
         return {"status": "missing"}
     response.raise_for_status()
@@ -1858,7 +1907,7 @@ def _reconcile_completed_cloudflare_call(call_id, lane):
                           ("id", "type", "project_id", "total_claims")},
                   "envelope": {"result": dbx._json_safe(completed["result"]),
                                "job_completed": True}},
-            headers=_cloudflare_headers(), timeout=10)
+            headers=_cloudflare_headers(call_id), timeout=10)
         return response.status_code == 200
     except Exception as exc:
         print(f"[dispatcher] Cloudflare completion acknowledgement for "
@@ -1990,7 +2039,7 @@ def _abandon_cloudflare_call(call_id, lane, job, reason):
             json={"job": {key: job.get(key) for key in
                           ("id", "type", "project_id", "total_claims")},
                   "reason": reason},
-            headers=_cloudflare_headers(), timeout=60)
+            headers=_cloudflare_headers(call_id), timeout=60)
         body = response.json() if response.status_code == 200 else {}
     except Exception as exc:
         # The shard may still finish the fence; the next status read sees it.
@@ -2258,7 +2307,10 @@ def _fence_cloudflare_call(call_id, lane, job, launch_id):
     or whatever terminal state the call reached meanwhile), or None when
     the Worker cannot fence or the call turned out to be alive.
     """
-    if "fence" not in _features_for(_call_target(call_id)):
+    if "fence" not in _features_for(_call_target(call_id),
+                                    _call_url(call_id)
+                                    if _call_target(call_id) == "box"
+                                    else None):
         return None
     try:
         response = requests.post(
@@ -2266,7 +2318,7 @@ def _fence_cloudflare_call(call_id, lane, job, launch_id):
             json={"job": {key: job.get(key) for key in
                           ("id", "type", "project_id", "total_claims")},
                   "launch_id": launch_id},
-            headers=_cloudflare_headers(), timeout=30)
+            headers=_cloudflare_headers(call_id), timeout=30)
         body = response.json() if response.status_code == 200 else {}
     except Exception as exc:
         print(f"[dispatcher] Cloudflare fence of {call_id} deferred "
@@ -2371,7 +2423,13 @@ def _run_cloudflare(job):
         if target == "cloudflare":
             _cloudflare_preflight(timeout=10)
         else:
-            _cloudflare_preflight(timeout=10, target=target)
+            base = _job_url(job)
+            if not base:
+                # Its box left the routing between choice and launch.
+                raise CloudflarePreflightUnavailable(
+                    f"render box {_job_box(job)} is not configured; "
+                    "nothing was launched")
+            _cloudflare_preflight(timeout=10, target=target, base=base)
     except requests.RequestException as exc:
         # No launch request was sent, so Modal fallback is unambiguous, and
         # without one this is a retry (a Worker publish, a network blip),
@@ -2422,12 +2480,15 @@ def _run_cloudflare(job):
     if target == "box":
         # Admission's queue order: customers, trial, then the owner factory.
         launch_body["priority_class"] = box_routing.priority_class(job)
-        launch_body["max_wait_s"] = config.BOX_ADMISSION_WAIT_S
+        # A box the job overflows to holds it only briefly: its home box
+        # may free a slot meanwhile (_run_box_with_wait).
+        launch_body["max_wait_s"] = (job.get("_box_wait_s")
+                                     or config.BOX_ADMISSION_WAIT_S)
     try:
         response = requests.post(
-            f"{_target_url(target)}/calls/{lane}/{call_id}",
+            f"{_job_url(job)}/calls/{lane}/{call_id}",
             json=launch_body,
-            headers=_cloudflare_headers(),
+            headers=_cloudflare_headers(call_id),
             # The named call remains recoverable after this observation
             # request ends. Reconnect early enough to detect a rollout-
             # abandoned `starting` state instead of waiting a full agent/MCP
@@ -2611,7 +2672,8 @@ def _next_rollout_slot(job):
     current = job.get("_cloudflare_admission_slot", 0)
     current = current if isinstance(current, int) else 0
     ceiling = (_MAX_ALT_SLOT if "alt_slots_32" in _features_for(
-        _job_target(job)) else _LEGACY_ALT_SLOTS)
+        _job_target(job), _job_url(job) if _job_target(job) == "box"
+        else None) else _LEGACY_ALT_SLOTS)
     nxt = current + 1
     return nxt if nxt <= ceiling else None
 
@@ -2996,6 +3058,22 @@ def _box_backoff(attempt_s, streak):
     return min(30.0, 2.0 * (2 ** min(streak, 4))) * random.uniform(0.75, 1.25)
 
 
+def _box_hop_delay():
+    """Asking the next box after a proven refusal: at once, jittered."""
+    return random.uniform(0.1, 0.4)
+
+
+def _box_route(job, order, at):
+    """Point this dispatch at box ``order[at]`` (its identity and wait)."""
+    box_id, home = order[at]
+    job["_box_id"] = box_id
+    if home:
+        job.pop("_box_wait_s", None)
+    else:
+        job["_box_wait_s"] = min(float(config.BOX_ADMISSION_WAIT_S),
+                                 box_routing.overflow_wait_s())
+
+
 def _run_box_with_wait(job):
     """Run one call on the owner's render box; wait, never fail, for room.
 
@@ -3013,12 +3091,26 @@ def _run_box_with_wait(job):
       parent's lease reserves, then reports "no capacity" to that parent
       like any child failure;
     * a read-only MCP call whose container the box lost mid-run is run
-      again under a fresh identity (a read changes nothing).
+      again under a fresh identity on the same box (a read changes nothing).
 
     Box admission orders waiting calls customers > trial > owner factory.
+
+    With two boxes (box_routing ``boxes``) the job asks its home box first;
+    a refusal that proves nothing ran there moves the SAME claim to the next
+    box at once, under that box's own call identity (``bx-h2-...``). This is
+    Cloudflare's shard hop: the refused identity is terminal and its ledger
+    row closed before the new one is recorded, the new identity was never
+    accepted anywhere, the lease is re-checked first, and the executor's
+    ownership fence runs only the call the ledger names. An ambiguous launch
+    never moves: it reconnects to its own box. After every box of the round
+    refused, the single-box backoff applies. Children stay on their parent's
+    box (inside a slot there is only that box).
     """
     job["_executor_target"] = "box"
     queued = job.get("id") is not None
+    order = box_routing.candidates(job)
+    at = 0
+    _box_route(job, order, at)
     started = time.monotonic()
     window = (config.BOX_INCLAIM_WAIT_S if queued else
               max(30.0, config.CLOUDFLARE_MCP_CHILD_MARGIN_S - 60))
@@ -3026,6 +3118,7 @@ def _run_box_with_wait(job):
     refusals = 0
     lost_reads = 0
     alarmed = False
+    round_attempt_s = 0.0
     while True:
         attempt_started = time.monotonic()
         try:
@@ -3053,11 +3146,16 @@ def _run_box_with_wait(job):
                 raise
         attempt_s = time.monotonic() - attempt_started
         refusals += 1
-        streak = 0 if attempt_s >= 20.0 else streak + 1
+        round_attempt_s = max(round_attempt_s, attempt_s)
+        hop = at + 1 < len(order)
+        if not hop:
+            # Every box of this round refused (one box: every refusal).
+            streak = 0 if round_attempt_s >= 20.0 else streak + 1
         if queued:
             dbx.unmark_remote_owned(job["id"])
         elapsed = time.monotonic() - started
-        delay = _box_backoff(attempt_s, streak)
+        delay = (_box_hop_delay() if hop
+                 else _box_backoff(round_attempt_s, streak))
         if elapsed + delay > window:
             what = str(job.get("type") or "job")
             if queued:
@@ -3080,13 +3178,22 @@ def _run_box_with_wait(job):
                 f"slot: {_short_reason_detail(reason, 160)}",
                 throttle_s=900)
         if refusals == 1 or refusals % 10 == 0:
+            where = (f" on {_job_box(job)}, asking {order[at + 1][0]}"
+                     if hop else "")
             print(f"[dispatcher] box {job.get('type')} {job.get('id')}: "
-                  f"{_short_reason_detail(reason, 140)}; nothing ran, "
+                  f"{_short_reason_detail(reason, 140)}; nothing ran{where}, "
                   f"waiting (asked {refusals}x over {elapsed:.0f}s)",
                   flush=True)
         time.sleep(delay)
         if queued:
             _require_current_lease(job, "box wait")
+        if len(order) > 1:
+            at = at + 1 if hop else 0
+            if not hop:
+                round_attempt_s = 0.0
+            _box_route(job, order, at)
+        else:
+            round_attempt_s = 0.0
 
 
 def _move_stale_local(job):

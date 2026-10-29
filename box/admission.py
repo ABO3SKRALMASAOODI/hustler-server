@@ -98,6 +98,12 @@ ABANDON_MIN_DISCONNECTED_S = 120.0
 LIVE = ("submitted", "starting", "running", "unknown", "stopping")
 OCCUPYING = ("starting", "running", "unknown", "stopping")
 CLASS_RANK = {"customer": 0, "trial": 1, "owner": 2}
+# Which box this is (box.json "box_id"; the first box is h1). The dispatcher
+# names it in every request about a call (X-Valmera-Box) and in the call ids
+# of every box but h1 ("bx-h2-..."; worker/box_routing.py).
+BOX_ID = re.compile(r"^h[1-9][0-9]?$")
+BOX_TAG = re.compile(r"^bx-h[1-9][0-9]?-")
+BOX_HEADER = "X-Valmera-Box"
 
 
 def now():
@@ -143,6 +149,8 @@ class Config:
         self.raw = raw
         self.host = raw.get("listen_host", "127.0.0.1")
         self.port = int(raw.get("listen_port", 8090))
+        box_id = str(raw.get("box_id") or "h1").strip().lower()
+        self.box_id = box_id if BOX_ID.match(box_id) else "h1"
         # Extra listen addresses (the containers' bridge gateway), so slot
         # containers reach admission for their own synchronous children.
         self.extra_hosts = [str(h) for h in raw.get("extra_listen_hosts", [])]
@@ -254,9 +262,15 @@ def disk_report(path=None):
 
 
 # ── Call identity (worker/cloudflare/src/index.ts matchesCompletedJob) ──────
+def untagged(call_id):
+    """The call id without its box tag ("bx-h2-mcp-..." -> "bx-mcp-...")."""
+    return BOX_TAG.sub("bx-", str(call_id or ""), count=1)
+
+
 def matches_job(call_id, job):
     if not isinstance(job, dict):
         return False
+    call_id = untagged(call_id)
     jid, claims, project = (job.get("id"), job.get("total_claims"),
                             job.get("project_id"))
     jtype = str(job.get("type") or "")
@@ -280,6 +294,7 @@ def matches_job(call_id, job):
 
 
 def affinity_key(call_id):
+    call_id = untagged(call_id)
     for pattern in (r"^bx-mcp-p([0-9]+)-", r"^bx-preview-p([0-9]+)-"):
         m = re.match(pattern, call_id)
         if m:
@@ -572,7 +587,7 @@ class Box:
         releases = sorted({s["release"] for s in slots if s["ready"]
                            and s["release"] not in ("", "unknown")})
         return {
-            "status": status, "provider": "box",
+            "status": status, "provider": "box", "box_id": self.cfg.box_id,
             "code_version": source, "source_version": source,
             "code_versions": releases,
             "strict_source": self.cfg.strict_source,
@@ -1404,6 +1419,17 @@ def make_handler(box, limiter):
                 return False
             return True
 
+        def this_box(self):
+            """The request names this box, or no box (an older dispatcher,
+            a child inside a slot)."""
+            named = (self.headers.get(BOX_HEADER) or "").strip().lower()
+            return not named or named == box.cfg.box_id
+
+        def wrong_box(self):
+            named = (self.headers.get(BOX_HEADER) or "").strip()[:8]
+            return {"error": f"this is render box {box.cfg.box_id}, not "
+                             f"{named}; nothing ran", "wrong_box": True}
+
         def do_GET(self):
             path = urlparse(self.path).path
             if path == "/ping":
@@ -1435,6 +1461,8 @@ def make_handler(box, limiter):
             if not m or not CALL_ID.match(m.group(2)) or m.group(3):
                 return self.send_json(404, {"error": "not found",
                                             "safe_to_fallback": True})
+            if not self.this_box():
+                return self.send_json(421, self.wrong_box())
             rec = box.status(m.group(2))
             if not rec:
                 return self.send_json(404, {"status": "missing"})
@@ -1473,6 +1501,13 @@ def make_handler(box, limiter):
                 return self.send_json(400, {
                     "error": "box call ids start with bx-",
                     "safe_to_fallback": True})
+            if not self.this_box():
+                if action == "":
+                    # Nothing is stored for a launch meant for another box:
+                    # a refusal that proves nothing ran.
+                    return self.send_json(429, refusal_envelope(
+                        "", self.wrong_box()["error"]))
+                return self.send_json(421, self.wrong_box())
             try:
                 body = self.read_body()
             except (ValueError, TypeError) as exc:
