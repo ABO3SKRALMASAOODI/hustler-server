@@ -23,6 +23,8 @@ never touches billing, credits, plans or Paddle.
     ops_review.py close    --ticket 7 --status wont_fix --reason "..."
     ops_review.py fetch    --key ops/evidence/<slug>/x.jpg --out /tmp/x.jpg
     ops_review.py reviews  [--days 7]
+    ops_review.py p0       [--count] [--sync-marker]     # the P0 watch
+    ops_review.py failures --ticket 7                    # auto-filed failures
     ops_review.py whoami
 
 DATABASE_URL comes from the environment, else from
@@ -458,6 +460,96 @@ def cmd_tickets(a):
     return 0
 
 
+def sync_p0_marker(rows):
+    """P0_PENDING mirrors the database: the P0 tickets the Fixer should take
+    now (open, or 'fixing' with no update for 6 h). Written atomically;
+    removed when there are none."""
+    if not rows:
+        if os.path.exists(P0_MARKER):
+            os.remove(P0_MARKER)
+        return None
+    marker = {"tickets": sorted(r["id"] for r in rows),
+              "titles": {str(r["id"]): r["title"] for r in rows},
+              "updated_at": _now().isoformat(),
+              "why": "a P0 ticket is open: run FIXER.md in P0 mode now"}
+    tmp = P0_MARKER + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(marker, fh, indent=1, default=str)
+    os.replace(tmp, P0_MARKER)
+    return marker
+
+
+def cmd_p0(a):
+    """The P0 watch's cheap check: one read-only query."""
+    from ops_loop import intake
+    conn = connect()
+    rows = intake.pending_p0(conn.cursor())
+    conn.close()
+    if a.sync_marker:
+        sync_p0_marker(rows)
+    if a.count:
+        print(len(rows))
+        return 0
+    out({"p0": rows, "marker": P0_MARKER if rows else None})
+    return 0
+
+
+def cmd_failures(a):
+    """A ticket's filed failures with what the Fixer needs to start: each
+    job's full error, attempts and timings, and the review session it
+    belongs to."""
+    from ops_loop import sessions
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM tickets WHERE id = %s", (a.ticket,))
+    t = cur.fetchone()
+    if not t:
+        raise CliError(f"no ticket {a.ticket}")
+    fails = [h for h in (t["history"] or []) if isinstance(h, dict)
+             and h.get("event") == "failure"][-a.limit:]
+    job_ids = sorted({int(h["job"]) for h in fails if h.get("job")} |
+                     {int(h["ref"].split(":")[1]) for h in fails
+                      if str(h.get("ref", "")).startswith(("job:",
+                                                           "request:"))})
+    jobs = {}
+    if job_ids:
+        cur.execute("""
+            SELECT id, type, state, user_id, project_id, attempts,
+                   total_claims, created_at, updated_at, error,
+                   payload->>'tool' AS tool, payload->>'source' AS source,
+                   payload->>'quality' AS quality,
+                   result->'timings' AS timings,
+                   result->>'outcome' AS outcome,
+                   LEFT(result->>'honesty', 1500) AS honesty
+              FROM video_jobs WHERE id = ANY(%s)""", (job_ids,))
+        jobs = {r["id"]: dict(r) for r in cur.fetchall()}
+    for h in fails:
+        jid = h.get("job") or (int(h["ref"].split(":")[1])
+                               if str(h.get("ref", "")).startswith(
+                                   ("job:", "request:")) else None)
+        if jid and int(jid) in jobs:
+            h["job_row"] = jobs[int(jid)]
+        if h.get("project") and h.get("at"):
+            at = datetime.fromisoformat(h["at"])
+            try:
+                found, _ = sessions.discover(
+                    cur, at - timedelta(minutes=5), _now(),
+                    project_ids=[int(h["project"])], include_unsettled=True)
+                h["sessions"] = [{"key": x["key"], "settled": x["settled"]}
+                                 for x in found
+                                 if x["started_at"] <= at + timedelta(
+                                     minutes=5)]
+            except Exception as e:      # the failure itself still prints
+                h["sessions_error"] = f"{type(e).__name__}: {e}"[:200]
+    conn.close()
+    out({"ticket": {k: t[k] for k in ("id", "cause_key", "title", "severity",
+                                       "status", "occurrences",
+                                       "recurrence_count", "summary",
+                                       "first_seen", "last_seen")},
+         "failures": fails})
+    return 0
+
+
 def cmd_reviews(a):
     from ops_loop import views
     conn = connect()
@@ -547,6 +639,16 @@ def parser():
     p.add_argument("--reason")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_close)
+    p = sub.add_parser("p0", help="P0 tickets the Fixer should take now")
+    p.add_argument("--count", action="store_true")
+    p.add_argument("--sync-marker", action="store_true",
+                   help="write (or remove) .valmera/ops-loop/P0_PENDING")
+    p.set_defaults(fn=cmd_p0)
+    p = sub.add_parser("failures", help="a ticket's filed failures with "
+                                        "job errors and sessions")
+    p.add_argument("--ticket", type=int, required=True)
+    p.add_argument("--limit", type=int, default=20)
+    p.set_defaults(fn=cmd_failures)
     p = sub.add_parser("reviews", help="recent reviews")
     p.add_argument("--days", type=int, default=7)
     p.set_defaults(fn=cmd_reviews)

@@ -474,7 +474,15 @@ def test_every_public_tool_error_records_bounded_diagnostics(client, monkeypatch
         {"tool": "get_transcript"}, {"tool": "load_tools"},
         {"tool": "create_project"}, {"tool": "stale_tool_name"},
     ]
-    assert all(set(event["detail"]) == {"tool", "category", "error_fingerprint"} for event in events)
+    assert all(set(event["detail"]) <= {"tool", "category", "error_fingerprint",
+                                         "message", "code"} for event in events)
+    # A sentence is kept only for OUR failures, bounded (the outcome loop's
+    # automatic intake reads it to find the cause).
+    for event in events:
+        d = event["detail"]
+        if "message" in d:
+            assert d["category"] in mcpmod.OWN_FAILURE_CATEGORIES
+            assert len(d["message"]) <= 300
     assert all(len(event["detail"]["error_fingerprint"]) == 16 for event in events)
     assert all(event["kind"] == "mcp_error_response" for event in events)
     assert all(event["project_id"] is None and event["asset_id"] is None
@@ -2115,6 +2123,40 @@ def test_mcp_workflow_teaches_the_premium_short_form_finish():
     # Dense rendered looks need a complete preview of the reviewed version.
     assert "render_preview(complete=true) and look_at(rendered=true" in flat
     assert "strength is magnification minus 1" in flat
+
+
+def test_our_own_failures_keep_a_bounded_sentence_without_contents():
+    result = mcpmod._text("export_final could not start: the render for "
+                          "project 4911 needs a complete preview of v12 "
+                          "('My wedding cut' by bride@example.com) "
+                          "https://r2.example/x?X-Amz-Signature=abc", True)
+    detail = mcpmod._public_error_detail("export_final", result)
+    assert detail["category"] == "unclassified"
+    msg = detail["message"]
+    assert msg.startswith("export_final could not start: the render for "
+                          "project 4911 needs a complete preview of v12")
+    for leaked in ("wedding", "bride@", "Signature", "https://"):
+        assert leaked not in msg
+    long = mcpmod._public_error_detail("open_project",
+                                       mcpmod._text("x" * 900, True))
+    assert len(long["message"]) == 300
+    # An AI app's correction keeps no text: it can quote the customer.
+    fix = mcpmod._public_error_detail("set_caption", mcpmod._text(
+        "REJECTED: the caption 'meet me at 5' must be under 2 lines", True))
+    assert fix["category"] == "invalid_request" and "message" not in fix
+    # The product's own gates (export_final's QC hold) are not failures.
+    held = mcpmod._public_error_detail("export_final", {
+        "content": [{"type": "text", "text": "PROJECT 5219: EDL v28 still "
+                     "has 2 unresolved verification finding(s), so no "
+                     "export was started"}],
+        "structuredContent": {"export": {"code": "verification_open"}},
+        "isError": True})
+    assert held["code"] == "verification_open"
+    assert held["category"] == "prerequisite" and "message" not in held
+    # The intake files the same set of our own failures.
+    from ops_loop import intake
+    assert set(intake.MCP_OURS) == mcpmod.OWN_FAILURE_CATEGORIES
+    assert set(intake.MCP_OURS_OUTCOMES) == mcpmod.OWN_FAILURE_OUTCOMES
 
 
 def test_error_diagnostics_do_not_retain_customer_contents():

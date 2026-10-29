@@ -3405,8 +3405,38 @@ def _text(s, is_error=False):
     return {"content": [{"type": "text", "text": s}], "isError": is_error}
 
 
+_ERR_URL = re.compile(r"https?://\S+")
+_ERR_EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+_ERR_QUOTED = re.compile(r"(\"[^\"]*\"|'[^']*'|“[^”]*”|‘[^’]*’)")
+# Our own failures (not the AI app's corrections, which may quote the
+# customer's words back): only these keep a sentence for the outcome loop.
+OWN_FAILURE_CATEGORIES = {"internal_error", "unclassified", "timeout",
+                          "upload_error", "executor_version_mismatch"}
+OWN_FAILURE_OUTCOMES = {"transient_failure", "unavailable", "unsafe"}
+# Structured codes of the product's own gates (export_final's QC hold, the
+# held tail, analysis not ready, the plan gate).
+GATE_CODES = {"verification_open": "prerequisite", "held_tail": "prerequisite",
+              "index_not_ready": "prerequisite",
+              "mcp_plan_required": "plan_gate"}
+
+
+def _error_message(text, limit=300):
+    """Our own error sentence, bounded, with links (signed URLs), email
+    addresses and anything quoted removed: what the automatic intake and the
+    Fixer need to find the cause, never the customer's contents."""
+    text = _ERR_URL.sub("<url>", text or "")
+    text = _ERR_EMAIL.sub("<email>", text)
+    text = _ERR_QUOTED.sub("<text>", text)
+    text = " ".join(text.split())
+    return text[:limit] or None
+
+
 def _public_error_detail(name, result):
-    """Persist diagnostic categories, never tool arguments or raw response text."""
+    """Persist diagnostic categories, never tool arguments. For OUR failures
+    (internal, unclassified, timeout, upload, transient, unavailable) also a
+    bounded sentence with links, emails and quoted text removed, so the
+    outcome loop can see why it failed; a correction the AI app must make
+    keeps no text (it can quote the customer's own words)."""
     text = "\n".join(str(b.get("text", "")) for b in result.get("content", []) if isinstance(b, dict) and b.get("type") == "text")
     lower = text.lower()
     category = "unclassified"
@@ -3425,7 +3455,20 @@ def _public_error_detail(name, result):
             break
     detail = {"tool": str(name or "unknown")[:100], "category": category,
               "error_fingerprint": hashlib.sha256(text.encode()).hexdigest()[:16]}
+
     structured = result.get("structuredContent") or {}
+    code = None
+    if isinstance(structured, dict):
+        code = structured.get("code") if isinstance(structured.get("code"), str) \
+            else next((v["code"] for v in structured.values()
+                       if isinstance(v, dict) and isinstance(v.get("code"), str)),
+                      None)
+    if code:
+        detail["code"] = code[:40]
+        # The product's own gates answering as designed: the caller must
+        # repair, wait or subscribe; not a failure of ours.
+        if category == "unclassified" and code in GATE_CODES:
+            category = detail["category"] = GATE_CODES[code]
     outcome = structured.get("tool_outcome") if isinstance(structured, dict) else None
     if isinstance(outcome, dict) and outcome.get("status") in {
             "correction_needed", "prerequisite", "transient_failure", "unavailable", "unsafe"}:
@@ -3434,6 +3477,11 @@ def _public_error_detail(name, result):
     reference = re.search(r"Reference ([a-f0-9]{16})\.", text)
     if reference:
         detail["reference"] = reference.group(1)
+    if category in OWN_FAILURE_CATEGORIES or \
+            detail.get("outcome") in OWN_FAILURE_OUTCOMES:
+        message = _error_message(text)
+        if message:
+            detail["message"] = message
     return detail
 
 

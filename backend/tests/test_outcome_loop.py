@@ -583,51 +583,102 @@ def test_the_blueprint_is_registered_and_probed():
 
 # ── The digest ───────────────────────────────────────────────────────────
 
-FUNNEL = {"day": "2026-10-24", "signups": 23, "uploaders": 4,
-          "first_cuts": 0, "watched_half": 0, "keep_clicks": 0,
-          "checkouts": 2, "cash_cents": 1500,
+FUNNEL = {"day": "2026-10-24",
           "start": datetime(2026, 10, 23, 20, tzinfo=timezone.utc),
           "end": datetime(2026, 10, 24, 20, tzinfo=timezone.utc)}
 
 
-def test_digest_carries_signups_outcomes_tickets_and_pictures():
-    facts = {"reviewed": 4, "signups_7d": 164,
-             "day": {"reviewed": 4, "good": 1, "rate_pct": 25.0},
-             "week": {"reviewed": 9, "good": 5, "rate_pct": 55.6},
-             "opened": [{"id": 3, "severity": "P0", "title": "Large uploads "
-                         "cannot be analysed", "cause_key": "index-scratch",
-                         "recurrence_count": 0}],
-             "fixed": [{"id": 1, "title": "Look-at frame misses",
-                        "root_cause": "seek past the end\nmore",
-                        "fix_sha": "abcdef1234567", "regression_check":
-                        "tests/test_x.py::y"}],
-             "still_open": 2,
-             "thumbnails": [{"url": "https://r2/ops/evidence/k/a.jpg?sig=1&x=2",
-                             "caption": "index error reply",
-                             "verdict": "not_delivered", "score": 1,
-                             "session_key": "k"}]}
-    subject, body = alerts.digest_email({"strip": {}, "rows": []}, FUNNEL,
-                                        NOW, outcomes=facts)
-    assert "23 signups" in subject and "25% good" in subject
-    assert "Signups 23" in body and "164 in the last 7 days" in body
-    assert "25% good (1 of 4)" in body and "56% good (5 of 9)" in body
-    assert "Opened #3" in body and "index-scratch" in body
-    assert "Fixed #1" in body and "abcdef123456" in body
-    assert "seek past the end" in body and "more" not in body.split(
-        "seek past the end")[1][:10]
+def _facts():
+    return {
+        "day": "2026-10-24", "loop_ready": True,
+        "results": {"judged": 4, "good": 1, "poor": 2, "not_delivered": 1,
+                    "rate_pct": 25.0, "avg_score": 4.5},
+        "results_7d": {"judged": 9, "good": 5, "rate_pct": 55.6},
+        "failures": {
+            "total": 5, "customers": 2,
+            "by_ticket": [{"id": 3, "severity": "P0", "status": "fixing",
+                           "title": "index job failed: scratch space",
+                           "failures": 4, "users": 1, "commits": [],
+                           "url": views.TICKET_URL + "3"},
+                          {"id": 4, "severity": "P1", "status": "fixed",
+                           "title": "Upload refused: over size cap",
+                           "failures": 1, "users": 1,
+                           "commits": views.commit_links("abcdef1234567"),
+                           "url": views.TICKET_URL + "4"}],
+            "fixed": [{"id": 1, "title": "Look-at frame misses",
+                       "root_cause": "seek past the end",
+                       "commits": views.commit_links("abcdef1234567,fe:9876543"),
+                       "regression_check": "tests/test_x.py::y",
+                       "url": views.TICKET_URL + "1"}],
+            "unhandled": [{"id": 3, "title": "index job failed",
+                           "waiting_min": 41, "url": views.TICKET_URL + "3"}],
+            "open": 2, "fixing": 1, "p0_active": 1},
+        "people": {"signups": 23, "active": 31},
+        "people_7d": {"signups": 164, "active": 120},
+        "infra": {"queue": {"queued": 0, "running": 2,
+                            "oldest_queued_min": None, "jobs_24h": 410,
+                            "failed_24h": 5, "p90_wait_s_24h": 12.0},
+                  "boxes": [{"name": "seattle-1", "load1": 2.5, "cpus": 8,
+                             "mem_used_pct": 41, "disk_used_pct": 30,
+                             "running_jobs": 2, "stale": False,
+                             "reported_at": "2026-10-24T19:59:00+00:00"}],
+                  "costs": {"yesterday_usd": 3.1, "cycle_to_date_usd": 60.2,
+                            "cycle_projected_usd": 98.0}},
+        "thumbnails": [{"url": "https://r2/ops/evidence/k/a.jpg?sig=1&x=2",
+                        "caption": "index error reply",
+                        "verdict": "not_delivered", "score": 1,
+                        "session_key": "k"}]}
+
+
+def test_digest_answers_the_four_questions_in_plain_words():
+    subject, body = alerts.digest_email(_facts())
+    assert subject == ("Valmera daily · 2026-10-24 · 25% good of 4 judged · "
+                       "5 failures · 23 signups")
+    titles = ["Did customers get good results?",
+              "What failed, and what was fixed automatically",
+              "Signups and active customers", "Infrastructure"]
+    assert [t for t in titles if t in body] == titles
+    assert body.index(titles[0]) < body.index(titles[1]) < \
+        body.index(titles[2]) < body.index(titles[3])
+    # Results with the sessions judged, and the proof pictures.
+    assert "25% good" in body and "1 of 4 sessions judged" in body
+    assert "56% good of 9 sessions" in body
     assert '<img src="https://r2/ops/evidence/k/a.jpg?sig=1&amp;x=2"' in body
-    assert "admin?tab=sessions" in body
+    # Failures with links, what was fixed automatically and by which commit.
+    assert "5 failures</b> hit 2 customers" in body
+    assert 'href="https://valmera.io/admin?tab=tickets&amp;ticket=3"' in body
+    assert "Fixed automatically" in body and \
+        "hustler-server/commit/abcdef1234567" in body and \
+        "startup_frontend/commit/9876543" in body
+    assert "Waiting for a person" in body and "41 min" in body
+    # People and infrastructure.
+    assert "23 signups" in body and "31 active customers" in body
+    assert "load 2.5/8 CPUs" in body and "0 waiting, 2 running" in body
+    assert "$3.1 yesterday" in body
+    # Cut: money, funnel, urgent accounts, trial spend, the factory.
+    for gone in ("MRR", "Committed", "Cash", "Funnel", "Most urgent",
+                 "Free trial", "Podcast factory", "refund", "Refund",
+                 "pause", "checkout"):
+        assert gone not in body, gone
 
 
-def test_digest_still_goes_out_without_the_loop():
-    subject, body = alerts.digest_email({"strip": {}, "rows": []}, FUNNEL,
-                                        NOW, outcomes=None)
-    assert "not live yet" in body
+def test_digest_still_goes_out_with_missing_parts():
+    facts = {"day": "2026-10-24", "loop_ready": False, "results": None,
+             "results_7d": None, "failures": None, "people": None,
+             "people_7d": None, "infra": None, "thumbnails": []}
+    subject, body = alerts.digest_email(facts)
+    assert "not live" in body and "not reporting health yet" in body
+    assert "no sessions judged" in subject
 
     class Broken:
         def execute(self, *a):
             raise RuntimeError("no table")
-    assert alerts.outcome_facts(Broken(), FUNNEL, NOW) is None
+
+        def fetchone(self):
+            return None
+    got = alerts.digest_facts(Broken(), NOW, presign=None)
+    assert got["day"] == "2026-10-24"
+    assert set(got["errors"]) >= {"people", "infra"}
 
 
 def test_digest_facts_pick_one_picture_per_session_problems_first():

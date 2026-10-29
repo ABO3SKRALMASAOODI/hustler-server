@@ -12,6 +12,9 @@ How it runs:
     BEFORE it is sent, so restarts, overlapping workers and retries never
     send the same alert twice; a failed send releases its claims for the
     next tick;
+  * alerts are only what needs the owner NOW (29 Oct 2026): a P0 ticket the
+    Fixer did not pick up within 30 minutes, or a model provider out of
+    credit; never payments, renewals, refunds or spend;
   * one tick sends at most ONE email that lists every new alert, and at most
     MAX_ALERT_EMAILS_PER_DAY a day, so alerts never eat the Brevo reserve
     that sign-in codes and receipts share;
@@ -42,8 +45,6 @@ TICK_MINUTES = 5
 MAX_ALERT_EMAILS_PER_DAY = int(os.getenv("COCKPIT_MAX_ALERT_EMAILS_PER_DAY",
                                          "24"))
 DIGEST_HOUR_LOCAL = 8
-INFRA_ALERT_USD_PER_DAY = float(os.getenv("COCKPIT_INFRA_ALERT_USD", "3"))
-TRIAL_THRESHOLDS = (50, 80, 95)
 FIRST_LOOKBACK = timedelta(minutes=30)   # a fresh install never replays history
 INTERNAL = list(INTERNAL_IDS)
 
@@ -93,175 +94,55 @@ def _put(wcur, key, value):
                  (key, json.dumps(value, default=str)))
 
 
-# ── What is new since the last tick ──────────────────────────────────────
+# ── What needs the owner NOW ─────────────────────────────────────────────
+# Owner, 29 Oct 2026: alerts only for things that need attention now, "a
+# customer blocked and not yet auto-handled". Every customer failure is
+# filed as a ticket within a minute (ops_loop.intake) and the Fixer starts on
+# P0s from the Mac; the owner is emailed only when that did not happen, or
+# when only the owner can unblock customers (a provider out of credit).
+# Payments, renewals, refunds, infrastructure spend and trial budgets are
+# never alerts (spend is in the digest; billing advice is nowhere).
 
 def _customer_sql(alias="u"):
     return (f"{defs.customer(alias)} AND NOT ({alias}.id = ANY(%(internal)s))")
 
 
 def event_alerts(rcur, since, now):
-    """Alerts that are events: (dedupe key, section, line html)."""
-    p = {"since": since, "since_naive": since.replace(tzinfo=None),
-         "internal": INTERNAL, "now": now}
+    """(dedupe key, section, line html) for what needs the owner now."""
     out = []
-    # Renewals and one-time charges (first payments on a subscription are
-    # announced by the paid-subscriber email, which now carries the first
-    # prompt and "result before paying").
-    rcur.execute(f"""
-        SELECT p.transaction_id, p.amount_cents, p.currency, p.plan, p.status,
-               u.id, u.email,
-               EXISTS (SELECT 1 FROM payments e
-                        WHERE e.subscription_id = p.subscription_id
-                          AND e.transaction_id <> p.transaction_id
-                          AND {defs.success('e')}
-                          AND COALESCE(e.occurred_at, e.created_at)
-                              < COALESCE(p.occurred_at, p.created_at))
-                   AS renewal
-          FROM payments p JOIN users u ON u.id = p.user_id
-         WHERE p.updated_at >= %(since_naive)s AND {_customer_sql()}
-           AND (({defs.success('p')}) OR p.amount_cents < 0
-                OR p.status = 'chargeback_warning')""", p)
-    for r in rcur.fetchall():
-        money = f"{r['currency']} {abs(r['amount_cents']) / 100:.2f}"
-        if r["amount_cents"] < 0 or r["status"] == "chargeback_warning":
-            out.append((f"adj:{r['transaction_id']}", "Money returned",
-                        f"<b>{_e(r['status'])}</b> {money} · {_e(r['email'])}"
-                        f" (#{r['id']})"))
-        elif r["renewal"] or not r["plan"]:
-            out.append((f"pay:{r['transaction_id']}", "Payments",
-                        f"{'Renewal' if r['renewal'] else 'Payment'} {money}"
-                        f" · {_e(r['email'])} (#{r['id']}) · "
-                        f"{_e(r['plan'])}"))
-    # Renewal turned off (a provider event, scheduled cancel).
-    rcur.execute(f"""
-        SELECT DISTINCT ON (h.subscription_id) h.subscription_id,
-               h.provider_updated_at, u.id, u.email,
-               (SELECT min(COALESCE(f.occurred_at, f.created_at))
-                  FROM payments f WHERE f.subscription_id = h.subscription_id
-                   AND {defs.success('f')}) AS paid_at,
-               (SELECT count(*) FROM video_jobs j WHERE j.user_id = u.id
-                   AND j.type IN ('agent_turn', 'mcp_tool')
-                   AND j.state = 'done') AS edits,
-               (SELECT count(*) FROM client_events c WHERE c.user_id = u.id
-                   AND c.kind IN ('download_triggered',
-                                  'mcp_export_delivered')) AS results,
-               (SELECT LEFT(j.error, 160) FROM video_jobs j
-                 WHERE j.user_id = u.id AND j.state = 'failed'
-                 ORDER BY j.updated_at DESC LIMIT 1) AS last_error
-          FROM admin_subscription_history h
-          JOIN (SELECT DISTINCT subscription_id, user_id FROM payments
-                 WHERE subscription_id IS NOT NULL) m
-            ON m.subscription_id = h.subscription_id
-          JOIN users u ON u.id = m.user_id
-         WHERE h.scheduled_action = 'cancel' AND h.event_id IS NOT NULL
-           AND h.provider_updated_at >= %(since)s AND {_customer_sql()}
-         ORDER BY h.subscription_id, h.provider_updated_at""", p)
-    for r in rcur.fetchall():
-        after = ""
-        if r["paid_at"]:
-            mins = (r["provider_updated_at"].replace(tzinfo=None)
-                    - r["paid_at"]).total_seconds() / 60
-            after = f" · {mins:.0f} min after paying"
-        out.append((f"off:{r['subscription_id']}:"
-                    f"{r['provider_updated_at']:%Y%m%d}", "Renewal turned off",
-                    f"{_e(r['email'])} (#{r['id']}){after} · edits "
-                    f"{r['edits']} · results {r['results']}"
-                    + (f" · last error: {_e(r['last_error'])}"
-                       if r["last_error"] else "")))
-    # A paying customer was shown a service error.
-    rcur.execute(f"""
-        SELECT m.id, LEFT(m.content, 180) AS content, u.id AS uid, u.email,
-               p.id AS project_id
-          FROM chat_messages m
-          JOIN projects p ON p.chat_session_id = m.session_id
-          JOIN users u ON u.id = p.user_id
-         WHERE m.role = 'assistant' AND m.created_at >= %(since_naive)s
-           AND m.meta->>'error' IN ('job_failed', 'job_died')
-           AND {defs.paying('u')} AND {_customer_sql()}""", p)
-    for r in rcur.fetchall():
-        out.append((f"err:{r['id']}", "Paying customer saw a service error",
-                    f"{_e(r['email'])} (#{r['uid']}) · project "
-                    f"{r['project_id']}: {_e(r['content'])}"))
-    # Model account out of credit, executor missing, deploy-killed jobs.
-    rcur.execute(f"""
-        SELECT j.id, j.type, j.user_id, LEFT(j.error, 200) AS error, u.email
-          FROM video_jobs j JOIN users u ON u.id = j.user_id
+    try:
+        from ops_loop import intake
+        for t in intake.unhandled(rcur, now):
+            out.append((f"unhandled:{t['id']}:"
+                        f"{t['opened_at']:%Y%m%dT%H%M}",
+                        "Customer blocked, not handled yet",
+                        f"<b>P0 #{t['id']}</b> {_e(t['title'])} · "
+                        f"{_e(t['users'])} customer"
+                        f"{'s' if t['users'] != 1 else ''} · open "
+                        f"{t['waiting_min']} min and the Fixer has not "
+                        f"started (the Mac may be asleep or the P0 watch "
+                        f"off) · <a href=\"{ADMIN_URL}?tab=tickets&ticket="
+                        f"{t['id']}\" style=\"color:#f87171\">ticket</a>"))
+    except Exception as e:
+        print(f"⚠️ [cockpit] unhandled-P0 check failed: "
+              f"{type(e).__name__}: {e}", flush=True)
+    # Only the owner can pay a provider: say so once a day while it lasts.
+    p = {"since": since, "internal": INTERNAL}
+    rcur.execute("""
+        SELECT count(*) AS n, count(DISTINCT j.user_id) AS users,
+               max(LEFT(j.error, 200)) AS error
+          FROM video_jobs j
          WHERE j.state = 'failed' AND j.updated_at >= %(since)s
-           AND j.user_id <> 60
+           AND NOT (j.user_id = ANY(%(internal)s))
            AND (j.error ILIKE '%%insufficient_quota%%'
                 OR j.error ILIKE '%%no credits remaining%%'
-                OR j.error ILIKE '%%no remote executor is configured%%'
-                OR j.error ILIKE '%%modal or cloudflare is required%%'
-                OR j.error ILIKE '%%deploy in progress%%')""", p)
-    for r in rcur.fetchall():
-        text = (r["error"] or "").lower()
-        section = ("LLM provider out of credit"
-                   if "quota" in text or "credits remaining" in text else
-                   "Deploy killed a user job" if "deploy" in text else
-                   "No executor for a user job")
-        out.append((f"job:{r['id']}", section,
-                    f"{_e(r['type'])} job {r['id']} · {_e(r['email'])} "
-                    f"(#{r['user_id']}): {_e(r['error'])}"))
-    # Worker-raised alarms (R2 routing, R5 LLM balance) parked in app_kv.
-    for key, section in (("llm_balance", "LLM provider balance"),
-                         ("executor_routing_alarm", "Executor routing")):
-        v = _kv(rcur, key) or {}
-        at = v.get("alarm_at") if isinstance(v, dict) else None
-        if at and str(at) >= since.isoformat():
-            out.append((f"{key}:{at}", section, _e(v.get("alarm"))))
-    return out
-
-
-def daily_alerts(board, now):
-    """Alerts read off the Health board (once a day per account/threshold)."""
-    out = []
-    rows = {r["id"]: r for r in board.get("rows") or []}
-    for r in rows.values():
-        ren = r.get("renewal") or {}
-        days = ren.get("days_left")
-        if "CHARGE_SOON_NO_USE" in r["flags"] and days is not None \
-                and days <= 3:
-            out.append((f"chargesoon:{r['id']}:{ren.get('next_charge_at')}",
-                        "Charge soon, no use",
-                        f"{_e(r['email'])} (#{r['id']}) is charged "
-                        f"${_e(ren.get('next_charge_usd'))} on "
-                        f"{_e((ren.get('next_charge_at') or '')[:10])} with 0 "
-                        "edits in 30 days: pause or refund first"))
-        retry = (r.get("billing") or {}).get("next_retry_at")
-        if "PAST_DUE_DORMANT" in r["flags"] and retry and \
-                datetime.fromisoformat(retry.replace("Z", "+00:00")) \
-                <= now + timedelta(days=1):
-            out.append((f"pastdue:{r['id']}:{retry[:10]}",
-                        "Past-due retry on a dormant account tomorrow",
-                        f"{_e(r['email'])} (#{r['id']}): Paddle retries the "
-                        f"card on {_e(retry[:16].replace('T', ' '))} UTC for "
-                        "someone inactive 14+ days: cancel the retry"))
-    infra = (board.get("strip") or {}).get("infra") or {}
-    y = infra.get("yesterday_usd")
-    if y is not None and y > INFRA_ALERT_USD_PER_DAY:
-        out.append((f"infra:{(now - timedelta(days=1)):%Y%m%d}",
-                    "Infrastructure over budget",
-                    f"${y:.2f} yesterday (alert above "
-                    f"${INFRA_ALERT_USD_PER_DAY:.2f}/day); cycle projected "
-                    f"${_e(infra.get('cycle_projected_usd'))}, owner share "
-                    f"{_e(infra.get('owner_share_7d_pct'))}%"))
-    trial = (board.get("strip") or {}).get("first_cut") or {}
-    for w in trial.get("llm_credit") or []:
-        for t in (80, 95):
-            if (w.get("used_pct") or 0) >= t:
-                out.append((f"llmcredit:{w['provider']}:{t}:"
-                            f"{w.get('loaded_at')}",
-                            f"LLM credit {t}% used",
-                            f"{_e(w['provider'])}: ${_e(w.get('spent_usd'))} "
-                            f"of ${_e(w.get('loaded_usd'))} spent since "
-                            f"{_e((w.get('loaded_at') or '')[:10])}; "
-                            f"${_e(w.get('remaining_usd'))} left"))
-    used = trial.get("used_pct") or 0
-    for t in TRIAL_THRESHOLDS:
-        if used >= t:
-            out.append((f"trial:{t}:{now:%Y%m}", f"Trial budget {t}% used",
-                        f"{used}% of ${trial.get('budget_usd')} used; "
-                        f"${trial.get('month_usd')} this month"))
+                OR j.error ILIKE '%%credit balance is too low%%')""", p)
+    r = rcur.fetchone() or {}
+    if r.get("n"):
+        out.append((f"llmquota:{now:%Y%m%d}",
+                    "A model provider is out of credit (only you can fix it)",
+                    f"{r['n']} customer job(s) of {r['users']} customer(s) "
+                    f"failed: {_e(r['error'])}"))
     return out
 
 
@@ -302,7 +183,7 @@ def _shell(title, sections, footer=None):
             f'border-radius:14px;padding:22px 24px"><h1 style="margin:0 0 6px;'
             f'color:#fff;font-size:18px">{_e(title)}</h1>{"".join(parts)}'
             f'<p style="margin:18px 0 0"><a href="{ADMIN_URL}" style="color:'
-            f'#f87171">Open the Health board</a></p>{foot}</div></div>')
+            f'#f87171">Open the admin</a></p>{foot}</div></div>')
 
 
 def alert_email(items):
@@ -319,46 +200,15 @@ def alert_email(items):
 
 
 # ── The digest ───────────────────────────────────────────────────────────
+# One clear email a day, answering four questions in plain words (owner,
+# 29 Oct 2026); everything else was cut (money, funnel, urgent accounts,
+# trial spend, podcast factory: the admin still has them).
 
-def funnel_yesterday(rcur, now):
+def day_window(now):
+    """Yesterday in the admin timezone: (day, start, end)."""
     day = ranges.local_today(now) - timedelta(days=1)
-    start, end = ranges.local_midnight(day), ranges.local_midnight(
+    return day, ranges.local_midnight(day), ranges.local_midnight(
         day + timedelta(days=1))
-    p = {"s": start, "e": end, "sn": start.replace(tzinfo=None),
-         "en": end.replace(tzinfo=None), "internal": INTERNAL}
-    rcur.execute(f"""
-        WITH s AS (SELECT u.id FROM users u WHERE {_customer_sql()}
-                     AND u.created_at >= %(sn)s AND u.created_at < %(en)s),
-        ev AS (SELECT ce.user_id, ce.kind, ce.created_at, ce.detail
-                 FROM client_events ce
-                WHERE ce.created_at >= %(s)s AND ce.created_at < %(e)s
-                  AND NOT (ce.user_id = ANY(%(internal)s)))
-        SELECT (SELECT count(*) FROM s) AS signups,
-               (SELECT count(DISTINCT user_id) FROM ev
-                 WHERE kind = 'upload_landed') AS uploaders,
-               (SELECT count(DISTINCT user_id) FROM ev
-                 WHERE kind IN ('free_result_delivered',
-                                'first_cut_delivered')) AS first_cuts,
-               (SELECT count(DISTINCT user_id) FROM ev
-                 WHERE kind IN ('free_result_watched', 'first_cut_watched')
-                   AND COALESCE(NULLIF(detail->>'pct', '')::float, 0) >= 50)
-                   AS watched_half,
-               (SELECT count(DISTINCT user_id) FROM ev
-                 WHERE kind IN ('free_result_keep_clicked',
-                                'first_cut_keep_clicked')) AS keep_clicks,
-               (SELECT count(DISTINCT user_id) FROM ev
-                 WHERE kind = 'checkout_stage'
-                   AND detail->>'stage' = 'opened') AS checkouts,
-               (SELECT COALESCE(sum(p.amount_cents), 0) FROM payments p
-                  JOIN users u ON u.id = p.user_id
-                 WHERE {defs.success('p')} AND p.currency = 'USD'
-                   AND COALESCE(p.occurred_at, p.created_at) >= %(sn)s
-                   AND COALESCE(p.occurred_at, p.created_at) < %(en)s
-                   AND {_customer_sql()}) AS cash_cents""", p)
-    out = dict(rcur.fetchone() or {})
-    out["day"] = day.isoformat()
-    out["start"], out["end"] = start, end
-    return out
 
 
 EVIDENCE_LINK_S = 6 * 24 * 3600     # R2 presigned URLs live at most 7 days
@@ -376,59 +226,71 @@ def _evidence_link(key):
         return None
 
 
-def outcome_facts(rcur, funnel, now, presign=_evidence_link):
-    """The outcome loop's part of the digest (None before migration 041).
-    Never raises: the digest must go out even if this part cannot."""
+def digest_facts(rcur, now, presign=_evidence_link):
+    """Everything the digest says, for yesterday (admin timezone). Never
+    raises: the digest goes out with whatever parts could be read."""
+    from ops_loop import views
+    day, start, end = day_window(now)
+    facts = views.awareness(rcur, start, end, now)
+    facts["day"] = day.isoformat()
     try:
-        from ops_loop import views
-        facts = views.digest_facts(rcur, funnel["start"], funnel["end"],
-                                   presign=presign)
-        if facts is None:
-            return None
-        daily = views.signups(rcur, now)["daily"]
-        upto = [d for d in daily if d["day"] <= funnel["day"]]
-        facts["signups_7d"] = sum(d["signups"] for d in upto[-7:])
-        return facts
+        proof = views.digest_facts(rcur, start, end, presign=presign) or {}
+        facts["thumbnails"] = proof.get("thumbnails") or []
     except Exception as e:
-        print(f"⚠️ [cockpit] digest outcome section failed: "
-              f"{type(e).__name__}: {e}", flush=True)
-        return None
+        facts["thumbnails"] = []
+        facts.setdefault("errors", {})["thumbnails"] = \
+            f"{type(e).__name__}: {e}"[:200]
+    return facts
 
 
-def _rate_text(part):
-    if not part or not part.get("reviewed"):
-        return "no sessions reviewed"
-    return (f"{part['rate_pct']:.0f}% good ({part['good']} of "
-            f"{part['reviewed']})")
+def _pct(v):
+    return f"{v:.0f}%" if isinstance(v, (int, float)) else "—"
 
 
-def outcome_lines(facts, funnel):
-    """(signups+outcomes lines, ticket lines, thumbnail line)."""
-    if not facts:
-        return ([f"Signups {funnel['signups']} · the outcome loop is not "
-                 "live yet (migration 041)"], [], None)
-    head = [f"<b>Signups {_e(funnel['signups'])}</b> yesterday · "
-            f"{_e(facts.get('signups_7d'))} in the last 7 days",
-            f"Outcome rate yesterday {_rate_text(facts['day'])} · 7 days "
-            f"{_rate_text(facts['week'])}",
-            f"Sessions reviewed yesterday: {_e(facts['reviewed'])} · tickets "
-            f"still open: {_e(facts['still_open'])}"]
-    tickets = []
-    for t in facts["opened"]:
-        tickets.append(f"Opened #{t['id']} <b>[{_e(t['severity'])}]</b> "
-                       f"{_e(t['title'])} · <code>{_e(t['cause_key'])}</code>"
-                       + (f" · recurred ×{t['recurrence_count']}"
-                          if t.get("recurrence_count") else ""))
-    for t in facts["fixed"]:
-        cause = (t.get("root_cause") or "").strip().splitlines()[0][:160] \
-            if t.get("root_cause") else ""
-        tickets.append(f"Fixed #{t['id']} {_e(t['title'])}: {_e(cause)} · "
-                       f"fix <code>{_e((t.get('fix_sha') or '')[:12])}</code>"
-                       f" · guarded by {_e(t.get('regression_check'))}")
-    pics = facts.get("thumbnails") or []
-    thumbs = None
-    if pics:
-        cells = "".join(
+def _link(url, text):
+    return (f'<a href="{html.escape(url, quote=True)}" style="color:#f87171">'
+            f'{_e(text)}</a>')
+
+
+def _ticket_line(t):
+    state = {"fixed": "fixed", "fixing": "being fixed", "open": "open",
+             "wont_fix": "won't fix"}.get(t.get("status"), t.get("status"))
+    commits = " ".join(_link(c["url"], c["sha"]) for c in t.get("commits")
+                       or [])
+    return (f"{_link(t['url'], '#' + str(t['id']))} "
+            f"<b>[{_e(t['severity'])}]</b> {_e(t['title'])} · "
+            f"{_e(t['failures'])} failure{'s' if t['failures'] != 1 else ''}"
+            f", {_e(t['users'])} customer{'s' if t['users'] != 1 else ''} · "
+            f"{_e(state)}" + (f" ({commits})" if commits else ""))
+
+
+def digest_sections(f):
+    """[(title, [line html])] for the four questions, in plain words."""
+    res, res7 = f.get("results"), f.get("results_7d")
+    fail = f.get("failures") or {}
+    ppl, ppl7 = f.get("people") or {}, f.get("people_7d") or {}
+    infra = f.get("infra") or {}
+    # 1. Results.
+    if res is None:
+        good = ["The outcome loop is not live (migration 041)."]
+    elif not res["judged"]:
+        good = ["No sessions were judged yesterday"
+                + (f" · last 7 days {_pct(res7['rate_pct'])} good of "
+                   f"{res7['judged']}" if res7 and res7["judged"] else "")
+                + "."]
+    else:
+        good = [f"<b>{_pct(res['rate_pct'])} good</b>: {res['good']} of "
+                f"{res['judged']} sessions judged delivered what was asked"
+                + (f" · {res['poor']} poor" if res["poor"] else "")
+                + (f" · {res['not_delivered']} not delivered"
+                   if res["not_delivered"] else "")
+                + (f" · average {res['avg_score']}/10"
+                   if res.get("avg_score") is not None else ""),
+                f"Last 7 days: {_pct((res7 or {}).get('rate_pct'))} good of "
+                f"{(res7 or {}).get('judged', 0)} sessions."]
+    thumbs = f.get("thumbnails") or []
+    if thumbs:
+        good.append("".join(
             f'<a href="{ADMIN_URL}?tab=sessions" style="display:inline-block;'
             f'margin:0 8px 8px 0;text-decoration:none;vertical-align:top;'
             f'width:140px"><img src="{html.escape(p["url"], quote=True)}" '
@@ -437,78 +299,97 @@ def outcome_lines(facts, funnel):
             f'style="display:block;color:#9a9aa5;font-size:11px;'
             f'line-height:1.35;margin-top:4px">{_e(p["verdict"])} · '
             f'{_e(p["score"])}/10 · {_e((p.get("caption") or "")[:90])}'
-            f'</span></a>' for p in pics[:4])
-        thumbs = cells
-    return head, tickets, thumbs
+            f'</span></a>' for p in thumbs[:4]))
+    # 2. Failures and what was fixed automatically.
+    if not fail:
+        failed = ["Failures could not be read."]
+    else:
+        failed = [f"<b>{fail['total']} failure"
+                  f"{'s' if fail['total'] != 1 else ''}</b> hit "
+                  f"{fail['customers']} customer"
+                  f"{'s' if fail['customers'] != 1 else ''}"
+                  + (", each filed as a ticket automatically:"
+                     if fail["total"] else " · nothing failed.")]
+        if fail.get("intake_stale"):
+            failed.insert(0, "<b>The automatic failure intake is not "
+                          "running</b> (last pass "
+                          f"{_e(fail.get('intake_last_at') or 'never')}): "
+                          "failures may be missing below.")
+        failed += [_ticket_line(t) for t in fail["by_ticket"][:8]]
+        if len(fail["by_ticket"]) > 8:
+            failed.append(f"… and {len(fail['by_ticket']) - 8} more causes "
+                          f"({_link(ADMIN_URL + '?tab=tickets', 'Tickets')})")
+        for t in fail["fixed"]:
+            commits = " ".join(_link(c["url"], c["sha"])
+                               for c in t.get("commits") or [])
+            failed.append(f"Fixed automatically: "
+                          f"{_link(t['url'], '#' + str(t['id']))} "
+                          f"{_e(t['title'])} · {commits} · guarded by "
+                          f"{_e(t.get('regression_check'))}")
+        for u in fail.get("unhandled") or []:
+            failed.append(f"<b>Waiting for a person</b>: "
+                          f"{_link(u['url'], '#' + str(u['id']))} "
+                          f"{_e(u['title'])} ({u['waiting_min']} min)")
+        failed.append(f"Tickets now: {fail['open']} open, {fail['fixing']} "
+                      f"being fixed"
+                      + (f" ({fail['p0_active']} P0)" if fail["p0_active"]
+                         else "") + ".")
+    # 3. People.
+    people = [f"<b>{ppl.get('signups', '—')} signups</b> · "
+              f"{ppl.get('active', '—')} active customers (sent a request, "
+              f"uploaded, ran an edit or an MCP call)",
+              f"Last 7 days: {ppl7.get('signups', '—')} signups · "
+              f"{ppl7.get('active', '—')} active customers."]
+    # 4. Infrastructure.
+    q = infra.get("queue") or {}
+    boxes = infra.get("boxes")
+    costs = infra.get("costs") or {}
+    box_lines = []
+    for b in boxes or []:
+        load = (f"load {b['load1']}/{b['cpus']} CPUs" if b.get("load1")
+                is not None and b.get("cpus") else "load —")
+        box_lines.append(
+            f"Box {_e(b['name'])}: {load} · memory "
+            f"{_pct(b.get('mem_used_pct'))} · disk "
+            f"{_pct(b.get('disk_used_pct'))} · "
+            f"{_e(b.get('running_jobs'))} jobs running"
+            + (" · <b>not reporting</b> (last " + _e(b['reported_at']) + ")"
+               if b.get("stale") else ""))
+    if not box_lines:
+        box_lines = ["Render box: not reporting health yet."]
+    wait = q.get("p90_wait_s_24h")
+    infra_lines = box_lines + [
+        f"Queue now: {q.get('queued', '—')} waiting, {q.get('running', '—')}"
+        f" running"
+        + (f", oldest waiting {q['oldest_queued_min']} min"
+           if q.get("oldest_queued_min") else "")
+        + f" · last 24 h: {q.get('jobs_24h', '—')} jobs, "
+        f"{q.get('failed_24h', '—')} failed"
+        + (f", 90% started within {wait:.0f} s" if wait is not None else ""),
+        f"Costs: ${_e(costs.get('yesterday_usd'))} yesterday · "
+        f"${_e(costs.get('cycle_to_date_usd'))} this cycle, projected "
+        f"${_e(costs.get('cycle_projected_usd'))} (Cloudflare executors + "
+        f"R2, from our own ledger)"]
+    return [("Did customers get good results?", good),
+            ("What failed, and what was fixed automatically", failed),
+            ("Signups and active customers", people),
+            ("Infrastructure", infra_lines)]
 
 
-def digest_email(board, funnel, now, outcomes=None):
-    s = board.get("strip") or {}
-    rows = board.get("rows") or []
-    start, end = funnel["start"], funnel["end"]
-
-    def within(iso):
-        if not iso:
-            return False
-        at = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-        return start <= at < end
-    payers = [r for r in rows if within(r.get("first_paid_at"))]
-    with_result = sum(1 for r in payers if r.get("result_before_paying"))
-    offs = (s.get("renewal_offs_7d") or {}).get("ids") or []
-    errs = s.get("service_errors_24h") or {}
-    infra = s.get("infra") or {}
-    trial = s.get("first_cut") or {}
-    fac = board.get("factory") or {}
-    urgent = [r for r in rows if r["health"] == "red"] + \
-        [r for r in rows if r["health"] == "amber"]
-    o_head, o_tickets, o_thumbs = outcome_lines(outcomes, funnel)
-    funnel_line = (
-        f"{funnel['signups']} signups → {funnel['uploaders']} uploaded → "
-        f"{funnel['first_cuts']} First cuts → {funnel['watched_half']} "
-        f"watched >50% → {funnel['keep_clicks']} Keep it → "
-        f"{funnel['checkouts']} opened checkout → {len(payers)} paid "
-        f"({with_result} saw a result first)")
-    sections = [
-        ("Signups and outcomes", o_head),
-        ("Tickets (the Reviewer and the Fixer)", o_tickets),
-        ("Proof from yesterday's sessions", [o_thumbs] if o_thumbs else []),
-        ("Funnel, " + funnel["day"], [funnel_line,
-                                      f"Renewal turned off in the last 7 "
-                                      f"days: {len(offs)}"]),
-        ("Money", [f"Committed MRR ${_e((s.get('committed_mrr') or {}).get('value'))}"
-                   f" · engaged ${_e((s.get('engaged_committed_mrr') or {}).get('value'))}"
-                   f" · Paddle-active ${_e((s.get('paddle_active_mrr') or {}).get('value'))}",
-                   f"Cash yesterday ${funnel['cash_cents'] / 100:.2f}"]),
-        ("Most urgent accounts", [
-            f"<b>{_e(r['email'])}</b> (#{r['id']}) · "
-            f"{_e(', '.join(r['flags'][:3]))} → {_e(r.get('next_action'))}"
-            for r in urgent[:5]]),
-        ("Service errors shown to customers (24 h)", [
-            ", ".join(f"{c['label']} {c['n']}" for c in errs.get("by_class")
-                      or []) or "None"]),
-        ("Infrastructure", [
-            f"${_e(infra.get('yesterday_usd'))} yesterday · cycle "
-            f"projected ${_e(infra.get('cycle_projected_usd'))} · owner "
-            f"{_e(infra.get('owner_share_7d_pct'))}% of the last 7 days"]),
-        ("Free trial spend", [
-            f"${_e(trial.get('month_usd'))} this month · "
-            f"{_e(trial.get('used_pct'))}% of ${_e(trial.get('budget_usd'))}"
-            + ("" if trial.get("live") else " · not live yet")]),
-        ("Podcast factory (7 days)", [
-            f"{_e(fac.get('shorts'))} shorts · "
-            f"{_e(fac.get('approval_renders_per_short'))} approval renders "
-            f"and {_e(fac.get('full_renders_per_short'))} full renders per "
-            f"short · ${_e(fac.get('usd_per_short'))} per short"]),
-    ]
-    rate = ((outcomes or {}).get("day") or {}).get("rate_pct")
-    subject = (f"Valmera daily · {funnel['day']} · {funnel['signups']} "
-               f"signup{'s' if funnel['signups'] != 1 else ''} · "
-               + (f"outcomes {rate:.0f}% good · " if rate is not None else "")
-               + f"MRR "
-               f"${(s.get('committed_mrr') or {}).get('value')} · "
-               f"{len(payers)} new payer{'s' if len(payers) != 1 else ''}")
-    return subject, _shell(f"Yesterday at Valmera ({funnel['day']})",
-                           sections,
+def digest_email(facts):
+    res = facts.get("results") or {}
+    fail = facts.get("failures") or {}
+    ppl = facts.get("people") or {}
+    rate = res.get("rate_pct")
+    subject = (f"Valmera daily · {facts['day']} · "
+               + (f"{rate:.0f}% good of {res['judged']} judged · "
+                  if rate is not None else "no sessions judged · ")
+               + f"{fail.get('total', 0)} failure"
+               f"{'s' if fail.get('total', 0) != 1 else ''} · "
+               f"{ppl.get('signups', 0)} signup"
+               f"{'s' if ppl.get('signups', 0) != 1 else ''}")
+    return subject, _shell(f"Yesterday at Valmera ({facts['day']})",
+                           digest_sections(facts),
                            "The daily digest, 08:00 Dubai time. Admin inbox "
                            "only.")
 
@@ -554,15 +435,6 @@ def run_tick(now=None, send=_send, rconn=None, wconn=None):
                          if isinstance(mark, dict) and mark.get("at")
                          else now - FIRST_LOOKBACK)
                 items = event_alerts(r, since - timedelta(minutes=2), now)
-                board = None
-                hourly = _kv(r, "cockpit_alert_hourly") or {}
-                if not isinstance(hourly, dict) or hourly.get("hour") != \
-                        now.strftime("%Y%m%d%H"):
-                    from admin_metrics import cockpit
-                    board = cockpit.compute(r, now)
-                    items += daily_alerts(board, now)
-                    _put(w, "cockpit_alert_hourly",
-                         {"hour": now.strftime("%Y%m%d%H")})
                 claimed = [i for i in items
                            if claim(w, "cockpit_alert:" + i[0][:180])]
                 out["alerts"] = len(claimed)
@@ -578,7 +450,7 @@ def run_tick(now=None, send=_send, rconn=None, wconn=None):
                         for i in claimed:
                             release(w, "cockpit_alert:" + i[0][:180])
                 _put(w, "cockpit_alert_watermark", {"at": now.isoformat()})
-                out["digest"] = maybe_digest(r, w, now, board, send)
+                out["digest"] = maybe_digest(r, w, now, send)
         finally:
             with wconn.cursor() as w:
                 w.execute("SELECT pg_advisory_unlock(%s)", (TICK_LOCK_ID,))
@@ -597,19 +469,14 @@ def digest_due(now):
     return local.hour >= DIGEST_HOUR_LOCAL
 
 
-def maybe_digest(r, w, now, board, send):
+def maybe_digest(r, w, now, send):
     if not digest_due(now):
         return False
     key = f"cockpit_digest:{ranges.local_today(now).isoformat()}"
     if not claim(w, key):
         return False
     try:
-        if board is None:
-            from admin_metrics import cockpit
-            board = cockpit.compute(r, now)
-        funnel = funnel_yesterday(r, now)
-        subject, body = digest_email(board, funnel, now,
-                                     outcomes=outcome_facts(r, funnel, now))
+        subject, body = digest_email(digest_facts(r, now))
         if send(subject, body):
             return True
     except Exception as e:
@@ -623,15 +490,12 @@ def preview(rcur, now=None):
     """What the next tick would contain (no claims, no email): for tests and
     the operator."""
     now = now or datetime.now(timezone.utc)
-    from admin_metrics import cockpit
-    board = cockpit.compute(rcur, now)
-    items = event_alerts(rcur, now - timedelta(days=1), now) + \
-        daily_alerts(board, now)
-    funnel = funnel_yesterday(rcur, now)
-    subject, _ = digest_email(board, funnel, now,
-                              outcomes=outcome_facts(rcur, funnel, now))
+    items = event_alerts(rcur, now - timedelta(days=1), now)
+    facts = digest_facts(rcur, now, presign=None)
+    subject, body = digest_email(facts)
     return {"alerts": [{"key": k, "section": s, "line": l}
-                       for k, s, l in items], "digest_subject": subject}
+                       for k, s, l in items], "digest_subject": subject,
+            "digest_html": body}
 
 
 _scheduler = None

@@ -12,7 +12,7 @@ verified accounts, no admin or test accounts) minus the internal ids, counted
 by admin-timezone day, so the strip agrees with the Users tab and the digest.
 Every query here is a small indexed read; nothing is cached.
 """
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 from admin_metrics import defs, ranges
 from ops_loop import EXCLUDED_USER_IDS
@@ -272,6 +272,325 @@ def tickets(cur, status="all", presign=None, limit=300):
                             -g["sessions"]))
     return {"loop_ready": True, "groups": out,
             "total": sum(len(g["tickets"]) for g in out)}
+
+
+# ── Awareness: the four questions (owner, 29 Oct 2026) ───────────────────
+# One read model for the top of the admin (today so far) and the 08:00
+# digest (yesterday): did customers get good results; what failed and what
+# was fixed automatically; signups and active users; infrastructure health.
+
+REPO_COMMIT = {"be": "https://github.com/ABO3SKRALMASAOODI/hustler-server/commit/",
+               "fe": "https://github.com/ABO3SKRALMASAOODI/startup_frontend/commit/"}
+TICKET_URL = "https://valmera.io/admin?tab=tickets&ticket="
+BOX_HEALTH_PREFIX = "box_health"      # app_kv rows the render box writes
+BOX_STALE = timedelta(minutes=10)
+
+
+def commit_links(fix_sha):
+    """[{sha, url}] for a ticket's fix_sha ("abc123,fe:def456")."""
+    out = []
+    for part in (fix_sha or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        repo, _, sha = part.rpartition(":")
+        repo = repo or "be"
+        out.append({"sha": sha[:12], "repo": repo,
+                    "url": REPO_COMMIT.get(repo, REPO_COMMIT["be"]) + sha})
+    return out
+
+
+def results_between(cur, start, end):
+    cur.execute("""
+        SELECT count(*) AS judged,
+               count(*) FILTER (WHERE verdict = 'delivered_good') AS good,
+               count(*) FILTER (WHERE verdict = 'delivered_poor') AS poor,
+               count(*) FILTER (WHERE verdict = 'not_delivered') AS not_d,
+               round(avg(score), 1) AS score
+          FROM session_reviews
+         WHERE started_at >= %(s)s AND started_at < %(e)s""",
+                {"s": start, "e": end})
+    r = cur.fetchone() or {}
+    judged = int(r.get("judged") or 0)
+    good = int(r.get("good") or 0)
+    return {"judged": judged, "good": good, "poor": int(r.get("poor") or 0),
+            "not_delivered": int(r.get("not_d") or 0),
+            "rate_pct": _rate(good, judged),
+            "avg_score": float(r["score"]) if r.get("score") is not None
+            else None}
+
+
+INTAKE_STALE = timedelta(minutes=10)
+
+
+def intake_last_pass(cur):
+    """When the automatic intake last ran (its watermark), or None."""
+    import json
+    from ops_loop import intake
+    cur.execute("SELECT value FROM app_kv WHERE key = %s",
+                (intake.WATERMARK_KEY,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    try:
+        v = json.loads(row["value"]) if isinstance(row["value"], str) \
+            else row["value"]
+        at = (v or {}).get("at")
+        return _aware_dt(at) if at else None
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _aware_dt(v):
+    from datetime import datetime
+    v = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+    return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+
+
+def failures_between(cur, start, end, now=None):
+    """Failures filed in [start, end) by ticket, the tickets fixed in it,
+    what is still open, and the P0s nobody picked up (two reads)."""
+    from ops_loop import intake
+    now = now or end
+    cur.execute("""
+        SELECT t.id, h->>'user' AS u, h->>'project' AS project
+          FROM tickets t, jsonb_array_elements(t.history) h
+         WHERE t.last_seen >= %(s)s AND h->>'event' = 'failure'
+           AND (h->>'at')::timestamptz >= %(s)s
+           AND (h->>'at')::timestamptz < %(e)s""", {"s": start, "e": end})
+    per, users = {}, set()
+    for r in cur.fetchall():
+        d = per.setdefault(r["id"], {"failures": 0, "users": set(),
+                                     "last_project": None})
+        d["failures"] += 1
+        if r["u"] is not None:
+            d["users"].add(r["u"])
+            users.add(r["u"])
+        d["last_project"] = r["project"] or d["last_project"]
+    cur.execute("""
+        SELECT id, cause_key, title, severity, status, root_cause, fix_sha,
+               regression_check, recurrence_count, closed_at, created_at,
+               (SELECT max((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' IN ('opened', 'recurred', 'escalated'))
+                   AS opened_at
+          FROM tickets
+         WHERE id = ANY(%(ids)s) OR status IN ('open', 'fixing')
+            OR (status = 'fixed' AND closed_at >= %(s)s
+                AND closed_at < %(e)s)""",
+                {"ids": sorted(per), "s": start, "e": end})
+    tickets = {r["id"]: dict(r) for r in cur.fetchall()}
+    by_ticket, fixed, unhandled = [], [], []
+    for tid, agg in per.items():
+        t = tickets.get(tid)
+        if not t:
+            continue
+        by_ticket.append({
+            "id": tid, "cause_key": t["cause_key"], "title": t["title"],
+            "severity": t["severity"], "status": t["status"],
+            "fix_sha": t["fix_sha"], "regression_check": t["regression_check"],
+            "closed_at": _iso(t["closed_at"]),
+            "recurrence_count": t["recurrence_count"],
+            "failures": agg["failures"], "users": len(agg["users"]),
+            "last_project": agg["last_project"],
+            "url": TICKET_URL + str(tid),
+            "commits": commit_links(t.get("fix_sha")),
+            "auto": t["cause_key"].startswith("auto-")})
+    by_ticket.sort(key=lambda x: (-x["failures"], x["id"]))
+    for t in sorted(tickets.values(), key=lambda x: x["closed_at"] or end):
+        if t["status"] == "fixed" and t["closed_at"] and \
+                start <= t["closed_at"] < end:
+            cause = (t.get("root_cause") or "").strip()
+            fixed.append({"id": t["id"], "cause_key": t["cause_key"],
+                          "title": t["title"], "severity": t["severity"],
+                          "root_cause": cause.splitlines()[0][:220]
+                          if cause else None,
+                          "fix_sha": t["fix_sha"],
+                          "regression_check": t["regression_check"],
+                          "recurrence_count": t["recurrence_count"],
+                          "closed_at": _iso(t["closed_at"]),
+                          "url": TICKET_URL + str(t["id"]),
+                          "commits": commit_links(t.get("fix_sha"))})
+        opened = t.get("opened_at") or t.get("created_at")
+        if t["status"] == "open" and t["severity"] == "P0" and opened and \
+                now - opened >= intake.UNHANDLED_AFTER:
+            unhandled.append({"id": t["id"], "title": t["title"],
+                              "waiting_min": int((now - opened)
+                                                 .total_seconds() // 60),
+                              "url": TICKET_URL + str(t["id"])})
+    active = [t for t in tickets.values() if t["status"] in ("open",
+                                                             "fixing")]
+    last_pass = intake_last_pass(cur)
+    return {"intake_last_at": _iso(last_pass),
+            "intake_stale": last_pass is None
+            or now - last_pass > INTAKE_STALE,
+            "total": sum(x["failures"] for x in by_ticket),
+            "customers": len(users), "by_ticket": by_ticket, "fixed": fixed,
+            "open": sum(1 for t in active if t["status"] == "open"),
+            "fixing": sum(1 for t in active if t["status"] == "fixing"),
+            "p0_active": sum(1 for t in active if t["severity"] == "P0"),
+            "unhandled": unhandled}
+
+
+def people_between(cur, start, end):
+    """Signups (the Overview's definition) and ACTIVE customers: anyone who
+    sent a message, uploaded, ran a job or an MCP call in [start, end)."""
+    p = {"s": start, "e": end, "sn": ranges.naive(start),
+         "en": ranges.naive(end), "internal": list(EXCLUDED_USER_IDS)}
+    cur.execute(f"""
+        WITH act AS (
+          SELECT j.user_id FROM video_jobs j
+           WHERE j.created_at >= %(s)s AND j.created_at < %(e)s
+          UNION
+          SELECT ce.user_id FROM client_events ce
+           WHERE ce.created_at >= %(s)s AND ce.created_at < %(e)s
+             AND ce.kind IN ('upload_started', 'upload_landed',
+                             'first_prompt_sent', 'export_clicked',
+                             'download_triggered')
+          UNION
+          SELECT p.user_id FROM chat_messages m
+            JOIN projects p ON p.chat_session_id = m.session_id
+           WHERE m.created_at >= %(sn)s AND m.created_at < %(en)s
+             AND m.role = 'user')
+        SELECT (SELECT count(*) FROM users u
+                 WHERE {defs.customer('u')}
+                   AND NOT (u.id = ANY(%(internal)s))
+                   AND u.created_at >= %(sn)s AND u.created_at < %(en)s)
+                   AS signups,
+               (SELECT count(*) FROM act JOIN users u ON u.id = act.user_id
+                 WHERE {defs.customer('u')}
+                   AND NOT (u.id = ANY(%(internal)s))) AS active""", p)
+    r = cur.fetchone() or {}
+    return {"signups": int(r.get("signups") or 0),
+            "active": int(r.get("active") or 0)}
+
+
+def queue_now(cur, now):
+    """The job queue right now and over the last 24 h (every user,
+    including the owner's factory, since it shares the capacity)."""
+    cur.execute("""
+        SELECT count(*) FILTER (WHERE state = 'queued') AS queued,
+               count(*) FILTER (WHERE state = 'running') AS running,
+               EXTRACT(EPOCH FROM (%(now)s - min(created_at) FILTER (
+                   WHERE state = 'queued'))) / 60.0 AS oldest_queued_min
+          FROM video_jobs
+         WHERE state IN ('queued', 'running')
+           AND type NOT IN ('filmstrip')""", {"now": now})
+    q = dict(cur.fetchone() or {})
+    cur.execute("""
+        SELECT count(*) AS jobs,
+               count(*) FILTER (WHERE state = 'failed') AS failed,
+               percentile_cont(0.9) WITHIN GROUP (ORDER BY NULLIF(
+                   result->'timings'->>'queue_wait_s', '')::float)
+                   AS p90_wait_s
+          FROM video_jobs
+         WHERE updated_at >= %(since)s AND state IN ('done', 'failed')""",
+                {"since": now - timedelta(hours=24)})
+    d = dict(cur.fetchone() or {})
+    oldest = q.get("oldest_queued_min")
+    return {"queued": int(q.get("queued") or 0),
+            "running": int(q.get("running") or 0),
+            "oldest_queued_min": round(float(oldest), 1)
+            if oldest is not None else None,
+            "jobs_24h": int(d.get("jobs") or 0),
+            "failed_24h": int(d.get("failed") or 0),
+            "p90_wait_s_24h": round(float(d["p90_wait_s"]), 1)
+            if d.get("p90_wait_s") is not None else None}
+
+
+def box_health(cur, now):
+    """What the render box(es) last reported (app_kv box_health*: at,
+    load1, cpus, mem_used_pct, disk_used_pct, running_jobs). None until a
+    box reports; `stale` when its last report is older than BOX_STALE."""
+    import json
+    cur.execute("""SELECT key, value, updated_at FROM app_kv
+                    WHERE key = %s OR key LIKE %s ORDER BY key""",
+                (BOX_HEALTH_PREFIX, BOX_HEALTH_PREFIX + ":%"))
+    boxes = []
+    for r in cur.fetchall():
+        try:
+            v = json.loads(r["value"]) if isinstance(r["value"], str) \
+                else (r["value"] or {})
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(v, dict):
+            continue
+        at = r["updated_at"]
+        at = at.replace(tzinfo=timezone.utc) if at is not None and \
+            at.tzinfo is None else at
+        boxes.append({
+            "name": v.get("name") or r["key"].partition(":")[2] or "box",
+            "load1": v.get("load1"), "cpus": v.get("cpus"),
+            "mem_used_pct": v.get("mem_used_pct"),
+            "disk_used_pct": v.get("disk_used_pct"),
+            "running_jobs": v.get("running_jobs"),
+            "reported_at": _iso(at),
+            "stale": bool(at and now - at > BOX_STALE)})
+    return boxes or None
+
+
+def cost_facts(cur, now):
+    """The executor + R2 spend (infra_cost's model of our own ledger)."""
+    from admin_metrics import infra_cost
+    rep = infra_cost.report(cur, now)
+    return {"yesterday_usd": rep.get("yesterday_usd"),
+            "cycle_to_date_usd": (rep.get("cycle") or {}).get("to_date_usd"),
+            "cycle_projected_usd": (rep.get("cycle") or {})
+            .get("projected_usd"),
+            "owner_share_7d_pct": rep.get("last_7d_owner_share_pct"),
+            "what": "Cloudflare executors + R2, modeled from our own ledger"}
+
+
+def infra_between(cur, now, costs=None):
+    """Queue, box health and spend. `costs` replaces the direct cost read
+    (the admin serves it from the shared report cache)."""
+    out = {"queue": queue_now(cur, now), "boxes": box_health(cur, now),
+           "costs": None}
+    try:
+        out["costs"] = costs() if costs else cost_facts(cur, now)
+    except Exception as e:                     # never lose the other parts
+        out["costs_error"] = f"{type(e).__name__}: {e}"[:200]
+    return out
+
+
+def awareness(cur, start, end, now=None, costs=None):
+    """The four answers for [start, end). Each part fails on its own."""
+    now = now or ranges.utc_now()
+    try:
+        ready = tables_ready(cur)
+    except Exception as e:
+        ready = False
+        print(f"⚠️ [ops views] tables_ready failed: {type(e).__name__}: {e}",
+              flush=True)
+    out = {"start": _iso(start), "end": _iso(end), "loop_ready": ready}
+    parts = (("results", lambda: results_between(cur, start, end)
+              if out["loop_ready"] else None),
+             ("results_7d", lambda: results_between(
+                 cur, end - timedelta(days=7), end)
+              if out["loop_ready"] else None),
+             ("failures", lambda: failures_between(cur, start, end, now)
+              if out["loop_ready"] else None),
+             ("people", lambda: people_between(cur, start, end)),
+             ("people_7d", lambda: people_between(
+                 cur, end - timedelta(days=7), end)),
+             ("infra", lambda: infra_between(cur, now, costs)))
+    for name, fn in parts:
+        try:
+            out[name] = fn()
+        except Exception as e:
+            out[name] = None
+            out.setdefault("errors", {})[name] = \
+                f"{type(e).__name__}: {e}"[:200]
+    return out
+
+
+def today(cur, now=None, costs=None):
+    """Awareness for today so far (admin timezone): the top of the admin."""
+    now = now or ranges.utc_now()
+    start = ranges.local_midnight(ranges.local_today(now))
+    out = awareness(cur, start, now, now, costs=costs)
+    out["day"] = ranges.local_today(now).isoformat()
+    return out
 
 
 # ── The digest ───────────────────────────────────────────────────────────

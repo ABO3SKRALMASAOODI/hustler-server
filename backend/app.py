@@ -326,6 +326,16 @@ def create_app():
     except Exception as e:
         app.logger.error("could not start cockpit alert scheduler: %s", e)
 
+    # The outcome loop's automatic intake (29 Oct 2026): every new customer
+    # failure (failed job, error reply, unfulfilled request, upload or
+    # player failure, our own MCP error) is filed as a ticket within a
+    # minute; the Mac's P0 watch starts the Fixer on it.
+    try:
+        from ops_loop.intake import start_scheduler as start_ops_intake
+        start_ops_intake(app)
+    except Exception as e:
+        app.logger.error("could not start ops intake scheduler: %s", e)
+
     return app
 
 
