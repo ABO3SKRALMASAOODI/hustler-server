@@ -1,0 +1,8 @@
+[Unit]
+Description=Valmera box disk hygiene
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/valmera/box/boxctl.py clean
+Nice=15
+IOSchedulingClass=idle

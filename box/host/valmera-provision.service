@@ -1,0 +1,15 @@
+[Unit]
+Description=Valmera box secrets intake (GitHub OIDC verified)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/valmera/box/provision.py
+Restart=always
+RestartSec=2
+Environment=PYTHONUNBUFFERED=1
+OOMScoreAdjust=-800
+
+[Install]
+WantedBy=multi-user.target
