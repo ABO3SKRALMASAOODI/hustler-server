@@ -129,3 +129,48 @@ def test_oom_killed_final_is_a_service_side_failure_not_a_bad_timeline():
     note = fake.messages[0][2]
     assert "service-side fix" in note
     assert "timeline needs to be repaired" not in note
+
+
+def _index_note(error):
+    fake = _FakeDb()
+    worker_main._notify_failure(
+        fake, {"id": 114997, "type": "index", "project_id": 4911,
+               "payload": {"asset_id": 1}}, RuntimeError(error))
+    assert len(fake.messages) == 1
+    return fake.messages[0][2]
+
+
+def test_index_killed_by_our_wall_clock_never_blames_the_file():
+    # Ticket #7: jobs 114997/115548/115549, a 2.1 h 1080p mp4.
+    note = _index_note(
+        "ffmpeg killed: wall-clock 3000s exceeded; last progress "
+        "4748.1/7552.3s (62.9%), reported speed 1.58x")
+    assert "nothing is wrong with your file" in note
+    for wrong in ("mp4", "format", "Try uploading"):
+        assert wrong not in note
+
+
+def test_unreadable_file_still_asks_for_another_file():
+    err = "no video stream found in the upload"
+    assert worker_main.failure_policy.decision_for(
+        RuntimeError(err), "index").kind == "invalid_media"
+    assert "different format" in _index_note(err)
+
+
+def test_batch_runner_index_budget_kill_never_blames_the_file():
+    import batch_runner
+
+    class _Db:
+        messages = []
+
+        def run(self, fn, *args):
+            if fn is batch_runner.dbx.get_project:
+                return {"chat_session_id": 5}
+            self.messages.append(args[2])
+
+    db = _Db()
+    batch_runner._notify_failure(
+        db, {"id": 1, "type": "index", "project_id": 2},
+        RuntimeError("ffmpeg killed: wall-clock 3000s exceeded"))
+    assert db.messages and "mp4" not in db.messages[0]
+    assert "nothing is wrong with your file" in db.messages[0]
