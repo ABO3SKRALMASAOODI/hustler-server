@@ -139,8 +139,13 @@ def source_version():
     return out.stdout.strip()
 
 
+IMAGE_REPOS = ("valmera-interactive", "valmera-exec", "valmera-agent")
+
+
 def image_names(source):
-    return f"valmera-exec:{source}", f"valmera-agent:{source}"
+    """(interactive, batch, agent): the three Cloudflare lane images."""
+    return (f"valmera-interactive:{source}", f"valmera-exec:{source}",
+            f"valmera-agent:{source}")
 
 
 def image_exists(name):
@@ -148,12 +153,18 @@ def image_exists(name):
 
 
 def build_images(source):
-    exec_image, agent_image = image_names(source)
+    """The exact wrangler.jsonc image_vars of each Cloudflare lane: the
+    interactive image (FULL_COMPUTE=0, no Whisper, Chromium headless shell),
+    the batch image (FULL_COMPUTE=1, Whisper medium) and the agent image."""
+    interactive_image, exec_image, agent_image = image_names(source)
     worker = os.path.join(REPO, "worker")
     for name, args in (
             (exec_image, ["-f", "Dockerfile.cloudflare",
                           "--build-arg", "FULL_COMPUTE=1",
                           "--build-arg", "WHISPER_MODEL=medium"]),
+            (interactive_image, ["-f", "Dockerfile.cloudflare",
+                                 "--build-arg", "FULL_COMPUTE=0",
+                                 "--build-arg", "WHISPER_MODEL="]),
             (agent_image, ["-f", "Dockerfile.agent-base"])):
         if image_exists(name):
             continue
@@ -265,8 +276,10 @@ def ensure_network():
 
 
 def slot_image(slot, source):
-    exec_image, agent_image = image_names(source)
-    return exec_image if slot["lane"] in EXEC_LANES else agent_image
+    interactive_image, exec_image, agent_image = image_names(source)
+    if slot["lane"] == "interactive":
+        return interactive_image
+    return exec_image if slot["lane"] == "batch" else agent_image
 
 
 def free_port(port, name):
@@ -644,7 +657,7 @@ def cmd_clean():
               for s in cfg.get("slots", [])}
     for image in images:
         repo, _, tag = image.partition(":")
-        if repo in ("valmera-exec", "valmera-agent") and tag not in keep \
+        if repo in IMAGE_REPOS and tag not in keep \
                 and image not in in_use:
             sh(["docker", "rmi", image], check=False)
             log(f"removed image {image}")
