@@ -97,6 +97,37 @@ def _iso(value):
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+# Upload failures as the founder reads them: one person's rapid repeats are
+# ONE failure. 30 Oct 2026: user 2649 picked the same 11 empty downloader
+# files twice in one minute and the widget read "24 upload failures today".
+# A failure starts a new one only when that person's previous failure is more
+# than UPLOAD_FAILURE_BURST_GAP earlier; every event row stays in
+# client_events, and "upload_failure_events" still reports the raw count.
+UPLOAD_FAILURE_BURST_GAP = "10 minutes"
+UPLOAD_FAILURES_SQL = """
+    WITH f AS (
+        SELECT ce.created_at,
+               LAG(ce.created_at) OVER (PARTITION BY ce.user_id
+                                        ORDER BY ce.created_at, ce.id)
+                   AS previous_at
+          FROM client_events ce
+          JOIN users u ON u.id = ce.user_id
+         WHERE ce.kind IN ('upload_rejected', 'upload_failed')
+           -- an upload accepted with a note (over the duration cap,
+           -- first part analysed) is not a failure
+           AND COALESCE(ce.detail->>'accepted', 'false') <> 'true'
+           AND ce.created_at >= %s AND ce.created_at <= %s
+           AND {scope}
+    )
+    SELECT COUNT(*) AS events,
+           COUNT(*) FILTER (
+               WHERE previous_at IS NULL
+                  OR created_at - previous_at > INTERVAL '""" \
+    + UPLOAD_FAILURE_BURST_GAP + """') AS failures
+      FROM f
+"""
+
+
 def _count(cur, sql, params=()):
     cur.execute(sql, params)
     row = cur.fetchone() or {}
@@ -253,17 +284,11 @@ def phone_status():
                    AND {scope}
             """, (starts_at, now_utc))
 
-            upload_failures = _count(cur, f"""
-                SELECT COUNT(*) AS n
-                  FROM client_events ce
-                  JOIN users u ON u.id = ce.user_id
-                 WHERE ce.kind IN ('upload_rejected', 'upload_failed')
-                   -- an upload accepted with a note (over the duration cap,
-                   -- first part analysed) is not a failure
-                   AND COALESCE(ce.detail->>'accepted', 'false') <> 'true'
-                   AND ce.created_at >= %s AND ce.created_at <= %s
-                   AND {scope}
-            """, (starts_at, now_utc))
+            cur.execute(UPLOAD_FAILURES_SQL.format(scope=scope),
+                        (starts_at, now_utc))
+            uploads = cur.fetchone() or {}
+            upload_failures = int(uploads.get("failures") or 0)
+            upload_failure_events = int(uploads.get("events") or 0)
 
         return jsonify({
             "meta": {
@@ -282,6 +307,7 @@ def phone_status():
                 "failed_projects": failed_projects,
                 "tool_refusals": tool_refusals,
                 "upload_failures": upload_failures,
+                "upload_failure_events": upload_failure_events,
             },
             "growth": {
                 "weekly_rate": _growth_percent(

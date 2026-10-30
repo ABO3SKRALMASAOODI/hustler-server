@@ -159,6 +159,8 @@ _EDITOR_LOCK_STALE_S = int(os.getenv("STALE_AFTER_S", "120"))
 MAX_FORCED_RENDERS_PER_HOUR = int(os.getenv("MAX_FORCED_RENDERS_PER_HOUR", "4"))
 # Beacons accepted per user per hour (see client_event).
 MAX_CLIENT_EVENTS_PER_HOUR = int(os.getenv("MAX_CLIENT_EVENTS_PER_HOUR", "60"))
+# How long one forensics insert may wait for a row lock (record_client_event).
+CLIENT_EVENT_LOCK_TIMEOUT_MS = 2000
 MESSAGES_PER_HOUR = int(os.getenv("MESSAGES_PER_HOUR", "20"))
 
 # Single source of truth: worker/schemas.py (loaded above as wschemas), so
@@ -321,8 +323,19 @@ def _register_link_original(cur, project, project_id, user_id, url, text):
     same chat wall an uploaded first video gets and no job, unchanged: the
     state poll's "subscription unlocked; analysis not started" heal starts
     the index (and with it the fetch) after checkout. Returns a dict for the
-    response, or None when the project already has a main video."""
-    cur.execute("SELECT id FROM projects WHERE id = %s FOR UPDATE",
+    response, or None when the project already has a main video.
+
+    The project row is locked FOR NO KEY UPDATE, never FOR UPDATE (ticket
+    #12, 30 Oct 2026). The caller records two client events on a SECOND
+    connection before this transaction commits, and every client_events
+    insert checks its project_id foreign key with FOR KEY SHARE, which a
+    FOR UPDATE lock blocks. The event waited on us and we waited on the
+    event until Postgres' 60 s idle-in-transaction timeout killed this
+    session: the message, the asset and the wall were all rolled back
+    (user 2651 pasted a Drive link twice and got nothing). NO KEY UPDATE
+    still serializes two link pastes and an upload completing (FOR UPDATE)
+    on the same project, and lets the foreign-key check through."""
+    cur.execute("SELECT id FROM projects WHERE id = %s FOR NO KEY UPDATE",
                 (project_id,))
     cur.execute("""SELECT 1 FROM assets WHERE project_id = %s
                    AND kind = 'original' LIMIT 1""", (project_id,))
@@ -6883,6 +6896,11 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       "player_recovered", "attach_failed",
                       "upload_started", "upload_rejected", "upload_failed",
                       "upload_deduped",
+                      # A picked file reported 0 bytes but its read returned
+                      # bytes, and the real-sized copy went up (ticket #12:
+                      # some platforms report File.size 0 until read). The
+                      # count says whether that class exists for real users.
+                      "upload_size_misreported",
                       # A transfer carried on from the parts storage already
                       # held (reload, sleep, dropped network) instead of
                       # starting from zero (/uploads/resume).
@@ -7001,6 +7019,12 @@ def record_client_event(user_id, project_id, kind, asset_id=None, detail=None,
         # Concierge replies run outside Flask's request/app context.
         with (vdb(db_url) if db_url else vdb()) as conn:
             cur = conn.cursor()
+            # "Never blocks a caller" must hold even when the CALLER's own
+            # open transaction holds a lock this insert needs (the project
+            # row's foreign-key check): drop the row after a short wait
+            # rather than wait on a transaction that is waiting on us.
+            cur.execute(f"SET LOCAL lock_timeout = '{CLIENT_EVENT_LOCK_TIMEOUT_MS}ms'")
+            cur.execute("SET LOCAL statement_timeout = '10s'")
             if project_id is not None and \
                     not _project_for_user(cur, project_id, user_id):
                 return False

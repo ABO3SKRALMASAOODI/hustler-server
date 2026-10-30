@@ -35,6 +35,20 @@ WORK_JOBS = ("agent_turn", "mcp_tool", "shorts_plan")
 PASSIVE_JOBS = ("filmstrip", "preview_check")
 # MCP tools that hand the user the result.
 MCP_DELIVERY_TOOLS = ("download_url", "export_final", "deliver_aspects")
+# download_url receipts of a DRAFT: a preview link is not an export (ticket
+# #4: the next_summary read five draft downloads as "exported").
+DRAFT_RECEIPTS = ("complete_preview", "changed_section_preview")
+
+
+def _mcp_delivery(job):
+    """'final', 'draft' or None: what one MCP job handed the user."""
+    if job.get("type") != "mcp_tool" or job.get("state") != "done" \
+            or job.get("tool") not in MCP_DELIVERY_TOOLS:
+        return None
+    if job.get("tool") == "download_url" and \
+            job.get("receipt_type") in DRAFT_RECEIPTS:
+        return "draft"
+    return "final"
 RENDER_JOBS = ("preview", "final")
 NEXT_KINDS = ("export_clicked", "download_triggered", "mcp_export_delivered",
               "export_blocked", "checkout_stage", "cancel_feedback",
@@ -175,6 +189,7 @@ def load(cur, roots, since, now):
                j.payload->>'source' AS source,
                j.payload->>'quality' AS quality,
                j.payload->>'tool' AS tool,
+               j.result->'download_receipt'->>'render_type' AS receipt_type,
                LEFT((j.payload->'args')::text, 500) AS args,
                j.payload->>'root_agent_job_id' AS root_agent_job_id,
                j.result->>'render_asset_id' AS render_asset_id,
@@ -642,19 +657,23 @@ def context(s, cur=None, presign=None):
             break
     nxt.sort(key=lambda e: e["at"] or "")
     came_back = min(later) if later else getattr(s, "next_session_at", None)
-    delivered_mcp = any(j["type"] == "mcp_tool" and j["state"] == "done"
-                        and j.get("tool") in MCP_DELIVERY_TOOLS
-                        for j in jobs)
+    deliveries = [_mcp_delivery(j) for j in jobs]
+    delivered_mcp = "final" in deliveries
+    drafts_mcp = "draft" in deliveries
     kinds = {e["kind"] for e in nxt}
     last_seen = _aware(user.get("last_seen_at"))
+    exported = (bool(kinds & {"export_clicked", "mcp_export_delivered"})
+                or delivered_mcp
+                or any(r["type"] == "final" and r["state"] == "done"
+                       for r in job_rows))
     summary = {
-        "exported": bool(kinds & {"export_clicked", "mcp_export_delivered"})
-        or delivered_mcp
-        or any(r["type"] == "final" and r["state"] == "done"
-               for r in job_rows),
+        "exported": exported,
         "downloaded": bool(kinds & {"download_triggered",
                                     "mcp_export_delivered"})
-        or delivered_mcp,
+        or delivered_mcp or drafts_mcp,
+        # An AI app fetched only draft preview links: the user may be
+        # holding a low-resolution check as their video (ticket #4).
+        "downloaded_draft_only": drafts_mcp and not exported,
         "thumbs_up": any(r["feedback"] == "up" for r in replies),
         "thumbs_down": any(r["feedback"] == "down" for r in replies),
         "checkout": "checkout_stage" in kinds,

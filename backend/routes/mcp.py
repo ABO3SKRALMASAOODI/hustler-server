@@ -1584,18 +1584,45 @@ def _preview_policy_line(preview):
               if enabled else
               "no separate listening model was invoked automatically for this saved preview; use deterministic "
               "audio QC, transcript, track identity and authored EDL facts")
+    if not enabled and preview.get("listener_policy") == \
+            "no_listening_excerpts":
+        detail += (" (rendered under the Studio's default policy, but no "
+                   "listening excerpts were cut, so no listener could hear it)")
     return (f"\n\nPREVIEW PROVENANCE: audio_model_review={value} — "
             f"{detail}. This preview flag does not describe a separate explicit "
             "review_audio call; that call reports its own bounded listening evidence.")
 
 
+def _listener_policy(meta):
+    """Whether a render is deterministic-only evidence, judged by the FACT.
+
+    The separate listening model only ever hears the excerpts the renderer
+    records in ``listen_keys``/``listen_clips`` (worker
+    agent_tools._review_render_audio: no excerpts, nothing heard). So:
+      'deterministic_only'     stamped audio_model_review=false, no excerpts;
+      'no_listening_excerpts'  a Studio render (stamp true or absent) whose
+                               excerpt lists are recorded and EMPTY: nothing
+                               was cut, nothing could be heard;
+      None                     excerpts exist, or the lists are not recorded.
+    The stamp alone used to decide (ticket #45, 30 Oct 2026): every MCP
+    changed-section render (688 in 30 days) was stamped true by default and
+    every Studio preview was invisible to MCP, so download_url and watch_video
+    refused customers' own renders with "No preview has been rendered yet"."""
+    meta = meta or {}
+    keys, clips = meta.get("listen_keys"), meta.get("listen_clips")
+    if meta.get("audio_model_review") is False:
+        return None if (keys or clips) else "deterministic_only"
+    if isinstance(keys, list) and isinstance(clips, list) \
+            and not keys and not clips:
+        return "no_listening_excerpts"
+    return None
+
+
 def _preview_asset_receipt(row, url=None):
     """Server-authored receipt for one deterministic-only preview asset."""
     meta = (row or {}).get("meta") or {}
-    listen_keys = meta.get("listen_keys") or []
-    listen_clips = meta.get("listen_clips") or []
-    if meta.get("audio_model_review") is not False or \
-            listen_keys or listen_clips:
+    policy = _listener_policy(meta)
+    if policy is None:
         return None
     try:
         asset_id = int(row.get("id"))
@@ -1623,6 +1650,7 @@ def _preview_asset_receipt(row, url=None):
         "edl_version": edl_version,
         "duration_s": duration_s,
         "audio_model_review": False,
+        "listener_policy": policy,
         "listen_keys_count": 0,
         "listen_clips_count": 0,
         "audio_reviewer_findings_count": 0,
@@ -1921,15 +1949,38 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
     if row["state"] in ("queued", "running"):
         return _out(identity + "\n" + _still_running(row, label))
     return _tool_answer(project, project_id, row.get("result") or {}, raw,
-                        _out)
+                        _out, tool=name)
 
 
-def _tool_answer(project, project_id, result, raw, _out):
+def _draft_preview_next_step(project_id, tool, result):
+    """render_preview's MCP answer ends on what the preview IS and how the
+    user gets their video (ticket #4 recurred 30 Oct: two paying customers'
+    AI apps rendered previews, downloaded them five times each and never
+    called export_final; the editor's text says the preview "is attached to
+    the chat", which is the Studio's view, not the MCP caller's)."""
+    preview = (result or {}).get("preview")
+    if tool != "render_preview" or result.get("is_error") or \
+            not isinstance(preview, dict) or \
+            preview.get("render_type") != "complete_preview":
+        return ""
+    version = preview.get("edl_version")
+    if version is None or version != result.get("edl_version"):
+        return ""
+    return (f"\n\nDRAFT PREVIEW of EDL v{version} (asset "
+            f"{preview.get('asset_id')}): for checking the edit, not the "
+            "user's finished video. When the edit is right, the full-quality "
+            f"MP4 is export_final(project_id={project_id}, edl_version="
+            f"{version}), then wait_for_job, then download_url(project_id="
+            f"{project_id}, kind='final', edl_version={version}).")
+
+
+def _tool_answer(project, project_id, result, raw, _out, tool=None):
     """One finished tool call's reply, from its stored result. Queued calls
     and fast reads (mcp_fast_reads) both answer through here."""
     identity = f"PROJECT {project_id} — \"{project.get('title') or 'Untitled'}\""
     text = identity + "\n" + (result.get("text") or json.dumps(result))
     text += _preview_policy_line(result.get("preview"))
+    text += _draft_preview_next_step(project_id, tool, result)
     if raw:
         result = dict(result)
         result.update(text=text, project_id=project_id,
@@ -2823,6 +2874,9 @@ def _t_wait_for_job(tok, args):
                 **result["download_receipt"], "download_job_id": job_id})
         text = identity + (result.get("text") or json.dumps(result))
         text += _preview_policy_line(result.get("preview"))
+        text += _draft_preview_next_step(
+            row.get("project_id"), (row.get("payload") or {}).get("tool"),
+            result)
         structured = _editor_structured_content(result)
         structured["job"] = job_status
         image_content = _image_blocks(result.get("images"))
@@ -3110,6 +3164,114 @@ def _final_job_note(cur, project_id, edl_version):
     return None
 
 
+def _preferred_preview(rows):
+    """The preview download_url hands over, from the newest candidates (id
+    order): the newest render's EDL version, and within it a render that is
+    deterministic-only evidence when one exists (an MCP render beside a
+    Studio render with listening excerpts), else that newest render."""
+    rows = list(rows or [])
+    if not rows:
+        return None
+    newest = rows[0]
+    version = str((newest.get("meta") or {}).get("edl_version"))
+    for row in rows:
+        if str((row.get("meta") or {}).get("edl_version")) == version and \
+                _preview_asset_receipt(row) is not None:
+            return row
+    return newest
+
+
+def _download_refusal(project, project_id, text, code, **facts):
+    """A download_url answer that hands out no link, with a structured code:
+    a gate code (GATE_CODES) is the product answering as designed (render
+    first, wait for the running render, export first), which the intake
+    does not file as our failure."""
+    identity = (f"PROJECT {project_id} — "
+                f"\"{(project or {}).get('title') or 'Untitled'}\"")
+    return {"content": [{"type": "text", "text": f"{identity}\n{text}"}],
+            "structuredContent": {"download": dict(
+                facts, code=code, project_id=project_id)},
+            "isError": True}
+
+
+def _running_render_job(cur, project_id, kind, version):
+    """The newest queued/running render job of this kind (and version), or
+    None."""
+    jtype = "preview" if kind == "preview" else "preview_check"
+    sql = ("SELECT id, state, progress, payload->>'edl_version' AS v "
+           "FROM video_jobs WHERE project_id = %s AND type = %s "
+           "AND state IN ('queued', 'running')")
+    params = [project_id, jtype]
+    if version is not None:
+        sql += " AND payload->>'edl_version' = %s"
+        params.append(str(int(version)))
+    try:
+        cur.execute(sql + " ORDER BY id DESC LIMIT 1", params)
+        job = cur.fetchone()
+    except Exception:  # noqa: BLE001 — the caller's plain answer still holds
+        return None
+    return job if job and job.get("id") else None
+
+
+def _preview_job_note(cur, project, project_id, kind, version):
+    """The render that will produce the preview asked for, while it is
+    queued or running (any surface: the Studio's own preview of the same
+    version counts), as a wait instruction; None when there is none.
+    30 Oct 2026 (project 2842): download_url(kind='preview') answered "No
+    preview has been rendered yet" while job 126609 was rendering exactly
+    that version, so the AI app started a second full render of a 41-minute
+    video beside it."""
+    job = _running_render_job(cur, project_id, kind, version)
+    if not job:
+        return None
+    label = "complete preview" if kind == "preview" else "changed-section render"
+    of = f" of EDL v{job.get('v')}" if job.get("v") else ""
+    return _download_refusal(
+        project, project_id,
+        f"The {label}{of} is render job {job['id']} ({job['state']}, "
+        f"{int(job.get('progress') or 0)}%) and its file is not ready yet. "
+        f"Call wait_for_job(job_id={job['id']}) until done, then "
+        f"download_url(project_id={project_id}, kind='{kind}') again. Do not "
+        "start another render of this version.",
+        "render_pending", kind=kind, job_id=job["id"],
+        edl_version=job.get("v"))
+
+
+def _preview_missing(cur, project, project_id, kind, version, asset_id):
+    """No render of this kind matches: say what to call, and what renders
+    the project does have, instead of a bare 'not rendered yet'."""
+    label = "complete preview" if kind == "preview" else "changed-section render"
+    of = (f" with asset_id {asset_id}" if asset_id is not None else
+          f" of EDL v{version}" if version is not None else "")
+    how = (f"render_preview(project_id={project_id}, complete=true) renders "
+           "the whole current edit"
+           if kind == "preview" else
+           f"render_preview(project_id={project_id}) renders the changed "
+           "sections of the current edit (complete=true renders the whole "
+           "program)")
+    available = []
+    try:
+        cur.execute("""SELECT id, meta->>'variant' AS variant,
+                              meta->>'edl_version' AS v FROM assets
+                        WHERE project_id = %s AND kind = 'render'
+                          AND meta->>'variant' IN ('preview', 'preview_check',
+                                                    'final')
+                        ORDER BY id DESC LIMIT 4""", (project_id,))
+        for r in cur.fetchall() or []:
+            available.append(
+                f"{r.get('variant')} of EDL v{r.get('v')}: "
+                f"download_url(project_id={project_id}, asset_id={r.get('id')})")
+    except Exception:  # noqa: BLE001 — the instruction alone still holds
+        available = []
+    text = (f"No {label}{of} exists, and none is rendering. {how}; then "
+            f"download_url(project_id={project_id}, kind='{kind}').")
+    if available:
+        text += " Renders this project has: " + "; ".join(available) + "."
+    return _download_refusal(project, project_id, text, "preview_missing",
+                             kind=kind, edl_version=version,
+                             asset_id=asset_id)
+
+
 def _t_download_url(tok, args):
     project_id, error = _required_project_id(args)
     if error:
@@ -3153,6 +3315,23 @@ def _t_download_url(tok, args):
                 if gate(frow["id"], frow.get("meta") or {},
                         (frow.get("meta") or {}).get("edl_version")):
                     kind = "final"
+        version = None
+        if args.get("edl_version") is not None:
+            try:
+                version = int(args["edl_version"])
+            except (TypeError, ValueError):
+                return _session_error("edl_version must be an integer.")
+        if asset_id is not None and not explicit_kind:
+            # An asset id names its own kind: download_url(asset_id=<a final>)
+            # without kind looked for a PREVIEW with that id and answered
+            # "No preview has been rendered yet".
+            cur.execute("""SELECT meta->>'variant' AS variant FROM assets
+                           WHERE project_id = %s AND id = %s
+                             AND kind = 'render'""", (project_id, asset_id))
+            named = (cur.fetchone() or {}).get("variant")
+            if named in ("preview", "preview_check", "final"):
+                kind = named
+        preview_kind = kind in ("preview", "preview_check")
         # Renders are assets of kind 'render'; the variant and the EDL version
         # they were made from live in meta.
         sql = """SELECT id, storage_key, duration_s, sha256, meta, width,
@@ -3160,24 +3339,22 @@ def _t_download_url(tok, args):
                  WHERE project_id = %s AND kind = 'render'
                    AND meta->>'variant' = %s"""
         params = [project_id, kind]
-        if kind in ("preview", "preview_check"):
-            # Codex preview evidence must carry an explicit deterministic-only
-            # receipt. Never hand it a legacy/Studio render whose listener
-            # policy cannot be proven from the asset itself.
-            sql += " AND meta->>'audio_model_review' = 'false'"
         if asset_id is not None:
             sql += " AND id = %s"
             params.append(asset_id)
-        if args.get("edl_version") is not None:
-            try:
-                version = int(args["edl_version"])
-            except (TypeError, ValueError):
-                return _session_error("edl_version must be an integer.")
+        if version is not None:
             sql += " AND (meta->>'edl_version')::int = %s"
             params.append(version)
-        sql += " ORDER BY id DESC LIMIT 1"
+        # A preview's provenance is judged from its facts, in Python, over
+        # the newest few candidates (_preferred_preview). The SQL filter on
+        # the audio_model_review STAMP hid every Studio render and every MCP
+        # changed-section render (stamped true by default), so customers'
+        # AI apps were told "No preview has been rendered yet" about renders
+        # that existed (ticket #45/#39, 30 Oct 2026).
+        sql += " ORDER BY id DESC LIMIT " + ("12" if preview_kind else "1")
         cur.execute(sql, params)
-        row = cur.fetchone()
+        row = (_preferred_preview(cur.fetchall()) if preview_kind
+               else cur.fetchone())
         if row and kind == "final" and gate is None:
             gate = _final_gate(cur, project_id, tok["user_id"])
         if row and kind == "final" and not gate(
@@ -3190,29 +3367,80 @@ def _t_download_url(tok, args):
                     "...) saying why it is acceptable, then export_final "
                     "again.")
             return _session_error("This export needs refreshing. Call export_final with this project_id and reviewed edl_version.")
-        pending = (_final_job_note(cur, project_id, args.get("edl_version"))
-                   if not row and kind == "final" else None)
+        pending = missing = None
+        if not row and kind == "final":
+            pending = _final_job_note(cur, project_id, args.get("edl_version"))
+            if not pending:
+                missing = _download_refusal(
+                    project, project_id,
+                    "No final has been rendered yet"
+                    + (f" for EDL v{version}" if version is not None else "")
+                    + ". download_url cannot create "
+                    f"one: call export_final(project_id={project_id}, "
+                    "edl_version=<the reviewed version>), wait_for_job, then "
+                    f"download_url(project_id={project_id}, kind='final').",
+                    "final_missing", kind=kind, edl_version=version)
+        elif not row:
+            missing = (_preview_job_note(cur, project, project_id, kind,
+                                         version)
+                       or _preview_missing(cur, project, project_id, kind,
+                                           version, asset_id))
+        current = (_latest_edl_version(cur, project_id)
+                   if row and preview_kind and version is None else None)
+        running = None
+        try:
+            if current is not None and \
+                    int(current) > int((row.get("meta") or {}).get("edl_version")):
+                running = _running_render_job(cur, project_id, kind, current)
+        except (TypeError, ValueError):
+            running = None
     if pending:
         return _session_error(pending)
-    if not row:
-        return _session_error(
-            f"No {kind} has been rendered yet"
-            + (" with audio_model_review=false — call render_preview."
-               if kind in ("preview", "preview_check")
-               else " — call export_final with project_id and reviewed edl_version."))
+    if missing:
+        return missing
     receipt = None
-    if kind in ("preview", "preview_check"):
+    if preview_kind:
         # Validate provenance before minting a bearer URL.  An asset stamped
         # false but still carrying listener excerpts is not deterministic-only
         # evidence and should not escape through this endpoint.
         receipt = _preview_asset_receipt(row)
         if receipt is None:
+            meta = row.get("meta") or {}
+            excerpts = bool(meta.get("listen_keys") or meta.get("listen_clips"))
+            recorded = isinstance(meta.get("listen_keys"), list) and \
+                isinstance(meta.get("listen_clips"), list)
+            studio = meta.get("audio_model_review") is not False
+            if studio and (excerpts or not recorded):
+                # The product's evidence gate answering as designed: a Studio
+                # render whose listening excerpts were cut, or one made before
+                # the excerpts were recorded (nothing proves no listener heard
+                # it), is not Codex evidence; a fresh MCP render is.
+                why = ("the Studio cut listening excerpts of it" if excerpts
+                       else "it predates the recorded listening policy, so "
+                            "whether a listener heard it cannot be proven")
+                return _download_refusal(
+                    project, project_id,
+                    f"The {kind} of EDL v{meta.get('edl_version')} (asset "
+                    f"{row['id']}) carries no deterministic-only receipt "
+                    + ("and carries listener artifacts " if excerpts else "")
+                    + f"({why}), so it cannot be used as Codex evidence: "
+                    f"call render_preview(project_id={project_id}, "
+                    "complete=true) to create audio_model_review=false "
+                    "evidence with zero listener excerpts.",
+                    "preview_not_evidence", kind=kind, asset_id=row["id"],
+                    edl_version=meta.get("edl_version"))
+            # Our own render without its lineage (job id, version, a real
+            # duration), or stamped false yet carrying excerpts, is OUR
+            # defect: answered without a gate code, so the intake files it.
             return _session_error(
-                "The matching preview lacks complete deterministic-only "
-                "provenance or carries listener artifacts, so it cannot be "
-                "used as Codex evidence. Call render_preview to create "
-                "audio_model_review=false evidence with zero listener "
-                "excerpts.")
+                "The matching preview "
+                + ("is stamped audio_model_review=false but carries listener "
+                   "artifacts" if excerpts else
+                   "lacks complete deterministic-only provenance (render "
+                   "job, EDL version and duration)")
+                + ", so it cannot be used as Codex evidence. Call "
+                "render_preview to create audio_model_review=false evidence "
+                "with zero listener excerpts.")
     try:
         url = storage.presign_get(row["storage_key"])
     except Exception as e:
@@ -3230,10 +3458,31 @@ def _t_download_url(tok, args):
     if kind in ("preview", "preview_check"):
         receipt["url"] = url
         receipt["deliverable"] = False
+        # Ticket #4 recurred (30 Oct) on sessions with NO final at all: the
+        # draft label was in the text only. The structured result now names
+        # the export the user's video needs, the way a client reads it.
+        receipt["deliverable_next_step"] = (
+            f"export_final(project_id={project_id}, edl_version={ver})")
         identity = (f"PROJECT {project_id} — "
                     f"\"{project.get('title') or 'Untitled'}\"")
+        stale = ""
+        try:
+            if current is not None and ver is not None and \
+                    int(current) > int(ver):
+                stale = (f"\nNOTE: this is the render of EDL v{ver}, and the "
+                         f"edit is now at v{current}: every change since "
+                         f"v{ver} is NOT in it. "
+                         + (f"v{current} is rendering as job {running['id']}: "
+                            f"wait_for_job(job_id={running['id']}), then "
+                            "download_url again."
+                            if running else
+                            f"render_preview(project_id={project_id}, "
+                            "complete=true) renders the current edit."))
+                receipt["current_edl_version"] = int(current)
+        except (TypeError, ValueError):
+            stale = ""
         text = (f"{identity}\n{kind} of EDL v{ver} (link valid a few "
-                f"hours):\n{url}\n\n" + _draft_notice(row, project_id, ver)
+                f"hours):\n{url}{stale}\n\n" + _draft_notice(row, project_id, ver)
                 + "\n\nPREVIEW RECEIPT: "
                 + json.dumps(receipt, sort_keys=True)
                 + _preview_policy_line(receipt))
@@ -3489,7 +3738,14 @@ OWN_FAILURE_OUTCOMES = {"transient_failure", "unavailable", "unsafe"}
 # held tail, analysis not ready, the plan gate).
 GATE_CODES = {"verification_open": "prerequisite", "held_tail": "prerequisite",
               "index_not_ready": "prerequisite",
-              "mcp_plan_required": "plan_gate"}
+              "mcp_plan_required": "plan_gate",
+              # download_url: nothing of that kind exists yet / it is still
+              # rendering / a final needs export_final / a Studio render with
+              # listening excerpts is not Codex evidence (ticket #45).
+              "preview_missing": "prerequisite",
+              "render_pending": "prerequisite",
+              "final_missing": "prerequisite",
+              "preview_not_evidence": "prerequisite"}
 
 
 def _error_message(text, limit=300):

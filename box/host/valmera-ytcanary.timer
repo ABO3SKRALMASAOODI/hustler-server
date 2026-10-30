@@ -1,9 +1,9 @@
 [Unit]
-Description=Valmera YouTube canary: hourly look, one real probe a day (hourly while failing)
+Description=Valmera YouTube canary: a look every 15 min (fallback traffic meter), one real probe a day (hourly while failing)
 
 [Timer]
 OnBootSec=15min
-OnUnitActiveSec=1h
+OnUnitActiveSec=15min
 RandomizedDelaySec=120
 AccuracySec=1min
 
