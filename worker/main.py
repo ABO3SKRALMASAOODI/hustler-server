@@ -454,13 +454,32 @@ def _escalate_oom_render(worker_db, job, err, decision, lease_claim):
     return bool(moved)
 
 
+def _box_turn_executor_dead(job, err, decision):
+    """A Studio turn whose render-box container is PROVEN gone.
+
+    The box reports a lost executor as ``outcome_unknown`` for a mutation
+    ("Box lost the executor during this agent_turn (Box container exited
+    ...)": the container exited, was OOM-killed or was fenced). Unlike an
+    unconfirmed remote, nothing can still be running it, so the turn takes
+    the same path as any infrastructure failure: requeued quietly when it
+    committed no write, continued from its last committed EDL when it did
+    (bounded death resume). Before (R1 chaos, 30 Oct 2026) the turn failed
+    with no reply at all: run_agent_job posts the apology, and it had died.
+    MCP mutations keep "outcome unknown": their caller re-reads the state.
+    """
+    return (job.get("type") == "agent_turn"
+            and decision.kind == "outcome_unknown"
+            and "box lost the executor" in str(err).lower())
+
+
 def _quiet_infra_retry(worker_db, job, err, decision, lease_claim):
     """Wait a little and hand an infrastructure failure back to the queue
     without spending its attempt. False when it is not one, or its window
     or retries are used up (the ordinary policy then decides). A Studio turn
     or MCP tool is requeued only when it committed no write; a Studio turn
     that did continues from its last committed EDL."""
-    if not failure_policy.is_infrastructure(err, decision):
+    if not (failure_policy.is_infrastructure(err, decision)
+            or _box_turn_executor_dead(job, err, decision)):
         return False
     if job.get("type") in failure_policy.MUTATING_RETRY_TYPES:
         if decision.kind in failure_policy.AMBIGUOUS_OWNERSHIP_KINDS:

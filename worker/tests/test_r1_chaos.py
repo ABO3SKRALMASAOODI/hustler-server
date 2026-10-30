@@ -445,3 +445,70 @@ def test_s5_a_box_render_that_hit_a_full_disk_mid_run_waits(monkeypatch,
     with pytest.raises(remote.BoxWaiting):
         remote._run_box_with_wait(job)
     assert not remote._box_scratch_wait({"type": "mcp_tool"}, err)
+
+
+# ── a Studio turn whose box container died ───────────────────────────────
+
+def _turn_lost():
+    err = RuntimeError("Box lost the executor during this agent_turn (Box "
+                       "container exited during agent_turn). Its outcome is "
+                       "unknown: it may or may not have changed the project.")
+    return failure_policy.attach(
+        err, failure_policy.decision_for(err, "agent_turn"),
+        {"kind": "outcome_unknown", "retryable": False, "max_attempts": 0})
+
+
+class _TurnDb(_QueueDb):
+    def __init__(self, committed):
+        super().__init__()
+        self.committed = committed
+
+    def run(self, fn, *args, **kw):
+        if fn is dbx.get_job:
+            self.calls.append((fn, args, kw))
+            return {"payload": {"mutation_receipt": {"committed": True}}
+                    if self.committed else {}}
+        return super().run(fn, *args, **kw)
+
+
+def test_a_box_turn_that_wrote_nothing_is_requeued_quietly(monkeypatch):
+    monkeypatch.setattr(worker_main.DRAINING, "wait", lambda s: None)
+    db = _TurnDb(committed=False)
+    err = _turn_lost()
+    job = {"id": 31, "type": "agent_turn", "user_id": 7, "project_id": 2,
+           "created_at": datetime.now(timezone.utc) - timedelta(minutes=3),
+           "payload": {"execution_provider": "box"}}
+    assert worker_main._quiet_infra_retry(
+        db, job, err, failure_policy.decision_for(err), 1)
+    assert any(c[0] is dbx.defer_unlaunched_cloudflare_busy for c in db.calls)
+
+
+def test_a_box_turn_that_wrote_continues_from_its_last_edl(monkeypatch):
+    monkeypatch.setattr(worker_main.DRAINING, "wait", lambda s: None)
+    resumed = []
+    monkeypatch.setattr(worker_main, "_resume_agent_after_infra",
+                        lambda db, job, err, claim: resumed.append(job["id"])
+                        or True)
+    db = _TurnDb(committed=True)
+    err = _turn_lost()
+    job = {"id": 32, "type": "agent_turn", "user_id": 7, "project_id": 2,
+           "created_at": datetime.now(timezone.utc) - timedelta(minutes=3),
+           "payload": {"execution_provider": "box"}}
+    assert worker_main._quiet_infra_retry(
+        db, job, err, failure_policy.decision_for(err), 1)
+    assert resumed == [32]
+
+
+def test_an_unconfirmed_or_mcp_outcome_is_never_replayed(monkeypatch):
+    monkeypatch.setattr(worker_main.DRAINING, "wait", lambda s: None)
+    err = _turn_lost()
+    mcp = {"id": 33, "type": "mcp_tool", "created_at": NOW, "payload": {}}
+    assert not worker_main._quiet_infra_retry(
+        _TurnDb(False), mcp, err, failure_policy.decision_for(err), 1)
+    other = failure_policy.attach(
+        RuntimeError("Cloudflare call outcome unknown"),
+        failure_policy.FailureDecision("outcome_unknown", False, 0),
+        {"kind": "outcome_unknown", "retryable": False, "max_attempts": 0})
+    turn = {"id": 34, "type": "agent_turn", "created_at": NOW, "payload": {}}
+    assert not worker_main._quiet_infra_retry(
+        _TurnDb(False), turn, other, failure_policy.decision_for(other), 1)
