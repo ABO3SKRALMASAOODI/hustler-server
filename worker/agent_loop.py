@@ -2517,6 +2517,24 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
         prep = None
     if not prep:
         return ""
+    if prep.get("intent") == "tighten":
+        # QB: the long-form cut is the head start's whole build (its hook,
+        # captions and cut-ins): all of it is final on this turn, so a picture
+        # note cannot send the model to move a title or a cut-in (talk10:
+        # a 21-minute turn of renders, waits and a refused reframe)
+        try:
+            cur = ctx.latest_edl()["json"]
+            kept_ids = {
+                "motion": {str(m.get("id")) for m in cur.get("motion") or []
+                           if m.get("id")},
+                "zoom": {str(z.get("id")) for z in
+                         (cur.get("effects") or {}).get("zooms") or []
+                         if z.get("id")},
+                "vector": {str(v.get("id")) for v in cur.get("vectors") or []
+                           if v.get("id")},
+            }
+        except Exception:  # noqa: BLE001 - the First cut's pieces stay kept
+            pass
     ctx.trial_prep = prep
     ctx.prep_start_version = before
     ctx.trial_kept_ids = kept_ids

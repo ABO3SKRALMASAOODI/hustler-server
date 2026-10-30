@@ -349,6 +349,17 @@ def scout_range(ctx, worker_db, spend):
                     first = whole_start
             if first and last and float(last["t1"]) > float(first["t0"]):
                 start, end = _fit_span(rows, first, last, complete=q1)
+                if q1 and 12.0 <= end - start <= 75.0:
+                    # QB: the model picks the strongest of the last few
+                    # sentence ends as the closing line (judges, every
+                    # talking head: "trails off on 'this and that'", "stops
+                    # on a setup line"); one small call, the span's own end
+                    # stands without a usable answer
+                    import longform
+                    closed = longform.pick_ending(ctx, rows, [[start, end]],
+                                                  spend)
+                    if closed[-1][1] - start >= 12.0:
+                        end = closed[-1][1]
                 if 12.0 <= end - start <= 75.0:
                     ctx.first_cut_hook = clean_hook(pick.get("hook"),
                                                     ctx.index)
@@ -561,6 +572,14 @@ def trim_range(ctx, worker_db, spend):
             b = by_id.get(str(pick.get("end_id")))
             if a and b and float(b["t1"]) - float(a["t0"]) >= min(
                     8.0, 0.5 * duration):
+                if getattr(ctx, "first_cut_q1", False):
+                    # QB: the span opens where the speaker's sentence begins
+                    # (scout_range does this since QI e792bae8; this short
+                    # source's trim did not: a phone First cut opened on
+                    # "you will be roughly one millionth only", the hook
+                    # title was dropped as a fragment and the reply claimed
+                    # one)
+                    a = true_sentence_start(rows, a)
                 first, last, how = a, b, "scout"
             hook = clean_hook(pick.get("hook"), ctx.index)
             ctx.first_cut_beats = beat_spans(ctx.index, by_id,
@@ -886,6 +905,8 @@ def chest_y(faces, bands=None):
     return round(min(max(bottom + 0.08, 0.58), 0.70), 3)
 
 
+DISCOURSE_OPENERS = frozenset((("you", "know"), ("i", "mean"), ("you", "see"),
+                               ("kind", "of"), ("sort", "of")))
 _TAIL_STOP = frozenset((
     "the", "a", "an", "of", "to", "and", "in", "on", "for", "with", "by",
     "our", "your", "my", "their", "is", "are", "was", "were", "be", "that",
@@ -920,6 +941,14 @@ def spoken_opening(ctx, most_s=2.6, most_words=7):
         picked.append((str(w["w"]).strip(), a, b))
     while picked and _norm(picked[0][0]) in LEAD_WORDS and len(picked) > 2:
         picked.pop(0)
+    if getattr(ctx, "first_cut_q1", False):
+        # QB: "you know" / "I mean" is filler, never the title (the 10-minute
+        # talk's long-form cut opened on "YOU KNOW", a hard fault)
+        while len(picked) > 2 and tuple(_norm(p[0]) for p in picked[:2]) in \
+                DISCOURSE_OPENERS:
+            picked = picked[2:]
+            while picked and _norm(picked[0][0]) in LEAD_WORDS and len(picked) > 2:
+                picked.pop(0)
     if len(picked) < 2:
         return None
     # The title takes a whole clause when one ends within nine words: the

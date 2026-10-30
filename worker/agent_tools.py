@@ -23174,12 +23174,25 @@ def _stored_render_report(ctx, row):
     return "\n".join(lines)
 
 
+def _deliverable_quality(ctx, quality):
+    """QB: a long-form cut IS the deliverable (longform.tighten sets
+    ctx.approval_previews): the user watches this turn's render, so it is the
+    720p approval render, never the 480p draft. No other turn has the flag, so
+    every other lane and every other trial turn keeps the quality it asked for
+    (approval previews on every trial turn measured no gain and two typed
+    requests lower)."""
+    if quality == "draft" and getattr(ctx, "approval_previews", False) is True:
+        return "approval"
+    return quality
+
+
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                    report=False):
     if report:
         return _stored_render_report(ctx, ctx.latest_edl())
     if quality not in ("draft", "approval"):
         return "REJECTED: quality must be draft or approval."
+    quality = _deliverable_quality(ctx, quality)
     if quality == "approval":
         complete = True
     row = ctx.latest_edl()

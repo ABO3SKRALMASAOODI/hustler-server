@@ -648,6 +648,16 @@ def prepare(ctx, worker_db, session_id, text, post=None):
     steps = Steps(ctx, post)
     t0 = time.monotonic()
     whole = False
+    tight = None
+    if kind == "generic" and _BORING.search(str(text or "")):
+        # QB (30 Oct): "cut the boring parts" of a LONG talk is a long-form
+        # clean-up, not the First cut's one moment (judge: "not what the
+        # user asked", 5.0, twice); a short source keeps the First cut
+        import longform
+        if longform.eligible(ctx):
+            tight = longform.tighten(ctx, worker_db, steps)
+            if tight:
+                kind = "tighten"
     if kind == "cleanup":
         import first_cut
         dur = float(ctx.duration or 0)
@@ -659,7 +669,9 @@ def prepare(ctx, worker_db, session_id, text, post=None):
         if dur > 0 and kept < WHOLE_KEPT_SHARE * dur \
                 and first_cut._speech(ctx.index):
             whole = whole_cleanup(ctx, worker_db, steps)
-    if kind != "kept":
+    if kind == "tighten":
+        pass                    # the long-form chain placed everything
+    elif kind != "kept":
         repair_empty_cards(ctx, steps)
         if _talking(ctx):
             # measured OFF by default (Q3, 30 Oct, three Haiku rounds, two
@@ -683,6 +695,18 @@ def prepare(ctx, worker_db, session_id, text, post=None):
                 "hook and framing exactly; do not re-cut, reset or extend it."
                 + (" Added in code: " + "; ".join(applied) + "."
                    if applied else ""))
+    elif kind == "tighten":
+        facts = getattr(steps, "facts", None) or {}
+        done = ("The request is DONE in code, replacing the First cut's short "
+                "moment: " + "; ".join(applied) + ". Keep this cut; do not "
+                "re-cut, reset, extend or reframe it to vertical (the "
+                "request did not ask for vertical). The earlier First cut "
+                "was a short vertical clip and is gone: the video now is "
+                "landscape 16:9"
+                + (f" and about {facts['program']} long (the talk was "
+                   f"{facts['was']})" if facts.get("program") else "")
+                + ". Say exactly that in the reply; never call it vertical, "
+                "9:16 or short.")
     elif applied:
         done = ("Applied in code before you started, on top of the First "
                 "cut: " + "; ".join(applied) + ".")

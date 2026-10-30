@@ -608,7 +608,7 @@ def face_aim(index, bands=None, vertical_source=True):
 
 
 def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
-            levels=None):
+            levels=None, target=None, hi=None):
     """Write the close framings (add_zoom punch, ramp 0: a hard cut to a
     tighter camera and a hard cut back). Returns how many landed."""
     import device_planner
@@ -632,7 +632,9 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
     near = [p for p in points if 1.1 <= p <= 2.2]
     first = min(near, key=lambda p: abs(p - CUT_IN_FIRST_S)
                 - (0.3 if p in turns else 0.0)) if near else hook_end
-    segs = plan_cut_ins(points, busy, first, prog, preferred=turns)
+    segs = plan_cut_ins(points, busy, first, prog, preferred=turns,
+                        target=target or CUT_IN_TARGET_S,
+                        hi=hi or CUT_IN_MAX_S)
     levels = levels or (CUT_IN_BANDED if bands else CUT_IN_STRENGTH)
     cx, cy = aim or (0.5, 0.4)
     n = 0
