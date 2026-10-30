@@ -191,6 +191,15 @@ def run_probes(container, urls, timeout_s=900):
         container, proc.returncode, (proc.stderr or "")[-200:]))
 
 
+def _kind_and_tail(why, n=150):
+    """'access_blocked: ...<the last n chars>' from a probe's reason."""
+    why = " ".join(str(why or "?").split())
+    kind, sep, rest = why.partition(": ")
+    if sep and kind in ("access_blocked", "error", "bot_wall"):
+        return f"{kind}: ...{rest[-n:]}" if len(rest) > n else why
+    return why[-n:]
+
+
 def judge(answer):
     """(ok, why, best verdict). The route passes when any probe got real
     media bytes; a single removed video must not page the owner."""
@@ -198,8 +207,10 @@ def judge(answer):
     for v in probes:
         if v.get("ok") and v.get("download_ok"):
             return True, "", v
+    # The END of yt-dlp's stderr names the gate ("Sign in to confirm",
+    # "HTTP Error 403", a proxy error); its start is update-check noise.
     whys = ["%s: %s" % (str(v.get("url", "?")).rsplit("/", 1)[-1],
-                        str(v.get("download_why") or v.get("why") or "?")[:140])
+                        _kind_and_tail(v.get("download_why") or v.get("why")))
             for v in probes]
     return False, "; ".join(whys) or "no probe ran", (probes[0] if probes
                                                       else {})

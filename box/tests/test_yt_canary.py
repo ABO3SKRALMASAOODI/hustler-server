@@ -233,3 +233,14 @@ def test_slots_still_on_the_old_env_are_listed():
     assert yc.slots_missing_proxy(names, lambda n: n not in old) == [
         "vbox-batch3", "vbox-bquick1"]
     assert yc.slots_missing_proxy(names, lambda n: True) == []
+
+
+def test_the_reason_keeps_the_gate_not_the_update_noise():
+    long = ("access_blocked: WARNING: You are using an outdated version. "
+            "To suppress this warning, add --no-update to your command. | "
+            "WARNING: [youtube] No title found in player responses | ERROR: "
+            "[youtube] abc: Sign in to confirm you're not a bot")
+    out = yc._kind_and_tail(long, n=60)
+    assert out.startswith("access_blocked: ...") and out.endswith("not a bot")
+    assert yc._kind_and_tail("error: HTTP Error 404") == "error: HTTP Error 404"
+    assert yc._kind_and_tail(None) == "?"
