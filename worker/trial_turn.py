@@ -320,6 +320,18 @@ def lift_static(ctx, steps, most=None):
                    if m.get("template") == "word_slam"
                    and (m.get("params") or {}).get("y") is not None
                    and float((m.get("params") or {}).get("y")) != 0.5), None)
+    if slam_y is None:
+        # no slam of the First cut's to align with: the chest band its
+        # captions use, never the template's default over the face (Q3:
+        # a slam over the mouth capped talk10best at 5)
+        style = ((edl.get("captions") or {}).get("style") or {}) \
+            if isinstance(edl.get("captions"), dict) else {}
+        if style.get("anchor_y") is not None:
+            slam_y = float(style["anchor_y"])
+        else:
+            import first_cut
+            faces = first_cut._faces(ctx.index)
+            slam_y = first_cut.chest_y(faces) if faces else None
     zoom_target = next(((z.get("cx"), z.get("cy"))
                         for z in (edl.get("effects") or {}).get("zooms") or []
                         if z.get("cx") is not None and z.get("cy") is not None),
@@ -368,7 +380,7 @@ def lift_static(ctx, steps, most=None):
                     punched += 1
                     continue
             text = re.sub(r"[^\w'’%$-]", "", str(word["w"]))
-            if not text:
+            if not text or slam_y is None:
                 continue
             params = {"text": f"*{text}*", "tier": "display", "entrance": "pop",
                       "exit": "cut", "accent": "#FFD23F", "width": 0.82,

@@ -455,3 +455,33 @@ def test_a_punch_never_lands_on_another_move(fake_tools, monkeypatch):
     for a in mine:
         for z in theirs:
             assert a["end"] + 0.1 <= z["start"] or a["start"] - 0.1 >= z["end"]
+
+
+def test_a_slam_without_a_first_cut_slam_sits_on_the_caption_band(fake_tools,
+                                                                    monkeypatch):
+    monkeypatch.setattr(agent_tools, "_zoom_room",
+                        lambda ctx, edl, s, e: (0.04, 1.6, 0.0))
+    edl = json.loads(json.dumps(FC_EDL))
+    for m in edl["motion"]:
+        m.get("params", {}).pop("y", None)        # no slam row to copy
+    edl["captions"] = {"mode": "from_transcript", "style": {"anchor_y": 0.64}}
+    ctx = _Proj(edl, _words(SPEECH), [])
+    trial_turn.lift_static(ctx, trial_turn.Steps(ctx))
+    slams = [a for n, a in ctx.calls if n == "add_motion_graphic"]
+    assert slams and all(a["params"]["y"] == 0.64 for a in slams)
+
+
+def test_the_guard_keeps_only_the_first_cuts_own_pieces(monkeypatch):
+    ctx = _lane_ctx("trial")
+    ctx.latest_edl = lambda: {"version": 12, "json": FC_EDL}
+
+    def prep(c, *a, **k):        # the head start adds zoom z99
+        return {"intent": "generic", "whole": False, "applied": ["x"],
+                "s": 0.0, "note": "\n[system: TRIAL TURN PREPARED.]",
+                "steps": []}
+    monkeypatch.setattr(trial_turn, "prepare", prep)
+    agent_loop._trial_head_start(ctx, None, 1, {"content": "a short"})
+    assert "zm2" in ctx.trial_kept_ids["zoom"]
+    assert agent_loop._kept_craft_refusal(ctx, "remove_zoom", {"id": "zm2"})
+    assert agent_loop._kept_craft_refusal(ctx, "remove_zoom",
+                                          {"id": "z99"}) is None

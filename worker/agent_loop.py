@@ -2456,6 +2456,21 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
         _activity(worker_db, session_id, name, args, result,
                   edl_version=(ctx.versions_written[-1]
                                if ctx.versions_written else before))
+    # the First cut's own pieces, before the head start adds any: those are
+    # final on this turn (_kept_craft_refusal); what the head start adds
+    # stays editable, so a misplaced addition can still be taken out
+    try:
+        cur = ctx.latest_edl()["json"]
+        kept_ids = {
+            "motion": {str(m.get("id")) for m in cur.get("motion") or []
+                       if m.get("id")},
+            "zoom": {str(z.get("id")) for z in
+                     (cur.get("effects") or {}).get("zooms") or [] if z.get("id")},
+            "vector": {str(v.get("id")) for v in cur.get("vectors") or []
+                       if v.get("id")},
+        }
+    except Exception:  # noqa: BLE001 — no guard, the turn runs
+        kept_ids = {}
     try:
         prep = trial_turn.prepare(ctx, worker_db, session_id,
                                   user_message.get("content") or "", post=post)
@@ -2467,18 +2482,7 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
         return ""
     ctx.trial_prep = prep
     ctx.prep_start_version = before
-    try:
-        cur = ctx.latest_edl()["json"]
-        ctx.trial_kept_ids = {
-            "motion": {str(m.get("id")) for m in cur.get("motion") or []
-                       if m.get("id")},
-            "zoom": {str(z.get("id")) for z in
-                     (cur.get("effects") or {}).get("zooms") or [] if z.get("id")},
-            "vector": {str(v.get("id")) for v in cur.get("vectors") or []
-                       if v.get("id")},
-        }
-    except Exception:  # noqa: BLE001 — no guard, the turn runs
-        ctx.trial_kept_ids = {}
+    ctx.trial_kept_ids = kept_ids
     # no paid second-opinion critics on top of a deterministic build: their
     # notes drove repairs that undid the First cut's craft (see
     # _quality_repair_pushback), and each cost 10-20 s per render
