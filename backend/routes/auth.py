@@ -237,9 +237,31 @@ def get_user_credits(user_id):
     conn = get_db()
     try:
         info = get_balance(conn, int(user_id))
+        card = _feature_upgrade_card(conn, int(user_id))
+        if card:
+            info["feature_upgrade"] = card
         return jsonify(info), 200
     finally:
         conn.close()
+
+
+def _feature_upgrade_card(conn, user_id):
+    """Shorts and Website demos come with Pro and Max (owner, 30 Oct 2026;
+    feature_gate.py): for a trial account or a new Plus subscriber the
+    Studio's Shorts and Website demo tiles show this card instead of
+    starting anything. Absent for everyone else, so their payload is
+    exactly today's. Never raises."""
+    try:
+        import feature_gate
+        why = feature_gate.safe_reason(conn, user_id)
+        if not why:
+            return None
+        from credits import subscribe_offer_body
+        return feature_gate.card(None, why, subscribe_offer_body(conn))
+    except Exception as e:                                  # pragma: no cover
+        print(f"[feature_gate] balance card failed for {user_id}: {e}",
+              flush=True)
+        return None
 
 
 @auth_bp.route('/job/<job_id>/credits', methods=['GET'])

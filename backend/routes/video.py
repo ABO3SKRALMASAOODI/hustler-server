@@ -1020,6 +1020,11 @@ def _trial_url_first_cut(cur, user_id, project_id, message_id):
         if match:
             url = match.group(0).rstrip(".,;:")
         job_id = None
+        if url and _feature_gate_reason(cur, user_id):
+            # Website demos come with Pro and Max (feature_gate.py): a trial
+            # account's URL is never recorded (the callers answer with the
+            # upgrade card or today's plans).
+            url = None
         if url:
             admission = free_trial.admit_upload(cur, user_id, project_id,
                                                 subscribed=False)
@@ -1315,6 +1320,114 @@ def _subscribe_offer_body():
 
 def _trial_offer_body():
     return _subscribe_offer_body()
+
+
+# ── Shorts and Website demos: Pro and Max only, in the Studio ────────────────
+# Owner rule (30 Oct 2026): "clicking on shorts or website demo in trial or
+# plus must show an upgrade card no podcasts or recordings for those plans
+# excluding the mcp". feature_gate.py (byte-identical in worker/) says who
+# and what; every Studio surface below answers a gated request with the same
+# card (200, ``code: feature_upgrade``), never an error, and nothing is run
+# or charged. MCP routes never read it.
+
+def _feature_gate_reason(cur, user_id):
+    """"trial", "plus" or None. Any doubt reads as not gated (today's)."""
+    conn = getattr(cur, "connection", None)
+    if conn is None:
+        return None
+    try:
+        import feature_gate
+        return feature_gate.safe_reason(conn, user_id)
+    except Exception as e:                                  # pragma: no cover
+        print(f"[feature_gate] lookup failed for user {user_id}: {e}",
+              flush=True)
+        return None
+
+
+def _feature_card(feature, why, conn=None):
+    """The card with the server's own offer. ``conn``: the caller's
+    connection (the concierge thread has no app context, and a context-less
+    offer read would cache "Studio in Plus off" for the plan cards)."""
+    import feature_gate
+    try:
+        if conn is not None:
+            from credits import subscribe_offer_body
+            offer = subscribe_offer_body(conn)
+        else:
+            offer = _subscribe_offer_body()
+    except Exception as e:                                  # pragma: no cover
+        print(f"[feature_gate] offer failed: {e}", flush=True)
+        offer = None
+    return feature_gate.card(feature, why, offer)
+
+
+def _post_feature_card(cur, session_id, card, **extra):
+    """The card as one assistant reply in the conversation; its id."""
+    import feature_gate
+    meta = {"kind": feature_gate.MESSAGE_KIND, "feature_upgrade": True,
+            "feature": card.get("feature"), "reason": card.get("reason"),
+            "title": card.get("title"), "text": card.get("text"),
+            "plan_ids": card.get("plan_ids") or [],
+            "outcome": feature_gate.OUTCOME}
+    if card.get("subscription_offer"):
+        meta["subscription_offer"] = card["subscription_offer"]
+    meta.update({k: v for k, v in extra.items() if v is not None})
+    cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
+                   VALUES (%s, 'assistant', %s, %s) RETURNING id""",
+                (session_id, card.get("message") or card.get("title"),
+                 Json(meta)))
+    row = cur.fetchone() or {}
+    return row.get("id") if isinstance(row, dict) else row[0]
+
+
+def _feature_upgrade_body(card, **extra):
+    """The 200 body of a refused gated request: the card, nothing run."""
+    out = {"ok": False, "queued": False, "code": card["code"],
+           "feature_upgrade": True, "feature": card.get("feature"),
+           "upgrade": card}
+    out.update({k: v for k, v in extra.items() if v is not None})
+    return out
+
+
+def _held_feature_card(cur, user_id, session_id, plans_id, blocked, origin):
+    """A request the subscribe wall held (ticket #11) that asks for a gated
+    feature, of an account the gate now covers (it bought Plus, say): the
+    upgrade card instead of the run. Posts the card, stamps the plans reply
+    so neither the webhook nor the Studio runs it later, and returns the
+    card; None when the request may run as before."""
+    import feature_gate
+    text = str((blocked or {}).get("text") or "")
+    if not text.strip() and (blocked or {}).get("message_id"):
+        text = _message_text(cur, int(blocked["message_id"])) or ""
+    feature = (feature_gate.request_feature(text)
+               or ("website_demo" if feature_gate.website_link(text)
+                   else None))
+    if not feature:
+        return None
+    why = _feature_gate_reason(cur, user_id)
+    if not why:
+        return None
+    card = _feature_card(feature, why)
+    request_id = (blocked or {}).get("message_id")
+    _post_feature_card(cur, session_id, card,
+                       request_message_id=(int(request_id)
+                                           if request_id else None))
+    cur.execute("""UPDATE chat_messages
+                   SET meta = COALESCE(meta, '{}'::jsonb) || %s
+                   WHERE id = %s
+                     AND NOT (COALESCE(meta, '{}'::jsonb) ? 'replayed_at')""",
+                (Json({"replayed_at": datetime.now(timezone.utc).isoformat(),
+                       "replay_origin": origin,
+                       "replay_refused": feature_gate.CODE}),
+                 int(plans_id)))
+    return card
+
+
+def _feature_shown(user_id, project_id, card, surface):
+    record_client_event(user_id, project_id, "feature_upgrade_shown",
+                        detail={"feature": card.get("feature"),
+                                "reason": card.get("reason"),
+                                "surface": surface}, origin="server")
 
 
 # ── TWO EDL VERSIONS CAN BE THE SAME VIDEO ───────────────────────────────────
@@ -4163,6 +4276,15 @@ def replay_blocked(user_id, project_id):
         agent_live = bool(cur.fetchone())
         if pending and blocked.get("message_id") \
                 and meta.get("surface") == "blank_canvas":
+            held_card = _held_feature_card(cur, user_id,
+                                           p["chat_session_id"], last["id"],
+                                           blocked, "studio")
+            if held_card:
+                conn.commit()
+                _feature_shown(user_id, project_id, held_card,
+                               "replay_blocked")
+                return jsonify({"replay": None, "reason": "feature_upgrade",
+                                "upgrade": held_card})
             if agent_live:
                 return jsonify({"replay": None, "reason": "busy"})
             if _running_jobs_count(cur, user_id) >= MAX_CONCURRENT_JOBS_PER_USER:
@@ -4273,6 +4395,48 @@ def post_message(user_id, project_id, data=None):
         if cur.fetchone()["n"] >= MESSAGES_PER_HOUR:
             return jsonify({"error": "Message limit reached for this hour. "
                                      "Try again a bit later."}), 429
+
+        # SHORTS AND WEBSITE DEMOS come with Pro and Max (owner rule, 30 Oct
+        # 2026; feature_gate.py). A typed request that plainly asks a trial
+        # account's or a new Plus subscriber's Studio for podcast -> shorts
+        # or a website recording is answered with the upgrade card before
+        # any wall, model or job: nothing runs and nothing is charged. The
+        # request and the card stay in the conversation.
+        import feature_gate
+        gated_feature = feature_gate.request_feature(text)
+        gate_why = (_feature_gate_reason(cur, user_id)
+                    if gated_feature else None)
+        if gated_feature and gate_why:
+            latest_gate = _latest_edl(cur, project_id)
+            stamp = ({"edl_version": latest_gate["version"]}
+                     if latest_gate else {})
+            umeta = dict(stamp, feature_upgrade=gated_feature)
+            if client_msg_id:
+                umeta["client_msg_id"] = client_msg_id
+            try:
+                cur.execute("""INSERT INTO chat_messages (session_id, role,
+                                                          content, meta)
+                               VALUES (%s, 'user', %s, %s) RETURNING id""",
+                            (p["chat_session_id"], text, Json(umeta)))
+                gate_message_id = cur.fetchone()["id"]
+            except psycopg2.errors.UniqueViolation:
+                conn.rollback()
+                cur = conn.cursor()
+                cur.execute("""SELECT id FROM chat_messages
+                               WHERE session_id = %s AND role = 'user'
+                                 AND meta->>'client_msg_id' = %s""",
+                            (p["chat_session_id"], client_msg_id))
+                row = cur.fetchone()
+                return jsonify({"queued": True, "duplicate": True,
+                                "message_id": row["id"] if row else None})
+            card = _feature_card(gated_feature, gate_why)
+            card_id = _post_feature_card(cur, p["chat_session_id"], card,
+                                         request_message_id=gate_message_id,
+                                         **stamp)
+            conn.commit()
+            _feature_shown(user_id, project_id, card, "chat")
+            return jsonify(_feature_upgrade_body(
+                card, message_id=gate_message_id, card_message_id=card_id))
 
         # One editor at a time per project — EDL writes must not race. That
         # includes an outside model driving this project over MCP (round 49):
@@ -4531,6 +4695,7 @@ def post_message(user_id, project_id, data=None):
 
         concierge = None
         trial_url_job = None
+        feature_card = None
         if not indexed and not defer_until_index:
             # Gather context inside the transaction, but make the LLM call
             # AFTER it commits — a model call must never hold a DB
@@ -4595,12 +4760,25 @@ def post_message(user_id, project_id, data=None):
                 "user_id": user_id,
                 "message_id": message_id,
             }
-            # Inside the transaction (the cursor closes with it): a walled
-            # account's website request starts the trial's URL First cut now.
-            trial_url_job = _trial_url_direct(cur, user_id, project_id,
-                                              message_id, text, concierge)
-            if trial_url_job:
+            # A website URL pasted by a trial account is a website recording
+            # (the trial's URL First cut): Website demos come with Pro and
+            # Max (feature_gate.py), so it gets the upgrade card instead.
+            if (concierge["can_act"]
+                    and feature_gate.website_link(text)
+                    and _subscribe_gate_applies(cur, user_id)
+                    and _feature_gate_reason(cur, user_id) == "trial"):
+                feature_card = _feature_card("website_demo", "trial")
+                _post_feature_card(cur, p["chat_session_id"], feature_card,
+                                   request_message_id=message_id)
                 concierge = None
+            else:
+                # Inside the transaction (the cursor closes with it): a
+                # walled account's website request starts the trial's URL
+                # First cut now.
+                trial_url_job = _trial_url_direct(cur, user_id, project_id,
+                                                  message_id, text, concierge)
+                if trial_url_job:
+                    concierge = None
 
         elif indexed:
             # A free-trial turn runs on the Claude lane in the executors and
@@ -4666,6 +4844,11 @@ def post_message(user_id, project_id, data=None):
     if trial_url_job:
         return jsonify({"queued": True, "job_id": trial_url_job,
                         "message_id": message_id, "first_cut": True})
+
+    if feature_card:
+        _feature_shown(user_id, project_id, feature_card, "website_link")
+        return jsonify(_feature_upgrade_body(feature_card,
+                                             message_id=message_id))
 
     if concierge is not None:
         # The model call runs in a thread with its own DB connection — the
@@ -4780,6 +4963,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
         try:
             cur = conn.cursor()
             subscription_blocked = False
+            feature_blocked = None
 
             def _say(content, meta):
                 cur.execute("""INSERT INTO chat_messages (session_id, role,
@@ -4807,10 +4991,28 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                 # first and fail honestly if they're tapped out or already busy.
                 info = get_balance(conn, ctx["user_id"])
                 trial_url_job = None
-                if info.get("subscribe_gated") and not info.get("payment_failed"):
+                # A blank-canvas build from a website link (or a plain
+                # shorts / website-recording ask) of a trial account or a new
+                # Plus subscriber: the upgrade card (feature_gate.py).
+                import feature_gate
+                act_text = _message_text(cur, ctx["message_id"]) or ""
+                act_feature = (feature_gate.request_feature(act_text)
+                               or ("website_demo"
+                                   if feature_gate.website_link(act_text)
+                                   else None))
+                act_why = (_feature_gate_reason(cur, ctx["user_id"])
+                           if act_feature else None)
+                if act_why:
+                    feature_blocked = _feature_card(act_feature, act_why,
+                                                    conn)
+                    _post_feature_card(cur, ctx["session_id"], feature_blocked,
+                                       request_message_id=ctx["message_id"])
+                elif info.get("subscribe_gated") and not info.get("payment_failed"):
                     trial_url_job = _trial_url_first_cut(
                         cur, ctx["user_id"], project_id, ctx["message_id"])
-                if trial_url_job:
+                if act_why:
+                    pass
+                elif trial_url_job:
                     _say(TRIAL_URL_FIRST_CUT_REPLY,
                          {"kind": "concierge", "act": True,
                           "first_cut_job_id": trial_url_job})
@@ -4895,6 +5097,15 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                              llm_rec["prompt_tokens"],
                              llm_rec["completion_tokens"]))
             conn.commit()
+            if feature_blocked:
+                record_client_event(ctx["user_id"], project_id,
+                                    "feature_upgrade_shown",
+                                    detail={"feature":
+                                                feature_blocked.get("feature"),
+                                            "reason":
+                                                feature_blocked.get("reason"),
+                                            "surface": "blank_canvas"},
+                                    origin="server", db_url=db_url)
             if subscription_blocked:
                 record_client_event(ctx["user_id"], project_id, "trial_gate_shown",
                                     detail={"subscribe_offer": True,
@@ -7554,6 +7765,14 @@ def start_shorts(user_id, project_id):
                 "kind": "edit",
                 "duration_s": round(source_duration, 1),
             })
+        # Shorts come with Pro and Max (feature_gate.py): a trial account
+        # or a new Plus subscriber gets the upgrade card, never a run.
+        gate_why = _feature_gate_reason(cur, user_id)
+        if gate_why:
+            card = _feature_card("shorts", gate_why)
+            conn.commit()
+            _feature_shown(user_id, project_id, card, "shorts_board")
+            return jsonify(_feature_upgrade_body(card))
         # Same walls as sending a message: story scouting is model time.
         if _subscribe_gate_applies(cur, user_id):
             record_client_event(user_id, project_id, "trial_gate_shown",
@@ -7672,6 +7891,13 @@ def start_short_editor(user_id, project_id, child_project_id):
         ai_gate = _studio_ai_gate(cur, user_id)
         if ai_gate:
             return ai_gate
+        gate_why = _feature_gate_reason(cur, user_id)
+        if gate_why:
+            # Shorts come with Pro and Max (feature_gate.py).
+            card = _feature_card("shorts", gate_why)
+            conn.commit()
+            _feature_shown(user_id, project_id, card, "short_editor")
+            return jsonify(_feature_upgrade_body(card))
         parent = _project_for_user(cur, project_id, user_id)
         child = _project_for_user(cur, child_project_id, user_id)
         if not parent or not child \
@@ -8075,6 +8301,17 @@ def set_project_mode(user_id, project_id):
             return jsonify({"error": "Project not found"}), 404
         if (p.get("kind") or "edit") == "short":
             return jsonify({"error": "A generated short keeps its kind"}), 400
+        if kind == "shorts":
+            # Shorts come with Pro and Max (feature_gate.py): the SHORTS mode
+            # of a trial account or a new Plus subscriber stays an edit and
+            # the Studio shows the upgrade card.
+            gate_why = _feature_gate_reason(cur, user_id)
+            if gate_why:
+                card = _feature_card("shorts", gate_why)
+                conn.commit()
+                _feature_shown(user_id, project_id, card, "shorts_mode")
+                return jsonify(_feature_upgrade_body(
+                    card, kind=(p.get("kind") or "edit")))
         cur.execute("""SELECT 1 FROM video_jobs
                        WHERE project_id = %s AND type = 'shorts_plan'
                          AND state IN ('queued','running')""", (project_id,))
@@ -8406,6 +8643,9 @@ CLIENT_EVENT_KINDS.update({
     "mcp_export_delivered",
     # The optional "what didn't work?" answer on /cancel.
     "cancel_feedback",
+    # The upgrade card for Shorts / Website demos (feature_gate.py): the
+    # Studio's tile press (client) and every server refusal (server).
+    "feature_upgrade_shown",
 })
 
 _studio_ai_gate_unrecorded = _studio_ai_gate

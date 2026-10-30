@@ -2715,6 +2715,61 @@ def _trial_lane_stop(ctx, worker_db, session_id, job, user_message,
         turn_deadline=turn_deadline, job=job)
 
 
+def feature_upgrade_meta(feature, reason, request_message_id=None,
+                         edl_version=None):
+    """The card's chat meta as the worker writes it: the Studio renders the
+    plans from the account's own card (GET /auth/credits feature_upgrade),
+    so no price is copied here."""
+    import feature_gate
+    extra = {}
+    if request_message_id is not None:
+        extra["request_message_id"] = int(request_message_id)
+    if edl_version is not None:
+        extra["edl_version"] = edl_version
+    return feature_gate.message_meta(feature, reason, None, **extra)
+
+
+def _feature_upgrade_stop(ctx, worker_db, job, session_id, user_message, gate,
+                          total_steps=0, timings=None, start_version=None):
+    """A gated tool call ended this Studio turn: the upgrade card, no
+    charge (billable False; a trial turn is never charged credits either)."""
+    import feature_gate
+    if ctx.versions_written:
+        version = ctx.versions_written[-1]
+    else:
+        version = start_version
+        if version is None:
+            try:
+                version = ctx.latest_edl()["version"]
+            except Exception:
+                version = None
+    print(f"[agent] job {job.get('id')}: {gate.tool} refused — "
+          f"{gate.feature} comes with Pro and Max ({gate.reason}); "
+          "upgrade card, not charged", flush=True)
+    worker_db.run(dbx.add_message, session_id, "assistant",
+                  feature_gate.message_text(gate.feature, gate.reason),
+                  feature_upgrade_meta(gate.feature, gate.reason,
+                                       (user_message or {}).get("id"),
+                                       version))
+    try:
+        worker_db.run(dbx.record_client_event, job.get("user_id"),
+                      job.get("project_id"), "feature_upgrade_shown",
+                      {"feature": gate.feature, "reason": gate.reason,
+                       "surface": "agent_tool", "tool": gate.tool,
+                       "origin": "server"})
+    except Exception:
+        pass
+    try:
+        _complete_adopted_steers(ctx, worker_db, job)
+    except Exception:
+        pass
+    return {"status": "replied", "steps": total_steps,
+            "timings": timings or {}, "outcome": feature_gate.OUTCOME,
+            "billable": False, "credits_charged": 0.0,
+            "feature_upgrade": gate.feature,
+            **({"edl_version": version} if version is not None else {})}
+
+
 def _claude_trial_stop(worker_db, ctx, job, session_id, user_message,
                        decision, text=None):
     """A trial turn that cannot start: the plan cards, with the facts."""
@@ -6264,6 +6319,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         return {"status": "awaiting_user",
                                 "steps": total_steps, "timings": timings,
                                 "outcome": "blocked", "billable": False}
+                except agent_tools.FeatureUpgrade as gate:
+                    # Shorts and Website demos come with Pro and Max (owner,
+                    # 30 Oct 2026; feature_gate.py). The tool did not run;
+                    # the turn ends on the upgrade card and is never charged
+                    # (anything this turn already saved stays saved).
+                    return _feature_upgrade_stop(
+                        ctx, worker_db, job, session_id, user_message, gate,
+                        total_steps, timings, start_version)
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
                 tt["n"] += 1
                 tt["s"] = round(tt["s"] + time.monotonic() - t0, 2)
