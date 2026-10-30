@@ -246,6 +246,12 @@ def test_summary_says_what_was_done():
         "a 31-second vertical version: pauses trimmed and captions"
     assert first_cut._summary([], 18, url="https://example.com/") == \
         "an 18-second vertical demo of https://example.com/"
+    # the upload's First cut takes the same article (30 Oct: "a 11-second")
+    assert first_cut._summary(["kept whole"], 11.2) == \
+        "an 11-second vertical version: kept whole"
+    assert first_cut._summary(["captions"], 84) .startswith("an 84-second ")
+    assert first_cut._summary(["captions"], 22) .startswith("a 22-second ")
+    assert first_cut._summary(["captions"], None) == "a vertical version: captions"
 
 
 def test_url_is_found_in_a_request():
