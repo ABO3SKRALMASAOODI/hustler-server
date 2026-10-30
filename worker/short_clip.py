@@ -62,11 +62,19 @@ def parse_boxes(text, sizes):
         if n not in sizes:
             continue
         w, h = sizes[n]
-        box = [x0 / w, y0 / h, x1 / w, y1 / h]
+        if max(x0, y0, x1, y1) <= 1.5:
+            # WAVE_A review (31 Oct): a model that answers in fractions
+            # ([0.42, 0.3, 0.6, 0.9]) is not boxing a 1-pixel speck in the
+            # corner (read as pixels it sent the camera 1.9x into the top left)
+            box = [x0, y0, x1, y1]
+        else:
+            box = [x0 / w, y0 / h, x1 / w, y1 / h]
         if not (-0.02 <= box[0] < box[2] <= 1.02 and -0.02 <= box[1] < box[3] <= 1.02):
             continue
         if (box[2] - box[0]) * (box[3] - box[1]) > 0.8:
             continue                      # "the whole frame" points at nothing
+        if box[2] - box[0] < 0.02 or box[3] - box[1] < 0.02:
+            continue                      # a degenerate box points at nothing either
         out[n] = tuple(min(max(v, 0.0), 1.0) for v in box)
     return out
 

@@ -815,6 +815,15 @@ STUTTER_WORDS = frozenset((
     "she", "they", "at", "for", "but", "or", "on", "was", "are", "be", "as",
     "with", "my", "our", "your", "if", "by", "an", "from", "have", "has"))
 STUTTER_GAP_S = 0.4
+# WAVE_A review (31 Oct): a repeat across a sentence or clause mark is speech,
+# not a stutter, when the first word can end a clause ("I love it. It
+# works", "thank you. You...", "come in. In fact"); only words that cannot
+# end one ("the. The", "and, and") are cut across a mark.
+NEVER_LAST = frozenset(("a", "an", "the", "and", "but", "or", "i", "my", "our",
+                        "your", "if", "of"))
+# "what it is is", "all it was was": the double copula is grammar after these
+COPULAS = frozenset(("is", "was", "are"))
+COPULA_LEADS = frozenset(("what", "all", "where", "how", "who", "why", "whatever"))
 
 
 def stutter_spans(words, keep):
@@ -822,11 +831,17 @@ def stutter_spans(words, keep):
     row inside the kept program, the span running up to the second word's
     start."""
     spans = []
-    for a, b in zip(words, words[1:]):
+    for k, (a, b) in enumerate(zip(words, words[1:])):
         if a.get("w") is None or b.get("w") is None:
             continue
         na, nb = _norm(a["w"]), _norm(b["w"])
         if not na or na != nb or na not in STUTTER_WORDS:
+            continue
+        if re.search(r"[.?!,;:\u2026\u2014-]\W*$", str(a["w"]).strip()) \
+                and na not in NEVER_LAST:
+            continue
+        if na in COPULAS and any(_norm(w.get("w")) in COPULA_LEADS
+                                 for w in words[max(0, k - 3):k]):
             continue
         try:
             a0, b0 = _wt(a, "t0"), _wt(b, "t0")

@@ -3141,6 +3141,10 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     wrong_way = _size_direction_refusal(hit, json.loads(old_shape)[3] or {}, purpose)
     if wrong_way:
         return wrong_way
+    size_moved = template is None and _record_base_size(
+        hit, json.loads(old_shape)[3] or {}, params)
+    if size_moved:
+        _record_face_band(ctx, edl, hit)
     same = _same_params_note(hit, json.loads(old_shape)[3] or {}, params)
     if same and template is None and html is None and start is None and end is None \
             and layer is None and box is None and mute_captions is None:
@@ -3216,6 +3220,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     err, where, bbox, rep = _probe_full(ctx, edl, hit)
     if err:
         return err
+    probed_params = json.dumps(hit.get("params"), sort_keys=True)
     keep_note, moved_where = _keep_out(ctx, edl, hit, rep)
     where = moved_where or where
     behind_note = ""
@@ -3248,6 +3253,11 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             hero_note += fit_note
     else:
         hit.pop("behind", None)
+    type_note = ""
+    if size_moved:
+        type_note = _type_size_note(
+            ctx, edl, hit, json.loads(old_shape)[3] or {},
+            rep if json.dumps(hit.get("params"), sort_keys=True) == probed_params else None)
     edl["motion"] = items
     series_note = _series_refresh(edl, hit, series_before)
     owned = [s for s in (edl.get("sfx") or []) if str(s.get("id", "")).startswith(_owned_sfx_prefix(id))]
@@ -3276,12 +3286,139 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         return res
     tail = (_yield_report(ctx, edl, hit) if persistent
             else _band_note(ctx, edl, hit) + _band_spill_note(ctx, edl, hit, bbox))
-    return (res + size_note_in + where + box_note + band_note + keep_note + number_note + size_note
+    return (res + size_note_in + type_note + where + box_note + band_note + keep_note + number_note + size_note
             + window_note + series_note + hero_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + (_owned_sfx_checks(ctx, edl, id) if checked else "")
             + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit)
             + _look_notes(ctx, edl, hit, {}))
+
+
+def _record_base_size(hit, old_params, passed):
+    """WAVE_A (31 Oct): a template that reads ``base_size`` (hook_title) lays
+    its lines out at that size and scales the type by size / base_size, so
+    a size change on a title whose widest line already fills the column
+    grows the type (re-breaking into more lines) instead of rendering
+    pixel-identical. The first size change records the size the title was
+    laid out at; later ones keep it. True when the size moved."""
+    try:
+        spec = motion_templates.spec(hit["template"]).get("params") or {}
+    except ValueError:
+        return False
+    if "base_size" not in spec or "size" not in spec:
+        return False
+    params = hit.get("params") or {}
+    default = float(spec["size"].get("default", 1.0))
+    try:
+        was = float(old_params.get("size", default))
+        now = float(params.get("size", default))
+    except (TypeError, ValueError):
+        return False
+    if abs(now - was) < 1e-6:
+        return False
+    if not float(old_params.get("base_size") or 0) and \
+            "base_size" not in (passed if isinstance(passed, dict) else {}):
+        hit["params"] = dict(params, base_size=was)
+    return True
+
+
+def _record_face_band(ctx, edl, hit):
+    """The band a grown title may fill (band_top/band_bottom), clear of the
+    face over its window: below the face for a title under it, above it for
+    one over it; the frame's safe band when no face is measured. Leaves the
+    params untouched when the template has no band or nothing is known."""
+    try:
+        spec = motion_templates.spec(hit["template"]).get("params") or {}
+    except ValueError:
+        return
+    if "band_top" not in spec or "band_bottom" not in spec:
+        return
+    params = hit.get("params") or {}
+    if not float(params.get("base_size") or 0):
+        return
+    W, H = _canvas_size(ctx, edl)
+    lo, hi = (0.08, 0.86) if H > W else (0.06, 0.92)
+    y = float(params.get("y", 0.42))
+    zones = []
+    try:
+        if getattr(ctx, "has_main_video", True):
+            track = keepout.face_track(edl, getattr(ctx, "index", None) or {}, W, H,
+                                       float(hit["start"]), float(hit["end"]),
+                                       measure=_face_measure(ctx))
+            zones = keepout.zones_of(track)
+    except Exception as ex:  # noqa: BLE001 — the frame's safe band answers
+        print(f"[motion] face band skipped: {str(ex)[:160]}", flush=True)
+        zones = []
+    if zones and not hit.get("allow_face_overlap"):
+        fy0 = min(float(z[1]) for z in zones)
+        fy1 = max(float(z[3]) for z in zones)
+        if y >= (fy0 + fy1) / 2.0:
+            lo = max(lo, fy1 + 0.02)
+        else:
+            hi = min(hi, fy0 - 0.02)
+    if hi - lo < 0.05:
+        return
+    hit["params"] = dict(params, band_top=round(lo, 3), band_bottom=round(hi, 3))
+
+
+def _type_px(ctx, edl, item, rep=None):
+    """(type px, lines, measured) the title draws at: the template's own
+    measurement when a browser probes here (motion_engine.probe 'info'),
+    else hook_fit's estimate (the agent image ships no Chromium)."""
+    import hook_fit
+    W, H = _canvas_size(ctx, edl)
+    if rep is None:
+        try:
+            rep = _probe_item(item, W, H)
+        except Exception:  # noqa: BLE001 — the estimate below answers
+            rep = None
+    info = rep.get("info") if isinstance(rep, dict) else None
+    if isinstance(info, dict) and info.get("type_px"):
+        return float(info["type_px"]), int(info.get("lines") or 0), True
+    est = hook_fit.estimate(item.get("params") or {}, W, H)
+    if not est:
+        return None
+    return float(est["type_px"]), int(est["lines"]), False
+
+
+def _type_size_note(ctx, edl, hit, old_params, rep):
+    """What a size change did to the PICTURE (WAVE_A, 31 Oct: 1.3 -> 1.5
+    rendered pixel-identical and the reply said "bigger"). Records the
+    turn's first and latest type size on ctx (trial_reply reads it)."""
+    try:
+        before = _type_px(ctx, edl, dict(hit, params=dict(old_params)))
+        after = _type_px(ctx, edl, hit, rep)
+    except Exception as ex:  # noqa: BLE001 — a measurement never blocks an edit
+        print(f"[motion] type size skipped: {str(ex)[:160]}", flush=True)
+        return ""
+    if not before or not after or before[0] <= 0:
+        return ""
+    try:
+        seen = getattr(ctx, "title_type_px", None)
+        if not isinstance(seen, dict):
+            seen = {}
+            ctx.title_type_px = seen
+        row = seen.setdefault(hit["id"], {"before": before[0]})
+        row["after"] = after[0]
+    except Exception:  # noqa: BLE001
+        pass
+    g = after[0] / before[0]
+    pct = int(round(abs(g - 1.0) * 100))
+    lines = (f", now on {after[1]} lines (was {before[1]})"
+             if after[1] and before[1] and after[1] != before[1] else "")
+    if g >= 1.04:
+        return f"\nRENDERED: the title's type draws about {pct}% bigger than before{lines}."
+    if g <= 0.96:
+        return f"\nRENDERED: the title's type draws about {pct}% smaller than before{lines}."
+    try:
+        up = float(hit["params"].get("size", 1)) > float(old_params.get("size", 1))
+    except (TypeError, ValueError):
+        up = True
+    return ("\nRENDERED: NO VISIBLE CHANGE: " + hit["id"] + " draws exactly as before: "
+            + ("its widest word already fills the frame's width and the safe band leaves no room "
+               "for more lines. Do not tell the user it is bigger; say it is already as large as "
+               "it fits, and offer fewer words or a separate line for the key word."
+               if up else "the type stays the size it was. Do not tell the user it is smaller."))
 
 
 _SIZE_WORDS = {"xs": 0.75, "s": 0.87, "small": 0.87, "smaller": 0.87, "m": 1.0, "medium": 1.0,

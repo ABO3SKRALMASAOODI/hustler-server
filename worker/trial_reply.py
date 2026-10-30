@@ -60,6 +60,12 @@ class Facts:
     # an export is theirs to make, so export lines are not trial claims
     subscriber: bool = False
     checked: bool = False                        # a verification passed this turn
+    # WAVE_C: a classified follow-up's result in the user's words (the
+    # REQUEST CHECK's before/after), used as the lead when the draft has none
+    followup_lead: str = ""
+    # WAVE_A (31 Oct): {graphic id: rendered type size now / at the turn's
+    # start} for the titles whose size changed (motion_tools._type_size_note)
+    type_scale: dict = field(default_factory=dict)
 
 
 # ── sentence classes ─────────────────────────────────────────────────────
@@ -70,6 +76,8 @@ _INTERNAL = re.compile(
     r"|\bfalse positive|\badvisor(?:y|ies)\b|\blufs\b|\bmid-?word\b|\bedl\b"
     r"|\bkeep (?:layer|segments?)\b|\btool\b|\bpreview (?:limit|budget|renders?)\b"
     r"|\brender (?:limit|budget)\b|\bused up\b|\bthe (?:checks?|check came back)\b"
+    r"|\b(?:request|render) check\b|\bmarked (?:the change|it|this) as (?:met|done)\b"
+    r"|\bNOT (?:MET|ASKED)\b"
     r"|\bpicture check|\bcaption check|\bstory check|\bthree-frame|\bspeculative"
     r"|\bv\d+\b|\bversion \d+\b|\(system|\[system|\bcorner mark\b|\bfree-tier\b"
     r"|\bhero frame|\bfocus_|\bset_frame\b|\bsource rect|\bcrop_|\bpad_blur\b"
@@ -349,6 +357,11 @@ def unbacked(sent, facts):
             if re.search(r"(?i)\b(?:" + rx + r")\b", s) and re.search(r"(?i)\b(bigger|larger|enlarged)\b", s):
                 if _size_went(facts.before, facts.after, what) == "down":
                     return "smaller"
+                if what == "title" and facts.type_scale and \
+                        max(facts.type_scale.values()) < 1.04:
+                    # WAVE_A: the size param went up but the type drew the
+                    # same (its widest word already filled the frame)
+                    return "unchanged"
     if facts.wrote and _TRIM_CLAIM.search(s) and not rg._NOT_A_CLAIM.search(s):
         # REAL_USER_BRUTE (31 Oct): "cut the boring parts" came back 1.5 s
         # LONGER, told as "with the dead pauses trimmed"
@@ -545,7 +558,10 @@ _STATUS = re.compile(r"(?i)\b(unchanged|untouched|remains?|remained|stays? (?:as
 # a pronoun that only points back at the line before ("I did not repair
 # those, so ..."); "those captions" names its own thing
 _BACKREF = re.compile(r"(?i)\b(them|(?:those|these)(?=\s*[,.;:!?]|\s+(?:so|and|but|yet|for|because|"
-                      r"either|too|as|now|anymore|any more)\b|\s*$))")
+                      r"either|too|as|now|anymore|any more)\b|\s*$)"
+                      # WAVE_C: "I did not change either, because you only
+                      # asked for bigger captions" after its line was dropped
+                      r"|(?<=\s)either(?=\s*[,.;:!?]|\s+(?:because|since|as)\b))")
 
 
 def _topics(text):
@@ -656,14 +672,44 @@ def _sound_phrase(before, after):
     return "levelled the sound"
 
 
+# WAVE_C (31 Oct): the lane each phrase speaks for. A cut slides or drops
+# the graphics and B-roll on the span it removed; the raw EDL diff calls that
+# "changed the motion graphics" / "changed the look effects", and the reply
+# said "added B-roll and updated the titles" on "cut the boring parts" (real
+# journey, talk10). A phrase whose lane did not change in design is dropped.
+_PHRASE_LANES = (
+    ("updated the titles", {"title", "graphics"}),
+    ("added on-screen text", {"title", "graphics"}),
+    ("added B-roll", {"broll"}),
+    ("push-in", {"zooms"}),
+    ("zoom", {"zooms"}),
+    ("reframed it", {"frame"}),
+    ("colour grade", {"grade"}),
+    ("captions", {"captions"}),
+)
+
+
+def _design_lanes(before, after):
+    try:
+        import followup_recipes
+        return set(followup_recipes.changed_lanes(before or {}, after or {}))
+    except Exception:  # noqa: BLE001 — no filter, the phrases stand
+        return None
+
+
 def friendly_changes(before, after):
     items = []
+    real = _design_lanes(before, after)
     for c in rg.edl_changes(before or {}, after or {}):
         for rx, fn in _FRIENDLY:
             m = rx.match(c["text"])
             if m:
                 phrase = (_sound_phrase(before, after)
                           if c["text"].startswith("changed the loudness") else fn(m))
+                lanes = next((ln for key, ln in _PHRASE_LANES if key in phrase),
+                             None)
+                if real is not None and lanes is not None and not (lanes & real):
+                    break
                 if phrase not in items:
                     items.append(phrase)
                 break
@@ -844,7 +890,9 @@ def finish(draft, facts):
         lead, rest = rest[0], rest[1:]
     if lead is None:
         shape = _shape_words(facts)
-        if facts.wrote and changes:
+        if facts.followup_lead:
+            lead = facts.followup_lead
+        elif facts.wrote and changes:
             lead = (f"Done: I {_join(changes[:3])}"
                     + (f", and it's now a {shape} cut." if shape else "."))
         elif facts.wrote:
@@ -912,11 +960,24 @@ def facts_from_ctx(ctx, user_text=""):
             dur = None
     records = getattr(ctx, "verification_records", None) or {}
     rec = records.get(latest.get("version")) or {}
-    return Facts(before=start.get("json") or {}, after=after,
+    lead = ""
+    try:
+        import followup_recipes
+        lead = followup_recipes.reply_lead(ctx) or ""
+    except Exception:  # noqa: BLE001 — the generic lead stands
+        lead = ""
+    scale = {}
+    for k, row in (getattr(ctx, "title_type_px", None) or {}).items():
+        try:
+            scale[k] = float(row["after"]) / float(row["before"])
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+    return Facts(before=start.get("json") or {}, after=after, type_scale=scale,
                  wrote=bool(getattr(ctx, "versions_written", None)),
                  previewed=previewed, duration_s=dur, frame=frame,
                  index=getattr(ctx, "index", None) or {}, user_text=user_text,
-                 checked=bool(rec) and not rec.get("unresolved_findings"))
+                 checked=bool(rec) and not rec.get("unresolved_findings"),
+                 followup_lead=lead)
 
 
 def finish_for_ctx(ctx, draft, user_text="", subscriber=False):

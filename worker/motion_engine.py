@@ -1291,9 +1291,17 @@ async def _probe_all(jobs, times_list, budget_s, measure=None):
                             except Exception as e:  # noqa: BLE001
                                 measures.append({"error": str(e)[:120]})
                     errs = await page.evaluate("window.__mgErrors || []")
+                    # what a template reports about its own layout (hook_title:
+                    # the type's size and lines, so "bigger" is read from the
+                    # pixels, never from the param: WAVE_A, 31 Oct)
+                    info = await page.evaluate(
+                        "(() => { try { const i = window.MG && window.MG.info; "
+                        "return i ? JSON.parse(JSON.stringify(i)) : null; } "
+                        "catch (e) { return null; } })()")
                     out.append({"errors": [str(e)[:200] for e in errs], "visible_frames": visible,
                                 "samples": len(times), "bboxes": bboxes, "ink": inks,
                                 "cover": covers,
+                                **({"info": info} if isinstance(info, dict) else {}),
                                 **({"measures": measures} if measure is not None else {})})
                   except Exception as e:  # noqa: BLE001 — one bad composition
                     out.append({"errors": [str(e).splitlines()[0][:200]], "visible_frames": 0,

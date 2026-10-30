@@ -9,7 +9,10 @@
   "font": {"type": "enum", "values": ["Inter Display", "Anton", "Bebas Neue", "Archivo Black", "Poppins", "Syne", "Montserrat", "Plus Jakarta Sans"], "default": "Inter Display"},
   "uppercase": {"type": "bool", "default": false},
   "y": {"type": "float", "min": 0.08, "max": 0.92, "default": 0.42, "hint": "vertical centre as frame fraction"},
-  "size": {"type": "float", "min": 0.5, "max": 1.6, "default": 1.0},
+  "size": {"type": "float", "min": 0.5, "max": 2.0, "default": 1.0, "hint": "absolute; above 1.6 only grows a title that has a base_size"},
+  "base_size": {"type": "float", "min": 0, "max": 2.0, "default": 0, "hint": "set by the editor when the size changes: the size the lines were laid out at; size / base_size scales the type, re-breaking into more lines when the width is full"},
+  "band_top": {"type": "float", "min": 0, "max": 1, "default": 0, "hint": "set by the editor with base_size: the highest a grown title may reach (clear of the face)"},
+  "band_bottom": {"type": "float", "min": 0, "max": 1, "default": 0, "hint": "set by the editor with base_size: the lowest a grown title may reach"},
   "align": {"type": "enum", "values": ["center", "left"], "default": "center"},
   "entrance": {"type": "enum", "values": ["spring", "slam", "rise", "blur", "mask", "pop", "cut"], "default": "spring", "hint": "pop = whole by 0.25 s (a fast fade-scale, tiny stagger); cut = whole on its first frame (a cover-style opening)"},
   "exit": {"type": "enum", "values": ["blur", "drop", "none", "cut"], "default": "blur"},
@@ -42,8 +45,16 @@
   wrap.style.textAlign = P.align;
   const raw = String(P.text || '').replace(/\s*\/\s*/g, '\n');
   let lines = raw.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 3);
-  const maxW = MG.W - 140, base = 150 * P.size;
-  const capFor = n => (n === 1 ? 210 : n === 2 ? 170 : 140) * P.size;
+  // LS: the size the lines are fitted at (the old range, so a title without
+  // a base_size renders exactly as it always has). WAVE_A (31 Oct): "make the
+  // title bigger" rendered pixel-identical, because the widest line already
+  // filled the column; a size change now records base_size, and size /
+  // base_size scales the type, re-breaking into more lines when it must.
+  const BASE_RAW = Number(P.base_size) > 0 ? Number(P.base_size) : 0;
+  const LS = Math.min(BASE_RAW || P.size, 1.6);
+  const GAIN = BASE_RAW ? P.size / BASE_RAW : 1;
+  const maxW = MG.W - 140, base = 150 * LS;
+  const capFor = n => (n === 1 ? 210 : n === 2 ? 170 : 140) * LS;
   const words = [];
   // the accent as it reads on the plate (MG.accentInk): unchanged on a dark
   // plate; lifted toward white, and a thin serif accent set heavier, where
@@ -74,7 +85,7 @@
   const fitAll = (ls) => {
     build(ls);
     const els = MG.$$('.line');
-    const cap = Math.min(capFor(ls.length), base) * P.size;
+    const cap = Math.min(capFor(ls.length), base) * LS;
     // text width scales linearly with font size: measure once at 100px
     els.forEach(el => { el.style.fontSize = '100px'; });
     const wmax = Math.max(...els.map(el => el.scrollWidth), 1);
@@ -100,24 +111,132 @@
     }
     return best.ls;
   };
+  // The re-breaks a bigger size may take: every split of the words into up
+  // to MAXL lines that keeps the text's own line breaks and never splits a
+  // *starred* accent; widths measured once per phrase at 100px.
+  const MAXL = 4;
+  const tokens = () => {
+    const out = [];
+    lines.forEach((L, li) => {
+      let inStar = false;
+      L.split(/\s+/).filter(Boolean).forEach((w, k, arr) => {
+        const stars = (w.match(/\*/g) || []).length;
+        if (stars % 2) inStar = !inStar;
+        // a break after this word: forced at the text's own line end,
+        // never inside an accent span
+        out.push({ w, forced: k === arr.length - 1 && li < lines.length - 1,
+                   open: k < arr.length - 1 && !inStar });
+      });
+    });
+    return out;
+  };
+  const splits = (toks, n) => {
+    const forced = [], free = [];
+    toks.forEach((t, i) => { if (i < toks.length - 1) (t.forced ? forced : t.open ? free : []).push(i); });
+    const k = n - 1 - forced.length;
+    if (k < 0 || k > free.length) return [];
+    const res = [];
+    const pick = (from, left, acc) => {
+      if (res.length > 600) return;
+      if (!left) { res.push([...forced, ...acc].sort((a, b) => a - b)); return; }
+      for (let i = from; i <= free.length - left; i++) pick(i + 1, left - 1, [...acc, free[i]]);
+    };
+    pick(0, k, []);
+    return res.map(cuts => {
+      const ls = []; let a = 0;
+      cuts.forEach(c => { ls.push(toks.slice(a, c + 1).map(t => t.w).join(' ')); a = c + 1; });
+      ls.push(toks.slice(a).map(t => t.w).join(' '));
+      return ls;
+    });
+  };
+  // per layout pass: the fonts and the accent's weight change between passes
+  const widthMeter = () => {
+    const memo = new Map();
+    return (phrase) => {
+      if (!memo.has(phrase)) {
+        build([phrase]);
+        const el = MG.$('.line'); el.style.fontSize = '100px';
+        memo.set(phrase, Math.max(el.scrollWidth, 1));
+      }
+      return memo.get(phrase);
+    };
+  };
+  // What to draw: {ls, f, top} (top null = centred on y, as always).
+  const choose = () => {
+    const ls0 = autoLines();
+    const f0 = fitAll(ls0);
+    const h0 = wrap.getBoundingClientRect().height;
+    const pick = { ls: ls0, f: f0, f0, n0: ls0.length, top: null };
+    if (!BASE_RAW || Math.abs(GAIN - 1) < 0.005) return pick;
+    const T = f0 * GAIN;
+    // the block grows away from the picture's middle: a title under the
+    // face keeps its top edge, one above it its bottom edge (the First cut
+    // placed it clear of the face), within the frame's safe band
+    const portrait = MG.H > MG.W;
+    let lo = MG.H * (portrait ? 0.08 : 0.06), hi = MG.H * (portrait ? 0.86 : 0.92);
+    const c0 = MG.H * P.y, t0 = c0 - h0 / 2, b0 = c0 + h0 / 2;
+    // the band the editor measured clear of the face (band_top/bottom):
+    // the block grows around its centre inside it
+    const banded = Number(P.band_bottom) > Number(P.band_top) && Number(P.band_bottom) > 0;
+    if (banded) {
+      lo = Math.max(lo, Math.min(t0, MG.H * Number(P.band_top)));
+      hi = Math.min(hi, Math.max(b0, MG.H * Number(P.band_bottom)));
+    }
+    const anchor = banded ? 'band' : P.y >= 0.55 ? 'top' : P.y <= 0.45 ? 'bottom' : 'centre';
+    const room = Math.max(h0, anchor === 'band' ? hi - lo : anchor === 'top' ? hi - t0
+      : anchor === 'bottom' ? b0 - lo : 2 * Math.min(c0 - lo, hi - c0));
+    const gapPx = 6;
+    // the block's height at font f, from its measured shape at f0
+    const lineH = (h0 - gapPx * (ls0.length - 1)) / ls0.length / f0;
+    const fitH = n => (room - gapPx * (n - 1)) / (n * lineH);
+    const topFor = (n, f) => {
+      const h = n * lineH * f + gapPx * (n - 1);
+      if (anchor === 'band') return Math.min(Math.max(c0 - h / 2, lo), Math.max(lo, hi - h));
+      return anchor === 'top' ? t0 : anchor === 'bottom' ? b0 - h : c0 - h / 2;
+    };
+    if (GAIN < 1) return { ls: ls0, f: T, f0, n0: ls0.length, top: topFor(ls0.length, T) };
+    const toks = tokens(), widthAt100 = widthMeter();
+    let best = { ls: ls0, f: Math.min(T, maxW * 100 / Math.max(...ls0.map(widthAt100)), fitH(ls0.length)) };
+    if (best.f < T * 0.995) {
+      for (let n = ls0.length + 1; n <= Math.min(MAXL, toks.length); n++) {
+        let bn = null;
+        splits(toks, n).forEach(ls => {
+          const f = Math.min(T, maxW * 100 / Math.max(...ls.map(widthAt100)), fitH(n));
+          if (!bn || f > bn.f) bn = { ls, f };
+        });
+        if (bn && bn.f > best.f * 1.02) best = bn;
+        if (best.f >= T * 0.995) break;
+      }
+    }
+    // a re-break that buys less than 4% is no visible change: keep the title
+    if (best.f < f0 * 1.04) return pick;
+    return { ls: best.ls, f: best.f, f0, n0: ls0.length, top: topFor(best.ls.length, best.f) };
+  };
   let fs = 100;
-  const place = (ls) => {
-    fs = fitAll(ls);
+  const place = (pk) => {
+    build(pk.ls);
+    MG.$$('.line').forEach(el => { el.style.fontSize = pk.f + 'px'; });
+    fs = pk.f;
     const h = wrap.getBoundingClientRect().height;
-    wrap.style.top = (MG.H * P.y - h / 2) + 'px';
+    wrap.style.top = (pk.top == null ? MG.H * P.y - h / 2 : pk.top) + 'px';
+    // what the editor reads back (motion_engine.probe -> info): the type's
+    // size and lines, and those of the layout the base size gives
+    MG.info = { type_px: Math.round(pk.f * 10) / 10, base_px: Math.round(pk.f0 * 10) / 10,
+                lines: pk.ls.length, base_lines: pk.n0 };
   };
   const accentRect = () => MG.rectOf(words.filter(w => w.acc).map(w => w.el));
   const layout = () => {
-    const ls = autoLines();
     ACC = { color: P.accent, short: false }; heavy = false;
-    place(ls);
+    let pk = choose();
+    place(pk);
     const tinted = P.treatment === 'serif' || P.treatment === 'color';
     if (MG.plate && tinted && accentRect()) {
       const serif = P.treatment === 'serif';
       const res = MG.accentInk(accentRect(), P.accent, { lc: serif ? 45 : 35, have: 0.3 * 0.78 * P.scrim });
       if (res.color !== P.accent) {
         ACC = res; heavy = serif && res.short;
-        place(ls);
+        pk = choose();
+        place(pk);
       }
     }
     if (P.shadow > 0) wrap.style.filter = `drop-shadow(0 ${6 * P.shadow}px ${22 * P.shadow}px rgba(0,0,0,${0.55 * P.shadow}))`;
