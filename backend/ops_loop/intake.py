@@ -279,7 +279,8 @@ def _held_not_resumed(cur, since, now, p):
             if not held_request.studio_lane_open(cur, r["user_id"]):
                 continue                # handed to the customer's assistant
             if held_request.assistant_took_over(cur, r["user_id"],
-                                                r["wall_at"]):
+                                                r["wall_at"],
+                                                r["project_id"]):
                 continue                # its assistant made it (D1V)
         except Exception:
             pass                        # unknown lane: file it, look at it

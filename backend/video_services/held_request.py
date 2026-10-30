@@ -100,18 +100,39 @@ def _assistant_worked_since(cur, user_id, since):
     return cur.fetchone() is not None
 
 
-def assistant_took_over(cur, user_id, since):
-    """The held request (walled at ``since``) was the customer's assistant's
-    to make and it started working: the Studio must never run it as well.
+def _assistant_was_shown(cur, user_id, project_id, since):
+    """The assistant read the held project's state while the request was
+    waiting (open_project / project_state print for_assistant's note with
+    it): the request is already in the customer's assistant conversation."""
+    if project_id is None or since is None:
+        return False
+    cur.execute("""SELECT 1 FROM video_jobs
+                    WHERE user_id = %s AND project_id = %s
+                      AND type = 'mcp_tool'
+                      AND COALESCE(payload->>'tool', '') = '__state__'
+                      AND created_at > %s
+                      AND created_at < %s + make_interval(hours => %s)
+                    LIMIT 1""",
+                (int(user_id), int(project_id), since, since, int(WINDOW_H)))
+    return cur.fetchone() is not None
+
+
+def assistant_took_over(cur, user_id, since, project_id=None):
+    """The held request (walled at ``since`` in ``project_id``) is the
+    customer's assistant's: it was shown the request (a state read of that
+    project while it waited) or started working (any other MCP call). The
+    Studio must then never run it as well.
 
     Only an MCP-only plan's request is ever handed to the assistant, so every
     other plan answers False (ticket #11's behaviour, unchanged). D1V: with
     Studio in Plus switched on (or the credit line back) after a payment
     that landed while it was off, the Studio (/replay-blocked on the next
     project open) and a webhook retry otherwise ran a request the assistant
-    had already made: twice, and charged twice."""
-    return (_mcp_only_plan(cur, user_id)
-            and _assistant_worked_since(cur, user_id, since))
+    had already made or been asked to make: twice, and charged twice."""
+    if not _mcp_only_plan(cur, user_id):
+        return False
+    return (_assistant_worked_since(cur, user_id, since)
+            or _assistant_was_shown(cur, user_id, project_id, since))
 
 
 def studio_lane_open(cur, user_id):
@@ -267,7 +288,8 @@ def resume(user_id, origin, project_id=None, window_h=WINDOW_H):
                 # The plan edits through the customer's own assistant; it is
                 # shown the request (for_assistant) instead of a Studio turn.
                 return dict(base, resumed=False, reason="mcp_only")
-            if assistant_took_over(cur, user_id, held["created_at"]):
+            if assistant_took_over(cur, user_id, held["created_at"],
+                                   held["project_id"]):
                 # The lane opened after the request was handed to the
                 # customer's assistant, which already took it (D1V).
                 return dict(base, resumed=False, reason="assistant_took_over")
