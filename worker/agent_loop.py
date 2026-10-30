@@ -30,6 +30,7 @@ import preview_critic
 import preference_memory
 import quality_verifier
 import request_scope
+import followup_recipes
 import read_tools
 import reference_profile
 import reply_grounding
@@ -2276,6 +2277,9 @@ def run_agent_job(worker_db, job):
                                                  user_message)
         elif ctx.claude_trial is not None and continuation_state:
             attachment_note += _tighten_continue_note(continuation_state)
+        attachment_note += _followup_start(
+            ctx, user_message, continuation_state,
+            (job.get("payload") or {}).get("death_resume"))
         result = _run_loop(ctx, worker_db, job, session_id, user_message,
                            attachment_note,
                            _cont=(continuation_state or None))
@@ -2549,6 +2553,54 @@ def _fresh_turn_yields_to_fleet(model):
     return not claude_lane.is_claude_model(model)
 
 
+def _followup_start(ctx, user_message, continuation_state=None,
+                    death_resume=False):
+    """WAVE_C: the follow-up recipe for a short, vague request on the NEW
+    Claude lanes only (the free trial, new subscribers): its note, or ''.
+    It names the request, gives the one chain with its defaults and done
+    bar, and arms the scope / length guards and the REQUEST CHECK
+    (followup_recipes). Never for grandfathered lanes, a continuation, a
+    resumed turn, or a turn whose head start already did the work."""
+    ctx.followup = None
+    if getattr(ctx, "claude_trial", None) is None \
+            and getattr(ctx, "claude_paid", None) is None:
+        return ""
+    if continuation_state or death_resume or getattr(ctx, "trial_prep", None):
+        return ""
+    if not getattr(ctx, "has_main_video", False):
+        return ""
+    try:
+        st = followup_recipes.start(ctx, (user_message or {}).get("content"))
+        if not st:
+            return ""
+        note = followup_recipes.note(ctx, (user_message or {}).get("content"))
+    except Exception as e:  # noqa: BLE001 — the turn runs as before
+        print(f"[followup] skipped: {type(e).__name__}: {str(e)[:160]}",
+              flush=True)
+        ctx.followup = None
+        return ""
+    metrics = getattr(ctx, "editing_metrics", None)
+    if isinstance(metrics, dict):
+        metrics["followup"] = {"keys": st["keys"], "start_s": st["start_s"]}
+    print(f"[followup] {st['keys']} from {st['start_s']} s", flush=True)
+    return "\n" + note if note else ""
+
+
+_CUT_ASKS = frozenset(("boring", "shorter", "punchier", "ums", "silences"))
+
+
+def _cut_ask_not_answered(prep, user_message):
+    """A generic head start that applied nothing to a request to CUT."""
+    if not isinstance(prep, dict) or prep.get("intent") != "generic" \
+            or prep.get("applied") or prep.get("whole"):
+        return False
+    try:
+        keys = followup_recipes.classify((user_message or {}).get("content"))
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(set(keys) & _CUT_ASKS)
+
+
 def _trial_head_start(ctx, worker_db, session_id, user_message):
     """The trial turn's deterministic head start on a generic first request
     (trial_turn.prepare): '' when there is none. TRIAL LANE ONLY: the
@@ -2591,6 +2643,11 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
               f"{str(e)[:200]}", flush=True)
         prep = None
     if not prep:
+        return ""
+    if _cut_ask_not_answered(prep, user_message):
+        # WAVE_C: "cut the boring parts" on a short First cut was answered
+        # with "the First cut already answers this request" and nothing was
+        # cut. Code wrote nothing here, so the follow-up recipe takes it.
         return ""
     if prep.get("intent") == "tighten":
         # QB: the long-form cut is the head start's whole build (its hook,
@@ -3002,6 +3059,13 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
     # pushed; MAX_QUALITY_REPAIR_PUSHBACKS is the backstop for a reviewer
     # that finds something new on every version.
     if len(pushed_versions) >= MAX_QUALITY_REPAIR_PUSHBACKS:
+        return False
+    if followup_recipes.active(ctx):
+        # WAVE_C: on a classified follow-up ("make the captions bigger") a
+        # review note about another part of the edit is not the request;
+        # chasing it is how unasked changes rode along (a graphic moved
+        # behind the speaker, a zoom removed) and what spent the trial. The
+        # REQUEST CHECK on the render is this turn's verification.
         return False
     if _prepared_trial(ctx):
         # Q3 (30 Oct): on a trial turn that code already built (the First
@@ -6147,6 +6211,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 continue
             if ctx.versions_written and not _verification_complete(ctx) \
                     and not _trial_lane(ctx) \
+                    and not followup_recipes.active(ctx) \
                     and int(_cont.get("verification_slices") or 0) \
                     < MAX_VERIFICATION_CONTINUATIONS \
                     and not _verification_stuck(ctx, _cont):
@@ -6284,6 +6349,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                           "Send a proper JSON object.")
             elif _kept_craft_refusal(ctx, name, args):
                 result = _kept_craft_refusal(ctx, name, args)
+            elif (followup_refused := followup_recipes.refusal(
+                    ctx, name, args)):
+                result = followup_refused
             elif _trial_render_refusal(ctx, name):
                 result = _trial_render_refusal(ctx, name)
             else:
@@ -6338,6 +6406,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
                 tt["n"] += 1
                 tt["s"] = round(tt["s"] + time.monotonic() - t0, 2)
+                if name == "render_preview" and isinstance(result, str) \
+                        and followup_recipes.active(ctx):
+                    check = followup_recipes.request_check(ctx)
+                    if check:
+                        result = result + "\n" + check
                 if name == "render_preview" and \
                         getattr(ctx, "trial_preview_cap", None):
                     ctx.trial_previews = int(

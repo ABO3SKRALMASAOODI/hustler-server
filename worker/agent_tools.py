@@ -57,6 +57,7 @@ import preview_critic
 import quality_gate
 import reference_profile
 import scope_guard
+import followup_recipes
 # The takeover's geometry (how far the camera travels, where it aims) is
 # renderer arithmetic, and the tool has to quote the SAME numbers the graph
 # will use — importing the resolver is the only way those two cannot drift.
@@ -696,6 +697,14 @@ class ToolContext:
             source_shape=_source_shape(self))
         if violations:
             return scope_guard.rejection_message(prev["version"], violations)
+        # WAVE_C: on a classified follow-up of the new Claude lanes, a write
+        # outside the request or one moving the length the wrong way
+        # ("cut the boring parts" came back longer) is refused.
+        followup_refusal = followup_recipes.check_write(
+            self, prev["json"], normalized,
+            getattr(self, "_executing_tool", None))
+        if followup_refusal:
+            return followup_refusal
         # Owner rule (Wave 0, 0C): agents never choose music. Every write —
         # add_music, a library pick, apply_look, swap_music, apply_edit_batch
         # — stamps the provenance of a track new to the edit and refuses one
@@ -3154,8 +3163,22 @@ def _exact_keep_quiet_edges(ctx, keep, words):
              if h.get("safe") is not None})
 
 
+def _within_keep(new_keep, prev_keep):
+    """new_keep clipped to prev_keep: a subtractive cut (silences, fillers)
+    never brings back footage the edit had already cut. Its word and audio
+    snapping widened the First cut's tighter edges (WAVE_C, real journey:
+    cut_silences took a 46.0 s cut to 47.0 s on "cut the boring parts")."""
+    out = []
+    for s, e in new_keep:
+        for ps, pe in prev_keep:
+            a, b = max(float(s), float(ps)), min(float(e), float(pe))
+            if b - a >= 0.05:
+                out.append([round(a, 3), round(b, 3)])
+    return out
+
+
 def _write_keep(ctx, new_keep, desc, snap_to_words=None,
-                check_regression=False, place_all=False):
+                check_regression=False, place_all=False, never_grow=False):
     """Shared tail for every keep-modifying write: audio-safe cut edges
     (snap_to_words None/True; True first snaps outward to word edges),
     insert re-snap + program-item re-anchoring (the shared remap above,
@@ -3181,6 +3204,10 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         audio_notes = _exact_keep_onset_notes(
             ctx, new_keep, None if place_all else prev_keep, words)
     new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
+    if never_grow:
+        clipped = _within_keep(new_keep, prev_keep)
+        if clipped:
+            new_keep = clipped
     safe_edges = {}
     if snap_to_words is False:
         quiet_edges, safe_edges = _exact_keep_quiet_edges(ctx, new_keep,
@@ -3413,7 +3440,7 @@ def cut_silences(ctx, min_silence_s=0.5, padding_s=0.12,
         ctx, new,
         f"cut {len(cuts)} {what} >= {min_s}s ({removed:.1f}s "
         f"removed, {pad}s kept around speech)",
-        snap_to_words=True)
+        snap_to_words=True, never_grow=True)
     if noisy and res.startswith("EDL v"):
         # Never let this land as "I removed the silences" when the user is
         # about to notice their game audio / music jumping at those cuts.
@@ -3480,12 +3507,22 @@ def remove_filler_words(ctx, words=None):
     summary = ", ".join(f"'{k}'×{v}" for k, v in sorted(hits.items()))
     return _write_keep(
         ctx, new,
-        f"removed {len(cuts)} filler-word span(s) ({summary})")
+        f"removed {len(cuts)} filler-word span(s) ({summary})",
+        never_grow=True)
 
 
 def _parse_style(style):
     """Validate a style dict -> normalized dict, None for absent, or an
-    error string. Legacy string styles ('default') mean absent."""
+    error string. Legacy string styles ('default') mean absent. A JSON
+    object sent as a string ('{"size_scale": 2.0}', how Haiku sent it on 3
+    of 4 caption-size turns, WAVE_C 31 Oct) is that object."""
+    if isinstance(style, str) and style.strip().startswith("{"):
+        try:
+            decoded = json.loads(style)
+        except ValueError:
+            decoded = None
+        if isinstance(decoded, dict):
+            style = decoded
     if style is None or isinstance(style, str) or style == {}:
         return None
     if not isinstance(style, dict):
