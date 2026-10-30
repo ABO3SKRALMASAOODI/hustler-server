@@ -1369,6 +1369,10 @@ BOX_ALARM_AFTER_S = float(os.getenv("BOX_ALARM_AFTER_S", "600"))
 # Stops only a pathological loop: 2,000 in-claim waits is weeks of waiting.
 BOX_MAX_WAIT_DEFERRALS = max(1, int(os.getenv(
     "BOX_MAX_WAIT_DEFERRALS", "2000")))
+# A box job refused for scratch space waits for the shared disk to free up
+# (remote._box_scratch_wait) unless it needs more than this many GB, which
+# no box (150 GB disk, 20 GB admission floor) could ever give one job.
+BOX_SCRATCH_MAX_GB = float(os.getenv("BOX_SCRATCH_MAX_GB", "100"))
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
     "CLOUDFLARE_MAX_INPUT_BYTES", str(4 * 1024 ** 3)))
 # Indexing uses standard-4 (20 GiB disk), not the interactive render tier.

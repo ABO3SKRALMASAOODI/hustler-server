@@ -454,13 +454,32 @@ def _escalate_oom_render(worker_db, job, err, decision, lease_claim):
     return bool(moved)
 
 
+def _box_turn_executor_dead(job, err, decision):
+    """A Studio turn whose render-box container is PROVEN gone.
+
+    The box reports a lost executor as ``outcome_unknown`` for a mutation
+    ("Box lost the executor during this agent_turn (Box container exited
+    ...)": the container exited, was OOM-killed or was fenced). Unlike an
+    unconfirmed remote, nothing can still be running it, so the turn takes
+    the same path as any infrastructure failure: requeued quietly when it
+    committed no write, continued from its last committed EDL when it did
+    (bounded death resume). Before (R1 chaos, 30 Oct 2026) the turn failed
+    with no reply at all: run_agent_job posts the apology, and it had died.
+    MCP mutations keep "outcome unknown": their caller re-reads the state.
+    """
+    return (job.get("type") == "agent_turn"
+            and decision.kind == "outcome_unknown"
+            and "box lost the executor" in str(err).lower())
+
+
 def _quiet_infra_retry(worker_db, job, err, decision, lease_claim):
     """Wait a little and hand an infrastructure failure back to the queue
     without spending its attempt. False when it is not one, or its window
     or retries are used up (the ordinary policy then decides). A Studio turn
     or MCP tool is requeued only when it committed no write; a Studio turn
     that did continues from its last committed EDL."""
-    if not failure_policy.is_infrastructure(err, decision):
+    if not (failure_policy.is_infrastructure(err, decision)
+            or _box_turn_executor_dead(job, err, decision)):
         return False
     if job.get("type") in failure_policy.MUTATING_RETRY_TYPES:
         if decision.kind in failure_policy.AMBIGUOUS_OWNERSHIP_KINDS:
@@ -531,6 +550,24 @@ INDEX_SERVICE_FAIL_NOTE = (
 INDEX_FILE_KINDS = frozenset({"invalid_media", "input_limit_exceeded"})
 # indexer's own duration refusal ("Video is 4.5h — the limit is 3h").
 _TOO_LONG = re.compile(r"Video is ([0-9.]+)h \S+ the limit is ([0-9.]+)h")
+# A link pasted as the main video that could not be imported
+# (indexer._import_link_source). The generic index note ("this version could
+# not be rendered as it stands ... try a different format like mp4") is
+# wrong for a link, and the bot-wall text itself is written for the agent
+# ("If this link came from find_song, fetch the NEXT candidate"). Every
+# YouTube link import from the render box meets the wall (R1 chaos, 30 Oct
+# 2026), so the customer gets the plain truth and the one step that works.
+_LINK_IMPORT = "couldn't import the video from that link"
+LINK_IMPORT_WALL_NOTE = (
+    "I couldn't import the video from that YouTube link: YouTube blocked our "
+    "server from downloading this upload (a check YouTube runs on some "
+    "videos; nothing is wrong with your link). Download the video and upload "
+    "the file here (mp4 or mov), and I'll start on it right away.")
+LINK_IMPORT_FAIL_NOTE = (
+    "I couldn't import a video from that link: it did not give us a video we "
+    "could download (it may be private, removed, region-locked or not a "
+    "video page). Paste a different link, or download the video and upload "
+    "the file here.")
 
 FAIL_NOTES = {
     # agent_turn posts its own apology inside run_agent_job — not repeated.
@@ -640,6 +677,9 @@ def _notify_failure(worker_db, job, err):
     elif job["type"] == "index" and decision.kind in {
             "executor_unavailable", "executor_capacity", "provider_budget_exhausted"}:
         note = INDEX_SERVICE_FAIL_NOTE
+    elif job["type"] == "index" and _LINK_IMPORT in str(err).lower():
+        note = (LINK_IMPORT_WALL_NOTE if "youtube blocked" in
+                str(err).lower() else LINK_IMPORT_FAIL_NOTE)
     elif job["type"] == "index" and _TOO_LONG.match(str(err)):
         # The one index refusal the customer CAN act on. "Try uploading it
         # again, or a different format" could never help a long recording.

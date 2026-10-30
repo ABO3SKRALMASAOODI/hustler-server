@@ -10,6 +10,8 @@ agent enough structured context to repair an EDL on a *new* version.
 from dataclasses import asdict, dataclass
 import re
 
+import psycopg2
+
 import config
 import db as dbx
 import error_text
@@ -43,6 +45,12 @@ _TRANSIENT = (
     "http 429", "http 500", "http 502", "http 503", "http 504",
     "status 429", "status 500", "status 502", "status 503", "status 504",
     "name resolution", "network is unreachable",
+    # The database link (psycopg2's words). R1 chaos, 30 Oct 2026: the box
+    # reaches Render's PostgreSQL across the Internet; a 60-s cut made an
+    # in-flight job's next write fail after Db.run's one reconnect.
+    "server closed the connection unexpectedly", "could not connect to server",
+    "ssl syscall error", "terminating connection due to administrator",
+    "connection already closed",
 )
 
 # Cloudflare could not provide a container before any /run (the runtime's
@@ -112,6 +120,13 @@ def classify(error, job_type=None):
             min(_base_attempts(job_type), 2), False)
     if "job was cancelled or handed to another worker" in text:
         return FailureDecision("lease_lost", False, 0, False)
+    if isinstance(error, (psycopg2.OperationalError,
+                          psycopg2.InterfaceError)):
+        # Our database link, not the customer's edit or file: a replay sees
+        # a different network. Classified before the text rules below so a
+        # driver message never reads as an ffmpeg or EDL verdict.
+        return FailureDecision("transient_infrastructure", True,
+                               min(_base_attempts(job_type), 2), False)
     if isinstance(error, WorkdirTooSmall):
         return FailureDecision("executor_capacity", False, 0, False)
     if isinstance(error, EDLValidationError):
@@ -285,6 +300,27 @@ INFRA_RETRY_WINDOW_S = 600
 # A Studio turn may have run for a while before its container went away.
 INFRA_RETRY_WINDOW_BY_TYPE = {"agent_turn": 1800}
 INFRA_RETRY_MAX = 3
+# The owner's render box (execution_provider "box"): a job is never failed
+# by our own infrastructure there (owner's rule: jobs wait, never fail). A
+# slot container lost after 20 minutes of a 40-minute index is the same
+# infrastructure failure as one lost after a minute, so box jobs are bounded
+# by the retry COUNT, not by their age (R1 chaos, 30 Oct 2026: a 30-min
+# index whose slot died at minute 11 spent its attempt; a second loss would
+# have failed the upload with "our processing service had a problem").
+BOX_INFRA_RETRY_WINDOW_S = 6 * 3600
+
+
+def _on_box(job):
+    return (str(job.get("_executor_target") or "") == "box"
+            or str((job.get("payload") or {}).get("execution_provider")
+                   or "").strip().lower() == "box")
+
+
+def infra_retry_window_s(job):
+    if _on_box(job):
+        return BOX_INFRA_RETRY_WINDOW_S
+    return INFRA_RETRY_WINDOW_BY_TYPE.get(str(job.get("type") or ""),
+                                          INFRA_RETRY_WINDOW_S)
 
 
 def is_infrastructure(error, decision=None):
@@ -311,8 +347,7 @@ def infra_retry_delay(job, now_ts, attempt):
         age = now_ts - created.timestamp()
     except AttributeError:
         return None
-    remaining = INFRA_RETRY_WINDOW_BY_TYPE.get(
-        str(job.get("type") or ""), INFRA_RETRY_WINDOW_S) - age
+    remaining = infra_retry_window_s(job) - age
     if remaining <= 0:
         return None
     return max(5.0, min(remaining, 10.0 * (2 ** attempt), 40.0))
