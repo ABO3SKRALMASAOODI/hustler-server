@@ -1266,6 +1266,34 @@ def run_shorts_plan(worker_db, job):
                 "directly.", {"kind": "direct_short"})
         return {"direct_edit": True, "billable": False}
 
+    # Shorts come with Pro and Max (owner, 30 Oct 2026; feature_gate.py): a
+    # Studio run (the board, the Studio agent) of a trial account or a new
+    # Plus subscriber answers with the upgrade card. MCP runs (source
+    # mcp_direct) are never gated, on any plan.
+    if str(payload.get("source") or "") != "mcp_direct":
+        import feature_gate
+        try:
+            why = worker_db.run(feature_gate.safe_reason, job.get("user_id"))
+        except Exception:  # noqa: BLE001 - any doubt: today's behaviour
+            why = None
+        if why:
+            if session_id:
+                worker_db.run(dbx.add_message, session_id, "assistant",
+                              feature_gate.message_text("shorts", why),
+                              feature_gate.message_meta("shorts", why, None))
+            try:
+                worker_db.run(dbx.record_client_event, job.get("user_id"),
+                              project_id, "feature_upgrade_shown",
+                              {"feature": "shorts", "reason": why,
+                               "surface": "shorts_plan"})
+            except Exception:
+                pass
+            print(f"[shorts] job {job_id}: refused — Shorts come with Pro "
+                  f"and Max ({why})", flush=True)
+            return {"gated": True, "billable": False,
+                    "outcome": feature_gate.OUTCOME,
+                    "feature_upgrade": "shorts", "clips": 0}
+
     # The gate, mirrored from the message path: cutting shorts runs the model
     # and the render farm, so it needs the same credit standing as a turn.
     try:
