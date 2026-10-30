@@ -37,9 +37,10 @@ Nobody should have to paste them into four dashboards, so:
 * Cached for TTL_S (5 minutes). A row that does not decrypt is retried
   after RETRY_S, and an authentication error from the next store (a rotated
   key) re-reads the row at most every RETRY_S. A failed database read keeps
-  the last good keys. Only a process's first read waits for the database;
-  later refreshes run in a background thread while calls use what is cached,
-  so a slow or unreachable database never stalls a storage call.
+  the last good keys. Nothing waits on the database for long: the first
+  read starts when storage is imported, a call waits for it at most
+  FIRST_WAIT_S (health routes answer within the box's 3 s probe), and later
+  refreshes run in a background thread while calls use what is cached.
 
 * Fail closed and quiet: no row, no sealing secret, a wrong key, a damaged
   or unknown row, or no AES implementation all leave the next store "not
@@ -65,6 +66,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Mapping
 
 KV_KEY = "storage_next_credentials"
@@ -80,6 +82,7 @@ FIELDS = REQUIRED + ("S3_NEXT_REGION", "S3_NEXT_PUBLIC_ENDPOINT",
                      "S3_NEXT_ADDRESSING_STYLE")
 TTL_S = 300.0
 RETRY_S = 30.0
+FIRST_WAIT_S = 1.0
 NONCE_BYTES = 12
 TAG_BYTES = 16
 # S3 error codes that mean "these keys are not (or no longer) accepted".
@@ -330,15 +333,30 @@ class Credentials:
         self._log = log or (lambda msg: print(f"[storage] {msg}",
                                               flush=True))
         self._impl = impl
+        self._first_wait = FIRST_WAIT_S
         self._lock = threading.Lock()
+        self._start_lock = threading.Lock()
         self._reset()
+        # A fork (a pre-forking server, multiprocessing) copies a lock that a
+        # refresh thread holds but not the thread: the child starts clean.
+        if hasattr(os, "register_at_fork"):
+            ref = weakref.ref(self)
+            os.register_at_fork(
+                after_in_child=lambda: ref() is not None and
+                ref()._after_fork())
+
+    def _after_fork(self):
+        self._lock = threading.Lock()
+        self._start_lock = threading.Lock()
+        if self._first is not None and not self._first.is_set():
+            self._first = None
 
     def _reset(self):
         self._values = None
         self._raw = None                # the row text last opened
         self._kek = None
         self._reason = "not_read"
-        self._tried = False
+        self._first = None              # Event: the first read finished
         self._due = 0.0
         self._read_at = None
         self._invalidated_at = None
@@ -346,13 +364,49 @@ class Credentials:
 
     def install(self, fetch):
         """Set where the row comes from (each process has its own database
-        access); forgets anything cached."""
+        access); forgets anything cached and starts the first read."""
         with self._lock:
             self._fetch = fetch
             self._reset()
+        self.prefetch()
 
     def _has_sealing_secret(self):
         return any(str(self._env.get(n) or "").strip() for n in KEKS)
+
+    def _needed(self):
+        return self._fetch is not None and self._has_sealing_secret() \
+            and not env_complete(self._env)
+
+    def prefetch(self):
+        """Start the first read in the background when this process will
+        need the row; never raises."""
+        try:
+            if self._background and self._needed():
+                self._start_first()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _start_first(self):
+        with self._start_lock:
+            if self._first is None:
+                event = threading.Event()
+                self._first = event
+                try:
+                    threading.Thread(target=self._run_first, args=(event,),
+                                     daemon=True,
+                                     name="storage-creds-first").start()
+                except Exception:
+                    self._first = None
+                    raise
+            return self._first
+
+    def _run_first(self, event):
+        try:
+            with self._lock:
+                if self._first is event:
+                    self._refresh()
+        finally:
+            event.set()
 
     def values(self):
         """The row's S3_NEXT_* values, or None. Never raises."""
@@ -364,11 +418,21 @@ class Credentials:
                 return None
             if self._clock() < self._due:
                 return self._values
-            if not self._tried:
-                with self._lock:                # the first read waits
-                    if not self._tried:
-                        self._refresh()
-            elif self._lock.acquire(blocking=False):
+            first = self._first
+            if first is None or not first.is_set():
+                if not self._background:
+                    with self._lock:
+                        if self._first is None or \
+                                not self._first.is_set():
+                            self._refresh()
+                            done = threading.Event()
+                            done.set()
+                            self._first = done
+                    return self._values
+                # The first read: wait for it, but never long.
+                self._start_first().wait(self._first_wait)
+                return self._values
+            if self._lock.acquire(blocking=False):
                 if self._clock() < self._due:
                     self._lock.release()
                 elif self._background:
@@ -392,7 +456,6 @@ class Credentials:
 
     def _refresh(self):
         now = self._clock()
-        self._tried = True
         try:
             raw = self._fetch()
         except Exception as exc:  # noqa: BLE001 — keep the last good keys

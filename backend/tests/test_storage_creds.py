@@ -313,6 +313,49 @@ def test_only_the_first_read_waits_for_the_database():
     assert c.values() == VALUES and rows.calls == 2
 
 
+def test_a_hung_database_never_holds_a_call_past_first_wait():
+    import threading
+    import time
+    gate = threading.Event()
+    rows = Rows(_sealed())
+
+    def fetch():
+        gate.wait(10)
+        return rows()
+    c = creds.Credentials(fetch=fetch, env={"S3_SECRET_ACCESS_KEY":
+                                            LEGACY_SECRET},
+                          log=lambda m: None)
+    c._first_wait = 0.2
+    started = time.monotonic()
+    assert c.values() is None                # not yet: the next store waits
+    assert c.values() is None
+    assert time.monotonic() - started < 1.5
+    gate.set()
+    c._first.wait(5)
+    assert c.values() == VALUES and rows.calls == 1
+
+
+def test_install_starts_the_first_read_and_a_fork_starts_clean():
+    import threading
+    rows = Rows(_sealed())
+    env = {"S3_SECRET_ACCESS_KEY": LEGACY_SECRET}
+    c = creds.Credentials(env=env, log=lambda m: None)
+    c.install(rows)
+    assert c._first is not None and c._first.wait(5)
+    assert rows.calls == 1 and c.values() == VALUES
+    # A process with the next store in its env never reads the row.
+    full = {**env, **VALUES}
+    rows2 = Rows(_sealed())
+    c2 = creds.Credentials(env=full, log=lambda m: None)
+    c2.install(rows2)
+    assert c2._first is None and rows2.calls == 0
+    # The child of a fork mid-refresh gets a free lock.
+    c._lock.acquire()
+    c._first = threading.Event()
+    c._after_fork()
+    assert c._lock.acquire(blocking=False) and c._first is None
+
+
 def test_an_auth_refusal_rereads_the_row_at_most_every_30_s():
     now = [0.0]
     rows = Rows(_sealed())
@@ -400,7 +443,11 @@ def row_only(monkeypatch):
     monkeypatch.setattr(storage, "_router", routing.Router(
         fetch=lambda: "copy", env=creds.ENV, log=lambda m: None))
     yield rows
-    creds.install(original)
+    # Restore the module's own source without starting a read (the env is
+    # still this test's until monkeypatch undoes it).
+    with creds.CREDENTIALS._lock:
+        creds.CREDENTIALS._fetch = original
+        creds.CREDENTIALS._reset()
 
 
 def test_backend_storage_uses_the_row(row_only):
