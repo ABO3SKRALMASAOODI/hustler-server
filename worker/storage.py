@@ -12,6 +12,7 @@ from boto3.s3.transfer import TransferConfig
 
 import config
 import io_telemetry
+import storage_creds as creds
 import storage_routing as routing
 
 
@@ -43,11 +44,11 @@ def client():
 # uses; in the default "legacy" mode, and in any process without S3_NEXT_*,
 # that is the legacy store alone and the router never reads the database.
 
-def _fetch_routing_row():
+def _fetch_kv(key):
     import db
     conn = db.connect()
     try:
-        return db.kv_get(conn, routing.KV_KEY)
+        return db.kv_get(conn, key)
     finally:
         try:
             conn.rollback()
@@ -56,7 +57,15 @@ def _fetch_routing_row():
             pass
 
 
-_router = routing.Router(fetch=_fetch_routing_row)
+def _fetch_routing_row():
+    return _fetch_kv(routing.KV_KEY)
+
+
+# The next store's keys: S3_NEXT_* from the environment, else the sealed
+# app_kv row (storage_creds.py). creds.ENV is os.environ with that row filled
+# in, so the router and every next-store client see one configuration.
+creds.install(lambda: _fetch_kv(creds.KV_KEY))
+_router = routing.Router(fetch=_fetch_routing_row, env=creds.ENV)
 _locator = routing.Locator()
 _next_lock = threading.Lock()
 _next_cached = {}
@@ -66,12 +75,23 @@ def router():
     return _router
 
 
+def next_config():
+    """The next store's configuration (env first, then the sealed row), or
+    None when it is not configured."""
+    return routing.store_config(routing.NEXT, creds.ENV)
+
+
 def routing_status():
-    return _router.status()
+    st = _router.status()
+    try:
+        st.update(creds.status())
+    except Exception:  # noqa: BLE001 — a health route never fails on this
+        pass
+    return st
 
 
 def _next_client():
-    cfg = routing.store_config(routing.NEXT)
+    cfg = next_config()
     if cfg is None:
         raise RuntimeError("the next store (S3_NEXT_*) is not configured")
     key = (cfg["endpoint"], cfg["access_key_id"],
@@ -87,6 +107,7 @@ def _next_client():
                 region_name=cfg["region"],
                 config=Config(**routing.botocore_config_kwargs(
                     cfg, retries={"max_attempts": 3})))
+            creds.watch_client(c)
             _next_cached.clear()
             _next_cached[key] = c
         return c
@@ -98,7 +119,7 @@ def store_client(name):
 
 def store_bucket(name):
     if name == routing.NEXT:
-        return routing.store_config(routing.NEXT)["bucket"]
+        return next_config()["bucket"]
     return config.S3_BUCKET
 
 

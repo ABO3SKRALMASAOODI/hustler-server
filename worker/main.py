@@ -1123,18 +1123,31 @@ def main():
     # R2, storage_routing.py). It has no health route, so it says so in
     # app_kv 'storage_probe_dispatcher'; storage_migrate.py's switch refuses
     # 'next' until this row reports the next store. Hosts only, never a key.
+    # Written at boot and again whenever the answer changes (checked every
+    # 5 minutes): the next store's keys may arrive later through the sealed
+    # app_kv row (storage_creds.py), with no restart.
     def _storage_probe():
-        try:
-            import json as _json
-            import storage as _storage
-            st = dict(_storage.routing_status())
-            st["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            st["code_version"] = version.code_version()
-            dbx.Db().run(dbx.kv_put, "storage_probe_dispatcher",
-                         _json.dumps(st, sort_keys=True))
-        except Exception as e:
-            print(f"[storage] probe row not written: {str(e)[:200]}",
-                  flush=True)
+        import json as _json
+        last, probe_db = None, None
+        while True:
+            try:
+                import storage as _storage
+                st = dict(_storage.routing_status())
+                seen = {k: st.get(k) for k in (
+                    "mode", "requested", "degraded", "legacy", "next",
+                    "next_host", "next_source")}
+                if seen != last:
+                    st["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime())
+                    st["code_version"] = version.code_version()
+                    probe_db = probe_db or dbx.Db()
+                    probe_db.run(dbx.kv_put, "storage_probe_dispatcher",
+                                 _json.dumps(st, sort_keys=True))
+                    last = seen
+            except Exception as e:
+                print(f"[storage] probe row not written: {str(e)[:200]}",
+                      flush=True)
+            time.sleep(300)
 
     threading.Thread(target=_storage_probe, daemon=True,
                      name="storage-probe").start()
