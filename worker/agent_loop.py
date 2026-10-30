@@ -2258,6 +2258,8 @@ def run_agent_job(worker_db, job):
                 and not (job.get("payload") or {}).get("death_resume"):
             attachment_note += _trial_head_start(ctx, worker_db, session_id,
                                                  user_message)
+        elif ctx.claude_trial is not None and continuation_state:
+            attachment_note += _tighten_continue_note(continuation_state)
         result = _run_loop(ctx, worker_db, job, session_id, user_message,
                            attachment_note,
                            _cont=(continuation_state or None))
@@ -2456,7 +2458,20 @@ def _tighten_checkpoint(ctx):
         return {}
     kept = getattr(ctx, "trial_kept_ids", None) or {}
     return {"trial_prep_intent": "tighten",
-            "trial_kept_ids": {k: sorted(v) for k, v in kept.items()}}
+            "trial_kept_ids": {k: sorted(v) for k, v in kept.items()},
+            # the prepared note (what the video now is: landscape 16:9,
+            # about N minutes; reply with that, never review notes) goes
+            # with it: a second slice without it called the cut "vertical"
+            # and listed open picture-QC items
+            "trial_prep_note": str(prep.get("note") or "")[:4000]}
+
+
+def _tighten_continue_note(cont):
+    """The long-form trial request's prepared note, again on its next slice
+    ("" for every other continuation)."""
+    if (cont or {}).get("trial_prep_intent") != "tighten":
+        return ""
+    return str((cont or {}).get("trial_prep_note") or "")
 
 
 def _restore_tighten(ctx, cont):
@@ -2465,7 +2480,8 @@ def _restore_tighten(ctx, cont):
             (cont or {}).get("trial_prep_intent") != "tighten":
         return False
     ctx.trial_prep = {"intent": "tighten", "whole": False, "applied": [],
-                      "s": 0.0, "restored": True}
+                      "s": 0.0, "restored": True,
+                      "note": str((cont or {}).get("trial_prep_note") or "")}
     ctx.trial_kept_ids = {k: set(v) for k, v in
                           ((cont or {}).get("trial_kept_ids") or {}).items()}
     ctx.second_opinions_off = True
