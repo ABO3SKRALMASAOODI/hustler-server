@@ -108,3 +108,21 @@ def test_the_repository_plan_turns_the_shared_cache_on(boxctl):
     assert shared.get("dir") == "/var/lib/valmera/cache"
     assert shared.get("memo") is True
     assert 4 <= float(shared.get("motion_max_gib")) <= 20
+
+
+def test_container_info_reads_a_cache_label_that_holds_separators(boxctl,
+                                                                  tmp_path):
+    # 30 Oct 01:07: the label "dir|12|1" was split as if "|" ended it, the
+    # port read "12|1|9101", every slot counted as drifted and the box
+    # rolled all 24 slots on every update run.
+    _set(boxctl, dir=str(tmp_path / "cache"))
+    label = boxctl.cache_label()
+    assert "|" in label
+    info = boxctl.parse_container_info(
+        f"valmera-exec:abc|true|2026-10-30T01:07:52Z|9109|{label}\n")
+    assert info["port"] == "9109" and info["cache"] == label
+    slot = {"name": "batch1", "lane": "batch", "port": 9109}
+    info["image"] = boxctl.slot_image(slot, "abc")
+    assert not boxctl._slot_drifted(slot, info, "abc")
+    plain = boxctl.parse_container_info("img|true|t|9101|\n")
+    assert plain["port"] == "9101" and plain["cache"] == ""
