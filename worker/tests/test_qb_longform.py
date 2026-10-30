@@ -258,8 +258,10 @@ def test_the_brief_follow_up_turn_is_off_unless_asked_and_a_brief_gets_a_tenth_m
     hints = {"seconds": 40}
     assert first_cut.tour_steps(hints, brief=True)[-1]["seconds"] == 44.0
     assert first_cut.tour_steps(hints)[-1]["seconds"] == 40.0          # a tile
-    assert first_cut.tour_steps({"seconds": 20}, brief=True)[-1]["seconds"] == 20.0
-    assert first_cut.tour_steps({"seconds": 60}, brief=True)[-1]["seconds"] == 60.0
+    # Q7: a short brief's range is an upper bound (a tenth less), and a
+    # 60 s brief may tour to 66 s (its pages' loading screens are cut)
+    assert first_cut.tour_steps({"seconds": 20}, brief=True)[-1]["seconds"] == 18.0
+    assert first_cut.tour_steps({"seconds": 60}, brief=True)[-1]["seconds"] == 66.0
 
 
 def test_the_program_ends_on_the_sentence_the_model_picks_among_the_last_few(
