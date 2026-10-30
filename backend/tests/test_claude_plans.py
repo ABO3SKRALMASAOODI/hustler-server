@@ -19,8 +19,12 @@ UTC = timezone.utc
 class Conn:
     """users + payments + admin_subscription_snapshots + app_kv by shape."""
 
-    def __init__(self, flag=None, payments=(), snapshots=(), sub_id="sub_1"):
+    def __init__(self, flag=None, payments=(), snapshots=(), sub_id="sub_1",
+                 credit_state=None, ledger=True):
         self.flag = flag
+        # the shared Claude credit line (claude_credit): open by default
+        self.credit_state = credit_state
+        self.ledger = ledger
         self.payments = list(payments)        # (user_id, when, amount, status)
         self.snapshots = list(snapshots)      # (subscription_id, started_at)
         self.sub_id = sub_id
@@ -45,7 +49,17 @@ class Conn:
         if q.startswith("SELECT to_regclass"):
             self._row = {"t": "x"}
         elif q.startswith("SELECT value FROM app_kv"):
-            self._row = {"value": self.flag} if self.flag else None
+            if params and params[0] == "claude_credit_state":
+                self._row = ({"value": self.credit_state}
+                             if self.credit_state else None)
+            elif params and params[0] == "claude_credit":
+                self._row = None
+            else:
+                self._row = {"value": self.flag} if self.flag else None
+        elif "information_schema.columns" in q:
+            self._row = {"x": 1} if self.ledger else None
+        elif "FROM trial_budget_days" in q:
+            self._row = {"usd": 0.0}
         elif q.startswith("SELECT 1 FROM payments"):
             uid, cutoff = params
             hit = [p for p in self.payments if p[0] == uid and p[2] > 0
@@ -105,6 +119,15 @@ def test_a_subscriber_who_joined_after_the_release_gets_the_offer():
     # never for MCP Connect, never for an account without a plan
     assert claude_plans.studio_included(conn, 8, "mcp_connect", True) is False
     assert claude_plans.applies(conn, 8, False) is False
+    # the Studio rides the trial's credit line: AUTO-OFF or no ledger -> MCP
+    # only again (the lane itself still "applies": Pro/Max keep the Studio)
+    off = Conn(flag=_on(), payments=after, credit_state=json.dumps(
+        {"state": "off", "reason": "budget"}))
+    assert claude_plans.applies(off, 8, True) is True
+    assert claude_plans.studio_included(off, 8, "plus_2026", True) is False
+    assert claude_plans.paused_for(off, 8, "plus_2026", True) is True
+    bare = Conn(flag=_on(), payments=after, ledger=False)
+    assert claude_plans.studio_included(bare, 8, "plus_2026", True) is False
 
 
 def test_flag_off_changes_nobody_except_internal_test_accounts():

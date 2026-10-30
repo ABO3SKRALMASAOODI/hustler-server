@@ -313,6 +313,28 @@ def billing_offer():
                 pass
 
 
+@paddle_bp.route('/billing/plan-includes', methods=['GET'])
+def billing_plan_includes():
+    """What the shopfront plans include RIGHT NOW, for the plan cards a
+    visitor sees without a Studio offer (/subscribe). Public, no account,
+    no prices (those stay in the catalogue): only the D1 keys of the Studio
+    offer, present while Plus includes the Studio for new subscribers (the
+    owner's switch on and the Claude credit line open), absent otherwise.
+    Cached 30 s (credits._studio_for_all_plans_on)."""
+    try:
+        from credits import subscribe_offer_body
+        body = subscribe_offer_body()
+    except Exception as e:
+        print(f"⚠️ plan-includes lookup failed: {e}")
+        body = {}
+    ids = body.get("studio_ai_plan_ids") or []
+    out = {"plus_studio": "plus_2026" in ids}
+    if ids:
+        out["studio_ai_plan_ids"] = ids
+        out["plan_notes"] = body.get("plan_notes") or {}
+    return jsonify(out), 200
+
+
 # Kept under its old name so an older cached frontend bundle keeps working; the
 # body is the new shape plus the one field that page read.
 @paddle_bp.route('/paddle/promo-status', methods=['GET'])
