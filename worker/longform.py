@@ -31,7 +31,7 @@ import config
 import llm
 
 MIN_SOURCE_S = 150.0        # a shorter source is the short-form chain's
-KEEP_MIN, KEEP_MAX = 0.30, 0.80     # share of the talk a scout pick may keep
+KEEP_MIN, KEEP_MAX = 0.20, 0.80     # share of the talk a scout pick may keep
 MIN_RUN_S = 8.0             # a kept stretch shorter than this is dropped
 MERGE_GAP_S = 1.2           # stretches this close are one
 CUT_IN_TARGET_S = 7.0       # a long program changes camera about this often
@@ -52,6 +52,47 @@ SYSTEM = (
     "opening title, 2 to 5 words faithful to what is said, with exactly "
     "ONE word wrapped in *stars*. Answer with JSON only: {{\"keep\": "
     "[[\"<first id>\", \"<last id>\"], ...], \"hook\": \"<2-5 words>\"}}.")
+# Q5 (30 Oct): the same call names what the long cut shows besides the
+# speaker (the references change the picture every 2-3 s: chapter cards,
+# key lines in big type, B-roll of the concrete things named)
+SYSTEM_Q5 = (
+    "You tighten a long talk by cutting its boring parts. Keep what a viewer "
+    "would choose to watch: the claims, stories, examples, answers and turns "
+    "of the argument. Cut greetings and housekeeping, repeated points, "
+    "tangents, setup that goes nowhere, chit-chat, false starts and the "
+    "speaker thinking aloud. Answer with the stretches to KEEP, in order: "
+    "each a run of whole sentences (copy the ids exactly as written) at "
+    "least 10 seconds long; together about {share} of the talk, never more "
+    "than that. When the talk is an interview, a kept stretch may open on "
+    "the interviewer's short question. "
+    "OPENING: the first kept sentence is a complete claim or a direct "
+    "question a stranger understands with no context (never one starting "
+    "with \"and\", \"so\", a filler or a subordinate clause like "
+    "\"Since...\", \"Because...\", \"If...\"). "
+    "ENDING: the LAST kept sentence lands the point: a conclusion, a result "
+    "or the lesson a viewer would quote; never a list item, an aside "
+    "(\"you know\", \"this and that\"), a question, a setup or a fragment. "
+    "CHAPTERS: for each kept stretch, in order, a 2 to 4 word chapter title "
+    "naming what it is about, faithful to it, exactly ONE word wrapped in "
+    "*stars* (\"Leaving *Stanford*\"). The hook is the opening title, 2 "
+    "to 5 words, a self-contained claim or topic faithful to what is said, "
+    "exactly ONE word in *stars*. "
+    "BEATS: up to 8 key phrases inside the kept stretches that a top editor "
+    "would slam on screen in huge type as they are said: each 1 to 3 "
+    "CONSECUTIVE words copied EXACTLY from one sentence (a number with its "
+    "noun, a named thing, the word the point turns on), spread through the "
+    "cut. BROLL: 8 to 14 moments inside the kept stretches where a top "
+    "editor would cut away to stock footage of a concrete thing, place, "
+    "person or action the speaker names (\"Stanford\", \"New York\", "
+    "\"a startup office\"), never an abstract idea: the sentence id, "
+    "\"word\": the 1-2 CONSECUTIVE words copied EXACTLY where the shot "
+    "starts, and \"query\": a literal 2-5 word stock-footage search of what "
+    "the shot SHOWS; spread them through the whole cut. "
+    "Answer with JSON only: {{\"keep\": [[\"<first id>\", \"<last id>\"], "
+    "...], \"chapters\": [\"<2-4 words>\", ...], \"hook\": \"<2-5 "
+    "words>\", \"beats\": [{{\"id\": \"<id>\", \"words\": \"<1-3 "
+    "words>\"}}], \"broll\": [{{\"id\": \"<id>\", \"word\": \"<1-2 "
+    "words>\", \"query\": \"<2-5 words>\"}}]}}.")
 
 
 CUT_IN_LEVELS = (0.26, 0.34)    # 1.3-1.35x: a medium shot, never a crop-in
@@ -86,8 +127,11 @@ def eligible(ctx):
 
 
 def share_for(duration_s):
-    """How much of the talk to keep: more of a short one."""
-    return 0.6 if duration_s < 300 else 0.5 if duration_s < 900 else 0.4
+    """How much of the talk to keep: more of a short one. Q5 (30 Oct): a
+    10-minute talk kept half (about 5-6 minutes) and the judges asked twice
+    to "actually cut the boring parts ... about 2-3 min"; about a third of
+    it lands near 3 minutes once the pauses are cut."""
+    return 0.55 if duration_s < 300 else 0.36 if duration_s < 900 else 0.3
 
 
 def rows_of(ctx):
@@ -158,10 +202,16 @@ def shape_runs(rows, runs, duration_s):
     sentence begins, the last ends on a sentence that ends; a stretch that is
     too short goes; stretches a breath apart join."""
     import first_cut
+    import talk_craft
     segs = []
-    for a, b in runs:
+    for n, (a, b) in enumerate(runs):
         first = first_cut.true_sentence_start(rows, rows[a])
         a = _opens_clean(rows, rows.index(first), b)
+        if n == 0:
+            # Q5: the program opens on a sentence that hooks on its own
+            # ("I think if you're like..." opened a long cut and its title)
+            a = rows.index(talk_craft.opening_row(rows, rows[a], rows[b],
+                                                  least_s=MIN_RUN_S))
         segs.append([float(rows[a]["t0"]), float(rows[b]["t1"]), b])
     segs = [s for s in segs if s[1] - s[0] >= MIN_RUN_S]
     if not segs:
@@ -175,7 +225,8 @@ def shape_runs(rows, runs, duration_s):
         # that stops mid-sentence still gets a full stop from the
         # transcript: "...and for society to, to benefit." at 10:00)
         return _ends_thought(rows[m]) and has_breath(rows, m) and \
-            float(rows[m]["t1"]) < float(duration_s) - END_GUARD_S
+            float(rows[m]["t1"]) < float(duration_s) - END_GUARD_S and \
+            _lands(rows, m)
     k = b
     while k + 1 < len(rows) and not lands(k) \
             and float(rows[k + 1]["t1"]) - float(rows[b]["t1"]) <= 20.0:
@@ -224,10 +275,21 @@ def end_candidates(rows, k, floor_t, most=4):
     out = [k]
     m = k - 1
     while m >= 0 and len(out) < most and float(rows[m]["t0"]) >= floor_t:
-        if _ends_thought(rows[m]) and has_breath(rows, m):
+        if _ends_thought(rows[m]) and has_breath(rows, m) and _lands(rows, m):
             out.append(m)
         m -= 1
+    if len(out) > 1 and not _lands(rows, k):
+        # Q5: the chosen last line trails ("...certainly one of them"): the
+        # candidates are the earlier lines that land
+        out.remove(k)
     return sorted(out)
+
+
+def _lands(rows, m):
+    """Q5: the sentence row ``m`` closes can end a talk (talk_craft.lands:
+    not a list item, an aside, a question or small talk)."""
+    import talk_craft
+    return talk_craft.lands(talk_craft.sentence_text(rows, m))
 
 
 def pick_ending(ctx, rows, segs, spend):
@@ -247,6 +309,10 @@ def pick_ending(ctx, rows, segs, spend):
     if not ks:
         return segs
     cands = end_candidates(rows, ks[0], last[0] + 6.0)
+    if len(cands) == 1 and cands[0] != ks[0] and has_breath(rows, cands[0]):
+        out = [list(x) for x in segs]
+        out[-1][1] = round(float(rows[cands[0]]["t1"]), 2)
+        return out
     if len(cands) < 2:
         return segs
     lines = []
@@ -293,6 +359,49 @@ def whole_take(rows, duration_s):
     return [[round(float(first["t0"]), 2), round(float(last["t1"]), 2)]]
 
 
+def extras(ctx, text, rows, segs):
+    """Q5: what the scout named besides the stretches, mapped onto the shaped
+    cut: {"titles": [(src_t0, title)] one per kept stretch, "beats":
+    [(src_t0, src_t1, text)], "broll": [(src_t0, src_t1, word, query)]},
+    each said word for word inside the kept stretches."""
+    import first_cut
+    import first_cut_visual as fcv
+    match = re.search(r"\{.*\}", text or "", re.S)
+    try:
+        pick = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        pick = {}
+    by_id = {}
+    for r in rows:
+        by_id[str(r["id"])] = r
+        digits = re.sub(r"\D", "", str(r["id"]))
+        if digits:
+            by_id.setdefault(digits, r)
+
+    def inside(t):
+        return any(a - 0.05 <= t <= b + 0.05 for a, b in segs)
+    titles = []
+    raw = [str(c) for c in pick.get("chapters") or [] if str(c).strip()]
+    pairs = []
+    for k, pair in enumerate(pick.get("keep") or []):
+        try:
+            r = by_id.get(str(pair[0])) or by_id.get(re.sub(r"\D", "", str(pair[0])))
+        except (IndexError, TypeError):
+            r = None
+        if r is not None and k < len(raw):
+            pairs.append((float(r["t0"]), raw[k]))
+    for a, b in segs:
+        own = [t for t0, t in pairs if a - 2.0 <= t0 < b]
+        titles.append((a, own[0] if own else None))
+    beats = [x for x in first_cut.beat_spans(ctx.index, by_id, pick.get("beats"))
+             if inside(x[0])]
+    broll = [x for x in fcv.broll_spans(ctx.index, by_id, pick.get("broll"))
+             if inside(x[0])]
+    print(f"[longform] extras: {sum(1 for _a, t in titles if t)} chapter titles, "
+          f"{len(beats)} beats, {len(broll)} b-roll moments", flush=True)
+    return {"titles": titles, "beats": beats, "broll": broll}
+
+
 def scout(ctx, rows, spend):
     """([[t0, t1]] source seconds, hook, how): one call over the whole
     transcript; the whole take trimmed without the lane or on a bad answer."""
@@ -310,11 +419,11 @@ def scout(ctx, rows, spend):
         try:
             share = share_for(duration)
             messages = [
-                {"role": "system", "content": SYSTEM.format(
+                {"role": "system", "content": SYSTEM_Q5.format(
                     share=f"{int(share * 100)}%")},
                 {"role": "user", "content":
                  "Transcript (sentence id, source seconds):\n" + "\n".join(lines)}]
-            resp = claude_lane.create(model, messages, max_tokens=4000,
+            resp = claude_lane.create(model, messages, max_tokens=8000,
                                       effort="low")
             text = resp.choices[0].message.content or ""
             spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0) or 0)
@@ -326,6 +435,7 @@ def scout(ctx, rows, spend):
             segs = pick_ending(ctx, rows, segs, spend)
             share_kept = kept_share(segs, duration)
             if segs and KEEP_MIN <= share_kept <= KEEP_MAX:
+                ctx.longform_extras = extras(ctx, text, rows, segs)
                 return segs, hook, "scout"
             print(f"[longform] scout pick unusable (kept {share_kept:.0%}); "
                   "keeping the whole take", flush=True)
@@ -349,6 +459,7 @@ def tighten(ctx, worker_db, steps):
     if trial is not None and not getattr(ctx, "first_cut_model", None):
         ctx.first_cut_model = trial.model
     spend = {"usd": 0.0}
+    ctx.longform_extras = None
     segs, hook, how = scout(ctx, rows, spend)
     if not segs:
         return None
@@ -367,32 +478,71 @@ def tighten(ctx, worker_db, steps):
     steps.run("remove_filler_words", {})
     # a word said twice in a row ("for society to, to benefit"): cut once
     first_cut.drop_stutters(ctx, _Run(steps), started)
+    import talk_craft
+    talk_craft.cut_phrase_repeats(ctx, steps.rows, started, _runner(steps))
+    # Q5: the pauses the viewer hears (judges: "8 inner silences over
+    # 0.4 s, the longest 0.85 s"; whisper's words abut across them)
     first_cut.shape_ends(ctx, _Run(steps), started)
+    talk_craft.cut_audio_pauses(ctx, steps.rows, started, _runner(steps))
     steps.run("set_master_loudness", {"enabled": True})
     keep = first_cut._keep(ctx) or []
-    # the opening line as the title (the spoken words, never invented)
+    # the opening line as the title (the spoken words, never invented); Q5:
+    # the scout's own title when the line heard is not a clause on its own
     hook_end = 0.0
+    ex = getattr(ctx, "longform_extras", None) or {}
+    # the fallback title names what the OPENING stretch is about (its
+    # chapter title), not the whole talk: "BETTING ON SCALE EARLY" over the
+    # interviewer's question about investment banking read as a mismatch
+    first_title = next((t for _a, t in (ex.get("titles") or [])[:1] if t), None)
     opening = first_cut.spoken_opening(ctx)
+    others = [first_cut.clean_hook(t, ctx.index)
+              for _a, t in (ex.get("titles") or []) if t]
+    opening = talk_craft.title_choice(
+        opening, getattr(ctx, "first_cut_opening_clause", False),
+        first_cut.clean_hook(first_title, ctx.index) if first_title else None,
+        more=others + ([first_cut.clean_hook(hook, ctx.index)] if hook else []))
     if opening:
         text, end = opening
         hook_end = round(min(max(end + 0.15, first_cut.HOOK_MIN_S),
                              first_cut.HOOK_MAX_S), 2)
         if steps.run("add_motion_graphic", {
                 "template": "hook_title", "start": 0.0, "end": hook_end,
-                "params": first_cut.hook_params(text, None, False),
+                "params": dict(first_cut.hook_params(text, None, False),
+                               entrance="cut"),
                 "mute_captions": True,
                 "purpose": "the opening line as a title"}):
             steps.applied.append("the opening line as a title")
+    # Q5: the picture changes every 2-3 s, as in the references: B-roll of
+    # the concrete things named, a chapter card where each kept part begins,
+    # key lines in big type, and a closer camera on the speaker between them
+    events_from = max(hook_end, first_cut.HOOK_S)
+    cutaways = []
+    if ex.get("broll"):
+        cutaways = fcv.place_broll(ctx, steps.rows, started, _runner(steps),
+                                   ex["broll"], events_from, spend)
+        if cutaways:
+            steps.applied.append("b-roll of what is said")
+    titles = [(a, t) for a, t in (ex.get("titles") or [])[1:] if t]
+    chapters = talk_craft.chapter_cards(
+        ctx, steps.rows, started, _runner(steps), [a for a, _t in titles],
+        [t for _a, t in titles], events_from, avoid=cutaways)
+    if chapters:
+        steps.applied.append("a chapter card where each part begins")
+    ctx.first_cut_cards = []
+    if ex.get("beats") and first_cut.beat_slams(
+            ctx, _Run(steps), time.monotonic(), ex["beats"], events_from,
+            None, avoid=sorted(cutaways + chapters)):
+        steps.applied.append("key lines in big type")
+        talk_craft.clear_slams(ctx, steps.rows, started, _runner(steps))
+    busy = sorted(cutaways + chapters + list(ctx.first_cut_cards or []))
+    faces = first_cut._faces(ctx.index)
+    if faces and faces["share"] >= 0.3:
+        if talk_craft.landscape_cut_ins(ctx, steps.rows, started,
+                                        _runner(steps), busy,
+                                        max(hook_end, 1.0)):
+            steps.applied.append("a closer camera every few seconds")
     if len(keep) > 1:
         steps.run("conceal_jump_cuts", {})
-    faces = first_cut._faces(ctx.index)
-    if faces and faces["share"] >= 0.5:
-        n = fcv.cut_ins(ctx, steps.rows, started, _runner(steps), [],
-                        face_centre(ctx.index), max(hook_end, 1.0),
-                        levels=CUT_IN_LEVELS, target=CUT_IN_TARGET_S,
-                        hi=CUT_IN_MAX_S)
-        if n:
-            steps.applied.append("a closer camera now and then")
     style, words_per = fcv.caption_style(
         {"preset": "reels", "motion_look": "editorial",
          "size_scale": first_cut.CAPTION_SCALE}, talking=True, screen=False,

@@ -2258,6 +2258,8 @@ def run_agent_job(worker_db, job):
                 and not (job.get("payload") or {}).get("death_resume"):
             attachment_note += _trial_head_start(ctx, worker_db, session_id,
                                                  user_message)
+        elif ctx.claude_trial is not None and continuation_state:
+            attachment_note += _tighten_continue_note(continuation_state)
         result = _run_loop(ctx, worker_db, job, session_id, user_message,
                            attachment_note,
                            _cont=(continuation_state or None))
@@ -2405,6 +2407,9 @@ def _prepared_trial(ctx):
     return _trial_lane(ctx) and bool(getattr(ctx, "trial_prep", None))
 
 
+_KEPT_CUT_TOOLS = frozenset((
+    "cut_range", "cut_output_range", "keep_segments", "restore_range",
+    "cut_silences", "remove_filler_words", "reset_edit"))
 _KEPT_CRAFT_TOOLS = {
     "set_motion_graphic": "motion", "remove_motion_graphic": "motion",
     "remove_zoom": "zoom", "remove_zoom_path": "zoom",
@@ -2421,6 +2426,16 @@ def _kept_craft_refusal(ctx, name, args):
     phonehook 7.25 -> 5.75; a slam moved behind the speaker left a blank
     card, talk10best 6.5 -> 5.0; punch-ins removed as 'pops'). Only the
     trial lane after trial_turn.prepare: every other turn is unchanged."""
+    if name in _KEPT_CUT_TOOLS and _prepared_trial(ctx) and \
+            str((getattr(ctx, "trial_prep", None) or {}).get("intent")) == "tighten":
+        # Q5 (30 Oct): the long-form cut is the deliverable and final on its
+        # turn; the model trimmed "a repeated phrase near 297 s" after the
+        # chain and re-rendered a 3-minute program (11 minutes, a second
+        # 720p render, an aside in the reply)
+        return ("REJECTED: KEPT — the long-form cut is final on this request "
+                "(the boring parts, pauses and fillers are already cut). Do "
+                "not trim or restore anything, and do not mention this: reply "
+                "with what the video is.")
     kind = _KEPT_CRAFT_TOOLS.get(name)
     if kind is None or not _prepared_trial(ctx):
         return None
@@ -2431,6 +2446,50 @@ def _kept_craft_refusal(ctx, name, args):
                 f"({kind} {target}); on this request it stays exactly as it "
                 "is. Do not retry it; reply with what the video is.")
     return None
+
+
+def _tighten_checkpoint(ctx):
+    """Q5 (30 Oct): a long-form trial request's "the cut is final" state,
+    carried to the request's next slice ({} on every other turn). The guard
+    held on the first slice, and the second slice (no head start) trimmed
+    and re-rendered the 3-minute program: 864 s, a 480p draft delivered."""
+    prep = getattr(ctx, "trial_prep", None) or {}
+    if not _trial_lane(ctx) or prep.get("intent") != "tighten":
+        return {}
+    kept = getattr(ctx, "trial_kept_ids", None) or {}
+    return {"trial_prep_intent": "tighten",
+            "trial_kept_ids": {k: sorted(v) for k, v in kept.items()},
+            # the prepared note (what the video now is: landscape 16:9,
+            # about N minutes; reply with that, never review notes) goes
+            # with it: a second slice without it called the cut "vertical"
+            # and listed open picture-QC items
+            "trial_prep_note": str(prep.get("note") or "")[:4000]}
+
+
+def _tighten_continue_note(cont):
+    """The long-form trial request's prepared note, again on its next slice
+    ("" for every other continuation)."""
+    if (cont or {}).get("trial_prep_intent") != "tighten":
+        return ""
+    return str((cont or {}).get("trial_prep_note") or "")
+
+
+def _restore_tighten(ctx, cont):
+    """The next slice of a long-form trial request keeps its cut final."""
+    if not _trial_lane(ctx) or getattr(ctx, "trial_prep", None) or \
+            (cont or {}).get("trial_prep_intent") != "tighten":
+        return False
+    ctx.trial_prep = {"intent": "tighten", "whole": False, "applied": [],
+                      "s": 0.0, "restored": True,
+                      "note": str((cont or {}).get("trial_prep_note") or "")}
+    ctx.trial_kept_ids = {k: set(v) for k, v in
+                          ((cont or {}).get("trial_kept_ids") or {}).items()}
+    ctx.second_opinions_off = True
+    # its renders stay the 720p approval render the user watches
+    # (longform.tighten sets it on the first slice; a later slice delivered
+    # a 480p draft)
+    ctx.approval_previews = True
+    return True
 
 
 def _trial_preview_cap(ctx, cap, operator_run=False):
@@ -4974,6 +5033,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         ctx.trial_previews = max(0, int(_cont.get("trial_previews") or 0))
     except (TypeError, ValueError):
         ctx.trial_previews = 0
+    _restore_tighten(ctx, _cont)
     def _durable_continuation(reason, blocker_fingerprint=None,
                               blocker_repeats=0, progress_frontier=None,
                               verification_slices=None, stagnant=None):
@@ -5016,6 +5076,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "preview_repair_pushed": preview_repair_pushed,
             "quality_repair_versions": sorted(quality_repair_versions),
             "trial_previews": int(getattr(ctx, "trial_previews", 0) or 0),
+            **_tighten_checkpoint(ctx),
             "plan_write_pushed": plan_write_pushed,
             "plan_close_pushed": plan_close_pushed,
             "first_write_pushed": first_write_pushed,

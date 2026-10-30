@@ -226,14 +226,38 @@ TRIM_SYSTEM = (
     "\"beats\": [{\"id\": \"<sentence id>\", \"words\": \"<1-3 words>\"}]}.")
 
 
-def _with_broll(system):
+# Q5: the TRIM prompt's start rule for engine accounts (_with_broll)
+_TRIM_FIRST = "otherwise keep the very first sentence."
+_TRIM_FIRST_Q5 = ("otherwise keep the first sentence that works as a hook on "
+                  "its own (see OPENING below).")
+
+
+def _with_broll(system, talk=False):
     """Q1 (30 Oct): the same scout call also names the B-roll moments
     (first_cut_visual.BROLL_RULE) for trial accounts and new subscribers;
     a grandfathered payer's scout prompt is unchanged."""
     import first_cut_visual as fcv
+    import talk_craft
     head, sep, tail = system.partition("Answer with JSON only")
     tail = tail.replace("}]}.", "}]" + fcv.BROLL_JSON + "}.", 1)
-    return head + fcv.OPENING_RULE + fcv.ENDING_RULE + fcv.BROLL_RULE + sep + tail
+    # Q5 (30 Oct): the opening is a hook on its own and the ending is the
+    # payoff (judges, every talking head: "Since we're a trillionth...",
+    # "ends on 'certainly one of them'"); the trim no longer keeps the very
+    # first sentence by default
+    if not talk:
+        return head + fcv.OPENING_RULE + fcv.ENDING_RULE + fcv.BROLL_RULE + sep + tail
+    head = head.replace(_TRIM_FIRST, _TRIM_FIRST_Q5)
+    return (head + fcv.OPENING_RULE + talk_craft.OPENING_RULE
+            + fcv.ENDING_RULE + talk_craft.ENDING_RULE + talk_craft.HOOK_RULE
+            + fcv.BROLL_RULE + talk_craft.BROLL_DENSITY_RULE + sep + tail)
+
+
+def _talk_source(ctx):
+    """Q5: a talking head (speech with a face in most samples): the
+    opening/ending guards and their prompt rules apply."""
+    f = _faces(ctx.index)
+    return bool(getattr(ctx, "first_cut_q1", False) and _speech(ctx.index)
+                and f and f["share"] >= 0.5)
 
 
 def _sentences(index, limit_s):
@@ -322,8 +346,10 @@ def scout_range(ctx, worker_db, spend):
             lines.append(line)
         try:
             q1 = bool(getattr(ctx, "first_cut_q1", False))
+            talk = _talk_source(ctx)
             messages = [{"role": "system", "content":
-                         _with_broll(SCOUT_SYSTEM) if q1 else SCOUT_SYSTEM},
+                         _with_broll(SCOUT_SYSTEM, talk) if q1
+                         else SCOUT_SYSTEM},
                         {"role": "user", "content":
                          "Transcript (sentence id, source seconds):\n"
                          + "\n".join(lines)}]
@@ -347,6 +373,11 @@ def scout_range(ctx, worker_db, spend):
                 if last is None or float(last["t1"]) - float(
                         whole_start["t0"]) <= 75.0:
                     first = whole_start
+            if first and last and talk and float(last["t1"]) > float(first["t0"]):
+                # Q5: open on a sentence that hooks on its own, end on one
+                # that lands (the scout's own pick, then these guards)
+                import talk_craft
+                first = talk_craft.opening_row(rows, first, last)
             if first and last and float(last["t1"]) > float(first["t0"]):
                 start, end = _fit_span(rows, first, last, complete=q1)
                 if q1 and 12.0 <= end - start <= 75.0:
@@ -360,6 +391,8 @@ def scout_range(ctx, worker_db, spend):
                                                   spend)
                     if closed[-1][1] - start >= 12.0:
                         end = closed[-1][1]
+                    if talk:
+                        end = _landing_end(ctx, rows, start, end)
                 if 12.0 <= end - start <= 75.0:
                     ctx.first_cut_hook = clean_hook(pick.get("hook"),
                                                     ctx.index)
@@ -554,7 +587,8 @@ def trim_range(ctx, worker_db, spend):
             q1 = bool(getattr(ctx, "first_cut_q1", False))
             resp = claude_lane.create(
                 model, [{"role": "system", "content":
-                         _with_broll(TRIM_SYSTEM) if q1 else TRIM_SYSTEM},
+                         _with_broll(TRIM_SYSTEM, _talk_source(ctx)) if q1
+                         else TRIM_SYSTEM},
                         {"role": "user", "content":
                          "Transcript (sentence id, source seconds):\n"
                          + "\n".join(lines)}],
@@ -591,6 +625,7 @@ def trim_range(ctx, worker_db, spend):
         except Exception as exc:  # noqa: BLE001 — the rules are the fallback
             print(f"[first_cut] trim scout failed: {type(exc).__name__}: "
                   f"{str(exc)[:200]}", flush=True)
+    model_last = last
     end_row = _complete_end(rows, first, last)
     if float(end_row["t1"]) - float(first["t0"]) >= min(8.0, 0.5 * duration):
         last = end_row
@@ -599,9 +634,41 @@ def trim_range(ctx, worker_db, spend):
             and not _screen_like(ctx.index):
         import first_cut_visual as fcv
         last = fcv.conclusion_end(rows, first, last, _ends_thought)
+    if _talk_source(ctx):
+        # Q5: a talking head opens on a sentence that hooks on its own and
+        # ends on the payoff (judges: "Since we're a trillionth...", "ends
+        # on 'certainly one of them'")
+        import talk_craft
+        least = min(12.0, 0.5 * duration)
+        first = talk_craft.opening_row(rows, first, model_last, least_s=least)
+        # judged on whole SENTENCES from the pick's own end: _complete_end
+        # reads rows, and dropped "...solve everything you can possibly /
+        # think of." because its last row has two words
+        end_s = _landing_end(ctx, rows, float(first["t0"]),
+                             float(model_last["t1"]), least_s=least)
+        last = next((r for r in rows if abs(float(r["t1"]) - end_s) < 1e-3),
+                    last)
     ctx.first_cut_hook = hook or _opening_hook(
         [r for r in rows if float(r["t0"]) >= float(first["t0"]) - 1e-3])
     return float(first["t0"]), float(last["t1"]), how
+
+
+def _landing_end(ctx, rows, start, end, least_s=12.0):
+    """Q5: the span's end walked back to the latest sentence that lands (a
+    payoff, never a list item, an aside, a question or small talk) and is
+    followed by a breath, keeping ``least_s``; ``end`` when none."""
+    import talk_craft
+    ks = [m for m, r in enumerate(rows) if abs(float(r["t1"]) - end) < 0.05]
+    firsts = [m for m, r in enumerate(rows) if abs(float(r["t0"]) - start) < 0.05]
+    if not ks or not firsts:
+        return end
+    row = talk_craft.closing_row(
+        rows, rows[firsts[0]], rows[ks[0]], least_s=least_s,
+        breath=lambda m: talk_craft.breath_after(ctx.index, rows, m))
+    if row is not rows[ks[0]]:
+        print(f"[first_cut] ending moved to the payoff: {row.get('id')} "
+              f"{str(row.get('text'))[:80]!r}", flush=True)
+    return float(row["t1"])
 
 
 def _keep(ctx):
@@ -931,9 +998,17 @@ def spoken_opening(ctx, most_s=2.6, most_words=7):
     except Exception:
         return None
     picked = []
+    # Q5: the opening is cut to its first SOUND (talk_craft), which can sit
+    # after whisper's early start time for the first word ("Deep" 326.28 s,
+    # heard from 326.58 s): a word whose end is in the program is heard
+    onset_cut = bool(getattr(ctx, "first_cut_q1", False)
+                     or getattr(ctx, "_q5_audio", None) is not None)
     for w in words:
         a = tl.src_to_out(_wt(w, "t0"))
         b = tl.src_to_out(_wt(w, "t1"))
+        if a is None and b is not None and onset_cut and not picked \
+                and b <= 1.0:
+            a = 0.0
         if a is None or b is None:
             continue
         if a >= most_s + 0.8 or len(picked) >= 10:
@@ -963,6 +1038,9 @@ def spoken_opening(ctx, most_s=2.6, most_words=7):
         picked = [p for p in picked if p[1] < most_s][:6]
         while len(picked) > 2 and _norm(picked[-1][0]) in _TAIL_STOP:
             picked.pop()
+    # Q5: whether the title is a whole clause (it ends on the speaker's own
+    # punctuation) or the first words of a longer one, cut at ~2.6 s
+    ctx.first_cut_opening_clause = clause is not None
     text = " ".join(p[0].strip(",;:") for p in picked)
     text = clean_hook(text, most_words=9, most_chars=64) or None
     if not text:
@@ -1616,7 +1694,17 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("filler words removed")
         if q1 and _ok(drop_stutters(ctx, steps, started)):
             applied.append("stutters cut")
+        if _talk_source(ctx):
+            import talk_craft
+            talk_craft.cut_phrase_repeats(ctx, steps, started, _run)
         shape_ends(ctx, steps, started)
+        if _talk_source(ctx):
+            # Q5: the pauses the viewer HEARS (whisper's words abut, so the
+            # speech gaps above miss them: judges, "five pauses over 0.4 s,
+            # the longest 0.53 s"), the opening on its first sound (not
+            # whisper's early or late word start) and the tail bounded
+            import talk_craft
+            talk_craft.cut_audio_pauses(ctx, steps, started, _run)
     faces = _faces(ctx.index)
     talking = bool(speech and faces and faces["share"] >= 0.5)
     if q1 and speech and not talking:
@@ -1696,12 +1784,21 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     # rule keeps it a self-contained claim.)
     if talking:
         opening = spoken_opening(ctx)
+        if q1 and _talk_source(ctx):
+            import talk_craft
+            opening = talk_craft.title_choice(
+                opening, getattr(ctx, "first_cut_opening_clause", False),
+                getattr(ctx, "first_cut_hook", None))
         hook, hook_end = opening if opening else (None, HOOK_S)
         # the references hold the opening title 2.5-3.5 s (C2: it left at
         # 1.6 s on a fast speaker); it owns its zone, the captions wait
         hook_end = round(min(max(hook_end + 0.15, HOOK_MIN_S), HOOK_MAX_S), 2)
     if hook:
         params = hook_params(hook, hook_y, vertical_out)
+        if _talk_source(ctx):
+            # Q5: whole on frame 0 (judges, phone and phonehook: "the hook
+            # title on screen at 0.0 s instead of about 0.3 s")
+            params["entrance"] = "cut"
         if q1 and screen_kept:
             # judges: the title on the busy docs page was low-contrast
             params["scrim"] = 0.85
@@ -1730,8 +1827,23 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         import first_cut_visual as fcv
         moments = getattr(ctx, "first_cut_broll", None) or []
         if moments:
+            clear_from = None
+            if _talk_source(ctx):
+                import talk_craft
+                clear_from = talk_craft.last_sentence_start(ctx)
+                try:
+                    # a long closing sentence keeps only its last ~4 s on
+                    # the face (talk10best's 13 s closing sentence left the
+                    # second half of the cut with no cutaway at all)
+                    import schemas
+                    prog = float(schemas.program_duration(ctx.latest_edl()["json"]))
+                    if clear_from is not None:
+                        clear_from = max(clear_from, prog - talk_craft.PAYOFF_FACE_S)
+                except Exception:
+                    pass
             cutaways = fcv.place_broll(ctx, steps, started, _run, moments,
-                                       max(hook_end, HOOK_S), spend)
+                                       max(hook_end, HOOK_S), spend,
+                                       clear_from=clear_from)
             if cutaways:
                 applied.append("b-roll of what is said")
     if q1 and screen_kept:
@@ -1739,7 +1851,14 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         if _ok(fcv.screen_follow(ctx, steps, started, _run, spend,
                                  max(hook_end, 1.5))):
             applied.append("a camera that follows what is discussed")
-    if speech and not screen_kept:
+    burned = False
+    if _talk_source(ctx):
+        import talk_craft
+        burned = talk_craft.burned_captions(ctx.index)
+        if burned:
+            print("[first_cut] the source carries its own captions: no "
+                  "captions or slams added on top", flush=True)
+    if speech and not screen_kept and not burned:
         beats = list(getattr(ctx, "first_cut_beats", None) or [])
         if len(beats) < 3:
             # the scout's beats first, the spoken figures after them
@@ -1748,6 +1867,12 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         if beat_slams(ctx, steps, started, beats, hook_end, y,
                       avoid=cutaways):
             applied.append("key lines in big type")
+            if _talk_source(ctx) and vertical_out:
+                # Q5: a slam's band clears the chin over its whole window
+                # (judges and picture QC: a slam over the mouth, talk10best
+                # 33.2-34.1 s), measured on the exact frames
+                import talk_craft
+                talk_craft.clear_slams(ctx, steps, started, _run)
     if q1 and talking:
         import first_cut_visual as fcv
         busy = sorted(cutaways + list(ctx.first_cut_cards or []))
@@ -1768,7 +1893,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     if q1 and bands:
         import first_cut_visual as fcv
         fcv.refresh_band_crop(ctx, steps, started, _run)
-    if speech:
+    if speech and not burned:
         style = {"preset": "reels", "motion_look": "editorial",
                  "size_scale": CAPTION_SCALE}
         words_per = CAPTION_WORDS

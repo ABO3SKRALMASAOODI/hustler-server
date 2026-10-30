@@ -532,3 +532,47 @@ def test_the_talking_head_lift_is_off_by_default(fake_tools, monkeypatch):
     assert not [n for n, _a in ctx.calls if n in ("add_zoom",
                                                   "add_motion_graphic")]
     assert "already answers this request" in prep["note"]
+
+
+@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
+def test_the_long_form_cut_is_final_only_on_its_own_trial_turn(kind):
+    """Q5 (30 Oct): after the long-form chain the model trimmed a phrase and
+    re-rendered a 3-minute program (11 minutes); the cut is final on that
+    turn. A generic prepared turn, and every other lane, can still cut."""
+    ctx = _lane_ctx(kind)
+    ctx.trial_prep = {"intent": "tighten"}
+    out = agent_loop._kept_craft_refusal(ctx, "cut_range", {"start": 1, "end": 2})
+    if kind == "trial":
+        assert out and out.startswith("REJECTED: KEPT")
+        assert agent_loop._kept_craft_refusal(ctx, "keep_segments", {}) is not None
+        ctx.trial_prep = {"intent": "generic"}
+        assert agent_loop._kept_craft_refusal(ctx, "cut_range", {}) is None
+    else:
+        assert out is None
+
+
+@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
+def test_the_long_form_cut_stays_final_on_the_requests_next_slice(kind):
+    """Q5: the second slice of a long-form trial request (no head start)
+    trimmed and re-rendered the program; the state now travels with it."""
+    ctx = _lane_ctx(kind)
+    ctx.trial_prep = {"intent": "tighten",
+                      "note": "\n[system: TRIAL TURN PREPARED. landscape 16:9]"}
+    ctx.trial_kept_ids = {"motion": {"mg1"}}
+    cp = agent_loop._tighten_checkpoint(ctx)
+    nxt = _lane_ctx(kind)
+    restored = agent_loop._restore_tighten(nxt, cp)
+    if kind == "trial":
+        assert cp["trial_prep_intent"] == "tighten" and restored
+        # the next slice reads the same note: what the video now is
+        assert "landscape 16:9" in agent_loop._tighten_continue_note(cp)
+        assert agent_loop._kept_craft_refusal(nxt, "cut_range", {}).startswith("REJECTED: KEPT")
+        assert agent_loop._kept_craft_refusal(nxt, "set_motion_graphic", {"id": "mg1"})
+    else:
+        assert cp == {} and not restored
+        assert agent_loop._kept_craft_refusal(nxt, "cut_range", {}) is None
+        assert agent_loop._tighten_continue_note(cp) == ""
+    # a generic prepared turn carries nothing
+    g = _lane_ctx(kind)
+    g.trial_prep = {"intent": "generic"}
+    assert agent_loop._tighten_checkpoint(g) == {}

@@ -11,7 +11,7 @@
   "y": {"type": "float", "min": 0.08, "max": 0.92, "default": 0.42, "hint": "vertical centre as frame fraction"},
   "size": {"type": "float", "min": 0.5, "max": 1.6, "default": 1.0},
   "align": {"type": "enum", "values": ["center", "left"], "default": "center"},
-  "entrance": {"type": "enum", "values": ["spring", "slam", "rise", "blur", "mask", "pop"], "default": "spring", "hint": "pop = whole by 0.25 s (a fast fade-scale, tiny stagger)"},
+  "entrance": {"type": "enum", "values": ["spring", "slam", "rise", "blur", "mask", "pop", "cut"], "default": "spring", "hint": "pop = whole by 0.25 s (a fast fade-scale, tiny stagger); cut = whole on its first frame (a cover-style opening)"},
   "exit": {"type": "enum", "values": ["blur", "drop", "none", "cut"], "default": "blur"},
   "shadow": {"type": "float", "min": 0, "max": 1, "default": 0.55},
   "scrim": {"type": "float", "min": 0, "max": 1, "default": 0.5, "hint": "soft dark glow behind the block so it reads over bright footage; 0 = none"}
@@ -179,6 +179,9 @@
       } else if (P.entrance === 'rise') {
         const p = MG.ease.outExpo(MG.range(t, t0, 0.6));
         s = { y: (1 - p) * 90, opacity: MG.range(t, t0, 0.25) };
+      } else if (P.entrance === 'cut') {
+        // whole on the first frame: the title IS the opening frame
+        s = { opacity: 1 };
       } else if (P.entrance === 'pop') {
         // whole by ~0.25 s: the references' title is read by 0.3 s
         const p = MG.ease.outCubic(MG.range(t, t0, 0.14));
