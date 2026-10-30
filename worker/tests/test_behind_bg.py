@@ -1064,14 +1064,16 @@ def test_rub_a_relative_title_size_ask_reaches_the_edit(shot, workdir, tool_env)
         ctx, "hook_title", 0.0, 2.5, params={"text": "Video games make *surgeons* better",
                                              "size": 1.3}, sfx=False).startswith("EDL v")
     same = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.3})
-    assert same.startswith("NO CHANGE") and "size is 1.3" in same and "range 0.5-1.6" in same, same
+    assert same.startswith("NO CHANGE") and "size is 1.3" in same and "range 0.5-2" in same, same
     res = motion_tools.set_motion_graphic(ctx, "mg1", template="hook_title", params={"size": 1.45})
     assert res.startswith("EDL v"), res
     p = ctx._edl["motion"][0]["params"]
     assert p["size"] == 1.45 and p["text"] == "Video games make *surgeons* better"
-    assert motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.6}).startswith("EDL v")
-    top = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 2.0})
+    assert motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 2.0}).startswith("EDL v")
+    top = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 2.4})
     assert top.startswith("NO CHANGE") and "already the largest" in top, top
+    # WAVE_A: the first size change recorded the size the lines were laid out at
+    assert ctx._edl["motion"][0]["params"]["base_size"] == 1.3
 
 
 @needs_ffmpeg
@@ -1108,6 +1110,29 @@ def test_rub_scale_and_size_words_are_relative_to_the_current_size(shot, workdir
     assert ctx._edl["motion"][0]["params"]["size"] == 1.5
     res = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": "xl"})
     assert res.startswith("EDL v"), res
-    assert ctx._edl["motion"][0]["params"]["size"] == 1.6      # clamped to the max
+    assert ctx._edl["motion"][0]["params"]["size"] == 1.95     # 1.5 x 1.3
+    assert motion_tools.set_motion_graphic(ctx, "mg1", params={"size": "xl"}).startswith("EDL v")
+    assert ctx._edl["motion"][0]["params"]["size"] == 2.0      # clamped to the max
     assert motion_tools.set_motion_graphic(ctx, "mg1", params={"size": "s"}).startswith("EDL v")
-    assert ctx._edl["motion"][0]["params"]["size"] < 1.6
+    assert ctx._edl["motion"][0]["params"]["size"] < 2.0
+
+
+@needs_ffmpeg
+def test_wave_a_a_bigger_title_says_what_the_picture_did(shot, workdir, tool_env):
+    """WAVE_A (31 Oct): 1.3 -> 1.5 rendered pixel-identical (the widest line
+    already filled the column) while the reply said "bigger". The size change
+    records base_size and a face-clear band, and the tool says what the type
+    really does (estimated here: the probe is a stub)."""
+    ctx = _Ctx(shot, workdir)
+    assert motion_tools.add_motion_graphic(
+        ctx, "hook_title", 0.0, 2.5, params={"text": "Stop doing / *this*", "size": 1.6,
+                                             "font": "Anton", "uppercase": True,
+                                             "y": 0.62}, sfx=False).startswith("EDL v")
+    res = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.84})
+    p = ctx._edl["motion"][0]["params"]
+    assert p["base_size"] == 1.6 and p["band_bottom"] > p["band_top"] > 0, p
+    assert "RENDERED: the title's type draws about" in res and "bigger" in res, res
+    assert ctx.title_type_px["mg1"]["after"] > ctx.title_type_px["mg1"]["before"] * 1.04
+    # a second step keeps the first base
+    motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.95})
+    assert ctx._edl["motion"][0]["params"]["base_size"] == 1.6

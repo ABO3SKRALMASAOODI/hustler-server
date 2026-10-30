@@ -60,6 +60,9 @@ class Facts:
     # an export is theirs to make, so export lines are not trial claims
     subscriber: bool = False
     checked: bool = False                        # a verification passed this turn
+    # WAVE_A (31 Oct): {graphic id: rendered type size now / at the turn's
+    # start} for the titles whose size changed (motion_tools._type_size_note)
+    type_scale: dict = field(default_factory=dict)
 
 
 # ── sentence classes ─────────────────────────────────────────────────────
@@ -349,6 +352,11 @@ def unbacked(sent, facts):
             if re.search(r"(?i)\b(?:" + rx + r")\b", s) and re.search(r"(?i)\b(bigger|larger|enlarged)\b", s):
                 if _size_went(facts.before, facts.after, what) == "down":
                     return "smaller"
+                if what == "title" and facts.type_scale and \
+                        max(facts.type_scale.values()) < 1.04:
+                    # WAVE_A: the size param went up but the type drew the
+                    # same (its widest word already filled the frame)
+                    return "unchanged"
     if facts.wrote and _TRIM_CLAIM.search(s) and not rg._NOT_A_CLAIM.search(s):
         # REAL_USER_BRUTE (31 Oct): "cut the boring parts" came back 1.5 s
         # LONGER, told as "with the dead pauses trimmed"
@@ -912,7 +920,13 @@ def facts_from_ctx(ctx, user_text=""):
             dur = None
     records = getattr(ctx, "verification_records", None) or {}
     rec = records.get(latest.get("version")) or {}
-    return Facts(before=start.get("json") or {}, after=after,
+    scale = {}
+    for k, row in (getattr(ctx, "title_type_px", None) or {}).items():
+        try:
+            scale[k] = float(row["after"]) / float(row["before"])
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+    return Facts(before=start.get("json") or {}, after=after, type_scale=scale,
                  wrote=bool(getattr(ctx, "versions_written", None)),
                  previewed=previewed, duration_s=dur, frame=frame,
                  index=getattr(ctx, "index", None) or {}, user_text=user_text,
