@@ -248,6 +248,13 @@ FIRST_CUT_MAX_RENDERS = int(os.getenv("FIRST_CUT_MAX_RENDERS", "6"))
 FIRST_CUT_BRIEF_FOLLOW_UP = os.getenv("FIRST_CUT_BRIEF_FOLLOW_UP", "0") != "0"
 FIRST_CUT_MAX_SOURCE_S = float(os.getenv("FIRST_CUT_MAX_SOURCE_S", "1800"))
 FIRST_CUT_SHORT_SOURCE_S = float(os.getenv("FIRST_CUT_SHORT_SOURCE_S", "90"))
+# Q8 (30 Oct): the First cut's speed for engine accounts. The B-roll searches
+# and downloads start when the scout names its moments (0 = search at
+# placement, as before); the user sees a draft render as soon as it is
+# encoded while the 720p approval render runs beside it (0 = wait for the
+# approval render, as before).
+FIRST_CUT_BROLL_PREFETCH = os.getenv("FIRST_CUT_BROLL_PREFETCH", "1") != "0"
+FIRST_CUT_DRAFT_FIRST = os.getenv("FIRST_CUT_DRAFT_FIRST", "1") != "0"
 
 # All subscribing editors use Luna on the standard OpenAI client. Keep the
 # rollback explicit: stale EDITOR_MODEL / PAID_* / FRONTIER_* environment
@@ -1994,6 +2001,12 @@ CLAUDE_TRIAL_MAX_PREVIEWS = max(
 # The trial turn's punch/slam lift on talking heads (trial_turn.lift_static):
 # off, measured (see trial_turn.prepare); "1" turns it on.
 CLAUDE_TRIAL_LIFT_TALKING = os.getenv("CLAUDE_TRIAL_LIFT_TALKING", "0") == "1"
+# Q8 (30 Oct): a prepared trial turn (trial_turn.prepare did the work) renders
+# its preview in code before the model's first call, so the model only
+# replies (0 = the model renders, as before); every trial reply goes through
+# trial_reply.finish (true, short, one next step; 0 = the reply as drafted).
+CLAUDE_TRIAL_PRERENDER = os.getenv("CLAUDE_TRIAL_PRERENDER", "1") != "0"
+CLAUDE_TRIAL_REPLY_GUARD = os.getenv("CLAUDE_TRIAL_REPLY_GUARD", "1") != "0"
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))
