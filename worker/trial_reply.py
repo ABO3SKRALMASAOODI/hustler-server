@@ -618,6 +618,11 @@ def _right(m):
     return f"{m.group(1)} in the player" if m.group(1) else ""
 
 
+# an offer that only points back at other lines ("Those are the next fixes I
+# can make", "These are things I can change"): never a next step of its own
+_ORPHAN_OFFER = re.compile(r"(?i)^(those|these|they|both|either)\b")
+
+
 def scrub_pixels(text):
     """(text without pixel sizes or "NNNNp" resolutions, and with "on the
     right" put as "in the player", how many removed)."""
@@ -641,6 +646,7 @@ def finish(draft, facts):
     prev_dropped = False
     for sent in sentences(draft):
         kind, why = classify(sent, facts)
+        prev_dropped_before = prev_dropped
         if kind in ("keep", "limit") and prev_dropped and re.match(
                 r"(?i)^(they|these|those|this|that|both|either|it also)\b", sent):
             kind, why = "orphan", None
@@ -648,7 +654,13 @@ def finish(draft, facts):
         if kind == "unbacked":
             report["dropped"].append({"why": why, "sentence": sent[:200]})
         elif kind == "offer":
-            if not _INTERNAL.search(rg.straight(sent)) and not review_note(sent) \
+            if _ORPHAN_OFFER.match(sent) or (prev_dropped_before and re.match(
+                    r"(?i)^(this|that|it also)\b", sent)):
+                # QI2: an offer that points back at dropped lines ("Those are
+                # the next fixes I can make if you want them." after a review
+                # note was dropped, QI2 matrix talk10 r3)
+                report["dropped"].append({"why": "orphan", "sentence": sent[:200]})
+            elif not _INTERNAL.search(rg.straight(sent)) and not review_note(sent) \
                     and not sent.rstrip().endswith(":"):
                 offers.append(sent)
             else:

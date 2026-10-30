@@ -306,3 +306,26 @@ def test_finish_drops_the_pixel_size_and_says_so():
 def test_on_the_right_becomes_the_player(draft, want):
     import trial_reply
     assert trial_reply.scrub_pixels(draft)[0] == want
+
+
+def test_an_offer_that_points_back_at_dropped_lines_is_dropped():
+    """QI2 matrix talk10 r3: a review note was dropped and the reply ended on
+    "Those are the next fixes I can make if you want them." (pointing at
+    nothing); the reply ends on a real next step instead."""
+    import trial_reply
+    facts = trial_reply.Facts(
+        after={"keep": [[0, 177]], "motion": [{"template": "hook_title"}],
+               "captions": {"mode": "from_transcript"}},
+        wrote=True, previewed=True, duration_s=177.0, frame="landscape")
+    out, report = trial_reply.finish(
+        "The video is now a landscape 16:9 cut of about 3 minutes. I noticed "
+        "the chapter cards sit near the face at 40 s and the ending trails. "
+        "Those are the next fixes I can make if you want them.", facts)
+    assert "Those are" not in out
+    assert any(d["why"] == "orphan" for d in report["dropped"])
+    assert out.rstrip().endswith("?")
+    # an ordinary offer stands
+    out2, _r = trial_reply.finish(
+        "The video is now a landscape 16:9 cut of about 3 minutes. Want me to "
+        "tighten the middle stretch next?", facts)
+    assert out2.rstrip().endswith("Want me to tighten the middle stretch next?")
