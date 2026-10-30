@@ -53,6 +53,15 @@ GENERIC = frozenset((
 
 _WORD = re.compile(r"[^\W\d_]{4,}")
 
+# Q7: a few plural nouns name a PAGE even though their stem is generic: "open
+# the designer brands section" (klosmo) is the site's brands page, while "the
+# OSAI brand" names nobody's page. Only these exact words escape GENERIC.
+CONTENT_WORDS = frozenset(("brands", "marcas", "marques", "designers"))
+
+
+def _skip(word, st):
+    return word in GENERIC or (st in GENERIC and word not in CONTENT_WORDS)
+
 
 def fold(text):
     """Lower case without accents: 'Diagnóstico' -> 'diagnostico'."""
@@ -71,7 +80,7 @@ def brief_stems(text):
     out = {}
     for m in _WORD.finditer(low):
         st = m.group(0)[:STEM_LEN]
-        if st in GENERIC or m.group(0) in GENERIC:
+        if _skip(m.group(0), st):
             continue
         out.setdefault(st, m.start())
     return out
@@ -86,7 +95,7 @@ def stem_counts(text):
     out = {}
     for m in _WORD.finditer(low):
         st = m.group(0)[:STEM_LEN]
-        if st in GENERIC or m.group(0) in GENERIC:
+        if _skip(m.group(0), st):
             continue
         out[st] = out.get(st, 0) + 1
     return out
@@ -177,3 +186,109 @@ def leads_to_products(label):
     shop, new arrivals), the pages a 'product page' ask is reached from."""
     low = fold(label)
     return any(w in low for w in _SHOP)
+
+
+# ---- Q7 (30 Oct 2026): a count of items, and the honest equivalents --------
+#
+# "Apresente as seis ferramentas matemáticas, utilizando gravações reais das
+# funcionalidades" (phmath): the judges, every run, "show all six tools, each
+# with a real interaction". A brief that counts the things on one page ("the
+# six tools", "all the tools", "each tool") gets that many of the page's own
+# cards, each one USED (an input typed, the button pressed, the result on
+# screen), never just the list.
+
+_COUNT = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+          "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+          "dois": 2, "duas": 2, "tres": 3, "quatro": 4, "cinco": 5, "seis": 6,
+          "sete": 7, "oito": 8, "nove": 9, "dez": 10,
+          "dos": 2, "cuatro": 4, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
+          "deux": 2, "trois": 3, "quatre": 4, "sept": 7, "huit": 8,
+          "neuf": 9, "dix": 10}
+_ALL = frozenset(("all", "every", "each", "todas", "todos", "cada", "tous",
+                  "toutes", "chaque"))
+_TOOL_WORDS = ("tool", "ferram", "herram", "outil", "calcul", "funcion",
+               "featur", "recurs", "app")
+ALL_ITEMS = 6
+MOST_ITEMS = 8
+
+
+def count_ask(text, label=""):
+    """How many of one page's items a brief asks to see: "as seis
+    ferramentas" -> 6, "show all the tools" -> ALL_ITEMS, else 0. The count
+    must stand right before the page's own word (by stem: "Ferramentas"),
+    or a tool word when the page is a tools page ("Tools", "Calculators"),
+    so "a 60-second video" or "two sections" count nothing, and a count of
+    tools never lands on another page ("Diagnóstico")."""
+    low = fold(re.sub(r"https?://\S+", " ", str(text or "")))
+    words = re.findall(r"[^\W_]+", low)
+    own = label_stems(label)
+    for i, w in enumerate(words):
+        if w in _COUNT:
+            n = _COUNT[w]
+        elif w.isdigit() and 2 <= int(w) <= 12:
+            n = int(w)
+        elif w in _ALL:
+            n = ALL_ITEMS
+        else:
+            continue
+        for nxt in words[i + 1:i + 4]:
+            if (len(nxt) >= 4 and nxt[:STEM_LEN] in own) or \
+                    (_tool_word(nxt) and any(_tool_word(w) for w in own)):
+                return min(int(n), MOST_ITEMS)
+    return 0
+
+
+def _tool_word(word):
+    return any(str(word).startswith(t[:STEM_LEN]) for t in _TOOL_WORDS)
+
+
+_JOURNEY = re.compile(
+    r"\bfrom\s+([A-Z][\w'’-]+(?:\s+[A-Z][\w'’-]+)?)\s+to\s+([A-Z][\w'’-]+(?:\s+[A-Z][\w'’-]+)?)")
+_OPENING = re.compile(r"\b(open(?:ing|s)?|intro(?:duction)?|start(?:s|ing)?|begin(?:s|ning)?|"
+                      r"abertura|in[ií]cio|comece|apertura|ouverture)\b", re.I)
+
+
+def journey(text):
+    """("Muscat", "Ireland") when a brief asks to OPEN on a journey between
+    two named places ("an elegant opening inspired by an Omani student's
+    journey from Muscat to Ireland"); None otherwise. Only the brief's own
+    place names, in a sentence about the opening: never invented."""
+    for sentence in re.split(r"(?<=[.!?\n])\s+", str(text or "")):
+        if not _OPENING.search(sentence):
+            continue
+        m = _JOURNEY.search(sentence)
+        if m:
+            return m.group(1).strip(), m.group(2).strip()
+    return None
+
+
+_FLOAT = re.compile(r"floating (?:browser )?windows?|browser (?:windows?|frames?|mock-?ups?)|"
+                    r"(?:device|laptop|desktop|screen) (?:frames?|mock-?ups?)|mock-?ups?|"
+                    r"janelas? flutuantes?|ventanas? flotantes?|fen[eê]tres? flottantes?", re.I)
+
+
+def wants_window(text):
+    """The brief asks for the site shown in a floating window or a device
+    frame (a 'tech launch ad' look). The capture cannot float itself, but
+    the edit can: the whole picture inset on the brief's colours."""
+    return bool(_FLOAT.search(str(text or "")))
+
+
+_MUSIC = re.compile(r"\b(music|soundtrack|sound effects?|sfx|m[uú]sica|musique|efeitos sonoros)\b", re.I)
+_LOGO = re.compile(r"\b(logo|logotipo|logotype)\b", re.I)
+_BOTH = re.compile(r"(?:separate|second|also|alternate|plus|additional|another)[^.\n]{0,24}"
+                   r"\b(9\s*:\s*16|16\s*:\s*9|vertical|horizontal|square|1\s*:\s*1)\b"
+                   r"|\b(9\s*:\s*16|16\s*:\s*9)\b[^.\n]{0,20}\bversion", re.I)
+
+
+def other_asks(text):
+    """What a brief asks for that the First cut does not make itself, so the
+    reply can say so plainly (never a claim, never a list of limits):
+    {"music": bool, "logo": bool, "second_shape": "9:16"|... or None}."""
+    t = str(text or "")
+    shape = None
+    m = _BOTH.search(t)
+    if m:
+        shape = (m.group(1) or m.group(2) or "").replace(" ", "")
+    return {"music": bool(_MUSIC.search(t)), "logo": bool(_LOGO.search(t)),
+            "second_shape": shape or None}

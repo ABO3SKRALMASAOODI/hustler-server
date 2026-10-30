@@ -126,7 +126,9 @@ def test_a_brief_that_names_few_pages_still_leaves_the_home_page():
     # the pages the brief names first (its order), then the site's own order
     assert names[:2] == ["New to Ireland?", "Halal Guide"] or \
         names[:2] == ["Halal Guide", "New to Ireland?"]
-    assert len(names) == 5 and "Join Us" not in names and "AR" not in names
+    # (Q7: two spare pages beyond the five, opened only when a long brief
+    # still has time)
+    assert len(names) == 7 and "Join Us" not in names and "AR" not in names
     # without the brief flag the old tour sees nothing it can match
     old = s._candidates([], _prefer(OSAI), start)
     assert old == []
@@ -211,19 +213,27 @@ def test_a_right_to_left_closing_line_is_a_big_card_in_the_briefs_colours(
     seen = []
     monkeypatch.setattr(agent_tools, "execute",
                         lambda c, name, args: seen.append((name, args)) or "EDL v1 ok")
-    monkeypatch.setattr(schemas, "program_duration", lambda e: 58.0)
+    # the program grows by the card once it is placed
+    lengths = iter([58.0, 61.0, 61.0, 61.0, 61.0])
+    monkeypatch.setattr(schemas, "program_duration", lambda e: next(lengths))
     ctx = type("C", (), {"latest_edl": lambda self: {"json": {}}})()
     first_cut.rtl_closing_card(ctx, [], __import__("time").monotonic(),
                                "قصتك تنتمي إلى هنا", "osai.ie", brief)
-    (name, args), (name2, line) = seen
-    assert name == "add_title_card" and args["size_scale"] >= 1.2
-    assert "subtitle" not in args and args["at_output_s"] == 57.99
-    assert args["bg_color"] == "#0E2A1E" and args["accent_color"] == "#D4A94F"
-    assert 2.0 <= args["duration_s"] <= 3.0 and args["exit"] == "none"
+    # Q7: a plain gradient card in the brief's two colours, every line on it
+    # held to the LAST frame (the title card's own text let go early)
+    (name, args), (name2, phrase), (name3, line), (name4, push) = seen
+    assert name4 == "add_zoom" and push["end"] == 61.0
+    assert name == "add_color_screen" and args["at_output_s"] == 57.99
+    assert args["color"] == "#0E2A1E" and args["color2"] == "#4A0E1E"
+    assert 2.0 <= args["duration_s"] <= 3.2
+    assert name2 == "add_text" and phrase["text"] == "قصتك تنتمي إلى هنا"
+    assert phrase["size_scale"] >= 1.5 and phrase["end"] == 61.0
+    assert phrase["exit"] == "none"
     # the address is its own line, clear of the phrase (never the card's
     # subtitle slot, which burned it through a large Arabic line)
-    assert name2 == "add_text" and line["text"] == "osai.ie"
-    assert line["y"] >= 0.62 and line["start"] > 57.99 and line["end"] <= 60.6
+    assert name3 == "add_text" and line["text"] == "osai.ie"
+    assert line["y"] >= 0.62 and line["start"] > 57.99 and line["end"] == 61.0
+    assert line["color"] == "#D4A94F"
 
 
 def test_a_brief_that_opens_a_product_page_ends_on_it_not_the_footer_form():
