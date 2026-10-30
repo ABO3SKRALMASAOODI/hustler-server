@@ -525,6 +525,10 @@ INDEX_SERVICE_FAIL_NOTE = (
     "Your video uploaded safely, and nothing is wrong with your file. Our "
     "processing service couldn't analyze it this time. That's on our side, "
     "not yours, and we're on it. You don't need to upload it again.")
+# The only index decisions that are about the customer's file, so the only
+# ones FAIL_NOTES["index"] ("try uploading it again, or a different format")
+# could help (failure_policy.user_reason words them the same way).
+INDEX_FILE_KINDS = frozenset({"invalid_media", "input_limit_exceeded"})
 # indexer's own duration refusal ("Video is 4.5h — the limit is 3h").
 _TOO_LONG = re.compile(r"Video is ([0-9.]+)h \S+ the limit is ([0-9.]+)h")
 
@@ -644,6 +648,12 @@ def _notify_failure(worker_db, job, err):
                 "can analyze is {l} hours, so I couldn't start on it. Your "
                 "upload is safe. Trim it, or split it into parts of up to "
                 "{l} hours each and upload those.").format(h=hours, l=limit)
+    elif job["type"] == "index" and decision.kind not in INDEX_FILE_KINDS:
+        # Ticket #7 (27 Oct): a 2.1 h mp4 killed by our own ffmpeg wall-clock
+        # (render_budget_exceeded) was told "try a different format like
+        # mp4". Only a decision that blames the file may ask for another one;
+        # every other index failure is ours.
+        note = INDEX_SERVICE_FAIL_NOTE
     elif note and job["type"] in {"preview", "preview_check", "final"} and (
             decision.kind in {"render_budget_exceeded", "executor_memory"}
             and not decision.agent_repairable

@@ -3186,12 +3186,60 @@ def keep_segments(ctx, segments, snap_to_words=None):
         cleaned.append([s, e])
     merged = _merge_touching(cleaned)
     kept = output_duration(merged)
-    return _write_keep(
+    res = _write_keep(
         ctx, merged,
         f"keep set to {len(merged)} segment(s), {kept}s of "
         f"{ctx.duration}s survives",
         snap_to_words=_snap_choice(snap_to_words), check_regression=True,
         place_all=True)
+    grid = _blind_grid_note(ctx, merged)
+    if grid and str(res).startswith("EDL v"):
+        res += grid
+    return res
+
+
+# A keep list on a long, nearly wordless source whose pieces are about the
+# same length at about the same spacing was picked by the clock, not by the
+# footage (ticket #9, 28 Oct: a 63-min Roblox recording with 174 spoken words
+# cut into 19 chunks of 35-40 s at regular intervals after 16 sampled frames).
+BLIND_GRID_MIN_SOURCE_S = 15 * 60
+BLIND_GRID_MIN_SEGMENTS = 6
+BLIND_GRID_MAX_WORDS_PER_MIN = 20
+BLIND_GRID_MAX_SPREAD = 0.25
+
+
+def _blind_grid_note(ctx, keep):
+    """The warning a uniform keep grid earns on low-speech footage, or ''."""
+    try:
+        duration = float(ctx.duration or 0.0)
+        if duration < BLIND_GRID_MIN_SOURCE_S or \
+                len(keep) < BLIND_GRID_MIN_SEGMENTS:
+            return ""
+        words = (getattr(ctx, "index", None) or {}).get("words") or []
+        if len(words) / (duration / 60.0) > BLIND_GRID_MAX_WORDS_PER_MIN:
+            return ""
+        lengths = [float(e) - float(s) for s, e in keep]
+        starts = [float(s) for s, _ in keep]
+        steps = [b - a for a, b in zip(starts, starts[1:])]
+
+        def spread(xs):
+            mean = sum(xs) / len(xs)
+            return (max(xs) - min(xs)) / mean if mean > 0 else 1.0
+
+        if spread(lengths) > BLIND_GRID_MAX_SPREAD or \
+                spread(steps) > BLIND_GRID_MAX_SPREAD:
+            return ""
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ""
+    return (
+        f"\nWARNING: BLIND GRID — these {len(keep)} pieces are almost the "
+        "same length at almost the same spacing, on a "
+        f"{duration / 60:.0f}-minute source with {len(words)} spoken words. "
+        "That is a sample of the clock, not the best moments. Find the "
+        "moments first: find_visual_moments(query=<the concrete event: a "
+        "kill, a fail, a win, a jump scare>) for candidates, get_shots for "
+        "where the action changes, then verify candidates in ONE batched "
+        "look_at(times=[...]) and rewrite the keep list around what you saw.")
 
 
 def cut_range(ctx, start, end, snap_to_words=None):
