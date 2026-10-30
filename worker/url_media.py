@@ -288,7 +288,7 @@ _bot_walled = ytaccess.bot_walled
 
 
 def _extract(url, workdir, prefer=None, client_override=None,
-             use_cookies=True, format_mode="adaptive"):
+             use_cookies=True, format_mode="adaptive", impersonate=False):
     """Pull media out of a page with yt-dlp. Returns (path, info dict).
 
     Runs as a subprocess rather than through the python API so a hung or
@@ -300,7 +300,12 @@ def _extract(url, workdir, prefer=None, client_override=None,
     path. YouTube bot-checks datacenter IPs on the default web client far
     more aggressively than on the tv/mweb clients, so a bot-walled first
     attempt earns ONE retry with alternate clients (see fetch below). This
-    is best-effort — when YouTube blocks both, the honest error stands."""
+    is best-effort — when YouTube blocks both, the honest error stands.
+
+    impersonate: browser impersonation for the generic extractor (curl-cffi,
+    pinned in requirements.txt). Off by default, as in yt-dlp itself: some
+    sites break under it (yt-dlp issue 11335). Only the retry for a
+    Cloudflare challenge turns it on (_extract_with_fallback)."""
     max_bytes = _limit("max_bytes", config.FETCH_MAX_BYTES)
     timeout_s = _limit("timeout_s", config.FETCH_TIMEOUT_S)
     # Cap the resolution rather than taking "best": a 4K source is a ~10x
@@ -340,6 +345,8 @@ def _extract(url, workdir, prefer=None, client_override=None,
            "-o", os.path.join(workdir, "dl.%(ext)s")]
     if client_override:
         cmd += ["--extractor-args", f"youtube:player_client={client_override}"]
+    if impersonate:
+        cmd += ["--extractor-args", "generic:impersonate"]
     # Operator cookies, resolved and normalized by ytaccess (five delivery
     # doors, one normalizer) — always a WRITABLE per-run copy that dies
     # with the workdir, never a mounted or shared file.
@@ -451,6 +458,13 @@ def _clear_partials(workdir):
             pass
 
 
+def _cloudflare_challenged(text):
+    """yt-dlp's generic extractor met a Cloudflare bot challenge (its own
+    words: "403 caused by Cloudflare anti-bot challenge")."""
+    low = (text or "").lower()
+    return "cloudflare" in low and ("anti-bot" in low or "challenge" in low)
+
+
 def _extract_with_fallback(url, workdir, prefer=None):
     """_extract, walking alternate player clients on YouTube's bot wall.
 
@@ -475,7 +489,18 @@ def _extract_with_fallback(url, workdir, prefer=None):
     # This matters for SoundCloud in particular: it is the working music
     # fallback and a YouTube repair must never perturb it.
     if not ytaccess.is_youtube_url(url):
-        return _extract(url, workdir, prefer=prefer)
+        try:
+            return _extract(url, workdir, prefer=prefer)
+        except FetchMediaError as err:
+            if not _cloudflare_challenged(str(err)):
+                raise
+        # 30 Oct, ticket 10: a customer's link died on "[generic] Got HTTP
+        # Error 403 caused by Cloudflare anti-bot challenge; try again with
+        # --extractor-args generic:impersonate". curl-cffi was installed for
+        # exactly this, but nothing ever asked for it. One retry, only on
+        # that signature, so every other site keeps its proven call.
+        _clear_partials(workdir)
+        return _extract(url, workdir, prefer=prefer, impersonate=True)
 
     deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
     last_wall = None
