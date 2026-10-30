@@ -132,6 +132,28 @@ def test_one_proxy_per_upload_and_a_global_bound():
                                True) == "source_not_ready"
 
 
+def test_an_audio_only_original_is_never_proxied():
+    """SWEEP_UPLOAD #43 (30 Oct 2026): an audio-only .mp4 uploaded as the
+    video has no picture to proxy (the browser plays it as it is). Once the
+    worker's proxy-only probe has marked it, no job is queued again, so no
+    failed box job is ever filed for it."""
+    box = _kv(box_routing=BOX)
+    for meta in ({"no_video": True}, json.dumps({"no_video": True})):
+        audio = dict(box, **{
+            "FROM assets WHERE project_id = %s AND kind = 'original'": {
+                "id": 41, "kind": "original", "bytes": 115_000_000,
+                "sha256": None, "meta": meta}})
+        assert upload_proxy.decide(_cur(**audio), 3, 7, 41, ERR4,
+                                   True) == "audio_only"
+        queued = []
+        job, why = upload_proxy.maybe_enqueue(
+            _cur(**audio), 3, 7, 41, ERR4, True,
+            lambda *a: queued.append(a) or 99)
+        assert (job, why, queued) == (None, "audio_only", [])
+    # A video original is unaffected (sensitivity).
+    assert upload_proxy.decide(_cur(**box), 3, 7, 41, ERR4, True) is None
+
+
 def test_a_proxy_job_is_never_mistaken_for_the_analysis():
     """After checkout the walled upload's analysis must start (the state
     poll's "subscription unlocked; analysis not started" heal), the Studio's

@@ -86,6 +86,76 @@ def test_a_proxy_only_job_builds_the_proxy_and_nothing_else(monkeypatch,
     assert not os.path.exists(os.path.join(config.TMP_DIR, "proxy_900"))
 
 
+def _audio_only(path):
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg is not on PATH")
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i",
+         "sine=frequency=440:duration=2", "-c:a", "aac", str(path)],
+        check=True)
+
+
+def test_an_audio_only_source_is_skipped_quietly_never_failed(monkeypatch,
+                                                              tmp_path):
+    """SWEEP_UPLOAD #43 (30 Oct 2026): an audio-only .mp4 uploaded as the
+    video (sound, no picture) used to fail the proxy-only job with "No video
+    stream found in file", a filed box failure for a file the browser plays
+    as it is. The job now ends done with skipped "audio_only", uploads
+    nothing, and marks the asset so the backend never queues another."""
+    src = tmp_path / "podcast.mp4"
+    _audio_only(src)
+    uploads = []
+    monkeypatch.setattr(config, "TMP_DIR", str(tmp_path / "work"))
+    monkeypatch.setattr(storage, "download_to",
+                        lambda key, dst: shutil.copyfile(src, dst))
+    monkeypatch.setattr(storage, "upload_file",
+                        lambda path, key, ctype=None: uploads.append(key))
+    db = _Db()
+    asset = {"id": 42, "kind": "original", "storage_key": "originals/7/p.mp4",
+             "bytes": os.path.getsize(src), "sha256": None, "meta": {}}
+    db.run = (lambda fn, *a, **k: asset if fn is dbx.get_asset
+              else _Db.run(db, fn, *a, **k))
+    job = {"id": 901, "project_id": 7, "user_id": 3, "type": "index",
+           "payload": {"asset_id": 42, "proxy_only": True,
+                       "execution_provider": "box"}}
+
+    result = indexer.run_index_job(db, job)
+
+    assert result == {"proxy_only": True, "skipped": "audio_only"}
+    assert uploads == []
+    assert ("update_asset_meta", (42, {"no_video": True})) in db.calls
+    names = [n for n, _ in db.calls]
+    for forbidden in ("insert_asset", "update_asset_probe", "upsert_index",
+                      "add_message"):
+        assert forbidden not in names, forbidden
+    assert not os.path.exists(os.path.join(config.TMP_DIR, "proxy_901"))
+    # Marked once: the next job (should one ever be queued) never downloads.
+    monkeypatch.setattr(storage, "download_to",
+                        lambda key, dst: pytest.fail("downloaded again"))
+    asset["meta"] = {"no_video": True}
+    assert indexer.run_index_job(db, job) == {"proxy_only": True,
+                                              "skipped": "audio_only"}
+
+
+def test_any_other_probe_failure_still_fails_the_job(monkeypatch, tmp_path):
+    """Only "no video stream" is a skip: a broken file still fails as it
+    always did (sensitivity)."""
+    bad = tmp_path / "broken.mp4"
+    bad.write_bytes(b"not a video at all" * 100)
+    monkeypatch.setattr(config, "TMP_DIR", str(tmp_path / "work"))
+    monkeypatch.setattr(storage, "download_to",
+                        lambda key, dst: shutil.copyfile(bad, dst))
+    db = _Db()
+    asset = {"id": 43, "kind": "original", "storage_key": "originals/7/b.mp4",
+             "bytes": os.path.getsize(bad), "sha256": None, "meta": {}}
+    with pytest.raises(Exception) as err:
+        indexer.run_proxy_only_job(
+            db, {"id": 902, "project_id": 7, "payload": {"proxy_only": True}},
+            asset)
+    assert "no video stream" not in str(err.value).lower()
+    assert "update_asset_meta" not in [n for n, _ in db.calls]
+
+
 def test_an_existing_proxy_is_not_rebuilt(monkeypatch):
     db = _Db()
     monkeypatch.setattr(dbx, "asset_by_key",

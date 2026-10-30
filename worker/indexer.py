@@ -1066,6 +1066,15 @@ def _run_clip_index(worker_db, job, asset):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
+# A proxy-only job for an original with no video stream ends here, done.
+AUDIO_ONLY_SKIP = "audio_only"
+
+
+def _no_picture(exc):
+    """media.probe's "No video stream found in file": sound, no picture."""
+    return "no video stream" in str(exc).lower()
+
+
 def run_proxy_only_job(worker_db, job, asset):
     """Only the playable proxy of a walled upload (backend/upload_proxy.py).
 
@@ -1088,22 +1097,43 @@ def run_proxy_only_job(worker_db, job, asset):
         if have:
             return {"proxy_only": True, "skipped": "proxy exists",
                     "sha256": asset["sha256"]}
+    if (asset.get("meta") or {}).get("no_video") is True:
+        return {"proxy_only": True, "skipped": AUDIO_ONLY_SKIP}
     workdir = os.path.join(config.TMP_DIR, f"proxy_{job_id}")
     os.makedirs(workdir, exist_ok=True)
     timings, t0 = {}, time.monotonic()
     try:
         proxy_kwargs = {}
-        if config.index_source_should_stream(asset["kind"], asset.get("bytes")):
-            src, sha, info, proxy_kbps = _stream_index_source(
-                worker_db, job, asset, workdir)
-            proxy_kwargs["maxrate_kbps"] = proxy_kbps
-        else:
-            src = os.path.join(
-                workdir, "src" + os.path.splitext(asset["storage_key"])[1])
-            storage.download_to(asset["storage_key"], src)
-            _set_progress(worker_db, job_id, 10)
-            sha = media.sha256_file(src)
-            info = clamp_to_duration_limit(media.probe(src))
+        try:
+            if config.index_source_should_stream(asset["kind"],
+                                                 asset.get("bytes")):
+                src, sha, info, proxy_kbps = _stream_index_source(
+                    worker_db, job, asset, workdir)
+                proxy_kwargs["maxrate_kbps"] = proxy_kbps
+            else:
+                src = os.path.join(
+                    workdir, "src" + os.path.splitext(asset["storage_key"])[1])
+                storage.download_to(asset["storage_key"], src)
+                _set_progress(worker_db, job_id, 10)
+                sha = media.sha256_file(src)
+                info = clamp_to_duration_limit(media.probe(src))
+        except media.MediaError as exc:
+            if not _no_picture(exc):
+                raise
+            # Sound but no picture (an audio-only .mp4 uploaded as the
+            # video, SWEEP_UPLOAD #43): the browser plays it as it is, and
+            # a 540p proxy of nothing is not a thing. Skip quietly: the job
+            # ends done (no failure filed, no note), and the asset says so,
+            # so the backend never queues another (upload_proxy.decide).
+            try:
+                worker_db.run(dbx.update_asset_meta, asset["id"],
+                              {"no_video": True})
+            except Exception as meta_exc:  # noqa: BLE001 - the skip stands
+                print(f"[index {job_id}] proxy only: no_video not recorded: "
+                      f"{str(meta_exc)[:120]}", flush=True)
+            print(f"[index {job_id}] proxy only: the source has sound but no "
+                  "picture; no proxy needed (skipped)", flush=True)
+            return {"proxy_only": True, "skipped": AUDIO_ONLY_SKIP}
         if info.get("limit_s"):
             proxy_kwargs["limit_s"] = info["limit_s"]
         timings["source_s"] = round(time.monotonic() - t0, 2)

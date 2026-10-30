@@ -24,6 +24,11 @@ waits in the durable queue when the box is busy. It is queued only while the
 box routing row is enabled, so no proxy-only job ever reaches a billable
 provider.
 
+AUDIO ONLY. An original with sound and no picture never gets a proxy: the
+browser plays it as it is. The proxy-only job that first probes such a
+source ends done with ``skipped: "audio_only"`` (no failure filed) and marks
+the asset ``meta.no_video``; ``decide`` then answers "audio_only".
+
 BOUNDS. One proxy per upload (a failed one is retried once), at most
 ``max_live`` proxy-only jobs queued or running across all accounts, sources
 up to ``max_bytes``. Kill switch: app_kv ``upload_proxy`` = {"on": false}.
@@ -119,9 +124,20 @@ def decide(cur, user_id, project_id, asset_id, detail, gated):
     if not original or int(_v(original, "id", 0)) != int(asset_id or 0):
         return "not_active_original"
     meta = _v(original, "meta", 4) or {}
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta) or {}
+        except (TypeError, ValueError):
+            meta = {}
     if (meta.get("upload_state") == "pending" or meta.get("r2_purged_at")
             or meta.get("link_src")):
         return "source_not_ready"
+    if meta.get("no_video") is True:
+        # Sound but no picture (an audio-only .mp4 uploaded as the video,
+        # SWEEP_UPLOAD #43): the browser plays it as it is and a proxy of no
+        # picture is not a thing. The worker's proxy-only job records this
+        # the first time it probes such a source (and ends done, quietly).
+        return "audio_only"
     nbytes = int(_v(original, "bytes", 2) or 0)
     if nbytes <= 0 or nbytes > int(cfg.get("max_bytes") or 0):
         return "size"
