@@ -73,6 +73,11 @@ ALLOWED = (
     # (slot.env keeps CLOUDFLARE_EXECUTOR_ENABLED=0) unless app_kv
     # box_routing.youtube_egress == "cloudflare" (worker/remote.py).
     "YTDLP_PROXY", "CLOUDFLARE_EXECUTOR_URL",
+    # Fallback YouTube proxies (comma-separated), tried by worker url_media
+    # only after the whole client ladder through YTDLP_PROXY hit the bot
+    # wall (C1, 30 Oct 2026: one static IP is walled for 1.5-2 h after
+    # 22-62 downloads). Optional, absent by default.
+    "YTDLP_PROXY_FALLBACK",
 )
 # Without these the executor cannot run a single job; refuse a partial set.
 REQUIRED = ("REMOTE_EXECUTOR_SECRET", "DATABASE_URL", "S3_ENDPOINT",

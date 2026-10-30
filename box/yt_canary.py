@@ -67,27 +67,47 @@ LEDGER = os.path.join(hr.DATA_DIR, "admission.sqlite")
 WALL_MARKS = ("not a bot", "YouTube blocked")
 KEEP_DAYS = 14
 
-# Runs inside the slot: the production probe, one per URL.
+# Runs inside the slot: the production probe, one per URL, through the
+# primary route (YTDLP_PROXY); only when none of them gets media, again
+# through each YTDLP_PROXY_FALLBACK route, as worker url_media does.
 SLOT_CODE = r"""
 import json, sys, time
+from urllib.parse import urlsplit
 sys.path.insert(0, "/app")
-import ytaccess
+import config, ytaccess
 try:
     import version
     code = version.code_version()
 except Exception:
     code = None
-out = []
-for url in sys.argv[1:]:
-    t0 = time.time()
-    try:
-        v = ytaccess.probe(url=url, timeout_s=90)
-    except Exception as e:
-        v = {"url": url, "ok": False, "download_ok": False,
-             "why": "probe crashed: " + str(e)[:160]}
-    v["secs"] = round(time.time() - t0, 1)
-    out.append(v)
-print("C1CANARY " + json.dumps({"code": code, "probes": out}))
+
+def host(p):
+    u = urlsplit(p if "://" in p else "http://" + p)
+    return "%s:%s" % (u.hostname, u.port or "")
+
+def run(route):
+    out = []
+    for url in sys.argv[1:]:
+        t0 = time.time()
+        try:
+            v = ytaccess.probe(url=url, timeout_s=90)
+        except Exception as e:
+            v = {"url": url, "ok": False, "download_ok": False,
+                 "why": "probe crashed: " + str(e)[:160]}
+        v["secs"] = round(time.time() - t0, 1)
+        v["route"] = route
+        out.append(v)
+    return out
+
+probes = run("primary")
+if not any(v.get("ok") and v.get("download_ok") for v in probes):
+    for fb in getattr(config, "YTDLP_PROXY_FALLBACK", ()) or ():
+        config.YTDLP_PROXY = fb
+        more = run("fallback " + host(fb))
+        probes += more
+        if any(v.get("ok") and v.get("download_ok") for v in more):
+            break
+print("C1CANARY " + json.dumps({"code": code, "probes": probes}))
 """
 
 BYTES_SQL = """
@@ -230,6 +250,14 @@ def _kind_and_tail(why, n=150):
     if sep and kind in ("access_blocked", "error", "bot_wall"):
         return f"{kind}: ...{rest[-n:]}" if len(rest) > n else why
     return why[-n:]
+
+
+def primary_ok(answer):
+    """Did the primary route (YTDLP_PROXY) get media? A pass that needed a
+    fallback still serves customers, but the primary is walled."""
+    return any(v.get("ok") and v.get("download_ok")
+               for v in (answer or {}).get("probes") or []
+               if v.get("route", "primary") == "primary")
 
 
 def judge(answer):
@@ -379,7 +407,9 @@ def main(argv):
             try:
                 answer = run_probes(slot, urls)
                 ok, why, verdict = judge(answer)
-                run.update(ok=ok, why=why, strategy=verdict.get("strategy"))
+                run.update(ok=ok, why=why, strategy=verdict.get("strategy"),
+                           route=verdict.get("route"),
+                           primary_ok=primary_ok(answer))
             except Exception as exc:  # noqa: BLE001 - recorded as a failure
                 run.update(ok=False, why=f"probe did not run: "
                            f"{type(exc).__name__}: {str(exc)[:160]}")

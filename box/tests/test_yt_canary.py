@@ -280,3 +280,22 @@ def test_a_wall_seen_by_real_traffic_makes_a_passing_canary_probe_now():
     # After a failure the retry pacing stays as it was.
     failed = {"runs": [{"at": _at(10), "ok": False}]}
     assert yc.due(failed, NOW, {}, walls=5)[0] is False
+
+
+def test_a_fallback_route_that_gets_media_keeps_the_route_passing():
+    ans = {"probes": [
+        {"url": "u1", "ok": False, "why": "access_blocked: not a bot",
+         "route": "primary"},
+        {"url": "u1", "ok": True, "download_ok": True,
+         "route": "fallback 10.0.0.2:8000"}]}
+    ok, _why, best = yc.judge(ans)
+    assert ok is True and best["route"] == "fallback 10.0.0.2:8000"
+    assert yc.primary_ok(ans) is False
+    assert yc.primary_ok({"probes": [{"ok": True, "download_ok": True}]})
+
+
+def test_the_slot_code_compiles_and_tries_fallbacks_only_after_a_wall():
+    compile(yc.SLOT_CODE, "<slot>", "exec")
+    assert "YTDLP_PROXY_FALLBACK" in yc.SLOT_CODE
+    assert yc.SLOT_CODE.index('run("primary")') < yc.SLOT_CODE.index(
+        "for fb in")
