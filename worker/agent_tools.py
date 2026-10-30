@@ -5193,6 +5193,25 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
             rules = CaptionsFromTranscript(corrections=rules).corrections or []
         except (ValueError, TypeError, IndexError, KeyError) as exc:
             return "REJECTED: invalid correction: " + str(exc)[:300]
+    # Captions never change what was said (R2, 30 Oct 2026): a correction
+    # may only respell a heard word. The live edits carried "we're gonna" ->
+    # "We won't" and "the the the the" -> "Falcon 9 rocket's reusable".
+    unfaithful = []
+    if operation != "clear":
+        import caption_truth
+        kept_rules = []
+        for rule in rules:
+            ok, why = caption_truth.faithful_fix(
+                rule.get("from"), rule.get("to"),
+                asr_unsure=caption_truth.asr_unsure(ctx.index or {}, rule))
+            if ok:
+                kept_rules.append(rule)
+            else:
+                unfaithful.append(caption_truth.refusal(rule, why))
+        if unfaithful and not kept_rules:
+            return ("REJECTED: no caption correction was applied; each would change "
+                    "what was said: " + "; ".join(unfaithful))
+        rules = kept_rules
     unmatched = _unmatched_caption_fixes(ctx, edl, rules) \
         if operation != "clear" else []
     notes = _caption_fix_notes(ctx, edl, rules) if operation != "clear" \
@@ -5218,6 +5237,8 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
             result += "\nNOT APPLIED (no caption words match): " + "; ".join(unmatched)
         for note in notes:
             result += "\n" + note
+        if unfaithful:
+            result += "\nNOT APPLIED (would change what was said): " + "; ".join(unfaithful)
         result += "\nACTIVE CORRECTIONS: " + json.dumps(rules)
         result += "\nCAPTION PREVIEW: " + _compact_caption_preview(
             audit_captions(ctx, limit=200), rules)
@@ -23138,7 +23159,22 @@ def _stored_render_report(ctx, row):
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                    report=False):
     if report:
-        return _stored_render_report(ctx, ctx.latest_edl())
+        # report=true reads a stored report; a caller that also asks for a
+        # COMPLETE preview wants one, so when the current version has none it
+        # is rendered instead of refused. R2 journeys, 30 Oct 2026: a studio
+        # turn spent 6 of its 28 model steps on render_preview(complete=true,
+        # quality=approval, report=true) answered "PREREQUISITE / STALE
+        # REPORT"; 85 such calls in 60 days (owner factory and customers).
+        wants_render = bool(complete) or quality == "approval"
+        current = None
+        if wants_render:
+            try:
+                current = ctx.db.run(dbx.find_render_asset, ctx.project_id,
+                                     "preview", ctx.latest_edl()["version"])
+            except Exception:  # noqa: BLE001 — fall back to the plain report
+                current = True
+        if not wants_render or current:
+            return _stored_render_report(ctx, ctx.latest_edl())
     if quality not in ("draft", "approval"):
         return "REJECTED: quality must be draft or approval."
     if quality == "approval":
