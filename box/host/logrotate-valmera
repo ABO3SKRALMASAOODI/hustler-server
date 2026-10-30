@@ -1,0 +1,11 @@
+# Valmera render box (installed by boxctl to /etc/logrotate.d/valmera).
+/var/log/valmera/*.log {
+    weekly
+    maxsize 50M
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
