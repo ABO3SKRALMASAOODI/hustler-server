@@ -3049,6 +3049,36 @@ _BOX_NOTHING_RAN_KINDS = frozenset({
     "provider_capacity_unavailable"})
 
 
+# A box slot's scratch is the box's one shared disk: "needs about 31 GB of
+# scratch and only 22 GB is free" there is the other jobs' and caches'
+# bytes, which the cleaner and finishing jobs give back, not a property of
+# the job (on Cloudflare it is the lane's fixed disk, hence executor_capacity
+# and no retry). Raised before any download, so nothing ran (R1 chaos, 30 Oct
+# 2026: a final admitted at 21 GB free failed instead of waiting). Only a
+# need no box could ever offer is still the job's honest failure.
+_BOX_SCRATCH_NEED = re.compile(
+    r"needs about ([0-9.]+) GB of\s+scratch space.*only ([0-9.]+) GB is free",
+    re.IGNORECASE | re.DOTALL)
+_BOX_SCRATCH_WAIT_TYPES = frozenset({
+    "index", "preview", "preview_check", "final", "filmstrip"})
+
+
+def _box_scratch_wait(job, exc):
+    """True when a box job refused for scratch space should wait instead."""
+    if str(job.get("type") or "") not in _BOX_SCRATCH_WAIT_TYPES:
+        return False
+    if getattr(exc, "failure_kind", None) != "executor_capacity":
+        return False
+    m = _BOX_SCRATCH_NEED.search(str(exc))
+    if not m:
+        return False
+    try:
+        need = float(m.group(1))
+    except ValueError:
+        return False
+    return need <= config.BOX_SCRATCH_MAX_GB
+
+
 def _box_backoff(attempt_s, streak):
     """A refusal that waited in admission's own queue (the box was full)
     asks again at once, keeping its place; a fast refusal (unreachable,
@@ -3129,6 +3159,21 @@ def _run_box_with_wait(job):
             kind = getattr(exc, "failure_kind", None)
             if kind in _BOX_NOTHING_RAN_KINDS:
                 reason = exc
+            elif queued and _box_scratch_wait(job, exc):
+                # This claim's call identity is terminal now; the next claim
+                # is a new one. Hold briefly (the disk frees as jobs finish
+                # and the cleaner runs), then back to the queue unspent.
+                dbx.unmark_remote_owned(job["id"])
+                print(f"[dispatcher] box {job.get('type')} {job.get('id')}: "
+                      f"{_short_reason_detail(exc, 160)}; the box's shared "
+                      "disk is short, waiting for room", flush=True)
+                time.sleep(random.uniform(20.0, 40.0))
+                _require_current_lease(job, "box scratch wait")
+                raise BoxWaiting(
+                    f"The render box's disk had no room for this "
+                    f"{job.get('type')} yet ({_short_reason_detail(exc, 140)})"
+                    "; nothing ran. It waits in the queue and starts as soon "
+                    "as the box has room.") from exc
             elif queued and _lost_read_only_call(job, exc) \
                     and lost_reads < _LOST_READ_RELAUNCHES:
                 slot = _next_rollout_slot(job) or (lost_reads + 1)
