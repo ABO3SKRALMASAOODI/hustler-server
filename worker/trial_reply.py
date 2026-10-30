@@ -65,7 +65,7 @@ class Facts:
 # ── sentence classes ─────────────────────────────────────────────────────
 
 _INTERNAL = re.compile(
-    r"(?i)(\bpicture[- ]?qc\b|\bqc\b|\bverif(?:y|ied|ication)\b|\breview(?:er)?s?\b"
+    r"(?i)(\bpicture[- ]?qc\b|\bqc\b|\bverif(?:y|ies|ied|ying|ication)\b|\breview(?:er)?s?\b"
     r"|\bnotes? (?:i|we) (?:did not|didn't)|\bflag(?:s|ged)?\b|\bfindings?\b"
     r"|\bfalse positive|\badvisor(?:y|ies)\b|\blufs\b|\bmid-?word\b|\bedl\b"
     r"|\bkeep (?:layer|segments?)\b|\btool\b|\bpreview (?:limit|budget|renders?)\b"
@@ -80,7 +80,7 @@ _INTERNAL = re.compile(
     # measurements, read by real trial users as noise ("It is not ready to
     # hand off yet", "I'd end that graphic at 21.07s", "captions at 2.3x")
     r"|\bhand(?:ed|ing)?[- ]?off\b|\bhandoff\b|\bas final\b"
-    r"|\b\d{1,3}\.\d{2}\s?s\b|\b\d\.\d{1,2}x\b"
+    r"|\b\d{1,3}\.\d{2}\s?s\b|\b\d\.\d{1,2}\s?[x\u00d7]"
     r"|\b(?:was|were|got) rejected\b|\bre-?aim(?:ed)?\b|\bre-?measured\b|\bno depth\b"
     r"|\bdepth (?:data|was measured|map)\b|\bjustif(?:y|ied|ies)\b|\bthe checker\b"
     r"|\bpass is only partly done\b|\bisn't finished\b|\b\d{1,2}% punch)")
@@ -741,8 +741,8 @@ _ORPHAN_OFFER = re.compile(r"(?i)^(those|these|they|both|either)\b")
 
 
 # "(caption scale 1.6 to 2.0)": the editor's own knob, inside a true line
-_KNOB = re.compile(r"\s*\((?=[^()]*\d)[^()]*\b(?:scale|size_scale|opacity|strength|level|"
-                   r"anchor_y|lufs|db)\b[^()]*\)", re.I)
+_KNOB = re.compile(r"\s*\((?=[^()]*\d)(?:[^()]*\b(?:scale|size_scale|opacity|strength|level|"
+                   r"anchor_y|lufs|db)\b|[^()]*\d(?:\.\d+)?\s?[x\u00d7](?![a-z]))[^()]*\)", re.I)
 
 
 def scrub_pixels(text):

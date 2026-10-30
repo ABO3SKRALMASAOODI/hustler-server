@@ -131,3 +131,11 @@ def test_the_editors_knobs_and_its_fallbacks_stay_out_of_the_reply():
     out, _ = tr.finish(draft, facts("make it punchier", subscriber=True, duration_s=12.1,
                                     before={"keep": [[0.0, 12.7]]}, after={"keep": [[0.0, 12.1]]}))
     assert "justified" not in out and "verification" not in out, out
+
+
+def test_a_new_subscribers_verifies_line_and_multiplier_are_dropped():
+    draft = ("I made the captions bigger (2.0× the previous size) and re-rendered. The 19-second "
+             "vertical cut now verifies, with one exception.")
+    out, _ = tr.finish(draft, facts("make the captions bigger", subscriber=True))
+    assert "×" not in out and "verifies" not in out, out
+    assert out.startswith("I made the captions bigger and re-rendered."), out
