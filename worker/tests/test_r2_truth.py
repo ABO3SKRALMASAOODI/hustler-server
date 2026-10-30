@@ -323,3 +323,35 @@ def test_a_stop_message_only_promises_a_preview_that_is_attached(monkeypatch):
     ctx.last_preview = {"edl_version": 9}
     agent_loop._finalize(ctx, db, 1, text, "budget", 3, {})
     assert posted[-1][2] == text
+
+
+# ── render_preview(complete=true, report=true) renders when it must ────────
+
+def test_report_with_complete_renders_a_missing_preview_instead_of_refusing(monkeypatch):
+    import agent_tools
+    import db as dbx
+    calls = []
+    monkeypatch.setattr(agent_tools, "_stored_render_report",
+                        lambda ctx, row: calls.append("report") or "RENDER REPORT")
+
+    class _Db:
+        def __init__(self, asset):
+            self.asset = asset
+
+        def run(self, fn, *a):
+            assert fn is dbx.find_render_asset
+            return self.asset
+    ctx = SimpleNamespace(db=_Db(None), project_id=5240,
+                          latest_edl=lambda: {"version": 12, "json": {}})
+    # no complete preview of v12: the call goes on to render (past the report)
+    try:
+        agent_tools.render_preview(ctx, complete=True, quality="approval", report=True)
+    except AttributeError:
+        pass                     # the bare test context has no render machinery
+    assert calls == []
+    # a complete preview of v12 exists: its stored report is read, nothing renders
+    ctx.db = _Db({"id": 1, "meta": {"edl_version": 12}})
+    assert agent_tools.render_preview(ctx, complete=True, report=True) == "RENDER REPORT"
+    # report=true alone keeps its read-only contract
+    ctx.db = _Db(None)
+    assert agent_tools.render_preview(ctx, report=True) == "RENDER REPORT"

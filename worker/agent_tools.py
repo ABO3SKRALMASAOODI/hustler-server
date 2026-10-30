@@ -23109,7 +23109,22 @@ def _stored_render_report(ctx, row):
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                    report=False):
     if report:
-        return _stored_render_report(ctx, ctx.latest_edl())
+        # report=true reads a stored report; a caller that also asks for a
+        # COMPLETE preview wants one, so when the current version has none it
+        # is rendered instead of refused. R2 journeys, 30 Oct 2026: a studio
+        # turn spent 6 of its 28 model steps on render_preview(complete=true,
+        # quality=approval, report=true) answered "PREREQUISITE / STALE
+        # REPORT"; 85 such calls in 60 days (owner factory and customers).
+        wants_render = bool(complete) or quality == "approval"
+        current = None
+        if wants_render:
+            try:
+                current = ctx.db.run(dbx.find_render_asset, ctx.project_id,
+                                     "preview", ctx.latest_edl()["version"])
+            except Exception:  # noqa: BLE001 — fall back to the plain report
+                current = True
+        if not wants_render or current:
+            return _stored_render_report(ctx, ctx.latest_edl())
     if quality not in ("draft", "approval"):
         return "REJECTED: quality must be draft or approval."
     if quality == "approval":
