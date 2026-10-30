@@ -583,7 +583,29 @@ class Box:
         with self.lock:
             for rec in [dict(r) for r in self.db.execute(
                     "SELECT * FROM calls WHERE status IN "
-                    "('submitted','starting','running')")]:
+                    "('submitted','starting','running','unknown')")]:
+                if self._child_answer_lost(rec):
+                    # R1 chaos (30 Oct 2026): a synchronous child (frames,
+                    # capture, fetch, ...) has no queue row, so once its
+                    # handler is gone its answer has nowhere to go: kept
+                    # `unknown`, its parent tool waited out the child's
+                    # whole lease (4-25 min) and the quick slot stayed
+                    # fenced as long. Fence it now (poll_slots restarts the
+                    # container and fails the call), so the parent hears
+                    # within seconds and may ask again.
+                    rec.update({"status": "stopping",
+                                "disconnected_at": rec.get("disconnected_at")
+                                or t,
+                                "abandon_reason": "admission restarted; this "
+                                "child's answer was lost",
+                                "error": "the admission handler awaiting /run "
+                                         "was lost (admission restart)"})
+                    self.put(rec)
+                    log(f"child call {rec['call_id']} on {rec['slot']} lost "
+                        "its answer in the restart; fencing its slot")
+                    continue
+                if rec["status"] == "unknown":
+                    continue
                 if rec["status"] in ("submitted", "starting"):
                     # No /run was sent by a handler that no longer exists.
                     self.terminalize(rec, "failed", refusal_envelope(
@@ -599,6 +621,18 @@ class Box:
                     self.put(rec)
                     log(f"call {rec['call_id']} on {rec['slot']} is unknown "
                         "after restart; its slot stays fenced")
+
+    @staticmethod
+    def _child_answer_lost(rec):
+        """A running/unknown synchronous child (no queue row to read)."""
+        if rec.get("status") not in ("running", "unknown") or \
+                not rec.get("slot"):
+            return False
+        try:
+            job = json.loads(rec.get("job") or "{}") or {}
+        except ValueError:
+            return False
+        return job.get("id") is None and job.get("total_claims") is None
 
     # ── views ──
     def state_json(self, rec):
@@ -1386,7 +1420,9 @@ class Box:
         for rec in recs:
             try:
                 if rec["status"] == "stopping":
-                    self._fence_and_fail(rec, reason="fence retried")
+                    self._fence_and_fail(
+                        rec, reason=rec.get("abandon_reason")
+                        or "fence retried")
                 elif rec["call_id"] not in self.live_handlers or \
                         (rec.get("active_until") or now()) <= now():
                     self.status(rec["call_id"])
