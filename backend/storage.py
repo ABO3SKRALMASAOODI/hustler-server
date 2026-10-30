@@ -24,6 +24,7 @@ import uuid
 import boto3
 from botocore.config import Config
 
+import storage_creds as creds
 import storage_routing as routing
 
 PRESIGN_EXPIRY = 900          # short-lived links (admin GETs lean on this)
@@ -224,7 +225,7 @@ def client(public=False, fast=False):
 # client()/bucket() exactly as before; the router never touches the database
 # unless the next store is configured.
 
-def _fetch_routing_row():
+def _fetch_kv(key):
     import psycopg2
     url = os.environ.get("DIRECT_DATABASE_URL") or os.environ.get(
         "DATABASE_URL")
@@ -234,15 +235,22 @@ def _fetch_routing_row():
                             options="-c statement_timeout=3000")
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT value FROM app_kv WHERE key = %s",
-                        (routing.KV_KEY,))
+            cur.execute("SELECT value FROM app_kv WHERE key = %s", (key,))
             row = cur.fetchone()
         return row[0] if row else None
     finally:
         conn.close()
 
 
-_router = routing.Router(fetch=_fetch_routing_row)
+def _fetch_routing_row():
+    return _fetch_kv(routing.KV_KEY)
+
+
+# The next store's keys: S3_NEXT_* from the environment, else the sealed
+# app_kv row (storage_creds.py). creds.ENV is os.environ with that row filled
+# in, so the router and every next-store client below see one configuration.
+creds.install(lambda: _fetch_kv(creds.KV_KEY))
+_router = routing.Router(fetch=_fetch_routing_row, env=creds.ENV)
 _locator = routing.Locator()
 
 
@@ -250,12 +258,23 @@ def router():
     return _router
 
 
+def next_config():
+    """The next store's configuration (env first, then the sealed row), or
+    None when it is not configured."""
+    return routing.store_config(routing.NEXT, creds.ENV)
+
+
 def routing_status():
-    return _router.status()
+    st = _router.status()
+    try:
+        st.update(creds.status())
+    except Exception:  # noqa: BLE001 — a health route never fails on this
+        pass
+    return st
 
 
 def _next_client(public=False, fast=False):
-    cfg = routing.store_config(routing.NEXT)
+    cfg = next_config()
     if cfg is None:
         raise RuntimeError("the next store (S3_NEXT_*) is not configured")
     endpoint = cfg["public_endpoint"] if public else cfg["endpoint"]
@@ -277,6 +296,7 @@ def _next_client(public=False, fast=False):
                     retries={"max_attempts": 2 if fast else S3_MAX_ATTEMPTS,
                              "mode": "standard"},
                     max_pool_connections=32)))
+            creds.watch_client(cached)
             if len(_clients) >= 8:
                 _clients.clear()
             _clients[key] = cached
@@ -291,7 +311,7 @@ def store_client(name, public=False, fast=False):
 
 def store_bucket(name):
     if name == routing.NEXT:
-        return routing.store_config(routing.NEXT)["bucket"]
+        return next_config()["bucket"]
     return bucket()
 
 
