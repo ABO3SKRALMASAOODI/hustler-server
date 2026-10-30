@@ -66,6 +66,13 @@ ALLOWED = (
     # worker/storage_routing.py). Absent = the executor uses S3_* alone.
     "S3_NEXT_ENDPOINT", "S3_NEXT_ACCESS_KEY_ID", "S3_NEXT_SECRET_ACCESS_KEY",
     "S3_NEXT_BUCKET", "S3_NEXT_REGION",
+    # YouTube from the box (E1, 30 Oct 2026), both optional and absent by
+    # default. YTDLP_PROXY: owner decision (b), a residential/ISP proxy that
+    # yt-dlp uses for YouTube pages only (worker/url_media, song_find).
+    # CLOUDFLARE_EXECUTOR_URL: owner decision (c); inert in box slots
+    # (slot.env keeps CLOUDFLARE_EXECUTOR_ENABLED=0) unless app_kv
+    # box_routing.youtube_egress == "cloudflare" (worker/remote.py).
+    "YTDLP_PROXY", "CLOUDFLARE_EXECUTOR_URL",
 )
 # Without these the executor cannot run a single job; refuse a partial set.
 REQUIRED = ("REMOTE_EXECUTOR_SECRET", "DATABASE_URL", "S3_ENDPOINT",
