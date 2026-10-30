@@ -127,11 +127,13 @@ def _num(args, name):
 # ------------------------------------------------------------------ #
 
 def _deterministic_preview(asset):
-    """Only an explicitly stamped preview belongs to the MCP workflow."""
+    """A preview no separate listening model could have heard, with its
+    lineage: the MCP workflow's evidence. Judged by the facts
+    (dbx.listener_policy), not the stamp: watch_video refused a paying
+    customer's own v1 Studio preview, which no listener heard, as "created
+    without the MCP deterministic-only receipt" (ticket #40/#45, 30 Oct)."""
     meta = (asset or {}).get("meta") or {}
-    if meta.get("audio_model_review") is not False or \
-            (meta.get("listen_keys") or []) or \
-            (meta.get("listen_clips") or []):
+    if dbx.listener_policy(meta) is None:
         return False
     try:
         duration_s = float(asset.get("duration_s"))
@@ -161,6 +163,7 @@ def _preview_receipt(asset, version):
         "edl_version": int(version),
         "duration_s": float(asset.get("duration_s")),
         "audio_model_review": False,
+        "listener_policy": dbx.listener_policy(meta),
         "listen_keys_count": 0,
         "listen_clips_count": 0,
         "audio_reviewer_findings_count": 0,
@@ -192,10 +195,12 @@ def _preview_for_watching(ctx, render):
         return asset, version, ""
     if asset and not render:
         raise Unavailable(
-            f"The preview of EDL v{version} was created without the MCP "
-            "deterministic-only receipt. Call watch_video again with "
-            "render=true (or call render_preview) to create a verified "
-            "audio_model_review=false preview.")
+            f"The preview of EDL v{version} (asset {asset.get('id')}) is not "
+            "deterministic-only evidence: listening excerpts were cut for "
+            "it, it predates their recording, or its render lineage is "
+            "incomplete. Call watch_video again with render=true (or "
+            "render_preview(complete=true)) to create an "
+            "audio_model_review=false preview of the same edit.")
 
     stale = ctx.db.run(dbx.latest_render, ctx.project_id, "preview")
     if not render:

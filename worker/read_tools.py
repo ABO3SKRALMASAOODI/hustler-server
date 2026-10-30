@@ -103,6 +103,31 @@ def asset_by_key(conn, project_id, storage_key):
         return cur.fetchone()
 
 
+def listener_policy(meta):
+    """Whether a render is deterministic-only MCP evidence, judged by the FACT.
+
+    The separate listening model only ever hears the excerpts the renderer
+    records in ``listen_keys``/``listen_clips`` (agent_tools.
+    _review_render_audio: no excerpts, nothing heard). So:
+      'deterministic_only'     stamped audio_model_review=false, no excerpts;
+      'no_listening_excerpts'  stamped true or unstamped (the Studio default)
+                               with both excerpt lists recorded and EMPTY;
+      None                     excerpts exist, or the lists were never
+                               recorded (nothing proves no listener heard it).
+    The stamp alone used to decide (ticket #45, 30 Oct 2026): every MCP
+    changed-section render was stamped true by default and every Studio
+    preview was invisible to MCP. backend/routes/mcp._listener_policy is the
+    same rule on the download_url side; keep the two identical."""
+    meta = meta or {}
+    keys, clips = meta.get("listen_keys"), meta.get("listen_clips")
+    if meta.get("audio_model_review") is False:
+        return None if (keys or clips) else "deterministic_only"
+    if isinstance(keys, list) and isinstance(clips, list) \
+            and not keys and not clips:
+        return "no_listening_excerpts"
+    return None
+
+
 def find_render_asset(conn, project_id, variant, edl_version):
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
@@ -922,6 +947,10 @@ def visual_evidence(available_before=0, created_this_call=0,
 def preview_summary(preview_asset):
     """The complete preview of an EDL version, as an MCP result names it."""
     preview_meta = preview_asset.get("meta") or {}
+    # The fact, not the stamp (listener_policy): a Studio render no listener
+    # could hear reports false, and an unstamped legacy render no longer
+    # reports false by default.
+    policy = listener_policy(preview_meta)
     preview = {
         "render_type": "complete_preview",
         "render_job_id": preview_meta.get("render_job_id"),
@@ -929,8 +958,8 @@ def preview_summary(preview_asset):
         "sha256": preview_asset.get("sha256") or preview_meta.get("sha256"),
         "edl_version": int(preview_meta.get("edl_version")),
         "duration_s": preview_asset.get("duration_s"),
-        "audio_model_review": preview_meta.get(
-            "audio_model_review", False),
+        "audio_model_review": policy is None,
+        "listener_policy": policy,
         "asset_id": preview_asset.get("id"),
     }
     if preview_meta.get("motion_warnings"):

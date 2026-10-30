@@ -9059,11 +9059,15 @@ def _audio_model_review_cache_compatible(requested, edl, meta):
     """Never reuse a render created under the opposite review policy.
 
     Old cache rows have no policy stamp and retain their historical behavior.
-    They remain compatible with legacy Studio requests, but MCP's explicit
-    deterministic-only request requires an explicit false receipt.
+    They remain compatible with legacy Studio requests. MCP's explicit
+    deterministic-only request needs a render no listener could hear: an
+    explicit false receipt, or a Studio render whose recorded excerpt lists
+    are empty (dbx.listener_policy). Requiring the stamp re-encoded the
+    identical pixels and mix (a 41-minute lecture, project 2842, 30 Oct)
+    only to change one metadata flag.
     """
     if not requested:
-        return (meta or {}).get("audio_model_review") is False
+        return dbx.listener_policy(meta) is not None
     authored = edl or {}
     has_designed_audio = bool(
         authored.get("music") or authored.get("sfx") or

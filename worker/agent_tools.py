@@ -22752,6 +22752,11 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
                 "preview requires render_preview(complete=true).")
     pages = _proof_pages(ranges)
     all_requested = [pair for page in pages for pair in page]
+    # The editing owner's listening policy travels with the proof job, as it
+    # does with the complete preview: an MCP proof was stamped
+    # audio_model_review=true by the renderer's default (688 in 30 days),
+    # and download_url then refused it (ticket #39/#45, 30 Oct).
+    audio_model_review = _audio_model_review_enabled(ctx)
     payload = _child_payload(ctx, {
                "edl_version": version,
                "check_ranges": all_requested,
@@ -22759,8 +22764,10 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
                "proof_pages": len(pages),
                "source": "agent_preview_check",
                "agent_job_id": ctx.job["id"],
+               "audio_model_review": audio_model_review,
                "render_signature": _render_signature(
-                   row, "preview_check", all_requested)})
+                   row, "preview_check", all_requested,
+                   audio_model_review=audio_model_review)})
     if plan:
         payload["verify_times"] = [
             t for t, _ in plan
@@ -22862,13 +22869,16 @@ def speculative_preview(ctx):
         return
     pages = _proof_pages(ranges)
     all_requested = [pair for page in pages for pair in page]
+    audio_model_review = _audio_model_review_enabled(ctx)
     payload = _child_payload(ctx, {
                "edl_version": version, "check_ranges": all_requested,
                "check_pages": pages, "proof_pages": len(pages),
                "source": "agent_preview_check",
                "agent_job_id": ctx.job["id"],
-               "render_signature": _render_signature(row, "preview_check",
-                                                       all_requested)})
+               "audio_model_review": audio_model_review,
+               "render_signature": _render_signature(
+                   row, "preview_check", all_requested,
+                   audio_model_review=audio_model_review)})
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     job_id, _created = ctx.db.run(
