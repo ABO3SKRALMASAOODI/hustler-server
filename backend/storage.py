@@ -24,6 +24,15 @@ import uuid
 import boto3
 from botocore.config import Config
 
+try:  # imported HERE, not in the background readers below: a thread that
+    # imports while the main thread is still importing can deadlock on the
+    # module locks.
+    import psycopg2
+except ImportError:  # pragma: no cover — the web image has psycopg2
+    psycopg2 = None
+
+import kv_feed
+import storage_creds as creds
 import storage_routing as routing
 
 PRESIGN_EXPIRY = 900          # short-lived links (admin GETs lean on this)
@@ -224,25 +233,97 @@ def client(public=False, fast=False):
 # client()/bucket() exactly as before; the router never touches the database
 # unless the next store is configured.
 
-def _fetch_routing_row():
-    import psycopg2
+# The app_kv reads below (the mode, the sealed keys) run in background
+# threads, never inside a request, and each one is bounded anyway: a short
+# connect, a short statement, and keepalives that end a dead peer's socket
+# in seconds instead of minutes.
+KV_CONNECT_TIMEOUT_S = 3
+KV_STATEMENT_TIMEOUT_MS = 2000
+_KV_KEEPALIVE = {"keepalives": 1, "keepalives_idle": 2,
+                 "keepalives_interval": 1, "keepalives_count": 2}
+
+
+def _fetch_kv(key):
     url = os.environ.get("DIRECT_DATABASE_URL") or os.environ.get(
         "DATABASE_URL")
     if not url:
         return None
-    conn = psycopg2.connect(url, connect_timeout=3,
-                            options="-c statement_timeout=3000")
+    if psycopg2 is None:
+        raise RuntimeError("psycopg2 is not installed")
+    conn = psycopg2.connect(
+        url, connect_timeout=KV_CONNECT_TIMEOUT_S,
+        options=f"-c statement_timeout={KV_STATEMENT_TIMEOUT_MS}",
+        **_KV_KEEPALIVE)
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT value FROM app_kv WHERE key = %s",
-                        (routing.KV_KEY,))
+            cur.execute("SELECT value FROM app_kv WHERE key = %s", (key,))
             row = cur.fetchone()
         return row[0] if row else None
     finally:
         conn.close()
 
 
-_router = routing.Router(fetch=_fetch_routing_row)
+def _fetch_routing_row():
+    return _fetch_kv(routing.KV_KEY)
+
+
+# The next store's keys: S3_NEXT_* from the environment, else the sealed
+# app_kv row (storage_creds.py). creds.ENV is os.environ with that row filled
+# in, so the router and every next-store client below see one configuration.
+creds.install(lambda: _fetch_kv(creds.KV_KEY))
+
+
+# The mode (kv_feed.py): ONE background reader per process, every
+# STORAGE_ROUTING_TTL_S (30 s), only while the next store is configured. The
+# router asks the feed on every call and gets the last good value at once
+# (ttl_s=0: the feed is the cache), so no upload, presign, playback URL or
+# /healthz ever waits on the database for the mode. Before the first read:
+# the last mode this container saw (STORAGE_ROUTING_CACHE, fresh for
+# STORAGE_ROUTING_CACHE_MAX_AGE_S: the mode lives in the very database whose
+# outage makes the cache matter, so it cannot change meanwhile), else the
+# router's default, 'legacy'. Router.mode() is unchanged: a mode past
+# copy/dual_write still only takes effect in a process that has the next
+# store's keys, else it runs legacy and reports degraded.
+
+def _next_configured():
+    return routing.store_config(routing.NEXT, creds.ENV) is not None
+
+
+def _names_a_mode(raw):
+    return raw is None or routing.parse_mode(raw) is not None
+
+
+def _router_log(msg):
+    # The feed says why the mode is unread (once per outage); the router's
+    # own "unreadable" line for that case would only repeat it.
+    if "NotReadYet" not in msg:
+        _log(msg)
+
+
+def _build_router(fetch, cache_path=None, env=None):
+    """(feed, router) reading the mode through ``fetch`` in the background."""
+    env = os.environ if env is None else env
+    feed = kv_feed.Feed(
+        fetch, name=routing.KV_KEY,
+        ttl_s=float(env.get("STORAGE_ROUTING_TTL_S") or 30),
+        enabled=_next_configured, accept=_names_a_mode,
+        cache_as=routing.parse_mode, cache_path=cache_path,
+        cache_max_age_s=float(env.get("STORAGE_ROUTING_CACHE_MAX_AGE_S")
+                              or 86400))
+    return feed, routing.Router(fetch=feed.get, env=creds.ENV, ttl_s=0,
+                                log=_router_log)
+
+
+_mode_feed, _router = _build_router(
+    _fetch_routing_row,
+    kv_feed.cache_path("STORAGE_ROUTING_CACHE",
+                       "valmera-storage-routing.json"))
+# Start reading at import when this process can have the next store (keys
+# in env, or a sealing secret for the app_kv row); otherwise the first call
+# that sees the next store starts it.
+if creds.env_complete(os.environ) or any(
+        str(os.environ.get(n) or "").strip() for n in creds.KEKS):
+    _mode_feed.start()
 _locator = routing.Locator()
 
 
@@ -250,12 +331,28 @@ def router():
     return _router
 
 
+def next_config():
+    """The next store's configuration (env first, then the sealed row), or
+    None when it is not configured."""
+    return routing.store_config(routing.NEXT, creds.ENV)
+
+
 def routing_status():
-    return _router.status()
+    st = _router.status()
+    try:
+        if _mode_feed.started():
+            st["mode_read"] = _mode_feed.status()
+    except Exception:  # noqa: BLE001 — a health route never fails on this
+        pass
+    try:
+        st.update(creds.status())
+    except Exception:  # noqa: BLE001 — a health route never fails on this
+        pass
+    return st
 
 
 def _next_client(public=False, fast=False):
-    cfg = routing.store_config(routing.NEXT)
+    cfg = next_config()
     if cfg is None:
         raise RuntimeError("the next store (S3_NEXT_*) is not configured")
     endpoint = cfg["public_endpoint"] if public else cfg["endpoint"]
@@ -277,6 +374,7 @@ def _next_client(public=False, fast=False):
                     retries={"max_attempts": 2 if fast else S3_MAX_ATTEMPTS,
                              "mode": "standard"},
                     max_pool_connections=32)))
+            creds.watch_client(cached)
             if len(_clients) >= 8:
                 _clients.clear()
             _clients[key] = cached
@@ -291,7 +389,7 @@ def store_client(name, public=False, fast=False):
 
 def store_bucket(name):
     if name == routing.NEXT:
-        return routing.store_config(routing.NEXT)["bucket"]
+        return next_config()["bucket"]
     return bucket()
 
 
@@ -455,8 +553,22 @@ def validate_upload(filename, nbytes, kind):
         "proxy": (ALLOWED_VIDEO_EXT, PROXY_MAX_BYTES),
     }.get(kind, (ALLOWED_VIDEO_EXT, max_upload_bytes()))
     if ext not in allowed:
+        # Say where the file DOES go (R2 journeys, 30 Oct 2026: an audio-only
+        # podcast sent as the main video was told only "not supported").
+        where = ""
+        if kind in (None, "original", "clip", "proxy"):
+            if ext in ALLOWED_MUSIC_EXT:
+                where = (" That is an audio file: upload it as music (kind "
+                         "'music') to score or voice the edit; its speech is "
+                         "transcribed too.")
+            elif ext in ALLOWED_IMAGE_EXT:
+                where = (" That is an image: upload it as an image (kind "
+                         "'image') to place it in the edit.")
+        elif kind == "music" and ext in ALLOWED_VIDEO_EXT:
+            where = (" That is a video: upload it as a clip (kind 'clip'); "
+                     "its sound can still be used as the music.")
         raise ValueError(f"File type {ext or '(none)'} not supported. "
-                         f"Allowed: {', '.join(sorted(allowed))}")
+                         f"Allowed: {', '.join(sorted(allowed))}.{where}")
     if not isinstance(nbytes, int) or nbytes <= 0:
         raise ValueError("File size missing or invalid")
     if nbytes > cap:

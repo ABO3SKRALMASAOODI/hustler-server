@@ -188,6 +188,13 @@ class Config:
                                      else None)
         self.owner_mem_headroom_gib = max(0.0, float(
             raw.get("owner_mem_headroom_gib", 0.0)))
+        # Light calls (estimate <= light_gib: MCP tools, agent and shorts
+        # turns, frame looks) are governed by real memory only: the
+        # committed-estimate budget, a higher class's memory reservation
+        # and the factory's memory limits never hold them (L4, 30 Oct: one
+        # customer final waiting for memory held every factory MCP call,
+        # so the editors' agents stalled for up to 6 minutes).
+        self.light_gib = float(raw.get("light_gib", 0.0))
         self.queue_max = int(raw.get("queue_max", 256))
         # Below the dispatcher's 180-s launch observation so a refusal comes
         # back on the launch request itself; the dispatcher asks again at
@@ -633,7 +640,8 @@ class Box:
                           self.cfg.owner_leave_free_by_lane,
                       "committed_gib": round(owner_committed, 2),
                       "mem_budget_gib": self.cfg.owner_mem_budget_gib,
-                      "mem_headroom_gib": self.cfg.owner_mem_headroom_gib},
+                      "mem_headroom_gib": self.cfg.owner_mem_headroom_gib,
+                      "light_gib": self.cfg.light_gib},
             "cpu_shares": self.cfg.cpu_shares,
             "queue": {"depth": sum(queue.values()), "by_class": dict(queue),
                       "by_lane": dict(queue_lanes),
@@ -702,12 +710,25 @@ class Box:
             return free
         return [s for s in free if s.quick]
 
+    def _light(self, need):
+        return need <= self.cfg.light_gib + 1e-9
+
     def _owner_memory_fits(self, need, occupying, mem):
-        """Whether one more owner top-level call fits the factory's memory:
-        its own committed budget and the real headroom it leaves customers."""
+        """Whether one more owner top-level HEAVY call fits the factory's
+        memory: its own committed budget (its heavy calls only) and the real
+        headroom it leaves customers. The headroom counts the call's FULL
+        estimate, not half (a factory final grows by ~5 GiB after it
+        starts; L4 measured 5.4 GiB p95), so what the factory starts can
+        never take the memory a customer's next render needs. Light calls
+        always fit (real memory still governs them below)."""
+        if self._light(need):
+            return True
         budget = self.cfg.owner_mem_budget_gib
         if budget is not None:
-            owner_committed = self._committed_gib(occupying, "owner")
+            owner_committed = sum(
+                self.cfg.estimate(jtype) for _s, prio, jtype, _c in occupying
+                if prio == "owner"
+                and not self._light(self.cfg.estimate(jtype)))
             # A lone owner call always fits its own budget (the global
             # rules below still apply), like a lone call fits the box's.
             if owner_committed > 0 and \
@@ -715,7 +736,7 @@ class Box:
                 return False
         headroom = self.cfg.owner_mem_headroom_gib
         if headroom > 0 and mem is not None and \
-                mem - need * 0.5 < self.cfg.mem_reserve_gib + headroom:
+                mem - need < self.cfg.mem_reserve_gib + headroom:
             return False
         return True
 
@@ -735,9 +756,12 @@ class Box:
         nobody of a LOWER class starts while it waits, so the owner factory
         can never starve a customer by always fitting first."""
         moved = False
-        if self.draining:
-            return False
-        order = sorted(self.waiting.values(),
+        # A drain stops new top-level work; synchronous children of calls
+        # that are already running still start, so the running calls can
+        # finish (a refused child fails its parent after its margin) and
+        # the box reaches idle.
+        order = sorted((w for w in self.waiting.values()
+                        if not self.draining or w.get("child")),
                        key=lambda w: (CLASS_RANK.get(w["priority"], 0),
                                       0 if w.get("child") else 1,
                                       w["enqueued"]))
@@ -748,8 +772,11 @@ class Box:
             if waiter.get("slot"):
                 continue
             rank = CLASS_RANK.get(waiter["priority"], 0)
-            if blocked_rank is not None and rank > blocked_rank:
-                break
+            need = self.cfg.estimate(waiter.get("job_type") or "")
+            light = self._light(need)
+            if blocked_rank is not None and rank > blocked_rank \
+                    and not light:
+                continue
             free = self._free_slots(waiter["lane"])
             # Quick slots take only synchronous children; children prefer
             # them but may use any slot of their lane.
@@ -759,7 +786,6 @@ class Box:
                 free = [s for s in free if s.release == want]
             if not free:
                 continue
-            need = self.cfg.estimate(waiter.get("job_type") or "")
             mem = mem_available_gib()
             if waiter["priority"] == "owner":
                 if not waiter.get("child"):
@@ -780,10 +806,17 @@ class Box:
                 free = self._owner_leaves_reserve(waiter, free)
                 if not free:
                     continue
-            if committed + need > self.cfg.mem_budget_gib + 1e-9 or (
-                    mem is not None
-                    and mem - need * 0.5 < self.cfg.mem_reserve_gib):
-                # Fits a slot but not memory: hold every lower class back.
+            if light and mem is not None and \
+                    mem - need * 0.5 < self.cfg.mem_reserve_gib:
+                # Real memory is short even for a light call: it waits,
+                # without holding anyone else back.
+                continue
+            if not light and (
+                    committed + need > self.cfg.mem_budget_gib + 1e-9 or (
+                        mem is not None
+                        and mem - need * 0.5 < self.cfg.mem_reserve_gib)):
+                # Fits a slot but not memory: hold every lower class's
+                # heavy calls back.
                 if committed > 0 or (mem is not None and mem <
                                      self.cfg.mem_reserve_gib):
                     blocked_rank = rank if blocked_rank is None \
@@ -884,7 +917,7 @@ class Box:
             if live:
                 return 409, {"error": "call already accepted",
                              "call_status": live["status"]}
-            if self.draining:
+            if self.draining and not synchronous:
                 return 429, refusal_envelope(
                     jtype, "Box is draining for maintenance; nothing ran")
             if lane not in self.lanes:
@@ -924,7 +957,8 @@ class Box:
                 self._assign()
                 while not waiter["slot"]:
                     remaining = deadline - time.monotonic()
-                    if remaining <= 0 or self.draining:
+                    if remaining <= 0 or (self.draining
+                                          and not waiter["child"]):
                         break
                     self.cond.wait(timeout=min(remaining, 1.0))
                     self._assign()
@@ -936,7 +970,7 @@ class Box:
                         and want != "unknown"
                         and want not in self.lane_releases(lane))
                     msg = ("Box is draining for maintenance; nothing ran"
-                           if self.draining else
+                           if self.draining and not waiter["child"] else
                            f"Box is switching releases: no {lane} slot runs "
                            f"{want} yet; nothing ran" if rollout else
                            f"Box is at capacity: no free {lane} slot within "
