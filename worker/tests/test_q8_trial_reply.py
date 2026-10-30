@@ -296,3 +296,20 @@ def test_a_year_the_cut_never_says():
     f = facts(index=idx, after=kept, wrote=True, duration_s=50.0)
     assert dropped("It is built on the 2015 bet on deep learning.", f) == ["year"]
     assert dropped("It ends on the 2005 professor's prediction.", f) == []
+
+
+def test_a_mute_is_never_called_levelling_the_sound():
+    """30 Oct, the first real trial request ("cut out the audio"): the turn
+    set the volume to -60 dB and the reply said "levelled the sound"."""
+    base = {"segments": [{"start": 0, "end": 10.5}]}
+    muted = dict(base, volume=[{"start": 0, "end": 10.54, "gain_db": -60.0}],
+                 master={"loudness": "natural"})
+    assert tr.friendly_changes(base, muted) == ["muted the original sound"]
+    part = dict(base, volume=[{"start": 0, "end": 4, "gain_db": -60.0},
+                              {"start": 4, "end": 10.5, "gain_db": 0.0}])
+    assert tr.friendly_changes(base, part) == ["muted part of the sound"]
+    quieter = dict(base, volume=[{"start": 0, "end": 10.5, "gain_db": -6.0}])
+    assert tr.friendly_changes(base, quieter) == ["lowered the sound"]
+    assert tr.friendly_changes(muted, base) == ["brought the original sound back"]
+    mastered = dict(base, master={"loudness": "social"})
+    assert tr.friendly_changes(base, mastered) == ["levelled the sound"]
