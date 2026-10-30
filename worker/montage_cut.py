@@ -316,3 +316,44 @@ def follow(ctx, steps, started, run):
         steps.append({"tool": "montage_follow", "ok": False,
                       "note": f"{type(exc).__name__}: {str(exc)[:140]}"})
     return True
+
+
+CUT_IN = 0.42               # a second moment of the same shot cuts in this much closer
+
+
+def cut_ins(wins, pairs, shots, duration):
+    """[(out_start, out_end, cx, cy)] for the windows that should cut in:
+    in a run of consecutive windows from the SAME shot, every second one.
+    With the crop on the subject, two moments of one shot read as one held
+    shot (judges, final run: "the landing shot held about 2.3 s", made of
+    three moments); a closer framing on alternate moments makes each a cut.
+    cx/cy pin the subject (the crop centres it across, its box gives the
+    height)."""
+    out, t, prev_shot, run = [], 0.0, None, 0
+    for a, b in wins:
+        shot = _shot_of(shots, (a + b) / 2.0, duration)
+        run = run + 1 if shot == prev_shot else 0
+        if run % 2 == 1:
+            box = _box_for(pairs, a, b)
+            cy = 0.5 if not box else round((box[1] + box[3]) / 2.0, 3)
+            out.append((round(t, 3), round(t + (b - a), 3), 0.5,
+                        min(max(cy, 0.2), 0.8)))
+        prev_shot = shot
+        t += b - a
+    return out
+
+
+def apply_cut_ins(ctx, steps, started, run, wins, shots, duration):
+    """One hard punch (add_zoom, ramp 0) on each cut-in window."""
+    pairs = getattr(ctx, "first_cut_montage_boxes", None) or []
+    n = 0
+    for s, e, cx, cy in cut_ins(wins, pairs, shots, duration):
+        res = run(ctx, steps, "add_zoom", {
+            "start": s, "end": e, "mode": "punch", "ramp_s": 0.0,
+            "strength": CUT_IN, "cx": cx, "cy": cy,
+            "purpose": "a closer camera on a second moment of the same shot, "
+                       "so the montage cuts instead of holding"}, started)
+        if res is not None and not str(res).lstrip().upper().startswith(
+                ("REJECTED", "FAILED", "CORRECTION")):
+            n += 1
+    return n
