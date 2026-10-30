@@ -1139,8 +1139,55 @@ def _message_text(cur, message_id):
         return ""
 
 
+def _export_value_line(edl_json):
+    """Q8 (30 Oct): what the trial user's finished edit is, in one line, for
+    the export paywall ("Your 36-second vertical edit is ready to download:
+    a hook title, captions and 3 B-roll cutaways."). Only what the EDL
+    holds; None when it cannot say."""
+    if not isinstance(edl_json, dict):
+        return None
+    total = 0.0
+    for k in edl_json.get("keep") or []:
+        try:
+            a, b = (k[0], k[1]) if isinstance(k, (list, tuple)) else \
+                (k.get("start"), k.get("end"))
+            total += max(0.0, float(b) - float(a))
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+    for ins in edl_json.get("inserts") or []:
+        try:
+            total += max(0.0, float((ins or {}).get("duration_s") or 0))
+        except (TypeError, ValueError):
+            continue
+    ratio = str(((edl_json.get("frame") or {}).get("ratio")) or "")
+    shape = {"9:16": "vertical ", "1:1": "square ", "16:9": "landscape "}.get(ratio, "")
+    have = []
+    if any(isinstance(m, dict) and m.get("template") == "hook_title"
+           for m in edl_json.get("motion") or []):
+        have.append("a hook title")
+    caps = edl_json.get("captions")
+    if caps and not (isinstance(caps, dict) and caps.get("mode") in ("off", "none")
+                     and not caps.get("items")):
+        have.append("captions")
+    broll = sum(1 for f in edl_json.get("fx") or []
+                if isinstance(f, dict) and f.get("type") == "broll")
+    if broll:
+        have.append(f"{broll} B-roll cutaway" + ("s" if broll != 1 else ""))
+    if len(edl_json.get("keep") or []) > 1:
+        have.append("the pauses cut")
+    if not total:
+        return None
+    length = f"{int(round(total))}-second "
+    line = f"Your {length}{shape}edit is ready to download"
+    if have:
+        line += ": " + (", ".join(have[:-1]) + " and " + have[-1]
+                        if len(have) > 1 else have[0])
+    return (line + ". Choose a plan and the full-quality export starts "
+            "right away.")
+
+
 def _record_plans_message(cur, session_id, surface, request_message_id=None,
-                          blocked_prompt=None):
+                          blocked_prompt=None, content=None):
     """Persist the plans reply once and return it as a chat message.
 
     A blocked send is not stored as a chat message, so when the newest
@@ -1166,6 +1213,10 @@ def _record_plans_message(cur, session_id, surface, request_message_id=None,
                         (Json({"blocked_prompt": blocked_prompt}), last["id"]))
             last = dict(last, meta=dict(last.get("meta") or {},
                                         blocked_prompt=blocked_prompt))
+        if content and last.get("content") != content:
+            cur.execute("UPDATE chat_messages SET content = %s WHERE id = %s",
+                        (content, last["id"]))
+            last = dict(last, content=content)
         return _message_out(last)
     meta = {"kind": "subscription_plans", "subscribe_required": True,
             "subscribe_gate": True, "surface": surface,
@@ -1178,9 +1229,10 @@ def _record_plans_message(cur, session_id, surface, request_message_id=None,
     cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
                    VALUES (%s, 'assistant', %s, %s)
                    RETURNING id, role, content, meta, created_at""",
-                (session_id, _PLANS_MESSAGE, Json(meta)))
+                (session_id, content or _PLANS_MESSAGE, Json(meta)))
     row = cur.fetchone() or {}
-    return _message_out({"content": _PLANS_MESSAGE, "meta": meta, **row})
+    return _message_out({"content": content or _PLANS_MESSAGE, "meta": meta,
+                         **row})
 
 
 def _upload_subscription_payload(asset_id, message_id):
@@ -3789,7 +3841,10 @@ def project_state(user_id, project_id):
             # playback from zero.
             bv[variant] = {"id": a["id"], "created_at": a["created_at"],
                            "object_id": m.get("reused_from_asset_id")
-                           or a["id"]}
+                           or a["id"],
+                           # Q8: a First cut is delivered on its draft and
+                           # the 720p render follows; the Studio says so
+                           "quality": m.get("quality")}
     # The preview the player should show is the render of the NEWEST edl version
     # — NOT merely the newest render asset id. A late re-render of an OLDER
     # version (a version-picker tap, a retried/redelivered job) inserts a higher
@@ -3803,7 +3858,8 @@ def project_state(user_id, project_id):
         pv = by_version[vmax]["preview"]
         latest_preview = {"asset_id": pv["id"], "edl_version": vmax,
                           "object_id": pv.get("object_id") or pv["id"],
-                          "created_at": pv["created_at"].isoformat()}
+                          "created_at": pv["created_at"].isoformat(),
+                          "quality": pv.get("quality")}
     # The tray is its own surface: staged uploads never appear in the music
     # picker or the media picker until Submit commits them.
     def _is_staged(a):
@@ -6757,11 +6813,25 @@ def _request_final(cur, user_id, project_id, version, render_group=None,
         body["code"] = "subscription_required"
         body["error"] = "Choose a plan to download this video."
         if p.get("chat_session_id"):
+            # Q8: the paywall says what the user is about to keep (the free
+            # plan's "Upgrade to start editing" read as if nothing had been
+            # edited, right after the edit was made)
+            value = None
+            try:
+                cur.execute("SELECT json FROM edls WHERE project_id = %s "
+                            "AND version = %s", (project_id, version))
+                row = cur.fetchone()
+                value = _export_value_line((row or {}).get("json"))
+            except Exception:  # noqa: BLE001 — the default line stands
+                value = None
             body["subscription_message"] = _record_plans_message(
                 cur, p["chat_session_id"], "export",
                 blocked_prompt={"export_version": int(version),
                                 "text": "",
-                                "at": datetime.now(timezone.utc).isoformat()})
+                                "at": datetime.now(timezone.utc).isoformat()},
+                content=value or "Your edit is ready to download. Choose a "
+                                 "plan and the full-quality export starts "
+                                 "right away.")
         return jsonify(body), 402
     cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
     cur.execute("SELECT version, json FROM edls "
