@@ -597,10 +597,32 @@ _SUMMARY = re.compile(r"(?i)\b(cut|video|short|reel|highlight|clip|edit|demo|pie
                       r"\b(done|ready|finished|i(?:'ve| have)? (?:cut|made|built|trimmed|turned|cleaned))\b")
 
 
+# QI2 (30 Oct): pixel sizes and "1080p"-style resolutions. The preview the
+# trial user watches is a 480p draft or a 720p approval render and the export
+# is the source's size, so any such number in a reply is wrong for one of
+# them (the long talk's reply: "a landscape 1920x1080 cut" over a 1280x720
+# preview; both judges called it a false claim).
+_PIXELS = re.compile(
+    r"\s*(?:\(\s*)?\b(?:\d{3,4}\s?[x\u00d7]\s?\d{3,4}|\d{3,4}p)\b(?:\s*\))?",
+    re.I)
+
+
+def scrub_pixels(text):
+    """(text without pixel sizes or "NNNNp" resolutions, how many removed)."""
+    out, n = _PIXELS.subn("", text or "")
+    if n:
+        out = re.sub(r"[ \t]{2,}", " ", out)
+        out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    return out, n
+
+
 def finish(draft, facts):
     """(reply, report): the reply the trial user reads, and what was dropped
     and why (kept in the job result for the admin)."""
     report = {"dropped": [], "kept": 0}
+    draft, pixels = scrub_pixels(draft)
+    if pixels:
+        report["dropped"].append({"why": "pixels", "sentence": f"{pixels} size(s)"})
     kept, offers, limits = [], [], []
     prev_dropped = False
     for sent in sentences(draft):

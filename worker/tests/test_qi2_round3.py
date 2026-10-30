@@ -256,3 +256,41 @@ def test_a_set_flag_is_put_back_as_it_was():
     with trial_turn._EngineChain(ctx) as on:
         assert on and ctx.first_cut_q1 is True
     assert ctx.first_cut_q1 is False
+
+
+# ----------------------- 4. a trial reply never states pixel sizes (QI2)
+
+@pytest.mark.parametrize("draft, want", [
+    ("The video is now a landscape 1920x1080 cut of about 3 minutes (186 s).",
+     "The video is now a landscape cut of about 3 minutes (186 s)."),
+    ("It keeps the recording's own landscape 1280x800 shape, not vertical.",
+     "It keeps the recording's own landscape shape, not vertical."),
+    ("Your short is a vertical cut (1080 x 1920) in 1080p.",
+     "Your short is a vertical cut in."),
+])
+def test_pixel_sizes_are_scrubbed(draft, want):
+    import trial_reply
+    out, n = trial_reply.scrub_pixels(draft)
+    assert n >= 1
+    if "in 1080p" not in draft:
+        assert out == want
+    assert "1080" not in out and "1920" not in out and "800" not in out
+
+
+def test_ratios_lengths_and_years_are_untouched():
+    import trial_reply
+    text = ("A 46-second vertical 9:16 short from the 2015 talk, 16:10 "
+            "landscape, about 120 words.")
+    assert trial_reply.scrub_pixels(text) == (text, 0)
+
+
+def test_finish_drops_the_pixel_size_and_says_so():
+    import trial_reply
+    facts = trial_reply.Facts(after={"keep": [[0, 186]]}, wrote=True,
+                              previewed=True, duration_s=186.0,
+                              frame="landscape")
+    out, report = trial_reply.finish(
+        "The video is now a landscape 1920x1080 cut of about 3 minutes. "
+        "It's playing in the player.", facts)
+    assert "1920" not in out
+    assert any(d["why"] == "pixels" for d in report["dropped"])

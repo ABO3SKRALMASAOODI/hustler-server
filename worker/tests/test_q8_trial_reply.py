@@ -51,9 +51,12 @@ def test_vertical_claimed_for_a_landscape_screen_recording():
         "and the \"um\" are removed, the hook title and captions are on.", f)
     assert [d["why"] for d in report["dropped"]] == ["shape"]
     assert "vertical" not in text.lower()
-    # the same cut described as what it is stands
-    assert dropped("Your footage is now an 18-second landscape cut at the "
-                   "original 1280x800 shape.", f) == []
+    # the same cut described as what it is stands (QI2: its pixel size is
+    # scrubbed, never the sentence: a reply states no pixel sizes)
+    text, report = tr.finish("Your footage is now an 18-second landscape cut "
+                             "at the original 1280x800 shape.", f)
+    assert [d["why"] for d in report["dropped"]] == ["pixels"]
+    assert "18-second landscape cut at the original shape" in text
 
 
 def test_a_denial_on_a_turn_that_wrote():
