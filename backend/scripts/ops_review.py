@@ -336,7 +336,8 @@ def _signals(ctx):
             "requests": len(ctx["requests"]),
             **{k: n[k] for k in ("exported", "downloaded", "thumbs_up",
                                  "thumbs_down", "checkout", "paid",
-                                 "cancelled", "left")}}
+                                 "cancelled", "left")},
+            "downloaded_draft_only": bool(n.get("downloaded_draft_only"))}
 
 
 def cmd_verdict(a):

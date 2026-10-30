@@ -219,6 +219,8 @@ class FakeCur:
             self.rows = [{"id": 5}]
         elif s.startswith("SELECT MAX(version) AS version FROM edls"):
             self.rows = [{"version": DB["current_version"]}]
+        elif s.startswith("SELECT MAX(version) AS v FROM edls"):
+            self.rows = [{"v": DB.get("latest_edl_version")}]
         elif "FROM video_jobs WHERE id" in s:
             self.rows = [DB.get("job_row") or {
                 "id": 5, "type": "mcp_tool", "state": "done",
@@ -226,6 +228,26 @@ class FakeCur:
                 "project_id": 3,
                 "result": DB.get("job_result")
                 or {"text": "12 sentences."}}]
+        elif s.startswith("SELECT meta->>'variant' AS variant FROM assets"):
+            self.rows = [{"variant": (row.get("meta") or {}).get("variant")}
+                         for row in DB["render_assets"]
+                         if row["project_id"] == p[0] and row["id"] == p[1]]
+        elif "FROM assets" in s and "meta->>'variant' IN (" in s:
+            self.rows = [{"id": row["id"],
+                          "variant": (row.get("meta") or {}).get("variant"),
+                          "v": str((row.get("meta") or {}).get("edl_version"))}
+                         for row in sorted(DB["render_assets"],
+                                           key=lambda r: r["id"],
+                                           reverse=True)
+                         if row["project_id"] == p[0]][:4]
+        elif "FROM video_jobs WHERE project_id = %s AND type = %s" in s \
+                and "state IN ('queued', 'running')" in s:
+            rows = [job for job in DB.get("render_jobs", [])
+                    if job["project_id"] == p[0] and job["type"] == p[1]
+                    and job["state"] in ("queued", "running")
+                    and (len(p) < 3 or str(job["v"]) == p[2])]
+            self.rows = sorted(rows, key=lambda job: job["id"],
+                               reverse=True)[:1]
         elif "FROM assets" in s and "kind = 'render'" in s:
             rows = [row for row in DB["render_assets"]
                     if row["project_id"] == p[0]
@@ -241,7 +263,10 @@ class FakeCur:
             if "(meta->>'edl_version')::int = %s" in s:
                 rows = [row for row in rows if int(
                     (row.get("meta") or {}).get("edl_version")) == int(p[extra])]
-            self.rows = sorted(rows, key=lambda row: row["id"], reverse=True)[:1]
+            limit = int(re.search(r"LIMIT (\d+)", s).group(1)) \
+                if re.search(r"LIMIT (\d+)", s) else 1
+            self.rows = sorted(rows, key=lambda row: row["id"],
+                               reverse=True)[:limit]
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
@@ -1307,7 +1332,12 @@ def test_preview_download_rejects_listener_enabled_cached_asset(
 
     assert "audio_model_review=false" in public["content"][0]["text"]
     assert "call render_preview" in public["content"][0]["text"]
-    assert "structuredContent" not in public
+    # A Studio render made before the excerpt lists were recorded: nothing
+    # proves no listener heard it. Refused as the product's gate (named,
+    # not filed as our failure), and no receipt leaves.
+    assert "preview_receipt" not in public.get("structuredContent", {})
+    assert public["structuredContent"]["download"]["code"] == \
+        "preview_not_evidence"
     assert public["isError"] is True
 
 
@@ -2541,3 +2571,244 @@ def test_download_without_kind_hands_out_the_finished_export(client,
     assert "DRAFT PREVIEW" in got["content"][0]["text"]
     tool = next(t for t in mcpmod.SESSION_TOOLS if t["name"] == "download_url")
     assert "never the user's finished video" in tool["description"]
+
+
+# ── Ticket #45 / #39 / #4 (30 Oct 2026): a preview is judged by its facts ──
+#
+# Project 2842 (paying MCP user): download_url and watch_video refused the
+# customer's own renders. Every MCP changed-section render (688 in 30 days)
+# was stamped audio_model_review=true by default and every Studio preview
+# carries the Studio's default stamp, and the gate filtered on the STAMP, so
+# renders that provably no listener heard (no excerpts were cut) were "not
+# rendered yet". The rows below are the shapes production stored.
+
+def _render(asset_id, version, variant="preview", stamp=False, excerpts=(),
+            job=None, width=960, height=540, duration=2460.36):
+    return {"id": asset_id, "project_id": 3,
+            "storage_key": f"media/3/{asset_id}.mp4", "duration_s": duration,
+            "width": width, "height": height, "sha256": "ab" * 32,
+            "meta": {"variant": variant, "edl_version": version,
+                     "audio_model_review": stamp,
+                     "render_job_id": job or 126000 + asset_id,
+                     "listen_keys": list(excerpts),
+                     "listen_clips": [{"key": k} for k in excerpts],
+                     "quality": "draft"}}
+
+
+def _download(client, monkeypatch, **arguments):
+    monkeypatch.setattr(mcpmod.storage, "presign_get",
+                        lambda key: f"https://cdn.example/{key}?sig=1")
+    monkeypatch.setattr(mcpmod, "_record_download_receipt",
+                        lambda tok, pid, receipt: {"download_job_id": 1})
+    monkeypatch.setattr(mcpmod, "_final_gate",
+                        lambda cur, pid, uid: (lambda aid, meta, v: True))
+    return rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url",
+        "arguments": dict({"project_id": 3}, **arguments),
+    }).get_json()["result"]
+
+
+def test_mcp_changed_section_render_downloads_with_its_receipt(
+        client, monkeypatch):
+    """14:49:04: render_preview(complete=false) made preview_check asset
+    38126 (stamped true by default, no excerpts); download_url(kind=
+    'preview_check') answered 'No preview_check has been rendered yet'."""
+    DB["render_assets"] = [_render(38126, 3, "preview_check", stamp=True,
+                                   job=126608, duration=346.141)]
+    got = _download(client, monkeypatch, kind="preview_check", edl_version=3)
+    assert got["isError"] is False
+    receipt = got["structuredContent"]["preview_receipt"]
+    assert receipt["asset_id"] == 38126
+    assert receipt["render_type"] == "changed_section_preview"
+    assert receipt["audio_model_review"] is False
+    assert receipt["listener_policy"] == "no_listening_excerpts"
+    assert receipt["listen_keys_count"] == 0
+    text = got["content"][0]["text"]
+    assert "media/3/38126.mp4" in text
+    assert "no listening excerpts were cut" in text
+
+
+def test_studio_preview_without_excerpts_downloads(client, monkeypatch):
+    """14:26: the project's only preview was the Studio's v1 render
+    (stamp true, no excerpts): 'No preview has been rendered yet'."""
+    DB["render_assets"] = [_render(19359, 1, stamp=True, job=47562)]
+    DB["current_version"] = 1
+    got = _download(client, monkeypatch)
+    assert got["isError"] is False
+    receipt = got["structuredContent"]["preview_receipt"]
+    assert receipt["asset_id"] == 19359 and receipt["edl_version"] == 1
+    assert receipt["deliverable"] is False
+    assert receipt["deliverable_next_step"] == \
+        "export_final(project_id=3, edl_version=1)"
+
+
+def test_download_names_the_running_render_instead_of_not_rendered(
+        client, monkeypatch):
+    """14:49:07: v3 had no complete preview yet while the Studio's job
+    126609 was rendering exactly v3; the AI app was told 'No preview has
+    been rendered yet' and started a second 41-minute render beside it."""
+    DB["render_assets"] = [_render(38125, 2)]
+    DB["render_jobs"] = [{"id": 126609, "project_id": 3, "type": "preview",
+                          "state": "running", "progress": 40, "v": 3}]
+    got = _download(client, monkeypatch, kind="preview", edl_version=3)
+    text = got["content"][0]["text"]
+    assert got["isError"] is True
+    assert "render job 126609 (running, 40%)" in text
+    assert "wait_for_job(job_id=126609)" in text
+    assert "Do not start another render" in text
+    assert "has been rendered yet" not in text
+    detail = mcpmod._public_error_detail("download_url", got)
+    assert detail["category"] == "prerequisite" and \
+        detail["code"] == "render_pending"
+    assert "message" not in detail      # a gate, not one of our failures
+
+
+def test_no_render_at_all_is_a_named_prerequisite(client, monkeypatch):
+    got = _download(client, monkeypatch, kind="preview_check")
+    text = got["content"][0]["text"]
+    assert got["isError"] is True
+    assert "render_preview(project_id=3)" in text
+    detail = mcpmod._public_error_detail("download_url", got)
+    assert detail["category"] == "prerequisite"
+    from ops_loop import intake
+    assert intake._event_failure({
+        "id": 1, "kind": "mcp_error_response", "user_id": 7,
+        "project_id": None, "at": "2026-10-30T14:49:04+00:00",
+        "paying": True, "detail": detail}) is None
+    # With a complete preview on the project, the answer names it.
+    DB["render_assets"] = [_render(38125, 2)]
+    text = _download(client, monkeypatch, kind="preview_check",
+                     edl_version=3)["content"][0]["text"]
+    assert "preview of EDL v2: download_url(project_id=3, asset_id=38125)" \
+        in text
+
+
+def test_final_missing_names_export_final_and_is_a_prerequisite(
+        client, monkeypatch):
+    DB["render_assets"] = [_render(38129, 6)]
+    got = _download(client, monkeypatch, kind="final", edl_version=6)
+    assert got["isError"] is True
+    assert "export_final(project_id=3" in got["content"][0]["text"]
+    assert mcpmod._public_error_detail(
+        "download_url", got)["category"] == "prerequisite"
+
+
+def test_an_asset_id_names_its_own_kind(client, monkeypatch):
+    """download_url(asset_id=<a final>) without kind looked for a PREVIEW
+    with that id and said no preview had been rendered."""
+    DB["render_assets"] = [_render(38125, 2),
+                           _render(51, 2, "final", width=1920, height=1080)]
+    got = _download(client, monkeypatch, asset_id=51)
+    assert got["isError"] is False
+    assert got["structuredContent"]["download_receipt"]["render_type"] == \
+        "final_export"
+    got = _download(client, monkeypatch, asset_id=38125)
+    assert got["structuredContent"]["preview_receipt"]["asset_id"] == 38125
+
+
+def test_deterministic_render_wins_within_its_version(client, monkeypatch):
+    """A Studio render WITH listening excerpts beside the MCP render of the
+    same version: the MCP one is handed over; alone, the Studio one is the
+    product's evidence gate (named, no link, no receipt)."""
+    DB["render_assets"] = [_render(59, 3), _render(60, 3, stamp=True,
+                                                   excerpts=["l/60_0.mp3"])]
+    got = _download(client, monkeypatch, kind="preview", edl_version=3)
+    assert got["structuredContent"]["preview_receipt"]["asset_id"] == 59
+    assert got["structuredContent"]["preview_receipt"]["listener_policy"] \
+        == "deterministic_only"
+    DB["render_assets"] = DB["render_assets"][1:]
+    monkeypatch.setattr(
+        mcpmod.storage, "presign_get",
+        lambda _key: (_ for _ in ()).throw(
+            AssertionError("listener-bearing preview must not be signed")))
+    got = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "download_url", "arguments": {
+            "project_id": 3, "kind": "preview", "edl_version": 3},
+    }).get_json()["result"]
+    assert got["isError"] is True
+    assert "listener artifacts" in got["content"][0]["text"]
+    assert got["structuredContent"]["download"]["code"] == \
+        "preview_not_evidence"
+
+
+def test_every_preview_kind_and_version_path(client, monkeypatch):
+    """The matrix: complete and changed-section renders, MCP and Studio
+    stamps, pinned and unpinned versions, and a stale newest render."""
+    DB["render_assets"] = [
+        _render(10, 1, stamp=True),                    # Studio v1
+        _render(11, 2),                                # MCP v2
+        _render(12, 3, "preview_check", stamp=True),   # MCP check v3
+        _render(13, 3, stamp=True),                    # Studio v3
+        _render(14, 4, "preview_check", stamp=False),  # stamped check v4
+    ]
+    DB["current_version"] = DB["latest_edl_version"] = 5
+    want = {(None, "preview"): 13, (1, "preview"): 10, (2, "preview"): 11,
+            (3, "preview"): 13, (3, "preview_check"): 12,
+            (4, "preview_check"): 14, (None, "preview_check"): 14}
+    for (version, kind), asset in want.items():
+        args = {"kind": kind}
+        if version is not None:
+            args["edl_version"] = version
+        got = _download(client, monkeypatch, **args)
+        assert got["isError"] is False, (version, kind, got)
+        receipt = got["structuredContent"]["preview_receipt"]
+        assert receipt["asset_id"] == asset, (version, kind)
+        assert receipt["audio_model_review"] is False
+    # Unpinned and older than the edit: the answer says so, and names the
+    # render of the current version when one is running.
+    text = _download(client, monkeypatch)["content"][0]["text"]
+    assert "edit is now at v5" in text and "render of EDL v3" in text
+    assert "render_preview(project_id=3, complete=true)" in text
+    DB["render_jobs"] = [{"id": 900, "project_id": 3, "type": "preview",
+                          "state": "queued", "progress": 0, "v": 5}]
+    text = _download(client, monkeypatch)["content"][0]["text"]
+    assert "v5 is rendering as job 900: wait_for_job(job_id=900)" in text
+    DB["render_jobs"] = []
+    for version, kind in ((4, "preview"), (2, "preview_check")):
+        got = _download(client, monkeypatch, kind=kind, edl_version=version)
+        assert got["isError"] is True
+        assert got["structuredContent"]["download"]["code"] == \
+            "preview_missing"
+
+
+def test_render_preview_answer_ends_on_the_export_call():
+    """Ticket #4 recurred on sessions with no final at all: render_preview's
+    MCP answer now says the preview is a draft and names export_final."""
+    out = {}
+    result = {"text": "Preview v6 rendered: 2460.4s.", "edl_version": 6,
+              "preview": {"render_type": "complete_preview", "edl_version": 6,
+                          "asset_id": 38129, "audio_model_review": False}}
+    text = mcpmod._tool_answer({"title": "Lezione 7"}, 2842, result, False,
+                               lambda t, r=None: out.setdefault("t", t),
+                               tool="render_preview")
+    assert "DRAFT PREVIEW of EDL v6 (asset 38129)" in text
+    assert "export_final(project_id=2842, edl_version=6)" in text
+    assert "download_url(project_id=2842, kind='final', edl_version=6)" in text
+    # Other tools, errors and an older preview carry no such line.
+    for tool, res in (("look_at", result),
+                      ("render_preview", dict(result, is_error=True)),
+                      ("render_preview", dict(result, edl_version=7))):
+        assert "DRAFT PREVIEW" not in mcpmod._tool_answer(
+            {"title": "x"}, 2842, res, False, lambda t, r=None: t, tool=tool)
+
+
+def test_download_url_and_the_worker_judge_previews_by_one_rule():
+    """backend _listener_policy and worker read_tools.listener_policy are the
+    same rule on the two sides of the MCP hop (download_url here,
+    watch_video / render_preview / the renderer cache in the worker)."""
+    from video_services import mcp_fast_reads
+    tools = mcp_fast_reads.read_tools()
+    if not hasattr(tools, "listener_policy"):
+        pytest.skip("worker side not released yet (BUNDLE_QUEUE)")
+    for stamp in (False, True, None, "false"):
+        for keys in (None, [], ["l.mp3"]):
+            for clips in (None, [], [{"key": "l.mp3"}]):
+                meta = {"listen_keys": keys, "listen_clips": clips}
+                if keys is None:
+                    meta.pop("listen_keys")
+                if clips is None:
+                    meta.pop("listen_clips")
+                if stamp is not None:
+                    meta["audio_model_review"] = stamp
+                assert mcpmod._listener_policy(meta) == \
+                    tools.listener_policy(meta), meta
