@@ -242,10 +242,14 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None):
              for n, (a, b, w, q) in enumerate(wins, 1)]
     print(f"[first_cut] b-roll moments: {[(s['at'], s['word'], s['query']) for s in specs]}",
           flush=True)
-    run(ctx, steps, "source_broll", {"moments": specs, "max": len(specs)},
-        started)
+    import first_cut
+    with first_cut._timed(ctx, "broll_source"):
+        run(ctx, steps, "source_broll", {"moments": specs, "max": len(specs)},
+            started)
     if spend is not None:
-        return verify_broll(ctx, steps, started, run, spend)
+        import first_cut
+        with first_cut._timed(ctx, "broll_check"):
+            return verify_broll(ctx, steps, started, run, spend)
     return covered(ctx, ("broll",))
 
 

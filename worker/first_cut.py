@@ -78,6 +78,32 @@ def _ok(result):
 _CORNER = re.compile(r"GRAPHIC ON THE CORNER MARK: '([^']+)'")
 
 
+class _timed:
+    """Q8 (30 Oct): wall time per First cut phase (the scout, the closing
+    pick, the B-roll search and check, the chain, the renders), recorded in
+    the First cut's meta as ``phases`` so the speed of each step is measured,
+    not guessed. It changes nothing the First cut does."""
+
+    def __init__(self, ctx, name):
+        self.ctx, self.name = ctx, name
+
+    def __enter__(self):
+        self.t0 = time.monotonic()
+        return self
+
+    def __exit__(self, *exc):
+        phases = getattr(self.ctx, "first_cut_phases", None)
+        if not isinstance(phases, dict):
+            phases = {}
+            try:
+                self.ctx.first_cut_phases = phases
+            except Exception:  # noqa: BLE001
+                return False
+        phases[self.name] = round(phases.get(self.name, 0.0)
+                                  + time.monotonic() - self.t0, 2)
+        return False
+
+
 def _clear_corner_mark(ctx, steps, render):
     """The render's PICTURE QC named a graphic drawn into the corner mark's
     box (the brand slot stays clear, always). Remove those items; returns
@@ -329,8 +355,9 @@ def scout_range(ctx, worker_db, spend):
                          + "\n".join(lines)}]
             # thinking is on by default on the lane's models: a small
             # max_tokens can be spent before any answer (C1: an empty pick)
-            resp = claude_lane.create(model, messages, max_tokens=4000,
-                                      effort="low")
+            with _timed(ctx, "scout"):
+                resp = claude_lane.create(model, messages, max_tokens=4000,
+                                          effort="low")
             text = resp.choices[0].message.content or ""
             usage = resp.usage
             spend["usd"] += float(getattr(usage, "provider_cost_usd", 0) or 0)
@@ -356,8 +383,9 @@ def scout_range(ctx, worker_db, spend):
                     # on a setup line"); one small call, the span's own end
                     # stands without a usable answer
                     import longform
-                    closed = longform.pick_ending(ctx, rows, [[start, end]],
-                                                  spend)
+                    with _timed(ctx, "closing_pick"):
+                        closed = longform.pick_ending(ctx, rows,
+                                                      [[start, end]], spend)
                     if closed[-1][1] - start >= 12.0:
                         end = closed[-1][1]
                 if 12.0 <= end - start <= 75.0:
@@ -1730,8 +1758,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         import first_cut_visual as fcv
         moments = getattr(ctx, "first_cut_broll", None) or []
         if moments:
-            cutaways = fcv.place_broll(ctx, steps, started, _run, moments,
-                                       max(hook_end, HOOK_S), spend)
+            with _timed(ctx, "broll"):
+                cutaways = fcv.place_broll(ctx, steps, started, _run,
+                                           moments, max(hook_end, HOOK_S),
+                                           spend)
             if cutaways:
                 applied.append("b-roll of what is said")
     if q1 and screen_kept:
@@ -2502,20 +2532,23 @@ def run(worker_db, job, project, index_row):
                                                      payload.get("message_id")))
             picked = None
         else:
-            steps, applied, picked = video_chain(ctx, worker_db, started,
-                                                 spend)
+            with _timed(ctx, "chain"):
+                steps, applied, picked = video_chain(ctx, worker_db, started,
+                                                     spend)
         render = None
         keep_whole = bool(picked and picked.get("how") == "finished_piece")
         if ctx.versions_written or keep_whole:
-            render = agent_tools.execute(
-                ctx, "render_preview", {"quality": "approval"})
+            with _timed(ctx, "render"):
+                render = agent_tools.execute(
+                    ctx, "render_preview", {"quality": "approval"})
             steps.append({"tool": "render_preview",
                           "ok": not _failed(render),
                           "note": str(render or "")[:160]})
             if _clear_corner_mark(ctx, steps, render) \
                     and _renders_done(steps) < config.FIRST_CUT_MAX_RENDERS:
-                render = agent_tools.execute(
-                    ctx, "render_preview", {"quality": "approval"})
+                with _timed(ctx, "render"):
+                    render = agent_tools.execute(
+                        ctx, "render_preview", {"quality": "approval"})
                 steps.append({"tool": "render_preview",
                               "ok": not _failed(render),
                               "note": str(render or "")[:160]})
@@ -2537,6 +2570,7 @@ def run(worker_db, job, project, index_row):
     meta = {"kind": "first_cut", "first_cut": {
         "steps": steps, "elapsed_s": elapsed, "picked": picked,
         "renders": _renders_done(steps),
+        "phases": dict(getattr(ctx, "first_cut_phases", None) or {}),
         "model_usd": round(spend["usd"], 5)}}
     follow_up = None
     if delivered and url and config.FIRST_CUT_BRIEF_FOLLOW_UP and \
