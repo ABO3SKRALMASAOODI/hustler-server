@@ -583,3 +583,43 @@ def test_an_older_wall_the_assistant_already_took_is_not_replayed(monkeypatch):
 def test_an_older_wall_still_replays_otherwise(monkeypatch, plan, worked):
     body, calls = _older_wall_replay(monkeypatch, plan, worked)
     assert body["replay"] == "enqueued" and len(calls["enqueued"]) == 1
+
+
+def test_printing_the_request_to_the_assistant_marks_it_shown(monkeypatch):
+    """open_project / project_state (a project id) stamp the plans reply;
+    list_projects' marker (no project id) does not; a failed stamp never
+    drops the note."""
+    note = {"project_id": 5249, "plans_id": 154609, "text": "WAITING REQUEST"}
+    stamped, sql = [], []
+
+    class C:
+        def execute(self, q, params=None):
+            sql.append(" ".join(q.split()))
+
+    @contextlib.contextmanager
+    def fake_vdb(*_a):
+        yield type("Conn", (), {"cursor": lambda self: C()})()
+    monkeypatch.setattr(mcp, "vdb", fake_vdb)
+    monkeypatch.setattr(mcp.held_request, "for_assistant",
+                        lambda cur, uid, pid=None: note)
+    monkeypatch.setattr(mcp.held_request, "mark_shown",
+                        lambda cur, plans_id: stamped.append(plans_id))
+    assert mcp._held_for_assistant({"user_id": 8}, 5249) == note
+    assert stamped == [154609]
+    assert mcp._held_for_assistant({"user_id": 8}) == note     # list_projects
+    assert stamped == [154609]
+
+    def boom(cur, plans_id):
+        raise RuntimeError("db")
+    monkeypatch.setattr(mcp.held_request, "mark_shown", boom)
+    assert mcp._held_for_assistant({"user_id": 8}, 5249) == note
+
+
+def test_a_request_shown_to_the_assistant_never_runs_in_the_studio(world):
+    held = dict(WALL, meta=dict(WALL["meta"], shown_to_assistant_at="x"))
+    world["held"] = held
+    world["cur"] = Cur(plan="plus_2026", assistant_worked=False)
+    out = held_request.resume(2647, "studio")
+    assert out["reason"] == "assistant_took_over" and world["enqueued"] == []
+    world["cur"] = Cur(plan="pro_2026")                 # a Studio plan: runs
+    assert held_request.resume(2647, "studio")["resumed"] is True

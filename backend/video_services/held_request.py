@@ -100,28 +100,28 @@ def _assistant_worked_since(cur, user_id, since):
     return cur.fetchone() is not None
 
 
-def _assistant_was_shown(cur, user_id, project_id, since):
-    """The assistant read the held project's state while the request was
-    waiting (open_project / project_state print for_assistant's note with
-    it): the request is already in the customer's assistant conversation."""
-    if project_id is None or since is None:
-        return False
-    cur.execute("""SELECT 1 FROM video_jobs
-                    WHERE user_id = %s AND project_id = %s
-                      AND type = 'mcp_tool'
-                      AND COALESCE(payload->>'tool', '') = '__state__'
-                      AND created_at > %s
-                      AND created_at < %s + make_interval(hours => %s)
-                    LIMIT 1""",
-                (int(user_id), int(project_id), since, since, int(WINDOW_H)))
-    return cur.fetchone() is not None
+# Stamped on the plans reply when open_project / project_state print the
+# waiting request to the customer's assistant (routes.mcp._held_for_assistant).
+SHOWN_KEY = "shown_to_assistant_at"
 
 
-def assistant_took_over(cur, user_id, since, project_id=None):
-    """The held request (walled at ``since`` in ``project_id``) is the
-    customer's assistant's: it was shown the request (a state read of that
-    project while it waited) or started working (any other MCP call). The
-    Studio must then never run it as well.
+def mark_shown(cur, plans_id):
+    """The customer's assistant was just shown the waiting request (its text,
+    printed with the project's state): from now on it is the assistant's
+    (assistant_took_over). Once only; a pure bookkeeping key nothing else
+    reads, so ticket #11's behaviour is otherwise unchanged."""
+    cur.execute("""UPDATE chat_messages
+                      SET meta = COALESCE(meta, '{}'::jsonb) || %s
+                    WHERE id = %s AND NOT (COALESCE(meta, '{}'::jsonb)
+                                           ? 'shown_to_assistant_at')""",
+                (Json({SHOWN_KEY: _now()}), int(plans_id)))
+
+
+def assistant_took_over(cur, user_id, since, meta=None):
+    """The held request (walled at ``since``; ``meta`` is its plans reply's)
+    is the customer's assistant's: the assistant was shown it (mark_shown)
+    or started working (any MCP call other than a state read since the
+    wall). The Studio must then never run it as well.
 
     Only an MCP-only plan's request is ever handed to the assistant, so every
     other plan answers False (ticket #11's behaviour, unchanged). D1V: with
@@ -131,8 +131,9 @@ def assistant_took_over(cur, user_id, since, project_id=None):
     had already made or been asked to make: twice, and charged twice."""
     if not _mcp_only_plan(cur, user_id):
         return False
-    return (_assistant_worked_since(cur, user_id, since)
-            or _assistant_was_shown(cur, user_id, project_id, since))
+    if (meta or {}).get(SHOWN_KEY):
+        return True
+    return _assistant_worked_since(cur, user_id, since)
 
 
 def studio_lane_open(cur, user_id):
@@ -289,7 +290,7 @@ def resume(user_id, origin, project_id=None, window_h=WINDOW_H):
                 # shown the request (for_assistant) instead of a Studio turn.
                 return dict(base, resumed=False, reason="mcp_only")
             if assistant_took_over(cur, user_id, held["created_at"],
-                                   held["project_id"]):
+                                   held["meta"]):
                 # The lane opened after the request was handed to the
                 # customer's assistant, which already took it (D1V).
                 return dict(base, resumed=False, reason="assistant_took_over")
@@ -418,7 +419,7 @@ def for_assistant(cur, user_id, project_id=None, window_h=WINDOW_H):
         return None
     if _assistant_worked_since(cur, user_id, held["created_at"]):
         return None
-    return {"project_id": held["project_id"], "text": (
+    return {"project_id": held["project_id"], "plans_id": held["id"], "text": (
         "WAITING REQUEST FROM THE STUDIO: before subscribing, the user typed "
         f"this in project {held['project_id']}; it has not run yet and their "
         "plan edits through you: \"" + text[:1500] + "\". Unless the user "

@@ -310,27 +310,25 @@ def test_the_intake_skips_a_plus_request_the_assistant_made(cur, monkeypatch):
     assert _scan(cur, now) == []
 
 
-def test_a_state_read_of_the_held_project_hands_it_to_the_assistant(cur):
-    """open_project / project_state print the waiting request; once the
-    assistant has been shown it, the Studio must not also run it (it may be
-    asking the user to confirm). A state read elsewhere, or after the
-    request's window, is not that."""
+def test_a_request_printed_to_the_assistant_is_the_assistants(cur):
+    """open_project / project_state print the waiting request (mark_shown);
+    once the assistant has been shown it, the Studio must not also run it
+    (the assistant may be asking the user to confirm). The note stays with
+    the assistant until it acts."""
     pid, sid = user(cur, 1)
     wall(cur, 2, sid, ago_min=10)
     subscribe(cur, 1, "plus_2026")
     since = NOW - timedelta(minutes=10)
-    cur.execute("INSERT INTO video_jobs (user_id, project_id, type, payload) "
-                "VALUES (1, 999, 'mcp_tool', %s)", (Json({"tool": "__state__"}),))
-    assert held_request.assistant_took_over(cur, 1, since, pid) is False
-    cur.execute("INSERT INTO video_jobs (user_id, project_id, type, payload, "
-                "created_at) VALUES (1, %s, 'mcp_tool', %s, %s)",
-                (pid, Json({"tool": "__state__"}),
-                 since + timedelta(hours=held_request.WINDOW_H, minutes=5)))
-    assert held_request.assistant_took_over(cur, 1, since, pid) is False
-    cur.execute("INSERT INTO video_jobs (user_id, project_id, type, payload) "
-                "VALUES (1, %s, 'mcp_tool', %s)", (pid, Json({"tool": "__state__"})))
-    assert held_request.assistant_took_over(cur, 1, since, pid) is True
-    # ...and the note stays with the assistant until it acts
+    note = held_request.for_assistant(cur, 1, pid)
+    assert note["plans_id"] == 2
+    held = held_request.pending(cur, 1)
+    assert held_request.assistant_took_over(cur, 1, since, held["meta"]) is False
+    held_request.mark_shown(cur, 2)
+    held_request.mark_shown(cur, 2)                      # once only
+    held = held_request.pending(cur, 1)
+    assert held is not None                              # still waiting
+    assert held["meta"][held_request.SHOWN_KEY]
+    assert held_request.assistant_took_over(cur, 1, since, held["meta"]) is True
     assert held_request.for_assistant(cur, 1, pid) is not None
     subscribe(cur, 1, "pro_2026")
-    assert held_request.assistant_took_over(cur, 1, since, pid) is False
+    assert held_request.assistant_took_over(cur, 1, since, held["meta"]) is False

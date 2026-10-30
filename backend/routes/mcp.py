@@ -1992,8 +1992,24 @@ def _held_for_assistant(tok, project_id=None):
     raises: a lookup failure only drops the note."""
     try:
         with vdb() as conn:
-            return held_request.for_assistant(conn.cursor(), tok["user_id"],
-                                              project_id)
+            cur = conn.cursor()
+            held = held_request.for_assistant(cur, tok["user_id"], project_id)
+            if held and project_id is not None and held.get("plans_id"):
+                # open_project / project_state print the request's text: it
+                # is the assistant's from now on, so the Studio never runs it
+                # too if Studio in Plus opens the lane later (D1V).
+                try:
+                    cur.execute("SAVEPOINT held_shown")
+                    held_request.mark_shown(cur, held["plans_id"])
+                    cur.execute("RELEASE SAVEPOINT held_shown")
+                except Exception as e:
+                    try:
+                        cur.execute("ROLLBACK TO SAVEPOINT held_shown")
+                    except Exception:
+                        pass
+                    print(f"[mcp] held-request shown stamp failed: "
+                          f"{type(e).__name__}: {e}", flush=True)
+            return held
     except Exception as e:
         print(f"[mcp] held-request lookup failed: {type(e).__name__}: {e}",
               flush=True)

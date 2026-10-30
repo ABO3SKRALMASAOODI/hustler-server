@@ -4137,7 +4137,7 @@ def replay_blocked(user_id, project_id):
                             "status": status,
                             **(response.get_json(silent=True) or {})})
         if pending and _held_request.assistant_took_over(
-                cur, user_id, last.get("created_at"), project_id):
+                cur, user_id, last.get("created_at"), meta):
             # An MCP-only plan's request went to the customer's own assistant
             # (held_request.for_assistant), which already started on it; the
             # Studio lane opened afterwards (D1: Studio in Plus switched on,
