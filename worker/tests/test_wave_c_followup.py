@@ -175,7 +175,7 @@ def test_request_check_compares_before_and_after_against_the_ask():
     fr.start(ctx, "make the captions bigger")
     ctx.edl = _edl(cap_scale=2.0, focus_x=0.4)
     out = fr.request_check(ctx)
-    assert "caption size 1.6 -> 2" in out and "NOT ASKED and changed" in out
+    assert "captions 25% bigger" in out and "NOT ASKED and changed" in out
 
 
 def test_cut_silences_never_brings_back_cut_footage():
@@ -255,3 +255,14 @@ def test_a_param_saved_at_its_empty_default_is_not_a_change():
     assert fr.changed_lanes(before, after) == []
     after["motion"][0]["params"]["size"] = 1.5
     assert fr.changed_lanes(before, after) == ["title"]
+
+
+def test_raw_size_numbers_never_reach_the_reply():
+    import trial_reply
+    out, n = trial_reply.scrub_pixels(
+        "The opening title is bigger: its size went from 1.49 to 1.79, and "
+        "the length stays at 22.0 s.")
+    assert n == 1 and "1.49" not in out and "22.0 s" in out
+    ctx = Ctx(_edl())
+    fr.start(ctx, "make the captions bigger")
+    assert "never the raw size numbers" in fr.note(ctx, "make the captions bigger")
