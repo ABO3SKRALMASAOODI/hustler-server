@@ -354,6 +354,30 @@ def abandoned_envelope(job_type, read_only, reason):
         "max_attempts": retry_attempts(job_type), "agent_repairable": False}}
 
 
+# Renders whose out-of-memory death is a property of the job on that slot
+# size, not a blip: the dispatcher re-runs a preview once on the 10 GiB
+# batch lane (main._escalate_oom_render) instead of replaying the identical
+# graph on the identical 5 GiB slot, and a final reports its limit honestly.
+MEMORY_KIND_TYPES = {"preview", "preview_check", "filmstrip", "final"}
+
+
+def memory_envelope(job_type, read_only, limit):
+    """A slot container that died after the kernel's OOM killer fired in it.
+
+    Before R1 (30 Oct 2026) this was "Box lost the executor ... safe to
+    retry": the dispatcher replayed the same render on the same slot size up
+    to five times and then told the customer our service had a problem."""
+    reason = (f"out of memory: the kernel's out-of-memory killer ended the "
+              f"executor at the slot's {limit or 'memory'} limit (exit -9)")
+    if job_type not in MEMORY_KIND_TYPES:
+        return abandoned_envelope(job_type, read_only, reason)
+    error = (f"Box {job_type} ran {reason}. The same graph cannot fit this "
+             "slot size on a replay.")
+    return {"error": error, "retryable": False, "oom": True, "failure": {
+        "kind": "executor_memory", "retryable": False, "max_attempts": 0,
+        "agent_repairable": job_type in {"preview", "preview_check"}}}
+
+
 def refusal_envelope(job_type, message, capacity=True, rollout=False):
     """A proof that nothing ran. ``box_wait`` tells the dispatcher to hold
     the job and ask again; ``safe_to_fallback`` keeps the shared pre-/run
@@ -395,6 +419,7 @@ class Slot:
         self.cpuset = parse_cpuset(spec.get("cpuset"))
         self.shares = None        # the cgroup CPU weight last applied
         self.container = spec.get("container") or f"vbox-{self.name}"
+        self.memory = str(spec.get("memory") or "")
         self.role = LANE_ROLES.get(self.lane, "executor")
         self.ready = False
         self.release = "unknown"
@@ -428,6 +453,26 @@ def docker_state(container):
         return False, ""
     running, _, started = out.stdout.strip().partition("|")
     return running == "true", started
+
+
+def docker_oom_since(container, since_ts):
+    """Did the kernel's OOM killer fire inside ``container`` since
+    ``since_ts``? Docker records an ``oom`` event for any OOM kill in the
+    container's cgroup; its State.OOMKilled flag is no use here because the
+    unless-stopped restart clears it before admission looks. None = unknown
+    (docker unreachable), never a guess."""
+    try:
+        out = subprocess.run(
+            ["docker", "events", "--since", str(int(max(0, since_ts - 5))),
+             "--until", str(int(time.time()) + 1),
+             "--filter", f"container={container}", "--filter", "event=oom",
+             "--format", "{{.Time}}"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return bool(out.stdout.strip())
 
 
 def docker_restart(container):
@@ -1154,9 +1199,21 @@ class Box:
             running, started = docker_state(slot.container)
             if running is False or (started and rec.get("container_started")
                                     and started != rec["container_started"]):
+                oom = docker_oom_since(
+                    slot.container, rec.get("started_at")
+                    or rec.get("created_at") or t)
                 with self.lock:
                     cur = self.get(rec["call_id"])
                     if cur and cur["status"] == "unknown":
+                        if oom:
+                            log(f"call {cur['call_id']} on {slot.name}: the "
+                                "container was OOM-killed "
+                                f"({slot.memory or 'limit'})")
+                            return self.terminalize(cur, "failed",
+                                                    memory_envelope(
+                                                        cur["job_type"],
+                                                        bool(cur["read_only"]),
+                                                        slot.memory))
                         reason = f"Box container exited during {cur['job_type']}"
                         return self.terminalize(cur, "failed",
                                                 abandoned_envelope(
