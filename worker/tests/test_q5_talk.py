@@ -99,6 +99,10 @@ def test_the_ending_is_judged_on_the_whole_sentence_and_needs_a_breath():
     end = talk_craft.closing_row(rows, by["s5"], by["s13"],
                                  breath=lambda m: talk_craft.breath_after(index, rows, m))
     assert end["id"] == "s11"
+    # a pick ending inside the running sentence ("...you can possibly")
+    # runs on to its end
+    assert talk_craft.closing_row(rows, by["s5"], by["s10"],
+                                  breath=lambda m: talk_craft.breath_after(index, rows, m))["id"] == "s11"
     # with no breath anywhere, nothing qualifies: the pick stands
     assert talk_craft.closing_row(rows, by["s5"], by["s13"],
                                   breath=lambda m: False)["id"] == "s13"

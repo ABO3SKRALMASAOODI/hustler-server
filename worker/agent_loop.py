@@ -2446,6 +2446,36 @@ def _kept_craft_refusal(ctx, name, args):
     return None
 
 
+def _tighten_checkpoint(ctx):
+    """Q5 (30 Oct): a long-form trial request's "the cut is final" state,
+    carried to the request's next slice ({} on every other turn). The guard
+    held on the first slice, and the second slice (no head start) trimmed
+    and re-rendered the 3-minute program: 864 s, a 480p draft delivered."""
+    prep = getattr(ctx, "trial_prep", None) or {}
+    if not _trial_lane(ctx) or prep.get("intent") != "tighten":
+        return {}
+    kept = getattr(ctx, "trial_kept_ids", None) or {}
+    return {"trial_prep_intent": "tighten",
+            "trial_kept_ids": {k: sorted(v) for k, v in kept.items()}}
+
+
+def _restore_tighten(ctx, cont):
+    """The next slice of a long-form trial request keeps its cut final."""
+    if not _trial_lane(ctx) or getattr(ctx, "trial_prep", None) or \
+            (cont or {}).get("trial_prep_intent") != "tighten":
+        return False
+    ctx.trial_prep = {"intent": "tighten", "whole": False, "applied": [],
+                      "s": 0.0, "restored": True}
+    ctx.trial_kept_ids = {k: set(v) for k, v in
+                          ((cont or {}).get("trial_kept_ids") or {}).items()}
+    ctx.second_opinions_off = True
+    # its renders stay the 720p approval render the user watches
+    # (longform.tighten sets it on the first slice; a later slice delivered
+    # a 480p draft)
+    ctx.approval_previews = True
+    return True
+
+
 def _trial_preview_cap(ctx, cap, operator_run=False):
     """The request's preview cap. A trial request renders at most
     CLAUDE_TRIAL_MAX_PREVIEWS (one look, one repair; Q3, 30 Oct: C1/C2
@@ -4987,6 +5017,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         ctx.trial_previews = max(0, int(_cont.get("trial_previews") or 0))
     except (TypeError, ValueError):
         ctx.trial_previews = 0
+    _restore_tighten(ctx, _cont)
     def _durable_continuation(reason, blocker_fingerprint=None,
                               blocker_repeats=0, progress_frontier=None,
                               verification_slices=None, stagnant=None):
@@ -5029,6 +5060,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "preview_repair_pushed": preview_repair_pushed,
             "quality_repair_versions": sorted(quality_repair_versions),
             "trial_previews": int(getattr(ctx, "trial_previews", 0) or 0),
+            **_tighten_checkpoint(ctx),
             "plan_write_pushed": plan_write_pushed,
             "plan_close_pushed": plan_close_pushed,
             "first_write_pushed": first_write_pushed,

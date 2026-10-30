@@ -549,3 +549,26 @@ def test_the_long_form_cut_is_final_only_on_its_own_trial_turn(kind):
         assert agent_loop._kept_craft_refusal(ctx, "cut_range", {}) is None
     else:
         assert out is None
+
+
+@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
+def test_the_long_form_cut_stays_final_on_the_requests_next_slice(kind):
+    """Q5: the second slice of a long-form trial request (no head start)
+    trimmed and re-rendered the program; the state now travels with it."""
+    ctx = _lane_ctx(kind)
+    ctx.trial_prep = {"intent": "tighten"}
+    ctx.trial_kept_ids = {"motion": {"mg1"}}
+    cp = agent_loop._tighten_checkpoint(ctx)
+    nxt = _lane_ctx(kind)
+    restored = agent_loop._restore_tighten(nxt, cp)
+    if kind == "trial":
+        assert cp["trial_prep_intent"] == "tighten" and restored
+        assert agent_loop._kept_craft_refusal(nxt, "cut_range", {}).startswith("REJECTED: KEPT")
+        assert agent_loop._kept_craft_refusal(nxt, "set_motion_graphic", {"id": "mg1"})
+    else:
+        assert cp == {} and not restored
+        assert agent_loop._kept_craft_refusal(nxt, "cut_range", {}) is None
+    # a generic prepared turn carries nothing
+    g = _lane_ctx(kind)
+    g.trial_prep = {"intent": "generic"}
+    assert agent_loop._tighten_checkpoint(g) == {}

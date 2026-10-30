@@ -507,7 +507,8 @@ def tighten(ctx, worker_db, steps):
                              first_cut.HOOK_MAX_S), 2)
         if steps.run("add_motion_graphic", {
                 "template": "hook_title", "start": 0.0, "end": hook_end,
-                "params": first_cut.hook_params(text, None, False),
+                "params": dict(first_cut.hook_params(text, None, False),
+                               entrance="cut"),
                 "mute_captions": True,
                 "purpose": "the opening line as a title"}):
             steps.applied.append("the opening line as a title")

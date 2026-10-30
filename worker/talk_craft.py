@@ -201,6 +201,16 @@ def closing_row(rows, first, last, least_s=12.0, breath=None):
         return lands(sentence_text(rows, m)) and (breath is None or breath(m))
     if ok(j):
         return last
+    # a pick that ends inside a running sentence ("...you can possibly")
+    # first runs on to where that sentence ends, a few rows at most
+    if not _ends(rows[j].get("text")):
+        for k in range(j + 1, min(len(rows), j + 4)):
+            if float(rows[k]["t1"]) - float(rows[j]["t1"]) > 8.0:
+                break
+            if _ends(rows[k].get("text")):
+                if ok(k):
+                    return rows[k]
+                break
     for m in range(j - 1, i - 1, -1):
         if float(rows[m]["t1"]) - start < least_s:
             break
