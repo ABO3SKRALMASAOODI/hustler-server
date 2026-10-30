@@ -152,6 +152,41 @@ def test_yt_dlp_fallback_opens_a_cryptography_sealed_row():
     assert e.value.reason == "damaged"
 
 
+def test_child_decrypt_without_yt_dlp_is_quietly_no_aes():
+    row = _sealed()
+    env = {"S3_SECRET_ACCESS_KEY": LEGACY_SECRET}
+    try:
+        import yt_dlp.aes  # noqa: F401
+    except ImportError:
+        with pytest.raises(creds.CredentialsError) as e:
+            creds.open_row(row, env, impl="child")
+        assert e.value.reason == "no_aes"
+    else:
+        assert creds.open_row(row, env, impl="child")[0] == VALUES
+
+
+def test_an_unchanged_row_is_decrypted_once(monkeypatch):
+    calls = []
+    real = creds._decrypt
+    monkeypatch.setattr(creds, "_decrypt",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    now = [0.0]
+    rows = Rows(_sealed())
+    c = _cache(rows, {"S3_SECRET_ACCESS_KEY": LEGACY_SECRET}, now)
+    for t in (0, 300, 600, 900):
+        now[0] = t
+        assert c.values() == VALUES
+    assert rows.calls == 4 and len(calls) == 1
+    rows.value = _sealed(secrets={"S3_SECRET_ACCESS_KEY": "other"})
+    for t in (1200, 1230, 1260):                 # wrong key: one attempt
+        now[0] = t
+        assert c.values() is None
+    assert rows.calls == 7 and len(calls) == 1   # kid mismatch: no decrypt
+    rows.value = _sealed()
+    now[0] = 1290
+    assert c.values() == VALUES and len(calls) == 2
+
+
 # ── the cache ───────────────────────────────────────────────────────────────
 
 class Rows:

@@ -49,8 +49,11 @@ Nobody should have to paste them into four dashboards, so:
 
 AES-GCM comes from ``cryptography`` (the web service, the sealing CLI) or,
 where that is not installed (the worker images), from yt-dlp's pure-Python
-``yt_dlp.aes`` (verified tag; a few milliseconds for this row). Sealing needs
-``cryptography``.
+``yt_dlp.aes`` (verified tag). Importing yt-dlp costs an executor ~30 MB that
+would stay resident in every slot, so unless the process has already loaded
+it, that decrypt runs in a short-lived child (``python -I``, ~0.3 s). A row
+is decrypted only when its text changes, so that is about once per process.
+Sealing needs ``cryptography``.
 """
 
 import base64
@@ -58,6 +61,8 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Mapping
@@ -136,10 +141,15 @@ def _aesgcm():
 
 
 def _decrypt(key, nonce, data, impl=None):
-    """Plaintext bytes, or CredentialsError('damaged' | 'no_aes')."""
+    """Plaintext bytes, or CredentialsError('damaged' | 'no_aes'). ``impl``:
+    'cryptography', 'yt_dlp' (in this process) or 'child' (yt-dlp in a
+    short-lived child); default the first available, in that order, with
+    'yt_dlp' only when this process has already imported it."""
     if len(nonce) != NONCE_BYTES or len(data) < TAG_BYTES:
         raise CredentialsError("damaged")
-    impl = impl or ("cryptography" if _aesgcm() is not None else "yt_dlp")
+    if impl is None:
+        impl = ("cryptography" if _aesgcm() is not None else
+                "yt_dlp" if "yt_dlp.aes" in sys.modules else "child")
     if impl == "cryptography":
         AESGCM = _aesgcm()
         if AESGCM is None:
@@ -148,14 +158,55 @@ def _decrypt(key, nonce, data, impl=None):
             return AESGCM(key).decrypt(nonce, data, None)
         except Exception:  # noqa: BLE001 — InvalidTag
             raise CredentialsError("damaged") from None
+    ct, tag = data[:-TAG_BYTES], data[-TAG_BYTES:]
+    if impl == "yt_dlp":
+        try:
+            from yt_dlp.aes import aes_gcm_decrypt_and_verify_bytes
+        except Exception:  # noqa: BLE001
+            raise CredentialsError("no_aes") from None
+        try:
+            return bytes(aes_gcm_decrypt_and_verify_bytes(ct, key, tag,
+                                                          nonce))
+        except Exception:  # noqa: BLE001 — "Mismatching authentication tag"
+            raise CredentialsError("damaged") from None
+    return _decrypt_in_child(key, nonce, ct, tag)
+
+
+# The child reads {data, key, tag, nonce} (base64) on stdin and writes the
+# plaintext (base64) on stdout; exit 3 = no yt-dlp, 4 = the tag does not
+# verify. Nothing is echoed: a traceback never reaches the parent's logs.
+_CHILD = """
+import base64, json, sys
+try:
+    from yt_dlp.aes import aes_gcm_decrypt_and_verify_bytes as dec
+except Exception:
+    sys.exit(3)
+try:
+    a = json.loads(sys.stdin.read())
+    out = dec(*[base64.b64decode(a[k]) for k in ("data", "key", "tag",
+                                                 "nonce")])
+except Exception:
+    sys.exit(4)
+sys.stdout.write(base64.b64encode(bytes(out)).decode("ascii"))
+"""
+
+
+def _decrypt_in_child(key, nonce, ct, tag, timeout_s=60):
+    payload = json.dumps({"data": _b64(ct), "key": _b64(key),
+                          "tag": _b64(tag), "nonce": _b64(nonce)})
     try:
-        from yt_dlp.aes import aes_gcm_decrypt_and_verify_bytes
-    except Exception:  # noqa: BLE001
+        r = subprocess.run([sys.executable, "-I", "-c", _CHILD],
+                           input=payload, capture_output=True, text=True,
+                           timeout=timeout_s)
+    except Exception:  # noqa: BLE001 — no interpreter, pids, timeout
         raise CredentialsError("no_aes") from None
+    if r.returncode == 4:
+        raise CredentialsError("damaged")
+    if r.returncode != 0:
+        raise CredentialsError("no_aes")
     try:
-        return bytes(aes_gcm_decrypt_and_verify_bytes(
-            data[:-TAG_BYTES], key, data[-TAG_BYTES:], nonce))
-    except Exception:  # noqa: BLE001 — "Mismatching authentication tag"
+        return _unb64(r.stdout.strip())
+    except Exception:  # noqa: BLE001
         raise CredentialsError("damaged") from None
 
 
@@ -284,6 +335,7 @@ class Credentials:
 
     def _reset(self):
         self._values = None
+        self._raw = None                # the row text last opened
         self._kek = None
         self._reason = "not_read"
         self._tried = False
@@ -351,10 +403,18 @@ class Credentials:
                       + ("; keeping the last good keys"
                          if self._values is not None else ""))
             return
+        if raw is not None and raw == self._raw and \
+                self._reason not in ("no_aes", "unreadable", "not_read"):
+            # The same row text as last time gives the same answer under
+            # the same secrets: no decrypt (and no child process).
+            self._read_at = now
+            self._due = now + (self._ttl if self._reason == "ok"
+                               else self._retry)
+            return
         try:
             values, kek = open_row(raw, self._env, impl=self._impl)
         except CredentialsError as exc:
-            self._values, self._kek = None, None
+            self._values, self._kek, self._raw = None, None, raw
             self._reason = exc.reason
             self._read_at = now
             self._due = now + (self._ttl if exc.reason in
@@ -362,7 +422,7 @@ class Credentials:
             self._say(f"next store not configured from app_kv "
                       f"({exc.reason})")
             return
-        self._values, self._kek = values, kek
+        self._values, self._kek, self._raw = values, kek, raw
         self._reason = "ok"
         self._read_at = now
         self._due = now + self._ttl
