@@ -204,10 +204,46 @@ def _kv_cache_reset():
 _health_cache = {"at": None, "walled": None}
 
 
+# The render box measures its OWN route: box/yt_canary.py runs the real-byte
+# probe through the owner's YTDLP_PROXY every day (hourly while failing) on
+# videos the box's own IP is walled on, and writes ytdlp_probe_box. On the
+# box that fresh verdict replaces the 'ytdlp_probe' row, which is the
+# dispatcher's boot probe on Render's network (walled since August), so
+# find_song stopped calling YouTube "WALLED from this server" and leading
+# with SoundCloud on a box that downloads YouTube fine (C1, 30 Oct 2026).
+_OWN_PROBE_PROVIDERS = ("box",)
+_OWN_PROBE_MAX_AGE_S = 36 * 3600.0
+
+
+def _own_probe_walled():
+    """True/False from this executor's own fresh probe row; None otherwise.
+
+    Only for providers whose row is written by a scheduled real-byte probe
+    (the box's canary); stale (over 36 h, by the verdict's own ``at``),
+    missing or unreadable rows return None so the caller keeps its old
+    source. A failed real-byte probe here means downloads fail here,
+    whatever the reason, so it counts as walled for routing."""
+    provider = os.getenv("EXECUTOR_PROVIDER", "").strip().lower()
+    if provider not in _OWN_PROBE_PROVIDERS:
+        return None
+    try:
+        raw = db.Db().run(db.kv_get, f"ytdlp_probe_{provider}")
+        if not raw:
+            return None
+        verdict = json.loads(raw)
+        at = float(verdict.get("at") or 0)
+        if not at or time.time() - at > _OWN_PROBE_MAX_AGE_S:
+            return None
+        return not (verdict.get("ok") and verdict.get("download_ok"))
+    except Exception:
+        return None
+
+
 def youtube_walled():
     """True when this box's last boot probe shows YouTube blocking its IP.
 
-    Read from the app_kv 'ytdlp_probe' row (either the extraction or the
+    On the render box its own fresh canary row decides first
+    (_own_probe_walled). Otherwise read from the app_kv 'ytdlp_probe' row (either the extraction or the
     download stage reporting a bot_wall). Self-healing: add a residential
     YTDLP_PROXY and the next boot's probe clears the wall, so ordering
     reverts on its own. Unknown, or any DB trouble, returns False — only a
@@ -217,6 +253,10 @@ def youtube_walled():
     now = time.monotonic()
     if _health_cache["at"] is not None and now - _health_cache["at"] < _KV_TTL_S:
         return bool(_health_cache["walled"])
+    own = _own_probe_walled()
+    if own is not None:
+        _health_cache.update(at=now, walled=own)
+        return own
     walled = False
     try:
         raw = db.Db().run(db.kv_get, "ytdlp_probe")

@@ -171,6 +171,60 @@ def test_youtube_walled_reads_the_probe_row(monkeypatch):
     assert ytaccess.youtube_walled() is True
 
 
+def _keyed_db(monkeypatch, rows):
+    class FakeDb:
+        def run(self, fn, key, *a, **k):
+            return rows.get(key)
+    monkeypatch.setattr(ytaccess.db, "Db", FakeDb)
+
+
+def test_on_the_box_its_own_fresh_probe_decides(monkeypatch):
+    # The dispatcher's boot row (Render's network) says walled; the box's
+    # canary measured its proxy route an hour ago and got real bytes.
+    monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "box")
+    now = ytaccess.time.time()
+    walled_row = json.dumps({"ok": False, "why": "access_blocked: Sign in"})
+    rows = {"ytdlp_probe": walled_row,
+            "ytdlp_probe_box": json.dumps({"ok": True, "download_ok": True,
+                                           "at": now - 3600})}
+    _keyed_db(monkeypatch, rows)
+    ytaccess._health_cache_reset()
+    assert ytaccess.youtube_walled() is False
+    # The canary failed (walled, or the proxy refused): lead elsewhere.
+    rows["ytdlp_probe_box"] = json.dumps({
+        "ok": False, "download_ok": False, "at": now - 60,
+        "why": "error: ProxyError: Tunnel connection failed: 407"})
+    ytaccess._health_cache_reset()
+    assert ytaccess.youtube_walled() is True
+
+
+def test_a_stale_or_foreign_own_probe_falls_back_to_the_boot_row(
+        monkeypatch):
+    monkeypatch.setattr(config, "DATABASE_URL", "postgres://x")
+    now = ytaccess.time.time()
+    rows = {"ytdlp_probe": json.dumps({"ok": False,
+                                       "why": "bot_wall: Sign in"}),
+            "ytdlp_probe_box": json.dumps({"ok": True, "download_ok": True,
+                                           "at": now - 40 * 3600}),
+            "ytdlp_probe_cloudflare": json.dumps({
+                "ok": True, "download_ok": True, "at": now})}
+    _keyed_db(monkeypatch, rows)
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "box")         # 40 h old
+    ytaccess._health_cache_reset()
+    assert ytaccess.youtube_walled() is True
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "cloudflare")  # not a canary row
+    ytaccess._health_cache_reset()
+    assert ytaccess.youtube_walled() is True
+    monkeypatch.delenv("EXECUTOR_PROVIDER")
+    ytaccess._health_cache_reset()
+    assert ytaccess.youtube_walled() is True
+    rows["ytdlp_probe_box"] = "{not json"
+    monkeypatch.setenv("EXECUTOR_PROVIDER", "box")
+    ytaccess._health_cache_reset()
+    assert ytaccess.youtube_walled() is True
+
+
 def test_youtube_walled_is_false_when_unknown(monkeypatch):
     # No DB, or a probe that never ran, must NOT reorder anything.
     monkeypatch.setattr(config, "DATABASE_URL", "")
