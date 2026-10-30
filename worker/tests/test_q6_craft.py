@@ -227,6 +227,49 @@ def test_the_title_is_whole_on_its_first_frame_for_an_engine_cut_only(monkeypatc
     assert not old or old[0]["params"].get("entrance") != "cut"
 
 
+def _screen_chain(monkeypatch, ctx):
+    import first_cut_visual as fcv
+    names = []
+
+    def execute(c, name, args):
+        names.append((name, args))
+        return f"EDL v{len(names) + 1} ok"
+    monkeypatch.setattr(agent_tools, "execute", execute)
+    monkeypatch.setattr(first_cut, "_screen_like", lambda index: True)
+    monkeypatch.setattr(first_cut, "_speech", lambda index: True)
+    monkeypatch.setattr(first_cut, "scout_range",
+                        lambda c, db, spend: (0.0, 18.0, "Where to start", "scout"))
+    monkeypatch.setattr(first_cut, "_opening_hook", lambda rows: "Where to *start* Python")
+    monkeypatch.setattr(fcv, "screen_follow", lambda *a, **k: None)
+    first_cut.video_chain(ctx, None, time.monotonic(), {"usd": 0.0})
+    return names
+
+
+def test_a_screen_recordings_title_has_the_page_blurred_under_it(monkeypatch):
+    """QB2 (30 Oct): the screen recording's title sat on a heavy dark scrim
+    that 4 of 8 judgements read as "a muddy smear over busy text". Its page is
+    blurred under it as a website's hero is (and sharpens as the title leaves),
+    the scrim at the website title's strength, the hold at most SCREEN_TITLE_S."""
+    names = _screen_chain(monkeypatch, _ChainCtx(q1=True, width=1280, height=800,
+                                                 duration=140.0))
+    hooks = [a for n, a in names if n == "add_motion_graphic"
+             and a.get("template") == "hook_title"]
+    assert hooks, names
+    hook = hooks[0]
+    assert hook["end"] <= first_cut.SCREEN_TITLE_S + 1e-6
+    assert hook["params"]["scrim"] == 0.5 and hook["params"]["entrance"] == "cut"
+    blurs = [a for n, a in names if n == "add_stylize"
+             and a.get("kind") == "dream_blur"]
+    assert [(b["start"], b["end"], b["intensity"]) for b in blurs] == \
+        list(first_cut.title_blur(hook["end"]))
+    assert all(b["end"] <= hook["end"] for b in blurs)         # sharp before it leaves
+    # the grandfathered account's screen title keeps its heavy scrim, no blur
+    names = _screen_chain(monkeypatch, _ChainCtx(q1=False, width=1280, height=800,
+                                                 duration=140.0))
+    assert not [a for n, a in names if n == "add_stylize"
+                and a.get("kind") == "dream_blur"]
+
+
 def test_a_grandfathered_payer_keeps_the_whole_take(monkeypatch):
     names, applied = _chain(monkeypatch, _ChainCtx(q1=False))
     assert "keep_segments" not in [n for n, _a in names]

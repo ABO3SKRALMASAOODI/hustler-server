@@ -548,6 +548,7 @@ PAUSE_PAD_S = 0.08         # what each side of a cut pause keeps
 HOOK_S = 3.0               # the hook title's time on screen (refs 2.5-3.5)
 HOOK_MIN_S = 2.9           # a spoken-line hook holds at least this
 HOOK_MAX_S = 3.3           # and at most this
+SCREEN_TITLE_S = 2.0       # QB2: a screen recording's title (its page is blurred under it)
 CAPTION_SCALE = 1.45       # chest captions (judge: "about 30% bigger", C2)
 CAPTION_WORDS = 2          # 1-2 words at a time (references: one word)
 BEAT_GAP_S = 4.5           # slams at least this far apart
@@ -1987,8 +1988,19 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             # recording drew the same note: 5 of 8 and 2 of 8 judgements)
             params["entrance"] = "cut"
         if q1 and screen_kept:
-            # judges: the title on the busy docs page was low-contrast
-            params["scrim"] = 0.85
+            # judges: the title on the busy docs page was low-contrast. A
+            # heavy dark scrim fixed that and read as "a muddy dark smudge /
+            # smeared band over busy text" (QB2: 4 of 8 judgements on the
+            # screen recording), so the page is blurred under the title the
+            # way a website's hero is (one reading task; the page's own text
+            # never collides with it) and sharpens as the title leaves, with
+            # the scrim back at the website title's strength
+            hook_end = min(hook_end, SCREEN_TITLE_S)
+            params["scrim"] = 0.5
+            for a, b, k in title_blur(hook_end):
+                _run(ctx, steps, "add_stylize", {
+                    "kind": "dream_blur", "start": a, "end": b,
+                    "intensity": k}, started)
         args = {"template": "hook_title", "start": 0.0, "end": hook_end,
                 "params": params,
                 # one reading task in the first seconds (captions.
