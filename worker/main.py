@@ -611,7 +611,16 @@ def _notify_failure(worker_db, job, err):
         # An agent that never launched cannot post the apology normally owned
         # by run_agent_job. Without this branch, a continuation could exhaust
         # capacity deferrals and leave the user's request with no reply.
-        note = ("I couldn't start the editing engine because every editing "
+        # A continuation of a turn that already worked must not say the
+        # engine never started (R2 audit, Sep 2026: posted after 26 versions
+        # had been written and rendered).
+        resumed = bool(payload.get("logical_turn_continuation")
+                       or (payload.get("root_agent_job_id")
+                           and payload.get("root_agent_job_id") != job.get("id")))
+        note = ("I paused because every editing server stayed busy. "
+                "Everything I finished is saved — send Continue and I'll pick "
+                "up from the latest version." if resumed else
+                "I couldn't start the editing engine because every editing "
                 "server stayed busy. Your request and saved edit are safe — "
                 "send Continue and I'll resume from the latest version.")
     if not note and job["type"] == "preview":

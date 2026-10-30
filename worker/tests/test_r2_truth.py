@@ -355,3 +355,39 @@ def test_report_with_complete_renders_a_missing_preview_instead_of_refusing(monk
     # report=true alone keeps its read-only contract
     ctx.db = _Db(None)
     assert agent_tools.render_preview(ctx, report=True) == "RENDER REPORT"
+
+
+# ── system-authored notes say what happened ─────────────────────────────────
+
+def test_placed_sound_effects_are_not_reported_as_an_unplaced_soundtrack():
+    ctx = SimpleNamespace(audio_fetched=["music/1/a.mp3", "music/1/b.mp3"],
+                          latest_edl=lambda: {"version": 3, "json": {
+                              "sfx": [{"storage_key": "music/1/a.mp3"},
+                                      {"storage_key": "music/1/b.mp3"}]}})
+    assert agent_loop._unused_fetched_audio_note(ctx) == ""
+    ctx.audio_fetched.append("music/1/c.mp3")
+    assert agent_loop._unused_fetched_audio_note(ctx) == (
+        " A sound was downloaded into the project but was not placed on the timeline.")
+
+
+def test_a_busy_fleet_on_a_continuation_does_not_say_the_engine_never_started(monkeypatch):
+    import db as dbx
+    import main
+    posted = []
+
+    class _Db:
+        def run(self, fn, *a, **k):
+            if fn is dbx.get_project:
+                return {"chat_session_id": 7}
+            posted.append((getattr(fn, "__name__", ""), a))
+            return None
+    job = {"id": 50, "type": "agent_turn", "project_id": 1, "user_id": 2,
+           "payload": {"root_agent_job_id": 40, "logical_turn_continuation": True}}
+    main._notify_failure(_Db(), job, RuntimeError("capacity busy"))
+    texts = [a[1] for name, a in posted if name == "add_job_failure_message"]
+    assert texts and texts[0].startswith("I paused because every editing server stayed busy.")
+    posted.clear()
+    job = dict(job, id=40, payload={})
+    main._notify_failure(_Db(), job, RuntimeError("capacity busy"))
+    texts = [a[1] for name, a in posted if name == "add_job_failure_message"]
+    assert texts and texts[0].startswith("I couldn't start the editing engine")

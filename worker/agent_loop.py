@@ -3082,15 +3082,24 @@ def _unused_fetched_audio_note(ctx):
     if not keys:
         return ""
     try:
-        music = (ctx.latest_edl()["json"] or {}).get("music") or []
+        edl = ctx.latest_edl()["json"] or {}
     except Exception:
-        music = []
-    placed = {m.get("storage_key") for m in music}
+        edl = {}
+    # A fetched sound effect is placed in the sfx layer and a voice in the
+    # voiceover layer: counting only music called four placed sound effects
+    # "a soundtrack ... not placed" (gpt-5.6-luna turn, Sep 2026, R2 audit).
+    placed = set()
+    for layer in ("music", "sfx", "voiceover"):
+        for item in edl.get(layer) or []:
+            if isinstance(item, dict):
+                placed.add(item.get("storage_key") or item.get("asset_key"))
     leftover = [k for k in keys if k not in placed]
     if not leftover:
         return ""
-    return (" A soundtrack was downloaded into the project but was not "
-            "placed on the timeline.")
+    return (" A sound was downloaded into the project but was not "
+            "placed on the timeline." if len(leftover) == 1 else
+            f" {len(leftover)} sounds were downloaded into the project but "
+            "were not placed on the timeline.")
 
 
 def _disclose_outstanding_quality(ctx, text):
