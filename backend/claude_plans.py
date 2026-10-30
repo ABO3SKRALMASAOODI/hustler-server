@@ -62,11 +62,14 @@ LUNA = "gpt-6-luna"
 SOL = "gpt-6.1-sol"
 
 DEFAULT_PLAN_MODELS = {
-    # Price parity with the contracted lane until the bake-off decides:
-    # Haiku 5.5 = Luna's card, Sonnet 5.5 = Sol's card.
+    # Owner decision (30 Oct 2026): every NEW subscriber's Studio agent runs
+    # on Claude Haiku 5.5, for Plus, Pro and Max alike (not Sonnet). Credits
+    # are still charged at the plan's contracted card (credit parity:
+    # contracted_model), so no price changes; grandfathered subscribers never
+    # reach this lane (claude_plans.applies).
     "plus_2026": "claude-haiku-5-5",
-    "pro_2026": "claude-sonnet-5-5",
-    "max_2026": "claude-sonnet-5-5",
+    "pro_2026": "claude-haiku-5-5",
+    "max_2026": "claude-haiku-5-5",
 }
 DEFAULT_MODEL = "claude-haiku-5-5"
 

@@ -35,7 +35,9 @@ CUTOFF = (datetime.now(timezone.utc) - timedelta(days=1)).replace(microsecond=0)
 # The row after the owner's first ON (backend/studio_plus_toggle.switch).
 SWITCHED_ON = json.dumps({"on": True, "cutoff_at": CUTOFF.isoformat(),
                           "studio_plans": ["plus_2026"],
-                          "plan_models": {"plus_2026": "claude-haiku-5-5"},
+                          "plan_models": {"plus_2026": "claude-haiku-5-5",
+                                          "pro_2026": "claude-haiku-5-5",
+                                          "max_2026": "claude-haiku-5-5"},
                           "updated_by": "admin"})
 SWITCHED_OFF = json.dumps(dict(json.loads(SWITCHED_ON), on=False))
 JOB = {"id": 41, "user_id": 8}
@@ -125,6 +127,21 @@ def test_a_new_plus_subscriber_runs_on_haiku_with_the_switch_on(lane_up):
     assert got["lane"]["name"] == "claude_paid"
     assert got["lane"]["model"] == "claude-haiku-5-5"
     assert got["credit_model"] == "gpt-6-luna"
+
+
+def test_new_pro_and_max_subscribers_run_on_haiku_too_owner_decision_1030(
+        lane_up):
+    """Owner decision (30 Oct 2026): every NEW subscriber's Studio model is
+    claude-haiku-5-5, Plus, Pro and Max alike, both with the row the switch
+    writes and with a row that names no plan_models (the defaults)."""
+    bare = json.dumps({"on": True, "cutoff_at": CUTOFF.isoformat()})
+    for row in (SWITCHED_ON, bare):
+        for plan, card in (("plus_2026", "gpt-6-luna"),
+                           ("pro_2026", "gpt-6.1-sol"),
+                           ("max_2026", "gpt-6.1-sol")):
+            got = agent_loop._claude_paid_lane(_Db(row), JOB, True, plan, {})
+            assert got["lane"]["model"] == "claude-haiku-5-5", (plan, row)
+            assert got["credit_model"] == card       # prices unchanged
 
 
 def test_switch_off_or_credit_line_off_never_starts_a_claude_turn(lane_up):

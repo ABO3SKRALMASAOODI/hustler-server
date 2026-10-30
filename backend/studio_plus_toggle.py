@@ -9,7 +9,7 @@ It mirrors the free-trial switch (trial_toggle.py) exactly; the admin's
 
 * **ON**: Plus subscribers whose subscription started after the release
   cutoff (``studio_for_all_plans.cutoff_at``) have the Studio AI editor, on
-  Claude (``plan_models``, Plus = claude-haiku-5-5) through the credited key,
+  Claude (``plan_models``: claude-haiku-5-5 for Plus, Pro and Max) through the credited key,
   metered into the same cycle ledger as the trial, and charged credits per
   turn like every subscriber (worker db.charge_turn_credits). Every other
   existing subscriber, grandfathered Plus included, is unchanged.
@@ -36,10 +36,14 @@ import claude_plans
 
 KEY = claude_plans.KEY
 PLAN = "plus_2026"
-# Filled in by the first ON when the row lacks them (the bake-off's pick for
-# Plus; the other keys keep claude_plans' defaults).
+# Filled in by the first ON when the row lacks them. Owner decision (30 Oct
+# 2026): every new subscriber's Studio model is claude-haiku-5-5, for Plus,
+# Pro and Max alike (not Sonnet); written out so the row says it.
+NEW_SUBSCRIBER_MODEL = "claude-haiku-5-5"
 RELEASE_VALUES = {"studio_plans": [PLAN],
-                  "plan_models": {PLAN: "claude-haiku-5-5"}}
+                  "plan_models": {PLAN: NEW_SUBSCRIBER_MODEL,
+                                  "pro_2026": NEW_SUBSCRIBER_MODEL,
+                                  "max_2026": NEW_SUBSCRIBER_MODEL}}
 REASON_TEXT = {
     claude_credit.REASON_BUDGET:
         "this cycle's Claude spend reached the line",

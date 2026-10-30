@@ -224,10 +224,15 @@ def test_off_by_default_and_on_fixes_the_release_cutoff_once():
     value = studio_plus_toggle.switch(w, True, now=when)
     assert value["on"] is True and value["cutoff_at"] == when.isoformat()
     assert value["studio_plans"] == ["plus_2026"]
-    assert value["plan_models"] == {"plus_2026": "claude-haiku-5-5"}
+    # Owner decision (30 Oct 2026): Haiku for every new subscriber, not Sonnet
+    assert value["plan_models"] == {"plus_2026": "claude-haiku-5-5",
+                                    "pro_2026": "claude-haiku-5-5",
+                                    "max_2026": "claude-haiku-5-5"}
     assert w.writes == ["studio_for_all_plans"]       # never the credit state
     st = studio_plus_toggle.status(w, now=NOW)
-    assert st["state"] == "on" and st["lanes"]["plus_2026"] == "claude-haiku-5-5"
+    assert st["state"] == "on"
+    assert {st["lanes"][p] for p in ("plus_2026", "pro_2026", "max_2026")} \
+        == {"claude-haiku-5-5"}
     # OFF keeps the cutoff; the next ON never moves it
     studio_plus_toggle.switch(w, False, now=when + timedelta(hours=1))
     assert studio_plus_toggle.status(w, now=NOW)["state"] == "off"

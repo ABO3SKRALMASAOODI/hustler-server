@@ -65,7 +65,9 @@ def test_grandfathered_subscribers_keep_their_lanes(lane_up):
 def test_a_new_subscriber_runs_on_the_plans_claude_model(lane_up):
     got = agent_loop._claude_paid_lane(_Db(ON), JOB, True, "pro_2026", {})
     assert got["lane"]["name"] == "claude_paid"
-    assert got["lane"]["model"] == "claude-sonnet-5-5"
+    # Owner decision (30 Oct 2026): Haiku for every new subscriber; credits
+    # stay at the plan's contracted card (Pro = Sol).
+    assert got["lane"]["model"] == "claude-haiku-5-5"
     assert got["credit_model"] == "gpt-6.1-sol"
     assert "test-anthropic-key-XYZ" not in json.dumps(
         {k: v for k, v in got["lane"].items() if k != "client"})

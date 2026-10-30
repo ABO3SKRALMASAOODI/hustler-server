@@ -149,16 +149,19 @@ def test_a_lookup_error_reads_as_grandfathered():
                                       _t("2026-11-02T00:00:00")) is True
 
 
-def test_models_per_plan_have_price_parity_until_the_bake_off_picks():
+def test_every_new_subscriber_plan_defaults_to_haiku_owner_decision_1030():
+    """Owner decision (30 Oct 2026): Haiku 5.5 for every NEW subscriber's
+    Studio, Plus, Pro and Max alike (not Sonnet); credits stay at the plan's
+    contracted card."""
     flag = claude_plans.parse_flag(_on())
-    assert claude_plans.lane_model(flag, "plus_2026") == "claude-haiku-5-5"
-    assert claude_plans.lane_model(flag, "pro_2026") == "claude-sonnet-5-5"
-    assert claude_plans.lane_model(flag, "unknown") == "claude-haiku-5-5"
+    for plan in ("plus_2026", "pro_2026", "max_2026", "unknown"):
+        assert claude_plans.lane_model(flag, plan) == "claude-haiku-5-5", plan
+    assert "claude-sonnet-5-5" not in claude_plans.DEFAULT_PLAN_MODELS.values()
     picked = claude_plans.parse_flag(_on(plan_models={
         "max_2026": "claude-opus-5-5", "pro_2026": "gpt-6-luna"}))
     assert claude_plans.lane_model(picked, "max_2026") == "claude-opus-5-5"
     # never another provider's model on this lane
-    assert claude_plans.lane_model(picked, "pro_2026") == "claude-sonnet-5-5"
+    assert claude_plans.lane_model(picked, "pro_2026") == "claude-haiku-5-5"
     assert claude_plans.contracted_model("plus_2026") == "gpt-6-luna"
     assert claude_plans.contracted_model("max_2026") == "gpt-6.1-sol"
 

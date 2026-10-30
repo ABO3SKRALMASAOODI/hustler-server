@@ -35,8 +35,8 @@ EVERY_FLAG_ON = {
         "on": True, "cutoff_at": CUTOFF, "claude_lane": True,
         "credit_parity": True, "test_user_ids": [22],
         "plan_models": {"plus_2026": "claude-haiku-5-5",
-                        "pro_2026": "claude-sonnet-5-5",
-                        "max_2026": "claude-sonnet-5-5"}}),
+                        "pro_2026": "claude-haiku-5-5",
+                        "max_2026": "claude-haiku-5-5"}}),
     "claude_credit": json.dumps({"cycle_budget_usd": 170,
                                  "safety_margin_usd": 10}),
     "claude_credit_state": json.dumps({"state": "on"}),
@@ -154,7 +154,7 @@ def test_the_proof_is_sensitive_a_new_subscriber_does_move(every_flag_on):
     db = every_flag_on
     job = {"id": 2, "user_id": NEW, "project_id": 10}
     got = agent_loop._claude_paid_lane(db, job, True, "pro_2026", {})
-    assert got and got["lane"]["model"] == "claude-sonnet-5-5"
+    assert got and got["lane"]["model"] == "claude-haiku-5-5"
     assert got["credit_model"] == "gpt-6.1-sol"
 
 
