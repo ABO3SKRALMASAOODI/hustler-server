@@ -465,24 +465,36 @@ class R2Store:
                                   retries={"max_attempts": att}))
             return self._client
 
-    def _next_client(self):
+    @staticmethod
+    def _next_cfg():
+        """The next store's configuration: env first, then the sealed app_kv
+        row (storage_creds.py, through storage's credentials source)."""
         import storage_routing as routing
-        cfg = routing.store_config(routing.NEXT)
+        try:
+            import storage
+            return storage.next_config()
+        except Exception:  # noqa: BLE001 — no storage module: env only
+            return routing.store_config(routing.NEXT)
+
+    def _next_client(self):
+        cfg = self._next_cfg()
         if cfg is None:
             raise RuntimeError("the next store (S3_NEXT_*) is not configured")
         with self._lock:
             if self._next is None or self._next[0] != cfg:
                 import boto3
                 from botocore.config import Config
+                import storage_creds
+                import storage_routing as routing
                 ct, rt, att = self._opts
-                self._next = (cfg, boto3.client(
+                self._next = (cfg, storage_creds.watch_client(boto3.client(
                     "s3", endpoint_url=cfg["endpoint"],
                     aws_access_key_id=cfg["access_key_id"],
                     aws_secret_access_key=cfg["secret_access_key"],
                     region_name=cfg["region"],
                     config=Config(**routing.botocore_config_kwargs(
                         cfg, connect_timeout=ct, read_timeout=rt,
-                        retries={"max_attempts": att}))))
+                        retries={"max_attempts": att})))))
             return self._next[1]
 
     def _c(self, store):
@@ -490,8 +502,7 @@ class R2Store:
 
     def _b(self, store):
         if store == "next":
-            import storage_routing as routing
-            return routing.store_config(routing.NEXT)["bucket"]
+            return self._next_cfg()["bucket"]
         return self.bucket
 
     @staticmethod

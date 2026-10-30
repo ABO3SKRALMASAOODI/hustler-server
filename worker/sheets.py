@@ -8,6 +8,7 @@ tiles to a sheet, still one vision call per sheet, still capped by
 MAX_VISION_SHEETS."""
 
 import os
+import shutil
 import threading
 from concurrent import futures
 
@@ -278,6 +279,78 @@ def build_caption_comparison_pages(frames, out_prefix, per_page=4):
     return pages
 
 
+# E3 (30 Oct 2026): stills a render's review sheets will need, read in ONE
+# decode (media.frames_at) before the sheets are built. Keyed by the file
+# and frame_at's own time formatting; a still found here is the file
+# frame_at would write (byte for byte, tests/test_frames_at.py), a still
+# not found is read by frame_at as before.
+_POOL = {}
+_POOL_LOCK = threading.Lock()
+PREFETCH_MIN = 12          # fewer stills: per-frame seeks are cheaper
+
+
+def _pool_key(video_path, t, width):
+    return (os.path.realpath(video_path), f"{max(0.0, float(t)):.3f}",
+            width)
+
+
+def result_sheet_times(duration, grid=3):
+    n = grid * grid
+    return [duration * (i + 0.5) / n for i in range(n)]
+
+
+def prefetch(video_path, times, workdir, width=426):
+    """Read the stills at ``times`` of ``video_path`` in one decode, for
+    the sheets built next; returns how many it placed (0 when there are
+    too few to be worth a pass, or on any failure). release() drops them."""
+    import media
+    want = {}
+    for t in times or []:
+        k = _pool_key(video_path, t, width)
+        with _POOL_LOCK:
+            if k in _POOL:
+                continue
+        want.setdefault(k, float(t))
+    if len(want) < PREFETCH_MIN:
+        return 0
+    try:
+        import tempfile
+        os.makedirs(workdir, exist_ok=True)
+        here = tempfile.mkdtemp(prefix="pool_", dir=workdir)
+        items = [(t, os.path.join(here, f"s{i}.jpg"))
+                 for i, t in enumerate(want.values())]
+        done = media.frames_at(video_path, items, width=width)
+    except Exception:  # noqa: BLE001 — frame_at reads them instead
+        return 0
+    with _POOL_LOCK:
+        for k, (_t, path) in zip(want, items):
+            if path in done:
+                _POOL[k] = path
+    return len(done)
+
+
+def release(video_path):
+    real = os.path.realpath(video_path)
+    with _POOL_LOCK:
+        for k in [k for k in _POOL if k[0] == real]:
+            path = _POOL.pop(k)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
+def _still(video_path, t, dst, width=426):
+    """frame_at(video_path, t, dst) — from the prefetched pool when there."""
+    import media
+    with _POOL_LOCK:
+        pooled = _POOL.get(_pool_key(video_path, t, width))
+    if pooled and os.path.exists(pooled):
+        shutil.copyfile(pooled, dst)
+        return dst
+    return media.frame_at(video_path, t, dst, width=width)
+
+
 def build_frames_sheet(video_path, out_path, times, cols=3, max_tiles=9,
                        parallelism=1):
     """Numbered tiles at EXPLICIT times — round 81's verify sheet.
@@ -296,7 +369,7 @@ def build_frames_sheet(video_path, out_path, times, cols=3, max_tiles=9,
         i, t = item
         fp = out_path + f".vframe{i}.jpg"
         try:
-            media.frame_at(video_path, t, fp, width=426)
+            _still(video_path, t, fp, width=426)
             return t, fp
         except Exception:
             return t, None
@@ -345,7 +418,7 @@ def build_result_sheet(video_path, out_path, duration, grid=3):
         t = duration * (i + 0.5) / n
         fp = out_path + f".frame{i}.jpg"
         try:
-            media.frame_at(video_path, t, fp, width=426)
+            _still(video_path, t, fp, width=426)
             tmp_frames.append((t, fp))
         except Exception:
             tmp_frames.append((t, None))

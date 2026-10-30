@@ -454,13 +454,32 @@ def _escalate_oom_render(worker_db, job, err, decision, lease_claim):
     return bool(moved)
 
 
+def _box_turn_executor_dead(job, err, decision):
+    """A Studio turn whose render-box container is PROVEN gone.
+
+    The box reports a lost executor as ``outcome_unknown`` for a mutation
+    ("Box lost the executor during this agent_turn (Box container exited
+    ...)": the container exited, was OOM-killed or was fenced). Unlike an
+    unconfirmed remote, nothing can still be running it, so the turn takes
+    the same path as any infrastructure failure: requeued quietly when it
+    committed no write, continued from its last committed EDL when it did
+    (bounded death resume). Before (R1 chaos, 30 Oct 2026) the turn failed
+    with no reply at all: run_agent_job posts the apology, and it had died.
+    MCP mutations keep "outcome unknown": their caller re-reads the state.
+    """
+    return (job.get("type") == "agent_turn"
+            and decision.kind == "outcome_unknown"
+            and "box lost the executor" in str(err).lower())
+
+
 def _quiet_infra_retry(worker_db, job, err, decision, lease_claim):
     """Wait a little and hand an infrastructure failure back to the queue
     without spending its attempt. False when it is not one, or its window
     or retries are used up (the ordinary policy then decides). A Studio turn
     or MCP tool is requeued only when it committed no write; a Studio turn
     that did continues from its last committed EDL."""
-    if not failure_policy.is_infrastructure(err, decision):
+    if not (failure_policy.is_infrastructure(err, decision)
+            or _box_turn_executor_dead(job, err, decision)):
         return False
     if job.get("type") in failure_policy.MUTATING_RETRY_TYPES:
         if decision.kind in failure_policy.AMBIGUOUS_OWNERSHIP_KINDS:
@@ -525,8 +544,30 @@ INDEX_SERVICE_FAIL_NOTE = (
     "Your video uploaded safely, and nothing is wrong with your file. Our "
     "processing service couldn't analyze it this time. That's on our side, "
     "not yours, and we're on it. You don't need to upload it again.")
+# The only index decisions that are about the customer's file, so the only
+# ones FAIL_NOTES["index"] ("try uploading it again, or a different format")
+# could help (failure_policy.user_reason words them the same way).
+INDEX_FILE_KINDS = frozenset({"invalid_media", "input_limit_exceeded"})
 # indexer's own duration refusal ("Video is 4.5h — the limit is 3h").
 _TOO_LONG = re.compile(r"Video is ([0-9.]+)h \S+ the limit is ([0-9.]+)h")
+# A link pasted as the main video that could not be imported
+# (indexer._import_link_source). The generic index note ("this version could
+# not be rendered as it stands ... try a different format like mp4") is
+# wrong for a link, and the bot-wall text itself is written for the agent
+# ("If this link came from find_song, fetch the NEXT candidate"). Every
+# YouTube link import from the render box meets the wall (R1 chaos, 30 Oct
+# 2026), so the customer gets the plain truth and the one step that works.
+_LINK_IMPORT = "couldn't import the video from that link"
+LINK_IMPORT_WALL_NOTE = (
+    "I couldn't import the video from that YouTube link: YouTube blocked our "
+    "server from downloading this upload (a check YouTube runs on some "
+    "videos; nothing is wrong with your link). Download the video and upload "
+    "the file here (mp4 or mov), and I'll start on it right away.")
+LINK_IMPORT_FAIL_NOTE = (
+    "I couldn't import a video from that link: it did not give us a video we "
+    "could download (it may be private, removed, region-locked or not a "
+    "video page). Paste a different link, or download the video and upload "
+    "the file here.")
 
 FAIL_NOTES = {
     # agent_turn posts its own apology inside run_agent_job — not repeated.
@@ -622,7 +663,16 @@ def _notify_failure(worker_db, job, err):
         # An agent that never launched cannot post the apology normally owned
         # by run_agent_job. Without this branch, a continuation could exhaust
         # capacity deferrals and leave the user's request with no reply.
-        note = ("I couldn't start the editing engine because every editing "
+        # A continuation of a turn that already worked must not say the
+        # engine never started (R2 audit, Sep 2026: posted after 26 versions
+        # had been written and rendered).
+        resumed = bool(payload.get("logical_turn_continuation")
+                       or (payload.get("root_agent_job_id")
+                           and payload.get("root_agent_job_id") != job.get("id")))
+        note = ("I paused because every editing server stayed busy. "
+                "Everything I finished is saved — send Continue and I'll pick "
+                "up from the latest version." if resumed else
+                "I couldn't start the editing engine because every editing "
                 "server stayed busy. Your request and saved edit are safe — "
                 "send Continue and I'll resume from the latest version.")
     if not note and job["type"] == "preview":
@@ -647,6 +697,9 @@ def _notify_failure(worker_db, job, err):
     elif job["type"] == "index" and decision.kind in {
             "executor_unavailable", "executor_capacity", "provider_budget_exhausted"}:
         note = INDEX_SERVICE_FAIL_NOTE
+    elif job["type"] == "index" and _LINK_IMPORT in str(err).lower():
+        note = (LINK_IMPORT_WALL_NOTE if "youtube blocked" in
+                str(err).lower() else LINK_IMPORT_FAIL_NOTE)
     elif job["type"] == "index" and _TOO_LONG.match(str(err)):
         # The one index refusal the customer CAN act on. "Try uploading it
         # again, or a different format" could never help a long recording.
@@ -655,6 +708,12 @@ def _notify_failure(worker_db, job, err):
                 "can analyze is {l} hours, so I couldn't start on it. Your "
                 "upload is safe. Trim it, or split it into parts of up to "
                 "{l} hours each and upload those.").format(h=hours, l=limit)
+    elif job["type"] == "index" and decision.kind not in INDEX_FILE_KINDS:
+        # Ticket #7 (27 Oct): a 2.1 h mp4 killed by our own ffmpeg wall-clock
+        # (render_budget_exceeded) was told "try a different format like
+        # mp4". Only a decision that blames the file may ask for another one;
+        # every other index failure is ours.
+        note = INDEX_SERVICE_FAIL_NOTE
     elif note and job["type"] in {"preview", "preview_check", "final"} and (
             decision.kind in {"render_budget_exceeded", "executor_memory"}
             and not decision.agent_repairable
@@ -1135,18 +1194,31 @@ def main():
     # R2, storage_routing.py). It has no health route, so it says so in
     # app_kv 'storage_probe_dispatcher'; storage_migrate.py's switch refuses
     # 'next' until this row reports the next store. Hosts only, never a key.
+    # Written at boot and again whenever the answer changes (checked every
+    # 5 minutes): the next store's keys may arrive later through the sealed
+    # app_kv row (storage_creds.py), with no restart.
     def _storage_probe():
-        try:
-            import json as _json
-            import storage as _storage
-            st = dict(_storage.routing_status())
-            st["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            st["code_version"] = version.code_version()
-            dbx.Db().run(dbx.kv_put, "storage_probe_dispatcher",
-                         _json.dumps(st, sort_keys=True))
-        except Exception as e:
-            print(f"[storage] probe row not written: {str(e)[:200]}",
-                  flush=True)
+        import json as _json
+        last, probe_db = None, None
+        while True:
+            try:
+                import storage as _storage
+                st = dict(_storage.routing_status())
+                seen = {k: st.get(k) for k in (
+                    "mode", "requested", "degraded", "legacy", "next",
+                    "next_host", "next_source")}
+                if seen != last:
+                    st["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                             time.gmtime())
+                    st["code_version"] = version.code_version()
+                    probe_db = probe_db or dbx.Db()
+                    probe_db.run(dbx.kv_put, "storage_probe_dispatcher",
+                                 _json.dumps(st, sort_keys=True))
+                    last = seen
+            except Exception as e:
+                print(f"[storage] probe row not written: {str(e)[:200]}",
+                      flush=True)
+            time.sleep(300)
 
     threading.Thread(target=_storage_probe, daemon=True,
                      name="storage-probe").start()

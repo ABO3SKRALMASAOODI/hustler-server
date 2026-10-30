@@ -288,7 +288,8 @@ _bot_walled = ytaccess.bot_walled
 
 
 def _extract(url, workdir, prefer=None, client_override=None,
-             use_cookies=True, format_mode="adaptive"):
+             use_cookies=True, format_mode="adaptive", proxy=None,
+             impersonate=False):
     """Pull media out of a page with yt-dlp. Returns (path, info dict).
 
     Runs as a subprocess rather than through the python API so a hung or
@@ -300,7 +301,12 @@ def _extract(url, workdir, prefer=None, client_override=None,
     path. YouTube bot-checks datacenter IPs on the default web client far
     more aggressively than on the tv/mweb clients, so a bot-walled first
     attempt earns ONE retry with alternate clients (see fetch below). This
-    is best-effort — when YouTube blocks both, the honest error stands."""
+    is best-effort — when YouTube blocks both, the honest error stands.
+
+    impersonate: browser impersonation for the generic extractor (curl-cffi,
+    pinned in requirements.txt). Off by default, as in yt-dlp itself: some
+    sites break under it (yt-dlp issue 11335). Only the retry for a
+    Cloudflare challenge turns it on (_extract_with_fallback)."""
     max_bytes = _limit("max_bytes", config.FETCH_MAX_BYTES)
     timeout_s = _limit("timeout_s", config.FETCH_TIMEOUT_S)
     # Cap the resolution rather than taking "best": a 4K source is a ~10x
@@ -340,6 +346,8 @@ def _extract(url, workdir, prefer=None, client_override=None,
            "-o", os.path.join(workdir, "dl.%(ext)s")]
     if client_override:
         cmd += ["--extractor-args", f"youtube:player_client={client_override}"]
+    if impersonate:
+        cmd += ["--extractor-args", "generic:impersonate"]
     # Operator cookies, resolved and normalized by ytaccess (five delivery
     # doors, one normalizer) — always a WRITABLE per-run copy that dies
     # with the workdir, never a mounted or shared file.
@@ -350,8 +358,10 @@ def _extract(url, workdir, prefer=None, client_override=None,
     # past YouTube's bot wall. Keep every other provider on its existing
     # direct path: the proxy is a YouTube access fix, not a new dependency
     # for SoundCloud, Vimeo, TikTok, or the generic extractor.
-    if config.YTDLP_PROXY and ytaccess.is_youtube_url(url):
-        cmd += ["--proxy", config.YTDLP_PROXY]
+    # ``proxy`` overrides it for one fallback route (_extract_with_fallback).
+    route = config.YTDLP_PROXY if proxy is None else proxy
+    if route and ytaccess.is_youtube_url(url):
+        cmd += ["--proxy", route]
     # The EJS challenge solver (see config.YTDLP_REMOTE_COMPONENTS): without
     # it, the cookie-mode client path resolves NO formats.
     if config.YTDLP_REMOTE_COMPONENTS:
@@ -451,6 +461,32 @@ def _clear_partials(workdir):
             pass
 
 
+_VIMEO_PAGE = re.compile(
+    r"^https?://(?:www\.)?vimeo\.com/"
+    r"(?:channels/[^/?#]+/|groups/[^/?#]+/videos/|album/\d+/video/|"
+    r"showcase/\d+/video/)?(\d{5,})(?:/([0-9a-f]{6,}))?/?(?:[?#].*)?$", re.I)
+
+
+def vimeo_player_url(url):
+    """player.vimeo.com/video/<id>[?h=<hash>] for a vimeo.com page link, or
+    None. An unlisted video's hash comes from the path or its ?h= query."""
+    m = _VIMEO_PAGE.match((url or "").strip())
+    if not m:
+        return None
+    vid, h = m.group(1), m.group(2)
+    if not h:
+        q = re.search(r"[?&]h=([0-9a-f]{6,})", url)
+        h = q.group(1) if q else None
+    return f"https://player.vimeo.com/video/{vid}" + (f"?h={h}" if h else "")
+
+
+def _cloudflare_challenged(text):
+    """yt-dlp's generic extractor met a Cloudflare bot challenge (its own
+    words: "403 caused by Cloudflare anti-bot challenge")."""
+    low = (text or "").lower()
+    return "cloudflare" in low and ("anti-bot" in low or "challenge" in low)
+
+
 def _extract_with_fallback(url, workdir, prefer=None):
     """_extract, walking alternate player clients on YouTube's bot wall.
 
@@ -475,26 +511,61 @@ def _extract_with_fallback(url, workdir, prefer=None):
     # This matters for SoundCloud in particular: it is the working music
     # fallback and a YouTube repair must never perturb it.
     if not ytaccess.is_youtube_url(url):
-        return _extract(url, workdir, prefer=prefer)
-
-    deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
-    last_wall = None
-    for attempt in ytaccess.extraction_strategies():
-        if time.monotonic() >= deadline:
-            break
-        _clear_partials(workdir)
         try:
-            return _extract(url, workdir, prefer=prefer,
-                            client_override=attempt.get("client"),
-                            use_cookies=attempt.get("cookies", False),
-                            format_mode=attempt.get("format", "adaptive"))
-        except FetchMediaError as retry_err:
-            # A DIFFERENT failure means this client got past the wall and hit
-            # something real (private, region-locked, removed). That is the
-            # useful error — stop cycling and report it.
-            if not ytaccess.access_blocked(str(retry_err)):
+            return _extract(url, workdir, prefer=prefer)
+        except FetchMediaError as err:
+            # vimeo.com page links fail anonymously ("Failed to fetch macos
+            # OAuth token: 401" on 2026.7.4, "the web client only works when
+            # logged-in" on 2026.10) while the same video's embed player
+            # (player.vimeo.com/video/<id>) still extracts: R2 journeys, 30
+            # Oct 2026. Only a failure reaches this, so every link that
+            # worked before keeps its exact call.
+            alt = vimeo_player_url(url)
+            if alt:
+                _clear_partials(workdir)
+                print("[fetch_url] vimeo page failed; trying its player URL",
+                      flush=True)
+                return _extract(alt, workdir, prefer=prefer)
+            if not _cloudflare_challenged(str(err)):
                 raise
-            last_wall = retry_err
+        # 30 Oct, ticket 10: a customer's link died on "[generic] Got HTTP
+        # Error 403 caused by Cloudflare anti-bot challenge; try again with
+        # --extractor-args generic:impersonate". curl-cffi was installed for
+        # exactly this, but nothing ever asked for it. One retry, only on
+        # that signature, so every other site keeps its proven call.
+        _clear_partials(workdir)
+        return _extract(url, workdir, prefer=prefer, impersonate=True)
+
+    # Routes: the primary egress (YTDLP_PROXY, or direct), then each
+    # config.YTDLP_PROXY_FALLBACK proxy, each with the whole client ladder
+    # and its own retry budget. A fallback is tried only after a route
+    # ended walled; with no fallback configured this is the single
+    # original loop, call for call.
+    last_wall = None
+    for route in (None,) + tuple(config.YTDLP_PROXY_FALLBACK):
+        deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
+        walled = None
+        via = {} if route is None else {"proxy": route}
+        for attempt in ytaccess.extraction_strategies():
+            if time.monotonic() >= deadline:
+                break
+            _clear_partials(workdir)
+            try:
+                return _extract(url, workdir, prefer=prefer,
+                                client_override=attempt.get("client"),
+                                use_cookies=attempt.get("cookies", False),
+                                format_mode=attempt.get("format", "adaptive"),
+                                **via)
+            except FetchMediaError as retry_err:
+                # A DIFFERENT failure means this client got past the wall and
+                # hit something real (private, region-locked, removed). That
+                # is the useful error — stop cycling and report it.
+                if not ytaccess.access_blocked(str(retry_err)):
+                    raise
+                walled = retry_err
+        if walled is None:
+            break
+        last_wall = walled
     if last_wall is not None:
         _clear_partials(workdir)
         # The wall is PER-UPLOAD, not per-song: Aug 9, the same box that

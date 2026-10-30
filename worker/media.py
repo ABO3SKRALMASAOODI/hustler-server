@@ -474,9 +474,10 @@ def probe(path):
         # A screen recorder writes a frame only when pixels change, so a
         # mostly static recording averages 3-15 fps. That average is not a
         # playback rate: normalizing to it made a 2.8 fps proxy, preview and
-        # export (scrolls became a slideshow) and section renders came back
-        # a frame long. Normalize to the stream's own nominal rate instead
-        # (24-60), else 30.
+        # export (scrolls became a slideshow; R2 journeys measured a 2.848 fps
+        # production preview on 30 Oct 2026, 150 frames in 52.7 s). Normalize
+        # to the stream's own nominal rate instead (24-60), else 30.
+        # (Same fix as the trial branch's 071bfeed, which never reached main.)
         fps = r if VFR_MIN_FPS <= r <= 60.0 else 30.0
     w, h = int(v.get("width") or 0), int(v.get("height") or 0)
     if abs(rotation_of(v)) % 180 == 90:
@@ -1013,6 +1014,104 @@ def frame_at(src, t, dst, width=None, quality=4, timeout=120):
             pass
     raise MediaError(f"no frame at {ts}s of {os.path.basename(src)}: "
                      f"{last_err}")
+
+
+FRAMES_AT_MIN = 4               # fewer stills than this: one frame_at each
+_SHOWINFO = re.compile(r"\bn:\s*(\d+)\s+pts:\s*(-?\d+)\s")
+_TIME_BASE = re.compile(r"config in time_base:\s*(\d+)/(\d+)")
+
+
+def _rescale_near(us, num, den):
+    """av_rescale_q(us, 1/1e6, num/den) with AV_ROUND_NEAR_INF."""
+    a, b = us * den, 1_000_000 * num
+    q, r = divmod(abs(a), b)
+    if 2 * r >= b:
+        q += 1
+    return q if a >= 0 else -q
+
+
+def frames_at(src, items, width=None, quality=4, timeout=180):
+    """The stills frame_at(src, t, dst) writes, for every (t, dst) in
+    ``items``, from ONE decode of ``src`` (E3, 30 Oct 2026).
+
+    A preview's review sheets are 30-60 stills, and each frame_at is its own
+    ffmpeg: a process start, a seek and a decode from the keyframe before
+    it; on a 720x1280 preview that was 8-14 CPU-seconds a render. Here one
+    decoder reads the file once; a select passes the frames within 0.1 s
+    of any wanted time, showinfo logs their timestamps in the stream's
+    time base, and each wanted time takes the FIRST frame at or after it,
+    which is the rule frame_at's input seek follows (-ss t: the decoder
+    discards every frame before t, the time rounded to the stream's time
+    base). Same decoder, same scale, same encoder settings, so the files
+    are byte-identical (tests/test_frames_at.py compares them).
+
+    Returns the set of dsts written; a time it could not place (past the
+    last frame, a file the pass could not read) is left to the caller's
+    frame_at. Never raises."""
+    import shutil
+    import tempfile
+    items = [(max(0.0, float(t)), dst) for t, dst in items]
+    if not items:
+        return set()
+    try:
+        info = run(["ffprobe", "-v", "error", "-show_entries",
+                    "format=start_time", "-of", "csv=p=0", src],
+                   timeout=60).strip()
+        start_us = int(round(float(info) * 1e6)) if info not in ("", "N/A") \
+            else 0
+    except Exception:  # noqa: BLE001
+        return set()
+    if start_us != 0:
+        # an offset start puts input seeking on another clock: frame_at
+        return set()
+    wanted = sorted({round(t, 3) for t, _d in items})
+    near = "+".join(f"between(t,{max(0.0, t - .1):.3f},{t + .1:.3f})"
+                    for t in wanted)
+    vf = f"select='{near}',showinfo" + (f",scale={width}:-2" if width else "")
+    work = tempfile.mkdtemp(prefix="frames_at_",
+                            dir=os.path.dirname(os.path.abspath(
+                                items[0][1])) or None)
+    written = set()
+    try:
+        cmd = ["ffmpeg", "-y", "-threads", "1", "-i", src, "-map", "0:v:0",
+               "-an", "-sn", "-dn", "-vf", vf, "-fps_mode", "passthrough",
+               "-pix_fmt", "yuvj420p", "-threads:v", "1",
+               "-q:v", str(quality), "-f", "image2", "-start_number", "0",
+               os.path.join(work, "f%05d.jpg")]
+        try:
+            r = subprocess.run(http_inputs.resilient(cmd), capture_output=True,
+                               timeout=timeout)
+        except Exception:  # noqa: BLE001
+            return set()
+        if r.returncode != 0:
+            return set()
+        log = r.stderr.decode("utf-8", "replace")
+        tb = _TIME_BASE.search(log)
+        if not tb:
+            return set()
+        num, den = int(tb.group(1)), int(tb.group(2))
+        frames = []                     # (pts, file) in output order
+        for i, m in enumerate(_SHOWINFO.finditer(log)):
+            path = os.path.join(work, f"f{i:05d}.jpg")
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                frames.append((int(m.group(2)), path))
+        for t, dst in items:
+            want = _rescale_near(int(round(float(f"{t:.3f}") * 1e6)),
+                                 num, den)
+            pick = next(((pts, p) for pts, p in frames if pts >= want), None)
+            # Only a frame inside the select's window is known to be the
+            # FIRST at or after the time (every frame of the window was
+            # passed); past it, frame_at decides.
+            if pick is None or (pick[0] - want) * num >= .09 * den:
+                continue
+            try:
+                shutil.copyfile(pick[1], dst)
+                written.add(dst)
+            except OSError:
+                pass
+        return written
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def duration_of(path):

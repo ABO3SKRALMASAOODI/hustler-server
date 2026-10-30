@@ -3191,12 +3191,60 @@ def keep_segments(ctx, segments, snap_to_words=None):
         cleaned.append([s, e])
     merged = _merge_touching(cleaned)
     kept = output_duration(merged)
-    return _write_keep(
+    res = _write_keep(
         ctx, merged,
         f"keep set to {len(merged)} segment(s), {kept}s of "
         f"{ctx.duration}s survives",
         snap_to_words=_snap_choice(snap_to_words), check_regression=True,
         place_all=True)
+    grid = _blind_grid_note(ctx, merged)
+    if grid and str(res).startswith("EDL v"):
+        res += grid
+    return res
+
+
+# A keep list on a long, nearly wordless source whose pieces are about the
+# same length at about the same spacing was picked by the clock, not by the
+# footage (ticket #9, 28 Oct: a 63-min Roblox recording with 174 spoken words
+# cut into 19 chunks of 35-40 s at regular intervals after 16 sampled frames).
+BLIND_GRID_MIN_SOURCE_S = 15 * 60
+BLIND_GRID_MIN_SEGMENTS = 6
+BLIND_GRID_MAX_WORDS_PER_MIN = 20
+BLIND_GRID_MAX_SPREAD = 0.25
+
+
+def _blind_grid_note(ctx, keep):
+    """The warning a uniform keep grid earns on low-speech footage, or ''."""
+    try:
+        duration = float(ctx.duration or 0.0)
+        if duration < BLIND_GRID_MIN_SOURCE_S or \
+                len(keep) < BLIND_GRID_MIN_SEGMENTS:
+            return ""
+        words = (getattr(ctx, "index", None) or {}).get("words") or []
+        if len(words) / (duration / 60.0) > BLIND_GRID_MAX_WORDS_PER_MIN:
+            return ""
+        lengths = [float(e) - float(s) for s, e in keep]
+        starts = [float(s) for s, _ in keep]
+        steps = [b - a for a, b in zip(starts, starts[1:])]
+
+        def spread(xs):
+            mean = sum(xs) / len(xs)
+            return (max(xs) - min(xs)) / mean if mean > 0 else 1.0
+
+        if spread(lengths) > BLIND_GRID_MAX_SPREAD or \
+                spread(steps) > BLIND_GRID_MAX_SPREAD:
+            return ""
+    except (TypeError, ValueError, ZeroDivisionError):
+        return ""
+    return (
+        f"\nWARNING: BLIND GRID — these {len(keep)} pieces are almost the "
+        "same length at almost the same spacing, on a "
+        f"{duration / 60:.0f}-minute source with {len(words)} spoken words. "
+        "That is a sample of the clock, not the best moments. Find the "
+        "moments first: find_visual_moments(query=<the concrete event: a "
+        "kill, a fail, a win, a jump scare>) for candidates, get_shots for "
+        "where the action changes, then verify candidates in ONE batched "
+        "look_at(times=[...]) and rewrite the keep list around what you saw.")
 
 
 def cut_range(ctx, start, end, snap_to_words=None):
@@ -5150,6 +5198,25 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
             rules = CaptionsFromTranscript(corrections=rules).corrections or []
         except (ValueError, TypeError, IndexError, KeyError) as exc:
             return "REJECTED: invalid correction: " + str(exc)[:300]
+    # Captions never change what was said (R2, 30 Oct 2026): a correction
+    # may only respell a heard word. The live edits carried "we're gonna" ->
+    # "We won't" and "the the the the" -> "Falcon 9 rocket's reusable".
+    unfaithful = []
+    if operation != "clear":
+        import caption_truth
+        kept_rules = []
+        for rule in rules:
+            ok, why = caption_truth.faithful_fix(
+                rule.get("from"), rule.get("to"),
+                asr_unsure=caption_truth.asr_unsure(ctx.index or {}, rule))
+            if ok:
+                kept_rules.append(rule)
+            else:
+                unfaithful.append(caption_truth.refusal(rule, why))
+        if unfaithful and not kept_rules:
+            return ("REJECTED: no caption correction was applied; each would change "
+                    "what was said: " + "; ".join(unfaithful))
+        rules = kept_rules
     unmatched = _unmatched_caption_fixes(ctx, edl, rules) \
         if operation != "clear" else []
     notes = _caption_fix_notes(ctx, edl, rules) if operation != "clear" \
@@ -5175,6 +5242,8 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
             result += "\nNOT APPLIED (no caption words match): " + "; ".join(unmatched)
         for note in notes:
             result += "\n" + note
+        if unfaithful:
+            result += "\nNOT APPLIED (would change what was said): " + "; ".join(unfaithful)
         result += "\nACTIVE CORRECTIONS: " + json.dumps(rules)
         result += "\nCAPTION PREVIEW: " + _compact_caption_preview(
             audit_captions(ctx, limit=200), rules)
@@ -22839,6 +22908,11 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
                 "preview requires render_preview(complete=true).")
     pages = _proof_pages(ranges)
     all_requested = [pair for page in pages for pair in page]
+    # The editing owner's listening policy travels with the proof job, as it
+    # does with the complete preview: an MCP proof was stamped
+    # audio_model_review=true by the renderer's default (688 in 30 days),
+    # and download_url then refused it (ticket #39/#45, 30 Oct).
+    audio_model_review = _audio_model_review_enabled(ctx)
     payload = _child_payload(ctx, {
                "edl_version": version,
                "check_ranges": all_requested,
@@ -22846,8 +22920,10 @@ def _run_changed_preview_check(ctx, row, plan, ranges):
                "proof_pages": len(pages),
                "source": "agent_preview_check",
                "agent_job_id": ctx.job["id"],
+               "audio_model_review": audio_model_review,
                "render_signature": _render_signature(
-                   row, "preview_check", all_requested)})
+                   row, "preview_check", all_requested,
+                   audio_model_review=audio_model_review)})
     if plan:
         payload["verify_times"] = [
             t for t, _ in plan
@@ -22949,13 +23025,16 @@ def speculative_preview(ctx):
         return
     pages = _proof_pages(ranges)
     all_requested = [pair for page in pages for pair in page]
+    audio_model_review = _audio_model_review_enabled(ctx)
     payload = _child_payload(ctx, {
                "edl_version": version, "check_ranges": all_requested,
                "check_pages": pages, "proof_pages": len(pages),
                "source": "agent_preview_check",
                "agent_job_id": ctx.job["id"],
-               "render_signature": _render_signature(row, "preview_check",
-                                                       all_requested)})
+               "audio_model_review": audio_model_review,
+               "render_signature": _render_signature(
+                   row, "preview_check", all_requested,
+                   audio_model_review=audio_model_review)})
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     job_id, _created = ctx.db.run(
@@ -23189,7 +23268,22 @@ def _deliverable_quality(ctx, quality):
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                    report=False):
     if report:
-        return _stored_render_report(ctx, ctx.latest_edl())
+        # report=true reads a stored report; a caller that also asks for a
+        # COMPLETE preview wants one, so when the current version has none it
+        # is rendered instead of refused. R2 journeys, 30 Oct 2026: a studio
+        # turn spent 6 of its 28 model steps on render_preview(complete=true,
+        # quality=approval, report=true) answered "PREREQUISITE / STALE
+        # REPORT"; 85 such calls in 60 days (owner factory and customers).
+        wants_render = bool(complete) or quality == "approval"
+        current = None
+        if wants_render:
+            try:
+                current = ctx.db.run(dbx.find_render_asset, ctx.project_id,
+                                     "preview", ctx.latest_edl()["version"])
+            except Exception:  # noqa: BLE001 — fall back to the plain report
+                current = True
+        if not wants_render or current:
+            return _stored_render_report(ctx, ctx.latest_edl())
     if quality not in ("draft", "approval"):
         return "REJECTED: quality must be draft or approval."
     quality = _deliverable_quality(ctx, quality)

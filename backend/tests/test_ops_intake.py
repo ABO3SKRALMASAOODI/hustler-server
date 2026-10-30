@@ -217,6 +217,14 @@ def test_which_client_events_are_failures_and_how_severe():
     empty = {"reason": "empty or incomplete file", "bytes": 0}
     assert ev(_ev("upload_rejected", empty))["severity"] == "P1"
     assert ev(_ev("upload_rejected", empty, paying=True))["severity"] == "P0"
+    # Ticket #12: the Studio now READS a file that says 0 bytes before it
+    # refuses it; a proven-empty or unreadable file is device-side too.
+    for reason in ("empty file", "unreadable file on this device"):
+        got = ev(_ev("upload_rejected", {"reason": reason, "bytes": 0,
+                                         "proven": True}))
+        assert got["severity"] == "P1", reason
+        assert ev(_ev("upload_rejected", {"reason": reason},
+                      paying=True))["severity"] == "P0"
     # The browser cannot decode a gated free upload (no server proxy yet).
     player = {"media_error": 4, "src_path": "/valmera-media/originals/1/a.mp4",
               "is_proxy": True}

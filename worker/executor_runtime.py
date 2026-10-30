@@ -30,6 +30,42 @@ _container_input_count = 0
 _container_input_lock = threading.Lock()
 
 
+# The terminal commit of a FINISHED job rides out a database blip instead of
+# throwing the work away (R1 chaos, 30 Oct 2026: the render box reaches
+# Render's PostgreSQL across the Internet; Db.run reconnects once, so a cut
+# of a minute turned a finished 40-minute final into a re-render). A commit
+# whose answer was lost may have landed: a retry that finds the row already
+# terminal under this claim reads it back rather than calling it superseded.
+COMMIT_RETRY_WAITS_S = (5, 10, 20, 30, 45)
+
+
+def _commit_result(db, job, result, lease_claim, sleep=time.sleep):
+    retried = False
+    for wait in COMMIT_RETRY_WAITS_S + (None,):
+        try:
+            completed = job_completion.finalize_success(
+                db, job, result, lease_claim)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            if wait is None:
+                raise
+            print(f"[executor] terminal commit of job {job.get('id')} hit "
+                  f"the database link ({str(exc)[:120]}); retrying in "
+                  f"{wait}s", flush=True)
+            retried = True
+            sleep(wait)
+            continue
+        if completed is False and retried:
+            try:
+                row = db.run(dbx.get_job, job["id"]) or {}
+            except Exception:  # noqa: BLE001
+                row = {}
+            if row.get("state") == "done" and \
+                    row.get("total_claims") == lease_claim:
+                return True
+        return completed
+    return False
+
+
 def _input_observation(now):
     global _container_input_count
     with _container_input_lock:
@@ -337,8 +373,7 @@ def execute(job, runners):
                 timings = result.setdefault("timings", {})
                 timings["queue_wait_s"] = job.get("_queue_wait_s")
                 timings.update(execution_timings)
-            completed = job_completion.finalize_success(
-                db, job, result, lease_claim)
+            completed = _commit_result(db, job, result, lease_claim)
             if completed is False:
                 raise dbx.JobLeaseLost(
                     f"job {job_id} execution lease {lease_claim} was "

@@ -10,8 +10,18 @@ import boto3
 from botocore.config import Config
 from boto3.s3.transfer import TransferConfig
 
+try:  # imported HERE, not in the background readers below: a thread that
+    # imports while the main thread is still importing can deadlock on the
+    # module locks.
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except ImportError:  # pragma: no cover — every worker image has psycopg2
+    psycopg2 = RealDictCursor = None
+
 import config
 import io_telemetry
+import kv_feed
+import storage_creds as creds
 import storage_routing as routing
 
 
@@ -43,11 +53,44 @@ def client():
 # uses; in the default "legacy" mode, and in any process without S3_NEXT_*,
 # that is the legacy store alone and the router never reads the database.
 
-def _fetch_routing_row():
-    import db
-    conn = db.connect()
+# The app_kv reads below (the mode, the sealed keys) run in background
+# threads, never inside a job or a health probe, and each one is bounded
+# anyway: a short connect, a short statement, and keepalives that end a dead
+# peer's socket in seconds (db.connect's are sized for long-lived job
+# connections: 10 s connect, ~60 s to notice a dead peer). The statement
+# timeout is transaction-local (set_config), as db.Db arms it: Render's
+# transaction-mode PgBouncer rejects startup options.
+KV_CONNECT_TIMEOUT_S = 3
+KV_STATEMENT_TIMEOUT_MS = 2000
+_KV_KEEPALIVE = {"keepalives": 1, "keepalives_idle": 2,
+                 "keepalives_interval": 1, "keepalives_count": 2}
+
+
+def _kv_connect():
+    if psycopg2 is None:
+        raise RuntimeError("psycopg2 is not installed")
+    conn = psycopg2.connect(config.DATABASE_URL,
+                            cursor_factory=RealDictCursor,
+                            connect_timeout=KV_CONNECT_TIMEOUT_S,
+                            **_KV_KEEPALIVE)
+    conn.autocommit = False
+    return conn
+
+
+def _fetch_kv(key):
+    """One app_kv value, or None (also when the table does not exist yet,
+    as db.kv_get). Runs in background threads, so it imports nothing."""
+    conn = _kv_connect()
     try:
-        return db.kv_get(conn, routing.KV_KEY)
+        with conn.cursor() as cur:
+            cur.execute("SELECT set_config('statement_timeout', %s, true)",
+                        (str(KV_STATEMENT_TIMEOUT_MS),))
+            cur.execute("SELECT to_regclass('public.app_kv') AS t")
+            if not (cur.fetchone() or {}).get("t"):
+                return None
+            cur.execute("SELECT value FROM app_kv WHERE key = %s", (key,))
+            row = cur.fetchone()
+        return row["value"] if row else None
     finally:
         try:
             conn.rollback()
@@ -56,7 +99,67 @@ def _fetch_routing_row():
             pass
 
 
-_router = routing.Router(fetch=_fetch_routing_row)
+def _fetch_routing_row():
+    return _fetch_kv(routing.KV_KEY)
+
+
+# The next store's keys: S3_NEXT_* from the environment, else the sealed
+# app_kv row (storage_creds.py). creds.ENV is os.environ with that row filled
+# in, so the router and every next-store client see one configuration.
+creds.install(lambda: _fetch_kv(creds.KV_KEY))
+
+
+# The mode (kv_feed.py): ONE background reader per process, every
+# STORAGE_ROUTING_TTL_S (30 s), only while the next store is configured. The
+# router asks the feed on every call and gets the last good value at once
+# (ttl_s=0: the feed is the cache), so no /health, render, download or upload
+# ever waits on the database for the mode. Before the first read: the last
+# mode this container saw (STORAGE_ROUTING_CACHE, fresh for
+# STORAGE_ROUTING_CACHE_MAX_AGE_S: the mode lives in the very database whose
+# outage makes the cache matter, so it cannot change meanwhile), else the
+# router's default, 'legacy'. Router.mode() is unchanged: a mode past
+# copy/dual_write still only takes effect in a process that has the next
+# store's keys, else it runs legacy and reports degraded.
+
+def _next_configured():
+    return routing.store_config(routing.NEXT, creds.ENV) is not None
+
+
+def _names_a_mode(raw):
+    return raw is None or routing.parse_mode(raw) is not None
+
+
+def _router_log(msg):
+    # The feed says why the mode is unread (once per outage); the router's
+    # own "unreadable" line for that case would only repeat it.
+    if "NotReadYet" not in msg:
+        _log(msg)
+
+
+def _build_router(fetch, cache_path=None, env=None):
+    """(feed, router) reading the mode through ``fetch`` in the background."""
+    env = os.environ if env is None else env
+    feed = kv_feed.Feed(
+        fetch, name=routing.KV_KEY,
+        ttl_s=float(env.get("STORAGE_ROUTING_TTL_S") or 30),
+        enabled=_next_configured, accept=_names_a_mode,
+        cache_as=routing.parse_mode, cache_path=cache_path,
+        cache_max_age_s=float(env.get("STORAGE_ROUTING_CACHE_MAX_AGE_S")
+                              or 86400))
+    return feed, routing.Router(fetch=feed.get, env=creds.ENV, ttl_s=0,
+                                log=_router_log)
+
+
+_mode_feed, _router = _build_router(
+    _fetch_routing_row,
+    kv_feed.cache_path("STORAGE_ROUTING_CACHE",
+                       "valmera-storage-routing.json"))
+# Start reading at import when this process can have the next store (keys
+# in env, or a sealing secret for the app_kv row); otherwise the first call
+# that sees the next store starts it.
+if creds.env_complete(os.environ) or any(
+        str(os.environ.get(n) or "").strip() for n in creds.KEKS):
+    _mode_feed.start()
 _locator = routing.Locator()
 _next_lock = threading.Lock()
 _next_cached = {}
@@ -66,12 +169,28 @@ def router():
     return _router
 
 
+def next_config():
+    """The next store's configuration (env first, then the sealed row), or
+    None when it is not configured."""
+    return routing.store_config(routing.NEXT, creds.ENV)
+
+
 def routing_status():
-    return _router.status()
+    st = _router.status()
+    try:
+        if _mode_feed.started():
+            st["mode_read"] = _mode_feed.status()
+    except Exception:  # noqa: BLE001 — a health route never fails on this
+        pass
+    try:
+        st.update(creds.status())
+    except Exception:  # noqa: BLE001 — a health route never fails on this
+        pass
+    return st
 
 
 def _next_client():
-    cfg = routing.store_config(routing.NEXT)
+    cfg = next_config()
     if cfg is None:
         raise RuntimeError("the next store (S3_NEXT_*) is not configured")
     key = (cfg["endpoint"], cfg["access_key_id"],
@@ -87,6 +206,7 @@ def _next_client():
                 region_name=cfg["region"],
                 config=Config(**routing.botocore_config_kwargs(
                     cfg, retries={"max_attempts": 3})))
+            creds.watch_client(c)
             _next_cached.clear()
             _next_cached[key] = c
         return c
@@ -98,7 +218,7 @@ def store_client(name):
 
 def store_bucket(name):
     if name == routing.NEXT:
-        return routing.store_config(routing.NEXT)["bucket"]
+        return next_config()["bucket"]
     return config.S3_BUCKET
 
 

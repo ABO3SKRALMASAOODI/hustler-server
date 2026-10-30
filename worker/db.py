@@ -21,6 +21,7 @@ import config
 # one definition, re-exported here under the names every caller uses.
 from read_tools import (  # noqa: E402,F401
     add_message, asset_by_key, assets_by_kinds, find_render_asset,
+    listener_policy,
     get_index_by_sha,
     latest_asset, latest_edl, user_billing)
 import error_text
@@ -1680,6 +1681,41 @@ def _failed_render_for_request(cur, project_id, job_type, payload):
     return row['id'] if row else None
 
 
+def _join_studio_preview(cur, project_id, version, payload):
+    """A running Studio-policy preview a deterministic-only (MCP) request
+    may join, else None.
+
+    The renderer cuts listening excerpts only for an EDL with designed audio
+    (music, sfx or voiceover), so a Studio preview of a version without it
+    produces the identical file with empty excerpt lists: deterministic-only
+    evidence (listener_policy). Production rendered such versions twice at
+    once 25 times in 30 days (project 2842, 30 Oct: the Studio's job 126609
+    and the AI app's job 126611, both of a 41-minute lecture's v3)."""
+    cur.execute("""SELECT id FROM video_jobs
+                   WHERE project_id = %s AND type = 'preview'
+                     AND state IN ('queued', 'running')
+                     AND payload->>'edl_version' = %s
+                     AND COALESCE(
+                           (payload->>'audio_model_review')::boolean,
+                           true) = true
+                     AND COALESCE(payload->>'force', 'false') <> 'true'
+                     AND COALESCE(payload->>'quality', 'draft') = %s
+                   ORDER BY id DESC LIMIT 1""",
+                (project_id, str(version),
+                 (payload or {}).get("quality", "draft")))
+    other = cur.fetchone()
+    if not other:
+        return None
+    cur.execute("""SELECT json FROM edls
+                   WHERE project_id = %s AND version = %s""",
+                (project_id, version))
+    edl = (cur.fetchone() or {}).get("json")
+    if not isinstance(edl, dict) or edl.get("music") or edl.get("sfx") \
+            or edl.get("voiceover"):
+        return None
+    return other["id"]
+
+
 def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
     """Atomically join or enqueue one live preview for an EDL version.
 
@@ -1724,6 +1760,10 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
         row = cur.fetchone()
         if row:
             return row["id"], False
+        if not audio_model_review:
+            joined = _join_studio_preview(cur, project_id, version, payload)
+            if joined is not None:
+                return joined, False
         failed = _failed_render_for_request(cur, project_id, 'preview', payload)
         if failed is not None:
             return failed, False

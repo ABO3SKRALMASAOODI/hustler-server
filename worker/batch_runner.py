@@ -33,6 +33,15 @@ def _notify_failure(worker_db, job, error):
         "index": ("I couldn't analyze that video ({err}). Try uploading it "
                   "again, or a different format like mp4."),
     }.get(job.get("type"))
+    if job.get("type") == "index" and failure_policy.decision_for(
+            error, "index").kind not in ("invalid_media",
+                                         "input_limit_exceeded"):
+        # Same rule as main._notify_failure (ticket #7): our own budget or
+        # capacity failure never sends the customer off to re-encode.
+        note = ("Your video uploaded safely, and nothing is wrong with your "
+                "file. Our processing service couldn't analyze it this time. "
+                "That's on our side, not yours, and we're on it. You don't "
+                "need to upload it again.")
     if job.get("type") == "final" and \
             not failure_policy.decision_for(error, "final").retryable:
         note = ("This edit did not pass the export safety check ({err}). The "

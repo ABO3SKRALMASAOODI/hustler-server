@@ -3,9 +3,12 @@
 Run locally: python -m pytest box/tests
 """
 
+import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 ".."))
@@ -13,6 +16,42 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
 import yt_canary as yc  # noqa: E402
 
 NOW = datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_meter(tmp_path, monkeypatch):
+    """Never touch the host's nftables or budget file from a test (the
+    suite also runs on the box, as root)."""
+    monkeypatch.setattr(yc, "BUDGET_PATH", str(tmp_path / "yt-fallback.json"))
+    monkeypatch.setattr(yc.ym, "_nft", _FakeNft())
+
+
+class _FakeNft:
+    """nft stand-in: one table with two counters, driven by the test."""
+
+    def __init__(self):
+        self.table = None          # None = absent, else {"tx", "rx"}
+        self.scripts = []
+
+    def __call__(self, args, stdin=None, timeout=20):
+        import json as _json
+        import subprocess as _sp
+        if args[:2] == ["-j", "list"]:
+            if self.table is None:
+                return _sp.CompletedProcess(args, 1, "", "No such file")
+            items = [{"counter": {"table": "valmera_ytmeter", "name": n,
+                                  "bytes": self.table[k]}}
+                     for n, k in (("fb_tx", "tx"), ("fb_rx", "rx"))]
+            return _sp.CompletedProcess(
+                args, 0, _json.dumps({"nftables": items}), "")
+        if args[:2] == ["-f", "-"]:
+            self.scripts.append(stdin)
+            self.table = {"tx": 0, "rx": 0}
+            return _sp.CompletedProcess(args, 0, "", "")
+        if args[:1] == ["delete"]:
+            self.table = None
+            return _sp.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
 
 
 def _at(minutes_ago):
@@ -299,3 +338,127 @@ def test_the_slot_code_compiles_and_tries_fallbacks_only_after_a_wall():
     assert "YTDLP_PROXY_FALLBACK" in yc.SLOT_CODE
     assert yc.SLOT_CODE.index('run("primary")') < yc.SLOT_CODE.index(
         "for fb in")
+
+
+# ── the fallback's traffic meter and prepaid budget (YT_FALLBACK) ────────
+def _box(tmp_path, monkeypatch, fallback=True):
+    env = tmp_path / "executor.env"
+    env.write_text("YTDLP_PROXY=http://185.113.182.198:12323\n"
+                   + ("YTDLP_PROXY_FALLBACK=http://geo.iproyal.com:12321\n"
+                      if fallback else ""))
+    written = {}
+    monkeypatch.setattr(yc.hr, "ENV_PATH", str(env))
+    monkeypatch.setattr(yc.hr, "CONFIG_PATH", str(tmp_path / "box.json"))
+    monkeypatch.setattr(yc.hr, "maintenance_until", lambda: None)
+    monkeypatch.setattr(yc.hr, "write",
+                        lambda k, d: written.__setitem__(k, d))
+    monkeypatch.setattr(yc, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(yc, "read_bytes", lambda: {})
+    monkeypatch.setattr(yc, "recent_walls", lambda since: 0)
+    monkeypatch.setattr(yc.ym, "resolve_v4", lambda h: ["185.113.182.198"])
+    monkeypatch.setattr(yc, "now_utc", lambda: NOW)
+    return written
+
+
+def test_fallback_traffic_makes_a_passing_canary_probe_paced_like_a_retry():
+    state = {"runs": [{"at": _at(60), "ok": True}], "last_ok_at": _at(60)}
+    assert yc.due(state, NOW, {}, fallback_bytes=999_999)[0] is False
+    go, why = yc.due(state, NOW, {}, fallback_bytes=40_000_000)
+    assert go is True and "fallback carried 40 MB" in why
+    recent = {"runs": [{"at": _at(20), "ok": True}], "last_ok_at": _at(20)}
+    assert yc.due(recent, NOW, {}, fallback_bytes=40_000_000)[0] is False
+
+
+def test_every_look_meters_the_fallback_and_reports_the_budget(
+        tmp_path, monkeypatch):
+    written = _box(tmp_path, monkeypatch)
+    nft = yc.ym._nft
+    ok_run = {"at": _at(60), "ok": True}
+    yc.save_state({"runs": [ok_run], "last_ok_at": _at(60),
+                   "consecutive_failures": 0})
+    yc.ym.save_budget(yc.BUDGET_PATH, yc.ym.new_baseline(1.35, NOW))
+    # first look: the table is built, nothing spent, the row says so
+    assert yc.main(["yt_canary.py"]) == 0
+    assert len(nft.scripts) == 1 and "tcp dport 12321" in nft.scripts[0]
+    fb = written["youtube_canary"]["fallback"]
+    assert fb["endpoints"] == ["geo.iproyal.com:12321"]
+    assert fb["budget"]["remaining_est_gb"] == 1.35
+    assert "ytdlp_probe_box" not in written        # no probe was due
+    # nothing moved: no write
+    written.clear()
+    assert yc.main(["yt_canary.py"]) == 0
+    assert written == {}
+    # 0.5 MB of real fetches: written, still not a probe
+    nft.table = {"tx": 20_000, "rx": 480_000}
+    assert yc.main(["yt_canary.py"]) == 0
+    fb = written["youtube_canary"]["fallback"]
+    assert fb["since_run_bytes"] == 500_000 and "ytdlp_probe_box" \
+        not in written
+    # 1.1 GB through the fallback: under the 0.3 GB floor, a probe is due
+    calls = []
+    monkeypatch.setattr(yc.hr, "admission_state", lambda cfg: {
+        "slot_detail": [_slot("mcp4", "mcp")]})
+    monkeypatch.setattr(yc, "container_has_proxy", lambda n: True)
+    monkeypatch.setattr(yc, "slots_missing_proxy", lambda: [])
+
+    def probes(slot, urls):
+        calls.append(slot)
+        nft.table["rx"] += 3_000_000            # the probe's own bytes
+        return {"probes": [
+            {"url": urls[0], "ok": False, "route": "primary",
+             "why": "access_blocked: not a bot"},
+            {"url": urls[0], "ok": True, "download_ok": True,
+             "route": "fallback geo.iproyal.com:12321"}]}
+    monkeypatch.setattr(yc, "run_probes", probes)
+    nft.table = {"tx": 20_000_000, "rx": 1_080_000_000}
+    written.clear()
+    assert yc.main(["yt_canary.py"]) == 0
+    assert calls == ["vbox-mcp4"]
+    doc = written["youtube_canary"]
+    run = doc["runs"][-1]
+    assert run["ok"] is True and run["primary_ok"] is False
+    assert run["fallback_bytes"] == 3_000_000
+    assert "fallback carried" in run["reason"]
+    fb = doc["fallback"]
+    assert fb["since_run_bytes"] == 0             # reset by the probe run
+    assert fb["budget"]["low"] is True
+    assert fb["budget"]["remaining_est_gb"] == round(
+        1.35 - 1_103_000_000 / 1e9, 3)
+    assert fb["bytes_by_day"] == {"2026-10-30": 1_103_000_000}
+    assert yc.ym.load_budget(yc.BUDGET_PATH)["used_bytes"] == 1_103_000_000
+
+
+def test_the_baseline_cli_arms_the_meter_before_the_secret_lands(
+        tmp_path, monkeypatch, capsys):
+    written = _box(tmp_path, monkeypatch, fallback=False)
+    nft = yc.ym._nft
+    assert yc.main(["yt_canary.py", "--fallback-baseline", "1.35",
+                    "--endpoint", "http://u:pw@geo.iproyal.com:12321"]) == 0
+    budget = yc.ym.load_budget(yc.BUDGET_PATH)
+    assert budget["endpoints"] == ["geo.iproyal.com:12321"]
+    assert budget["baseline_gb"] == 1.35 and budget["floor_gb"] == 0.3
+    assert "pw" not in json.dumps(budget) and "pw" not in json.dumps(
+        written["youtube_canary"])
+    assert len(nft.scripts) == 1
+    out = capsys.readouterr().out
+    assert "metering geo.iproyal.com:12321" in out and "pw" not in out
+    # a top-up later: a new baseline, the floor and endpoints kept
+    nft.table = {"tx": 1_000_000, "rx": 299_000_000}
+    assert yc.main(["yt_canary.py", "--fallback-baseline", "11.05"]) == 0
+    budget = yc.ym.load_budget(yc.BUDGET_PATH)
+    assert budget["used_bytes"] == 0 and budget["baseline_gb"] == 11.05
+    assert budget["endpoints"] == ["geo.iproyal.com:12321"]
+    v = written["youtube_canary"]["fallback"]["budget"]
+    assert v["remaining_est_gb"] == 11.05 and v["low"] is False
+    assert yc.main(["yt_canary.py", "--fallback-baseline", "x"]) == 2
+
+
+def test_no_fallback_means_no_table_and_no_budget(tmp_path, monkeypatch):
+    written = _box(tmp_path, monkeypatch, fallback=False)
+    yc.save_state({"runs": [{"at": _at(60), "ok": True}],
+                   "last_ok_at": _at(60)})
+    assert yc.main(["yt_canary.py"]) == 0
+    assert yc.ym._nft.scripts == []
+    fb = written["youtube_canary"]["fallback"]
+    assert fb["endpoints"] == [] and fb["budget"] == {"set": False,
+                                                      "low": False}

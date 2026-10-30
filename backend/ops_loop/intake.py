@@ -314,7 +314,8 @@ def _detail(row):
 # (a cloud placeholder with no bytes on the device, a transfer the browser
 # lost and resumes): a customer still failed, so they are filed, but as P1
 # for the daily Fixer unless the customer pays.
-DEVICE_SIDE = re.compile(r"empty or incomplete|lost access to this file|"
+DEVICE_SIDE = re.compile(r"empty or incomplete|empty file|unreadable file|"
+                         r"lost access to this file|"
                          r"lost its connection|timed out|offline", re.I)
 
 

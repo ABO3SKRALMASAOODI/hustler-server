@@ -109,7 +109,9 @@ def test_a_paying_users_link_is_registered_and_indexed(monkeypatch):
     assert meta.adapted["upload_state"] == "pending"
     assert cur.jobs == [("index", {"asset_id": 901})]
     assert "start on your request automatically" in cur.messages[0][1]
-    assert any("FOR UPDATE" in q for q in cur.sql)
+    # NO KEY UPDATE: the route writes client events on a second connection
+    # before committing (test_link_import_postgres.py).
+    assert any("FOR NO KEY UPDATE" in q for q in cur.sql)
 
 
 def test_the_wall_answers_a_link_exactly_as_an_upload(monkeypatch):

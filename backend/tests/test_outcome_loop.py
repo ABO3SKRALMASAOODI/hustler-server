@@ -733,6 +733,31 @@ def test_mcp_ask_user_is_not_an_error_and_a_download_url_is_a_delivery():
     assert ctx["next_summary"]["exported"] and ctx["next_summary"]["downloaded"]
 
 
+def test_a_draft_preview_link_is_a_download_not_an_export():
+    """Ticket #4 (30 Oct): five download_url calls of DRAFT previews read as
+    "exported" in the session summary, so the Reviewer and the digest saw
+    exports that never happened."""
+    data = _data()
+    data["jobs"].append(dict(data["jobs"][0], id=24, tool="download_url",
+                             created_at=T0 + timedelta(minutes=40),
+                             updated_at=T0 + timedelta(minutes=40),
+                             receipt_type="complete_preview", text=None))
+    data["events"] = []
+    found, _ = _discover(data)
+    s = [x for x in found if x["key"] == sessions.session_key(10, T0)][0]
+    summary = sessions.context(s)["next_summary"]
+    assert summary["exported"] is False
+    assert summary["downloaded"] is True
+    assert summary["downloaded_draft_only"] is True
+    data["jobs"].append(dict(data["jobs"][-1], id=25,
+                             receipt_type="final_export"))
+    found, _ = _discover(data)
+    s = [x for x in found if x["key"] == sessions.session_key(10, T0)][0]
+    summary = sessions.context(s)["next_summary"]
+    assert summary["exported"] is True
+    assert summary["downloaded_draft_only"] is False
+
+
 def test_signed_urls_never_reach_a_context_file():
     data = _data()
     data["jobs"][1]["text"] = ("no frame at 580 s of x.mp4?X-Amz-Algorithm="

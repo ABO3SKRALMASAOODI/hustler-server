@@ -799,6 +799,14 @@ YTDLP_PROBE_URL = os.getenv(
 # banned — the trade is a paid proxy vendor instead. Empty = direct. When
 # both this and cookies are set, both apply (cookies ride the proxy).
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
+# Fallback YouTube proxies, tried in order only after the whole client
+# ladder through YTDLP_PROXY hit the bot wall (C1, 30 Oct 2026: the owner's
+# single static ISP IP served 22-62 full downloads, then YouTube walled it
+# for 1.5-2 h). Comma-separated, e.g. more static IPs or a residential
+# endpoint; empty (the default) keeps exactly the single-proxy path.
+YTDLP_PROXY_FALLBACK = tuple(
+    p.strip() for p in os.getenv("YTDLP_PROXY_FALLBACK", "").split(",")
+    if p.strip())
 # yt-dlp remote components for the EJS challenge solver ("" disables).
 # "ejs:github" fetches yt-dlp's own solver script; the Dockerfile ships
 # deno to run it. Required for cookie-mode fetches (see YTDLP_COOKIES_FILE
@@ -1457,6 +1465,10 @@ BOX_ALARM_AFTER_S = float(os.getenv("BOX_ALARM_AFTER_S", "600"))
 # Stops only a pathological loop: 2,000 in-claim waits is weeks of waiting.
 BOX_MAX_WAIT_DEFERRALS = max(1, int(os.getenv(
     "BOX_MAX_WAIT_DEFERRALS", "2000")))
+# A box job refused for scratch space waits for the shared disk to free up
+# (remote._box_scratch_wait) unless it needs more than this many GB, which
+# no box (150 GB disk, 20 GB admission floor) could ever give one job.
+BOX_SCRATCH_MAX_GB = float(os.getenv("BOX_SCRATCH_MAX_GB", "100"))
 CLOUDFLARE_MAX_INPUT_BYTES = int(os.getenv(
     "CLOUDFLARE_MAX_INPUT_BYTES", str(4 * 1024 ** 3)))
 # Indexing uses standard-4 (20 GiB disk), not the interactive render tier.
