@@ -548,3 +548,17 @@ def test_a_long_hold_reads_down_the_column_in_discrete_steps():
     # a region that moves on soon is never stepped
     assert fcv.reading_steps([(1.0, t1, 2.2), (3.0, t1, 2.2)], 5.0)[:2] == \
         [(1.0, t1, 2.2), (3.0, t1, 2.2)]
+
+
+def test_a_beat_never_shows_much_below_the_subject():
+    """The gym clip's judges, every run: "the lower third is sink". A
+    window keeps at most GROUND of itself below the subject's base."""
+    box = (0.05, 0.47, 0.35, 0.72)
+    for z in (1.3, 1.6, 2.1):
+        x0, y0, x1, y1 = silent_cut.frame_at(box, z)
+        assert y1 - box[3] <= silent_cut.GROUND * (y1 - y0) + 1e-3   # 4-decimal windows
+        assert y0 <= box[1]                                 # the head stays in
+    # a medium beat is clearly wider than a close one, even when capped
+    close = silent_cut.beat_z(box, 1, 2.1)
+    medium = silent_cut.beat_z(box, 2, 2.1)
+    assert medium <= close * silent_cut.MEDIUM_RATIO + 1e-6

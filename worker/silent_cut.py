@@ -34,10 +34,10 @@ import subprocess
 
 SILENT_CUT_MIN_S = 8.0      # a shorter clip keeps its whole take
 BEATS_MIN, BEATS_MAX = 4, 6
-BEAT_S = 3.0                # one beat per this much source
+BEAT_S = 2.6                # one beat per this much source
 PROG_SHARE = 0.62           # the cut keeps about this share of the take
 PROG_MIN_S, PROG_MAX_S = 7.0, 11.5
-BEAT_MIN_S, BEAT_MAX_S = 1.2, 2.2
+BEAT_MIN_S, BEAT_MAX_S = 1.1, 1.8   # judges: "something every 1-2 s"
 OPEN_MIN_S = 1.6            # the first beat carries the title's first read
 END_MIN_S = 1.6             # the end beat: the snap and live picture after it
 GAP_MIN_S = 0.8             # a jump skips at least this much of the take
@@ -54,6 +54,9 @@ OPEN_FILL = 0.62
 END_FILL = 0.9              # the hero framing after the snap
 PUSH = 0.14                 # an eased push-in adds this much zoom
 ALTERNATE = 0.3             # medium and close differ by at least this much zoom
+MEDIUM_RATIO = 0.72         # ... and the medium is at most this share of the close
+                            # (final run: 2.1x after 2.4x read as one long shot)
+GROUND = 0.08               # at most this share of the window below the subject
 READ_FILL = 0.28            # the subject reads at this share of the frame height
 OPEN_SKIP_MAX = 0.4         # the cut never skips more than this share of the take
 
@@ -304,11 +307,15 @@ def fill_z(box, fill, z_max):
 
 def frame_at(box, z, bias=0.0):
     """The crop window ([x0, y0, x1, y1], fractions, the frame's own aspect)
-    at zoom ``z`` centred on the subject; ``bias`` moves the subject down the
-    frame by that share of the window (room above it for a title)."""
+    at zoom ``z`` on the subject: centred on it, but never showing more than
+    GROUND of the window below its base (the subject stands near the bottom
+    of the frame; judges, the gym clip: "the lower third is sink", every
+    run); ``bias`` moves the subject down the frame by that share of the
+    window (room above it for a title)."""
     half = 0.5 / max(1.0, z)
     cx = (box[0] + box[2]) / 2.0
     cy = (box[1] + box[3]) / 2.0 - bias * 2 * half
+    cy = min(cy, box[3] + GROUND * 2 * half - half)
     x0 = _clamp(cx - half, 0.0, 1.0 - 2 * half)
     y0 = _clamp(cy - half, 0.0, 1.0 - 2 * half)
     return [round(x0, 4), round(y0, 4), round(x0 + 2 * half, 4),
@@ -340,7 +347,8 @@ def beat_z(box, i, z_max):
     always at least ALTERNATE apart (a small subject caps both at z_max, and
     two cuts at the same framing read as a glitch, not a new camera)."""
     close = fill_z(box, FILLS[1], z_max)
-    medium = max(Z_FLOOR, min(fill_z(box, FILLS[0], z_max), close - ALTERNATE))
+    medium = max(Z_FLOOR, min(fill_z(box, FILLS[0], z_max), close - ALTERNATE,
+                              close * MEDIUM_RATIO))
     return close if i % 2 else medium
 
 
