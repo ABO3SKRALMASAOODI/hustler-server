@@ -80,6 +80,8 @@ class World:
                          (NEW_PRO, CUTOFF + timedelta(hours=3), 5000),
                          (NEW_MCP, CUTOFF + timedelta(hours=4), 2500)]
         self.snapshots = {}
+        # D1V: accounts whose own assistant made an MCP call since the wall
+        self.mcp_work = set()
         self.writes = []
         self.marked = []
         self._row = None
@@ -154,6 +156,10 @@ class World:
             u = self.users.get(int(p[0])) or {}
             self._row = {"plan": u.get("plan"),
                          "is_subscribed": u.get("is_subscribed")}
+        elif q.startswith("SELECT plan FROM users WHERE id"):
+            self._row = {"plan": (self.users.get(int(p[0])) or {}).get("plan")}
+        elif "type = 'mcp_tool'" in q:
+            self._row = {"x": 1} if int(p[0]) in self.mcp_work else None
         elif q.startswith("SELECT COUNT(*) AS n FROM users u"):
             plan, cutoff = p[0], p[1]
             self._row = {"n": sum(
@@ -238,6 +244,31 @@ def test_switching_keeps_every_other_key_and_never_replaces_a_set_value():
     assert value["cutoff_at"] == CUTOFF.isoformat()
     assert value["plan_models"] == {"plus_2026": "claude-sonnet-5-5"}
     assert value["updated_by"] == "admin" and value["switched_at"]
+
+
+def test_an_unreadable_cutoff_is_fixed_by_the_next_on():
+    """D1V: a hand-written cutoff claude_plans cannot parse keeps the row
+    OFF (parse_flag); the card said "comes back when the switch is pressed
+    again", but pressing kept the bad value. The ON now fixes it once."""
+    w = World(studio={"on": True, "cutoff_at": "next week"})
+    st = studio_plus_toggle.status(w, now=NOW)
+    assert st["state"] == "auto_off" and st["reason"] == "cutoff_missing"
+    studio_plus_toggle.switch(w, False, now=NOW)
+    when = NOW.replace(microsecond=0)
+    value = studio_plus_toggle.switch(w, True, now=when)
+    assert value["cutoff_at"] == when.isoformat()
+    assert studio_plus_toggle.status(w, now=NOW)["state"] == "on"
+
+
+def test_a_row_without_plus_never_says_plus_has_the_studio(app):
+    """D1V: studio_plans written without plus_2026 keeps Plus MCP-only
+    (cards, gate); the Studio-in-Plus row must not read ON."""
+    w = World(studio=_studio(studio_plans=[]))
+    st = studio_plus_toggle.status(w, now=NOW)
+    assert st["state"] == "auto_off" and st["reason"] == "plus_not_listed"
+    assert "plus_2026" in st["comes_back"] and st["plus_included"] is False
+    assert claude_plans.plus_studio_live(w) is False
+    assert _gate(w, NEW_PLUS)[0] == 403
 
 
 def test_the_switch_clears_the_plan_card_cache_at_once():
@@ -537,6 +568,37 @@ def test_held_request_lane_for_a_grandfathered_plus_is_always_mcp(held_world):
         held_world["world"] = World(**state)
         assert held_request.studio_lane_open(held_world["world"],
                                              GRANDFATHERED) is False
+
+
+def test_held_request_the_assistant_already_made_never_runs_after_on(
+        held_world):
+    """D1V: the payment landed while Studio in Plus was off (handed to the
+    assistant), the assistant made it, then the owner switched ON: neither
+    the Studio's replay nor a webhook retry runs it a second time."""
+    from video_services import held_request
+    held_world["world"] = World(**ON)
+    held_world["world"].mcp_work.add(NEW_PLUS)
+    out = held_request.resume(NEW_PLUS, "studio")
+    assert out == {"project_id": 800, "plans_id": 77, "resumed": False,
+                   "reason": "assistant_took_over"}
+    assert held_world["sent"] == []
+
+
+@pytest.mark.parametrize("state", sorted(STATES))
+def test_the_assistant_is_shown_a_plus_request_in_every_state(held_world,
+                                                              state):
+    """D1V: the hand-off follows the plan, not the switch at this instant,
+    so a lane that opens after the payment never drops the request; a Pro
+    subscriber's request is the Studio's, as before."""
+    from video_services import held_request
+    world = World(**STATES[state])
+    held_world["world"] = world
+    for uid in (NEW_PLUS, GRANDFATHERED, NEW_MCP):
+        note = held_request.for_assistant(world, uid)
+        assert note and note["text"].startswith("WAITING REQUEST"), uid
+    assert held_request.for_assistant(world, NEW_PRO) is None
+    world.mcp_work.add(NEW_PLUS)
+    assert held_request.for_assistant(world, NEW_PLUS) is None
 
 
 # --------------------------------------------------- the automatic First cut

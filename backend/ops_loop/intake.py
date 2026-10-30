@@ -246,10 +246,10 @@ def _held_not_resumed(cur, since, now, p):
              window_h=held_request.WINDOW_H)
     cur.execute(f"""
         SELECT pay.id AS payment_id, pay.user_id, pay.occurred_at AS at,
-               pay.plan, h.id AS plans_id, h.project_id, h.surface
+               pay.plan, h.id AS plans_id, h.project_id, h.surface, h.wall_at
           FROM payments pay JOIN users u ON u.id = pay.user_id
           CROSS JOIN LATERAL (
-                SELECT m.id, pr.id AS project_id,
+                SELECT m.id, pr.id AS project_id, m.created_at AS wall_at,
                        m.meta->>'surface' AS surface
                   FROM projects pr
                   JOIN chat_messages m ON m.session_id = pr.chat_session_id
@@ -278,6 +278,9 @@ def _held_not_resumed(cur, since, now, p):
         try:
             if not held_request.studio_lane_open(cur, r["user_id"]):
                 continue                # handed to the customer's assistant
+            if held_request.assistant_took_over(cur, r["user_id"],
+                                                r["wall_at"]):
+                continue                # its assistant made it (D1V)
         except Exception:
             pass                        # unknown lane: file it, look at it
         out.append({

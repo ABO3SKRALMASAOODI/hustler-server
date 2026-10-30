@@ -4101,7 +4101,7 @@ def replay_blocked(user_id, project_id):
                             "waiting_for_index":
                                 resumed.get("reason") == "waiting_for_index"})
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
-        cur.execute("""SELECT id, role, meta,
+        cur.execute("""SELECT id, role, meta, created_at,
                               created_at > NOW() - make_interval(hours => %s)
                                   AS recent
                        FROM chat_messages
@@ -4136,6 +4136,13 @@ def replay_blocked(user_id, project_id):
             return jsonify({"replay": "export", "version": version,
                             "status": status,
                             **(response.get_json(silent=True) or {})})
+        if pending and _held_request.assistant_took_over(
+                cur, user_id, last.get("created_at")):
+            # An MCP-only plan's request went to the customer's own assistant
+            # (held_request.for_assistant), which already started on it; the
+            # Studio lane opened afterwards (D1: Studio in Plus switched on,
+            # or the credit line back). Never run it a second time (D1V).
+            return jsonify({"replay": None, "reason": "assistant_took_over"})
         cur.execute("""SELECT 1 FROM video_jobs
                        WHERE project_id = %s AND type = 'agent_turn'
                          AND state IN ('queued','running') LIMIT 1""",

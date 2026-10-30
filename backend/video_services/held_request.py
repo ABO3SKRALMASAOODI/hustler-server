@@ -31,9 +31,12 @@ Which lane runs it is ``routes.video._studio_ai_gate``'s answer, unchanged:
 a plan without the Studio AI editor (MCP Connect, Plus while owner decision
 D1 is held on main) never gets a Studio turn from here. Its buyer's own
 assistant is shown the request instead (``for_assistant``, read by the MCP
-project tools) until that assistant starts working. The held trial branch
-widens _studio_ai_gate for new Plus subscribers (D1); this module follows it
-with no change. A held kind this module does not know (the trial branch's
+project tools) until that assistant starts working. D1 (Studio in Plus, on
+the trial release) widens _studio_ai_gate for new Plus subscribers while the
+owner's switch and the Claude credit line are on, so such a lane can open
+AFTER the hand-off: the assistant keeps the note until the Studio runs the
+request, and once the assistant has started on it the Studio never runs it
+(``assistant_took_over``, D1V). A held kind this module does not know (the trial branch's
 ``export_version``) is left to the Studio's /replay-blocked.
 
 Nothing here changes when or where the wall shows, its plans or its copy.
@@ -68,6 +71,47 @@ def _kind(meta):
     if str(blocked.get("text") or "").strip():
         return "text"
     return None
+
+
+def _mcp_only_plan(cur, user_id):
+    """The account is on a plan that is MCP-only today (routes.video
+    .MCP_ONLY_PLANS: MCP Connect, Plus): a held request of such a plan is
+    shown to the customer's own assistant.
+
+    D1 (Studio in Plus, 30 Oct 2026): a NEW Plus subscriber's Studio lane
+    opens and closes with the owner's switch and the Claude credit line, so
+    it can open AFTER the request was handed to the assistant (the payment
+    landed while it was off). The hand-off therefore follows the plan, not
+    the lane at this instant (D1V)."""
+    from routes import video as v
+    cur.execute("SELECT plan FROM users WHERE id = %s", (int(user_id),))
+    row = cur.fetchone() or {}
+    return row.get("plan") in v.MCP_ONLY_PLANS
+
+
+def _assistant_worked_since(cur, user_id, since):
+    """Any MCP call other than a state read since ``since``: the customer's
+    own assistant started working (for_assistant's rule)."""
+    cur.execute("""SELECT 1 FROM video_jobs
+                    WHERE user_id = %s AND type = 'mcp_tool'
+                      AND created_at > %s
+                      AND COALESCE(payload->>'tool', '') <> '__state__'
+                    LIMIT 1""", (int(user_id), since))
+    return cur.fetchone() is not None
+
+
+def assistant_took_over(cur, user_id, since):
+    """The held request (walled at ``since``) was the customer's assistant's
+    to make and it started working: the Studio must never run it as well.
+
+    Only an MCP-only plan's request is ever handed to the assistant, so every
+    other plan answers False (ticket #11's behaviour, unchanged). D1V: with
+    Studio in Plus switched on (or the credit line back) after a payment
+    that landed while it was off, the Studio (/replay-blocked on the next
+    project open) and a webhook retry otherwise ran a request the assistant
+    had already made: twice, and charged twice."""
+    return (_mcp_only_plan(cur, user_id)
+            and _assistant_worked_since(cur, user_id, since))
 
 
 def studio_lane_open(cur, user_id):
@@ -223,6 +267,10 @@ def resume(user_id, origin, project_id=None, window_h=WINDOW_H):
                 # The plan edits through the customer's own assistant; it is
                 # shown the request (for_assistant) instead of a Studio turn.
                 return dict(base, resumed=False, reason="mcp_only")
+            if assistant_took_over(cur, user_id, held["created_at"]):
+                # The lane opened after the request was handed to the
+                # customer's assistant, which already took it (D1V).
+                return dict(base, resumed=False, reason="assistant_took_over")
             kind = _kind(held["meta"])
             blocked = held["meta"]["blocked_prompt"]
             pid = held["project_id"]
@@ -325,11 +373,16 @@ def for_assistant(cur, user_id, project_id=None, window_h=WINDOW_H):
     """The held request an MCP-only subscriber's own assistant should see:
     {project_id, text} (``project_id`` None: the account's newest), or None.
 
-    Only while the Studio cannot run it (the plan has no Studio AI editor, so
-    the two can never both run it), the account has paid past the wall, and
-    the assistant has not started working since the wall (any MCP call other
-    than a state read, in any project, means it took over). Needs an app
-    context (the plan check is routes.video._studio_ai_gate)."""
+    Only for a plan that is MCP-only today (MCP Connect, Plus), while the
+    request is still waiting (pending: not run by the Studio, nothing typed
+    after it), the account has paid past the wall, and the assistant has not
+    started working since the wall (any MCP call other than a state read, in
+    any project, means it took over). Exactly once: a Studio run stamps the
+    wall (pending then answers None), and once the assistant took over the
+    Studio never runs it (assistant_took_over, read by resume and by
+    /replay-blocked). D1V: a NEW Plus subscriber's Studio lane may open after
+    the payment handed the request here; the note stays until one of the two
+    takes it, instead of vanishing with nobody running it."""
     from routes import video as v
     held = pending(cur, user_id, window_h, project_id)
     if not held:
@@ -339,14 +392,9 @@ def for_assistant(cur, user_id, project_id=None, window_h=WINDOW_H):
     if not text:
         return None
     if v._subscribe_gate_applies(cur, user_id) \
-            or studio_lane_open(cur, user_id):
+            or not _mcp_only_plan(cur, user_id):
         return None
-    cur.execute("""SELECT 1 FROM video_jobs
-                    WHERE user_id = %s AND type = 'mcp_tool'
-                      AND created_at > %s
-                      AND COALESCE(payload->>'tool', '') <> '__state__'
-                    LIMIT 1""", (int(user_id), held["created_at"]))
-    if cur.fetchone():
+    if _assistant_worked_since(cur, user_id, held["created_at"]):
         return None
     return {"project_id": held["project_id"], "text": (
         "WAITING REQUEST FROM THE STUDIO: before subscribing, the user typed "

@@ -48,6 +48,7 @@ REASON_TEXT = {
     claude_credit.REASON_AUTH: "Anthropic refused the key",
     "ledger_missing": "the Claude ledger (migration 040) is missing",
     "cutoff_missing": "the release cutoff (cutoff_at) is missing",
+    "plus_not_listed": "the row's studio_plans does not list plus_2026",
 }
 
 
@@ -148,6 +149,10 @@ def status(conn, now=None):
         state, reason = "off", None
     elif flag["cutoff_at"] is None:
         state, reason = "auto_off", "cutoff_missing"
+    elif PLAN not in flag["studio_plans"]:
+        # D1V: a hand-written studio_plans without Plus keeps Plus MCP-only
+        # (claude_plans.plus_studio_live); the card must not say ON.
+        state, reason = "auto_off", "plus_not_listed"
     elif not ledger:
         state, reason = "auto_off", "ledger_missing"
     elif not credit.get("on"):
@@ -167,6 +172,8 @@ def status(conn, now=None):
             if reason == claude_credit.REASON_AUTH else
             "after migration 040 is applied" if reason == "ledger_missing"
             else "when the switch is pressed again" if reason == "cutoff_missing"
+            else "when plus_2026 is back in studio_plans"
+            if reason == "plus_not_listed"
             else f"by itself in the next cycle ({credit['cycle_end'][:10]})")
     paid_usd, paid_calls = _paid_spend(conn, credit["cycle_start"],
                                        credit["cycle_end"])
@@ -215,7 +222,9 @@ def switch(conn, on, actor="admin", now=None):
         value = dict(stored)
         value["on"] = bool(on)
         if on:
-            if not value.get("cutoff_at"):
+            # A cutoff claude_plans cannot read is no cutoff (parse_flag keeps
+            # the row OFF): the first ON that works fixes it here (D1V).
+            if claude_plans._parse_time(value.get("cutoff_at")) is None:
                 # The release cutoff: everyone subscribed before the first ON
                 # is grandfathered (today's lanes and plan rules, exactly).
                 value["cutoff_at"] = now.isoformat()
