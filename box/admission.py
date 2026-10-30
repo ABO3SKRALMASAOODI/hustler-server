@@ -21,9 +21,16 @@ Durable Object shard). What this layer adds for the box:
   synchronous children (id-less frames, captures, ...) of an admitted parent
   rank above top-level work of their class and are exempt from the owner cap,
   so a parent can never deadlock on its own child;
+* a customer reserve, so no customer ever waits behind the factory: the
+  owner factory starts on an ordinary slot only while
+  ``owner_leave_free_by_lane`` other ordinary slots of that lane stay free
+  (its children too; quick slots, children only, are outside the reserve),
+  and only while its own committed memory stays within
+  ``owner_mem_budget_gib`` and MemAvailable keeps ``owner_mem_headroom_gib``
+  beyond the global reserve;
 * CPU priority under contention: each call sets its slot's cgroup CPU weight
-  from its class (customers 4x the owner factory), on top of the slot's hard
-  ``--cpus``/``--memory`` limits;
+  from its class (``cpu_shares``; by default customers about 5x the owner
+  factory), on top of the slot's hard ``--cpus``/``--memory`` limits;
 * memory-budgeted admission: the measured p95 of every running call's type
   plus the newcomer's must fit ``mem_budget_gib`` and MemAvailable must keep
   ``mem_reserve_gib``;
@@ -139,9 +146,12 @@ MEM_ESTIMATE_GIB = {
     "ytprobe": 0.3, "search": 0.5, "fetch": 1.0, "stock_acquire": 1.0,
 }
 DEFAULT_MEM_ESTIMATE_GIB = 2.0
-# cgroup CPU weight per class (docker --cpu-shares): under contention a
-# customer's render gets 4x the owner factory's CPU time.
-CPU_SHARES = {"customer": 4096, "trial": 2048, "owner": 1024}
+# cgroup CPU weight per class (docker --cpu-shares). The box runs cgroup v2,
+# where runc maps shares to cpu.weight non-linearly (measured on the box
+# 30 Oct: 1024 -> 100, 4096 -> 303, 8192 -> 532; test containers at 64 ->
+# 12): under contention a customer's render gets about 5.3x the owner
+# factory's CPU time, a trial user's about 3x.
+CPU_SHARES = {"customer": 8192, "trial": 4096, "owner": 1024}
 
 
 class Config:
@@ -163,6 +173,21 @@ class Config:
         self.owner_max_cpus = float(raw.get("owner_max_cpus", 99))
         self.owner_max_by_lane = {str(k): int(v) for k, v in (
             raw.get("owner_max_by_lane") or {}).items()}
+        # The customer reserve (X1, 30 Oct 2026): the owner factory starts on
+        # an ordinary slot of a lane only while this many OTHER ordinary
+        # slots of the lane stay free, so a customer (or trial user) who
+        # arrives finds one at once instead of waiting behind the factory.
+        self.owner_leave_free_by_lane = {str(k): max(0, int(v)) for k, v in (
+            raw.get("owner_leave_free_by_lane") or {}).items()}
+        # The factory's own memory: its committed estimates (children
+        # included) stay within owner_mem_budget_gib (absent = the global
+        # budget), and it starts only while MemAvailable keeps
+        # owner_mem_headroom_gib beyond mem_reserve_gib for customers.
+        budget = raw.get("owner_mem_budget_gib")
+        self.owner_mem_budget_gib = (float(budget) if budget is not None
+                                     else None)
+        self.owner_mem_headroom_gib = max(0.0, float(
+            raw.get("owner_mem_headroom_gib", 0.0)))
         self.queue_max = int(raw.get("queue_max", 256))
         # Below the dispatcher's 180-s launch observation so a refusal comes
         # back on the launch request itself; the dispatcher asks again at
@@ -564,6 +589,7 @@ class Box:
             occupying = self._occupying()
             owner_busy = self._owner_busy(occupying)
             committed = self._committed_gib(occupying)
+            owner_committed = self._committed_gib(occupying, "owner")
         free = [s for s in slots if s["ready"] and not s["busy"]
                 and not s["retiring"]]
         by_lane = {}
@@ -602,7 +628,13 @@ class Box:
                       "by_lane": owner_busy[2],
                       "max_slots": self.cfg.owner_max_slots,
                       "max_cpus": self.cfg.owner_max_cpus,
-                      "max_by_lane": self.cfg.owner_max_by_lane},
+                      "max_by_lane": self.cfg.owner_max_by_lane,
+                      "leave_free_by_lane":
+                          self.cfg.owner_leave_free_by_lane,
+                      "committed_gib": round(owner_committed, 2),
+                      "mem_budget_gib": self.cfg.owner_mem_budget_gib,
+                      "mem_headroom_gib": self.cfg.owner_mem_headroom_gib},
+            "cpu_shares": self.cfg.cpu_shares,
             "queue": {"depth": sum(queue.values()), "by_class": dict(queue),
                       "by_lane": dict(queue_lanes),
                       "oldest_wait_s": (round(now() - oldest, 1)
@@ -648,9 +680,44 @@ class Box:
         by_lane = collections.Counter(s.lane for s in owner)
         return len(owner), sum(s.cpus for s in owner), dict(by_lane)
 
-    def _committed_gib(self, occupying=None):
+    def _committed_gib(self, occupying=None, priority=None):
         occupying = self._occupying() if occupying is None else occupying
-        return sum(self.cfg.estimate(jtype) for _s, _p, jtype, _c in occupying)
+        return sum(self.cfg.estimate(jtype) for _s, prio, jtype, _c
+                   in occupying if priority is None or prio == priority)
+
+    def _owner_leaves_reserve(self, waiter, free):
+        """The slots of ``free`` the owner factory may take without eating
+        the lane's customer reserve (``owner_leave_free_by_lane``).
+
+        An ordinary slot is allowed only while at least that many OTHER
+        ordinary slots of the lane stay free after it starts; quick slots
+        (synchronous children only) are outside the reserve, so an owner
+        child can always make progress there."""
+        leave = self.cfg.owner_leave_free_by_lane.get(waiter["lane"], 0)
+        if leave <= 0:
+            return free
+        ordinary_free = sum(1 for s in self._free_slots(waiter["lane"])
+                            if not s.quick)
+        if ordinary_free - 1 >= leave:
+            return free
+        return [s for s in free if s.quick]
+
+    def _owner_memory_fits(self, need, occupying, mem):
+        """Whether one more owner top-level call fits the factory's memory:
+        its own committed budget and the real headroom it leaves customers."""
+        budget = self.cfg.owner_mem_budget_gib
+        if budget is not None:
+            owner_committed = self._committed_gib(occupying, "owner")
+            # A lone owner call always fits its own budget (the global
+            # rules below still apply), like a lone call fits the box's.
+            if owner_committed > 0 and \
+                    owner_committed + need > budget + 1e-9:
+                return False
+        headroom = self.cfg.owner_mem_headroom_gib
+        if headroom > 0 and mem is not None and \
+                mem - need * 0.5 < self.cfg.mem_reserve_gib + headroom:
+            return False
+        return True
 
     def _free_slots(self, lane):
         return [s for s in self.slots if s.lane == lane and s.ready
@@ -692,19 +759,27 @@ class Box:
                 free = [s for s in free if s.release == want]
             if not free:
                 continue
-            if waiter["priority"] == "owner" and not waiter.get("child"):
-                busy_n, busy_cpu, by_lane = self._owner_busy(occupying)
-                lane_cap = self.cfg.owner_max_by_lane.get(waiter["lane"])
-                if busy_n + 1 > self.cfg.owner_max_slots or (
-                        lane_cap is not None
-                        and by_lane.get(waiter["lane"], 0) + 1 > lane_cap):
-                    continue
-                free = [s for s in free if busy_cpu + s.cpus
-                        <= self.cfg.owner_max_cpus + 1e-9]
-                if not free:
-                    continue
             need = self.cfg.estimate(waiter.get("job_type") or "")
             mem = mem_available_gib()
+            if waiter["priority"] == "owner":
+                if not waiter.get("child"):
+                    busy_n, busy_cpu, by_lane = self._owner_busy(occupying)
+                    lane_cap = self.cfg.owner_max_by_lane.get(waiter["lane"])
+                    if busy_n + 1 > self.cfg.owner_max_slots or (
+                            lane_cap is not None
+                            and by_lane.get(waiter["lane"], 0) + 1
+                            > lane_cap):
+                        continue
+                    free = [s for s in free if busy_cpu + s.cpus
+                            <= self.cfg.owner_max_cpus + 1e-9]
+                    if not free or not self._owner_memory_fits(
+                            need, occupying, mem):
+                        continue
+                # Top-level calls and children alike leave the customer
+                # reserve alone (children keep the quick slots).
+                free = self._owner_leaves_reserve(waiter, free)
+                if not free:
+                    continue
             if committed + need > self.cfg.mem_budget_gib + 1e-9 or (
                     mem is not None
                     and mem - need * 0.5 < self.cfg.mem_reserve_gib):
