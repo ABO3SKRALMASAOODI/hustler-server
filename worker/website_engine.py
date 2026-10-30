@@ -128,9 +128,16 @@ def route_url(worker_db, job, user_message):
     # cut's follow-up: those are the agent's
     for key in ("first_cut", "trial_lane", "logical_turn_continuation",
                 "operator_repair", "operator_instruction", "after_first_cut",
-                "continuation_state", "root_agent_job_id"):
+                "continuation_state", "continuation_sequence"):
         if payload.get(key):
             return None
+    # the turn stamps its own id as its root when it starts (a re-claimed
+    # job carries it); another job's id is a later slice of a request
+    try:
+        if int(payload.get("root_agent_job_id") or job["id"]) != int(job["id"]):
+            return None
+    except (TypeError, ValueError, KeyError):
+        return None
     if not payload.get("message_id") or \
             int(payload["message_id"]) != int(user_message.get("id") or 0):
         return None

@@ -83,9 +83,15 @@ def test_route_only_on_a_blank_canvas_for_a_studio_request():
     assert website_engine.route_url(_DB(None, titled), _job(), _msg(TILE)) is None
     # never the trial's own lane, a continuation, a repair or a follow-up
     for key in ("trial_lane", "first_cut", "logical_turn_continuation",
-                "operator_repair", "after_first_cut", "root_agent_job_id"):
+                "operator_repair", "after_first_cut", "continuation_sequence"):
         assert website_engine.route_url(
             _DB(None, blank), _job(**{key: True}), _msg(TILE)) is None, key
+    # a later slice of another request is the agent's; the turn's own root
+    # stamp (a re-claimed job) is not
+    assert website_engine.route_url(
+        _DB(None, blank), _job(root_agent_job_id=6), _msg(TILE)) is None
+    assert website_engine.route_url(
+        _DB(None, blank), _job(root_agent_job_id=7), _msg(TILE))
     # the request must be this job's own user message
     assert website_engine.route_url(
         _DB(None, blank), _job(), _msg(TILE, mid=9)) is None
