@@ -451,6 +451,25 @@ def _clear_partials(workdir):
             pass
 
 
+_VIMEO_PAGE = re.compile(
+    r"^https?://(?:www\.)?vimeo\.com/"
+    r"(?:channels/[^/?#]+/|groups/[^/?#]+/videos/|album/\d+/video/|"
+    r"showcase/\d+/video/)?(\d{5,})(?:/([0-9a-f]{6,}))?/?(?:[?#].*)?$", re.I)
+
+
+def vimeo_player_url(url):
+    """player.vimeo.com/video/<id>[?h=<hash>] for a vimeo.com page link, or
+    None. An unlisted video's hash comes from the path or its ?h= query."""
+    m = _VIMEO_PAGE.match((url or "").strip())
+    if not m:
+        return None
+    vid, h = m.group(1), m.group(2)
+    if not h:
+        q = re.search(r"[?&]h=([0-9a-f]{6,})", url)
+        h = q.group(1) if q else None
+    return f"https://player.vimeo.com/video/{vid}" + (f"?h={h}" if h else "")
+
+
 def _extract_with_fallback(url, workdir, prefer=None):
     """_extract, walking alternate player clients on YouTube's bot wall.
 
@@ -475,7 +494,22 @@ def _extract_with_fallback(url, workdir, prefer=None):
     # This matters for SoundCloud in particular: it is the working music
     # fallback and a YouTube repair must never perturb it.
     if not ytaccess.is_youtube_url(url):
-        return _extract(url, workdir, prefer=prefer)
+        try:
+            return _extract(url, workdir, prefer=prefer)
+        except FetchMediaError:
+            # vimeo.com page links fail anonymously ("Failed to fetch macos
+            # OAuth token: 401" on 2026.7.4, "the web client only works when
+            # logged-in" on 2026.10) while the same video's embed player
+            # (player.vimeo.com/video/<id>) still extracts: R2 journeys, 30
+            # Oct 2026. Only a failure reaches this, so every link that
+            # worked before keeps its exact call.
+            alt = vimeo_player_url(url)
+            if not alt:
+                raise
+            _clear_partials(workdir)
+            print("[fetch_url] vimeo page failed; trying its player URL",
+                  flush=True)
+            return _extract(alt, workdir, prefer=prefer)
 
     deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
     last_wall = None

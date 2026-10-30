@@ -5145,6 +5145,23 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
             rules = CaptionsFromTranscript(corrections=rules).corrections or []
         except (ValueError, TypeError, IndexError, KeyError) as exc:
             return "REJECTED: invalid correction: " + str(exc)[:300]
+    # Captions never change what was said (R2, 30 Oct 2026): a correction
+    # may only respell a heard word. The live edits carried "we're gonna" ->
+    # "We won't" and "the the the the" -> "Falcon 9 rocket's reusable".
+    unfaithful = []
+    if operation != "clear":
+        import caption_truth
+        kept_rules = []
+        for rule in rules:
+            ok, why = caption_truth.faithful_fix(rule.get("from"), rule.get("to"))
+            if ok:
+                kept_rules.append(rule)
+            else:
+                unfaithful.append(caption_truth.refusal(rule, why))
+        if unfaithful and not kept_rules:
+            return ("REJECTED: no caption correction was applied; each would change "
+                    "what was said: " + "; ".join(unfaithful))
+        rules = kept_rules
     unmatched = _unmatched_caption_fixes(ctx, edl, rules) \
         if operation != "clear" else []
     notes = _caption_fix_notes(ctx, edl, rules) if operation != "clear" \
@@ -5170,6 +5187,8 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
             result += "\nNOT APPLIED (no caption words match): " + "; ".join(unmatched)
         for note in notes:
             result += "\n" + note
+        if unfaithful:
+            result += "\nNOT APPLIED (would change what was said): " + "; ".join(unfaithful)
         result += "\nACTIVE CORRECTIONS: " + json.dumps(rules)
         result += "\nCAPTION PREVIEW: " + _compact_caption_preview(
             audit_captions(ctx, limit=200), rules)

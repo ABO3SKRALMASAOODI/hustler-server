@@ -30,6 +30,7 @@ import quality_verifier
 import request_scope
 import read_tools
 import reference_profile
+import reply_grounding
 import remote
 import request_intent
 import visual_index
@@ -2578,6 +2579,9 @@ def _plan_completion_pushback(ctx, messages, already_pushed):
 EDIT_CLAIM = re.compile(
     r"(?i)("
     r"\b(?:i(?:'ve| have)?|we(?:'ve| have)?|now|just) "
+    # "I've also set the frame back to 9:16" (deepseek-v4-pro, 27 Jul: a
+    # zero-write turn) slipped past with an adverb between subject and verb.
+    r"(?:(?:also|now|just|then|finally|quickly|went ahead and) )?"
     r"(?:cut|trimmed|removed|applied|added|set|updated|changed|adjusted|"
     r"restored|made|moved|cropped|resized|reframed|inserted|spliced|"
     r"sped|slowed|overlaid|stylized|mastered|beat.?aligned|"
@@ -2590,6 +2594,12 @@ EDIT_CLAIM = re.compile(
     r"restructured|rebuilt|redid|redone|revised|reworked|swapped|"
     r"replaced|reversed|retimed|re-?cut|shortened|extended|lengthened|"
     r"tightened|reshaped|rebalanced|reorgani[sz]ed)\b"
+    # a bare past participle opening a sentence or bullet: "Removed the
+    # first second." (gpt-5.6-luna, Aug: a zero-write turn). Only forms that
+    # cannot be imperatives (never "Cut" / "Set"), so an options list
+    # ("Cut the silences?") is not read as a claim.
+    r"|(?:^|(?<=[\n.!?])\s*|(?<=[-•*]) )(?:\*\*)?(?:removed|trimmed|tightened|"
+    r"shortened|deleted|replaced|swapped|inserted|reframed|cropped|muted)\b"
     r"|\b(?:cuts?|changes?|edits?|adjustments?)(?: (?:were|have been|are|got))? "
     r"(?:applied|made|done)\b"
     r"|\bapplied (?:the |a )?(?:cut|change|edit|style)"
@@ -2600,6 +2610,7 @@ EDIT_CLAIM = re.compile(
     r"(?! not\b| still\b| already\b| currently\b| unchanged\b)[^.\n]{0,60}"
     r"(?:red|blue|green|yellow|white|black|orange|purple|pink|"
     r"#[0-9A-Fa-f]{6}|top|bottom|middle|cent(?:er|re)|bigger|smaller|"
+    r"larger|bolder|thicker|"
     r"karaoke|dynamic|pops?|light(?:s|ing)? up|word.by.word|highlight|"
     r"premium|presets?|clean|documentary|broadcast|retro|neon|podcast|"
     r"beast|elegant|serif|uppercase|all.caps|"
@@ -2659,7 +2670,12 @@ RENDER_CLAIM = re.compile(
     r"(?i)(\b(?<!no )preview (?:v?\d+ )?(?:is |was |has been )?"
     r"(?:now )?(?:rendered|ready|updated|attached|refreshed|playing)\b"
     r"|\brendered (?:a |the )?(?:new )?preview\b|\bre-?rendered\b"
-    r"|\brendering (?:the |a )?(?:new )?preview\b)")
+    r"|\brendering (?:the |a )?(?:new )?preview\b"
+    # "here's a fresh preview so you can check it" / "saved and previewed
+    # below" on turns that rendered nothing (R2 audit, Jul-Aug 2026)
+    r"|\bhere'?s (?:a |the |your )?(?:fresh |new |updated )?preview\b"
+    r"|\bpreviewed (?:below|above|here|on the right)\b"
+    r"|\bpreview (?:is )?(?:below|above)\b)")
 DENY_CLAIM = re.compile(
     r"(?i)(\bedl (?:did not|didn't) change\b"
     r"|\bnothing (?:was |has been )?changed\b"
@@ -2700,6 +2716,17 @@ def _offered_claim(draft, m):
     return bool(OFFER_WORDS.search(draft[sent_start:m.start()]))
 
 
+def _asked_claim(draft, m):
+    """True when the matched words sit in a question ("should I cut the
+    whole shot?"): a question proposes, it does not claim."""
+    end = len(draft)
+    for ch in ".!?\n":
+        pos = draft.find(ch, m.end())
+        if pos != -1:
+            end = min(end, pos)
+    return end < len(draft) and draft[end] == "?"
+
+
 def _norm_text(s):
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
@@ -2737,6 +2764,18 @@ def _echo_violation(draft, messages):
     return None
 
 
+_CURLY = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'",
+                        "\u201c": '"', "\u201d": '"'})
+
+
+def _straight_quotes(text):
+    """Models write "I’ve added" / "didn’t" with a typographic apostrophe in
+    about a fifth of replies (R2 audit, 30 Oct 2026: gpt-5.6-luna 20%,
+    grok-4.5 40%, qwen-plus 44%). Every honesty pattern spells contractions
+    with a straight one, so those claims and negations went unseen."""
+    return (text or "").translate(_CURLY)
+
+
 def _reply_violations(draft, wrote, previewed, acted=None):
     """Each violation names the exact fabricated claim it matched, so the
     regeneration correction (and the logs) point at the offending words.
@@ -2744,16 +2783,23 @@ def _reply_violations(draft, wrote, previewed, acted=None):
     a truthful edit-verb sentence on a zero-write turn, while a denial
     check must still key on the EDL alone."""
     acted = wrote if acted is None else acted
+    draft = _straight_quotes(draft)
     v = []
     # An explicit denial ("nothing was changed") dominates — its own words
     # ("changes were made") must not read as a change claim.
     m = next((mm for mm in EDIT_CLAIM.finditer(draft)
               if not _negated_claim(draft, mm)
-              and not _offered_claim(draft, mm)), None)
+              and not _offered_claim(draft, mm)
+              and not _asked_claim(draft, mm)), None)
     if not acted and m and not DENY_CLAIM.search(draft):
         v.append(f'claims edits ("{m.group(0).strip()}"), but no write tool '
                  "succeeded this turn")
-    m = RENDER_CLAIM.search(draft)
+    m = next((mm for mm in RENDER_CLAIM.finditer(draft)
+              if not _negated_claim(draft, mm)
+              and not re.search(r"(?i)\b(?:couldn'?t|can'?t|unable to|"
+                                r"failed to|not able to)\b",
+                                draft[max(0, mm.start() - 40):mm.start()])
+              and not _asked_claim(draft, mm)), None)
     if not previewed and m:
         v.append(f'claims a render ("{m.group(0).strip()}"), but no preview '
                  "was rendered this turn")
@@ -3112,6 +3158,9 @@ def _turn_facts(ctx, start_version):
             pv += f"; self-check: {ctx.last_selfcheck[:120]}"
     else:
         pv = "none"
+    changes = _turn_change_list(ctx)
+    if changes:
+        edl_line += f"; what changed in the edit: {changes}"
     return ("TURN FACTS (system-verified):\n"
             f"- {edl_line}\n"
             f"- Successful write tools this turn: {writes}\n"
@@ -3310,20 +3359,75 @@ def _agreeing_sentences(text, wrote, previewed):
         for sent in _SENTENCE_SPLIT.split(para.strip()):
             if not sent.strip():
                 continue
-            if wrote and (DENY_CLAIM.search(sent) or _STALE_STATE.search(sent)):
+            test = _straight_quotes(sent)
+            if wrote and (DENY_CLAIM.search(test) or _STALE_STATE.search(test)):
                 continue
             if not wrote:
-                m = next((mm for mm in EDIT_CLAIM.finditer(sent)
-                          if not _negated_claim(sent, mm)
-                          and not _offered_claim(sent, mm)), None)
+                m = next((mm for mm in EDIT_CLAIM.finditer(test)
+                          if not _negated_claim(test, mm)
+                          and not _offered_claim(test, mm)), None)
                 if m is not None:
                     continue
-            if not previewed and RENDER_CLAIM.search(sent):
+            if not previewed and RENDER_CLAIM.search(test):
                 continue
             kept.append(sent.strip())
         if kept:
             paragraphs.append(" ".join(kept))
     return "\n\n".join(paragraphs)
+
+
+def _turn_edl_pair(ctx):
+    """(json at the turn's start, json now) or (None, None)."""
+    try:
+        start = (getattr(ctx, "turn_start_edl", None) or {}).get("json")
+        now = (ctx.latest_edl() or {}).get("json")
+        return start, now
+    except Exception:  # noqa: BLE001 — grounding is advisory, never load-bearing
+        return None, None
+
+
+def _turn_change_list(ctx):
+    """The turn's changes in plain words, from the EDL diff alone."""
+    if not ctx.versions_written:
+        return ""
+    start, now = _turn_edl_pair(ctx)
+    if not isinstance(now, dict) or not now or not isinstance(start, dict) \
+            or not start:
+        return ""
+    return reply_grounding.change_list_text(
+        reply_grounding.edl_changes(start or {}, now))
+
+
+def _grounding_violations(ctx, draft):
+    """[(violation, sentence)] for claims finer than _reply_violations sees:
+    an effect a claim names that the EDL did not change this turn, an export
+    the in-app editor cannot make, and speech quoted that the transcript does
+    not hold (R2 hallucination audit, 30 Oct 2026). Fail-open."""
+    out = []
+    try:
+        start, now = _turn_edl_pair(ctx)
+        # The effect check needs both ends of the turn; without the start
+        # (an old continuation, a failed read) it says nothing.
+        if ctx.versions_written and isinstance(now, dict) and now \
+                and isinstance(start, dict) and start:
+            changes = _turn_change_list(ctx) or "nothing"
+            for sent, layer in reply_grounding.effect_violations(
+                    draft, start, now):
+                out.append((f'names the {layer} ("{sent[:90]}"), but the '
+                            f"{layer} did not change this turn (what "
+                            f"changed: {changes})", sent))
+        for sent, claim in reply_grounding.export_violations(draft):
+            out.append((f'claims an export ("{claim}"), but no export ran: '
+                        "the user exports with the Export button", sent))
+        for sent, quote in reply_grounding.quote_violations(
+                draft, getattr(ctx, "index", None) or {},
+                now if isinstance(now, dict) else None):
+            out.append((f'quotes "{quote[:80]}" as spoken, but those words '
+                        "are not in the transcript", sent))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[honesty] grounding check skipped: {exc}", flush=True)
+        return []
+    return out
 
 
 def _facts_reply(ctx, start_version, draft, wrote, previewed):
@@ -3332,8 +3436,12 @@ def _facts_reply(ctx, start_version, draft, wrote, previewed):
     draft's sentences that agree with them. Never an internal note."""
     if wrote:
         latest = ctx.latest_edl()["version"]
+        changes = _turn_change_list(ctx)
         lead = (f"I changed the edit in this turn: it is now version "
                 f"{latest} (it was version {start_version})")
+        if changes and changes != "nothing in the edit changed":
+            lead = (f"I changed the edit in this turn (version {latest}, "
+                    f"was {start_version}): {changes}")
         preview = getattr(ctx, "last_preview", None) or {}
         if previewed and str(preview.get("edl_version")) == str(latest):
             lead += ", and the preview on the right shows it"
@@ -3349,6 +3457,8 @@ def _facts_reply(ctx, start_version, draft, wrote, previewed):
         lead = ("I didn't change the edit in this turn, but "
                 + " and ".join(made) + ", and it is saved to your project.")
     rest = _agreeing_sentences(draft, wrote, previewed)
+    bad = [sent for _v, sent in _grounding_violations(ctx, rest)]
+    rest = reply_grounding.drop_sentences(rest, bad) if bad else rest
     return lead + ("\n\n" + rest if rest else "")
 
 
@@ -3374,9 +3484,14 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     echo = None if (acted or previewed) else _echo_violation(draft, messages)
     if echo:
         viol.append(echo)
+    grounded = _grounding_violations(ctx, draft)
+    coarse = list(viol)
+    viol += [v for v, _sent in grounded]
     if not viol:
         return draft
     honesty["false_claims"] += 1
+    if grounded:
+        honesty["grounding"] = [v[:200] for v, _s in grounded][:6]
     facts = _turn_facts(ctx, start_version)
     print(f"[honesty] job {ctx.job['id']}: reply violates turn facts "
           f"({'; '.join(viol)}) — forcing one regeneration", flush=True)
@@ -3403,10 +3518,23 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
         redraft = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         print(f"[honesty] regeneration failed: {e}", flush=True)
-    if redraft and not _reply_violations(redraft, wrote, previewed, acted) \
-            and (acted or previewed
-                 or not _echo_violation(redraft, messages)):
+    redraft_coarse = bool(redraft) and bool(
+        _reply_violations(redraft, wrote, previewed, acted)
+        or (not (acted or previewed) and _echo_violation(redraft, messages)))
+    redraft_grounded = _grounding_violations(ctx, redraft) if redraft else []
+    if redraft and not redraft_coarse and not redraft_grounded:
         return redraft
+    if redraft and not redraft_coarse and not coarse:
+        # Only the finer claims survived (an effect that did not change, an
+        # export, a misquote): the rest of the reply is true, so it is kept
+        # without the sentences that are not.
+        kept = reply_grounding.drop_sentences(
+            redraft, [sent for _v, sent in redraft_grounded])
+        if kept.strip():
+            honesty["grounding_dropped"] = len(redraft_grounded)
+            print(f"[honesty] job {ctx.job['id']}: dropped "
+                  f"{len(redraft_grounded)} unbacked sentence(s)", flush=True)
+            return kept
     honesty["false_claims"] += 1
     honesty["corrective_note"] = True
     honesty["discarded_drafts"] = [d for d in (draft, redraft) if d]
@@ -3762,6 +3890,45 @@ def _normalized_blocker_text(value):
     # used to make an unchanged quality finding look new forever.  The words,
     # category and tool identity carry the structural meaning we need here.
     return re.sub(r"\d+(?:\.\d+)?", "#", text)[:700]
+
+
+def _display_blocker_text(value, limit=220):
+    """A blocker row as the user reads it: the original words and numbers,
+    whitespace collapsed, cut at a word boundary (never inside a quote)."""
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(",;:—–- ")
+    unclosed = (cut.rfind("“") if cut.count("“") > cut.count("”")
+                else cut.rfind('"') if cut.count('"') % 2 else -1)
+    if unclosed > 40:
+        cut = cut[:unclosed].rstrip(",;:—–- ")
+    return cut + "…"
+
+
+def _blocker_display_rows(plan, verification, limit=3):
+    """The same rows _objective_blocker_fingerprint hashes, in the order it
+    prefers them (pending plan steps, open checks, verification findings),
+    but in their original wording for the stop message."""
+    plan = director.normalize_blueprint(plan) or {}
+    pending = [row.get("task") for row in (plan.get("step_states") or [])
+               if row.get("status") == "pending" and row.get("task")]
+    checks = [row.get("criterion")
+              for row in (plan.get("acceptance_checks") or [])
+              if row.get("status") in {"pending", "failed"}
+              and row.get("criterion")]
+    findings = []
+    for row in (verification or {}).get("unresolved_findings") or []:
+        if isinstance(row, dict):
+            findings.append(row.get("message") or row.get("detail")
+                            or row.get("code") or row.get("kind"))
+        else:
+            findings.append(row)
+    for rows in (pending, checks, findings):
+        rows = [_display_blocker_text(r) for r in rows if str(r or "").strip()]
+        if rows:
+            return rows[:limit]
+    return []
 
 
 def _objective_blocker_fingerprint(plan, verification):
@@ -4694,12 +4861,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         latest = ctx.latest_edl()["version"]
         verification = ((getattr(ctx, "verification_records", None) or {})
                         .get(int(latest)) or {})
-        fingerprint, state = _objective_blocker_fingerprint(
+        fingerprint, _state = _objective_blocker_fingerprint(
             plan, verification)
-        return fingerprint, (state["pending"][:3]
-                             or state["checks"][:3]
-                             or [row[-1] for row in
-                                 state["verification"][:3]])
+        # The fingerprint's rows are normalised (lower case, every number
+        # replaced by '#', cut at 700 characters) so that a renewed finding
+        # matches; the user reads the original words (5 customers read
+        # "dead air: #-#s is silent for #s" between 21 Sep and 22 Oct 2026).
+        return fingerprint, _blocker_display_rows(plan, verification)
 
     # TPM admission: the provider's tokens-per-minute ceiling is org-wide,
     # and a fresh turn's first call is the biggest single request we make
