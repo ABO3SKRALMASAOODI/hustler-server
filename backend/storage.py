@@ -475,8 +475,22 @@ def validate_upload(filename, nbytes, kind):
         "proxy": (ALLOWED_VIDEO_EXT, PROXY_MAX_BYTES),
     }.get(kind, (ALLOWED_VIDEO_EXT, max_upload_bytes()))
     if ext not in allowed:
+        # Say where the file DOES go (R2 journeys, 30 Oct 2026: an audio-only
+        # podcast sent as the main video was told only "not supported").
+        where = ""
+        if kind in (None, "original", "clip", "proxy"):
+            if ext in ALLOWED_MUSIC_EXT:
+                where = (" That is an audio file: upload it as music (kind "
+                         "'music') to score or voice the edit; its speech is "
+                         "transcribed too.")
+            elif ext in ALLOWED_IMAGE_EXT:
+                where = (" That is an image: upload it as an image (kind "
+                         "'image') to place it in the edit.")
+        elif kind == "music" and ext in ALLOWED_VIDEO_EXT:
+            where = (" That is a video: upload it as a clip (kind 'clip'); "
+                     "its sound can still be used as the music.")
         raise ValueError(f"File type {ext or '(none)'} not supported. "
-                         f"Allowed: {', '.join(sorted(allowed))}")
+                         f"Allowed: {', '.join(sorted(allowed))}.{where}")
     if not isinstance(nbytes, int) or nbytes <= 0:
         raise ValueError("File size missing or invalid")
     if nbytes > cap:
