@@ -545,3 +545,26 @@ def test_the_band_crop_is_relaid_over_the_whole_program():
     ctx.edl["effects"]["zooms"][0]["end"] = 20.0
     calls.clear()
     assert fcv.refresh_band_crop(ctx, [], 0.0, run) is False and not calls
+
+
+def test_a_beat_card_lasts_exactly_as_long_as_its_slam(monkeypatch):
+    """QI (30 Oct): the slam the tool placed ended at 15.19 s, its card at
+    15.33 s, and the judges saw an empty navy frame; the card now follows
+    the slam it carries."""
+    import first_cut
+    from types import SimpleNamespace
+    calls = []
+    edl = {"motion": [{"id": "mg3", "template": "word_slam",
+                       "start": 13.9, "end": 15.19}],
+           "vectors": [{"id": "vec1", "start": 13.9, "end": 15.33}]}
+    ctx = SimpleNamespace(latest_edl=lambda: {"json": edl})
+    monkeypatch.setattr(first_cut, "_run",
+                        lambda ctx, steps, name, args, started:
+                        calls.append((name, args)) or "ok")
+    first_cut._card_to_slam(ctx, [], 0.0, "vec1", 13.9, 15.33)
+    assert calls == [("set_vector_graphic",
+                      {"id": "vec1", "start": 13.9, "end": 15.19})]
+    calls.clear()
+    edl["motion"][0]["end"] = 15.33
+    first_cut._card_to_slam(ctx, [], 0.0, "vec1", 13.9, 15.33)
+    assert calls == []

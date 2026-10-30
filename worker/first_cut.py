@@ -954,6 +954,27 @@ def _star(text):
                   text, count=1)
 
 
+def _card_to_slam(ctx, steps, started, card_id, start, end):
+    """The card under a slam lasts exactly as long as the slam the tool
+    actually placed. add_motion_graphic may shorten a slam (a cut or the
+    program's end), and the card then showed empty for the difference: QI,
+    30 Oct, vlog First cut, slam 13.90-15.19 s over a card to 15.33 s, judged
+    "an empty navy frame around 15.2 s" (C2 and Q3 saw the same)."""
+    edl = ctx.latest_edl()["json"]
+    slam = None
+    for m in edl.get("motion") or []:
+        if m.get("template") == "word_slam" and \
+                abs(float(m.get("start") or 0) - start) < 0.3:
+            slam = m
+    if not slam:
+        return
+    s0, s1 = float(slam.get("start") or start), float(slam.get("end") or end)
+    if abs(s0 - start) > 0.02 or abs(s1 - end) > 0.02:
+        _run(ctx, steps, "set_vector_graphic",
+             {"id": card_id, "start": round(s0, 3), "end": round(s1, 3)},
+             started)
+
+
 def beat_slams(ctx, steps, started, beats, hook_end, y, avoid=None):
     """Slam the beats on screen as they are said (word_slam, display tier:
     huge type, the spoken words, captions drop exactly those words). At
@@ -1018,6 +1039,8 @@ def beat_slams(ctx, steps, started, beats, hook_end, y, avoid=None):
         if _ok(res):
             placed += 1
             earliest = start + BEAT_GAP_S
+            if card_id:
+                _card_to_slam(ctx, steps, started, card_id, start, end)
             cards = getattr(ctx, "first_cut_cards", None)
             if isinstance(cards, list):
                 # Q1: a card covers the picture; a slam over the face keeps
