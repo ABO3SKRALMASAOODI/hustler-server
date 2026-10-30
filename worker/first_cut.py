@@ -3071,17 +3071,18 @@ def brief_reply(facts, duration_s):
 
 def _summary(applied, duration_s, url=None):
     length = f"{int(round(duration_s))}-second " if duration_s else ""
+    secs = int(round(duration_s)) if duration_s else 0
+    # (Q7: "an 18-second", never "a 18-second"; the upload's First cut too:
+    # the first real trial reply on 30 Oct read "a 11-second vertical version")
+    art = "an" if secs in (8, 11, 18) or 80 <= secs <= 89 else "a"
     if url:
         shape = "" if any("landscape" in p for p in applied) else "vertical "
-        secs = int(round(duration_s)) if duration_s else 0
-        # (Q7: "an 18-second", never "a 18-second")
-        art = "an" if secs in (8, 11, 18) or 80 <= secs <= 89 else "a"
         return f"{art} {length}{shape}demo of {url}"
     parts = [p for p in applied if p != "a format pack"]
     detail = (", ".join(parts[:-1]) + " and " + parts[-1]) if len(parts) > 1 \
         else (parts[0] if parts else "")
     shape = "" if any("own shape" in p for p in applied) else "vertical "
-    return f"a {length}{shape}version" + (f": {detail}" if detail else "")
+    return f"{art} {length}{shape}version" + (f": {detail}" if detail else "")
 
 
 def _message_text(worker_db, message_id):

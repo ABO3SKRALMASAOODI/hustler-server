@@ -3185,7 +3185,7 @@ _wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
 _wav.write(b"RIFF....WAVEfmt "); _wav.close()
 
 _orig = (wconfig.TRANSCRIBER, wconfig.DEEPGRAM_API_KEY, tr.requests,
-         tr._transcribe_whisper)
+         tr._transcribe_whisper, tr.time.sleep)
 _whisper_hits = []
 tr._transcribe_whisper = lambda p: (_whisper_hits.append(p) or
                                     ([Word(w="local", t0=0.0, t1=0.1)], "en"))
@@ -3221,7 +3221,12 @@ def _stub_post(responses):
 
 wconfig.TRANSCRIBER = "deepgram"
 wconfig.DEEPGRAM_API_KEY = "test-key"
-tr.time.sleep = lambda s: None      # no real backoff in tests
+# No real backoff in tests. tr.time IS the process-wide time module, so the
+# original sleep is restored at the end of this section: left patched, it
+# made every later time.sleep a no-op for the whole session (CI runs the suite
+# in one process: test_q8_speed's slow library "answered" inside its 0.3 s
+# deadline and deploy-cloudflare-executor failed on 0e16144f, 30 Oct).
+tr.time.sleep = lambda s: None
 
 _calls = _stub_post([_Resp(200, _dg_ok)])
 _whisper_hits.clear(); _warns = []
@@ -3284,7 +3289,9 @@ check("transcribe still works with no warnings list to write to",
       tr.transcribe(_wav.name)[0][0].w == "local")
 
 (wconfig.TRANSCRIBER, wconfig.DEEPGRAM_API_KEY, tr.requests,
- tr._transcribe_whisper) = _orig
+ tr._transcribe_whisper, tr.time.sleep) = _orig
+check("the Deepgram section leaves the process-wide time.sleep as it found it",
+      tr.time.sleep is _orig[4])
 os.unlink(_wav.name)
 
 # ------------------------------------------------------------------ #

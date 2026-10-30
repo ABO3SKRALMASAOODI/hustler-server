@@ -509,13 +509,45 @@ _FRIENDLY = (
 )
 
 
+def _sound_phrase(before, after):
+    """The volume/loudness change in the user's words. A mute is never
+    "levelled the sound": the first real trial request on 30 Oct (user 2665,
+    "cut out the audio") was set_volume -60 dB, and the reply said "levelled
+    the sound" next to "the audio is muted"."""
+    def rows(edl):
+        return [v for v in ((edl or {}).get("volume") or []) if isinstance(v, dict)]
+    vb, va = rows(before), rows(after)
+    if json.dumps(vb, sort_keys=True) != json.dumps(va, sort_keys=True):
+        if not va:
+            return "brought the original sound back"
+        try:
+            gains = [float(v.get("gain_db") or 0.0) for v in va]
+        except (TypeError, ValueError):
+            return "changed the volume"
+        if max(gains) <= -40:
+            return "muted the original sound"
+        if min(gains) <= -40:
+            return "muted part of the sound"
+        if max(gains) <= 0:
+            return "lowered the sound"
+        if min(gains) >= 0:
+            return "raised the sound"
+        return "changed the volume"
+    master = (after or {}).get("master")
+    level = master.get("loudness") if isinstance(master, dict) else master
+    if str(level or "").lower() in ("natural", "off", "none"):
+        return "kept the sound at its own level"
+    return "levelled the sound"
+
+
 def friendly_changes(before, after):
     items = []
     for c in rg.edl_changes(before or {}, after or {}):
         for rx, fn in _FRIENDLY:
             m = rx.match(c["text"])
             if m:
-                phrase = fn(m)
+                phrase = (_sound_phrase(before, after)
+                          if c["text"].startswith("changed the loudness") else fn(m))
                 if phrase not in items:
                     items.append(phrase)
                 break
