@@ -312,9 +312,11 @@ def test_plan_leaves_every_lane_a_customer_reserve():
     plan = _plan()
     caps = plan["owner_max_by_lane"]
     leave = plan["owner_leave_free_by_lane"]
-    # 30 days of real customer concurrency (to 30 Oct 2026), per lane:
-    # p99 / peak. The factory at its cap leaves at least the p99 free.
-    customer_p99 = {"interactive": 2, "batch": 4, "mcp": 4, "agent": 1,
+    # 30 days of real customer concurrency (to 30 Oct 2026), per lane: the
+    # p99 (batch: its p95 2 plus one; its p99 7 was one user's 8-file
+    # upload, which memory, not slots, bounds). The factory at its cap
+    # leaves at least that free.
+    customer_p99 = {"interactive": 2, "batch": 3, "mcp": 4, "agent": 1,
                     "shorts": 1}
     for lane, need in customer_p99.items():
         n = len(_ordinary(plan, lane))
@@ -367,3 +369,184 @@ def _cpus(text):
         lo, _, hi = part.partition("-")
         out.update(range(int(lo), int(hi or lo) + 1))
     return out
+
+
+# ── a drain lets running calls finish ──────────────────────────────────────
+def test_a_drain_stops_new_work_but_children_of_running_calls_still_start(
+        adm):
+    box = _box(adm)
+    parent = _submit(box, priority="customer")
+    _assign(box)
+    assert parent["slot"]
+    box.set_draining(True)
+    late = _submit(box, priority="customer")
+    owner = _submit(box)
+    child = _submit(box, priority="customer", jtype="frames", child=True)
+    owner_child = _submit(box, jtype="frames", child=True)
+    _assign(box)
+    assert late["slot"] is None and owner["slot"] is None
+    # The running parents' children run, so the box can reach idle.
+    assert child["slot"] and owner_child["slot"]
+    box.set_draining(False)
+    _assign(box)
+    assert late["slot"] and owner["slot"]
+
+
+def test_a_drained_launch_refuses_top_level_calls_at_once(adm):
+    box = _box(adm)
+    box.set_draining(True)
+    code, body = box.execute("interactive", "bx-preview-p9-zzzzzzzz", {
+        "job": {"id": 9, "type": "preview", "project_id": 9,
+                "total_claims": 1, "dispatcher_source": "v1"},
+        "launch_id": "launch-bbbb", "timeout_s": 600})
+    assert code == 429 and "draining" in body.get("error", "")
+
+
+def test_plan_batch_slots_hold_a_final_as_large_as_cloudflare_did():
+    # Owner finals peaked at 10.2 GiB on Cloudflare's 12 GiB batch lane.
+    for s in _plan()["slots"]:
+        if s["lane"] == "batch" and not s.get("quick"):
+            assert s["memory"] == "12g", s["name"]
+
+
+
+# ── light calls and the factory's real memory (L4, 30 Oct) ────────────────
+def _mixed_box(adm, **overrides):
+    slots = ([{"name": f"i{n}", "lane": "interactive", "port": 9100 + n,
+               "cpus": 2} for n in range(1, 5)]
+             + [{"name": f"b{n}", "lane": "batch", "port": 9110 + n,
+                 "cpus": 4} for n in range(1, 4)]
+             + [{"name": f"m{n}", "lane": "mcp", "port": 9120 + n}
+                for n in range(1, 7)])
+    cfg = {"light_gib": 1.0, "mem_reserve_gib": 3.5,
+           "owner_leave_free_by_lane": {},
+           "owner_max_by_lane": {"interactive": 4, "batch": 2, "mcp": 6}}
+    cfg.update(overrides)
+    return _box(adm, slots=slots, **cfg)
+
+
+def test_a_customer_waiting_for_memory_never_stalls_factory_mcp_calls(adm):
+    box = _mixed_box(adm)
+    running = _submit(box, priority="customer")
+    _assign(box)
+    assert running["slot"]
+    adm._mem["gib"] = 6.0
+    # A customer final (6.5) cannot start: 6 - 3.25 < 3.5 ...
+    final = _submit(box, lane="batch", priority="customer", jtype="final")
+    preview = _submit(box, priority="owner")
+    mcp = [_submit(box, lane="mcp", jtype="mcp_tool") for _ in range(3)]
+    _assign(box)
+    assert final["slot"] is None
+    # ... it holds the factory's heavy preview back, but its light MCP
+    # calls still run (6 - 0.4 >= 3.5): the agents keep working.
+    assert preview["slot"] is None
+    assert all(m["slot"] for m in mcp)
+
+
+def test_light_calls_wait_only_for_real_memory(adm):
+    box = _mixed_box(adm)
+    adm._mem["gib"] = 3.6
+    mcp = _submit(box, lane="mcp", priority="customer", jtype="mcp_tool")
+    _assign(box)
+    assert mcp["slot"] is None           # 3.6 - 0.4 < 3.5: it waits
+    adm._mem["gib"] = 8.0
+    _assign(box)
+    assert mcp["slot"]
+
+
+def test_light_calls_are_not_held_by_the_committed_estimate_budget(adm):
+    box = _mixed_box(adm, mem_budget_gib=7.0)
+    final = _submit(box, lane="batch", priority="customer", jtype="final")
+    _assign(box)
+    assert final["slot"]                 # 6.5 of 7 committed
+    mcp = [_submit(box, lane="mcp", priority="customer", jtype="mcp_tool")
+           for _ in range(4)]
+    _assign(box)
+    assert all(m["slot"] for m in mcp)   # 6.5 + 3.2 > 7, real memory fine
+    heavy = _submit(box, priority="customer")
+    _assign(box)
+    assert heavy["slot"] is None         # a heavy call still respects it
+
+
+def test_factory_headroom_counts_a_render_s_full_estimate(adm):
+    box = _mixed_box(adm, owner_mem_headroom_gib=2.5)
+    # A factory final (6.5) needs 3.5 + 2.5 + 6.5 = 12.5 GiB available.
+    adm._mem["gib"] = 12.0
+    final = _submit(box, lane="batch", jtype="final")
+    _assign(box)
+    assert final["slot"] is None
+    adm._mem["gib"] = 12.6
+    _assign(box)
+    assert final["slot"]
+    # A factory preview (3.0) needs 9.0; a customer preview only 5.0.
+    adm._mem["gib"] = 8.0
+    owner_preview = _submit(box)
+    customer_preview = _submit(box, priority="customer")
+    _assign(box)
+    assert owner_preview["slot"] is None and customer_preview["slot"]
+
+
+def test_factory_budget_counts_its_heavy_calls_only(adm):
+    box = _mixed_box(adm, owner_mem_budget_gib=6.0)
+    mcp = [_submit(box, lane="mcp", jtype="mcp_tool") for _ in range(6)]
+    _assign(box)
+    assert all(m["slot"] for m in mcp)   # 4.8 GiB of light calls
+    previews = [_submit(box) for _ in range(3)]
+    _assign(box)
+    # The light calls never count: two previews (6.0) fit, a third not.
+    assert sum(1 for p in previews if p["slot"]) == 2
+
+
+def test_without_light_gib_every_call_is_heavy_as_before(adm):
+    box = _mixed_box(adm, light_gib=0.0)
+    running = _submit(box, priority="customer")
+    _assign(box)
+    adm._mem["gib"] = 6.0
+    final = _submit(box, lane="batch", priority="customer", jtype="final")
+    mcp = _submit(box, lane="mcp", jtype="mcp_tool")
+    _assign(box)
+    assert final["slot"] is None and mcp["slot"] is None
+
+
+def test_plan_marks_mcp_agent_and_looks_light_and_renders_heavy(adm):
+    plan = _plan()
+    cfg = adm.Config(plan)
+    light = cfg.light_gib
+    for jtype in ("mcp_tool", "agent_turn", "shorts_plan", "frames"):
+        assert cfg.estimate(jtype) <= light, jtype
+    for jtype in ("preview", "preview_check", "final", "index"):
+        assert cfg.estimate(jtype) > light, jtype
+
+
+# ── boxctl: a slot dropped from the plan leaves no idle container ──────────
+def test_orphan_slot_containers_are_only_dropped_unadmitted_slots(tmp_path,
+                                                                 monkeypatch):
+    monkeypatch.setenv("BOX_DATA_DIR", str(tmp_path))
+    spec = importlib.util.spec_from_file_location(
+        f"box_boxctl_{time.monotonic_ns()}",
+        os.path.join(BOX_DIR, "boxctl.py"))
+    ctl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ctl)
+    names = ["vbox-mcp1", "vbox-mcp11", "vbox-batch6", "qb-run", "qb-pg",
+             "vbox-mcp12"]
+    plan = {"vbox-mcp1"}
+    # Admission still serves mcp12 (its restart is pending): kept.
+    admitted = {"vbox-mcp1", "vbox-mcp12"}
+    assert ctl.orphan_containers(names, plan, admitted) == [
+        "vbox-batch6", "vbox-mcp11"]
+
+
+def test_an_orphan_slot_holding_a_call_is_kept(tmp_path, monkeypatch, adm):
+    box = _box(adm)
+    running = _submit(box, priority="customer")
+    _assign(box)
+    db = os.environ["BOX_STATE_DB"]
+    monkeypatch.setenv("BOX_DATA_DIR", str(tmp_path))
+    spec = importlib.util.spec_from_file_location(
+        f"box_boxctl_{time.monotonic_ns()}",
+        os.path.join(BOX_DIR, "boxctl.py"))
+    ctl = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ctl)
+    assert ctl.slot_has_live_call(running["slot"], db) is True
+    assert ctl.slot_has_live_call("i8", db) is False
+    assert ctl.slot_has_live_call("x", str(tmp_path / "missing.db")) is True
