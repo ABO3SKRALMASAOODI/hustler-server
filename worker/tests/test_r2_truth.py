@@ -391,3 +391,25 @@ def test_a_busy_fleet_on_a_continuation_does_not_say_the_engine_never_started(mo
     main._notify_failure(_Db(), job, RuntimeError("capacity busy"))
     texts = [a[1] for name, a in posted if name == "add_job_failure_message"]
     assert texts and texts[0].startswith("I couldn't start the editing engine")
+
+
+def test_caption_guard_keeps_transcript_repairs_and_trusts_unsure_words():
+    # stutters, dropped short words, hidden words and mishearings that sound alike pass
+    for src, dst in (("not not", "not"), ("this is this is", "this is"), ("do see", "do you see"),
+                     ("cars", ""), ("wax in vain", "wax and wane"), ("Flying in London", "flying and landing"),
+                     ("10 x", "ten times"), ("90,000,000.", "$90M."), ("R and D", "R&D")):
+        ok, why = caption_truth.faithful_fix(src, dst)
+        assert ok, (src, dst, why)
+    # a confident word swapped for another is refused; an unsure one may be the real word
+    assert not caption_truth.faithful_fix("we're already a sidewalk", "We're already a cyborg")[0]
+    assert caption_truth.faithful_fix("we're already a sidewalk", "We're already a cyborg",
+                                      asr_unsure=True)[0]
+    # ...but never by adding content or flipping a negation
+    assert not caption_truth.faithful_fix("I know.", "I don't know.", asr_unsure=True)[0]
+    assert not caption_truth.faithful_fix("to the stage", "to the reusable rocket stage",
+                                          asr_unsure=True)[0]
+    index = {"words": [{"w": "already", "p": .97}, {"w": "a", "p": .99}, {"w": "sidewalk", "p": .41}]}
+    assert caption_truth.asr_unsure(index, {"from": "a sidewalk"})
+    index["words"][2]["p"] = .93
+    assert not caption_truth.asr_unsure(index, {"from": "a sidewalk"})
+    assert not caption_truth.asr_unsure({"words": [{"w": "x"}]}, {"from": "x"})

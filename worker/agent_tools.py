@@ -5153,7 +5153,9 @@ def set_caption_fixes(ctx, replacements=None, clear=False, operation="replace"):
         import caption_truth
         kept_rules = []
         for rule in rules:
-            ok, why = caption_truth.faithful_fix(rule.get("from"), rule.get("to"))
+            ok, why = caption_truth.faithful_fix(
+                rule.get("from"), rule.get("to"),
+                asr_unsure=caption_truth.asr_unsure(ctx.index or {}, rule))
             if ok:
                 kept_rules.append(rule)
             else:
