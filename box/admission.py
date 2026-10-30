@@ -723,17 +723,18 @@ class Box:
         always fit (real memory still governs them below)."""
         if self._light(need):
             return True
+        owner_committed = sum(
+            self.cfg.estimate(jtype) for _s, prio, jtype, _c in occupying
+            if prio == "owner" and not self._light(self.cfg.estimate(jtype)))
+        if owner_committed <= 0:
+            # The factory's FIRST heavy call is held by the box-wide rules
+            # only, so the factory always makes progress: memory held
+            # outside the slots (test containers, migrations) once kept
+            # every factory final waiting on an idle box (L4b, 30 Oct).
+            return True
         budget = self.cfg.owner_mem_budget_gib
-        if budget is not None:
-            owner_committed = sum(
-                self.cfg.estimate(jtype) for _s, prio, jtype, _c in occupying
-                if prio == "owner"
-                and not self._light(self.cfg.estimate(jtype)))
-            # A lone owner call always fits its own budget (the global
-            # rules below still apply), like a lone call fits the box's.
-            if owner_committed > 0 and \
-                    owner_committed + need > budget + 1e-9:
-                return False
+        if budget is not None and owner_committed + need > budget + 1e-9:
+            return False
         headroom = self.cfg.owner_mem_headroom_gib
         if headroom > 0 and mem is not None and \
                 mem - need < self.cfg.mem_reserve_gib + headroom:

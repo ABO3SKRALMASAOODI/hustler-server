@@ -1,5 +1,5 @@
 {
-  "_comment": "Valmera render box admission + slots. 8 shared vCPU / 24 GB. Each slot's --cpus is a ceiling for ONE job (a lone preview may use 2 cores, a final 4), not a reservation: the slots oversubscribe the CPU on purpose and per-call cgroup CPU weights (cpu_shares: customers about 5x the owner factory under cgroup v2) divide it under contention. Memory limits are the measured p95 with headroom; batch slots have Cloudflare's 12 GiB (an owner final has peaked at 10.2 GiB there; admission's memory budget, not the slot limit, bounds what runs at once). X1 (30 Oct 2026), the owner's target: every customer, trial and MCP call plus at most 2 podcast runs (a coordinator and up to 3 editors each), customers first. The owner factory (user 60) is capped per lane (interactive 4 of 8, batch 2 of 5, mcp 6 of 10) AND leaves a customer reserve (owner_leave_free_by_lane: it starts on an ordinary slot only while that many other ordinary slots of the lane stay free; its children too), so a customer never waits behind the factory; the reserve was sized from 30 days of real customer concurrency (peaks: interactive 4, batch 8 = one user's 8-file upload, mcp 6). Memory is the box's binding resource (L4, 30 Oct: an idle slot holds ~0.25 GiB, so slots are not free): the factory's HEAVY calls (estimate above light_gib) stay within owner_mem_budget_gib of committed estimates and start only while MemAvailable minus their FULL estimate keeps owner_mem_headroom_gib beyond mem_reserve_gib, so a factory final that grows after it starts never takes the memory a customer's next render needs; light calls (MCP tools, agent turns, frame looks) are governed by real memory alone and never held behind another class's memory reservation. Quick slots serve synchronous children only. Parity: interactive slots see 2 CPUs and batch slots 4 (cpusets), exactly what Cloudflare's standard-3/standard-4 lanes expose, because x264's thread count follows the visible CPUs: with that the box renders bit-identical files (29 Oct parity gate); admission picks the free slot whose CPU set is least busy. New slots are appended with new ports so existing slots keep theirs.",
+  "_comment": "Valmera render box admission + slots. 8 shared vCPU / 24 GB. Each slot's --cpus is a ceiling for ONE job (a lone preview may use 2 cores, a final 4), not a reservation: the slots oversubscribe the CPU on purpose and per-call cgroup CPU weights (cpu_shares: customers about 5x the owner factory under cgroup v2) divide it under contention. Memory limits are the measured p95 with headroom; batch slots have Cloudflare's 12 GiB (an owner final has peaked at 10.2 GiB there; admission's memory budget, not the slot limit, bounds what runs at once). X1 (30 Oct 2026), the owner's target: every customer, trial and MCP call plus at most 2 podcast runs (a coordinator and up to 3 editors each), customers first. The owner factory (user 60) is capped per lane (interactive 4 of 9, batch 2 of 5, mcp 6 of 10) AND leaves a customer reserve (owner_leave_free_by_lane: it starts on an ordinary slot only while that many other ordinary slots of the lane stay free; its children too), so a customer never waits behind the factory; the reserve was sized from 30 days of real customer concurrency (peaks: interactive 4, batch 8 = one user's 8-file upload, mcp 6). Memory is the box's binding resource (L4, 30 Oct: an idle slot holds ~0.25 GiB, so slots are not free): the factory's HEAVY calls (estimate above light_gib) stay within owner_mem_budget_gib of committed estimates and start only while MemAvailable minus their FULL estimate keeps owner_mem_headroom_gib beyond mem_reserve_gib, so a factory final that grows after it starts never takes the memory a customer's next render needs; light calls (MCP tools, agent turns, frame looks) are governed by real memory alone and never held behind another class's memory reservation. Measured on the box (L4a/L4b/L4r, 30 Oct): an idle slot ~0.25 GiB, a preview p95 1.6 GiB, a final p95 3.0-5.4 GiB (mem_estimate_gib final 5.5, Cloudflare's 6.5 overstated the box's), an MCP call 0.6. The factory headroom is 1 GiB on top of the full estimate: a factory preview starts while ~7.5 GiB are available, a final ~10; customers' previews need 5, finals ~6.3. Quick slots serve synchronous children only. Parity: interactive slots see 2 CPUs and batch slots 4 (cpusets), exactly what Cloudflare's standard-3/standard-4 lanes expose, because x264's thread count follows the visible CPUs: with that the box renders bit-identical files (29 Oct parity gate); admission picks the free slot whose CPU set is least busy. New slots are appended with new ports so existing slots keep theirs.",
   "listen_host": "127.0.0.1",
   "listen_port": 8090,
   "extra_listen_hosts": [
@@ -25,7 +25,7 @@
     "shorts": 1
   },
   "owner_mem_budget_gib": 16.0,
-  "owner_mem_headroom_gib": 2.5,
+  "owner_mem_headroom_gib": 1.0,
   "light_gib": 1.0,
   "cpu_shares": {
     "customer": 8192,
@@ -40,6 +40,9 @@
   "max_wait_s": 170,
   "mem_budget_gib": 44.0,
   "mem_reserve_gib": 3.5,
+  "mem_estimate_gib": {
+    "final": 5.5
+  },
   "strict_source": true,
   "disk_min_free_gib": 20,
   "disk_low_water_gib": 40,
@@ -280,6 +283,14 @@
       "port": 9131,
       "cpus": 2.0,
       "memory": "2g"
+    },
+    {
+      "name": "interactive9",
+      "lane": "interactive",
+      "port": 9134,
+      "cpus": 2.0,
+      "memory": "5g",
+      "cpuset": "0-1"
     }
   ]
 }
