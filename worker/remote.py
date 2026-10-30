@@ -3067,6 +3067,11 @@ def _box_scratch_wait(job, exc):
     """True when a box job refused for scratch space should wait instead."""
     if str(job.get("type") or "") not in _BOX_SCRATCH_WAIT_TYPES:
         return False
+    if "no space left on device" in str(exc).lower():
+        # The shared disk filled DURING the run (ENOSPC from ffmpeg or a
+        # write): these types are idempotent re-runs (one artifact per EDL
+        # version or source), and the disk frees as other jobs finish.
+        return True
     if getattr(exc, "failure_kind", None) != "executor_capacity":
         return False
     m = _BOX_SCRATCH_NEED.search(str(exc))

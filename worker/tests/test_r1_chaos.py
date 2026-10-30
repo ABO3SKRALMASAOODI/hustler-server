@@ -429,3 +429,19 @@ def test_a_link_down_for_good_still_raises(monkeypatch):
         executor_runtime._commit_result(_JobRow({}), {"id": 1}, {}, 2,
                                         sleep=lambda s: None)
     assert sum(executor_runtime.COMMIT_RETRY_WAITS_S) <= 120
+
+
+def test_s5_a_box_render_that_hit_a_full_disk_mid_run_waits(monkeypatch,
+                                                            _box_path):
+    err = remote.CloudflareTerminalFailure(
+        "ffmpeg failed (exit 1): [out#0/mp4] Error writing trailer: No space "
+        "left on device")
+    err.failure_kind, err.retryable = "media_command", True
+    monkeypatch.setattr(remote, "_run_cloudflare",
+                        lambda job: (_ for _ in ()).throw(err))
+    job = {"id": 79, "type": "final", "project_id": 5, "user_id": 60,
+           "attempts": 1, "total_claims": 1,
+           "payload": {"execution_provider": "box"}}
+    with pytest.raises(remote.BoxWaiting):
+        remote._run_box_with_wait(job)
+    assert not remote._box_scratch_wait({"type": "mcp_tool"}, err)
