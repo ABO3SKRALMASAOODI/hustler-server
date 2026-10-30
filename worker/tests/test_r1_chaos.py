@@ -253,3 +253,101 @@ def test_scratch_wait_never_replays_a_mutation_or_a_child():
     other = remote.CloudflareTerminalFailure("Invalid argument")
     other.failure_kind = "executor_capacity"
     assert not remote._box_scratch_wait({"type": "final"}, other)
+
+
+# ── S7: the Render dispatcher restarted mid-job (the guardian takes over) ─
+# The SIGTERM path keeps a remote-owned box call ("preserving durable remote
+# job(s)", main._on_shutdown) and hands back only unlaunched claims; the new
+# dispatcher's guardian then observes each box ledger row it inherited.
+
+from datetime import datetime as _dt  # noqa: E402
+
+
+class _GuardianDb:
+    def __init__(self, job_state="running"):
+        self.calls = []
+        self.job_state = job_state
+
+    def run(self, fn, *args, **_kwargs):
+        self.calls.append(fn)
+        if fn is dbx.get_job:
+            return {"state": self.job_state}
+        if fn in (dbx.finish_remote_execution, dbx.defer_box_wait,
+                  dbx.requeue_job, dbx.finish_job,
+                  dbx.heartbeat_remote_execution):
+            return True
+        return None
+
+
+def _box_row(jtype="final", ago=600):
+    now = _dt.now(timezone.utc)
+    return {"provider": "box", "call_id": f"bx-{jtype}-0123456789abcdef0123",
+            "function_name": "batch", "job_id": 125413, "total_claims": 1,
+            "type": jtype, "project_id": 5122, "user_id": 60, "attempts": 1,
+            "payload": {"execution_provider": "box"},
+            "submitted_at": now - timedelta(seconds=ago)}
+
+
+def _status(monkeypatch, body):
+    monkeypatch.setattr(remote, "check_executor_version",
+                        lambda quiet=True: "")
+    monkeypatch.setattr(remote, "_cloudflare_status",
+                        lambda *_a, **_k: body)
+
+
+def test_s7_a_call_refused_in_the_queue_after_its_dispatcher_died_waits(
+        monkeypatch):
+    now = _dt.now(timezone.utc)
+    _status(monkeypatch, {
+        "status": "refused",
+        "updatedAt": (now - timedelta(seconds=300)).isoformat()
+        .replace("+00:00", "Z"),
+        "envelope": {"error": "Box is at capacity: no free batch slot "
+                     "within 150s; nothing ran", "safe_to_fallback": True,
+                     "box_wait": True, "capacity_unavailable": True,
+                     "failure": {"kind": "provider_capacity_unavailable",
+                                 "retryable": True, "max_attempts": 2}}})
+    db = _GuardianDb()
+    event = remote.reconcile_remote_execution(db, _box_row())
+    assert event["status"] == "requeued"
+    assert dbx.defer_box_wait in db.calls          # unspent, box rules
+    assert dbx.finish_job not in db.calls and dbx.requeue_job not in db.calls
+
+
+def test_s7_a_call_still_running_on_the_box_is_left_alone(monkeypatch):
+    _status(monkeypatch, {"status": "running"})
+    db = _GuardianDb()
+    event = remote.reconcile_remote_execution(db, _box_row())
+    assert event["status"] == "running"
+    assert db.calls == [dbx.heartbeat_remote_execution]   # never a 2nd run
+
+
+def test_s7_a_call_the_executor_finished_is_closed_as_done(monkeypatch):
+    _status(monkeypatch, {"status": "done", "envelope": {
+        "job_completed": True, "result": {"render_asset_id": 37871}}})
+    db = _GuardianDb(job_state="done")
+    event = remote.reconcile_remote_execution(db, _box_row())
+    assert event["status"] == "done"
+    assert dbx.finish_remote_execution in db.calls
+    assert dbx.finish_job not in db.calls and dbx.requeue_job not in db.calls
+
+
+def test_s7_a_slot_lost_while_no_dispatcher_watched_is_retried(monkeypatch):
+    _status(monkeypatch, {"status": "failed", "envelope": {
+        "error": LOST, "retryable": True,
+        "failure": {"kind": "transient_infrastructure", "retryable": True,
+                    "max_attempts": 2}}})
+    db = _GuardianDb()
+    event = remote.reconcile_remote_execution(db, _box_row("index"))
+    assert event["status"] == "requeued"
+    assert dbx.finish_job not in db.calls
+
+
+def test_s7_an_unreachable_box_is_observed_again_never_failed(monkeypatch):
+    def down(*_a, **_k):
+        raise remote.requests.ConnectionError("box unreachable")
+    monkeypatch.setattr(remote, "_cloudflare_status", down)
+    db = _GuardianDb()
+    event = remote.reconcile_remote_execution(db, _box_row())
+    assert event["status"] == "unknown"
+    assert db.calls == []
