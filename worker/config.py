@@ -255,6 +255,7 @@ FIRST_CUT_SHORT_SOURCE_S = float(os.getenv("FIRST_CUT_SHORT_SOURCE_S", "90"))
 # approval render, as before).
 FIRST_CUT_BROLL_PREFETCH = os.getenv("FIRST_CUT_BROLL_PREFETCH", "1") != "0"
 FIRST_CUT_DRAFT_FIRST = os.getenv("FIRST_CUT_DRAFT_FIRST", "1") != "0"
+FIRST_CUT_UPGRADE_PARALLEL = os.getenv("FIRST_CUT_UPGRADE_PARALLEL", "0") == "1"
 
 # All subscribing editors use Luna on the standard OpenAI client. Keep the
 # rollback explicit: stale EDITOR_MODEL / PAID_* / FRONTIER_* environment

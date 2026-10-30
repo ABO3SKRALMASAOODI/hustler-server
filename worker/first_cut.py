@@ -136,13 +136,16 @@ def _say(ctx, step, label):
 def _render_draft_first(ctx, steps):
     """Q8: the user watches the First cut as soon as a draft is encoded.
 
-    The 720p approval render is queued first, without waiting, so it runs on
-    its own slot beside the draft; the First cut is delivered on the draft
-    and the approval render replaces it in the player when it lands (the
-    Studio plays the newest render of the newest version). The corner-mark
-    check runs on the draft's picture QC (graphics sit where they sit at any
-    size); a removal re-renders and re-queues the approval for the new
-    version (the old one is superseded by the queue itself). Returns the
+    The draft (the 480p preview every request turn uses) is rendered and the
+    First cut is delivered on it; then the 720p approval render of the same
+    version is queued without waiting, and the Studio swaps it in, at the
+    same moment of playback, when it lands (it plays the newest render of
+    the newest version). Queued after the draft, never beside it: two
+    encodes on one machine slowed the draft to the approval's pace (Mac
+    harness, 30 Oct: 43 s instead of 11 s). The corner-mark check runs on the
+    draft's picture QC (graphics sit where they sit at any size); a removal
+    renders the new version's draft first. FIRST_CUT_UPGRADE_PARALLEL=1
+    queues the approval before the draft (separate slots). Returns the
     draft's render note."""
     def queue_approval():
         try:
@@ -162,12 +165,17 @@ def _render_draft_first(ctx, steps):
                       "ok": not _failed(note), "note": str(note or "")[:160]})
         return note
 
-    queue_approval()
+    parallel = config.FIRST_CUT_UPGRADE_PARALLEL
+    if parallel:
+        queue_approval()
     render = draft()
     if _clear_corner_mark(ctx, steps, render) \
             and _renders_done(steps) < config.FIRST_CUT_MAX_RENDERS:
-        queue_approval()
+        if parallel:
+            queue_approval()
         render = draft()
+    if not parallel and not _failed(render):
+        queue_approval()
     return render
 
 

@@ -246,8 +246,10 @@ def test_the_draft_is_delivered_while_the_approval_render_runs(monkeypatch):
     ctx = types.SimpleNamespace()
     steps = []
     note = first_cut._render_draft_first(ctx, steps)
-    assert calls == [("queue", "approval", 0),
-                     ("execute", "render_preview", "draft", True)]
+    # the draft first, then the approval queued (two encodes side by side
+    # on one machine slowed the draft to the approval's pace)
+    assert calls == [("execute", "render_preview", "draft", True),
+                     ("queue", "approval", 0)]
     assert note.startswith("Preview v4 rendered")
     assert steps[-1]["quality"] == "draft" and steps[-1]["ok"]
     assert "still running" in ctx.first_cut_upgrade
@@ -269,9 +271,18 @@ def test_a_corner_mark_removal_requeues_the_approval(monkeypatch):
     steps = []
     note = first_cut._render_draft_first(types.SimpleNamespace(), steps)
     assert note == "Preview v5 rendered: 20.0s"
-    assert calls == [("queue", "approval"), ("render_preview", None),
-                     ("remove_motion_graphic", "mg2"), ("queue", "approval"),
-                     ("render_preview", None)]
+    assert calls == [("render_preview", None),
+                     ("remove_motion_graphic", "mg2"),
+                     ("render_preview", None), ("queue", "approval")]
+    # separate slots: the approval is queued before each draft
+    import config
+    monkeypatch.setattr(config, "FIRST_CUT_UPGRADE_PARALLEL", True)
+    calls.clear()
+    notes = iter(["Preview v6 rendered: 20.0s"])
+    monkeypatch.setattr(agent_tools, "execute",
+                        lambda ctx, name, args: calls.append((name, None)) or next(notes))
+    first_cut._render_draft_first(types.SimpleNamespace(), [])
+    assert calls == [("queue", "approval"), ("render_preview", None)]
 
 
 # ── progress lines ───────────────────────────────────────────────────────
