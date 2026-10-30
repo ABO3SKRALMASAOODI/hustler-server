@@ -192,3 +192,67 @@ def test_a_grandfathered_source_broll_searches_the_libraries_directly():
     ctx = types.SimpleNamespace(first_cut_q1=False)
     pf, fn = bt._prefetch_for(ctx, "portrait", 1080, 1920, ["pexels"])
     assert pf is None and fn is broll_source.search
+
+
+# ------------------- 3. a trial turn's chains run the engine account's craft
+
+def _chain_ctx(trial):
+    return types.SimpleNamespace(
+        claude_trial=types.SimpleNamespace(model="claude-haiku-5-5")
+        if trial else None, write_calls=[])
+
+
+@pytest.mark.parametrize("trial", [True, False])
+def test_the_whole_take_clean_up_runs_the_engine_chain_on_the_trial_lane(
+        monkeypatch, trial):
+    """QI2: ctx.first_cut_q1 is set only by the First cut job, so a trial
+    request's whole-take clean-up ran the grandfathered chain (no screen
+    camera, cut-ins or B-roll). On an engine context it runs the engine
+    chain; anywhere else nothing changes; the flag is restored after."""
+    import trial_turn
+    seen = []
+
+    def chain(ctx, worker_db, started, spend, whole=False):
+        seen.append(bool(getattr(ctx, "first_cut_q1", False)))
+        return [], ["captions"], None
+    monkeypatch.setattr(first_cut, "video_chain", chain)
+    monkeypatch.setattr(agent_tools, "execute", lambda c, n, a: "EDL v2 -> v3")
+    ctx = _chain_ctx(trial)
+    assert trial_turn.whole_cleanup(ctx, None, trial_turn.Steps(ctx))
+    assert seen == [trial]
+    assert not hasattr(ctx, "first_cut_q1")              # restored
+
+
+def test_the_long_form_cut_runs_the_engine_chain_on_the_trial_lane(
+        monkeypatch):
+    import longform
+    import trial_turn
+    seen = []
+    monkeypatch.setattr(longform, "eligible", lambda ctx: True)
+
+    def tighten(ctx, worker_db, steps):
+        seen.append(bool(getattr(ctx, "first_cut_q1", False)))
+        return None
+    monkeypatch.setattr(longform, "tighten", tighten)
+    monkeypatch.setattr(trial_turn, "first_cut_state",
+                        lambda *a: {"edl_version": 1, "first_cut": {}})
+
+    class _DB:
+        def run(self, fn, *a):
+            return fn(*a)
+    ctx = _chain_ctx(True)
+    ctx.has_main_video = True
+    ctx.latest_edl = lambda: {"version": 1, "json": {"keep": [[0, 600]]}}
+    ctx.index, ctx.duration = {}, 600.0
+    trial_turn.prepare(ctx, _DB(), 1, "cut the boring parts")
+    assert seen == [True]
+    assert not hasattr(ctx, "first_cut_q1")
+
+
+def test_a_set_flag_is_put_back_as_it_was():
+    import trial_turn
+    ctx = _chain_ctx(True)
+    ctx.first_cut_q1 = False
+    with trial_turn._EngineChain(ctx) as on:
+        assert on and ctx.first_cut_q1 is True
+    assert ctx.first_cut_q1 is False

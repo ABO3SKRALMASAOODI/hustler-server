@@ -592,6 +592,42 @@ def montage_end_beat(ctx, steps):
     return False
 
 
+class _EngineChain:
+    """QI2 (30 Oct): the First cut's chain run inside a trial request turn
+    (the whole-take clean-up, the long-form cut) gets the engine account's
+    craft. ``ctx.first_cut_q1`` is set only by the First cut job itself, so
+    inside a trial turn the chain ran the grandfathered path: no screen
+    camera, plated captions, cut-ins, B-roll, ending guard or Q5 talk craft
+    (QI2 matrix: "clean up my footage" on the screen recording came back a
+    flat scroll with no push-ins, 7.25, under its own First cut). Only for an
+    engine context (agent_tools.engine_on: the trial lane is one); restored
+    after the chain."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def __enter__(self):
+        self.prev = getattr(self.ctx, "first_cut_q1", None)
+        try:
+            import agent_tools
+            on = bool(agent_tools.engine_on(self.ctx))
+        except Exception:  # noqa: BLE001 — any doubt: the old path
+            on = False
+        if on:
+            self.ctx.first_cut_q1 = True
+        return on
+
+    def __exit__(self, *exc):
+        if self.prev is None:
+            try:
+                del self.ctx.first_cut_q1
+            except AttributeError:
+                pass
+        else:
+            self.ctx.first_cut_q1 = self.prev
+        return False
+
+
 def whole_cleanup(ctx, worker_db, steps):
     """The First cut's chain over the WHOLE take (clean ends, pauses, fillers,
     framing, hook, slams, captions): reset to the source, then
@@ -605,8 +641,9 @@ def whole_cleanup(ctx, worker_db, steps):
         # trial's own budget like every call of this turn
         ctx.first_cut_model = trial.model
     spend = {"usd": 0.0}
-    chain_steps, applied, _picked = first_cut.video_chain(
-        ctx, worker_db, time.monotonic(), spend, whole=True)
+    with _EngineChain(ctx):
+        chain_steps, applied, _picked = first_cut.video_chain(
+            ctx, worker_db, time.monotonic(), spend, whole=True)
     steps.record(chain_steps)
     steps.applied.append("the whole take cleaned up: " + ", ".join(
         a for a in applied if a) if applied else "the whole take cleaned up")
@@ -673,7 +710,8 @@ def prepare(ctx, worker_db, session_id, text, post=None):
         # user asked", 5.0, twice); a short source keeps the First cut
         import longform
         if longform.eligible(ctx):
-            tight = longform.tighten(ctx, worker_db, steps)
+            with _EngineChain(ctx):
+                tight = longform.tighten(ctx, worker_db, steps)
             if tight:
                 kind = "tighten"
     if kind == "cleanup":
