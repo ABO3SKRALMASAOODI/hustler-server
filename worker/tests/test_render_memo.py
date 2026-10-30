@@ -339,7 +339,9 @@ def test_fast_playwright_stack_is_what_the_client_parses():
     pytest.importorskip("playwright")
     import motion_engine
     from playwright._impl import _connection
-    real = _connection.inspect
+    before = _connection.inspect       # an earlier render may have patched it
+    real = inspect
+    _connection.inspect = real
     motion_engine._PW_FAST["done"] = False
     try:
         motion_engine._fast_playwright_stacks()
@@ -357,7 +359,7 @@ def test_fast_playwright_stack_is_what_the_client_parses():
                 _connection._extract_stack_trace_information_from_stack(
                     theirs, internal)
     finally:
-        _connection.inspect = real
+        _connection.inspect = before
         motion_engine._PW_FAST["done"] = False
 
 
@@ -365,12 +367,14 @@ def test_fast_playwright_stack_can_be_turned_off(monkeypatch):
     pytest.importorskip("playwright")
     import motion_engine
     from playwright._impl import _connection
-    real = _connection.inspect
+    before = _connection.inspect
+    real = inspect
+    _connection.inspect = real
     monkeypatch.setenv("MOTION_PW_FAST_STACK", "0")
     motion_engine._PW_FAST["done"] = False
     try:
         motion_engine._fast_playwright_stacks()
         assert _connection.inspect is real
     finally:
-        _connection.inspect = real
+        _connection.inspect = before
         motion_engine._PW_FAST["done"] = False
