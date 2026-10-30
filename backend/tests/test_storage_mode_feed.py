@@ -473,3 +473,43 @@ def test_a_forked_child_runs_its_own_refresher(both_envs):
         assert os.WEXITSTATUS(status) == 0
     finally:
         feed.stop()
+
+
+# ── the sealed keys' first read waits FIRST_WAIT_S in all, not per lookup ──
+
+def test_a_hung_first_key_read_holds_a_health_probe_first_wait_in_all():
+    """One status() looks the S3_NEXT_* names up a dozen times. While the
+    first read of the sealed keys hangs (a DB outage at boot), each lookup
+    used to wait FIRST_WAIT_S of its own: 3 s for the first /health on the
+    box (its probe timeout), measured. Now the wait is one budget from the
+    read's start."""
+    import storage_creds as creds
+    gate = threading.Event()
+
+    def hung():
+        gate.wait(30)
+        raise OperationalError("timeout expired")
+    base = dict(LEGACY_ENV)
+    c = creds.Credentials(fetch=hung, env=base, log=lambda m: None)
+    c._first_wait = 0.3
+    view = creds.Env(base, c)
+    feed = kv_feed.Feed(lambda: None, routing.KV_KEY, log=lambda m: None,
+                        enabled=lambda: routing.store_config(
+                            routing.NEXT, view) is not None)
+    router = routing.Router(fetch=feed.get, env=view, ttl_s=0,
+                            log=lambda m: None)
+    try:
+        c.prefetch()                                   # the import
+        t0 = time.monotonic()
+        for _ in range(3):
+            st = router.status()
+            assert st["mode"] == "legacy" and st["next"] is False
+        assert routing.store_config(routing.NEXT, view) is None
+        took = time.monotonic() - t0
+        assert took < 0.3 + 0.25, took
+        t1 = time.monotonic()
+        router.status()                                # past the budget
+        assert time.monotonic() - t1 < 0.05
+    finally:
+        gate.set()
+        feed.stop()
