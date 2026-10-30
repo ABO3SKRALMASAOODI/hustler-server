@@ -70,7 +70,9 @@ _INTERNAL = re.compile(
     r"|\bpicture check|\bcaption check|\bstory check|\bthree-frame|\bspeculative"
     r"|\bv\d+\b|\bversion \d+\b|\(system|\[system|\bcorner mark\b|\bfree-tier\b"
     r"|\bhero frame|\bfocus_|\bset_frame\b|\bsource rect|\bcrop_|\bpad_blur\b"
-    r"|\bimprove it\b|\bpress\b|\bexport this version\b|\bnot a blocker\b)")
+    r"|\bimprove it\b|\bpress\b|\bexport this version\b|\bnot a blocker\b|\bfree plan\b"
+    r"|\bwarnings?\b|\bnotes? remain|\bmeasured depth\b|\bpreview (?:shows|confirms)\b"
+    r"|\bthe (?:render|preview)'s\b)")
 _APOLOGY = re.compile(r"(?i)\b(sorry|apologi[sz]e|unfortunately|i'?m afraid)\b")
 _LIMIT = re.compile(
     r"(?i)(\b(?:i|we) (?:can't|cannot|couldn't|could not|wasn't able to|was not able to|"
@@ -355,7 +357,8 @@ _DEFECT = re.compile(
     r"top|bottom|left|right|head sits|nears?)\b")
 _LIST = re.compile(r"(?i)\b(two|three|four|several|a few|some) (?:things|items|issues|notes|"
                    r"spots|points|problems)\b|\bstill to improve\b|\bi'?d still (?:improve|change|fix)\b"
-                   r"|\bopen items?\b|\bwhat i would still\b|\bstill off\b|\blimitations?\b")
+                   r"|\bopen items?\b|\bwhat i would still\b|\bstill off\b|\blimitations?\b"
+                   r"|\bstill open\b|\bfalls? short\b|\bdoes not (?:yet )?meet\b")
 
 
 def review_note(sent):
@@ -502,7 +505,8 @@ def _an(text):
 
 _SUMMARY = re.compile(r"(?i)\b(cut|video|short|reel|highlight|clip|edit|demo|piece|version|"
                       r"footage|take)\b.*\b(is|now|ready|done|finished|runs?|made|built)\b|"
-                      r"\b(done|ready|finished|i (?:cut|made|built|trimmed|turned|cleaned))\b")
+                      r"\b(?:is|it's|now)\b.{0,30}\b(cut|video|short|reel|highlight|clip|edit|demo|piece)\b|"
+                      r"\b(done|ready|finished|i(?:'ve| have)? (?:cut|made|built|trimmed|turned|cleaned))\b")
 
 
 def finish(draft, facts):
@@ -510,8 +514,13 @@ def finish(draft, facts):
     and why (kept in the job result for the admin)."""
     report = {"dropped": [], "kept": 0}
     kept, offers, limits = [], [], []
+    prev_dropped = False
     for sent in sentences(draft):
         kind, why = classify(sent, facts)
+        if kind in ("keep", "limit") and prev_dropped and re.match(
+                r"(?i)^(they|these|those|this|that|both|either|it also)\b", sent):
+            kind, why = "orphan", None
+        prev_dropped = kind not in ("keep", "limit", "offer")
         if kind == "unbacked":
             report["dropped"].append({"why": why, "sentence": sent[:200]})
         elif kind == "offer":
