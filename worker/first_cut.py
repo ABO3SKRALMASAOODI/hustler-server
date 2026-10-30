@@ -226,6 +226,16 @@ TRIM_SYSTEM = (
     "\"beats\": [{\"id\": \"<sentence id>\", \"words\": \"<1-3 words>\"}]}.")
 
 
+def _with_broll(system):
+    """Q1 (30 Oct): the same scout call also names the B-roll moments
+    (first_cut_visual.BROLL_RULE) for trial accounts and new subscribers;
+    a grandfathered payer's scout prompt is unchanged."""
+    import first_cut_visual as fcv
+    head, sep, tail = system.partition("Answer with JSON only")
+    tail = tail.replace("}]}.", "}]" + fcv.BROLL_JSON + "}.", 1)
+    return head + fcv.OPENING_RULE + fcv.ENDING_RULE + fcv.BROLL_RULE + sep + tail
+
+
 def _sentences(index, limit_s):
     return [s for s in index.get("sentences") or []
             if s.get("t0") is not None and float(s["t0"]) < limit_s]
@@ -250,7 +260,12 @@ def _density_pick(index, limit_s):
     return best
 
 
-def _fit_span(rows, first, last, low=20.0, high=60.0):
+def _ends_thought(row):
+    text = str(row.get("text") or "").strip()
+    return text[-1:] in ".!?" and len(text.split()) >= 3
+
+
+def _fit_span(rows, first, last, low=20.0, high=60.0, complete=False):
     """Keep the scout's hook (its first sentence) and bring the span into
     20-60 s on whole sentences: a too-short pick runs on to the following
     sentences, a too-long one ends earlier (E2E 25 Oct: Haiku often picks a
@@ -263,6 +278,21 @@ def _fit_span(rows, first, last, low=20.0, high=60.0):
         j += 1
     while j > i and float(rows[j]["t1"]) - start > high:
         j -= 1
+    if complete and not _ends_thought(rows[j]):
+        # Q1 (30 Oct): never end on a fragment. The run-on above reached
+        # "So I think it, I actually, when I was a student at" (talk10best,
+        # a hard fault): run on to the end of that thought, or walk back
+        # to the last one that ends.
+        k = j
+        while k + 1 < len(rows) and not _ends_thought(rows[k]) \
+                and float(rows[k + 1]["t1"]) - start <= high:
+            k += 1
+        if _ends_thought(rows[k]):
+            j = k
+        else:
+            back = [m for m in range(j, i - 1, -1) if _ends_thought(rows[m])]
+            if back and float(rows[back[0]]["t1"]) - start >= 12.0:
+                j = back[0]
     return start, float(rows[j]["t1"])
 
 
@@ -291,7 +321,9 @@ def scout_range(ctx, worker_db, spend):
                 break
             lines.append(line)
         try:
-            messages = [{"role": "system", "content": SCOUT_SYSTEM},
+            q1 = bool(getattr(ctx, "first_cut_q1", False))
+            messages = [{"role": "system", "content":
+                         _with_broll(SCOUT_SYSTEM) if q1 else SCOUT_SYSTEM},
                         {"role": "user", "content":
                          "Transcript (sentence id, source seconds):\n"
                          + "\n".join(lines)}]
@@ -311,12 +343,16 @@ def scout_range(ctx, worker_db, spend):
             first = by_id.get(str(pick.get("start_id")))
             last = by_id.get(str(pick.get("end_id")))
             if first and last and float(last["t1"]) > float(first["t0"]):
-                start, end = _fit_span(rows, first, last)
+                start, end = _fit_span(rows, first, last, complete=q1)
                 if 12.0 <= end - start <= 75.0:
                     ctx.first_cut_hook = clean_hook(pick.get("hook"),
                                                     ctx.index)
                     ctx.first_cut_beats = beat_spans(ctx.index, by_id,
                                                      pick.get("beats"))
+                    if q1:
+                        import first_cut_visual as fcv
+                        ctx.first_cut_broll = fcv.broll_spans(
+                            ctx.index, by_id, pick.get("broll"))
                     return start, end, pick.get("title"), "scout"
         except Exception as exc:  # noqa: BLE001 — the fallback is the point
             print(f"[first_cut] scout failed: {type(exc).__name__}: "
@@ -467,8 +503,10 @@ def trim_range(ctx, worker_db, spend):
         lines = [f"[{r['id']} {float(r['t0']):.1f}-{float(r['t1']):.1f}] "
                  f"{r['text']}" for r in rows]
         try:
+            q1 = bool(getattr(ctx, "first_cut_q1", False))
             resp = claude_lane.create(
-                model, [{"role": "system", "content": TRIM_SYSTEM},
+                model, [{"role": "system", "content":
+                         _with_broll(TRIM_SYSTEM) if q1 else TRIM_SYSTEM},
                         {"role": "user", "content":
                          "Transcript (sentence id, source seconds):\n"
                          + "\n".join(lines)}],
@@ -490,12 +528,21 @@ def trim_range(ctx, worker_db, spend):
             hook = clean_hook(pick.get("hook"), ctx.index)
             ctx.first_cut_beats = beat_spans(ctx.index, by_id,
                                              pick.get("beats"))
+            if q1:
+                import first_cut_visual as fcv
+                ctx.first_cut_broll = fcv.broll_spans(ctx.index, by_id,
+                                                      pick.get("broll"))
         except Exception as exc:  # noqa: BLE001 — the rules are the fallback
             print(f"[first_cut] trim scout failed: {type(exc).__name__}: "
                   f"{str(exc)[:200]}", flush=True)
     end_row = _complete_end(rows, first, last)
     if float(end_row["t1"]) - float(first["t0"]) >= min(8.0, 0.5 * duration):
         last = end_row
+    f = _faces(ctx.index)
+    if getattr(ctx, "first_cut_q1", False) and (not f or f["share"] < 0.35) \
+            and not _screen_like(ctx.index):
+        import first_cut_visual as fcv
+        last = fcv.conclusion_end(rows, first, last, _ends_thought)
     ctx.first_cut_hook = hook or _opening_hook(
         [r for r in rows if float(r["t0"]) >= float(first["t0"]) - 1e-3])
     return float(first["t0"]), float(last["t1"]), how
@@ -907,7 +954,7 @@ def _star(text):
                   text, count=1)
 
 
-def beat_slams(ctx, steps, started, beats, hook_end, y):
+def beat_slams(ctx, steps, started, beats, hook_end, y, avoid=None):
     """Slam the beats on screen as they are said (word_slam, display tier:
     huge type, the spoken words, captions drop exactly those words). At
     least BEAT_GAP_S apart, clear of the hook and the last second, two type
@@ -935,6 +982,8 @@ def beat_slams(ctx, steps, started, beats, hook_end, y):
         end = round(min(max(b + 0.45, start + 1.0), start + 1.6), 2)
         if start < earliest or end > prog - 0.8:
             continue
+        if any(start < b + 0.3 and end > a - 0.3 for a, b in avoid or []):
+            continue        # a cutaway already shows this moment (Q1)
         card = placed % 2 == 1
         params = {"text": _star(text), "tier": "display", "entrance": "pop",
                   "exit": "cut", "accent": BEAT_ACCENT, "width": 0.82,
@@ -962,6 +1011,11 @@ def beat_slams(ctx, steps, started, beats, hook_end, y):
         if _ok(res):
             placed += 1
             earliest = start + BEAT_GAP_S
+            cards = getattr(ctx, "first_cut_cards", None)
+            if isinstance(cards, list):
+                # Q1: a card covers the picture; a slam over the face keeps
+                # the wide framing (a cut-in pushed the chin into it)
+                cards.append((start, end))
     return placed
 
 
@@ -1200,6 +1254,15 @@ def _orientation(index):
     return "vertical" if h / w >= 1.6 else "other"
 
 
+def _fitted(ctx):
+    """The output frame fits the picture over bands (pad / pad_blur)."""
+    try:
+        frame = ctx.latest_edl()["json"].get("frame") or {}
+    except Exception:
+        return False
+    return str(frame.get("mode") or "") in ("pad", "pad_blur")
+
+
 def _clean_word(w):
     """A transcribed token that reads as a word in some script: letters
     (and their combining marks) with inner apostrophes or hyphens, not one
@@ -1234,7 +1297,7 @@ def _speech(index):
     return sum(1 for w in longer if _clean_word(w)) >= 0.6 * len(longer)
 
 
-def _music_piece(index, duration):
+def _music_piece(index, duration, robust=False):
     """An already-finished piece over a song (a music promo, an animated
     invitation, a lyric edit): the audio has a beat and what is heard is
     sung or not speech at all (fewer than 1.2 words a second). The First
@@ -1250,6 +1313,12 @@ def _music_piece(index, duration):
     words = (index or {}).get("words") or []
     if not _speech(index):
         return bool(words)
+    if robust:
+        # Q1 (30 Oct): SUNG, measured on the voice itself (held words, an
+        # unsure transcript, a chorus). The words-per-second rule below also
+        # kept a slow narration over a music bed whole and uncaptioned.
+        import first_cut_visual as fcv
+        return float(duration or 0) <= 75.0 and fcv.sung(index)
     # sung, not spoken: slow words over a beat in a short piece (C2: a 100 s
     # narrated vlog with long pauses over room noise is NOT one)
     return float(duration or 0) <= 60.0 and \
@@ -1263,7 +1332,24 @@ def video_chain(ctx, worker_db, started, spend):
     speech = _speech(ctx.index)
     ctx.first_cut_hook = None
     ctx.first_cut_beats = None
-    if _music_piece(ctx.index, duration) and duration <= 120:
+    # Q1 (30 Oct, first_cut_visual): trial accounts and new subscribers only
+    q1 = bool(getattr(ctx, "first_cut_q1", False))
+    ctx.first_cut_broll = None
+    ctx.first_cut_cards = []
+    early_bands = None
+    if q1 and _speech(ctx.index) and _orientation(ctx.index) == "vertical" \
+            and not _music_piece(ctx.index, duration, robust=True):
+        f0 = _faces(ctx.index)
+        if f0 and f0["share"] >= 0.5:
+            # Q1: the band crop is written while the program is the whole
+            # source, so its zoom spans every second of it; written after
+            # the trim, a trial request that restored earlier footage fell
+            # outside it and showed the bars (judges: "a small, banded
+            # layout on the first frame and the last 0.5 s", twice)
+            res, early_bands = deband(ctx, steps, started)
+            if not _ok(res):
+                early_bands = None
+    if _music_piece(ctx.index, duration, robust=q1) and duration <= 120:
         # a finished piece over a song: whole, unchanged in time, no title
         # or captions over its own design; only a non-vertical frame is
         # fitted to 9:16 (crop for footage, never bands around a speaker)
@@ -1331,6 +1417,12 @@ def video_chain(ctx, worker_db, started, spend):
             # pauses (the vlog fixture: every gap "non-quiet", nothing cut);
             # music and game audio never carry this many words a second.
             args["allow_nonquiet"] = True
+        elif q1:
+            import first_cut_visual as fcv
+            if fcv.spoken_slowly(ctx.index):
+                # Q1: a slow narration over a bed (music, room): its long
+                # pauses are not quiet, and they are still dead air
+                args.update(allow_nonquiet=True, min_silence_s=0.45)
         if _ok(_run(ctx, steps, "cut_silences", args, started)):
             applied.append("pauses trimmed")
         if _ok(_run(ctx, steps, "remove_filler_words", {}, started)):
@@ -1338,6 +1430,9 @@ def video_chain(ctx, worker_db, started, spend):
         shape_ends(ctx, steps, started)
     faces = _faces(ctx.index)
     talking = bool(speech and faces and faces["share"] >= 0.5)
+    if q1 and speech and not talking:
+        import first_cut_visual as fcv
+        fcv.muted_tail(ctx, steps, started, _run)
     vertical_source = _orientation(ctx.index) == "vertical"
     vertical_out = vertical_source
     screen_kept = False
@@ -1347,7 +1442,9 @@ def video_chain(ctx, worker_db, started, spend):
             # references keep tutorials landscape (R07, R11).
             applied.append("the screen's own shape kept so its text reads")
             screen_kept = True
-            if _ok(screen_focus(ctx, steps, started)):
+            if q1:
+                pass    # the travelling camera comes after the hook (below)
+            elif _ok(screen_focus(ctx, steps, started)):
                 applied.append("pushed in on its content")
         else:
             # Footage with no face and no speech (a montage, an event, a
@@ -1359,20 +1456,29 @@ def video_chain(ctx, worker_db, started, spend):
             if _ok(_run(ctx, steps, "auto_reframe", args, started)):
                 applied.append("reframed to 9:16")
                 vertical_out = True
-    if speech and not vertical_out:
+                if q1 and speech and not talking and _fitted(ctx):
+                    # Q1: a narrated landscape animation sat small between
+                    # blurred bands (u4899): crop it, following the action
+                    import first_cut_visual as fcv
+                    if fcv.action_follow(ctx, steps, started, _run):
+                        applied.append("the crop follows the action")
+    if speech and (q1 or not vertical_out):
+        # Q1: every speech cut is mastered (talk10best measured -15.6 LUFS)
         # 9:16 is mastered by default; a kept landscape/screen shape is not
         # (C2: the screen recording measured -17.1 LUFS; references -14)
         _run(ctx, steps, "set_master_loudness", {"enabled": True}, started)
-    bands = None
-    if vertical_out and talking:
+    bands = early_bands
+    if early_bands:
+        applied.append("the source's bars cropped")
+    elif vertical_out and talking:
         res, bands = deband(ctx, steps, started)
         if not _ok(res):
             bands = None
         else:
             applied.append("the source's bars cropped")
-    if talking and len(_keep(ctx) or []) > 1:
+    if talking and len(_keep(ctx) or []) > 1 and not q1:
         _run(ctx, steps, "conceal_jump_cuts", {}, started)
-    if talking:
+    if talking and not q1:
         # The references change the picture every 2-3 s; on a single take
         # the honest events are a punch on a stressed word and the key
         # phrase slammed in type (beat_slams), kept sparse (a punch about
@@ -1387,6 +1493,12 @@ def video_chain(ctx, worker_db, started, spend):
             _run(ctx, steps, "punch_in_on_emphasis", args, started)
     y = chest_y(faces, bands) if (talking and vertical_out) else None
     hook, hook_end = getattr(ctx, "first_cut_hook", None), HOOK_S
+    hook_y, mute_under = y, True
+    # (Q1 tried the scout's promise above the head: the band above a
+    # vertical talking head is the brand corner mark's (y 0.115-0.192), and
+    # the corner-mark guard removed every such title, scoring hook 2.5-4.
+    # The spoken line stays the title, at the chest; the scout's opening
+    # rule keeps it a self-contained claim.)
     if talking:
         opening = spoken_opening(ctx)
         hook, hook_end = opening if opening else (None, HOOK_S)
@@ -1394,35 +1506,85 @@ def video_chain(ctx, worker_db, started, spend):
         # 1.6 s on a fast speaker); it owns its zone, the captions wait
         hook_end = round(min(max(hook_end + 0.15, HOOK_MIN_S), HOOK_MAX_S), 2)
     if hook:
+        params = hook_params(hook, hook_y, vertical_out)
+        if q1 and screen_kept:
+            # judges: the title on the busy docs page was low-contrast
+            params["scrim"] = 0.85
         args = {"template": "hook_title", "start": 0.0, "end": hook_end,
-                "params": hook_params(hook, y, vertical_out),
+                "params": params,
                 # one reading task in the first seconds (captions.
                 # hook_owns_zone): no caption stacked under the title
-                "mute_captions": True,
+                "mute_captions": mute_under,
                 "purpose": "the opening line as a poster title (references: "
                            "a poster-scale title by 0.3 s, held 2.5-3.5 s)"}
         if _ok(_run(ctx, steps, "add_motion_graphic", args, started)):
             applied.append("a hook title")
     else:
         hook_end = 0.0
+    cutaways = []
+    if q1 and talking:
+        # Q1: B-roll on the concrete things the speaker names, first (the
+        # slams and cards keep clear of it)
+        import first_cut_visual as fcv
+        moments = getattr(ctx, "first_cut_broll", None) or []
+        if moments:
+            cutaways = fcv.place_broll(ctx, steps, started, _run, moments,
+                                       max(hook_end, HOOK_S), spend)
+            if cutaways:
+                applied.append("b-roll of what is said")
+    if q1 and screen_kept:
+        import first_cut_visual as fcv
+        if _ok(fcv.screen_follow(ctx, steps, started, _run, spend,
+                                 max(hook_end, 1.5))):
+            applied.append("a camera that follows what is discussed")
     if speech and not screen_kept:
         beats = list(getattr(ctx, "first_cut_beats", None) or [])
         if len(beats) < 3:
             # the scout's beats first, the spoken figures after them
             beats += [b for b in number_beats(ctx.index)
                       if all(abs(b[0] - a[0]) > 2.0 for a in beats)]
-        if beat_slams(ctx, steps, started, beats, hook_end, y):
+        if beat_slams(ctx, steps, started, beats, hook_end, y,
+                      avoid=cutaways):
             applied.append("key lines in big type")
+    if q1 and talking:
+        import first_cut_visual as fcv
+        busy = sorted(cutaways + list(ctx.first_cut_cards or []))
+        aim = fcv.face_aim(ctx.index, bands, vertical_source)
+        if fcv.cut_ins(ctx, steps, started, _run, busy, aim,
+                       max(hook_end, 1.0), bands=bool(bands)):
+            applied.append("a closer camera at the turns")
+        if len(_keep(ctx) or []) > 1:
+            _run(ctx, steps, "conceal_jump_cuts", {}, started)
+    elif q1 and speech and not screen_kept and vertical_out:
+        # Q1: a narrated animation's long shots get the same rhythm, softer
+        # (judges: "one cut every 4.5 s across long camera moves")
+        import first_cut_visual as fcv
+        if fcv.cut_ins(ctx, steps, started, _run,
+                       sorted(ctx.first_cut_cards or []), (0.5, 0.5),
+                       max(hook_end, 1.0), levels=fcv.CUT_IN_SOFT):
+            applied.append("closer framings at the turns")
+    if q1 and bands:
+        import first_cut_visual as fcv
+        fcv.refresh_band_crop(ctx, steps, started, _run)
     if speech:
         style = {"preset": "reels", "motion_look": "editorial",
                  "size_scale": CAPTION_SCALE}
+        words_per = CAPTION_WORDS
+        if q1:
+            import first_cut_visual as fcv
+            style, words_per = fcv.caption_style(
+                style, talking=talking, screen=screen_kept,
+                vertical=vertical_out)
         if y is not None:
             style["anchor_y"] = y
         if _ok(_run(ctx, steps, "add_captions",
                     {"mode": "from_transcript", "style": style,
-                     "max_words_per_caption": CAPTION_WORDS},
+                     "max_words_per_caption": words_per},
                     started)):
             applied.append("captions")
+            if q1:
+                import first_cut_visual as fcv
+                fcv.drop_tail_words(ctx, steps, started, _run)
     return steps, applied, picked
 
 
@@ -1700,6 +1862,14 @@ def run(worker_db, job, project, index_row):
         claude_trial.activate(trial_scope, recorder)
     elif subscribed and claude_trial.credit_status(worker_db).get("on"):
         ctx.first_cut_model = claude_trial.flag(worker_db)["model"]
+    # Q1 (30 Oct): the visual-variety devices reach trial accounts and NEW
+    # subscribers only; a grandfathered payer's First cut is unchanged (D1)
+    try:
+        import first_cut_visual
+        ctx.first_cut_q1 = bool(worker_db.run(
+            first_cut_visual.engine_on, job.get("user_id"), subscribed))
+    except Exception:
+        ctx.first_cut_q1 = False
     llm.set_turn_plan(plan if subscribed else "", project_id=project["id"])
     try:
         if url:
