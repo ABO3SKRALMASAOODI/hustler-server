@@ -211,6 +211,22 @@ def test_an_engine_account_gets_the_beats_title_camera_and_end_beat(monkeypatch)
     assert any("punch-in" in p for p in applied)
 
 
+def test_the_title_is_whole_on_its_first_frame_for_an_engine_cut_only(monkeypatch):
+    """QB2 (30 Oct): "bring the title in on frame 0.0, not 0.3 s" (the silent
+    clips, 5 of 8 judgements): an engine cut's hook title enters as a cut
+    (Q5's rule for a talking head, now for every engine cut); a grandfathered
+    account's title is exactly as before."""
+    names, _applied = _chain(monkeypatch, _ChainCtx(q1=True))
+    hooks = [a for n, a in names if n == "add_motion_graphic"
+             and a.get("template") == "hook_title"]
+    assert hooks and hooks[0]["start"] == 0.0
+    assert hooks[0]["params"]["entrance"] == "cut"
+    names, _applied = _chain(monkeypatch, _ChainCtx(q1=False))
+    old = [a for n, a in names if n == "add_motion_graphic"
+           and a.get("template") == "hook_title"]
+    assert not old or old[0]["params"].get("entrance") != "cut"
+
+
 def test_a_grandfathered_payer_keeps_the_whole_take(monkeypatch):
     names, applied = _chain(monkeypatch, _ChainCtx(q1=False))
     assert "keep_segments" not in [n for n, _a in names]
@@ -550,18 +566,68 @@ def test_a_long_hold_reads_down_the_column_in_discrete_steps():
         [(1.0, t1, 2.2), (3.0, t1, 2.2)]
 
 
-def test_a_beat_never_shows_much_below_the_subject():
-    """The gym clip's judges, every run: "the lower third is sink". A
-    window keeps at most GROUND of itself below the subject's base."""
-    box = (0.05, 0.47, 0.35, 0.72)
-    for z in (1.3, 1.6, 2.1):
+def test_a_subject_that_fills_the_window_never_shows_much_ground_below_it():
+    """The gym clip's judges (Q6): "the lower third is sink". A subject that
+    fills the window (FILL_TOP or more of its height) keeps at most GROUND of
+    the window below its base."""
+    box = (0.05, 0.40, 0.35, 0.72)                       # 0.32 high
+    for z in (2.0, 2.1, 2.3):
         x0, y0, x1, y1 = silent_cut.frame_at(box, z)
-        assert y1 - box[3] <= silent_cut.GROUND * (y1 - y0) + 1e-3   # 4-decimal windows
+        win = y1 - y0
+        assert box[3] - box[1] >= silent_cut.FILL_TOP * win - 1e-6
+        assert y1 - box[3] <= silent_cut.GROUND * win + 1e-3   # 4-decimal windows
         assert y0 <= box[1]                                 # the head stays in
     # a medium beat is clearly wider than a close one, even when capped
     close = silent_cut.beat_z(box, 1, 2.1)
     medium = silent_cut.beat_z(box, 2, 2.1)
     assert medium <= close * silent_cut.MEDIUM_RATIO + 1e-6
+    assert close - medium >= silent_cut.ALTERNATE - 1e-6
+
+
+def test_a_small_subject_sits_in_the_upper_two_thirds_not_pinned_to_the_base():
+    """QB2 (30 Oct), the gym clip's and the snow walk's judges, 8 of 8: "the
+    head sits around y 0.7 under a band of empty wall". A subject that
+    cannot fill the window (a small one at the deepest crop) has HEAD_ROOM of
+    the window above its top, whatever is below it."""
+    box = (0.07, 0.476, 0.34, 0.713)                     # the gym clip's last beat
+    for z in (1.5, 1.8, 2.1):
+        x0, y0, x1, y1 = silent_cut.frame_at(box, z)
+        win = y1 - y0
+        assert box[3] - box[1] < silent_cut.FILL_TOP * win
+        assert abs((box[1] - y0) / win - silent_cut.HEAD_ROOM) < 0.01
+        assert (box[3] - y0) / win < 0.95            # the whole subject is in
+    # the head's own centre: the references' 0.30-0.38
+    up = silent_cut._upper(box)
+    _x0, y0, _x1, y1 = silent_cut.frame_at(up, 2.2)
+    head_y = ((up[1] + 0.04) - y0) / (y1 - y0)
+    assert 0.25 <= head_y <= 0.42
+    # the title's room (bias) pushes him down by that share
+    _a, y0b, _b, y1b = silent_cut.frame_at(box, 2.1, 0.1)
+    assert abs((box[1] - y0b) / (y1b - y0b) - (silent_cut.HEAD_ROOM + 0.1)) < 0.01
+
+
+def test_a_window_never_leaves_the_frame_and_follows_a_subject_at_the_edge():
+    for box in ((0.0, 0.0, 0.2, 0.15), (0.8, 0.85, 1.0, 1.0), (0.4, 0.9, 0.6, 1.0)):
+        for z in (1.2, 2.1, 2.4):
+            x0, y0, x1, y1 = silent_cut.frame_at(box, z, 0.12)
+            assert 0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0
+            assert abs((x1 - x0) - 1.0 / z) < 2e-4 and abs((y1 - y0) - 1.0 / z) < 2e-4
+
+
+def test_the_end_beat_never_slides_past_the_frame_the_model_saw_clean():
+    """QB2: the snow walk's end beat started later than planned (a blocked
+    look just before it) and the slide carried its last 0.8 s onto frames
+    where the man had left (a jacket edge, 4 of 4 judgements). It only
+    shortens now: it ends END_AFTER_S after its clean look."""
+    looks = [(t, (0.4, 0.4, 0.55, 0.7), True, False) for t in
+             (0.6, 1.9, 3.1, 4.3, 5.6, 6.8, 8.0, 9.3, 10.5, 11.7, 13.0)]
+    looks += [(14.2, (0.0, 0.48, 0.31, 0.87), False, False),    # blocked
+              (15.4, (0.19, 0.37, 0.56, 0.74), True, True),     # the end pick
+              (16.7, (0.59, 0.31, 1.0, 0.76), False, False)]    # he has left
+    segs = silent_cut.plan(looks, 17.3)
+    assert segs and segs[-1][1] <= 15.4 + silent_cut.END_AFTER_S + 1e-6
+    assert segs[-1][1] - segs[-1][0] >= 0.7
+    assert segs[-1][0] >= 14.2 + silent_cut.DIRTY_PAD_S - 1e-6      # clear of the block
 
 
 def test_never_more_than_two_moments_of_one_shot_in_a_row():

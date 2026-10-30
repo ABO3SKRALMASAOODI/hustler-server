@@ -37,8 +37,8 @@ BEATS_MIN, BEATS_MAX = 4, 6
 BEAT_S = 2.6                # one beat per this much source
 PROG_SHARE = 0.62           # the cut keeps about this share of the take
 PROG_MIN_S, PROG_MAX_S = 7.0, 11.5
-BEAT_MIN_S, BEAT_MAX_S = 1.1, 1.8   # judges: "something every 1-2 s"
-OPEN_MIN_S = 1.6            # the first beat carries the title's first read
+BEAT_MIN_S, BEAT_MAX_S = 1.1, 1.5   # judges: "something every 1-2 s"
+OPEN_MIN_S = 1.4            # the first beat carries the title's first read
 END_MIN_S = 1.6             # the end beat: the snap and live picture after it
 GAP_MIN_S = 0.8             # a jump skips at least this much of the take
 DIRTY_PAD_S = 0.3           # a beat stays this far from an unclean frame
@@ -54,9 +54,13 @@ OPEN_FILL = 0.62
 END_FILL = 0.9              # the hero framing after the snap
 PUSH = 0.14                 # an eased push-in adds this much zoom
 ALTERNATE = 0.3             # medium and close differ by at least this much zoom
-MEDIUM_RATIO = 0.72         # ... and the medium is at most this share of the close
+MEDIUM_RATIO = 0.8          # ... and the medium is at most this share of the close
                             # (final run: 2.1x after 2.4x read as one long shot)
-GROUND = 0.08               # at most this share of the window below the subject
+GROUND = 0.08               # a subject that fills the window: at most this share below it
+HEAD_ROOM = 0.25            # a subject that cannot fill it sits with this much above
+FILL_TOP = 0.62             # ... "fills" = at least this share of the window height
+                            # (QB2, 30 Oct: a small subject pinned to the base left the
+                            # head at y 0.72 under a band of empty wall, 8 of 8 judgements)
 READ_FILL = 0.28            # the subject reads at this share of the frame height
 OPEN_SKIP_MAX = 0.4         # the cut never skips more than this share of the take
 
@@ -252,7 +256,14 @@ def plan(looks, duration, z_max=2.4):
         if b > hi:
             a, b = a - (b - hi), hi
         if a < lo:
-            b, a = min(hi, b + (lo - a)), lo
+            if last and b - lo >= 0.7:
+                # the end beat only ever shortens: sliding it later put its
+                # last second on a frame the model had not seen clean (the
+                # snow walk's man was out of the frame, "a jacket edge", 4
+                # of 4 judgements)
+                a = lo
+            else:
+                b, a = min(hi, b + (lo - a)), lo
         a, b = max(a, lo), min(b, hi)
         if b - a >= 0.7:
             segs.append([round(a, 2), round(b, 2)])
@@ -307,19 +318,27 @@ def fill_z(box, fill, z_max):
 
 def frame_at(box, z, bias=0.0):
     """The crop window ([x0, y0, x1, y1], fractions, the frame's own aspect)
-    at zoom ``z`` on the subject: centred on it, but never showing more than
-    GROUND of the window below its base (the subject stands near the bottom
-    of the frame; judges, the gym clip: "the lower third is sink", every
-    run); ``bias`` moves the subject down the frame by that share of the
-    window (room above it for a title)."""
+    at zoom ``z`` on the subject. A subject that fills the window
+    (FILL_TOP or more of its height) is centred, but never with more than
+    GROUND of the window below its base (the gym clip: "the lower third is
+    sink"). One that cannot fill it (a small subject at the deepest crop)
+    sits with HEAD_ROOM of the window above its top, the rule of thirds: the
+    old base pin left the head at y 0.72 under empty wall (QB2: the gym
+    clip's last beat, the snow walk's whole middle, every judgement).
+    ``bias`` moves the subject down the frame by that share of the window
+    (room above it for a title)."""
     half = 0.5 / max(1.0, z)
+    win = 2 * half
     cx = (box[0] + box[2]) / 2.0
-    cy = (box[1] + box[3]) / 2.0 - bias * 2 * half
-    cy = min(cy, box[3] + GROUND * 2 * half - half)
-    x0 = _clamp(cx - half, 0.0, 1.0 - 2 * half)
-    y0 = _clamp(cy - half, 0.0, 1.0 - 2 * half)
-    return [round(x0, 4), round(y0, 4), round(x0 + 2 * half, 4),
-            round(y0 + 2 * half, 4)]
+    if box[3] - box[1] < FILL_TOP * win:
+        y0 = _clamp(box[1] - (HEAD_ROOM + bias) * win, 0.0, 1.0 - win)
+    else:
+        cy = (box[1] + box[3]) / 2.0 - bias * win
+        cy = min(cy, box[3] + GROUND * win - half)
+        y0 = _clamp(cy - half, 0.0, 1.0 - win)
+    x0 = _clamp(cx - half, 0.0, 1.0 - win)
+    return [round(x0, 4), round(y0, 4), round(x0 + win, 4),
+            round(y0 + win, 4)]
 
 
 def _key(t, box, z, bias=0.0):

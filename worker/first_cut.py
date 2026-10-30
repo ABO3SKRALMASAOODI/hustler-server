@@ -1980,9 +1980,11 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         hook_end = round(min(max(hook_end + 0.15, HOOK_MIN_S), HOOK_MAX_S), 2)
     if hook:
         params = hook_params(hook, hook_y, vertical_out)
-        if _talk_source(ctx):
+        if q1:
             # Q5: whole on frame 0 (judges, phone and phonehook: "the hook
-            # title on screen at 0.0 s instead of about 0.3 s")
+            # title on screen at 0.0 s instead of about 0.3 s"); QB2: the
+            # same for every engine cut (the silent clips and the screen
+            # recording drew the same note: 5 of 8 and 2 of 8 judgements)
             params["entrance"] = "cut"
         if q1 and screen_kept:
             # judges: the title on the busy docs page was low-contrast
