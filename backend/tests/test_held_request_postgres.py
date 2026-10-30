@@ -246,3 +246,89 @@ def test_mcp_only_plans_internal_accounts_and_later_walls_are_not_filed(cur):
                     "amount_cents, occurred_at) VALUES (%s, 'x', 'completed',"
                     " 1500, %s)", (uid, NOW - timedelta(minutes=5)))
     assert _scan(cur, NOW.replace(tzinfo=timezone.utc)) == []
+
+
+# ── D1V: Studio in Plus can open a new Plus subscriber's lane later ────────
+
+def _plus_lane_open(monkeypatch):
+    """A NEW Plus subscriber while Studio in Plus is on (D1): the gate lets
+    them into the Studio."""
+    from routes import video
+    monkeypatch.setattr(video, "_new_subscriber_studio", lambda *_: True)
+
+
+def test_the_assistant_keeps_the_request_when_the_plus_lane_opens(cur,
+                                                                  monkeypatch):
+    pid, sid = user(cur, 1)
+    wall(cur, 2, sid)
+    subscribe(cur, 1, "plus_2026")
+    assert held_request.for_assistant(cur, 1, pid) is not None   # lane closed
+    _plus_lane_open(monkeypatch)
+    assert held_request.studio_lane_open(cur, 1) is True
+    # The hand-off follows the plan: the note does not vanish with nobody
+    # running the request.
+    assert held_request.for_assistant(cur, 1, pid) is not None
+    assert held_request.assistant_took_over(cur, 1, NOW - timedelta(minutes=5)) is False
+    cur.execute("INSERT INTO video_jobs (user_id, project_id, type, payload) "
+                "VALUES (1, %s, 'mcp_tool', %s)",
+                (pid, Json({"tool": "record_website_demo"})))
+    assert held_request.assistant_took_over(cur, 1, NOW - timedelta(minutes=5)) is True
+    assert held_request.for_assistant(cur, 1, pid) is None
+    # Once the Studio ran it the note is gone too.
+    pid2, sid2 = user(cur, 3)
+    wall(cur, 30, sid2)
+    subscribe(cur, 3, "plus_2026")
+    held_request._mark(cur, 30, "studio", 9, 31)
+    assert held_request.for_assistant(cur, 3, pid2) is None
+
+
+def test_mcp_activity_never_holds_back_a_studio_plan(cur):
+    pid, sid = user(cur, 1)
+    wall(cur, 2, sid)
+    subscribe(cur, 1, "pro_2026")
+    cur.execute("INSERT INTO video_jobs (user_id, project_id, type, payload) "
+                "VALUES (1, %s, 'mcp_tool', %s)",
+                (pid, Json({"tool": "record_website_demo"})))
+    assert held_request.assistant_took_over(cur, 1, NOW - timedelta(minutes=5)) is False
+    assert held_request.for_assistant(cur, 1, pid) is None
+
+
+def test_the_intake_skips_a_plus_request_the_assistant_made(cur, monkeypatch):
+    _plus_lane_open(monkeypatch)
+    pid, sid = user(cur, 1)
+    wall(cur, 2, sid, ago_min=9)
+    subscribe(cur, 1, "plus_2026")
+    cur.execute("INSERT INTO payments (user_id, plan, status, amount_cents, "
+                "occurred_at) VALUES (1, 'plus_2026', 'completed', 1500, %s)",
+                (NOW - timedelta(minutes=5),))
+    now = NOW.replace(tzinfo=timezone.utc)
+    assert [f["ref"] for f in _scan(cur, now)] == ["held:2"]   # lane open
+    cur.execute("INSERT INTO video_jobs (user_id, project_id, type, payload, "
+                "created_at) VALUES (1, %s, 'mcp_tool', %s, %s)",
+                (pid, Json({"tool": "record_website_demo"}),
+                 now - timedelta(minutes=4)))
+    assert _scan(cur, now) == []
+
+
+def test_a_request_printed_to_the_assistant_is_the_assistants(cur):
+    """open_project / project_state print the waiting request (mark_shown);
+    once the assistant has been shown it, the Studio must not also run it
+    (the assistant may be asking the user to confirm). The note stays with
+    the assistant until it acts."""
+    pid, sid = user(cur, 1)
+    wall(cur, 2, sid, ago_min=10)
+    subscribe(cur, 1, "plus_2026")
+    since = NOW - timedelta(minutes=10)
+    note = held_request.for_assistant(cur, 1, pid)
+    assert note["plans_id"] == 2
+    held = held_request.pending(cur, 1)
+    assert held_request.assistant_took_over(cur, 1, since, held["meta"]) is False
+    held_request.mark_shown(cur, 2)
+    held_request.mark_shown(cur, 2)                      # once only
+    held = held_request.pending(cur, 1)
+    assert held is not None                              # still waiting
+    assert held["meta"][held_request.SHOWN_KEY]
+    assert held_request.assistant_took_over(cur, 1, since, held["meta"]) is True
+    assert held_request.for_assistant(cur, 1, pid) is not None
+    subscribe(cur, 1, "pro_2026")
+    assert held_request.assistant_took_over(cur, 1, since, held["meta"]) is False

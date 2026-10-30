@@ -831,8 +831,11 @@ def vdb(db_url=None):
 
 
 # Plans whose subscription does not include the Studio AI editor: MCP Connect
-# and Plus ($15, 500 credits). Owner decision D1 (Plus includes the Studio)
-# is on hold since 25 Oct 2026, so Plus stays an MCP-only plan.
+# and Plus ($15, 500 credits). Owner decision D1 (30 Oct 2026): Plus includes
+# the Studio for NEW subscribers only while the owner's "Studio in Plus"
+# switch is on and the Claude credit line is open (claude_plans
+# .studio_included, _new_subscriber_studio below); otherwise Plus stays an
+# MCP-only plan, and grandfathered Plus always is.
 MCP_ONLY_PLANS = frozenset({"mcp_connect", "plus_2026"})
 
 
@@ -843,8 +846,9 @@ def studio_ai_included(plan):
 def _new_subscriber_studio(cur, user_id, plan):
     """Owner decision D1 for NEW subscribers (claude_plans, app_kv
     studio_for_all_plans, default off): a Plus account that subscribed after
-    the release cutoff has the Studio AI editor. Grandfathered accounts, MCP
-    Connect, the flag off or any doubt: False (today's rule)."""
+    the release cutoff has the Studio AI editor while the switch is on and
+    the Claude credit line is open. Grandfathered accounts, MCP Connect, the
+    flag off, the credit line AUTO-OFF or any doubt: False (today's rule)."""
     conn = getattr(cur, "connection", None)
     if conn is None:
         return False
@@ -853,14 +857,31 @@ def _new_subscriber_studio(cur, user_id, plan):
                                   user_id, plan, True, default=False))
 
 
+def _studio_paused(cur, user_id, plan):
+    """A NEW Plus subscriber while Studio-in-Plus is off or the Claude credit
+    line is AUTO-OFF (claude_plans.paused_for): their refusal says so
+    plainly. Grandfathered accounts and any doubt: False (today's words)."""
+    conn = getattr(cur, "connection", None)
+    if conn is None:
+        return False
+    import claude_plans
+    return bool(claude_plans.safe(conn, claude_plans.paused_for,
+                                  user_id, plan, True, default=False))
+
+
 def _studio_ai_gate(cur, user_id):
     cur.execute("SELECT plan, is_subscribed FROM users WHERE id = %s", (user_id,))
     account = cur.fetchone() or {}
     if account.get("plan") in MCP_ONLY_PLANS and account.get("is_subscribed") \
             and not _new_subscriber_studio(cur, user_id, account.get("plan")):
-        return jsonify({"error": "You’re on the MCP plan. Upgrade to use the Valmera AI editor.",
-                        "code": "mcp_only", "connect_url": "/mcp/connect",
-                        "upgrade_url": "/subscribe"}), 403
+        body = {"error": "You’re on the MCP plan. Upgrade to use the Valmera AI editor.",
+                "code": "mcp_only", "connect_url": "/mcp/connect",
+                "upgrade_url": "/subscribe"}
+        if _studio_paused(cur, user_id, account.get("plan")):
+            from credits import PLUS_STUDIO_PAUSED_TEXT
+            body["error"] = PLUS_STUDIO_PAUSED_TEXT
+            body["studio_ai_paused"] = True
+        return jsonify(body), 403
     return None
 
 
@@ -4080,7 +4101,7 @@ def replay_blocked(user_id, project_id):
                             "waiting_for_index":
                                 resumed.get("reason") == "waiting_for_index"})
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
-        cur.execute("""SELECT id, role, meta,
+        cur.execute("""SELECT id, role, meta, created_at,
                               created_at > NOW() - make_interval(hours => %s)
                                   AS recent
                        FROM chat_messages
@@ -4115,6 +4136,13 @@ def replay_blocked(user_id, project_id):
             return jsonify({"replay": "export", "version": version,
                             "status": status,
                             **(response.get_json(silent=True) or {})})
+        if pending and _held_request.assistant_took_over(
+                cur, user_id, last.get("created_at"), meta):
+            # An MCP-only plan's request went to the customer's own assistant
+            # (held_request.for_assistant), which already started on it; the
+            # Studio lane opened afterwards (D1: Studio in Plus switched on,
+            # or the credit line back). Never run it a second time (D1V).
+            return jsonify({"replay": None, "reason": "assistant_took_over"})
         cur.execute("""SELECT 1 FROM video_jobs
                        WHERE project_id = %s AND type = 'agent_turn'
                          AND state IN ('queued','running') LIMIT 1""",

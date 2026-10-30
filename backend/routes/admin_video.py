@@ -3453,6 +3453,44 @@ def video_trial_set():
     return jsonify(dict(out, ok=True))
 
 
+@admin_video_bp.route("/admin/video/claude-features", methods=["GET"])
+@admin_required
+def video_claude_features_get():
+    """The owner's "Claude features" card: the free trial and Studio in Plus,
+    each ON / OFF / AUTO-OFF with the reason, and the shared Claude spend
+    against the cycle budget (studio_plus_toggle.features)."""
+    import studio_plus_toggle
+    with adb() as conn:
+        return jsonify(studio_plus_toggle.features(conn))
+
+
+@admin_video_bp.route("/admin/video/studio-plus", methods=["GET"])
+@admin_required
+def video_studio_plus_get():
+    import studio_plus_toggle
+    with adb() as conn:
+        return jsonify(studio_plus_toggle.status(conn))
+
+
+@admin_video_bp.route("/admin/video/studio-plus", methods=["POST"])
+@admin_required
+def video_studio_plus_set():
+    """{"on": true|false}: the owner switches Studio in Plus (new Plus
+    subscribers' Studio AI editor on Claude). Effective within 30 s. It never
+    overrides the automatic credit switch."""
+    import studio_plus_toggle
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body.get("on"), bool):
+        return jsonify({"error": "send {\"on\": true} or {\"on\": false}"}), 400
+    with adb() as conn:
+        studio_plus_toggle.switch(conn, body["on"], actor="admin")
+        conn.commit()
+        out = studio_plus_toggle.status(conn)
+    current_app.logger.info("Studio in Plus switched %s by the admin",
+                            "ON" if body["on"] else "OFF")
+    return jsonify(dict(out, ok=True))
+
+
 @admin_video_bp.route("/admin/video/projects/<int:project_id>/repair",
                       methods=["POST"])
 @admin_required

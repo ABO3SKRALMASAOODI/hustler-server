@@ -353,13 +353,23 @@ def _account_reason(cur, cfg, user_id):
 
 
 def _new_subscriber(cur, user_id):
-    """A subscriber who joined after the release cutoff (claude_plans).
-    Any failure reads as grandfathered: today's behaviour."""
+    """A subscriber who joined after the release cutoff (claude_plans) and
+    whose plan includes the Studio right now: an MCP-only plan (MCP Connect,
+    and Plus while Studio-in-Plus is off or AUTO-OFF) never gets an automatic
+    Studio First cut. Any failure reads as grandfathered: today's
+    behaviour."""
     try:
         import claude_plans
         cur.execute("SAVEPOINT free_trial_new_subscriber")
         try:
             out = bool(claude_plans.applies(cur.connection, user_id, True))
+            if out:
+                cur.execute("SELECT plan FROM users WHERE id = %s",
+                            (int(user_id),))
+                plan = (cur.fetchone() or {}).get("plan")
+                if plan in ("plus_2026", "mcp_connect"):
+                    out = bool(claude_plans.studio_included(
+                        cur.connection, user_id, plan, True))
             cur.execute("RELEASE SAVEPOINT free_trial_new_subscriber")
         except Exception:
             cur.execute("ROLLBACK TO SAVEPOINT free_trial_new_subscriber")

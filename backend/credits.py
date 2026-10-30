@@ -125,9 +125,11 @@ _D1_FLAG_CACHE = {"value": None, "expires": 0.0}
 
 
 def _studio_for_all_plans_on(conn=None):
-    """app_kv studio_for_all_plans is on (D1 for new subscribers): the plan
-    cards then say that Plus includes the Studio AI editor. Off, missing or
-    unreadable: False, and the cards are exactly today's. Cached 30 s."""
+    """Plus includes the Studio for new subscribers right now (D1;
+    claude_plans.plus_studio_live: the owner's switch on AND the Claude
+    credit line open): the plan cards then say that Plus includes the Studio
+    AI editor. Off, AUTO-OFF, missing or unreadable: False, and the cards are
+    exactly today's (Plus = MCP). Cached 30 s."""
     import time as _time
     if _D1_FLAG_CACHE["value"] is not None \
             and _time.monotonic() < _D1_FLAG_CACHE["expires"]:
@@ -141,23 +143,33 @@ def _read_studio_for_all_plans(conn=None):
     try:
         import claude_plans
         if conn is not None:
-            flag = claude_plans.safe(conn, claude_plans.read_flag, default=None)
-        else:
-            from flask import has_app_context
-            if not has_app_context():
-                return False
-            import psycopg2
-            from database_config import preferred_database_url
-            c = psycopg2.connect(preferred_database_url(), connect_timeout=3,
-                                 options="-c default_transaction_read_only=on "
-                                         "-c statement_timeout=1500")
-            try:
-                flag = claude_plans.read_flag(c)
-            finally:
-                c.close()
-        return bool(flag and flag["on"] and "plus_2026" in flag["studio_plans"])
+            return bool(claude_plans.safe(conn, claude_plans.plus_studio_live,
+                                          default=False))
+        from flask import has_app_context
+        if not has_app_context():
+            return False
+        import psycopg2
+        from database_config import preferred_database_url
+        c = psycopg2.connect(preferred_database_url(), connect_timeout=3,
+                             options="-c default_transaction_read_only=on "
+                                     "-c statement_timeout=1500")
+        try:
+            return bool(claude_plans.plus_studio_live(c))
+        finally:
+            c.close()
     except Exception:
         return False
+
+
+# What a new Plus subscriber reads while Plus does not include the Studio
+# right now (the owner's switch off, or the Claude credit line AUTO-OFF).
+# Plain, no numbers, no mention of credits or of anyone's billing: the plan
+# edits through MCP, as Plus did before D1. Grandfathered Plus keeps today's
+# words (routes.video._studio_ai_gate).
+PLUS_STUDIO_PAUSED_TEXT = (
+    "Studio editing isn't included in Plus right now. Your plan edits "
+    "through MCP: connect your assistant and ask it to edit this project. "
+    "To edit here with Valmera AI, upgrade to Pro or Max.")
 
 
 def subscribe_offer_body(conn=None):
@@ -407,6 +419,12 @@ def get_balance(conn, user_id: int) -> dict:
         if claude_plans.safe(conn, claude_plans.studio_included, user_id,
                              plan, True, default=False):
             out["studio_ai_included"] = True
+        elif claude_plans.safe(conn, claude_plans.paused_for, user_id,
+                               plan, True, default=False):
+            # A NEW Plus subscriber while Studio-in-Plus is off or AUTO-OFF:
+            # the Studio shows the MCP path with this plain line.
+            out["studio_ai_paused"] = True
+            out["studio_ai_notice"] = PLUS_STUDIO_PAUSED_TEXT
     if subscribe_gated:
         out["subscribe_offer"] = subscribe_offer_body(conn)
     return out

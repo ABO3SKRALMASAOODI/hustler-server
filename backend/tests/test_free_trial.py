@@ -88,6 +88,8 @@ class DB:
             self._row = {"n": self.today}
         elif q.startswith("SELECT email, is_verified FROM users"):
             self._row = self.user
+        elif q.startswith("SELECT plan FROM users"):
+            self._row = {"plan": self.user.get("plan")}
         elif q.startswith("SELECT device_id FROM website_signups"):
             self._row = {"device_id": "dev-1"}
         elif "COUNT(DISTINCT p.user_id)" in q:

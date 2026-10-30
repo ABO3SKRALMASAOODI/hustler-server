@@ -364,6 +364,22 @@ def check_trial_switch(b, t):
             f"{'ready' if b.get('ledger_ready') else 'missing (040)'}")
 
 
+def check_claude_features(b, t):
+    """The owner's "Claude features" card (studio_plus_toggle.features): the
+    free trial and Studio in Plus, each in a known state, and the shared
+    line's budget."""
+    need(isinstance(b, dict) and b, "empty body")
+    trial, studio = b.get("trial") or {}, b.get("studio_plus") or {}
+    need(trial.get("state") in ("on", "off", "auto_off"),
+         f"trial state {trial.get('state')!r}")
+    need(studio.get("state") in ("on", "off", "auto_off"),
+         f"studio_plus state {studio.get('state')!r}")
+    need((b.get("spend") or {}).get("budget_usd") is not None, "no cycle budget")
+    def _one(x):
+        return x["state"] + (f" ({x.get('reason')})" if x.get("reason") else "")
+    return f"trial {_one(trial)} · Studio in Plus {_one(studio)}"
+
+
 # PLAN.md §4.3 (strategy 1025, written 25 Oct 2026 09:00 UTC): the accounts
 # each list-type flag named that morning. Printed beside what the board
 # flags now; states move (a card retry, a cancellation), so a difference is
@@ -556,6 +572,7 @@ ENDPOINTS = [
     ("Overview", "/admin/video/ops/summary", check_ops_summary),
     ("Overview", "/admin/video/ops/today", check_ops_today),
     ("Overview", "/admin/video/trial", check_trial_switch),
+    ("Overview", "/admin/video/claude-features", check_claude_features),
     ("Overview", "/admin/video/overview?summary=1", check_video_overview),
     ("Overview", "/admin/video/overview", check_video_overview),
     ("Overview", "/admin/video/upload_failures?days=30&limit=100", check_dict),

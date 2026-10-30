@@ -43,8 +43,12 @@ TYPED = {"id": 55, "session_id": 3, "project_id": 9, "created_at": None,
 class Cur:
     """The few statements resume() sends itself, by their opening words."""
 
-    def __init__(self, agent_live=False, taken=False):
+    def __init__(self, agent_live=False, taken=False, plan="pro_2026",
+                 assistant_worked=False):
         self.agent_live, self.taken = agent_live, taken
+        # D1V: the plan (MCP-only plans hand the request to the assistant)
+        # and whether that assistant already started working since the wall.
+        self.plan, self.assistant_worked = plan, assistant_worked
         self.sql, self.marks = [], []
         self._one = None
 
@@ -58,6 +62,10 @@ class Cur:
             self._one = None if self.taken else {"?": 1}
         elif "type = 'agent_turn'" in flat:
             self._one = {"?": 1} if self.agent_live else None
+        elif flat.startswith("SELECT plan FROM users WHERE id"):
+            self._one = {"plan": self.plan}
+        elif "type = 'mcp_tool'" in flat:
+            self._one = {"?": 1} if self.assistant_worked else None
         elif flat.startswith("UPDATE chat_messages"):
             patch = params[0].adapted
             if self.taken:
@@ -124,7 +132,14 @@ def test_a_held_website_request_runs_once_as_an_agent_turn(world):
     assert patch["replay_origin"] == "transaction.completed"
     # The lock comes before the re-check and the enqueue.
     sql = world["cur"].sql
-    assert sql[0].startswith("SELECT pg_advisory_xact_lock")
+    lock = [i for i, q in enumerate(sql)
+            if q.startswith("SELECT pg_advisory_xact_lock")]
+    recheck = [i for i, q in enumerate(sql)
+               if q.startswith("SELECT 1 FROM chat_messages WHERE id")]
+    assert lock and recheck and lock[0] < recheck[0]
+    # Only the plan lookup of the D1V takeover check precedes the lock.
+    assert all(q.startswith("SELECT plan FROM users WHERE id")
+               for q in sql[:lock[0]])
     assert world["events"][0][0][2] == "blocked_prompt_replayed"
     # Paddle's second event (or the Studio) finds it taken: no second turn.
     again = held_request.resume(2647, "transaction.paid")
@@ -471,3 +486,140 @@ def test_the_studio_runs_the_held_request_the_webhook_way(monkeypatch):
     assert calls == [(8, "studio", 9)]
     assert body == {"replay": "started", "job_id": 778, "message_id": 901,
                     "origin": "studio", "waiting_for_index": False}
+
+
+# ── D1V: the Studio lane of an MCP-only plan can open after the hand-off ────
+# D1 (Studio in Plus) opens a NEW Plus subscriber's Studio lane with the
+# owner's switch and the Claude credit line. A payment that landed while it
+# was off handed the request to the customer's own assistant; once that
+# assistant started on it, the Studio (its replay on the next project open)
+# and a webhook retry must never run it again (harness proof:
+# .valmera/week-1029/harness/d1v_held_flip.py).
+
+@pytest.mark.parametrize("held", [WALL, TYPED])
+def test_a_request_the_assistant_already_took_never_runs_in_the_studio(
+        world, held):
+    world["held"] = held
+    world["cur"] = Cur(plan="plus_2026", assistant_worked=True)
+    out = held_request.resume(2647, "studio")
+    assert out == {"project_id": held["project_id"], "plans_id": held["id"],
+                   "resumed": False, "reason": "assistant_took_over"}
+    assert world["enqueued"] == [] and world["sent"] == []
+    assert world["cur"].marks == []
+
+
+def test_a_plus_request_nobody_took_yet_runs_once_when_the_lane_opens(world):
+    world["cur"] = Cur(plan="plus_2026", assistant_worked=False)
+    out = held_request.resume(2647, "studio")
+    assert out["resumed"] is True and len(world["enqueued"]) == 1
+
+
+def test_other_plans_are_never_held_back_by_mcp_activity(world):
+    # Ticket #11 unchanged: only an MCP-only plan's request is ever handed to
+    # the assistant, so a Studio plan's request runs whatever MCP did.
+    world["cur"] = Cur(plan="pro_2026", assistant_worked=True)
+    out = held_request.resume(2647, "transaction.completed")
+    assert out["resumed"] is True and len(world["enqueued"]) == 1
+
+
+def _older_wall_replay(monkeypatch, plan, worked):
+    """/replay-blocked's own 24-48 h path (resume's window has passed)."""
+    meta = dict(WALL["meta"])
+    calls = {"enqueued": [], "sql": []}
+
+    class C:
+        _one = None
+
+        def execute(self, sql, params=None):
+            flat = " ".join(sql.split())
+            calls["sql"].append(flat)
+            if flat.startswith("SELECT id, role, meta, created_at"):
+                self._one = {"id": 154609, "role": "assistant", "meta": meta,
+                             "created_at": "2026-10-29T10:00:00",
+                             "recent": True}
+            elif flat.startswith("SELECT plan FROM users WHERE id"):
+                self._one = {"plan": plan}
+            elif "type = 'mcp_tool'" in flat:
+                self._one = {"?": 1} if worked else None
+            else:
+                self._one = None
+
+        def fetchone(self):
+            return self._one
+
+    cur = C()
+
+    @contextlib.contextmanager
+    def fake_vdb(*_a):
+        yield type("Conn", (), {"cursor": lambda self: cur,
+                                "commit": lambda self: None})()
+    monkeypatch.setattr(video, "vdb", fake_vdb)
+    monkeypatch.setattr(video, "_project_for_user",
+                        lambda *_: {"id": 5249, "chat_session_id": 3})
+    monkeypatch.setattr(video, "_subscribe_gate_applies", lambda *_: False)
+    monkeypatch.setattr(video, "_studio_ai_gate", lambda *_: None)
+    monkeypatch.setattr(video._held_request, "started", lambda *_: None)
+    monkeypatch.setattr(video._held_request, "resume",
+                        lambda *a: {"resumed": False, "reason": "nothing_held"})
+    monkeypatch.setattr(video, "_running_jobs_count", lambda *_: 0)
+    monkeypatch.setattr(video, "check_and_reserve", lambda *a, **k: True)
+    monkeypatch.setattr(video, "record_client_event", lambda *a, **k: None)
+    monkeypatch.setattr(video, "_enqueue", lambda c, p, u, t, payload:
+                        calls["enqueued"].append((p, t, payload)) or 779)
+    with Flask(__name__).test_request_context(json={}):
+        body = video.replay_blocked.__wrapped__(user_id=2647,
+                                                project_id=5249).get_json()
+    return body, calls
+
+
+def test_an_older_wall_the_assistant_already_took_is_not_replayed(monkeypatch):
+    body, calls = _older_wall_replay(monkeypatch, "plus_2026", worked=True)
+    assert body == {"replay": None, "reason": "assistant_took_over"}
+    assert calls["enqueued"] == []
+
+
+@pytest.mark.parametrize("plan,worked", [("plus_2026", False),
+                                         ("pro_2026", True)])
+def test_an_older_wall_still_replays_otherwise(monkeypatch, plan, worked):
+    body, calls = _older_wall_replay(monkeypatch, plan, worked)
+    assert body["replay"] == "enqueued" and len(calls["enqueued"]) == 1
+
+
+def test_printing_the_request_to_the_assistant_marks_it_shown(monkeypatch):
+    """open_project / project_state (a project id) stamp the plans reply;
+    list_projects' marker (no project id) does not; a failed stamp never
+    drops the note."""
+    note = {"project_id": 5249, "plans_id": 154609, "text": "WAITING REQUEST"}
+    stamped, sql = [], []
+
+    class C:
+        def execute(self, q, params=None):
+            sql.append(" ".join(q.split()))
+
+    @contextlib.contextmanager
+    def fake_vdb(*_a):
+        yield type("Conn", (), {"cursor": lambda self: C()})()
+    monkeypatch.setattr(mcp, "vdb", fake_vdb)
+    monkeypatch.setattr(mcp.held_request, "for_assistant",
+                        lambda cur, uid, pid=None: note)
+    monkeypatch.setattr(mcp.held_request, "mark_shown",
+                        lambda cur, plans_id: stamped.append(plans_id))
+    assert mcp._held_for_assistant({"user_id": 8}, 5249) == note
+    assert stamped == [154609]
+    assert mcp._held_for_assistant({"user_id": 8}) == note     # list_projects
+    assert stamped == [154609]
+
+    def boom(cur, plans_id):
+        raise RuntimeError("db")
+    monkeypatch.setattr(mcp.held_request, "mark_shown", boom)
+    assert mcp._held_for_assistant({"user_id": 8}, 5249) == note
+
+
+def test_a_request_shown_to_the_assistant_never_runs_in_the_studio(world):
+    held = dict(WALL, meta=dict(WALL["meta"], shown_to_assistant_at="x"))
+    world["held"] = held
+    world["cur"] = Cur(plan="plus_2026", assistant_worked=False)
+    out = held_request.resume(2647, "studio")
+    assert out["reason"] == "assistant_took_over" and world["enqueued"] == []
+    world["cur"] = Cur(plan="pro_2026")                 # a Studio plan: runs
+    assert held_request.resume(2647, "studio")["resumed"] is True

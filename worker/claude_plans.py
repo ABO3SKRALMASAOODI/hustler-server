@@ -33,6 +33,20 @@ before ``cutoff_at``: no paid payment (``payments``, amount > 0, completed or
 paid) before it, and no Paddle snapshot of the account's subscription with
 ``started_at`` before it. Every one of the 23 accounts subscribed on 25 Oct
 2026 has a paid payment row, so every one of them is grandfathered.
+
+STUDIO IN PLUS RIDES THE TRIAL'S CREDIT LINE (owner, 30 Oct 2026: "include
+the studio in the plus, but that would be with the trial release. So we can
+turn it off if we wanted. Or if we run out of credits, it turns off
+automatically. just like the trial thing."). The owner's switch is ``on``
+(the admin's "Claude features" card, backend/studio_plus_toggle.py). Plus
+includes the Studio for a new subscriber only while the automatic credit
+switch (claude_credit.py) is ON and its ledger (migration 040) is installed
+(``lane_open``): when the line goes AUTO-OFF, Plus is MCP-only again at once
+(the Studio gate, the held-request resume and the plan cards all read
+``studio_included`` / ``plus_studio_live``), and it comes back by itself
+with the credit line's next-cycle probe. ``paused_for`` names the accounts
+that then see the plain "not included right now" copy: new Plus subscribers
+only; grandfathered Plus keeps today's words.
 """
 
 import json
@@ -174,13 +188,53 @@ def applies(conn, user_id, subscribed, flag=None):
     return not grandfathered(conn, user_id, flag["cutoff_at"])
 
 
+def lane_open(conn, now=None):
+    """The shared Claude credit line is ON (claude_credit.status) and its
+    ledger (migration 040) is installed, so every Claude call is metered
+    against the cycle budget. The free trial and Studio-in-Plus both stop
+    when this is False."""
+    import claude_credit
+    if not claude_credit.ledger_ready(conn):
+        return False
+    return bool(claude_credit.status(conn, now=now).get("on"))
+
+
 def studio_included(conn, user_id, plan, subscribed, flag=None):
     """True when a plan that is MCP-only today includes the Studio AI editor
-    for THIS account (a new subscriber, D1). False means today's rule."""
+    for THIS account (a new subscriber, D1) RIGHT NOW: the owner's switch is
+    on and the Claude credit line is open. False means today's rule."""
     flag = flag if flag is not None else read_flag(conn)
     if str(plan or "") not in flag["studio_plans"]:
         return False
-    return applies(conn, user_id, subscribed, flag)
+    if not applies(conn, user_id, subscribed, flag):
+        return False
+    return lane_open(conn)
+
+
+def plus_studio_live(conn, flag=None):
+    """Plus includes the Studio for new subscribers right now: what the plan
+    cards describe (the owner's switch on, with a cutoff, and the credit line
+    open). Global, not per account."""
+    flag = flag if flag is not None else read_flag(conn)
+    if not flag["on"] or "plus_2026" not in flag["studio_plans"]:
+        return False
+    return lane_open(conn)
+
+
+def paused_for(conn, user_id, plan, subscribed, flag=None):
+    """A subscriber on a Studio-in-Plus plan who joined after the cutoff,
+    while Plus does not include the Studio right now (the owner switched it
+    off, or the credit line is AUTO-OFF). Only they see the plain "not
+    included right now" copy; grandfathered accounts, a flag that never had a
+    cutoff, other plans and any doubt: False (today's words)."""
+    if not subscribed or user_id is None:
+        return False
+    flag = flag if flag is not None else read_flag(conn)
+    if str(plan or "") not in flag["studio_plans"] or flag["cutoff_at"] is None:
+        return False
+    if grandfathered(conn, user_id, flag["cutoff_at"]):
+        return False
+    return not studio_included(conn, user_id, plan, subscribed, flag)
 
 
 def lane_model(flag, plan):

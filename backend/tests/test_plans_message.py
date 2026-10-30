@@ -130,8 +130,12 @@ class Replay:
         command = " ".join(sql.split())
         if command.startswith("SELECT pg_advisory_xact_lock"):
             self._result = None
-        elif command.startswith("SELECT id, role, meta, created_at >"):
+        elif command.startswith("SELECT id, role, meta, created_at"):
             self._result = self.last
+        elif command.startswith("SELECT plan FROM users WHERE id"):
+            # D1V's takeover check: a Studio plan (only an MCP-only plan's
+            # request is ever handed to the customer's assistant).
+            self._result = {"plan": "pro_2026"}
         elif command.startswith("SELECT id, meta FROM chat_messages") or \
                 command.startswith("SELECT m.id, m.session_id, m.meta"):
             # held_request.started / .pending (resume): nothing resumed or
