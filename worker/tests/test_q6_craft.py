@@ -562,24 +562,3 @@ def test_a_beat_never_shows_much_below_the_subject():
     close = silent_cut.beat_z(box, 1, 2.1)
     medium = silent_cut.beat_z(box, 2, 2.1)
     assert medium <= close * silent_cut.MEDIUM_RATIO + 1e-6
-
-
-def test_a_second_moment_of_the_same_shot_cuts_in_closer():
-    shots = [{"start": 0.0, "end": 10.0}, {"start": 10.0, "end": 30.0}]
-    wins = [[1.0, 1.4], [12.0, 12.4], [15.0, 15.4], [18.0, 18.4], [21.0, 21.6]]
-    pairs = [([15.0, 15.4], (0.4, 0.3, 0.6, 0.5))]
-    got = montage_cut.cut_ins(wins, pairs, shots, 30.0)
-    # the run 12/15/18/21 in one shot: 15 and 21 cut in, 12 and 18 stay wide
-    assert [(round(s, 2), round(e, 2)) for s, e, _x, _y in got] == [(0.8, 1.2), (1.6, 2.2)]
-    assert got[0][3] == 0.4 and got[1][3] == 0.5
-    calls = []
-
-    def run(ctx, steps, name, args, started):
-        calls.append((name, args))
-        return "EDL v3 -> v4: ok"
-    ctx = NS(first_cut_montage_boxes=pairs)
-    assert montage_cut.apply_cut_ins(ctx, [], 0.0, run, wins, shots, 30.0) == 2
-    assert all(n == "add_zoom" and a["mode"] == "punch" and a["ramp_s"] == 0.0
-               for n, a in calls)
-    # one moment per shot: no cut-in
-    assert montage_cut.cut_ins([[1.0, 1.4], [12.0, 12.4]], [], shots, 30.0) == []

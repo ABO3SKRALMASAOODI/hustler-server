@@ -1834,11 +1834,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         import first_cut_visual as fcv
         fcv.refresh_band_crop(ctx, steps, started, _run)
     if q1 and (picked or {}).get("how") == "motion":
-        # Q6: two moments of one shot cut in closer (else they read as one
-        # held shot), and the montage ends on its hit with one white flash
+        # Q6: the montage ends on its hit with one white flash (R01)
         import montage_cut
-        montage_cut.apply_cut_ins(ctx, steps, started, _run, _keep(ctx) or [],
-                                  (ctx.index or {}).get("shots"), duration)
         montage_cut.end_flash(ctx, steps, started, _run)
     if speech:
         style = {"preset": "reels", "motion_look": "editorial",
