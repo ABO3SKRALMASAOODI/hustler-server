@@ -625,6 +625,20 @@ class Box:
                     log(f"call {rec['call_id']} on {rec['slot']} is unknown "
                         "after restart; its slot stays fenced")
 
+    def _job_running(self, job_id):
+        """Whether a call of queue job ``job_id`` holds a slot here."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT job FROM calls WHERE status IN "
+                "('starting','running','unknown','stopping')").fetchall()
+        for row in rows:
+            try:
+                if (json.loads(row["job"] or "{}") or {}).get("id") == job_id:
+                    return True
+            except ValueError:
+                continue
+        return False
+
     @staticmethod
     def _child_answer_lost(rec):
         """A running/unknown synchronous child (no queue row to read)."""
@@ -842,9 +856,11 @@ class Box:
         # A drain stops new top-level work; synchronous children of calls
         # that are already running still start, so the running calls can
         # finish (a refused child fails its parent after its margin) and
-        # the box reaches idle.
+        # the box reaches idle. So does a render a running Studio turn on
+        # this box waits for (``drain_ok``; R1 chaos, 30 Oct 2026).
         order = sorted((w for w in self.waiting.values()
-                        if not self.draining or w.get("child")),
+                        if not self.draining or w.get("child")
+                        or w.get("drain_ok")),
                        key=lambda w: (CLASS_RANK.get(w["priority"], 0),
                                       0 if w.get("child") else 1,
                                       w["enqueued"]))
@@ -973,6 +989,15 @@ class Box:
         payload = job.get("payload") if isinstance(job.get("payload"),
                                                    dict) else {}
         read_only = jtype == "mcp_tool" and payload.get("mutation") is False
+        # Work a drain must still admit: a synchronous child of a running
+        # call, or a render a RUNNING Studio turn on this box is waiting for
+        # (payload.agent_job_id). Refusing either deadlocks the drain: X1's
+        # 30 Oct drain never reached idle because an agent turn waited on
+        # its own preview (R1 chaos).
+        parent = payload.get("agent_job_id")
+        drain_ok = bool(synchronous) or (
+            queue_backed and isinstance(parent, int)
+            and not isinstance(parent, bool) and self._job_running(parent))
         identity = {k: job.get(k) for k in
                     ("id", "type", "project_id", "total_claims")}
         t = now()
@@ -1000,7 +1025,7 @@ class Box:
             if live:
                 return 409, {"error": "call already accepted",
                              "call_status": live["status"]}
-            if self.draining and not synchronous:
+            if self.draining and not drain_ok:
                 return 429, refusal_envelope(
                     jtype, "Box is draining for maintenance; nothing ran")
             if lane not in self.lanes:
@@ -1041,7 +1066,7 @@ class Box:
             self.put(rec)
             waiter = {"call_id": call_id, "lane": lane, "priority": priority,
                       "enqueued": arrived, "slot": None, "job_type": jtype,
-                      "child": bool(synchronous),
+                      "child": bool(synchronous), "drain_ok": drain_ok,
                       "source": str(job.get("dispatcher_source") or ""),
                       "affinity": affinity_key(call_id)}
             self.waiting[call_id] = waiter
@@ -1052,7 +1077,7 @@ class Box:
                 while not waiter["slot"]:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0 or (self.draining
-                                          and not waiter["child"]):
+                                          and not drain_ok):
                         break
                     self.cond.wait(timeout=min(remaining, 1.0))
                     self._assign()
@@ -1064,7 +1089,7 @@ class Box:
                         and want != "unknown"
                         and want not in self.lane_releases(lane))
                     msg = ("Box is draining for maintenance; nothing ran"
-                           if self.draining and not waiter["child"] else
+                           if self.draining and not drain_ok else
                            f"Box is switching releases: no {lane} slot runs "
                            f"{want} yet; nothing ran" if rollout else
                            f"Box is at capacity: no free {lane} slot within "

@@ -126,3 +126,42 @@ def test_a_drain_assigns_only_children(adm):
     with box.lock:
         box._assign()
     assert box.waiting["kid"]["slot"] and box.waiting["top"]["slot"] is None
+
+
+def test_a_running_studio_turns_render_is_admitted_during_a_drain(
+        adm, monkeypatch):
+    """X1, 30 Oct: the drain never reached idle because an agent turn
+    waited on its own preview, which the drain refused."""
+    box = _box(adm)
+    t = time.time()
+    box.put({"call_id": "bx-agent_turn-abc", "lane": "interactive",
+             "job_type": "agent_turn", "status": "running", "slot": "i1",
+             "job": json.dumps({"id": 900, "type": "agent_turn",
+                                "project_id": 7, "total_claims": 1}),
+             "launch_id": "launch-t", "read_only": 0, "priority": "customer",
+             "user_id": 9, "envelope": None, "error": None,
+             "created_at": t, "active_until": t + 3000, "started_at": t,
+             "container_started": "t0", "disconnected_at": None,
+             "terminal_at": None, "abandon_reason": None})
+    box.set_draining(True)
+    box.slots[0].ready = True
+    monkeypatch.setattr(adm.http.client, "HTTPConnection", _Conn)
+
+    def launch(call_id, parent):
+        return box.execute("interactive", call_id, {
+            "job": {"id": 901, "type": "preview", "project_id": 7,
+                    "total_claims": 1, "user_id": 9,
+                    "dispatcher_source": "v1",
+                    "payload": {"agent_job_id": parent}},
+            "launch_id": "launch-p", "max_wait_s": 3})
+    code, _ = launch("bx-preview-p7-orphan", 12345)
+    assert code == 429                     # nobody waits for it: refused
+    # Its parent turn holds i1; the quick slot serves children only, so
+    # free a second ordinary slot for the render.
+    box.slots.append(adm.Slot({"name": "i2", "lane": "interactive",
+                               "port": 9102, "cpus": 2}))
+    box.by_name["i2"] = box.slots[-1]
+    box.slots[-1].ready, box.slots[-1].release = True, "v1"
+    code, body = launch("bx-preview-p7-dep", 900)
+    assert code == 200
+    assert box.get("bx-preview-p7-dep")["slot"] == "i2"
