@@ -306,18 +306,24 @@ def container_name(slot):
 
 
 def container_info(name):
+    # The cache label holds "|" itself (cache_label), so it is read LAST
+    # and keeps everything after the fourth separator.
     out = sh(["docker", "inspect", "-f",
               "{{.Config.Image}}|{{.State.Running}}|{{.Created}}|"
-              "{{index .Config.Labels \"valmera.cache\"}}|"
               "{{range $p, $b := .HostConfig.PortBindings}}"
-              "{{range $b}}{{.HostPort}}{{end}}{{end}}", name],
+              "{{range $b}}{{.HostPort}}{{end}}{{end}}|"
+              "{{index .Config.Labels \"valmera.cache\"}}", name],
              check=False)
     if out.returncode != 0:
         return None
-    image, running, created, cache, port = (out.stdout.strip().split("|", 4)
-                                            + ["", ""])[:5]
+    return parse_container_info(out.stdout)
+
+
+def parse_container_info(text):
+    image, running, created, port, cache = (text.strip().split("|", 4)
+                                            + ["", "", ""])[:5]
     return {"image": image, "running": running == "true", "created": created,
-            "cache": cache.strip(), "port": port.strip()}
+            "port": port.strip(), "cache": cache.strip()}
 
 
 def _slot_drifted(slot, info, source):
