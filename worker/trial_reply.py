@@ -89,7 +89,7 @@ _PLACE = re.compile(r"(?i)\b(playing|on the right|in the player|preview (?:on th
 # a claim about the video's length: "a 36-second cut", "now runs 25.6 seconds",
 # "is 18.5 s long", "at 51.6 seconds" when it names the whole ("ready at")
 _LENGTH = re.compile(
-    r"(?i)(?:\b(?:is|runs?|running|now|ready at|comes in at|down to|cut to|trimmed to|lasts?)\s+(?:about\s+|around\s+|roughly\s+|just\s+|under\s+)?"
+    r"(?i)(?:\b(?:is|runs?|running|now|ready at|comes in at|down to|cut to|trimmed to|lasts?)\s+(?:about\s+|around\s+|roughly\s+|just\s+|under\s+|exactly\s+|precisely\s+|only\s+|nearly\s+|almost\s+|over\s+)?"
     r"(\d{1,3}(?:\.\d+)?)\s*(?:-\s*)?(?:seconds?|secs?|s)\b(?!\s*(?:in|into|of|before|after|mark|later|earlier|and|to|–|-))"
     r"|\b(?:a|an|the|your)\s+(?:tight\s+|clean\s+|new\s+|full\s+)?(\d{1,3}(?:\.\d+)?)\s*-?\s*(?:second|sec|s)\b"
     r"(?=[\s,-]+(?:\w+[\s,-]+)?(?:cut|clip|video|short|reel|version|edit|highlight|piece|demo|vertical|"
@@ -98,7 +98,8 @@ _VERTICAL = re.compile(r"(?i)\b(vertical|9:16|portrait)\b")
 _LANDSCAPE = re.compile(r"(?i)\b(landscape|16:9|widescreen)\b")
 _RENDER_CLAIM = re.compile(
     r"(?i)\b((?:new|fresh|updated|latest|final|complete|rendered)\s+(?:preview|render)"
-    r"|preview (?:is |was )?(?:ready|rendered|updated|refreshed)|re-?rendered|rendered (?:it|a|the))\b")
+    r"|preview (?:is |was )?(?:ready|rendered|updated|refreshed)|re-?rendered|rendered (?:it|a|the)"
+    r"|previewed below|preview below)\b")
 _CHECK_CLAIM = re.compile(
     r"(?i)\b(passed|passes|checks? out|came back clean|looks? clean|is clean|verified|"
     r"i (?:checked|looked at|reviewed|watched|screened)|the frames show|found the \w+ clean|"
@@ -287,8 +288,43 @@ def unbacked(sent, facts):
             r"extended|restyled|changed|made|set|applied|replaced|swapped|fixed)\b", s) \
             and not rg._NOT_A_CLAIM.search(s):
         return "change"
+    why = removal_unbacked(s, facts)
+    if why:
+        return why
     if quote_unbacked(s, facts):
         return "quote"
+    return None
+
+
+_REMOVED = re.compile(
+    r"(?i)(?:\b(?:i|we)(?:'ve| have)?\s+(?:also\s+|now\s+|just\s+)?|^\W*)"
+    r"(cut|trimmed|removed|shortened|tightened|dropped|took out|deleted)\b(?P<obj>[^.;]{0,80})")
+_OBJ_LAYER = (("zoom", r"zooms?|punch|push"), ("transition", r"transitions?|fades?|dissolves?"),
+              ("text", r"titles?|slams?|cards?|graphics?|text"),
+              ("captions", r"captions?|subtitles?"), ("music", r"music|songs?|soundtrack"),
+              ("sfx", r"sound effects?|sfx|whoosh"), ("broll", r"b-?roll|cutaways?|photos?"))
+_STATE_ONLY = re.compile(r"(?i)\b(already|first cut|earlier|before this)\b")
+
+
+def removal_unbacked(sent, facts):
+    """'Removed the first second.' on a turn whose cut did not change (R2's
+    audit: only the titles changed): a first-person cut or removal must show
+    in the layer it names (the cut itself, a zoom, a title, a transition)."""
+    m = _REMOVED.search(sent)
+    if not m or rg._NOT_A_CLAIM.search(sent) or _STATE_ONLY.search(sent):
+        return None
+    if not facts.wrote:
+        return "change"
+    obj = m.group("obj") or ""
+    if re.match(r"(?i)^\s*(?:this|it|the (?:video|footage|talk|clip|interview|take|recording)"
+                r"|(?:it )?down|(?:it )?(?:in)?to an? \d)\b", obj):
+        # "I cut this to a 52-second short": the editor describing the
+        # deliverable (its length is checked on its own), not this turn's cut
+        return None
+    layer = next((ly for ly, rx in _OBJ_LAYER
+                  if re.search(r"(?i)\b(?:" + rx + r")\b", obj)), "cuts")
+    if not rg.layer_changed(facts.before or {}, facts.after or {}, layer):
+        return f"unchanged:{layer}"
     return None
 
 
