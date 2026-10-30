@@ -545,6 +545,29 @@ def slot_busy(state, name):
     return False
 
 
+# How long ONE update run waits for a busy slot before leaving it on its
+# release for the next run (the timer fires every 2 min; a call is never
+# killed). R1 chaos, 30 Oct 2026: with the whole drain_timeout_s (2 h) per
+# run, one 2-h index on a retiring slot held the update service for its
+# whole run, so nothing else converged meanwhile: no killed slot came back,
+# and a worker release pushed in that window would not even be BUILT, so
+# every new box job (dispatcher on the new fingerprint, skew "hold") would
+# have waited for the index to finish.
+ROLL_WAIT_PER_RUN_S = 300.0
+
+
+def roll_wait_s(cfg):
+    try:
+        per_run = float(cfg.get("roll_wait_per_run_s", ROLL_WAIT_PER_RUN_S))
+    except (TypeError, ValueError):
+        per_run = ROLL_WAIT_PER_RUN_S
+    try:
+        total = float(cfg.get("drain_timeout_s", 7200))
+    except (TypeError, ValueError):
+        total = 7200.0
+    return max(30.0, min(total, per_run))
+
+
 def roll_slots(slots, source, drain_timeout_s):
     """Retire, drain, replace and readmit ``slots`` together."""
     for slot in slots:
@@ -855,7 +878,7 @@ def cmd_update():
     except Exception as exc:  # noqa: BLE001 - never blocks a release
         log(f"host files: {type(exc).__name__}: {str(exc)[:200]}")
     build_images(source)
-    converge(source, commit, float(cfg.get("drain_timeout_s", 7200)))
+    converge(source, commit, roll_wait_s(cfg))
     sync_limits()
     try:
         remove_orphan_slots()
@@ -877,8 +900,7 @@ def cmd_apply():
         source = source_version()
         build_images(source)
         rel.update({"source": source, "commit": commit})
-    converge(source, rel.get("commit"), float(
-        config().get("drain_timeout_s", 7200)))
+    converge(source, rel.get("commit"), roll_wait_s(config()))
     sync_limits()
 
 
