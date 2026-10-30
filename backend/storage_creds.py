@@ -38,9 +38,10 @@ Nobody should have to paste them into four dashboards, so:
   after RETRY_S, and an authentication error from the next store (a rotated
   key) re-reads the row at most every RETRY_S. A failed database read keeps
   the last good keys. Nothing waits on the database for long: the first
-  read starts when storage is imported, a call waits for it at most
-  FIRST_WAIT_S (health routes answer within the box's 3 s probe), and later
-  refreshes run in a background thread while calls use what is cached.
+  read starts when storage is imported, calls wait for it at most
+  FIRST_WAIT_S IN ALL, counted from its start (one health probe looks the
+  keys up a dozen times; the box gives /health 3 s), and later refreshes
+  run in a background thread while calls use what is cached.
 
 * Fail closed and quiet: no row, no sealing secret, a wrong key, a damaged
   or unknown row, or no AES implementation all leave the next store "not
@@ -357,6 +358,7 @@ class Credentials:
         self._kek = None
         self._reason = "not_read"
         self._first = None              # Event: the first read finished
+        self._first_until = 0.0         # monotonic: callers stop waiting
         self._due = 0.0
         self._read_at = None
         self._invalidated_at = None
@@ -391,6 +393,7 @@ class Credentials:
             if self._first is None:
                 event = threading.Event()
                 self._first = event
+                self._first_until = time.monotonic() + self._first_wait
                 try:
                     threading.Thread(target=self._run_first, args=(event,),
                                      daemon=True,
@@ -429,8 +432,13 @@ class Credentials:
                             done.set()
                             self._first = done
                     return self._values
-                # The first read: wait for it, but never long.
-                self._start_first().wait(self._first_wait)
+                # The first read: wait for it, but never long, and never
+                # past FIRST_WAIT_S from its start in all (a health route
+                # asks once per S3_NEXT_* name, several times over).
+                first = self._start_first()
+                left = self._first_until - time.monotonic()
+                if left > 0:
+                    first.wait(left)
                 return self._values
             if self._lock.acquire(blocking=False):
                 if self._clock() < self._due:
