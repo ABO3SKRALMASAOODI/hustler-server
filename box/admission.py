@@ -21,9 +21,16 @@ Durable Object shard). What this layer adds for the box:
   synchronous children (id-less frames, captures, ...) of an admitted parent
   rank above top-level work of their class and are exempt from the owner cap,
   so a parent can never deadlock on its own child;
+* a customer reserve, so no customer ever waits behind the factory: the
+  owner factory starts on an ordinary slot only while
+  ``owner_leave_free_by_lane`` other ordinary slots of that lane stay free
+  (its children too; quick slots, children only, are outside the reserve),
+  and only while its own committed memory stays within
+  ``owner_mem_budget_gib`` and MemAvailable keeps ``owner_mem_headroom_gib``
+  beyond the global reserve;
 * CPU priority under contention: each call sets its slot's cgroup CPU weight
-  from its class (customers 4x the owner factory), on top of the slot's hard
-  ``--cpus``/``--memory`` limits;
+  from its class (``cpu_shares``; by default customers about 5x the owner
+  factory), on top of the slot's hard ``--cpus``/``--memory`` limits;
 * memory-budgeted admission: the measured p95 of every running call's type
   plus the newcomer's must fit ``mem_budget_gib`` and MemAvailable must keep
   ``mem_reserve_gib``;
@@ -95,6 +102,9 @@ TERMINAL_RETENTION_S = 7 * 24 * 3600
 SUBMITTED_STALE_S = 60.0
 STARTING_STALE_S = 180.0
 ABANDON_MIN_DISCONNECTED_S = 120.0
+# A claim re-asking after a capacity refusal keeps its arrival time this
+# long (the dispatcher's in-claim window is 30 min; then a new claim).
+KEEP_PLACE_S = 3600.0
 LIVE = ("submitted", "starting", "running", "unknown", "stopping")
 OCCUPYING = ("starting", "running", "unknown", "stopping")
 CLASS_RANK = {"customer": 0, "trial": 1, "owner": 2}
@@ -139,9 +149,12 @@ MEM_ESTIMATE_GIB = {
     "ytprobe": 0.3, "search": 0.5, "fetch": 1.0, "stock_acquire": 1.0,
 }
 DEFAULT_MEM_ESTIMATE_GIB = 2.0
-# cgroup CPU weight per class (docker --cpu-shares): under contention a
-# customer's render gets 4x the owner factory's CPU time.
-CPU_SHARES = {"customer": 4096, "trial": 2048, "owner": 1024}
+# cgroup CPU weight per class (docker --cpu-shares). The box runs cgroup v2,
+# where runc maps shares to cpu.weight non-linearly (measured on the box
+# 30 Oct: 1024 -> 100, 4096 -> 303, 8192 -> 532; test containers at 64 ->
+# 12): under contention a customer's render gets about 5.3x the owner
+# factory's CPU time, a trial user's about 3x.
+CPU_SHARES = {"customer": 8192, "trial": 4096, "owner": 1024}
 
 
 class Config:
@@ -163,6 +176,28 @@ class Config:
         self.owner_max_cpus = float(raw.get("owner_max_cpus", 99))
         self.owner_max_by_lane = {str(k): int(v) for k, v in (
             raw.get("owner_max_by_lane") or {}).items()}
+        # The customer reserve (X1, 30 Oct 2026): the owner factory starts on
+        # an ordinary slot of a lane only while this many OTHER ordinary
+        # slots of the lane stay free, so a customer (or trial user) who
+        # arrives finds one at once instead of waiting behind the factory.
+        self.owner_leave_free_by_lane = {str(k): max(0, int(v)) for k, v in (
+            raw.get("owner_leave_free_by_lane") or {}).items()}
+        # The factory's own memory: its committed estimates (children
+        # included) stay within owner_mem_budget_gib (absent = the global
+        # budget), and it starts only while MemAvailable keeps
+        # owner_mem_headroom_gib beyond mem_reserve_gib for customers.
+        budget = raw.get("owner_mem_budget_gib")
+        self.owner_mem_budget_gib = (float(budget) if budget is not None
+                                     else None)
+        self.owner_mem_headroom_gib = max(0.0, float(
+            raw.get("owner_mem_headroom_gib", 0.0)))
+        # Light calls (estimate <= light_gib: MCP tools, agent and shorts
+        # turns, frame looks) are governed by real memory only: the
+        # committed-estimate budget, a higher class's memory reservation
+        # and the factory's memory limits never hold them (L4, 30 Oct: one
+        # customer final waiting for memory held every factory MCP call,
+        # so the editors' agents stalled for up to 6 minutes).
+        self.light_gib = float(raw.get("light_gib", 0.0))
         self.queue_max = int(raw.get("queue_max", 256))
         # Below the dispatcher's 180-s launch observation so a refusal comes
         # back on the launch request itself; the dispatcher asks again at
@@ -322,6 +357,30 @@ def abandoned_envelope(job_type, read_only, reason):
         "max_attempts": retry_attempts(job_type), "agent_repairable": False}}
 
 
+# Renders whose out-of-memory death is a property of the job on that slot
+# size, not a blip: the dispatcher re-runs a preview once on the 10 GiB
+# batch lane (main._escalate_oom_render) instead of replaying the identical
+# graph on the identical 5 GiB slot, and a final reports its limit honestly.
+MEMORY_KIND_TYPES = {"preview", "preview_check", "filmstrip", "final"}
+
+
+def memory_envelope(job_type, read_only, limit):
+    """A slot container that died after the kernel's OOM killer fired in it.
+
+    Before R1 (30 Oct 2026) this was "Box lost the executor ... safe to
+    retry": the dispatcher replayed the same render on the same slot size up
+    to five times and then told the customer our service had a problem."""
+    reason = (f"out of memory: the kernel's out-of-memory killer ended the "
+              f"executor at the slot's {limit or 'memory'} limit (exit -9)")
+    if job_type not in MEMORY_KIND_TYPES:
+        return abandoned_envelope(job_type, read_only, reason)
+    error = (f"Box {job_type} ran {reason}. The same graph cannot fit this "
+             "slot size on a replay.")
+    return {"error": error, "retryable": False, "oom": True, "failure": {
+        "kind": "executor_memory", "retryable": False, "max_attempts": 0,
+        "agent_repairable": job_type in {"preview", "preview_check"}}}
+
+
 def refusal_envelope(job_type, message, capacity=True, rollout=False):
     """A proof that nothing ran. ``box_wait`` tells the dispatcher to hold
     the job and ask again; ``safe_to_fallback`` keeps the shared pre-/run
@@ -363,6 +422,7 @@ class Slot:
         self.cpuset = parse_cpuset(spec.get("cpuset"))
         self.shares = None        # the cgroup CPU weight last applied
         self.container = spec.get("container") or f"vbox-{self.name}"
+        self.memory = str(spec.get("memory") or "")
         self.role = LANE_ROLES.get(self.lane, "executor")
         self.ready = False
         self.release = "unknown"
@@ -396,6 +456,26 @@ def docker_state(container):
         return False, ""
     running, _, started = out.stdout.strip().partition("|")
     return running == "true", started
+
+
+def docker_oom_since(container, since_ts):
+    """Did the kernel's OOM killer fire inside ``container`` since
+    ``since_ts``? Docker records an ``oom`` event for any OOM kill in the
+    container's cgroup; its State.OOMKilled flag is no use here because the
+    unless-stopped restart clears it before admission looks. None = unknown
+    (docker unreachable), never a guess."""
+    try:
+        out = subprocess.run(
+            ["docker", "events", "--since", str(int(max(0, since_ts - 5))),
+             "--until", str(int(time.time()) + 1),
+             "--filter", f"container={container}", "--filter", "event=oom",
+             "--format", "{{.Time}}"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return bool(out.stdout.strip())
 
 
 def docker_restart(container):
@@ -506,7 +586,29 @@ class Box:
         with self.lock:
             for rec in [dict(r) for r in self.db.execute(
                     "SELECT * FROM calls WHERE status IN "
-                    "('submitted','starting','running')")]:
+                    "('submitted','starting','running','unknown')")]:
+                if self._child_answer_lost(rec):
+                    # R1 chaos (30 Oct 2026): a synchronous child (frames,
+                    # capture, fetch, ...) has no queue row, so once its
+                    # handler is gone its answer has nowhere to go: kept
+                    # `unknown`, its parent tool waited out the child's
+                    # whole lease (4-25 min) and the quick slot stayed
+                    # fenced as long. Fence it now (poll_slots restarts the
+                    # container and fails the call), so the parent hears
+                    # within seconds and may ask again.
+                    rec.update({"status": "stopping",
+                                "disconnected_at": rec.get("disconnected_at")
+                                or t,
+                                "abandon_reason": "admission restarted; this "
+                                "child's answer was lost",
+                                "error": "the admission handler awaiting /run "
+                                         "was lost (admission restart)"})
+                    self.put(rec)
+                    log(f"child call {rec['call_id']} on {rec['slot']} lost "
+                        "its answer in the restart; fencing its slot")
+                    continue
+                if rec["status"] == "unknown":
+                    continue
                 if rec["status"] in ("submitted", "starting"):
                     # No /run was sent by a handler that no longer exists.
                     self.terminalize(rec, "failed", refusal_envelope(
@@ -522,6 +624,32 @@ class Box:
                     self.put(rec)
                     log(f"call {rec['call_id']} on {rec['slot']} is unknown "
                         "after restart; its slot stays fenced")
+
+    def _job_running(self, job_id):
+        """Whether a call of queue job ``job_id`` holds a slot here."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT job FROM calls WHERE status IN "
+                "('starting','running','unknown','stopping')").fetchall()
+        for row in rows:
+            try:
+                if (json.loads(row["job"] or "{}") or {}).get("id") == job_id:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    @staticmethod
+    def _child_answer_lost(rec):
+        """A running/unknown synchronous child (no queue row to read)."""
+        if rec.get("status") not in ("running", "unknown") or \
+                not rec.get("slot"):
+            return False
+        try:
+            job = json.loads(rec.get("job") or "{}") or {}
+        except ValueError:
+            return False
+        return job.get("id") is None and job.get("total_claims") is None
 
     # ── views ──
     def state_json(self, rec):
@@ -564,6 +692,7 @@ class Box:
             occupying = self._occupying()
             owner_busy = self._owner_busy(occupying)
             committed = self._committed_gib(occupying)
+            owner_committed = self._committed_gib(occupying, "owner")
         free = [s for s in slots if s["ready"] and not s["busy"]
                 and not s["retiring"]]
         by_lane = {}
@@ -602,7 +731,14 @@ class Box:
                       "by_lane": owner_busy[2],
                       "max_slots": self.cfg.owner_max_slots,
                       "max_cpus": self.cfg.owner_max_cpus,
-                      "max_by_lane": self.cfg.owner_max_by_lane},
+                      "max_by_lane": self.cfg.owner_max_by_lane,
+                      "leave_free_by_lane":
+                          self.cfg.owner_leave_free_by_lane,
+                      "committed_gib": round(owner_committed, 2),
+                      "mem_budget_gib": self.cfg.owner_mem_budget_gib,
+                      "mem_headroom_gib": self.cfg.owner_mem_headroom_gib,
+                      "light_gib": self.cfg.light_gib},
+            "cpu_shares": self.cfg.cpu_shares,
             "queue": {"depth": sum(queue.values()), "by_class": dict(queue),
                       "by_lane": dict(queue_lanes),
                       "oldest_wait_s": (round(now() - oldest, 1)
@@ -648,9 +784,58 @@ class Box:
         by_lane = collections.Counter(s.lane for s in owner)
         return len(owner), sum(s.cpus for s in owner), dict(by_lane)
 
-    def _committed_gib(self, occupying=None):
+    def _committed_gib(self, occupying=None, priority=None):
         occupying = self._occupying() if occupying is None else occupying
-        return sum(self.cfg.estimate(jtype) for _s, _p, jtype, _c in occupying)
+        return sum(self.cfg.estimate(jtype) for _s, prio, jtype, _c
+                   in occupying if priority is None or prio == priority)
+
+    def _owner_leaves_reserve(self, waiter, free):
+        """The slots of ``free`` the owner factory may take without eating
+        the lane's customer reserve (``owner_leave_free_by_lane``).
+
+        An ordinary slot is allowed only while at least that many OTHER
+        ordinary slots of the lane stay free after it starts; quick slots
+        (synchronous children only) are outside the reserve, so an owner
+        child can always make progress there."""
+        leave = self.cfg.owner_leave_free_by_lane.get(waiter["lane"], 0)
+        if leave <= 0:
+            return free
+        ordinary_free = sum(1 for s in self._free_slots(waiter["lane"])
+                            if not s.quick)
+        if ordinary_free - 1 >= leave:
+            return free
+        return [s for s in free if s.quick]
+
+    def _light(self, need):
+        return need <= self.cfg.light_gib + 1e-9
+
+    def _owner_memory_fits(self, need, occupying, mem):
+        """Whether one more owner top-level HEAVY call fits the factory's
+        memory: its own committed budget (its heavy calls only) and the real
+        headroom it leaves customers. The headroom counts the call's FULL
+        estimate, not half (a factory final grows by ~5 GiB after it
+        starts; L4 measured 5.4 GiB p95), so what the factory starts can
+        never take the memory a customer's next render needs. Light calls
+        always fit (real memory still governs them below)."""
+        if self._light(need):
+            return True
+        owner_committed = sum(
+            self.cfg.estimate(jtype) for _s, prio, jtype, _c in occupying
+            if prio == "owner" and not self._light(self.cfg.estimate(jtype)))
+        if owner_committed <= 0:
+            # The factory's FIRST heavy call is held by the box-wide rules
+            # only, so the factory always makes progress: memory held
+            # outside the slots (test containers, migrations) once kept
+            # every factory final waiting on an idle box (L4b, 30 Oct).
+            return True
+        budget = self.cfg.owner_mem_budget_gib
+        if budget is not None and owner_committed + need > budget + 1e-9:
+            return False
+        headroom = self.cfg.owner_mem_headroom_gib
+        if headroom > 0 and mem is not None and \
+                mem - need < self.cfg.mem_reserve_gib + headroom:
+            return False
+        return True
 
     def _free_slots(self, lane):
         return [s for s in self.slots if s.lane == lane and s.ready
@@ -668,9 +853,14 @@ class Box:
         nobody of a LOWER class starts while it waits, so the owner factory
         can never starve a customer by always fitting first."""
         moved = False
-        if self.draining:
-            return False
-        order = sorted(self.waiting.values(),
+        # A drain stops new top-level work; synchronous children of calls
+        # that are already running still start, so the running calls can
+        # finish (a refused child fails its parent after its margin) and
+        # the box reaches idle. So does a render a running Studio turn on
+        # this box waits for (``drain_ok``; R1 chaos, 30 Oct 2026).
+        order = sorted((w for w in self.waiting.values()
+                        if not self.draining or w.get("child")
+                        or w.get("drain_ok")),
                        key=lambda w: (CLASS_RANK.get(w["priority"], 0),
                                       0 if w.get("child") else 1,
                                       w["enqueued"]))
@@ -681,8 +871,11 @@ class Box:
             if waiter.get("slot"):
                 continue
             rank = CLASS_RANK.get(waiter["priority"], 0)
-            if blocked_rank is not None and rank > blocked_rank:
-                break
+            need = self.cfg.estimate(waiter.get("job_type") or "")
+            light = self._light(need)
+            if blocked_rank is not None and rank > blocked_rank \
+                    and not light:
+                continue
             free = self._free_slots(waiter["lane"])
             # Quick slots take only synchronous children; children prefer
             # them but may use any slot of their lane.
@@ -692,23 +885,37 @@ class Box:
                 free = [s for s in free if s.release == want]
             if not free:
                 continue
-            if waiter["priority"] == "owner" and not waiter.get("child"):
-                busy_n, busy_cpu, by_lane = self._owner_busy(occupying)
-                lane_cap = self.cfg.owner_max_by_lane.get(waiter["lane"])
-                if busy_n + 1 > self.cfg.owner_max_slots or (
-                        lane_cap is not None
-                        and by_lane.get(waiter["lane"], 0) + 1 > lane_cap):
-                    continue
-                free = [s for s in free if busy_cpu + s.cpus
-                        <= self.cfg.owner_max_cpus + 1e-9]
+            mem = mem_available_gib()
+            if waiter["priority"] == "owner":
+                if not waiter.get("child"):
+                    busy_n, busy_cpu, by_lane = self._owner_busy(occupying)
+                    lane_cap = self.cfg.owner_max_by_lane.get(waiter["lane"])
+                    if busy_n + 1 > self.cfg.owner_max_slots or (
+                            lane_cap is not None
+                            and by_lane.get(waiter["lane"], 0) + 1
+                            > lane_cap):
+                        continue
+                    free = [s for s in free if busy_cpu + s.cpus
+                            <= self.cfg.owner_max_cpus + 1e-9]
+                    if not free or not self._owner_memory_fits(
+                            need, occupying, mem):
+                        continue
+                # Top-level calls and children alike leave the customer
+                # reserve alone (children keep the quick slots).
+                free = self._owner_leaves_reserve(waiter, free)
                 if not free:
                     continue
-            need = self.cfg.estimate(waiter.get("job_type") or "")
-            mem = mem_available_gib()
-            if committed + need > self.cfg.mem_budget_gib + 1e-9 or (
-                    mem is not None
-                    and mem - need * 0.5 < self.cfg.mem_reserve_gib):
-                # Fits a slot but not memory: hold every lower class back.
+            if light and mem is not None and \
+                    mem - need * 0.5 < self.cfg.mem_reserve_gib:
+                # Real memory is short even for a light call: it waits,
+                # without holding anyone else back.
+                continue
+            if not light and (
+                    committed + need > self.cfg.mem_budget_gib + 1e-9 or (
+                        mem is not None
+                        and mem - need * 0.5 < self.cfg.mem_reserve_gib)):
+                # Fits a slot but not memory: hold every lower class's
+                # heavy calls back.
                 if committed > 0 or (mem is not None and mem <
                                      self.cfg.mem_reserve_gib):
                     blocked_rank = rank if blocked_rank is None \
@@ -782,6 +989,15 @@ class Box:
         payload = job.get("payload") if isinstance(job.get("payload"),
                                                    dict) else {}
         read_only = jtype == "mcp_tool" and payload.get("mutation") is False
+        # Work a drain must still admit: a synchronous child of a running
+        # call, or a render a RUNNING Studio turn on this box is waiting for
+        # (payload.agent_job_id). Refusing either deadlocks the drain: X1's
+        # 30 Oct drain never reached idle because an agent turn waited on
+        # its own preview (R1 chaos).
+        parent = payload.get("agent_job_id")
+        drain_ok = bool(synchronous) or (
+            queue_backed and isinstance(parent, int)
+            and not isinstance(parent, bool) and self._job_running(parent))
         identity = {k: job.get(k) for k in
                     ("id", "type", "project_id", "total_claims")}
         t = now()
@@ -809,7 +1025,7 @@ class Box:
             if live:
                 return 409, {"error": "call already accepted",
                              "call_status": live["status"]}
-            if self.draining:
+            if self.draining and not drain_ok:
                 return 429, refusal_envelope(
                     jtype, "Box is draining for maintenance; nothing ran")
             if lane not in self.lanes:
@@ -824,6 +1040,17 @@ class Box:
             if len(self.waiting) >= self.cfg.queue_max:
                 return 429, refusal_envelope(
                     jtype, "Box admission queue is full; nothing ran")
+            # The same claim asking again after "no room within 150 s"
+            # keeps its place in the queue (R1 chaos, 30 Oct 2026): it used
+            # to re-enter at the back of its class, behind every call that
+            # arrived while it waited, so under sustained load a call could
+            # lose round after round, and oldest_wait_s reset every 150 s.
+            # The call id names one claim, so this is the same job's wait.
+            arrived = t
+            if existing and existing["status"] == "refused" and \
+                    existing.get("created_at") and \
+                    0 <= t - float(existing["created_at"]) < KEEP_PLACE_S:
+                arrived = float(existing["created_at"])
             rec = {"call_id": call_id, "lane": lane, "job_type": jtype,
                    "status": "submitted", "slot": None,
                    "job": json.dumps(identity), "launch_id": launch_id,
@@ -832,14 +1059,14 @@ class Box:
                    # The execution lease starts when a slot takes the
                    # call (_run_on_slot); a queued call only needs to
                    # outlive its own bounded wait.
-                   "created_at": t, "active_until": t + wait_s + 120,
+                   "created_at": arrived, "active_until": t + wait_s + 120,
                    "started_at": None, "container_started": None,
                    "disconnected_at": None, "terminal_at": None,
                    "abandon_reason": None}
             self.put(rec)
             waiter = {"call_id": call_id, "lane": lane, "priority": priority,
-                      "enqueued": t, "slot": None, "job_type": jtype,
-                      "child": bool(synchronous),
+                      "enqueued": arrived, "slot": None, "job_type": jtype,
+                      "child": bool(synchronous), "drain_ok": drain_ok,
                       "source": str(job.get("dispatcher_source") or ""),
                       "affinity": affinity_key(call_id)}
             self.waiting[call_id] = waiter
@@ -849,7 +1076,8 @@ class Box:
                 self._assign()
                 while not waiter["slot"]:
                     remaining = deadline - time.monotonic()
-                    if remaining <= 0 or self.draining:
+                    if remaining <= 0 or (self.draining
+                                          and not drain_ok):
                         break
                     self.cond.wait(timeout=min(remaining, 1.0))
                     self._assign()
@@ -861,7 +1089,7 @@ class Box:
                         and want != "unknown"
                         and want not in self.lane_releases(lane))
                     msg = ("Box is draining for maintenance; nothing ran"
-                           if self.draining else
+                           if self.draining and not drain_ok else
                            f"Box is switching releases: no {lane} slot runs "
                            f"{want} yet; nothing ran" if rollout else
                            f"Box is at capacity: no free {lane} slot within "
@@ -1044,9 +1272,21 @@ class Box:
             running, started = docker_state(slot.container)
             if running is False or (started and rec.get("container_started")
                                     and started != rec["container_started"]):
+                oom = docker_oom_since(
+                    slot.container, rec.get("started_at")
+                    or rec.get("created_at") or t)
                 with self.lock:
                     cur = self.get(rec["call_id"])
                     if cur and cur["status"] == "unknown":
+                        if oom:
+                            log(f"call {cur['call_id']} on {slot.name}: the "
+                                "container was OOM-killed "
+                                f"({slot.memory or 'limit'})")
+                            return self.terminalize(cur, "failed",
+                                                    memory_envelope(
+                                                        cur["job_type"],
+                                                        bool(cur["read_only"]),
+                                                        slot.memory))
                         reason = f"Box container exited during {cur['job_type']}"
                         return self.terminalize(cur, "failed",
                                                 abandoned_envelope(
@@ -1219,7 +1459,9 @@ class Box:
         for rec in recs:
             try:
                 if rec["status"] == "stopping":
-                    self._fence_and_fail(rec, reason="fence retried")
+                    self._fence_and_fail(
+                        rec, reason=rec.get("abandon_reason")
+                        or "fence retried")
                 elif rec["call_id"] not in self.live_handlers or \
                         (rec.get("active_until") or now()) <= now():
                     self.status(rec["call_id"])

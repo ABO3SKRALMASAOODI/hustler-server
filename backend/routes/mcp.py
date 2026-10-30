@@ -65,6 +65,7 @@ from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
 from routes.video import complete_upload_core, record_client_event, vdb, wschemas, apply_edit_batch_core, _request_final, _final_gate, final_degraded_hold, final_hold_message
 from routes.video import wtimeline
+from video_services import held_request
 from video_services import mcp_fast_reads
 from video_services import tail_gate
 from video_services.mcp_reads import read_metadata
@@ -1984,7 +1985,23 @@ def _session_project_identity(tok, project_id):
     return (f"PROJECT {int(project_id)} — "
             f"\"{project.get('title') or 'Untitled'}\"")
 
+def _held_for_assistant(tok, project_id=None):
+    """The request this MCP-only subscriber typed in the Studio before paying
+    and that has not run ({project_id, text}), or None (ticket #11: their
+    plan edits through the assistant, so it is the assistant's to do). Never
+    raises: a lookup failure only drops the note."""
+    try:
+        with vdb() as conn:
+            return held_request.for_assistant(conn.cursor(), tok["user_id"],
+                                              project_id)
+    except Exception as e:
+        print(f"[mcp] held-request lookup failed: {type(e).__name__}: {e}",
+              flush=True)
+        return None
+
+
 def _t_list_projects(tok, args):
+    held = _held_for_assistant(tok)
     with vdb() as conn:
         cur = conn.cursor()
         cur.execute("""
@@ -2016,8 +2033,11 @@ def _t_list_projects(tok, args):
                 kind_label = f"podcast shorts ({status})"
             else:
                 kind_label = "editor project"
+            waiting = (" — A REQUEST FROM THE STUDIO IS WAITING (open it)"
+                       if held and held["project_id"] == r["id"] else "")
             lines.append(f"  [{r['id']}] {r['title']} — {kind_label} — {what}"
-                         f" — created {r['created_at']:%Y-%m-%d}{active}")
+                         f" — created {r['created_at']:%Y-%m-%d}{active}"
+                         f"{waiting}")
     if not lines:
         return ("No projects yet. create_project(title) makes one, then "
                 "upload_start(project_id=ID, ...) puts a video in it.")
@@ -2043,7 +2063,9 @@ def _t_open_project(tok, args):
         return _session_error(
             f"Opened project {project_id}, but its state could not be read. "
             f"{state}")
-    return f"Opened project {project_id} — \"{p['title']}\".\n\n{state}"
+    held = _held_for_assistant(tok, project_id)
+    note = f"{held['text']}\n\n" if held else ""
+    return f"Opened project {project_id} — \"{p['title']}\".\n\n{note}{state}"
 
 
 def _t_open_short(tok, args):
@@ -2187,7 +2209,11 @@ def _t_project_state(tok, args):
     project_id, error = _required_project_id(args)
     if error:
         return _session_error(error)
-    return _run_tool_job(tok, "__state__", {}, project_id=project_id)
+    state = _run_tool_job(tok, "__state__", {}, project_id=project_id)
+    if isinstance(state, _SessionToolError) or not isinstance(state, str):
+        return state
+    held = _held_for_assistant(tok, project_id)
+    return f"{held['text']}\n\n{state}" if held else state
 
 
 def _upload_contract(args, kind):

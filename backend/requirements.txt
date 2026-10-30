@@ -8,9 +8,13 @@ anyio==4.14.2
 attrs==26.1.0
 blinker==1.9.0
 certifi==2026.10.19
+cffi==2.1.1
 charset-normalizer==3.3.2
 click==8.3.3
 colorama==0.4.6
+# AES-256-GCM for the sealed next-store keys (storage_creds.py, Oct 2026);
+# cffi and pycparser are its build/runtime dependencies.
+cryptography==50.0.2
 distro==1.9.0
 fal-client==0.13.1
 Flask==3.1.3
@@ -38,6 +42,7 @@ openai==1.59.9
 packaging==23.2
 propcache==0.4.1
 psycopg2-binary==2.9.10
+pycparser==3.0
 pydantic==2.9.2
 pydantic_core==2.23.4
 PyJWT==2.15.0

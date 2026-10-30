@@ -5,7 +5,7 @@ import time
 
 import jwt
 import requests
-from flask import Blueprint, request
+from flask import Blueprint, request, current_app
 from models import get_db, update_user_subscription_status
 from datetime import datetime
 
@@ -14,6 +14,7 @@ import credits as credits_mod
 import offers
 import paid_subscription_alert
 import trial_state
+from video_services import held_request
 from plan_catalog import (PLAN_MONTHLY_CREDITS, MONTHLY_CYCLE_PLANS,
                           daily_credits_for_plan, is_yearly_price)
 
@@ -631,6 +632,13 @@ def handle_webhook():
                 if event_type == 'transaction.completed':
                     paid_subscription_alert.enqueue_and_kick(
                         get_db(), user_id, plan, data, event_type)
+                # The request the subscribe wall held runs now, once, in the
+                # project it was typed in (ticket #11): the money is the
+                # webhook's own fact, never the browser's. Off the request
+                # thread; idempotent with the Studio's /replay-blocked and
+                # with Paddle's paid -> completed pair.
+                held_request.kick_after_payment(
+                    current_app._get_current_object(), user_id, event_type)
         elif sub_status:
             billing.set_status(get_db(), user_id, sub_status, plan)
 
