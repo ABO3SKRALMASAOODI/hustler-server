@@ -102,6 +102,9 @@ TERMINAL_RETENTION_S = 7 * 24 * 3600
 SUBMITTED_STALE_S = 60.0
 STARTING_STALE_S = 180.0
 ABANDON_MIN_DISCONNECTED_S = 120.0
+# A claim re-asking after a capacity refusal keeps its arrival time this
+# long (the dispatcher's in-claim window is 30 min; then a new claim).
+KEEP_PLACE_S = 3600.0
 LIVE = ("submitted", "starting", "running", "unknown", "stopping")
 OCCUPYING = ("starting", "running", "unknown", "stopping")
 CLASS_RANK = {"customer": 0, "trial": 1, "owner": 2}
@@ -354,6 +357,30 @@ def abandoned_envelope(job_type, read_only, reason):
         "max_attempts": retry_attempts(job_type), "agent_repairable": False}}
 
 
+# Renders whose out-of-memory death is a property of the job on that slot
+# size, not a blip: the dispatcher re-runs a preview once on the 10 GiB
+# batch lane (main._escalate_oom_render) instead of replaying the identical
+# graph on the identical 5 GiB slot, and a final reports its limit honestly.
+MEMORY_KIND_TYPES = {"preview", "preview_check", "filmstrip", "final"}
+
+
+def memory_envelope(job_type, read_only, limit):
+    """A slot container that died after the kernel's OOM killer fired in it.
+
+    Before R1 (30 Oct 2026) this was "Box lost the executor ... safe to
+    retry": the dispatcher replayed the same render on the same slot size up
+    to five times and then told the customer our service had a problem."""
+    reason = (f"out of memory: the kernel's out-of-memory killer ended the "
+              f"executor at the slot's {limit or 'memory'} limit (exit -9)")
+    if job_type not in MEMORY_KIND_TYPES:
+        return abandoned_envelope(job_type, read_only, reason)
+    error = (f"Box {job_type} ran {reason}. The same graph cannot fit this "
+             "slot size on a replay.")
+    return {"error": error, "retryable": False, "oom": True, "failure": {
+        "kind": "executor_memory", "retryable": False, "max_attempts": 0,
+        "agent_repairable": job_type in {"preview", "preview_check"}}}
+
+
 def refusal_envelope(job_type, message, capacity=True, rollout=False):
     """A proof that nothing ran. ``box_wait`` tells the dispatcher to hold
     the job and ask again; ``safe_to_fallback`` keeps the shared pre-/run
@@ -395,6 +422,7 @@ class Slot:
         self.cpuset = parse_cpuset(spec.get("cpuset"))
         self.shares = None        # the cgroup CPU weight last applied
         self.container = spec.get("container") or f"vbox-{self.name}"
+        self.memory = str(spec.get("memory") or "")
         self.role = LANE_ROLES.get(self.lane, "executor")
         self.ready = False
         self.release = "unknown"
@@ -428,6 +456,26 @@ def docker_state(container):
         return False, ""
     running, _, started = out.stdout.strip().partition("|")
     return running == "true", started
+
+
+def docker_oom_since(container, since_ts):
+    """Did the kernel's OOM killer fire inside ``container`` since
+    ``since_ts``? Docker records an ``oom`` event for any OOM kill in the
+    container's cgroup; its State.OOMKilled flag is no use here because the
+    unless-stopped restart clears it before admission looks. None = unknown
+    (docker unreachable), never a guess."""
+    try:
+        out = subprocess.run(
+            ["docker", "events", "--since", str(int(max(0, since_ts - 5))),
+             "--until", str(int(time.time()) + 1),
+             "--filter", f"container={container}", "--filter", "event=oom",
+             "--format", "{{.Time}}"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return bool(out.stdout.strip())
 
 
 def docker_restart(container):
@@ -538,7 +586,29 @@ class Box:
         with self.lock:
             for rec in [dict(r) for r in self.db.execute(
                     "SELECT * FROM calls WHERE status IN "
-                    "('submitted','starting','running')")]:
+                    "('submitted','starting','running','unknown')")]:
+                if self._child_answer_lost(rec):
+                    # R1 chaos (30 Oct 2026): a synchronous child (frames,
+                    # capture, fetch, ...) has no queue row, so once its
+                    # handler is gone its answer has nowhere to go: kept
+                    # `unknown`, its parent tool waited out the child's
+                    # whole lease (4-25 min) and the quick slot stayed
+                    # fenced as long. Fence it now (poll_slots restarts the
+                    # container and fails the call), so the parent hears
+                    # within seconds and may ask again.
+                    rec.update({"status": "stopping",
+                                "disconnected_at": rec.get("disconnected_at")
+                                or t,
+                                "abandon_reason": "admission restarted; this "
+                                "child's answer was lost",
+                                "error": "the admission handler awaiting /run "
+                                         "was lost (admission restart)"})
+                    self.put(rec)
+                    log(f"child call {rec['call_id']} on {rec['slot']} lost "
+                        "its answer in the restart; fencing its slot")
+                    continue
+                if rec["status"] == "unknown":
+                    continue
                 if rec["status"] in ("submitted", "starting"):
                     # No /run was sent by a handler that no longer exists.
                     self.terminalize(rec, "failed", refusal_envelope(
@@ -554,6 +624,32 @@ class Box:
                     self.put(rec)
                     log(f"call {rec['call_id']} on {rec['slot']} is unknown "
                         "after restart; its slot stays fenced")
+
+    def _job_running(self, job_id):
+        """Whether a call of queue job ``job_id`` holds a slot here."""
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT job FROM calls WHERE status IN "
+                "('starting','running','unknown','stopping')").fetchall()
+        for row in rows:
+            try:
+                if (json.loads(row["job"] or "{}") or {}).get("id") == job_id:
+                    return True
+            except ValueError:
+                continue
+        return False
+
+    @staticmethod
+    def _child_answer_lost(rec):
+        """A running/unknown synchronous child (no queue row to read)."""
+        if rec.get("status") not in ("running", "unknown") or \
+                not rec.get("slot"):
+            return False
+        try:
+            job = json.loads(rec.get("job") or "{}") or {}
+        except ValueError:
+            return False
+        return job.get("id") is None and job.get("total_claims") is None
 
     # ── views ──
     def state_json(self, rec):
@@ -760,9 +856,11 @@ class Box:
         # A drain stops new top-level work; synchronous children of calls
         # that are already running still start, so the running calls can
         # finish (a refused child fails its parent after its margin) and
-        # the box reaches idle.
+        # the box reaches idle. So does a render a running Studio turn on
+        # this box waits for (``drain_ok``; R1 chaos, 30 Oct 2026).
         order = sorted((w for w in self.waiting.values()
-                        if not self.draining or w.get("child")),
+                        if not self.draining or w.get("child")
+                        or w.get("drain_ok")),
                        key=lambda w: (CLASS_RANK.get(w["priority"], 0),
                                       0 if w.get("child") else 1,
                                       w["enqueued"]))
@@ -891,6 +989,15 @@ class Box:
         payload = job.get("payload") if isinstance(job.get("payload"),
                                                    dict) else {}
         read_only = jtype == "mcp_tool" and payload.get("mutation") is False
+        # Work a drain must still admit: a synchronous child of a running
+        # call, or a render a RUNNING Studio turn on this box is waiting for
+        # (payload.agent_job_id). Refusing either deadlocks the drain: X1's
+        # 30 Oct drain never reached idle because an agent turn waited on
+        # its own preview (R1 chaos).
+        parent = payload.get("agent_job_id")
+        drain_ok = bool(synchronous) or (
+            queue_backed and isinstance(parent, int)
+            and not isinstance(parent, bool) and self._job_running(parent))
         identity = {k: job.get(k) for k in
                     ("id", "type", "project_id", "total_claims")}
         t = now()
@@ -918,7 +1025,7 @@ class Box:
             if live:
                 return 409, {"error": "call already accepted",
                              "call_status": live["status"]}
-            if self.draining and not synchronous:
+            if self.draining and not drain_ok:
                 return 429, refusal_envelope(
                     jtype, "Box is draining for maintenance; nothing ran")
             if lane not in self.lanes:
@@ -933,6 +1040,17 @@ class Box:
             if len(self.waiting) >= self.cfg.queue_max:
                 return 429, refusal_envelope(
                     jtype, "Box admission queue is full; nothing ran")
+            # The same claim asking again after "no room within 150 s"
+            # keeps its place in the queue (R1 chaos, 30 Oct 2026): it used
+            # to re-enter at the back of its class, behind every call that
+            # arrived while it waited, so under sustained load a call could
+            # lose round after round, and oldest_wait_s reset every 150 s.
+            # The call id names one claim, so this is the same job's wait.
+            arrived = t
+            if existing and existing["status"] == "refused" and \
+                    existing.get("created_at") and \
+                    0 <= t - float(existing["created_at"]) < KEEP_PLACE_S:
+                arrived = float(existing["created_at"])
             rec = {"call_id": call_id, "lane": lane, "job_type": jtype,
                    "status": "submitted", "slot": None,
                    "job": json.dumps(identity), "launch_id": launch_id,
@@ -941,14 +1059,14 @@ class Box:
                    # The execution lease starts when a slot takes the
                    # call (_run_on_slot); a queued call only needs to
                    # outlive its own bounded wait.
-                   "created_at": t, "active_until": t + wait_s + 120,
+                   "created_at": arrived, "active_until": t + wait_s + 120,
                    "started_at": None, "container_started": None,
                    "disconnected_at": None, "terminal_at": None,
                    "abandon_reason": None}
             self.put(rec)
             waiter = {"call_id": call_id, "lane": lane, "priority": priority,
-                      "enqueued": t, "slot": None, "job_type": jtype,
-                      "child": bool(synchronous),
+                      "enqueued": arrived, "slot": None, "job_type": jtype,
+                      "child": bool(synchronous), "drain_ok": drain_ok,
                       "source": str(job.get("dispatcher_source") or ""),
                       "affinity": affinity_key(call_id)}
             self.waiting[call_id] = waiter
@@ -959,7 +1077,7 @@ class Box:
                 while not waiter["slot"]:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0 or (self.draining
-                                          and not waiter["child"]):
+                                          and not drain_ok):
                         break
                     self.cond.wait(timeout=min(remaining, 1.0))
                     self._assign()
@@ -971,7 +1089,7 @@ class Box:
                         and want != "unknown"
                         and want not in self.lane_releases(lane))
                     msg = ("Box is draining for maintenance; nothing ran"
-                           if self.draining and not waiter["child"] else
+                           if self.draining and not drain_ok else
                            f"Box is switching releases: no {lane} slot runs "
                            f"{want} yet; nothing ran" if rollout else
                            f"Box is at capacity: no free {lane} slot within "
@@ -1154,9 +1272,21 @@ class Box:
             running, started = docker_state(slot.container)
             if running is False or (started and rec.get("container_started")
                                     and started != rec["container_started"]):
+                oom = docker_oom_since(
+                    slot.container, rec.get("started_at")
+                    or rec.get("created_at") or t)
                 with self.lock:
                     cur = self.get(rec["call_id"])
                     if cur and cur["status"] == "unknown":
+                        if oom:
+                            log(f"call {cur['call_id']} on {slot.name}: the "
+                                "container was OOM-killed "
+                                f"({slot.memory or 'limit'})")
+                            return self.terminalize(cur, "failed",
+                                                    memory_envelope(
+                                                        cur["job_type"],
+                                                        bool(cur["read_only"]),
+                                                        slot.memory))
                         reason = f"Box container exited during {cur['job_type']}"
                         return self.terminalize(cur, "failed",
                                                 abandoned_envelope(
@@ -1329,7 +1459,9 @@ class Box:
         for rec in recs:
             try:
                 if rec["status"] == "stopping":
-                    self._fence_and_fail(rec, reason="fence retried")
+                    self._fence_and_fail(
+                        rec, reason=rec.get("abandon_reason")
+                        or "fence retried")
                 elif rec["call_id"] not in self.live_handlers or \
                         (rec.get("active_until") or now()) <= now():
                     self.status(rec["call_id"])
