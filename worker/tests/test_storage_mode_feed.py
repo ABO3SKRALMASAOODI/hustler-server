@@ -294,9 +294,9 @@ def test_a_silent_database_is_given_up_on_in_seconds(monkeypatch):
                 pass
     t = threading.Thread(target=accept, daemon=True)
     t.start()
+    port = srv.getsockname()[1]
     monkeypatch.setattr(config, "DATABASE_URL",
-                        f"postgresql://u:p@127.0.0.1:{srv.getsockname()[1]}"
-                        "/db?sslmode=disable")
+                        f"postgresql://u@127.0.0.1:{port}/db?sslmode=disable")
     t0 = time.monotonic()
     try:
         with pytest.raises(Exception) as err:
