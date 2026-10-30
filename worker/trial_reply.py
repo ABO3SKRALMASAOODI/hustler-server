@@ -84,7 +84,7 @@ _LIMIT = re.compile(
 _OFFER = re.compile(
     r"(?i)(\?\s*$|\b(?:want me to|would you like|i can (?:also )?|if you want|if you'd like|"
     r"say (?:the word|if)|tell me|let me know|next,? (?:i|try|you)|try asking|ask me)\b)")
-_PLACE = re.compile(r"(?i)\b(playing|on the right|in the player|preview (?:on the right|shows|is playing))\b")
+_PLACE = re.compile(r"(?i)\b(playing|on the right|the player|preview (?:on the right|shows|is playing))\b")
 
 # a claim about the video's length: "a 36-second cut", "now runs 25.6 seconds",
 # "is 18.5 s long", "at 51.6 seconds" when it names the whole ("ready at")

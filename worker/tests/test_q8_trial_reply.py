@@ -260,3 +260,11 @@ def test_the_advisory_hand_off_opens_the_export(monkeypatch):
     monkeypatch.setattr(agent_loop, "_safety_hold", lambda c: False)
     out = agent_loop._quality_handoff(types.SimpleNamespace(critics_advisory=True))
     assert out["quality_status"] == "advisory" and out["export_ready"] is True
+
+
+def test_where_to_look_is_said_once():
+    # q8d phonehook (30 Oct): "Look at the player to see it." then the
+    # added "It's playing in the player."
+    text, _ = tr.finish("Your reel is now a 27-second vertical 9:16 edit with "
+                        "captions. Look at the player to see it.", facts())
+    assert text.count("player") == 1
