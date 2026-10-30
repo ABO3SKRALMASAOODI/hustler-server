@@ -1092,3 +1092,22 @@ def test_rub_a_size_against_its_own_purpose_is_refused(shot, workdir, tool_env):
     down = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.4},
                                            purpose="make the title smaller")
     assert down.startswith("EDL v"), down
+
+
+@needs_ffmpeg
+def test_rub_scale_and_size_words_are_relative_to_the_current_size(shot, workdir, tool_env):
+    """REAL_USER_BRUTE loop 3 (a new Pro subscriber, no purpose passed):
+    {"scale": 1.25} and {"size": "xl"} were refused, then size 1.25 shrank
+    a 1.3 title. Both now step from the current size."""
+    ctx = _Ctx(shot, workdir)
+    assert motion_tools.add_motion_graphic(
+        ctx, "hook_title", 0.0, 2.5, params={"text": "A *million* times more power",
+                                             "size": 1.2}, sfx=False).startswith("EDL v")
+    res = motion_tools.set_motion_graphic(ctx, "mg1", params={"scale": 1.25})
+    assert res.startswith("EDL v") and "relative to the current size" in res, res
+    assert ctx._edl["motion"][0]["params"]["size"] == 1.5
+    res = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": "xl"})
+    assert res.startswith("EDL v"), res
+    assert ctx._edl["motion"][0]["params"]["size"] == 1.6      # clamped to the max
+    assert motion_tools.set_motion_graphic(ctx, "mg1", params={"size": "s"}).startswith("EDL v")
+    assert ctx._edl["motion"][0]["params"]["size"] < 1.6

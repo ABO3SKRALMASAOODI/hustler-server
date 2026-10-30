@@ -3124,6 +3124,7 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     # editors pass it here inside params: 'phrase_build has no parameter(s)
     # ['replace_params']' (2 refusals on 23-24 Oct, last job 104970). True
     # replaces the whole set, as there; false is this tool's own merge.
+    params, size_note_in = _relative_size(hit, params)
     replace = False
     if isinstance(params, dict) and "replace_params" in params:
         params = dict(params)
@@ -3275,12 +3276,64 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         return res
     tail = (_yield_report(ctx, edl, hit) if persistent
             else _band_note(ctx, edl, hit) + _band_spill_note(ctx, edl, hit, bbox))
-    return (res + where + box_note + band_note + keep_note + number_note + size_note
+    return (res + size_note_in + where + box_note + band_note + keep_note + number_note + size_note
             + window_note + series_note + hero_note
             + (f"\nNOTE: {'; '.join(notes)}" if notes else "")
             + (_owned_sfx_checks(ctx, edl, id) if checked else "")
             + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit)
             + _look_notes(ctx, edl, hit, {}))
+
+
+_SIZE_WORDS = {"xs": 0.75, "s": 0.87, "small": 0.87, "smaller": 0.87, "m": 1.0, "medium": 1.0,
+               "l": 1.15, "large": 1.15, "bigger": 1.15, "larger": 1.15, "xl": 1.3, "xxl": 1.45}
+
+
+def _relative_size(hit, params):
+    """(params, note): REAL_USER_BRUTE (31 Oct). For "make the opening title
+    a little bigger" the Claude lanes passed {"scale": 1.25}, then
+    {"size": "xl"}, both refused, then {"size": 1.25}: SMALLER than the
+    title's 1.3. A template whose size is a number reads 'scale' (when it
+    has no 'scale' of its own) as a multiplier of the current size, and a
+    size word (s/m/l/xl, bigger) as a step from it."""
+    if not isinstance(params, dict) or not params:
+        return params, ""
+    try:
+        spec = motion_templates.spec(hit["template"]).get("params") or {}
+    except ValueError:
+        return params, ""
+    p = spec.get("size") or {}
+    if p.get("type") not in ("float", "int"):
+        return params, ""
+    try:
+        cur = float((hit.get("params") or {}).get("size", p.get("default", 1.0)))
+    except (TypeError, ValueError):
+        return params, ""
+    factor = None
+    out = dict(params)
+    if "scale" in out and "scale" not in spec and "size" not in out:
+        try:
+            factor = float(out.pop("scale"))
+        except (TypeError, ValueError):
+            return params, ""
+    elif isinstance(out.get("size"), str):
+        word = out["size"].strip().lower()
+        try:
+            float(word)
+        except ValueError:
+            factor = _SIZE_WORDS.get(word)
+            if factor is None:
+                return params, ""
+    if factor is None or factor <= 0:
+        return params, ""
+    lo, hi = p.get("min"), p.get("max")
+    new = cur * factor
+    if lo is not None:
+        new = max(float(lo), new)
+    if hi is not None:
+        new = min(float(hi), new)
+    out["size"] = round(new, 3)
+    return out, (f"\nNOTE: read as relative to the current size: size {cur:g} x {factor:g} -> "
+                 f"{out['size']:g} (absolute, range {lo:g}-{hi:g}).")
 
 
 _BIGGER = re.compile(r"(?i)\b(bigger|larger|enlarg\w*|increas\w*|grow|scale (?:it )?up|more prominent|"

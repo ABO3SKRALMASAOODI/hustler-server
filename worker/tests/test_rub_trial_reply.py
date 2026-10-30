@@ -139,3 +139,13 @@ def test_a_new_subscribers_verifies_line_and_multiplier_are_dropped():
     out, _ = tr.finish(draft, facts("make the captions bigger", subscriber=True))
     assert "×" not in out and "verifies" not in out, out
     assert out.startswith("I made the captions bigger and re-rendered."), out
+
+
+def test_bigger_is_never_claimed_for_a_title_that_got_smaller():
+    mg = lambda size: {"keep": [[0.0, 19.0]], "motion": [{"id": "mg1", "template": "hook_title",
+                                                         "params": {"text": "X", "size": size}}]}
+    draft = "I made the opening title bigger and matched its accent to the short's yellow."
+    f = facts("make the opening title a little bigger", before=mg(1.3), after=mg(1.25))
+    assert tr.unbacked(draft, f) == "smaller"
+    f = facts("make the opening title a little bigger", before=mg(1.3), after=mg(1.5))
+    assert tr.unbacked(draft, f) is None

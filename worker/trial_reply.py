@@ -306,6 +306,30 @@ _TRIM_CLAIM = re.compile(
     r"(?:pauses?|gaps?|silences?|dead air|fillers?|boring parts?) (?:are |were )?(?:cut|removed|trimmed|gone))\b")
 
 
+def _size_went(before, after, what):
+    """"up", "down" or None: the title graphics' (or the captions') size
+    from the turn's start to now."""
+    def sizes(edl):
+        edl = edl or {}
+        if what == "captions":
+            st = ((edl.get("captions") or {}) if isinstance(edl.get("captions"), dict) else {}).get("style") or {}
+            v = st.get("size_scale")
+            return {"c": float(v)} if isinstance(v, (int, float)) else {}
+        out = {}
+        for m in edl.get("motion") or []:
+            v = (m.get("params") or {}).get("size") if isinstance(m, dict) else None
+            if isinstance(v, (int, float)) and m.get("template") in (
+                    "hook_title", "headline", "title_card", "kinetic_title", "lower_third"):
+                out[m.get("id")] = float(v)
+        return out
+    b, a = sizes(before), sizes(after)
+    ups = [k for k in a if k in b and a[k] > b[k] + 1e-6]
+    downs = [k for k in a if k in b and a[k] < b[k] - 1e-6]
+    if ups:
+        return "up"
+    return "down" if downs else None
+
+
 def _kept_s(edl):
     try:
         return round(sum(float(b) - float(a) for a, b in (edl or {}).get("keep") or []), 2)
@@ -318,6 +342,13 @@ def unbacked(sent, facts):
     s = rg.straight(sent)
     if not facts.subscriber and (_TRIAL_EXPORT.search(s) or rg.export_violations(s)):
         return "export"
+    if facts.wrote and not rg._NOT_A_CLAIM.search(s):
+        # REAL_USER_BRUTE loop 3: "I made the opening title bigger" over a
+        # title that went from size 1.3 to 1.25
+        for what, rx in (("title", r"titles?|headlines?|hook"), ("captions", r"captions?|subtitles?")):
+            if re.search(r"(?i)\b(?:" + rx + r")\b", s) and re.search(r"(?i)\b(bigger|larger|enlarged)\b", s):
+                if _size_went(facts.before, facts.after, what) == "down":
+                    return "smaller"
     if facts.wrote and _TRIM_CLAIM.search(s) and not rg._NOT_A_CLAIM.search(s):
         # REAL_USER_BRUTE (31 Oct): "cut the boring parts" came back 1.5 s
         # LONGER, told as "with the dead pauses trimmed"
