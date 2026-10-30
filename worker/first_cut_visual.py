@@ -180,10 +180,13 @@ BROLL_SHARE = 0.45      # at most this share of the program (refs 30-60%)
 BROLL_TAIL_S = 1.4      # the ending is on the speaker
 
 
-def broll_windows(moments, tl, prog, hook_end):
+def broll_windows(moments, tl, prog, hook_end, clear_from=None):
     """[(start, end, word, query)] program windows for the cutaways: after
     the hook, BROLL_GAP_S of face between them, clear of the ending, at most
-    BROLL_SHARE of the program."""
+    BROLL_SHARE of the program. ``clear_from`` (Q5): no cutaway reaches
+    past this program second (the closing sentence stays on the face)."""
+    if clear_from is not None:
+        prog = min(prog, float(clear_from) + BROLL_TAIL_S)
     cands = []
     for t0, _t1, word, query in moments or []:
         a = tl.src_to_out(t0)
@@ -212,7 +215,8 @@ def broll_windows(moments, tl, prog, hook_end):
     return out
 
 
-def place_broll(ctx, steps, started, run, moments, hook_end, spend=None):
+def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
+                clear_from=None):
     """Cut away to B-roll on the scout's concrete moments (source_broll:
     every live library, licence-checked, judged on the real files,
     colour-matched; photos move). Returns the placed program windows."""
@@ -228,22 +232,44 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None):
     print(f"[first_cut] b-roll at program s: "
           f"{[(None if tl.src_to_out(m[0]) is None else round(tl.src_to_out(m[0]), 1), m[2]) for m in moments or []]}",
           flush=True)
-    wins = broll_windows(moments, tl, prog, hook_end)
+    wins = broll_windows(moments, tl, prog, hook_end, clear_from=clear_from)
     print(f"[first_cut] b-roll: {len(moments or [])} scout moments, "
           f"{len(wins)} windows", flush=True)
     if not wins:
         return []
     # video where a keyed library is live (production: Pexels), photos
-    # (moving) from the keyless libraries otherwise
-    kind = "any" if stock.video_available() else "photo"
+    # (moving) from the keyless libraries otherwise. Q5 (30 Oct): VIDEO
+    # first (with Pexels live the judged pick was still a still photo: the
+    # references cut to footage that moves), then "any" for the moments no
+    # clip answered
+    video = stock.video_available()
+    kind = "video" if video else "photo"
     specs = [{"id": f"b{n}", "query": q, "word": w, "at": a,
               "duration_s": round(b - a, 2), "kind": kind,
-              "purpose": f"show what '{w}' names, as it is said"}
+              "purpose": f"show {q} as '{w}' is said"}
              for n, (a, b, w, q) in enumerate(wins, 1)]
     print(f"[first_cut] b-roll moments: {[(s['at'], s['word'], s['query']) for s in specs]}",
           flush=True)
-    run(ctx, steps, "source_broll", {"moments": specs, "max": len(specs)},
-        started)
+    first = {"moments": specs, "max": len(specs)}
+    if video:
+        # the curated stock libraries only: the archives' "videos" answered
+        # "power plant at night" with a drone strike on Chernobyl and "a
+        # computer science lab" with shorebirds (Q5 harness, 30 Oct)
+        import broll_source
+        live = [p for p, v in broll_source.status().items() if v == "on"]
+        keyed = [p for p in ("pexels", "pixabay") if p in live]
+        if keyed:
+            first["providers"] = keyed
+    run(ctx, steps, "source_broll", first, started)
+    if video:
+        got = covered(ctx)
+        missed = [dict(s, kind="any", id=s["id"] + "a") for s in specs
+                  if not any(a - 0.35 <= s["at"] <= b for a, b in got)]
+        if missed:
+            print(f"[first_cut] b-roll: {len(missed)} moments without a "
+                  "clip, any picture now", flush=True)
+            run(ctx, steps, "source_broll", {"moments": missed,
+                                             "max": len(missed)}, started)
     if spend is not None:
         return verify_broll(ctx, steps, started, run, spend)
     return covered(ctx, ("broll",))
@@ -306,8 +332,11 @@ def verify_broll(ctx, steps, started, run, spend):
         said = " ".join(str(w.get("w") or "") for w in words
                         if a - 1.2 <= float(w["t0"]) <= b + 0.3)
         ids[n] = str(it.get("id"))
+        meant = str(it.get("moment") or "")[:90]
         parts.append({"type": "text", "text": f"Picture {n}, said over it: "
-                                              f"\"{said[:200]}\""})
+                                              f"\"{said[:200]}\""
+                                              + (f" (the editor wanted: {meant})"
+                                                 if meant else "")})
         parts.append({"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}})
     if not ids:

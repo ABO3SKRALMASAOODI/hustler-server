@@ -113,11 +113,12 @@ def test_the_chain_keeps_the_shape_and_never_reframes(monkeypatch):
                         lambda c: ("Deep learning was working", 2.4))
     cuts = {}
 
-    def cut_ins(c, steps, started, run, busy, aim, hook_end, bands=False,
-                levels=None, target=None, hi=None):
-        cuts.update(target=target, hi=hi, aim=aim, levels=levels)
+    def cut_ins(c, steps, started, run, busy, hook_end, **kw):
+        cuts.update(busy=busy, hook_end=hook_end, **kw)
         return 3
-    monkeypatch.setattr(fcv, "cut_ins", cut_ins)
+    import talk_craft
+    monkeypatch.setattr(talk_craft, "landscape_cut_ins", cut_ins)
+    monkeypatch.setattr(talk_craft, "cut_audio_pauses", lambda *a, **k: None)
     steps = _FakeSteps()
     out = longform.tighten(ctx, None, steps)
     names = [n for n, _a in steps.calls]
@@ -131,13 +132,10 @@ def test_the_chain_keeps_the_shape_and_never_reframes(monkeypatch):
     assert ctx.approval_previews is True
     title = dict(steps.calls)["add_motion_graphic"]
     assert title["template"] == "hook_title" and title["params"]["size"] <= 1.2
-    # a long program changes camera about every 7 s, not every 2.4
-    assert cuts["target"] == longform.CUT_IN_TARGET_S == 7.0
-    assert cuts["hi"] == longform.CUT_IN_MAX_S
-    # pinned at the face's centre (the chin pin pushed the head to the edge)
-    # and a gentle 1.3x, not the short-form 1.4-1.5x
-    assert cuts["aim"] == (0.5, 0.4) and cuts["levels"] == longform.CUT_IN_LEVELS
-    assert max(longform.CUT_IN_LEVELS) < 0.36
+    # Q5: the long program changes camera about every 3 s (judges: "a
+    # visual event every 2-3 s across the long stretches"), each close
+    # framing aimed at the face measured on its own frame (talk_craft)
+    assert talk_craft.LONG_CUT_TARGET_S == 3.0 and cuts["hook_end"] >= 1.0
     assert out["how"] == "scout" and out["segments"] == 2
     assert any("16:9" in a and "10-minute" in a for a in steps.applied)
 

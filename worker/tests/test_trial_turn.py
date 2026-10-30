@@ -532,3 +532,20 @@ def test_the_talking_head_lift_is_off_by_default(fake_tools, monkeypatch):
     assert not [n for n, _a in ctx.calls if n in ("add_zoom",
                                                   "add_motion_graphic")]
     assert "already answers this request" in prep["note"]
+
+
+@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
+def test_the_long_form_cut_is_final_only_on_its_own_trial_turn(kind):
+    """Q5 (30 Oct): after the long-form chain the model trimmed a phrase and
+    re-rendered a 3-minute program (11 minutes); the cut is final on that
+    turn. A generic prepared turn, and every other lane, can still cut."""
+    ctx = _lane_ctx(kind)
+    ctx.trial_prep = {"intent": "tighten"}
+    out = agent_loop._kept_craft_refusal(ctx, "cut_range", {"start": 1, "end": 2})
+    if kind == "trial":
+        assert out and out.startswith("REJECTED: KEPT")
+        assert agent_loop._kept_craft_refusal(ctx, "keep_segments", {}) is not None
+        ctx.trial_prep = {"intent": "generic"}
+        assert agent_loop._kept_craft_refusal(ctx, "cut_range", {}) is None
+    else:
+        assert out is None

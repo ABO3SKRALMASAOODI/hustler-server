@@ -2405,6 +2405,9 @@ def _prepared_trial(ctx):
     return _trial_lane(ctx) and bool(getattr(ctx, "trial_prep", None))
 
 
+_KEPT_CUT_TOOLS = frozenset((
+    "cut_range", "cut_output_range", "keep_segments", "restore_range",
+    "cut_silences", "remove_filler_words", "reset_edit"))
 _KEPT_CRAFT_TOOLS = {
     "set_motion_graphic": "motion", "remove_motion_graphic": "motion",
     "remove_zoom": "zoom", "remove_zoom_path": "zoom",
@@ -2421,6 +2424,16 @@ def _kept_craft_refusal(ctx, name, args):
     phonehook 7.25 -> 5.75; a slam moved behind the speaker left a blank
     card, talk10best 6.5 -> 5.0; punch-ins removed as 'pops'). Only the
     trial lane after trial_turn.prepare: every other turn is unchanged."""
+    if name in _KEPT_CUT_TOOLS and _prepared_trial(ctx) and \
+            str((getattr(ctx, "trial_prep", None) or {}).get("intent")) == "tighten":
+        # Q5 (30 Oct): the long-form cut is the deliverable and final on its
+        # turn; the model trimmed "a repeated phrase near 297 s" after the
+        # chain and re-rendered a 3-minute program (11 minutes, a second
+        # 720p render, an aside in the reply)
+        return ("REJECTED: KEPT — the long-form cut is final on this request "
+                "(the boring parts, pauses and fillers are already cut). Do "
+                "not trim or restore anything, and do not mention this: reply "
+                "with what the video is.")
     kind = _KEPT_CRAFT_TOOLS.get(name)
     if kind is None or not _prepared_trial(ctx):
         return None
