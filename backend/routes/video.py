@@ -56,6 +56,7 @@ from video_services.upload import (
 )
 from video_services.chat_jobs import parse_client_event as _event_request_args
 from video_services import held_request as _held_request
+from video_services import chat_display
 from video_services.render_export import (
     deterministic_final_failure as _deterministic_final_failure,
     export_edl_error as _service_export_edl_error,
@@ -4087,10 +4088,9 @@ def project_state(user_id, project_id):
         # only for an admitted project (absent otherwise: today's payload).
         **({"free_trial": trial_status} if trial_status else {}),
         "jobs": jobs,
-        "messages": [
-            {"id": r["id"], "role": r["role"], "content": r["content"],
-             "meta": r["meta"], "created_at": r["created_at"].isoformat()}
-            for r in msgs],
+        # Activity rows go out as plain steps, never the agent's tool text
+        # (video_services/chat_display.py; owner, 30 Oct 2026).
+        "messages": [chat_display.client_message(r) for r in msgs],
         "last_message_id": msgs[-1]["id"] if msgs else after_id,
         "latest_edl": ({"version": edl["version"], "json": edl["json"],
                         "created_by": edl["created_by"],
@@ -4170,11 +4170,8 @@ def get_messages(user_id, project_id):
                        ORDER BY id ASC LIMIT 500""",
                     (p["chat_session_id"], after_id))
         rows = cur.fetchall()
-    return jsonify({"messages": [
-        {"id": r["id"], "role": r["role"], "content": r["content"],
-         "meta": r["meta"], "created_at": r["created_at"].isoformat()}
-        for r in rows
-    ]})
+    return jsonify({"messages": [chat_display.client_message(r)
+                                 for r in rows]})
 
 
 # How long after the wall a purchase still replays the refused request. 20 of
