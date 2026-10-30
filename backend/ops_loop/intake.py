@@ -263,7 +263,7 @@ def _held_not_resumed(cur, since, now, p):
                    AND NOT EXISTS (
                          SELECT 1 FROM chat_messages n
                           WHERE n.session_id = m.session_id AND n.id > m.id
-                            AND n.role IN ('user', 'assistant'))
+                            AND n.role = 'user')
                  ORDER BY m.id DESC LIMIT 1) h
          WHERE pay.occurred_at > %(held_since)s
            AND pay.occurred_at <= %(held_until)s

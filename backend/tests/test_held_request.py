@@ -424,3 +424,50 @@ def test_a_failed_lookup_never_breaks_an_mcp_call(monkeypatch):
         yield type("C", (), {"cursor": lambda self: object()})()
     monkeypatch.setattr(mcp, "vdb", fake_vdb)
     assert mcp._held_for_assistant({"user_id": 1}, 5) is None
+
+
+def test_the_lane_lookup_never_counts_as_a_refusal(monkeypatch):
+    # routes.video._studio_ai_gate records an mcp_only_refused event (the
+    # cockpit's wrong-plan signal); a lookup from the webhook, the intake or
+    # an MCP call must not add one.
+    events = []
+    monkeypatch.setattr(video, "record_client_event",
+                        lambda *a, **k: events.append(a[2]))
+
+    class Cur:
+        def execute(self, sql, params=None):
+            assert "SELECT plan, is_subscribed FROM users" in sql
+
+        def fetchone(self):
+            return {"plan": "plus_2026", "is_subscribed": 1}
+    assert held_request.studio_lane_open(Cur(), 2647) is False
+    assert events == []
+    with Flask(__name__).app_context():
+        assert video._studio_ai_gate(Cur(), 2647) is not None
+    assert events == ["mcp_only_refused"]          # the real refusal still is
+
+
+def test_the_studio_runs_the_held_request_the_webhook_way(monkeypatch):
+    @contextlib.contextmanager
+    def fake_vdb(*_a):
+        yield type("C", (), {"cursor": lambda self: object(),
+                             "commit": lambda self: None})()
+    monkeypatch.setattr(video, "vdb", fake_vdb)
+    monkeypatch.setattr(video, "_project_for_user",
+                        lambda *_: {"id": 9, "chat_session_id": 3})
+    monkeypatch.setattr(video, "_subscribe_gate_applies", lambda *_: False)
+    monkeypatch.setattr(video, "_studio_ai_gate", lambda *_: None)
+    monkeypatch.setattr(video._held_request, "started", lambda *_: None)
+    calls = []
+    monkeypatch.setattr(video._held_request, "resume",
+                        lambda uid, origin, pid: calls.append(
+                            (uid, origin, pid)) or {
+                            "resumed": True, "reason": "sent",
+                            "job_id": 778, "message_id": 901})
+    app = Flask(__name__)
+    with app.test_request_context(json={}):
+        body = video.replay_blocked.__wrapped__(user_id=8,
+                                                project_id=9).get_json()
+    assert calls == [(8, "studio", 9)]
+    assert body == {"replay": "started", "job_id": 778, "message_id": 901,
+                    "origin": "studio", "waiting_for_index": False}

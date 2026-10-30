@@ -3773,6 +3773,18 @@ def replay_blocked(user_id, project_id):
         running = _held_request.started(cur, p["chat_session_id"])
         if running:
             return jsonify({"replay": "started", **running})
+        # Run it here the same way the webhook does (one exactly-once path,
+        # also when an automatic message followed the wall); a wall this
+        # does not cover (older than its window, a walled upload alone, a
+        # held download) continues below as before.
+        resumed = _held_request.resume(user_id, "studio", project_id)
+        if resumed.get("resumed"):
+            return jsonify({"replay": "started",
+                            "job_id": resumed.get("job_id"),
+                            "message_id": resumed.get("message_id"),
+                            "origin": "studio",
+                            "waiting_for_index":
+                                resumed.get("reason") == "waiting_for_index"})
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
         cur.execute("""SELECT id, role, meta,
                               created_at > NOW() - make_interval(hours => %s)

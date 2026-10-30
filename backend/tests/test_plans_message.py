@@ -132,9 +132,11 @@ class Replay:
             self._result = None
         elif command.startswith("SELECT id, role, meta, created_at >"):
             self._result = self.last
-        elif command.startswith("SELECT id, meta FROM chat_messages"):
-            # held_request.started: the newest plans reply (nothing resumed
-            # yet in these cases; test_held_request covers the rest).
+        elif command.startswith("SELECT id, meta FROM chat_messages") or \
+                command.startswith("SELECT m.id, m.session_id, m.meta"):
+            # held_request.started / .pending (resume): nothing resumed or
+            # waiting through that path in these cases (the legacy replay
+            # below answers); test_held_request covers the rest.
             self._result = None
         elif "type = 'agent_turn'" in command:
             self._result = {"?": 1} if self.agent_live else None

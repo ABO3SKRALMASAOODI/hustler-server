@@ -99,7 +99,11 @@ def test_the_newest_wall_that_is_still_the_last_message_is_waiting(cur):
 def test_nothing_waits_once_the_user_moved_on_or_it_ran_or_it_is_old(cur):
     _, sid = user(cur, 1)
     wall(cur, 2, sid, ago_min=5, surface="chat")
-    msg(cur, 3, sid, "user", ago_min=1)               # typed again
+    # The analysis greeting of the walled upload the payment unlocked is not
+    # the user moving on (users 2544, 2555, 2589 had one after their wall).
+    msg(cur, 3, sid, "assistant", {"kind": "index_ready"}, ago_min=2)
+    assert held_request.pending(cur, 1)["id"] == 2
+    msg(cur, 4, sid, "user", ago_min=1)               # typed again
     assert held_request.pending(cur, 1) is None
     _, sid = user(cur, 2)
     wall(cur, 20, sid, surface="chat", replayed_at="x")

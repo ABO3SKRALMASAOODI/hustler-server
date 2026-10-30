@@ -72,24 +72,29 @@ def _kind(meta):
 
 def studio_lane_open(cur, user_id):
     """Whether this account's plan includes the Studio AI editor: exactly
-    routes.video._studio_ai_gate's answer (a refusal is a jsonify response,
-    so an app context is pushed when the caller has none, e.g. the intake's
-    unit tests)."""
+    routes.video._studio_ai_gate's answer, through its unrecorded form (this
+    is a lookup, not a refusal the customer saw, so it must never add an
+    mcp_only_refused event). A refusal is a jsonify response, so an app
+    context is pushed when the caller has none (the intake's unit tests)."""
     from flask import Flask, has_app_context
     from routes import video as v
+    gate = getattr(v, "_studio_ai_gate_unrecorded", v._studio_ai_gate)
     if has_app_context():
-        return not v._studio_ai_gate(cur, user_id)
+        return not gate(cur, user_id)
     with Flask(__name__).app_context():
-        return not v._studio_ai_gate(cur, user_id)
+        return not gate(cur, user_id)
 
 
 def pending(cur, user_id, window_h=WINDOW_H, project_id=None):
     """The account's newest held request that is still waiting, or None.
 
     A plans reply that carries the refused request, was written within the
-    window, has not been resumed, and is still the newest user/assistant
-    message of its conversation (anything typed after it means the user moved
-    on, and a resumed request's own message is such a message)."""
+    window, has not been resumed, and has no user message after it (anything
+    typed after it means the user moved on, and a resumed request's own
+    message is such a message). Automatic assistant messages after it, such
+    as the analysis greeting of the walled upload that the subscription
+    unlocked, do not count: users 2544, 2555 and 2589 (25-27 Oct) each had
+    one, and their held requests were dropped too."""
     cur.execute("""
         SELECT m.id, m.session_id, m.meta, m.created_at, p.id AS project_id
           FROM projects p
@@ -104,7 +109,7 @@ def pending(cur, user_id, window_h=WINDOW_H, project_id=None):
            AND NOT EXISTS (
                  SELECT 1 FROM chat_messages n
                   WHERE n.session_id = m.session_id AND n.id > m.id
-                    AND n.role IN ('user', 'assistant'))
+                    AND n.role = 'user')
          ORDER BY m.id DESC LIMIT 1""",
                 (int(user_id), project_id, project_id, int(window_h)))
     row = cur.fetchone()
