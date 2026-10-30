@@ -1896,6 +1896,21 @@ def run_agent_job(worker_db, job):
 
     payload = job.get("payload") or {}
     original = worker_db.run(dbx.latest_asset, job["project_id"], "original")
+    if not original:
+        # A website demo asked for on a blank canvas (the "Record my
+        # website" tile or a typed request) is the engine's URL First cut
+        # for every account, not the agent's plain scroll (owner's own test,
+        # 30 Oct; website_engine.py). A gated account gets the upgrade card
+        # inside first_cut.run.
+        import website_engine
+        web_url = website_engine.route_url(worker_db, job, user_message)
+        if web_url:
+            import first_cut
+            print(f"[agent] job {job.get('id')}: website demo of {web_url} "
+                  "-> the URL First cut", flush=True)
+            return first_cut.run(worker_db,
+                                 website_engine.engine_job(job, web_url),
+                                 project, None)
     index_row = original and original["sha256"] and \
         worker_db.run(dbx.get_index_by_sha, original["sha256"])
     if original and not index_row:

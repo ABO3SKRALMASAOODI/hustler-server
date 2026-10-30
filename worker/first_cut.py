@@ -2464,7 +2464,12 @@ def url_hints(text):
         # the first shape named is the one asked for ("a 16:9 promo, 9:16
         # optional"; C2 real request)
         out["orientation"] = "landscape"
-    if _SCROLL_ASK.search(text) and _WHOLE_PAGE.search(text):
+    if _SCROLL_ASK.search(text) and _WHOLE_PAGE.search(text) and \
+            not _TILE.search(text):
+        # the tile's own template ("scroll the page from top to bottom at a
+        # steady pace", until 31 Oct) is not the user's ask: the owner's
+        # verdict on a scroll was "nothing but a scroll" (30 Oct). A user
+        # who types it gets it.
         out["mode"] = "scroll"
     secs = [int(m.group(1)) for m in _SECONDS.finditer(text)]
     if secs and 10 <= secs[0] <= 180:
@@ -3169,6 +3174,13 @@ def run(worker_db, job, project, index_row):
             first_cut_visual.engine_on, job.get("user_id"), subscribed))
     except Exception:
         ctx.first_cut_q1 = False
+    if url:
+        # A website demo is the engine's for every account allowed to make
+        # one (owner, 30 Oct: his own demo was a plain scroll): the phone
+        # layout, the pointed beats and the progress lines, a grandfathered
+        # payer's and the owner's included. A URL First cut makes no model
+        # call, so no lane or model changes with it.
+        ctx.first_cut_q1 = True
     llm.set_turn_plan(plan if subscribed else "", project_id=project["id"])
     try:
         if url:

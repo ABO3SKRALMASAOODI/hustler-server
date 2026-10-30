@@ -497,9 +497,14 @@ def test_website_request_hints_are_read_from_its_words():
             "vertical (9:16) demo: scroll the page from top to bottom at a "
             "steady pace, then make it a polished showcase video.")
     h = first_cut.url_hints(tile)
-    assert h["mode"] == "scroll" and h["seconds"] == 20
+    # the tile's own template is not the user's ask: a section tour (owner,
+    # 30 Oct: "nothing but a scroll"); the length and shape still hold
+    assert "mode" not in h and h["seconds"] == 20
     assert "orientation" not in h
-    assert first_cut.tour_steps(h)[1]["mode"] == "scroll"
+    assert "mode" not in first_cut.tour_steps(h)[1]
+    h = first_cut.url_hints("Record https://x.dev as a demo: scroll the page "
+                            "from top to bottom at a steady pace.")
+    assert h["mode"] == "scroll"
     h = first_cut.url_hints("Record a demo of https://x.dev in landscape: wait "
                             "2 seconds, scroll down to the bottom.")
     assert h["orientation"] == "landscape" and h["mode"] == "scroll"
