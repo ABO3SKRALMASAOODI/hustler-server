@@ -80,9 +80,13 @@ def intent(text):
         return None
     if _SPECIFIC.search(t):
         return None
-    if _CLEANUP.search(t):
+    if _CLEANUP.search(t) or _BORING.search(t):
+        # QI (30 Oct): "cut the boring parts" asks for the user's footage
+        # minus its dead weight, not one 36 s moment of a 10-min talk (the
+        # matrix: "not what the user asked", a hard fault, twice). It takes
+        # the whole-take clean-up when the First cut kept one moment.
         return "cleanup"
-    if _BORING.search(t) or _GENERIC.search(t):
+    if _GENERIC.search(t):
         return "generic"
     return None
 
