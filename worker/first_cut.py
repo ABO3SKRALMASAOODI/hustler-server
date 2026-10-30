@@ -1383,12 +1383,15 @@ def montage_windows(curve, shots, duration, target=MONTAGE_TARGET_S):
     return out if len(out) >= 4 else None
 
 
-def montage_scout(ctx, windows, spend, title_only=False):
+def montage_scout(ctx, windows, spend, title_only=False, boxes=False):
     """(windows, title) after the trial model's look at one frame of every
     picked window: the poster title (1-3 words, faithful to what is
     visible), the payoff shot to end on, the broken or off-topic shots to
     drop. The windows unchanged and no title without the lane or a usable
-    answer."""
+    answer. ``boxes`` (Q6, engine accounts' montages): the same look also
+    boxes each shot's subject (ctx.first_cut_montage_boxes, for the crop),
+    the payoff must show the subject, and the payoff window is left to
+    montage_cut.hit_end (no 1 s hold)."""
     import base64
     import subprocess
     import claude_lane
@@ -1399,7 +1402,7 @@ def montage_scout(ctx, windows, spend, title_only=False):
         path = ctx.proxy_path()
     except Exception:
         return windows, None
-    parts = []
+    parts, sizes = [], {}
     for n, (a, b) in enumerate(windows, 1):
         try:
             jpg = subprocess.run(
@@ -1411,14 +1414,25 @@ def montage_scout(ctx, windows, spend, title_only=False):
             jpg = b""
         if not jpg:
             continue
-        parts.append({"type": "text", "text": f"Shot {n}:"})
+        if boxes:
+            import first_cut_visual as fcv
+            sizes[n] = fcv._jpeg_size(jpg) or (256, 144)
+            parts.append({"type": "text", "text":
+                          f"Shot {n} ({sizes[n][0]}x{sizes[n][1]} px):"})
+        else:
+            parts.append({"type": "text", "text": f"Shot {n}:"})
         parts.append({"type": "image_url", "image_url": {
             "url": "data:image/jpeg;base64," + base64.b64encode(jpg).decode()}})
     if len(parts) < (6 if title_only else 8):
         return windows, None
     try:
+        if boxes:
+            import montage_cut
+            system = montage_cut.SCOUT_SYSTEM
+        else:
+            system = _MONTAGE_TITLE_SYSTEM
         resp = claude_lane.create(
-            model, [{"role": "system", "content": _MONTAGE_TITLE_SYSTEM},
+            model, [{"role": "system", "content": system},
                     {"role": "user", "content": parts}],
             max_tokens=3000, effort="low")
         text = resp.choices[0].message.content or ""
@@ -1444,12 +1458,20 @@ def montage_scout(ctx, windows, spend, title_only=False):
             drop.add(int(d))
         except (TypeError, ValueError):
             continue
+    kept_n = list(range(1, len(windows) + 1))
     if end >= max(4, int(0.6 * len(windows))):
-        keep = [w for n, w in enumerate(windows, 1) if n <= end and n not in drop]
-        if len(keep) >= 4:
-            out = keep
-            a, b = out[-1]
-            out[-1] = [a, round(max(b, a + MONTAGE_CLOSE_S), 2)]
+        keep_n = [n for n in kept_n if n <= end and n not in drop]
+        if len(keep_n) >= 4:
+            kept_n = keep_n
+            out = [windows[n - 1] for n in kept_n]
+            if not boxes:
+                a, b = out[-1]
+                out[-1] = [a, round(max(b, a + MONTAGE_CLOSE_S), 2)]
+    if boxes:
+        import montage_cut
+        got = montage_cut.parse_boxes(pick.get("boxes"), sizes)
+        ctx.first_cut_montage_boxes = [(list(windows[n - 1]), got.get(n))
+                                       for n in kept_n]
     t = " ".join(str(pick.get("title") or "").split()).strip(" .\"'")
     words = t.replace("*", "").split()
     if not 1 <= len(words) <= 3 or len(t) > 32 or re.search(r"\d", t):
@@ -1624,11 +1646,23 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         # Silent footage (an event, gameplay, b-roll): the references cut
         # it to its strongest moving moments (recipe D), never the whole take
         curve = _motion_curve(ctx)
-        windows = montage_windows(curve, (ctx.index or {}).get("shots"),
-                                  duration) if curve else None
+        shots = (ctx.index or {}).get("shots")
+        if curve and q1:
+            # Q6: the references' rhythm (0.3-0.5 s shots, several moments
+            # of a long shot), opening on a strong moment, ending on a hit
+            import montage_cut
+            windows = montage_cut.windows(curve, shots, duration)
+        else:
+            windows = montage_windows(curve, shots, duration) if curve else None
         title = None
         if windows:
-            windows, title = montage_scout(ctx, windows, spend)
+            windows, title = montage_scout(ctx, windows, spend, boxes=q1)
+        if windows and curve and q1:
+            windows = montage_cut.hit_end(curve, windows, shots, duration)
+            windows = montage_cut.framable(
+                windows, getattr(ctx, "first_cut_montage_boxes", None),
+                montage_cut.crop_share(ctx.index))
+            windows = montage_cut.fit_length(windows, shots, duration)
         if windows and _ok(_run(ctx, steps, "keep_segments",
                                 {"segments": windows, "snap_to_words": False},
                                 started)):
@@ -1709,6 +1743,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     talking = bool(speech and faces and faces["share"] >= 0.5)
     if q1 and speech and not talking:
         import first_cut_visual as fcv
+        # Q6: the last sentence is complete and its picture live (u4899
+        # ended on "a fitting piece" over the source's empty grey fade)
+        import ending_guard
+        ending_guard.guard(ctx, steps, started, _run)
         fcv.muted_tail(ctx, steps, started, _run)
     vertical_source = _orientation(ctx.index) == "vertical"
     vertical_out = vertical_source
@@ -1728,7 +1766,14 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             # landscape) fills the frame like the references' montages
             # (R01, R04): auto mode would fit it small over blurred bands.
             args = _faceless_reframe_args(speech, faces, picked)
-            if _ok(_run(ctx, steps, "auto_reframe", args, started)):
+            if q1 and (picked or {}).get("how") == "motion":
+                # Q6: a montage's crop sits on each shot's subject as the
+                # scout boxed it (it was the frame's centre: no face to find)
+                import montage_cut
+                if montage_cut.follow(ctx, steps, started, _run):
+                    applied.append("reframed to 9:16 on the subject")
+                    vertical_out = True
+            elif _ok(_run(ctx, steps, "auto_reframe", args, started)):
                 applied.append("reframed to 9:16")
                 vertical_out = True
                 if q1 and speech and not talking and _fitted(ctx):
@@ -1770,11 +1815,27 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     hook, hook_end = getattr(ctx, "first_cut_hook", None), HOOK_S
     hook_y, mute_under = y, True
     subject = []
+    silent_beats = None
     if q1 and short_silent and vertical_source and not screen_kept:
         # QB: one look at the subject of a short silent clip: where the title
         # may sit without crossing it, and (below) the camera that follows it
         import short_clip
-        subject = short_clip.whole_looks(ctx, spend)
+        import silent_cut
+        if duration >= silent_cut.SILENT_CUT_MIN_S:
+            # Q6: a longer one is cut into its beats (jump cuts on its clean,
+            # strong moments) before the title and the camera land
+            looks = silent_cut.look(ctx, duration, spend)
+            segs = silent_cut.plan_for(ctx, looks, duration)
+            if segs and silent_cut.apply(ctx, steps, started, _run, looks,
+                                         segs):
+                silent_beats = (looks, segs)
+                applied.append("cut into its strongest moments")
+                if hook:
+                    hook_y = silent_cut.title_for(ctx, looks, segs)
+            elif looks:
+                subject = [(t, b) for t, b, ok, _p in looks if ok and b]
+        if not silent_beats and not subject:
+            subject = short_clip.whole_looks(ctx, spend)
         if subject and hook:
             hook_y = short_clip.title_y(subject)
     # (Q1 tried the scout's promise above the head: the band above a
@@ -1813,7 +1874,14 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("a hook title")
     else:
         hook_end = 0.0
-    if subject:
+    if silent_beats:
+        # Q6: each beat framed on the subject, an eased push-in under the
+        # title, the end beat a snap in to the hero framing with one flash
+        import silent_cut
+        if _ok(silent_cut.camera(ctx, steps, started, _run, *silent_beats)):
+            applied.append("a camera on the subject that ends on a "
+                           "punch-in")
+    elif subject:
         # QB: a short silent clip is not "raw footage with a title": a
         # camera finds its subject, pushes in, follows it and ends moving
         import short_clip
@@ -1893,6 +1961,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     if q1 and bands:
         import first_cut_visual as fcv
         fcv.refresh_band_crop(ctx, steps, started, _run)
+    if q1 and (picked or {}).get("how") == "motion":
+        # Q6: the montage ends on its hit with one white flash (R01)
+        import montage_cut
+        montage_cut.end_flash(ctx, steps, started, _run)
     if speech and not burned:
         style = {"preset": "reels", "motion_look": "editorial",
                  "size_scale": CAPTION_SCALE}

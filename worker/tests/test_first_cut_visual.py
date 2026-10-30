@@ -365,8 +365,10 @@ def test_screen_keyframes_start_wide_push_in_and_travel_eased():
     assert ts == sorted(ts) and ts[0] == 0.0 and ts[-1] == 12.0
     assert keys[0]["strength"] == 0.0 and keys[2]["strength"] > 1.0
     assert sum(1 for k in keys if k["rect"] == t2) >= 1
-    # the 6.5 s region came too soon after the move: held
+    # the 6.5 s region came too soon after the move: held (Q6: held a
+    # little wider, then pushing in to its framing over the last seconds)
     assert keys[-1]["rect"] == t2
+    assert keys[-2]["strength"] < keys[-1]["strength"]
 
 
 def test_page_changes_are_whole_screen_changes_only():
@@ -485,10 +487,12 @@ def test_a_screen_ends_live_with_the_runon_muted():
     assert fcv.muted_tail(ctx, [], 0.0, run) is None and not calls
 
 
-def test_screen_captions_keep_the_c2_look():
+def test_screen_captions_sit_on_a_plate():
     style = {"preset": "reels", "motion_look": "editorial", "size_scale": 1.45}
     got, n = fcv.caption_style(style, talking=False, screen=True, vertical=False)
-    assert got == style and n == 2
+    # Q6: the C2 look sank into the docs (judges: "a contrast plate, 30%
+    # larger, in a fixed lower band"): the box look's plate, one low band
+    assert got["motion_look"] == "box" and got["anchor_y"] >= 0.85 and n == 3
     got, n = fcv.caption_style(style, talking=True, screen=False, vertical=True)
     assert got["motion_look"] == "serif" and got["single_line"] and n == 3
 
