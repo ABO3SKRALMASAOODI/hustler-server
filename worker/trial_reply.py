@@ -607,9 +607,23 @@ _PIXELS = re.compile(
     re.I)
 
 
+# "on the right" is wrong on a phone, where the player sits above the chat
+# (Q8 moved the First cut's message to "in the player"; the model still wrote
+# "It's playing in the player on the right", QI2 matrix vlog r3)
+_RIGHT = re.compile(r"(?i)\b(?:(?<=player )|(?<=preview ))on the right\b|"
+                    r"\b(playing|is) on the right\b")
+
+
+def _right(m):
+    return f"{m.group(1)} in the player" if m.group(1) else ""
+
+
 def scrub_pixels(text):
-    """(text without pixel sizes or "NNNNp" resolutions, how many removed)."""
+    """(text without pixel sizes or "NNNNp" resolutions, and with "on the
+    right" put as "in the player", how many removed)."""
     out, n = _PIXELS.subn("", text or "")
+    out, r = _RIGHT.subn(_right, out)
+    n += r
     if n:
         out = re.sub(r"[ \t]{2,}", " ", out)
         out = re.sub(r"\s+([,.;:!?])", r"\1", out)

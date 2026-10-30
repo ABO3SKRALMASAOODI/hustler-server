@@ -294,3 +294,15 @@ def test_finish_drops_the_pixel_size_and_says_so():
         "It's playing in the player.", facts)
     assert "1920" not in out
     assert any(d["why"] == "pixels" for d in report["dropped"])
+
+
+@pytest.mark.parametrize("draft, want", [
+    ("It's playing in the player on the right.", "It's playing in the player."),
+    ("It's playing on the right now.", "It's playing in the player now."),
+    ("The preview on the right shows it.", "The preview shows it."),
+    ("The title sits on the right of the frame.",
+     "The title sits on the right of the frame."),
+])
+def test_on_the_right_becomes_the_player(draft, want):
+    import trial_reply
+    assert trial_reply.scrub_pixels(draft)[0] == want
