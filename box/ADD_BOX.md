@@ -60,6 +60,12 @@ It is idempotent; re-run it after any failure and it resumes. In order it:
 
 The smoke report is written to `box-h2-smoke/smoke.json` in the checkout.
 
+**YouTube (owner step, before step 7):** the box reaches YouTube only
+through the owner's IPRoyal ISP proxy (`YTDLP_PROXY`), which admits
+whitelisted IPs only: add the new box's IPv4 under IPRoyal -> ISP Dedicated
+-> Whitelisted IPs. Box 2's daily canary (`box/yt_canary.py`, app_kv
+`youtube_canary:h2`) fails until it is whitelisted.
+
 ## How work spreads (the design)
 
 ```json
