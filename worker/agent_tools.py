@@ -175,6 +175,64 @@ class AskUser(Exception):
         self.question = question
 
 
+class FeatureUpgrade(Exception):
+    """Raised by the dispatch chokepoint when a Studio turn of a gated
+    account (feature_gate.py: a trial account, a new Plus subscriber) calls
+    a Shorts or Website-demo tool. Nothing ran; the loop ends the turn on
+    the upgrade card, uncharged. Never raised for MCP calls."""
+
+    def __init__(self, feature, reason, tool=None):
+        super().__init__(f"{feature} comes with Pro and Max ({reason})")
+        self.feature = feature
+        self.reason = reason
+        self.tool = tool
+
+
+def _feature_gate_reason(ctx):
+    """The account's gate for THIS turn ("trial", "plus" or None), read once
+    per context. Only Studio agent turns are gated: an MCP call (job type
+    mcp_tool) never is, on any plan (owner: "excluding the mcp")."""
+    job = getattr(ctx, "job", None) or {}
+    if job.get("type") != "agent_turn":
+        return None
+    if (job.get("payload") or {}).get("operator_repair") is True:
+        return None
+    cached = getattr(ctx, "_feature_gate", "unset")
+    if cached != "unset":
+        return cached
+    why = None
+    try:
+        import feature_gate
+        why = ctx.db.run(feature_gate.safe_reason, job.get("user_id"))
+    except Exception as exc:  # noqa: BLE001 - any doubt: not gated
+        print(f"[feature_gate] lookup failed: {str(exc)[:160]}", flush=True)
+        why = None
+    try:
+        ctx._feature_gate = why
+    except Exception:
+        pass
+    return why
+
+
+def _feature_gated(ctx, name, args):
+    """(feature, reason) when this call is a gated feature of a gated turn,
+    else None. make_shorts is gated only when it would cut a long source
+    into shorts: on a sub-minute source or a generated short it only routes
+    the turn into a normal edit of the user's own footage."""
+    import feature_gate
+    feature = feature_gate.tool_feature(name)
+    if feature is None:
+        return None
+    if name == "make_shorts":
+        project = getattr(ctx, "project", None) or {}
+        if project.get("parent_project_id") \
+                or not getattr(ctx, "has_main_video", False) \
+                or float(getattr(ctx, "duration", 0) or 0) < 60.0:
+            return None
+    why = _feature_gate_reason(ctx)
+    return (feature, why) if why else None
+
+
 class ToolContext:
     def __init__(self, worker_db, job, project, index, workdir):
         self.db = worker_db
@@ -33265,6 +33323,12 @@ def _execute(ctx, name, args):
         _count_tool_outcome(ctx, "tool_refused")
         return (f"Unknown tool '{name}'. Available: "
                 + ", ".join(t for t in TOOLS if not _tool_disabled(t)))
+    # Shorts and Website demos come with Pro and Max (owner, 30 Oct 2026;
+    # feature_gate.py): a Studio turn of a trial account or a new Plus
+    # subscriber never runs them. The loop answers with the upgrade card.
+    gated = _feature_gated(ctx, name, args)
+    if gated:
+        raise FeatureUpgrade(gated[0], gated[1], tool=name)
     # Exactly replaying an already-successful additive write against the EDL
     # it produced is never a creative alternative; it is how duplicate title
     # layers, SFX and B-roll entered real edits. Idempotency is state-based,
@@ -33315,7 +33379,7 @@ def _execute(ctx, name, args):
     except dbx.JobLeaseLost:
         ctx._executing_tool = previous_executing_tool
         raise
-    except AskUser:
+    except (AskUser, FeatureUpgrade):
         ctx._executing_tool = previous_executing_tool
         raise
     except TypeError as e:
@@ -33333,7 +33397,7 @@ def _execute(ctx, name, args):
         if tool_retry.may_retry(name, e):
             try:
                 out = fn(ctx, **args)
-            except (AskUser, dbx.JobLeaseLost):
+            except (AskUser, FeatureUpgrade, dbx.JobLeaseLost):
                 ctx._executing_tool = previous_executing_tool
                 raise
             except Exception as retry_exc:

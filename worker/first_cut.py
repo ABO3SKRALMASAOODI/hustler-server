@@ -40,6 +40,7 @@ an agent turn behind its project's index.
 import json
 import os
 import re
+import shutil
 import time
 
 import agent_tools
@@ -3128,6 +3129,13 @@ def run(worker_db, job, project, index_row):
     ctx.turn_start_edl = start_edl
     spend = {"usd": 0.0}
     url = payload.get("url")
+    if url:
+        # Website demos come with Pro and Max (owner, 30 Oct 2026;
+        # feature_gate.py): a trial account's URL First cut is never
+        # recorded. A job queued before the release answers with the card.
+        stop = _feature_gate_stop(worker_db, job, session_id, ctx, workdir)
+        if stop is not None:
+            return stop
     try:
         worker_db.run(dbx.record_client_event, job["user_id"],
                       job["project_id"], "free_result_started",
@@ -3291,6 +3299,44 @@ def run(worker_db, job, project, index_row):
             "edl_version": (latest or {}).get("version"),
             "first_cut": meta["first_cut"],
             "trial_usd": round(spend["usd"], 6),
+            "credits_charged": 0.0}
+
+
+def _feature_gate_stop(worker_db, job, session_id, ctx, workdir):
+    """The upgrade card instead of a URL First cut for a gated account
+    (feature_gate.py), or None (the First cut runs as before)."""
+    import feature_gate
+    try:
+        why = worker_db.run(feature_gate.safe_reason, job.get("user_id"))
+    except Exception:  # noqa: BLE001 - any doubt: today's behaviour
+        why = None
+    if not why:
+        return None
+    try:
+        version = ctx.latest_edl()["version"]
+    except Exception:
+        version = None
+    extra = {"edl_version": version} if version is not None else {}
+    message_id = (job.get("payload") or {}).get("message_id")
+    if message_id is not None:
+        extra["request_message_id"] = int(message_id)
+    worker_db.run(dbx.add_message, session_id, "assistant",
+                  feature_gate.message_text("website_demo", why),
+                  feature_gate.message_meta("website_demo", why, None,
+                                            **extra))
+    try:
+        worker_db.run(dbx.record_client_event, job.get("user_id"),
+                      job.get("project_id"), "feature_upgrade_shown",
+                      {"feature": "website_demo", "reason": why,
+                       "surface": "first_cut_url"})
+    except Exception:
+        pass
+    shutil.rmtree(workdir, ignore_errors=True)
+    print(f"[first_cut] job {job.get('id')}: URL First cut refused — "
+          f"Website demos come with Pro and Max ({why})", flush=True)
+    return {"status": "first_cut", "outcome": feature_gate.OUTCOME,
+            "billable": False, "edl_version": version,
+            "feature_upgrade": "website_demo", "trial_usd": 0.0,
             "credits_charged": 0.0}
 
 

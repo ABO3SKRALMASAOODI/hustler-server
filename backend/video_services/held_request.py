@@ -308,6 +308,16 @@ def resume(user_id, origin, project_id=None, window_h=WINDOW_H):
                             (held["id"],))
                 if not cur.fetchone():
                     return dict(base, resumed=False, reason="already_resumed")
+                # Shorts and Website demos come with Pro and Max (owner, 30
+                # Oct 2026; feature_gate.py): a held website request of a
+                # buyer the gate covers (a new Plus subscriber) is answered
+                # with the upgrade card, once, and never run.
+                card = v._held_feature_card(cur, user_id, held["session_id"],
+                                            held["id"], blocked, origin)
+                if card:
+                    conn.commit()
+                    v._feature_shown(user_id, pid, card, "held_request")
+                    return dict(base, resumed=False, reason="feature_upgrade")
                 cur.execute("""SELECT 1 FROM video_jobs
                                 WHERE project_id = %s AND type = 'agent_turn'
                                   AND state IN ('queued','running') LIMIT 1""",
@@ -346,6 +356,11 @@ def resume(user_id, origin, project_id=None, window_h=WINDOW_H):
         with v.vdb() as conn:
             stamped = _mark(conn.cursor(), held["id"], origin,
                             body.get("job_id"), body.get("message_id"))
+        if body.get("feature_upgrade"):
+            # The send path answered it with the upgrade card (Shorts and
+            # Website demos: feature_gate.py); nothing runs.
+            return dict(base, resumed=False, reason="feature_upgrade",
+                        message_id=body.get("message_id"))
         if body.get("duplicate") or not stamped:
             return dict(base, resumed=False, reason="already_resumed",
                         message_id=body.get("message_id"))
