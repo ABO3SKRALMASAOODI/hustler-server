@@ -37,7 +37,11 @@ Nobody should have to paste them into four dashboards, so:
 * Cached for TTL_S (5 minutes). A row that does not decrypt is retried
   after RETRY_S, and an authentication error from the next store (a rotated
   key) re-reads the row at most every RETRY_S. A failed database read keeps
-  the last good keys.
+  the last good keys. Nothing waits on the database for long: the first
+  read starts when storage is imported, calls wait for it at most
+  FIRST_WAIT_S IN ALL, counted from its start (one health probe looks the
+  keys up a dozen times; the box gives /health 3 s), and later refreshes
+  run in a background thread while calls use what is cached.
 
 * Fail closed and quiet: no row, no sealing secret, a wrong key, a damaged
   or unknown row, or no AES implementation all leave the next store "not
@@ -47,8 +51,11 @@ Nobody should have to paste them into four dashboards, so:
 
 AES-GCM comes from ``cryptography`` (the web service, the sealing CLI) or,
 where that is not installed (the worker images), from yt-dlp's pure-Python
-``yt_dlp.aes`` (verified tag; a few milliseconds for this row). Sealing needs
-``cryptography``.
+``yt_dlp.aes`` (verified tag). Importing yt-dlp costs an executor ~30 MB that
+would stay resident in every slot, so unless the process has already loaded
+it, that decrypt runs in a short-lived child (``python -I``, ~0.3 s). A row
+is decrypted only when its text changes, so that is about once per process.
+Sealing needs ``cryptography``.
 """
 
 import base64
@@ -56,8 +63,11 @@ import hashlib
 import hmac
 import json
 import os
+import subprocess
+import sys
 import threading
 import time
+import weakref
 from collections.abc import Mapping
 
 KV_KEY = "storage_next_credentials"
@@ -73,6 +83,7 @@ FIELDS = REQUIRED + ("S3_NEXT_REGION", "S3_NEXT_PUBLIC_ENDPOINT",
                      "S3_NEXT_ADDRESSING_STYLE")
 TTL_S = 300.0
 RETRY_S = 30.0
+FIRST_WAIT_S = 1.0
 NONCE_BYTES = 12
 TAG_BYTES = 16
 # S3 error codes that mean "these keys are not (or no longer) accepted".
@@ -134,10 +145,15 @@ def _aesgcm():
 
 
 def _decrypt(key, nonce, data, impl=None):
-    """Plaintext bytes, or CredentialsError('damaged' | 'no_aes')."""
+    """Plaintext bytes, or CredentialsError('damaged' | 'no_aes'). ``impl``:
+    'cryptography', 'yt_dlp' (in this process) or 'child' (yt-dlp in a
+    short-lived child); default the first available, in that order, with
+    'yt_dlp' only when this process has already imported it."""
     if len(nonce) != NONCE_BYTES or len(data) < TAG_BYTES:
         raise CredentialsError("damaged")
-    impl = impl or ("cryptography" if _aesgcm() is not None else "yt_dlp")
+    if impl is None:
+        impl = ("cryptography" if _aesgcm() is not None else
+                "yt_dlp" if "yt_dlp.aes" in sys.modules else "child")
     if impl == "cryptography":
         AESGCM = _aesgcm()
         if AESGCM is None:
@@ -146,14 +162,55 @@ def _decrypt(key, nonce, data, impl=None):
             return AESGCM(key).decrypt(nonce, data, None)
         except Exception:  # noqa: BLE001 — InvalidTag
             raise CredentialsError("damaged") from None
+    ct, tag = data[:-TAG_BYTES], data[-TAG_BYTES:]
+    if impl == "yt_dlp":
+        try:
+            from yt_dlp.aes import aes_gcm_decrypt_and_verify_bytes
+        except Exception:  # noqa: BLE001
+            raise CredentialsError("no_aes") from None
+        try:
+            return bytes(aes_gcm_decrypt_and_verify_bytes(ct, key, tag,
+                                                          nonce))
+        except Exception:  # noqa: BLE001 — "Mismatching authentication tag"
+            raise CredentialsError("damaged") from None
+    return _decrypt_in_child(key, nonce, ct, tag)
+
+
+# The child reads {data, key, tag, nonce} (base64) on stdin and writes the
+# plaintext (base64) on stdout; exit 3 = no yt-dlp, 4 = the tag does not
+# verify. Nothing is echoed: a traceback never reaches the parent's logs.
+_CHILD = """
+import base64, json, sys
+try:
+    from yt_dlp.aes import aes_gcm_decrypt_and_verify_bytes as dec
+except Exception:
+    sys.exit(3)
+try:
+    a = json.loads(sys.stdin.read())
+    out = dec(*[base64.b64decode(a[k]) for k in ("data", "key", "tag",
+                                                 "nonce")])
+except Exception:
+    sys.exit(4)
+sys.stdout.write(base64.b64encode(bytes(out)).decode("ascii"))
+"""
+
+
+def _decrypt_in_child(key, nonce, ct, tag, timeout_s=60):
+    payload = json.dumps({"data": _b64(ct), "key": _b64(key),
+                          "tag": _b64(tag), "nonce": _b64(nonce)})
     try:
-        from yt_dlp.aes import aes_gcm_decrypt_and_verify_bytes
-    except Exception:  # noqa: BLE001
+        r = subprocess.run([sys.executable, "-I", "-c", _CHILD],
+                           input=payload, capture_output=True, text=True,
+                           timeout=timeout_s)
+    except Exception:  # noqa: BLE001 — no interpreter, pids, timeout
         raise CredentialsError("no_aes") from None
+    if r.returncode == 4:
+        raise CredentialsError("damaged")
+    if r.returncode != 0:
+        raise CredentialsError("no_aes")
     try:
-        return bytes(aes_gcm_decrypt_and_verify_bytes(
-            data[:-TAG_BYTES], key, data[-TAG_BYTES:], nonce))
-    except Exception:  # noqa: BLE001 — "Mismatching authentication tag"
+        return _unb64(r.stdout.strip())
+    except Exception:  # noqa: BLE001
         raise CredentialsError("damaged") from None
 
 
@@ -267,8 +324,9 @@ class Credentials:
     returns the raw app_kv value (None when absent) and may raise."""
 
     def __init__(self, fetch=None, env=None, ttl_s=None, retry_s=None,
-                 clock=None, log=None, impl=None):
+                 clock=None, log=None, impl=None, background=True):
         self._fetch = fetch
+        self._background = background
         self._env = os.environ if env is None else env
         self._ttl = float(TTL_S if ttl_s is None else ttl_s)
         self._retry = float(RETRY_S if retry_s is None else retry_s)
@@ -276,14 +334,31 @@ class Credentials:
         self._log = log or (lambda msg: print(f"[storage] {msg}",
                                               flush=True))
         self._impl = impl
+        self._first_wait = FIRST_WAIT_S
         self._lock = threading.Lock()
+        self._start_lock = threading.Lock()
         self._reset()
+        # A fork (a pre-forking server, multiprocessing) copies a lock that a
+        # refresh thread holds but not the thread: the child starts clean.
+        if hasattr(os, "register_at_fork"):
+            ref = weakref.ref(self)
+            os.register_at_fork(
+                after_in_child=lambda: ref() is not None and
+                ref()._after_fork())
+
+    def _after_fork(self):
+        self._lock = threading.Lock()
+        self._start_lock = threading.Lock()
+        if self._first is not None and not self._first.is_set():
+            self._first = None
 
     def _reset(self):
         self._values = None
+        self._raw = None                # the row text last opened
         self._kek = None
         self._reason = "not_read"
-        self._tried = False
+        self._first = None              # Event: the first read finished
+        self._first_until = 0.0         # monotonic: callers stop waiting
         self._due = 0.0
         self._read_at = None
         self._invalidated_at = None
@@ -291,13 +366,50 @@ class Credentials:
 
     def install(self, fetch):
         """Set where the row comes from (each process has its own database
-        access); forgets anything cached."""
+        access); forgets anything cached and starts the first read."""
         with self._lock:
             self._fetch = fetch
             self._reset()
+        self.prefetch()
 
     def _has_sealing_secret(self):
         return any(str(self._env.get(n) or "").strip() for n in KEKS)
+
+    def _needed(self):
+        return self._fetch is not None and self._has_sealing_secret() \
+            and not env_complete(self._env)
+
+    def prefetch(self):
+        """Start the first read in the background when this process will
+        need the row; never raises."""
+        try:
+            if self._background and self._needed():
+                self._start_first()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _start_first(self):
+        with self._start_lock:
+            if self._first is None:
+                event = threading.Event()
+                self._first = event
+                self._first_until = time.monotonic() + self._first_wait
+                try:
+                    threading.Thread(target=self._run_first, args=(event,),
+                                     daemon=True,
+                                     name="storage-creds-first").start()
+                except Exception:
+                    self._first = None
+                    raise
+            return self._first
+
+    def _run_first(self, event):
+        try:
+            with self._lock:
+                if self._first is event:
+                    self._refresh()
+        finally:
+            event.set()
 
     def values(self):
         """The row's S3_NEXT_* values, or None. Never raises."""
@@ -307,20 +419,51 @@ class Credentials:
             if not self._has_sealing_secret():
                 self._reason = "no_secret"
                 return None
-            if self._clock() >= self._due and \
-                    self._lock.acquire(blocking=not self._tried):
-                try:
-                    if self._clock() >= self._due:
-                        self._refresh()
-                finally:
+            if self._clock() < self._due:
+                return self._values
+            first = self._first
+            if first is None or not first.is_set():
+                if not self._background:
+                    with self._lock:
+                        if self._first is None or \
+                                not self._first.is_set():
+                            self._refresh()
+                            done = threading.Event()
+                            done.set()
+                            self._first = done
+                    return self._values
+                # The first read: wait for it, but never long, and never
+                # past FIRST_WAIT_S from its start in all (a health route
+                # asks once per S3_NEXT_* name, several times over).
+                first = self._start_first()
+                left = self._first_until - time.monotonic()
+                if left > 0:
+                    first.wait(left)
+                return self._values
+            if self._lock.acquire(blocking=False):
+                if self._clock() < self._due:
                     self._lock.release()
+                elif self._background:
+                    try:
+                        threading.Thread(target=self._refresh_then_release,
+                                         daemon=True,
+                                         name="storage-creds").start()
+                    except Exception:  # noqa: BLE001
+                        self._lock.release()
+                else:
+                    self._refresh_then_release()
             return self._values
         except Exception:  # noqa: BLE001 — never into a storage call
             return None
 
+    def _refresh_then_release(self):
+        try:
+            self._refresh()
+        finally:
+            self._lock.release()
+
     def _refresh(self):
         now = self._clock()
-        self._tried = True
         try:
             raw = self._fetch()
         except Exception as exc:  # noqa: BLE001 — keep the last good keys
@@ -331,10 +474,18 @@ class Credentials:
                       + ("; keeping the last good keys"
                          if self._values is not None else ""))
             return
+        if raw is not None and raw == self._raw and \
+                self._reason not in ("no_aes", "unreadable", "not_read"):
+            # The same row text as last time gives the same answer under
+            # the same secrets: no decrypt (and no child process).
+            self._read_at = now
+            self._due = now + (self._ttl if self._reason == "ok"
+                               else self._retry)
+            return
         try:
             values, kek = open_row(raw, self._env, impl=self._impl)
         except CredentialsError as exc:
-            self._values, self._kek = None, None
+            self._values, self._kek, self._raw = None, None, raw
             self._reason = exc.reason
             self._read_at = now
             self._due = now + (self._ttl if exc.reason in
@@ -342,7 +493,7 @@ class Credentials:
             self._say(f"next store not configured from app_kv "
                       f"({exc.reason})")
             return
-        self._values, self._kek = values, kek
+        self._values, self._kek, self._raw = values, kek, raw
         self._reason = "ok"
         self._read_at = now
         self._due = now + self._ttl

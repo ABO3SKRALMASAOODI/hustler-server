@@ -152,6 +152,41 @@ def test_yt_dlp_fallback_opens_a_cryptography_sealed_row():
     assert e.value.reason == "damaged"
 
 
+def test_child_decrypt_without_yt_dlp_is_quietly_no_aes():
+    row = _sealed()
+    env = {"S3_SECRET_ACCESS_KEY": LEGACY_SECRET}
+    try:
+        import yt_dlp.aes  # noqa: F401
+    except ImportError:
+        with pytest.raises(creds.CredentialsError) as e:
+            creds.open_row(row, env, impl="child")
+        assert e.value.reason == "no_aes"
+    else:
+        assert creds.open_row(row, env, impl="child")[0] == VALUES
+
+
+def test_an_unchanged_row_is_decrypted_once(monkeypatch):
+    calls = []
+    real = creds._decrypt
+    monkeypatch.setattr(creds, "_decrypt",
+                        lambda *a, **k: calls.append(1) or real(*a, **k))
+    now = [0.0]
+    rows = Rows(_sealed())
+    c = _cache(rows, {"S3_SECRET_ACCESS_KEY": LEGACY_SECRET}, now)
+    for t in (0, 300, 600, 900):
+        now[0] = t
+        assert c.values() == VALUES
+    assert rows.calls == 4 and len(calls) == 1
+    rows.value = _sealed(secrets={"S3_SECRET_ACCESS_KEY": "other"})
+    for t in (1200, 1230, 1260):                 # wrong key: one attempt
+        now[0] = t
+        assert c.values() is None
+    assert rows.calls == 7 and len(calls) == 1   # kid mismatch: no decrypt
+    rows.value = _sealed()
+    now[0] = 1290
+    assert c.values() == VALUES and len(calls) == 2
+
+
 # ── the cache ───────────────────────────────────────────────────────────────
 
 class Rows:
@@ -169,7 +204,7 @@ class Rows:
 def _cache(rows, env, now, logs=None):
     return creds.Credentials(fetch=rows, env=env, clock=lambda: now[0],
                              log=(logs.append if logs is not None
-                                  else (lambda m: None)))
+                                  else (lambda m: None)), background=False)
 
 
 def test_env_wins_and_the_row_is_never_read():
@@ -249,6 +284,76 @@ def test_cache_ttl_retry_and_last_good_keys():
     rows.value = None
     now[0] = 990
     assert c.values() is None and c.status()["row"] == "missing"
+
+
+def test_only_the_first_read_waits_for_the_database():
+    import threading
+    now = [0.0]
+    gate = threading.Event()
+    rows = Rows(_sealed())
+
+    def fetch():
+        if rows.calls:                      # every refresh after the first
+            gate.wait(5)
+        return rows()
+    c = creds.Credentials(fetch=fetch, env={"S3_SECRET_ACCESS_KEY":
+                                            LEGACY_SECRET},
+                          clock=lambda: now[0], log=lambda m: None)
+    assert c.values() == VALUES and rows.calls == 1
+    now[0] = 301
+    # The refresh is stuck on the database; calls keep the cached keys.
+    assert c.values() == VALUES
+    assert c.values() == VALUES
+    gate.set()
+    for _ in range(200):
+        if rows.calls == 2 and not c._lock.locked():
+            break
+        threading.Event().wait(0.01)
+    assert rows.calls == 2                  # exactly one refresh ran
+    assert c.values() == VALUES and rows.calls == 2
+
+
+def test_a_hung_database_never_holds_a_call_past_first_wait():
+    import threading
+    import time
+    gate = threading.Event()
+    rows = Rows(_sealed())
+
+    def fetch():
+        gate.wait(10)
+        return rows()
+    c = creds.Credentials(fetch=fetch, env={"S3_SECRET_ACCESS_KEY":
+                                            LEGACY_SECRET},
+                          log=lambda m: None)
+    c._first_wait = 0.2
+    started = time.monotonic()
+    assert c.values() is None                # not yet: the next store waits
+    assert c.values() is None
+    assert time.monotonic() - started < 1.5
+    gate.set()
+    c._first.wait(5)
+    assert c.values() == VALUES and rows.calls == 1
+
+
+def test_install_starts_the_first_read_and_a_fork_starts_clean():
+    import threading
+    rows = Rows(_sealed())
+    env = {"S3_SECRET_ACCESS_KEY": LEGACY_SECRET}
+    c = creds.Credentials(env=env, log=lambda m: None)
+    c.install(rows)
+    assert c._first is not None and c._first.wait(5)
+    assert rows.calls == 1 and c.values() == VALUES
+    # A process with the next store in its env never reads the row.
+    full = {**env, **VALUES}
+    rows2 = Rows(_sealed())
+    c2 = creds.Credentials(env=full, log=lambda m: None)
+    c2.install(rows2)
+    assert c2._first is None and rows2.calls == 0
+    # The child of a fork mid-refresh gets a free lock.
+    c._lock.acquire()
+    c._first = threading.Event()
+    c._after_fork()
+    assert c._lock.acquire(blocking=False) and c._first is None
 
 
 def test_an_auth_refusal_rereads_the_row_at_most_every_30_s():
@@ -338,7 +443,11 @@ def row_only(monkeypatch):
     monkeypatch.setattr(storage, "_router", routing.Router(
         fetch=lambda: "copy", env=creds.ENV, log=lambda m: None))
     yield rows
-    creds.install(original)
+    # Restore the module's own source without starting a read (the env is
+    # still this test's until monkeypatch undoes it).
+    with creds.CREDENTIALS._lock:
+        creds.CREDENTIALS._fetch = original
+        creds.CREDENTIALS._reset()
 
 
 def test_backend_storage_uses_the_row(row_only):
