@@ -4476,6 +4476,13 @@ def _finalize(ctx, worker_db, session_id, final_text, status, total_steps,
                                                timings, turn_deadline)
     if fail_note:
         final_text += fail_note
+    # The budget stops promise "saved and previewed below"; three customers
+    # in Aug 2026 got that line with no preview attached (R2 audit). Only the
+    # latest version's own preview makes it true.
+    shown = getattr(ctx, "last_preview", None) or {}
+    if str(shown.get("edl_version")) != str(latest.get("version")):
+        final_text = final_text.replace(" are saved and previewed below",
+                                        " are saved")
     final_text = _disclose_outstanding_quality(ctx, final_text)
     final_text += _unused_fetched_audio_note(ctx)
     quality = _quality_handoff(ctx)

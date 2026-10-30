@@ -299,3 +299,27 @@ def test_music_video_and_descriptions_are_not_effect_claims():
                  "Created the teaser from native footage, which ends on the group poster title.",
                  "Added transitions were removed because they looked abrupt."):
         assert g.effect_violations(text, before, after) == [], text
+
+
+def test_a_stop_message_only_promises_a_preview_that_is_attached(monkeypatch):
+    posted = []
+    ctx = SimpleNamespace(last_preview=None, critics_advisory=False, autorendered=False)
+    monkeypatch.setattr(agent_loop, "_auto_render_if_needed",
+                        lambda *a, **k: ({"version": 9}, ""))
+    monkeypatch.setattr(agent_loop, "_disclose_outstanding_quality", lambda c, t: t)
+    monkeypatch.setattr(agent_loop, "_unused_fetched_audio_note", lambda c: "")
+    monkeypatch.setattr(agent_loop, "_quality_handoff", lambda c: {})
+    monkeypatch.setattr(agent_loop, "_turn_completion", lambda c, s, fail_note=None: ("partial", True))
+    monkeypatch.setattr(agent_loop, "_outcome_meta", lambda c, o: {})
+    monkeypatch.setattr(agent_loop, "_turn_edl_changed", lambda c: True)
+    import fulfillment
+    monkeypatch.setattr(fulfillment, "disclose", lambda c, t: t)
+    db = SimpleNamespace(run=lambda fn, *a: posted.append(a))
+    text = ("I've hit my budget for this request, so I'm stopping here — the edits I "
+            "completed are saved and previewed below.")
+    agent_loop._finalize(ctx, db, 1, text, "budget", 3, {})
+    assert posted[-1][2] == ("I've hit my budget for this request, so I'm stopping here — "
+                             "the edits I completed are saved.")
+    ctx.last_preview = {"edl_version": 9}
+    agent_loop._finalize(ctx, db, 1, text, "budget", 3, {})
+    assert posted[-1][2] == text
