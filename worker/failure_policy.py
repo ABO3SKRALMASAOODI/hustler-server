@@ -10,6 +10,8 @@ agent enough structured context to repair an EDL on a *new* version.
 from dataclasses import asdict, dataclass
 import re
 
+import psycopg2
+
 import config
 import db as dbx
 import error_text
@@ -43,6 +45,12 @@ _TRANSIENT = (
     "http 429", "http 500", "http 502", "http 503", "http 504",
     "status 429", "status 500", "status 502", "status 503", "status 504",
     "name resolution", "network is unreachable",
+    # The database link (psycopg2's words). R1 chaos, 30 Oct 2026: the box
+    # reaches Render's PostgreSQL across the Internet; a 60-s cut made an
+    # in-flight job's next write fail after Db.run's one reconnect.
+    "server closed the connection unexpectedly", "could not connect to server",
+    "ssl syscall error", "terminating connection due to administrator",
+    "connection already closed",
 )
 
 # Cloudflare could not provide a container before any /run (the runtime's
@@ -112,6 +120,13 @@ def classify(error, job_type=None):
             min(_base_attempts(job_type), 2), False)
     if "job was cancelled or handed to another worker" in text:
         return FailureDecision("lease_lost", False, 0, False)
+    if isinstance(error, (psycopg2.OperationalError,
+                          psycopg2.InterfaceError)):
+        # Our database link, not the customer's edit or file: a replay sees
+        # a different network. Classified before the text rules below so a
+        # driver message never reads as an ffmpeg or EDL verdict.
+        return FailureDecision("transient_infrastructure", True,
+                               min(_base_attempts(job_type), 2), False)
     if isinstance(error, WorkdirTooSmall):
         return FailureDecision("executor_capacity", False, 0, False)
     if isinstance(error, EDLValidationError):

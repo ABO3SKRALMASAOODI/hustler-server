@@ -351,3 +351,81 @@ def test_s7_an_unreachable_box_is_observed_again_never_failed(monkeypatch):
     event = remote.reconcile_remote_execution(db, _box_row())
     assert event["status"] == "unknown"
     assert db.calls == []
+
+
+# ── S4: the database unreachable from the box for a minute ───────────────
+
+import psycopg2  # noqa: E402
+import executor_runtime  # noqa: E402
+
+
+def test_a_database_link_error_is_infrastructure_not_the_edit():
+    for err in (psycopg2.OperationalError("server closed the connection "
+                                          "unexpectedly"),
+                psycopg2.InterfaceError("connection already closed"),
+                psycopg2.OperationalError("connection to server at \"db\" "
+                                          "(10.0.0.1), port 5432 failed: "
+                                          "timeout expired")):
+        decision = failure_policy.classify(err, "final")
+        assert decision.kind == "transient_infrastructure"
+        assert decision.retryable
+        assert failure_policy.is_infrastructure(err, decision)
+    # The same words relayed as text by an executor envelope.
+    relayed = RuntimeError("SSL SYSCALL error: EOF detected")
+    assert failure_policy.classify(relayed, "preview").kind == \
+        "transient_infrastructure"
+
+
+class _FlakyCommit:
+    def __init__(self, fails, landed=False):
+        self.fails, self.landed, self.calls = fails, landed, 0
+
+    def __call__(self, db, job, result, claim):
+        self.calls += 1
+        if self.calls <= self.fails:
+            raise psycopg2.OperationalError("server closed the connection "
+                                            "unexpectedly")
+        return False if self.landed else True
+
+
+class _JobRow:
+    def __init__(self, row):
+        self.row = row
+
+    def run(self, fn, *args, **kw):
+        assert fn is dbx.get_job
+        return self.row
+
+
+def test_a_finished_job_rides_out_a_database_blip(monkeypatch):
+    flaky = _FlakyCommit(fails=3)
+    monkeypatch.setattr(executor_runtime.job_completion, "finalize_success",
+                        flaky)
+    waits = []
+    assert executor_runtime._commit_result(
+        _JobRow({}), {"id": 1}, {"ok": True}, 2, sleep=waits.append) is True
+    assert flaky.calls == 4 and waits == [5, 10, 20]
+
+
+def test_a_commit_whose_answer_was_lost_is_read_back_not_superseded(
+        monkeypatch):
+    flaky = _FlakyCommit(fails=1, landed=True)
+    monkeypatch.setattr(executor_runtime.job_completion, "finalize_success",
+                        flaky)
+    ok = _JobRow({"state": "done", "total_claims": 2})
+    assert executor_runtime._commit_result(
+        ok, {"id": 1}, {}, 2, sleep=lambda s: None) is True
+    # Another claim's row is a real supersession.
+    flaky.calls = 0
+    other = _JobRow({"state": "running", "total_claims": 3})
+    assert executor_runtime._commit_result(
+        other, {"id": 1}, {}, 2, sleep=lambda s: None) is False
+
+
+def test_a_link_down_for_good_still_raises(monkeypatch):
+    monkeypatch.setattr(executor_runtime.job_completion, "finalize_success",
+                        _FlakyCommit(fails=99))
+    with pytest.raises(psycopg2.OperationalError):
+        executor_runtime._commit_result(_JobRow({}), {"id": 1}, {}, 2,
+                                        sleep=lambda s: None)
+    assert sum(executor_runtime.COMMIT_RETRY_WAITS_S) <= 120
