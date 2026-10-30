@@ -113,3 +113,21 @@ def test_a_quoted_title_with_its_own_question_mark_stays_one_sentence():
                                     duration_s=17.0, previewed=True))
     assert out.index("NEW TO PYTHON? START HERE") > out.index("already does"), out
     assert not out.startswith("START HERE"), out
+
+
+def test_the_editors_knobs_and_its_fallbacks_stay_out_of_the_reply():
+    draft = ("I made the captions larger (caption scale 1.6 to 2.0) with no change to their timing "
+             "or wording. The three B-roll stills also play as slow Ken Burns moves because no "
+             "depth was measured for them.")
+    out, _ = tr.finish(draft, facts("make the captions bigger"))
+    assert "scale 1.6" not in out and "Ken Burns" not in out and "depth" not in out, out
+    assert out.startswith("I made the captions larger with no change"), out
+    draft = ("Done: I reframed it to 9:16, and it's now a 25-second vertical cut. My re-aim of "
+             "those spans was rejected, so the current version keeps that framing.")
+    out, _ = tr.finish(draft, facts("add a title at the start"))
+    assert "rejected" not in out and "re-aim" not in out, out
+    draft = ("The final render passed verification, except the still at 7.3-8.1s, which I "
+             "justified rather than fixed. The cut is tighter at 12.1 seconds.")
+    out, _ = tr.finish(draft, facts("make it punchier", subscriber=True, duration_s=12.1,
+                                    before={"keep": [[0.0, 12.7]]}, after={"keep": [[0.0, 12.1]]}))
+    assert "justified" not in out and "verification" not in out, out

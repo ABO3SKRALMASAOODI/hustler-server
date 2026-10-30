@@ -80,7 +80,10 @@ _INTERNAL = re.compile(
     # measurements, read by real trial users as noise ("It is not ready to
     # hand off yet", "I'd end that graphic at 21.07s", "captions at 2.3x")
     r"|\bhand(?:ed|ing)?[- ]?off\b|\bhandoff\b|\bas final\b"
-    r"|\b\d{1,3}\.\d{2}\s?s\b|\b\d\.\d{1,2}x\b)")
+    r"|\b\d{1,3}\.\d{2}\s?s\b|\b\d\.\d{1,2}x\b"
+    r"|\b(?:was|were|got) rejected\b|\bre-?aim(?:ed)?\b|\bre-?measured\b|\bno depth\b"
+    r"|\bdepth (?:data|was measured|map)\b|\bjustif(?:y|ied|ies)\b|\bthe checker\b"
+    r"|\bpass is only partly done\b|\bisn't finished\b|\b\d{1,2}% punch)")
 _APOLOGY = re.compile(r"(?i)\b(sorry|apologi[sz]e|unfortunately|i'?m afraid)\b")
 _LIMIT = re.compile(
     r"(?i)(\b(?:i|we) (?:can't|cannot|couldn't|could not|wasn't able to|was not able to|"
@@ -527,6 +530,10 @@ def status_aside(sent, facts):
     A status line about what the user DID ask for is an honest limitation
     and stays ("The opening title is unchanged ...")."""
     s = rg.straight(sent)
+    if re.search(r"(?i)\bken burns\b", s) and not re.search(
+            r"(?i)ken burns|stills?|photos?|images?|pictures?", facts.user_text or ""):
+        # the still's renderer fallback, told to someone who never asked
+        return True
     if not _STATUS.search(s):
         return False
     about = _topics(s)
@@ -733,10 +740,17 @@ def _right(m):
 _ORPHAN_OFFER = re.compile(r"(?i)^(those|these|they|both|either)\b")
 
 
+# "(caption scale 1.6 to 2.0)": the editor's own knob, inside a true line
+_KNOB = re.compile(r"\s*\((?=[^()]*\d)[^()]*\b(?:scale|size_scale|opacity|strength|level|"
+                   r"anchor_y|lufs|db)\b[^()]*\)", re.I)
+
+
 def scrub_pixels(text):
     """(text without pixel sizes or "NNNNp" resolutions, and with "on the
     right" put as "in the player", how many removed)."""
     out, n = _PIXELS.subn("", text or "")
+    out, k = _KNOB.subn("", out)
+    n += k
     out, r = _RIGHT.subn(_right, out)
     n += r
     if n:
