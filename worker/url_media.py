@@ -288,7 +288,7 @@ _bot_walled = ytaccess.bot_walled
 
 
 def _extract(url, workdir, prefer=None, client_override=None,
-             use_cookies=True, format_mode="adaptive"):
+             use_cookies=True, format_mode="adaptive", proxy=None):
     """Pull media out of a page with yt-dlp. Returns (path, info dict).
 
     Runs as a subprocess rather than through the python API so a hung or
@@ -350,8 +350,10 @@ def _extract(url, workdir, prefer=None, client_override=None,
     # past YouTube's bot wall. Keep every other provider on its existing
     # direct path: the proxy is a YouTube access fix, not a new dependency
     # for SoundCloud, Vimeo, TikTok, or the generic extractor.
-    if config.YTDLP_PROXY and ytaccess.is_youtube_url(url):
-        cmd += ["--proxy", config.YTDLP_PROXY]
+    # ``proxy`` overrides it for one fallback route (_extract_with_fallback).
+    route = config.YTDLP_PROXY if proxy is None else proxy
+    if route and ytaccess.is_youtube_url(url):
+        cmd += ["--proxy", route]
     # The EJS challenge solver (see config.YTDLP_REMOTE_COMPONENTS): without
     # it, the cookie-mode client path resolves NO formats.
     if config.YTDLP_REMOTE_COMPONENTS:
@@ -477,24 +479,36 @@ def _extract_with_fallback(url, workdir, prefer=None):
     if not ytaccess.is_youtube_url(url):
         return _extract(url, workdir, prefer=prefer)
 
-    deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
+    # Routes: the primary egress (YTDLP_PROXY, or direct), then each
+    # config.YTDLP_PROXY_FALLBACK proxy, each with the whole client ladder
+    # and its own retry budget. A fallback is tried only after a route
+    # ended walled; with no fallback configured this is the single
+    # original loop, call for call.
     last_wall = None
-    for attempt in ytaccess.extraction_strategies():
-        if time.monotonic() >= deadline:
+    for route in (None,) + tuple(config.YTDLP_PROXY_FALLBACK):
+        deadline = time.monotonic() + config.FETCH_RETRY_BUDGET_S
+        walled = None
+        via = {} if route is None else {"proxy": route}
+        for attempt in ytaccess.extraction_strategies():
+            if time.monotonic() >= deadline:
+                break
+            _clear_partials(workdir)
+            try:
+                return _extract(url, workdir, prefer=prefer,
+                                client_override=attempt.get("client"),
+                                use_cookies=attempt.get("cookies", False),
+                                format_mode=attempt.get("format", "adaptive"),
+                                **via)
+            except FetchMediaError as retry_err:
+                # A DIFFERENT failure means this client got past the wall and
+                # hit something real (private, region-locked, removed). That
+                # is the useful error — stop cycling and report it.
+                if not ytaccess.access_blocked(str(retry_err)):
+                    raise
+                walled = retry_err
+        if walled is None:
             break
-        _clear_partials(workdir)
-        try:
-            return _extract(url, workdir, prefer=prefer,
-                            client_override=attempt.get("client"),
-                            use_cookies=attempt.get("cookies", False),
-                            format_mode=attempt.get("format", "adaptive"))
-        except FetchMediaError as retry_err:
-            # A DIFFERENT failure means this client got past the wall and hit
-            # something real (private, region-locked, removed). That is the
-            # useful error — stop cycling and report it.
-            if not ytaccess.access_blocked(str(retry_err)):
-                raise
-            last_wall = retry_err
+        last_wall = walled
     if last_wall is not None:
         _clear_partials(workdir)
         # The wall is PER-UPLOAD, not per-song: Aug 9, the same box that

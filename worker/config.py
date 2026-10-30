@@ -711,6 +711,14 @@ YTDLP_PROBE_URL = os.getenv(
 # banned — the trade is a paid proxy vendor instead. Empty = direct. When
 # both this and cookies are set, both apply (cookies ride the proxy).
 YTDLP_PROXY = os.getenv("YTDLP_PROXY", "").strip()
+# Fallback YouTube proxies, tried in order only after the whole client
+# ladder through YTDLP_PROXY hit the bot wall (C1, 30 Oct 2026: the owner's
+# single static ISP IP served 22-62 full downloads, then YouTube walled it
+# for 1.5-2 h). Comma-separated, e.g. more static IPs or a residential
+# endpoint; empty (the default) keeps exactly the single-proxy path.
+YTDLP_PROXY_FALLBACK = tuple(
+    p.strip() for p in os.getenv("YTDLP_PROXY_FALLBACK", "").split(",")
+    if p.strip())
 # yt-dlp remote components for the EJS challenge solver ("" disables).
 # "ejs:github" fetches yt-dlp's own solver script; the Dockerfile ships
 # deno to run it. Required for cookie-mode fetches (see YTDLP_COOKIES_FILE
