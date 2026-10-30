@@ -1508,6 +1508,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             if _ok(_run(ctx, steps, "auto_reframe", {"ratio": "9:16"}, started)):
                 applied.append("reframed to 9:16")
         return steps, applied, {"how": "finished_piece"}
+    short_silent = False
     _f = _faces(ctx.index)
     montage = (not speech and duration >= MONTAGE_MIN_SOURCE_S
                and (not _f or _f["share"] < 0.35)
@@ -1537,6 +1538,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                                         for k in range(6)], spend,
                                   title_only=True)
         ctx.first_cut_hook = title
+        short_silent = True
     elif duration > config.FIRST_CUT_SHORT_SOURCE_S and not whole:
         start, end, title, how = scout_range(ctx, worker_db, spend)
         picked = {"start_s": round(start, 2), "end_s": round(end, 2),
@@ -1650,6 +1652,14 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     y = chest_y(faces, bands) if (talking and vertical_out) else None
     hook, hook_end = getattr(ctx, "first_cut_hook", None), HOOK_S
     hook_y, mute_under = y, True
+    subject = []
+    if q1 and short_silent and vertical_source and not screen_kept:
+        # QB: one look at the subject of a short silent clip: where the title
+        # may sit without crossing it, and (below) the camera that follows it
+        import short_clip
+        subject = short_clip.whole_looks(ctx, spend)
+        if subject and hook:
+            hook_y = short_clip.title_y(subject)
     # (Q1 tried the scout's promise above the head: the band above a
     # vertical talking head is the brand corner mark's (y 0.115-0.192), and
     # the corner-mark guard removed every such title, scoring hook 2.5-4.
@@ -1677,6 +1687,13 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("a hook title")
     else:
         hook_end = 0.0
+    if subject:
+        # QB: a short silent clip is not "raw footage with a title": a
+        # camera finds its subject, pushes in, follows it and ends moving
+        import short_clip
+        if _ok(short_clip.camera(ctx, steps, started, _run, spend,
+                                 samples=subject)):
+            applied.append("a camera that follows the subject")
     cutaways = []
     if q1 and talking:
         # Q1: B-roll on the concrete things the speaker names, first (the
