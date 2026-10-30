@@ -14,6 +14,8 @@ import time
 from decimal import Decimal
 
 import psycopg2
+import psycopg2.extensions
+import psycopg2.sql
 from psycopg2.extras import RealDictCursor, Json
 
 import config
@@ -83,28 +85,132 @@ _CONNECT_KW = {
 _STATEMENT_TIMEOUT_MS = int(os.getenv("PGSTATEMENT_TIMEOUT_S", "60")) * 1000
 
 
+# THREE ROUND TRIPS PER TRANSACTION WERE FREE OF ANY WORK (31 Oct 2026).
+#
+# psycopg2 opens every transaction with its own "BEGIN" round trip, Db.run
+# armed the statement timeout with another (set_config), and COMMIT is a
+# third: a one-query Db.run cost four round trips. Measured from a box slot
+# to the Render PgBouncer in Oregon: 36 ms per round trip (22 ms ping), so a
+# single SELECT in Db.run took 145 ms, and an agent turn's ~300 Db.run calls
+# spent 53-131 s in the database (jobs 126653-126692: 80 s of a 268 s
+# "cut the boring parts", with 15 s of container CPU in the whole turn).
+#
+# A lean connection runs in autocommit mode and opens the transaction itself,
+# in the SAME packet as the transaction's first statement:
+#     BEGIN; SELECT set_config('statement_timeout', '60000', true); <query>
+# One simple-query message, one round trip. The cursor returns the last
+# statement's result, so callers see exactly what they saw before. Every
+# statement after the first runs inside that explicit transaction, and
+# commit()/rollback() send COMMIT/ROLLBACK only while one is open, so the
+# transaction boundaries (and every lock and snapshot) are unchanged: a
+# Db.run is still exactly one transaction. A Db.run that executed nothing
+# (a cached read) now costs no round trip at all.
+_TX_IDLE = psycopg2.extensions.TRANSACTION_STATUS_IDLE
+_TX_UNKNOWN = psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN
+
+
+def _open_sql():
+    # No "%" in here: a parameterised query is interpolated as a whole.
+    return ("BEGIN; SELECT set_config('statement_timeout', '%d', true); "
+            % int(_STATEMENT_TIMEOUT_MS))
+
+
 class _MeteredCursor(RealDictCursor):
     """RealDictCursor that counts statements for the per-job io telemetry.
 
     Every statement is one network round trip to Postgres, and an MCP call's
     fixed cost was inferred (never measured) to be dominated by them. Counting
     here costs one ContextVar read per statement and changes nothing else.
+    On a lean connection the transaction's first statement also carries its
+    BEGIN and statement timeout (see _LeanConnection).
     """
 
     def execute(self, query, vars=None):
         io_telemetry.add_db_statement()
+        conn = self.connection
+        if getattr(conn, "lean", False):
+            query = conn.opening(query)
         return super().execute(query, vars)
 
     def executemany(self, query, vars_list):
         io_telemetry.add_db_statement()
+        conn = self.connection
+        if getattr(conn, "lean", False):
+            conn.ensure_open()
         return super().executemany(query, vars_list)
+
+    def callproc(self, procname, parameters=None):
+        conn = self.connection
+        if getattr(conn, "lean", False):
+            conn.ensure_open()
+        return super().callproc(procname, parameters)
+
+
+class _LeanConnection(psycopg2.extensions.connection):
+    """A connection that opens each transaction inside its first statement.
+
+    Used with autocommit=True, which only stops psycopg2 from sending its own
+    BEGIN round trip: the transaction is explicit, opened by opening() /
+    ensure_open() and closed by commit() / rollback()."""
+
+    lean = True
+
+    def _idle(self):
+        return self.info.transaction_status == _TX_IDLE
+
+    def opening(self, query):
+        """The query, prefixed with BEGIN and the statement timeout when no
+        transaction is open (else unchanged)."""
+        if not self._idle():
+            return query
+        if isinstance(query, psycopg2.sql.Composable):
+            query = query.as_string(self)
+        if isinstance(query, (bytes, bytearray)):
+            return _open_sql().encode("ascii") + bytes(query)
+        return _open_sql() + query
+
+    def _command(self, sql_text):
+        io_telemetry.add_db_roundtrip()
+        cur = psycopg2.extensions.connection.cursor(
+            self, cursor_factory=psycopg2.extensions.cursor)
+        try:
+            psycopg2.extensions.cursor.execute(cur, sql_text)
+        finally:
+            cur.close()
+
+    def ensure_open(self):
+        """Open the transaction now (one round trip) when a caller is about
+        to use something that cannot carry the prefix."""
+        if self._idle():
+            self._command(_open_sql().rstrip("; "))
+
+    def cursor(self, *args, **kwargs):
+        cur = super().cursor(*args, **kwargs)
+        if not isinstance(cur, _MeteredCursor):
+            # another cursor class cannot prefix its first statement: open
+            # the transaction first, so it still runs inside one
+            self.ensure_open()
+        return cur
+
+    def commit(self):
+        if not self._idle():
+            self._command("COMMIT")
+
+    def rollback(self):
+        if self.closed:
+            return super().rollback()
+        if self.info.transaction_status not in (_TX_IDLE, _TX_UNKNOWN):
+            self._command("ROLLBACK")
 
 
 def connect():
     started = time.monotonic()
     conn = psycopg2.connect(config.DATABASE_URL, cursor_factory=_MeteredCursor,
+                            connection_factory=_LeanConnection,
                             **_CONNECT_KW)
-    conn.autocommit = False
+    # autocommit only stops psycopg2's separate BEGIN round trip: a lean
+    # connection opens every transaction itself (see _LeanConnection)
+    conn.autocommit = bool(getattr(conn, "lean", False))
     io_telemetry.add_db_connect(time.monotonic() - started)
     return conn
 
@@ -136,7 +242,8 @@ class Db:
         try:
             return self._run(fn, *args, **kwargs)
         finally:
-            io_telemetry.add_db_call(time.monotonic() - started)
+            io_telemetry.add_db_call(time.monotonic() - started,
+                                     getattr(fn, "__name__", None))
 
     def _run(self, fn, *args, **kwargs):
         for attempt in (1, 2):
@@ -146,12 +253,18 @@ class Db:
                 # physical server connection can be leased to another client.
                 # set_config is parameterized because PostgreSQL's SET syntax
                 # does not accept a bind parameter in every supported version.
-                with self.conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT set_config('statement_timeout', %s, true)",
-                        (str(_STATEMENT_TIMEOUT_MS),),
-                    )
+                # A lean connection arms it inside the transaction's first
+                # statement instead (_LeanConnection): no round trip here.
+                if not getattr(self.conn, "lean", False):
+                    with self.conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT set_config('statement_timeout', %s, true)",
+                            (str(_STATEMENT_TIMEOUT_MS),),
+                        )
                 out = fn(self.conn, *args, **kwargs)
+                if not getattr(self.conn, "lean", False):
+                    # psycopg2's own BEGIN and COMMIT round trips
+                    io_telemetry.add_db_roundtrip(2)
                 self.conn.commit()
                 return out
             except (psycopg2.OperationalError, psycopg2.InterfaceError):
@@ -1641,6 +1754,21 @@ def get_verification_record(conn, project_id, edl_version):
         cur.execute("""SELECT status, record, updated_at
                        FROM verification_records
                        WHERE project_id = %s AND edl_version = %s""",
+                    (project_id, int(edl_version)))
+        return cur.fetchone()
+
+
+def latest_verification_record_upto(conn, project_id, edl_version):
+    """The newest verification record at or below one EDL version: what the
+    user was watching when a request started (agent_tools._baseline_keys)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.verification_records') AS t")
+        if not (cur.fetchone() or {}).get("t"):
+            return None
+        cur.execute("""SELECT edl_version, status, record
+                       FROM verification_records
+                       WHERE project_id = %s AND edl_version <= %s
+                       ORDER BY edl_version DESC LIMIT 1""",
                     (project_id, int(edl_version)))
         return cur.fetchone()
 

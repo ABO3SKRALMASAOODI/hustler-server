@@ -2022,6 +2022,10 @@ CLAUDE_TRIAL_LIFT_TALKING = os.getenv("CLAUDE_TRIAL_LIFT_TALKING", "0") == "1"
 # replies (0 = the model renders, as before); every trial reply goes through
 # trial_reply.finish (true, short, one next step; 0 = the reply as drafted).
 CLAUDE_TRIAL_PRERENDER = os.getenv("CLAUDE_TRIAL_PRERENDER", "1") != "0"
+# The story review starts while the preview renders (agent_tools, 31 Oct):
+# it reads the EDL and transcript only. Off: STORY_REVIEW_PREFETCH=0.
+STORY_REVIEW_PREFETCH = os.getenv("STORY_REVIEW_PREFETCH", "1") != "0"
+STORY_REVIEW_COLLECT_S = float(os.getenv("STORY_REVIEW_COLLECT_S", "90"))
 CLAUDE_TRIAL_REPLY_GUARD = os.getenv("CLAUDE_TRIAL_REPLY_GUARD", "1") != "0"
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.

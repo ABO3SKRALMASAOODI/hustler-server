@@ -1136,7 +1136,8 @@ def build_verification_record(project_id, version, manifest, edl, index,
                               story_findings=None, repairs=None,
                               justified=None, request_text=None,
                               advisory_findings=None, prior_records=None,
-                              media_keys=None):
+                              media_keys=None, baseline_keys=None,
+                              start_edl=None):
     """Version-stamped verification. ``visual/audio/story_findings`` are
     review lines that already passed their reviewer's blocking bar; taste
     notes and other craft observations go in ``advisory_findings`` and are
@@ -1161,6 +1162,10 @@ def build_verification_record(project_id, version, manifest, edl, index,
             "taste_advisory", "craft", str(row)[:1000],
             severity="advisory", repair=ADVISORY_LABEL))
     findings = request_scope.demote_recurring(findings, prior_records, version)
+    # ``baseline_keys`` (Claude lanes only, agent_tools): reviewer findings
+    # the request's starting version already had are advisory here.
+    findings = request_scope.demote_preexisting(
+        findings, baseline_keys, start_edl, edl, request_text)
     preview = preview or {}
     findings += device_findings(preview)
     complete_preview = (int(preview.get("edl_version") or -1) == int(version)

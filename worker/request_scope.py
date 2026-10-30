@@ -18,6 +18,7 @@ verification record and the agent loop share them so the render note, the
 durable record and the handoff can never disagree.
 """
 
+import json
 import re
 
 
@@ -297,6 +298,124 @@ def demote_recurring(findings, prior_records, version):
                                      recurring_after_repair=True),
                        repair=("advisory: this reviewer category was already "
                                "repaired once in this request"))
+        out.append(row)
+    return out
+
+
+# ── Pre-existing findings (Claude lanes: one preview per typical request) ────
+#
+# 31 Oct 2026, production: a request's first complete preview came back with
+# the picture-QC notes its First cut ALREADY had ("graphic on the face 'mg1'",
+# "stall before end card"; v15 -> v16 of project 5270, the user had asked for
+# bigger captions). The editor repaired them unasked, rendered a second
+# preview (~85 s), moved the hook behind the speaker and hid its middle
+# words. A reviewer finding that was already unresolved in the version the
+# user started this request from, about an element this request did not
+# touch and a subject the request does not name, is the user's known
+# baseline, not this request's work: it is recorded as advisory. Anything
+# the request changed, or asked about, still blocks.
+
+_ELEMENT_ID = re.compile(r"'([a-z]{1,6}\d{1,4})'")
+_KEY_STOP = frozenset(("the", "on", "of", "at", "to", "a", "an", "and", "in",
+                       "before", "after", "with", "over", "under", "for",
+                       "line", "craft", "picture", "audio", "visual", "story",
+                       "other", "is", "it", "its", "too", "no"))
+_AUDIO_ASK = re.compile(
+    r"\b(audio|sound|loud|quiet|volume|music|voice|mix|level|noise|hum|"
+    r"mute|silen)", re.I)
+
+
+def element_ids(text):
+    return frozenset(_ELEMENT_ID.findall(str(text or "").lower()))
+
+
+def preexisting_keys(baseline_record):
+    """{finding_key: [element-id sets]} of the reviewer findings that were
+    unresolved (or already advisory as pre-existing / recurring) in the
+    version a request started from."""
+    record = baseline_record
+    if isinstance(record, dict) and isinstance(record.get("record"), dict):
+        record = record["record"]
+    if not isinstance(record, dict):
+        return {}
+    rows = list(record.get("unresolved_findings") or [])
+    rows += [row for row in record.get("findings") or []
+             if isinstance(row, dict)
+             and ((row.get("evidence") or {}).get("preexisting")
+                  or (row.get("evidence") or {}).get("recurring_after_repair"))]
+    out = {}
+    for row in rows:
+        if is_review(row):
+            out.setdefault(finding_key(row), []).append(
+                element_ids(row.get("message")))
+    return out
+
+
+def _snapshot(edl, eid):
+    found = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            if str(node.get("id") or "").lower() == eid:
+                found.append(json.dumps(node, sort_keys=True, default=str))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+    walk(edl or {})
+    return sorted(found)
+
+
+def _asked_about(key, request_text):
+    text = str(request_text or "").lower()
+    if not text:
+        return False
+    if key.startswith("audio:") and _AUDIO_ASK.search(text):
+        return True
+    words = [w for w in re.split(r"[^a-z]+", key.split(":", 1)[-1])
+             if len(w) >= 3 and w not in _KEY_STOP]
+    return any(re.search(r"\b" + re.escape(w[:5]), text) for w in words)
+
+
+def is_preexisting(row, keys, start_edl=None, edl=None, request_text=""):
+    """Whether one reviewer finding (a durable row, or a 'picture QC: ...' /
+    'audio QC: ...' line) is the request's starting baseline (see above)."""
+    if not keys:
+        return False
+    if not isinstance(row, dict):
+        row = {"code": "review_finding", "message": str(row)}
+    if not is_review(row):
+        return False
+    key = finding_key(row)
+    if key not in keys:
+        return False
+    ids = element_ids(row.get("message"))
+    if ids:
+        known = frozenset().union(*keys[key])
+        if not ids <= known:
+            return False
+        if start_edl is not None and edl is not None and any(
+                _snapshot(start_edl, eid) != _snapshot(edl, eid)
+                for eid in ids):
+            return False          # this request changed that element
+    return not _asked_about(key, request_text)
+
+
+def demote_preexisting(findings, keys, start_edl=None, edl=None,
+                       request_text=""):
+    if not keys:
+        return findings
+    out = []
+    for row in findings:
+        if is_review(row) and row.get("severity") != "advisory" and \
+                is_preexisting(row, keys, start_edl, edl, request_text):
+            row = dict(row, severity="advisory",
+                       evidence=dict(row.get("evidence") or {},
+                                     preexisting=True),
+                       repair=("advisory: already in the version this "
+                               "request started from (the user has seen "
+                               "it); not part of this request"))
         out.append(row)
     return out
 

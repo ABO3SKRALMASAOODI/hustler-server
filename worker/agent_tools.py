@@ -23323,6 +23323,59 @@ def _deliverable_quality(ctx, quality):
     return quality
 
 
+def _claude_lane_turn(ctx):
+    """The free trial's or a NEW subscriber's Claude lane. Grandfathered
+    subscribers' lanes are never this."""
+    return (getattr(ctx, "claude_trial", None) is not None
+            or bool(getattr(ctx, "claude_paid", None)))
+
+
+def _baseline_keys(ctx):
+    """Reviewer findings the version this request started from already had
+    (request_scope.preexisting_keys), on a Claude lane; {} elsewhere. One
+    database read per turn. 31 Oct 2026: a request's first preview repeated
+    its First cut's own picture-QC notes, the editor repaired them unasked
+    and rendered a second preview (~85 s of a 281 s 'bigger captions')."""
+    cached = getattr(ctx, "_baseline_keys_cache", None)
+    if cached is not None:
+        return cached
+    keys = {}
+    start = getattr(ctx, "turn_start_edl", None) or {}
+    if _claude_lane_turn(ctx) and start.get("version") is not None \
+            and not (getattr(ctx, "job", None) or {}).get(
+                "payload", {}).get("first_cut"):
+        try:
+            record = ctx.db.run(dbx.latest_verification_record_upto,
+                                ctx.project_id, int(start["version"]))
+            keys = request_scope.preexisting_keys(record)
+        except Exception as exc:  # noqa: BLE001 - nothing demoted
+            print(f"[quality] baseline record unavailable: {exc}", flush=True)
+            keys = {}
+    ctx._baseline_keys_cache = keys
+    return keys
+
+
+def _split_preexisting(ctx, row, lines, prefix):
+    """(lines this request must still answer, lines its starting version
+    already had) for picture/audio QC lines on a Claude lane."""
+    keys = _baseline_keys(ctx)
+    if not keys or not lines:
+        return list(lines or []), []
+    start = (getattr(ctx, "turn_start_edl", None) or {}).get("json")
+    request = quality_verifier.request_text_for(ctx)
+    keep, known = [], []
+    for line in lines:
+        if request_scope.is_preexisting(
+                {"code": "review_finding", "message": prefix + str(line)},
+                keys, start, (row or {}).get("json"), request):
+            known.append(line)
+        else:
+            keep.append(line)
+    if known:
+        _metric(ctx, "preexisting_findings_advisory", len(known))
+    return keep, known
+
+
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                    report=False):
     if report:
@@ -23425,6 +23478,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
               min(config.PREVIEW_WAIT_TIMEOUT_S,
                   max(0.0, float(_wait_timeout_s))))
     deadline = time.monotonic() + wait_s
+    _prefetch_story_review(ctx, row)
     while time.monotonic() < deadline:
         j = ctx.db.run(dbx.get_job, job_id)
         if j["state"] == "done":
@@ -23622,6 +23676,18 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                 quality_verifier.request_text_for(ctx),
                 source_has_audio=((ctx.index or {}).get("video") or {}).get(
                     "has_audio"))
+            aqf, aq_known = _split_preexisting(
+                ctx, row, aqf, "audio QC: ")
+            if aq_known:
+                ctx.last_taste_advisory = list(
+                    getattr(ctx, "last_taste_advisory", None) or []) + [
+                    "audio QC (already in the version this request started "
+                    "from; not part of this request): " + line
+                    for line in aq_known[:3]]
+                note += (" AUDIO CHECK (already in the version the user "
+                         "started this request from, not part of this "
+                         "request: leave it unless the user asks): "
+                         + "; ".join(aq_known[:3]) + ".")
             ctx.last_audio_qc_findings = list(aqf[:4])
             if aqf:
                 ctx.last_taste.extend(
@@ -23650,6 +23716,18 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             # request can finish instead of looping on it (bake-off 26 Oct:
             # four add/remove-zoom cycles on one 'stall', a 570 s turn).
             pqf, persisted = _picture_qc_split(ctx, pqf)
+            pqf, pq_known = _split_preexisting(ctx, row, pqf, "picture QC: ")
+            if pq_known:
+                ctx.last_taste_advisory = list(
+                    getattr(ctx, "last_taste_advisory", None) or []) + [
+                    "picture QC (already in the version this request started "
+                    "from; not part of this request): " + line
+                    for line in pq_known]
+                note += (" PICTURE CHECK (already in the version the user "
+                         "started this request from, not part of this "
+                         "request: leave it unless the user asks): "
+                         + "; ".join(pq_known[:render_qc.MAX_FINDINGS])
+                         + ".")
             if persisted:
                 ctx.last_taste_advisory = list(
                     getattr(ctx, "last_taste_advisory", None) or []) + [
@@ -23760,7 +23838,10 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                 request_text=quality_verifier.request_text_for(ctx),
                 advisory_findings=advisory_record_findings,
                 prior_records=getattr(ctx, "verification_records", None),
-                media_keys=getattr(ctx, "request_media_keys", None))
+                media_keys=getattr(ctx, "request_media_keys", None),
+                baseline_keys=_baseline_keys(ctx),
+                start_edl=(getattr(ctx, "turn_start_edl", None)
+                           or {}).get("json"))
             if not hasattr(ctx, "verification_records"):
                 ctx.verification_records = {}
             ctx.verification_records[version] = verification
@@ -23820,6 +23901,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                 )
             return note
         if j["state"] == "failed":
+            _drain_story_prefetch(ctx)
             failure = dict(((j.get("result") or {}).get("failure") or {}))
             failure.setdefault("error", j.get("error") or "unknown render error")
             failure.setdefault("kind", "unknown")
@@ -23830,6 +23912,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         remaining = deadline - time.monotonic()
         if remaining > 0:
             time.sleep(min(1.0, remaining))
+    _drain_story_prefetch(ctx)
     if park_s is not None:
         return _park_render(ctx, job_id, "preview", version,
                             {"quality": quality})
@@ -24292,23 +24375,9 @@ def _parse_render_audio_review(answer, edl_version, clips,
             "text": text, "clips": clips}
 
 
-def _review_program_story(ctx, row):
-    """Independent semantic review of one immutable final EDL version."""
-    if getattr(ctx, "second_opinions_off", False):
-        # a prepared trial turn (agent_loop._trial_head_start)
-        return None
-    if getattr(ctx, "sight_out", False):
-        # An MCP editing model owns its judgment and receives the transcript
-        # tools directly; do not make the product pay for a duplicate critic.
-        return None
-    version = int(row["version"])
-    prior = getattr(ctx, "last_story_review", None) or {}
-    reviewed = getattr(ctx, "story_reviewed_versions", None)
-    if reviewed is None:
-        reviewed = set()
-        ctx.story_reviewed_versions = reviewed
-    if version in reviewed:
-        return prior if prior.get("edl_version") == version else None
+def _story_inputs(ctx, row):
+    """What the independent story review of this version reads before its
+    model call: (edl, family, asset_indexes), or None when no review runs."""
     inferred, program = program_cast_inputs(ctx, row.get("json"))
     family = director.editorial_family(
         getattr(ctx, "edit_plan", None), inferred,
@@ -24335,15 +24404,166 @@ def _review_program_story(ctx, row):
     if not story_critic.should_review(
             edl, getattr(ctx, "index", None), family, asset_indexes):
         return None
-    # Mark attempted before the remote call: a malformed/outage response on a
-    # cached preview must not silently multiply calls within the same turn.
-    reviewed.add(version)
-    report = story_critic.review(
+    return edl, family, asset_indexes
+
+
+def _story_review_call(ctx, inputs):
+    edl, family, asset_indexes = inputs
+    return story_critic.review(
         edl, getattr(ctx, "index", None), family,
         # The customer's brief, not a Repair/Improve button's critic prose.
         user_request=quality_verifier.request_text_for(ctx),
         plan=getattr(ctx, "edit_plan", None),
         asset_indexes=asset_indexes)
+
+
+# THE STORY REVIEW RUNS WHILE THE PREVIEW RENDERS (31 Oct 2026).
+#
+# It reads the EDL and the transcript, never the rendered file, yet it ran
+# after the render and after the visual critic: 6-14 s of every complete
+# preview on production (job 126676: critic 21:44:44, story 21:44:51 and
+# 21:44:58, then the editor). Started when the preview is enqueued, its
+# answer is waiting when the render lands. Same inputs, same call, same
+# report. Claude lanes (trial, new subscribers) only. Its model-I/O rows
+# are recorded on the turn's own thread when the review is collected
+# (_DeferredRecorder), so the turn's database connection is never used
+# from two threads at once.
+_STORY_POOL = ThreadPoolExecutor(max_workers=8,
+                                 thread_name_prefix="story-review")
+
+
+class _DeferredRecorder:
+    """The turn's llm recorder, held: calls are kept and replayed on the
+    turn's thread. Carries the attributes llm.record and the trial scope
+    read from the recorder."""
+
+    def __init__(self, real):
+        self.real = real
+        self.rows = []
+        if hasattr(real, "claude_trial_scope"):
+            self.claude_trial_scope = real.claude_trial_scope
+        if hasattr(real, "credit_price_aliases"):
+            self.credit_price_aliases = real.credit_price_aliases
+
+    def __call__(self, *args):
+        self.rows.append(args)
+
+    def flush(self):
+        rows, self.rows = self.rows, []
+        for args in rows:
+            try:
+                self.real(*args)
+            except Exception as exc:  # noqa: BLE001 - a record, never the turn
+                print(f"[story-critic] deferred record failed: {exc}",
+                      flush=True)
+
+
+def _story_prefetch_on(ctx):
+    return (config.STORY_REVIEW_PREFETCH and _claude_lane_turn(ctx)
+            and not getattr(ctx, "second_opinions_off", False)
+            and not getattr(ctx, "sight_out", False))
+
+
+def _prefetch_story_review(ctx, row):
+    """Start this version's story review now (see above); never raises."""
+    try:
+        if not _story_prefetch_on(ctx):
+            return
+        version = int(row["version"])
+        reviewed = getattr(ctx, "story_reviewed_versions", None)
+        if reviewed is None:
+            reviewed = set()
+            ctx.story_reviewed_versions = reviewed
+        pending = getattr(ctx, "_story_prefetch", None)
+        if pending is None:
+            pending = {}
+            ctx._story_prefetch = pending
+        if version in reviewed or version in pending:
+            return
+        inputs = _story_inputs(ctx, row)
+        if inputs is None:
+            pending[version] = None
+            return
+        reviewed.add(version)
+        real = llm.get_recorder()
+        deferred = _DeferredRecorder(real) if real is not None else None
+        plan = llm.turn_plan()
+        project_id = getattr(ctx, "project_id", None)
+
+        def run():
+            if deferred is not None:
+                llm.set_recorder(deferred)
+            llm.set_turn_plan(plan, project_id)
+            try:
+                return _story_review_call(ctx, inputs)
+            finally:
+                llm.set_recorder(None)
+                llm.clear_turn_plan()
+
+        pending[version] = (_STORY_POOL.submit(run), deferred, inputs[1])
+        _metric(ctx, "story_reviews_prefetched")
+    except Exception as exc:  # noqa: BLE001 - the review runs after instead
+        print(f"[story-critic] prefetch skipped: {exc}", flush=True)
+
+
+def _collect_story_prefetch(ctx, version):
+    """(True, report, family) when a prefetch of this version exists (its
+    report may be None), else (False, None, None). Replays its model-I/O
+    records here."""
+    pending = getattr(ctx, "_story_prefetch", None) or {}
+    if version not in pending:
+        return False, None, None
+    entry = pending.pop(version)
+    if entry is None:
+        return True, None, None
+    future, deferred, family = entry
+    try:
+        report = future.result(timeout=max(
+            1.0, float(config.STORY_REVIEW_COLLECT_S)))
+    except Exception as exc:  # noqa: BLE001 - outage = no report
+        print(f"[story-critic] prefetched review failed: {exc}", flush=True)
+        report = None
+    if deferred is not None:
+        deferred.flush()
+    return True, report, family
+
+
+def _drain_story_prefetch(ctx):
+    """Collect every outstanding prefetch (a failed or parked render), so its
+    model-I/O rows are recorded on this thread."""
+    for version in list((getattr(ctx, "_story_prefetch", None) or {})):
+        _collect_story_prefetch(ctx, version)
+
+
+def _review_program_story(ctx, row):
+    """Independent semantic review of one immutable final EDL version."""
+    if getattr(ctx, "second_opinions_off", False):
+        # a prepared trial turn (agent_loop._trial_head_start)
+        return None
+    if getattr(ctx, "sight_out", False):
+        # An MCP editing model owns its judgment and receives the transcript
+        # tools directly; do not make the product pay for a duplicate critic.
+        return None
+    version = int(row["version"])
+    prefetched, report, family = _collect_story_prefetch(ctx, version)
+    prior = getattr(ctx, "last_story_review", None) or {}
+    reviewed = getattr(ctx, "story_reviewed_versions", None)
+    if reviewed is None:
+        reviewed = set()
+        ctx.story_reviewed_versions = reviewed
+    if not prefetched:
+        if version in reviewed:
+            return prior if prior.get("edl_version") == version else None
+        inputs = _story_inputs(ctx, row)
+        if inputs is None:
+            return None
+        # Mark attempted before the remote call: a malformed/outage response
+        # on a cached preview must not silently multiply calls within the
+        # same turn.
+        reviewed.add(version)
+        family = inputs[1]
+        report = _story_review_call(ctx, inputs)
+    edl = row.get("json") or {}
     report = story_critic.scope_to_source(report, edl)
     if report is None:
         return None
