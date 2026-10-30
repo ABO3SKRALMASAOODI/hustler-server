@@ -224,6 +224,52 @@ def quote_unbacked(sent, facts):
     return None
 
 
+_YEAR = re.compile(r"\b(19\d\d|20\d\d)\b")
+
+
+def kept_words(facts):
+    """The transcript words the edit keeps (source seconds inside its keep
+    spans), lower-cased; all of them when the EDL has no spans."""
+    words = [w for w in (facts.index or {}).get("words") or [] if isinstance(w, dict)]
+    spans = []
+    for k in (facts.after or {}).get("keep") or []:
+        try:
+            a, b = (k[0], k[1]) if isinstance(k, (list, tuple)) else (k["start"], k["end"])
+            spans.append((float(a), float(b)))
+        except (TypeError, ValueError, KeyError, IndexError):
+            continue
+    out = []
+    for w in words:
+        try:
+            t = float(w.get("t0", w.get("s")))
+        except (TypeError, ValueError):
+            t = None
+        if not spans or t is None or any(a - 0.05 <= t < b for a, b in spans):
+            out.extend(rg._norm_words(str(w.get("w") or "")))
+    return out
+
+
+def year_unbacked(sent, facts):
+    """A year the reply puts in the video that the video never says or
+    shows (q8d talk10best: "the 2015 bet" on a cut whose card reads 2005 and
+    whose kept speech never says 2015; 2015 was in the part left out)."""
+    years = _YEAR.findall(sent)
+    if not years:
+        return None
+    words = kept_words(facts)
+    if len(words) < 30:
+        return None
+    after = facts.after or {}
+    own = " ".join(rg._norm_words(json.dumps(
+        [after.get("texts"), after.get("motion"), after.get("vectors"), after.get("fx")],
+        default=str)))
+    have = set(words)
+    for y in years:
+        if y not in have and y not in own:
+            return y
+    return None
+
+
 def _length_claims(sent):
     vals = []
     for m in _LENGTH.finditer(rg.straight(sent)):
@@ -295,6 +341,8 @@ def unbacked(sent, facts):
     why = removal_unbacked(s, facts)
     if why:
         return why
+    if year_unbacked(s, facts):
+        return "year"
     if quote_unbacked(s, facts):
         return "quote"
     return None

@@ -281,3 +281,15 @@ def test_a_cutaways_own_title_is_not_an_invented_name_and_a_pick_is_not_the_user
     g = facts(user_text="find the best moment and make a short")
     assert dropped("Your short is about the moment you chose: the scaling argument.", g) \
         == ["attributed"]
+
+
+def test_a_year_the_cut_never_says():
+    # q8d talk10best (the judge caught it): "the 2015 bet" on a cut whose
+    # kept speech never says 2015 (it was in the part left out)
+    words = ("in 2015 when you co founded it most people said no " * 3).split() + \
+            ("deep learning was working and in 2005 a professor said it would never work " * 3).split()
+    idx = {"words": [{"w": w, "t0": i * 0.3} for i, w in enumerate(words)]}
+    kept = dict(FIRST_CUT, keep=[[10.0, 60.0]])
+    f = facts(index=idx, after=kept, wrote=True, duration_s=50.0)
+    assert dropped("It is built on the 2015 bet on deep learning.", f) == ["year"]
+    assert dropped("It ends on the 2005 professor's prediction.", f) == []
