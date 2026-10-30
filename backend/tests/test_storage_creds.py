@@ -169,7 +169,7 @@ class Rows:
 def _cache(rows, env, now, logs=None):
     return creds.Credentials(fetch=rows, env=env, clock=lambda: now[0],
                              log=(logs.append if logs is not None
-                                  else (lambda m: None)))
+                                  else (lambda m: None)), background=False)
 
 
 def test_env_wins_and_the_row_is_never_read():
@@ -249,6 +249,33 @@ def test_cache_ttl_retry_and_last_good_keys():
     rows.value = None
     now[0] = 990
     assert c.values() is None and c.status()["row"] == "missing"
+
+
+def test_only_the_first_read_waits_for_the_database():
+    import threading
+    now = [0.0]
+    gate = threading.Event()
+    rows = Rows(_sealed())
+
+    def fetch():
+        if rows.calls:                      # every refresh after the first
+            gate.wait(5)
+        return rows()
+    c = creds.Credentials(fetch=fetch, env={"S3_SECRET_ACCESS_KEY":
+                                            LEGACY_SECRET},
+                          clock=lambda: now[0], log=lambda m: None)
+    assert c.values() == VALUES and rows.calls == 1
+    now[0] = 301
+    # The refresh is stuck on the database; calls keep the cached keys.
+    assert c.values() == VALUES
+    assert c.values() == VALUES
+    gate.set()
+    for _ in range(200):
+        if rows.calls == 2 and not c._lock.locked():
+            break
+        threading.Event().wait(0.01)
+    assert rows.calls == 2                  # exactly one refresh ran
+    assert c.values() == VALUES and rows.calls == 2
 
 
 def test_an_auth_refusal_rereads_the_row_at_most_every_30_s():

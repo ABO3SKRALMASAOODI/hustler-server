@@ -37,7 +37,9 @@ Nobody should have to paste them into four dashboards, so:
 * Cached for TTL_S (5 minutes). A row that does not decrypt is retried
   after RETRY_S, and an authentication error from the next store (a rotated
   key) re-reads the row at most every RETRY_S. A failed database read keeps
-  the last good keys.
+  the last good keys. Only a process's first read waits for the database;
+  later refreshes run in a background thread while calls use what is cached,
+  so a slow or unreachable database never stalls a storage call.
 
 * Fail closed and quiet: no row, no sealing secret, a wrong key, a damaged
   or unknown row, or no AES implementation all leave the next store "not
@@ -267,8 +269,9 @@ class Credentials:
     returns the raw app_kv value (None when absent) and may raise."""
 
     def __init__(self, fetch=None, env=None, ttl_s=None, retry_s=None,
-                 clock=None, log=None, impl=None):
+                 clock=None, log=None, impl=None, background=True):
         self._fetch = fetch
+        self._background = background
         self._env = os.environ if env is None else env
         self._ttl = float(TTL_S if ttl_s is None else ttl_s)
         self._retry = float(RETRY_S if retry_s is None else retry_s)
@@ -307,16 +310,33 @@ class Credentials:
             if not self._has_sealing_secret():
                 self._reason = "no_secret"
                 return None
-            if self._clock() >= self._due and \
-                    self._lock.acquire(blocking=not self._tried):
-                try:
-                    if self._clock() >= self._due:
+            if self._clock() < self._due:
+                return self._values
+            if not self._tried:
+                with self._lock:                # the first read waits
+                    if not self._tried:
                         self._refresh()
-                finally:
+            elif self._lock.acquire(blocking=False):
+                if self._clock() < self._due:
                     self._lock.release()
+                elif self._background:
+                    try:
+                        threading.Thread(target=self._refresh_then_release,
+                                         daemon=True,
+                                         name="storage-creds").start()
+                    except Exception:  # noqa: BLE001
+                        self._lock.release()
+                else:
+                    self._refresh_then_release()
             return self._values
         except Exception:  # noqa: BLE001 — never into a storage call
             return None
+
+    def _refresh_then_release(self):
+        try:
+            self._refresh()
+        finally:
+            self._lock.release()
 
     def _refresh(self):
         now = self._clock()
