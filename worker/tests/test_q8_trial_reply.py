@@ -268,3 +268,16 @@ def test_where_to_look_is_said_once():
     text, _ = tr.finish("Your reel is now a 27-second vertical 9:16 edit with "
                         "captions. Look at the player to see it.", facts())
     assert text.count("player") == 1
+
+
+def test_a_cutaways_own_title_is_not_an_invented_name_and_a_pick_is_not_the_users():
+    # q8b phone r4: "cutaways of ... the Kansas City skyline": the stock
+    # photo's own title; q8b talk10best r1: "the moment you chose" for
+    # "find the best moment"
+    after = dict(FIRST_CUT, fx=[{"id": "br1", "type": "broll",
+                                 "credit": {"title": "Kansas City skyline at dusk"}}])
+    f = facts(after=after, wrote=True, duration_s=27.2)
+    assert dropped("It has cutaways of the sun and the Kansas City skyline.", f) == []
+    g = facts(user_text="find the best moment and make a short")
+    assert dropped("Your short is about the moment you chose: the scaling argument.", g) \
+        == ["attributed"]

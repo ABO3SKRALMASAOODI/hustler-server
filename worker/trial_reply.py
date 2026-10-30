@@ -123,7 +123,8 @@ _RENDER_DENY = re.compile(
 _ATTRIBUTED = re.compile(
     r"(?i)\b(as you asked|as instructed|per your (?:trial )?(?:setup|instructions?|request)|"
     r"this turn's instructions|(?:were|was) set to stay|(?:were|was) locked|locked as part of|"
-    r"your trial setup|as you wanted|you told me (?:to )?(?:keep|leave)|as requested)\b")
+    r"your trial setup|as you wanted|you told me (?:to )?(?:keep|leave)|as requested|"
+    r"the (?:moment|part|line|clip|section|bit) you (?:chose|picked|selected))\b")
 _CAPABILITY = re.compile(
     r"(?i)(\bcanvas is fixed\b|\b(?:can't|cannot|couldn't|could not) (?:export|make|deliver|render) "
     r"(?:a |the )?(?:16:9|landscape|4:3|square)|\bonly (?:supports?|does|makes) 9:16\b"
@@ -146,8 +147,11 @@ def _invented_name(sent, facts):
     if len(words) < 30:
         return None
     after = facts.after or {}
+    # the edit's own words, its cutaways' titles and credits included (a
+    # stock photo of "the Kansas City skyline" is named by its own title)
     own = set(rg._norm_words(json.dumps([after.get("texts"), after.get("motion"),
-                                         after.get("vectors"), after.get("captions")],
+                                         after.get("vectors"), after.get("captions"),
+                                         after.get("fx"), after.get("overlays")],
                                         default=str)))
     own |= set(rg._norm_words(facts.user_text or ""))
     for m in _NAME.finditer(sent):
