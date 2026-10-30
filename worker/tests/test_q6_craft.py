@@ -694,3 +694,32 @@ def test_a_subject_wider_than_the_vertical_crop_is_dropped_but_not_the_payoff():
     # never below four shots
     assert montage_cut.framable(wins[:4], [([float(k), k + 0.4], wide) for k in range(0, 8, 2)],
                                 0.316) == wins[:4]
+
+
+def test_a_beat_under_the_title_keeps_the_subjects_head_below_it():
+    """QB2 loop 5: with head room (HEAD_ROOM) the head walked into the title
+    (y 0.26, held HOOK_S): "MIRROR FLEX over his forehead", "the title over
+    his beanie", 3 of 8 judgements. Every beat that starts under the title
+    keeps TITLE_BIAS more room above the subject; later beats do not."""
+    box = (0.07, 0.476, 0.34, 0.713)
+    looks = [(float(t), box, True, t % 2 == 0) for t in np.arange(0.5, 16.0, 1.1)]
+    segs = [[0.0, 1.3], [2.5, 3.8], [5.0, 6.3], [8.0, 9.3], [11.0, 12.6]]
+    keys, _snap, _first = silent_cut.keyframes(looks, segs, 2.1)
+    starts, t_out = [], 0.0
+    for a, b in segs:
+        starts.append(t_out)
+        t_out += b - a
+
+    def head(k):
+        x0, y0, x1, y1 = k["rect"]
+        return (box[1] - y0) / (y1 - y0)
+    middle = {round(k["t"], 2): k for k in keys}
+    under = [middle[round(t, 3)] for t in starts[1:-1] if t < silent_cut.TITLE_HOLD_S
+             and round(t, 3) in middle]
+    after = [middle[round(t, 3)] for t in starts[1:-1] if t >= silent_cut.TITLE_HOLD_S
+             and round(t, 3) in middle]
+    assert under and after
+    for k in under:
+        assert head(k) >= silent_cut.HEAD_ROOM + silent_cut.TITLE_BIAS - 0.02
+    for k in after:
+        assert abs(head(k) - silent_cut.HEAD_ROOM) < 0.02

@@ -37,8 +37,8 @@ BEATS_MIN, BEATS_MAX = 4, 6
 BEAT_S = 2.6                # one beat per this much source
 PROG_SHARE = 0.62           # the cut keeps about this share of the take
 PROG_MIN_S, PROG_MAX_S = 7.0, 11.5
-BEAT_MIN_S, BEAT_MAX_S = 1.1, 1.5   # judges: "something every 1-2 s"
-OPEN_MIN_S = 1.4            # the first beat carries the title's first read
+BEAT_MIN_S, BEAT_MAX_S = 1.1, 1.3   # judges: "something every 1-2 s"
+OPEN_MIN_S = 1.3            # the first beat carries the title's first read
 END_MIN_S = 1.6             # the end beat: the snap and live picture after it
 GAP_MIN_S = 0.8             # a jump skips at least this much of the take
 DIRTY_PAD_S = 0.3           # a beat stays this far from an unclean frame
@@ -57,6 +57,10 @@ ALTERNATE = 0.3             # medium and close differ by at least this much zoom
 MEDIUM_RATIO = 0.8          # ... and the medium is at most this share of the close
                             # (final run: 2.1x after 2.4x read as one long shot)
 GROUND = 0.08               # a subject that fills the window: at most this share below it
+TITLE_HOLD_S = 3.0          # the hook title's time on screen (first_cut.HOOK_S)
+TITLE_BIAS = 0.12           # every beat under the title keeps this much more room above
+                            # the subject (QB2 loop 5: with head room the head walked into
+                            # the title at y 0.26, "MIRROR FLEX over his forehead", 3 of 8)
 HEAD_ROOM = 0.25            # a subject that cannot fill it sits with this much above
 FILL_TOP = 0.62             # ... "fills" = at least this share of the window height
                             # (QB2, 30 Oct: a small subject pinned to the base left the
@@ -418,7 +422,8 @@ def keyframes(looks, segs, z_max=1.9):
         else:
             z0 = beat_z(ba, i, z_max)
             z1 = z0 if i != push_at else min(z_max, z0 + PUSH)
-            keys += [_key(o0, ba, z0), _key(o1 - 0.02, bb, z1)]
+            under = TITLE_BIAS if o0 < TITLE_HOLD_S else 0.0
+            keys += [_key(o0, ba, z0, under), _key(o1 - 0.02, bb, z1, under)]
         t_out = o1
     return keys, snap, first_win
 
