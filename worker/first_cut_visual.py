@@ -356,6 +356,7 @@ def covered(ctx, types=("broll",)):
 
 
 CAPTION_SCALE = 1.6     # judges, C2 and Q1: "captions 20-30% larger"
+SCREEN_CAPTION_SCALE = 1.85   # Q6: a screen's plated captions, 30% over C2's
 
 
 def caption_style(style, talking, screen, vertical):
@@ -367,9 +368,12 @@ def caption_style(style, talking, screen, vertical):
     families and accent); a screen or an animation (white snow) gets the
     phrase pill so it reads on any picture, at one steady band."""
     if screen:
-        # a screen keeps the C2 look (judges: editorial 6-7 over the docs;
-        # the serif line "dissolves into the doc text", 4-4.5)
-        return dict(style), 2
+        # Q6: the phrase sits on its own dark plate in one low band, larger
+        # (judges, every vfr run on the C2 look: "give the captions a
+        # contrast plate, about 30% larger, in a fixed lower band clear of
+        # the code"; the serif line "dissolves into the doc text", 4-4.5)
+        return dict(style, motion_look="box", size_scale=SCREEN_CAPTION_SCALE,
+                    single_line=True, anchor_y=0.87), 3
     out = dict(style, size_scale=CAPTION_SCALE, motion_look="serif",
                single_line=True)
     if not talking:
@@ -660,7 +664,15 @@ def cut_ins(ctx, steps, started, run, busy, aim, hook_end, bands=False,
 
 SCREEN_ZOOM = 2.2       # the window is 1/2.2 of the frame (2-3x, task)
 SCREEN_ZOOM_MIN = 1.8   # the floor: a region, never the page (task: 2-3x)
-SCREEN_MOVE_S = 0.7     # an eased travel between regions
+SCREEN_MOVE_S = 0.25    # Q6: a snap to each new region, read as a cut-in
+                        # (judges, vfr: "cut or snap straight to each section
+                        # as it is named", never a drift; Q1's travel was 0.7)
+SCREEN_END_PUSH = 0.3   # Q6: the last region pushes in a little to the end
+SCREEN_HEADER_Y = 0.13  # Q6: above this a docs page is its bar and breadcrumb
+SCREEN_STEP_S = 2.6     # Q6: a held region steps down the column this often
+SCREEN_STEP_DOWN = 0.55 # ... by this share of the window's height
+SCREEN_END_PUSH_S = 1.2 # (judges: "push in on the code example during the
+                        # last words so the last beat lands live")
 SCREEN_HOLD_S = 1.2     # at least this long on a region
 SCREEN_SAME = 0.6       # a new region overlapping the held one this much: hold
 _SCREEN_SYSTEM = (
@@ -669,7 +681,8 @@ _SCREEN_SYSTEM = (
     "frame give the box (pixel coordinates of THAT image, x0 y0 x1 y1) of "
     "the region the sentence is about: the heading, menu item, code block "
     "or paragraph it names or points at, or where the action is (the "
-    "cursor, what changed). The box must be SMALL: the named heading with "
+    "cursor, what changed); never the browser bar, the page's top "
+    "navigation or its breadcrumb line. The box must be SMALL: the named heading with "
     "the 2-4 lines under it, one code block, one button or menu, at most a "
     "third of the image wide and a quarter of it tall, never a whole column "
     "or page. Answer with JSON only: {\"boxes\": "
@@ -737,7 +750,8 @@ def column_top(index, src_t, column):
     x0, x1 = column or (0.1, 0.9)
     lines = sorted((b for b in (best or {}).get("text") or []
                     if len(b) >= 4 and float(b[0]) >= x0 - 0.03
-                    and float(b[2]) <= x1 + 0.05),
+                    and float(b[2]) <= x1 + 0.05
+                    and float(b[1]) >= SCREEN_HEADER_Y),
                    key=lambda b: float(b[1]))
     y0 = float(lines[0][1]) if lines else 0.1
     return [x0, max(0.0, y0 - 0.03), x0 + 0.42, min(1.0, y0 + 0.24)]
@@ -769,6 +783,31 @@ def _overlap(a, b):
     return (ix * iy) / area if area > 0 else 0.0
 
 
+def reading_steps(held, prog, every=SCREEN_STEP_S):
+    """Q6: a region held longer than two steps gets discrete steps down the
+    text column, a reading camera (vfr q6c4: the model boxed whole columns
+    and the page bar, so one window held 15 s; judges: "a visible reframe
+    every 2-3 s", "snap to each section"). Each step moves the window
+    SCREEN_STEP_DOWN of its height down the page (back to the top of the
+    region when the page ends), at the same zoom."""
+    out = []
+    for k, (t, win, z) in enumerate(held):
+        out.append((t, win, z))
+        until = held[k + 1][0] if k + 1 < len(held) else prog - SCREEN_END_PUSH_S
+        cur, at = list(win), t + every
+        while until - at >= every * 0.75:
+            h = cur[3] - cur[1]
+            y0 = cur[1] + SCREEN_STEP_DOWN * h
+            if y0 + h > 1.0:
+                y0 = win[1]
+            if abs(y0 - cur[1]) < 1e-3:
+                break
+            cur = [cur[0], round(y0, 4), cur[2], round(y0 + h, 4)]
+            out.append((round(at, 2), list(cur), z))
+            at += every
+    return out
+
+
 def screen_keyframes(targets, prog, hook_end):
     """add_zoom_path keyframes from [(t, window, zoom)] (program seconds):
     wide under the hook, a push onto the first region as it leaves, an eased
@@ -784,6 +823,7 @@ def screen_keyframes(targets, prog, hook_end):
         if _overlap(win, held[-1][1]) >= SCREEN_SAME:
             continue
         held.append((t, win, z))
+    held = reading_steps(held, prog)
     first = held[0]
     push_at = min(1.0, prog - 1.0)
     keys = [{"t": 0.0, "rect": first[1], "strength": 0.0},
@@ -800,7 +840,29 @@ def screen_keyframes(targets, prog, hook_end):
         keys.append({"t": round(b, 2), "rect": win,
                      "strength": round(z - 1.0, 3)})
     last = keys[-1]
-    if prog - last["t"] > 0.05:
+    if prog - last["t"] > SCREEN_END_PUSH_S + 0.3 and last["strength"] > 0:
+        # Q6: the ending keeps moving: the last region is held a little
+        # wider and pushes in to its framing over the last seconds (the
+        # framing is already at the deepest zoom the source allows, so the
+        # push starts wider rather than ending deeper)
+        z = 1.0 + float(last["strength"])
+        lo = max(1.0, z - SCREEN_END_PUSH)
+        x0, y0, x1, y1 = last["rect"]
+        cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+        w, h = min(1.0, (x1 - x0) * z / lo), min(1.0, (y1 - y0) * z / lo)
+        wx0 = min(max(cx - w / 2, 0.0), 1.0 - w)
+        wy0 = min(max(cy - h / 2, 0.0), 1.0 - h)
+        wide = [round(wx0, 4), round(wy0, 4), round(wx0 + w, 4), round(wy0 + h, 4)]
+        target = last["rect"]
+        k = len(keys) - 1
+        while k > 0 and keys[k]["rect"] == target:
+            keys[k] = dict(keys[k], rect=wide, strength=round(lo - 1.0, 3))
+            k -= 1
+        keys.append({"t": round(prog - SCREEN_END_PUSH_S, 2), "rect": wide,
+                     "strength": round(lo - 1.0, 3)})
+        keys.append({"t": round(prog, 2), "rect": target,
+                     "strength": round(z - 1.0, 3)})
+    elif prog - last["t"] > 0.05:
         keys.append(dict(last, t=round(prog, 2)))
     return keys
 
@@ -869,6 +931,10 @@ def _vision_boxes(ctx, frames_at, spend):
             continue
         if (box[2] - box[0]) * (box[3] - box[1]) > 0.6:
             continue        # "the whole page" is no direction
+        if box[3] <= SCREEN_HEADER_Y:
+            continue        # Q6: the page's top bar is no direction either
+                            # (vfr: four of five boxes on the breadcrumb, so
+                            # one window held 11 s)
         if box[3] - box[1] > 0.3:
             # a whole column: its top, where a section's heading sits
             box = [box[0], box[1], box[2], box[1] + 0.24]
