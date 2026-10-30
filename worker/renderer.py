@@ -9757,20 +9757,14 @@ def _run_render_job(worker_db, job):
 
         sheet_key = reused_visual_meta.get("sheet_key")
         sheet_local = None if sheet_key else os.path.join(workdir, "result_sheet.jpg")
-        try:
-            # The PROGRAMME duration, not the file duration. build_result_sheet
-            # samples at duration*(i+0.5)/9, so with the file duration the last
-            # tile of any render under ~45s lands on the end card — and the
-            # vision self-check that reads this sheet is told to flag
-            # unexpected black frames. It would report the branding as a defect
-            # and the agent would tell the user their video is broken.
-            if sheet_local:
-                sheets.build_result_sheet(
-                    out_local, sheet_local,
-                    max(0.1, out_dur - (0.0 if proof_only else
-                                        outro_seconds(variant == "preview"))))
-        except Exception:
-            sheet_local = None
+        # The PROGRAMME duration, not the file duration. build_result_sheet
+        # samples at duration*(i+0.5)/9, so with the file duration the last
+        # tile of any render under ~45s lands on the end card — and the
+        # vision self-check that reads this sheet is told to flag
+        # unexpected black frames. It would report the branding as a defect
+        # and the agent would tell the user their video is broken.
+        sheet_dur = max(0.1, out_dur - (0.0 if proof_only else
+                                        outro_seconds(variant == "preview")))
         # A complete preview deserves more than nine clock samples. Build a
         # compact visual screening plan from the actual edit decisions and
         # spread it across 4x4 pages. Proof renders stay intentionally narrow:
@@ -9779,6 +9773,7 @@ def _run_render_job(worker_db, job):
         screening_locals = []
         screening_frames = []
         screening_pages = []
+        planned_screening = []
         if variant == "preview" and not proof_only:
             try:
                 program_dur = max(
@@ -9789,13 +9784,39 @@ def _run_render_job(worker_db, job):
                     base_frames=config.SCREENING_BASE_FRAMES,
                     extra_frames=(job["payload"].get("screening_frames")
                                   or []), index=index)
-                planned_pages = list(screening.pages(
+                planned_screening = list(screening.pages(
                     screening_frames, config.SCREENING_PAGE_TILES))
                 screening_pages = _matching_evidence_pages(
                     reused_visual_meta.get("screening_pages"),
-                    planned_pages, "frames")
-                for page_n, page in enumerate(
-                        [] if screening_pages else planned_pages, 1):
+                    planned_screening, "frames")
+            except Exception as exc:
+                print(f"[render {job_id}] screening sheets skipped: "
+                      f"{str(exc)[:160]}", flush=True)
+                screening_frames = []
+                screening_pages = []
+                planned_screening = []
+        vtimes = (mapped_verify_times if proof_only else
+                  (job["payload"].get("verify_times") or []))
+        # E3 (30 Oct 2026): the stills of these sheets in ONE decode of the
+        # render (byte-identical to frame_at's; sheets.prefetch).
+        try:
+            sheets.prefetch(out_local, (
+                (sheets.result_sheet_times(sheet_dur) if sheet_local else [])
+                + [row["time_s"] for page in
+                   ([] if screening_pages else planned_screening)
+                   for row in page]
+                + [float(t) for t in vtimes or []]),
+                os.path.join(workdir, "stills"))
+        except Exception:  # noqa: BLE001 — frame_at reads them instead
+            pass
+        try:
+            if sheet_local:
+                sheets.build_result_sheet(out_local, sheet_local, sheet_dur)
+        except Exception:
+            sheet_local = None
+        if planned_screening and not screening_pages:
+            try:
+                for page_n, page in enumerate(planned_screening, 1):
                     local = os.path.join(
                         workdir, f"screening_sheet_{page_n}.jpg")
                     sheets.build_frames_sheet(
@@ -9818,8 +9839,6 @@ def _run_render_job(worker_db, job):
         # own review artwork, and an executor that predates this field simply
         # ignores it.
         verify_local = None
-        vtimes = (mapped_verify_times if proof_only else
-                  (job["payload"].get("verify_times") or []))
         if vtimes:
             try:
                 verify_local = os.path.join(workdir, "verify_sheet.jpg")
@@ -9843,6 +9862,12 @@ def _run_render_job(worker_db, job):
                     caption_pages = _matching_evidence_pages(
                         reused_visual_meta.get("caption_pages"),
                         planned_pages, "times")
+                    if not caption_pages:
+                        try:
+                            sheets.prefetch(out_local, caption_times,
+                                            os.path.join(workdir, "stills"))
+                        except Exception:  # noqa: BLE001
+                            pass
                     for page_n, page_times in enumerate(
                             [] if caption_pages else planned_pages, 1):
                         local = os.path.join(
@@ -9861,6 +9886,7 @@ def _run_render_job(worker_db, job):
         if reused_visual_meta:
             detail["reused_visual_evidence_pages"] = (
                 int(bool(sheet_key)) + len(screening_pages) + len(caption_pages))
+        sheets.release(out_local)
         _mark("sheet_s")
 
         # The render itself can finish in the narrow window between progress
@@ -10157,4 +10183,9 @@ def _run_render_job(worker_db, job):
         fxgraph.stop_collecting(fx_token)
         matte_track.RENDER_LAUNCH.reset(launch_token)
         plate.end_source_scope(plate_token)
+        try:
+            sheets.release(os.path.join(workdir,
+                                        f"{asset_variant}_v{version}.mp4"))
+        except Exception:  # noqa: BLE001
+            pass
         shutil.rmtree(workdir, ignore_errors=True)

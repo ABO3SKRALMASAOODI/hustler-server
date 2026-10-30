@@ -1210,17 +1210,14 @@ def eye_counts(path, plan_, deadline, cv2=None):
            "-frames:v", str(n), "-an", "-sn", "-dn", "-map", "0:v:0",
            "-vf", f"scale={w}:{h},format=gray",
            "-f", "rawvideo", "-pix_fmt", "gray", "-"]
-    out = []
-    for g in _stream(cmd, w, h, deadline):
+    def one(g):
         faces = follow.detect(g, cv2=cv2)
         if not faces:
-            out.append((None, None))
-            continue
+            return (None, None)
         box = max(faces, key=lambda f: f[0][2] - f[0][0])[0]
         fw = box[2] - box[0]
         if fw < HOOK_FACE_MIN:
-            out.append((None, box))
-            continue
+            return (None, box)
         x0, y0 = int(box[0] * w), int(box[1] * h)
         x1, y1 = int(box[2] * w), int(box[3] * h)
         roi = cv2.equalizeHist(
@@ -1229,8 +1226,42 @@ def eye_counts(path, plan_, deadline, cv2=None):
         found = eye.detectMultiScale(roi, 1.05, EYE_NEIGHBORS,
                                      minSize=(max(10, px // 9),) * 2,
                                      maxSize=(max(11, px // 3),) * 2)
-        out.append((len(found), box))
+        return (len(found), box)
+    memo = _eye_memo(cv2)
+    out = []
+    for g in _stream(cmd, w, h, deadline):
+        out.append(memo(g, one) if memo else one(g))
     return out
+
+
+def _eye_memo(cv2):
+    """eye_counts' per-frame answer remembered by the frame's bytes
+    (render_memo; E3): the key holds this module's, follow's and subject's
+    source, the OpenCV version, the cascade files and the eye settings.
+    None when render_memo is off."""
+    import render_memo
+    if not render_memo.enabled():
+        return None
+    import follow
+    import subject
+    try:
+        base = render_memo.key(
+            "render_qc.eye_counts", render_memo.code_digest(
+                __file__, follow, subject), cv2.__version__,
+            follow.cascade_files(cv2, (
+                "haarcascade_frontalface_default.xml",
+                "haarcascade_profileface.xml", "haarcascade_eye.xml")),
+            HOOK_FACE_MIN, EYE_NEIGHBORS)
+    except Exception:  # noqa: BLE001
+        return None
+
+    def memo(g, compute):
+        try:
+            k = render_memo.key("eye", base, render_memo.array_part(g))
+        except Exception:  # noqa: BLE001
+            return compute(g)
+        return render_memo.memoize("eyes", k, lambda: compute(g))
+    return memo
 
 
 def closed_eyes(counts, fps):
@@ -1672,7 +1703,7 @@ def face_samples(path, program_s, W, H, deadline, keyframes=False):
                                extra_vf=f"select='eq(n,0)',scale={w}:{h},",
                                deadline=deadline)
             if got:
-                out.append((round(t, 3), follow.detect(got[0], cv2, cascades)))
+                out.append((round(t, 3), follow.detect_memo(got[0], cv2, cascades)))
         return out
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-threads", "4",
            "-ss", f"{off:.3f}", "-i", path, "-t", f"{max(.05, program_s - off):.3f}",
@@ -1686,7 +1717,7 @@ def face_samples(path, program_s, W, H, deadline, keyframes=False):
             break
         times.append(round(t, 3))
         grays.append(g.copy())
-        found.append(follow.detect(g, cv2, cascades))
+        found.append(follow.detect_memo(g, cv2, cascades))
     found = follow.carry(times, grays, found, cv2)
     return list(zip(times, found))
 
@@ -1797,7 +1828,7 @@ def source_card_faces(src_path, plan_, deadline):
         gw, gh = (roi[2] - roi[0]) * SRC_REACH, (roi[3] - roi[1]) * SRC_REACH
         roi = [max(0.0, roi[0] - gw), max(0.0, roi[1] - gh),
                min(1.0, roi[2] + gw), min(1.0, roi[3] + gh)]
-        dets = follow.detect(g, cv2, cascades, roi=roi)
+        dets = follow.detect_memo(g, cv2, cascades, roi=roi)
         placed, dead, top = [], set(), 0.0
         for box, look in dets:
             box = src_face(box)
@@ -2172,7 +2203,7 @@ def _graphic_face_tracks(plan_, tplan, src_path, out_path, deadline):
             if key not in seen:
                 fp = frames.get(key)
                 try:
-                    seen[key] = keepout.detect_faces(fp) if fp else None
+                    seen[key] = _detect_faces_memo(fp) if fp else None
                 except Exception:  # noqa: BLE001
                     seen[key] = None
             return seen[key]
@@ -2184,6 +2215,39 @@ def _graphic_face_tracks(plan_, tplan, src_path, out_path, deadline):
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
     return out
+
+
+def _detect_faces_memo(path):
+    """keepout.detect_faces on one source frame file, its answer remembered
+    by the file's bytes (render_memo; E3): the preview and the final of one
+    version, and the next version's render, read the same source frames.
+    The key holds keepout's source, the OpenCV version, its cascade files
+    and the YuNet model."""
+    import keepout
+    import render_memo
+    if not render_memo.enabled():
+        return keepout.detect_faces(path)
+    try:
+        import cv2
+        import config
+        k = render_memo.key(
+            "keepout.detect_faces", render_memo.code_digest(keepout),
+            cv2.__version__, follow_cascades(cv2),
+            render_memo.file_digest(getattr(config, "YUNET_MODEL", "") or ""),
+            render_memo.file_digest(path))
+    except Exception:  # noqa: BLE001
+        return keepout.detect_faces(path)
+    return render_memo.memoize(
+        "kofaces", k, lambda: keepout.detect_faces(path),
+        encode=lambda r: render_memo.MISS if r is None
+        else render_memo.pack(r))
+
+
+def follow_cascades(cv2):
+    import follow
+    return follow.cascade_files(cv2, (
+        "haarcascade_frontalface_default.xml",
+        "haarcascade_frontalface_alt2.xml", "haarcascade_profileface.xml"))
 
 
 def type_findings(tres, tplan, cards):

@@ -1141,6 +1141,55 @@ async def _render_all(jobs, out_dir, pages, budget_s):
     return results
 
 
+_PW_FAST = {"done": False}
+
+
+def _fast_playwright_stacks():
+    """Playwright's Python client captures ``inspect.stack()`` on every API
+    call (it names the call and its user frames in the protocol metadata,
+    for traces and error messages). On Python 3.11 that reads every
+    frame's source context and code positions: about 4,200 captures per
+    preview, the largest Python cost of the motion layer after the
+    browser itself (E3 profile, 30 Oct 2026). A plain frame walk yields the
+    same (frame, filename, lineno) the parser reads, so the metadata, and
+    every pixel, are unchanged. Applied once per process; MOTION_PW_FAST_STACK=0
+    turns it off. Never raises."""
+    if _PW_FAST["done"]:
+        return
+    _PW_FAST["done"] = True
+    if os.getenv("MOTION_PW_FAST_STACK", "1") == "0":
+        return
+    try:
+        import collections
+        import inspect as _inspect
+        import sys
+        from playwright._impl import _connection
+        if getattr(_connection, "inspect", None) is not _inspect:
+            return                      # another layout of the client
+        frame_info = collections.namedtuple("FrameInfo",
+                                            "frame filename lineno")
+
+        class _Inspect:
+            """``inspect`` for playwright's connection module: stack() is
+            a frame walk, everything else the real module."""
+
+            def __getattr__(self, name):
+                return getattr(_inspect, name)
+
+            @staticmethod
+            def stack(context=1):
+                f = sys._getframe(1)
+                out = []
+                while f is not None:
+                    out.append(frame_info(f, f.f_code.co_filename,
+                                          f.f_lineno))
+                    f = f.f_back
+                return out
+        _connection.inspect = _Inspect()
+    except Exception:  # noqa: BLE001 — the slow path still works
+        pass
+
+
 def render_jobs(jobs, out_dir, pages=None, budget_s=900.0):
     """Render RenderJobs to transparent clips in out_dir. Returns RenderedClip
     list aligned with jobs. Raises MotionRenderError with a relayable reason."""
@@ -1151,6 +1200,7 @@ def render_jobs(jobs, out_dir, pages=None, budget_s=900.0):
                                 + unavailable_reason())
     os.makedirs(out_dir, exist_ok=True)
     pages = pages or DEFAULT_PAGES
+    _fast_playwright_stacks()
     coro = _render_all(list(jobs), out_dir, pages, budget_s)
     try:
         asyncio.get_running_loop()
@@ -1265,10 +1315,82 @@ def probe(jobs, times_list, budget_s=60.0, measure=None):
     of the design canvas at every requested time; its answers come back in
     ``measures`` (one per time), and ``budget_s`` then bounds the whole
     probe (compositions past it come back unread). Raises MotionRenderError
-    when the browser itself cannot run."""
+    when the browser itself cannot run.
+
+    E3 (30 Oct 2026): with render_memo on, a composition's report is
+    remembered by its clip key, the times and the measuring code, so the
+    next render of an unchanged graphic (the next version, the final, the
+    picture check's type pass after the caption plan's) starts no browser
+    for it. Only clean reports (no errors) are remembered."""
     if not available():
         raise MotionRenderError("motion graphics renderer unavailable: "
                                 + unavailable_reason())
+    jobs, times_list = list(jobs), list(times_list)
+    keys = _probe_memo_keys(jobs, times_list, measure)
+    if keys is None:
+        return _probe_run(jobs, times_list, budget_s, measure)
+    import render_memo
+    out = [None] * len(jobs)
+    todo = []
+    for i, k in enumerate(keys):
+        got = render_memo.get("probe", k) if k else render_memo.MISS
+        if not render_memo.is_miss(got):
+            try:
+                out[i] = render_memo.unpack(got)
+                continue
+            except Exception:  # noqa: BLE001 — a damaged answer is a miss
+                pass
+        todo.append(i)
+    if todo:
+        fresh = _probe_run([jobs[i] for i in todo],
+                           [times_list[i] for i in todo], budget_s, measure)
+        for i, rep in zip(todo, fresh):
+            out[i] = rep
+            if keys[i] and isinstance(rep, dict) and not rep.get("errors"):
+                try:
+                    render_memo.put("probe", keys[i], render_memo.pack(rep))
+                except Exception:  # noqa: BLE001
+                    pass
+    return out
+
+
+def _probe_memo_keys(jobs, times_list, measure):
+    """One render_memo key per job (None for a job whose key cannot be
+    formed), or None when render_memo is off. The key holds the job's clip
+    key (document, runtime, sizes, assets by content), the requested times,
+    this module's source and the measuring function's module source."""
+    try:
+        import render_memo
+    except Exception:  # noqa: BLE001
+        return None
+    if not render_memo.enabled():
+        return None
+    try:
+        tag = None
+        if measure is not None:
+            import inspect
+            mod = inspect.getsourcefile(measure) or ""
+            tag = [getattr(measure, "__module__", ""),
+                   getattr(measure, "__qualname__", ""),
+                   render_memo.file_digest(mod) if mod else "unknown"]
+            if tag[2] == "unknown" or tag[2] == "missing":
+                return None
+        code = render_memo.code_digest(__file__)
+    except Exception:  # noqa: BLE001
+        return None
+    keys = []
+    for job, times in zip(jobs, times_list):
+        try:
+            keys.append(render_memo.key(
+                "motion_engine.probe", code, tag, job.key(),
+                [float(t) for t in times]))
+        except Exception:  # noqa: BLE001
+            keys.append(None)
+    return keys
+
+
+def _probe_run(jobs, times_list, budget_s, measure):
+    _fast_playwright_stacks()
     coro = _probe_all(list(jobs), list(times_list), budget_s, measure)
     try:
         asyncio.get_running_loop()

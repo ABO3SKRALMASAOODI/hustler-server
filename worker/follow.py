@@ -487,6 +487,44 @@ def detect(gray, cv2=None, cascades=None, face_px=None, roi=None):
     return out
 
 
+def cascade_files(cv2, names=("haarcascade_frontalface_default.xml",
+                               "haarcascade_profileface.xml")):
+    """Digests of the cascade data files a detector loads (part of every
+    memo key: another OpenCV wheel ships other cascades)."""
+    import render_memo
+    try:
+        base = cv2.data.haarcascades
+    except Exception:  # noqa: BLE001
+        return []
+    return [(n, render_memo.file_digest(os.path.join(base, n))) for n in names]
+
+
+def detect_memo(gray, cv2=None, cascades=None, face_px=None, roi=None):
+    """detect() with its answer remembered by the frame's exact bytes
+    (render_memo; E3, 30 Oct 2026). For the DEFAULT cascades only
+    (subject._cascades), which every picture-check caller passes: the key
+    holds the cascade files' digests, the OpenCV version and this module's
+    and subject's source, so a hit is exactly what detect() returns.
+    Without render_memo enabled this is detect()."""
+    import render_memo
+    if not render_memo.enabled():
+        return detect(gray, cv2, cascades, face_px, roi)
+    import subject
+    cv2 = cv2 or subject._cv2()
+    if cv2 is None:
+        return detect(gray, cv2, cascades, face_px, roi)
+    try:
+        k = render_memo.key(
+            "follow.detect", render_memo.code_digest(__file__, subject),
+            cv2.__version__, cascade_files(cv2),
+            len(cascades) if cascades is not None else None,
+            face_px, roi, render_memo.array_part(gray))
+    except Exception:  # noqa: BLE001 — never the measurement
+        return detect(gray, cv2, cascades, face_px, roi)
+    return render_memo.memoize(
+        "faces", k, lambda: detect(gray, cv2, cascades, face_px, roi))
+
+
 def _decode_gray(path, a, b, fps, width, height, timeout):
     cmd = ["ffmpeg", "-v", "error", "-nostdin", "-threads", "2",
            "-ss", f"{max(0.0, a):.3f}", "-i", path, "-t", f"{max(0.05, b - a):.3f}",
