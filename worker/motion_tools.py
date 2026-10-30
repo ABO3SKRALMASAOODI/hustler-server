@@ -3137,6 +3137,9 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         hit["params"] = motion_templates.check_params(hit["template"], merged, html=hit.get("html"))
     except ValueError as e:
         return f"REJECTED: {e}"
+    wrong_way = _size_direction_refusal(hit, json.loads(old_shape)[3] or {}, purpose)
+    if wrong_way:
+        return wrong_way
     same = _same_params_note(hit, json.loads(old_shape)[3] or {}, params)
     if same and template is None and html is None and start is None and end is None \
             and layer is None and box is None and mute_captions is None:
@@ -3278,6 +3281,42 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             + (_owned_sfx_checks(ctx, edl, id) if checked else "")
             + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit)
             + _look_notes(ctx, edl, hit, {}))
+
+
+_BIGGER = re.compile(r"(?i)\b(bigger|larger|enlarg\w*|increas\w*|grow|scale (?:it )?up|more prominent|"
+                     r"stand out more|bolder)\b")
+_SMALLER = re.compile(r"(?i)\b(smaller|reduc\w*|shrink\w*|decreas\w*|scale (?:it )?down|less prominent|"
+                      r"tone (?:it )?down)\b")
+
+
+def _size_direction_refusal(hit, old_params, purpose):
+    """REAL_USER_BRUTE (31 Oct): "make the opening title a little bigger"
+    came out SMALLER (size 1.3 -> 1.25): the model read 'size' as a
+    multiplier. A size change against the direction its own purpose states
+    is refused with the current value, so the retry lands."""
+    text = str(purpose or "")
+    up, down = bool(_BIGGER.search(text)), bool(_SMALLER.search(text))
+    if up == down:
+        return None
+    try:
+        p = (motion_templates.spec(hit["template"]).get("params") or {}).get("size") or {}
+    except ValueError:
+        return None
+    if p.get("type") not in ("float", "int"):
+        return None
+    try:
+        was = float(old_params.get("size", p.get("default", 1.0)))
+        now = float((hit.get("params") or {}).get("size", was))
+    except (TypeError, ValueError):
+        return None
+    if (up and now < was) or (down and now > was):
+        lo, hi = p.get("min"), p.get("max")
+        step = round(min(hi, was * 1.15), 2) if up and hi is not None else round(max(lo or 0, was * 0.85), 2)
+        return (f"REJECTED: 'size' is the absolute size, not a multiplier: {hit['id']} is at "
+                f"size {was:g} now (range {lo:g}-{hi:g}), so size {now:g} makes it "
+                f"{'SMALLER' if up else 'BIGGER'}, against the purpose. For '{'bigger' if up else 'smaller'}' "
+                f"pass a value {'above' if up else 'below'} {was:g}, e.g. size {step:g}.")
+    return None
 
 
 def _same_params_note(hit, old_params, passed):

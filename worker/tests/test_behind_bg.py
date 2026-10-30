@@ -1072,3 +1072,23 @@ def test_rub_a_relative_title_size_ask_reaches_the_edit(shot, workdir, tool_env)
     assert motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.6}).startswith("EDL v")
     top = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 2.0})
     assert top.startswith("NO CHANGE") and "already the largest" in top, top
+
+
+@needs_ffmpeg
+def test_rub_a_size_against_its_own_purpose_is_refused(shot, workdir, tool_env):
+    """REAL_USER_BRUTE (31 Oct, a new Pro subscriber's turn): size 1.3 ->
+    1.25 for "Make the opening hook title a little bigger"."""
+    ctx = _Ctx(shot, workdir)
+    assert motion_tools.add_motion_graphic(
+        ctx, "hook_title", 0.0, 2.5, params={"text": "Intelligence will *solve* everything",
+                                             "size": 1.3}, sfx=False).startswith("EDL v")
+    res = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.25},
+                                          purpose="Make the opening hook title a little bigger")
+    assert res.startswith("REJECTED") and "not a multiplier" in res and "size 1.3" in res, res
+    assert ctx._edl["motion"][0]["params"]["size"] == 1.3
+    ok = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.5},
+                                         purpose="Make the opening hook title a little bigger")
+    assert ok.startswith("EDL v"), ok
+    down = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.4},
+                                           purpose="make the title smaller")
+    assert down.startswith("EDL v"), down

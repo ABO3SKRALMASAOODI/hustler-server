@@ -741,7 +741,7 @@ _ORPHAN_OFFER = re.compile(r"(?i)^(those|these|they|both|either)\b")
 
 
 # "(caption scale 1.6 to 2.0)": the editor's own knob, inside a true line
-_KNOB = re.compile(r"\s*\((?=[^()]*\d)(?:[^()]*\b(?:scale|size_scale|opacity|strength|level|"
+_KNOB = re.compile(r"\s*\((?=[^()]*\d)(?:[^()]*\b(?:scale|size|size_scale|opacity|strength|level|"
                    r"anchor_y|lufs|db)\b|[^()]*\d(?:\.\d+)?\s?[x\u00d7](?![a-z]))[^()]*\)", re.I)
 
 
