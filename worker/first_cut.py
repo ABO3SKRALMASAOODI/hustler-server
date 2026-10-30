@@ -2690,7 +2690,8 @@ def run(worker_db, job, project, index_row):
     meta = {"kind": "first_cut", "first_cut": {
         "steps": steps, "elapsed_s": elapsed, "picked": picked,
         "renders": _renders_done(steps),
-        "phases": dict(getattr(ctx, "first_cut_phases", None) or {}),
+        "phases": dict(getattr(ctx, "first_cut_phases", None) or {},
+                       broll_stages=getattr(ctx, "broll_stages", None)),
         "model_usd": round(spend["usd"], 5)}}
     follow_up = None
     if delivered and url and config.FIRST_CUT_BRIEF_FOLLOW_UP and \

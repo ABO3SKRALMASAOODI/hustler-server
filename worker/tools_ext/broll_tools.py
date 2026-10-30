@@ -607,8 +607,13 @@ def _source_broll(ctx, moments, limit, providers, place):
                                       need_s=spec["duration_s"],
                                       archival=spec["archival"])
         return spec, ranked, errs
+    import time as _time
+    stage = {"search": 0.0, "hero": 0.0, "fetch": 0.0, "judge": 0.0,
+             "place": 0.0}
+    _t = _time.monotonic()
     with ThreadPoolExecutor(max_workers=min(4, len(specs))) as pool:
         found = list(pool.map(find, specs))
+    stage["search"] += _time.monotonic() - _t
 
     # 2. acquire + judge a short list per moment
     used = {str(((i.get("credit") or {}).get("page_url")) or "")
@@ -616,7 +621,9 @@ def _source_broll(ctx, moments, limit, providers, place):
             and i.get("type") == "broll"}
     plans, misses, rejected_n = [], [], {}
     for spec, ranked, errs in found:
+        _t = _time.monotonic()
         hero = _hero(ctx, edl, spec["start"], spec["end"])
+        stage["hero"] += _time.monotonic() - _t
         short = _interleave([c for c in ranked
                              if c.get("page_url") not in used], SHORTLIST)
         if not short:
@@ -625,12 +632,16 @@ def _source_broll(ctx, moments, limit, providers, place):
             continue
         # fetch in parallel (network); decode and judge here, one at a
         # time (numpy's BLAS must not be driven from several threads)
+        _t = _time.monotonic()
         with ThreadPoolExecutor(max_workers=min(3, len(short))) as pool:
             fetched = list(pool.map(
                 lambda c: (pf.fetched(c) if pf is not None else None)
                 or _fetch(ctx, c, W, H), short))
+        stage["fetch"] += _time.monotonic() - _t
+        _t = _time.monotonic()
         judged = [_judge(ctx, f, W, H, hero, spec["duration_s"],
                          spec["archival"]) for f in fetched]
+        stage["judge"] += _time.monotonic() - _t
         debug = getattr(ctx, "_broll_debug", None)
         if isinstance(debug, list):
             for j in judged:
@@ -674,6 +685,7 @@ def _source_broll(ctx, moments, limit, providers, place):
     plans = plans[:max(0, cap)]
 
     # 3. place
+    _t_place = _time.monotonic()
     lines, ops, ids, rows = [], [], [], []
     for n, (spec, best, hero) in enumerate(plans):
         cand, got, res = best["cand"], best["got"], best["res"]
@@ -758,6 +770,15 @@ def _source_broll(ctx, moments, limit, providers, place):
             except Exception:  # noqa: BLE001
                 pass
 
+    stage["place"] += _time.monotonic() - _t_place
+    # Q8: where source_broll's time goes, per stage (measurement only)
+    print("[broll] stages s: " + ", ".join(f"{k} {v:.1f}" for k, v in
+                                           stage.items())
+          + f" ({len(specs)} moments)", flush=True)
+    try:
+        ctx.broll_stages = {k: round(v, 2) for k, v in stage.items()}
+    except Exception:  # noqa: BLE001
+        pass
     # the board is a picture for an agent's eyes; a First cut has none
     board = _board(ctx, rows, W, H) if rows and pf is None else None
     if board and isinstance(getattr(ctx, "pending_images", None), list):
