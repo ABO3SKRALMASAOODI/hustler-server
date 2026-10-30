@@ -21,16 +21,27 @@ silent: customers' YouTube imports would fail one by one. This canary looks:
 The P0 watch on the owner's Mac (ops-loop/yt_watch.py) starts the Fixer,
 which emails the owner, once ``consecutive_failures`` reaches 2.
 
-The timer looks every hour; a probe runs only when the last pass is
+The timer looks every 15 minutes; a probe runs only when the last pass is
 ``every_h`` (23) hours old, the last run failed and ``retry_min`` (50)
-minutes passed, or real box fetches were walled since the last run
-(admission's call ledger, read-only). So a healthy route costs one probe a day, and two failures
-in a row means about an hour of a broken route, not two days. Never during a
-planned window (host/maint.sh).
+minutes passed, real box fetches were walled since the last run
+(admission's call ledger, read-only), or real fetches moved traffic through
+the fallback route since the last run (at most once per ``retry_min``). So a
+healthy route costs one probe a day, and two failures in a row means about
+an hour of a broken route, not two days. Never during a planned window
+(host/maint.sh).
+
+Every look also meters the fallback route (yt_meter.py: a counting-only
+nftables table, the bytes per UTC day, and the prepaid budget the residential
+fallback has left; ``fallback`` in the row, ``low`` under 0.3 GB). The row is
+rewritten whenever the meter moved, so the P0 watch sees the budget within
+about 25 minutes.
 
     yt_canary.py            probe when due (valmera-ytcanary.timer)
     yt_canary.py --force    probe now
     yt_canary.py --print    print the last state; write nothing
+    yt_canary.py --fallback-baseline GB [--floor 0.3] [--endpoint host:port]
+                            the residential traffic the vendor's dashboard
+                            shows now (after a top-up, or to arm the meter)
 
 Config (box.json, optional): ``"yt_canary": {"urls": [...], "every_h": 23,
 "retry_min": 50}``. Never prints the proxy's credentials (the box's proxy is
@@ -49,8 +60,12 @@ from urllib.parse import urlsplit
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import health_report as hr  # noqa: E402  (admission state, DB writer)
+import yt_meter as ym  # noqa: E402  (the fallback's traffic meter)
 
 STATE_PATH = os.path.join(hr.DATA_DIR, "yt-canary.json")
+# The fallback's prepaid budget (baseline from the vendor's dashboard, bytes
+# spent since, floor); yt_meter.py. Box state, not git: re-baselined by CLI.
+BUDGET_PATH = os.path.join(hr.DATA_DIR, "yt-fallback.json")
 KEY_CANARY = "youtube_canary"
 KEY_PROBE = "ytdlp_probe_box"      # worker ytaccess.provider_youtube_ok("box")
 # Walled from the box's own IP on every client and IP family (E1, 29 Oct):
@@ -164,8 +179,9 @@ def recent_walls(since_s, path=None):
         return 0
 
 
-def due(state, now, cfg, force=False, walls=0):
-    """(bool, reason). Pure."""
+def due(state, now, cfg, force=False, walls=0, fallback_bytes=0):
+    """(bool, reason). Pure. fallback_bytes: what real fetches moved through
+    the fallback route since the last run (the primary is likely walled)."""
     if force:
         return True, "forced"
     every = timedelta(hours=float(cfg.get("every_h", 23)))
@@ -181,6 +197,9 @@ def due(state, now, cfg, force=False, walls=0):
         return now - last_at >= retry, "retry after a failure"
     if walls:
         return True, f"{walls} real fetch(es) walled since the last run"
+    if fallback_bytes >= ym.PROBE_TRIGGER_BYTES and now - last_at >= retry:
+        return True, (f"the fallback carried {fallback_bytes / 1e6:.0f} MB "
+                      f"of real fetches since the last run")
     last_ok = datetime.fromisoformat(state.get("last_ok_at") or last["at"])
     return now - last_ok >= every, "daily"
 
@@ -368,6 +387,76 @@ def probe_doc(verdict, answer, proxy, now):
     return doc
 
 
+def meter(state, now, traffic=True):
+    """One look at the fallback meter (yt_meter.look), folded into the state
+    under ``fallback`` and spent from the budget file. ``traffic``: bytes
+    since the last look were real fetches (they count toward the probe
+    trigger); False for the canary's own probe. Returns (state, bytes)."""
+    budget = ym.load_budget(BUDGET_PATH)
+    eps = ym.endpoints(hr.ENV_PATH, budget)
+    primary = ym.host_port(ym.env_value("YTDLP_PROXY", hr.ENV_PATH))
+    fs, budget, delta = ym.look(state.get("fallback"), budget, eps, primary,
+                                now)
+    if delta:
+        ym.save_budget(BUDGET_PATH, budget)
+    if traffic:
+        fs["since_run_bytes"] = int(fs.get("since_run_bytes") or 0) + delta
+    fs["budget"] = ym.budget_view(budget)
+    state = dict(state)
+    state["fallback"] = fs
+    return state, delta
+
+
+def _fallback_view(state):
+    """The part of the fallback block whose change is worth a row write."""
+    fs = dict((state or {}).get("fallback") or {})
+    fs.pop("at", None)
+    return fs
+
+
+def publish(state, cfg_all):
+    """Write the canary row only (the meter moved; no probe ran)."""
+    key_canary, _ = keys_for(cfg_all)
+    try:
+        hr.write(key_canary, state)
+        return 0
+    except Exception as exc:  # noqa: BLE001 - the next look retries
+        print(f"yt-canary: app_kv not written ({type(exc).__name__}: "
+              f"{str(exc)[:160]})", file=sys.stderr)
+        return 1
+
+
+def _arg(argv, flag, cast=str):
+    try:
+        return cast(argv[argv.index(flag) + 1])
+    except (ValueError, IndexError):
+        return None
+
+
+def set_baseline(argv, state, now, cfg_all):
+    """--fallback-baseline GB [--floor F] [--endpoint host:port ...]."""
+    gb = _arg(argv, "--fallback-baseline", float)
+    if gb is None or gb < 0:
+        print("usage: yt_canary.py --fallback-baseline GB [--floor 0.3] "
+              "[--endpoint host:port ...]", file=sys.stderr)
+        return 2
+    raw = [argv[k + 1] for k, a in enumerate(argv[:-1]) if a == "--endpoint"]
+    eps = [ym.label(hp) for hp in map(ym.host_port, raw) if hp] or None
+    state, _ = meter(state, now)          # spend what ran so far first
+    budget = ym.new_baseline(gb, now, _arg(argv, "--floor", float), eps,
+                             ym.load_budget(BUDGET_PATH))
+    ym.save_budget(BUDGET_PATH, budget)
+    state, _ = meter(state, now)          # arm / rebuild for the endpoints
+    save_state(state)
+    status = publish(state, cfg_all)
+    fs = state["fallback"]
+    print(f"yt-canary: fallback budget {gb:g} GB from {now.isoformat()}, "
+          f"floor {budget['floor_gb']:g} GB; metering "
+          f"{', '.join(fs.get('endpoints') or []) or 'nothing yet'}"
+          + (f"; meter error: {fs['error']}" if fs.get("error") else ""))
+    return status
+
+
 def main(argv):
     cfg_all = hr.load_json(hr.CONFIG_PATH, {})
     cfg = cfg_all.get("yt_canary") or {}
@@ -376,18 +465,30 @@ def main(argv):
         print(json.dumps(state, indent=1, sort_keys=True))
         return 0
     now = now_utc()
+    if "--fallback-baseline" in argv:
+        return set_baseline(argv, state, now, cfg_all)
+    before = _fallback_view(state)
+    state, _ = meter(state, now)
+    moved = _fallback_view(state) != before
     runs = state.get("runs") or []
     since = (datetime.fromisoformat(runs[-1]["at"]).timestamp() if runs
              else now.timestamp() - 3600)
     walls = recent_walls(since)
-    go, reason = due(state, now, cfg, force="--force" in argv, walls=walls)
+    go, reason = due(state, now, cfg, force="--force" in argv, walls=walls,
+                     fallback_bytes=state["fallback"].get("since_run_bytes",
+                                                          0))
+    if go and hr.maintenance_until():
+        go, reason = False, "planned maintenance window"
     if not go:
+        status = 0
+        if moved:
+            save_state(state)
+            status = publish(state, cfg_all)
         print(f"yt-canary: not due ({reason}); last ok "
-              f"{state.get('last_ok_at')}")
-        return 0
-    if hr.maintenance_until():
-        print("yt-canary: planned maintenance window; not probing")
-        return 0
+              f"{state.get('last_ok_at')}"
+              + (f"; fallback meter: {state['fallback']['budget']}"
+                 if moved else ""))
+        return status
     proxy = proxy_host()
     urls = list(cfg.get("urls") or DEFAULT_URLS)
     run = {"at": now.isoformat(), "reason": reason, "proxy": proxy}
@@ -414,6 +515,13 @@ def main(argv):
                 run.update(ok=False, why=f"probe did not run: "
                            f"{type(exc).__name__}: {str(exc)[:160]}")
             run["secs"] = round(time.time() - t0, 1)
+            # What the probe itself moved through the fallback (it tries the
+            # fallback only after the primary got no media): spent from the
+            # budget, never counted as customers' traffic.
+            state, run["fallback_bytes"] = meter(state, now_utc(),
+                                                 traffic=False)
+    if not run.get("skipped"):
+        state["fallback"]["since_run_bytes"] = 0
     state = record(state, run, now)
     state["proxy"] = proxy
     if proxy:
@@ -433,7 +541,7 @@ def main(argv):
         hr.write(key_canary, state)
         if not run.get("skipped"):
             hr.write(key_probe, probe_doc(verdict, answer, proxy, now))
-    except Exception as exc:  # noqa: BLE001 - next hourly run retries
+    except Exception as exc:  # noqa: BLE001 - next look retries
         print(f"yt-canary: app_kv not written ({type(exc).__name__}: "
               f"{str(exc)[:160]})", file=sys.stderr)
         status = 1
