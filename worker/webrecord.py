@@ -79,6 +79,7 @@ import re
 import time
 from urllib.parse import urlparse
 
+import brief_tour
 import config
 import net_fetch
 
@@ -530,6 +531,84 @@ _TOUR_JS = r"""() => {
   return {items: out, heads, links};
 }"""
 
+# The cards of a page (QB, 30 Oct 2026): every same-origin link outside the
+# header, nav and footer, with the heading of the card it belongs to (the
+# smallest ancestor that holds one heading and only this link's address). A
+# brief that names a thing a section page lists ("a ferramenta de gráficos")
+# opens that card.
+_CARDS_JS = r"""() => {
+  const out = [];
+  for (const a of document.querySelectorAll('a[href]')) {
+    const href = a.getAttribute('href') || '';
+    if (!href || href.startsWith('#') || /^(mailto|tel|javascript):/.test(href)) continue;
+    let u = null;
+    try { u = new URL(href, location.href); } catch (e) { continue; }
+    if (u.hostname !== location.hostname || u.href === location.href) continue;
+    if (a.closest('header,nav,footer,[role=navigation]')) continue;
+    let head = '';
+    const own = a.querySelector('h1,h2,h3,h4');
+    if (own) head = own.innerText;
+    else {
+      let n = a.parentElement;
+      for (let k = 0; n && k < 5 && !head; k++, n = n.parentElement) {
+        const hrefs = new Set(Array.from(n.querySelectorAll('a[href]')).map(x => x.href));
+        if (hrefs.size > 1) break;
+        const h = n.querySelector('h1,h2,h3,h4');
+        if (h) head = h.innerText;
+      }
+    }
+    head = (head || '').trim().replace(/\s+/g, ' ');
+    const t = (a.innerText || a.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+    out.push({head: head.slice(0, 60), t: t.slice(0, 60), href: u.href});
+    if (out.length >= 80) break;
+  }
+  return out;
+}"""
+
+# A tool page's own form (QB, 30 Oct 2026): a brief that asks to see its tools
+# working ("gravações reais das funcionalidades") needs one real use of each:
+# the page's text or number fields that are not about a person (never an
+# e-mail, a password, a phone, a card, a search or a sign-up) and the button
+# whose label says what it does (generate, calculate, convert, solve...).
+# Elements are tagged for the recorder's own selectors.
+_FORM_JS = r"""() => {
+  const bad = /e-?mail|mail|passw|senha|phone|\btel\b|fone|card|cart[aã]o|cvv|cpf|cnpj|search|busca|pesquis|newsletter|subscri|assin|coupon|cupom|login|entrar|user|usu[aá]rio|name|nome|address|endere|zip|cep/i;
+  const act = /gerar|calcular|plot|desenhar|resolver|converter|planificar|simular|visualizar|executar|decompor|analisar|abrir|animar|girar|generate|calculate|convert|solve|draw|compute|run|plan|show|mostrar|criar|animate|unfold|rotate|play|\u25b6/i;
+  const noact = /subscri|assin|sign|cadastr|entrar|login|enviar|send|join|buy|compr|pagar|pay|checkout/i;
+  const H = window.innerHeight;
+  const vis = (el) => {
+    const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
+    return r.width > 20 && r.height > 14 &&
+           r.top + window.scrollY < 6 * H &&
+           st.visibility !== 'hidden' && st.display !== 'none';
+  };
+  const topOf = (el) => el.getBoundingClientRect().top + window.scrollY;
+  const inputs = [];
+  let k = 0;
+  const sel = 'input:not([type=hidden]):not([type=password]):not([type=email]):not([type=tel]):not([type=file]):not([type=checkbox]):not([type=radio]):not([type=submit]):not([type=button]):not([type=range]):not([type=color]), textarea';
+  for (const el of document.querySelectorAll(sel)) {
+    if (el.readOnly || el.disabled || !vis(el)) continue;
+    const tag = [el.name, el.id, el.placeholder, el.getAttribute('aria-label'), el.autocomplete, el.type].join(' ');
+    if (bad.test(tag)) continue;
+    el.setAttribute('data-qb-i', String(k));
+    inputs.push({sel: '[data-qb-i="' + k + '"]', value: el.value || '', ph: el.placeholder || '', type: el.type || 'text', top: topOf(el)});
+    k++;
+    if (inputs.length >= 2) break;
+  }
+  let button = null;
+  const form = inputs.length ? document.querySelector('[data-qb-i="0"]').closest('form') : null;
+  const scope = form || document;
+  for (const el of scope.querySelectorAll('button, input[type=submit], input[type=button], [role=button]')) {
+    if (!vis(el)) continue;
+    const t = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+    if (!t || t.length > 40 || noact.test(t) || !act.test(t)) continue;
+    el.setAttribute('data-qb-b', '1');
+    button = {sel: '[data-qb-b="1"]', t: t, top: topOf(el)};
+    break;
+  }
+  return {inputs: inputs, button: button};
+}"""
+
 # The page's geometry for the tour (Q2, 30 Oct 2026): where its footer starts,
 # its calls to action anywhere on the page and its headings, in page pixels.
 # The tour keeps the footer and the page's closing call to action out of the
@@ -705,8 +784,13 @@ def _norm_steps(steps):
             # words, which rank the site's links that name them first
             if str(raw.get("mode") or "").strip().lower() == "scroll":
                 step["mode"] = "scroll"
+            if raw.get("brief") is True:
+                # QB: the request is a brief with its own words (brief_tour):
+                # its named pages and cards are matched by word stem and
+                # share the time; a tile or a bare URL keeps the old tour
+                step["brief"] = True
             if raw.get("prefer"):
-                step["prefer"] = str(raw["prefer"])[:600]
+                step["prefer"] = str(raw["prefer"])[:1600 if step.get("brief") else 600]
             try:
                 secs = float(raw.get("seconds") or 0)
             except (TypeError, ValueError):
@@ -1486,15 +1570,18 @@ class _Session:
                     break
             self._stop(pos, dwell, pointed)
 
-    def _finale(self, until, scroll_mode=False):
+    def _finale(self, until, scroll_mode=False, here_only=False):
         """The closing beat: the page's closing call to action framed in the
         middle of the screen, the pointer arriving on it, live to the end.
-        Asked for the page top to bottom, the page's bottom instead."""
+        Asked for the page top to bottom, the page's bottom instead.
+        ``here_only`` (QB: a brief that asked for a product page ends ON it):
+        the closing block of a product page is the footer's newsletter form,
+        so the beat is what is in view, never a scroll down to the footer."""
         info = self._page()
         H = self.H
         sy = float(info.get("sy") or 0)
         bottom = float(info.get("bottom") or 0)
-        closing = self._closing(info)
+        closing = None if here_only else self._closing(info)
         if closing and float(closing["top"]) > sy - H * 3.0:
             # the closing call to action, even when the page only rendered it
             # after the tour passed it: the last beat is the call to action
@@ -1585,12 +1672,19 @@ class _Session:
         return bool(low) and 3 <= len(t) <= 28 and bool(
             re.search(r"(?<!\w)" + re.escape(t) + r"(?!\w)", low))
 
-    def _candidates(self, items, prefer, start):
+    def _candidates(self, items, prefer, start, brief=False, want=0):
         """The sections to open, in order: the links the request names (in
         the order it names them), then the usual sections. Each is
         {t, href, item?}: ``item`` when it sits visibly in the top bar (it is
         clicked), else it is opened by its own address (a phone layout's
-        hidden navigation, no menu fumble on camera)."""
+        hidden navigation, no menu fumble on camera).
+
+        ``brief`` (QB): the request is a brief in its own words. A link is
+        named when the brief uses its words by stem ("guides" -> "Halal
+        Guide", "ferramentas" -> "Ferramentas"), in the brief's order; when
+        the brief names fewer than three of the site's links, the first
+        ``want`` navigation links fill the tour (a one-page scroll of 44 s was
+        the judge's "passive scroll")."""
         try:
             info = self.page.evaluate(_TOUR_JS) or {}
         except Exception:
@@ -1600,7 +1694,7 @@ class _Session:
         top = {str(i.get("t", "")).strip().lower(): i for i in items
                if float(i.get("y") or 1) <= 0.16 and not i.get("ext")
                and i.get("href")}
-        found, seen = [], set()
+        found, seen, spare = [], set(), []
         for link in info.get("links") or []:
             t = str(link.get("t") or "").strip()
             lt = t.lower()
@@ -1613,13 +1707,27 @@ class _Session:
                 continue
             named = self._named(t, low)
             rank = self._section_rank(t)
-            if not named and rank is None:
+            stem_pos = brief_tour.label_pos(t, prefer) if brief else None
+            if brief:
+                spare.append({"t": t, "href": href, "item": top.get(lt)})
+            if not named and rank is None and stem_pos is None:
                 continue
             seen.add(key)
-            pos = low.find(lt) if named else -1
-            order = (0, pos) if named else (1, rank)
+            if stem_pos is not None:
+                order = (0, stem_pos)
+            else:
+                pos = low.find(lt) if named else -1
+                order = (0, pos) if named else (1, rank)
             found.append((order, {"t": t, "href": href, "item": top.get(lt)}))
-        return [c for _o, c in sorted(found, key=lambda x: x[0])]
+        out = [c for _o, c in sorted(found, key=lambda x: x[0])]
+        if brief and want >= 2 and sum(
+                1 for o, _c in found if o[0] == 0) < 3:
+            have = {self._norm_url(c["href"]) for c in out}
+            fill = brief_tour.nav_fallback(
+                [c for c in spare if self._norm_url(c["href"]) not in have],
+                max(0, want - len(out)), TOUR_AVOID, TOUR_CTA)
+            out += fill
+        return out
 
     def _open(self, cand, start):
         """Open one section: a visible top-bar link is clicked where it is, a
@@ -1628,6 +1736,7 @@ class _Session:
         before = len(self.problems)
         item = cand.get("item")
         t0 = self.now()
+        t_act = t0
         if item:
             x, y = float(item["x"]) * self.W, float(item["y"]) * self.H
             self.move_to(x, y)
@@ -1637,6 +1746,7 @@ class _Session:
                     "width": (b[2] - b[0]) * self.W,
                     "height": (b[3] - b[1]) * self.H} if b else None)
             self.note("click", x, y, cand["t"], box=box)
+            t_act = self.now()
             try:
                 self.page.mouse.click(x, y)
             except Exception as e:
@@ -1665,6 +1775,14 @@ class _Session:
         # half of it: the old page often stays on screen while the new one
         # loads, and only blank frames are cut (Q2: 20 s asks came out 23-24 s)
         self.lost_s += 0.5 * max(0.0, self.now() - t0 - 0.9)
+        # QB: the old page held on screen while a slow site loads the new one
+        # (klosmo: 13 s on the hero, "pacing 3" from both judges) is noted so
+        # the edit can cut it: from a second after the click (the click must
+        # still read) to just before the new page paints
+        t_done = self.now()
+        if t_done - t_act > 2.6:
+            self.events.append({"t": round(t_act + 1.0, 2), "kind": "stale",
+                                "end": round(t_done - 0.35, 2)})
         if _off_tour(start, self.page.url):
             self.problems.append(f"\"{cand['t']}\" led to a sign-in or another "
                                  "site, so the tour went on")
@@ -1674,6 +1792,123 @@ class _Session:
                                  "tour went on")
             return False
         return True
+
+    def _named_cards(self, prefer, start, skip_stems, visited, most=3):
+        """The cards of this page the brief names (by the stems of their
+        heading, never the stems of the section's own name), in the brief's
+        order: [{t, href}]."""
+        try:
+            cards = self.page.evaluate(_CARDS_JS) or []
+        except Exception:
+            return []
+        found, seen = [], set()
+        for card in cards:
+            label = str(card.get("head") or "").strip()
+            href = str(card.get("href") or "")
+            key = self._norm_url(href)
+            if not label or not href or key in seen or key in visited or \
+                    _off_tour(start, href):
+                continue
+            pos = brief_tour.label_pos(label, prefer, skip=skip_stems)
+            # a card is named when the brief is about it: two of its words,
+            # or one the brief says twice (never a domain word said once)
+            if pos is None or brief_tour.label_score(
+                    label, prefer, skip=skip_stems) < 2:
+                continue
+            seen.add(key)
+            found.append((pos, {"t": label[:40], "href": href}))
+        return [c for _p, c in sorted(found, key=lambda x: x[0])][:most]
+
+    _EXAMPLE = re.compile(r"[\d=+^*/()]|\bx\b", re.I)
+
+    def _demo_form(self, section_end):
+        """Use the tool this page is, once: type an example the field itself
+        shows (its placeholder, when that looks like a value) into at most two
+        empty fields and press the button that says what it does, then give
+        the result a moment. Nothing that asks for a person's details is ever
+        touched (_FORM_JS). Returns whether a button was pressed."""
+        try:
+            info = self.page.evaluate(_FORM_JS) or {}
+        except Exception:
+            return False
+        button = info.get("button")
+        if not button or self.now() >= section_end - 2.5:
+            return False
+        for field in info.get("inputs") or []:
+            if str(field.get("value") or "").strip():
+                continue                # a default is already there: keep it
+            ph = str(field.get("ph") or "").strip()
+            if self._EXAMPLE.search(ph) and len(ph) <= 30:
+                text = ph
+            elif field.get("type") == "number":
+                text = "12"
+            else:
+                continue
+            if self.now() >= section_end - 2.5:
+                return False
+            try:
+                here = float(self.page.evaluate("() => window.scrollY") or 0)
+                want = max(0.0, float(field.get("top") or 0) - 0.4 * self.H)
+                if abs(want - here) > 0.2 * self.H:
+                    self.note("scroll")
+                    self._glide_scroll(want, self._glide_s(want - here))
+                    self.sleep(0.2)
+            except Exception:
+                pass
+            self.do_type({"selector": field["sel"], "text": text,
+                          "seconds": 0.4})
+        if self.now() >= section_end - 1.8:
+            return False
+        try:
+            # the tool's button, brought to the middle of the screen the way
+            # the tour moves everywhere (eased, never a jump)
+            here = float(self.page.evaluate("() => window.scrollY") or 0)
+            want = max(0.0, float(button.get("top") or 0) - 0.45 * self.H)
+            if abs(want - here) > 0.15 * self.H:
+                self.note("scroll")
+                self._glide_scroll(want, self._glide_s(want - here))
+                self.sleep(0.2)
+        except Exception:
+            pass
+        before = len(self.problems)
+        self.do_click({"selector": button["sel"], "text": button["t"]})
+        if len(self.problems) > before:
+            return False
+        self.sleep(1.3)
+        return True
+
+    def _open_cards(self, cards, start, visited, section_end):
+        """Open each named card by its own address and read it: its name is
+        the chapter, its heading the beat, one thing on it pointed at.
+        Returns how many opened."""
+        opened = 0
+        for card in cards:
+            if self.now() >= section_end - 3.5 or self._time_up(section_end, 0.0):
+                break
+            key = self._norm_url(card["href"])
+            if key in visited:
+                continue
+            visited.add(key)
+            if not self._open({"t": card["t"], "href": card["href"],
+                               "item": None}, start):
+                visited.add(self._norm_url(self.page.url))
+                continue
+            visited.add(self._norm_url(self.page.url))
+            opened += 1
+            self.note("section", label=card["t"])
+            self._chapters.append(self.now())
+            self.sleep(0.9)
+            info = self._page()
+            self._look(info)
+            self.sleep(1.2)
+            if self._demo_form(section_end):
+                continue                # the tool was used: that is the beat
+            items, _h = self._tour_items()
+            here = self._feature(items)
+            if here and not self._time_up(section_end, 0.0):
+                self._point(here, 1.0)
+        return opened
+
 
     def do_tour(self, step):
         """Show the site the way a person demos it, as beats an edit cuts on:
@@ -1723,8 +1958,10 @@ class _Session:
             self._finale(until, scroll_mode=True)
             return
         deep = _deep_page(getattr(self, "requested", None) or start)
+        brief = bool(step.get("brief"))
         cands = [] if deep or not want else \
-            self._candidates(items, step.get("prefer"), start)
+            self._candidates(items, step.get("prefer"), start, brief=brief,
+                             want=want)
         if not cands:
             # a one-page site, or the page the request points at: its own
             # sections, top to bottom, then its closing call to action
@@ -1734,19 +1971,45 @@ class _Session:
         n = min(want, len(cands))
         # the chapters are the section pages, not their sub-headings
         self._paged = True
+        item_ask = bool(_ITEM_ASK.search(str(step.get("prefer") or "")))
+        if brief and item_ask:
+            # the product page the brief asks for is paid for up front, not
+            # from what the sections leave (klosmo: the brands page ate it);
+            # the sections that fit in what is left are the ones that lead
+            # to products (a collection), before an A-Z list of brands
+            reserve += 4.5
+            shop = [c for c in cands if brief_tour.leads_to_products(c["t"])]
+            cands = shop + [c for c in cands if c not in shop]
+            n = max(1, min(n, int((until - self.now() - reserve - 3.0) / 5.0)))
         left = until - self.now() - reserve
-        home_stop = left >= n * 5.0 + 2.6
+        # a brief's hero is not held for a stop of its own unless there is time to
+        # spare after every page (klosmo, judge: "5.6 s on the hero, only the
+        # cursor drifts")
+        home_stop = left >= (n * 9.0 + 8.0 if brief else n * 5.0 + 2.6)
         per = max(1, min(3, int((left - (2.6 if home_stop else 0.0)
                                  - n * 2.4) / (2.6 * n))))
         if home_stop:
             self._travel(until, reserve, most=1)
         opened, visited = 0, {self._norm_url(start)}
+        item_done = False
         for cand in cands:
             if opened >= n or self._time_up(until, reserve + 3.0):
                 break
             key = self._norm_url(cand["href"])
             if key in visited:
                 continue
+            slot = section_end = None
+            if brief:
+                # the time left is shared by the sections still to open, the
+                # earlier ones a little short so the last page (where a brief
+                # names its items) is not starved
+                rem = n - opened
+                slot = brief_tour.section_slot(
+                    until + self.lost_s - reserve - self.now(), rem) \
+                    * (0.55 if rem > 1 else 1.0)
+                if opened and slot < 4.2:
+                    break
+                section_end = self.now() + slot
             visited.add(key)
             if not self._open(cand, start):
                 visited.add(self._norm_url(self.page.url))
@@ -1761,20 +2024,45 @@ class _Session:
             self.sleep(0.9)
             info = self._page()
             self._look(info)
-            self.sleep(1.7)
-            self._travel(until, reserve, most=per)
-        if _ITEM_ASK.search(str(step.get("prefer") or "")):
+            self.sleep(1.3 if brief else 1.7)
+            if brief and item_ask and opened >= n and not item_done:
+                # the last section of a brief that asks for a product page:
+                # its grid is scrolled into view and one product opens now,
+                # while the grid is still near the top (the lazy grid is
+                # scrolled past by the usual stops)
+                item_done = bool(self._open_item(start))
+                if item_done:
+                    continue
+            if brief:
+                cards = self._named_cards(
+                    step.get("prefer"), start,
+                    brief_tour.label_stems(cand["t"]), visited)
+                # a card page costs about CARD_S seconds: its load, its name,
+                # its heading and one use of the tool (or the one thing pointed at)
+                room = max(0, int((slot - 5.0) / CARD_S))
+                cards = cards[:room]
+                card_s = CARD_S * len(cards)
+                self._travel(section_end - card_s - self.lost_s, 0.0,
+                             most=brief_tour.stops_for(
+                                 slot - card_s, open_s=5.0, per_stop_s=3.0,
+                                 least=0))
+                if cards:
+                    self._open_cards(cards, start, visited, section_end)
+            else:
+                self._travel(until, reserve, most=per)
+        if item_ask and not brief:
             # "open a product page to highlight product imagery and details"
             # (a real brief): the last page opens one of its own items
             reserve += 4.5
         if not opened:
             self._travel(until, reserve)
-        elif not self._time_up(until, reserve + 2.6):
+        elif not (brief and item_done) and \
+                not self._time_up(until, reserve + 2.6):
             # time left over: further down the last page, before its finale
             self._travel(until, reserve)
-        if _ITEM_ASK.search(str(step.get("prefer") or "")):
-            self._open_item(start)
-        self._finale(until)
+        if item_ask and not item_done:
+            item_done = bool(self._open_item(start))
+        self._finale(until, here_only=bool(brief and item_done))
 
     def _open_item(self, start):
         """Open one item of the page (a product, a project) by its own card,
@@ -1912,6 +2200,9 @@ def _deep_page(url):
     parts = [p for p in parts if not _LOCALE.match(p)
              and p not in ("index.html", "index.htm", "index.php", "home")]
     return bool(parts)
+
+
+CARD_S = 6.5   # a tool page in a brief tour: load, name, heading, one use
 
 
 def _off_tour(start, url):
