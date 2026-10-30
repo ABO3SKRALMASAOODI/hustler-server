@@ -237,6 +237,10 @@ FRONTIER_PLANS = {"ai_max"}
 # whole; longer ones become their best 20-60 s story.
 FIRST_CUT_MAX_S = float(os.getenv("FIRST_CUT_MAX_S", "480"))
 FIRST_CUT_MAX_RENDERS = int(os.getenv("FIRST_CUT_MAX_RENDERS", "6"))
+# A website brief gets ONE trial agent turn after its First cut (C2). Q2 (30 Oct)
+# measured that turn against the First cut alone; this switch lets the release
+# keep or drop it without a code change (see round2/Q2_WEB.md).
+FIRST_CUT_BRIEF_FOLLOW_UP = os.getenv("FIRST_CUT_BRIEF_FOLLOW_UP", "1") != "0"
 FIRST_CUT_MAX_SOURCE_S = float(os.getenv("FIRST_CUT_MAX_SOURCE_S", "1800"))
 FIRST_CUT_SHORT_SOURCE_S = float(os.getenv("FIRST_CUT_SHORT_SOURCE_S", "90"))
 

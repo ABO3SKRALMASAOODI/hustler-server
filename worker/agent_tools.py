@@ -21477,7 +21477,8 @@ def _store_capture(ctx, url, got, kind_word):
     ctx.web_recordings.append({"storage_key": key, "url": url,
                                "events": got.get("events") or [],
                                "page_title": got.get("page_title") or "",
-                               "h1": got.get("h1") or ""})
+                               "h1": got.get("h1") or "",
+                               "site_name": got.get("site_name") or ""})
     return key, (got.get("page_title") or domain), None
 
 
