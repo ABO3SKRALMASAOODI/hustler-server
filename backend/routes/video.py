@@ -55,6 +55,7 @@ from video_services.upload import (
     serialize_asset as _asset_out,
 )
 from video_services.chat_jobs import parse_client_event as _event_request_args
+from video_services import held_request as _held_request
 from video_services.render_export import (
     deterministic_final_failure as _deterministic_final_failure,
     export_edl_error as _service_export_edl_error,
@@ -3767,6 +3768,11 @@ def replay_blocked(user_id, project_id):
             return jsonify({"replay": None, "reason": "subscription_required"})
         if _studio_ai_gate(cur, user_id):
             return jsonify({"replay": None, "reason": "mcp_only"})
+        # The paid webhook (or another tab) already ran the held request:
+        # say it is starting instead of asking for it again (ticket #11).
+        running = _held_request.started(cur, p["chat_session_id"])
+        if running:
+            return jsonify({"replay": "started", **running})
         cur.execute("SELECT pg_advisory_xact_lock(%s)", (project_id,))
         cur.execute("""SELECT id, role, meta,
                               created_at > NOW() - make_interval(hours => %s)
@@ -3842,8 +3848,10 @@ def replay_blocked(user_id, project_id):
 
 @video_bp.route("/projects/<int:project_id>/messages", methods=["POST"])
 @token_required
-def post_message(user_id, project_id):
-    data = request.get_json() or {}
+def post_message(user_id, project_id, data=None):
+    # ``data``: the server sending a request for the user through this same
+    # path (send_as_user); a browser send reads the request body.
+    data = data if data is not None else (request.get_json() or {})
     text = (data.get("text") or "").strip()
     client_msg_id = (str(data.get("client_msg_id") or "")[:64]) or None
     defer_until_index = bool(data.get("defer_until_index"))
@@ -4287,6 +4295,17 @@ def post_message(user_id, project_id):
 
     return jsonify({"queued": True, "message_id": message_id,
                     "job_id": job_id, "stacked": stacked})
+
+
+def send_as_user(user_id, project_id, data):
+    """Send a request for the user through the ordinary send path.
+
+    For a request the subscribe wall held and a confirmed payment released
+    (video_services.held_request): every gate, the index resume, stacking
+    and the client_msg_id dedupe apply exactly as for a typed message. Needs
+    an app context, not a request one. Returns the view's return value."""
+    return post_message.__wrapped__(user_id=user_id, project_id=project_id,
+                                    data=dict(data or {}))
 
 
 # Total capacity across every request-based agent instance. Historically this

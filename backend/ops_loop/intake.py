@@ -19,6 +19,10 @@ an advisory lock) reads what failed since the last tick and files it:
             (internal, unclassified, timeout, upload, unavailable or
             transient; corrections and prerequisites are the caller's)
   proxy     the browser could not build the playback proxy (P1)
+  held      a payment landed HELD_GRACE ago and the request the subscribe
+            wall held before it has still not run (ticket #11), on a plan
+            whose Studio could run it (an MCP-only plan hands it to the
+            customer's own assistant instead)
 
 One ticket per CAUSE: the cause key is derived from the failure's own
 signature (`auto-<source>-<kind>-<signature>`), so one customer's retry loop
@@ -45,6 +49,9 @@ WATERMARK_KEY = "ops_intake_watermark"
 OVERLAP = timedelta(minutes=10)     # late commits are still seen
 FIRST_LOOKBACK = timedelta(minutes=30)  # a fresh install never replays history
 MAX_PER_TICK = 400
+# The webhook resumes a held request seconds after the payment; this long
+# after it, a request still waiting was dropped.
+HELD_GRACE = timedelta(minutes=3)
 UNHANDLED_AFTER = timedelta(minutes=30)
 P1_JOB_TYPES = ("preview_check", "filmstrip")
 MCP_OURS = ("internal_error", "unclassified", "timeout", "upload_error",
@@ -224,7 +231,66 @@ def scan(cur, since, now):
         item = _event_failure(r)
         if item:
             out.append(item)
+    out.extend(_held_not_resumed(cur, since, now, p))
     out.sort(key=lambda f: _aware(f["at"]))
+    return out
+
+
+def _held_not_resumed(cur, since, now, p):
+    """Paid customers whose held request never ran (see the module doc).
+    The window trails by HELD_GRACE; the plans reply must predate the
+    payment by at most the resume window (held_request.WINDOW_H)."""
+    from video_services import held_request
+    q = dict(p, held_since=_naive(since - HELD_GRACE),
+             held_until=_naive(now - HELD_GRACE),
+             window_h=held_request.WINDOW_H)
+    cur.execute(f"""
+        SELECT pay.id AS payment_id, pay.user_id, pay.occurred_at AS at,
+               pay.plan, h.id AS plans_id, h.project_id, h.surface
+          FROM payments pay JOIN users u ON u.id = pay.user_id
+          CROSS JOIN LATERAL (
+                SELECT m.id, pr.id AS project_id,
+                       m.meta->>'surface' AS surface
+                  FROM projects pr
+                  JOIN chat_messages m ON m.session_id = pr.chat_session_id
+                 WHERE pr.user_id = pay.user_id AND m.role = 'assistant'
+                   AND m.meta->>'kind' = 'subscription_plans'
+                   AND m.meta ? 'blocked_prompt'
+                   AND NOT (m.meta ? 'replayed_at')
+                   AND m.created_at <= pay.occurred_at
+                   AND m.created_at > pay.occurred_at
+                                      - make_interval(hours => %(window_h)s)
+                   AND NOT EXISTS (
+                         SELECT 1 FROM chat_messages n
+                          WHERE n.session_id = m.session_id AND n.id > m.id
+                            AND n.role IN ('user', 'assistant'))
+                 ORDER BY m.id DESC LIMIT 1) h
+         WHERE pay.occurred_at > %(held_since)s
+           AND pay.occurred_at <= %(held_until)s
+           AND pay.amount_cents > 0 AND pay.status IN ('completed', 'paid')
+           AND {_customers()}
+         ORDER BY pay.occurred_at LIMIT %(limit)s""", q)
+    out, seen = [], set()
+    for r in cur.fetchall():
+        if r["plans_id"] in seen:
+            continue                    # Paddle's paid + completed rows
+        seen.add(r["plans_id"])
+        try:
+            if not held_request.studio_lane_open(cur, r["user_id"]):
+                continue                # handed to the customer's assistant
+        except Exception:
+            pass                        # unknown lane: file it, look at it
+        out.append({
+            "ref": f"held:{r['plans_id']}", "source": "held",
+            "at": _aware(r["at"]) + HELD_GRACE,
+            "user_id": r["user_id"], "project_id": r["project_id"],
+            "severity": "P0",
+            "cause_key": cause_key("held", "request-not-resumed"),
+            "title": "A request the subscribe wall held did not run after "
+                     "the customer paid",
+            "detail": _short(f"plan {r['plan']} · {r['surface'] or 'chat'} "
+                             f"wall · plans reply {r['plans_id']} · payment "
+                             f"{r['payment_id']}", 600)})
     return out
 
 
