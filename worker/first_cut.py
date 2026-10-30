@@ -988,16 +988,23 @@ def beat_slams(ctx, steps, started, beats, hook_end, y, avoid=None):
         params = {"text": _star(text), "tier": "display", "entrance": "pop",
                   "exit": "cut", "accent": BEAT_ACCENT, "width": 0.82,
                   "role": "serif" if card else "condensed"}
+        card_id = None
         if card:
             # a graphic insert: the picture cuts to a flat card with the
             # line in huge type while the voice runs on (the references'
             # chapter and stat cards; C2 judge: "B-roll or graphic inserts")
+            before = {v.get("id") for v in
+                      ctx.latest_edl()["json"].get("vectors") or []}
             if not _ok(_run(ctx, steps, "add_vector_graphic", {
                     "kind": "rectangle", "start": start, "end": end,
                     "x": 0.5, "y": 0.5, "width": 1.0, "height": 1.0,
                     "color": BEAT_CARD, "opacity": 1.0}, started)):
                 card = False
                 params["role"] = "condensed"
+            else:
+                card_id = next((v.get("id") for v in
+                                ctx.latest_edl()["json"].get("vectors") or []
+                                if v.get("id") not in before), None)
         if card:
             params["y"] = 0.5
         elif y is not None:
@@ -1016,6 +1023,11 @@ def beat_slams(ctx, steps, started, beats, hook_end, y, avoid=None):
                 # Q1: a card covers the picture; a slam over the face keeps
                 # the wide framing (a cut-in pushed the chin into it)
                 cards.append((start, end))
+        elif card_id:
+            # Q3 (30 Oct): the slam was refused after its card landed; an
+            # empty navy card is a hole in the picture (C2 vlog judges:
+            # "remove or fill the empty dark-navy frame at 15.2 s")
+            _run(ctx, steps, "remove_vector_graphic", {"id": card_id}, started)
     return placed
 
 
@@ -1325,7 +1337,10 @@ def _music_piece(index, duration, robust=False):
         len(words) / max(1.0, float(duration or 0)) < 1.2
 
 
-def video_chain(ctx, worker_db, started, spend):
+def video_chain(ctx, worker_db, started, spend, whole=False):
+    """The First cut's chain. whole=True (the trial turn's clean-up of the
+    whole take, trial_turn.whole_cleanup): no best-moment pick, the source's
+    own ends trimmed (a mic check, a trailing fragment) and the rest kept."""
     steps, applied = [], []
     duration = float(ctx.duration or 0)
     picked = None
@@ -1388,7 +1403,7 @@ def video_chain(ctx, worker_db, started, spend):
                                         for k in range(6)], spend,
                                   title_only=True)
         ctx.first_cut_hook = title
-    elif duration > config.FIRST_CUT_SHORT_SOURCE_S:
+    elif duration > config.FIRST_CUT_SHORT_SOURCE_S and not whole:
         start, end, title, how = scout_range(ctx, worker_db, spend)
         picked = {"start_s": round(start, 2), "end_s": round(end, 2),
                   "title": title, "how": how}
@@ -1403,6 +1418,13 @@ def video_chain(ctx, worker_db, started, spend):
             applied.append("best moment")
     elif speech:
         start, end, how = trim_range(ctx, worker_db, spend)
+        if whole:
+            # the scout still names the hook and the beats; the span is the
+            # whole take minus its junk ends
+            rows = _sentences(ctx.index, duration + 1)
+            if rows:
+                first, last = _trim_pick(rows, duration)
+                start, end, how = float(first["t0"]), float(last["t1"]), "whole"
         picked = {"start_s": round(start, 2), "end_s": round(end, 2),
                   "how": how}
         if start > 0.3 or end < duration - 0.6:

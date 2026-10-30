@@ -2254,6 +2254,10 @@ def run_agent_job(worker_db, job):
                 "off mid-work on our side. Everything you already changed "
                 "is saved in the project state — do NOT redo it; finish "
                 "what remains of the request and reply.]")
+        if ctx.claude_trial is not None and not continuation_state \
+                and not (job.get("payload") or {}).get("death_resume"):
+            attachment_note += _trial_head_start(ctx, worker_db, session_id,
+                                                 user_message)
         result = _run_loop(ctx, worker_db, job, session_id, user_message,
                            attachment_note,
                            _cont=(continuation_state or None))
@@ -2388,6 +2392,141 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
         print(f"[agent] job {job.get('id')}: new-subscriber lane lookup "
               f"failed ({str(exc)[:160]}); contracted lanes", flush=True)
         return None
+
+
+def _trial_lane(ctx):
+    """The free trial's Claude lane (claude_trial ACTIVE). Grandfathered
+    subscribers and new subscribers on the Claude lane are never on it."""
+    return getattr(ctx, "claude_trial", None) is not None
+
+
+def _prepared_trial(ctx):
+    """A trial turn whose main work code already did (trial_turn.prepare)."""
+    return _trial_lane(ctx) and bool(getattr(ctx, "trial_prep", None))
+
+
+_KEPT_CRAFT_TOOLS = {
+    "set_motion_graphic": "motion", "remove_motion_graphic": "motion",
+    "remove_zoom": "zoom", "remove_zoom_path": "zoom",
+    "remove_vector_graphic": "vector", "set_vector_graphic": "vector",
+}
+
+
+def _kept_craft_refusal(ctx, name, args):
+    """On a prepared trial turn the First cut's hook, slams and cards and
+    the head start's own events are final: a refusal text for a call that
+    would move, restyle or remove one, else None. Q3 (30 Oct), measured:
+    every such edit on the trial lane chased a review note and lowered the
+    judged result (the hook moved behind the speaker ran off both edges,
+    phonehook 7.25 -> 5.75; a slam moved behind the speaker left a blank
+    card, talk10best 6.5 -> 5.0; punch-ins removed as 'pops'). Only the
+    trial lane after trial_turn.prepare: every other turn is unchanged."""
+    kind = _KEPT_CRAFT_TOOLS.get(name)
+    if kind is None or not _prepared_trial(ctx):
+        return None
+    kept = getattr(ctx, "trial_kept_ids", None) or {}
+    target = str((args or {}).get("id") or "")
+    if target and target in kept.get(kind, ()):
+        return ("REJECTED: KEPT — this is part of the finished First cut "
+                f"({kind} {target}); on this request it stays exactly as it "
+                "is. Do not retry it; reply with what the video is.")
+    return None
+
+
+def _trial_preview_cap(ctx, cap, operator_run=False):
+    """The request's preview cap. A trial request renders at most
+    CLAUDE_TRIAL_MAX_PREVIEWS (one look, one repair; Q3, 30 Oct: C1/C2
+    measured 3-7 renders and 170-445 s per trial turn, the extra renders
+    chasing critic findings without a gain). Every other lane: unchanged."""
+    if not _trial_lane(ctx) or operator_run \
+            or not config.CLAUDE_TRIAL_MAX_PREVIEWS:
+        return cap
+    return min(int(cap or config.CLAUDE_TRIAL_MAX_PREVIEWS),
+               int(config.CLAUDE_TRIAL_MAX_PREVIEWS))
+
+
+def _trial_render_refusal(ctx, name):
+    """A refusal text once a trial request has rendered its
+    CLAUDE_TRIAL_MAX_PREVIEWS previews, for another render or an edit that
+    could never be previewed; else None. Only ctx.trial_preview_cap, which
+    _trial_preview_cap sets on the trial lane alone, arms it: every other
+    lane renders until its request is fulfilled (main, 25 Oct)."""
+    cap = getattr(ctx, "trial_preview_cap", None)
+    if not cap or (name != "render_preview"
+                   and name not in agent_tools.WRITE_TOOLS):
+        return None
+    if int(getattr(ctx, "trial_previews", 0) or 0) < int(cap):
+        return None
+    return ("REJECTED: this free-trial request has rendered its "
+            f"{int(cap)} previews, so no further render or edit can be "
+            "shown. Reply now with what the latest preview delivers, in two "
+            "or three sentences ending on a statement.")
+
+
+def _fresh_turn_yields_to_fleet(model):
+    """A fresh turn's first call waits for the fleet's TPM burn to fall
+    under the OpenAI org's ceiling. Not on a Claude lane (the trial, new
+    subscribers): another provider and organisation, whose limit that burn
+    says nothing about; the mid-turn reservation already skips Claude (Q3,
+    30 Oct: 100-120 s of a 175-290 s trial turn was this wait). Every OpenAI
+    or xAI lane, which is every grandfathered subscriber's, still yields."""
+    return not claude_lane.is_claude_model(model)
+
+
+def _trial_head_start(ctx, worker_db, session_id, user_message):
+    """The trial turn's deterministic head start on a generic first request
+    (trial_turn.prepare): '' when there is none. TRIAL LANE ONLY: the
+    caller gates on ctx.claude_trial, so grandfathered subscribers and the
+    new-subscriber Claude lane never run it. Its steps appear in the
+    activity feed like the agent's own and count as this turn's writes; the
+    turn's start version stays the First cut's (_run_loop)."""
+    if getattr(ctx, "claude_trial", None) is None:
+        return ""
+    import trial_turn
+    try:
+        before = int(ctx.latest_edl()["version"])
+    except Exception:  # noqa: BLE001
+        return ""
+
+    def post(name, args, result):
+        _activity(worker_db, session_id, name, args, result,
+                  edl_version=(ctx.versions_written[-1]
+                               if ctx.versions_written else before))
+    # the First cut's own pieces, before the head start adds any: those are
+    # final on this turn (_kept_craft_refusal); what the head start adds
+    # stays editable, so a misplaced addition can still be taken out
+    try:
+        cur = ctx.latest_edl()["json"]
+        kept_ids = {
+            "motion": {str(m.get("id")) for m in cur.get("motion") or []
+                       if m.get("id")},
+            "zoom": {str(z.get("id")) for z in
+                     (cur.get("effects") or {}).get("zooms") or [] if z.get("id")},
+            "vector": {str(v.get("id")) for v in cur.get("vectors") or []
+                       if v.get("id")},
+        }
+    except Exception:  # noqa: BLE001 — no guard, the turn runs
+        kept_ids = {}
+    try:
+        prep = trial_turn.prepare(ctx, worker_db, session_id,
+                                  user_message.get("content") or "", post=post)
+    except Exception as e:  # noqa: BLE001 — the turn runs as before
+        print(f"[trial_turn] head start failed: {type(e).__name__}: "
+              f"{str(e)[:200]}", flush=True)
+        prep = None
+    if not prep:
+        return ""
+    ctx.trial_prep = prep
+    ctx.prep_start_version = before
+    ctx.trial_kept_ids = kept_ids
+    # no paid second-opinion critics on top of a deterministic build: their
+    # notes drove repairs that undid the First cut's craft (see
+    # _quality_repair_pushback), and each cost 10-20 s per render
+    ctx.second_opinions_off = True
+    ctx.editing_metrics["trial_head_start"] = {
+        "intent": prep["intent"], "whole": prep["whole"],
+        "applied": prep["applied"], "s": prep["s"]}
+    return prep["note"]
 
 
 def _claude_trial_extras(ctx):
@@ -2670,6 +2809,13 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
     # pushed; MAX_QUALITY_REPAIR_PUSHBACKS is the backstop for a reviewer
     # that finds something new on every version.
     if len(pushed_versions) >= MAX_QUALITY_REPAIR_PUSHBACKS:
+        return False
+    if _prepared_trial(ctx):
+        # Q3 (30 Oct): on a trial turn that code already built (the First
+        # cut plus the head start), a repair pass chasing review notes about
+        # the First cut's own design moved the hook behind the speaker and
+        # off both frame edges (phone: 7.0 -> 5.0). The editor's own look at
+        # the render decides; the notes stay advisory.
         return False
     _latest, verification = _latest_verification(ctx)
     findings = []
@@ -3253,6 +3399,12 @@ def _unused_fetched_audio_note(ctx):
 def _disclose_outstanding_quality(ctx, text):
     """Disclose the concrete blocker on legitimate terminal boundaries."""
     quality = _quality_handoff(ctx)
+    if _prepared_trial(ctx) and quality.get("quality_status") == "advisory":
+        # advisory review notes stay in the message meta (quality_findings)
+        # for the admin; the trial reply says what the video is (Q3: a
+        # disclosed note "starts mid-sentence" on a First cut the judges
+        # passed became a hard fault in the turn's judgement)
+        return text
     if quality.get("quality_status") == "advisory":
         if quality.get("contract_met"):
             # Fulfilled: the reviewers' remaining notes travel in the
@@ -3494,6 +3646,67 @@ def _nearest_alternative(user_text):
     return None
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?…])\s+")
+# "The current cut is still v12", "the edit remains unchanged": a stale-state
+# claim is as false as a denial on a turn that wrote a new version.
+_STALE_STATE = re.compile(
+    r"(?i)\b(?:still|remains?|stays?|kept at)\b[^.\n]{0,40}\bv(?:ersion)?\s?\d+\b"
+    r"|\bunchanged\b|\bas it was\b|\bleft (?:it|the (?:edit|cut|video)) "
+    r"(?:as it (?:is|was)|alone|unchanged)\b")
+
+
+def _agreeing_sentences(text, wrote, previewed):
+    """The draft without the sentences that contradict the turn facts: a
+    denial or a stale-state claim when the edit changed, an edit claim when
+    it did not, a render claim when nothing was rendered."""
+    paragraphs = []
+    for para in re.split(r"\n\s*\n", text or ""):
+        kept = []
+        for sent in _SENTENCE_SPLIT.split(para.strip()):
+            if not sent.strip():
+                continue
+            if wrote and (DENY_CLAIM.search(sent) or _STALE_STATE.search(sent)):
+                continue
+            if not wrote:
+                m = next((mm for mm in EDIT_CLAIM.finditer(sent)
+                          if not _negated_claim(sent, mm)
+                          and not _offered_claim(sent, mm)), None)
+                if m is not None:
+                    continue
+            if not previewed and RENDER_CLAIM.search(sent):
+                continue
+            kept.append(sent.strip())
+        if kept:
+            paragraphs.append(" ".join(kept))
+    return "\n\n".join(paragraphs)
+
+
+def _facts_reply(ctx, start_version, draft, wrote, previewed):
+    """The user's reply for a turn that did real work but whose model drafts
+    (twice) misreported it: one plain sentence from the turn facts, then the
+    draft's sentences that agree with them. Never an internal note."""
+    if wrote:
+        latest = ctx.latest_edl()["version"]
+        lead = (f"I changed the edit in this turn: it is now version "
+                f"{latest} (it was version {start_version})")
+        preview = getattr(ctx, "last_preview", None) or {}
+        if previewed and str(preview.get("edl_version")) == str(latest):
+            lead += ", and the preview on the right shows it"
+        lead += ". Each change is listed in the editing steps above."
+    else:
+        made = []
+        if ctx.urls_fetched:
+            made.append("the linked media was downloaded")
+        if ctx.images_generated:
+            made.append("an image was generated")
+        if getattr(ctx, "audio_extracted", None):
+            made.append("the audio was taken out of the video you uploaded")
+        lead = ("I didn't change the edit in this turn, but "
+                + " and ".join(made) + ", and it is saved to your project.")
+    rest = _agreeing_sentences(draft, wrote, previewed)
+    return lead + ("\n\n" + rest if rest else "")
+
+
 def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
                      honesty, user_text=""):
     """Deterministic check of the drafted reply against the turn facts.
@@ -3555,29 +3768,18 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     if wrote or ctx.images_generated or ctx.urls_fetched \
             or getattr(ctx, "audio_extracted", None):
         # Real work happened, so the reply is corrected rather than discarded.
-        # The note has to say WHICH work, though: routing a fetch-only turn
-        # into the fallback below told the user nothing happened and that we
-        # cannot fetch links, while their downloaded file sat in the project —
-        # a lie in the opposite direction to the one being guarded against.
-        # Equally, "DID modify the edit" is false when only an asset was
-        # created, so each case gets its own wording.
-        if wrote:
-            note = ("this turn DID modify the edit — see the editing steps "
-                    "above")
-        else:
-            made = []
-            if ctx.urls_fetched:
-                made.append("the linked media WAS downloaded")
-            if ctx.images_generated:
-                made.append("an image WAS generated")
-            if getattr(ctx, "audio_extracted", None):
-                made.append("the audio WAS taken out of the video you "
-                            "uploaded")
-            note = ("this turn did NOT change the edit, but "
-                    + " and ".join(made) + " and saved to the project")
+        # It has to say WHICH work, though: routing a fetch-only turn into the
+        # fallback below told the user nothing happened and that we cannot
+        # fetch links, while their downloaded file sat in the project. And it
+        # is the USER's reply: until 30 Oct 2026 this prepended
+        # "*(system: this turn DID modify the edit ...)*" to a draft that
+        # still said "Nothing was changed", and the customer read both. The
+        # reply now leads with the turn facts in plain words and keeps only
+        # the draft's sentences that agree with them (_facts_reply).
         print(f"[honesty] job {ctx.job['id']}: regeneration still misreports "
-              "real work — posting a corrective note", flush=True)
-        return f"*(system: {note})*\n\n" + (redraft or draft)
+              "real work — replying from the turn facts", flush=True)
+        return _facts_reply(ctx, start_version, redraft or draft,
+                            wrote, previewed)
     # Zero-write fabrication that survived regeneration: never publish it.
     honesty["fallback_reply"] = True
     print(f"[honesty] job {ctx.job['id']}: regeneration still fabricates — "
@@ -4723,6 +4925,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     honesty = _cont.get("honesty") or \
         {"false_claims": 0, "corrective_note": False}
     start_version = int(_cont.get("start_version")
+                        or getattr(ctx, "prep_start_version", None)
                         or ctx.latest_edl()["version"])
     # Completion budget for this step, and how many times a truncated step has
     # already been retried with a bigger one. See _TRUNCATED_NUDGE.
@@ -4738,6 +4941,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     _responses_warned = False      # say the lane fell back ONCE, not per step
     unread_tool_images = False
     visual_handoff = False
+    # A free-trial request renders at most CLAUDE_TRIAL_MAX_PREVIEWS previews
+    # (Q3, 30 Oct; QI kept it trial-only when main removed the general
+    # request cap on 25 Oct). Every other lane has no render cap.
+    ctx.trial_preview_cap = _trial_preview_cap(
+        ctx, None, payload.get("operator_repair") is True)
+    try:
+        ctx.trial_previews = max(0, int(_cont.get("trial_previews") or 0))
+    except (TypeError, ValueError):
+        ctx.trial_previews = 0
     def _durable_continuation(reason, blocker_fingerprint=None,
                               blocker_repeats=0, progress_frontier=None,
                               verification_slices=None, stagnant=None):
@@ -4779,6 +4991,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "honesty": honesty,
             "preview_repair_pushed": preview_repair_pushed,
             "quality_repair_versions": sorted(quality_repair_versions),
+            "trial_previews": int(getattr(ctx, "trial_previews", 0) or 0),
             "plan_write_pushed": plan_write_pushed,
             "plan_close_pushed": plan_close_pushed,
             "first_write_pushed": first_write_pushed,
@@ -4870,7 +5083,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     # just three times and then slams in (that is how 5 TPM deaths still
     # happened after the first wait helper). Continuations never wait here:
     # their clock is already running and mid-turn 429s use rate_limit_wait.
-    if not _cont:
+    if not _cont and _fresh_turn_yields_to_fleet(model):
         _soft_cap, _hard_cap = llm.tpm_caps(model)
         room = _hard_cap - config.AGENT_TPM_CALL_RESERVE
         yield_line = min(_soft_cap, room)
@@ -5550,6 +5763,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     messages.append({"role": "assistant", "content": body})
                 continue
             if ctx.versions_written and not _verification_complete(ctx) \
+                    and not _trial_lane(ctx) \
                     and int(_cont.get("verification_slices") or 0) \
                     < MAX_VERIFICATION_CONTINUATIONS \
                     and not _verification_stuck(ctx, _cont):
@@ -5660,6 +5874,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if args is None:
                 result = ("REJECTED: arguments were not valid JSON. "
                           "Send a proper JSON object.")
+            elif _kept_craft_refusal(ctx, name, args):
+                result = _kept_craft_refusal(ctx, name, args)
+            elif _trial_render_refusal(ctx, name):
+                result = _trial_render_refusal(ctx, name)
             else:
                 t0 = time.monotonic()
                 try:
@@ -5704,6 +5922,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 tt = timings["tools"].setdefault(name, {"n": 0, "s": 0.0})
                 tt["n"] += 1
                 tt["s"] = round(tt["s"] + time.monotonic() - t0, 2)
+                if name == "render_preview" and \
+                        getattr(ctx, "trial_preview_cap", None):
+                    ctx.trial_previews = int(
+                        getattr(ctx, "trial_previews", 0) or 0) + 1
                 if name in agent_tools.WRITE_TOOLS and \
                         isinstance(result, str) and result.startswith("EDL v"):
                     ctx.write_calls.append(name)

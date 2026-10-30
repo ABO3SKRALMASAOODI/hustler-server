@@ -136,8 +136,85 @@ def latest_edl(conn, project_id):
         return cur.fetchone()
 
 
+# ── User-visible replies never carry the editor's internal notes ─────────
+#
+# The agent loop talks to the model through bracketed notes ("[system:
+# CONTINUATION ...]", "[system note: ...]") and, until 30 Oct 2026, the honesty
+# guard itself prepended "*(system: this turn DID modify the edit ...)*" to a
+# reply whose model draft still said "Nothing was changed". A customer saw both
+# lines in one message: an internal note and a contradiction.
+#
+# strip_internal_notes() removes every such note, whatever produced it (our own
+# code, or a model echoing a note it was sent). add_message runs it on every
+# assistant message the worker writes, so no code path can post one. It lives
+# here, not in its own module, because the backend loads this file standalone.
+
+# "(system: ...)", "[system note: ...]", "(internal: ...)", with or without the
+# markdown emphasis around them ("*(system: ...)*", "_[system: ...]_").
+_NOTE_OPEN = re.compile(
+    r"[*_]{0,3}([(\[])\s*(?:system|internal)(?:[ _-]?notes?)?\s*:", re.I)
+_NOTE_CLOSE = {"(": ")", "[": "]"}
+
+NOTE_ONLY_REPLY = "Here's where this edit stands: the latest version is on the right."
+
+
+def _note_end(text, start, opener):
+    """Index just past the bracket that closes the note opened at `start`
+    (nesting counted), or the end of the paragraph when it never closes."""
+    closer = _NOTE_CLOSE[opener]
+    depth = 0
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        elif text.startswith("\n\n", i):
+            return i
+        i += 1
+    return len(text)
+
+
+def has_internal_note(text):
+    return bool(text) and bool(_NOTE_OPEN.search(text))
+
+
+def strip_internal_notes(text):
+    """`text` without any internal note; unchanged when it has none."""
+    if not isinstance(text, str) or not has_internal_note(text):
+        return text
+    out, pos = [], 0
+    while True:
+        m = _NOTE_OPEN.search(text, pos)
+        if not m:
+            out.append(text[pos:])
+            break
+        out.append(text[pos:m.start()])
+        end = _note_end(text, m.start(1), m.group(1))
+        # the emphasis that closed it: "*(system: ...)*"
+        while end < len(text) and text[end] in "*_":
+            end += 1
+        pos = end
+    cleaned = "".join(out)
+    # tidy what the removal left: doubled spaces, spaces before punctuation,
+    # empty lines at the edges, more than one blank line in a row
+    cleaned = re.sub(r"(?<=\S)[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r" +([.,;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned or NOTE_ONLY_REPLY
+
+
 def add_message(conn, session_id, role, content, meta=None):
     from psycopg2.extras import Json
+    if role == "assistant":
+        # The one choke point for every reply the worker posts: the editor's
+        # internal notes ("(system: ...)", "[system: ...]") never reach a
+        # user, whichever path composed the text (30 Oct 2026).
+        content = strip_internal_notes(content)
     with conn.cursor() as cur:
         cur.execute("""INSERT INTO chat_messages (session_id, role, content, meta)
                        VALUES (%s, %s, %s, %s) RETURNING id""",

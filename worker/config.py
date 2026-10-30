@@ -1981,6 +1981,14 @@ AGENT_MAX_PRODUCTIVE_SLICES = min(
 # requests short). It works until it is fulfilled; what stops it is evidence
 # of being stuck (the repeated-blocker and same-findings checks in
 # agent_loop), AGENT_MAX_PRODUCTIVE_SLICES above, and the user's credits.
+# The one exception is the FREE TRIAL's request (never a subscriber's): it
+# renders at most this many previews (Q3, 30 Oct 2026: one look and one
+# repair; agent_loop._trial_render_refusal). 0 = no cap on the trial either.
+CLAUDE_TRIAL_MAX_PREVIEWS = max(
+    0, int(os.getenv("CLAUDE_TRIAL_MAX_PREVIEWS", "2")))
+# The trial turn's punch/slam lift on talking heads (trial_turn.lift_static):
+# off, measured (see trial_turn.prepare); "1" turns it on.
+CLAUDE_TRIAL_LIFT_TALKING = os.getenv("CLAUDE_TRIAL_LIFT_TALKING", "0") == "1"
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))
