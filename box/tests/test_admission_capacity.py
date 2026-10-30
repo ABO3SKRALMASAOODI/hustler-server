@@ -240,8 +240,11 @@ def test_a_lone_owner_call_always_fits_its_own_budget(adm):
 
 def test_owner_memory_headroom_keeps_real_memory_for_customers(adm):
     box = _box(adm, mem_reserve_gib=3.5, owner_mem_headroom_gib=3.0)
+    running = _submit(box)                # the factory already renders
+    _assign(box)
+    assert running["slot"]
     adm._mem["gib"] = 8.0
-    # A final needs 6.5: 8 - 3.25 = 4.75 < 3.5 + 3 -> the factory waits ...
+    # Its next final needs 6.5: 8 - 6.5 < 3.5 + 3 -> the factory waits ...
     owner = _submit(box, lane="batch", jtype="final")
     _assign(box)
     assert owner["slot"] is None
@@ -470,7 +473,10 @@ def test_light_calls_are_not_held_by_the_committed_estimate_budget(adm):
 
 def test_factory_headroom_counts_a_render_s_full_estimate(adm):
     box = _mixed_box(adm, owner_mem_headroom_gib=2.5)
-    # A factory final (6.5) needs 3.5 + 2.5 + 6.5 = 12.5 GiB available.
+    first = _submit(box)                  # the factory's first render
+    _assign(box)
+    assert first["slot"]
+    # A second factory final (6.5) needs 3.5 + 2.5 + 6.5 = 12.5 GiB.
     adm._mem["gib"] = 12.0
     final = _submit(box, lane="batch", jtype="final")
     _assign(box)
@@ -478,12 +484,30 @@ def test_factory_headroom_counts_a_render_s_full_estimate(adm):
     adm._mem["gib"] = 12.6
     _assign(box)
     assert final["slot"]
-    # A factory preview (3.0) needs 9.0; a customer preview only 5.0.
+    # Another factory preview (3.0) needs 9.0; a customer preview only 5.0.
     adm._mem["gib"] = 8.0
     owner_preview = _submit(box)
     customer_preview = _submit(box, priority="customer")
     _assign(box)
     assert owner_preview["slot"] is None and customer_preview["slot"]
+
+
+def test_the_factory_s_first_render_always_starts_on_a_quiet_box(adm):
+    # 30 Oct, L4b: test containers and a migration held ~4.8 GiB outside
+    # the slots; MemAvailable 10.2 on an idle box, and both factory finals
+    # waited 35 minutes. The first heavy call answers to box-wide rules.
+    box = _mixed_box(adm, owner_mem_headroom_gib=2.5,
+                     owner_mem_budget_gib=16.0)
+    adm._mem["gib"] = 10.2
+    finals = [_submit(box, lane="batch", jtype="final") for _ in range(2)]
+    _assign(box)
+    assert finals[0]["slot"] and finals[1]["slot"] is None
+    # Below the box-wide reserve even the first one waits.
+    box2 = _mixed_box(adm, owner_mem_headroom_gib=2.5)
+    adm._mem["gib"] = 3.0
+    held = _submit(box2, lane="batch", jtype="final")
+    _assign(box2)
+    assert held["slot"] is None
 
 
 def test_factory_budget_counts_its_heavy_calls_only(adm):
