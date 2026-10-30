@@ -102,6 +102,9 @@ TERMINAL_RETENTION_S = 7 * 24 * 3600
 SUBMITTED_STALE_S = 60.0
 STARTING_STALE_S = 180.0
 ABANDON_MIN_DISCONNECTED_S = 120.0
+# A claim re-asking after a capacity refusal keeps its arrival time this
+# long (the dispatcher's in-claim window is 30 min; then a new claim).
+KEEP_PLACE_S = 3600.0
 LIVE = ("submitted", "starting", "running", "unknown", "stopping")
 OCCUPYING = ("starting", "running", "unknown", "stopping")
 CLASS_RANK = {"customer": 0, "trial": 1, "owner": 2}
@@ -1012,6 +1015,17 @@ class Box:
             if len(self.waiting) >= self.cfg.queue_max:
                 return 429, refusal_envelope(
                     jtype, "Box admission queue is full; nothing ran")
+            # The same claim asking again after "no room within 150 s"
+            # keeps its place in the queue (R1 chaos, 30 Oct 2026): it used
+            # to re-enter at the back of its class, behind every call that
+            # arrived while it waited, so under sustained load a call could
+            # lose round after round, and oldest_wait_s reset every 150 s.
+            # The call id names one claim, so this is the same job's wait.
+            arrived = t
+            if existing and existing["status"] == "refused" and \
+                    existing.get("created_at") and \
+                    0 <= t - float(existing["created_at"]) < KEEP_PLACE_S:
+                arrived = float(existing["created_at"])
             rec = {"call_id": call_id, "lane": lane, "job_type": jtype,
                    "status": "submitted", "slot": None,
                    "job": json.dumps(identity), "launch_id": launch_id,
@@ -1020,13 +1034,13 @@ class Box:
                    # The execution lease starts when a slot takes the
                    # call (_run_on_slot); a queued call only needs to
                    # outlive its own bounded wait.
-                   "created_at": t, "active_until": t + wait_s + 120,
+                   "created_at": arrived, "active_until": t + wait_s + 120,
                    "started_at": None, "container_started": None,
                    "disconnected_at": None, "terminal_at": None,
                    "abandon_reason": None}
             self.put(rec)
             waiter = {"call_id": call_id, "lane": lane, "priority": priority,
-                      "enqueued": t, "slot": None, "job_type": jtype,
+                      "enqueued": arrived, "slot": None, "job_type": jtype,
                       "child": bool(synchronous),
                       "source": str(job.get("dispatcher_source") or ""),
                       "affinity": affinity_key(call_id)}
