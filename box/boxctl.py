@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -51,6 +52,8 @@ LOCK_PATH = "/run/valmera-boxctl.lock"
 # named (box/host/add_box.sh writes this file, e.g. "box-h2.json").
 PLAN_NAME_PATH = os.getenv("BOX_PLAN_NAME_FILE", "/etc/valmera/plan")
 CHANGED_FLAG = os.path.join(DATA_DIR, "env-changed")
+STATE_DB = os.getenv("BOX_STATE_DB", os.path.join(DATA_DIR,
+                                                  "admission.sqlite"))
 LOG_PATH = "/var/log/valmera/boxctl.log"
 NETWORK = "valmera"
 SUBNET = "172.30.0.0/24"
@@ -741,6 +744,58 @@ def pending_admission_restart():
     log("restarted valmera-admission (deferred)")
 
 
+def orphan_containers(names, plan_containers, admitted_containers):
+    """Slot containers ("vbox-*") the slot plan no longer lists and the
+    running admission no longer serves: a slot removed from box.json."""
+    return sorted(n for n in names if n.startswith("vbox-")
+                  and n not in plan_containers
+                  and n not in admitted_containers)
+
+
+def slot_has_live_call(slot_name, path=None):
+    """Whether admission's ledger holds a live call on this slot (read
+    only). Unreadable counts as yes: never remove what might be working."""
+    try:
+        db = sqlite3.connect(f"file:{path or STATE_DB}?mode=ro", uri=True,
+                             timeout=5)
+        try:
+            row = db.execute(
+                "SELECT 1 FROM calls WHERE slot=? AND status IN "
+                "('submitted','starting','running','unknown','stopping') "
+                "LIMIT 1", (slot_name,)).fetchone()
+        finally:
+            db.close()
+        return row is not None
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def remove_orphan_slots():
+    """Remove the containers of slots dropped from the plan, once the
+    running admission no longer lists them (its restart applied the plan),
+    so an idle dropped slot never keeps its memory. Never touches any other
+    container (test containers, databases) and never a slot admission
+    still serves."""
+    state = admission_state()
+    if state is None:
+        return []
+    admitted = {container_name({"name": s.get("name")})
+                for s in state.get("slot_detail") or [] if s.get("name")}
+    plan = {container_name(s) for s in config().get("slots", [])}
+    out = sh(["docker", "ps", "-a", "--format", "{{.Names}}"], check=False)
+    if out.returncode != 0:
+        return []
+    gone = []
+    for name in orphan_containers(out.stdout.split(), plan, admitted):
+        if slot_has_live_call(name[len("vbox-"):]):
+            log(f"{name} left the plan but still holds a call; kept")
+            continue
+        sh(["docker", "rm", "-f", name], check=False)
+        log(f"removed {name}: its slot is no longer in the plan")
+        gone.append(name)
+    return gone
+
+
 def cmd_update():
     cfg = config()
     commit = fetch_main()
@@ -758,6 +813,10 @@ def cmd_update():
     build_images(source)
     converge(source, commit, float(cfg.get("drain_timeout_s", 7200)))
     sync_limits()
+    try:
+        remove_orphan_slots()
+    except Exception as exc:  # noqa: BLE001 - never blocks a release
+        log(f"orphan slots: {type(exc).__name__}: {str(exc)[:200]}")
     rel = release()
     if rel.get("source") != source or rel.get("commit") != commit:
         rel.update({"source": source, "commit": commit})
