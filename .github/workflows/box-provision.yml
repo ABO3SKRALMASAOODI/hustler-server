@@ -28,7 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      BOX_URL: https://13-140-241-231.sslip.io
+      # Every render box, space-separated. box/host/add_box.sh appends a new
+      # box here; each one gets its own single-use OIDC token.
+      BOX_URLS: https://13-140-241-231.sslip.io
     steps:
       - name: deliver executor secrets to the box
         env:
@@ -57,14 +59,14 @@ jobs:
           S3_NEXT_SECRET_ACCESS_KEY: ${{ secrets.S3_NEXT_SECRET_ACCESS_KEY }}
           S3_NEXT_BUCKET: ${{ secrets.S3_NEXT_BUCKET }}
           S3_NEXT_REGION: ${{ secrets.S3_NEXT_REGION }}
+          # Owner YouTube decisions (b) and (c); empty secrets are skipped.
+          YTDLP_PROXY: ${{ secrets.YTDLP_PROXY }}
+          CLOUDFLARE_EXECUTOR_URL: ${{ secrets.CLOUDFLARE_EXECUTOR_URL }}
         run: |
           set -euo pipefail
           for name in REMOTE_EXECUTOR_SECRET DATABASE_URL S3_ENDPOINT S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_BUCKET; do
             test -n "${!name}" || { echo "::error::missing GitHub secret for $name"; exit 1; }
           done
-          token=$(curl -sS --fail -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=valmera-box" | jq -r .value)
-          echo "::add-mask::$token"
           body=$(mktemp)
           trap 'rm -f "$body"' EXIT
           jq -n \
@@ -93,25 +95,37 @@ jobs:
             --arg S3_NEXT_SECRET_ACCESS_KEY "$S3_NEXT_SECRET_ACCESS_KEY" \
             --arg S3_NEXT_BUCKET "$S3_NEXT_BUCKET" \
             --arg S3_NEXT_REGION "$S3_NEXT_REGION" \
-            '{env: {REMOTE_EXECUTOR_SECRET:$REMOTE_EXECUTOR_SECRET,DATABASE_URL:$DATABASE_URL,S3_ENDPOINT:$S3_ENDPOINT,S3_ACCESS_KEY_ID:$S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY:$S3_SECRET_ACCESS_KEY,S3_BUCKET:$S3_BUCKET,S3_REGION:$S3_REGION,OPENAI_API_KEY:$OPENAI_API_KEY,OPENAI_BASE_URL:$OPENAI_BASE_URL,VISION_API_KEY:$VISION_API_KEY,VISION_BASE_URL:$VISION_BASE_URL,VISION_MODEL:$VISION_MODEL,IMAGE_API_KEY:$IMAGE_API_KEY,IMAGE_BASE_URL:$IMAGE_BASE_URL,IMAGE_GEN_MODEL:$IMAGE_GEN_MODEL,FAL_KEY:$FAL_KEY,DEEPGRAM_API_KEY:$DEEPGRAM_API_KEY,PEXELS_API_KEY:$PEXELS_API_KEY,PIXABAY_API_KEY:$PIXABAY_API_KEY,ANTHROPIC_API_KEY:$ANTHROPIC_API_KEY,S3_NEXT_ENDPOINT:$S3_NEXT_ENDPOINT,S3_NEXT_ACCESS_KEY_ID:$S3_NEXT_ACCESS_KEY_ID,S3_NEXT_SECRET_ACCESS_KEY:$S3_NEXT_SECRET_ACCESS_KEY,S3_NEXT_BUCKET:$S3_NEXT_BUCKET,S3_NEXT_REGION:$S3_NEXT_REGION} | with_entries(select(.value != ""))}' \
+            --arg YTDLP_PROXY "$YTDLP_PROXY" \
+            --arg CLOUDFLARE_EXECUTOR_URL "$CLOUDFLARE_EXECUTOR_URL" \
+            '{env: {REMOTE_EXECUTOR_SECRET:$REMOTE_EXECUTOR_SECRET,DATABASE_URL:$DATABASE_URL,S3_ENDPOINT:$S3_ENDPOINT,S3_ACCESS_KEY_ID:$S3_ACCESS_KEY_ID,S3_SECRET_ACCESS_KEY:$S3_SECRET_ACCESS_KEY,S3_BUCKET:$S3_BUCKET,S3_REGION:$S3_REGION,OPENAI_API_KEY:$OPENAI_API_KEY,OPENAI_BASE_URL:$OPENAI_BASE_URL,VISION_API_KEY:$VISION_API_KEY,VISION_BASE_URL:$VISION_BASE_URL,VISION_MODEL:$VISION_MODEL,IMAGE_API_KEY:$IMAGE_API_KEY,IMAGE_BASE_URL:$IMAGE_BASE_URL,IMAGE_GEN_MODEL:$IMAGE_GEN_MODEL,FAL_KEY:$FAL_KEY,DEEPGRAM_API_KEY:$DEEPGRAM_API_KEY,PEXELS_API_KEY:$PEXELS_API_KEY,PIXABAY_API_KEY:$PIXABAY_API_KEY,ANTHROPIC_API_KEY:$ANTHROPIC_API_KEY,S3_NEXT_ENDPOINT:$S3_NEXT_ENDPOINT,S3_NEXT_ACCESS_KEY_ID:$S3_NEXT_ACCESS_KEY_ID,S3_NEXT_SECRET_ACCESS_KEY:$S3_NEXT_SECRET_ACCESS_KEY,S3_NEXT_BUCKET:$S3_NEXT_BUCKET,S3_NEXT_REGION:$S3_NEXT_REGION,YTDLP_PROXY:$YTDLP_PROXY,CLOUDFLARE_EXECUTOR_URL:$CLOUDFLARE_EXECUTOR_URL} | with_entries(select(.value != ""))}' \
             > "$body"
-          for attempt in 1 2 3 4 5; do
-            code=$(curl -sS -o response.json -w '%{http_code}' --max-time 30 \
-              -X POST "$BOX_URL/provision/secrets" \
-              -H "Authorization: Bearer $token" \
-              -H "Content-Type: application/json" \
-              --data-binary @"$body" || echo 000)
-            if [ "$code" = "200" ]; then
-              jq '{ok, changed, names}' response.json
-              exit 0
-            fi
-            echo "box answered $code: $(jq -r .error response.json 2>/dev/null || true)"
-            if [ "$code" = "401" ] || [ "$code" = "400" ]; then exit 1; fi
-            # A token is single-use; mint a fresh one for the retry.
-            sleep $((attempt * 10))
+          mint() {
             token=$(curl -sS --fail -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
               "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=valmera-box" | jq -r .value)
             echo "::add-mask::$token"
+          }
+          deliver() {
+            local box_url=$1 attempt code
+            for attempt in 1 2 3 4 5; do
+              # A token is single-use: a fresh one for every box and retry.
+              mint
+              code=$(curl -sS -o response.json -w '%{http_code}' --max-time 30 \
+                -X POST "$box_url/provision/secrets" \
+                -H "Authorization: Bearer $token" \
+                -H "Content-Type: application/json" \
+                --data-binary @"$body" || echo 000)
+              if [ "$code" = "200" ]; then
+                echo "$box_url: $(jq -c '{ok, changed, names}' response.json)"
+                return 0
+              fi
+              echo "$box_url answered $code: $(jq -r .error response.json 2>/dev/null || true)"
+              if [ "$code" = "401" ] || [ "$code" = "400" ]; then return 1; fi
+              sleep $((attempt * 10))
+            done
+            return 1
+          }
+          failed=0
+          for box_url in $BOX_URLS; do
+            deliver "$box_url" || { echo "::error::$box_url did not accept the secrets"; failed=1; }
           done
-          echo "::error::the box did not accept the secrets"
-          exit 1
+          exit $failed

@@ -28,6 +28,7 @@ switch and no job ever runs on other code.
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,10 @@ SLOT_ENV_PATH = os.getenv("BOX_SLOT_ENV_FILE", "/etc/valmera/slot.env")
 ADMIN_TOKEN_PATH = os.getenv("BOX_ADMIN_TOKEN_FILE",
                              "/etc/valmera/admin.token")
 LOCK_PATH = "/run/valmera-boxctl.lock"
+# Which of the repository's slot plans (box/host/box*.json) this host runs:
+# the first box runs box.json (no file), a second box the plan its install
+# named (box/host/add_box.sh writes this file, e.g. "box-h2.json").
+PLAN_NAME_PATH = os.getenv("BOX_PLAN_NAME_FILE", "/etc/valmera/plan")
 CHANGED_FLAG = os.path.join(DATA_DIR, "env-changed")
 LOG_PATH = "/var/log/valmera/boxctl.log"
 NETWORK = "valmera"
@@ -92,6 +97,16 @@ def write_json(path, obj):
 
 def config():
     return load_json(CONFIG_PATH, {})
+
+
+def plan_name():
+    """This host's slot plan file in box/host ("box.json" by default)."""
+    try:
+        with open(PLAN_NAME_PATH, encoding="utf-8") as fh:
+            name = fh.read().strip()
+    except OSError:
+        name = ""
+    return name if re.fullmatch(r"box[a-z0-9-]*\.json", name) else "box.json"
 
 
 def release():
@@ -205,30 +220,192 @@ def install_box_tooling():
     return changed
 
 
+# Host files the repository owns, kept in place by every update run (E1,
+# 30 Oct 2026): a box-only push changes the box's units and host config with
+# no hands on it. Destination -> source under BOX_HOME/host.
+HOST_FILES = {
+    "/etc/needrestart/conf.d/valmera.conf": "needrestart-valmera.conf",
+    "/etc/systemd/journald.conf.d/valmera.conf": "journald-valmera.conf",
+    "/etc/logrotate.d/valmera": "logrotate-valmera",
+}
+UNIT_DIR = "/etc/systemd/system"
+# Long-running services: a changed unit file is reloaded, never restarted
+# here (restart_services owns their restarts, deferred while calls run).
+_LONG_RUNNING = {"valmera-admission.service", "valmera-provision.service"}
+
+
+def _write_if_changed(src, dest, mode=0o644):
+    with open(src, "rb") as fh:
+        new = fh.read()
+    try:
+        with open(dest, "rb") as fh:
+            if fh.read() == new:
+                return False
+    except OSError:
+        pass
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest + ".tmp", "wb") as fh:
+        fh.write(new)
+    os.chmod(dest + ".tmp", mode)
+    os.replace(dest + ".tmp", dest)
+    return True
+
+
+def install_host_files():
+    """Install changed systemd units and host config from BOX_HOME/host.
+
+    New timers are enabled and started; a changed oneshot or timer is picked
+    up by daemon-reload; admission and provisioning are never restarted
+    here. Returns the destinations that changed."""
+    host = os.path.join(BOX_HOME, "host")
+    changed, units = [], []
+    try:
+        names = sorted(os.listdir(host))
+    except OSError:
+        return changed
+    for name in names:
+        if name.startswith("valmera-") and name.endswith(
+                (".service", ".timer")):
+            dest = os.path.join(UNIT_DIR, name)
+            if _write_if_changed(os.path.join(host, name), dest):
+                changed.append(dest)
+                units.append(name)
+    for dest, name in HOST_FILES.items():
+        src = os.path.join(host, name)
+        if os.path.exists(src) and _write_if_changed(src, dest):
+            changed.append(dest)
+    if units:
+        sh(["systemctl", "daemon-reload"], check=False)
+    for name in units:
+        if name.endswith(".timer"):
+            sh(["systemctl", "enable", "--now", name], check=False)
+        elif name == "valmera-resume.service":
+            sh(["systemctl", "enable", name], check=False)
+        elif name not in _LONG_RUNNING:
+            pass  # oneshots run from their timers
+    if any(d.startswith("/etc/systemd/journald") for d in changed):
+        sh(["systemctl", "restart", "systemd-journald"], check=False)
+    if changed:
+        log("host files installed: " + ", ".join(changed))
+    return changed
+
+
+def ensure_host_packages():
+    """python3-psycopg2 for health_report.py (installed once, if missing)."""
+    if sh(["dpkg", "-s", "python3-psycopg2"], check=False).returncode == 0:
+        return
+    out = sh(["apt-get", "install", "-y", "-q", "python3-psycopg2"],
+             check=False, timeout=600)
+    log("installed python3-psycopg2" if out.returncode == 0 else
+        "python3-psycopg2 install failed (apt busy?); retry next run")
+
+
 # ── slot containers ────────────────────────────────────────────────────────
 def container_name(slot):
     return slot.get("container") or f"vbox-{slot['name']}"
 
 
 def container_info(name):
+    # The cache label holds "|" itself (cache_label), so it is read LAST
+    # and keeps everything after the fourth separator.
     out = sh(["docker", "inspect", "-f",
               "{{.Config.Image}}|{{.State.Running}}|{{.Created}}|"
               "{{range $p, $b := .HostConfig.PortBindings}}"
-              "{{range $b}}{{.HostPort}}{{end}}{{end}}", name],
+              "{{range $b}}{{.HostPort}}{{end}}{{end}}|"
+              "{{index .Config.Labels \"valmera.cache\"}}", name],
              check=False)
     if out.returncode != 0:
         return None
-    image, running, created, port = (out.stdout.strip().split("|", 3)
-                                     + [""])[:4]
+    return parse_container_info(out.stdout)
+
+
+def parse_container_info(text):
+    image, running, created, port, cache = (text.strip().split("|", 4)
+                                            + ["", "", ""])[:5]
     return {"image": image, "running": running == "true", "created": created,
-            "port": port.strip()}
+            "port": port.strip(), "cache": cache.strip()}
 
 
 def _slot_drifted(slot, info, source):
-    """Missing, stopped, on another image, or published on another port."""
+    """Missing, stopped, on another image, published on another port, or
+    created with another shared-cache setup."""
     return (info is None or not info["running"]
             or info["image"] != slot_image(slot, source)
-            or (info.get("port") and info["port"] != str(slot["port"])))
+            or (info.get("port") and info["port"] != str(slot["port"]))
+            or info.get("cache", "") != cache_label())
+
+
+# ── the box-wide render cache (E3, 30 Oct 2026) ────────────────────────────
+# Every slot used to keep its motion-graphic clips, plate moments and (with
+# worker/render_memo.py) its picture-check answers in its own container
+# layer: lost on every release roll, and a short's next render, landing on
+# another of six slots, re-rendered all of it. One host directory shared by
+# every slot is the same content-addressed cache seen by all of them (keys
+# hold content, code and runtime digests, so slots on two releases during a
+# roll never share a wrong answer). box.json "shared_cache":
+#   {"dir": "/var/lib/valmera/cache", "motion_max_gib": 12, "memo": true,
+#    "max_age_days": 4}
+# An empty or absent "dir" keeps the per-container caches (old behaviour).
+SHARED_CACHE_MOUNT = "/var/cache/valmera"
+
+
+def cache_conf(cfg=None):
+    conf = dict((cfg if cfg is not None else config()).get("shared_cache")
+                or {})
+    if not str(conf.get("dir") or "").strip():
+        return None
+    conf["dir"] = str(conf["dir"]).strip()
+    return conf
+
+
+def cache_label(cfg=None):
+    """The slot label naming its shared-cache setup ("" when off): a slot
+    whose label differs is recreated by the next drained roll."""
+    conf = cache_conf(cfg)
+    if conf is None:
+        return ""
+    return (f"{conf['dir']}|{float(conf.get('motion_max_gib', 12)):g}|"
+            f"{int(bool(conf.get('memo', True)))}")
+
+
+def cache_args(cfg=None):
+    """docker run arguments for the shared cache ([] when off)."""
+    conf = cache_conf(cfg)
+    if conf is None:
+        return []
+    os.makedirs(conf["dir"], exist_ok=True)
+    max_bytes = int(float(conf.get("motion_max_gib", 12)) * 1024 ** 3)
+    args = ["-v", f"{conf['dir']}:{SHARED_CACHE_MOUNT}",
+            "-e", f"MOTION_CACHE_DIR={SHARED_CACHE_MOUNT}/motion",
+            "-e", f"MOTION_CACHE_MAX_BYTES={max_bytes}",
+            "--label", f"valmera.cache={cache_label(cfg)}"]
+    if conf.get("memo", True):
+        args += ["-e", "RENDER_MEMO=1"]
+    return args
+
+
+def clean_shared_cache(conf, tight, now=None):
+    """Age out the shared cache: files untouched for ``max_age_days`` (a
+    hit refreshes a clip's mtime), or for 6 h when the disk is under its
+    low-water mark. The writers bound it by size and count themselves;
+    this is the backstop. Returns the number of files removed."""
+    if not conf:
+        return 0
+    now = time.time() if now is None else now
+    limit = (6 * 3600 if tight else
+             float(conf.get("max_age_days", 4)) * 86400)
+    removed = 0
+    for root, _dirs, files in os.walk(conf["dir"]):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+                if now - max(st.st_mtime, st.st_atime) > limit:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 def _bytes(size):
@@ -335,6 +512,7 @@ def run_slot(slot, source):
         "-e", f"BOX_SLOT={slot['name']}",
         "-e", f"BOX_SLOT_CPUS={slot.get('cpus', 1)}",
         "-e", f"BOX_EXECUTOR_URL=http://{GATEWAY}:{port}",
+        *cache_args(cfg),
         slot_image(slot, source),
     ]
     sh(args, timeout=300)
@@ -517,8 +695,9 @@ def restart_services(changed):
             open(flag, "w").close()
         else:
             units.append("valmera-admission")
+    plan = os.path.join(BOX_HOME, "host", plan_name())
     try:
-        with open(os.path.join(BOX_HOME, "host", "box.json"), "rb") as fh:
+        with open(plan, "rb") as fh:
             repo_plan = fh.read()
         with open(CONFIG_PATH, "rb") as fh:
             live_plan = fh.read()
@@ -530,12 +709,11 @@ def restart_services(changed):
         # while calls are in flight, like a code change).
         before = [(s.get("name"), s.get("lane")) for s in
                   config().get("slots", [])]
-        shutil.copyfile(os.path.join(BOX_HOME, "host", "box.json"),
-                        CONFIG_PATH + ".tmp")
+        shutil.copyfile(plan, CONFIG_PATH + ".tmp")
         os.replace(CONFIG_PATH + ".tmp", CONFIG_PATH)
         after = [(s.get("name"), s.get("lane")) for s in
                  config().get("slots", [])]
-        log("installed box.json from the repository")
+        log(f"installed {plan_name()} from the repository")
         if before != after and "valmera-admission" not in units:
             state = admission_state() or {}
             if (state.get("slots") or {}).get("busy", 0) or \
@@ -572,6 +750,11 @@ def cmd_update():
         log(f"box tooling changed: {', '.join(sorted(changed))}")
     restart_services(changed)
     pending_admission_restart()
+    try:
+        ensure_host_packages()
+        install_host_files()
+    except Exception as exc:  # noqa: BLE001 - never blocks a release
+        log(f"host files: {type(exc).__name__}: {str(exc)[:200]}")
     build_images(source)
     converge(source, commit, float(cfg.get("drain_timeout_s", 7200)))
     sync_limits()
@@ -609,7 +792,9 @@ def cmd_clean():
       its low-water mark;
     * images: every valmera-* tag other than the current and previous
       release; dangling layers; build cache above 20 GB;
-    * stopped containers that no slot owns.
+    * stopped containers that no slot owns;
+    * the shared render cache: entries untouched for its max age (6 h when
+      the disk is tight).
     """
     cfg = config()
     low_water = float(cfg.get("disk_low_water_gib", 40))
@@ -649,8 +834,13 @@ def cmd_clean():
                     except OSError:
                         pass
                 removed += 1
+    removed += clean_shared_cache(cache_conf(cfg), tight, now)
     rel = release()
-    keep = {rel.get("source"), rel.get("previous_source")}
+    # Under the low-water mark the previous release's images go too (the
+    # current one always stays): the disk guard must never let admission
+    # reach its refusal line (disk_min_free_gib) because of old layers.
+    keep = {rel.get("source")} if tight else \
+        {rel.get("source"), rel.get("previous_source")}
     images = sh(["docker", "images", "--format",
                  "{{.Repository}}:{{.Tag}}"]).stdout.split()
     in_use = {(container_info(container_name(s)) or {}).get("image")
@@ -662,8 +852,8 @@ def cmd_clean():
             sh(["docker", "rmi", image], check=False)
             log(f"removed image {image}")
     sh(["docker", "image", "prune", "-f"], check=False)
-    sh(["docker", "builder", "prune", "-f", "--keep-storage", "20GB"],
-       check=False, timeout=600)
+    sh(["docker", "builder", "prune", "-f", "--keep-storage",
+        "5GB" if tight else "20GB"], check=False, timeout=600)
     log(f"clean: removed {removed} scratch entries; "
         f"{free_gb():.1f} GB free{' (was tight)' if tight else ''}")
 

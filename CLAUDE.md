@@ -76,6 +76,13 @@ waits in its claim and then in the Postgres queue (`remote._run_box_with_wait`,
   `worker/box_routing.py`: `{"enabled", "url", "stages": {"owner", "mcp",
   "trial", "free", "paying"}, "owner_user_ids": [60], "skew": "hold"}`. The
   stamp is immutable: turning a stage off moves only unstamped jobs.
+- **Two boxes** (dormant until box 2 exists): an optional `boxes` list
+  (`[{"id": "h1", "url", "classes", "accepts"}, {"id": "h2", ...}]`) gives
+  each job a home box and overflow boxes; a refusal that proves nothing ran
+  moves the claim to the next box under that box's own call id
+  (`bx-h2-...`), children never leave their box, and without `boxes` the
+  path is exactly the single box. Adding box 2: `box/ADD_BOX.md`
+  (`box/host/add_box.sh <ip>`).
 - **Box side** (`box/`): `admission.py` speaks the Cloudflare named-call
   contract (`bx-` call ids), orders calls customers > trial > owner factory,
   caps the owner per lane, gives synchronous children quick slots, sets each

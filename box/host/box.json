@@ -32,6 +32,13 @@
   "rate_burst": 400,
   "queue_max": 256,
   "drain_timeout_s": 7200,
+  "shared_cache": {
+    "_comment": "E3 (30 Oct 2026): one host directory, mounted into every slot, holds the content-addressed motion clips, plate moments and picture-check answers (MOTION_CACHE_DIR, RENDER_MEMO=1), so a short's next render on any slot reuses what an earlier one measured. boxctl clean ages it out (max_age_days, 6 h when the disk is tight).",
+    "dir": "/var/lib/valmera/cache",
+    "motion_max_gib": 12,
+    "memo": true,
+    "max_age_days": 4
+  },
   "slots": [
     {
       "name": "interactive1",
