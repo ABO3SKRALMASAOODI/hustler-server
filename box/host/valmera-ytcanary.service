@@ -1,0 +1,10 @@
+[Unit]
+Description=Valmera YouTube-through-proxy canary (app_kv youtube_canary + ytdlp_probe_box; the Mac P0 watch alerts the owner)
+After=network-online.target valmera-admission.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/valmera/box/yt_canary.py
+TimeoutStartSec=1200
+Nice=19
+IOSchedulingClass=idle

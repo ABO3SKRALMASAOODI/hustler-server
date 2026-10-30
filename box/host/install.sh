@@ -47,6 +47,7 @@ rm -f /etc/caddy/Caddyfile.valmera
 for unit in valmera-admission.service valmera-provision.service \
     valmera-update.service valmera-update.timer valmera-clean.service \
     valmera-clean.timer valmera-health.service valmera-health.timer \
+    valmera-ytcanary.service valmera-ytcanary.timer \
     valmera-resume.service; do
   install -m 0644 "$here/host/$unit" "/etc/systemd/system/$unit"
 done
@@ -59,7 +60,8 @@ install -m 0644 "$here/host/logrotate-valmera" /etc/logrotate.d/valmera
 systemctl restart systemd-journald
 systemctl daemon-reload
 systemctl enable --now valmera-provision.service valmera-admission.service
-systemctl enable --now valmera-update.timer valmera-clean.timer valmera-health.timer
+systemctl enable --now valmera-update.timer valmera-clean.timer valmera-health.timer \
+    valmera-ytcanary.timer
 systemctl enable valmera-resume.service
 systemctl reload caddy || systemctl restart caddy
 echo "install: ok"

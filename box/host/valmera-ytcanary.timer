@@ -1,0 +1,11 @@
+[Unit]
+Description=Valmera YouTube canary: hourly look, one real probe a day (hourly while failing)
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+RandomizedDelaySec=120
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
