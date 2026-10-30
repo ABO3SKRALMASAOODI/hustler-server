@@ -6206,13 +6206,21 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 truncated=truncated_out)
             import fulfillment
             final = fulfillment.disclose(ctx, final)
-            if _trial_lane(ctx) and config.CLAUDE_TRIAL_REPLY_GUARD:
+            _new_sub = (not _trial_lane(ctx)
+                        and getattr(ctx, "claude_paid", None) is not None)
+            if (_trial_lane(ctx) or _new_sub) and config.CLAUDE_TRIAL_REPLY_GUARD:
                 # Q8: the trial reply says only what the turn's facts back
                 # (EDL diff, the latest preview, the transcript), short and
-                # warm: what changed, where to look, one next step
+                # warm: what changed, where to look, one next step.
+                # REAL_USER_BRUTE (31 Oct): a NEW subscriber's Claude-lane
+                # turn (D1, the same Haiku model) read raw: "The 19-second
+                # cut passes the current preview. I left the opening 'But'
+                # fragment and the sagging middle section unchanged."
+                # Grandfathered subscribers' lanes are untouched.
                 import trial_reply
                 final, _report = trial_reply.finish_for_ctx(
-                    ctx, final, user_message.get("content") or "")
+                    ctx, final, user_message.get("content") or "",
+                    subscriber=_new_sub)
                 if _report and _report.get("dropped"):
                     honesty["trial_reply_dropped"] = _report["dropped"][:12]
             if _trial_lane(ctx):

@@ -56,6 +56,9 @@ class Facts:
     frame: str = None                            # "vertical", "landscape", "square"
     index: dict = field(default_factory=dict)    # transcript (words)
     user_text: str = ""
+    # a NEW subscriber on the Claude lane (D1): the same reply finish, but
+    # an export is theirs to make, so export lines are not trial claims
+    subscriber: bool = False
     checked: bool = False                        # a verification passed this turn
 
 
@@ -72,7 +75,12 @@ _INTERNAL = re.compile(
     r"|\bhero frame|\bfocus_|\bset_frame\b|\bsource rect|\bcrop_|\bpad_blur\b"
     r"|\bimprove it\b|\bpress\b|\bexport this version\b|\bnot a blocker\b|\bfree plan\b"
     r"|\bwarnings?\b|\bnotes? remain|\bmeasured depth\b|\bpreview (?:shows|confirms)\b"
-    r"|\bthe (?:render|preview)'s\b)")
+    r"|\bthe (?:render|preview)'s\b"
+    # REAL_USER_BRUTE (31 Oct): the hand-off contract and the editor's own
+    # measurements, read by real trial users as noise ("It is not ready to
+    # hand off yet", "I'd end that graphic at 21.07s", "captions at 2.3x")
+    r"|\bhand(?:ed|ing)?[- ]?off\b|\bhandoff\b|\bas final\b"
+    r"|\b\d{1,3}\.\d{2}\s?s\b|\b\d\.\d{1,2}x\b)")
 _APOLOGY = re.compile(r"(?i)\b(sorry|apologi[sz]e|unfortunately|i'?m afraid)\b")
 _LIMIT = re.compile(
     r"(?i)(\b(?:i|we) (?:can't|cannot|couldn't|could not|wasn't able to|was not able to|"
@@ -174,9 +182,18 @@ def sentences(text):
             # a sentence ending inside its closing quote ('... "intelligence."
             # The hook ...') is two sentences too
             line = re.sub(r'([.!?\u2026]["\u201d\u2019)])\s+(?=[A-Z\u00c0-\u00dd"\u201c])', "\\1\n", line)
+            # a title quoted with its own question mark ('"NEW TO PYTHON?
+            # START HERE"') is one sentence: REAL_USER_BRUTE (31 Oct) split
+            # it and the reply came out in pieces
+            line = _QUOTED.sub(lambda m: re.sub(r"([.!?\u2026])\s+", "\\1" + _JOIN, m.group(0)), line)
             for part in line.split("\n"):
-                out.extend(s.strip() for s in rg.sentences(part) if s.strip())
+                out.extend(s.strip().replace(_JOIN, " ")
+                           for s in rg.sentences(part) if s.strip())
     return out
+
+
+_JOIN = "\u2063"
+_QUOTED = re.compile(r'"[^"\n]{1,160}"|\u201c[^\u201d\n]{1,160}\u201d')
 
 
 _MARK = re.compile(r'["\u201c\u201d]')
@@ -281,11 +298,29 @@ def _length_claims(sent):
     return vals
 
 
+_TRIM_CLAIM = re.compile(
+    r"(?i)\b(trimm(?:ed|ing)|tightened|tighter|shorter|shortened|cut (?:out|down|away)|"
+    r"(?:pauses?|gaps?|silences?|dead air|fillers?|boring parts?) (?:are |were )?(?:cut|removed|trimmed|gone))\b")
+
+
+def _kept_s(edl):
+    try:
+        return round(sum(float(b) - float(a) for a, b in (edl or {}).get("keep") or []), 2)
+    except (TypeError, ValueError):
+        return None
+
+
 def unbacked(sent, facts):
     """The reason this sentence is not backed by the turn's facts, or None."""
     s = rg.straight(sent)
-    if _TRIAL_EXPORT.search(s) or rg.export_violations(s):
+    if not facts.subscriber and (_TRIAL_EXPORT.search(s) or rg.export_violations(s)):
         return "export"
+    if facts.wrote and _TRIM_CLAIM.search(s) and not rg._NOT_A_CLAIM.search(s):
+        # REAL_USER_BRUTE (31 Oct): "cut the boring parts" came back 1.5 s
+        # LONGER, told as "with the dead pauses trimmed"
+        b, a = _kept_s(facts.before), _kept_s(facts.after)
+        if b and a and a > b + 0.5:
+            return "longer"
     if facts.wrote and _DENY.search(s):
         return "deny"
     if facts.previewed and _RENDER_DENY.search(s):
@@ -457,6 +492,47 @@ def review_note(sent):
     return bool((_STAMP.search(s) and _DEFECT.search(s)) or _LIST.search(s))
 
 
+# What a sentence is about, to tell a status line the user asked for from one
+# about something they never mentioned.
+_TOPICS = {
+    "caption": r"captions?|subtitles?|words? on screen",
+    "title": r"titles?|headlines?|hook|heading|text|graphics?",
+    "zoom": r"zooms?|push-?ins?|camera|punch-?ins?|ken burns|moves?",
+    "broll": r"b-?roll|cutaways?|stills?|images?|footage",
+    "blur": r"blur(?:red|s)?",
+    "music": r"music|songs?|soundtrack",
+    "sound": r"sound effects?|sfx|audio|sound|volume",
+    "colour": r"colou?r|grade|look|filter",
+    "cut": r"cuts?|pauses?|length|pacing|ums?|fillers?|boring",
+    "frame": r"frame|framing|crop|vertical|shape",
+}
+_STATUS = re.compile(r"(?i)\b(unchanged|untouched|remains?|remained|stays? (?:as|the same)|"
+                     r"(?:i )?(?:also )?(?:kept|left) (?:the|its|their|your)\b.*\b(?:which|as|because|since)\b)")
+# a pronoun that only points back at the line before ("I did not repair
+# those, so ..."); "those captions" names its own thing
+_BACKREF = re.compile(r"(?i)\b(them|(?:those|these)(?=\s*[,.;:!?]|\s+(?:so|and|but|yet|for|because|"
+                      r"either|too|as|now|anymore|any more)\b|\s*$))")
+
+
+def _topics(text):
+    t = rg.straight(text or "")
+    return {k for k, rx in _TOPICS.items() if re.search(r"(?i)\b(?:" + rx + r")\b", t)}
+
+
+def status_aside(sent, facts):
+    """A line about what stayed as it was ("the opening zoom and stacked blur
+    effects from the first cut are unchanged", "I also kept the B-roll still's
+    gentle Ken Burns move, which is clean for a cutaway") on a topic the user
+    never asked about: the editor answering its own checks, not the user.
+    A status line about what the user DID ask for is an honest limitation
+    and stays ("The opening title is unchanged ...")."""
+    s = rg.straight(sent)
+    if not _STATUS.search(s):
+        return False
+    about = _topics(s)
+    return bool(about) and not (about & _topics(facts.user_text))
+
+
 def classify(sent, facts):
     why = unbacked(sent, facts)
     if why:
@@ -469,6 +545,8 @@ def classify(sent, facts):
         return "internal", None
     if review_note(sent):
         return "review_note", None
+    if status_aside(sent, facts):
+        return "status", None
     if _APOLOGY.search(s):
         return "apology", None
     if _OFFER.search(s) and not re.search(r"(?i)\b(i've|i have|i made|i cut|i added)\b", s):
@@ -679,8 +757,9 @@ def finish(draft, facts):
     for sent in sentences(draft):
         kind, why = classify(sent, facts)
         prev_dropped_before = prev_dropped
-        if kind in ("keep", "limit") and prev_dropped and re.match(
-                r"(?i)^(they|these|those|this|that|both|either|it also)\b", sent):
+        if kind in ("keep", "limit") and prev_dropped and (re.match(
+                r"(?i)^(they|these|those|this|that|both|either|it also)\b", sent)
+                or _BACKREF.search(rg.straight(sent))):
             kind, why = "orphan", None
         prev_dropped = kind not in ("keep", "limit", "offer")
         if kind == "unbacked":
@@ -795,10 +874,13 @@ def facts_from_ctx(ctx, user_text=""):
                  checked=bool(rec) and not rec.get("unresolved_findings"))
 
 
-def finish_for_ctx(ctx, draft, user_text=""):
-    """finish() for a live trial turn; fail-open to the draft."""
+def finish_for_ctx(ctx, draft, user_text="", subscriber=False):
+    """finish() for a live trial turn (or a new subscriber's Claude-lane
+    turn); fail-open to the draft."""
     try:
-        text, report = finish(draft, facts_from_ctx(ctx, user_text))
+        f = facts_from_ctx(ctx, user_text)
+        f.subscriber = bool(subscriber)
+        text, report = finish(draft, f)
     except Exception as exc:  # noqa: BLE001 — never lose the reply
         print(f"[trial_reply] skipped: {type(exc).__name__}: {exc}", flush=True)
         return draft, None

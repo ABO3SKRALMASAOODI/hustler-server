@@ -1051,3 +1051,24 @@ def test_a_hero_whose_mask_cannot_be_fetched_renders_as_its_display_slam(
     assert any("display slam" in w and "mask unavailable" in w
                for w in motion_layer.LAST_WARNINGS), motion_layer.LAST_WARNINGS
     assert not any("not drawn" in w for w in motion_layer.LAST_WARNINGS)
+
+
+@needs_ffmpeg
+def test_rub_a_relative_title_size_ask_reaches_the_edit(shot, workdir, tool_env):
+    """REAL_USER_BRUTE (31 Oct, production project 5270): "make the opening
+    title a little bigger" ended unchanged. The agent passed the value the
+    title already had (NO CHANGE, with no hint what it had), then named the
+    title's own template, which reset every param ("needs 'text'")."""
+    ctx = _Ctx(shot, workdir)
+    assert motion_tools.add_motion_graphic(
+        ctx, "hook_title", 0.0, 2.5, params={"text": "Video games make *surgeons* better",
+                                             "size": 1.3}, sfx=False).startswith("EDL v")
+    same = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.3})
+    assert same.startswith("NO CHANGE") and "size is 1.3" in same and "range 0.5-1.6" in same, same
+    res = motion_tools.set_motion_graphic(ctx, "mg1", template="hook_title", params={"size": 1.45})
+    assert res.startswith("EDL v"), res
+    p = ctx._edl["motion"][0]["params"]
+    assert p["size"] == 1.45 and p["text"] == "Video games make *surgeons* better"
+    assert motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 1.6}).startswith("EDL v")
+    top = motion_tools.set_motion_graphic(ctx, "mg1", params={"size": 2.0})
+    assert top.startswith("NO CHANGE") and "already the largest" in top, top

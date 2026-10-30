@@ -3098,6 +3098,12 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
     old_shape = json.dumps([hit.get(k) for k in
                             ("start", "end", "template", "params", "html", "box", "layer")],
                            sort_keys=True)
+    if template is not None and template == hit.get("template"):
+        # REAL_USER_BRUTE (31 Oct): naming the graphic's OWN template is not
+        # a template change. It used to reset every param ("hook_title needs
+        # 'text'") and a trial user's "make the opening title a little
+        # bigger" (production project 5270) never reached the edit.
+        template = None
     if template is not None:
         try:
             motion_templates.spec(template)
@@ -3131,6 +3137,10 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
         hit["params"] = motion_templates.check_params(hit["template"], merged, html=hit.get("html"))
     except ValueError as e:
         return f"REJECTED: {e}"
+    same = _same_params_note(hit, json.loads(old_shape)[3] or {}, params)
+    if same and template is None and html is None and start is None and end is None \
+            and layer is None and box is None and mute_captions is None:
+        return same
     prog = _program_duration(edl)
     try:
         if start is not None:
@@ -3268,6 +3278,35 @@ def set_motion_graphic(ctx, id, start=None, end=None, params=None, html=None,
             + (_owned_sfx_checks(ctx, edl, id) if checked else "")
             + (behind_note or "") + tail + _caption_integrity_notes(ctx, edl, hit)
             + _look_notes(ctx, edl, hit, {}))
+
+
+def _same_params_note(hit, old_params, passed):
+    """A params patch that leaves every value as it was (the value it already
+    has, or one past the template's range that clamps back to it): say what
+    the values ARE and their range, so a relative ask ("a little bigger")
+    can pick a value that changes something. None when anything changed."""
+    if not isinstance(passed, dict) or not passed or hit.get("params") != old_params:
+        return None
+    try:
+        spec = motion_templates.spec(hit["template"]).get("params") or {}
+    except ValueError:
+        spec = {}
+    parts = []
+    for k, asked in passed.items():
+        p = spec.get(k) or {}
+        now = old_params.get(k, p.get("default"))
+        rng = (f" (range {p['min']:g}-{p['max']:g})"
+               if isinstance(p.get("min"), (int, float)) and isinstance(p.get("max"), (int, float)) else "")
+        edge = ""
+        if isinstance(p.get("max"), (int, float)) and isinstance(now, (int, float)) and now >= p["max"]:
+            edge = " — already the largest it goes"
+        elif isinstance(p.get("min"), (int, float)) and isinstance(now, (int, float)) and now <= p["min"]:
+            edge = " — already the smallest it goes"
+        parts.append(f"{k} is {now!r}{rng}{edge} (you passed {asked!r})")
+    return (f"NO CHANGE: {hit['id']} ({hit['template']}) already has these values: "
+            + "; ".join(parts) + ". For a relative ask (bigger, smaller, higher) pass a value "
+            "that differs from the current one, inside the range; at the end of a range say "
+            "so plainly instead of claiming a change.")
 
 
 def remove_motion_graphic(ctx, id):
