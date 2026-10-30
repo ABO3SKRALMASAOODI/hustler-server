@@ -339,6 +339,7 @@ class _Screencast:
     # 80s at 30fps. A backstop on disk, not a policy: the wall-clock deadline
     # and WEB_DEMO_MAX_DURATION_S both bind long before this.
     MAX_FRAMES = 2600
+    MIN_GAP_S = 0.03
 
     def __init__(self, page, context, workdir, width, height):
         self.dir = os.path.join(workdir, "frames")
@@ -370,6 +371,21 @@ class _Screencast:
             return
         ts = ((params.get("metadata") or {}).get("timestamp")
               or time.time())
+        if self.frames and float(ts) - self.frames[-1][1] < self.MIN_GAP_S:
+            # Q7: a page that animates sends 50+ frames a second, and the
+            # backstop cut the TAIL of a 60 s capture (osai.ie: "224 frames
+            # near the end were not recorded", the closing call to action
+            # with them). The file is encoded at 30 fps, so a frame closer
+            # than a thirtieth of a second to the last one kept replaces its
+            # picture: the newest state is kept, the count stays at 30/s.
+            try:
+                raw = base64.b64decode(params.get("data") or "")
+                if raw:
+                    with open(self.frames[-1][0], "wb") as fh:
+                        fh.write(raw)
+            except Exception:
+                pass
+            return
         if len(self.frames) >= self.MAX_FRAMES:
             self.dropped += 1
             return
@@ -609,6 +625,181 @@ _FORM_JS = r"""() => {
   return {inputs: inputs, button: button};
 }"""
 
+# A tool's RESULT (Q7, 30 Oct 2026): the judges, every phmath run, "each tool
+# with a real interaction, a calculation typed in and its result". A watcher
+# is set before the tool is used (the elements a script changes, and a
+# fingerprint of each canvas); after the press, the result is the largest
+# block that changed (never the field, the button or the site's own bars),
+# so the tour can bring it into view and the edit can push in on it.
+_WATCH_JS = r"""() => {
+  try { window.__q7o && window.__q7o.disconnect(); } catch (e) {}
+  window.__q7m = [];
+  const o = new MutationObserver((ms) => {
+    for (const m of ms) {
+      let n = m.target;
+      if (n && n.nodeType !== 1) n = n.parentElement;
+      if (n) window.__q7m.push(n);
+      for (const a of (m.addedNodes || [])) {
+        const e = a.nodeType === 1 ? a : a.parentElement;
+        if (e) window.__q7m.push(e);
+      }
+    }
+    if (window.__q7m.length > 600) window.__q7m.splice(0, window.__q7m.length - 600);
+  });
+  o.observe(document.body, {subtree: true, childList: true, characterData: true});
+  window.__q7o = o;
+  const fp = (c) => { try { const d = c.toDataURL('image/jpeg', 0.3); return d.length + ':' + d.slice(-48); } catch (e) { return ''; } };
+  window.__q7c = Array.from(document.querySelectorAll('canvas')).slice(0, 8).map(fp);
+  return true;
+}"""
+
+_RESULT_JS = r"""(skip) => {
+  const W = innerWidth, H = innerHeight, sy = scrollY;
+  try { window.__q7o && window.__q7o.disconnect(); } catch (e) {}
+  const bad = (el) => !el || !el.isConnected ||
+    el.closest('header,nav,footer,[role=navigation],form button') ||
+    el.matches('input,textarea,select,button,option,label,script,style');
+  const shown = (el) => { const st = getComputedStyle(el);
+    return st.display !== 'none' && st.visibility !== 'hidden' && parseFloat(st.opacity || '1') > 0.1; };
+  const cands = [], seen = new Set();
+  const add = (el, why) => {
+    // a changed line of text is read inside its block: climb to an ancestor
+    // at least half the width (the result card), at most four levels
+    let n = el;
+    for (let k = 0; k < 4 && n && n.parentElement; k++) {
+      const r = n.getBoundingClientRect();
+      if (r.width >= W * 0.5 && r.height >= 40) break;
+      n = n.parentElement;
+    }
+    if (!n || seen.has(n) || bad(n) || !shown(n) || n === document.body) return;
+    seen.add(n);
+    const r = n.getBoundingClientRect();
+    if (r.width < W * 0.25 || r.height < 24 || r.height > H * 4) return;
+    cands.push({top: r.top + sy, left: r.left, right: r.right, h: r.height, w: r.width, why});
+  };
+  for (const el of (window.__q7m || [])) add(el, 'dom');
+  const fp = (c) => { try { const d = c.toDataURL('image/jpeg', 0.3); return d.length + ':' + d.slice(-48); } catch (e) { return ''; } };
+  Array.from(document.querySelectorAll('canvas')).slice(0, 8).forEach((c, i) => {
+    const before = (window.__q7c || [])[i];
+    if (before !== undefined && before !== fp(c)) add(c, 'canvas');
+  });
+  // a canvas the press redrew is the result (a plotted curve, a 3D net);
+  // else the biggest changed block that is not a whole-page wrapper, below
+  // the button first (a long list of steps is read from its top)
+  const pick = (list) => { let best = null, area = 0;
+    for (const c of list) { const a = c.w * Math.min(c.h, H); if (a > area) { best = c; area = a; } }
+    return best; };
+  const drawn = cands.filter(c => c.why === 'canvas');
+  if (drawn.length) return pick(drawn);
+  // a big canvas next to the button (a WebGL 3D view cannot be read back,
+  // so its redraw is invisible to the fingerprint): the tool's own view
+  if (skip != null) {
+    for (const el of document.querySelectorAll('canvas')) {
+      const r = el.getBoundingClientRect();
+      const top = r.top + sy;
+      if (r.width >= W * 0.5 && r.height >= 150 && Math.abs(top + r.height / 2 - skip) <= H)
+        return {top, left: r.left, right: r.right, h: r.height, w: r.width, why: 'view'};
+    }
+  }
+  const blocks = cands.filter(c => c.h <= H * 1.6 && c.top >= 0);
+  const below = skip == null ? [] : blocks.filter(c => c.top >= skip - H * 0.3);
+  // below the button, the FIRST block of a real size (the plotted curve
+  // before the analysis under it), not simply the biggest
+  const first = (list) => { const big = pick(list); if (!big) return null;
+    const floor = 0.25 * big.w * Math.min(big.h, H);
+    return list.filter(c => c.w * Math.min(c.h, H) >= floor).sort((a, b) => a.top - b.top)[0]; };
+  const got = first(below) || pick(blocks);
+  if (got) return got;
+  // nothing changed that we can see (the same example drawn again): the
+  // chart the tool shows, the first one below its button
+  for (const el of document.querySelectorAll('canvas,svg')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < W * 0.5 || r.height < 80) continue;
+    const top = r.top + sy;
+    if (skip != null && (top < skip - H * 0.3 || top > skip + H * 1.5)) continue;
+    return {top, left: r.left, right: r.right, h: r.height, w: r.width, why: 'chart'};
+  }
+  return null;
+}"""
+
+# A calculator is a keypad, not a form: digits, an operator and "=" (phmath's
+# Calculadora Científica has no field to type into). Tagged for the
+# recorder's own selectors; null when the page has no keypad.
+_KEYPAD_JS = r"""() => {
+  const keys = {};
+  let k = 0;
+  for (const el of document.querySelectorAll('button,[role=button],input[type=button]')) {
+    const r = el.getBoundingClientRect(), st = getComputedStyle(el);
+    if (r.width < 16 || r.height < 16 || st.visibility === 'hidden' || st.display === 'none') continue;
+    if (el.closest('header,nav,footer')) continue;
+    const t = (el.innerText || el.value || '').trim();
+    if (!/^([0-9]|=|\+|×|x|\*|−|-|÷)$/.test(t) || t in keys) continue;
+    el.setAttribute('data-q7-k', String(k));
+    keys[t] = {sel: '[data-q7-k="' + k + '"]', top: r.top + scrollY};
+    k++;
+  }
+  const digits = Object.keys(keys).filter(t => /^[0-9]$/.test(t)).length;
+  return digits >= 8 && keys['='] ? keys : null;
+}"""
+
+# A product page's own picture and its name with the price (Q7: klosmo, both
+# judges: "push in on the product imagery, then glide to the name, price and
+# details" instead of one held hoodie shot).
+_PRODUCT_JS = r"""() => {
+  const W = innerWidth, H = innerHeight, sy = scrollY;
+  let img = null, area = 0;
+  for (const el of document.querySelectorAll('img,picture,video')) {
+    const r = el.getBoundingClientRect();
+    if (r.bottom < H * 0.08 || r.top > H * 0.9 || r.width < W * 0.4) continue;
+    const a = Math.min(r.width, W) * Math.min(r.height, H);
+    if (a > area) { img = {x0: Math.max(0, r.left) / W, y0: Math.max(0, r.top) / H,
+                           x1: Math.min(W, r.right) / W, y1: Math.min(H, r.bottom) / H}; area = a; }
+  }
+  let info = null;
+  const h1 = document.querySelector('h1');
+  if (h1) {
+    const r = h1.getBoundingClientRect();
+    let top = r.top + sy, bottom = r.bottom + sy, x0 = r.left, x1 = r.right;
+    // the price close under (or over) the name
+    for (const el of document.querySelectorAll('[class*=price],[itemprop=price],.money')) {
+      const q = el.getBoundingClientRect();
+      if (q.height < 8 || Math.abs(q.top + sy - bottom) > H * 0.25) continue;
+      top = Math.min(top, q.top + sy); bottom = Math.max(bottom, q.bottom + sy);
+      x0 = Math.min(x0, q.left); x1 = Math.max(x1, q.right);
+      break;
+    }
+    if (r.height > 6) info = {top, bottom, x0: x0 / W, x1: x1 / W, t: (h1.innerText || '').trim().slice(0, 60)};
+  }
+  return {img, info};
+}"""
+
+# A ticker in the site's announcement bar (Q7: klosmo's "10% Off Your First
+# Order — Subscribe to Unlock" marquee came out as overlapping, garbled words
+# in a frames-on-change capture; judges: "a stutter"): its CSS animation is
+# put back to its start and paused, so the bar reads as the site's own words,
+# still there, standing still. Nothing else on the page is touched.
+_TICKER_JS = r"""() => {
+  if (!document.getAnimations) return 0;
+  const W = innerWidth, H = innerHeight; let n = 0;
+  for (const a of document.getAnimations()) {
+    const el = a.effect && a.effect.target;
+    if (!el || !el.getBoundingClientRect) continue;
+    let band = el;
+    for (let k = 0; k < 8 && band.parentElement; k++) {
+      if (band.getBoundingClientRect().width >= W * 0.9) break;
+      band = band.parentElement;
+    }
+    const r = band.getBoundingClientRect();
+    const tr = el.getBoundingClientRect();
+    if (r.width >= W * 0.9 && r.height <= 64 && r.top + scrollY < H * 0.25 &&
+        tr.width > W * 1.05) {
+      try { a.currentTime = 0; a.pause(); n++; } catch (e) {}
+    }
+  }
+  return n;
+}"""
+
+
 # The page's geometry for the tour (Q2, 30 Oct 2026): where its footer starts,
 # its calls to action anywhere on the page and its headings, in page pixels.
 # The tour keeps the footer and the page's closing call to action out of the
@@ -638,11 +829,13 @@ _PAGE_JS = r"""(words) => {
   for (const el of document.querySelectorAll('a,button,[role=button]')) {
     const r = el.getBoundingClientRect();
     if (r.width < 40 || r.height < 18) continue;
-    const st = getComputedStyle(el);
-    if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') < 0.2) continue;
+    // (Q7) the words first: reading every link's style on a shop's
+    // mega-menu took seconds on a busy machine
     const t = (el.innerText || el.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
     const low = t.toLowerCase();
     if (!t || t.length > 32 || !words.some(c => low === c || low.startsWith(c))) continue;
+    const st = getComputedStyle(el);
+    if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') < 0.2) continue;
     if (pinned(el)) continue;
     // a BUTTON, not a text link in a list of links (a footer's "Get a
     // demo" link is not the page's closing call to action; Q2, cal.com)
@@ -791,6 +984,13 @@ def _norm_steps(steps):
                 step["brief"] = True
             if raw.get("prefer"):
                 step["prefer"] = str(raw["prefer"])[:1600 if step.get("brief") else 600]
+            try:
+                # Q7: how long the edit's opening title holds over the hero
+                tts = float(raw.get("title_s") or 0)
+            except (TypeError, ValueError):
+                tts = 0.0
+            if tts:
+                step["title_s"] = min(max(tts, 1.0), 8.0)
             try:
                 secs = float(raw.get("seconds") or 0)
             except (TypeError, ValueError):
@@ -1182,7 +1382,7 @@ class _Session:
         """[(rank, {t, href})] of the site's own section links (hidden ones
         too), in TOUR_SECTIONS order."""
         try:
-            info = self.page.evaluate(_TOUR_JS) or {}
+            info = self._eval(_TOUR_JS) or {}
         except Exception:
             return []
         out, seen = [], set()
@@ -1198,7 +1398,7 @@ class _Session:
 
     def _tour_items(self):
         try:
-            info = self.page.evaluate(_TOUR_JS) or {}
+            info = self._eval(_TOUR_JS) or {}
         except Exception:
             info = {}
         items = [i for i in info.get("items") or []
@@ -1289,7 +1489,7 @@ class _Session:
 
     def _page(self):
         try:
-            return self.page.evaluate(_PAGE_JS, list(CLOSING_CTA)) or {}
+            return self._eval(_PAGE_JS, list(CLOSING_CTA)) or {}
         except Exception:
             return {}
 
@@ -1367,8 +1567,13 @@ class _Session:
         return min(max(0.85 + 0.18 * abs(float(dist)) / max(1.0, self.H), 0.9), 1.7)
 
     def _time_up(self, until, reserve):
+        # Q7: the length ceiling is the EDIT's (what the edit cuts does not
+        # count), with a capture ceiling well above it: on a busy machine a
+        # slow site's loading spans (cut from the edit) ate the 75 s and a
+        # six-tool brief stopped after its first tool
         return (self.deadline - time.monotonic() <= 8
-                or self.now() >= config.WEB_DEMO_MAX_DURATION_S - 6
+                or self.now() - self.lost_s >= config.WEB_DEMO_MAX_DURATION_S - 6
+                or self.now() >= config.WEB_DEMO_MAX_DURATION_S + CAPTURE_EXTRA_S
                 or self.now() >= until + self.lost_s - reserve)
 
     def _point(self, item, dwell, kind="hover"):
@@ -1510,7 +1715,8 @@ class _Session:
                   str(best["t"]), box=box)
         return best
 
-    def _travel(self, until, reserve, most=None, scroll_mode=False):
+    def _travel(self, until, reserve, most=None, scroll_mode=False,
+                dwell=None):
         """Travel DOWN the page we are on by its own sections, never back up,
         one stop at a time, until the time left is the finale's (or, asked
         for the page top to bottom, to the bottom of the page)."""
@@ -1553,10 +1759,13 @@ class _Session:
         if most is not None:
             stops = stops[:most]
         # a short page still fills the time: a steadier pace, longer stops
+        hold = dwell
         dwell = 0.8
         if stops:
             dwell = min(1.6 if until <= 30 else 3.0,
                         max(0.8, left / len(stops) - 1.75))
+        if hold is not None:
+            dwell = float(hold)
         pointed = set()
         for pos in stops:
             if self._time_up(until, reserve):
@@ -1686,7 +1895,7 @@ class _Session:
         ``want`` navigation links fill the tour (a one-page scroll of 44 s was
         the judge's "passive scroll")."""
         try:
-            info = self.page.evaluate(_TOUR_JS) or {}
+            info = self._eval(_TOUR_JS) or {}
         except Exception:
             info = {}
         low = str(prefer or "").lower()
@@ -1723,9 +1932,12 @@ class _Session:
         if brief and want >= 2 and sum(
                 1 for o, _c in found if o[0] == 0) < 3:
             have = {self._norm_url(c["href"]) for c in out}
+            # Q7: two spare pages beyond ``want``, opened only when a long
+            # brief still has time once the others are shown (osai.ie: a
+            # 60 s ask came out at 50 s)
             fill = brief_tour.nav_fallback(
                 [c for c in spare if self._norm_url(c["href"]) not in have],
-                max(0, want - len(out)), TOUR_AVOID, TOUR_CTA)
+                max(0, want + 2 - len(out)), TOUR_AVOID, TOUR_CTA)
             out += fill
         return out
 
@@ -1771,18 +1983,33 @@ class _Session:
             if len(self.problems) > before:
                 return False
         self._settle()
-        _hide_consent(self.page)
+        self._eval_safe(_HIDE_CONSENT_JS)
         # half of it: the old page often stays on screen while the new one
         # loads, and only blank frames are cut (Q2: 20 s asks came out 23-24 s)
-        self.lost_s += 0.5 * max(0.0, self.now() - t0 - 0.9)
+        # (Q7: at most 0.6 s a page; a slow load is a stale span below, added
+        # back exactly, never twice: osai.ie on a busy box came out 66 s for
+        # a 60 s ask)
+        load_back = min(0.6, 0.5 * max(0.0, self.now() - t0 - 0.9))
         # QB: the old page held on screen while a slow site loads the new one
         # (klosmo: 13 s on the hero, "pacing 3" from both judges) is noted so
         # the edit can cut it: from a second after the click (the click must
         # still read) to just before the new page paints
         t_done = self.now()
-        if t_done - t_act > 2.6:
-            self.events.append({"t": round(t_act + 1.0, 2), "kind": "stale",
+        # Q7: a page the tour opened by its address (a tool card, a hidden
+        # link) showed no click, so its whole load is cut and the page opens
+        # on its own name; after a click the click still reads for a second
+        by_address = not item and getattr(self, "_paged", False)
+        lead, least = (0.15, 0.8) if by_address else (1.0, 2.0)
+        if t_done - t_act > least:
+            self.events.append({"t": round(t_act + lead, 2), "kind": "stale",
                                 "end": round(t_done - 0.35, 2)})
+            # Q7: the edit cuts this span whole, so the tour gets exactly it
+            # back (a slow site's brief came out 10 s short of the 60 s
+            # asked, osai.ie)
+            load_back = max(0.0, (t_done - 0.35) - (t_act + lead))
+        self.lost_s += load_back
+        self._eval_safe(_NO_SMOOTH_JS)
+        self._eval_safe(_TICKER_JS)
         if _off_tour(start, self.page.url):
             self.problems.append(f"\"{cand['t']}\" led to a sign-in or another "
                                  "site, so the tour went on")
@@ -1793,15 +2020,20 @@ class _Session:
             return False
         return True
 
-    def _named_cards(self, prefer, start, skip_stems, visited, most=3):
+    def _named_cards(self, prefer, start, skip_stems, visited, most=3,
+                     fill_to=0):
         """The cards of this page the brief names (by the stems of their
         heading, never the stems of the section's own name), in the brief's
-        order: [{t, href}]."""
+        order: [{t, href}].
+
+        ``fill_to`` (Q7): the brief counts this page's items ("as seis
+        ferramentas"): the ones it names first (in its order), then the
+        page's other cards in page order, up to the count."""
         try:
-            cards = self.page.evaluate(_CARDS_JS) or []
+            cards = self._eval(_CARDS_JS) or []
         except Exception:
             return []
-        found, seen = [], set()
+        found, seen, other = [], set(), []
         for card in cards:
             label = str(card.get("head") or "").strip()
             href = str(card.get("href") or "")
@@ -1814,76 +2046,310 @@ class _Session:
             # or one the brief says twice (never a domain word said once)
             if pos is None or brief_tour.label_score(
                     label, prefer, skip=skip_stems) < 2:
+                if fill_to:
+                    seen.add(key)
+                    other.append({"t": label[:40], "href": href})
                 continue
             seen.add(key)
             found.append((pos, {"t": label[:40], "href": href}))
-        return [c for _p, c in sorted(found, key=lambda x: x[0])][:most]
+        named = [c for _p, c in sorted(found, key=lambda x: x[0])]
+        if fill_to:
+            # the ones the brief names first (they must be in the cut), then
+            # the page's others in its own order
+            named = named[:fill_to]
+            return named + other[:max(0, fill_to - len(named))]
+        return named[:most]
 
     _EXAMPLE = re.compile(r"[\d=+^*/()]|\bx\b", re.I)
+    _EX_PREFIX = re.compile(r"^\s*(?:ex(?:emplo|ample)?\s*[.:]+|e\.\s*g\.\s*:?|eg\s*:)\s*",
+                            re.I)
+
+    def _eval(self, js, *args):
+        """A tour's own read of the page. On a busy machine one read of a
+        large page (a shop's mega-menu: hundreds of links, each styled) took
+        seconds while the picture stood still, and that wait landed in the
+        demo as a held frame and ate the tour's time (klosmo on the loaded
+        render box: the hero held 9 s, no section opened). A read that takes
+        over half a second is noted as a span the edit cuts, so the demo's
+        pace does not depend on the machine's (Q7)."""
+        if getattr(self, "t_zero", None) is None:
+            return self.page.evaluate(js, *args)
+        t0 = self.now()
+        try:
+            return self.page.evaluate(js, *args)
+        finally:
+            t1 = self.now()
+            if t1 - t0 > 0.5:
+                self.skip(t0 + 0.1, t1 - 0.05)
+
+    def _eval_safe(self, js, *args):
+        try:
+            return self._eval(js, *args)
+        except Exception:
+            return None
+
+    def _tidy(self):
+        """The page made fit to film, through the tour's own timed reads (a
+        slow read is cut, _eval): a consent banner with no privacy choice
+        hidden, the page's smooth scrolling off, an announcement ticker
+        standing still."""
+        self._eval_safe(_HIDE_CONSENT_JS)
+        self._eval_safe(_NO_SMOOTH_JS)
+        self._eval_safe(_TICKER_JS)
+
+    def prog_now(self):
+        """Seconds into the EDIT: the capture's clock less what the edit cuts
+        (pages loading, the transit between a tool's input and its result)."""
+        return self.now() - self.lost_s
+
+    def skip(self, a, b):
+        """Note a span of the capture the edit cuts (Q7): the glide to a
+        tool's result and the wait for it carry nothing a viewer needs; the
+        references cut a screen demo hard from the press to the result."""
+        # never inside the opening title's window: the title is placed in
+        # capture time and a cut there would shorten it
+        a, b = max(float(a), float(getattr(self, "cut_from", 0.0) or 0.0)), float(b)
+        if b - a >= 0.3:
+            # only what no earlier cut span already covers is given back
+            # (a slow read inside the transit to a result is one cut)
+            covered = sum(max(0.0, min(b, float(e["end"])) - max(a, float(e["t"])))
+                          for e in self.events
+                          if e.get("kind") in ("skip", "stale") and "end" in e)
+            self.events.append({"t": round(a, 2), "kind": "skip",
+                                "end": round(b, 2)})
+            self.lost_s += max(0.0, (b - a) - covered)
+
+    def _bring(self, top, at=0.4, quick=False):
+        """Glide so page pixel ``top`` sits ``at`` of the way down the
+        screen (eased, never a jump)."""
+        try:
+            here = float(self.page.evaluate("() => window.scrollY") or 0)
+        except Exception:
+            return
+        want = max(0.0, float(top) - at * self.H)
+        if abs(want - here) > 0.12 * self.H:
+            self.note("scroll")
+            self._glide_scroll(want, 0.6 if quick else self._glide_s(want - here))
+            self.sleep(0.15)
 
     def _demo_form(self, section_end):
-        """Use the tool this page is, once: type an example the field itself
-        shows (its placeholder, when that looks like a value) into at most two
-        empty fields and press the button that says what it does, then give
-        the result a moment. Nothing that asks for a person's details is ever
-        touched (_FORM_JS). Returns whether a button was pressed."""
+        """QB's name for one use of a tool page (kept for callers)."""
+        return self._use_tool(section_end)
+
+    def _jump(self, top, at=0.5):
+        """Bring page pixel ``top`` to ``at`` of the screen with a quick
+        glide the edit CUTS (a hard cut from the page's name to the tool,
+        the way the references cut a screen demo): only the arrival shows."""
+        t0 = self.now()
+        self._bring(top, at, quick=True)
+        self.skip(t0, self.now() - 0.05)
+
+    def _use_tool(self, section_end):
+        """Use the tool this page is, ONCE, and show what it gives (Q7):
+        type the example its field shows (a field already holding its example
+        is cleared and typed again, so the viewer sees the input; never a
+        field about a person, _FORM_JS) and press the button that says what
+        it does, or press 1 2 x 8 = on a calculator's keypad; then the block
+        the press changed (a graph, a solution, a decomposition, a 3D net) is
+        brought into view and held, with a beat the edit pushes in on. The
+        moves in between are noted for the edit to cut, so a tool reads in
+        about four seconds. Returns whether the tool was used."""
         try:
-            info = self.page.evaluate(_FORM_JS) or {}
+            info = self._eval(_FORM_JS) or {}
         except Exception:
-            return False
-        button = info.get("button")
-        if not button or self.now() >= section_end - 2.5:
-            return False
-        for field in info.get("inputs") or []:
-            if str(field.get("value") or "").strip():
-                continue                # a default is already there: keep it
-            ph = str(field.get("ph") or "").strip()
-            if self._EXAMPLE.search(ph) and len(ph) <= 30:
-                text = ph
-            elif field.get("type") == "number":
-                text = "12"
-            else:
-                continue
-            if self.now() >= section_end - 2.5:
-                return False
+            info = {}
+        button, keypad = info.get("button"), None
+        if not button:
             try:
-                here = float(self.page.evaluate("() => window.scrollY") or 0)
-                want = max(0.0, float(field.get("top") or 0) - 0.4 * self.H)
-                if abs(want - here) > 0.2 * self.H:
-                    self.note("scroll")
-                    self._glide_scroll(want, self._glide_s(want - here))
-                    self.sleep(0.2)
+                keypad = self._eval(_KEYPAD_JS)
             except Exception:
-                pass
-            self.do_type({"selector": field["sel"], "text": text,
-                          "seconds": 0.4})
-        if self.now() >= section_end - 1.8:
+                keypad = None
+            if not keypad:
+                return False
+        if self.now() >= section_end - 2.5:
             return False
         try:
-            # the tool's button, brought to the middle of the screen the way
-            # the tour moves everywhere (eased, never a jump)
-            here = float(self.page.evaluate("() => window.scrollY") or 0)
-            want = max(0.0, float(button.get("top") or 0) - 0.45 * self.H)
-            if abs(want - here) > 0.15 * self.H:
-                self.note("scroll")
-                self._glide_scroll(want, self._glide_s(want - here))
-                self.sleep(0.2)
+            self.page.evaluate(_WATCH_JS)
         except Exception:
             pass
-        before = len(self.problems)
-        self.do_click({"selector": button["sel"], "text": button["t"]})
-        if len(self.problems) > before:
+        btn_top = None
+        if keypad:
+            if not self._press_keys(keypad):
+                return False
+        else:
+            btn_top = float(button.get("top") or 0)
+            field = None
+            for f in info.get("inputs") or []:
+                val = str(f.get("value") or "").strip()
+                ph = self._EX_PREFIX.sub("", str(f.get("ph") or "")).strip()
+                if val and self._EXAMPLE.search(val) and len(val) <= 40:
+                    field = (f, val, True)
+                elif not val and ph and self._EXAMPLE.search(ph) and len(ph) <= 40:
+                    field = (f, ph, False)
+                elif not val and f.get("type") == "number":
+                    field = (f, "12", False)
+                if field:
+                    break
+            # one move: the field and its button in view together; a field
+            # a screen away from its button (a solid's size above its 3D
+            # view) keeps its value and only the button is pressed
+            if field and abs(btn_top - float(field[0].get("top") or btn_top)) \
+                    >= self.H * 0.45:
+                field = None
+            top = float(field[0].get("top") or btn_top) if field else btn_top
+            if field:
+                self._jump((top + btn_top) / 2, 0.5)
+            else:
+                self._jump(btn_top, 0.6)
+            try:
+                sy = float(self.page.evaluate("() => window.scrollY") or 0)
+            except Exception:
+                sy = 0.0
+            y0 = min(top, btn_top) - sy
+            self.note("hover", self.W * 0.5, y0 + 20, "the tool's input",
+                      box={"x": self.W * 0.04, "y": y0 - 10,
+                           "width": self.W * 0.92,
+                           "height": max(btn_top - sy - y0 + 66, 66)})
+            if field and self.now() < section_end - 3.0:
+                f, text, clear = field
+                self._quick_type(f["sel"], text, clear)
+            # once the input is on screen the button is always pressed: an
+            # input typed and left is the one thing worse than no tool
+            if not self._quick_press(button["sel"], button["t"]):
+                return False
+        self._show_result(section_end, btn_top)
+        return True
+
+    def _quick_type(self, sel, text, clear):
+        try:
+            box = self.page.locator(sel).bounding_box(timeout=800)
+        except Exception:
+            box = None
+        if not box:
             return False
-        self.sleep(1.3)
+        cx, cy = box["x"] + min(box["width"] * 0.3, 80), box["y"] + box["height"] / 2
+        self.move_to(cx, cy, seconds=0.3)
+        try:
+            self.page.mouse.click(cx, cy)
+            if clear:
+                self.page.locator(sel).fill("", timeout=800)
+            self.note("type", cx, cy, text[:40], box=box)
+            self.page.keyboard.type(text[:60], delay=45)
+        except Exception as e:
+            self.problems.append(f"could not type into that field "
+                                 f"({str(e).splitlines()[0][:80]})")
+            return False
+        self.sleep(0.1)
+        return True
+
+    def _quick_press(self, sel, label):
+        try:
+            box = self.page.locator(sel).bounding_box(timeout=800)
+        except Exception:
+            box = None
+        if not box:
+            self.problems.append(f"could not find \"{label}\", so the tool "
+                                 "was not used")
+            return False
+        cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        self.move_to(cx, cy, seconds=0.25)
+        self.sleep(0.1)
+        self.note("click", cx, cy, label, box=box)
+        try:
+            self.page.mouse.click(cx, cy)
+        except Exception as e:
+            self.problems.append(f"the click on \"{label}\" did not go "
+                                 f"through ({str(e).splitlines()[0][:80]})")
+            return False
+        self.sleep(0.3)
+        return True
+
+    def _press_keys(self, keypad):
+        """1 2 x 8 = on a calculator, each key pointed at and pressed."""
+        op = next((o for o in ("×", "x", "*", "+") if o in keypad), None)
+        seq = ["1", "2", op, "8", "="]
+        if not op or not all(k in keypad for k in seq):
+            return False
+        tops = [float(keypad[k]["top"]) for k in seq]
+        self._jump((min(tops) + max(tops)) / 2, 0.55)
+        for k in seq:
+            try:
+                box = self.page.locator(keypad[k]["sel"]).bounding_box(timeout=800)
+            except Exception:
+                box = None
+            if not box:
+                return False
+            cx, cy = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+            self.move_to(cx, cy, seconds=0.2)
+            self.note("click", cx, cy, k, box=box)
+            try:
+                self.page.mouse.click(cx, cy)
+            except Exception:
+                return False
+            self.sleep(0.1)
+        self.sleep(0.2)
+        return True
+
+    def _show_result(self, section_end, btn_top=None):
+        """Bring the block the tool changed into view and hold it (a "look"
+        beat with the block's box, so the edit pushes in on it). The wait
+        and the glide in between are noted as a span the edit cuts."""
+        t_wait = self.now()
+        self.sleep(0.45)
+        try:
+            res = self._eval(_RESULT_JS, btn_top)
+        except Exception:
+            res = None
+        if not res:
+            self.sleep(0.6)
+            return False
+        top, h = float(res["top"]), float(res["h"])
+        target = (top + h / 2 - self.H * 0.5) if h <= self.H * 0.8 \
+            else top - self.H * 0.1
+        try:
+            here = float(self.page.evaluate("() => window.scrollY") or 0)
+        except Exception:
+            here = 0.0
+        moved = abs(max(0.0, target) - here) > 0.12 * self.H
+        if moved:
+            self.note("scroll")
+            self._glide_scroll(max(0.0, target), 0.6)
+            self.sleep(0.25)
+        try:
+            sy = float(self.page.evaluate("() => window.scrollY") or 0)
+        except Exception:
+            sy = here
+        y = max(0.0, top - sy)
+        hh = min(h, self.H * 0.9, self.H - y)
+        if hh < 20:
+            self.sleep(0.6)
+            return False
+        box = {"x": max(0.0, float(res["left"])), "y": y,
+               "width": min(float(res["w"]), self.W), "height": hh}
+        cx = box["x"] + box["width"] * 0.62
+        cy = min(y + hh * 0.6, self.H * 0.86)
+        if moved:
+            # from just after the press to the result on screen: cut
+            self.skip(t_wait + 0.25, self.now() - 0.05)
+        self.move_to(cx, cy, seconds=0.4)
+        self.note("look", box["x"] + box["width"] / 2, y + hh / 2, "result",
+                  box=box)
+        self.events[-1]["result"] = True
+        self.sleep(min(1.6, max(1.0, section_end - self.now() - 0.2)))
         return True
 
     def _open_cards(self, cards, start, visited, section_end):
         """Open each named card by its own address and read it: its name is
-        the chapter, its heading the beat, one thing on it pointed at.
+        the chapter, then the tool on it is USED with its result on screen
+        (Q7), or, on a page that is not a tool, its heading is the beat and
+        one thing on it is pointed at. What the edit cuts (a page loading,
+        the transit to a result) does not count against the section's time.
         Returns how many opened."""
         opened = 0
+        lost0 = self.lost_s
         for card in cards:
-            if self.now() >= section_end - 3.5 or self._time_up(section_end, 0.0):
+            end = section_end + (self.lost_s - lost0)
+            if self.now() >= end - 3.0 or self._time_up(end, 0.0):
                 break
             key = self._norm_url(card["href"])
             if key in visited:
@@ -1898,14 +2364,18 @@ class _Session:
             self.note("section", label=card["t"])
             self._chapters.append(self.now())
             self.sleep(0.9)
+            end = section_end + (self.lost_s - lost0)
+            # each card's share of what is left, so the last is not starved
+            share = self.now() + max(3.6, (end - self.now()) /
+                                     max(1, len(cards) - opened + 1))
+            if self._use_tool(min(end, share + 0.5)):
+                continue                # the tool was used: that is the beat
             info = self._page()
             self._look(info)
             self.sleep(1.2)
-            if self._demo_form(section_end):
-                continue                # the tool was used: that is the beat
             items, _h = self._tour_items()
             here = self._feature(items)
-            if here and not self._time_up(section_end, 0.0):
+            if here and not self._time_up(end, 0.0):
                 self._point(here, 1.0)
         return opened
 
@@ -1922,36 +2392,60 @@ class _Session:
         blank page is skipped. Nothing is ever submitted."""
         want = max(0, min(int(step.get("by") or 2), 6))
         start = self.page.url
-        _hide_consent(self.page)
+        self._tidy()
         until = float(step.get("seconds") or 0) or 18.0
         scroll_mode = step.get("mode") == "scroll"
         items, _heads = self._tour_items()
         cta = self._cta([i for i in items if not i.get("fixed")])
         # the hero: the opening title plays over it, then the pointer finds
         # the call to action (no push-in there: the title owns the opening),
-        # or drifts into the hero when it has none in its body
+        # or drifts into the hero when it has none in its body.
+        # Q7: the beat lands AS THE TITLE LEAVES (``title_s``, from the
+        # edit), not under it: it used to play at ~1.8 s, under the title, so
+        # no push could follow it and the hero held still for 3-4 s after the
+        # reveal (the judges, web2/web3/web: "the hero holds with only the
+        # cursor moving; push in on the headline")
+        title_s = float(step.get("title_s") or HERO_TITLE_S)
+        self.cut_from = title_s + 0.2
+        hero = self._hero_head()
         self.sleep(0.1)
         if cta:
             # the pointer reaches it as the title leaves and presses it (the
             # press ring only, nothing is clicked): the first beat after the
             # title, with a push on it (the judge: "click Upload video with a
             # push-in right after the reveal")
+            self.sleep(max(0.0, title_s - 0.9 - self.now()))
             cx, cy = float(cta["x"]) * self.W, float(cta["y"]) * self.H
             self.move_to(cx, cy, seconds=0.8)
             b = cta.get("box")
-            self.note("hover", cx, cy, str(cta.get("t") or ""),
-                      box=({"x": b[0] * self.W, "y": b[1] * self.H,
-                            "width": (b[2] - b[0]) * self.W,
-                            "height": (b[3] - b[1]) * self.H} if b else None))
+            box = ({"x": b[0] * self.W, "y": b[1] * self.H,
+                    "width": (b[2] - b[0]) * self.W,
+                    "height": (b[3] - b[1]) * self.H} if b else None)
+            if box and hero and 0 <= hero["y"] < box["y"] and \
+                    box["y"] + box["height"] - hero["y"] < self.H * 0.6:
+                # the hero's own headline and its button in one frame
+                x0 = min(box["x"], hero["x"])
+                x1 = max(box["x"] + box["width"], hero["x"] + hero["width"])
+                box = {"x": x0, "y": hero["y"], "width": x1 - x0,
+                       "height": box["y"] + box["height"] - hero["y"]}
+            self.note("hover", cx, cy, str(cta.get("t") or ""), box=box)
             self.sleep(0.15)
             try:
                 self.page.evaluate(_PRESS_JS, [cx, cy])
             except Exception:
                 pass
-            self.sleep(1.0)
+            self.sleep(1.4)
         else:
+            self.sleep(max(0.0, title_s - 1.2 - self.now()))
             self.move_to(self.W * 0.56, self.H * 0.55, seconds=1.1)
-            self.sleep(0.3)
+            if hero:
+                self.note("look", hero["x"] + hero["width"] / 2,
+                          hero["y"] + hero["height"] / 2, hero["t"], box=hero)
+                self.sleep(1.4)
+            else:
+                self.sleep(0.3)
+        # a ticker that started only after the page settled stands still too
+        self._eval_safe(_TICKER_JS)
         reserve = self.FINALE_S
         if scroll_mode:
             self._travel(until, reserve, scroll_mode=True)
@@ -1977,36 +2471,88 @@ class _Session:
             # from what the sections leave (klosmo: the brands page ate it);
             # the sections that fit in what is left are the ones that lead
             # to products (a collection), before an A-Z list of brands
-            reserve += 4.5
+            # (Q7: the product page IS the brief's ending, so the usual
+            # closing beat's reserve shrinks to its live hold)
+            reserve = 1.5 + 4.5
             shop = [c for c in cands if brief_tour.leads_to_products(c["t"])]
             cands = shop + [c for c in cands if c not in shop]
             n = max(1, min(n, int((until - self.now() - reserve - 3.0) / 5.0)))
+        # Q7: a page whose items the brief counts ("as seis ferramentas")
+        # pays for every one of them up front: TOOL_S each in the edit (name,
+        # input, press, result), the other pages PAGE_S each, the piece a
+        # little longer than asked when that is what showing them all takes
+        counts = {}
+        if brief:
+            for k, c in enumerate(cands):
+                got = brief_tour.count_ask(step.get("prefer"), c["t"])
+                if got:
+                    counts[self._norm_url(c["href"])] = got
+                    n = max(n, min(len(cands), k + 1))
+            if counts:
+                need = (self.now() + reserve + PAGE_S * max(0, n - len(counts))
+                        + sum(COUNTED_OPEN_S + TOOL_S * k for k in counts.values()))
+                if need > until:
+                    until = min(need, until * 1.3,
+                                config.WEB_DEMO_MAX_DURATION_S - 8)
+            # a section of this page the brief names that no page it opens
+            # covers (klosmo: "the designer brands section" is the home
+            # page's "Featured Brands" row): one stop on it, when it fits
+            named = self._home_named(step.get("prefer"), cands[:n])
+            if named is not None and not counts and \
+                    until + self.lost_s - reserve - self.now() - 2.6 >= n * 3.6:
+                self._stop_on_head(named)
         left = until - self.now() - reserve
         # a brief's hero is not held for a stop of its own unless there is time to
         # spare after every page (klosmo, judge: "5.6 s on the hero, only the
         # cursor drifts")
-        home_stop = left >= (n * 9.0 + 8.0 if brief else n * 5.0 + 2.6)
+        home_stop = left >= (n * 9.0 + 8.0 if brief else n * 5.0 + 2.6) \
+            and not counts
         per = max(1, min(3, int((left - (2.6 if home_stop else 0.0)
                                  - n * 2.4) / (2.6 * n))))
         if home_stop:
             self._travel(until, reserve, most=1)
         opened, visited = 0, {self._norm_url(start)}
-        item_done = False
+        item_done = tools_end = False
         for cand in cands:
-            if opened >= n or self._time_up(until, reserve + 3.0):
+            spare_time = until + self.lost_s - reserve - self.now()
+            if (opened >= n and not (brief and not counts and not item_ask
+                                     and spare_time >= 9.0)) \
+                    or ((opened or not brief)
+                        and self._time_up(until, reserve + 3.0)):
+                # (Q7: a brief always opens its first page: a slow hero left
+                # klosmo's 18 s tour no time for any, and it ended on the
+                # home page's footer without the collection or the product)
                 break
             key = self._norm_url(cand["href"])
             if key in visited:
                 continue
             slot = section_end = None
-            if brief:
+            counted = counts.get(key, 0)
+            if brief and counts:
+                # Q7: the counted pages' tools first, the other pages share
+                # what is left (never under PAGE_S)
+                left_now = until + self.lost_s - reserve - self.now()
+                later = [kk for c2 in cands[cands.index(cand) + 1:n]
+                         for kk in [counts.get(self._norm_url(c2["href"]), 0)]]
+                tools_later = sum(COUNTED_OPEN_S + TOOL_S * kk for kk in later if kk)
+                plain_later = sum(1 for kk in later if not kk)
+                if counted:
+                    slot = max(COUNTED_OPEN_S + TOOL_S,
+                               left_now - plain_later * PAGE_S - tools_later)
+                else:
+                    slot = max(PAGE_S, (left_now - tools_later)
+                               / max(1, plain_later + 1))
+                section_end = self.now() + slot
+            elif brief:
                 # the time left is shared by the sections still to open, the
                 # earlier ones a little short so the last page (where a brief
                 # names its items) is not starved
-                rem = n - opened
+                rem = max(1, n - opened)
+                # (Q7: the earlier pages' cut is smaller now that a counted
+                # page pays for its own items up front)
                 slot = brief_tour.section_slot(
                     until + self.lost_s - reserve - self.now(), rem) \
-                    * (0.55 if rem > 1 else 1.0)
+                    * ((0.55 if item_ask else 0.85) if rem > 1 else 1.0)
                 if opened and slot < 4.2:
                     break
                 section_end = self.now() + slot
@@ -2016,6 +2562,7 @@ class _Session:
                 continue
             visited.add(self._norm_url(self.page.url))
             opened += 1
+            tools_end = False
             # the section opens on its name (the edit sets it over the
             # page, softened), then its own heading is the beat: long enough
             # for a push to ease in, hold and let go before the page moves on
@@ -2033,6 +2580,16 @@ class _Session:
                 item_done = bool(self._open_item(start))
                 if item_done:
                     continue
+            if brief and counted:
+                # every counted item, each opened and used (Q7)
+                cards = self._named_cards(
+                    step.get("prefer"), start,
+                    brief_tour.label_stems(cand["t"]), visited,
+                    fill_to=counted)
+                if cards:
+                    self._open_cards(cards, start, visited, section_end)
+                    tools_end = any(e.get("result") for e in self.events[-6:])
+                continue
             if brief:
                 cards = self._named_cards(
                     step.get("prefer"), start,
@@ -2042,6 +2599,12 @@ class _Session:
                 room = max(0, int((slot - 5.0) / CARD_S))
                 cards = cards[:room]
                 card_s = CARD_S * len(cards)
+                if counts:
+                    # Q7: in a counted brief the other pages are their name
+                    # and their heading (pushed in on): a stop down the page
+                    # cost the six tools two of them, and the judges then
+                    # asked to "shorten the Diagnóstico/Aprender dwell"
+                    continue
                 self._travel(section_end - card_s - self.lost_s, 0.0,
                              most=brief_tour.stops_for(
                                  slot - card_s, open_s=5.0, per_stop_s=3.0,
@@ -2054,6 +2617,18 @@ class _Session:
             # "open a product page to highlight product imagery and details"
             # (a real brief): the last page opens one of its own items
             reserve += 4.5
+        if tools_end:
+            # Q7: a counted brief ends ON its last result (the 3D net, the
+            # plotted curve), live, never a scroll away to the page's footer
+            last = next(e for e in reversed(self.events) if e.get("result"))
+            b = last.get("box")
+            cx, cy = self.mx, self.my
+            self.note("finale", cx, cy, "result",
+                      box=({"x": b[0] * self.W, "y": b[1] * self.H,
+                            "width": (b[2] - b[0]) * self.W,
+                            "height": (b[3] - b[1]) * self.H} if b else None))
+            self._live_hold(until, cx, cy)
+            return
         if not opened:
             self._travel(until, reserve)
         elif not (brief and item_done) and \
@@ -2063,6 +2638,97 @@ class _Session:
         if item_ask and not item_done:
             item_done = bool(self._open_item(start))
         self._finale(until, here_only=bool(brief and item_done))
+
+    def _hero_head(self):
+        """The hero's own headline in view ({x, y, width, height, t} in
+        screen pixels), or None."""
+        try:
+            h = self._eval(_HERO_HEAD_JS)
+        except Exception:
+            h = None
+        if not h:
+            return None
+        return {"x": float(h["x"]), "y": float(h["y"]),
+                "width": float(h["w"]), "height": float(h["h"]),
+                "t": str(h.get("t") or "")[:60]}
+
+    def _home_named(self, prefer, cands):
+        """A section of the page we are on that the brief names and no page
+        it opens covers (klosmo: "open the designer brands section" is the
+        home page's "Featured Brands" row; Q7): its heading in page pixels,
+        or None."""
+        info = self._page()
+        sy = float(info.get("sy") or 0)
+        covered = set()
+        for c in cands:
+            covered |= brief_tour.label_stems(c.get("t"))
+        best = None
+        for h in info.get("heads") or []:
+            label = str(h.get("t") or "").strip()
+            if not label or len(label) > 40 or float(h["top"]) < sy + self.H * 0.5:
+                continue
+            pos = brief_tour.label_pos(label, prefer, skip=covered)
+            if pos is None:
+                continue
+            if best is None or pos < best[0]:
+                best = (pos, h)
+        return best[1] if best else None
+
+    def _stop_on_head(self, head):
+        """One stop on a section of this page, by its heading (in page
+        pixels): its name is the chapter, its heading the beat."""
+        here = float(self.page.evaluate("() => window.scrollY") or 0)
+        pos = max(0.0, float(head["top"]) - self.H * 0.15)
+        t0 = self.now()
+        self.note("scroll")
+        self._glide_scroll(pos, 0.7)
+        self.sleep(0.2)
+        # the glide down to it is cut: its name opens on it
+        self.skip(t0 + 0.1, self.now() - 0.05)
+        self.note("section", label=str(head.get("t") or "")[:40])
+        self._chapters.append(self.now())
+        self.sleep(0.9)
+        self._look()
+        self.sleep(1.2)
+
+    def _product_beats(self):
+        """A product page's two beats (Q7): its picture pushed in on, then
+        its name and price glided to and held."""
+        try:
+            info = self._eval(_PRODUCT_JS) or {}
+        except Exception:
+            info = {}
+        img, name = info.get("img"), info.get("info")
+        if img:
+            box = {"x": img["x0"] * self.W, "y": img["y0"] * self.H,
+                   "width": (img["x1"] - img["x0"]) * self.W,
+                   "height": (img["y1"] - img["y0"]) * self.H}
+            cx = box["x"] + box["width"] * 0.6
+            cy = box["y"] + box["height"] * 0.55
+            self.move_to(cx, cy, seconds=0.5)
+            self.note("hover", cx, cy, "the product's picture", box=box)
+            self.sleep(1.25)
+        if name:
+            self._bring(float(name["top"]), 0.42)
+            try:
+                sy = float(self.page.evaluate("() => window.scrollY") or 0)
+            except Exception:
+                sy = 0.0
+            y = float(name["top"]) - sy
+            box = {"x": float(name["x0"]) * self.W, "y": y,
+                   "width": (float(name["x1"]) - float(name["x0"])) * self.W,
+                   "height": float(name["bottom"]) - float(name["top"])}
+            if 0 <= y < self.H * 0.9:
+                self.move_to(box["x"] + box["width"] * 0.7,
+                             min(y + box["height"] + 10, self.H * 0.88), 0.45)
+                self.note("look", box["x"] + box["width"] / 2,
+                          y + box["height"] / 2, str(name.get("t") or ""),
+                          box=box)
+                self.sleep(1.25)
+                return
+        if not img:
+            self._look()
+            self.sleep(1.7)
 
     def _open_item(self, start):
         """Open one item of the page (a product, a project) by its own card,
@@ -2091,8 +2757,7 @@ class _Session:
         if not self._open({"t": pick["t"], "href": pick["href"], "item": pick},
                           start):
             return False
-        self._look()
-        self.sleep(1.7)
+        self._product_beats()
         return True
 
     def _live_end(self):
@@ -2202,7 +2867,15 @@ def _deep_page(url):
     return bool(parts)
 
 
+HERO_TITLE_S = 2.5   # the edit's opening title over the hero (first_cut.DEMO_TITLE_S)
+CAPTURE_EXTRA_S = 45.0      # capture seconds beyond the edit's ceiling (cut spans)
+BRIEF_EXTRA_WALL_S = 120.0  # wall seconds a brief's tour gets beyond WEB_DEMO_WALL_S
 CARD_S = 6.5   # a tool page in a brief tour: load, name, heading, one use
+# Q7: a tool page in the EDIT once the transit is cut (name, input typed,
+# the press, the result held): what a counted brief pays per tool
+TOOL_S = 5.4
+PAGE_S = 2.8          # a plain page of a counted brief: its name, its heading, a stop
+COUNTED_OPEN_S = 3.0  # the counted page itself: its name and its list
 
 
 def _off_tour(start, url):
@@ -2281,6 +2954,47 @@ def _hide_consent(page):
         return int(page.evaluate(_HIDE_CONSENT_JS) or 0)
     except Exception:
         return 0
+
+
+def _pause_ticker(page):
+    """Q7: an announcement bar's scrolling ticker stands still (_TICKER_JS),
+    and the page's own smooth scrolling is off, so the tour's eased glide is
+    the only motion: with ``scroll-behavior: smooth`` every scrollTo of the
+    glide started an animation of its own, the page lagged behind and the
+    tour read positions mid-flight (phmath: a tool's button pressed off the
+    bottom edge of the screen)."""
+    try:
+        page.evaluate(_NO_SMOOTH_JS)
+    except Exception:
+        pass
+    try:
+        return int(page.evaluate(_TICKER_JS) or 0)
+    except Exception:
+        return 0
+
+
+# The hero's own headline in view (Q7): the first h1 (else h2) on screen.
+_HERO_HEAD_JS = r"""() => {
+  const H = innerHeight;
+  for (const tag of ['h1', 'h2']) {
+    for (const el of document.querySelectorAll(tag)) {
+      const r = el.getBoundingClientRect();
+      const st = getComputedStyle(el);
+      if (r.height < 14 || r.width < 40 || r.top < -2 || r.top > H * 0.7) continue;
+      if (st.visibility === 'hidden' || st.display === 'none' || parseFloat(st.opacity || '1') < 0.1) continue;
+      return {x: r.left, y: r.top, w: r.width, h: r.height, t: (el.innerText || '').trim().slice(0, 60)};
+    }
+  }
+  return null;
+}"""
+
+_NO_SMOOTH_JS = r"""() => {
+  if (document.getElementById('__q7_scroll')) return;
+  const st = document.createElement('style');
+  st.id = '__q7_scroll';
+  st.textContent = 'html,body{scroll-behavior:auto!important}';
+  (document.head || document.documentElement).appendChild(st);
+}"""
 
 
 def _decline_consent(page):
@@ -2531,7 +3245,11 @@ def record_demo(url, workdir, steps, orientation="landscape",
         except Exception:
             s.sleep(0.7)
 
-    return _record(url, workdir, orientation, config.WEB_DEMO_WALL_S,
+    # Q7: a brief's tour opens many pages; a slow site (or a busy machine)
+    # gets more wall time for them (each page's loading is cut from the edit)
+    briefed = any(st.get("do") == "tour" and st.get("brief") for st in plan)
+    return _record(url, workdir, orientation,
+                   config.WEB_DEMO_WALL_S + (BRIEF_EXTRA_WALL_S if briefed else 0.0),
                    True, body, css=(_TOUR_VIEWPORTS if toured else
                                     None if phone_layout
                                     else _DESKTOP_VIEWPORTS))

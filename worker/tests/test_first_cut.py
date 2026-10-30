@@ -245,7 +245,7 @@ def test_summary_says_what_was_done():
                               31.4) == \
         "a 31-second vertical version: pauses trimmed and captions"
     assert first_cut._summary([], 18, url="https://example.com/") == \
-        "a 18-second vertical demo of https://example.com/"
+        "an 18-second vertical demo of https://example.com/"
 
 
 def test_url_is_found_in_a_request():
