@@ -13,10 +13,9 @@ were rolled back; only the two events survived. The mocked tests in
 test_link_import.py could not see it (one connection, no locks).
 
 Real tables live in a throwaway schema (a second connection cannot see a
-temp table). CI: QUEUE_TEST_DATABASE_URL; locally any throwaway database:
-
-    QUEUE_TEST_DATABASE_URL=postgresql://u:p@localhost:5432/db \
-        python -m pytest tests/test_link_import_postgres.py -q
+temp table). CI: QUEUE_TEST_DATABASE_URL; locally point it at any
+throwaway database on localhost and run
+python -m pytest tests/test_link_import_postgres.py -q
 """
 import os
 import secrets
