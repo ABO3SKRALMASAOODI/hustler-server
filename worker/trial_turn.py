@@ -634,7 +634,14 @@ def shape_words(ctx):
         return "vertical 9:16"
     if abs(h / w - 1.0) < 0.05:
         return "square"
-    return f"landscape, the source's own {int(w)}x{int(h)} shape (not vertical)"
+    # QI2 (30 Oct): a ratio, never pixel sizes. The long talk's reply said "a
+    # landscape 1920x1080 cut" over its 1280x720 approval preview and both
+    # judges marked it a false claim ("the program is 1280x720").
+    ratio = next((name for name, r in (("16:9", 16 / 9), ("16:10", 1.6),
+                                       ("4:3", 4 / 3), ("3:2", 1.5))
+                  if abs(w / h - r) < 0.03), None) if w > h else None
+    return ("landscape " + ratio if ratio else "landscape") + \
+        ", the source's own shape (not vertical)"
 
 
 def prepare(ctx, worker_db, session_id, text, post=None):

@@ -392,6 +392,14 @@ def test_the_note_names_the_delivered_shape():
     ctx.index["video"] = {"width": 1280, "height": 800}
     assert trial_turn.shape_words(ctx).startswith("landscape")
     assert "not vertical" in trial_turn.shape_words(ctx)
+    # QI2: a ratio, never pixel sizes (the reply repeated "1920x1080" over a
+    # 720p preview and the judges marked it a false claim)
+    assert trial_turn.shape_words(ctx) == \
+        "landscape 16:10, the source's own shape (not vertical)"
+    ctx.index["video"] = {"width": 1920, "height": 1080}
+    assert "16:9" in trial_turn.shape_words(ctx)
+    assert "1920" not in trial_turn.shape_words(ctx)
+    ctx.index["video"] = {"width": 1280, "height": 800}
     ctx.edl["frame"] = {"ratio": "9:16"}
     assert trial_turn.shape_words(ctx) == "vertical 9:16"
     ctx2 = _Proj({"keep": [[0, 10]]}, [], [])          # a 720x1280 phone clip
