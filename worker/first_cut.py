@@ -78,6 +78,107 @@ def _ok(result):
 _CORNER = re.compile(r"GRAPHIC ON THE CORNER MARK: '([^']+)'")
 
 
+class _timed:
+    """Q8 (30 Oct): wall time per First cut phase (the scout, the closing
+    pick, the B-roll search and check, the chain, the renders), recorded in
+    the First cut's meta as ``phases`` so the speed of each step is measured,
+    not guessed. It changes nothing the First cut does."""
+
+    def __init__(self, ctx, name):
+        self.ctx, self.name = ctx, name
+
+    def __enter__(self):
+        self.t0 = time.monotonic()
+        return self
+
+    def __exit__(self, *exc):
+        phases = getattr(self.ctx, "first_cut_phases", None)
+        if not isinstance(phases, dict):
+            phases = {}
+            try:
+                self.ctx.first_cut_phases = phases
+            except Exception:  # noqa: BLE001
+                return False
+        phases[self.name] = round(phases.get(self.name, 0.0)
+                                  + time.monotonic() - self.t0, 2)
+        return False
+
+
+def _start_prefetch(ctx, moments):
+    """Q8: start the B-roll searches and the short lists' downloads the
+    moment the scout names its moments, for the First cuts that place B-roll
+    (a talking head on an engine account); the chain runs meanwhile and
+    source_broll takes what the prefetch holds (first_cut_speed)."""
+    if not moments or not getattr(ctx, "first_cut_q1", False) \
+            or getattr(ctx, "broll_prefetch", None) is not None \
+            or not config.FIRST_CUT_BROLL_PREFETCH:
+        return None
+    faces = _faces(ctx.index)
+    if not (_speech(ctx.index) and faces and faces["share"] >= 0.5):
+        return None
+    import first_cut_speed
+    return first_cut_speed.start_broll_prefetch(
+        ctx, moments, _orientation(ctx.index) == "vertical")
+
+
+def _say(ctx, step, label):
+    """Q8: one live progress line in the Studio while the First cut works
+    (engine accounts; the line is posted only once the step it names has
+    happened, or as it starts for the render)."""
+    if not getattr(ctx, "first_cut_q1", False):
+        return
+    import first_cut_speed
+    first_cut_speed.progress(ctx, getattr(ctx, "first_cut_db", None),
+                             getattr(ctx, "first_cut_session", None),
+                             step, label)
+
+
+def _render_draft_first(ctx, steps):
+    """Q8: the user watches the First cut as soon as a draft is encoded.
+
+    The draft (the 480p preview every request turn uses) is rendered and the
+    First cut is delivered on it; then the 720p approval render of the same
+    version is queued without waiting, and the Studio swaps it in, at the
+    same moment of playback, when it lands (it plays the newest render of
+    the newest version). Queued after the draft, never beside it: two
+    encodes on one machine slowed the draft to the approval's pace (Mac
+    harness, 30 Oct: 43 s instead of 11 s). The corner-mark check runs on the
+    draft's picture QC (graphics sit where they sit at any size); a removal
+    renders the new version's draft first. FIRST_CUT_UPGRADE_PARALLEL=1
+    queues the approval before the draft (separate slots). Returns the
+    draft's render note."""
+    def queue_approval():
+        try:
+            with _timed(ctx, "render_queue"):
+                note = agent_tools.render_preview(ctx, quality="approval",
+                                                  _wait_timeout_s=0)
+            ctx.first_cut_upgrade = str(note or "")[:160]
+        except Exception as exc:  # noqa: BLE001 — the draft still delivers
+            print(f"[first_cut] approval render not queued: "
+                  f"{type(exc).__name__}: {str(exc)[:160]}", flush=True)
+
+    def draft():
+        with _timed(ctx, "render_draft"):
+            note = agent_tools.execute(ctx, "render_preview",
+                                       {"quality": "draft", "complete": True})
+        steps.append({"tool": "render_preview", "quality": "draft",
+                      "ok": not _failed(note), "note": str(note or "")[:160]})
+        return note
+
+    parallel = config.FIRST_CUT_UPGRADE_PARALLEL
+    if parallel:
+        queue_approval()
+    render = draft()
+    if _clear_corner_mark(ctx, steps, render) \
+            and _renders_done(steps) < config.FIRST_CUT_MAX_RENDERS:
+        if parallel:
+            queue_approval()
+        render = draft()
+    if not parallel and not _failed(render):
+        queue_approval()
+    return render
+
+
 def _clear_corner_mark(ctx, steps, render):
     """The render's PICTURE QC named a graphic drawn into the corner mark's
     box (the brand slot stays clear, always). Remove those items; returns
@@ -355,8 +456,9 @@ def scout_range(ctx, worker_db, spend):
                          + "\n".join(lines)}]
             # thinking is on by default on the lane's models: a small
             # max_tokens can be spent before any answer (C1: an empty pick)
-            resp = claude_lane.create(model, messages, max_tokens=4000,
-                                      effort="low")
+            with _timed(ctx, "scout"):
+                resp = claude_lane.create(model, messages, max_tokens=4000,
+                                          effort="low")
             text = resp.choices[0].message.content or ""
             usage = resp.usage
             spend["usd"] += float(getattr(usage, "provider_cost_usd", 0) or 0)
@@ -380,6 +482,14 @@ def scout_range(ctx, worker_db, spend):
                 first = talk_craft.opening_row(rows, first, last)
             if first and last and float(last["t1"]) > float(first["t0"]):
                 start, end = _fit_span(rows, first, last, complete=q1)
+                early_broll = None
+                if q1 and 12.0 <= end - start <= 75.0:
+                    # Q8: the B-roll searches and downloads run while the
+                    # closing pick and the chain do their work
+                    import first_cut_visual as fcv
+                    early_broll = fcv.broll_spans(ctx.index, by_id,
+                                                  pick.get("broll"))
+                    _start_prefetch(ctx, early_broll)
                 if q1 and 12.0 <= end - start <= 75.0:
                     # QB: the model picks the strongest of the last few
                     # sentence ends as the closing line (judges, every
@@ -387,8 +497,9 @@ def scout_range(ctx, worker_db, spend):
                     # on a setup line"); one small call, the span's own end
                     # stands without a usable answer
                     import longform
-                    closed = longform.pick_ending(ctx, rows, [[start, end]],
-                                                  spend)
+                    with _timed(ctx, "closing_pick"):
+                        closed = longform.pick_ending(ctx, rows,
+                                                      [[start, end]], spend)
                     if closed[-1][1] - start >= 12.0:
                         end = closed[-1][1]
                     if talk:
@@ -400,8 +511,9 @@ def scout_range(ctx, worker_db, spend):
                                                      pick.get("beats"))
                     if q1:
                         import first_cut_visual as fcv
-                        ctx.first_cut_broll = fcv.broll_spans(
-                            ctx.index, by_id, pick.get("broll"))
+                        ctx.first_cut_broll = early_broll if \
+                            early_broll is not None else fcv.broll_spans(
+                                ctx.index, by_id, pick.get("broll"))
                     return start, end, pick.get("title"), "scout"
         except Exception as exc:  # noqa: BLE001 — the fallback is the point
             print(f"[first_cut] scout failed: {type(exc).__name__}: "
@@ -585,14 +697,15 @@ def trim_range(ctx, worker_db, spend):
                  f"{r['text']}" for r in rows]
         try:
             q1 = bool(getattr(ctx, "first_cut_q1", False))
-            resp = claude_lane.create(
-                model, [{"role": "system", "content":
-                         _with_broll(TRIM_SYSTEM, _talk_source(ctx)) if q1
-                         else TRIM_SYSTEM},
-                        {"role": "user", "content":
-                         "Transcript (sentence id, source seconds):\n"
-                         + "\n".join(lines)}],
-                max_tokens=4000, effort="low")
+            with _timed(ctx, "scout"):
+                resp = claude_lane.create(
+                    model, [{"role": "system", "content":
+                             _with_broll(TRIM_SYSTEM, _talk_source(ctx)) if q1
+                             else TRIM_SYSTEM},
+                            {"role": "user", "content":
+                             "Transcript (sentence id, source seconds):\n"
+                             + "\n".join(lines)}],
+                    max_tokens=4000, effort="low")
             text = resp.choices[0].message.content or ""
             spend["usd"] += float(getattr(resp.usage, "provider_cost_usd", 0)
                                   or 0)
@@ -622,6 +735,7 @@ def trim_range(ctx, worker_db, spend):
                 import first_cut_visual as fcv
                 ctx.first_cut_broll = fcv.broll_spans(ctx.index, by_id,
                                                       pick.get("broll"))
+                _start_prefetch(ctx, ctx.first_cut_broll)
         except Exception as exc:  # noqa: BLE001 — the rules are the fallback
             print(f"[first_cut] trim scout failed: {type(exc).__name__}: "
                   f"{str(exc)[:200]}", flush=True)
@@ -1667,6 +1781,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                                 {"segments": windows, "snap_to_words": False},
                                 started)):
             applied.append("its strongest moments cut into a highlight")
+            _say(ctx, "pick", f"Cut its {len(windows)} strongest moments "
+                              "into a highlight")
             picked = {"how": "motion", "shots": len(windows),
                       "s": round(sum(b - a for a, b in windows), 2)}
             ctx.first_cut_hook = title
@@ -1693,6 +1809,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                       started)
         if _ok(result):
             applied.append("best moment")
+            _say(ctx, "pick", f"Picked the strongest {int(round(end - start))}"
+                              " seconds of your video")
     elif speech:
         start, end, how = trim_range(ctx, worker_db, spend)
         if whole:
@@ -1709,6 +1827,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                         {"segments": [[start, end]], "snap_to_words": True},
                         started)):
                 applied.append("a clean opening and ending")
+                _say(ctx, "pick", "Found a clean opening and ending")
     if speech:
         args = {"min_silence_s": PAUSE_CUT_S, "padding_s": PAUSE_PAD_S}
         if _talk_density(ctx) >= 1.2:
@@ -1726,6 +1845,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("pauses trimmed")
         if _ok(_run(ctx, steps, "remove_filler_words", {}, started)):
             applied.append("filler words removed")
+        if "pauses trimmed" in applied:
+            _say(ctx, "clean", "Cut the pauses" + (
+                " and filler words" if "filler words removed" in applied
+                else ""))
         if q1 and _ok(drop_stutters(ctx, steps, started)):
             applied.append("stutters cut")
         if _talk_source(ctx):
@@ -1775,6 +1898,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                     vertical_out = True
             elif _ok(_run(ctx, steps, "auto_reframe", args, started)):
                 applied.append("reframed to 9:16")
+                _say(ctx, "frame", "Reframed it to vertical 9:16")
                 vertical_out = True
                 if q1 and speech and not talking and _fitted(ctx):
                     # Q1: a narrated landscape animation sat small between
@@ -1872,6 +1996,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                            "a poster-scale title by 0.3 s, held 2.5-3.5 s)"}
         if _ok(_run(ctx, steps, "add_motion_graphic", args, started)):
             applied.append("a hook title")
+            _say(ctx, "hook", "Set the opening line as a title")
     else:
         hook_end = 0.0
     if silent_beats:
@@ -1909,11 +2034,15 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                         clear_from = max(clear_from, prog - talk_craft.PAYOFF_FACE_S)
                 except Exception:
                     pass
-            cutaways = fcv.place_broll(ctx, steps, started, _run, moments,
-                                       max(hook_end, HOOK_S), spend,
-                                       clear_from=clear_from)
+            _say(ctx, "broll_find", "Finding B-roll of what you talk about")
+            with _timed(ctx, "broll"):
+                cutaways = fcv.place_broll(ctx, steps, started, _run,
+                                           moments, max(hook_end, HOOK_S),
+                                           spend, clear_from=clear_from)
             if cutaways:
                 applied.append("b-roll of what is said")
+                _say(ctx, "broll", f"Added {len(cutaways)} B-roll cutaway"
+                                   + ("s" if len(cutaways) != 1 else ""))
     if q1 and screen_kept:
         import first_cut_visual as fcv
         if _ok(fcv.screen_follow(ctx, steps, started, _run, spend,
@@ -1981,6 +2110,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                      "max_words_per_caption": words_per},
                     started)):
             applied.append("captions")
+            _say(ctx, "captions", "Added captions")
             if q1:
                 import first_cut_visual as fcv
                 fcv.drop_tail_words(ctx, steps, started, _run)
@@ -2623,6 +2753,8 @@ def url_chain(ctx, worker_db, url, started, text=None):
         else BRIEF_CARD_S if brief else 0.0
     tour = tour_steps(hints, brief=brief, title_s=title_s, tail_s=tail) \
         if text else TOUR_STEPS
+    _say(ctx, "record", "Recording the site: opening its pages and clicking "
+                        "through them")
     result = _run(ctx, steps, "record_website_demo",
                   {"url": url, "orientation": hints.get("orientation", "portrait"),
                    "steps": tour}, started)
@@ -2638,6 +2770,8 @@ def url_chain(ctx, worker_db, url, started, text=None):
         key = match.group(1) if match else None
     if _ok(result):
         applied.append("website recorded")
+        _say(ctx, "recorded", "Recorded the site; adding the title and the "
+                              "camera moves")
     vertical = hints.get("orientation", "portrait") != "landscape"
     if key:
         # placed whole, with no zooms of its own: the push-ins come from the
@@ -2971,6 +3105,7 @@ def run(worker_db, job, project, index_row):
     ctx.request_preview_cap = max(1, config.FIRST_CUT_MAX_RENDERS)
     ctx.user_message = "First cut"
     ctx.credit_budget = None
+    ctx.first_cut_db, ctx.first_cut_session = worker_db, session_id
     try:
         start_edl = ctx.latest_edl()
     except Exception:
@@ -3027,24 +3162,41 @@ def run(worker_db, job, project, index_row):
                                                      payload.get("message_id")))
             picked = None
         else:
-            steps, applied, picked = video_chain(ctx, worker_db, started,
-                                                 spend)
+            with _timed(ctx, "chain"):
+                steps, applied, picked = video_chain(ctx, worker_db, started,
+                                                     spend)
         render = None
         keep_whole = bool(picked and picked.get("how") == "finished_piece")
         if ctx.versions_written or keep_whole:
-            render = agent_tools.execute(
-                ctx, "render_preview", {"quality": "approval"})
-            steps.append({"tool": "render_preview",
-                          "ok": not _failed(render),
-                          "note": str(render or "")[:160]})
-            if _clear_corner_mark(ctx, steps, render) \
-                    and _renders_done(steps) < config.FIRST_CUT_MAX_RENDERS:
-                render = agent_tools.execute(
-                    ctx, "render_preview", {"quality": "approval"})
+            _say(ctx, "render", "Rendering your preview")
+            if config.FIRST_CUT_DRAFT_FIRST and \
+                    getattr(ctx, "first_cut_q1", False):
+                render = _render_draft_first(ctx, steps)
+            else:
+                with _timed(ctx, "render"):
+                    render = agent_tools.execute(
+                        ctx, "render_preview", {"quality": "approval"})
                 steps.append({"tool": "render_preview",
                               "ok": not _failed(render),
                               "note": str(render or "")[:160]})
+                if _clear_corner_mark(ctx, steps, render) and \
+                        _renders_done(steps) < config.FIRST_CUT_MAX_RENDERS:
+                    with _timed(ctx, "render"):
+                        render = agent_tools.execute(
+                            ctx, "render_preview", {"quality": "approval"})
+                    steps.append({"tool": "render_preview",
+                                  "ok": not _failed(render),
+                                  "note": str(render or "")[:160]})
     finally:
+        pf = getattr(ctx, "broll_prefetch", None)
+        if pf is not None:
+            try:
+                ctx.first_cut_phases = dict(
+                    getattr(ctx, "first_cut_phases", None) or {},
+                    prefetch=dict(pf.stats))
+            except Exception:  # noqa: BLE001
+                pass
+            pf.close()
         llm.clear_turn_plan()
         if trial_scope is not None:
             claude_trial.deactivate(recorder)
@@ -3062,6 +3214,8 @@ def run(worker_db, job, project, index_row):
     meta = {"kind": "first_cut", "first_cut": {
         "steps": steps, "elapsed_s": elapsed, "picked": picked,
         "renders": _renders_done(steps),
+        "phases": dict(getattr(ctx, "first_cut_phases", None) or {},
+                       broll_stages=getattr(ctx, "broll_stages", None)),
         "model_usd": round(spend["usd"], 5)}}
     follow_up = None
     if delivered and url and config.FIRST_CUT_BRIEF_FOLLOW_UP and \
@@ -3084,8 +3238,10 @@ def run(worker_db, job, project, index_row):
             text = (brief_reply(facts, duration) + " Tell me what to change."
                     + (" To download it, choose a plan." if trial else ""))
         else:
-            text = (f"Here's your first cut: {summary}. It's playing on the "
-                    "right."
+            # Q8: "on the right" is wrong on a phone, where the player sits
+            # above the chat
+            text = (f"Here's your first cut: {summary}. It's playing in the "
+                    "player."
                     + (" Now I'm working through the rest of your brief."
                        if follow_up else " Tell me what to change.")
                     + (" To download it, choose a plan." if trial else ""))
@@ -3095,6 +3251,10 @@ def run(worker_db, job, project, index_row):
         meta.update({"edl_version": latest["version"], "preview": preview,
                      "quality_status": "unchecked", "quality_findings": [],
                      "export_ready": True, "outcome": "fulfilled"})
+        if preview.get("quality") == "draft" and \
+                getattr(ctx, "first_cut_upgrade", None):
+            # Q8: delivered on the draft; the approval render is on its way
+            meta["upgrading"] = True
         worker_db.run(dbx.add_message, session_id, "assistant", text, meta)
         try:
             worker_db.run(dbx.record_client_event, job["user_id"],

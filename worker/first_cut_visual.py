@@ -215,6 +215,20 @@ def broll_windows(moments, tl, prog, hook_end, clear_from=None):
     return out
 
 
+def keyed_video_providers():
+    """Q5: the curated stock libraries live here (Pexels, Pixabay), which the
+    First cut's first B-roll pass asks for VIDEO; None when neither is live.
+    The B-roll prefetch (Q8, first_cut_speed) searches the same set, so the
+    placement takes its answers instead of searching again."""
+    try:
+        import broll_source
+        live = [p for p, v in broll_source.status().items() if v == "on"]
+    except Exception:  # noqa: BLE001
+        return None
+    keyed = [p for p in ("pexels", "pixabay") if p in live]
+    return keyed or None
+
+
 def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
                 clear_from=None):
     """Cut away to B-roll on the scout's concrete moments (source_broll:
@@ -255,23 +269,26 @@ def place_broll(ctx, steps, started, run, moments, hook_end, spend=None,
         # the curated stock libraries only: the archives' "videos" answered
         # "power plant at night" with a drone strike on Chernobyl and "a
         # computer science lab" with shorebirds (Q5 harness, 30 Oct)
-        import broll_source
-        live = [p for p, v in broll_source.status().items() if v == "on"]
-        keyed = [p for p in ("pexels", "pixabay") if p in live]
+        keyed = keyed_video_providers()
         if keyed:
             first["providers"] = keyed
-    run(ctx, steps, "source_broll", first, started)
-    if video:
-        got = covered(ctx)
-        missed = [dict(s, kind="any", id=s["id"] + "a") for s in specs
-                  if not any(a - 0.35 <= s["at"] <= b for a, b in got)]
-        if missed:
-            print(f"[first_cut] b-roll: {len(missed)} moments without a "
-                  "clip, any picture now", flush=True)
-            run(ctx, steps, "source_broll", {"moments": missed,
-                                             "max": len(missed)}, started)
+    import first_cut
+    # Q8: the B-roll stage's wall time (both passes) in the First cut's meta
+    with first_cut._timed(ctx, "broll_source"):
+        run(ctx, steps, "source_broll", first, started)
+        if video:
+            got = covered(ctx)
+            missed = [dict(s, kind="any", id=s["id"] + "a") for s in specs
+                      if not any(a - 0.35 <= s["at"] <= b for a, b in got)]
+            if missed:
+                print(f"[first_cut] b-roll: {len(missed)} moments without a "
+                      "clip, any picture now", flush=True)
+                run(ctx, steps, "source_broll", {"moments": missed,
+                                                 "max": len(missed)}, started)
     if spend is not None:
-        return verify_broll(ctx, steps, started, run, spend)
+        import first_cut
+        with first_cut._timed(ctx, "broll_check"):
+            return verify_broll(ctx, steps, started, run, spend)
     return covered(ctx, ("broll",))
 
 

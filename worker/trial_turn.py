@@ -71,6 +71,17 @@ _SPECIFIC = re.compile(
     r"seconds?|minutes?|landscape|16\s*:\s*9|square|1\s*:\s*1|4\s*:\s*5|"
     r"translate|language|spanish|arabic|french|voice\s*over|narrat)\b", re.I)
 _URL = re.compile(r"https?://|www\.", re.I)
+# Q8 (30 Oct): a change to something the First cut already has ("make the
+# captions bigger", "change the hook title to SAVE THIS") is a specific
+# instruction: the prepared note keeps the First cut's captions, hook and
+# slams exactly, so the generic head start would have refused the very thing
+# the user asked for.
+_MODIFY = re.compile(
+    r"\b(bigger|smaller|larger|bolder|thinner|thicker|higher|lower|brighter|"
+    r"darker|louder|quieter|softer|wider|narrower|tighter\s+crop|"
+    r"(?:change|rename|reword|rewrite|replace|swap|move|resize|restyle)\s+"
+    r"(?:the|my|its|this|that|it)|instead\s+of|to\s+say|that\s+says|"
+    r"(?:title|hook|caption|text)\s+(?:to|should|reads?))\b", re.I)
 
 
 def intent(text):
@@ -78,7 +89,7 @@ def intent(text):
     t = " ".join(str(text or "").split())
     if not t or _URL.search(t) or len(t.split()) > 18:
         return None
-    if _SPECIFIC.search(t):
+    if _SPECIFIC.search(t) or _MODIFY.search(t):
         return None
     if _CLEANUP.search(t):
         return "cleanup"

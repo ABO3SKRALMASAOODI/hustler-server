@@ -224,6 +224,27 @@ def _hero(ctx, edl, start, end):
         return frames
 
 
+def _prefetch_for(ctx, orientation, W, H, providers):
+    """(the First cut's BrollPrefetch when it holds this frame, the search
+    function): engine accounts search through the short-lived cache, every
+    other account calls the libraries exactly as before (D1)."""
+    import broll_source
+    pf = getattr(ctx, "broll_prefetch", None)
+    if pf is not None and not pf.matches(orientation, W, H, providers):
+        print(f"[broll] prefetch frame {pf.frame} != {(orientation, W, H)}: "
+              "searching as usual", flush=True)
+        pf = None
+    try:
+        import agent_tools
+        engine = bool(agent_tools.engine_on(ctx))
+    except Exception:  # noqa: BLE001
+        engine = False
+    if engine or pf is not None:
+        import first_cut_speed
+        return pf, first_cut_speed.cached_search
+    return pf, broll_source.search
+
+
 def _dedupe(cands):
     seen, out = set(), []
     for c in cands:
@@ -558,6 +579,13 @@ def _source_broll(ctx, moments, limit, providers, place):
                 + "\n".join("  " + x for x in broll_source.shoot_list(
                     specs, orientation)))
 
+    # Q8 (30 Oct): a First cut started these searches and the short lists'
+    # downloads when its scout answered (first_cut_speed.BrollPrefetch); an
+    # engine account's searches answer from a short-lived cache. Anything
+    # the prefetch does not hold (another frame, providers, archival) runs
+    # exactly as before.
+    pf, search_fn = _prefetch_for(ctx, orientation, W, H, providers)
+
     # 1. search every moment's routes in parallel
     def find(spec):
         kinds = {"video": ["video"], "photo": ["photo"],
@@ -565,17 +593,27 @@ def _source_broll(ctx, moments, limit, providers, place):
         cands, errs = [], []
         for q in spec["queries"]:
             for k in kinds:
-                c, e, _lanes = broll_source.search(
-                    q, k, orientation, count=4, providers=providers,
-                    archival=spec["archival"])
+                hit = pf.search(q, k, providers) if (
+                    pf is not None and not spec["archival"]) else None
+                if hit is not None:
+                    c, e = hit
+                else:
+                    c, e, _lanes = search_fn(
+                        q, k, orientation, count=4, providers=providers,
+                        archival=spec["archival"])
                 cands += c
                 errs += e
         ranked = broll_source.prerank(_dedupe(cands), spec["queries"], W, H,
                                       need_s=spec["duration_s"],
                                       archival=spec["archival"])
         return spec, ranked, errs
+    import time as _time
+    stage = {"search": 0.0, "hero": 0.0, "fetch": 0.0, "judge": 0.0,
+             "place": 0.0}
+    _t = _time.monotonic()
     with ThreadPoolExecutor(max_workers=min(4, len(specs))) as pool:
         found = list(pool.map(find, specs))
+    stage["search"] += _time.monotonic() - _t
 
     # 2. acquire + judge a short list per moment
     used = {str(((i.get("credit") or {}).get("page_url")) or "")
@@ -583,7 +621,9 @@ def _source_broll(ctx, moments, limit, providers, place):
             and i.get("type") == "broll"}
     plans, misses, rejected_n = [], [], {}
     for spec, ranked, errs in found:
+        _t = _time.monotonic()
         hero = _hero(ctx, edl, spec["start"], spec["end"])
+        stage["hero"] += _time.monotonic() - _t
         short = _interleave([c for c in ranked
                              if c.get("page_url") not in used], SHORTLIST)
         if not short:
@@ -592,10 +632,16 @@ def _source_broll(ctx, moments, limit, providers, place):
             continue
         # fetch in parallel (network); decode and judge here, one at a
         # time (numpy's BLAS must not be driven from several threads)
+        _t = _time.monotonic()
         with ThreadPoolExecutor(max_workers=min(3, len(short))) as pool:
-            fetched = list(pool.map(lambda c: _fetch(ctx, c, W, H), short))
+            fetched = list(pool.map(
+                lambda c: (pf.fetched(c) if pf is not None else None)
+                or _fetch(ctx, c, W, H), short))
+        stage["fetch"] += _time.monotonic() - _t
+        _t = _time.monotonic()
         judged = [_judge(ctx, f, W, H, hero, spec["duration_s"],
                          spec["archival"]) for f in fetched]
+        stage["judge"] += _time.monotonic() - _t
         debug = getattr(ctx, "_broll_debug", None)
         if isinstance(debug, list):
             for j in judged:
@@ -639,6 +685,7 @@ def _source_broll(ctx, moments, limit, providers, place):
     plans = plans[:max(0, cap)]
 
     # 3. place
+    _t_place = _time.monotonic()
     lines, ops, ids, rows = [], [], [], []
     for n, (spec, best, hero) in enumerate(plans):
         cand, got, res = best["cand"], best["got"], best["res"]
@@ -723,7 +770,17 @@ def _source_broll(ctx, moments, limit, providers, place):
             except Exception:  # noqa: BLE001
                 pass
 
-    board = _board(ctx, rows, W, H) if rows else None
+    stage["place"] += _time.monotonic() - _t_place
+    # Q8: where source_broll's time goes, per stage (measurement only)
+    print("[broll] stages s: " + ", ".join(f"{k} {v:.1f}" for k, v in
+                                           stage.items())
+          + f" ({len(specs)} moments)", flush=True)
+    try:
+        ctx.broll_stages = {k: round(v, 2) for k, v in stage.items()}
+    except Exception:  # noqa: BLE001
+        pass
+    # the board is a picture for an agent's eyes; a First cut has none
+    board = _board(ctx, rows, W, H) if rows and pf is None else None
     if board and isinstance(getattr(ctx, "pending_images", None), list):
         ctx.pending_images.append((
             "B-ROLL BOARD — hero | as fetched | after the match grade",

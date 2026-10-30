@@ -2604,7 +2604,51 @@ def _trial_head_start(ctx, worker_db, session_id, user_message):
     ctx.editing_metrics["trial_head_start"] = {
         "intent": prep["intent"], "whole": prep["whole"],
         "applied": prep["applied"], "s": prep["s"]}
-    return prep["note"]
+    note = prep["note"]
+    rendered = _trial_prerender(ctx, worker_db, session_id, post)
+    if rendered:
+        # the head start's preview is already on screen: the model replies
+        # (Q8: the model's own render step and its re-cuts cost 40-90 s of
+        # a 100 s clean-up turn for no judged gain, Q3/QB)
+        note = note.replace(
+            " Your job now: render_preview once, look at the result, fix only "
+            "a MAJOR defect you can see (a face cut off, a caption over the "
+            "face, a fragment at the start or end), then reply in two or three "
+            "sentences saying what the video now is.",
+            " The preview of this exact version is ALREADY rendered and "
+            "playing for the user (" + rendered + "). Do not call "
+            "render_preview and do not edit; reply now in two or three short, "
+            "warm sentences: what the video now is, where to look (the "
+            "player), and one useful next step the user could ask for.")
+    return note
+
+
+def _trial_prerender(ctx, worker_db, session_id, post):
+    """Q8: render the prepared trial turn's preview in code, before the
+    model's first call. Returns '<seconds> s, <shape>' when the latest
+    version's preview is rendered, else '' (the model renders as before).
+    Trial lane only (the caller is _trial_head_start)."""
+    if not config.CLAUDE_TRIAL_PRERENDER or not _prepared_trial(ctx):
+        return ""
+    try:
+        t0 = time.monotonic()
+        result = agent_tools.execute(ctx, "render_preview",
+                                     {"quality": "draft", "complete": True})
+        post("render_preview", {"quality": "draft", "complete": True}, result)
+        ctx.editing_metrics["trial_prerender_s"] = round(
+            time.monotonic() - t0, 2)
+        preview = getattr(ctx, "last_preview", None) or {}
+        if str(preview.get("edl_version")) != str(ctx.latest_edl()["version"]):
+            return ""
+        import trial_turn
+        shape = trial_turn.shape_words(ctx) or ""
+        dur = preview.get("duration_s")
+        return (f"{float(dur):.0f} s" if dur else "rendered") + \
+            (f", {shape}" if shape else "")
+    except Exception as exc:  # noqa: BLE001 — the model renders instead
+        print(f"[trial_turn] prerender skipped: {type(exc).__name__}: "
+              f"{str(exc)[:160]}", flush=True)
+        return ""
 
 
 def _claude_trial_extras(ctx):
@@ -5908,6 +5952,23 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 truncated=truncated_out)
             import fulfillment
             final = fulfillment.disclose(ctx, final)
+            if _trial_lane(ctx) and config.CLAUDE_TRIAL_REPLY_GUARD:
+                # Q8: the trial reply says only what the turn's facts back
+                # (EDL diff, the latest preview, the transcript), short and
+                # warm: what changed, where to look, one next step
+                import trial_reply
+                final, _report = trial_reply.finish_for_ctx(
+                    ctx, final, user_message.get("content") or "")
+                if _report and _report.get("dropped"):
+                    honesty["trial_reply_dropped"] = _report["dropped"][:12]
+            if _trial_lane(ctx):
+                # Q8: a trial turn always ends on a version the user can take
+                # to the export paywall: the reviewers' open notes advise
+                # (flash safety still holds). A "repair_required" ending
+                # showed a trial user "This edit needs another pass" and no
+                # Download at all (harness, 30 Oct: every prepared turn whose
+                # picture QC kept its known First-cut notes)
+                ctx.critics_advisory = True
             quality = _quality_handoff(ctx)
             message_meta = {
                 "edl_version": latest["version"],
