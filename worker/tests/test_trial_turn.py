@@ -410,6 +410,26 @@ def test_a_prepared_trial_turn_takes_no_critic_repair_pass(monkeypatch):
     assert agent_loop._disclose_outstanding_quality(ctx, "Done.") == "Done."
 
 
+@pytest.mark.parametrize("status", ["advisory", "repair_required"])
+def test_a_prepared_trial_reply_never_lists_review_notes(status, monkeypatch):
+    ctx = _lane_ctx("trial")
+    ctx.trial_prep = {"intent": "generic"}
+    monkeypatch.setattr(agent_loop, "_quality_handoff", lambda c: {
+        "quality_status": status,
+        "quality_findings": ["picture QC: FACE AT THE LEFT EDGE 11.2-11.8s"]})
+    assert agent_loop._disclose_outstanding_quality(ctx, "Done.") == "Done."
+
+
+@pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
+def test_unprepared_turns_keep_the_verification_line(kind, monkeypatch):
+    ctx = _lane_ctx(kind)              # no head start ran
+    monkeypatch.setattr(agent_loop, "_quality_handoff", lambda c: {
+        "quality_status": "repair_required",
+        "quality_findings": ["picture QC: FACE AT THE LEFT EDGE"]})
+    out = agent_loop._disclose_outstanding_quality(ctx, "Done.")
+    assert out.startswith("Done.") and "Verification remains open" in out
+
+
 @pytest.mark.parametrize("kind", ["grandfathered", "new_subscriber", "trial"])
 def test_unprepared_turns_keep_the_review_appendix(kind, monkeypatch):
     ctx = _lane_ctx(kind)              # no head start ran

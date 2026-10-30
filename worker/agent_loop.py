@@ -3399,11 +3399,16 @@ def _unused_fetched_audio_note(ctx):
 def _disclose_outstanding_quality(ctx, text):
     """Disclose the concrete blocker on legitimate terminal boundaries."""
     quality = _quality_handoff(ctx)
-    if _prepared_trial(ctx) and quality.get("quality_status") == "advisory":
-        # advisory review notes stay in the message meta (quality_findings)
-        # for the admin; the trial reply says what the video is (Q3: a
-        # disclosed note "starts mid-sentence" on a First cut the judges
-        # passed became a hard fault in the turn's judgement)
+    if _prepared_trial(ctx) and quality.get("quality_status") in (
+            "advisory", "repair_required"):
+        # review notes stay in the message meta (quality_findings) for the
+        # admin; the trial reply says what the video is (Q3: a disclosed
+        # note "starts mid-sentence" on a First cut the judges passed became
+        # a hard fault in the turn's judgement). QI (30 Oct): main's
+        # verification records leave a prepared trial turn at
+        # repair_required (it never takes a verification slice), and the
+        # reply then ended "Verification remains open: picture QC: FACE AT
+        # THE LEFT EDGE ..." on a First cut the judges scored 8+.
         return text
     if quality.get("quality_status") == "advisory":
         if quality.get("contract_met"):
