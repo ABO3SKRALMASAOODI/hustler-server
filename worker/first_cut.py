@@ -604,6 +604,65 @@ def _talk_density(ctx):
     return n / span if span > 0 else 0.0
 
 
+# QB (30 Oct): a word said twice in a row ("is is deep", "work and And") is a
+# stutter: the captions printed it and the judges marked it in 2 of 2
+# judgements of the 10-minute talk. Only short function words, never an
+# emphasis a speaker means ("very very", "no no", "that that").
+STUTTER_WORDS = frozenset((
+    "i", "a", "the", "and", "to", "of", "in", "is", "it", "we", "you", "he",
+    "she", "they", "at", "for", "but", "or", "on", "was", "are", "be", "as",
+    "with", "my", "our", "your", "if", "by", "an", "from", "have", "has"))
+STUTTER_GAP_S = 0.4
+
+
+def stutter_spans(words, keep):
+    """[(t0, t1)] source spans of the FIRST of two identical short words in a
+    row inside the kept program, the span running up to the second word's
+    start."""
+    spans = []
+    for a, b in zip(words, words[1:]):
+        if a.get("w") is None or b.get("w") is None:
+            continue
+        na, nb = _norm(a["w"]), _norm(b["w"])
+        if not na or na != nb or na not in STUTTER_WORDS:
+            continue
+        try:
+            a0, b0 = _wt(a, "t0"), _wt(b, "t0")
+            a1 = _wt(a, "t1")
+        except (KeyError, TypeError, ValueError):
+            continue
+        if b0 - a1 >= STUTTER_GAP_S or b0 <= a0:
+            continue
+        if any(s <= a0 and b0 <= e for s, e in keep):
+            spans.append((a0, round(b0 - 0.01, 3)))
+    return spans
+
+
+def drop_stutters(ctx, steps, started):
+    """Cut each stutter out of the kept program (one keep write), so the
+    audio and the captions both carry the word once. None when there is none."""
+    keep = _keep(ctx)
+    words = (ctx.index or {}).get("words") or []
+    if not keep or not words:
+        return None
+    spans = stutter_spans(words, keep)
+    if not spans:
+        return None
+    new = []
+    for s, e in keep:
+        cur = s
+        for a, b in sorted(x for x in spans if s <= x[0] and x[1] <= e):
+            if a - cur >= 0.2:
+                new.append([round(cur, 3), round(a, 3)])
+            cur = max(cur, b)
+        if e - cur >= 0.2:
+            new.append([round(cur, 3), round(e, 3)])
+    if not new or new == [list(map(float, k)) for k in keep]:
+        return None
+    return _run(ctx, steps, "keep_segments",
+                {"segments": new, "snap_to_words": False}, started)
+
+
 def shape_ends(ctx, steps, started):
     """The opening starts ON its first real word (no lead silence, no
     "And/um/so" first), and the ending runs TAIL_LIVE_S of live picture past
@@ -1524,6 +1583,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("pauses trimmed")
         if _ok(_run(ctx, steps, "remove_filler_words", {}, started)):
             applied.append("filler words removed")
+        if q1 and _ok(drop_stutters(ctx, steps, started)):
+            applied.append("stutters cut")
         shape_ends(ctx, steps, started)
     faces = _faces(ctx.index)
     talking = bool(speech and faces and faces["share"] >= 0.5)
