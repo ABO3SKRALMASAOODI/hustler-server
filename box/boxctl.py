@@ -681,19 +681,65 @@ def stale_slots_without_env(source):
     return out
 
 
+STATE_DB_PATH = os.getenv("BOX_STATE_DB",
+                          os.path.join(DATA_DIR, "admission.sqlite"))
+
+
+def admission_restart_blocker(state=None):
+    """Why admission must not restart now, or None when it may.
+
+    R1 chaos (30 Oct 2026): `systemctl restart valmera-admission` with five
+    queue-backed calls in flight (two approval previews, a final, a 30-min
+    and a 2-h index) lost nothing: each finished on its first claim and the
+    dispatcher reconciled it from PostgreSQL; a call still waiting in the
+    queue is refused with proof that nothing ran and asks again within
+    seconds. Waiting for a fully idle box instead held a slot-plan change
+    behind a 2-h index and needed a drain, which made every new call (the
+    owner's podcast agents' read-only MCP calls included) wait 50+ minutes.
+    Only a synchronous child's answer is lost in a restart (it has no queue
+    row), and a call between slot and /run would be refused mid-start, so
+    those two still block. Children last seconds."""
+    try:
+        import sqlite3
+        db = sqlite3.connect(f"file:{STATE_DB_PATH}?mode=ro", uri=True,
+                             timeout=5)
+        try:
+            rows = db.execute(
+                "SELECT status, job FROM calls WHERE status IN "
+                "('starting','running','unknown','stopping')").fetchall()
+        finally:
+            db.close()
+    except Exception:  # noqa: BLE001 - unreadable: the old, idle-only rule
+        state = admission_state() if state is None else state
+        state = state or {}
+        busy = (state.get("slots") or {}).get("busy", 0)
+        depth = (state.get("queue") or {}).get("depth", 0)
+        return "calls in flight" if busy or depth else None
+    for status, job in rows:
+        if status == "starting":
+            return "a call is starting on a slot"
+        try:
+            child = (json.loads(job or "{}") or {}).get("id") is None
+        except ValueError:
+            child = False
+        if child and status in ("running", "unknown"):
+            return "a synchronous child call is running"
+    return None
+
+
 def restart_services(changed):
     """Pick up new box tooling. Admission restarts are safe (its state is
-    durable and every in-flight call is recovered as `unknown` until its
-    executor finishes) but are done only when no call is running."""
+    durable and every in-flight queue call is recovered as `unknown` until
+    its executor finishes and the dispatcher reconciles it); they wait only
+    for synchronous children and starting calls (admission_restart_blocker),
+    never for long renders or indexes."""
     units = []
     if "provision.py" in changed:
         units.append("valmera-provision")
     if "admission.py" in changed:
-        state = admission_state() or {}
-        busy = (state.get("slots") or {}).get("busy", 0)
-        depth = (state.get("queue") or {}).get("depth", 0)
-        if busy or depth:
-            log("admission.py changed; restart deferred (calls in flight)")
+        blocker = admission_restart_blocker()
+        if blocker:
+            log(f"admission.py changed; restart deferred ({blocker})")
             flag = os.path.join(DATA_DIR, "admission-restart-pending")
             open(flag, "w").close()
         else:
@@ -718,12 +764,12 @@ def restart_services(changed):
                  config().get("slots", [])]
         log(f"installed {plan_name()} from the repository")
         if before != after and "valmera-admission" not in units:
-            state = admission_state() or {}
-            if (state.get("slots") or {}).get("busy", 0) or \
-                    (state.get("queue") or {}).get("depth", 0):
+            blocker = admission_restart_blocker()
+            if blocker:
                 open(os.path.join(DATA_DIR, "admission-restart-pending"),
                      "w").close()
-                log("slot list changed; admission restart deferred")
+                log(f"slot list changed; admission restart deferred "
+                    f"({blocker})")
             else:
                 units.append("valmera-admission")
     for unit in units:
@@ -735,9 +781,7 @@ def pending_admission_restart():
     flag = os.path.join(DATA_DIR, "admission-restart-pending")
     if not os.path.exists(flag):
         return
-    state = admission_state() or {}
-    if (state.get("slots") or {}).get("busy", 0) or \
-            (state.get("queue") or {}).get("depth", 0):
+    if admission_restart_blocker():
         return
     sh(["systemctl", "restart", "valmera-admission"], check=False)
     os.remove(flag)
