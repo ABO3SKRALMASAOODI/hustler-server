@@ -35,6 +35,8 @@ import json
 import re
 import time
 
+import config
+
 LIFT_GAP_S = 4.0           # a talking head never holds one look longer
 LIFT_MIN_EDGE_S = 1.8      # an added event stays this clear of its neighbours
 PUNCH_STRENGTH = 0.2       # 100% -> 120%: a second framing the eye reads
@@ -660,7 +662,14 @@ def prepare(ctx, worker_db, session_id, text, post=None):
     if kind != "kept":
         repair_empty_cards(ctx, steps)
         if _talking(ctx):
-            lift_static(ctx, steps)
+            # measured OFF by default (Q3, 30 Oct, three Haiku rounds, two
+            # Opus judgements each): added punches and slams on a talking
+            # head never raised the judged score over its First cut (phone
+            # -0.75..0, phonehook -1.0..-0.25, talk10best -1.25..-0.75,
+            # talk10 0..+0.25); the judges ask for reframes and B-roll, which
+            # this pass cannot add. CLAUDE_TRIAL_LIFT_TALKING=1 turns it on.
+            if config.CLAUDE_TRIAL_LIFT_TALKING:
+                lift_static(ctx, steps)
         else:
             lift_screen(ctx, steps)
     elif picked.get("how") == "motion":

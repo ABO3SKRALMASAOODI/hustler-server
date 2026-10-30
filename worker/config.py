@@ -1958,6 +1958,9 @@ AGENT_REQUEST_MAX_S = max(
 # 2026): one look and one repair. 0 = the general cap above.
 CLAUDE_TRIAL_MAX_PREVIEWS = max(
     0, int(os.getenv("CLAUDE_TRIAL_MAX_PREVIEWS", "2")))
+# The trial turn's punch/slam lift on talking heads (trial_turn.lift_static):
+# off, measured (see trial_turn.prepare); "1" turns it on.
+CLAUDE_TRIAL_LIFT_TALKING = os.getenv("CLAUDE_TRIAL_LIFT_TALKING", "0") == "1"
 # Fresh turns yield while the fleet's last-60s token burn is above this —
 # leave room for the next ~50K first call under the org's 200K TPM tier.
 AGENT_TPM_SOFT_CAP = int(os.getenv("AGENT_TPM_SOFT_CAP", "140000"))

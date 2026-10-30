@@ -203,6 +203,7 @@ class _DB:
 def test_prepare_only_on_an_untouched_first_cut(fake_tools, monkeypatch):
     monkeypatch.setattr(agent_tools, "_zoom_room",
                         lambda ctx, edl, s, e: (0.3, 1.2, 0.0))
+    monkeypatch.setattr(config, "CLAUDE_TRIAL_LIFT_TALKING", True)
     ctx = _Proj(FC_EDL, _words(SPEECH), [])
     fc = {"kind": "first_cut", "edl_version": 12,
           "first_cut": {"picked": {"start_s": 4.5, "end_s": 36.3,
@@ -485,3 +486,18 @@ def test_the_guard_keeps_only_the_first_cuts_own_pieces(monkeypatch):
     assert agent_loop._kept_craft_refusal(ctx, "remove_zoom", {"id": "zm2"})
     assert agent_loop._kept_craft_refusal(ctx, "remove_zoom",
                                           {"id": "z99"}) is None
+
+
+def test_the_talking_head_lift_is_off_by_default(fake_tools, monkeypatch):
+    """Measured: it never raised a talking head over its First cut."""
+    assert config.CLAUDE_TRIAL_LIFT_TALKING is False
+    ctx = _Proj(FC_EDL, _words(SPEECH), [])
+    fc = {"kind": "first_cut", "edl_version": 12,
+          "first_cut": {"picked": {"start_s": 4.5, "end_s": 36.3,
+                                   "how": "scout"}}}
+    prep = trial_turn.prepare(ctx, _DB(fc), 1, "make it a vertical short "
+                              "with captions")
+    assert prep["intent"] == "generic" and not prep["applied"]
+    assert not [n for n, _a in ctx.calls if n in ("add_zoom",
+                                                  "add_motion_graphic")]
+    assert "already answers this request" in prep["note"]
