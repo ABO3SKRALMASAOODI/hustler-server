@@ -184,17 +184,31 @@ def test_url_records_a_tour_then_showcases_it_under_the_site_title(monkeypatch):
     monkeypatch.setattr(agent_tools, "execute", execute)
     steps, applied = first_cut.url_chain(ctx, None, "https://example.com/",
                                          _clock())
-    assert [c[0] for c in calls] == ["record_website_demo", "showcase_demo",
-                                     "add_motion_graphic"]
+    names = [c[0] for c in calls]
+    assert names == ["record_website_demo", "showcase_demo"] + \
+        ["add_stylize"] * len(first_cut.DEMO_TITLE_BLUR) + ["add_motion_graphic"]
     assert calls[0][1]["orientation"] == "portrait"
     assert calls[0][1]["steps"] == first_cut.TOUR_STEPS
     assert calls[1][1]["asset_key"] == "web/9/capture.mp4"
-    assert calls[1][1]["zoom_strength"] == first_cut.DEMO_ZOOM
+    # placed whole: the push-ins come from the tour's beats, never from
+    # showcase_demo's travelling zoom (Q2: it glided sideways between cards)
+    assert calls[1][1]["zooms"] is False
+    # the hero blurs under the title and is sharp again by its end
+    blurs = [c[1] for c in calls if c[0] == "add_stylize"]
+    assert all(b["kind"] == "dream_blur" for b in blurs)
+    # two stacked passes make the deep blur; an identical second call would
+    # be refused as a replay, so no two are the same
+    assert len({tuple(sorted(b.items())) for b in blurs}) == len(blurs)
+    deep = [b for b in blurs if b["intensity"] >= 0.95]
+    # deep until the title has mostly left (its exit is the last ~0.3 s)
+    assert min(b["end"] for b in deep) >= first_cut.DEMO_TITLE_S - 0.3
+    assert max(b["end"] for b in blurs) <= first_cut.DEMO_TITLE_S + 0.1
     # the site's name as a two-family poster, never its own <h1> (which the
-    # hero already shows), on a soft scrim over the live site
-    assert calls[2][1]["params"]["text"] == "Meet / *Acme*"
-    assert calls[2][1]["end"] == first_cut.DEMO_TITLE_S
-    assert calls[2][1]["mute_captions"] is True
+    # hero already shows)
+    title = calls[-1][1]
+    assert title["params"]["text"] == "Meet / *Acme*"
+    assert title["end"] == first_cut.DEMO_TITLE_S
+    assert title["mute_captions"] is True
 
 
 def test_failed_steps_are_not_claimed(monkeypatch):
@@ -221,9 +235,9 @@ def test_the_capture_key_is_read_from_the_tool_reply(monkeypatch):
     monkeypatch.setattr(agent_tools, "execute", execute)
     first_cut.url_chain(ctx, None, "https://valmera.io/", _clock())
     assert calls[1] == ("showcase_demo", {"asset_key": "fetched/4695/40a996fb2036.mp4",
-                                          "zoom_strength": first_cut.DEMO_ZOOM})
+                                          "zooms": False})
     # the site's own name from its host when the capture carries no title
-    assert calls[2][1]["params"]["text"] == "Meet / *Valmera*"
+    assert calls[-1][1]["params"]["text"] == "Meet / *Valmera*"
 
 
 def test_summary_says_what_was_done():
@@ -485,7 +499,9 @@ def test_website_request_hints_are_read_from_its_words():
     assert h["orientation"] == "landscape" and h["mode"] == "scroll"
     h = first_cut.url_hints("Create a premium 60-second cinematic promotional "
                             "video for https://osai.ie. Open the Pricing page.")
-    assert "mode" not in h and first_cut.tour_steps(h)[1]["by"] == 3
+    # a 60 s brief opens five section pages (Q2: "2 of 3 sections" in 40 s)
+    assert "mode" not in h and first_cut.tour_steps(h)[1]["by"] == 5
+    assert first_cut.tour_steps(first_cut.url_hints(tile))[1]["by"] == 2
     assert "pricing" in first_cut.tour_steps(h)[1]["prefer"].lower()
     assert first_cut.url_hints(None) == {}
 
