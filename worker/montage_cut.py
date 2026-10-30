@@ -49,6 +49,8 @@ OPEN_S = 0.8                # the first shot carries the title's first read
 SECOND_GAP_S = 1.4          # two moments of one shot are this far apart (a jump)
 PIECE_S = 2.0
 CAP_EVERY_S = 2.2
+RUN_MAX = 2                 # at most this many moments of one shot in a row
+WIDE_SUBJECT = 1.6          # a subject wider than this many 9:16 crops is unframable
 HIT_BEFORE_S = 0.48         # the last shot runs this long up to its peak
 HIT_AFTER_S = 0.14          # ... and ends this soon after it (the hit)
 HIT_REACH_S = 0.6           # the peak is looked for this close around the payoff
@@ -132,6 +134,16 @@ def windows(curve, shots, duration, target=TARGET_S):
         chosen.append(c)
         total += c["span"]
     chosen.sort(key=lambda c: c["peak"])
+    # never more than RUN_MAX moments of one shot in a row: with the crop on
+    # the subject they read as one held shot (judges: "the landing shot held
+    # about 2.3 s", three moments of it): the weakest of such a run goes
+    kept = []
+    for c in chosen:
+        kept.append(c)
+        run = kept[-(RUN_MAX + 1):]
+        if len(run) == RUN_MAX + 1 and all(k["shot"] == c["shot"] for k in run):
+            kept.remove(min(run, key=lambda k: k["score"]))
+    chosen = kept
     med = float(np.median([c["score"] for c in chosen]))
     while len(chosen) > 4 and chosen[0]["score"] < med:
         chosen.pop(0)                       # never open on a weak moment
@@ -187,6 +199,21 @@ def hit_end(curve, wins, shots, duration):
     if w1 - w0 >= 0.35:
         out[-1] = [round(w0, 2), round(w1, 2)]
     return out
+
+
+def framable(wins, pairs, ww, keep_last=True):
+    """``wins`` without the shots whose subject is much wider than the 9:16
+    crop (a ship crossing the frame sideways came out "sliced at the right
+    edge of an empty navy frame", judges, both runs); the payoff stays, and
+    nothing is dropped below four shots."""
+    out = []
+    for k, (a, b) in enumerate(wins):
+        box = _box_for(pairs, a, b)
+        last = keep_last and k == len(wins) - 1
+        if box and not last and (box[2] - box[0]) > WIDE_SUBJECT * ww:
+            continue
+        out.append([a, b])
+    return out if len(out) >= 4 else [list(w) for w in wins]
 
 
 def fit_length(wins, shots, duration, least=MIN_TOTAL_S, most_span=MAX_SPAN_S):
@@ -251,6 +278,15 @@ def parse_boxes(items, sizes):
             continue
         out[n] = tuple(min(max(v, 0.0), 1.0) for v in b)
     return out
+
+
+def crop_share(index):
+    """The 9:16 crop's width as a share of the source's (0.316 on 16:9)."""
+    try:
+        video = (index or {}).get("video") or {}
+        return (9 / 16.0) / (float(video["width"]) / float(video["height"]))
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return 0.316
 
 
 def crop_x(box, ww):

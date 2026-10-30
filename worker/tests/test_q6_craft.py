@@ -562,3 +562,26 @@ def test_a_beat_never_shows_much_below_the_subject():
     close = silent_cut.beat_z(box, 1, 2.1)
     medium = silent_cut.beat_z(box, 2, 2.1)
     assert medium <= close * silent_cut.MEDIUM_RATIO + 1e-6
+
+
+def test_never_more_than_two_moments_of_one_shot_in_a_row():
+    times, diff, luma = _curve(90.0)
+    shots = [{"start": 0.0, "end": 4.0}, {"start": 4.0, "end": 60.0},
+             {"start": 60.0, "end": 64.0}, {"start": 64.0, "end": 90.0}]
+    wins = montage_cut.windows((times, diff, luma), shots, 90.0, target=30.0)
+    which = [next(k for k, sh in enumerate(shots) if sh["start"] <= (a + b) / 2 < sh["end"])
+             for a, b in wins]
+    for k in range(2, len(which)):
+        assert not (which[k] == which[k - 1] == which[k - 2])
+
+
+def test_a_subject_wider_than_the_vertical_crop_is_dropped_but_not_the_payoff():
+    wins = [[float(k), k + 0.4] for k in range(0, 12, 2)]
+    wide = (0.1, 0.4, 0.9, 0.6)
+    pairs = [([2.0, 2.4], wide), ([10.0, 10.4], wide)] + \
+        [([float(k), k + 0.4], (0.45, 0.4, 0.55, 0.6)) for k in (0, 4, 6, 8)]
+    out = montage_cut.framable(wins, pairs, 0.316)
+    assert [2.0, 2.4] not in out and out[-1] == [10.0, 10.4] and len(out) == 5
+    # never below four shots
+    assert montage_cut.framable(wins[:4], [([float(k), k + 0.4], wide) for k in range(0, 8, 2)],
+                                0.316) == wins[:4]

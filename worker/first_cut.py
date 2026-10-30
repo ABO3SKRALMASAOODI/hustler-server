@@ -1581,6 +1581,9 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             windows, title = montage_scout(ctx, windows, spend, boxes=q1)
         if windows and curve and q1:
             windows = montage_cut.hit_end(curve, windows, shots, duration)
+            windows = montage_cut.framable(
+                windows, getattr(ctx, "first_cut_montage_boxes", None),
+                montage_cut.crop_share(ctx.index))
             windows = montage_cut.fit_length(windows, shots, duration)
         if windows and _ok(_run(ctx, steps, "keep_segments",
                                 {"segments": windows, "snap_to_words": False},
