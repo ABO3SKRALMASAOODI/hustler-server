@@ -22,8 +22,9 @@ The P0 watch on the owner's Mac (ops-loop/yt_watch.py) starts the Fixer,
 which emails the owner, once ``consecutive_failures`` reaches 2.
 
 The timer looks every hour; a probe runs only when the last pass is
-``every_h`` (23) hours old, or the last run failed and ``retry_min`` (50)
-minutes passed. So a healthy route costs one probe a day, and two failures
+``every_h`` (23) hours old, the last run failed and ``retry_min`` (50)
+minutes passed, or real box fetches were walled since the last run
+(admission's call ledger, read-only). So a healthy route costs one probe a day, and two failures
 in a row means about an hour of a broken route, not two days. Never during a
 planned window (host/maint.sh).
 
@@ -38,6 +39,7 @@ IP-whitelisted and has none; a URL with credentials is shown host:port).
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import time
@@ -57,6 +59,12 @@ DEFAULT_URLS = ("https://www.youtube.com/shorts/myZ9kn9MIWQ",
                 "https://www.youtube.com/watch?v=iKx3gAODybU")
 LANES = ("mcp", "batch", "interactive")   # mcp first: fetch_url runs there
 KEEP_RUNS = 30
+# Admission's call ledger (read-only here): real fetches that YouTube walled
+# since the last run make the next hourly look probe at once, so a wall that
+# real traffic hits is confirmed within the hour instead of at the next
+# daily probe (30 Oct: the IP was walled again after 22 paced downloads).
+LEDGER = os.path.join(hr.DATA_DIR, "admission.sqlite")
+WALL_MARKS = ("not a bot", "YouTube blocked")
 KEEP_DAYS = 14
 
 # Runs inside the slot: the production probe, one per URL.
@@ -114,7 +122,29 @@ def proxy_host(env_path=None):
     return None
 
 
-def due(state, now, cfg, force=False):
+def recent_walls(since_s, path=None):
+    """Box calls finished after since_s (epoch) that YouTube walled: real
+    fetch children and MCP calls whose answer carries the wall's words.
+    Read-only (SQLite mode=ro); 0 when the ledger cannot be read."""
+    try:
+        conn = sqlite3.connect(f"file:{path or LEDGER}?mode=ro", uri=True,
+                               timeout=5)
+        try:
+            clause = " OR ".join("envelope LIKE ?" for _ in WALL_MARKS)
+            row = conn.execute(
+                "SELECT COUNT(*) FROM calls WHERE terminal_at > ? AND "
+                "job_type IN ('fetch', 'mcp_tool', 'search') AND "
+                f"({clause})",
+                (float(since_s),) + tuple(f"%{m}%" for m in WALL_MARKS)
+            ).fetchone()
+        finally:
+            conn.close()
+        return int(row[0] or 0)
+    except Exception:  # noqa: BLE001 - informational; the probe decides
+        return 0
+
+
+def due(state, now, cfg, force=False, walls=0):
     """(bool, reason). Pure."""
     if force:
         return True, "forced"
@@ -129,6 +159,8 @@ def due(state, now, cfg, force=False):
         return now - last_at >= retry, "retry after a skipped run"
     if not last.get("ok"):
         return now - last_at >= retry, "retry after a failure"
+    if walls:
+        return True, f"{walls} real fetch(es) walled since the last run"
     last_ok = datetime.fromisoformat(state.get("last_ok_at") or last["at"])
     return now - last_ok >= every, "daily"
 
@@ -316,7 +348,11 @@ def main(argv):
         print(json.dumps(state, indent=1, sort_keys=True))
         return 0
     now = now_utc()
-    go, reason = due(state, now, cfg, force="--force" in argv)
+    runs = state.get("runs") or []
+    since = (datetime.fromisoformat(runs[-1]["at"]).timestamp() if runs
+             else now.timestamp() - 3600)
+    walls = recent_walls(since)
+    go, reason = due(state, now, cfg, force="--force" in argv, walls=walls)
     if not go:
         print(f"yt-canary: not due ({reason}); last ok "
               f"{state.get('last_ok_at')}")

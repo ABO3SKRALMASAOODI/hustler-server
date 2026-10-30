@@ -244,3 +244,39 @@ def test_the_reason_keeps_the_gate_not_the_update_noise():
     assert out.startswith("access_blocked: ...") and out.endswith("not a bot")
     assert yc._kind_and_tail("error: HTTP Error 404") == "error: HTTP Error 404"
     assert yc._kind_and_tail(None) == "?"
+
+
+def _ledger(tmp_path, rows):
+    import sqlite3
+    path = tmp_path / "admission.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE calls (call_id TEXT, job_type TEXT, "
+                 "terminal_at REAL, envelope TEXT)")
+    conn.executemany("INSERT INTO calls VALUES (?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_real_walled_fetches_since_the_last_run_are_counted(tmp_path):
+    wall = '{"result": {"ok": false, "error": "YouTube blocked THIS upload"}}'
+    path = _ledger(tmp_path, [
+        ("bx-fetch-1", "fetch", 100.0, wall),             # before the run
+        ("bx-fetch-2", "fetch", 200.0, wall),
+        ("bx-mcp-3", "mcp_tool", 210.0, '{"text": "confirm you are not a bot"}'),
+        ("bx-mcp-4", "mcp_tool", 220.0, '{"text": "sign in: not a bot"}'),
+        ("bx-fetch-5", "fetch", 230.0, '{"result": {"ok": true}}'),
+        ("bx-prev-6", "preview", 240.0, "not a bot")])    # not a fetch
+    assert yc.recent_walls(150.0, path) == 3
+    assert yc.recent_walls(50.0, path) == 4
+    assert yc.recent_walls(150.0, str(tmp_path / "missing.sqlite")) == 0
+
+
+def test_a_wall_seen_by_real_traffic_makes_a_passing_canary_probe_now():
+    state = {"runs": [{"at": _at(60), "ok": True}], "last_ok_at": _at(60)}
+    assert yc.due(state, NOW, {}, walls=0)[0] is False
+    go, why = yc.due(state, NOW, {}, walls=2)
+    assert go is True and "2 real fetch" in why
+    # After a failure the retry pacing stays as it was.
+    failed = {"runs": [{"at": _at(10), "ok": False}]}
+    assert yc.due(failed, NOW, {}, walls=5)[0] is False
