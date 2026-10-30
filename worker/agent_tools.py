@@ -8222,6 +8222,39 @@ TALKING_FACE_MIN_W = 0.07
 TALKING_FACE_MIN_COVERAGE = 0.5
 
 
+def engine_on(ctx):
+    """True when this context's account gets the trial branch's engine
+    changes: a free-trial turn (claude_trial), a NEW subscriber on the Claude
+    lane (claude_paid), or a First cut for such an account (first_cut_q1,
+    first_cut_visual.engine_on). Every other context, a grandfathered
+    subscriber's turn and every MCP call included, keeps main's behaviour
+    exactly (owner rule D1, strategy-1025/DECISIONS.md). QI, 30 Oct."""
+    return (getattr(ctx, "claude_trial", None) is not None
+            or getattr(ctx, "claude_paid", None) is not None
+            or bool(getattr(ctx, "first_cut_q1", False)))
+
+
+def _crops_talking_head(ctx, boxes, coverage):
+    """auto_reframe crops (never fits) a talking head for engine accounts
+    (bake-off 26 Oct); every other account keeps main's detail rule."""
+    return engine_on(ctx) and _talking_head(boxes, coverage)
+
+
+def _pointed_kinds(ctx):
+    """Event kinds showcase_demo pushes in on: a hover too for engine
+    accounts (the tour points at a CTA it never submits); main: clicks."""
+    return ("click", "hover") if engine_on(ctx) else ("click",)
+
+
+def _picture_qc_split(ctx, findings):
+    """(blocking, persisted) picture-QC findings. Engine accounts move a
+    finding unchanged after PQ_PERSIST_RENDERS renders to the advisories;
+    every other account keeps main's behaviour (all blocking)."""
+    if not engine_on(ctx):
+        return list(findings or []), []
+    return _persisting_picture_findings(ctx, findings)
+
+
 def _talking_head(boxes, coverage):
     if not boxes or float(coverage or 0) < TALKING_FACE_MIN_COVERAGE:
         return False
@@ -9858,8 +9891,8 @@ def _auto_reframe(ctx, ratio="9:16", mode="auto", follow=True):
         # has low GLOBAL detail retention: the first shot must fit while the
         # second can crop. Returning a global pad here before building the
         # mixed track made the close-up stay tiny inside the wide-shot bars.
-        if mode == "auto" and not _talking_head(
-                _spatial_face_boxes(sidecar, keep), spatial_coverage):
+        if mode == "auto" and not _crops_talking_head(
+                ctx, _spatial_face_boxes(sidecar, keep), spatial_coverage):
             keep_score = _kept(pt)
             if keep_score is not None and keep_score < CROP_DETAIL_KEEP_MIN:
                 return _fit_instead(
@@ -21415,6 +21448,9 @@ def _run_capture(ctx, mode, url, **kw):
     that would reproduce the crash it exists to avoid, on a box we already know
     is too small.
     """
+    # D1: the phone layout (C1) and the tour viewports reach engine
+    # accounts only; every other capture films main's desktop viewport
+    kw.setdefault("phone_layout", engine_on(ctx))
     if remote.capture_available():
         payload = dict(kw, mode=mode, url=url)
         try:
@@ -21435,12 +21471,15 @@ def _run_capture(ctx, mode, url, **kw):
     try:
         if mode == "demo":
             got = webrecord.record_demo(url, workdir, kw.get("steps") or [],
-                                        orientation=kw.get("orientation"))
+                                        orientation=kw.get("orientation"),
+                                        phone_layout=bool(
+                                            kw.get("phone_layout")))
         else:
             got = webrecord.record(url, workdir,
                                    duration_s=kw.get("duration_s"),
                                    orientation=kw.get("orientation"),
-                                   scroll=bool(kw.get("scroll", True)))
+                                   scroll=bool(kw.get("scroll", True)),
+                                   phone_layout=bool(kw.get("phone_layout")))
         # Upload HERE, while the file still exists, so both branches hand back
         # the same shape and the workdir's lifetime lives in one place. The
         # caller is then only ever registering an object that is already in
@@ -21794,7 +21833,7 @@ def showcase_demo(ctx, asset_key, at_output_s=None, zoom_strength=0.4,
     # magnify empty UI while the actual interaction sits at an edge.
     # A hover is a pointed-at target too (the automatic tour points at a
     # call to action it never submits): it gets the same push-in.
-    clicks = [e for e in events if e.get("kind") in ("click", "hover")
+    clicks = [e for e in events if e.get("kind") in _pointed_kinds(ctx)
               and "x" in e and "y" in e]
     blind_clicks = [e for e in events if e.get("kind") == "click"
                     and not ("x" in e and "y" in e)]
@@ -23445,7 +23484,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             # PQ_PERSIST_RENDERS renders it is kept as an advisory, so a
             # request can finish instead of looping on it (bake-off 26 Oct:
             # four add/remove-zoom cycles on one 'stall', a 570 s turn).
-            pqf, persisted = _persisting_picture_findings(ctx, pqf)
+            pqf, persisted = _picture_qc_split(ctx, pqf)
             if persisted:
                 ctx.last_taste_advisory = list(
                     getattr(ctx, "last_taste_advisory", None) or []) + [
@@ -32846,11 +32885,24 @@ _COMPACT_CONTRACTS = {
 }
 
 
-def openai_tools(model=None, compact=False, names=None):
+# The automatic tour step is the trial branch's (Q2/C1): only engine lanes
+# see it in record_website_demo's description (openai_tools(engine=True));
+# every other caller gets main's description exactly (D1).
+_TOUR_STEP_TEXT = (
+    ", and {do:'tour', by:2} — the automatic tour for a site you have not "
+    "seen: it points at the call to action, opens up to `by` main "
+    "sections from the navigation (Pricing, Features…) and reads each, "
+    "then travels the home page by its headings, ending live. Add ")
+_NO_TOUR_TEXT = ". Add "
+
+
+def openai_tools(model=None, compact=False, names=None, engine=False):
     """`model` is the agent model this schema is for, so per-model honest-off
     (a provider that has refused audio parts) can hide a tool the same way an
     unconfigured service does. Omitted by MCP and the tests, where the
-    deployment-wide answer is the right one."""
+    deployment-wide answer is the right one. `engine`: the turn's account
+    gets the trial branch's engine (agent_tools.engine_on); False keeps
+    main's schema exactly (D1)."""
     selected_recipe_tools = set(RECIPE_TOOLS)
     if names is not None:
         names = set(names)
@@ -32870,6 +32922,8 @@ def openai_tools(model=None, compact=False, names=None):
             continue
         if _tool_disabled(name, model):
             continue
+        if name == "record_website_demo" and not engine:
+            desc = desc.replace(_TOUR_STEP_TEXT, _NO_TOUR_TEXT)
         if sees and name in ("look_at", "look_at_asset"):
             props = {k: v for k, v in props.items() if k != "question"}
         if name == "read_skill":

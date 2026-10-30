@@ -4893,7 +4893,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # where the visual/index context is already largest. Property schemas
         # remain complete; compact mode removes repeated handbook prose only.
         compact=True,
-        names=names)
+        names=names, engine=agent_tools.engine_on(ctx))
     ctx.editing_metrics["initial_tool_schemas"] = len(tools)
     ctx.editing_metrics["initial_tool_schema_chars"] = len(
         json.dumps(tools, separators=(",", ":")))
@@ -6062,7 +6062,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # dispatches; this changes request size, never available power.
             names = agent_tools.compact_tool_names(ctx)
             tools = agent_tools.openai_tools(
-                model, compact=True, names=names)
+                model, compact=True, names=names,
+                engine=agent_tools.engine_on(ctx))
             ctx.editing_metrics["post_plan_tool_schemas"] = len(tools)
             ctx.editing_metrics["post_plan_tool_schema_chars"] = len(
                 json.dumps(tools, separators=(",", ":")))

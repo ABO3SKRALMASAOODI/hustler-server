@@ -218,7 +218,8 @@ def test_only_the_tour_films_the_narrower_phone(monkeypatch):
                           orientation="portrait")
     webrecord.record_demo("https://acme.io", "/tmp", [{"do": "tour", "by": 2}],
                           orientation="portrait")
-    assert seen == [None, webrecord._TOUR_VIEWPORTS]
+    # QI (D1): a scripted capture outside the engine films main's viewport
+    assert seen == [webrecord._DESKTOP_VIEWPORTS, webrecord._TOUR_VIEWPORTS]
     w, h, dpr = webrecord._TOUR_VIEWPORTS["portrait"]
     assert (round(w * dpr), round(h * dpr)) == (1080, 1920)
     w, h, dpr = webrecord._TOUR_VIEWPORTS["landscape"]
@@ -332,7 +333,7 @@ def test_a_scripted_capture_runs_exactly_as_before(monkeypatch):
                           [{"do": "click", "text": "Pricing"}],
                           orientation="portrait")
     assert calls == [("sleep", 0.9), ("run", ["click"]), ("sleep", 0.3),
-                     ("drift", 0.9), ("css", None)]
+                     ("drift", 0.9), ("css", webrecord._DESKTOP_VIEWPORTS)]
 
 
 def test_a_real_call_to_action_beats_a_softer_link_below_it():

@@ -138,6 +138,11 @@ _CSS_VIEWPORTS = {"portrait": (432, 768, 2.5)}
 # 1280x720 CSS, 1.5x: its text is 1.5x the 1920-wide layout's. Captures
 # scripted step by step keep _CSS_VIEWPORTS, so nothing changes for them.
 _TOUR_VIEWPORTS = {"portrait": (360, 640, 3.0), "landscape": (1280, 720, 1.5)}
+# D1 (QI, 30 Oct): both layouts above are the trial branch's engine. A
+# capture for any other account (a grandfathered subscriber, MCP) films
+# main's viewport exactly: the frame size in CSS pixels, density 1. The
+# caller says which with phone_layout (agent_tools.engine_on).
+_DESKTOP_VIEWPORTS = {}
 
 
 def _guard_router(cache):
@@ -2030,8 +2035,8 @@ def _record(url, workdir, orientation, wall_s, cursor, body, css=None):
     W, H = _VIEWPORTS.get(orientation or "landscape",
                           _VIEWPORTS["landscape"])
     # CSS size and pixel density: the frames are W x H pixels either way
-    CW, CH, DPR = (css or _CSS_VIEWPORTS).get(orientation or "landscape",
-                                              (W, H, 1.0))
+    CW, CH, DPR = (_CSS_VIEWPORTS if css is None else css).get(
+        orientation or "landscape", (W, H, 1.0))
     deadline = time.monotonic() + wall_s
 
     session = None
@@ -2170,7 +2175,7 @@ def _record(url, workdir, orientation, wall_s, cursor, body, css=None):
 
 
 def record(url, workdir, duration_s=12.0, orientation="landscape",
-           scroll=True, cursor=False):
+           scroll=True, cursor=False, phone_layout=False):
     """Record `url` for ~duration_s seconds as a scrolling pan.
 
     Returns dict(path, width, height, duration_s, final_url, page_title,
@@ -2202,10 +2207,12 @@ def record(url, workdir, duration_s=12.0, orientation="landscape",
         s.sleep(hold_s)
 
     return _record(url, workdir, orientation, config.WEB_RECORD_WALL_S,
-                   cursor, body)
+                   cursor, body,
+                   css=None if phone_layout else _DESKTOP_VIEWPORTS)
 
 
-def record_demo(url, workdir, steps, orientation="landscape"):
+def record_demo(url, workdir, steps, orientation="landscape",
+                phone_layout=False):
     """Drive `url` through `steps` with a visible cursor and record it.
 
     Returns the same dict as record(), where `events` is the timestamped
@@ -2234,7 +2241,9 @@ def record_demo(url, workdir, steps, orientation="landscape"):
             s.sleep(0.7)
 
     return _record(url, workdir, orientation, config.WEB_DEMO_WALL_S,
-                   True, body, css=_TOUR_VIEWPORTS if toured else None)
+                   True, body, css=(_TOUR_VIEWPORTS if toured else
+                                    None if phone_layout
+                                    else _DESKTOP_VIEWPORTS))
 
 
 def element_box(box, W, H):
@@ -2341,12 +2350,14 @@ def run_capture_job(worker_db, job):
     try:
         if mode == "demo":
             got = record_demo(url, workdir, payload.get("steps") or [],
-                              orientation=payload.get("orientation"))
+                              orientation=payload.get("orientation"),
+                              phone_layout=bool(payload.get("phone_layout")))
         else:
             got = record(url, workdir,
                          duration_s=payload.get("duration_s"),
                          orientation=payload.get("orientation"),
-                         scroll=bool(payload.get("scroll", True)))
+                         scroll=bool(payload.get("scroll", True)),
+                         phone_layout=bool(payload.get("phone_layout")))
         path = got.pop("path")
         key = _url_media.storage_key(project_id, _url_media.KIND_VIDEO, path)
         _storage.upload_file(path, key, _url_media.content_type(path))
