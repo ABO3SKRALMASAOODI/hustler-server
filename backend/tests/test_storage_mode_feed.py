@@ -387,7 +387,7 @@ def test_a_silent_server_is_given_up_on_in_seconds(monkeypatch):
     t.start()
     port = srv.getsockname()[1]
     monkeypatch.setenv("DIRECT_DATABASE_URL",
-                       f"postgresql://u:p@127.0.0.1:{port}/db"
+                       f"postgresql://u@127.0.0.1:{port}/db"
                        "?sslmode=disable")
     t0 = time.monotonic()
     try:
