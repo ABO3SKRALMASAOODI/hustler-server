@@ -254,7 +254,10 @@ FIRST_CUT_SHORT_SOURCE_S = float(os.getenv("FIRST_CUT_SHORT_SOURCE_S", "90"))
 # encoded while the 720p approval render runs beside it (0 = wait for the
 # approval render, as before).
 FIRST_CUT_BROLL_PREFETCH = os.getenv("FIRST_CUT_BROLL_PREFETCH", "1") != "0"
-FIRST_CUT_DRAFT_FIRST = os.getenv("FIRST_CUT_DRAFT_FIRST", "1") != "0"
+# (measured 30 Oct: the draft render costs about what the approval render
+# costs, 10-100 s either way, because encoding is not where a render's time
+# goes; off until a draft is much cheaper)
+FIRST_CUT_DRAFT_FIRST = os.getenv("FIRST_CUT_DRAFT_FIRST", "0") == "1"
 FIRST_CUT_UPGRADE_PARALLEL = os.getenv("FIRST_CUT_UPGRADE_PARALLEL", "0") == "1"
 
 # All subscribing editors use Luna on the standard OpenAI client. Keep the

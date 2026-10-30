@@ -28,15 +28,26 @@ reached only from a First cut context that set them up):
 import copy
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 
 SEARCH_TTL_S = 1800.0
+PARTIAL_TTL_S = 300.0      # an answer a slow library missed is kept shorter
 SEARCH_MAX = 512
-PREFETCH_WORKERS = 4
+SEARCH_WORKERS = 8         # network-bound: searches, then the short lists
+FETCH_WORKERS = 6          # the downloads, never queued behind a search
 WAIT_S = 90.0              # the longest placement waits on one prefetch item
+# A library that has not answered within LANE_DEADLINE_S is not waited for:
+# its siblings' answers are used, and it is skipped for SLOW_LANE_SKIP_S.
+# Measured 30 Oct: Openverse timed out at its 20 s read timeout on every
+# search while Wikimedia and NASA answered in 0.4 s, so every First cut's
+# B-roll waited 20 s per wave of searches for nothing.
+LANE_DEADLINE_S = 6.0
+SLOW_LANE_SKIP_S = 300.0
 
 _SEARCH = {}
 _SEARCH_LOCK = threading.Lock()
+_SLOW = {}                 # provider -> skip it until (monotonic)
+_LANE_POOL = ThreadPoolExecutor(max_workers=24, thread_name_prefix="fc-lane")
 
 
 def _search_key(query, kind, orientation, count, providers, archival):
@@ -51,25 +62,72 @@ def cached_search(query, kind, orientation, count=4, providers=None,
     cache when the same search ran in the last SEARCH_TTL_S. Only a complete
     answer (no library errored) is kept; callers get their own copies, since
     acquisition fills renditions into a candidate in place."""
-    import broll_source
     key = _search_key(query, kind, orientation, count, providers, archival)
     now = time.monotonic()
     with _SEARCH_LOCK:
         hit = _SEARCH.get(key)
-        if hit and now - hit[0] < SEARCH_TTL_S:
+        if hit and now - hit[0] < hit[4]:
             return copy.deepcopy(hit[1]), list(hit[2]), list(hit[3])
-    cands, errors, lanes = broll_source.search(
+    cands, errors, lanes, partial = deadline_search(
         query, kind, orientation, count=count, providers=providers,
         archival=archival)
-    if not errors and lanes:
+    if lanes and (not errors or partial):
         with _SEARCH_LOCK:
             if len(_SEARCH) >= SEARCH_MAX:
                 for k in sorted(_SEARCH, key=lambda k: _SEARCH[k][0])[
                         :SEARCH_MAX // 4]:
                     _SEARCH.pop(k, None)
             _SEARCH[key] = (now, copy.deepcopy(cands), list(errors),
-                            list(lanes))
+                            list(lanes),
+                            PARTIAL_TTL_S if errors else SEARCH_TTL_S)
     return cands, errors, lanes
+
+
+def deadline_search(query, kind, orientation="portrait", count=4,
+                    providers=None, archival=False):
+    """broll_source.search's (candidates, errors, lanes) plus whether a slow
+    library was left out: the same libraries for the same kind, searched in
+    parallel, but a library still silent after LANE_DEADLINE_S is not waited
+    for (and is skipped for SLOW_LANE_SKIP_S). The candidates keep the
+    libraries' order, as broll_source.search returns them."""
+    import broll_source as bs
+    st = bs.status()
+    want = [p for p in (providers or bs.PROVIDERS) if p in bs.LANES]
+    if not archival:
+        want = [p for p in want if p != "archive"]
+    lanes = [p for p in want if st.get(p) == "on"]
+    if kind == bs.KIND_PHOTO:
+        lanes = [p for p in lanes if p != "archive"]
+    else:
+        lanes = [p for p in lanes if p != "openverse"]
+    now = time.monotonic()
+    errors, skipped = [], []
+    for p in list(lanes):
+        if _SLOW.get(p, 0.0) > now:
+            lanes.remove(p)
+            skipped.append(p)
+            errors.append(f"{p}: slow, skipped")
+    if not lanes:
+        return [], errors, [], bool(skipped)
+    futs = {_LANE_POOL.submit(bs.LANES[p], query, kind, orientation, count): p
+            for p in lanes}
+    done, pending = wait(futs, timeout=LANE_DEADLINE_S)
+    got = {}
+    for f in done:
+        p = futs[f]
+        try:
+            got[p] = f.result() or []
+        except Exception as e:  # noqa: BLE001 — one library down
+            errors.append(f"{p}: {str(e)[:120]}")
+    for f in pending:
+        p = futs[f]
+        _SLOW[p] = time.monotonic() + SLOW_LANE_SKIP_S
+        errors.append(f"{p}: no answer in {LANE_DEADLINE_S:g}s, skipped")
+        skipped.append(p)
+    out = []
+    for p in lanes:
+        out.extend(got.get(p) or [])
+    return out, errors, [p for p in lanes if p in got], bool(skipped)
 
 
 def clear_search_cache():
@@ -101,8 +159,10 @@ class BrollPrefetch:
         self._lock = threading.Lock()
         self._search = {}      # (query, kind) -> Future[(cands, errors)]
         self._fetch = {}       # cand_key -> Future[fetched]
-        self._pool = ThreadPoolExecutor(max_workers=PREFETCH_WORKERS,
+        self._pool = ThreadPoolExecutor(max_workers=SEARCH_WORKERS,
                                         thread_name_prefix="fc-broll")
+        self._fpool = ThreadPoolExecutor(max_workers=FETCH_WORKERS,
+                                         thread_name_prefix="fc-fetch")
         self.started = time.monotonic()
         self.stats = {"searches": 0, "fetches": 0, "search_hits": 0,
                       "fetch_hits": 0, "fetch_misses": 0}
@@ -152,8 +212,8 @@ class BrollPrefetch:
             if key in self._fetch:
                 return
             _o, W, H = self.frame
-            self._fetch[key] = self._pool.submit(bt._fetch, self.ctx,
-                                                 copy.deepcopy(cand), W, H)
+            self._fetch[key] = self._fpool.submit(bt._fetch, self.ctx,
+                                                  copy.deepcopy(cand), W, H)
             self.stats["fetches"] += 1
 
     # -- what source_broll asks --------------------------------------------
@@ -194,6 +254,7 @@ class BrollPrefetch:
 
     def close(self):
         self._pool.shutdown(wait=False, cancel_futures=True)
+        self._fpool.shutdown(wait=False, cancel_futures=True)
 
 
 def predicted_frame(ctx, vertical_source):

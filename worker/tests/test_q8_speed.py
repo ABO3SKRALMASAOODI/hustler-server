@@ -31,34 +31,79 @@ project = w4c.project          # the B-roll suite's fixture: a real source
 
 # ── the search cache ─────────────────────────────────────────────────────
 
-def test_the_search_cache_answers_a_repeat_and_never_keeps_a_failure(
-        monkeypatch):
+def _lanes(monkeypatch, lanes):
     import broll_source
     import first_cut_speed as fs
+    monkeypatch.setattr(broll_source, "LANES", dict(lanes))
+    monkeypatch.setattr(broll_source, "status",
+                        lambda: {p: "on" for p in broll_source.PROVIDERS})
+    fs._SLOW.clear()
     fs.clear_search_cache()
+
+
+def test_the_search_cache_answers_a_repeat_and_never_keeps_a_failure(
+        monkeypatch):
+    import first_cut_speed as fs
     calls = []
 
-    def search(q, kind, orientation, count=4, providers=None, archival=False):
+    def wiki(q, kind, orientation, count):
         calls.append(q)
         if q == "down":
-            return [], ["pexels: 503"], ["pexels"]
-        return [{"id": f"{q}-1", "provider": "nasa", "_files": []}], [], ["nasa"]
-    monkeypatch.setattr(broll_source, "search", search)
-    a = fs.cached_search("the sun", "video", "portrait")
-    b = fs.cached_search("The  Sun", "video", "portrait")
+            raise RuntimeError("503")
+        return [{"id": f"{q}-1", "provider": "wikimedia", "_files": []}]
+    _lanes(monkeypatch, {"wikimedia": wiki})
+    a = fs.cached_search("the sun", "photo", "portrait")
+    b = fs.cached_search("The  Sun", "photo", "portrait")
     assert len(calls) == 1 and a[0] == b[0]
     b[0][0]["_files"].append("mutated")          # acquisition fills it in
-    c = fs.cached_search("the sun", "video", "portrait")
+    c = fs.cached_search("the sun", "photo", "portrait")
     assert c[0][0]["_files"] == []               # the cache kept its copy
-    fs.cached_search("the sun", "photo", "portrait")
+    fs.cached_search("the sun", "video", "portrait")
     assert len(calls) == 2                       # another kind, another search
-    fs.cached_search("down", "video", "portrait")
-    fs.cached_search("down", "video", "portrait")
+    fs.cached_search("down", "photo", "portrait")
+    fs.cached_search("down", "photo", "portrait")
     assert calls.count("down") == 2              # a failure is never cached
     monkeypatch.setattr(fs, "SEARCH_TTL_S", 0.0)
-    fs.cached_search("the sun", "video", "portrait")
-    assert calls.count("the sun") == 3           # expired
     fs.clear_search_cache()
+    fs.cached_search("the sun", "photo", "portrait")
+    fs.cached_search("the sun", "photo", "portrait")
+    assert calls.count("the sun") == 4           # expired: searched again
+
+
+def test_a_library_that_does_not_answer_in_time_is_not_waited_for(monkeypatch):
+    """Openverse timed out at 20 s on every search (30 Oct) while the other
+    libraries answered in 0.4 s: its siblings' answers are used at the
+    deadline, in the libraries' order, and it is skipped for a while."""
+    import first_cut_speed as fs
+    slow_calls = []
+
+    def openverse(q, kind, orientation, count):
+        slow_calls.append(q)
+        time.sleep(1.5)
+        return [{"id": "ov", "provider": "openverse"}]
+    _lanes(monkeypatch, {
+        "openverse": openverse,
+        "wikimedia": lambda q, k, o, c: [{"id": "wm", "provider": "wikimedia"}],
+        "nasa": lambda q, k, o, c: [{"id": "na", "provider": "nasa"}]})
+    monkeypatch.setattr(fs, "LANE_DEADLINE_S", 0.3)
+    t0 = time.monotonic()
+    c, errors, lanes, partial = fs.deadline_search("power plant", "photo", "landscape")
+    assert time.monotonic() - t0 < 1.0
+    assert [x["id"] for x in c] == ["wm", "na"] and partial
+    assert any(e.startswith("openverse") for e in errors)
+    c2, _e, _l, _p = fs.deadline_search("the sun", "photo", "landscape")
+    assert [x["id"] for x in c2] == ["wm", "na"] and len(slow_calls) == 1
+    # video searches never asked openverse (broll_source.search's rule)
+    fs._SLOW.clear()
+    c3, _e, lanes3, _p = fs.deadline_search("the sun", "video", "landscape")
+    assert "openverse" not in lanes3
+    # the same libraries in time: the same answer as broll_source.search
+    import broll_source
+    fs._SLOW.clear()
+    monkeypatch.setattr(fs, "LANE_DEADLINE_S", 5.0)
+    ref = broll_source.search("power plant", "photo", "landscape")
+    got = fs.deadline_search("power plant", "photo", "landscape")
+    assert [x["id"] for x in got[0]] == [x["id"] for x in ref[0]]
 
 
 def test_a_grandfathered_account_searches_exactly_as_before(monkeypatch):
@@ -83,15 +128,17 @@ def _counting(monkeypatch, clip):
     from tools_ext import broll_tools as bt
     calls = {"search": 0, "fetch": 0}
 
-    def search(q, k, o, count=4, providers=None, archival=False):
+    def nasa(q, k, o, count=4):
         calls["search"] += 1
-        return (w4c._cands(clip) if k == "video" else [], [], ["nasa"])
+        return w4c._cands(clip) if k == "video" else []
     real_fetch = bt._fetch
 
     def fetch(ctx, cand, W, H):
         calls["fetch"] += 1
         return real_fetch(ctx, cand, W, H)
-    monkeypatch.setattr(broll_source, "search", search)
+    monkeypatch.setattr(broll_source, "LANES", {"nasa": nasa})
+    import first_cut_speed as fs
+    fs._SLOW.clear()
     monkeypatch.setattr(bt, "_fetch", fetch)
     monkeypatch.setattr(broll_source, "status",
                         lambda: {p: "on" for p in broll_source.PROVIDERS})
@@ -165,9 +212,12 @@ def test_the_shortlist_follows_source_brolls_rule(monkeypatch):
         return {"provider": p, "id": f"{p}:{n}", "kind": "photo",
                 "title": f"sun {p} {n}", "width": 2000, "height": 3000,
                 "_url": "x"}
-    monkeypatch.setattr(broll_source, "search", lambda *a, **k: (
+    monkeypatch.setattr(broll_source, "LANES", {"pexels": lambda *a: (
         [cand("pexels", 1), cand("pexels", 2), cand("pexels", 3),
-         cand("wikimedia", 1), cand("openverse", 1)], [], ["pexels"]))
+         cand("wikimedia", 1), cand("openverse", 1)])})
+    monkeypatch.setattr(broll_source, "status",
+                        lambda: {p: "on" for p in broll_source.PROVIDERS})
+    fs._SLOW.clear()
     fetched = []
     lock = threading.Lock()
 
