@@ -614,3 +614,15 @@ def test_the_first_cut_needs_nothing_main_removed_from_the_tool_context():
              {"tool": "render_preview", "ok": False}, "noise"]
     assert first_cut._renders_done(steps) == 2
     assert first_cut._renders_done(None) == 0
+
+
+def test_a_highlight_montage_fills_the_frame_even_with_a_face_in_it():
+    """QI (30 Oct): a crowd shot in a launch montage made auto_reframe fit
+    the whole montage small between blurred bands."""
+    crowd = {"share": 0.2}
+    assert first_cut._faceless_reframe_args(False, crowd, {"how": "motion"}) == \
+        {"ratio": "9:16", "mode": "crop"}
+    assert first_cut._faceless_reframe_args(False, None, None)["mode"] == "crop"
+    # narrated footage and faces outside a montage keep auto mode
+    assert "mode" not in first_cut._faceless_reframe_args(True, None, {"how": "motion"})
+    assert "mode" not in first_cut._faceless_reframe_args(False, crowd, None)

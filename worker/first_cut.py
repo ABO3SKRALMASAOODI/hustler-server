@@ -1360,6 +1360,21 @@ def _music_piece(index, duration, robust=False):
         len(words) / max(1.0, float(duration or 0)) < 1.2
 
 
+def _faceless_reframe_args(speech, faces, picked):
+    """auto_reframe's arguments for footage that is not a screen and not a
+    vertical talking head. Silent footage with no face fills the frame
+    (crop), like the references' montages. QI (30 Oct): a highlight
+    montage crops even when the face detector finds a face in some shots
+    (a crowd, a control room); the montage test already found faces
+    incidental (share < 0.35). With mode auto the game fixture came back
+    small between blurred bands on the box harness (C2's Mac run found no
+    face and cropped): judged 8.25 -> 6.25."""
+    args = {"ratio": "9:16"}
+    if not speech and (not faces or (picked or {}).get("how") == "motion"):
+        args["mode"] = "crop"
+    return args
+
+
 def video_chain(ctx, worker_db, started, spend, whole=False):
     """The First cut's chain. whole=True (the trial turn's clean-up of the
     whole take, trial_turn.whole_cleanup): no best-moment pick, the source's
@@ -1495,9 +1510,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             # Footage with no face and no speech (a montage, an event, a
             # landscape) fills the frame like the references' montages
             # (R01, R04): auto mode would fit it small over blurred bands.
-            args = {"ratio": "9:16"}
-            if not speech and not faces:
-                args["mode"] = "crop"
+            args = _faceless_reframe_args(speech, faces, picked)
             if _ok(_run(ctx, steps, "auto_reframe", args, started)):
                 applied.append("reframed to 9:16")
                 vertical_out = True
