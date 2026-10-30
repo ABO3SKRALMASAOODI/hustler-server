@@ -626,3 +626,29 @@ def test_a_highlight_montage_fills_the_frame_even_with_a_face_in_it():
     # narrated footage and faces outside a montage keep auto mode
     assert "mode" not in first_cut._faceless_reframe_args(True, None, {"how": "motion"})
     assert "mode" not in first_cut._faceless_reframe_args(False, crowd, None)
+
+
+_PHONE_ROWS = [
+    {"id": "s1", "t0": 0.0, "t1": 2.86, "text": "economy by a factor of a million is still roughly a trillion."},
+    {"id": "s2", "t0": 4.0, "t1": 7.62, "text": "Since we're a trillionth of the Sun's energy, if you increase this"},
+    {"id": "s3", "t0": 7.62, "t1": 10.86, "text": "economy in terms of electricity usage by roughly a million,"},
+    {"id": "s4", "t0": 11.6, "t1": 16.12, "text": "you will be roughly one millionth only of the Sun's energy harness."},
+    {"id": "s5", "t0": 17.65, "t1": 21.37, "text": "But what is an economy or an intelligence using a million times"},
+]
+
+
+def test_a_span_opens_where_the_speakers_sentence_begins():
+    """QI (30 Oct): the scout picked s4 and the First cut opened on "you
+    will be roughly one millionth only…" (both judges: opens mid-sentence)."""
+    rows = _PHONE_ROWS
+    assert first_cut.true_sentence_start(rows, rows[3])["id"] == "s2"
+    assert first_cut.true_sentence_start(rows, rows[1])["id"] == "s2"
+    assert first_cut.true_sentence_start(rows, rows[4])["id"] == "s5"
+
+
+def test_a_continuation_fragment_is_never_the_hook():
+    assert first_cut.clean_hook("will be roughly one *millionth* only") is None
+    assert first_cut.clean_hook("to harness the *sun*") is None
+    assert first_cut.clean_hook("we built the thing") == "we built the *thing*"
+    assert first_cut.clean_hook("What is an *economy*") == "What is an *economy*"
+    assert first_cut.clean_hook("Rocket *Launch*") == "Rocket *Launch*"

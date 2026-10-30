@@ -342,6 +342,11 @@ def scout_range(ctx, worker_db, spend):
             pick = json.loads(match.group(0)) if match else {}
             first = by_id.get(str(pick.get("start_id")))
             last = by_id.get(str(pick.get("end_id")))
+            if first and q1:
+                whole_start = true_sentence_start(rows, first)
+                if last is None or float(last["t1"]) - float(
+                        whole_start["t0"]) <= 75.0:
+                    first = whole_start
             if first and last and float(last["t1"]) > float(first["t0"]):
                 start, end = _fit_span(rows, first, last, complete=q1)
                 if 12.0 <= end - start <= 75.0:
@@ -418,6 +423,10 @@ def clean_hook(text, index=None, most_words=6, most_chars=48):
     words = t.replace("*", "").split()
     if not 2 <= len(words) <= most_words or len(t) > most_chars:
         return None
+    if words[0][:1].islower() and _norm(words[0]) in _CONTINUATION:
+        # QI (30 Oct): "will be roughly one *millionth* only" opened a
+        # phone First cut; both judges: "opens mid-sentence" (hard fault)
+        return None
     said = " ".join(str(w.get("w") or "") for w in
                     (index or {}).get("words") or []).lower()
     for num in re.findall(r"\d[\d,.]*", t):
@@ -430,6 +439,34 @@ def clean_hook(text, index=None, most_words=6, most_chars=48):
         longest = max(reversed(words), key=len)     # the last, on a tie
         t = t.replace(longest, f"*{longest}*", 1)
     return t
+
+
+# Words that continue a sentence (an auxiliary, a preposition, a relative)
+# and never start a title when written in lower case.
+_CONTINUATION = frozenset((
+    "will", "would", "be", "is", "are", "was", "were", "been", "being",
+    "to", "of", "for", "with", "that", "which", "than", "as", "by", "from",
+    "into", "onto", "about"))
+
+
+def true_sentence_start(rows, first):
+    """The row a span should open on: ``first`` walked back to where the
+    speaker's sentence begins. The transcript splits a long sentence into
+    rows; a row that starts in lower case after a row with no terminal mark
+    is the middle of a sentence (QI, 30 Oct: a phone First cut opened on
+    "you will be roughly one millionth only…", rows s2-s4)."""
+    try:
+        i = rows.index(first)
+    except ValueError:
+        return first
+    while i > 0:
+        text = str(rows[i].get("text") or "").lstrip(" \"'\u201c(")
+        prev = str(rows[i - 1].get("text") or "").rstrip(" \"'\u201d)")
+        if text[:1].islower() and prev and prev[-1] not in ".?!\u2026":
+            i -= 1
+            continue
+        break
+    return rows[i]
 
 
 def _opening_hook(rows):
