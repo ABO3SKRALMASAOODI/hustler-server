@@ -2708,8 +2708,10 @@ def run(worker_db, job, project, index_row):
         summary = _summary(applied, duration, url)
         admission = project_admission_safe(worker_db, project["id"])
         trial = bool(admission and admission.get("kind") == "trial")
-        text = (f"Here's your first cut: {summary}. It's playing on the "
-                "right."
+        # Q8: "on the right" is wrong on a phone, where the player sits
+        # above the chat
+        text = (f"Here's your first cut: {summary}. It's playing in the "
+                "player."
                 + (" Now I'm working through the rest of your brief."
                    if follow_up else " Tell me what to change.")
                 + (" To download it, choose a plan." if trial else ""))

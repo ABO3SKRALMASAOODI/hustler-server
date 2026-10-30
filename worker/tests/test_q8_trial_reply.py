@@ -64,7 +64,7 @@ def test_a_denial_on_a_turn_that_wrote():
     text, report = tr.finish("Nothing was changed this turn.", f)
     assert [d["why"] for d in report["dropped"]] == ["deny"]
     assert text.startswith("Done: I tightened it by 16 seconds")
-    assert "It's playing on the right." in text
+    assert "It's playing in the player." in text
     assert dropped("Upgrade to start editing.", f) == ["deny"]
 
 
@@ -168,7 +168,7 @@ def test_a_review_log_becomes_what_changed_where_to_look_and_one_next_step():
     assert text.startswith("I made it a reel: a 27-second vertical cut")
     for gone in ("QC", "review note", "Improve it", "Sorry", "22.2s", "checks"):
         assert gone not in text, gone
-    assert "It's playing on the right." in text
+    assert "It's playing in the player." in text
     assert text.rstrip().endswith("?")
     assert len(tr.sentences(text)) <= 4 and len(text.split()) <= tr.MAX_WORDS
 
@@ -230,3 +230,33 @@ def test_the_guard_never_loses_a_reply(monkeypatch):
             raise RuntimeError("db down")
     monkeypatch.setattr(tr, "finish", lambda d, f: (_ for _ in ()).throw(ValueError("x")))
     assert tr.finish_for_ctx(Ctx(), "draft reply") == ("draft reply", None)
+
+
+def test_a_trial_turn_always_ends_on_an_exportable_version():
+    """repair_required showed a trial user "This edit needs another pass" and
+    no Download (harness, 30 Oct): the trial lane's notes advise instead.
+    Only the trial lane sets it before the final hand-off."""
+    src = open(os.path.join(os.path.dirname(HERE), "agent_loop.py")).read()
+    tree = ast.parse(src)
+    sets = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+            and ast.get_source_segment(src, n) == "ctx.critics_advisory = True"]
+    guarded = []
+    for node in sets:
+        ifs = [i for i in ast.walk(tree) if isinstance(i, ast.If)
+               and i.lineno <= node.lineno <= i.end_lineno]
+        inner = min(ifs, key=lambda i: i.end_lineno - i.lineno) if ifs else None
+        if inner is not None and ast.get_source_segment(src, inner.test) == "_trial_lane(ctx)":
+            guarded.append(node)
+    assert len(guarded) == 1
+
+
+def test_the_advisory_hand_off_opens_the_export(monkeypatch):
+    import types
+    import agent_loop
+    monkeypatch.setattr(agent_loop, "_strict_quality_handoff", lambda c: {
+        "quality_status": "repair_required", "export_ready": False,
+        "quality_findings": ["picture QC: FACE AT THE LEFT EDGE 11.8-13.2s"]})
+    monkeypatch.setattr(agent_loop, "_open_request_findings", lambda c, row=None: [])
+    monkeypatch.setattr(agent_loop, "_safety_hold", lambda c: False)
+    out = agent_loop._quality_handoff(types.SimpleNamespace(critics_advisory=True))
+    assert out["quality_status"] == "advisory" and out["export_ready"] is True

@@ -5900,6 +5900,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     ctx, final, user_message.get("content") or "")
                 if _report and _report.get("dropped"):
                     honesty["trial_reply_dropped"] = _report["dropped"][:12]
+            if _trial_lane(ctx):
+                # Q8: a trial turn always ends on a version the user can take
+                # to the export paywall: the reviewers' open notes advise
+                # (flash safety still holds). A "repair_required" ending
+                # showed a trial user "This edit needs another pass" and no
+                # Download at all (harness, 30 Oct: every prepared turn whose
+                # picture QC kept its known First-cut notes)
+                ctx.critics_advisory = True
             quality = _quality_handoff(ctx)
             message_meta = {
                 "edl_version": latest["version"],

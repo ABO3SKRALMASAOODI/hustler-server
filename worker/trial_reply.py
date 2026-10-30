@@ -510,9 +510,9 @@ def suggestion(facts):
 _EN = frozenset("the a an and is it it's your you to of in on with now this that "
                 "for are was cut video".split())
 _LOCAL = {
-    "pt": {"place": "Está tocando no player à direita.",
+    "pt": {"place": "Já está tocando no player.",
            "next": "Quer que eu deixe mais curto, ou mude a cor das legendas?"},
-    "es": {"place": "Ya se reproduce en el reproductor de la derecha.",
+    "es": {"place": "Ya se reproduce en el reproductor.",
            "next": "¿Quieres que lo acorte o que cambie el color de los subtítulos?"},
 }
 _PT = frozenset("o a os as um uma de do da que não com para em é está vídeo corte".split())
@@ -602,7 +602,7 @@ def finish(draft, facts):
     parts = [lead] if lead else []
     place = None
     if facts.previewed and not any(_PLACE.search(x) for x in parts + rest[:1]):
-        place = "It's playing on the right." if lang == "en" else local.get("place")
+        place = "It's playing in the player." if lang == "en" else local.get("place")
     nxt = offers[0] if offers else (suggestion(facts) if lang == "en"
                                     else local.get("next"))
     budget = MAX_WORDS - sum(len(x.split()) for x in parts + [place or "", nxt or ""])

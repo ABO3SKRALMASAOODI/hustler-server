@@ -82,3 +82,15 @@ def test_the_trial_export_gate_builds_its_line_from_the_version():
     assert "_export_value_line" in gate and '"export"' in gate
     assert "SELECT json FROM edls WHERE project_id = %s" in " ".join(gate.split()) \
         or "SELECT json FROM edls" in gate
+
+
+def test_a_stock_cutaway_the_edit_does_not_use_leaves_the_media_list():
+    used = {"storage_key": "fetched/5/broll/a.jpg", "meta": {"broll": True, "stock": True}}
+    dropped = {"storage_key": "fetched/5/broll/b.jpg", "meta": {"broll": True, "stock": True}}
+    upload = {"storage_key": "media/5/mine.mp4", "meta": {"filename": "mine.mp4"}}
+    edl = {"version": 4, "json": {"fx": [{"id": "br1", "type": "broll",
+                                          "source": {"kind": "asset", "asset_key": "fetched/5/broll/a.jpg"}}]}}
+    assert video._unused_broll(used, edl) is False
+    assert video._unused_broll(dropped, edl) is True
+    assert video._unused_broll(upload, edl) is False
+    assert video._unused_broll(dropped, None) is False

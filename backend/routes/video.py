@@ -1139,6 +1139,25 @@ def _message_text(cur, message_id):
         return ""
 
 
+def _unused_broll(asset, edl):
+    """True for a stock cutaway the editor fetched (meta.broll) that the
+    latest EDL does not use."""
+    meta = (asset or {}).get("meta") or {}
+    if not meta.get("broll"):
+        return False
+    j = (edl or {}).get("json") if isinstance(edl, dict) else None
+    if not isinstance(j, dict):
+        return False
+    key = asset.get("storage_key")
+    for item in (j.get("fx") or []) + (j.get("overlays") or []) + (j.get("inserts") or []):
+        if not isinstance(item, dict):
+            continue
+        src = item.get("source") if isinstance(item.get("source"), dict) else {}
+        if key and key in (src.get("asset_key"), item.get("asset_key")):
+            return False
+    return True
+
+
 def _export_value_line(edl_json):
     """Q8 (30 Oct): what the trial user's finished edit is, in one line, for
     the export paywall ("Your 36-second vertical edit is ready to download:
@@ -3966,7 +3985,12 @@ def project_state(user_id, project_id):
             and not _is_staged(a)
             # The shorts style reference is analysis input, not b-roll — it
             # must never appear as something to splice into the timeline.
-            and (a.get("meta") or {}).get("role") != "shorts_reference"],
+            and (a.get("meta") or {}).get("role") != "shorts_reference"
+            # Q8: a stock cutaway the editor fetched and then did not use
+            # (the B-roll check dropped it) is not the user's media: listed
+            # as "ready to place" it read as an upload ("your uploaded
+            # skyline images", a trial reply, 30 Oct)
+            and not _unused_broll(a, edl)],
         # The staging tray (round 84): uploads waiting for Submit. The studio
         # renders these as the temporary timeline above the chat and on the
         # timeline panel.
