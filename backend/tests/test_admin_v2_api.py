@@ -311,9 +311,13 @@ def test_a_failed_section_is_not_cached(app, monkeypatch):
 
 # ── 3. trend ─────────────────────────────────────────────────────────────
 def test_trend_rows_and_seven_day_averages_align(app, monkeypatch):
+    tracking_began = []
+
     def by_day(cur, p):
-        tracked = ranges.local_day(datetime(2026, 10, 3, 16, 7,
-                                            tzinfo=timezone.utc))
+        # Tracking began part-way through the window (on 3 Oct 2026 in
+        # production); relative to today, so the test never ages out.
+        tracked = p.day_list()[10]
+        tracking_began.append(tracked)
         return {d: (dict(CLASSES) if d >= tracked else None)
                 for d in p.day_list()}
     monkeypatch.setattr(visitors, "classify_by_day", by_day)
@@ -329,7 +333,8 @@ def test_trend_rows_and_seven_day_averages_align(app, monkeypatch):
     assert d["averages"]["signups_7d"][0] == 10.0
     assert d["rows"][-1]["signups"] == 10 and d["rows"][0]["cash_usd"] == 0.0
     # Days before tracking began are unknown, never 0.
-    before = [row for row in d["rows"] if row["date"] < "2026-10-03"]
+    began = str(tracking_began[0])
+    before = [row for row in d["rows"] if row["date"] < began]
     assert before and all(row["people"] is None for row in before)
 
 

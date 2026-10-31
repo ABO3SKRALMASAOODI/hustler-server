@@ -57,6 +57,8 @@ MAX_PER_TICK = 400
 HELD_GRACE = timedelta(minutes=3)
 UNHANDLED_AFTER = timedelta(minutes=30)
 P1_JOB_TYPES = ("preview_check", "filmstrip")
+# agent_turn result.status of a request the trial or plan budget held.
+BUDGET_STATUSES = ("budget",)
 MCP_OURS = ("internal_error", "unclassified", "timeout", "upload_error",
             "executor_version_mismatch")
 MCP_OURS_OUTCOMES = ("transient_failure", "unavailable", "unsafe")
@@ -204,6 +206,7 @@ def scan(cur, since, now):
     cur.execute(f"""
         SELECT j.id, j.user_id, j.project_id, j.updated_at AS at,
                j.result->>'outcome' AS outcome,
+               COALESCE(j.result->>'status', '') AS status,
                LEFT(COALESCE(j.result->>'honesty', j.result->>'text', ''),
                     600) AS why
           FROM video_jobs j JOIN users u ON u.id = j.user_id
@@ -215,11 +218,18 @@ def scan(cur, since, now):
            AND {_customers()}
          ORDER BY j.updated_at LIMIT %(limit)s""", p)
     for r in cur.fetchall():
+        # The turn's status says WHY it ended unfulfilled (first_cut,
+        # budget, blocked, replied, ...). Without it every unfulfilled
+        # request folded into one key, so a trial budget stop "recurred" the
+        # fixed box range-read P0 #60 (ticket #69). A budget stop is the
+        # trial's own limit answering with the plans: filed, never paged.
+        status = r.get("status") or ""
         out.append({
             "ref": f"request:{r['id']}", "source": "request", "at": r["at"],
             "user_id": r["user_id"], "project_id": r["project_id"],
-            "severity": "P0",
-            "cause_key": cause_key("request", r["outcome"]),
+            "severity": "P2" if status in BUDGET_STATUSES else "P0",
+            "cause_key": cause_key("request", r["outcome"],
+                                   "" if status == r["outcome"] else status),
             "title": f"A Studio request ended {r['outcome']} (not fulfilled)",
             "detail": _short(r["why"], 600), "job_id": r["id"]})
     cur.execute(f"""

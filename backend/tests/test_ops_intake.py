@@ -321,6 +321,41 @@ def test_a_question_to_the_user_is_not_filed_as_a_blocked_request():
     assert "awaiting_user', 'partial" not in req[0]
 
 
+def test_a_budget_stop_never_folds_into_another_blocked_cause():
+    # Ticket #69: request 126999 (31 Oct) ended blocked because the free
+    # trial's budget held it (status budget). It was filed under the one key
+    # every unfulfilled request shared, auto-request-blocked, and "recurred"
+    # P0 #60 (the box range-read First cut, status first_cut, fixed in
+    # 93aa1dc0). Each way a request ends gets its own cause; a budget stop
+    # is filed at P2, never paged as a blocked customer.
+    requests = [
+        {"id": 126722, "user_id": 2677, "project_id": 5284, "at": NOW,
+         "outcome": "blocked", "status": "first_cut", "why": ""},
+        {"id": 126999, "user_id": 2685, "project_id": 5291, "at": NOW,
+         "outcome": "blocked", "status": "budget",
+         "why": '{"budget_stop": true}'},
+        {"id": 126713, "user_id": 2675, "project_id": 5282, "at": NOW,
+         "outcome": "partial", "status": "replied", "why": ""},
+        {"id": 89122, "user_id": 1970, "project_id": 2592, "at": NOW,
+         "outcome": "partial", "status": "blocked", "why": ""},
+        {"id": 7, "user_id": 2600, "project_id": 5000, "at": NOW,
+         "outcome": "blocked", "status": "blocked", "why": ""}]
+    cur = ScanCur([], [], [], requests, [])
+    got = {f["ref"]: f for f in
+           intake.scan(cur, NOW - timedelta(minutes=10), NOW)}
+    keys = {ref: f["cause_key"] for ref, f in got.items()}
+    assert keys == {
+        "request:126722": "auto-request-blocked-first-cut",
+        "request:126999": "auto-request-blocked-budget",
+        "request:126713": "auto-request-partial-replied",
+        "request:89122": "auto-request-partial-blocked",
+        "request:7": "auto-request-blocked"}
+    assert got["request:126999"]["severity"] == "P2"
+    assert got["request:126722"]["severity"] == "P0"
+    req = [sql for sql, _p in cur.sql if "j.type = 'agent_turn'" in sql]
+    assert "COALESCE(j.result->>'status', '') AS status" in req[0]
+
+
 def test_a_pass_never_counts_the_overlap_twice(monkeypatch):
     db = TicketsDB()
     seen = [_f("job:1", NOW - timedelta(minutes=3)),
