@@ -8320,9 +8320,7 @@ def _stream_cloudflare_source(asset):
     startup tax; every consumer on this path is ffmpeg-family and already
     supports the presigned-URL fallback used for oversized workdirs.
     """
-    if os.getenv("EXECUTOR_PROVIDER") not in ("cloudflare", "box"):
-        return False
-    return execution_inputs.streams_source(asset)
+    return execution_inputs.executor_streams_source(asset)
 
 
 def _fetch_into(workdir, key, tag):
