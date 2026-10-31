@@ -659,8 +659,9 @@ def note(ctx, text):
           "findings about parts the user did not ask about. Then "
           "render_preview(complete=true) ONCE, read its REQUEST CHECK (the "
           "before/after edit against this request), fix only a NOT MET line, "
-          "and reply in one or two sentences with the real numbers (the "
-          "length, the size) from that check.")
+          "and reply in one or two sentences with the real result from that "
+          "check: the new length in seconds, a size change as a percent "
+          "(never the raw size numbers).")
 
 
 # ── the verification step (on every preview render) ───────────────────────
@@ -703,7 +704,8 @@ def request_check(ctx):
                 met = False
                 lines.append(f"NOT MET: caption size {x:g} -> {y:g}.")
             else:
-                lines.append(f"caption size {x:g} -> {y:g}.")
+                lines.append(f"captions {_pct(x, y)}% "
+                             f"{'bigger' if y > x else 'smaller'}.")
         elif k in ("title_bigger", "title_smaller"):
             x, y = _title_size(before), _title_size(now)
             if (k == "title_bigger" and y <= x) or \
@@ -711,7 +713,8 @@ def request_check(ctx):
                 met = False
                 lines.append(f"NOT MET: title size {x:g} -> {y:g}.")
             else:
-                lines.append(f"title size {x:g} -> {y:g}.")
+                lines.append(f"title set {_pct(x, y)}% "
+                             f"{'bigger' if y > x else 'smaller'}.")
         elif k == "title_change":
             x = ((title_item(before) or {}).get("params") or {}).get("text")
             y = ((title_item(now) or {}).get("params") or {}).get("text")
