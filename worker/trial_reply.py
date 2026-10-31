@@ -822,11 +822,20 @@ _KNOB = re.compile(r"\s*\((?=[^()]*\d)(?:[^()]*\b(?:scale|size|size_scale|opacit
                    r"anchor_y|lufs|db)\b|[^()]*\d(?:\.\d+)?\s?[x\u00d7](?![a-z]))[^()]*\)", re.I)
 
 
+# "its size went from 1.49 to 1.79" (live, 30 Oct 23:53): the knob's raw
+# values outside parentheses; the clause goes, the sentence stays
+_KNOB_PAIR = re.compile(r"(?i)[,:;]?\s*(?:and\s+)?(?:its|the|their)\s+(?:caption\s+|title\s+)?"
+                        r"(?:size|scale|size_scale)\s+(?:went|changed|moved|is now|now)?\s*"
+                        r"(?:from\s+)?\d+(?:\.\d+)?\s*(?:x\s*)?(?:to|->|\u2192)\s*\d+(?:\.\d+)?x?")
+
+
 def scrub_pixels(text):
     """(text without pixel sizes or "NNNNp" resolutions, and with "on the
     right" put as "in the player", how many removed)."""
     out, n = _PIXELS.subn("", text or "")
     out, k = _KNOB.subn("", out)
+    n += k
+    out, k = _KNOB_PAIR.subn("", out)
     n += k
     out, r = _RIGHT.subn(_right, out)
     n += r
