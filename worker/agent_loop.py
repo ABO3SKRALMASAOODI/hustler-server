@@ -4654,6 +4654,16 @@ def _record_outer_tool_outcome(ctx, name, result):
         pending = re.search(r"\bjob(?:_id=| )(\d+)\b", str(result))
         if pending:
             receipt["pending_job_id"] = int(pending.group(1))
+    if kind == "success":
+        # An order-only prerequisite ("call render_preview(complete=true)
+        # first") is met once the same tool later succeeds. Left open, it
+        # labelled a delivered request partial (ticket #58, 31 Oct: report
+        # before the complete render, then the render, reply sent). A wait
+        # on a named background job is resolved only by that job.
+        for row in ctx.turn_tool_outcomes:
+            if (row.get("tool") == name and row.get("kind") == "prerequisite"
+                    and not row.get("pending_job_id")):
+                row["resolved"] = True
     ctx.turn_tool_outcomes.append(receipt)
     if name in agent_tools.WRITE_TOOLS:
         ctx.write_attempts += 1
