@@ -62,6 +62,14 @@ def wants_natural(text):
     return bool(_NATURAL.search(str(text or "")))
 
 
+_VIBRANT = re.compile(r"\b(?:vibrant|vivid|rich|colou?rful|pop(?:py|s)?|"
+                      r"saturated|punchy)\b", re.I)
+
+
+def wants_vibrant(text):
+    return bool(_VIBRANT.search(str(text or "")))
+
+
 def wants_dark(text):
     """An explicit ask for a darker picture (and no 'keep it natural')."""
     return bool(_DARK.search(str(text or ""))) and not wants_natural(text)
@@ -240,6 +248,23 @@ def after_write(ctx, before_sig, request_text=""):
             r = compare(src, _measure(ctx, cur, picks, raws))
             if not verdict(r, natural, dark):
                 break
+        if cur is not edl and natural and wants_vibrant(request_text) and r \
+                and not verdict(r, natural, dark) and r["sat"] < 1.12:
+            # "vibrant and rich ... avoid oversaturation" (2672): the
+            # tempering (and the exposure lift) took the colour back to
+            # the source's; give it back up to the natural ceiling
+            gc = dict((cur.get("effects") or {}).get("grade_custom") or {})
+            sat0 = float(gc.get("saturation") or 1.0)
+            boost = json.loads(json.dumps(cur))
+            boost["effects"].setdefault("grade_custom", {})
+            boost["effects"]["grade_custom"]["saturation"] = round(
+                min(1.6, sat0 * min(1.35, 1.2 / max(r["sat"], 0.5))), 3)
+            rb = compare(src, _measure(ctx, boost, picks, raws))
+            if rb and not verdict(rb, natural, dark):
+                cur, r = boost, rb
+                notes.append(f"saturation {sat0:.2f} -> "
+                             f"{boost['effects']['grade_custom']['saturation']:.2f}"
+                             " (vibrant, still natural)")
         if cur is edl:
             return ("\nLEGIBILITY GUARD: this look leaves the picture "
                     + "; ".join(bad) + ". Ease it (less contrast, no shadow "

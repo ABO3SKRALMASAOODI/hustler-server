@@ -418,3 +418,46 @@ def test_a_repeat_is_told_as_a_repeat_never_as_b_roll():
     items = trial_reply.friendly_changes(before, after)
     assert "added B-roll" not in items
     assert "repeated a part to fill its length" in items
+
+
+def test_vibrant_and_natural_asks_are_both_read():
+    assert look_guard.wants_vibrant(ASK_2672) and look_guard.wants_natural(ASK_2672)
+    assert not look_guard.wants_vibrant("make it black and white")
+
+
+def test_after_write_tempers_the_2672_stack_end_to_end(tmp_path):
+    src = str(tmp_path / "dark.mp4")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i",
+         "color=c=0x1c2028:s=320x180:d=4,drawbox=x=10:y=150:w=120:h=20:"
+         "color=0xd8d0c0:t=fill,drawbox=x=200:y=40:w=60:h=60:color=0x8a3020:t=fill",
+         "-pix_fmt", "yuv420p", src], check=True)
+
+    class C:
+        workdir = str(tmp_path)
+        user_message = ASK_2672
+
+        def __init__(self):
+            self.v = [{"version": 3, "json": {"keep": [[0.0, 4.0]], "effects": {
+                "grade": "cinematic",
+                "grade_custom": {"contrast": 1.12, "shadows": -0.1},
+                "stylize": [{"kind": "vignette", "intensity": 0.3}]}}}]
+
+        def proxy_path(self):
+            return src
+
+        def latest_edl(self):
+            return self.v[-1]
+
+        def write_edl(self, edl, desc):
+            self.v.append({"version": self.v[-1]["version"] + 1, "json": edl})
+            return f"EDL v{self.v[-1]['version']}: {desc}"
+
+    ctx = C()
+    out = look_guard.after_write(ctx, look_guard.signature({}), ASK_2672)
+    assert out.startswith("\nLEGIBILITY GUARD (EDL v4)"), out
+    fx = ctx.latest_edl()["json"]["effects"]
+    assert fx["grade"] == "cinematic" and fx["stylize"][0]["intensity"] == 0.12
+    assert "never claim deeper" in out
+    # a second look at the tempered edit finds nothing to change
+    assert look_guard.after_write(ctx, look_guard.signature({}), ASK_2672) == ""
