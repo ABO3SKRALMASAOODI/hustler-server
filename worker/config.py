@@ -325,6 +325,14 @@ CLAUDE_TRIAL_EXECUTOR_EFFORT = os.getenv(
 # replays); below it the request plans on the lane model.
 CLAUDE_TRIAL_PLANNER_MIN_LEFT_USD = float(
     os.getenv("CLAUDE_TRIAL_PLANNER_MIN_LEFT_USD", "0.2"))
+# The planning call is priced before it is made (its estimated prompt at the
+# cache-write rate plus this much output; 6,190 tokens measured at xhigh on
+# 31 Oct): the planner runs only when that call still leaves this reserve
+# for the steps that make the edit (P0 #60).
+CLAUDE_TRIAL_PLANNER_OUTPUT_TOKENS = int(
+    os.getenv("CLAUDE_TRIAL_PLANNER_OUTPUT_TOKENS", "8000"))
+CLAUDE_TRIAL_PLANNER_RESERVE_USD = float(
+    os.getenv("CLAUDE_TRIAL_PLANNER_RESERVE_USD", "0.1"))
 CLAUDE_TRIAL_TIMEOUT_S = float(os.getenv("CLAUDE_TRIAL_TIMEOUT_S", "300"))
 # Owner's design defaults; every one can be overridden in app_kv.free_result
 # ({on, per_account_usd_cap, pool_usd_cap, monthly_usd_cap, daily_count_cap,

@@ -2466,14 +2466,30 @@ def _single_shot_design(ctx, user_text):
         return ""
 
 
-def _trial_planner_step(ctx, model, iteration, step_effort):
+def _planner_call_usd(planner, prompt_tokens):
+    """Upper estimate of one uncached planning call on ``planner``: the
+    whole prompt written to the cache plus CLAUDE_TRIAL_PLANNER_OUTPUT_TOKENS
+    of output. None when the model has no rate card."""
+    rates = model_prices.MODEL_PRICES.get(model_prices.normalize(planner))
+    if not rates:
+        return None
+    write = rates.get("cache_write_in", rates["in"])
+    return (max(0, int(prompt_tokens)) * write
+            + config.CLAUDE_TRIAL_PLANNER_OUTPUT_TOKENS * rates["out"]) / 1e6
+
+
+def _trial_planner_step(ctx, model, iteration, step_effort,
+                        prompt_tokens=None):
     """(model to call, effort) for one agent step. On the free trial's
     Claude lane with its planner on (claude_trial Scope.planner_model):
     iteration 0, the planning call, runs on the planner at planner_effort;
     every later step on the lane model at executor_effort. Any other lane,
     a non-Claude model, or the planner off: (model, step_effort) unchanged.
     Thinking blocks are never replayed by claude_lane, so a model switch
-    between steps is legal; each call is priced by the model it ran on."""
+    between steps is legal; each call is priced by the model it ran on.
+    ``prompt_tokens`` (the planning call's estimated prompt) keeps the
+    planner off when that one call could not leave the account
+    CLAUDE_TRIAL_PLANNER_RESERVE_USD for the steps that make the edit."""
     scope = getattr(ctx, "claude_trial", None)
     if scope is None or not claude_lane.is_claude_model(model):
         return model, step_effort
@@ -2490,6 +2506,14 @@ def _trial_planner_step(ctx, model, iteration, step_effort):
         # 31 Oct): with less than this left, the request plans on the lane
         # model so the rest of the trial buys more requests, not one.
         return model, step_effort
+    if iteration == 0 and left is not None and prompt_tokens is not None:
+        # P0 #60 (31 Oct, project 5291): a 14-minute gaming video's planning
+        # prompt was 107k tokens, so the one Opus call cost $0.66 against
+        # $0.36 left of a $0.40 cap: the trial ended with nothing made.
+        cost = _planner_call_usd(planner, prompt_tokens)
+        if cost is not None \
+                and cost + config.CLAUDE_TRIAL_PLANNER_RESERVE_USD > left:
+            return model, step_effort
     if iteration == 0:
         scope.planner_used = True
         return planner, (getattr(scope, "planner_effort", None)
@@ -5971,8 +5995,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # THE TRIAL LANE'S PLANNER (TRIAL_QUALITY_BUILD, 31 Oct 2026): the
         # planning call on Opus at xhigh, every other call of the turn on the
         # lane model at high (app_kv.free_result.planner_model; trial only).
+        planner_prompt = (
+            _agent_request_token_estimate(messages, tools, 0)
+            if iteration == 0 and getattr(ctx, "claude_trial", None)
+            is not None else None)
         call_model, step_effort = _trial_planner_step(
-            ctx, model, iteration, step_effort)
+            ctx, model, iteration, step_effort, prompt_tokens=planner_prompt)
         def _chat_request(active_model):
             active_extra = {}
             if step_effort and iteration > 0 \
