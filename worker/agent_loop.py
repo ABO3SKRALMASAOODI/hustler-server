@@ -2643,6 +2643,52 @@ def _outcome_after_reply(outcome, report, honesty):
     return "partial" if outcome == "fulfilled" else outcome
 
 
+_CUT_TOOLS = frozenset((
+    "cut_range", "cut_output_range", "keep_segments", "cut_silences",
+    "remove_filler_words"))
+_LOOK_ONLY_TOPICS = frozenset(("grade", "clarity", "music", "captions", "angle"))
+# words that let a request change the cut ("cut out the audio" does not)
+_CUT_WORDS = re.compile(
+    r"\bcut(?!\s+(?:out\s+)?(?:the\s+|all\s+the\s+)?(?:audio|sound|music|voice|noise))"
+    r"|\btrim|\bshort(?:en|er)\b|\btighten|\bremov(?:e|ing)\b(?!\s+(?:the\s+)?(?:audio|sound|music|noise|grain))"
+    r"|\bdelet|\bboring|\bpauses?\b|\bsilen|\bdead\s+air|\blength|\bseconds?\b|\bminutes?\b"
+    r"|\b\d+(?:\.\d+)?\s*s\b|\bloop|\brepeat|\bparts?\b|\bonly\s+(?:keep|show)|\bkeep\s+only"
+    r"|\bhighlights?\b|\breel\b|\bshorts?\b|\bintro\b|\boutro\b|\bfaster\b|\bpac(?:e|ing)\b"
+    r"|\bbest\s+(?:part|moment|bit)s?|\bget\s+rid\b|\btake\s+out\b", re.I)
+
+
+def _look_only_cut_refusal(ctx, name, user_text):
+    """A refusal for a cut tool on a request that asked only about the
+    look, the clarity, the sound or the captions, else None. The Claude
+    lanes only (the trial, new subscribers).
+
+    TRIAL_QUALITY_BUILD (31 Oct): user 2675's "Make the video clearer and
+    give a cinematic colour grading" came back 10-15 s shorter in both
+    final-code replays ("I trimmed the silent lead-in and the dead tail");
+    the judge marked it unrequested both times (4 of 4 judgements), and the
+    replay before this build did the same (3 of 3). A request that names no
+    cut, length, part or pacing keeps every second of the video."""
+    if name not in _CUT_TOOLS:
+        return None
+    if getattr(ctx, "claude_trial", None) is None \
+            and getattr(ctx, "claude_paid", None) is None:
+        return None
+    try:
+        import ask_ledger
+        topics = set(ask_ledger.asks(user_text))
+    except Exception:  # noqa: BLE001 - the tool runs as asked
+        return None
+    text = " ".join(str(user_text or "").split())
+    if not topics or not topics <= _LOOK_ONLY_TOPICS or _CUT_WORDS.search(text):
+        return None
+    what = ", ".join(sorted(topics))
+    return ("REJECTED (not run): NOT ASKED - the user asked only about the "
+            f"{what}; this changes what is kept and the video's length, which "
+            "the request did not mention, so every second stays exactly as it "
+            "is. Make only the requested change, render once and reply. Do "
+            "not retry this.")
+
+
 def _broll_throughout_hold(ctx, name, user_text):
     """Once per request, before the editor's own render of a request that
     asked for b-roll THROUGHOUT the video: the stretches its cutaways still
@@ -6557,6 +6603,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             elif (broll_hold := _broll_throughout_hold(
                     ctx, name, user_message.get("content") or "")):
                 result = broll_hold
+            elif (cut_refused := _look_only_cut_refusal(
+                    ctx, name, user_message.get("content") or "")):
+                result = cut_refused
             else:
                 t0 = time.monotonic()
                 # the editor's own call (sentence_snap applies to its cuts,

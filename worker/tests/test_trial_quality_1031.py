@@ -419,3 +419,34 @@ def test_the_reply_says_what_the_design_added_once():
         "\n\nFor the music, pick one.", line)
     assert out.startswith("The cut is silent with a cinematic grade. To make it")
     assert out.endswith("For the music, pick one.")
+
+
+
+# ── 5. a look-only request keeps every second ─────────────────────────────
+
+@pytest.mark.parametrize("text,refused", [
+    ("Make the video clearer and give a cinematic colour grading", True),     # 2675
+    ("Cut out the audio and play something else relating to nature. Give colour "
+     "gradings cinematic vibes. Correct the angle (if possible)", True),        # 2665
+    ("I want cinmatic", False),                                                # no named ask
+    ("make it clearer and cut the boring parts", False),
+    ("cinematic grade and trim the ending", False),
+    ("give it a cinematic grade and make it 30 seconds", False),
+    ("add b-roll and a grade", False),                                         # b-roll is not look-only
+])
+def test_look_only_requests_refuse_cut_tools(text, refused):
+    ctx = SimpleNamespace(claude_trial=object(), claude_paid=None)
+    got = agent_loop._look_only_cut_refusal(ctx, "cut_output_range", text)
+    assert (got is not None) is refused
+    if refused:
+        assert got.startswith("REJECTED (not run): NOT ASKED")
+
+
+def test_look_only_refusal_is_for_cut_tools_on_claude_lanes_only():
+    t = "Make the video clearer and give a cinematic colour grading"
+    trial = SimpleNamespace(claude_trial=object(), claude_paid=None)
+    assert agent_loop._look_only_cut_refusal(trial, "set_color_grade", t) is None
+    assert agent_loop._look_only_cut_refusal(trial, "keep_segments", t)
+    assert agent_loop._look_only_cut_refusal(trial, "cut_silences", t)
+    legacy = SimpleNamespace(claude_trial=None, claude_paid=None)
+    assert agent_loop._look_only_cut_refusal(legacy, "cut_output_range", t) is None
