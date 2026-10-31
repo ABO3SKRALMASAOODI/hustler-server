@@ -12,8 +12,12 @@ never touches billing, credits, plans or Paddle.
     ops_review.py pending [--days 3] [--out DIR] [--count]
     ops_review.py context  --session p4746-1792941458
     ops_review.py evidence --session KEY --file sheet.jpg [--name sheet.jpg]
-    ops_review.py verdict  --session KEY --verdict delivered_poor --score 3 \
-        --reasoning "..." --root-cause "..." --evidence-json evidence.json
+    ops_review.py verdict  --json verdict.json   # all fields in one file:
+        verdict, score, reasoning, root_cause, request_summary, evidence,
+        asks [{text, status: done|partly|not_done, note <= 20 words}],
+        why_short (<= 25 words), next_actions, source_asset_id,
+        delivered_asset_id (the journey fields: required)
+    ops_review.py annotate --session KEY --json journey.json [--backfilled-from reasoning]
     ops_review.py ticket   --session KEY --cause index-scratch-too-small \
         --title "..." --severity P0 [--summary "..."]
     ops_review.py tickets  [--status active] [--urls]
@@ -340,8 +344,29 @@ def _signals(ctx):
             "downloaded_draft_only": bool(n.get("downloaded_draft_only"))}
 
 
+JOURNEY_KEYS = ("asks", "why_short", "next_actions", "source_asset_id",
+                "delivered_asset_id")
+
+
+def _journey(a, spec=None):
+    """The journey fields from the --json spec, then the flags on top."""
+    spec = spec or {}
+    j = {k: spec.get(k) for k in JOURNEY_KEYS if spec.get(k) is not None}
+    if getattr(a, "asks_json", None):
+        with open(a.asks_json, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+        j["asks"] = loaded if isinstance(loaded, list) else loaded.get("asks")
+    for k in ("why_short", "source_asset_id", "delivered_asset_id"):
+        if getattr(a, k, None) not in (None, ""):
+            j[k] = getattr(a, k)
+    if getattr(a, "next_action", None):
+        j["next_actions"] = list(a.next_action)
+    return j
+
+
 def cmd_verdict(a):
     from ops_loop import sessions, store
+    spec = {}
     if a.json:
         with open(a.json, encoding="utf-8") as fh:
             spec = json.load(fh)
@@ -352,6 +377,9 @@ def cmd_verdict(a):
         if spec.get("evidence") and not (a.evidence or a.evidence_json):
             a.evidence_json = a.json
         a.session = a.session or spec.get("session_key")
+    journey = _journey(a, spec)
+    # Refuse a bad journey before any database work.
+    store.check_journey(journey, required=True)
     conn = connect()
     cur = conn.cursor()
     s = find_session(cur, a.session)
@@ -361,10 +389,28 @@ def cmd_verdict(a):
         row = store.write_verdict(
             w, s, a.verdict, a.score, a.reasoning, _evidence_items(a),
             root_cause=a.root_cause, request_summary=a.request_summary,
-            signals=_signals(ctx))
+            signals=_signals(ctx), journey=journey)
     out({"review_id": row["id"], "review_count": row["review_count"],
          "session_key": s["key"], "verdict": a.verdict, "score": int(a.score),
          "dry_run": bool(a.dry_run)})
+    return 0
+
+
+def cmd_annotate(a):
+    """The journey fields for an existing review (verdict, score and
+    reasoning unchanged): the backfill of reviews written before them."""
+    from ops_loop import store
+    spec = {}
+    if a.json:
+        with open(a.json, encoding="utf-8") as fh:
+            spec = json.load(fh)
+    journey = _journey(a, spec)
+    store.check_journey(journey, required=True)
+    with Writer(a.dry_run) as w:
+        row = store.annotate(w, a.session, journey,
+                             backfilled_from=a.backfilled_from)
+    out({"review_id": row["id"], "session_key": row["session_key"],
+         "asks": len(journey.get("asks") or []), "dry_run": bool(a.dry_run)})
     return 0
 
 
@@ -607,8 +653,32 @@ def parser():
     p.add_argument("--evidence-json", dest="evidence_json")
     p.add_argument("--evidence", action="append",
                    help="'storage_key|kind|caption' (repeatable)")
+    p.add_argument("--asks-json", dest="asks_json",
+                   help='a file with [{"text", "status": done|partly|'
+                        'not_done, "note"}]')
+    p.add_argument("--why-short", dest="why_short",
+                   help="one plain line of why the score, 25 words or fewer")
+    p.add_argument("--next-action", dest="next_action", action="append",
+                   help="what the user did next, in order (repeatable)")
+    p.add_argument("--source-asset", dest="source_asset_id", type=int)
+    p.add_argument("--delivered-asset", dest="delivered_asset_id", type=int)
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_verdict)
+    p = sub.add_parser("annotate", help="add the journey fields (asks, "
+                                        "why_short, ...) to an existing review")
+    p.add_argument("--session", required=True)
+    p.add_argument("--json", help="a file with asks, why_short, "
+                                  "next_actions, source_asset_id, "
+                                  "delivered_asset_id")
+    p.add_argument("--asks-json", dest="asks_json")
+    p.add_argument("--why-short", dest="why_short")
+    p.add_argument("--next-action", dest="next_action", action="append")
+    p.add_argument("--source-asset", dest="source_asset_id", type=int)
+    p.add_argument("--delivered-asset", dest="delivered_asset_id", type=int)
+    p.add_argument("--backfilled-from", dest="backfilled_from",
+                   help="e.g. 'reasoning' when written from an older review")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_annotate)
     p = sub.add_parser("ticket", help="open or attach the ticket for a cause")
     p.add_argument("--session", required=True)
     p.add_argument("--cause", required=True)

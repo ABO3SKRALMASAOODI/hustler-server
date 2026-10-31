@@ -1530,6 +1530,9 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
     brief = quality_verifier.request_text_for(ctx)
     contract = request_scope.contract_lines(
         brief, quality_verifier.requested_duration_target(brief))
+    _parts_line = quality_verifier.part_lengths_line(brief)
+    if _parts_line:
+        contract = list(contract) + [_parts_line]
     if contract:
         request_contract += ("\nTHIS BRIEF FIXES:\n- "
                              + "\n- ".join(contract))
@@ -6373,6 +6376,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if _report and _report.get("dropped"):
                     honesty["trial_reply_dropped"] = _report["dropped"][:12]
                 outcome = _outcome_after_reply(outcome, _report, honesty)
+            # RS_ENGINE (31 Oct): music the user asked for ends on a choice
+            # of 2-4 library tracks, never on silence told as done (user
+            # 2665: audio muted, the library listed, nothing offered).
+            import music_offer
+            _music_ask = music_offer.turn_end_offer(
+                ctx, user_message.get("content") or "")
+            if _music_ask:
+                final = music_offer.append_offer(final, _music_ask)
+                honesty["music_offer"] = True
             if _trial_lane(ctx):
                 # Q8: a trial turn always ends on a version the user can take
                 # to the export paywall: the reviewers' open notes advise

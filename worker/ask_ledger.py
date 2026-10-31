@@ -125,6 +125,11 @@ _PRESENT = {
 def _present(edl, topic):
     if topic == "broll" and fx_broll(edl):
         return True
+    if topic == "broll":
+        # keep_segments' repeats (inserts "rep*") are the main video again
+        edl = dict(edl or {})
+        edl["inserts"] = [i for i in edl.get("inserts") or []
+                          if not str((i or {}).get("id") or "").startswith("rep")]
     for path in _PRESENT.get(topic, ()):
         cur = edl
         for part in path.split("."):

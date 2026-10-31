@@ -320,6 +320,11 @@ def _evidence(s, n=1):
             for i in range(n)]
 
 
+JOURNEY = {"asks": [{"text": "cut to the payoff", "status": "not_done",
+                     "note": "the payoff line is cut"}],
+           "why_short": "The cut drops the line the user asked to keep."}
+
+
 def test_a_verdict_needs_pictures_under_the_sessions_own_folder():
     s = _session()
     cur = Cur([{"id": 1, "review_count": 1}])
@@ -338,14 +343,22 @@ def test_a_verdict_needs_pictures_under_the_sessions_own_folder():
     with pytest.raises(store.StoreError, match="scores 1-3"):
         store.write_verdict(cur, s, "not_delivered", 8, "x", _evidence(s),
                             root_cause="r")
+    with pytest.raises(store.StoreError, match="asks"):
+        store.write_verdict(cur, s, "delivered_poor", 3, "cuts the payoff",
+                            _evidence(s, 2), root_cause="story selection")
     row = store.write_verdict(cur, s, "delivered_poor", 3, "cuts the payoff",
-                              _evidence(s, 2), root_cause="story selection")
+                              _evidence(s, 2), root_cause="story selection",
+                              journey=JOURNEY)
     assert row == {"id": 1, "review_count": 1}
     sql, p = cur.sql[-1]
     assert sql.strip().startswith("INSERT INTO session_reviews")
     assert p["user"] == 7 and p["project"] == 10 and p["fp"] == \
         s["fingerprint"]
     assert len(json.loads(p["evidence"])) == 2
+    sig = json.loads(p["signals"])
+    assert sig["asks"][0]["status"] == "not_done"
+    assert sig["why_short"].startswith("The cut drops")
+    assert sig["journey_format"] == 2
     assert json.loads(p["ids"])["jobs"]
 
 
@@ -577,7 +590,7 @@ def test_the_blueprint_is_registered_and_probed():
     assert "app.register_blueprint(admin_ops_bp)" in app_src
     probe = (ROOT / "backend" / "scripts" / "admin_probe.py").read_text()
     for path in ("/admin/video/ops/summary", "/admin/video/ops/sessions",
-                 "/admin/video/ops/tickets"):
+                 "/admin/video/ops/tickets", "/admin/video/ops/journeys"):
         assert path in probe
 
 

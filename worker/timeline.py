@@ -623,8 +623,10 @@ def broll_coverage(edl, min_scale=0.8):
     if not blocks:
         return None
     total = float(blocks[-1]["out_end"])
+    # a keep_segments repeat (id "rep*") is the main video again, not b-roll
     spans = [(float(b["out_start"]), float(b["out_end"]))
-             for b in blocks if b["kind"] == "insert"]
+             for b in blocks if b["kind"] == "insert"
+             and not str(b.get("id") or "").startswith("rep")]
     for o in (edl or {}).get("overlays") or []:
         get = o.get if isinstance(o, dict) else (lambda k, _o=o: getattr(_o, k, None))
         try:
