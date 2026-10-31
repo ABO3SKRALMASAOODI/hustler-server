@@ -11,7 +11,10 @@ an advisory lock) reads what failed since the last tick and files it:
   reply     an error reply the customer saw in the chat (meta.error) whose
             job was not already filed
   request   a Studio request that ended unfulfilled (agent_turn done with
-            outcome partial or blocked, not continued)
+            outcome partial or blocked, not continued). A request that
+            ended on a question to the user (ask_user: outcome
+            awaiting_user, or an older worker's status awaiting_user with
+            outcome blocked) is waiting on the customer, not a failure.
   upload    an upload the customer could not get in (upload_failed, or
             upload_rejected unless the file was accepted anyway)
   player    the editor could not play the customer's video (player_error)
@@ -207,6 +210,7 @@ def scan(cur, since, now):
          WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
            AND j.type = 'agent_turn' AND j.state = 'done'
            AND j.result->>'outcome' IN ('partial', 'blocked')
+           AND COALESCE(j.result->>'status', '') <> 'awaiting_user'
            AND COALESCE(j.result->>'continued_job_id', '') = ''
            AND {_customers()}
          ORDER BY j.updated_at LIMIT %(limit)s""", p)

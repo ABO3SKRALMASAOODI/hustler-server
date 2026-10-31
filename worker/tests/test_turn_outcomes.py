@@ -191,14 +191,16 @@ def test_intermediate_asset_does_not_bill_a_timed_out_edit():
 
 def test_awaiting_user_without_a_deliverable_is_free():
     ctx = _ctx(write_attempts=1)
+    # TRIAL_QUALITY_BUILD: a question to the user is awaiting_user, never
+    # blocked (blocked filed a P0 ticket for every question)
     assert agent_loop._turn_completion(ctx, "awaiting_user") == \
-        ("blocked", False)
+        ("awaiting_user", False)
 
 
 def test_awaiting_user_does_not_bill_an_intermediate_asset():
     ctx = _ctx(audio_extracted=["audio/extracted.wav"])
     assert agent_loop._turn_completion(ctx, "awaiting_user") == \
-        ("partial", False)
+        ("awaiting_user", False)
 
 
 def test_prior_durable_plan_does_not_make_a_read_only_answer_an_edit_failure():

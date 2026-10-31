@@ -89,6 +89,39 @@ def _num(value, default, lo=0.0):
     return out if out >= lo else default
 
 
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_PLANNER_OFF = ("", "off", "none", "false", "0", "no")
+
+
+def _effort_value(value, default):
+    v = str(value or "").strip().lower()
+    return v if v in EFFORTS else default
+
+
+def planner_setup(data):
+    """(planner_model or None, planner_effort, executor_effort) for the
+    trial lane from the flag dict. An absent planner_model means the
+    config default (the Opus planner, ON); "", "off", false or a non-Claude
+    name turns it off."""
+    data = data if isinstance(data, dict) else {}
+    if "planner_model" in data:
+        raw = data.get("planner_model")
+        name = "" if raw is None or raw is False else str(raw).strip()
+    else:
+        name = config.CLAUDE_TRIAL_PLANNER_MODEL
+    if name.lower() in _PLANNER_OFF or not name.lower().startswith("claude-"):
+        planner = None
+    else:
+        planner = name
+    return (planner,
+            _effort_value(data.get("planner_effort"),
+                          _effort_value(config.CLAUDE_TRIAL_PLANNER_EFFORT,
+                                        "xhigh")),
+            _effort_value(data.get("executor_effort"),
+                          _effort_value(config.CLAUDE_TRIAL_EXECUTOR_EFFORT,
+                                        "high")))
+
+
 def parse_flag(raw):
     """app_kv text -> normalized flag dict. Anything unparsable is OFF."""
     try:
@@ -107,7 +140,11 @@ def parse_flag(raw):
     if not model.lower().startswith("claude-"):
         model = config.CLAUDE_TRIAL_MODEL
     pool = _num(data.get("pool_usd_cap"), config.CLAUDE_TRIAL_POOL_USD)
+    planner, planner_effort, executor_effort = planner_setup(data)
     return {
+        "planner_model": planner,
+        "planner_effort": planner_effort,
+        "executor_effort": executor_effort,
         "on": data.get("on") is True or str(data.get("on")).lower() == "true",
         "per_account_usd_cap": _num(data.get("per_account_usd_cap"),
                                     config.CLAUDE_TRIAL_PER_ACCOUNT_USD, 0.001),
@@ -431,6 +468,19 @@ class Scope:
         self.calls = 0
         self.extras_metered_usd = 0.0
         self.meter_errors = 0
+        # The trial lane's planner (TRIAL_QUALITY_BUILD): the planning call
+        # on this model and effort, every other call on ``model`` at
+        # ``executor_effort``. None = no planner (config efforts).
+        self.planner_model = None
+        self.planner_effort = None
+        self.executor_effort = None
+
+    def with_planner(self, flag_value):
+        flag_value = flag_value or {}
+        self.planner_model = flag_value.get("planner_model")
+        self.planner_effort = flag_value.get("planner_effort")
+        self.executor_effort = flag_value.get("executor_effort")
+        return self
 
     @property
     def remaining_usd(self):
@@ -438,6 +488,7 @@ class Scope:
 
     def as_dict(self):
         return {"user_id": self.user_id, "model": self.model,
+                "planner_model": self.planner_model,
                 "cap_usd": round(self.cap_usd, 4),
                 "spent_usd": round(self.spent_usd, 6),
                 "turn_usd": round(self.spent_usd - self.spent_at_start, 6),
@@ -742,7 +793,8 @@ def resolve(worker_db, user_id, subscribed, project_id=None,
                 return Decision(Decision.ACTIVE, scope=Scope(
                     user_id, value["per_account_usd_cap"], 0.0,
                     value["model"], granted=False, is_test=is_test,
-                    pool_cap=value["pool_usd_cap"]), reason="pending_grant")
+                    pool_cap=value["pool_usd_cap"]).with_planner(value),
+                    reason="pending_grant")
             got = worker_db.run(grant, user_id, project_id, via, value,
                                 0.0, is_test, True)
             if not got["granted"]:
@@ -761,7 +813,7 @@ def resolve(worker_db, user_id, subscribed, project_id=None,
         cap = max(cap, spent + value["per_account_usd_cap"])
     return Decision(Decision.ACTIVE, scope=Scope(
         user_id, cap, spent, value["model"], granted=True, is_test=is_test,
-        pool_cap=value["pool_usd_cap"]), reason="ok")
+        pool_cap=value["pool_usd_cap"]).with_planner(value), reason="ok")
 
 
 def settle_grant(worker_db, scope, project_id, via="index"):

@@ -299,6 +299,22 @@ CLAUDE_TRIAL_MODEL = os.getenv("CLAUDE_TRIAL_MODEL", "claude-haiku-5-5").strip()
 # 104 s. .valmera/week-1029/round3/TRIAL_ECONOMICS.md
 CLAUDE_TRIAL_PLAN_EFFORT = os.getenv("CLAUDE_TRIAL_PLAN_EFFORT", "xhigh").strip()
 CLAUDE_TRIAL_EFFORT = os.getenv("CLAUDE_TRIAL_EFFORT", "medium").strip()
+# THE TRIAL LANE ONLY (TRIAL_QUALITY_BUILD, 31 Oct 2026; owner delegated the
+# model choice): the request's PLANNING call (iteration 0) runs on Opus at
+# xhigh and every other call of the turn on the lane model (Haiku) at high,
+# setup (d) of the TRIAL_ECONOMICS A/B: 6.15 vs 4.75 on the real sessions,
+# 17.7/22 asks met vs 11.3/22, $0.115 a user, inside the paced $0.40 cap.
+# app_kv.free_result.planner_model / planner_effort / executor_effort
+# override these without a deploy; planner_model "" or "off" turns the
+# planner off (the lane then plans and dispatches like new subscribers,
+# CLAUDE_TRIAL_PLAN_EFFORT / CLAUDE_TRIAL_EFFORT above). New subscribers
+# and grandfathered lanes never read these.
+CLAUDE_TRIAL_PLANNER_MODEL = os.getenv(
+    "CLAUDE_TRIAL_PLANNER_MODEL", "claude-opus-5-5").strip()
+CLAUDE_TRIAL_PLANNER_EFFORT = os.getenv(
+    "CLAUDE_TRIAL_PLANNER_EFFORT", "xhigh").strip()
+CLAUDE_TRIAL_EXECUTOR_EFFORT = os.getenv(
+    "CLAUDE_TRIAL_EXECUTOR_EFFORT", "high").strip()
 CLAUDE_TRIAL_TIMEOUT_S = float(os.getenv("CLAUDE_TRIAL_TIMEOUT_S", "300"))
 # Owner's design defaults; every one can be overridden in app_kv.free_result
 # ({on, per_account_usd_cap, pool_usd_cap, monthly_usd_cap, daily_count_cap,

@@ -2419,6 +2419,58 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
         return None
 
 
+# The outcome of a request that ended on a question to the user (ask_user).
+AWAITING_USER = "awaiting_user"
+
+
+def _single_shot_design(ctx, user_text):
+    """Once per request on the Claude lanes (the trial, new subscribers):
+    a single-shot clip asked to look cinematic gets a designed open, middle
+    and close (single_shot_design) right before its first preview. Returns
+    the line for the render result, '' when nothing was added. Never
+    raises: the render goes ahead as asked."""
+    if getattr(ctx, "single_shot_done", False):
+        return ""
+    if getattr(ctx, "claude_trial", None) is None \
+            and getattr(ctx, "claude_paid", None) is None:
+        return ""
+    ctx.single_shot_done = True
+    try:
+        import single_shot_design
+        if not single_shot_design.asks_for_it(user_text):
+            return ""
+        note = single_shot_design.apply(
+            ctx, user_text, lambda n, a: agent_tools.execute(ctx, n, a))
+        if note:
+            print(f"[single_shot] job {(getattr(ctx, 'job', None) or {}).get('id')}: "
+                  f"{note.strip()[:240]}", flush=True)
+        return note
+    except Exception as exc:  # noqa: BLE001 - the render goes ahead
+        print(f"[single_shot] skipped: {type(exc).__name__}: {exc}",
+              flush=True)
+        return ""
+
+
+def _trial_planner_step(ctx, model, iteration, step_effort):
+    """(model to call, effort) for one agent step. On the free trial's
+    Claude lane with its planner on (claude_trial Scope.planner_model):
+    iteration 0, the planning call, runs on the planner at planner_effort;
+    every later step on the lane model at executor_effort. Any other lane,
+    a non-Claude model, or the planner off: (model, step_effort) unchanged.
+    Thinking blocks are never replayed by claude_lane, so a model switch
+    between steps is legal; each call is priced by the model it ran on."""
+    scope = getattr(ctx, "claude_trial", None)
+    if scope is None or not claude_lane.is_claude_model(model):
+        return model, step_effort
+    planner = getattr(scope, "planner_model", None)
+    if not planner or not claude_lane.is_claude_model(planner):
+        return model, step_effort
+    if iteration == 0:
+        return planner, (getattr(scope, "planner_effort", None)
+                         or step_effort)
+    return model, (getattr(scope, "executor_effort", None) or step_effort)
+
+
 def _trial_lane(ctx):
     """The free trial's Claude lane (claude_trial ACTIVE). Grandfathered
     subscribers and new subscribers on the Claude lane are never on it."""
@@ -3046,6 +3098,12 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
     """If the EDL changed this turn without a successful render_preview,
     render one now (logged + counted). Returns (latest_edl_row, fail_note)."""
     recovery = _recover_catastrophic_timeline_collapse(ctx, worker_db)
+    if ctx.versions_written and not recovery:
+        # a single-shot cinematic ask gets its designed structure before
+        # the preview the user sees, also when the editor skipped the render
+        _single_shot_design(ctx, quality_verifier.request_text_for(ctx)
+                            if hasattr(quality_verifier, "request_text_for")
+                            else "")
     latest = ctx.latest_edl()
     fail_note = None
     if recovery:
@@ -4800,7 +4858,10 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     if delivery and not delivery['complete']:
         unfinished_edit = True
 
-    if not has_value and (failed or status in {"timeout", "shutdown"}):
+    if status == "awaiting_user" and not failed:
+        # a question to the user: the request waits on their answer
+        outcome = AWAITING_USER
+    elif not has_value and (failed or status in {"timeout", "shutdown"}):
         outcome = "internal_error"
     elif not has_value and (blank_canvas_no_value or refused or prerequisite
                             or attempted_edit
@@ -5835,6 +5896,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         if claude_lane.is_claude_model(model):
             step_effort = (config.CLAUDE_TRIAL_PLAN_EFFORT if iteration == 0
                            else config.CLAUDE_TRIAL_EFFORT)
+        # THE TRIAL LANE'S PLANNER (TRIAL_QUALITY_BUILD, 31 Oct 2026): the
+        # planning call on Opus at xhigh, every other call of the turn on the
+        # lane model at high (app_kv.free_result.planner_model; trial only).
+        call_model, step_effort = _trial_planner_step(
+            ctx, model, iteration, step_effort)
         def _chat_request(active_model):
             active_extra = {}
             if step_effort and iteration > 0 \
@@ -5957,7 +6023,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 return True
 
             def _switch_quota_lane(exc):
-                nonlocal lane_index, client, step_client, model
+                nonlocal lane_index, client, step_client, model, call_model
                 nonlocal active_base_url, active_api_key, kw, extra
                 if not llm.note_quota_error(exc, model, active_base_url):
                     return False
@@ -5969,6 +6035,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 client = lane["client"]
                 step_client = llm.without_sdk_retries(client)
                 model = lane["model"]
+                call_model = model
                 active_base_url = lane.get("base_url") or config.OPENAI_BASE_URL
                 active_api_key = lane.get("api_key") or config.OPENAI_API_KEY
                 kw, extra = _chat_request(model)
@@ -6037,7 +6104,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             while resp is None:
                 try:
                     resp = step_client.chat.completions.create(
-                        model=model, messages=messages, tools=tools, **kw)
+                        model=call_model, messages=messages, tools=tools,
+                        **kw)
                     break
                 except Exception as e:
                     if _switch_quota_lane(e):
@@ -6108,7 +6176,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             timings["llm_s"] = round(
                 timings["llm_s"] + time.monotonic() - t0, 2)
             llm.record("agent",
-                       {"model": model,
+                       {"model": call_model,
                         "messages": _messages_for_record(messages[-2:]),
                         "tools": [t["function"]["name"] for t in tools]},
                        {"error": f"{type(e).__name__}: {str(e)[:400]}"}, None)
@@ -6140,7 +6208,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       f"({str(exc)[:120]}) — keeping the safe estimate",
                       flush=True)
         llm.record("agent",
-                   {"model": model, "messages": _messages_for_record(messages),
+                   {"model": call_model, "messages": _messages_for_record(messages),
                     "tools": [t["function"]["name"] for t in tools],
                     "max_tokens": max_tokens,
                     # The effort the request CARRIED, and which endpoint
@@ -6456,8 +6524,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 result = broll_hold
             else:
                 t0 = time.monotonic()
+                # the editor's own call (sentence_snap applies to its cuts,
+                # never to the engine's or a recipe's internal ones)
+                ctx._editor_tool = name
+                design_note = (_single_shot_design(
+                    ctx, user_message.get("content") or "")
+                    if name == "render_preview" else "")
                 try:
                     result = agent_tools.execute(ctx, name, args)
+                    if design_note and isinstance(result, str):
+                        result += design_note
                 except agent_tools.AskUser as q:
                     # The question goes to the user VERBATIM, which makes it
                     # a reply — and until 2026-08-09 it was the one reply
@@ -6486,15 +6562,20 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         _activity(worker_db, session_id, name, args,
                                   f"asked: {q.question}",
                                   edl_version=_cur_v)
+                        # TRIAL_QUALITY_BUILD (31 Oct): a question to the
+                        # user (music choices, which take) is the request
+                        # WAITING on them, not blocked: "blocked" filed a P0
+                        # ticket for every question the editor asked
+                        # (ops_loop.intake files partial / blocked only).
                         worker_db.run(dbx.add_message, session_id,
                                       "assistant", q.question,
                                       {"ask_user": True,
                                        "edl_version": _cur_v,
-                                       "outcome": "blocked"})
+                                       "outcome": AWAITING_USER})
                         _complete_adopted_steers(ctx, worker_db, job)
                         return {"status": "awaiting_user",
                                 "steps": total_steps, "timings": timings,
-                                "outcome": "blocked", "billable": False}
+                                "outcome": AWAITING_USER, "billable": False}
                 except agent_tools.FeatureUpgrade as gate:
                     # Shorts and Website demos come with Pro and Max (owner,
                     # 30 Oct 2026; feature_gate.py). The tool did not run;

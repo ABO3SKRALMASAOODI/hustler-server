@@ -307,6 +307,20 @@ def test_scan_files_jobs_requests_and_replies_once():
             assert 60 in params["internal"] and 22 in params["internal"]
 
 
+def test_a_question_to_the_user_is_not_filed_as_a_blocked_request():
+    # TRIAL_QUALITY_BUILD (31 Oct): the editor asking the user (music
+    # choices) ended the request "blocked" and filed P0 noise. The worker
+    # now records awaiting_user; the rule also leaves out an older worker's
+    # status awaiting_user rows, and never matches outcome awaiting_user.
+    cur = ScanCur([], [], [], [], [])
+    intake.scan(cur, NOW - timedelta(minutes=10), NOW)
+    req = [sql for sql, _p in cur.sql if "j.type = 'agent_turn'" in sql]
+    assert req, "the request read is issued"
+    assert "j.result->>'outcome' IN ('partial', 'blocked')" in req[0]
+    assert "COALESCE(j.result->>'status', '') <> 'awaiting_user'" in req[0]
+    assert "awaiting_user', 'partial" not in req[0]
+
+
 def test_a_pass_never_counts_the_overlap_twice(monkeypatch):
     db = TicketsDB()
     seen = [_f("job:1", NOW - timedelta(minutes=3)),

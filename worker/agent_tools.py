@@ -3197,6 +3197,15 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
         return "REJECTED: nothing would survive that keep list."
     prev = ctx.latest_edl()
     prev_keep = prev["json"]["keep"]
+    sentence_line = ""
+    if words and _sentence_snap_on(ctx, snap_to_words):
+        # TRIAL_QUALITY_BUILD: the Claude lanes' editor never starts or ends
+        # a piece mid-sentence (sentence_snap; new edges only)
+        import sentence_snap
+        new_keep, _moved = sentence_snap.snap_keep(
+            new_keep, words, ctx.duration, prev_keep=prev_keep,
+            sentences=ctx.index.get("sentences"))
+        sentence_line = sentence_snap.note_line(_moved)
     audio_notes, quiet_edges = [], set()
     if snap_to_words is not False:
         new_keep, audio_notes, quiet_edges = _audio_safe_keep(
@@ -3260,7 +3269,34 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
             "the previous list from get_edl.")
     if warn:
         result += "\n" + "\n".join(warn)
-    return result
+    return result + sentence_line
+
+
+SENTENCE_SNAP_TOOLS = frozenset((
+    "keep_segments", "cut_range", "cut_output_range", "restore_range"))
+
+
+def _sentence_snap_on(ctx, snap_to_words=None):
+    """Sentence-boundary snapping applies to THIS keep write: the editor's
+    own cut tool (the model's tool call, never the First cut's engine or a
+    filler/silence pass, which cut inside sentences by design) on a Claude
+    lane (the free trial or a new subscriber). An explicit
+    snap_to_words=false on a request with part lengths keeps exact times."""
+    if getattr(ctx, "claude_trial", None) is None \
+            and getattr(ctx, "claude_paid", None) is None:
+        return False
+    tool = getattr(ctx, "_executing_tool", None)
+    if tool not in SENTENCE_SNAP_TOOLS \
+            or getattr(ctx, "_editor_tool", None) not in SENTENCE_SNAP_TOOLS:
+        return False
+    if snap_to_words is False:
+        try:
+            if quality_verifier.requested_part_lengths(
+                    quality_verifier.request_text_for(ctx)):
+                return False
+        except Exception:  # noqa: BLE001 - snap when unsure
+            pass
+    return True
 
 
 # RS_ENGINE (31 Oct, ticket #55): a range listed again is a REPEAT. User 2670
