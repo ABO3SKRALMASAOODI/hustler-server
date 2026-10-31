@@ -111,6 +111,7 @@ import sfx_mix
 # the missing-sound queue (worker/devices/INTERFACES.md §6.1).
 import mono_policy
 import music_gate
+import look_guard
 import sound_requests
 import hooks
 import sfx_placement
@@ -3262,6 +3263,186 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     return result
 
 
+# RS_ENGINE (31 Oct, ticket #55): a range listed again is a REPEAT. User 2670
+# asked to "copy a part till it makes 8.2 seconds, then one clip of a first
+# touch"; the agent listed [[100.69, 102.53]] five times and every call came
+# back merged to one copy ("2 segments, 3.4 s", then "NO CHANGE"). The keep
+# list itself stays sorted and non-overlapping (the renderer, the timeline
+# and every source-anchored item rely on it); each replay is spliced in as an
+# insert of the main video's own footage, right after the piece listed
+# before it, on the program's own framing, so a loop plays as listed.
+REPLAY_ID = "rep"
+
+
+def _plan_keep_repeats(segments):
+    """(base, replays) for a keep list in the order the editor listed it.
+
+    base: the forward pieces (touching ones merged), the keep list proper.
+    replays: [(after, [s, e])] - a piece that shows footage already listed
+    (it overlaps an earlier piece) plays again after base piece ``after``;
+    once a list repeats, a later piece that runs backwards is spliced the
+    same way, so the listed order is the played order. A list with no
+    repeat keeps the old behaviour exactly (sorted, touching merged)."""
+    segs = [[float(a), float(b)] for a, b in segments]
+
+    def overlaps(x, pieces):
+        return any(x[0] < p[1] - 0.01 and x[1] > p[0] + 0.01 for p in pieces)
+
+    if not any(overlaps(x, segs[:i]) for i, x in enumerate(segs)):
+        return _merge_touching(segs), []
+    base, replays = [], []
+    for x in segs:
+        if base and (overlaps(x, base) or x[0] < base[-1][1] - 0.01):
+            replays.append((len(base) - 1, x))
+        elif base and x[0] <= base[-1][1] + 0.01:
+            base[-1][1] = max(base[-1][1], x[1])
+        else:
+            base.append(list(x))
+    return base, replays
+
+
+def _replay_framing(ctx, edl, src_t):
+    """(fit, crop) that shows the main video's own footage at ``src_t`` as
+    the program frames it there: the same 9:16 crop window (its focus_track
+    or focus), the same pad mode, or a plain cover crop."""
+    frame = (edl or {}).get("frame") or {}
+    mode = str(frame.get("mode") or "")
+    if mode in ("pad", "pad_blur"):
+        return mode, None
+    if mode != "crop":
+        return "crop", None
+    try:
+        rw, rh = (float(v) for v in str(frame.get("ratio") or "").split(":"))
+        orig = ctx.db.run(dbx.latest_asset, ctx.project_id, "original") or {}
+        W, H = float(orig.get("width") or 0), float(orig.get("height") or 0)
+        rot = int(((orig.get("meta") or {}).get("rotation") or 0)) % 180
+        if rot:
+            W, H = H, W
+        if W <= 0 or H <= 0 or rw <= 0 or rh <= 0:
+            return "crop", None
+    except (TypeError, ValueError, AttributeError):
+        return "crop", None
+    fx, fy = frame.get("focus_x"), frame.get("focus_y")
+    for item in frame.get("focus_track") or []:
+        try:
+            if float(item["t0"]) - 1e-3 <= src_t < float(item["t1"]) + 1e-3:
+                fx, fy = item.get("x", fx), item.get("y", fy)
+                break
+        except (KeyError, TypeError, ValueError):
+            continue
+    fx = 0.5 if fx is None else float(fx)
+    fy = 0.5 if fy is None else float(fy)
+    target, src = rw / rh, W / H
+    if abs(target - src) < 0.01:
+        return "crop", None
+    if src > target:
+        w = target / src
+        x0 = min(max(fx - w / 2, 0.0), 1.0 - w)
+        rect = [x0, 0.0, x0 + w, 1.0]
+    else:
+        h = src / target
+        y0 = min(max(fy - h / 2, 0.0), 1.0 - h)
+        rect = [0.0, y0, 1.0, y0 + h]
+    return "pad", [round(v, 4) for v in rect]
+
+
+def _splice_replays(ctx, base, replays):
+    """Write the replay inserts for ``replays`` (and drop the replays of an
+    earlier keep_segments call). Returns (result line, error)."""
+    edl = dict(ctx.latest_edl()["json"])
+    inserts = [dict(i) for i in (edl.get("inserts") or [])]
+    if not replays and not any(str(i.get("id", "")).startswith(REPLAY_ID)
+                               for i in inserts):
+        return "", None
+    orig = ctx.db.run(dbx.latest_asset, ctx.project_id, "original") or {}
+    main_key = orig.get("storage_key")
+    old = [i for i in inserts if str(i.get("id", "")).startswith(REPLAY_ID)
+           and i.get("asset_key") == main_key]
+    inserts = [i for i in inserts if i not in old]
+    if not replays and not old:
+        return "", None
+    if replays and not main_key:
+        return "", ("the main video's file is not available here, so the "
+                    "repeats were NOT added")
+    keep = [list(x) for x in edl["keep"]]
+    speed = edl.get("speed") or []
+    bounds = keep_boundaries(keep, speed)
+    placed = []
+    for after, (s, e) in replays:
+        # the base piece as written (its edges may have snapped): the keep
+        # segment that overlaps it most
+        b0, b1 = base[min(max(after, 0), len(base) - 1)]
+        k = max(range(len(keep)), key=lambda j: (
+            min(keep[j][1], b1) - max(keep[j][0], b0), -abs(keep[j][1] - b1)))
+        at = bounds[k + 1]
+        fit, crop = _replay_framing(ctx, edl, s)
+        item = {"id": _next_item_id(inserts, REPLAY_ID), "asset_key": main_key,
+                "kind": "video", "at_output_s": round(at, 2),
+                "duration_s": round(e - s, 2), "source_start_s": round(s, 2),
+                "fit": fit}
+        if crop:
+            item["crop"] = crop
+        inserts.append(item)
+        placed.append(item)
+    edl["inserts"] = inserts
+    desc = (f"{len(placed)} repeat(s) of the main video spliced in"
+            if placed else f"removed {len(old)} earlier repeat(s)")
+    res = ctx.write_edl(edl, desc)
+    if not str(res).startswith("EDL v"):
+        return "", f"the repeats could not be written ({str(res)[:200]})"
+    if not placed:
+        return f"\nRemoved the {len(old)} repeat(s) from the previous keep list ({res.split(':')[0]}).", None
+    by_range = {}
+    for it in placed:
+        r = (it["source_start_s"], round(it["source_start_s"] + it["duration_s"], 2))
+        by_range[r] = by_range.get(r, 0) + 1
+    shown = "; ".join(f"{a:.2f}-{b:.2f}s x{n} more" for (a, b), n in by_range.items())
+    return (f"\nREPEATS KEPT ({res.split(':')[0]}): {shown}. Each replay plays "
+            "right after the piece listed before it, on the same framing "
+            "(hard cut at the loop point: on still footage it reads as one "
+            "continuous shot). Program length now "
+            f"{program_duration(ctx.latest_edl()['json']):.2f}s."), None
+
+
+def _part_check_line(ctx, base, replays):
+    """'PART CHECK ...' against the lengths the user gave each part, or ''."""
+    try:
+        import quality_verifier
+        parts = quality_verifier.requested_part_lengths(
+            quality_verifier.request_text_for(ctx))
+    except Exception:  # noqa: BLE001
+        return ""
+    if not parts or not base:
+        return ""
+    first = base[0][1] - base[0][0] + sum(
+        e - s for after, (s, e) in replays if after == 0)
+    total = sum(e - s for s, e in base) + sum(e - s for _a, (s, e) in replays)
+    want = parts["parts"][0]
+    lines = []
+    if want:
+        gap = want - first
+        if abs(gap) <= max(0.3, want * 0.05):
+            lines.append(f"PART CHECK: part 1 runs {first:.2f}s (asked "
+                         f"{want:g} s) - OK.")
+        elif gap > 0:
+            seg = base[0][1] - base[0][0]
+            more = int(-(-gap // seg)) if seg > 0.05 else 0
+            lines.append(
+                f"PART CHECK: part 1 runs only {first:.2f}s; the user asked "
+                f"for {want:g} s of it (a PART length, not the total). "
+                + (f"List [{base[0][0]:g}, {base[0][1]:g}] {more} more "
+                   "time(s) right after it (repeats play as listed), or pick "
+                   "a longer take." if more else "Pick a longer take."))
+        else:
+            lines.append(f"PART CHECK: part 1 runs {first:.2f}s, longer than "
+                         f"the {want:g} s asked; trim it.")
+    if total < parts["min_total_s"] - 0.05:
+        lines.append(f"PART CHECK: the program is {total:.2f}s; the parts "
+                     f"the user asked for need at least "
+                     f"{parts['min_total_s']:g} s.")
+    return ("\n" + "\n".join(lines)) if lines else ""
+
+
 def keep_segments(ctx, segments, snap_to_words=None):
     if not isinstance(segments, list) or not segments:
         return "REJECTED: segments must be a non-empty array of [start, end]."
@@ -3274,17 +3455,29 @@ def keep_segments(ctx, segments, snap_to_words=None):
         except ValueError as err:
             return f"REJECTED: segments[{i}]: {err}"
         cleaned.append([s, e])
-    merged = _merge_touching(cleaned)
+    merged, replays = _plan_keep_repeats(cleaned)
     kept = output_duration(merged)
+    rep_s = round(sum(e - s for _a, (s, e) in replays), 2)
     res = _write_keep(
         ctx, merged,
         f"keep set to {len(merged)} segment(s), {kept}s of "
-        f"{ctx.duration}s survives",
+        f"{ctx.duration}s survives"
+        + (f" (+{len(replays)} repeat(s), {rep_s}s)" if replays else ""),
         snap_to_words=_snap_choice(snap_to_words), check_regression=True,
         place_all=True)
+    if str(res).startswith("EDL v") and hasattr(ctx, "db"):
+        try:
+            line, err = _splice_replays(ctx, merged, replays)
+        except Exception as exc:  # noqa: BLE001
+            line, err = "", f"the repeats failed ({str(exc)[:160]})"
+        if err:
+            res += f"\nWARNING: {err}. The keep list above has each range once."
+        res += line
     grid = _blind_grid_note(ctx, merged)
     if grid and str(res).startswith("EDL v"):
         res += grid
+    if str(res).startswith("EDL v"):
+        res += _part_check_line(ctx, merged, replays)
     return res
 
 
@@ -30155,7 +30348,13 @@ TOOLS = {
                       + _AUDIO_SAFE_DOC + " Every keep write also "
                       "moves an edge that lands on or up to 6 frames past a "
                       "source camera cut back off it (no flash of the other "
-                      "shot) and reports it.",
+                      "shot) and reports it. The list plays IN THE ORDER "
+                      "GIVEN: a range listed again REPEATS (loop a 1.8 s "
+                      "moment to fill 8.2 s: list it 5 times, then the next "
+                      "part) on the same framing. A length the user gives "
+                      "for a PART ('the first 8.2 s ..., then ...') is that "
+                      "part's length, not the total; the result's PART CHECK "
+                      "measures it.",
                       {"segments": _seg_schema(),
                        "snap_to_words": {"type": "boolean"}}),
     "cut_range": (cut_range, "Remove ONE source-time range from the current "
@@ -33630,8 +33829,12 @@ def _execute(ctx, name, args):
     previous_executing_tool = getattr(ctx, "_executing_tool", None)
     ctx._executing_tool = name
     before_version = None
+    look_before = None
     try:
-        before_version = int(ctx.latest_edl()["version"])
+        _before_row = ctx.latest_edl()
+        before_version = int(_before_row["version"])
+        if name in look_guard.LOOK_TOOLS:
+            look_before = look_guard.signature(_before_row["json"])
     except Exception:
         pass
     try:
@@ -33672,6 +33875,12 @@ def _execute(ctx, name, args):
             ctx.last_structured_tool_outcome = outcome.to_dict()
             ctx._executing_tool = previous_executing_tool
             return outcome.render_text()
+    if look_before is not None and isinstance(out, str) \
+            and out.startswith("EDL v"):
+        # RS_ENGINE (#56): a stacked look never leaves the picture crushed
+        out += look_guard.after_write(
+            ctx, look_before, quality_verifier.request_text_for(ctx)
+            if hasattr(quality_verifier, "request_text_for") else "")
     kind = tool_result_kind(out)
     if kind == "refused":
         _count_tool_outcome(ctx, "tool_refused")
