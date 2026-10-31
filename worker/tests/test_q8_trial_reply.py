@@ -334,7 +334,9 @@ def test_a_dropped_line_never_hides_an_unmet_ask():
         "I did not correct the angle: the horizon looked level to me and no tool "
         "rotates the picture cleanly. "
         "Valmera doesn't pick music, so tell me which of three CC0 tracks you want.", f)
-    assert "didn't change the angle" in text
+    # RS_HONESTY_BROLL: the agent's own line is salvaged without its
+    # internal clause; music gets the plain line and the choice
+    assert "did not correct the angle" in text
     assert "didn't add music" in text
     assert "no tool" not in text and "CC0" not in text
     assert len(report["answered"]) == 2
@@ -344,15 +346,16 @@ def test_a_dropped_line_never_hides_a_done_ask():
     """Ticket #49 (30 Oct, user 2666): the only line saying b-roll was added
     was dropped as a review note; the reply only said what was NOT added."""
     base = {"keep": [[0.0, 15.4]], "captions": {"mode": "from_transcript"}}
-    after = dict(base, overlays=[{"id": "o1", "start": 1, "end": 4},
-                                 {"id": "o2", "start": 4, "end": 7}])
+    after = dict(base, overlays=[{"id": "o1", "start": 1, "end": 4, "fit": "cover"},
+                                 {"id": "o2", "start": 4, "end": 7, "fit": "cover"}])
     f = facts(before=base, after=after, wrote=True, duration_s=15.4,
               user_text="automatically add relevant REAL B-roll footage throughout the video")
     text, _report = tr.finish(
         "The 15-second vertical cut is ready with your voice running throughout. "
         "Two Istanbul clips from Pexels cover the spoken \"Istanbul\" at about 1-4 s and 4-7 s. "
         "The speech never mentions Forbes, so I added no footage for it.", f)
-    assert "I added B-roll footage." in text
+    # RS_HONESTY_BROLL: 6 s of a 15.4 s "throughout" is told as part of it
+    assert "B-roll over part of the video" in text
 
 
 def test_asks_already_answered_get_no_extra_line():

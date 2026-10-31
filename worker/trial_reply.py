@@ -561,7 +561,18 @@ _BACKREF = re.compile(r"(?i)\b(them|(?:those|these)(?=\s*[,.;:!?]|\s+(?:so|and|b
                       r"either|too|as|now|anymore|any more)\b|\s*$)"
                       # WAVE_C: "I did not change either, because you only
                       # asked for bigger captions" after its line was dropped
-                      r"|(?<=\s)either(?=\s*[,.;:!?]|\s+(?:because|since|as)\b))")
+                      r"|(?<=\s)either(?=\s*[,.;:!?]|\s+(?:because|since|as)\b)"
+                      # RS_HONESTY_BROLL (31 Oct, user 2668): "I left both
+                      # alone because you asked only for the look." after
+                      # the two lines it meant were dropped as internal
+                      r"|(?<=\s)both(?=\s*[,.;:!?]|\s+(?:alone|unchanged|untouched|"
+                      r"as they were|in place|because|since|as)\b))")
+
+
+# "The speech never mentions Hamdi Ulukaya, Chobani, Murat \u00dclker or Forbes,
+# so I added no footage for them." names what "them" means (RS_HONESTY_BROLL,
+# user 2666: the honest answer to the user's own list was dropped as an orphan)
+_SELF_NAMED = re.compile(r"^\S+(?:.*?\b[A-Z\u00c0-\u00dd][\w\u00c0-\u00ff'-]+){2,}.*\bthem\b")
 
 
 def _topics(text):
@@ -613,8 +624,11 @@ def classify(sent, facts):
 # ── what changed, in the user's words ────────────────────────────────────
 
 _FRIENDLY = (
+    # under a second off is a trim, not "tightened the cuts" (replay of
+    # 2668, 31 Oct: 0.13 s off the tail of a 61 s single shot was told as
+    # tightened cuts, and the judge read it as a false claim)
     (re.compile(r"^cut ([\d.]+)s"), lambda m: f"tightened it by {float(m.group(1)):.0f} seconds"
-     if float(m.group(1)) >= 1 else "tightened the cuts"),
+     if float(m.group(1)) >= 1 else "trimmed a fraction of a second"),
     (re.compile(r"^restored ([\d.]+)s"), lambda m: f"brought back {float(m.group(1)):.0f} seconds"
      if float(m.group(1)) >= 1 else "eased the cuts"),
     (re.compile(r"^re-timed"), lambda m: "re-timed the cuts"),
@@ -845,49 +859,132 @@ def scrub_pixels(text):
     return out, n
 
 
-# An ask the user made that the reply must answer even when every line about
-# it was dropped (ticket #49, 30 Oct: user 2665 asked for new music and an
-# angle fix; the filter dropped "I did not correct the angle ..." (internal)
-# and "Valmera doesn't pick music ..." (music_pick), so the reply read
-# "Done" and never said two of three asks were not done. User 2666's only
-# b-roll line was dropped as a review note, so the reply never said b-roll was
-# added). (topic, what the user asked, what a line about it says, layer,
-# done line, not-done line)
-_ASKS = (
-    ("music", r"music|songs?|soundtrack|tracks?|play something", r"music|songs?|soundtrack|tracks?",
-     "music", "I added the music.", "I didn't add music this time; upload a track you like "
-     "and I'll put it in."),
-    ("broll", r"b-?roll|cutaways?|stock (?:footage|clips?|videos?)|real footage",
-     r"b-?roll|cutaways?|footage|clips?|pexels|stock|overlays?", "broll",
-     "I added B-roll footage.", "I didn't add B-roll this time."),
-    ("angle", r"angle|horizon|tilt(?:ed)?|straighten\w*|rotat\w*",
-     r"angle|horizon|tilt(?:ed)?|straighten\w*|rotat\w*", "frame",
-     "I adjusted the framing.", "I didn't change the angle this time."),
-)
-_NEGATED = re.compile(r"(?i)\b(no|not|never|didn't|did not|couldn't|could not|without|none)\b")
+# An ask the user made is answered in the reply, done or not (ticket #49,
+# 30 Oct: user 2665 asked for new music, a cinematic grade and an angle fix;
+# the filter dropped "I did not correct the angle ..." (internal) and
+# "Valmera doesn't pick music ..." (music_pick), so the reply read "Done"
+# about the grade alone; user 2666's only b-roll line was dropped as a review
+# note). A filter may drop how a line was put, never the fact that an ask was
+# or was not done: the line is salvaged (its internal clause cut away) or
+# replaced by a plain one. The asks themselves are ask_ledger's.
+_DONE_LINE = {
+    "music": "I added the music.",
+    "broll": "I added B-roll footage.",
+    "angle": "I adjusted the framing.",
+    "grade": "I changed the colour grade.",
+    "captions": "I updated the captions.",
+    "clarity": "I sharpened the picture.",
+    "speed": "I changed the speed.",
+}
+_NOT_DONE_LINE = {
+    "music": "I didn't add music yet.",
+    "broll": "I didn't add B-roll this time.",
+    "angle": "I didn't change the angle this time.",
+    "grade": "I didn't change the colour grade this time.",
+    "captions": "I didn't change the captions this time.",
+    "clarity": "I didn't sharpen the picture this time.",
+    "speed": "I didn't change the speed this time.",
+}
+_PARTLY_LINE = {
+    "broll": "I added B-roll over part of the video, not all of it yet.",
+}
+# Valmera never picks music; when the user asked for it, offering the choice
+# is right (owner's rule)
+_MUSIC_OFFER = ("Upload a track you like, or ask me for a few library tracks "
+                "that fit and pick one.")
+_NEGATED = re.compile(r"(?i)\b(no|not|never|didn't|did not|couldn't|could not|"
+                      r"haven't|have not|without|none|yet to)\b")
+# "Done:", "All done -", "All set." leading a reply whose asks are not all met
+_DONE_LEAD = re.compile(r"(?i)^\s*(?:all\s+)?(?:done|set|finished|complete)\s*[:,.!—–-]+\s*")
+_ALL_CLAIM = re.compile(r"(?i)\b(everything (?:you asked|is done|is in)|all (?:of )?(?:your|the) "
+                        r"(?:asks?|requests?|changes)|exactly as (?:you )?asked|fully done)\b")
+_CLAUSE = re.compile(r"\s*(?::|;|—|–| - |, so | so that |, but | but |, because | because |"
+                     r", which |, since | since |, and (?=i |it |the |this ))\s*")
 
 
-def unanswered_asks(facts, dropped, said):
-    """The lines that answer an ask whose every mention was dropped: a
-    filter may drop how a line was put, never the fact that an ask was or
-    was not done. ``dropped`` are the dropped sentences, ``said`` the reply's
-    parts."""
-    user = rg.straight(facts.user_text or "")
+def _mentions(sent, topic):
+    import ask_ledger
+    return bool(ask_ledger.said_rx(topic).search(rg.straight(sent or "")))
+
+
+def _fits(sent, topic, state):
+    """A line about ``topic`` that tells its state truthfully: a not-done
+    ask needs a negated line; a done one a plain one."""
+    if not _mentions(sent, topic):
+        return False
+    negated = bool(_NEGATED.search(rg.straight(sent)))
+    return negated if state == "not_done" else not negated
+
+
+def _salvage(sent, topic, state, facts):
+    """The part of a dropped line that still tells the ask's state, without
+    its internal clause ("I did not correct the angle: ... no tool rotates
+    the picture cleanly." -> "I did not correct the angle."); None if no
+    clause of it is fit for the user."""
+    for clause in [sent] + _CLAUSE.split(sent):
+        # a time stamp ends the line ("... cover the spoken Istanbul at about
+        # 1-4 s and 4-7 s." -> "... cover the spoken Istanbul.")
+        stamp = _STAMP.search(clause)
+        c = clause[:stamp.start()] if stamp else clause
+        c = re.sub(r"(?i)(?:\s+(?:at|around|about|near|from|between|by|to|and|over|in|on))+\s*[.!?]?$",
+                   "", c.rstrip())
+        c = re.sub(r"\s{2,}", " ", c).strip(" ,;:-–—")
+        if len(c.split()) < 3 or not _fits(c, topic, state):
+            continue
+        c = c[0].upper() + c[1:]
+        if not re.search(r"[.!?]$", c):
+            c += "."
+        kind, _why = classify(c, facts)
+        if kind in ("keep", "limit"):
+            return c
+    return None
+
+
+def ask_lines(facts, kept, dropped_full, led=None):
+    """(ledger, [(topic, line, how)]) for every asked topic the reply has to
+    answer. ``kept`` are the lines already in the reply, ``dropped_full``
+    the (kind, sentence) the filter dropped. how: "kept" (a kept line says
+    it), "salvaged", "template"."""
+    import ask_ledger
+    if led is None:
+        led = ask_ledger.ledger(facts.user_text, facts.before, facts.after, facts.wrote)
     out = []
-    for _topic, ask_rx, said_rx, layer, done, not_done in _ASKS:
-        rx = re.compile(r"(?i)\b(?:" + said_rx + r")\b")
-        if not re.search(r"(?i)\b(?:" + ask_rx + r")\b", user):
+    for topic, state in led.items():
+        want = "done" if state == "done" else "not_done"
+        if state != "not_done":
+            # what of a met ask was NOT done stays too (candidate replay of
+            # 2666: "Hamdi Ulukaya, Chobani, Murat \u00dclker and Forbes are
+            # never named in this speech, so I added no footage of them." was
+            # dropped for length beside two Istanbul cutaways)
+            neg = next((k for k in kept if k and _fits(k, topic, "not_done")), None)
+            if neg:
+                out.append((topic, neg, "kept"))
+        hit = next((k for k in kept if k and _fits(k, topic, want)), None)
+        if hit and state != "partly":
+            out.append((topic, hit, "kept"))
             continue
-        if not any(rx.search(rg.straight(d)) for d in dropped):
-            continue
-        changed = facts.wrote and rg.layer_changed(facts.before or {}, facts.after or {}, layer)
-        mentions = [p for p in said if rx.search(rg.straight(p))]
-        if changed and any(not _NEGATED.search(rg.straight(p)) for p in mentions):
-            continue
-        if not changed and mentions:
-            continue
-        out.append(done if changed else not_done)
-    return out
+        hidden = [d for kind, d in dropped_full
+                  if kind not in ("unbacked", "pixels") and _mentions(d, topic)]
+        if state == "done" and not hidden:
+            continue                        # the reply never hid it
+        line = None
+        if state != "partly":
+            line = next((x for x in (_salvage(d, topic, want, facts) for d in hidden) if x), None)
+        if line:
+            out.append((topic, line, "salvaged"))
+        else:
+            out.append((topic, (_DONE_LINE if state == "done" else
+                                _PARTLY_LINE if state == "partly" else
+                                _NOT_DONE_LINE).get(topic, _NOT_DONE_LINE[topic]), "template"))
+        if topic == "music" and state != "done":
+            offer = next((d for kind, d in dropped_full
+                          if kind in ("length", "offer", "limit") and _mentions(d, "music")
+                          and not _MUSIC_PICK.search(rg.straight(d))), None)
+            offer = offer or next((k for k in kept if k and _mentions(k, "music")
+                                   and not _NEGATED.search(rg.straight(k))
+                                   and not _MUSIC_PICK.search(rg.straight(k))), None)
+            out.append((topic, offer or _MUSIC_OFFER, "offer"))
+    return led, out
 
 
 def finish(draft, facts):
@@ -898,17 +995,20 @@ def finish(draft, facts):
     if pixels:
         report["dropped"].append({"why": "pixels", "sentence": f"{pixels} size(s)"})
     kept, offers, limits = [], [], []
+    dropped_full = []           # (kind, sentence) in full, for ask_lines
     prev_dropped = False
     for sent in sentences(draft):
         kind, why = classify(sent, facts)
         prev_dropped_before = prev_dropped
         if kind in ("keep", "limit") and prev_dropped and (re.match(
                 r"(?i)^(they|these|those|this|that|both|either|it also)\b", sent)
-                or _BACKREF.search(rg.straight(sent))):
+                or (_BACKREF.search(rg.straight(sent))
+                    and not _SELF_NAMED.search(rg.straight(sent)))):
             kind, why = "orphan", None
         prev_dropped = kind not in ("keep", "limit", "offer")
         if kind == "unbacked":
             report["dropped"].append({"why": why, "sentence": sent[:200]})
+            dropped_full.append(("unbacked", sent))
         elif kind == "offer":
             if _ORPHAN_OFFER.match(sent) or (prev_dropped_before and re.match(
                     r"(?i)^(this|that|it also)\b", sent)):
@@ -916,11 +1016,13 @@ def finish(draft, facts):
                 # the next fixes I can make if you want them." after a review
                 # note was dropped, QI2 matrix talk10 r3)
                 report["dropped"].append({"why": "orphan", "sentence": sent[:200]})
+                dropped_full.append(("orphan", sent))
             elif not _INTERNAL.search(rg.straight(sent)) and not review_note(sent) \
                     and not sent.rstrip().endswith(":"):
                 offers.append(sent)
             else:
                 report["dropped"].append({"why": "review_note", "sentence": sent[:200]})
+                dropped_full.append(("review_note", sent))
         elif kind == "limit":
             limits.append(sent)
         elif kind == "keep":
@@ -928,12 +1030,15 @@ def finish(draft, facts):
                     r"(?i)^(this removes|separately|which|both|either)\b", sent):
                 # a list's heading or a line about a dropped line
                 report["dropped"].append({"why": "orphan", "sentence": sent[:200]})
+                dropped_full.append(("orphan", sent))
             else:
                 kept.append(sent)
         else:
             report["dropped"].append({"why": kind, "sentence": sent[:200]})
+            dropped_full.append((kind, sent))
     for sent in limits[1:]:
         report["dropped"].append({"why": "limit", "sentence": sent[:200]})
+        dropped_full.append(("limit", sent))
     lang = language(draft)
     local = _LOCAL.get(lang or "", {})
     changes = friendly_changes(facts.before, facts.after) if facts.wrote else []
@@ -963,23 +1068,58 @@ def finish(draft, facts):
         place = "It's playing in the player." if lang == "en" else local.get("place")
     nxt = offers[0] if offers else (suggestion(facts) if lang == "en"
                                     else local.get("next"))
+    import ask_ledger
+    led = ask_ledger.ledger(facts.user_text, facts.before, facts.after, facts.wrote)
+    missing = [t for t, st in led.items() if st != "done"]
+    if missing:
+        # a reply never says done while an ask is unmet (ticket #49: "Done: I
+        # gave it a cinematic colour grade" with the music and angle missing)
+        if lead and parts and parts[0] == lead and lead.endswith(": it already does what you asked."):
+            # never "it already does what you asked" beside an unmet ask
+            # (replay of 2666: "Your cut stays as it is ...: it already does
+            # what you asked. ... I couldn't add the B-roll")
+            lead = parts[0] = lead[:-len(": it already does what you asked.")] + "."
+        if lead and _DONE_LEAD.match(lead) and parts and parts[0] == lead:
+            lead = _DONE_LEAD.sub("", lead, count=1)
+            lead = lead[:1].upper() + lead[1:]
+            parts[0] = lead
+        for k in list(rest):
+            if _ALL_CLAIM.search(rg.straight(k)):
+                rest.remove(k)
+                report["dropped"].append({"why": "unmet_claim", "sentence": k[:200]})
+        if not offers:
+            nxt = None                      # the ask lines say what comes next
+    answers = []
+    if lang == "en":
+        led, answers = ask_lines(facts, [lead] + rest + limits + offers, dropped_full, led)
+    # an ask's own line keeps its place and is never dropped for length; the
+    # other lines compete for the budget as before
+    protected = [line for _t, line, how in answers if how in ("kept", "offer")]
     budget = MAX_WORDS - sum(len(x.split()) for x in parts + [place or "", nxt or ""])
     for extra in rest[:1] + limits[:1]:
-        if len(extra.split()) <= budget:
+        if extra in protected or len(extra.split()) <= budget:
             parts.append(extra)
             budget -= len(extra.split())
         else:
             report["dropped"].append({"why": "length", "sentence": extra[:200]})
     for extra in rest[1:]:
-        report["dropped"].append({"why": "length", "sentence": extra[:200]})
-    if lang == "en":
-        dropped = [d["sentence"] for d in report["dropped"] if d["why"] != "pixels"]
-        for line in unanswered_asks(facts, dropped, parts):
-            parts.append(line)
+        if extra not in protected:
+            report["dropped"].append({"why": "length", "sentence": extra[:200]})
+    for topic, line, how in answers:
+        # an ask's line is never dropped for length
+        if line in parts or (how == "offer" and nxt and line == nxt):
+            continue
+        parts.append(line)
+        if how in ("template", "salvaged"):
             report.setdefault("answered", []).append(line)
+        report["dropped"] = [d for d in report["dropped"] if d["sentence"] != line[:200]]
+    if led:
+        report["asks"] = dict(led)
+    if missing:
+        report["unmet"] = missing
     if place:
         parts.append(place)
-    if nxt:
+    if nxt and nxt not in parts:
         parts.append(nxt)
     report["kept"] = len(kept)
     return _an(" ".join(p for p in parts if p).strip()), report

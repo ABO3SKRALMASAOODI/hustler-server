@@ -631,8 +631,21 @@ def broll_coverage(edl, min_scale=0.8):
             start, dur = float(get("start")), float(get("duration_s"))
         except (TypeError, ValueError):
             continue
-        if _peak(get("scale"), 0.4) >= min_scale and dur > 0:
+        # fit cover/picture fills the frame whatever its scale (the
+        # renderer crops it to the canvas): user 2666's two clips were
+        # scale 0.4, fit cover, and covered the speaker fully
+        full = get("fit") in ("cover", "picture")
+        if (full or _peak(get("scale"), 0.4) >= min_scale) and dur > 0:
             spans.append((max(0.0, start), min(total, start + dur)))
+    # source_broll's cutaways are EDL.fx items (type "broll", program time)
+    for it in (edl or {}).get("fx") or []:
+        if isinstance(it, dict) and it.get("type") == "broll":
+            try:
+                a, b = float(it.get("start")), float(it.get("end"))
+            except (TypeError, ValueError):
+                continue
+            if b > a:
+                spans.append((max(0.0, a), min(total, b)))
     if not spans:
         return None
     spans.sort()
