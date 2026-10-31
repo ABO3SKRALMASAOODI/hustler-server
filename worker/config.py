@@ -289,8 +289,15 @@ ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "").strip()
 CLAUDE_TRIAL_MODEL = os.getenv("CLAUDE_TRIAL_MODEL", "claude-haiku-5-5").strip()
 # output_config.effort for the planning step (iteration 0) and the dispatch
 # steps after it. Effort is the main cost/quality lever on Claude 5.5 models;
-# thinking is adaptive and is billed as output.
-CLAUDE_TRIAL_PLAN_EFFORT = os.getenv("CLAUDE_TRIAL_PLAN_EFFORT", "high").strip()
+# thinking is adaptive and is billed as output. Applies to every Claude lane
+# (the trial and new subscribers' Studio).
+# TRIAL_ECONOMICS (31 Oct 2026): the 6 real trial sessions since the release
+# (8 requests) replayed under every plan effort {medium, high, xhigh, max} x
+# dispatch {medium, high}, Opus-judged with a per-ask check: Haiku planning at
+# xhigh (dispatch medium) scored 5.38 vs 4.75 at high, met 15/22 asks vs
+# 12/22, cost $0.014 vs $0.022 a request (fewer calls) and waited 92 s vs
+# 104 s. .valmera/week-1029/round3/TRIAL_ECONOMICS.md
+CLAUDE_TRIAL_PLAN_EFFORT = os.getenv("CLAUDE_TRIAL_PLAN_EFFORT", "xhigh").strip()
 CLAUDE_TRIAL_EFFORT = os.getenv("CLAUDE_TRIAL_EFFORT", "medium").strip()
 CLAUDE_TRIAL_TIMEOUT_S = float(os.getenv("CLAUDE_TRIAL_TIMEOUT_S", "300"))
 # Owner's design defaults; every one can be overridden in app_kv.free_result
