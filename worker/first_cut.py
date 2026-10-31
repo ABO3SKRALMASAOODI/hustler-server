@@ -635,11 +635,21 @@ def _opening_hook(rows):
     words = [w for w in str(rows[0].get("text") or "").split()]
     while words and _norm(words[0]) in LEAD_WORDS:
         words.pop(0)
-    words = [w.strip(",.;:!?") for w in words if w.strip(",.;:!?")]
+    raw = [w for w in words if w.strip(",.;:!?")]
+    words = [w.strip(",.;:!?") for w in raw]
     if len(words) < 2:
         return None
-    pick = words[:5] if len(words) > 6 else words
-    return clean_hook(" ".join(pick))
+    if len(words) > 6:
+        # RS_ENGINE (#52): the first five words of a longer sentence are a
+        # fragment ("SEEM LIKE THEY WILL DO" of "Seem like they will do feel
+        # a bit alive"); only a whole clause (up to its comma, colon or
+        # dash) is a title.
+        cut = next((i + 1 for i, w in enumerate(raw[:6])
+                    if i >= 1 and w[-1:] in ",;:-–—"), None)
+        if not cut:
+            return None
+        words = words[:cut]
+    return clean_hook(" ".join(words))
 
 
 def _trim_pick(rows, duration):
@@ -1401,9 +1411,12 @@ MONTAGE_CLOSE_S = 1.0           # the payoff shot ends on live motion
 _MONTAGE_TITLE_SYSTEM = (
     "The numbered frames are the shots of a highlight reel cut from one "
     "video, in order. 1) TITLE: the poster title a top editor would put "
-    "over its opening: 1 to 3 words naming what is visibly happening "
-    "(\"LAUNCH *DAY*\", \"Game *winner*\"), nothing you cannot see, no brand "
-    "or name unless legible on screen, exactly one word in *stars*. 2) END: "
+    "over its opening: 1 to 3 words that say what the moment IS (the "
+    "event, the look, the feeling: \"LAUNCH *DAY*\", \"Game *winner*\", "
+    "\"Autumn *look*\"), never an inventory label of an object or a pose "
+    "(not \"Holding cup\", \"Woman standing\"), nothing you cannot see, no "
+    "brand or name unless legible on screen, exactly one word in *stars*. "
+    "2) END: "
     "the number of the shot the reel should END on: its payoff (the "
     "landing, the goal, the reveal), late in the order; later shots are "
     "dropped. 3) DROP: the numbers of shots that are broken (heavy "
@@ -1688,6 +1701,75 @@ def _speech(index):
     return sum(1 for w in longer if _clean_word(w)) >= 0.6 * len(longer)
 
 
+# RS_ENGINE (31 Oct, ticket #52): a few spoken seconds are not a talk. User
+# 2669's 39 s two-shot clip carried 9 words (a lyric) in 3.4 s; the speech
+# chain trimmed the cut to that span and cut the rest as pauses: 39 s -> 3.4 s
+# (91% cut), its hook the fragment "SEEM LIKE THEY WILL DO". When speech
+# covers this little of the source, the cut follows the footage (shots,
+# moments), never the speech span.
+SPARSE_SPEECH_SHARE = 0.35        # spoken span (words +-0.4 s) / source
+SPARSE_SPEECH_WPM = 45.0          # words per minute of source
+# A short source's First cut keeps at least this share without a reason the
+# footage itself gives (a best-moment pick of a long source, a montage).
+KEPT_SHARE_FLOOR = 0.40
+
+
+def sparse_speech(index, duration):
+    """True when the transcript is too thin to cut by: under 45 words a
+    minute AND the spoken span (each word +-0.4 s, merged) covers less than
+    35% of the source."""
+    try:
+        duration = float(duration or 0)
+    except (TypeError, ValueError):
+        return False
+    words = (index or {}).get("words") or []
+    if duration <= 0 or not words:
+        return False
+    if len(words) / (duration / 60.0) >= SPARSE_SPEECH_WPM:
+        return False
+    spans = []
+    for w in words:
+        try:
+            t0, t1 = _wt(w, "t0"), _wt(w, "t1")
+        except Exception:  # noqa: BLE001
+            continue
+        spans.append([max(0.0, t0 - 0.4), min(duration, max(t1, t0) + 0.4)])
+    spans.sort()
+    covered, cur = 0.0, None
+    for a, b in spans:
+        if cur and a <= cur[1]:
+            cur[1] = max(cur[1], b)
+        else:
+            if cur:
+                covered += cur[1] - cur[0]
+            cur = [a, b]
+    if cur:
+        covered += cur[1] - cur[0]
+    return covered / duration < SPARSE_SPEECH_SHARE
+
+
+def kept_share_restore(keep, duration, picked=None):
+    """The keep list to restore when a short source's cut kept too little
+    for no reason the footage gives, else None: a source up to
+    FIRST_CUT_SHORT_SOURCE_S whose cut keeps under KEPT_SHARE_FLOOR (and
+    more than 6 s less than the source) gets its whole take back. A montage
+    pick (how == 'motion') is a designed cut and is left alone."""
+    if not keep:
+        return None          # the keep is unknown: nothing to judge
+    try:
+        duration = float(duration or 0)
+        kept = sum(max(0.0, float(e) - float(s)) for s, e in keep)
+    except (TypeError, ValueError):
+        return None
+    if duration <= 0 or duration > config.FIRST_CUT_SHORT_SOURCE_S:
+        return None
+    if (picked or {}).get("how") == "motion":
+        return None
+    if kept >= KEPT_SHARE_FLOOR * duration or duration - kept <= 6.0:
+        return None
+    return [[0.0, round(duration, 2)]]
+
+
 def _music_piece(index, duration, robust=False):
     """An already-finished piece over a song (a music promo, an animated
     invitation, a lyric edit): the audio has a beat and what is heard is
@@ -1739,6 +1821,18 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     duration = float(ctx.duration or 0)
     picked = None
     speech = _speech(ctx.index)
+    # RS_ENGINE (#52): a thin transcript (a lyric, a few words over a visual
+    # clip) does not decide the cut: the pick and the pause cuts follow the
+    # footage; the words are still captioned.
+    # (short sources only: a long one already goes to the scouted story
+    # pick, which reads the picture as well as the words)
+    thin = bool(speech and duration <= config.FIRST_CUT_SHORT_SOURCE_S
+                and sparse_speech(ctx.index, duration))
+    if thin:
+        print(f"[first_cut] sparse speech: {len(ctx.index.get('words') or [])}"
+              f" words in {duration:.1f}s - cutting by the footage",
+              flush=True)
+    cut_speech = speech and not thin
     ctx.first_cut_hook = None
     ctx.first_cut_beats = None
     # Q1 (30 Oct, first_cut_visual): trial accounts and new subscribers only
@@ -1770,7 +1864,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         return steps, applied, {"how": "finished_piece"}
     short_silent = False
     _f = _faces(ctx.index)
-    montage = (not speech and duration >= MONTAGE_MIN_SOURCE_S
+    montage = (not cut_speech and duration >= MONTAGE_MIN_SOURCE_S
                and (not _f or _f["share"] < 0.35)
                and not _screen_like(ctx.index))
     if montage:
@@ -1803,7 +1897,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             picked = {"how": "motion", "shots": len(windows),
                       "s": round(sum(b - a for a, b in windows), 2)}
             ctx.first_cut_hook = title
-    elif not speech and duration >= 3.0:
+    elif not cut_speech and duration >= 3.0:
         # a short silent clip keeps its whole take and gets a poster title
         # from the trial model's look (C2: a 15 s gym clip and a 17 s walk
         # in the snow got "I couldn't finish an automatic first cut")
@@ -1828,7 +1922,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("best moment")
             _say(ctx, "pick", f"Picked the strongest {int(round(end - start))}"
                               " seconds of your video")
-    elif speech:
+    elif cut_speech:
         start, end, how = trim_range(ctx, worker_db, spend)
         if whole:
             # the scout still names the hook and the beats; the span is the
@@ -1845,7 +1939,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                         started)):
                 applied.append("a clean opening and ending")
                 _say(ctx, "pick", "Found a clean opening and ending")
-    if speech:
+    if cut_speech:
         args = {"min_silence_s": PAUSE_CUT_S, "padding_s": PAUSE_PAD_S}
         if _talk_density(ctx) >= 1.2:
             # Narration over room tone or street sound is still speech with
@@ -1879,9 +1973,21 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             # whisper's early or late word start) and the tail bounded
             import talk_craft
             talk_craft.cut_audio_pauses(ctx, steps, started, _run)
+    # RS_ENGINE (#52): a short source never loses most of its footage to
+    # the trim and pause cuts without a reason the footage gives.
+    restore = kept_share_restore(_keep(ctx), duration, picked)
+    if restore:
+        kept_s = sum(e - s for s, e in (_keep(ctx) or []))
+        print(f"[first_cut] kept only {kept_s:.1f}s of {duration:.1f}s - "
+              "restoring the whole take", flush=True)
+        if _ok(_run(ctx, steps, "keep_segments",
+                    {"segments": restore, "snap_to_words": False}, started)):
+            applied = [a for a in applied if a not in (
+                "a clean opening and ending", "pauses trimmed")]
+            applied.append("kept whole (trimming would have cut most of it)")
     faces = _faces(ctx.index)
     talking = bool(speech and faces and faces["share"] >= 0.5)
-    if q1 and speech and not talking:
+    if q1 and cut_speech and not talking:
         import first_cut_visual as fcv
         # Q6: the last sentence is complete and its picture live (u4899
         # ended on "a fitting piece" over the source's empty grey fade)
@@ -1905,7 +2011,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             # Footage with no face and no speech (a montage, an event, a
             # landscape) fills the frame like the references' montages
             # (R01, R04): auto mode would fit it small over blurred bands.
-            args = _faceless_reframe_args(speech, faces, picked)
+            args = _faceless_reframe_args(cut_speech, faces, picked)
             if q1 and (picked or {}).get("how") == "motion":
                 # Q6: a montage's crop sits on each shot's subject as the
                 # scout boxed it (it was the frame's centre: no face to find)
@@ -2085,7 +2191,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         if burned:
             print("[first_cut] the source carries its own captions: no "
                   "captions or slams added on top", flush=True)
-    if speech and not screen_kept and not burned:
+    if cut_speech and not screen_kept and not burned:
         beats = list(getattr(ctx, "first_cut_beats", None) or [])
         if len(beats) < 3:
             # the scout's beats first, the spoken figures after them
@@ -2109,7 +2215,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied.append("a closer camera at the turns")
         if len(_keep(ctx) or []) > 1:
             _run(ctx, steps, "conceal_jump_cuts", {}, started)
-    elif q1 and speech and not screen_kept and vertical_out:
+    elif q1 and cut_speech and not screen_kept and vertical_out:
         # Q1: a narrated animation's long shots get the same rhythm, softer
         # (judges: "one cut every 4.5 s across long camera moves")
         import first_cut_visual as fcv

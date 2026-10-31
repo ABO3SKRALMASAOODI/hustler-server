@@ -327,8 +327,14 @@ def lanes(edl):
         caps = _strip_time({k: caps.get(k) for k in (
             "mode", "style", "enabled", "emphasis_words", "emphasis_mode",
             "text_fixes", "corrections")})
+    # RS_ENGINE (31 Oct): a repeat of the main video (keep_segments' replay
+    # inserts, id "rep*") is part of the cut, never B-roll
+    ins = [i for i in edl.get("inserts") or [] if isinstance(i, dict)]
+    reps = [i for i in ins if str(i.get("id") or "").startswith("rep")]
     return {
-        "cuts": {"keep": edl.get("keep") or [], "speed": edl.get("speed") or []},
+        "cuts": {"keep": edl.get("keep") or [], "speed": edl.get("speed") or [],
+                 "repeats": [[i.get("source_start_s"), i.get("duration_s"),
+                              i.get("at_output_s")] for i in reps]},
         "captions": caps,
         "title": _by_id(title),
         "graphics": {"motion": _by_id(graphics),
@@ -342,7 +348,7 @@ def lanes(edl):
                                               "focus_y", "zoom", "picture")}
                   if isinstance(frame, dict) else frame),
         "broll": {"fx": _by_id(edl.get("fx")),
-                  "inserts": _by_id(edl.get("inserts")),
+                  "inserts": _by_id([i for i in ins if i not in reps]),
                   "overlays": _by_id(edl.get("overlays"))},
         "grade": {"grade": eff.get("grade"), "custom": eff.get("grade_custom"),
                   "stylize": _by_id(eff.get("stylize")),

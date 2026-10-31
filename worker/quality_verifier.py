@@ -627,6 +627,92 @@ def _program_duration_context(text, match):
     return _program_duration_strength(text, match) is not None
 
 
+# RS_ENGINE (31 Oct, ticket #54): "for the first 8.2 seconds, it is someone
+# standing stationary, and then just a small snippet of a first touch" gives
+# the length of a PART, not of the programme. The agent read 8.2 s as the
+# total and cut the standing part to 3.4 s (user 2670, 7.7 s delivered).
+_SECONDS = r"(\d{1,4}(?:\.\d+)?)\s*-?\s*(?:s|secs?|seconds?)\b"
+_PART_FIRST_RE = re.compile(
+    r"\b(?:for\s+)?the\s+first\s+" + _SECONDS
+    + r"|\b(?:open|start|begin)\w*\s+(?:it\s+)?with\s+(?:about\s+)?"
+    + _SECONDS + r"\s+of\b"
+    + r"|\b(?:multiple|several|many)\s+times\s+to\s+(?:make|fill|reach)\s+"
+    + _SECONDS, re.I)
+_PART_OF_RE = re.compile(r"\b" + _SECONDS + r"\s+of\s+(?!the\s+(?:video|"
+                         r"clip|footage|source|whole)\b)", re.I)
+_THEN_RE = re.compile(r"\b(?:and\s+)?then\b|\bfollowed\s+by\b|"
+                      r"\bafter\s+(?:that|this)\b|\bafterwards\b", re.I)
+# A part named without a length ("a small clip of a first touch") still
+# needs screen time: at least this much.
+PART_FLOOR_S = 1.0
+
+
+def requested_part_lengths(request_text):
+    """{'parts': [seconds or None, ...], 'min_total_s': x, 'request': str}
+    when the request gives the length of PARTS of the programme in order
+    ("the first 8.2 seconds ... then a small clip of ..."; "3 seconds of the
+    crowd, then 5 seconds of the goal"), else None. A part with no length
+    of its own counts PART_FLOOR_S toward the minimum total."""
+    text = str(request_text or "")
+    first = _PART_FIRST_RE.search(text)
+    parts, anchor_end = [], None
+    if first:
+        val = first.group(1) or first.group(2) or first.group(3)
+        try:
+            parts.append(float(val))
+        except (TypeError, ValueError):
+            return None
+        anchor_end = first.end()
+    else:
+        ofs = list(_PART_OF_RE.finditer(text))
+        if len(ofs) < 2:
+            return None
+        between = text[ofs[0].end():ofs[1].start()]
+        if not _THEN_RE.search(between) and "," not in between:
+            return None
+        for m in ofs:
+            parts.append(float(m.group(1)))
+        anchor_end = ofs[-1].end()
+        rest = text[anchor_end:]
+        if _THEN_RE.search(rest):
+            parts.append(None)
+        return _parts_result(parts, text)
+    rest = text[anchor_end:]
+    then = _THEN_RE.search(rest)
+    if not then:
+        return None
+    after = rest[then.end():]
+    m = re.match(r"[^.;!?]{0,40}?" + _SECONDS, after, re.I)
+    parts.append(float(m.group(1)) if m else None)
+    return _parts_result(parts, text)
+
+
+def _parts_result(parts, text):
+    parts = [p for p in parts if p is None or 0.2 <= p <= 3600]
+    if len(parts) < 2 or not any(p for p in parts):
+        return None
+    total = sum(p if p else PART_FLOOR_S for p in parts)
+    return {"parts": parts, "min_total_s": round(total, 2),
+            "request": text[:200]}
+
+
+def part_lengths_line(request_text):
+    """The contract line for a request that gives part lengths, or ''."""
+    got = requested_part_lengths(request_text)
+    if not got:
+        return ""
+    bits = []
+    for i, p in enumerate(got["parts"], 1):
+        bits.append(f"part {i} = {p:g} s" if p else
+                    f"part {i} = its own moment (at least {PART_FLOOR_S:g} s)")
+    return ("PART LENGTHS (each part's own length, NOT the total): "
+            + "; ".join(bits) + f". The programme is at least "
+            f"{got['min_total_s']:g} s. If the footage has no single take "
+            "long enough for a part, REPEAT a range: list the same "
+            "[start, end] several times in keep_segments (it plays once per "
+            "listing) until the part is long enough.")
+
+
 def requested_duration_target(request_text):
     """Return an explicit requested program-duration envelope, if present.
 
@@ -640,7 +726,15 @@ def requested_duration_target(request_text):
     """
     text = str(request_text or "")
     strong, weak = [], []
+    _parts = requested_part_lengths(text)
+    part_values = {p for p in (_parts or {}).get("parts", []) if p}
     for m in _PROGRAM_DURATION_RE.finditer(text):
+        if part_values and not m.group(2):
+            try:
+                if float(m.group(1)) in part_values:
+                    continue        # a PART's length, never the total
+            except (TypeError, ValueError):
+                pass
         strength = _program_duration_strength(text, m)
         if strength == "strong":
             strong.append(m)
@@ -738,6 +832,21 @@ def _request_findings(edl, request_text, media_keys=None):
     ``media_keys``: the customer's supplied clips/photos, passed only when
     the brief asks to use all of them (agent_loop._request_media_keys)."""
     findings = []
+    parts = requested_part_lengths(request_text)
+    if parts:
+        actual = float(program_duration(edl) or 0.0)
+        if actual < parts["min_total_s"] - 0.05:
+            findings.append(_finding(
+                "requested_part_lengths_short", "story",
+                (f"The user gave the length of each part (" + ", ".join(
+                    f"{p:g} s" if p else "a short clip"
+                    for p in parts["parts"])
+                 + f"); the programme is {actual:.2f}s, shorter than those "
+                 f"parts need (at least {parts['min_total_s']:g} s)."),
+                {"actual_s": round(actual, 3), "parts": parts["parts"]},
+                "give each part its asked length (repeat a range in "
+                "keep_segments when no take is long enough), then "
+                "render-check it"))
     target = requested_duration_target(request_text)
     if target:
         actual = float(program_duration(edl) or 0.0)

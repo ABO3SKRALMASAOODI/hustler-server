@@ -727,6 +727,14 @@ def friendly_changes(before, after):
                 if phrase not in items:
                     items.append(phrase)
                 break
+    # RS_ENGINE (31 Oct): keep_segments' repeats (replay inserts "rep*") are
+    # a repeated part, not B-roll (the 2670 replay read "added B-roll")
+    def _reps(edl):
+        return sum(1 for i in (edl or {}).get("inserts") or []
+                   if isinstance(i, dict)
+                   and str(i.get("id") or "").startswith("rep"))
+    if _reps(after) > _reps(before):
+        items.append("repeated a part to fill its length")
     return items
 
 
