@@ -3662,7 +3662,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                or any(s.get("kind") == "shake" for s in stylize)
                # fx windows address program frames (enable on n): the
                # program must run on the normalized block clock
-               or bool(fx_plan is not None and fx_plan.needs_cfr))
+               or bool(fx_plan is not None and fx_plan.needs_cfr)
+               # A preview whose frame preview_geometry shrank (a 4K source
+               # at 720x1280): the cheap graph never scales, and the trailing
+               # preview scale reads the CAPPED H, so a plain whole-take cut
+               # shipped its "preview" at native size (ticket #64: 2160x3840,
+               # 448 MB, 412 s, on every box approval of a large source).
+               or bool(preview and W and H and src_w and src_h
+                       and (_even(src_w), _even(src_h)) != (int(W), int(H))))
     mode = frame_mode or (edl.get("frame") or {}).get("mode") or "crop"
 
     # The global grade (preset, then custom) is a per-pixel map. Run after

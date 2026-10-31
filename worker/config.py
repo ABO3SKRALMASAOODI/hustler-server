@@ -236,6 +236,11 @@ FRONTIER_PLANS = {"ai_max"}
 # its one scout call. Sources up to FIRST_CUT_SHORT_SOURCE_S are finished
 # whole; longer ones become their best 20-60 s story.
 FIRST_CUT_MAX_S = float(os.getenv("FIRST_CUT_MAX_S", "480"))
+# A First cut whose preview is still rendering when render_preview's own wait
+# (PREVIEW_WAIT_TIMEOUT_S) ends keeps waiting on that same render this much
+# longer before it gives up (ticket #62: it ended "couldn't finish" 10 s
+# before its render landed).
+FIRST_CUT_RENDER_GRACE_S = float(os.getenv("FIRST_CUT_RENDER_GRACE_S", "900"))
 FIRST_CUT_MAX_RENDERS = int(os.getenv("FIRST_CUT_MAX_RENDERS", "6"))
 # A website brief used to get ONE trial agent turn after its First cut (C2,
 # Q2). QB (30 Oct) measured it against the First cut alone, two runs each, two
