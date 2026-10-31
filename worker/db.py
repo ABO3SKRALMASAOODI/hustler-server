@@ -2711,6 +2711,23 @@ def latest_render_asset(conn, project_id, variant):
         return cur.fetchone()
 
 
+def recent_complete_preview(conn, project_id, minutes):
+    """The newest complete preview render of the project made in the last
+    ``minutes`` (id, edl_version, duration_s, age_s), or None. Ticket #46:
+    an MCP app re-rendered a 41-min lecture as a full draft 8 times in 3 h
+    to adjust overlays a few seconds long."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id, (meta->>'edl_version')::int AS edl_version,
+                              duration_s,
+                              EXTRACT(EPOCH FROM NOW() - created_at) AS age_s
+                         FROM assets
+                        WHERE project_id = %s AND kind = 'render'
+                          AND meta->>'variant' = 'preview'
+                          AND created_at >= NOW() - make_interval(mins => %s)
+                        ORDER BY id DESC LIMIT 1""", (project_id, int(minutes)))
+        return cur.fetchone()
+
+
 def latest_render(conn, project_id, variant):
     """The newest render of a variant REGARDLESS of EDL version — what the
     project last actually produced. find_render_asset answers "is version N

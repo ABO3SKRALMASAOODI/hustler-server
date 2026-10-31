@@ -313,3 +313,49 @@ def test_a_mute_is_never_called_levelling_the_sound():
     assert tr.friendly_changes(muted, base) == ["brought the original sound back"]
     mastered = dict(base, master={"loudness": "social"})
     assert tr.friendly_changes(base, mastered) == ["levelled the sound"]
+
+
+def test_a_dropped_line_never_hides_an_unmet_ask():
+    """Ticket #49 (30 Oct, user 2665): asked for new music and an angle fix;
+    the filter dropped "I did not correct the angle ..." (internal) and
+    "Valmera doesn't pick music ..." (music_pick) and the reply only said
+    "Done" about the grade."""
+    base = {"keep": [[0.0, 10.54]]}
+    after = dict(base, volume=[{"start": 0, "end": 10.54, "gain_db": -60.0}],
+                 master={"loudness": "natural"},
+                 effects={"grade": "cinematic"})
+    f = facts(before=base, after=after, wrote=True, duration_s=10.6,
+              index={"words": []},
+              user_text="Cut out the audio and play something else relating to nature "
+                        "and outdoors. Give colour gradings cinematic vibes. Correct the "
+                        "angle (if possible)")
+    text, report = tr.finish(
+        "I gave it a cinematic grade and muted the original audio. "
+        "I did not correct the angle: the horizon looked level to me and no tool "
+        "rotates the picture cleanly. "
+        "Valmera doesn't pick music, so tell me which of three CC0 tracks you want.", f)
+    assert "didn't change the angle" in text
+    assert "didn't add music" in text
+    assert "no tool" not in text and "CC0" not in text
+    assert len(report["answered"]) == 2
+
+
+def test_a_dropped_line_never_hides_a_done_ask():
+    """Ticket #49 (30 Oct, user 2666): the only line saying b-roll was added
+    was dropped as a review note; the reply only said what was NOT added."""
+    base = {"keep": [[0.0, 15.4]], "captions": {"mode": "from_transcript"}}
+    after = dict(base, overlays=[{"id": "o1", "start": 1, "end": 4},
+                                 {"id": "o2", "start": 4, "end": 7}])
+    f = facts(before=base, after=after, wrote=True, duration_s=15.4,
+              user_text="automatically add relevant REAL B-roll footage throughout the video")
+    text, _report = tr.finish(
+        "The 15-second vertical cut is ready with your voice running throughout. "
+        "Two Istanbul clips from Pexels cover the spoken \"Istanbul\" at about 1-4 s and 4-7 s. "
+        "The speech never mentions Forbes, so I added no footage for it.", f)
+    assert "I added B-roll footage." in text
+
+
+def test_asks_already_answered_get_no_extra_line():
+    f = facts(user_text="add some music", wrote=False)
+    text, report = tr.finish("Your cut is ready. I didn't add music yet. Want a title?", f)
+    assert "answered" not in report and text.count("music") == 1

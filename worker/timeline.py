@@ -594,6 +594,64 @@ def program_blocks(edl):
     return out
 
 
+def _peak(v, default):
+    """The largest value an AnimFloat reaches (a number or keyframes)."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    vals = []
+    for k in (v if isinstance(v, list) else (v or {}).get("keyframes") or []):
+        try:
+            vals.append(float(k.get("v", k.get("value")) if isinstance(k, dict) else k[1]))
+        except (TypeError, ValueError, IndexError, AttributeError):
+            continue
+    return max(vals) if vals else default
+
+
+def broll_coverage(edl, min_scale=0.8):
+    """(program seconds, seconds a cutaway covers, the longest stretch with
+    none as (start, end)) in output time: inserted clips plus video/image
+    overlays big enough to replace the picture (a logo or a small PIP is not
+    b-roll). None for an empty program or one with no cutaway at all.
+
+    Ticket #51 (30 Oct): asked for b-roll "throughout" an 18 s talk, the
+    agent covered 1-7 s at the one literal keyword and rendered; nothing it
+    read said that 7-15.4 s was still the bare talking head."""
+    try:
+        blocks = program_blocks(edl)
+    except Exception:
+        return None
+    if not blocks:
+        return None
+    total = float(blocks[-1]["out_end"])
+    spans = [(float(b["out_start"]), float(b["out_end"]))
+             for b in blocks if b["kind"] == "insert"]
+    for o in (edl or {}).get("overlays") or []:
+        get = o.get if isinstance(o, dict) else (lambda k, _o=o: getattr(_o, k, None))
+        try:
+            start, dur = float(get("start")), float(get("duration_s"))
+        except (TypeError, ValueError):
+            continue
+        if _peak(get("scale"), 0.4) >= min_scale and dur > 0:
+            spans.append((max(0.0, start), min(total, start + dur)))
+    if not spans:
+        return None
+    spans.sort()
+    merged = []
+    for a, b in spans:
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    covered = sum(max(0.0, b - a) for a, b in merged)
+    gaps, prev = [], 0.0
+    for a, b in merged:
+        gaps.append((prev, a))
+        prev = max(prev, b)
+    gaps.append((prev, total))
+    bare = max(gaps, key=lambda g: g[1] - g[0])
+    return round(total, 2), round(covered, 2), (round(bare[0], 2), round(bare[1], 2))
+
+
 def describe_program(edl, name_of=None):
     """Multi-line, viewer-ordered scene listing of the assembled program.
 

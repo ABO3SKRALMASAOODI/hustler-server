@@ -836,6 +836,51 @@ def scrub_pixels(text):
     return out, n
 
 
+# An ask the user made that the reply must answer even when every line about
+# it was dropped (ticket #49, 30 Oct: user 2665 asked for new music and an
+# angle fix; the filter dropped "I did not correct the angle ..." (internal)
+# and "Valmera doesn't pick music ..." (music_pick), so the reply read
+# "Done" and never said two of three asks were not done. User 2666's only
+# b-roll line was dropped as a review note, so the reply never said b-roll was
+# added). (topic, what the user asked, what a line about it says, layer,
+# done line, not-done line)
+_ASKS = (
+    ("music", r"music|songs?|soundtrack|tracks?|play something", r"music|songs?|soundtrack|tracks?",
+     "music", "I added the music.", "I didn't add music this time; upload a track you like "
+     "and I'll put it in."),
+    ("broll", r"b-?roll|cutaways?|stock (?:footage|clips?|videos?)|real footage",
+     r"b-?roll|cutaways?|footage|clips?|pexels|stock|overlays?", "broll",
+     "I added B-roll footage.", "I didn't add B-roll this time."),
+    ("angle", r"angle|horizon|tilt(?:ed)?|straighten\w*|rotat\w*",
+     r"angle|horizon|tilt(?:ed)?|straighten\w*|rotat\w*", "frame",
+     "I adjusted the framing.", "I didn't change the angle this time."),
+)
+_NEGATED = re.compile(r"(?i)\b(no|not|never|didn't|did not|couldn't|could not|without|none)\b")
+
+
+def unanswered_asks(facts, dropped, said):
+    """The lines that answer an ask whose every mention was dropped: a
+    filter may drop how a line was put, never the fact that an ask was or
+    was not done. ``dropped`` are the dropped sentences, ``said`` the reply's
+    parts."""
+    user = rg.straight(facts.user_text or "")
+    out = []
+    for _topic, ask_rx, said_rx, layer, done, not_done in _ASKS:
+        rx = re.compile(r"(?i)\b(?:" + said_rx + r")\b")
+        if not re.search(r"(?i)\b(?:" + ask_rx + r")\b", user):
+            continue
+        if not any(rx.search(rg.straight(d)) for d in dropped):
+            continue
+        changed = facts.wrote and rg.layer_changed(facts.before or {}, facts.after or {}, layer)
+        mentions = [p for p in said if rx.search(rg.straight(p))]
+        if changed and any(not _NEGATED.search(rg.straight(p)) for p in mentions):
+            continue
+        if not changed and mentions:
+            continue
+        out.append(done if changed else not_done)
+    return out
+
+
 def finish(draft, facts):
     """(reply, report): the reply the trial user reads, and what was dropped
     and why (kept in the job result for the admin)."""
@@ -918,6 +963,11 @@ def finish(draft, facts):
             report["dropped"].append({"why": "length", "sentence": extra[:200]})
     for extra in rest[1:]:
         report["dropped"].append({"why": "length", "sentence": extra[:200]})
+    if lang == "en":
+        dropped = [d["sentence"] for d in report["dropped"] if d["why"] != "pixels"]
+        for line in unanswered_asks(facts, dropped, parts):
+            parts.append(line)
+            report.setdefault("answered", []).append(line)
     if place:
         parts.append(place)
     if nxt:
