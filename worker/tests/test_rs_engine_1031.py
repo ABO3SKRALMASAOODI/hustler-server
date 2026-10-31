@@ -461,3 +461,14 @@ def test_after_write_tempers_the_2672_stack_end_to_end(tmp_path):
     assert "never claim deeper" in out
     # a second look at the tempered edit finds nothing to change
     assert look_guard.after_write(ctx, look_guard.signature({}), ASK_2672) == ""
+
+
+def test_deep_shadows_keep_some_depth_while_the_hud_reads():
+    assert look_guard.wants_deep(ASK_2672)
+    r = {"luma": 0.9, "bright": 0.95, "crush": 0.15, "sat": 1.1}
+    assert look_guard.verdict(r, True)                # unasked: too crushed
+    assert not look_guard.verdict(r, True, deep=True)
+    edl = {"effects": {"grade_custom": {"shadows": -0.1, "contrast": 1.12},
+                       "grade": "cinematic"}}
+    out, note = look_guard.temper_step(edl, 1, r, True, deep=True)
+    assert out["effects"]["grade_custom"]["shadows"] == -0.06 and "-0.06" in note

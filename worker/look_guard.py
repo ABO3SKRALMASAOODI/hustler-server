@@ -66,6 +66,19 @@ _VIBRANT = re.compile(r"\b(?:vibrant|vivid|rich|colou?rful|pop(?:py|s)?|"
                       r"saturated|punchy)\b", re.I)
 
 
+_DEEP = re.compile(r"\bdeep(?:er)?\s+(?:shadows|blacks)\b|\bcrush(?:ed)?\s+"
+                   r"blacks\b|\bdramatic\s+(?:lighting|shadows)\b|"
+                   r"\bhigh[- ]contrast\b", re.I)
+CRUSH_MAX_DEEP = 0.22       # "deep shadows": the darks may sit on black
+
+
+def wants_deep(text):
+    """'deep shadows', 'dramatic lighting': contrast in the darks is asked
+    for, so more of the frame may sit near black as long as the mids and
+    the bright detail (HUD, text) still read."""
+    return bool(_DEEP.search(str(text or "")))
+
+
 def wants_vibrant(text):
     return bool(_VIBRANT.search(str(text or "")))
 
@@ -112,7 +125,7 @@ def compare(src, graded):
             "src_luma": sl / len(pairs), "graded_luma": gl / len(pairs)}
 
 
-def verdict(r, natural, dark=False):
+def verdict(r, natural, dark=False, deep=False):
     """The list of problems in a comparison (empty: it reads). ``dark``: the
     user asked for a darker picture, so only a near-black result fails."""
     if not r:
@@ -123,14 +136,15 @@ def verdict(r, natural, dark=False):
         bad.append(f"{100 * (1 - r['luma']):.0f}% darker than the source")
     if r["bright"] < (0.7 if dark and not natural else BRIGHT_MIN):
         bad.append(f"its bright detail (HUD, text, UI) {100 * (1 - r['bright']):.0f}% dimmer")
-    if r["crush"] > (0.2 if dark and not natural else CRUSH_MAX):
+    if r["crush"] > (0.2 if dark and not natural else
+                     CRUSH_MAX_DEEP if deep else CRUSH_MAX):
         bad.append(f"{100 * r['crush']:.0f}% more of the frame crushed to black")
     if natural and r["sat"] > SAT_MAX_NATURAL:
         bad.append(f"saturation up {100 * (r['sat'] - 1):.0f}% on a 'natural' ask")
     return bad
 
 
-def temper_step(edl, step, r, natural):
+def temper_step(edl, step, r, natural, deep=False):
     """One tempering move on a copy of ``edl``: (edl, note) or (None, '')
     when this step has nothing left to change."""
     edl = json.loads(json.dumps(edl))
@@ -148,9 +162,10 @@ def temper_step(edl, step, r, natural):
         return None, ""
     if step == 1:
         notes = []
-        if float(gc.get("shadows") or 0) < 0:
-            notes.append(f"shadows {float(gc['shadows']):+.2f} -> 0")
-            gc["shadows"] = 0.0
+        floor = -0.06 if deep else 0.0       # an asked depth keeps some
+        if float(gc.get("shadows") or 0) < floor:
+            notes.append(f"shadows {float(gc['shadows']):+.2f} -> {floor:+.2f}")
+            gc["shadows"] = floor
         if gc.get("contrast") is not None and float(gc["contrast"]) > 1.05 \
                 and fx.get("grade"):
             notes.append(f"custom contrast {float(gc['contrast']):.2f} -> "
@@ -168,7 +183,8 @@ def temper_step(edl, step, r, natural):
     if step == 3:
         # the darks themselves: a dark source under any contrast sits on
         # the black floor; lift the shadow curve once (the mids stay put)
-        if r and r["crush"] > CRUSH_MAX and float(gc.get("shadows") or 0) < 0.15:
+        if r and r["crush"] > (CRUSH_MAX_DEEP if deep else CRUSH_MAX) \
+                and float(gc.get("shadows") or 0) < 0.15:
             old = float(gc.get("shadows") or 0)
             gc["shadows"] = 0.15
             fx["grade_custom"] = gc
@@ -235,21 +251,22 @@ def after_write(ctx, before_sig, request_text=""):
         src = [frame_stats(r) if r else None for r in raws]
         natural = wants_natural(request_text)
         dark = wants_dark(request_text)
+        deep = wants_deep(request_text)
         r0 = compare(src, _measure(ctx, edl, picks, raws))
-        bad = verdict(r0, natural, dark)
+        bad = verdict(r0, natural, dark, deep)
         if not bad:
             return ""
         cur, r, notes = edl, r0, []
         for step in (0, 1, 3, 2, 2, 2, 2, 3, 2):
-            nxt, note = temper_step(cur, step, r, natural)
+            nxt, note = temper_step(cur, step, r, natural, deep)
             if nxt is None:
                 continue
             cur, notes = nxt, notes + [note]
             r = compare(src, _measure(ctx, cur, picks, raws))
-            if not verdict(r, natural, dark):
+            if not verdict(r, natural, dark, deep):
                 break
         if cur is not edl and natural and wants_vibrant(request_text) and r \
-                and not verdict(r, natural, dark) and r["sat"] < 1.12:
+                and not verdict(r, natural, dark, deep) and r["sat"] < 1.12:
             # "vibrant and rich ... avoid oversaturation" (2672): the
             # tempering (and the exposure lift) took the colour back to
             # the source's; give it back up to the natural ceiling
@@ -260,7 +277,7 @@ def after_write(ctx, before_sig, request_text=""):
             boost["effects"]["grade_custom"]["saturation"] = round(
                 min(1.6, sat0 * min(1.35, 1.2 / max(r["sat"], 0.5))), 3)
             rb = compare(src, _measure(ctx, boost, picks, raws))
-            if rb and not verdict(rb, natural, dark):
+            if rb and not verdict(rb, natural, dark, deep):
                 cur, r = boost, rb
                 notes.append(f"saturation {sat0:.2f} -> "
                              f"{boost['effects']['grade_custom']['saturation']:.2f}"
@@ -272,7 +289,7 @@ def after_write(ctx, before_sig, request_text=""):
         res = ctx.write_edl(cur, "look tempered so the picture stays readable")
         if not str(res).startswith("EDL v"):
             return ""
-        left = verdict(r, natural, dark)
+        left = verdict(r, natural, dark, deep)
         return (f"\nLEGIBILITY GUARD ({str(res).split(':')[0]}): the stacked look "
                 f"left the picture {'; '.join(bad)} (measured on "
                 f"{len(picks)} frames against the source). Tempered: "
