@@ -1562,6 +1562,15 @@ CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S = max(0.0, float(os.getenv(
     "CLOUDFLARE_STREAM_SOURCE_MIN_DURATION_S", "3600")))
 CLOUDFLARE_STREAM_SOURCE_MIN_BYTES = max(0, int(os.getenv(
     "CLOUDFLARE_STREAM_SOURCE_MIN_BYTES", str(512 * 1024 ** 2))))
+# The render box (execution_provider "box") has its own disk (about 58 GB
+# free) and fetches R2 at 20+ MB/s, so it stages a source in full up to this
+# size and range-reads only bigger ones. Range reads cost one HTTPS
+# connection per seek, and a source whose audio and video sit far apart in
+# the file makes ffmpeg seek between them on every chunk: P0 #60 (31 Oct,
+# preview 126723) opened 184 connections for 3 s of a 1.1 GB original and
+# spent 817 s on a 32 s approval preview, so the First cut gave up at 900 s.
+BOX_STREAM_SOURCE_MIN_BYTES = max(0, int(os.getenv(
+    "BOX_STREAM_SOURCE_MIN_BYTES", str(8 * 1024 ** 3))))
 # Optional operator emergency brake. Zero means no duration gate. Cloudflare
 # has resource ceilings, not a one-hour media-duration limit; staged bytes and
 # the executor's own disk/memory checks are the meaningful admission signals.

@@ -29,6 +29,27 @@ def streams_source(asset):
                 and size >= config.CLOUDFLARE_STREAM_SOURCE_MIN_BYTES))
 
 
+def executor_streams_source(asset, provider=None):
+    """Whether THIS executor range-reads ``asset`` instead of staging it.
+
+    Cloudflare streams by streams_source (its Containers' disk is the
+    ceiling); the render box stages up to BOX_STREAM_SOURCE_MIN_BYTES, since
+    a range read can turn a badly interleaved file into thousands of
+    connections (P0 #60). Anything else always stages.
+    """
+    provider = provider if provider is not None else os.getenv('EXECUTOR_PROVIDER')
+    if provider == 'cloudflare':
+        return streams_source(asset)
+    if provider == 'box':
+        try:
+            size = int((asset or {}).get('bytes') or 0)
+        except (TypeError, ValueError):
+            return False
+        return (config.BOX_STREAM_SOURCE_MIN_BYTES > 0
+                and size >= config.BOX_STREAM_SOURCE_MIN_BYTES)
+    return False
+
+
 def filmstrip_inputs(rows, edl, limit=FILMSTRIP_ASSETS):
     """Same bounded, newest-first unique selection for admission and execution."""
     selected, seen = [], set()

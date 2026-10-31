@@ -608,8 +608,7 @@ def run_filmstrip_job(worker_db, job):
         have_local = False
         if not cached or not main_wave_hit:
             try:
-                if (os.getenv('EXECUTOR_PROVIDER') in ('cloudflare', 'box')
-                        and execution_inputs.streams_source(row)):
+                if execution_inputs.executor_streams_source(row):
                     local = storage.presign_get(row['storage_key'], expires=21600)
                 else:
                     storage.download_to(row["storage_key"], local)
