@@ -542,6 +542,28 @@ def check_ops_sessions(b, t):
     return f"{len(rows)} cards · total {b.get('total')} · mix {b.get('counts')}"
 
 
+def check_ops_journeys(b, t):
+    if b.get("pending"):
+        return "computing (shared report)"
+    f = (b.get("funnel") or {}).get("7d") or {}
+    steps = f.get("steps") or []
+    need(len(steps) == 7, f"{len(steps)} funnel steps")
+    need(steps[0]["n"] > 0, "no signups in 7 days")
+    for a, z in zip(steps, steps[1:]):
+        need(z["n"] <= a["n"], f"{z['key']} {z['n']} > {a['key']} {a['n']}")
+    rows = b.get("stories")
+    need(isinstance(rows, list) and rows, "no session stories")
+    for r in rows:
+        need(r.get("who", {}).get("user_id"), f"{r.get('key')} has no user")
+        for part in ("uploaded", "got"):
+            v = r.get(part)
+            if v and not v.get("purged"):
+                need("url" in v, f"{r['key']} {part} has no url field")
+    reviewed = sum(1 for r in rows if r.get("review"))
+    return (f"{len(rows)} stories · {reviewed} reviewed · signups 7d "
+            f"{steps[0]['n']} → subscribed {steps[-1]['n']}")
+
+
 def check_ops_tickets(b, t):
     groups = b.get("groups")
     need(isinstance(groups, list), "no groups")
@@ -585,6 +607,7 @@ ENDPOINTS = [
     ("Overview", "/admin/top-users", check_rows("users")),
     ("Overview", "/admin/activity", check_rows("events")),
     ("Sessions", "/admin/video/ops/sessions?days=30&page=1&per_page=30", check_ops_sessions),
+    ("Journeys", "/admin/video/ops/journeys?window=7d", check_ops_journeys),
     ("Tickets", "/admin/video/ops/tickets?status=all", check_ops_tickets),
     ("Projects", "/admin/video/projects?search=&fields=list", check_rows("projects")),
     ("Projects", "/admin/video/projects?search=", check_rows("projects")),

@@ -7,6 +7,12 @@ Admin (admin_required, read-only connections):
                                   failures and auto-fixes, signups and active
                                   customers, queue / box / spend
   GET /admin/video/ops/sessions   reviewed sessions with evidence pictures
+  GET /admin/video/ops/journeys   the Journeys view: the trial funnel (24 h /
+                                  7 d) and one story per edit session (who,
+                                  the upload, the exact asks, the delivered
+                                  video, per-ask result, what came next, the
+                                  fix); shared report cache, URLs signed per
+                                  request
   GET /admin/video/ops/tickets    tickets grouped by root cause
 
 For backend/scripts/ops_review.py (the Reviewer/Fixer CLI on the owner's
@@ -29,7 +35,7 @@ from psycopg2.extras import RealDictCursor
 from flask import Blueprint, current_app, jsonify, request
 
 import storage
-from ops_loop import EVIDENCE_PREFIX, VERDICTS, views
+from ops_loop import EVIDENCE_PREFIX, VERDICTS, journeys, views
 from routes.admin import (admin_required, gzip_large_json,
                           legacy_error_response)
 
@@ -133,6 +139,41 @@ def ops_sessions():
                                       presign=_admin_presign))
     finally:
         conn.close()
+
+
+def _presign_many(keys):
+    """{key: url or None}. One signature per key, computed locally."""
+    return {k: _admin_presign(k) for k in keys}
+
+
+@admin_ops_bp.route("/admin/video/ops/journeys", methods=["GET"])
+@admin_required
+def ops_journeys():
+    """The Journeys view (owner, 31 Oct 2026): what each user wanted, what
+    the product did, whether we made it, and what they did next. Computed in
+    the background through the shared report cache (it builds every
+    session's context); the video and picture links are signed here, on
+    every request, so a cached copy never holds an expired link."""
+    from admin_metrics import cache as admin_cache
+    window = request.args.get("window") or "7d"
+    if window not in journeys.WINDOWS:
+        return jsonify({"error": "window must be one of "
+                                 + ", ".join(journeys.WINDOWS)}), 400
+
+    def compute():
+        conn = _connect()
+        try:
+            return journeys.report(conn.cursor(), window=window)
+        finally:
+            conn.close()
+    got = admin_cache.shared_report("/admin/video/ops/journeys",
+                                    {"window": window}, compute,
+                                    fresh=request.args.get("fresh") == "1",
+                                    logger=current_app.logger)
+    if got.get("pending"):
+        return jsonify(got)
+    urls = _presign_many(journeys.storage_keys(got))
+    return jsonify(journeys.attach_urls(got, urls))
 
 
 @admin_ops_bp.route("/admin/video/ops/tickets", methods=["GET"])
