@@ -23096,6 +23096,25 @@ def _proof_pages(ranges):
     return pages
 
 
+def _broll_coverage_line(edl):
+    """How much of the program the cutaways cover, once any b-roll is in and
+    a long stretch is still bare (ticket #51: "b-roll throughout" got 2 clips
+    at the one named place, 1-7 s of 15.4 s, and the agent never saw the
+    gap). A fact for the editor to weigh against the request, not a rule."""
+    cov = timeline_mod.broll_coverage(edl or {})
+    if not cov:
+        return ""
+    total, covered, (a, b) = cov
+    if total <= 0 or covered / total >= 0.6 or b - a < 5.0:
+        return ""
+    return (f" B-ROLL COVERAGE: cutaways cover {covered:g}s of the {total:g}s "
+            f"program ({covered / total:.0%}); {a:g}-{b:g}s has none. If the "
+            "user asked for b-roll throughout (or across the whole video), "
+            "that stretch is still unmet: read what is said there (get_words) "
+            "and source footage for its topics, not only for the names the "
+            "user listed, before you reply.")
+
+
 def _motion_warning_line(result):
     """Name motion graphics a render could not draw. The render succeeds
     without them (motion_layer degrades an item to absent), so without this
@@ -23185,6 +23204,50 @@ def _mcp_adopted_render(ctx, job_type, version, match):
     if not match(body):
         return None
     return int(job["id"])
+
+
+LONG_PROGRAM_S = 900.0          # a 15-min program's full draft takes minutes
+REPEAT_FULL_WINDOW_MIN = 60
+
+
+def _long_program_repeat_proof(ctx, row, plan):
+    """An MCP caller asking for another complete draft of a long program
+    whose length barely moved since the last one (within the hour) gets the
+    changed-section proof instead, and is told where the full file comes
+    from. Ticket #46 (30 Oct, user 2007): render_preview(complete=true) ran
+    8 times on a 41-min lecture, each a 5-10 min full encode, to adjust
+    3-60 s cursor overlays; cost and wait scaled with the source, not the
+    change. None = render as asked (short program, first draft, a changed
+    length, or nothing to prove)."""
+    try:
+        blocks = timeline_mod.program_blocks(row.get("json") or {})
+        total = float(blocks[-1]["out_end"]) if blocks else 0.0
+    except Exception:  # noqa: BLE001 — the normal path renders
+        return None
+    if total < LONG_PROGRAM_S:
+        return None
+    try:
+        last = ctx.db.run(dbx.recent_complete_preview, ctx.project_id,
+                          REPEAT_FULL_WINDOW_MIN)
+    except Exception:  # noqa: BLE001
+        return None
+    if not last or last.get("duration_s") is None:
+        return None
+    if abs(float(last["duration_s"]) - total) > max(30.0, 0.05 * total):
+        return None
+    ranges, _baseline = _change_check_ranges(ctx, row, plan)
+    if not ranges:
+        return None
+    _metric(ctx, "long_full_previews_routed_to_proof")
+    age_min = max(1, int(float(last.get("age_s") or 0) // 60))
+    out = _run_changed_preview_check(ctx, row, plan, ranges)
+    return (f"{out}\nRendered the CHANGED SECTIONS only: a complete draft of "
+            f"this {total / 60:.0f}-min program (v{last.get('edl_version')}) was "
+            f"made {age_min} min ago and the length has not changed, so "
+            "another full encode would take minutes to show the same program "
+            "plus this change. Keep proving small edits with "
+            "render_preview(complete=false); the full-length file is "
+            "export_final's job when the edit is done.")
 
 
 def _run_changed_preview_check(ctx, row, plan, ranges):
@@ -23653,6 +23716,11 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
     # ("this should read X, behind the person") instead of nine even samples
     # of the whole programme that the edit may not even appear in.
     plan = _verify_plan_for(ctx, row)
+    if requested_complete and not autorendering and quality == "draft" \
+            and music_gate.is_mcp(ctx):
+        proof = _long_program_repeat_proof(ctx, row, plan)
+        if proof:
+            return proof
     if not complete:
         ranges, _baseline = _change_check_ranges(ctx, row, plan)
         # Default iterative calls retain the cheaper changed-section proof.
@@ -23811,6 +23879,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                            "place edges audio-safely; get_words) and "
                            "re-render.")
             note += _motion_warning_line(result)
+            note += _broll_coverage_line(row.get("json"))
             # Caption audit on what actually survived the cut: captions are
             # usually enabled BEFORE later cuts, so the add-time warning
             # can't see speech that a later keep_segments removed. A real
