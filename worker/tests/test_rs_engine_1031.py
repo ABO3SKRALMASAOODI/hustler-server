@@ -403,3 +403,18 @@ def test_new_footage_gets_the_crop_aimed_at_it(monkeypatch):
     rep = [i for i in edl["inserts"] if i["id"].startswith("rep")][0]
     x0, _y0, x1, _y1 = rep["crop"]
     assert abs((x0 + x1) / 2 - 0.22) < 0.01      # the replay sits on the aim too
+
+
+def test_a_repeat_is_told_as_a_repeat_never_as_b_roll():
+    import followup_recipes
+    import trial_reply
+    before = {"keep": [[0.0, 30.0]], "inserts": []}
+    after = {"keep": [list(STAND), list(TOUCH)], "inserts": [
+        {"id": f"rep{n}", "asset_key": "originals/1/a.mp4", "kind": "video",
+         "at_output_s": 1.84, "duration_s": 1.84, "source_start_s": 100.69}
+        for n in (1, 2)]}
+    assert "broll" not in followup_recipes.changed_lanes(before, after)
+    assert "cuts" in followup_recipes.changed_lanes(before, after)
+    items = trial_reply.friendly_changes(before, after)
+    assert "added B-roll" not in items
+    assert "repeated a part to fill its length" in items
