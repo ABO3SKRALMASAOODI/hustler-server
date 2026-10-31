@@ -450,3 +450,34 @@ def test_look_only_refusal_is_for_cut_tools_on_claude_lanes_only():
     assert agent_loop._look_only_cut_refusal(trial, "cut_silences", t)
     legacy = SimpleNamespace(claude_trial=None, claude_paid=None)
     assert agent_loop._look_only_cut_refusal(legacy, "cut_output_range", t) is None
+
+
+# ── P0 #60: the planning call is priced before it is made ────────────────
+
+def test_a_planning_call_that_would_spend_the_trial_runs_on_the_lane_model():
+    # project 5291 (31 Oct): $0.04 spent of a $0.40 cap, a 107,546-token
+    # planning prompt; the Opus call cost $0.66 and the request ended blocked
+    s = claude_trial.Scope(2685, 0.40, 0.04, "claude-haiku-5-5").with_planner(
+        claude_trial.parse_flag({"on": True}))
+    ctx = SimpleNamespace(claude_trial=s)
+    assert agent_loop._planner_call_usd("claude-opus-5-5", 107546) > 0.6
+    assert agent_loop._trial_planner_step(
+        ctx, "claude-haiku-5-5", 0, "xhigh", prompt_tokens=107546) == \
+        ("claude-haiku-5-5", "xhigh")
+    assert not getattr(s, "planner_used", False)
+
+
+def test_a_small_planning_prompt_still_plans_on_opus():
+    # the replays' planning calls (about 20k tokens, $0.11-0.14) keep Opus
+    s = claude_trial.Scope(1, 0.40, 0.0, "claude-haiku-5-5").with_planner(
+        claude_trial.parse_flag({"on": True}))
+    ctx = SimpleNamespace(claude_trial=s)
+    assert agent_loop._trial_planner_step(
+        ctx, "claude-haiku-5-5", 0, "xhigh", prompt_tokens=20000) == \
+        ("claude-opus-5-5", "xhigh")
+
+
+def test_the_run_loop_prices_the_planning_prompt():
+    import inspect
+    src = inspect.getsource(agent_loop._run_loop)
+    assert "prompt_tokens=planner_prompt" in src
