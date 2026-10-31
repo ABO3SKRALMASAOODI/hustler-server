@@ -311,3 +311,46 @@ def test_blank_canvas_capture_never_placed_is_partial_not_fulfilled():
                   versions_written=[2], rendered_versions={2},
                   last_preview={"url": "https://p.example/x.mp4", "cached": False})
     assert agent_loop._turn_completion(placed)[0] != "blocked"
+
+
+def test_order_prerequisite_met_by_a_later_success_is_fulfilled(monkeypatch):
+    """Ticket #58 (31 Oct): render_preview(report) before any complete
+    preview answered PREREQUISITE; the agent then rendered complete and
+    replied. The request was delivered, so it is fulfilled, not partial."""
+    ctx = _changed(_ctx(versions_written=[5], rendered_versions={5},
+                        last_preview={'edl_version': 5}, write_attempts=3))
+    agent_loop._record_outer_tool_outcome(
+        ctx, 'render_preview', 'PREREQUISITE: no complete preview exists to '
+        'report on — call render_preview(complete=true) first.')
+    agent_loop._record_outer_tool_outcome(
+        ctx, 'render_preview', 'Preview v5 rendered: 37.164s (source 37.129s).')
+    monkeypatch.setattr(agent_loop, '_quality_handoff',
+                        lambda *_: {'export_ready': True})
+    assert agent_loop._turn_completion(ctx) == ('fulfilled', True)
+    assert ctx.turn_tool_outcomes[0]['kind'] == 'prerequisite'  # history kept
+
+
+def test_named_job_wait_is_not_resolved_by_another_success(monkeypatch):
+    ctx = _changed(_ctx(versions_written=[2], rendered_versions={2},
+                        last_preview={'edl_version': 2}, write_attempts=1))
+    agent_loop._record_outer_tool_outcome(
+        ctx, 'wait_for_job', 'PREREQUISITE: job 88 is still running.')
+    agent_loop._record_outer_tool_outcome(
+        ctx, 'wait_for_job', 'Job 91 finished.')
+    agent_loop._record_outer_tool_outcome(
+        ctx, 'look_at', 'Captured 2 frame(s).')
+    monkeypatch.setattr(agent_loop, '_quality_handoff',
+                        lambda *_: {'export_ready': True})
+    assert agent_loop._turn_completion(ctx) == ('partial', True)
+
+
+def test_prerequisite_of_another_tool_stays_open(monkeypatch):
+    ctx = _changed(_ctx(versions_written=[2], rendered_versions={2},
+                        last_preview={'edl_version': 2}, write_attempts=1))
+    agent_loop._record_outer_tool_outcome(
+        ctx, 'export_final', 'PREREQUISITE: render a complete preview first.')
+    agent_loop._record_outer_tool_outcome(
+        ctx, 'render_preview', 'Preview v2 rendered: 10.0s.')
+    monkeypatch.setattr(agent_loop, '_quality_handoff',
+                        lambda *_: {'export_ready': True})
+    assert agent_loop._turn_completion(ctx) == ('partial', True)
