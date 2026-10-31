@@ -472,3 +472,13 @@ def test_deep_shadows_keep_some_depth_while_the_hud_reads():
                        "grade": "cinematic"}}
     out, note = look_guard.temper_step(edl, 1, r, True, deep=True)
     assert out["effects"]["grade_custom"]["shadows"] == -0.06 and "-0.06" in note
+
+
+def test_a_repeat_never_counts_as_b_roll_for_the_ask_ledger():
+    import ask_ledger
+    import timeline
+    edl = {"keep": [list(STAND), list(TOUCH)], "inserts": [
+        {"id": "rep1", "asset_key": "originals/1/a.mp4", "kind": "video",
+         "at_output_s": 1.84, "duration_s": 1.84, "source_start_s": 100.69}]}
+    assert not ask_ledger._present(edl, "broll")
+    assert timeline.broll_coverage(edl) is None
