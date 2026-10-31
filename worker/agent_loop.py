@@ -2423,6 +2423,21 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
 AWAITING_USER = "awaiting_user"
 
 
+def _insert_after_lead(reply, line):
+    """The reply with ``line`` as its second sentence (after the lead that
+    says what changed), on the reply's first paragraph."""
+    text = str(reply or "").strip()
+    if not text:
+        return line
+    head, sep, tail = text.partition("\n\n")
+    m = re.search(r"(?<=[.!?])\s+", head)
+    if m:
+        head = head[:m.start()] + " " + line + head[m.start():]
+    else:
+        head = head + " " + line
+    return head + (sep + tail if sep else "")
+
+
 def _single_shot_design(ctx, user_text):
     """Once per request on the Claude lanes (the trial, new subscribers):
     a single-shot clip asked to look cinematic gets a designed open, middle
@@ -2465,7 +2480,18 @@ def _trial_planner_step(ctx, model, iteration, step_effort):
     planner = getattr(scope, "planner_model", None)
     if not planner or not claude_lane.is_claude_model(planner):
         return model, step_effort
+    try:
+        left = float(scope.remaining_usd)
+    except (AttributeError, TypeError, ValueError):
+        left = None
+    if left is not None and left < config.CLAUDE_TRIAL_PLANNER_MIN_LEFT_USD \
+            and not getattr(scope, "planner_used", False):
+        # An uncached Opus planning call costs about $0.11-0.14 (replays,
+        # 31 Oct): with less than this left, the request plans on the lane
+        # model so the rest of the trial buys more requests, not one.
+        return model, step_effort
     if iteration == 0:
+        scope.planner_used = True
         return planner, (getattr(scope, "planner_effort", None)
                          or step_effort)
     return model, (getattr(scope, "executor_effort", None) or step_effort)
@@ -6444,6 +6470,15 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if _report and _report.get("dropped"):
                     honesty["trial_reply_dropped"] = _report["dropped"][:12]
                 outcome = _outcome_after_reply(outcome, _report, honesty)
+                # TRIAL_QUALITY_BUILD: the reply says what the designed
+                # single-shot structure added (title, cut-ins, ending)
+                _applied = getattr(ctx, "single_shot_applied", None)
+                if _applied and trial_reply.language(final) == "en":
+                    import single_shot_design
+                    _line = single_shot_design.reply_line(_applied, final)
+                    if _line:
+                        final = _insert_after_lead(final, _line)
+                        honesty["single_shot_design"] = _applied
             # RS_ENGINE (31 Oct): music the user asked for ends on a choice
             # of 2-4 library tracks, never on silence told as done (user
             # 2665: audio muted, the library listed, nothing offered).

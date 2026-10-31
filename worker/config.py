@@ -315,6 +315,11 @@ CLAUDE_TRIAL_PLANNER_EFFORT = os.getenv(
     "CLAUDE_TRIAL_PLANNER_EFFORT", "xhigh").strip()
 CLAUDE_TRIAL_EXECUTOR_EFFORT = os.getenv(
     "CLAUDE_TRIAL_EXECUTOR_EFFORT", "high").strip()
+# The planner runs only while the account has at least this much trial
+# budget left (an uncached Opus planning call measured $0.11-0.14 on the
+# replays); below it the request plans on the lane model.
+CLAUDE_TRIAL_PLANNER_MIN_LEFT_USD = float(
+    os.getenv("CLAUDE_TRIAL_PLANNER_MIN_LEFT_USD", "0.2"))
 CLAUDE_TRIAL_TIMEOUT_S = float(os.getenv("CLAUDE_TRIAL_TIMEOUT_S", "300"))
 # Owner's design defaults; every one can be overridden in app_kv.free_result
 # ({on, per_account_usd_cap, pool_usd_cap, monthly_usd_cap, daily_count_cap,

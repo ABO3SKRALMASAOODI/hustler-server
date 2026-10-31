@@ -8,11 +8,11 @@ visual events; the judge caps those at about 5"). The reference playbook
 of one camera does instead:
 
 * OPEN: a poster title whole on frame 0, held 2.5-3.5 s (9 of 9 hooked
-  references): the clip's own first line when it is a short complete line,
-  else a short line the speech repeats ("Happy Birthday!"), else the index's
-  own description of the shot (2-3 words). Never invented, never a right-to-
-  left script (the poster font breaks its joining), never a low-confidence
-  transcript.
+  references), in the top band: the clip's own first line when it is a short
+  complete line, else a short line the speech repeats ("Happy Birthday!").
+  Never invented, never a label of the picture (the replays judged "Wooden
+  boardwalk" generic and unrequested), never a right-to-left script (the
+  poster font breaks its joining), never a low-confidence transcript.
 * MIDDLE: the camera changes every 2-4 s, landing on the clip's own beats
   (sentence and clause ends when it speaks; an even 3 s rhythm when it does
   not): cut-ins between the wide frame and a closer one (a held punch, hard
@@ -23,8 +23,11 @@ of one camera does instead:
   freeze, a slow-motion hold or a fade; brand rule).
 
 Deterministic: no model call. Who gets it: the free trial and new
-subscribers' Claude lane, a request that asks for a cinematic look (and does
-not limit the change to the colours or keep the content unchanged), on a
+subscribers' Claude lane, a request that asks for the video to be cinematic
+("make it cinematic", "I want cinmatic": all three parts) or for a cinematic
+colour AND framing ("cinematic grade, more dramatic framing": the cut-ins and
+the ending only; a colour-only "cinematic grade" is the grade's job), that
+does not keep the content unchanged, on a
 program of 8-90 s that is one shot (at most 3 shots, or one shot holding 60%
 of it), whose edit has no opening title, zooms or B-roll of its own yet. It
 runs once per request, right before the request's first preview.
@@ -41,6 +44,17 @@ LIMITED = re.compile(
     r"|\bdon'?t\s+(?:change|touch|cut|edit|add)\b|\bdo\s+not\s+(?:change|touch|cut|edit|add)\b"
     r"|\bkeep\s+(?:the\s+)?(?:content|everything|it)\s+(?:the\s+same|unchanged|as\s+is)\b"
     r"|\bnothing\s+else\b", re.I)
+# "cinematic grade / colours / look": a colour ask, which the grade answers
+_COLOUR_NOUN = (r"(?:grad(?:e|ing)|colou?r(?:s|ing|\s+grad\w*)?|look|lut|filter|tones?|toning|"
+                r"palette|lighting|contrast)")
+COLOUR_ONLY = re.compile(
+    r"\b(?:c[iy]n[ae]?m+[ae]?t+[io]?c\w*|cin[ae]ma\w*|filmic|movie[\s-]?like)\s+(?:\w+\s+)?"
+    + _COLOUR_NOUN + r"\b", re.I)
+# "give colour gradings cinematic vibes": the colour noun right before it
+COLOUR_BEFORE = re.compile(r"\b" + _COLOUR_NOUN + r"\w*\s+(?:\w+\s+)?$", re.I)
+FRAMING = re.compile(
+    r"\b(?:dramatic|cinematic|better|more\s+\w+)\s+(?:framing|angles?|shots?|camera(?:\s+work)?)\b"
+    r"|\bframing\b|\breframe\b|\bzoom|\bpunch[\s-]?ins?\b|\bcamera\s+(?:moves?|movement)\b", re.I)
 NO_TEXT = re.compile(
     r"\bno\s+(?:text|titles?|captions?|subtitles?|words|writing)\b|\bwithout\s+(?:any\s+)?(?:text|titles?)\b"
     r"|\bdon'?t\s+(?:add|put)\s+(?:any\s+)?(?:text|titles?)\b", re.I)
@@ -55,14 +69,36 @@ BEAT_S, BEAT_MIN_S, BEAT_MAX_S = 3.0, 2.0, 4.0
 END_MIN_S, END_MAX_S = 2.0, 2.6
 CLOSE, MEDIUM, PUSH = 0.16, 0.09, 0.07
 TITLE_MAX_WORDS = 7
+TITLE_Y = 0.26
 MIN_CONF = 0.6
 
 
 def asks_for_it(text):
     """Does this request ask for a cinematic look, without limiting the
     change to the colours or keeping the content as it is?"""
+    return scope(text) is not None
+
+
+def scope(text):
+    """What the request lets the design add, or None:
+    'whole'   "make it cinematic", "I want cinmatic": the whole video's
+              style (title from a spoken line, cut-ins, the ending beat);
+    'framing' a cinematic colour ask that also asks for framing ("cinematic
+              grade, more dramatic framing"): cut-ins and the ending only.
+    A colour-only cinematic ask ("cinematic grade") is the grade's job: the
+    replays judged a title or zooms on it unrequested (31 Oct, 5282)."""
     t = " ".join(str(text or "").split())
-    return bool(t) and bool(CINEMATIC.search(t)) and not LIMITED.search(t)
+    if not t or not CINEMATIC.search(t) or LIMITED.search(t):
+        return None
+    framing = bool(FRAMING.search(t))
+    whole = any(not COLOUR_ONLY.match(t, m.start())
+                and not COLOUR_BEFORE.search(t[max(0, m.start() - 40):m.start()])
+                and not re.match(r"(?i)dramatic\s+(?:framing|angles?|shots?|camera|"
+                                 r"lighting|shadows?)", t[m.start():])
+                for m in CINEMATIC.finditer(t))
+    if whole:
+        return "whole"
+    return "framing" if framing else None
 
 
 def _shots_in(index, keep):
@@ -116,28 +152,6 @@ def _usable_line(text, conf):
     return t
 
 
-def _description_title(index):
-    """2-3 words naming the shot from the index's own description ("A wooden
-    boardwalk with railings ..." -> "Wooden boardwalk"), or None."""
-    vs = (index or {}).get("visual_storyboard") or {}
-    for ch in vs.get("chapters") or []:
-        d = str((ch or {}).get("description") or "").strip()
-        if not d:
-            continue
-        head = re.split(r"\s+(?:with|in|on|at|of|and|under|over|near|by|while|that|which|where|from|against|beside|during|through|as|is|are)\s+|[,.;:(]",
-                        d, maxsplit=1)[0]
-        words = [w for w in head.split() if w]
-        while words and words[0].lower() in ("a", "an", "the", "this", "two", "one", "some", "close-up", "closeup", "wide"):
-            words = words[1:]
-        if not words or any(not re.match(r"^[A-Za-z][A-Za-z'\-]*$", w) for w in words):
-            continue
-        words = words[-3:]
-        if len(words) == 1 and len(words[0]) < 4:
-            continue
-        return " ".join(w.capitalize() if i == 0 else w.lower() for i, w in enumerate(words))
-    return None
-
-
 def hook_text(index, keep):
     """(text, kind) for the opening title, or (None, None). Pure."""
     index = index or {}
@@ -173,9 +187,8 @@ def hook_text(index, keep):
             n, ln = max(counts.values(), key=lambda v: v[0])
             if n >= 2 or len(sents) == 1:
                 return ln.rstrip(".").strip(), "spoken_line"
-    desc = _description_title(index)
-    if desc:
-        return desc, "shot"
+    # The index's description of the shot ("Wooden boardwalk") was judged a
+    # generic, unrequested label over the opening (31 Oct, 5271 x2): never.
     return None, None
 
 
@@ -222,7 +235,8 @@ def plan(edl, index, text):
     'why': str} or None when the clip does not get a designed structure.
     Pure; the EDL is read, never written."""
     edl = edl or {}
-    if not asks_for_it(text):
+    kind = scope(text)
+    if kind is None:
         return None
     import schemas
     try:
@@ -241,7 +255,7 @@ def plan(edl, index, text):
         return None
     hook = None
     hook_end = 0.0
-    if not has_title and not NO_TEXT.search(text or ""):
+    if kind == "whole" and not has_title and not NO_TEXT.search(text or ""):
         line, kind = hook_text(index, keep)
         if line:
             hook_end = HOOK_DEFAULT_S
@@ -308,7 +322,9 @@ def apply(ctx, text, run):
     import first_cut
     done = []
     if p["hook"]:
-        params = first_cut.hook_params(p["hook"]["text"], None, _vertical(edl))
+        # the top band, clear of the brand mark (y 0.115-0.192) and of the
+        # subject (the replay's title over the child: 5282)
+        params = first_cut.hook_params(p["hook"]["text"], TITLE_Y, _vertical(edl))
         params["entrance"] = "cut"      # whole on frame 0
         res = run("add_motion_graphic", {
             "template": "hook_title", "start": p["hook"]["start"],
@@ -341,6 +357,34 @@ def apply(ctx, text, run):
             done.append(f"a slow push-in over the last {e['end'] - e['start']:.1f}s")
     if not done:
         return ""
+    try:
+        ctx.single_shot_applied = {
+            "title": p["hook"]["text"] if p["hook"] and done[0].startswith(
+                "the opening title") else None,
+            "cutins": n, "ending": any(d.startswith("a slow push-in") for d in done)}
+    except Exception:  # noqa: BLE001
+        pass
     return ("\nDESIGNED STRUCTURE (single shot, cinematic ask): added "
             + "; ".join(done) + ". These are part of the look the user asked "
             "for: mention them in one short clause of the reply.")
+
+
+def reply_line(applied, reply):
+    """One plain English sentence telling the user what the designed
+    structure added, or '' (nothing applied, the reply already says it, or
+    the reply is not English: the line never flips the user's language)."""
+    if not applied:
+        return ""
+    low = str(reply or "").lower()
+    title = applied.get("title")
+    bits = []
+    if title and title.lower() not in low and "title" not in low:
+        bits.append(f'opened it on the title "{title}"')
+    if applied.get("cutins") and not re.search(r"cut[\s-]?ins?|punch", low):
+        bits.append("cut in closer on its beats")
+    if applied.get("ending") and "push" not in low:
+        bits.append("end on a slow push-in")
+    if not bits:
+        return ""
+    joined = bits[0] if len(bits) == 1 else ", ".join(bits[:-1]) + " and " + bits[-1]
+    return "To make it feel cinematic I also " + joined + "."

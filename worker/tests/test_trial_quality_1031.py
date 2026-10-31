@@ -68,6 +68,26 @@ def test_new_subscribers_and_other_lanes_are_unchanged():
         off, "claude-haiku-5-5", 0, "xhigh") == ("claude-haiku-5-5", "xhigh")
 
 
+def test_little_budget_left_plans_on_the_lane_model():
+    s = claude_trial.Scope(1, 0.40, 0.25, "claude-haiku-5-5").with_planner(
+        claude_trial.parse_flag({"on": True}))
+    ctx = SimpleNamespace(claude_trial=s)
+    # $0.15 left < CLAUDE_TRIAL_PLANNER_MIN_LEFT_USD: no Opus call
+    assert agent_loop._trial_planner_step(
+        ctx, "claude-haiku-5-5", 0, "xhigh") == ("claude-haiku-5-5", "xhigh")
+    assert agent_loop._trial_planner_step(
+        ctx, "claude-haiku-5-5", 1, "medium") == ("claude-haiku-5-5", "medium")
+    # a turn that planned on Opus keeps its executor effort as it spends
+    s2 = claude_trial.Scope(1, 0.40, 0.0, "claude-haiku-5-5").with_planner(
+        claude_trial.parse_flag({"on": True}))
+    ctx2 = SimpleNamespace(claude_trial=s2)
+    assert agent_loop._trial_planner_step(
+        ctx2, "claude-haiku-5-5", 0, "xhigh")[0] == "claude-opus-5-5"
+    s2.spent_usd = 0.35
+    assert agent_loop._trial_planner_step(
+        ctx2, "claude-haiku-5-5", 2, "medium") == ("claude-haiku-5-5", "high")
+
+
 def test_scope_carries_the_planner_from_resolve_flag():
     s = claude_trial.Scope(5, 0.4, 0.1, "claude-haiku-5-5").with_planner(
         claude_trial.parse_flag({"on": True}))
@@ -205,17 +225,23 @@ BIRTHDAY = {
 
 
 @pytest.mark.parametrize("text,want", [
-    ("I want cinmatic", True),
-    ("make it cinematic", True),
-    ("Make it clearer, cinematic grade", True),
-    ("correct the angle, more dramatic framing", True),
-    ("vibrant cinematic colours, content unchanged, not oversaturated", False),
-    ("just the colours, cinematic", False),
-    ("add b-roll", False),
-    ("", False),
+    ("I want cinmatic", "whole"),                                   # 2668
+    ("make it cinematic", "whole"),
+    ("Make the video clearer and give a cinematic colour grading", None),   # 2675
+    ("Give colour gradings cinematic vibes", None),
+    ("Give colour gradings cinematic vibes . Correct the angle (if possible) "
+     "make it looj mire dramatic but not to lose the actual original outlines .",
+     "whole"),                                                      # 2665
+    ("cinematic grade, more dramatic framing", "framing"),
+    ("Enhance this Dead by Daylight gaming video with professional cinematic "
+     "colors. Make the colors vibrant ... do not change the original content.", None),
+    ("just the colours, cinematic", None),
+    ("add b-roll", None),
+    ("", None),
 ])
 def test_who_asks_for_it(text, want):
-    assert ssd.asks_for_it(text) is want
+    assert ssd.scope(text) == want
+    assert ssd.asks_for_it(text) is (want is not None)
 
 
 def _check_rhythm(p):
@@ -241,7 +267,7 @@ def _check_rhythm(p):
 
 
 def test_a_37s_single_shot_gets_title_cutins_and_a_live_ending():
-    p = ssd.plan(_edl([[0.0, 37.13]]), BIRTHDAY, "Make it clearer, cinematic grade")
+    p = ssd.plan(_edl([[0.0, 37.13]]), BIRTHDAY, "make it cinematic")
     assert p and p["hook"]["text"] == "Happy Birthday!"
     assert p["hook"]["kind"] == "spoken_line"
     assert len(p["cutins"]) >= 4
@@ -261,13 +287,19 @@ def test_the_first_line_is_the_title_when_it_opens_the_clip():
     _check_rhythm(p)
 
 
-def test_a_wordless_shot_is_titled_from_its_own_description():
+def test_a_wordless_shot_is_never_titled_from_a_label_of_the_picture():
     ix = {"shots": [{"start": 0, "end": 10.54}], "words": [], "sentences": [],
           "visual_storyboard": {"chapters": [{"description":
               "A wooden boardwalk with railings descends a hillside"}]}}
-    p = ssd.plan(_edl([[0.0, 10.54]]), ix, "cinematic grade, more dramatic framing")
-    assert p["hook"]["text"] == "Wooden boardwalk" and p["hook"]["kind"] == "shot"
+    p = ssd.plan(_edl([[0.0, 10.54]]), ix, "make it cinematic")
+    assert p["hook"] is None and p["cutins"] and p["ending"]
     _check_rhythm(p)
+
+
+def test_a_colour_and_framing_ask_gets_no_title():
+    p = ssd.plan(_edl([[0.0, 37.13]]), BIRTHDAY, "cinematic grade, more dramatic framing")
+    assert p["hook"] is None and p["cutins"] and p["ending"]
+    assert ssd.plan(_edl([[0.0, 37.13]]), BIRTHDAY, "cinematic colour grading") is None
 
 
 def test_low_confidence_or_rtl_speech_is_never_a_title():
@@ -357,3 +389,33 @@ def test_ask_user_records_awaiting_user_not_blocked():
     assert '"outcome": AWAITING_USER' in window
     assert '"outcome": "blocked"' not in window
     assert agent_loop.AWAITING_USER == "awaiting_user"
+
+
+def test_the_title_sits_in_the_top_band():
+    calls = []
+
+    class Ctx:
+        index = BIRTHDAY
+
+        def latest_edl(self):
+            return {"version": 3, "json": _edl([[0.0, 37.13]])}
+
+    ssd.apply(Ctx(), "make it cinematic",
+              lambda n, a: calls.append((n, a)) or "EDL v4 saved")
+    assert calls[0][1]["params"]["y"] == ssd.TITLE_Y
+
+
+def test_the_reply_says_what_the_design_added_once():
+    applied = {"title": "Wooden boardwalk", "cutins": 2, "ending": True}
+    line = ssd.reply_line(applied, "I gave it a cinematic grade.")
+    assert line == ('To make it feel cinematic I also opened it on the title '
+                    '"Wooden boardwalk", cut in closer on its beats and end on '
+                    'a slow push-in.')
+    assert ssd.reply_line(applied, 'Added the title "Wooden boardwalk", '
+                          "cut-ins and a slow push-in.") == ""
+    assert ssd.reply_line(None, "x") == ""
+    out = agent_loop._insert_after_lead(
+        "The cut is silent with a cinematic grade. It's playing in the player."
+        "\n\nFor the music, pick one.", line)
+    assert out.startswith("The cut is silent with a cinematic grade. To make it")
+    assert out.endswith("For the music, pick one.")
