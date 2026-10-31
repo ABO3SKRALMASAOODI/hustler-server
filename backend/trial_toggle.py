@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 
 import claude_credit
 import free_trial
+import trial_pacing
 
 DEFAULT_MODEL = "claude-haiku-5-5"
 # The calibrated release values (C2_BRUTEFORCE.md §5). Filled in when the
@@ -145,6 +146,12 @@ def status(conn, now=None):
         "since": credit.get("since") if state == "auto_off" else None,
         "model": model,
         "per_account_usd_cap": float(flag.get("per_account_usd_cap") or 0),
+        # The effective per-account cap and the one sentence of why
+        # (trial_pacing.py recomputes it from the credit left and the
+        # trailing signup rate). None until pacing first ran.
+        "pacing": trial_pacing.card(stored),
+        "daily_usd_cap": (float(flag["daily_usd_cap"])
+                          if flag.get("daily_usd_cap") is not None else None),
         "spend": {"spent_usd": credit.get("spent_usd"),
                   "budget_usd": credit.get("budget_usd"),
                   "line_usd": credit.get("line_usd"),

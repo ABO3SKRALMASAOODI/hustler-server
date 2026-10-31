@@ -340,6 +340,14 @@ def create_app():
         start_trial_alerts(app)
     except Exception as e:
         app.logger.error("could not start claude trial alerts: %s", e)
+    # Adaptive pacing of the trial's Claude credit (31 Oct 2026): the daily
+    # and per-account caps in app_kv.free_result follow the credit left and
+    # the signup rate (trial_pacing.py). Advisory-locked, change-only write.
+    try:
+        from trial_pacing import start_scheduler as start_trial_pacing
+        start_trial_pacing(app)
+    except Exception as e:
+        app.logger.error("could not start trial pacing: %s", e)
     # The outcome loop's automatic intake (29 Oct 2026): every new customer
     # failure (failed job, error reply, unfulfilled request, upload or
     # player failure, our own MCP error) is filed as a ticket within a
