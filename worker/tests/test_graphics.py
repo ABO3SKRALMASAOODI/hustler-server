@@ -394,3 +394,25 @@ def test_unpinned_overlap_still_stacks(tmp_path):
     ys = _pos_ys(_build(texts, tmp_path=tmp_path))
     assert len(ys) >= 2
     assert abs(max(ys) - min(ys)) > 10.0, ys
+
+
+def test_lower_third_second_deck_stays_readable_at_a_small_font_size(tmp_path):
+    """Ticket #38 (30 Oct, user 2647): font_size 0.041 on a 1280x720 screen
+    recording drew the role line at 18 px, half the name line."""
+    texts = [{"id": "a", "text": "\u7db2\u7ad9\u5206\u985e | APP \u8cc7\u8a0a",
+              "start": 0.0, "end": 4.0, "template": "lower_third",
+              "font_size": 0.041}]
+    path = _build(texts, out_dur=10.0, play_res=(1280, 720), tmp_path=tmp_path)
+    _content, evs, _ = _events(path)
+    sizes = [int(n) for n in re.findall(r"\\fs(\d+)", evs[0].group(4))]
+    assert sizes[0] == 30 and sizes[-1] == 24       # was 18
+    assert sizes[-1] <= sizes[0]
+
+
+def test_lower_third_default_deck_is_unchanged(tmp_path):
+    texts = [{"id": "a", "text": "Sarah Chen | HEAD OF PRODUCT",
+              "start": 0.0, "end": 4.0, "template": "lower_third"}]
+    path = _build(texts, out_dur=10.0, play_res=(1280, 720), tmp_path=tmp_path)
+    _content, evs, _ = _events(path)
+    sizes = [int(n) for n in re.findall(r"\\fs(\d+)", evs[0].group(4))]
+    assert sizes[0] == 38 and sizes[-1] == 24

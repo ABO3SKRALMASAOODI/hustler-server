@@ -2543,6 +2543,80 @@ def _trial_render_refusal(ctx, name):
             "or accounts in the reply.")
 
 
+def _outcome_after_reply(outcome, report, honesty):
+    """RS_HONESTY_BROLL (31 Oct, ticket #49): an ask the turn did not
+    deliver (user 2665: the music and the angle; user 2666: b-roll over 6 s
+    of a 15 s "throughout") makes the request partial in the job result, the
+    message meta and the review signals (honesty.unmet_asks), never
+    fulfilled. ``report`` is trial_reply.finish's."""
+    unmet = list((report or {}).get("unmet") or [])
+    if not unmet:
+        return outcome
+    if isinstance(honesty, dict):
+        # ahead of the dropped lines: the intake files the first 600
+        # characters of the honesty record as the ticket's detail
+        dropped = honesty.pop("trial_reply_dropped", None)
+        honesty["unmet_asks"] = unmet
+        if dropped is not None:
+            honesty["trial_reply_dropped"] = dropped
+    return "partial" if outcome == "fulfilled" else outcome
+
+
+def _broll_throughout_hold(ctx, name, user_text):
+    """Once per request, before the editor's own render of a request that
+    asked for b-roll THROUGHOUT the video: the stretches its cutaways still
+    leave bare, with what is said in each, so it covers them at the
+    references' density before the one trial preview, not after it.
+
+    Ticket #51 (30 Oct, user 2666): "add relevant REAL B-roll footage
+    throughout the video" got two clips over 1-7 s of a 15.4 s talk; the
+    agent searched only the one literal place name, and the coverage fact
+    (the daily fixer's B-ROLL COVERAGE line) only arrived in the render's
+    result, when the trial's one preview was spent. The new Claude lanes
+    only (the trial, new subscribers); grandfathered lanes are untouched.
+    None = render as asked."""
+    if name != "render_preview" or getattr(ctx, "broll_hold_done", False):
+        return None
+    if getattr(ctx, "claude_trial", None) is None \
+            and getattr(ctx, "claude_paid", None) is None:
+        return None
+    try:
+        import ask_ledger
+        if not ask_ledger.broll_throughout(user_text):
+            return None
+        latest = ctx.latest_edl() or {}
+        edl = latest.get("json") or {}
+        gaps = ask_ledger.broll_shortfall(edl)
+        cov = ask_ledger.broll_gaps(edl)
+        # Only once some b-roll is placed: with none (every source failed),
+        # holding the render only ended the turn with no preview at all
+        # (replay of 2666 on the candidate, 31 Oct). A held turn that then
+        # replies without rendering is auto-rendered as before.
+        if not gaps or not cov or cov[0] <= 0 or cov[1] <= 0:
+            return None
+        ctx.broll_hold_done = True
+        total, covered, _all = cov
+        spans = []
+        for a, b in gaps[:3]:
+            said = ask_ledger.spoken_in(edl, getattr(ctx, "index", None), (a, b))
+            spans.append(f"{a:g}-{b:g}s" + (f' (said there: "{said}")' if said else ""))
+    except Exception as exc:  # noqa: BLE001 — the render goes ahead
+        print(f"[broll_hold] skipped: {type(exc).__name__}: {exc}", flush=True)
+        return None
+    return ("NOT RENDERED YET, do this first: the user asked for b-roll throughout the video, "
+            f"and cutaways cover {covered:g}s of the {total:g}s program "
+            f"({covered / total:.0%}). Still bare: {'; '.join(spans)}. Before "
+            "this request's preview, cover those stretches so b-roll fills "
+            "about 30-60% of the talking head: take the concrete nouns and "
+            "topics spoken in each stretch (a place, an object, an action, a "
+            "document) and source real footage for them (search_stock, then "
+            "add_stock_media and add_overlay over that stretch). Never show a "
+            "person, brand, number or event the speech does not name. Then "
+            "call render_preview again. If nothing fitting exists for a "
+            "stretch, call render_preview again and tell the user which part "
+            "has no b-roll.")
+
+
 def _fresh_turn_yields_to_fleet(model):
     """A fresh turn's first call waits for the fleet's TPM burn to fall
     under the OpenAI org's ceiling. Not on a Claude lane (the trial, new
@@ -4654,6 +4728,16 @@ def _record_outer_tool_outcome(ctx, name, result):
         pending = re.search(r"\bjob(?:_id=| )(\d+)\b", str(result))
         if pending:
             receipt["pending_job_id"] = int(pending.group(1))
+    if kind == "success":
+        # An order-only prerequisite ("call render_preview(complete=true)
+        # first") is met once the same tool later succeeds. Left open, it
+        # labelled a delivered request partial (ticket #58, 31 Oct: report
+        # before the complete render, then the render, reply sent). A wait
+        # on a named background job is resolved only by that job.
+        for row in ctx.turn_tool_outcomes:
+            if (row.get("tool") == name and row.get("kind") == "prerequisite"
+                    and not row.get("pending_job_id")):
+                row["resolved"] = True
     ctx.turn_tool_outcomes.append(receipt)
     if name in agent_tools.WRITE_TOOLS:
         ctx.write_attempts += 1
@@ -6288,6 +6372,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     subscriber=_new_sub)
                 if _report and _report.get("dropped"):
                     honesty["trial_reply_dropped"] = _report["dropped"][:12]
+                outcome = _outcome_after_reply(outcome, _report, honesty)
             if _trial_lane(ctx):
                 # Q8: a trial turn always ends on a version the user can take
                 # to the export paywall: the reviewers' open notes advise
@@ -6354,6 +6439,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 result = followup_refused
             elif _trial_render_refusal(ctx, name):
                 result = _trial_render_refusal(ctx, name)
+            elif (broll_hold := _broll_throughout_hold(
+                    ctx, name, user_message.get("content") or "")):
+                result = broll_hold
             else:
                 t0 = time.monotonic()
                 try:

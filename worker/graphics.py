@@ -110,6 +110,9 @@ def needs_shaping(text):
 # treats newlines as plain line breaks and " | " as literal text).
 # box_kind: "accent" fills the box with the accent color and sets the text
 # dark (the caption box treatment); "panel" backs the text with a dark bar.
+DECK2_MIN_FRAC = 0.030     # second deck: px floor as a share of min(W, H)
+DECK2_MIN_RATIO = 0.8      # ... and of the main line when font_size is explicit
+
 TEMPLATES = {
     "title": {
         # Hero card: Inter Display Black caps, tight leading, heavy shadow —
@@ -474,6 +477,17 @@ def _compile_item(tx, out_dur, play_res, y_shift=0.0, enforce_min=True,
         if d2["uppercase"]:
             sec_text = sec_text.upper()
         px2 = max(8, round(px * d2["scale"]))
+        # A readable floor for the second deck (ticket #38, 30 Oct): an
+        # explicit font_size of 0.041 put a lower_third's role line at 18 px
+        # on a 1280x720 screen recording, half the name line and unreadable.
+        # The deck never drops under DECK2_MIN_FRAC of the frame's short side
+        # and, when the item sets its own font_size, under DECK2_MIN_RATIO of
+        # the main line; it never exceeds the main line. Every template's own
+        # default size is above both floors, so default items are unchanged.
+        floor2 = DECK2_MIN_FRAC * min(W, H)
+        if tx.get("font_size") is not None:
+            floor2 = max(floor2, DECK2_MIN_RATIO * px)
+        px2 = min(max(px2, round(floor2)), max(px2, px))
         sp2 = 0.0 if shaped else round(d2["spacing"] * f, 1)
 
     edge_x, edge_y = round(0.04 * W), round(0.03 * H)
