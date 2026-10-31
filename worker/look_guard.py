@@ -54,8 +54,17 @@ def signature(edl):
                        fx.get("stylize"), wins], sort_keys=True, default=str)
 
 
+_DARK = re.compile(r"\b(?:dark(?:er)?|moody|low[- ]?key|night(?:time)?|noir|"
+                   r"gloomy|shadowy)\b", re.I)
+
+
 def wants_natural(text):
     return bool(_NATURAL.search(str(text or "")))
+
+
+def wants_dark(text):
+    """An explicit ask for a darker picture (and no 'keep it natural')."""
+    return bool(_DARK.search(str(text or ""))) and not wants_natural(text)
 
 
 def frame_stats(path, chain=""):
@@ -95,16 +104,18 @@ def compare(src, graded):
             "src_luma": sl / len(pairs), "graded_luma": gl / len(pairs)}
 
 
-def verdict(r, natural):
-    """The list of problems in a comparison (empty: it reads)."""
+def verdict(r, natural, dark=False):
+    """The list of problems in a comparison (empty: it reads). ``dark``: the
+    user asked for a darker picture, so only a near-black result fails."""
     if not r:
         return []
     bad = []
-    if r["luma"] < (LUMA_MIN_NATURAL if natural else LUMA_MIN):
+    luma_min = (LUMA_MIN_NATURAL if natural else 0.55 if dark else LUMA_MIN)
+    if r["luma"] < luma_min:
         bad.append(f"{100 * (1 - r['luma']):.0f}% darker than the source")
-    if r["bright"] < BRIGHT_MIN:
+    if r["bright"] < (0.7 if dark and not natural else BRIGHT_MIN):
         bad.append(f"its bright detail (HUD, text, UI) {100 * (1 - r['bright']):.0f}% dimmer")
-    if r["crush"] > CRUSH_MAX:
+    if r["crush"] > (0.2 if dark and not natural else CRUSH_MAX):
         bad.append(f"{100 * r['crush']:.0f}% more of the frame crushed to black")
     if natural and r["sat"] > SAT_MAX_NATURAL:
         bad.append(f"saturation up {100 * (r['sat'] - 1):.0f}% on a 'natural' ask")
@@ -215,8 +226,9 @@ def after_write(ctx, before_sig, request_text=""):
                 raws.append(None)
         src = [frame_stats(r) if r else None for r in raws]
         natural = wants_natural(request_text)
+        dark = wants_dark(request_text)
         r0 = compare(src, _measure(ctx, edl, picks, raws))
-        bad = verdict(r0, natural)
+        bad = verdict(r0, natural, dark)
         if not bad:
             return ""
         cur, r, notes = edl, r0, []
@@ -226,7 +238,7 @@ def after_write(ctx, before_sig, request_text=""):
                 continue
             cur, notes = nxt, notes + [note]
             r = compare(src, _measure(ctx, cur, picks, raws))
-            if not verdict(r, natural):
+            if not verdict(r, natural, dark):
                 break
         if cur is edl:
             return ("\nLEGIBILITY GUARD: this look leaves the picture "
@@ -235,7 +247,7 @@ def after_write(ctx, before_sig, request_text=""):
         res = ctx.write_edl(cur, "look tempered so the picture stays readable")
         if not str(res).startswith("EDL v"):
             return ""
-        left = verdict(r, natural)
+        left = verdict(r, natural, dark)
         return (f"\nLEGIBILITY GUARD ({str(res).split(':')[0]}): the stacked look "
                 f"left the picture {'; '.join(bad)} (measured on "
                 f"{len(picks)} frames against the source). Tempered: "
@@ -243,7 +255,9 @@ def after_write(ctx, before_sig, request_text=""):
                 f"{r['luma']:.2f}x the source's"
                 + (" (still: " + "; ".join(left) + ")" if left else
                    ", the content reads") + ". Keep this level of "
-                "darkness unless the user asks for darker.")
+                "darkness unless the user asks for darker, and in the reply "
+                "say the look keeps the picture readable: never claim deeper "
+                "or darker shadows than this.")
     except Exception as exc:  # noqa: BLE001
         print(f"[look_guard] skipped ({str(exc)[:160]})", flush=True)
         return ""

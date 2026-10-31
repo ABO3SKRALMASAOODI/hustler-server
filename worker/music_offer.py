@@ -17,7 +17,7 @@ _NO_MUSIC = re.compile(
     r"\b(?:don'?t|do\s+not|never)\s+(?:add|use|put|play)\s+(?:any\s+)?"
     r"(?:music|songs?)\b", re.I)
 _MUSIC = re.compile(
-    r"\b(?:music|song|soundtrack|background\s+track|beat|instrumental|tune)\b|"
+    r"\b(?:music|song|soundtrack|background\s+track|instrumental)\b|"
     r"\bplay\s+something\b|\b(?:replace|swap)\s+the\s+(?:audio|sound)\s+with\b|"
     r"\bcut\s+out\s+the\s+audio\s+and\s+(?:play|put|add)\b", re.I)
 
@@ -81,6 +81,25 @@ def offer_text(tracks):
     return ("For the music, pick one and I'll put it under the video: "
             + "; ".join(lines) + ". Reply with its number or name, or "
             "upload your own track.")
+
+
+_NEXT_Q = re.compile(r"\s*(?:Want|Would you like|Shall I|Should I|Do you want)"
+                     r"[^.!?]*\?\s*$")
+
+
+_NO_MUSIC_SAID = re.compile(
+    r"[^.!?\n]*\b(?:didn'?t|did not|haven'?t|have not|couldn'?t|could not|"
+    r"no|not)\b[^.!?\n]*\b(?:music|track|song)s?\b[^.!?\n]*[.!?]\s*", re.I)
+
+
+def append_offer(reply, offer):
+    """The reply with the offer as its one closing question: a trailing
+    'Want a title over the opening next?' and a 'no music this time, upload
+    one' line give way to it."""
+    body = _NEXT_Q.sub("", str(reply or "")).rstrip()
+    body = _NO_MUSIC_SAID.sub(" ", body).strip()
+    body = re.sub(r"[ \t]{2,}", " ", body)
+    return (body + "\n\n" + offer) if body else offer
 
 
 def turn_end_offer(ctx, request_text):

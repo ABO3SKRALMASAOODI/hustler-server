@@ -1177,8 +1177,32 @@ def action_follow(ctx, steps, started, run):
     if not 0.1 < ww < 0.95:
         return True
     keep = [tuple(map(float, k)) for k in edl.get("keep") or []]
+    spans = action_spans(ctx.index, path, keep, ww)
+    if not spans:
+        return True
+    frame = dict(edl.get("frame") or {})
+    frame["follow"] = spans[:schemas.FOLLOW_MAX_SPANS] \
+        if hasattr(schemas, "FOLLOW_MAX_SPANS") else spans
+    edl["frame"] = frame
+    try:
+        out = ctx.write_edl(edl, "the 9:16 crop follows the action in each "
+                                 "shot")
+        steps.append({"tool": "action_follow", "ok": str(out).startswith(
+            ("EDL v", "NO CHANGE")), "note": str(out)[:160]})
+    except Exception as exc:  # noqa: BLE001 — the static crop stands
+        steps.append({"tool": "action_follow", "ok": False,
+                      "note": f"{type(exc).__name__}: {str(exc)[:140]}"})
+    return True
+
+
+def action_spans(index, path, keep, ww):
+    """Frame.follow spans (one per shot the keep touches) that keep a crop
+    window of width ``ww`` on the action of ``keep``'s footage; [] when
+    nothing could be measured. Shared by the First cut's action_follow and
+    keep_segments' re-aim of footage the crop was never aimed at."""
+    import follow
     shots = [(float(s["start"]), float(s["end"]))
-             for s in (ctx.index or {}).get("shots") or []
+             for s in (index or {}).get("shots") or []
              if s.get("start") is not None and s.get("end") is not None]
     if not shots:
         shots = [(keep[0][0], keep[-1][1])] if keep else []
@@ -1216,18 +1240,4 @@ def action_follow(ctx, steps, started, run):
             keys = [[round((a + b) / 2.0, 3), round(x, 4), 0.5]]
         spans.append({"t0": round(a, 3), "t1": round(b, 3),
                       "k": [[k[0], k[1], 0.5] for k in keys]})
-    if not spans:
-        return True
-    frame = dict(edl.get("frame") or {})
-    frame["follow"] = spans[:schemas.FOLLOW_MAX_SPANS] \
-        if hasattr(schemas, "FOLLOW_MAX_SPANS") else spans
-    edl["frame"] = frame
-    try:
-        out = ctx.write_edl(edl, "the 9:16 crop follows the action in each "
-                                 "shot")
-        steps.append({"tool": "action_follow", "ok": str(out).startswith(
-            ("EDL v", "NO CHANGE")), "note": str(out)[:160]})
-    except Exception as exc:  # noqa: BLE001 — the static crop stands
-        steps.append({"tool": "action_follow", "ok": False,
-                      "note": f"{type(exc).__name__}: {str(exc)[:140]}"})
-    return True
+    return spans

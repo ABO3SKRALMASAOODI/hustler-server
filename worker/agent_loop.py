@@ -6298,7 +6298,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             _music_ask = music_offer.turn_end_offer(
                 ctx, user_message.get("content") or "")
             if _music_ask:
-                final = final.rstrip() + "\n\n" + _music_ask
+                final = music_offer.append_offer(final, _music_ask)
                 honesty["music_offer"] = True
             if _trial_lane(ctx):
                 # Q8: a trial turn always ends on a version the user can take

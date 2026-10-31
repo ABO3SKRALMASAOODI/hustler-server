@@ -74,17 +74,20 @@ class _TalkCtx:
     def __init__(self, q1):
         spec = ("so it is is deep and the work we do here matters because "
                 "people are watching closely today")
-        self.index = {"video": {"duration": 60.0, "width": 1920, "height": 1080},
+        # RS_ENGINE (31 Oct): a TALK, i.e. speech over most of the source
+        # (18 words in 8 s of a 60 s source is sparse speech, which the
+        # First cut now cuts by the footage: first_cut.sparse_speech)
+        self.index = {"video": {"duration": 20.0, "width": 1920, "height": 1080},
                       "words": _words(spec), "sentences": [
                           {"id": "s0", "t0": 10.0, "t1": 18.0,
                            "text": spec.capitalize() + "."}]}
-        self.duration = 60.0
+        self.duration = 20.0
         self.first_cut_q1 = q1
         self.versions_written, self.web_recordings = [], []
         self.last_preview = None
 
     def latest_edl(self):
-        return {"version": 2, "json": {"keep": [[0.0, 60.0]]}}
+        return {"version": 2, "json": {"keep": [[0.0, 20.0]]}}
 
 
 def test_only_an_engine_account_has_its_stutters_cut(monkeypatch):

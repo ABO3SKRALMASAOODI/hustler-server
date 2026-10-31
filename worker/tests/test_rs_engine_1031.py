@@ -295,3 +295,111 @@ def test_a_light_grade_passes_untouched(tmp_path):
     r = look_guard.compare([look_guard.frame_stats(raw)], [look_guard.frame_stats(
         raw, ",".join(renderer.cutaway_look_chain(edl, 1.0, 0.04)))])
     assert not look_guard.verdict(r, True)
+
+
+def test_the_offer_is_the_replys_one_closing_question():
+    out = music_offer.append_offer(
+        "The grade is on and the audio muted. Want a title over the opening next?",
+        "For the music, pick one ...")
+    assert out == ("The grade is on and the audio muted.\n\n"
+                   "For the music, pick one ...")
+    assert not music_offer.wants_music("cut every shot on the beat")
+
+
+def test_an_asked_for_dark_look_is_judged_by_its_own_limits():
+    assert look_guard.wants_dark("make it dark and moody")
+    assert not look_guard.wants_dark(ASK_2672)        # 'natural and clear' wins
+    r = {"luma": 0.65, "bright": 0.8, "crush": 0.12, "sat": 1.0}
+    assert look_guard.verdict(r, False)               # unasked: too dark
+    assert not look_guard.verdict(r, False, dark=True)
+
+
+def test_a_replay_follows_the_programs_follow_path_and_never_repeats_speech(monkeypatch):
+    monkeypatch.setattr(agent_tools, "_write_keep", _fake_write_keep)
+    frame = {"mode": "crop", "ratio": "9:16", "focus_x": 0.5,
+             "follow": [{"t0": 100.0, "t1": 104.0,
+                         "k": [[100.0, 0.2, 0.5], [104.0, 0.6, 0.5]]}]}
+    ctx = _Ctx(frame)
+    ctx.index = {"words": [{"w": "first", "t0": 101.0, "t1": 101.3},
+                           {"w": "touch", "t0": 101.4, "t1": 101.7}]}
+    res = agent_tools.keep_segments(ctx, [STAND, STAND, TOUCH])
+    rep = [i for i in ctx.latest_edl()["json"]["inserts"] if i["id"].startswith("rep")][0]
+    x0, _y0, x1, _y1 = rep["crop"]
+    centre = (x0 + x1) / 2          # the path at 101.61 s: 0.2 + 0.4 * 1.61 / 4
+    assert abs(centre - 0.361) < 0.01
+    assert rep["mute"] is True and "play SILENT" in res
+
+
+class _NoChangeCtx(_Ctx):
+    def write_edl(self, edl, desc):
+        if edl == self.versions[-1]["json"]:
+            return f"NO CHANGE — the EDL is identical to v{self.versions[-1]['version']}"
+        return super().write_edl(edl, desc)
+
+
+def test_repeats_land_when_the_keep_list_itself_is_unchanged(monkeypatch):
+    # replay seen live (2670b, after): the same keep with a repeat added came
+    # back "NO CHANGE" and the repeat was lost
+    monkeypatch.setattr(agent_tools, "_write_keep", _fake_write_keep)
+    ctx = _NoChangeCtx()
+    agent_tools.keep_segments(ctx, [STAND, TOUCH])
+    res = agent_tools.keep_segments(ctx, [STAND, STAND, TOUCH])
+    assert res.startswith("EDL v") and "REPEATS KEPT" in res
+    assert len(ctx.latest_edl()["json"]["inserts"]) == 1
+    again = agent_tools.keep_segments(ctx, [STAND, STAND, TOUCH])
+    assert again.startswith("NO CHANGE") and "WARNING" not in again
+
+
+def test_the_offer_replaces_a_no_music_line():
+    reply = ("I muted the original audio, so the clip now plays silently. A "
+             "cinematic grade gives it a cooler look. I didn't add music this "
+             "time; upload a track you like and I'll put it in. I didn't change "
+             "the angle this time. It's playing in the player.")
+    out = music_offer.append_offer(reply, "For the music, pick one ...")
+    assert "didn't add music" not in out and "didn't change the angle" in out
+    assert "look. I didn't change the angle this time. It's" in out
+    tight = music_offer.append_offer(
+        "The picture stays readable. I didn't add music this time; upload a "
+        "track you like and I'll put it in. I didn't change the angle.", "Pick:")
+    assert "readable. I didn't change the angle." in tight
+    assert out.endswith("For the music, pick one ...")
+
+
+def test_a_loop_never_crosses_a_camera_cut(monkeypatch):
+    # 2670 replay: [151.5, 152.6] x8 spanned a chapter card (cut at 151.93)
+    monkeypatch.setattr(agent_tools, "_write_keep", _fake_write_keep)
+    ctx = _Ctx()
+    ctx.index = {"words": [], "video": {"fps": 30},
+                 "shots": [{"start": 0.0}, {"start": 151.93}, {"start": 160.0}]}
+    res = agent_tools.keep_segments(ctx, [[151.5, 152.6]] * 3 + [[153.33, 156.67]])
+    edl = ctx.latest_edl()["json"]
+    assert edl["keep"][0] == [151.96, 152.6]
+    reps = [i for i in edl["inserts"] if i["id"].startswith("rep")]
+    assert len(reps) == 2 and all(i["source_start_s"] == 151.96 for i in reps)
+    assert "LOOP ON ONE SHOT" in res
+
+
+def test_new_footage_gets_the_crop_aimed_at_it(monkeypatch):
+    # 2670 replay (r3): the loop stood outside the First cut's 9:16 window
+    import first_cut_visual
+    monkeypatch.setattr(agent_tools, "_write_keep", _fake_write_keep)
+    seen = {}
+
+    def spans(index, path, keep, ww):
+        seen["keep"] = keep
+        return [{"t0": s, "t1": e, "k": [[round((s + e) / 2, 3), 0.22, 0.5]]}
+                for s, e in keep]
+    monkeypatch.setattr(first_cut_visual, "action_spans", spans)
+    frame = {"mode": "crop", "ratio": "9:16", "focus_x": 0.54,
+             "follow": [{"t0": 0.0, "t1": 30.0, "k": [[10.0, 0.5, 0.5]]}]}
+    ctx = _Ctx(frame)
+    ctx.index = {"words": [], "video": {"width": 1920, "height": 1080, "fps": 30}}
+    ctx.proxy_path = lambda: "/nonexistent/proxy.mp4"
+    res = agent_tools.keep_segments(ctx, [[112.8, 115.62]] * 3 + [[157.83, 161.0]])
+    assert "CROP RE-AIMED" in res
+    assert seen["keep"] == [(112.8, 115.62), (157.83, 161.0)]
+    edl = ctx.latest_edl()["json"]
+    assert [round(sp["t0"], 2) for sp in edl["frame"]["follow"]] == [112.8, 157.83]
+    rep = [i for i in edl["inserts"] if i["id"].startswith("rep")][0]
+    x0, _y0, x1, _y1 = rep["crop"]
+    assert abs((x0 + x1) / 2 - 0.22) < 0.01      # the replay sits on the aim too
