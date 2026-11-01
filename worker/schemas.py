@@ -43,7 +43,9 @@ from pydantic import AfterValidator, BaseModel, Field, field_validator, model_va
 # v12: transcription/silence WAVs preserve the media clock through AAC joins,
 # timestamp gaps and delayed audio starts. v11 sample-packed WAVs can drift
 # from renderer PTS; do not reuse their word times for a new indexing job.
-PIPELINE_VERSION = 12
+# v13 validates uncertain ASR words before caption styling. Reusing a v12
+# index would preserve the confident mishearing this generation corrects.
+PIPELINE_VERSION = 13
 
 MIN_SPAN_S = 0.05
 GAIN_MIN_DB = -60.0

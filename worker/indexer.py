@@ -111,6 +111,8 @@ def _transcribe_wav(job_id, wav_local, duration, warnings,
         try:
             words, language = transcribe.transcribe(
                 wav_local, warnings, progress_cb=progress_cb)
+            import transcript_verify
+            words = transcript_verify.verify(words, wav_local, language, warnings)
             # ASR on music invents timings past the end of the file — clamp
             # before sentences inherit the bad spans.
             words = clamp_word_times(words, duration)

@@ -33,6 +33,9 @@ S3_REGION = os.getenv("S3_REGION", "auto")
 # Sol, a different (pricier) model.
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# Dedicated ASR validates uncertain transcript words before they become the
+# most prominent caption. Independent of subjective AUDIO_REVIEW_ENABLED.
+TRANSCRIPT_VERIFY_ENABLED = os.getenv("TRANSCRIPT_VERIFY_ENABLED", "1") == "1"
 AGENT_MODEL = os.getenv("AGENT_MODEL", "gpt-6-luna")
 if AGENT_MODEL == "gpt-5.6-luna":
     AGENT_MODEL = "gpt-6-luna"  # migrate the former deployed default too

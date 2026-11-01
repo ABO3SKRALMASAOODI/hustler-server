@@ -267,7 +267,9 @@ def test_render_version_stamps_are_unchanged():
     The pin follows production main, never a track: CARD_LAYOUT_VERSION went
     1 -> 2 -> 3 in production (8b0322c composed holds keep source-fed cards;
     56b8736 cards align to indexed camera cuts) after the Wave 1 base was
-    cut, so the integration re-pinned it to 3. No Wave 1 track moves a stamp."""
+    cut, so the integration re-pinned it to 3. PIPELINE_VERSION 13 refreshes
+    cached transcripts after independent ASR verification; render stamps
+    are unchanged. No Wave 1 track moves a stamp."""
     import config
     with open(os.path.join(FIX, "w1_render_stamps.json")) as f:
         pin = json.load(f)
