@@ -40,10 +40,30 @@ def wants_music(text):
     """True when the user asked for music to be added or to replace the
     sound (not when they asked to remove it)."""
     t = str(text or "")
+    import ask_ledger
+    # The fulfillment ledger also tracks beat-synced cuts. That is not an
+    # instruction to add a new track; reuse its negation handling only for
+    # the explicit localized music nouns missing from the English matcher.
+    if re.search(r"\b(?:musik|musique|m[uú]sica)\b", t, re.I) \
+            and "music" in ask_ledger.asks(t):
+        return True
     if not t.strip() or _NO_MUSIC.search(t) and not re.search(
             r"\b(?:play|add|put)\s+(?:some|a|new|other|different)\b", t, re.I):
         return False
     return bool(_MUSIC.search(t))
+
+
+def choice_outcome(before_reply, outcome, unmet, offer):
+    """A real track choice is waiting for the user, not a failed edit.
+
+    Only reclassify a turn otherwise fulfilled before the ask ledger found
+    missing music. Existing tool/quality failures and other unmet asks stay
+    partial; a generic suggestion without an opened offer is not a choice.
+    """
+    if offer and before_reply == "fulfilled" and outcome == "partial" \
+            and set(unmet or []) == {"music"}:
+        return "awaiting_user"
+    return outcome
 
 
 def moods_for(text):

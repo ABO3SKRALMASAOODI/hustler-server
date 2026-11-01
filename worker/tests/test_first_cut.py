@@ -74,12 +74,31 @@ def test_a_screen_recording_keeps_its_shape(monkeypatch):
     index = _index(50)
     index["spatial"] = {"samples": [{"t": i, "faces": [], "dense_ui": True,
                                      "text": []} for i in range(10)]}
+    index["visual_storyboard"] = {"evidence": [{"subjects": ["browser window"],
+        "objects": ["navigation bar", "website"], "visible_text": "Home Features"}]}
     ctx = Ctx(index)
     calls = _record(monkeypatch, ctx)
     _steps, applied, _p = first_cut.video_chain(ctx, None, _clock(), {"usd": 0})
     assert "auto_reframe" not in [c[0] for c in calls]
     assert any("own shape" in a for a in applied)
     assert first_cut._summary(applied, 30) .startswith("a 30-second version")
+
+
+def test_no_face_table_geometry_is_not_a_screen_or_ui_camera(monkeypatch):
+    index = _index(28, width=1440, height=1080)
+    index['spatial'] = {'samples': [{'t': i, 'faces': [], 'dense_ui': True,
+        'text': [[.2, .3, .4, .5]] * 8} for i in range(10)]}
+    # Without semantic evidence, a rectangle detector cannot claim a screen.
+    assert not first_cut._screen_like(index)
+    index['visual_storyboard'] = {'evidence': [{'subjects': ['beer glass', 'water glass'],
+        'objects': ['phone', 'notepad', 'bar table'], 'visible_text': '',
+        'setting': 'Bar interior with a dark wooden table'}]}
+    assert not first_cut._screen_like(index)
+    ctx = Ctx(index)
+    calls = _record(monkeypatch, ctx)
+    _steps, applied, _p = first_cut.video_chain(ctx, None, _clock(), {'usd': 0})
+    assert 'auto_reframe' in [c[0] for c in calls]
+    assert not any('screen' in a or 'follows what' in a for a in applied)
 
 
 def test_long_source_cuts_to_one_scouted_story_first(monkeypatch):

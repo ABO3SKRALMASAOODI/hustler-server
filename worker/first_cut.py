@@ -984,13 +984,32 @@ def _faces(index):
 
 
 def _screen_like(index):
-    """A screen recording: most samples are dense UI or text, with no face."""
+    """Dense geometry needs semantic UI evidence before choosing a screen edit.
+
+    The fast spatial detector measures connected edges, not OCR. Glasses,
+    furniture and a bar table can produce many of its 'text' rectangles.
+    Those rectangles alone must not choose screen framing or a UI-follow camera.
+    """
     samples = ((index or {}).get("spatial") or {}).get("samples") or []
     if not samples:
         return False
     ui = sum(1 for s in samples if s.get("dense_ui") or len(s.get("text") or []) >= 3)
     faces = sum(1 for s in samples if s.get("faces"))
-    return ui >= 0.6 * len(samples) and faces <= 0.15 * len(samples)
+    if ui < 0.6 * len(samples) or faces > 0.15 * len(samples):
+        return False
+    evidence = ((index or {}).get("visual_storyboard") or {}).get("evidence") or []
+    cues = re.compile(r"\b(?:screen recording|screencast|computer screen|phone screen|"
+                      r"browser|web(?:site|page)|desktop|spreadsheet|code editor|"
+                      r"terminal window|(?:software|app|user) interface|"
+                      r"(?:menu|navigation|search) bar|ui (?:panel|element)s?)\b", re.I)
+    semantic = []
+    for row in evidence:
+        parts = [str(row.get("setting") or ""), str(row.get("description") or "")]
+        parts += [str(v) for k in ("subjects", "objects", "actions") for v in row.get(k) or []]
+        text = " ".join(parts).strip()
+        if text:
+            semantic.append(bool(cues.search(text)))
+    return bool(semantic) and sum(semantic) >= 0.6 * len(semantic)
 
 
 def static_bands(frames):

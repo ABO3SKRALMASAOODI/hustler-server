@@ -13,6 +13,23 @@ def execution_policy():
 def enqueue(cur, project_id, user_id, job_type, payload):
     stamped = dict(payload or {})
     stamped.setdefault("execution_policy", execution_policy())
+    if job_type == "preview" and stamped.get("source") == "user_edit" \
+            and not stamped.get("force") and stamped.get("edl_version"):
+        # The player needs a watchable file, not its own lower-resolution
+        # encode alongside the editor's approval render (#74). Share the
+        # worker's transaction lock so either arrival order has one owner.
+        version = int(stamped["edl_version"])
+        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)",
+                    (int(project_id), version))
+        cur.execute("""SELECT id FROM video_jobs
+                       WHERE project_id = %s AND type = 'preview'
+                         AND state IN ('queued', 'running')
+                         AND payload->>'edl_version' = %s
+                       ORDER BY id DESC LIMIT 1""",
+                    (project_id, str(version)))
+        existing = cur.fetchone()
+        if existing:
+            return existing["id"]
     cur.execute(
         """INSERT INTO video_jobs (project_id, user_id, type, payload)
            VALUES (%s, %s, %s, %s) RETURNING id""",

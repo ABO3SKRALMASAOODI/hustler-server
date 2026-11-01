@@ -693,6 +693,15 @@ class ToolContext:
                         "call reset_edit to start from the full video, then "
                         "rebuild what they asked for.")
             return msg
+        import counter_facts
+        if counter_facts.candidates(prev["json"], normalized):
+            clock = timeline_mod.Timeline(normalized.get("keep") or [],
+                normalized.get("inserts") or [], normalized.get("speed"))
+            counter_refusal = counter_facts.check_write(
+                prev["json"], normalized, (self.index or {}).get("words"),
+                clock.src_to_out, self.user_message)
+            if counter_refusal:
+                return f"REJECTED (EDL v{prev['version']} unchanged): {counter_refusal}"
         violations = scope_guard.preservation_violations(
             prev["json"], normalized, self.user_message,
             source_shape=_source_shape(self))
@@ -23454,7 +23463,7 @@ REPEAT_FULL_WINDOW_MIN = 60
 
 
 def _long_program_repeat_proof(ctx, row, plan):
-    """An MCP caller asking for another complete draft of a long program
+    """An editor asking for another complete draft of a long program
     whose length barely moved since the last one (within the hour) gets the
     changed-section proof instead, and is told where the full file comes
     from. Ticket #46 (30 Oct, user 2007): render_preview(complete=true) ran
@@ -23959,8 +23968,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
     # ("this should read X, behind the person") instead of nine even samples
     # of the whole programme that the edit may not even appear in.
     plan = _verify_plan_for(ctx, row)
-    if requested_complete and not autorendering and quality == "draft" \
-            and music_gate.is_mcp(ctx):
+    if requested_complete and not autorendering and quality == "draft":
         proof = _long_program_repeat_proof(ctx, row, plan)
         if proof:
             return proof
@@ -23976,6 +23984,15 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         return (f"EDL v{version} has no changed-section render to return. "
                 "No full encode was started. Call render_preview(complete=true) "
                 "to create a watchable complete preview.")
+    # An explicitly ordered Studio story must be checked while edits can
+    # still be corrected, before a full preview consumes its allowance.
+    # MCP editors own their judgment; the automatic First cut stays deterministic.
+    if (_claude_lane_turn(ctx) and not getattr(ctx, "sight_out", False)
+            and not getattr(ctx, "second_opinions_off", False)):
+        import sequence_preflight
+        order_note = sequence_preflight.check(ctx, row, quality_verifier.request_text_for(ctx))
+        if order_note:
+            return order_note
     # Adopt the speculative encode of this exact version when one is already
     # queued/running (round 98) — same payload shape, same verify plan,
     # half the wait and none of the double cost.

@@ -328,6 +328,25 @@ def test_studio_request_never_joins_an_mcp_render():
     assert (job_id, created) == (126611, True)
 
 
+def test_approval_supersedes_the_players_draft_before_enqueuing(monkeypatch):
+    cur = _JoinCursor(default_edl(30), studio_job=False)
+    retired = []
+    monkeypatch.setattr(dbx, '_retire_player_drafts', lambda *a: retired.append(a[1:]))
+    job, created = dbx.get_or_enqueue_preview_job(_Conn(cur), 5251, 2647,
+        {'edl_version': 18, 'quality': 'approval', 'audio_model_review': False})
+    assert created and job == 126611 and retired == [(5251, 18)]
+
+
+def test_failed_approval_retry_never_retires_a_working_player_draft(monkeypatch):
+    cur = _JoinCursor(default_edl(30), studio_job=False)
+    retired = []
+    monkeypatch.setattr(dbx, '_retire_player_drafts', lambda *a: retired.append(a))
+    monkeypatch.setattr(dbx, '_failed_render_for_request', lambda *a: 991)
+    assert dbx.get_or_enqueue_preview_job(_Conn(cur), 5251, 2647,
+        {'edl_version': 18, 'quality': 'approval', 'audio_model_review': False}) == (991, False)
+    assert not retired and cur.inserted is None
+
+
 # ── what an MCP result says about a preview ─────────────────────────────
 
 def test_preview_summary_reports_the_fact():

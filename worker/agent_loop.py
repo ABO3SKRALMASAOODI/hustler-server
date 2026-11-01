@@ -2684,6 +2684,14 @@ def _trial_preview_cap(ctx, cap, operator_run=False):
                int(config.CLAUDE_TRIAL_MAX_PREVIEWS))
 
 
+def _count_trial_preview(ctx, result):
+    import sequence_preflight
+    if (getattr(ctx, "trial_preview_cap", None)
+            and not (isinstance(result, str)
+                     and result.startswith(sequence_preflight.REFUSAL_PREFIX))):
+        ctx.trial_previews = int(getattr(ctx, "trial_previews", 0) or 0) + 1
+
+
 def _trial_render_refusal(ctx, name):
     """A refusal text once a trial request has rendered its
     CLAUDE_TRIAL_MAX_PREVIEWS previews, for another render or an edit that
@@ -6674,6 +6682,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             outcome, billable = _turn_completion(
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
+            outcome_before_reply = outcome
             import fulfillment
             final = fulfillment.disclose(ctx, final)
             _new_sub = (not _trial_lane(ctx)
@@ -6712,6 +6721,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if _music_ask:
                 final = music_offer.append_offer(final, _music_ask)
                 honesty["music_offer"] = True
+                outcome = music_offer.choice_outcome(
+                    outcome_before_reply, outcome,
+                    honesty.get("unmet_asks"), _music_ask)
             if _trial_lane(ctx):
                 # Q8: a trial turn always ends on a version the user can take
                 # to the export paywall: the reviewers' open notes advise
@@ -6730,7 +6742,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           message_meta)
             _complete_adopted_steers(ctx, worker_db, job)
-            return {"status": "replied", "edl_version": latest["version"],
+            return {"status": ("awaiting_user" if outcome == AWAITING_USER else "replied"),
+                    "edl_version": latest["version"],
                     "steps": total_steps, "auto_render": ctx.autorendered,
                     "honesty": honesty, "timings": timings,
                     # A turn that only ever hit the token ceiling delivered
@@ -6857,13 +6870,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     check = followup_recipes.request_check(ctx)
                     if check:
                         result = result + "\n" + check
-                if name == "render_preview" and \
-                        getattr(ctx, "trial_preview_cap", None):
-                    ctx.trial_previews = int(
-                        getattr(ctx, "trial_previews", 0) or 0) + 1
+                if name == "render_preview":
+                    _count_trial_preview(ctx, result)
                 if name in agent_tools.WRITE_TOOLS and \
                         isinstance(result, str) and result.startswith("EDL v"):
                     ctx.write_calls.append(name)
+                    import sequence_preflight
+                    result += sequence_preflight.cleanup_reminder(
+                        quality_verifier.request_text_for(ctx), ctx.write_calls)
                     batch_committed_edl = True
             _record_outer_tool_outcome(ctx, name, result)
             total_steps += 1

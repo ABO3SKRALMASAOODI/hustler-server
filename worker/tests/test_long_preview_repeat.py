@@ -60,8 +60,16 @@ def test_nothing_changed_to_prove_renders_as_asked(monkeypatch):
     assert agent_tools._long_program_repeat_proof(_ctx(last), LECTURE, []) is None
 
 
-def test_render_preview_asks_the_guard_only_for_mcp_drafts():
-    import inspect
-    src = inspect.getsource(agent_tools.render_preview)
-    assert "_long_program_repeat_proof(ctx, row, plan)" in src
-    assert "music_gate.is_mcp(ctx)" in src
+def test_studio_repeat_draft_uses_the_same_changed_section_guard(monkeypatch):
+    calls = _wire(monkeypatch)
+    last = {"id": 1, "edl_version": 10, "duration_s": 2460.0, "age_s": 60}
+    ctx = _ctx(last)
+    ctx.latest_edl = lambda: LECTURE
+    ctx.rendered_versions = set()
+    ctx.failed_preview_versions = {}
+    ctx.last_preview = None
+    monkeypatch.setattr(agent_tools, "_verify_plan_for", lambda *_: [])
+    monkeypatch.setattr(agent_tools.music_gate, "is_mcp", lambda *_: False)
+    out = agent_tools.render_preview(ctx, complete=True, quality="draft")
+    assert calls == [[(296.0, 356.0)]]
+    assert "CHANGED SECTIONS only" in out

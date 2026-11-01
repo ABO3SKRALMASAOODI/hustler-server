@@ -1844,6 +1844,25 @@ def _join_studio_preview(cur, project_id, version, payload):
     return other["id"]
 
 
+def _retire_player_drafts(cur, project_id, version):
+    # A browser/setup draft has no editing-model waiter and the
+    # approval file supersedes its picture. Retire it before starting
+    # the approval encode, even at the same EDL version (#74).
+    # Explicit forced renders and another model's preview retain
+    # their separate contract. The progress fence stops retired work.
+    cur.execute("""UPDATE video_jobs
+                   SET state = 'done', result = %s, updated_at = NOW()
+                   WHERE project_id = %s AND type = 'preview'
+                     AND state IN ('queued', 'running')
+                     AND payload->>'edl_version' = %s
+                     AND payload->>'source' = 'user_edit'
+                     AND COALESCE(payload->>'quality', 'draft') = 'draft'
+                     AND COALESCE(payload->>'force', 'false') <> 'true'""",
+                (Json({"superseded_by": version,
+                       "superseded_by_quality": "approval"}),
+                 project_id, str(version)))
+
+
 def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
     """Atomically join or enqueue one live preview for an EDL version.
 
@@ -1887,10 +1906,14 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
                      (payload or {}).get("quality", "draft")))
         row = cur.fetchone()
         if row:
+            if (payload or {}).get("quality") == "approval":
+                _retire_player_drafts(cur, project_id, version)
             return row["id"], False
         if not audio_model_review:
             joined = _join_studio_preview(cur, project_id, version, payload)
             if joined is not None:
+                if (payload or {}).get("quality") == "approval":
+                    _retire_player_drafts(cur, project_id, version)
                 return joined, False
         failed = _failed_render_for_request(cur, project_id, 'preview', payload)
         if failed is not None:
@@ -1910,6 +1933,8 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
             row = cur.fetchone()
             if row:
                 return row["id"], False
+        if (payload or {}).get("quality") == "approval":
+            _retire_player_drafts(cur, project_id, version)
         cur.execute("""INSERT INTO video_jobs
                           (project_id, user_id, type, payload)
                        VALUES (%s, %s, 'preview', %s) RETURNING id""",

@@ -147,6 +147,7 @@ whooks = _pure_worker_module("hooks")
 # MCP batch carries no user words, so a batch that makes the whole short B&W
 # is applied with the advisory the worker's writes give (worker/mono_policy).
 wmono = _pure_worker_module("mono_policy")
+wcounter = _pure_worker_module("counter_facts")
 
 video_bp = Blueprint("video", __name__)
 
@@ -3173,10 +3174,14 @@ def tray_submit(user_id, project_id):
                          (_subscribe_gate_applies(cur, user_id)
                           and not _trial_admission(cur, user_id, project_id)))
         if not original:
+            from video_services.media_selection import named_base
+            base = named_base([a for a in ordered if a['id'] not in reference_ids],
+                              data.get('brief'))
             promoted_idx, promoted = next(
                 ((i, a) for i, a in enumerate(ordered)
                  if a["kind"] == "video_clip"
-                 and a["id"] not in reference_ids), (-1, None))
+                 and a["id"] not in reference_ids
+                 and (base is None or a['id'] == base['id'])), (-1, None))
         jobs = []
         edl_now = _latest_edl(cur, project_id)
         visual_candidates = sum(
@@ -3187,6 +3192,10 @@ def tray_submit(user_id, project_id):
         autoplace = wschemas.edl_accepts_tray_autoplace(
             (edl_now or {}).get("version"),
             (edl_now or {}).get("json"), visual_candidates)
+        from video_services.media_selection import contains_alternate_versions
+        if contains_alternate_versions([a for a in ordered if a['id'] not in reference_ids],
+                                       data.get('brief')):
+            autoplace = False
         for i, a in enumerate(ordered):
             if a["id"] in reference_ids:
                 # Reference footage remains available to the agent's eyes and
@@ -6144,6 +6153,15 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                                        normalized)
             if refusal:
                 return {"error": refusal[:500]}, 400
+        if origin == "mcp" and original and wcounter.candidates(latest["json"], normalized):
+            cur.execute("SELECT json->'words' AS words FROM indexes WHERE video_sha256=%s",
+                        (original.get("sha256"),))
+            words = (cur.fetchone() or {}).get("words") or []
+            clock = wtimeline.Timeline(normalized.get("keep") or [],
+                normalized.get("inserts") or [], normalized.get("speed"))
+            refusal = wcounter.check_write(latest["json"], normalized, words, clock.src_to_out)
+            if refusal:
+                return {"error": refusal, "code": "invalid_edit_batch"}, 400
         notes = list(batch_notes)
         if origin == "mcp":
             try:
