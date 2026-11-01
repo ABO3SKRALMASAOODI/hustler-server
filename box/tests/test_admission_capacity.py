@@ -448,10 +448,13 @@ def test_a_customer_waiting_for_memory_never_stalls_factory_mcp_calls(adm):
 
 def test_light_calls_wait_only_for_real_memory(adm):
     box = _mixed_box(adm)
+    running = _submit(box, lane="mcp", priority="customer", jtype="mcp_tool")
+    _assign(box)
+    assert running["slot"]               # plenty of memory: it runs
     adm._mem["gib"] = 3.6
     mcp = _submit(box, lane="mcp", priority="customer", jtype="mcp_tool")
     _assign(box)
-    assert mcp["slot"] is None           # 3.6 - 0.4 < 3.5: it waits
+    assert mcp["slot"] is None           # 3.6 - 0.4 < 3.5 while one runs
     adm._mem["gib"] = 8.0
     _assign(box)
     assert mcp["slot"]
@@ -502,12 +505,15 @@ def test_the_factory_s_first_render_always_starts_on_a_quiet_box(adm):
     finals = [_submit(box, lane="batch", jtype="final") for _ in range(2)]
     _assign(box)
     assert finals[0]["slot"] and finals[1]["slot"] is None
-    # Below the box-wide reserve even the first one waits.
+    # Below the box-wide reserve on an IDLE box the first one still starts
+    # (1 Nov 2026 outage: an idle box below its reserve started nothing for
+    # 50 minutes), and the next waits.
     box2 = _mixed_box(adm, owner_mem_headroom_gib=2.5)
     adm._mem["gib"] = 3.0
+    first = _submit(box2, lane="batch", jtype="final")
     held = _submit(box2, lane="batch", jtype="final")
     _assign(box2)
-    assert held["slot"] is None
+    assert first["slot"] and held["slot"] is None
 
 
 def test_factory_budget_counts_its_heavy_calls_only(adm):
