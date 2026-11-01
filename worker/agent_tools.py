@@ -11587,6 +11587,28 @@ def _original_local(ctx):
     return local
 
 
+def _no_original_refusal(ctx, what):
+    """A REJECTED answer when the project has no original recording, else
+    None. Ticket #89 (1 Nov 2026): an MCP project assembled from clips and
+    images (no upload of its own) asked enhance_cursor for a pass;
+    _original_row raised and the generic "Could not run" text was read as a
+    TRANSIENT_FAILURE, so the caller was told to retry something that can
+    never run and the intake filed our failure as P0. A missing original is
+    a precondition of the project, said once, with what does work."""
+    try:
+        row = ctx.db.run(dbx.latest_asset, ctx.project_id, "original")
+    except Exception:
+        return None            # the tool's own path reports a real DB fault
+    if row:
+        return None
+    return (f"REJECTED: {what} works on the project's own uploaded "
+            "recording, and this project has none (it is built from inserted "
+            "clips and images). Nothing changed. Tell the user that plainly; "
+            "on this timeline use add_zoom / add_zoom_path to follow the "
+            "action, set_screen_frame for a floating frame, blur_region or an "
+            "overlay to cover a mark, or set_volume for the sound.")
+
+
 def _original_row(ctx):
     """The original's asset row — storage key + sha, WITHOUT downloading the
     bytes. Round 67: the remote clean path stages the original on the
@@ -12278,6 +12300,9 @@ def _apply_patches(ctx, new_items, what, drop=None):
 
 def erase_burned_text(ctx, scope="captions", start=None, end=None):
     """Detect and repaint out every burned-in region of one kind, one pass."""
+    refusal = _no_original_refusal(ctx, "erasing burned-in text")
+    if refusal:
+        return refusal
     if not ctx.has_main_video:
         return "REJECTED: there is no main video in this project."
     sc = (scope or "captions").strip().lower()
@@ -12442,6 +12467,9 @@ def erase_region(ctx, x=None, y=None, w=None, h=None, start=None, end=None,
     fourteen minutes, and the turn hit its time budget with the user's OTHER
     request (a brightness lift) still undone. The same five rectangles in one
     call are one pass."""
+    refusal = _no_original_refusal(ctx, "erasing pixels")
+    if refusal:
+        return refusal
     if not ctx.has_main_video:
         return "REJECTED: there is no main video in this project."
     if regions is not None and not isinstance(regions, (list, tuple)):
@@ -12614,6 +12642,9 @@ def enhance_cursor(ctx, scale=None, smoothing=None, click_highlight=None,
                    click_times=None):
     """Find the mouse pointer in the source, smooth its path and redraw it
     bigger, with a ripple at each supplied click time."""
+    refusal = _no_original_refusal(ctx, "the cursor pass")
+    if refusal:
+        return refusal
     edl = dict(ctx.latest_edl()["json"])
     cur = dict(_edl_cursor(edl) or {})
     spec = {"scale": cur.get("scale", 2.0),
