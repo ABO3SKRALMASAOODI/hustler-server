@@ -141,6 +141,31 @@ def test_cache_breakpoints_sit_on_stability_boundaries():
     assert "cache_control" in msgs[-1]["content"][-1]
 
 
+def test_the_one_call_opus_planner_writes_no_cache():
+    # 1 Nov 2026: 7.9% read of what it wrote; its turn continues on Haiku.
+    system, msgs, tools = claude_lane.to_anthropic([
+        {"role": "system", "content": "kernel"},
+        {"role": "system", "content": "project"},
+        {"role": "user", "content": "go"},
+    ], TOOLS, "claude-opus-5-5")
+    claude_lane._mark_cache(system, msgs, tools, "claude-opus-5-5")
+    assert not any("cache_control" in b for b in system)
+    assert not any("cache_control" in t for t in tools)
+    assert not any("cache_control" in b for m in msgs for b in m["content"])
+
+
+def test_a_one_shot_critic_caches_only_its_shared_instructions():
+    # 1 Nov 2026: the preview critic read 0% of what it wrote, because the
+    # last-message breakpoint covered that preview's unique frames.
+    system, msgs, tools = claude_lane.to_anthropic([
+        {"role": "system", "content": "critic instructions"},
+        {"role": "user", "content": "frames of this preview"},
+    ], None, "claude-haiku-5-5")
+    claude_lane._mark_cache(system, msgs, tools, "claude-haiku-5-5")
+    assert "cache_control" in system[0]
+    assert not any("cache_control" in b for m in msgs for b in m["content"])
+
+
 def _message(blocks, stop="tool_use", **usage):
     u = dict(input_tokens=20, output_tokens=50, cache_read_input_tokens=1000,
              cache_creation_input_tokens=100)

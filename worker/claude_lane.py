@@ -369,8 +369,32 @@ def to_anthropic(messages, tools=None, model=None):
     return system, out, tool_defs
 
 
-def _mark_cache(system, msgs, tools):
-    """Up to four ephemeral breakpoints at the stability boundaries."""
+# Calls whose prompt is never sent again inside the cache's 5 minutes: a
+# write there is a 25% surcharge with no read behind it. Measured 1 Nov 2026
+# (72 h, llm_calls): the trial's Opus planner (one call per request, the rest
+# of the turn runs on Haiku, a separate cache) read 7.9% of what it wrote,
+# $1.21 for 5 calls; the one-shot preview critic read 0% (its message carries
+# that preview's unique frames). Anthropic flagged the account's hit rate.
+_ONE_CALL_MODELS = ("claude-opus",)
+
+
+def _one_shot(msgs, tools):
+    """A single request with no tools and no assistant turn: nothing after
+    the shared system prefix will ever be sent again."""
+    return not tools and all(m["role"] != "assistant" for m in msgs)
+
+
+def _mark_cache(system, msgs, tools, model=""):
+    """Up to four ephemeral breakpoints at the stability boundaries, and none
+    where nothing would be read back."""
+    if str(model or "").lower().startswith(_ONE_CALL_MODELS):
+        return
+    if _one_shot(msgs, tools):
+        # Only the shared instructions can repeat across calls; the request
+        # itself (frames, this cut) never does.
+        if system:
+            system[0] = dict(system[0], cache_control={"type": "ephemeral"})
+        return
     if tools:
         tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral"})
     if system:
@@ -536,7 +560,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
     import claude_trial            # metering + hard per-account ceiling
     claude_trial.guard_call()
     system, msgs, tool_defs = to_anthropic(messages, tools, model)
-    _mark_cache(system, msgs, tool_defs)
+    _mark_cache(system, msgs, tool_defs, model)
     body = {"model": model, "max_tokens": int(max_tokens or 8000),
             "messages": msgs}
     if system:
