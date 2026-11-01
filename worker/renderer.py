@@ -3344,7 +3344,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                       music_inputs, index, preview,
                       W=None, H=None, fps=30.0, frame_mode=None,
                       insert_inputs=None, vo_inputs=None, silence_idx=None,
-                      src_w=None, src_h=None, src_pad=0.0,
+                      src_w=None, src_h=None, src_pad=0.0, src_lead=0.0,
                       sfx_inputs=None, outro_s=0.0, card_idx=None,
                       stem_inputs=None,
                       src_sar=1.0, src_fps=None, src_color_space=None,
@@ -3378,6 +3378,10 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     frame is held across them, matching what a player shows, what the proxy
     holds and therefore what the user approved in the preview — trimming a keep
     span that lands in there would otherwise yield no picture at all.
+    src_lead: seconds the source's picture starts after its sound
+    (media.picture_lead). Its first frame is held from 0 across them, as a
+    player and the proxy show it; unfilled, every trim rebased the picture a
+    lead early and ended it before the sound (ticket #104).
     loudness: 'auto' resolves the EDL's mastering (schemas.master_loudness on
     the source shape); 'social'/None force it — the bounded canvas base stages
     pass None, because mastering belongs to the final composition.
@@ -4140,8 +4144,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     # to the output frame. Skipped entirely for a canvas program (no [0]).
     if n >= 1:
         vsrc = "0:v"
+        if src_lead > 0:
+            parts.append(f"[0:v]{media.lead_vf(src_fps or fps)}[vlead]")
+            vsrc = "vlead"
         if src_pad > 0:
-            parts.append(f"[0:v]tpad=stop_mode=clone:"
+            parts.append(f"[{vsrc}]tpad=stop_mode=clone:"
                          f"stop_duration={src_pad:.3f}[vpad]")
             vsrc = "vpad"
         # Repainted windows (round 92): each patch clip replaces its span of
@@ -7217,7 +7224,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # preceding keyframe as needed.
     first_source_s = min(float(span[0]) for span in edl["keep"])
     source_seek_s = max(0.0, first_source_s - 1.0)
-    seek_main_source = source_seek_s >= 5.0
+    # A late picture (media.picture_lead) is filled from t=0 on the plain
+    # input's clock, so it never seeks.
+    src_lead = media.picture_lead(info)
+    seek_main_source = source_seek_s >= 5.0 and not src_lead
     main_input_args = (["-copyts", "-ss", f"{source_seek_s:.3f}",
                         "-i", src_path]
                        if seek_main_source else ["-i", src_path])
@@ -7226,7 +7236,9 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # earliest stream starts at 0. Focus handoffs land on real frames with it
     # (focus_handoff). A VFR picture has no frame grid to land on.
     focus_origin = None
-    if info.get("video_start") is not None and not info.get("vfr"):
+    if src_lead:
+        focus_origin = 0.0      # the held first frame starts the grid at 0
+    elif info.get("video_start") is not None and not info.get("vfr"):
         focus_origin = float(info["video_start"]) - (
             0.0 if seek_main_source else float(info.get("format_start") or 0.0))
 
@@ -7454,11 +7466,12 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
     # already holds its last frame across a short picture track. Without the
     # same hold here the two would disagree: the user approves a preview and
     # exports something else.
+    # A late picture is short at its start, not its end (src_lead).
     src_pad = 0.0
     vdur = info.get("video_duration")
-    if vdur and src_dur - vdur > max(media.PROXY_SHORT_MIN_S,
-                                     media.PROXY_SHORT_FRAC * src_dur):
-        src_pad = src_dur - vdur
+    if vdur and src_dur - vdur - src_lead > max(
+            media.PROXY_SHORT_MIN_S, media.PROXY_SHORT_FRAC * src_dur):
+        src_pad = src_dur - vdur - src_lead
 
     # Distant keep spans (perf round). The main input seeks once, to the first
     # keep, and the [0:v] split then decodes EVERY frame up to the last keep:
@@ -7808,7 +7821,8 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                                  insert_inputs=insert_inputs,
                                  vo_inputs=vo_inputs, silence_idx=silence_idx,
                                  src_w=info["width"], src_h=info["height"],
-                                 src_pad=src_pad, sfx_inputs=sfx_inputs,
+                                 src_pad=src_pad, src_lead=src_lead,
+                                 sfx_inputs=sfx_inputs,
                                  outro_s=outro_s, card_idx=card_idx,
                                  stem_inputs=stem_inputs,
                                  src_sar=info.get("sar") or 1.0,

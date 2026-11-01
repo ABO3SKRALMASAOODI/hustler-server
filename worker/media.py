@@ -534,8 +534,37 @@ def probe(path):
 VFR_MIN_FPS = 23.5
 
 
-def _proxy_vf(h, pad_s=0.0):
+# A picture track that starts this much after the recording's earliest stream
+# is a LATE picture, not encoder priming (B-frame encodes start the video a
+# frame or two after the audio; render focus_origin handles those).
+PICTURE_LEAD_MIN_S = 0.25
+
+
+def picture_lead(info):
+    """Seconds the picture starts after the recording does (a probe() dict),
+    or 0.0. A player holds the first frame across them while the sound plays;
+    ffmpeg's filters rebase the picture to its first frame instead, so an
+    unfilled lead plays the picture early and ends it before the sound
+    (ticket #104: a 5.03 s clip whose video started at 1.0 s rendered 0.96 s
+    short of its audio, every preview, every retry)."""
+    try:
+        lead = float(info.get("video_start")) - float(
+            info.get("format_start") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(lead, 3) if lead > PICTURE_LEAD_MIN_S else 0.0
+
+
+def lead_vf(fps):
+    """Hold the first frame from t=0 up to the late picture, on the source's
+    own frame grid; the frames after it keep their timestamps."""
+    return f"fps={max(1.0, float(fps or 30.0)):.6f}:start_time=0"
+
+
+def _proxy_vf(h, pad_s=0.0, lead_fps=None):
     vf = rf"scale=-2:min({h}\,floor(ih/2)*2)"
+    if lead_fps:
+        vf = f"{lead_vf(lead_fps)},{vf}"
     if pad_s > 0:
         # Clone the last frame forward. After scale, so it clones a proxy frame.
         vf += f",tpad=stop_mode=clone:stop_duration={pad_s:.3f}"
@@ -562,7 +591,7 @@ def input_args(src, limit_s=None):
 
 def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
                   expected_out_s=None, cancelled_cb=None, maxrate_kbps=None,
-                  limit_s=None):
+                  limit_s=None, lead=False):
     # DO NOT SLICE THIS ENCODE ACROSS CORES. It was tried and MEASURED, on a
     # 90s 3840x2160 95Mbps file (the profile of the customer upload that spent
     # 386.8s of a 493s index right here):
@@ -588,7 +617,7 @@ def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
     # hardware decode, or a proxy produced by the client's own GPU before
     # upload — not a cleverer arrangement of this loop.
     cmd = ["ffmpeg", "-y", *input_args(src, limit_s), "-vf",
-           _proxy_vf(config.PROXY_HEIGHT, pad_s),
+           _proxy_vf(config.PROXY_HEIGHT, pad_s, fps if lead else None),
            "-c:v", "libx264", "-preset", config.PROXY_PRESET,
            "-crf", str(config.PROXY_CRF), "-pix_fmt", "yuv420p"]
     if maxrate_kbps:
@@ -672,15 +701,25 @@ def make_proxy(src, dst, fps, vfr, has_audio, duration=None, progress_cb=None,
         return
     got = probe(dst)
     have = got["video_duration"] or got["duration"]
-    gap = duration - have
+    # A picture that starts late is short at its START: hold its first frame
+    # there (the frames after it keep their clock), never its last frame at
+    # the end, which played the whole picture a lead early (ticket #104).
+    lead = picture_lead(got)
+    gap = duration - have - lead
     if gap <= max(PROXY_SHORT_MIN_S, PROXY_SHORT_FRAC * duration):
+        gap = 0.0
+    if not (lead or gap):
         return
-    print(f"[media] proxy picture track ran {gap:.2f}s short of the "
-          f"{duration:.2f}s recording — holding the "
-          f"last frame to fill it", flush=True)
+    if lead:
+        print(f"[media] proxy picture starts {lead:.2f}s after the sound — "
+              "holding the first frame to fill it", flush=True)
+    if gap:
+        print(f"[media] proxy picture track ran {gap:.2f}s short of the "
+              f"{duration:.2f}s recording — holding the "
+              f"last frame to fill it", flush=True)
     _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=gap,
                   progress_cb=progress_cb, expected_out_s=duration,
-                  **cancel_kw)
+                  lead=bool(lead), **cancel_kw)
 
 
 def adopt_client_proxy(src, dst, warnings=None):

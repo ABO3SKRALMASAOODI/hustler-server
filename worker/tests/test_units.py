@@ -2949,7 +2949,7 @@ _enc_calls = []
 
 
 def _fake_encode(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
-                 expected_out_s=None):
+                 expected_out_s=None, lead=False):
     _enc_calls.append(round(pad_s, 3))
 
 
