@@ -2768,6 +2768,62 @@ def _broll_throughout_hold(ctx, name, user_text):
             "has no b-roll.")
 
 
+# what the editor can still do for an asked topic before the one trial
+# preview (music is never picked by Valmera: its ask is answered with an offer)
+_ASK_HOLD_HOW = {
+    "speed": ("slow motion / speed changes",
+              "set_speed on a SOURCE range of a kept shot (factor below 1 for slow "
+              "motion, e.g. 0.5 on the most striking 2-4 s; above 1 to speed up)"),
+    "grade": ("the colour grade", "set_color_grade (or set_grade_custom)"),
+    "captions": ("captions", "add_captions"),
+    "clarity": ("a clearer picture", "enhance_video"),
+    "angle": ("the angle / framing", "set_frame"),
+    "broll": ("b-roll", "search_stock, then add_stock_media and add_overlay"),
+}
+
+
+def _unmet_ask_hold(ctx, name, args, user_text):
+    """Once per request, before the editor's own render on the new Claude
+    lanes: the asks of the request the timeline does not carry yet, with the
+    tool for each, so they land before the one trial preview, not after it.
+
+    Ticket #77, second recurrence (1 Nov, user 2710, job 132664): "Use smooth
+    transitions, speed ramping, slow motion ..." was rendered with the grade,
+    cuts and dissolves but no speed change; the ask ledger only read the
+    request after the preview was spent, the follow-up edits were refused,
+    and the request ended partial. #51's hold covered only b-roll
+    throughout; every deliverable ask now gets the same look before the
+    render. A report-only call renders nothing and does not spend it. None =
+    render as asked."""
+    if name != "render_preview" or getattr(ctx, "ask_hold_done", False):
+        return None
+    if getattr(ctx, "claude_trial", None) is None \
+            and getattr(ctx, "claude_paid", None) is None:
+        return None
+    if isinstance(args, dict) and args.get("report") and not args.get("complete"):
+        return None
+    try:
+        import ask_ledger
+        latest = (ctx.latest_edl() or {}).get("json") or {}
+        start = (getattr(ctx, "turn_start_edl", None) or {}).get("json") or {}
+        led = ask_ledger.ledger(user_text, start, latest,
+                                bool(getattr(ctx, "versions_written", None)))
+        missing = [t for t, st in led.items() if st == "not_done" and t in _ASK_HOLD_HOW]
+        if not missing:
+            return None
+        ctx.ask_hold_done = True
+    except Exception as exc:  # noqa: BLE001 — the render goes ahead
+        print(f"[ask_hold] skipped: {type(exc).__name__}: {exc}", flush=True)
+        return None
+    what = "; ".join(f"{_ASK_HOLD_HOW[t][0]} ({_ASK_HOLD_HOW[t][1]})" for t in missing)
+    return ("NOT RENDERED YET, do this first: the user asked for things the "
+            f"timeline does not carry yet: {what}. Add each where it fits the "
+            "footage before this request's preview, then call render_preview "
+            "again. If one cannot be done on this footage, call render_preview "
+            "again and tell the user in one plain sentence which ask is not "
+            "done and why.")
+
+
 def _fresh_turn_yields_to_fleet(model):
     """A fresh turn's first call waits for the fleet's TPM burn to fall
     under the OpenAI org's ceiling. Not on a Claude lane (the trial, new
@@ -6663,6 +6719,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             elif (broll_hold := _broll_throughout_hold(
                     ctx, name, user_message.get("content") or "")):
                 result = broll_hold
+            elif (ask_hold := _unmet_ask_hold(
+                    ctx, name, args, user_message.get("content") or "")):
+                result = ask_hold
             elif (cut_refused := _look_only_cut_refusal(
                     ctx, name, user_message.get("content") or "")):
                 result = cut_refused
