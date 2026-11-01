@@ -57,6 +57,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import re
 import shutil
@@ -155,6 +156,38 @@ DEFAULT_MEM_ESTIMATE_GIB = 2.0
 # 12): under contention a customer's render gets about 5.3x the owner
 # factory's CPU time, a trial user's about 3x.
 CPU_SHARES = {"customer": 8192, "trial": 4096, "owner": 1024}
+# The owner factory's weight is its CLASS total, split across its busy
+# containers (ticket #109, 1 Nov 2026). A per-container weight let ten
+# factory calls (10 x 100) outweigh one new user's index (303): it got
+# 303/1303 of the box's 8 CPUs, 1.8 of its 4, and its first cut arrived
+# after the user had left. Customers and trial users keep the full weight
+# per container: each is a different person waiting.
+POOLED_CLASSES = ("owner",)
+
+
+def cgroup_v2_weight(shares):
+    """runc's cpu-shares -> cgroup v2 cpu.weight (the measured mapping
+    above: 1024 -> 100, 4096 -> 303, 8192 -> 532)."""
+    shares = int(shares)
+    if shares <= 2:
+        return 1
+    if shares >= 262144:
+        return 10000
+    lg = math.log2(shares)
+    return int(math.ceil(10 ** ((lg * lg + 125 * lg) / 612.0 - 7.0 / 34.0)))
+
+
+def shares_for_weight(weight):
+    """The smallest cpu-shares whose cgroup v2 weight reaches `weight`."""
+    weight = max(1, min(10000, int(math.ceil(weight))))
+    lo, hi = 2, 262144
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if cgroup_v2_weight(mid) >= weight:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
 
 
 class Config:
@@ -773,6 +806,39 @@ class Box:
                         r["job_type"], child))
         return out
 
+    def target_shares(self, occupying=None):
+        """{slot name: docker cpu-shares} for every slot holding a call.
+
+        A pooled class (the owner factory) shares ONE class weight across
+        its busy containers, so under contention all of it together weighs
+        what one call of it did; customers and trial users keep the full
+        class weight on each container."""
+        occupying = self._occupying() if occupying is None else occupying
+        shares = self.cfg.cpu_shares
+        pooled = collections.Counter(prio for _s, prio, _t, _c in occupying
+                                     if prio in POOLED_CLASSES)
+        out = {}
+        for slot, prio, _t, _c in occupying:
+            base = shares.get(prio or "", shares["customer"])
+            if prio in POOLED_CLASSES and pooled[prio] > 1:
+                base = shares_for_weight(
+                    cgroup_v2_weight(base) / pooled[prio])
+            out[slot.name] = base
+        return out
+
+    def _apply_shares(self):
+        """Bring every busy slot's cgroup weight to target_shares(); docker
+        runs outside the lock. A refusal is logged, never raised."""
+        with self.lock:
+            want = [(self.by_name[n], v) for n, v in
+                    self.target_shares().items()
+                    if self.by_name[n].shares != v]
+        for slot, value in want:
+            if docker_cpu_shares(slot.container, value):
+                slot.shares = value
+            else:
+                log(f"could not set cpu shares {value} on {slot.container}")
+
     def _owner_busy(self, occupying=None):
         """Owner factory TOP-LEVEL calls: (count, cpus, {lane: count}).
 
@@ -1186,15 +1252,10 @@ class Box:
                         "container_started": started})
             self.put(rec)
             slot.last_affinity = affinity_key(call_id) or slot.last_affinity
-            shares = self.cfg.cpu_shares.get(rec.get("priority") or "",
-                                             self.cfg.cpu_shares["customer"])
         # CPU priority under contention: this call's class decides the
-        # slot's cgroup weight. Best effort: a refusal never fails a call.
-        if slot.shares != shares:
-            if docker_cpu_shares(slot.container, shares):
-                slot.shares = shares
-            else:
-                log(f"could not set cpu shares {shares} on {slot.container}")
+        # slot's cgroup weight (pooled for the owner factory, so every
+        # factory call re-splits it). Best effort: never fails a call.
+        self._apply_shares()
         rel = self.release_info()
         forwarded = dict(job)
         forwarded["provider_call_id"] = call_id
@@ -1253,6 +1314,7 @@ class Box:
             if rec:
                 self.terminalize(rec, status, envelope)
             self._prune()
+        self._apply_shares()       # the factory's pool is split one fewer
         return 200, envelope
 
     # ── status, lease and liveness ──
