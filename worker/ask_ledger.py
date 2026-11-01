@@ -52,9 +52,18 @@ ASKS = (
 TOPICS = tuple(a[0] for a in ASKS)
 
 # "do not add subtitles", "no music", "keep the colours", "without captions"
+# Ticket #77 recurrence (1 Nov): user 2698 wrote "Verwende ausschließlich
+# dieses Video, kein Stock-B-Roll" (German: only this video, no stock
+# b-roll); the English-only list read "B-Roll" as an ask, the request was
+# marked partial and the reply told them "I didn't add B-roll this time".
+# Asks are matched on words that read the same in many languages (B-roll,
+# LUT, captions), so their negations must be read in those languages too.
 _NEG_BEFORE = re.compile(
     r"(?i)\b(?:don'?t|do not|never|no|without|not|keep(?:ing)?|leave|remove|"
-    r"cut out|turn off|get rid of|delete|drop|lose)\b(?:\s+\S+){0,3}\s*$")
+    r"cut out|turn off|get rid of|delete|drop|lose|"
+    r"kein\w*|ohne|nicht|niemals|sans|aucun\w*|pas de|jamais|sin|sem|nunca|"
+    r"ningun\w*|nada de|senza|nessun\w*|niente|geen|zonder|nooit|bez|hiç)\b"
+    r"(?:\s+\S+){0,3}\s*$")
 # "the captions look great", "captions are fine": praise, not an ask
 _PRAISE_AFTER = re.compile(r"(?i)^\s*(?:are|is|look|looks|seem|seems)\s+(?:great|good|fine|perfect|nice|ok|okay)\b")
 # "if possible" asks are still asks; "maybe" / "or not" are too

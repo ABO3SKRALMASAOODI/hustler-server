@@ -155,8 +155,16 @@ _MUSIC_PICK = re.compile(
     "|\\b(?:music|tracks?|trilhas?|faixas?)\\b[^.]{0,60}\\b(?:for you|para voc\u00ea|cc0)\\b)")
 _SNAKE = re.compile(r"\b[a-z]+_[a-z][a-z_]*\b")
 _NAME = re.compile(r"(?<![.!?]\s)(?<!^)\b([A-Z][a-z]{2,})\s+([A-Z][a-z]{2,})\b")
+# Ticket #77 recurrence (1 Nov): German capitalises every noun, so "Das
+# Stottern" (the stutter) read as an invented name and the turn's honest
+# "two points I did not reach" line was dropped. An article or determiner
+# never starts a person's name.
 _NAME_OK = frozenset("""valmera studio first cut end card hook title pro plus max
-    the this your our it its i and big type ken burns""".split())
+    the this your our it its i and big type ken burns
+    der die das den dem des ein eine einen einem einer eines kein keine keinen
+    dieser diese dieses diesen jeder jede jedes ihr ihre mein meine dein deine
+    sein seine unser unsere el la los las le les un une una uno il lo gli
+    het een deze dit""".split())
 
 
 def _invented_name(sent, facts):
