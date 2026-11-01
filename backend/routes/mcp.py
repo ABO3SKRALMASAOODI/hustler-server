@@ -1667,7 +1667,7 @@ def _editor_structured_content(result):
     result = result or {}
     out = {key: result[key] for key in (
                "edl_version", "edl_changed", "mutation_status",
-               "visual_evidence", "tool_outcome")
+               "visual_evidence", "tool_outcome", "code")
            if key in result}
     preview = result.get("preview")
     if isinstance(preview, dict):
@@ -1839,6 +1839,16 @@ def _run_tool_job(tok, name, args, raw=False, project_id=None,
         changed = status == 200 and not result.get("no_change")
         result.update(project_id=project_id, is_error=status != 200,
                       edl_changed=changed, edl_version=result.get("version"))
+        if status != 200:
+            # Preserve the HTTP boundary's meaning through MCP. Without a
+            # stable code an ordinary batch correction becomes an opaque
+            # JSON error in intake (ticket #86), indistinguishable from a
+            # server failure once private quoted text has been removed.
+            result.setdefault("code", (
+                "edit_busy" if status == 409 and result.get("blocking_job_id")
+                else {400: "invalid_edit_batch", 402: "mcp_plan_required",
+                      404: "project_missing", 409: "edit_conflict"}.get(
+                          status, "internal_error")))
         result["text"] = json.dumps({k:v for k,v in result.items() if k != "edl"}, separators=(",", ":"))
         return _out(result["text"], result)
     with vdb() as conn:
@@ -3756,6 +3766,9 @@ OWN_FAILURE_OUTCOMES = {"transient_failure", "unavailable", "unsafe"}
 # Structured codes of the product's own gates (export_final's QC hold, the
 # held tail, analysis not ready, the plan gate).
 GATE_CODES = {"verification_open": "prerequisite", "held_tail": "prerequisite",
+              "invalid_edit_batch": "invalid_request",
+              "edit_conflict": "version_conflict", "edit_busy": "prerequisite",
+              "project_missing": "invalid_request", "media_purged": "prerequisite",
               "index_not_ready": "prerequisite",
               "mcp_plan_required": "plan_gate",
               # download_url: nothing of that kind exists yet / it is still
@@ -3812,9 +3825,12 @@ def _public_error_detail(name, result):
                       None)
     if code:
         detail["code"] = code[:40]
+        if code in {"batch_validation_fault", "internal_error"}:
+            category = detail["category"] = "internal_error"
         # The product's own gates answering as designed: the caller must
         # repair, wait or subscribe; not a failure of ours.
-        if category == "unclassified" and code in GATE_CODES:
+        if code in GATE_CODES and (category == "unclassified" or code in {
+                "invalid_edit_batch", "edit_conflict", "edit_busy", "project_missing"}):
             category = detail["category"] = GATE_CODES[code]
     outcome = structured.get("tool_outcome") if isinstance(structured, dict) else None
     if isinstance(outcome, dict) and outcome.get("status") in {

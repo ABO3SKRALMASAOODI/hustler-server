@@ -411,6 +411,8 @@ def unbacked(sent, facts):
                  if rx.search(rg.straight(facts.user_text or ""))} \
             if _CHANGE_ASK.search(facts.user_text or "") else set()
         for layer in sorted(layers):
+            if layer == "transition" and not rg.has_rendered_transitions(facts.after, facts.index):
+                return "absent:transition"
             if not layer_present(facts.after or {}, layer):
                 return f"absent:{layer}"
             changed = facts.wrote and rg.layer_changed(
@@ -719,10 +721,12 @@ def _design_lanes(before, after):
         return None
 
 
-def friendly_changes(before, after):
+def friendly_changes(before, after, index=None):
     items = []
     real = _design_lanes(before, after)
     for c in rg.edl_changes(before or {}, after or {}):
+        if c["layer"] == "transition" and not rg.has_rendered_transitions(after, index):
+            continue
         for rx, fn in _FRIENDLY:
             m = rx.match(c["text"])
             if m:
@@ -891,6 +895,7 @@ _DONE_LINE = {
     "captions": "I updated the captions.",
     "clarity": "I sharpened the picture.",
     "speed": "I changed the speed.",
+    "transitions": "I added transitions.",
 }
 _NOT_DONE_LINE = {
     "music": "I didn't add music yet.",
@@ -900,6 +905,7 @@ _NOT_DONE_LINE = {
     "captions": "I didn't change the captions this time.",
     "clarity": "I didn't sharpen the picture this time.",
     "speed": "I didn't change the speed this time.",
+    "transitions": "I didn't add transitions this time.",
 }
 _PARTLY_LINE = {
     "broll": "I added B-roll over part of the video, not all of it yet.",
@@ -963,7 +969,8 @@ def ask_lines(facts, kept, dropped_full, led=None):
     it), "salvaged", "template"."""
     import ask_ledger
     if led is None:
-        led = ask_ledger.ledger(facts.user_text, facts.before, facts.after, facts.wrote)
+        led = ask_ledger.ledger(facts.user_text, facts.before, facts.after, facts.wrote,
+                                index=facts.index)
     out = []
     for topic, state in led.items():
         want = "done" if state == "done" else "not_done"
@@ -1092,7 +1099,7 @@ def finish(draft, facts):
         dropped_full.append(("limit", sent))
     lang = language(draft)
     local = _LOCAL.get(lang or "", {})
-    changes = friendly_changes(facts.before, facts.after) if facts.wrote else []
+    changes = friendly_changes(facts.before, facts.after, facts.index) if facts.wrote else []
     # the lead: the draft's own summary of the video, else the EDL diff
     lead = next((k for k in kept if _SUMMARY.search(k)), None)
     rest = [k for k in kept if k is not lead]
@@ -1120,7 +1127,8 @@ def finish(draft, facts):
     nxt = offers[0] if offers else (suggestion(facts) if lang == "en"
                                     else local.get("next"))
     import ask_ledger
-    led = ask_ledger.ledger(facts.user_text, facts.before, facts.after, facts.wrote)
+    led = ask_ledger.ledger(facts.user_text, facts.before, facts.after, facts.wrote,
+                            index=facts.index)
     missing = [t for t, st in led.items() if st != "done"]
     if missing:
         # a reply never says done while an ask is unmet (ticket #49: "Done: I

@@ -1554,6 +1554,60 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
     return msgs
 
 
+def _page_initial_visual_context(messages, tools, max_tokens, boundary):
+    """Fit the orientation page to the *whole* request's model budget.
+
+    Separate tile/still limits allowed 80 images to block a fresh turn
+    before any model call (#117). Keep text, tools and exact tool evidence;
+    page only the broad overview, fairly across assets before visual depth.
+    Omitted pixels remain available through the existing visual tools.
+    """
+    if not boundary:
+        return 0
+    estimate = _agent_request_token_estimate(messages, tools, max_tokens)
+    if estimate < boundary:
+        return 0
+    removed = 0
+    for message in messages:
+        parts = message.get("content")
+        if message.get("role") != "user" or not isinstance(parts, list):
+            continue
+        first = next((p for p in parts if p.get("type") == "text"), None)
+        if not first or not first.get("text", "").startswith("FILMSTRIPS & STILLS"):
+            continue
+        groups = []
+        for pos, part in enumerate(parts):
+            if part.get("type") == "text":
+                groups.append([])
+            elif part.get("type") == "image_url":
+                if not groups:
+                    groups.append([])
+                groups[-1].append(pos)
+        groups = [g for g in groups if g]
+        count = sum(map(len, groups))
+        # 1400 is the same image reservation used by the request estimator.
+        # Extra headroom includes the paging notice and tokenizer variance.
+        drop = min(count, max(1, (estimate - boundary + 5000 + 1399) // 1400))
+        slots = count - drop
+        selected_groups = _spread_rows(groups, min(slots, len(groups)))
+        order = [g[depth] for depth in range(max(map(len, groups), default=0))
+                 for g in selected_groups if depth < len(g)]
+        keep = set(order[:slots])
+        message["content"] = [p for i, p in enumerate(parts)
+                              if p.get("type") != "image_url" or i in keep]
+        message["content"].append({"type": "text", "text": (
+            f"ORIENTATION PAGED: {drop} overview image(s) are not attached "
+            "to keep this request within the model context. Labels above "
+            "are inventory, not proof you saw the omitted pictures. Use "
+            "open_visual_page / look_at / look_at_asset to inspect every "
+            "relevant source before editing it.")})
+        removed += drop
+        estimate = _agent_request_token_estimate(messages, tools, max_tokens)
+        if estimate < boundary:
+            break
+    return removed
+
+
 def _compact_initial_filmstrip(messages):
     """Drop only the turn's broad filmstrip pixels after its first dispatch.
 
@@ -2772,6 +2826,7 @@ def _broll_throughout_hold(ctx, name, user_text):
 # what the editor can still do for an asked topic before the one trial
 # preview (music is never picked by Valmera: its ask is answered with an offer)
 _ASK_HOLD_HOW = {
+    "transitions": ("transitions at real scene changes", "set_transitions"),
     "speed": ("slow motion / speed changes",
               "set_speed on a SOURCE range of a kept shot (factor below 1 for slow "
               "motion, e.g. 0.5 on the most striking 2-4 s; above 1 to speed up)"),
@@ -2808,7 +2863,8 @@ def _unmet_ask_hold(ctx, name, args, user_text):
         latest = (ctx.latest_edl() or {}).get("json") or {}
         start = (getattr(ctx, "turn_start_edl", None) or {}).get("json") or {}
         led = ask_ledger.ledger(user_text, start, latest,
-                                bool(getattr(ctx, "versions_written", None)))
+                                bool(getattr(ctx, "versions_written", None)),
+                                index=getattr(ctx, "index", None))
         missing = [t for t, st in led.items() if st == "not_done" and t in _ASK_HOLD_HOW]
         if not missing:
             return None
@@ -5035,7 +5091,7 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         outcome = "internal_error"
     elif not has_value and (blank_canvas_no_value or refused or prerequisite
                             or attempted_edit
-                            or status in {"budget", "awaiting_user"}):
+                            or status in {"budget", "awaiting_user", "blocked"}):
         outcome = "blocked"
     elif has_value and (status != "replied" or fail_note or failed
                         or prerequisite or unfinished_edit
@@ -6120,6 +6176,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # never throw away unread tool images before the editor sees them.
         boundary = (150000 if model.startswith("grok-") else
                     90000 if model.startswith("claude-haiku-5") else None)
+        if iteration == 0 and boundary and estimate >= boundary:
+            paged = _page_initial_visual_context(messages, tools, max_tokens, boundary)
+            if paged:
+                ctx.editing_metrics["initial_visual_images_paged"] = paged
+                estimate = _agent_request_token_estimate(messages, tools, max_tokens)
         if boundary and estimate >= boundary and not unread_tool_images:
             if iteration > 0:
                 return _durable_continuation("prompt context checkpoint")

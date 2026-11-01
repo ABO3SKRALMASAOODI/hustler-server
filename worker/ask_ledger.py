@@ -25,10 +25,12 @@ import reply_grounding as rg
 
 # (topic, what the user says, what a reply line about it says, EDL layers)
 ASKS = (
+    ("transitions", r"transitions?|cross[- ]?fades?|dissolves?",
+     r"transitions?|cross[- ]?fades?|dissolves?", ("transition",)),
     ("music",
-     r"music|songs?|soundtrack|background tracks?|a tracks?|some tracks?|"
+     r"music|musik|musique|m[uú]sica|songs?|soundtrack|background tracks?|a tracks?|some tracks?|"
      r"play (?:something|some\w*)(?: else)?|beat",
-     r"music|songs?|soundtrack|tracks?", ("music",)),
+     r"music|musik|musique|m[uú]sica|songs?|soundtrack|tracks?", ("music",)),
     ("broll",
      r"b-?roll|cutaways?|stock (?:footage|clips?|videos?)|real footage|"
      r"(?:relevant|real|some|authentic) (?:footage|clips|visuals|photos)",
@@ -171,6 +173,8 @@ _PRESENT = {
 
 
 def _present(edl, topic):
+    if topic == "transitions":
+        return rg.has_rendered_transitions(edl)
     if topic == "broll" and fx_broll(edl):
         return True
     if topic == "broll":
@@ -328,7 +332,7 @@ def _captions_met(before, after, wrote):
     return _text_beats(after or before) >= CAPTION_BEATS_MIN
 
 
-def ledger(user_text, before, after, wrote=True):
+def ledger(user_text, before, after, wrote=True, index=None):
     """{topic: "done" | "partly" | "not_done"} for every asked topic. Done
     means the layers that carry the topic changed this turn, or (for an
     add-type ask, not "something else") the video already carries it;
@@ -342,6 +346,8 @@ def ledger(user_text, before, after, wrote=True):
             changed = True
         if topic == "captions" and not change_required:
             changed = _captions_met(before, after, wrote)
+        if topic == "transitions":
+            changed = changed and rg.has_rendered_transitions(after or before, index)
         state = "done" if changed else "not_done"
         if topic == "broll" and changed and broll_throughout(user_text) \
                 and broll_shortfall(after or before):

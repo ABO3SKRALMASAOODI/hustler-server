@@ -313,8 +313,9 @@ _HOOK_RULE = (
     "the first 2-3 seconds: 2 to 5 words, faithful to what is said (no "
     "invented claims, numbers or names, never a negation the speaker did not "
     "say, numbers written as words exactly as spoken), with exactly ONE "
-    "word wrapped in *stars* for the accent, e.g. "
-    "\"The *real* cost of AI\". ")
+    "word wrapped in *stars* for the accent. Quote a short contiguous phrase "
+    "from the selected speech, in the speaker's own language. Never translate "
+    "the title or invent a more dramatic claim. ")
 # C2 (29 Oct): the references change the picture every 2-3 s; on a single
 # take the cheapest faithful event is the spoken key phrase slammed in big
 # type (R09, R10, R14). The scout names them in the same call.
@@ -611,6 +612,17 @@ def clean_hook(text, index=None, most_words=6, most_chars=48):
         return None
     said = " ".join(str(w.get("w") or "") for w in
                     (index or {}).get("words") or []).lower()
+    if said.strip():
+        # #108: an English invented hook passed on Russian speech because
+        # only its numbers were checked. A contiguous spoken phrase keeps
+        # both the language and the claim; matching a bag of words would
+        # allow deleting a negation. Unicode words retain accents/scripts.
+        def tokens(value):
+            return re.findall(r"[^\W_]+(?:['’][^\W_]+)*", value.casefold())
+        source, title = tokens(said), tokens(t)
+        if not title or not any(source[i:i + len(title)] == title
+                                for i in range(len(source) - len(title) + 1)):
+            return None
     for num in re.findall(r"\d[\d,.]*", t):
         if said and num.strip(",.") not in said:
             return None

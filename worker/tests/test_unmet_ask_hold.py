@@ -18,7 +18,7 @@ V8 = {"keep": [[0.0, 10.5], [13.5, 20.5], [40.5, 47.0], [61.0, 66.5],
       "music": [], "speed": [],
       "effects": {"grade": "cinematic", "fade_out_s": 0.6,
                   "grade_custom": {"contrast": 1.12},
-                  "junctions": [{"at": 10.5, "style": "dissolve"}]}}
+                  "transition": {"style": "dissolve", "junctions": [0]}}}
 
 
 class _Ctx(SimpleNamespace):

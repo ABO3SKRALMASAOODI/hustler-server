@@ -56,3 +56,16 @@ def test_german_request_without_broll_stays_fulfilled():
     honesty = {}
     agent_loop._outcome_after_reply("fulfilled", report, honesty)
     assert "broll" not in honesty.get("unmet_asks", [])
+
+
+def test_german_music_request_cannot_end_done_with_a_silent_edit():
+    # Ticket 49's latest recurrence: the initial brief prohibited music,
+    # but the follow-up explicitly requested Musik and muted the voice.
+    request = 'Entferne die Stimme und füge passende Musik hinzu.'
+    reply, report = tr.finish('Done: I muted the sound.', facts(user_text=request))
+    assert report['asks']['music'] == 'not_done'
+    assert report['unmet'] == ['music']
+    assert "didn't add music" in reply
+    assert not reply.startswith('Done')
+    for request in ('Füge keine Musik hinzu.', 'Sans musique.', 'Sem música.'):
+        assert 'music' not in ask_ledger.asks(request)

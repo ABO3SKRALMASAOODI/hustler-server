@@ -65,6 +65,15 @@ def layer_changed(before, after, layer):
     return any(not _same(_get(before, k, s), _get(after, k, s)) for k, s in _SUBKEYS[layer])
 
 
+def has_rendered_transitions(edl, index=None):
+    """A preset is not a visible transition without a qualifying cut (#96)."""
+    transition = ((edl or {}).get("effects") or {}).get("transition")
+    if not isinstance(transition, dict) or transition.get("style") in ("none", "cut", "off"):
+        return False
+    from timeline import transition_junctions
+    return bool(transition_junctions(edl, index or {}))
+
+
 def _kept_seconds(keep):
     total = 0.0
     for k in keep or []:
