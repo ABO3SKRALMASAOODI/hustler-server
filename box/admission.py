@@ -866,6 +866,14 @@ class Box:
                                       w["enqueued"]))
         occupying = self._occupying()
         committed = self._committed_gib(occupying)
+        # Only HEAVY calls decide whether a heavy call may start alone on a
+        # short box: light calls (agent turns, MCP tools, looks) answer to
+        # real memory, and the turn that waits for a render is itself one
+        # (ticket #76, 1 Nov 2026: a trial user's first-cut turn held its
+        # own preview back for 15 minutes on an idle box, MemAvailable 4.3).
+        heavy_committed = sum(self.cfg.estimate(jtype) for _s, _p, jtype, _c
+                              in occupying
+                              if not self._light(self.cfg.estimate(jtype)))
         blocked_rank = None
         for waiter in order:
             if waiter.get("slot"):
@@ -916,8 +924,8 @@ class Box:
                         and mem - need * 0.5 < self.cfg.mem_reserve_gib)):
                 # Fits a slot but not memory: hold every lower class's
                 # heavy calls back.
-                if committed > 0 or (mem is not None and mem <
-                                     self.cfg.mem_reserve_gib):
+                if heavy_committed > 0 or (mem is not None and mem <
+                                           self.cfg.mem_reserve_gib):
                     blocked_rank = rank if blocked_rank is None \
                         else min(blocked_rank, rank)
                     continue
@@ -946,6 +954,8 @@ class Box:
                               waiter.get("job_type") or "",
                               bool(waiter.get("child"))))
             committed += need
+            if not light:
+                heavy_committed += need
             moved = True
         if moved:
             self.cond.notify_all()

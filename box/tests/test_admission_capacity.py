@@ -574,3 +574,48 @@ def test_an_orphan_slot_holding_a_call_is_kept(tmp_path, monkeypatch, adm):
     assert ctl.slot_has_live_call(running["slot"], db) is True
     assert ctl.slot_has_live_call("i8", db) is False
     assert ctl.slot_has_live_call("x", str(tmp_path / "missing.db")) is True
+
+
+# ── a turn never holds its own render back (ticket #76, 1 Nov) ────────────
+def test_a_running_turn_never_holds_back_the_render_it_waits_for(adm):
+    # 1 Nov 2026, 07:47-08:02: idle slots kept MemAvailable at ~4.3 GiB
+    # (reserve 3.5, a preview needs 5.0), and the only calls running were
+    # light: the trial user's own first-cut turn and MCP tools. The lone-
+    # call rule counted them as "something runs", so the preview waited
+    # until the turn gave up at 900 s, on a box ~6% busy.
+    box = _mixed_box(adm)
+    turn = _submit(box, lane="mcp", priority="trial", jtype="agent_turn")
+    tools = [_submit(box, lane="mcp", jtype="mcp_tool") for _ in range(2)]
+    _assign(box)
+    assert turn["slot"] and all(t["slot"] for t in tools)
+    adm._mem["gib"] = 4.3
+    preview = _submit(box, priority="trial")
+    _assign(box)
+    assert preview["slot"]
+
+
+def test_a_render_still_waits_for_memory_behind_another_heavy_call(adm):
+    box = _mixed_box(adm)
+    running = _submit(box, priority="customer")
+    _assign(box)
+    assert running["slot"]
+    adm._mem["gib"] = 4.3
+    preview = _submit(box, priority="trial")
+    owner = _submit(box)
+    _assign(box)
+    # A heavy call already holds memory: the newcomer waits (and holds the
+    # factory back), exactly as before.
+    assert preview["slot"] is None and owner["slot"] is None
+    _finish(box, running)
+    _assign(box)
+    assert preview["slot"] and owner["slot"] is None
+
+
+def test_the_lone_render_escape_still_keeps_the_box_wide_reserve(adm):
+    box = _mixed_box(adm)
+    _submit(box, lane="mcp", priority="trial", jtype="agent_turn")
+    _assign(box)
+    adm._mem["gib"] = 3.2                 # below the 3.5 reserve itself
+    preview = _submit(box, priority="customer")
+    _assign(box)
+    assert preview["slot"] is None
