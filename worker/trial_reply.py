@@ -995,6 +995,38 @@ def ask_lines(facts, kept, dropped_full, led=None):
     return led, out
 
 
+_LINE_HEAD = re.compile(r"^(\s*(?:[-*\u2022]|\d+[.)])?\s*)(.*)$")
+
+
+def _assessment(draft, facts, report):
+    """Ticket #77: an analysis, rating or feedback request is answered by
+    the draft itself. Its layout (numbered items, bullets) and every line
+    the turn's facts back stay; only unbacked sentences go (an export
+    claim, a change that did not happen, a wrong length). The edit shape
+    (what changed, where to look, one next step, 75 words) cut user 2697's
+    ten-item ad analysis to two sentences."""
+    out = []
+    for line in (draft or "").split("\n"):
+        head, body = _LINE_HEAD.match(line).groups()
+        if not body.strip():
+            out.append("")
+            continue
+        keep = []
+        for sent in rg.sentences(body) or [body]:
+            why = unbacked(sent, facts)
+            if why:
+                report["dropped"].append({"why": why, "sentence": sent[:200]})
+            else:
+                keep.append(sent.strip())
+        if keep:
+            out.append(head + " ".join(keep))
+    report["kept"] = sum(1 for x in out if x.strip())
+    report["asks"] = {}
+    report["assessment"] = True
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    return _an(text), report
+
+
 def finish(draft, facts):
     """(reply, report): the reply the trial user reads, and what was dropped
     and why (kept in the job result for the admin)."""
@@ -1002,6 +1034,9 @@ def finish(draft, facts):
     draft, pixels = scrub_pixels(draft)
     if pixels:
         report["dropped"].append({"why": "pixels", "sentence": f"{pixels} size(s)"})
+    import ask_ledger
+    if not facts.wrote and ask_ledger.assessment_only(facts.user_text):
+        return _assessment(draft, facts, report)
     kept, offers, limits = [], [], []
     dropped_full = []           # (kind, sentence) in full, for ask_lines
     prev_dropped = False

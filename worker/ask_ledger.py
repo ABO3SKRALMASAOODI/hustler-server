@@ -79,6 +79,43 @@ _CHANGE_WORDS = re.compile(r"(?i)\b(?:else|different|another|new|replace|swap|ch
                            r"other|correct|fix|straighten|redo)\b")
 
 
+# Ticket #77 (1 Nov): "Analyse this 42s 9:16 paid social ad ... Rate each
+# item 1-10 ... 5. Captions: sync with the voice, readability" names topics as
+# things to JUDGE. Read as edit asks, "captions" became an unmet ask, the
+# request was marked partial and the trial reply cut the requested analysis
+# down to two sentences. A request that asks for an assessment and gives no
+# edit instruction has no edit asks.
+_LEAD = r"(?:^\W*(?:\d+[.)]\s*)?|[.!?]\s+|\b(?:please|can you|could you|would you|will you|i want you to|i'd like you to|i need you to|help me)\s+)"
+# the request is led by an assessment: "Analyse this ad", "Rate each item",
+# "Can you review my reel"
+_ASSESS = re.compile(
+    r"(?im)" + _LEAD + r"(?:please\s+)?(?:analy[sz]e|rate|review|critique|assess|evaluate|"
+    r"score|audit|judge|give me (?:your )?(?:honest )?(?:feedback|opinion|thoughts|verdict|critique)|"
+    r"what do you think)\b")
+# ... and asks for a judgement, not a search ("List the timestamps only")
+_JUDGEMENT = re.compile(
+    r"(?i)\b(?:rate|rating|ratings|score|scores|\d{1,2}\s*/\s*10|1\s*(?:-|to)\s*10|verdict|"
+    r"feedback|critique|opinion|strengths?|weakness\w*|would it stop the scroll|is it (?:good|working))\b")
+_EDIT_VERBS = (r"add|remove|cut|trim|make|making|change|put|apply|insert|replace|edit|export|"
+               r"delete|shorten|speed|slow|crop|zoom|reframe|mute|straighten|rotate|"
+               r"tighten|swap|turn|fix|improve|enhance|polish|clean|redo|re-?cut|"
+               r"re-?edit|level|boost|lower|raise|move|split|reorder|caption|subtitle|"
+               r"create|generate|render|build|design|animate|produce|translate|dub|"
+               r"keep|place|use|overlay|layer|sync|match|try|give it|let'?s")
+_EDIT_IMPERATIVE = re.compile(
+    r"(?im)(?:^\W*(?:\d+[.)]\s*)?|[.!?]\s+|\b(?:and|then|also|please|can you|could you|"
+    r"would you|will you|i want you to|i'd like you to|i need you to|help me)\s+)"
+    r"(?:please\s+|also\s+|just\s+)?(?:" + _EDIT_VERBS + r")\b(?!\s*:)")
+
+
+def assessment_only(user_text):
+    """The request asks for an analysis, a rating or feedback and gives no
+    edit instruction (ticket #77): its answer is the deliverable."""
+    text = rg.straight(user_text or "")
+    return bool(_ASSESS.search(text)) and bool(_JUDGEMENT.search(text)) \
+        and not _EDIT_IMPERATIVE.search(text)
+
+
 def asks_detail(user_text):
     """[(topic, change_required)] for the topics the user asked to add or
     change, in their order. A topic mentioned only in a negated phrase ("Do
@@ -87,6 +124,8 @@ def asks_detail(user_text):
     something else", "a new grade"), so an existing layer does not meet it."""
     text = rg.straight(user_text or "")
     out = []
+    if assessment_only(text):
+        return out
     for topic, _user_rx, _said, _layers in ASKS:
         for m in _ask_rx(topic).finditer(text):
             head = text[max(0, m.start() - 60):m.start()]
