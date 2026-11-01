@@ -502,28 +502,56 @@ def build(src_path, duration, shots, motion, spatial, sentences, sha,
     }
 
 
-def compact_text(storyboard, include_all=True):
-    """Stable text inventory retained after pixels leave active context."""
+def _digest_line(row):
+    ranges = ",".join(f"{_clock(a)}-{_clock(b)}"
+                      for a, b in row.get("covered_ranges") or [])
+    description = row.get("semantic_description") or (
+        f"measured faces={len(row.get('faces') or [])}, "
+        f"text_regions={len(row.get('text_geometry') or [])}, "
+        f"motion={row.get('motion_state')}")
+    return (f"- {row.get('evidence_id')} | SOURCE {row.get('source_clock')} "
+            f"| covers {ranges or 'exact instant'} | shots "
+            f"{row.get('shot_ids') or [row.get('shot_id')]} | {description}")
+
+
+def compact_text(storyboard, include_all=True, max_chars=None):
+    """Stable text inventory retained after pixels leave active context.
+
+    Bounded by ``max_chars`` (config.STORYBOARD_DIGEST_MAX_CHARS): a long
+    source keeps an even sample across its clock and says how many clusters
+    it left out and how to reach them (P0 #115: an unbounded 181k-character
+    digest refused a 73-minute source's first request)."""
     if not storyboard:
         return ""
-    lines = [
-        (f"VISUAL STORYBOARD v{storyboard.get('version')}: "
-         f"{storyboard.get('distinct_clusters', 0)} distinct clusters; "
-         f"{storyboard.get('duplicates_collapsed', 0)} redundant samples "
-         f"collapsed; semantic status={storyboard.get('semantic_status')}.")
-    ]
+    if max_chars is None:
+        max_chars = config.STORYBOARD_DIGEST_MAX_CHARS
+    head = (f"VISUAL STORYBOARD v{storyboard.get('version')}: "
+            f"{storyboard.get('distinct_clusters', 0)} distinct clusters; "
+            f"{storyboard.get('duplicates_collapsed', 0)} redundant samples "
+            f"collapsed; semantic status={storyboard.get('semantic_status')}.")
     rows = storyboard.get("evidence") or []
     if not include_all:
         rows = rows[:30]
-    for row in rows:
-        ranges = ",".join(f"{_clock(a)}-{_clock(b)}"
-                          for a, b in row.get("covered_ranges") or [])
-        description = row.get("semantic_description") or (
-            f"measured faces={len(row.get('faces') or [])}, "
-            f"text_regions={len(row.get('text_geometry') or [])}, "
-            f"motion={row.get('motion_state')}")
-        lines.append(
-            f"- {row.get('evidence_id')} | SOURCE {row.get('source_clock')} "
-            f"| covers {ranges or 'exact instant'} | shots "
-            f"{row.get('shot_ids') or [row.get('shot_id')]} | {description}")
-    return "\n".join(lines)
+    lines = [_digest_line(row) for row in rows]
+    total = len(head) + sum(len(x) + 1 for x in lines)
+    if not max_chars or total <= max_chars:
+        return "\n".join([head] + lines)
+    note_room = 400
+    budget = max(0, max_chars - len(head) - note_room)
+    avg = max(1.0, (total - len(head)) / max(1, len(lines)))
+    keep = max(1, min(len(lines), int(budget // avg)))
+    while True:
+        picks = sorted({round(i * (len(lines) - 1) / max(1, keep - 1))
+                        for i in range(keep)}) if keep > 1 else [0]
+        size = sum(len(lines[i]) + 1 for i in picks)
+        if size <= budget or keep == 1:
+            break
+        keep = max(1, int(keep * budget / size) - 1)
+    kept = [lines[i] for i in picks]
+    left = len(lines) - len(kept)
+    note = (f"... {left} more clusters left out of this digest to keep the "
+            "prompt bounded (the lines above are an even sample across the "
+            "whole source clock). Reach any moment with look_at(times=[...]) "
+            "at its SOURCE time, get_shots for the shot list, or "
+            "open_visual_page for the contact sheets.")
+    return "\n".join([head] + kept + [note])

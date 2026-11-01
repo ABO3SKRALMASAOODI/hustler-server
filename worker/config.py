@@ -2113,6 +2113,13 @@ from read_tools import (TOOL_OUTPUT_CHAR_BUDGET,  # noqa: E402,F401
 # short-but-dense video can't blow up the prompt.
 FULL_INDEX_MAX_DURATION_S = float(os.getenv("FULL_INDEX_MAX_DURATION_S", "600"))
 FULL_INDEX_MAX_CHARS = int(os.getenv("FULL_INDEX_MAX_CHARS", "40000"))
+# The storyboard digest the editor reads every turn (visual_index.compact_text)
+# is bounded the same way. P0 #115 (1 Nov 2026): a 73-minute school report had
+# 1,149 visual clusters, a 181k-character digest sent twice, so the trial's
+# first call was over the Haiku context checkpoint and the request was refused
+# before any edit. p90 of 30 days' indexes is 89 clusters (~14k chars), so this
+# changes nothing for normal sources; longer ones keep a time-spread sample.
+STORYBOARD_DIGEST_MAX_CHARS = int(os.getenv("STORYBOARD_DIGEST_MAX_CHARS", "30000"))
 
 # A turn's budget is what the user can PAY FOR: balance + this grace. There is
 # deliberately NO flat per-turn ceiling on top — the old AGENT_TURN_MAX_CREDITS

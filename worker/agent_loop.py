@@ -1451,8 +1451,9 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
         (getattr(ctx, "index", None) or {}).get("visual_storyboard") or {})
     if storyboard_text:
         immutable_visual = (
-            "IMMUTABLE VISUAL INDEX / STORYBOARD DIGEST — every omitted "
-            "cluster remains reopenable by evidence ID:\n" + storyboard_text)
+            "IMMUTABLE VISUAL INDEX / STORYBOARD DIGEST — every cluster, "
+            "listed or left out, remains reachable by its SOURCE time:\n"
+            + storyboard_text)
         msgs.append({"role": "system", "content": immutable_visual})
         _component("visual_index_digest", immutable_visual)
     blueprint = director.prompt_block(getattr(ctx, "edit_plan", None))

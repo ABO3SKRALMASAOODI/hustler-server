@@ -2,6 +2,7 @@ import os
 
 from PIL import Image
 
+import config
 import visual_index
 
 
@@ -85,3 +86,40 @@ def test_compact_storyboard_retains_reopen_coordinates():
     assert "SOURCE 0:12.50" in text
     assert "0:10.00-0:14.00" in text
     assert "A presenter points at UI" in text
+
+
+def _p0_115_storyboard(n=1149, duration=4373.0):
+    """The shape of project 5312's index (P0 #115): a 73-minute school report
+    with 1,149 distinct clusters, most with a one-sentence description."""
+    rows = []
+    for i in range(n):
+        t = duration * i / (n - 1)
+        rows.append({
+            "evidence_id": f"ve_{i:016x}", "source_clock": visual_index._clock(t),
+            "covered_ranges": [[t, min(duration, t + 4.0)]], "shot_ids": [1 + i * 147 // (n - 1)],
+            "semantic_description": (None if i % 2 else
+                                     "Two people in red tops walk apart on a shaded "
+                                     "tree-lined road toward the camera."),
+            "faces": [], "text_geometry": [[0, 0, 1, 1]] * 4, "motion_state": "high"})
+    return {"version": 1, "distinct_clusters": n, "duplicates_collapsed": 566,
+            "semantic_status": "partial_raw_contact_sheets_required", "evidence": rows}
+
+
+def test_p0_115_a_long_source_digest_is_bounded_and_spans_the_whole_clock():
+    sb = _p0_115_storyboard()
+    full = len(visual_index.compact_text(sb, max_chars=0))
+    assert full > 150000                      # the unbounded digest that refused the request
+    text = visual_index.compact_text(sb)
+    assert len(text) <= config.STORYBOARD_DIGEST_MAX_CHARS
+    assert text.startswith("VISUAL STORYBOARD v1: 1149 distinct clusters")
+    assert "ve_0000000000000000" in text and f"ve_{1148:016x}" in text
+    assert "more clusters left out of this digest" in text and "look_at" in text
+    kept = [line for line in text.splitlines() if line.startswith("- ve_")]
+    assert 100 < len(kept) < 1149
+
+
+def test_a_normal_storyboard_digest_is_unchanged():
+    sb = _p0_115_storyboard(n=89, duration=600.0)
+    text = visual_index.compact_text(sb)
+    assert text == visual_index.compact_text(sb, max_chars=0)
+    assert "left out" not in text and text.count("\n- ve_") == 89
