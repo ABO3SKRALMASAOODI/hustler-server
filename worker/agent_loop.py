@@ -4849,6 +4849,23 @@ def _merge_progress_frontier(before, after):
     return _serializable_progress_marker(out)
 
 
+def _awaiting_own_preview(ctx, worker_db):
+    """True when this request wrote the current EDL version and its preview
+    is still queued or running (ticket #93): the slice boundary is a render
+    wait, not a stalled edit. Fails closed (False) on a database error, so
+    the stagnation stop keeps working."""
+    if not getattr(ctx, "versions_written", None):
+        return False
+    try:
+        version = int(ctx.latest_edl()["version"])
+        if version in (getattr(ctx, "rendered_versions", None) or ()):
+            return False
+        return worker_db.run(dbx.pending_preview_job, ctx.project_id,
+                             version) is not None
+    except Exception:
+        return False
+
+
 def _slice_boundary_resolution(frontier, current, blocker_fingerprint,
                                previous_fingerprint=None,
                                previous_repeats=0):
@@ -5842,6 +5859,21 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     else "productive work remains",
                     progress_frontier=resolution["frontier"],
                     stagnant=False)
+            if _awaiting_own_preview(ctx, worker_db):
+                # Ticket #93 (1 Nov 2026): a 62-minute episode's complete
+                # preview takes ~24 min, so three slices that each waited on
+                # the request's own render (jobs 130886, 131022) were counted
+                # as three slices without progress and the request was
+                # blocked the second before v90's preview landed. A render of
+                # the current version still running is the same wait the
+                # reply path already treats as "awaiting complete preview":
+                # neither progress nor stagnation, and no work slice.
+                return _durable_continuation(
+                    "awaiting complete preview",
+                    _cont.get("blocker_fingerprint"),
+                    _cont.get("blocker_repeats"),
+                    progress_frontier=resolution["frontier"],
+                    stagnant=None)
             if resolution["action"] == "continue_recovery":
                 return _durable_continuation(
                     "recovering unresolved work",
