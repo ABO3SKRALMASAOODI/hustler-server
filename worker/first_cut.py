@@ -41,6 +41,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import time
 
 import agent_tools
@@ -132,6 +133,29 @@ def _say(ctx, step, label):
     first_cut_speed.progress(ctx, getattr(ctx, "first_cut_db", None),
                              getattr(ctx, "first_cut_session", None),
                              step, label)
+
+
+_STILL_RUNNING = re.compile(r"is still running as job \d+")
+
+
+def _await_running_render(ctx, steps, render, args=None):
+    """Ticket #62: the First cut's preview outlived render_preview's wait
+    (PREVIEW_WAIT_TIMEOUT_S) and the cut ended "I couldn't finish" while its
+    render was alive and landed 10 s later. A render that is still running
+    has not failed: adopt it again (get_or_enqueue_preview_job returns the
+    same job, nothing restarts) for up to FIRST_CUT_RENDER_GRACE_S more."""
+    deadline = time.monotonic() + config.FIRST_CUT_RENDER_GRACE_S
+    args = dict(args or {"quality": "approval"}, complete=True)
+    while render and _STILL_RUNNING.search(str(render)) \
+            and time.monotonic() < deadline:
+        print("[first_cut] preview still rendering - waiting on the same job",
+              flush=True)
+        with _timed(ctx, "render_wait"):
+            render = agent_tools.execute(ctx, "render_preview", dict(args))
+        steps.append({"tool": "render_preview", "adopted": True,
+                      "ok": not _failed(render),
+                      "note": str(render or "")[:160]})
+    return render
 
 
 def _render_draft_first(ctx, steps):
@@ -1454,6 +1478,103 @@ def _motion_curve(ctx, fps=4.0, width=64):
     return times, diff, luma
 
 
+# Ticket #65: an app's own intro/outro card burned into the upload (CapCut's
+# black card with its logo and the creator's name, InShot, a TikTok export)
+# is the app's branding, never the user's content: 1.6 s of a 6.8 s first cut
+# was CapCut's "Joseph Shevon" card. Measured on that source: every frame of
+# the card is >= 99% near-black (luma < 40) and the run touches the end.
+CARD_DARK_LUMA = 40
+CARD_DARK_SHARE = 0.95
+CARD_MIN_S = 0.5
+CARD_MAX_S = 5.0
+CARD_SCAN_S = 6.0
+
+
+def card_run(dark, fps, from_end):
+    """Seconds of the run of card frames (share of near-black pixels >=
+    CARD_DARK_SHARE) touching the scanned edge, or 0.0 when the run is
+    shorter than CARD_MIN_S or longer than CARD_MAX_S (a long black stretch
+    is footage, a night shot or a fade, not a card)."""
+    seq = list(reversed(dark)) if from_end else list(dark)
+    n = 0
+    for share in seq:
+        if share < CARD_DARK_SHARE:
+            break
+        n += 1
+    run = n / float(fps)
+    return run if CARD_MIN_S <= run <= CARD_MAX_S else 0.0
+
+
+def _dark_shares(path, start, length, fps=10.0, width=48):
+    import numpy as np
+    try:
+        raw = subprocess.run(
+            ["ffmpeg", "-v", "error", "-nostdin", "-ss", f"{max(0.0, start):.3f}",
+             "-t", f"{length:.3f}", "-i", path, "-an", "-vf",
+             f"fps={fps},scale={width}:-2,format=gray", "-f", "rawvideo",
+             "-pix_fmt", "gray", "-"], capture_output=True, timeout=60).stdout
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        sw, sh = (int(x) for x in probe.split(",")[:2])
+    except Exception:
+        return None
+    h = int(round(width * sh / float(sw)))
+    h += h % 2
+    n = len(raw) // (width * h) if h > 0 else 0
+    if n < 2:
+        return None
+    frames = np.frombuffer(raw[:n * width * h], np.uint8).reshape(n, h, width)
+    return [float(x) for x in (frames < CARD_DARK_LUMA).mean(axis=(1, 2))]
+
+
+def app_card_edges(ctx, duration):
+    """(usable start, usable end) of the source once an app's intro/outro
+    card is left out; (0.0, duration) when there is none or nothing could
+    be read."""
+    duration = float(duration or 0)
+    start, end = 0.0, duration
+    if duration < 3.0:
+        return start, end
+    try:
+        path = ctx.proxy_path()
+    except Exception:
+        return start, end
+    scan = min(CARD_SCAN_S, duration / 2.0)
+    tail = _dark_shares(path, duration - scan, scan)
+    if tail:
+        end = duration - card_run(tail, 10.0, from_end=True)
+    head = _dark_shares(path, 0.0, scan)
+    if head:
+        start = card_run(head, 10.0, from_end=False)
+    return start, end
+
+
+def clip_keeps(keep, start, end, least_s=0.3):
+    """keep cut to [start, end]; pieces left shorter than least_s go."""
+    out = []
+    for a, b in keep or []:
+        a, b = max(float(a), start), min(float(b), end)
+        if b - a >= least_s:
+            out.append([round(a, 3), round(b, 3)])
+    return out
+
+
+def drop_app_cards(ctx, steps, started, duration):
+    start, end = app_card_edges(ctx, duration)
+    if start <= 0.0 and end >= float(duration or 0) - 1e-3:
+        return False
+    keep = _keep(ctx)
+    new = clip_keeps(keep, start, end)
+    if not new or new == keep:
+        return False
+    print(f"[first_cut] app card left out: usable {start:.2f}-{end:.2f}s "
+          f"of {float(duration):.2f}s", flush=True)
+    return _ok(_run(ctx, steps, "keep_segments",
+                    {"segments": new, "snap_to_words": False}, started))
+
+
 def montage_windows(curve, shots, duration, target=MONTAGE_TARGET_S):
     """[[start, end]] source windows for a highlight: the strongest moving
     moment of each shot (long shots in 3 s pieces), never a black or frozen
@@ -1770,6 +1891,11 @@ def kept_share_restore(keep, duration, picked=None):
     return [[0.0, round(duration, 2)]]
 
 
+# The longest source the First cut keeps whole as an already-finished piece
+# over a song (a promo, an invitation, a lyric edit).
+FINISHED_PIECE_MAX_S = 75.0
+
+
 def _music_piece(index, duration, robust=False):
     """An already-finished piece over a song (a music promo, an animated
     invitation, a lyric edit): the audio has a beat and what is heard is
@@ -1785,13 +1911,18 @@ def _music_piece(index, duration, robust=False):
         return False
     words = (index or {}).get("words") or []
     if not _speech(index):
-        return bool(words)
+        # Ticket #63: a 104 s vertical 4K phone take at a concert (2 words
+        # heard) was "a finished piece" and came back whole, the camera's
+        # swing through the crowd included. A finished piece over a song is
+        # short-form length; a longer take with no speech is raw footage,
+        # cut to its strongest moments like any other silent source.
+        return bool(words) and float(duration or 0) <= FINISHED_PIECE_MAX_S
     if robust:
         # Q1 (30 Oct): SUNG, measured on the voice itself (held words, an
         # unsure transcript, a chorus). The words-per-second rule below also
         # kept a slow narration over a music bed whole and uncaptioned.
         import first_cut_visual as fcv
-        return float(duration or 0) <= 75.0 and fcv.sung(index)
+        return float(duration or 0) <= FINISHED_PIECE_MAX_S and fcv.sung(index)
     # sung, not spoken: slow words over a beat in a short piece (C2: a 100 s
     # narrated vlog with long pauses over room noise is NOT one)
     return float(duration or 0) <= 60.0 and \
@@ -1858,6 +1989,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         # fitted to 9:16 (crop for footage, never bands around a speaker)
         applied.append("kept whole (it already plays as a finished piece "
                        "over its song)")
+        if drop_app_cards(ctx, steps, started, duration):
+            applied.append("the app's end card left out")
         if _orientation(ctx.index) != "vertical" and not _screen_like(ctx.index):
             if _ok(_run(ctx, steps, "auto_reframe", {"ratio": "9:16"}, started)):
                 applied.append("reframed to 9:16")
@@ -1985,6 +2118,8 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             applied = [a for a in applied if a not in (
                 "a clean opening and ending", "pauses trimmed")]
             applied.append("kept whole (trimming would have cut most of it)")
+    if drop_app_cards(ctx, steps, started, duration):
+        applied.append("the app's end card left out")
     faces = _faces(ctx.index)
     talking = bool(speech and faces and faces["share"] >= 0.5)
     if q1 and cut_speech and not talking:
@@ -3343,6 +3478,7 @@ def run(worker_db, job, project, index_row):
                     steps.append({"tool": "render_preview",
                                   "ok": not _failed(render),
                                   "note": str(render or "")[:160]})
+                render = _await_running_render(ctx, steps, render)
     finally:
         pf = getattr(ctx, "broll_prefetch", None)
         if pf is not None:
@@ -3492,7 +3628,8 @@ def _renders_done(steps):
     on that missing attribute (T1 harness, 30 Oct); the step log is the
     First cut's own record and needs nothing from ToolContext."""
     return sum(1 for step in steps or ()
-               if isinstance(step, dict) and step.get("tool") == "render_preview")
+               if isinstance(step, dict) and step.get("tool") == "render_preview"
+               and not step.get("adopted"))
 
 
 def project_admission_safe(worker_db, project_id):

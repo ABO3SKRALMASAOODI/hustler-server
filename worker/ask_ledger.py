@@ -293,6 +293,32 @@ def broll_shortfall(edl):
     return long_gaps or [g for g in gaps if g[1] - g[0] >= 2.0]
 
 
+# Ticket #66 / #49 (31 Oct): "big kinetic captions" on a silent watch clip
+# was met by ONE "CITIZEN" label: the captions topic borrowed reply
+# grounding's layer set (any text, vector or motion change), so the turn ended
+# "fulfilled" while the reply said no captions were added. A captions ask is
+# met by the captions layer, or by text beats ACROSS the short.
+CAPTION_BEATS_MIN = 3
+
+
+def _text_beats(edl):
+    edl = edl or {}
+    n = len([t for t in edl.get("texts") or [] if isinstance(t, dict)])
+    for m in edl.get("motion") or []:
+        if not isinstance(m, dict):
+            continue
+        params = m.get("params") if isinstance(m.get("params"), dict) else {}
+        if any(params.get(k) or m.get(k) for k in ("text", "words", "lines")):
+            n += 1
+    return n
+
+
+def _captions_met(before, after, wrote):
+    if _on((after or before or {}).get("captions")):
+        return True
+    return _text_beats(after or before) >= CAPTION_BEATS_MIN
+
+
 def ledger(user_text, before, after, wrote=True):
     """{topic: "done" | "partly" | "not_done"} for every asked topic. Done
     means the layers that carry the topic changed this turn, or (for an
@@ -305,6 +331,8 @@ def ledger(user_text, before, after, wrote=True):
         changed = bool(wrote) and _layer_changed(before, after, layers)
         if not changed and not change_required and _present(after or before, topic):
             changed = True
+        if topic == "captions" and not change_required:
+            changed = _captions_met(before, after, wrote)
         state = "done" if changed else "not_done"
         if topic == "broll" and changed and broll_throughout(user_text) \
                 and broll_shortfall(after or before):

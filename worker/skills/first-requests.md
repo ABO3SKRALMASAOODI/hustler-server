@@ -98,6 +98,16 @@ A VERTICAL SHORT WITH CAPTIONS:
    number, a contrast, a name). Read hooks-retention and motion-design.
 5. The payoff holds about 0.3-0.7 s of live footage after the last word,
    never a freeze or a slowed tail (read cutting, END ON PURPOSE).
+6. NO SPEECH (a product clip, a silent or music-only video): "captions" or
+   "kinetic captions" means big kinetic on-screen TEXT, never "nothing to
+   caption". Write 3-5 `add_kinetic_text` beats across the whole short (the
+   hook, what it is, two or three things you can SEE: a name legible on
+   screen, a feature, the payoff), each readable for at least 1 s. Text the
+   user asked for is never thinned "for density"; one small label is not
+   captions.
+7. A burned-in app card (CapCut, InShot, a TikTok end card: a black frame
+   with an app logo or a creator's name, usually the last or first 1-3 s) is
+   the app's branding, not the user's content: cut it, never keep it.
 
 HIGHLIGHTS / BEST MOMENTS:
 1. Speech: walk the whole transcript and pick moments with a hook and a

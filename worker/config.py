@@ -236,6 +236,11 @@ FRONTIER_PLANS = {"ai_max"}
 # its one scout call. Sources up to FIRST_CUT_SHORT_SOURCE_S are finished
 # whole; longer ones become their best 20-60 s story.
 FIRST_CUT_MAX_S = float(os.getenv("FIRST_CUT_MAX_S", "480"))
+# A First cut whose preview is still rendering when render_preview's own wait
+# (PREVIEW_WAIT_TIMEOUT_S) ends keeps waiting on that same render this much
+# longer before it gives up (ticket #62: it ended "couldn't finish" 10 s
+# before its render landed).
+FIRST_CUT_RENDER_GRACE_S = float(os.getenv("FIRST_CUT_RENDER_GRACE_S", "900"))
 FIRST_CUT_MAX_RENDERS = int(os.getenv("FIRST_CUT_MAX_RENDERS", "6"))
 # A website brief used to get ONE trial agent turn after its First cut (C2,
 # Q2). QB (30 Oct) measured it against the First cut alone, two runs each, two
@@ -320,6 +325,14 @@ CLAUDE_TRIAL_EXECUTOR_EFFORT = os.getenv(
 # replays); below it the request plans on the lane model.
 CLAUDE_TRIAL_PLANNER_MIN_LEFT_USD = float(
     os.getenv("CLAUDE_TRIAL_PLANNER_MIN_LEFT_USD", "0.2"))
+# The planning call is priced before it is made (its estimated prompt at the
+# cache-write rate plus this much output; 6,190 tokens measured at xhigh on
+# 31 Oct): the planner runs only when that call still leaves this reserve
+# for the steps that make the edit (P0 #60).
+CLAUDE_TRIAL_PLANNER_OUTPUT_TOKENS = int(
+    os.getenv("CLAUDE_TRIAL_PLANNER_OUTPUT_TOKENS", "8000"))
+CLAUDE_TRIAL_PLANNER_RESERVE_USD = float(
+    os.getenv("CLAUDE_TRIAL_PLANNER_RESERVE_USD", "0.1"))
 CLAUDE_TRIAL_TIMEOUT_S = float(os.getenv("CLAUDE_TRIAL_TIMEOUT_S", "300"))
 # Owner's design defaults; every one can be overridden in app_kv.free_result
 # ({on, per_account_usd_cap, pool_usd_cap, monthly_usd_cap, daily_count_cap,
