@@ -913,7 +913,14 @@ class Box:
                 free = self._owner_leaves_reserve(waiter, free)
                 if not free:
                     continue
-            if light and mem is not None and \
+            # Nothing runs at all: whatever MemAvailable says is idle slots'
+            # baseline, not work, so one call always starts. Without this the
+            # reserve check deadlocked the whole box (1 Nov 2026, 08:28-09:20
+            # UTC: 31 idle slots had crept to MemAvailable 3.46 < reserve 3.5
+            # GiB and 13 calls, customers' included, waited 50 min with
+            # nothing running).
+            idle_box = not occupying
+            if light and mem is not None and not idle_box and \
                     mem - need * 0.5 < self.cfg.mem_reserve_gib:
                 # Real memory is short even for a light call: it waits,
                 # without holding anyone else back.
@@ -925,7 +932,8 @@ class Box:
                 # Fits a slot but not memory: hold every lower class's
                 # heavy calls back.
                 if heavy_committed > 0 or (mem is not None and mem <
-                                           self.cfg.mem_reserve_gib):
+                                           self.cfg.mem_reserve_gib
+                                           and not idle_box):
                     blocked_rank = rank if blocked_rank is None \
                         else min(blocked_rank, rank)
                     continue
