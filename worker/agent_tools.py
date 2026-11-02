@@ -3317,6 +3317,37 @@ def _sentence_snap_on(ctx, snap_to_words=None):
 # insert of the main video's own footage, right after the piece listed
 # before it, on the program's own framing, so a loop plays as listed.
 REPLAY_ID = "rep"
+# P0 #77 (2 Nov, user 2661): "a 60 s cold open at 00:00, then the full episode
+# from the beginning" was listed as [teaser pieces..., the whole episode]. Every
+# episode piece then overlapped or ran behind the teaser, so the EPISODE became
+# 66 muted replays cut to one shot each (66 s kept + 2116 s of silent replays of
+# a 3647 s episode) and the agent reverted it 14 times over two requests. A
+# short head of pieces that the long forward run after it shows again is a COLD
+# OPEN: the run is the keep, the head is spliced at 0:00 with its sound.
+COLD_ID = "cold"
+COLD_OPEN_AT = -1          # the replays' ``after`` for a cold-open piece
+
+
+def _cold_open_split(segs):
+    """(head, run) when ``segs`` lists a cold open then the programme, else
+    None. The run is forward (each piece starts where the last one ended or
+    later), every head piece is footage the run also shows, and the run is at
+    least three times the head (a teaser, not a loop: [STAND] x5 + [TOUCH]
+    stays a loop)."""
+    def forward(run):
+        return all(b[0] >= a[1] - 0.01 for a, b in zip(run, run[1:]))
+
+    for p in range(1, len(segs)):
+        head, run = segs[:p], segs[p:]
+        if not forward(run):
+            continue
+        if not all(any(x[0] < r[1] - 0.01 and x[1] > r[0] + 0.01 for r in run)
+                   for x in head):
+            return None
+        head_s = sum(b - a for a, b in head)
+        run_s = sum(b - a for a, b in run)
+        return (head, run) if run_s >= 3 * head_s else None
+    return None
 
 
 def _plan_keep_repeats(segments):
@@ -3335,6 +3366,10 @@ def _plan_keep_repeats(segments):
 
     if not any(overlaps(x, segs[:i]) for i, x in enumerate(segs)):
         return _merge_touching(segs), []
+    cold = _cold_open_split(segs)
+    if cold:
+        head, run = cold
+        return _merge_touching(run), [(COLD_OPEN_AT, x) for x in head]
     base, replays = [], []
     for x in segs:
         if base and (overlaps(x, base) or x[0] < base[-1][1] - 0.01):
@@ -3378,6 +3413,10 @@ def _replays_in_one_shot(ctx, base, replays):
         return base, replays, ""
     out, moved = [], []
     for after, (s, e) in replays:
+        if after == COLD_OPEN_AT:
+            # a cold open is jump cuts by design; only a LOOP flickers
+            out.append((after, [s, e]))
+            continue
         t = _one_shot([s, e], index)
         if t != [s, e]:
             moved.append(f"{s:g}-{e:g}s -> {t[0]:g}-{t[1]:g}s")
@@ -3540,17 +3579,23 @@ def _splice_replays(ctx, base, replays):
     earlier keep_segments call). Returns (result line, error)."""
     edl = dict(ctx.latest_edl()["json"])
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
-    if not replays and not any(str(i.get("id", "")).startswith(REPLAY_ID)
-                               for i in inserts):
+    cold = [r for a, r in replays if a == COLD_OPEN_AT]
+    replays = [(a, r) for a, r in replays if a != COLD_OPEN_AT]
+    if not replays and not cold and not any(
+            str(i.get("id", "")).startswith(REPLAY_ID) for i in inserts):
         return "", None
     orig = ctx.db.run(dbx.latest_asset, ctx.project_id, "original") or {}
     main_key = orig.get("storage_key")
     old = [i for i in inserts if str(i.get("id", "")).startswith(REPLAY_ID)
            and i.get("asset_key") == main_key]
-    inserts = [i for i in inserts if i not in old]
-    if not replays and not old:
+    # A keep list without its own cold open (an episode cleanup) keeps the
+    # cold open already there; a new cold open replaces it.
+    old_cold = [i for i in inserts if str(i.get("id", "")).startswith(COLD_ID)
+                and i.get("asset_key") == main_key] if cold else []
+    inserts = [i for i in inserts if i not in old and i not in old_cold]
+    if not replays and not old and not cold:
         return "", None
-    if replays and not main_key:
+    if (replays or cold) and not main_key:
         return "", ("the main video's file is not available here, so the "
                     "repeats were NOT added")
     keep = [list(x) for x in edl["keep"]]
@@ -3580,17 +3625,47 @@ def _splice_replays(ctx, base, replays):
                                    for w in said[:6]))
         inserts.append(item)
         placed.append(item)
+    opened = []
+    for s, e in cold:
+        fit, crop = _replay_framing(ctx, edl, (s + e) / 2.0)
+        # at 0:00 and FIRST in list order: ahead of any clip already at 0:00
+        # (a logo placed after the cold open lands between it and the episode)
+        item = {"id": _next_item_id(inserts + opened, COLD_ID),
+                "asset_key": main_key, "kind": "video", "at_output_s": 0.0,
+                "duration_s": round(e - s, 2), "source_start_s": round(s, 2),
+                "fit": fit}
+        if crop:
+            item["crop"] = crop
+        opened.append(item)
+    inserts = opened + inserts
     edl["inserts"] = inserts
-    desc = (f"{len(placed)} repeat(s) of the main video spliced in"
-            if placed else f"removed {len(old)} earlier repeat(s)")
+    desc = "; ".join(x for x in (
+        f"{len(opened)}-piece cold open spliced at 0:00" if opened else "",
+        f"{len(placed)} repeat(s) of the main video spliced in" if placed
+        else (f"removed {len(old)} earlier repeat(s)" if old else "")) if x)
     res = ctx.write_edl(edl, desc)
     if str(res).startswith("NO CHANGE"):
         return "", None              # the same repeats are already there
     if not str(res).startswith("EDL v"):
         return "", f"the repeats could not be written ({str(res)[:200]})"
     ctx._replay_write = res
+    cold_line = ""
+    if opened:
+        lead = round(sum(i["duration_s"] for i in opened), 2)
+        cold_line = (
+            f"\nCOLD OPEN KEPT ({res.split(':')[0]}): "
+            + ", ".join(f"{i['source_start_s']:g}-"
+                        f"{round(i['source_start_s'] + i['duration_s'], 2):g}s"
+                        for i in opened)
+            + f" play first, WITH their sound ({lead:g}s), then the episode "
+            "(the keep list above) from its start. Later keep lists that list "
+            "only the episode leave this cold open in place; list a new cold "
+            "open first to replace it. To put a clip (a logo) between the "
+            f"cold open and the episode, insert it at at_output_s={lead:g}.")
     if not placed:
-        return f"\nRemoved the {len(old)} repeat(s) from the previous keep list ({res.split(':')[0]}).", None
+        if not old:
+            return cold_line, None
+        return cold_line + f"\nRemoved the {len(old)} repeat(s) from the previous keep list ({res.split(':')[0]}).", None
     by_range = {}
     for it in placed:
         r = (it["source_start_s"], round(it["source_start_s"] + it["duration_s"], 2))
@@ -3600,7 +3675,7 @@ def _splice_replays(ctx, base, replays):
              " The repeated range has speech (\"" + spoken[0][:60] + "\"), so "
              "its replays play SILENT rather than say it twice; for a clean "
              "loop pick a range where nobody talks.")
-    return (f"\nREPEATS KEPT ({res.split(':')[0]}): {shown}. Each replay plays "
+    return cold_line + (f"\nREPEATS KEPT ({res.split(':')[0]}): {shown}. Each replay plays "
             "right after the piece listed before it, on the same framing "
             "(hard cut at the loop point: on still footage it reads as one "
             "continuous shot)." + muted + " Program length now "
@@ -3624,8 +3699,10 @@ def _part_check_line(ctx, base, replays):
         return ""
     if not parts or not base:
         return ""
-    first = base[0][1] - base[0][0] + sum(
-        e - s for after, (s, e) in replays if after == 0)
+    lead = [(s, e) for after, (s, e) in replays if after == COLD_OPEN_AT]
+    first = (sum(e - s for s, e in lead) if lead else
+             base[0][1] - base[0][0] + sum(
+                 e - s for after, (s, e) in replays if after == 0))
     total = sum(e - s for s, e in base) + sum(e - s for _a, (s, e) in replays)
     want = parts["parts"][0]
     lines = []
@@ -3634,6 +3711,10 @@ def _part_check_line(ctx, base, replays):
         if abs(gap) <= max(0.3, want * 0.05):
             lines.append(f"PART CHECK: part 1 runs {first:.2f}s (asked "
                          f"{want:g} s) - OK.")
+        elif gap > 0 and lead:
+            lines.append(
+                f"PART CHECK: the cold open runs only {first:.2f}s; the user "
+                f"asked for {want:g} s. List more pieces before the episode.")
         elif gap > 0:
             seg = base[0][1] - base[0][0]
             more = int(-(-gap // seg)) if seg > 0.05 else 0
@@ -3668,12 +3749,16 @@ def keep_segments(ctx, segments, snap_to_words=None):
     merged, replays = _plan_keep_repeats(cleaned)
     merged, replays, shot_note = _replays_in_one_shot(ctx, merged, replays)
     kept = output_duration(merged)
-    rep_s = round(sum(e - s for _a, (s, e) in replays), 2)
+    loops = [(a, r) for a, r in replays if a != COLD_OPEN_AT]
+    lead = [r for a, r in replays if a == COLD_OPEN_AT]
+    rep_s = round(sum(e - s for _a, (s, e) in loops), 2)
+    lead_s = round(sum(e - s for s, e in lead), 2)
     res = _write_keep(
         ctx, merged,
         f"keep set to {len(merged)} segment(s), {kept}s of "
         f"{ctx.duration}s survives"
-        + (f" (+{len(replays)} repeat(s), {rep_s}s)" if replays else ""),
+        + (f" (+{len(loops)} repeat(s), {rep_s}s)" if loops else "")
+        + (f" (+{len(lead)}-piece cold open, {lead_s}s)" if lead else ""),
         snap_to_words=_snap_choice(snap_to_words), check_regression=True,
         place_all=True)
     # the keep list itself may be unchanged while the repeats are new (or

@@ -3584,8 +3584,15 @@ def resolve_pending_auto_resume(conn, project_id, session_id, user_id,
                                WHERE j.project_id = %s
                                  AND j.type = 'agent_turn'
                                  AND j.payload->>'message_id' = m.id::text)
+                          AND NOT EXISTS (
+                              SELECT 1 FROM video_jobs j
+                               WHERE j.project_id = %s
+                                 AND j.type = 'agent_turn'
+                                 AND j.payload->>'message_id' ~ '^[0-9]+$'
+                                 AND (j.payload->>'message_id')::bigint > m.id)
                         FOR UPDATE OF m""",
-                    (int(message_id), session_id, int(project_id)))
+                    (int(message_id), session_id, int(project_id),
+                     int(project_id)))
         if not cur.fetchone():
             return {"state": "consumed", "job_id": None}
 
@@ -3704,7 +3711,16 @@ def pending_user_message(conn, project_id, session_id):
                   SELECT 1 FROM video_jobs j
                   WHERE j.project_id = %s AND j.type = 'agent_turn'
                     AND j.payload->>'message_id' = m.id::text)
-            ORDER BY m.id DESC LIMIT 1""", (session_id, project_id))
+              -- P0 #77 (2 Nov): only a message NEWER than every answered one
+              -- is pending. A replayed duplicate (client_msg_id replay-*)
+              -- that never got its own turn was re-run 17 h and four answered
+              -- requests later by a re-index, as a stale brief.
+              AND NOT EXISTS (
+                  SELECT 1 FROM video_jobs j
+                  WHERE j.project_id = %s AND j.type = 'agent_turn'
+                    AND j.payload->>'message_id' ~ '^[0-9]+$'
+                    AND (j.payload->>'message_id')::bigint > m.id)
+            ORDER BY m.id DESC LIMIT 1""", (session_id, project_id, project_id))
         return cur.fetchone()
 
 
