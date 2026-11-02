@@ -1,0 +1,7 @@
+{
+  "wave": "recolour-1102",
+  "doc": "Ticket 72: selective colour replacement using the existing tracked-object masks.",
+  "fx_tags": ["recolour"],
+  "verbs": ["recolour_object"],
+  "core_growth_bytes": 0
+}

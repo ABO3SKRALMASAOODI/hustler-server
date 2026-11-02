@@ -31,7 +31,7 @@ from tools_ext import _write
 
 DEPARTMENT = "world"
 
-VERBS = ("attach", "track_point", "select_object", "pin_to_plane",
+VERBS = ("attach", "track_point", "select_object", "recolour_object", "pin_to_plane",
          "place_in_world", "remove_world", "look_at_world")
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 _LANDMARK_KIND = {"face": "landmarks.face", "head": "landmarks.face",
@@ -338,6 +338,53 @@ def select_object(ctx, t, box=None, points=None, start=None, end=None,
                        _measuring(ctx, edl, defs=[item])])
 
 
+def recolour_object(ctx, object_id, from_colour, colour, start=None, end=None,
+                    tolerance=.06, intensity=1., id=None):
+    """Replace one hue inside a selected object; never grade the whole scene."""
+    import remote
+    try:
+        supported = remote.executor_supports('fx:recolour')
+    except Exception:
+        supported = None
+    if supported is False:
+        return 'REJECTED: the render service is still updating object recolouring; try again after it updates.'
+    object_id = str(object_id).removeprefix('object:')
+    edl = _latest(ctx)
+    target = next((x for x in edl.get('fx') or []
+                   if x.get('id') == object_id and x.get('type') == 'object'), None)
+    if target is None:
+        return 'REJECTED: first select_object with its visible box or points; give the returned object id.'
+    tl = _tl(edl)
+    boundaries = list(tl.offsets)
+    boundaries += [a + length for a, length in zip(tl.offsets, tl.seg_out_len)]
+    for a, length in tl.insert_positions():
+        boundaries.extend([a, a + length])
+    for shot in (ctx.index or {}).get('shots') or []:
+        source_cut = float(shot.get('start') or 0.)
+        for i, (a, b) in enumerate(tl.segs):
+            if a < source_cut < b:
+                boundaries.append(tl._seg_out(i, source_cut))
+    cuts = sorted(x for x in boundaries
+                  if float(target['start']) + 1e-6 < x < float(target['end']) - 1e-6)
+    if cuts:
+        return (f'REJECTED: the selected object spans a shot change at {cuts[0]:.2f}s. '
+                'Select separate objects on each side of the cut, then recolour each one.')
+    fid = str(id) if id and _ID_RE.match(str(id)) else _next_id(edl.get('fx'), 'rc')
+    item = {'id': fid, 'type': 'recolour', 'stage': 'world',
+            'object_id': object_id, 'from_colour': from_colour, 'colour': colour,
+            'start': target['start'] if start is None else start,
+            'end': target['end'] if end is None else end,
+            'tolerance': tolerance, 'intensity': intensity}
+    result = _write.commit(ctx, [_write.upsert_fx(item)],
+                           f'recolour object {object_id}: {from_colour} to {colour}')
+    if result.startswith('REJECTED'):
+        return result
+    return _done(result, [_measuring(ctx, edl, defs=[target]),
+                         'Only matching colour inside this tracked object changes. '
+                         'Inspect a preview frame before claiming it is done. '
+                         'At each shot change, select a new object; keep each window <=6s.'])
+
+
 def _object_prompt(ctx, edl, t, box, points):
     box = _num_list(box, 4) if box is not None else None
     pts = _num_list(points) if points is not None else None
@@ -558,7 +605,7 @@ def remove_world(ctx, ids):
     ops, done = [], []
     for i in want:
         if (fx.get(i) or {}).get("type") in ("track", "object", "plane",
-                                             "light"):
+                                             "light", "recolour"):
             for m in motion.values():
                 a = m.get("anchor") or {}
                 refs = [a.get("to")] + list(a.get("occluders") or [])
@@ -571,6 +618,9 @@ def remove_world(ctx, ids):
                         ops.append(_anchor_op(m["id"],
                                               dict(a, occluders=occ)))
             ops.append(_write.remove_fx(i))
+            for effect in fx.values():
+                if effect.get('type') == 'recolour' and effect.get('object_id') == i:
+                    ops.append(_write.remove_fx(effect['id']))
             done.append(i)
         elif i in motion and motion[i].get("anchor") is not None:
             ops.append(_anchor_op(i, None))
@@ -599,6 +649,17 @@ _TO = ("face, face.<eye_l|eye_r|iris_l|iris_r|nose|mouth|chin|forehead|"
        "plane:<id>, screen")
 
 TOOL_SPECS = {
+    'recolour_object': (
+        recolour_object,
+        'Change color (recolor/recolour) of a moving car, shirt or object. '
+        'First select_object, then give its object_id, observed from_colour and '
+        'requested colour as #rrggbb. Keeps shade and detail, other hues and the '
+        'background unchanged. Limited to the selected <=6s tracking window; '
+        'select each next window for a longer clip. Ask the desired colour if unspecified.',
+        {'object_id': {'type': 'string'}, 'from_colour': {'type': 'string'},
+         'colour': {'type': 'string'}, 'start': {'type': 'number'},
+         'end': {'type': 'number'}, 'tolerance': {'type': 'number'},
+         'intensity': {'type': 'number'}, 'id': {'type': 'string'}}),
     "attach": (
         attach,
         "Attach a motion graphic to the world (MotionItem.anchor): it rides "
@@ -694,6 +755,7 @@ TOOL_SPECS = {
 }
 
 REQUIRED_ARGS = {
+    'recolour_object': ['object_id', 'from_colour', 'colour'],
     "attach": ["motion_id"],
     "track_point": ["t", "x", "y"],
     "select_object": ["t"],
@@ -705,6 +767,7 @@ REQUIRED_ARGS = {
 WRITE_TOOLS = set(VERBS) - {"look_at_world"}
 
 COMPACT = {
+    'recolour_object': 'Change an object color: select_object first, then object_id, from_colour and colour (#rrggbb). Tracked <=6s window; inspect preview.',
     "attach": (
         "Attach a graphic to the world: to=face.<part>|head|hand.<part>|"
         "pose.<joint>|track:<id>|object:<id>|plane:<id>|screen; pin, "

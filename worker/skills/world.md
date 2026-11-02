@@ -17,6 +17,18 @@ Say where in plain words and the verbs do the measuring:
 | "next to her face" | `place_in_world(where='next to her face', motion_id=...)` or `attach(to='face', offset=[0.9, 0], follow=['position', 'scale'])` | a label beside the face, following it (offset in face heights; negative = the other side) |
 | "on the floor under my shadow" | `pin_to_plane(quad, t, shadow=true)` | floor type darkened by the real shadow |
 | "follow that thing" | `track_point(t, x, y)` then `attach(to='track:<id>')` | a tracked point |
+| "change the car/shirt's colour" | `select_object(t, box, start, end)` then `recolour_object(object_id, from_colour, colour)` | selective colour replacement inside the tracked object; colours are observed/requested #rrggbb, each window <=6 s |
+
+For recolouring, ask the desired colour if it is missing. Read the source
+colour from the actual object, select its visible outline, and inspect the
+rendered result. Split tracking at every shot change and cap each window
+at six seconds; inspect the object at each new prompt time. Recolour only
+the shots where the object is visible, leaving outros untouched.
+Pending or missing tracking leaves the picture unchanged and is not
+a completed recolour. Black, white and gray surfaces use a neutral-brightness
+key. Select the intended paint/fabric surface precisely and use negative
+points to exclude windows, tires or skin with a similar colour; inspect the
+result. A colour key cannot distinguish two same-coloured parts inside one mask.
 
 Which device a line earns is a STORY decision. A price belongs on the
 desk it is negotiated over; a secret goes behind the object that hides

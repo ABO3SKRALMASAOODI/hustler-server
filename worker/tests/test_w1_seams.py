@@ -351,7 +351,8 @@ def test_program_matte_api_is_an_inert_stub():
 
 
 def test_mask_peers_resolve_lazily_and_degrade(monkeypatch):
-    assert fxgraph.MASK_PEERS == PEERS
+    # The tracked-object consumer was added with recolouring (ticket 72).
+    assert fxgraph.MASK_PEERS == dict(PEERS, object='world_defs:object_mask')
     plan = fxgraph.FxPlan(W=64, H=64, fps=25.0, program_s=1.0)
     # absent module -> absent mask, never an exception
     monkeypatch.setitem(fxgraph.MASK_PEERS, "face",

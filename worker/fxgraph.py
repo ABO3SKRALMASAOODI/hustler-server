@@ -1144,6 +1144,7 @@ register_mask("person", _person_mask)
 # render that never asks never imports them (and a module that does not
 # exist yet reads as "absent"). INTERFACES_W1.md §1.3.
 MASK_PEERS = {
+    "object": "world_defs:object_mask",   # tracked, selected object in program space
     "face": "matte_track:face_mask",       # 1A: faces.yunet soft ellipses
     "glyph": "compositor:glyph_mask",      # 1C: a motion item's clip alpha
     "region": "regions:region_mask",       # 1C: an fx item's FxRegion

@@ -16,6 +16,7 @@ import os
 import sys
 
 import pytest
+import later_waves
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 WORKER = os.path.dirname(HERE)
@@ -106,7 +107,7 @@ def test_wave3_models_are_pinned_licensed_and_never_on_agent_lanes():
 
 def test_the_world_department_fits_its_budget_and_mcp_prose():
     names = tools_ext.EXT_DEPARTMENTS.get("world") or set()
-    assert names and names <= W3_VERBS
+    assert names and names <= W3_VERBS | later_waves.get('verbs')
     size = len(json.dumps(agent_tools.openai_tools(
         "any-model", compact=True, names=sorted(names)),
         separators=(",", ":")))
@@ -178,4 +179,4 @@ def test_department_modules_export_their_verbs():
     from tools_ext import world_tools
     assert set(world_tools.VERBS) == set(world_tools.TOOL_SPECS)
     assert world_tools.DEPARTMENT == "world"
-    assert set(world_tools.VERBS) <= W3_VERBS
+    assert set(world_tools.VERBS) <= W3_VERBS | later_waves.get('verbs')
