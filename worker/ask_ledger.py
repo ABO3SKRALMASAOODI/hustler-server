@@ -62,6 +62,7 @@ TOPICS = tuple(a[0] for a in ASKS)
 # LUT, captions), so their negations must be read in those languages too.
 _NEG_BEFORE = re.compile(
     r"(?i)\b(?:don'?t|do not|never|no|without|not|keep(?:ing)?|leave|remove|"
+    r"avoid\w*|skip|exclude|"
     r"cut out|turn off|get rid of|delete|drop|lose|"
     r"kein\w*|ohne|nicht|niemals|sans|aucun\w*|pas de|jamais|sin|sem|nunca|"
     r"ningun\w*|nada de|senza|nessun\w*|niente|geen|zonder|nooit|bez|hiç)\b"
@@ -105,6 +106,69 @@ def _negated_list(head, tail):
     return bool(re.match(r"(?i)\s*(?:,|(?:or|and|nor)\b)", tail)
                 or re.search(r"(?i)\b(?:or|and|nor|ni|oder|und|ou|et|o|y|e)\s*$", items[-1])
                 or len(items) >= 2)
+
+
+def _negated_and_list(head, mention=""):
+    """"Avoid slow fades and generic subtitles", "no logos or captions": a
+    negation reaches along nouns joined by "and"/"or" too, but not into a new
+    instruction ("no music and add captions"; ticket #77, user 2737)."""
+    clause = re.split(r"[.!?;\n:]|\bthen\b|\balso\b|\bbut\b", head)[-1]
+    negs = list(_NEG_LIST_HEAD.finditer(clause))
+    if not negs:
+        return False
+    items = re.split(r"(?i)\b(?:and|or|nor)\b", clause[negs[-1].end():])
+    if len(items) < 2:
+        return False
+    # the mention ends the last item: "cut out the audio and play something
+    # else" is a new instruction (user 2665)
+    items[-1] += mention
+    verb = re.compile(r"(?i)^\s*(?:(?:then|also|please)\s+)?(?:" + _EDIT_VERBS + r"|play)\b")
+    # the first item is the negation's own object ("avoid slow fades")
+    return len(items[0].split()) <= 4 \
+        and all(len(i.split()) <= 4 and not verb.match(i) for i in items[1:])
+
+
+# Ticket #77 recurrence (2 Nov): user 2737 asked for a kinetic typography
+# intro: "bold modern music-video typography", "Synchronise the biggest
+# reveal with a strong musical beat if audio is available", "slight
+# rotations, overlapping text compositions", "crisp typography", "the
+# letters ... move, slide, scale and transition", "Avoid ... generic
+# captions". Each word was read as an edit ask (music, angle, clarity,
+# transitions, captions), the request was marked partial and the reply told
+# them "I didn't change the angle this time. I didn't sharpen the picture
+# this time." A topic word that describes something else is not an ask for
+# that topic: "music video" names a style, timing to the beat uses the audio
+# that is there, and rotations, crispness or transitions of the letters are
+# the typography's motion, not the frame's.
+_STYLE_AFTER = {"music": re.compile(r"(?i)^[- ]?(?:videos?|clips?)\b")}
+_SYNC_BEFORE = re.compile(r"(?i)\b(?:sync\w*|align\w*|tim(?:e|ed|ing)|match\w*|hit\w*|land\w*|on|to|with)"
+                          r"(?:\s+\S+){0,3}\s*$")
+_TYPE_NOUN = re.compile(r"(?i)\b(?:text|texts|typography|typeface|type|letters?|lettering|words?|"
+                        r"titles?|fonts?|headlines?|kinetic)\b")
+# "short English titles, and clean transitions" (user 2407's website demo)
+# asks for transitions: only the typography's own words claim them
+_TYPE_ONLY = re.compile(r"(?i)\b(?:typography|typeface|letters?|lettering|kinetic|fonts?)\b")
+_FRAME_NOUN = re.compile(r"(?i)\b(?:video|clips?|shots?|scenes?|cuts?|footage|picture|image|frame|"
+                         r"camera|horizon|recording|between)\b")
+
+
+def _describes_other(topic, m, text):
+    """The mention describes another deliverable, not an ask for its topic
+    (ticket #77, user 2737)."""
+    after = text[m.end():m.end() + 12]
+    style = _STYLE_AFTER.get(topic)
+    if style and style.match(after):
+        return True
+    if topic == "music" and m.group(0).lower().startswith("beat") \
+            and _SYNC_BEFORE.search(text[max(0, m.start() - 60):m.start()]):
+        return True
+    if topic in ("angle", "clarity", "transitions"):
+        a = max(text.rfind(c, 0, m.start()) for c in ".!?\n") + 1
+        ends = [i for i in (text.find(c, m.end()) for c in ".!?\n") if i >= 0]
+        sentence = text[a:min(ends) if ends else len(text)]
+        nouns = _TYPE_ONLY if topic == "transitions" else _TYPE_NOUN
+        return bool(nouns.search(sentence)) and not _FRAME_NOUN.search(sentence)
+    return False
 
 
 def _ask_rx(topic):
@@ -179,7 +243,8 @@ def asks_detail(user_text):
             head = re.split(r"[.!?;\n:,]|\band\b|\bthen\b|\balso\b", wide[-60:])[-1]
             tail = re.split(r"[.!?;\n]", text[m.end():m.end() + 60])[0]
             if _NEG_BEFORE.search(head) or _IGNORE_CONTEXT.search(head) \
-                    or _PRAISE_AFTER.match(tail) or _negated_list(wide, tail):
+                    or _PRAISE_AFTER.match(tail) or _negated_list(wide, tail) \
+                    or _negated_and_list(wide, m.group(0)) or _describes_other(topic, m, text):
                 continue
             out.append((topic, bool(_CHANGE_WORDS.search(head + " " + m.group(0) + tail))))
             break
