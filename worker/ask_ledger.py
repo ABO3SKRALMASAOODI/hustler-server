@@ -70,6 +70,41 @@ _NEG_BEFORE = re.compile(
 _PRAISE_AFTER = re.compile(r"(?i)^\s*(?:are|is|look|looks|seem|seems)\s+(?:great|good|fine|perfect|nice|ok|okay)\b")
 # "if possible" asks are still asks; "maybe" / "or not" are too
 _IGNORE_CONTEXT = re.compile(r"(?i)\b(?:like|as in) (?:the|my) (?:reference|example)\b")
+# Ticket #77 recurrence (2 Nov): user 2728 wrote "10. Do not add unnecessary
+# text, subtitles, logos or watermarks." The mention's clause was cut at every
+# comma, so "subtitles" lost its "Do not add", counted as a captions ask, the
+# request was marked partial and the reply said "I didn't change the captions
+# this time". A negation reaches along a list of nouns ("text, subtitles,
+# logos or watermarks") but not into a new instruction ("no music, add
+# captions"): a list item that starts with an edit verb ends its reach.
+_NEG_LIST_HEAD = re.compile(_NEG_BEFORE.pattern[4:-len(r"(?:\s+\S+){0,3}\s*$")], re.I)
+_LIST_ITEM = re.compile(r"(?i)^\s*(?:(?:or|and|nor|ni|oder|und|ou|et|o|y|e)\s+)?"
+                        r"(?:\S+\s+){0,2}$")
+
+
+def _negated_list(head, tail):
+    """The mention sits in a comma list a negation opened: "do not add
+    unnecessary text, subtitles, logos or watermarks", "no logos or
+    captions". The list must read as one: it goes on after the mention or
+    the mention closes it with "or"/"and", so "No music, captions please"
+    stays a captions ask."""
+    clause = re.split(r"[.!?;\n:]|\bthen\b|\balso\b|\bbut\b", head)[-1]
+    if "," not in clause:
+        return False
+    negs = list(_NEG_LIST_HEAD.finditer(clause))
+    if not negs:
+        return False
+    rest = clause[negs[-1].end():]
+    first, *items = rest.split(",")
+    if len(first.split()) > 4 or not items:
+        return False
+    verb = re.compile(r"(?i)^\s*(?:(?:and|then|also|please)\s+)?(?:" + _EDIT_VERBS + r")\b")
+    for item in items:
+        if verb.match(item) or not _LIST_ITEM.match(item + " "):
+            return False
+    return bool(re.match(r"(?i)\s*(?:,|(?:or|and|nor)\b)", tail)
+                or re.search(r"(?i)\b(?:or|and|nor|ni|oder|und|ou|et|o|y|e)\s*$", items[-1])
+                or len(items) >= 2)
 
 
 def _ask_rx(topic):
@@ -139,12 +174,12 @@ def asks_detail(user_text):
         return out
     for topic, _user_rx, _said, _layers in ASKS:
         for m in _ask_rx(topic).finditer(text):
-            head = text[max(0, m.start() - 60):m.start()]
+            wide = text[max(0, m.start() - 120):m.start()]
             # the clause the mention sits in
-            head = re.split(r"[.!?;\n:,]|\band\b|\bthen\b|\balso\b", head)[-1]
+            head = re.split(r"[.!?;\n:,]|\band\b|\bthen\b|\balso\b", wide[-60:])[-1]
             tail = re.split(r"[.!?;\n]", text[m.end():m.end() + 60])[0]
             if _NEG_BEFORE.search(head) or _IGNORE_CONTEXT.search(head) \
-                    or _PRAISE_AFTER.match(tail):
+                    or _PRAISE_AFTER.match(tail) or _negated_list(wide, tail):
                 continue
             out.append((topic, bool(_CHANGE_WORDS.search(head + " " + m.group(0) + tail))))
             break

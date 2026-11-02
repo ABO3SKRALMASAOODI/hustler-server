@@ -92,12 +92,43 @@ def offer_tracks(text, catalog, used=(), n=3):
     return out[:4]
 
 
-def offer_text(tracks):
+# Ticket #77 recurrence (2 Nov): user 2728 asked for a reel cut to "the
+# uploaded Tamil song" but only the video reached the project. The editor's
+# "Attach the MP3 and I'll cut to its beats." was dropped by the trial reply's
+# length cap and the user read a library offer that never said their song was
+# missing. A request that says its own song is attached, in a project with no
+# music upload, leads the offer with that.
+_OWN_SONG = re.compile(
+    r"\b(?:uploaded|attached|my|our|the\s+(?:same\s+)?(?:uploaded|attached))\s+"
+    r"(?:\S+\s+){0,3}?(?:song|track|music|mp3|audio(?:\s+file)?|soundtrack)\b|"
+    r"\b(?:song|track|music|mp3|soundtrack)\s+(?:\S+\s+){0,2}?"
+    r"(?:i\s+)?(?:uploaded|attached)\b", re.I)
+MISSING_SONG = ("I don't see the song you mentioned in this project: only your "
+                "video arrived. Attach the MP3 with the paperclip and I'll cut "
+                "to its beats.")
+
+
+def own_song_missing(ctx, text):
+    """The request names the user's own uploaded song and the project has no
+    music upload. Never raises (False when unsure)."""
+    if not _OWN_SONG.search(str(text or "")):
+        return False
+    try:
+        import read_tools
+        return not ctx.db.run(read_tools.assets_by_kinds, ctx.project_id, ["music"])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def offer_text(tracks, lead=""):
     """The question the user reads (it names each track's exact title, so
     music_gate.open_offer records the offer and their pick places it)."""
     lines = []
     for i, t in enumerate(tracks, 1):
         lines.append(f"{i}. \"{t['title']}\" ({t['mood']})")
+    if lead:
+        return (lead + " Or pick one of these and I'll put it under the "
+                "video: " + "; ".join(lines) + ". Reply with its number or name.")
     return ("For the music, pick one and I'll put it under the video: "
             + "; ".join(lines) + ". Reply with its number or name, or "
             "upload your own track.")
@@ -147,7 +178,8 @@ def turn_end_offer(ctx, request_text):
         tracks = offer_tracks(request_text, cat, used=used)
         if len(tracks) < 2:
             return ""
-        text = offer_text(tracks)
+        text = offer_text(tracks, MISSING_SONG if own_song_missing(
+            ctx, request_text) else "")
         if not music_gate.open_offer(ctx, text):
             return ""
         ctx._music_offer_made = True
