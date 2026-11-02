@@ -352,6 +352,27 @@ def remote_executions_table_ready(conn):
     return _REMOTE_EXEC_TABLE["ok"]
 
 
+def _serial_priority_sql(alias):
+    """A serialized child inherits its parent editor's continuity priority.
+
+    The parent still blocks it while running. Once the editor checkpoints,
+    the older child runs before its continuation, and both precede new user
+    follow-ups. Verify the parent scope rather than trusting a payload id.
+    """
+    assert alias in {"live", "video_jobs"}
+    return f"""CASE WHEN {alias}.type = 'agent_turn'
+              AND COALESCE({alias}.payload->>'logical_turn_continuation', 'false') = 'true'
+          OR ({alias}.type = 'shorts_plan' AND EXISTS (
+              SELECT 1 FROM video_jobs serial_parent
+              WHERE serial_parent.id = CASE
+                WHEN {alias}.payload->>'parent_agent_job_id' ~ '^[0-9]{{1,18}}$'
+                THEN ({alias}.payload->>'parent_agent_job_id')::bigint END
+                AND serial_parent.project_id = {alias}.project_id
+                AND serial_parent.user_id = {alias}.user_id
+                AND serial_parent.type = 'agent_turn'))
+          THEN 0 ELSE 1 END"""
+
+
 def claim_job(conn, types, max_attempts):
     # Previews (always a user or agent actively waiting) jump the queue over
     # finals, and both jump over indexing — a turn's render_preview never
@@ -418,7 +439,7 @@ def claim_job(conn, types, max_attempts):
         # READ COMMITTED/SKIP LOCKED race-closer. A stale-running or spent
         # sibling blocks nothing: those are the reaper's to bury, and a dead
         # row must never wedge its project's queue behind it.
-        serial_where = """
+        serial_where = f"""
                   AND (
                     (video_jobs.type = 'mcp_tool'
                      AND video_jobs.payload->>'mutation' = 'false')
@@ -437,29 +458,13 @@ def claim_job(conn, types, max_attempts):
                              OR (live.state = 'queued'
                                  AND live.attempts < %s
                                  AND (
-                                   CASE WHEN live.type = 'agent_turn'
-                                             AND COALESCE(
-                                               live.payload->>'logical_turn_continuation',
-                                               'false') = 'true'
-                                        THEN 0 ELSE 1 END
+                                   {_serial_priority_sql("live")}
                                    <
-                                   CASE WHEN video_jobs.type = 'agent_turn'
-                                             AND COALESCE(
-                                               video_jobs.payload->>'logical_turn_continuation',
-                                               'false') = 'true'
-                                        THEN 0 ELSE 1 END
+                                   {_serial_priority_sql("video_jobs")}
                                    OR (
-                                     CASE WHEN live.type = 'agent_turn'
-                                               AND COALESCE(
-                                                 live.payload->>'logical_turn_continuation',
-                                                 'false') = 'true'
-                                          THEN 0 ELSE 1 END
+                                     {_serial_priority_sql("live")}
                                      =
-                                     CASE WHEN video_jobs.type = 'agent_turn'
-                                               AND COALESCE(
-                                                 video_jobs.payload->>'logical_turn_continuation',
-                                                 'false') = 'true'
-                                          THEN 0 ELSE 1 END
+                                     {_serial_priority_sql("video_jobs")}
                                      AND live.id < video_jobs.id))))))"""
         params.extend([config.STALE_AFTER_S, max_attempts])
     if tuple(types) == ("index",):

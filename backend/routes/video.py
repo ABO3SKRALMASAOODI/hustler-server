@@ -7879,12 +7879,13 @@ def _short_editor_boot_prompt(parent, child, clip, style_profile):
         reference += ("\nThe user's preserved direction: "
                       + str(style_profile["user_note"])[:400])
     return (
-        "You are the fresh lead editor for one selected podcast reel. The "
+        "You are the fresh lead editor for one selected source story. The "
         "parent scout chose this complete story because it is worth "
         "developing; no creative styling has been applied yet.\n\n"
         f"Reel: {child.get('title') or clip.get('title') or 'Untitled'}\n"
         f"Source window: {clip.get('start')}s-{clip.get('end')}s\n"
-        f"Opening words: {clip.get('hook') or 'inspect the transcript'}\n"
+        f"Opening hook candidate: {clip.get('hook') or 'inspect the footage'}. "
+        "Verify it against the footage; it is not evidence of spoken words.\n"
         "Story:\n" + story_text + reference + "\n\n"
         "Before making edits, call read_skill for short-form-direction, "
         "motion-design, cutting, and hooks-retention. Load captions, zooms, "
@@ -7893,8 +7894,9 @@ def _short_editor_boot_prompt(parent, child, clip, style_profile):
         "and hear the actual reel, inspect the reference when present, then "
         "commit to one look and name the hook and the hero moments — a short "
         "decision, not a written plan. Finish it as a premium reel in the "
-        "short-form grammar those skills teach: motion captions, hero "
-        "moments on exact spoken words, eased camera, sparse sound from the "
+        "short-form grammar those skills teach. Follow the preserved user "
+        "direction; speech captions require actual speech and must not be "
+        "added when excluded. Consider hero moments, eased camera, sparse sound from the "
         "approved library edited to picture (music only if the user asked "
         "for it), a designed frame. Bind every device to a "
         "word, cut or beat of this story. Do not apply a formula and do not "
@@ -8029,6 +8031,9 @@ def start_short_editor(user_id, project_id, child_project_id):
         latest_row = _latest_edl(cur, child_project_id)
         msg_meta = {
             "shorts_boot": True,
+            "customer_request": (
+                "Edit this selected source story into a finished short with an opening hook.\n"
+                + str((shorts_meta.get("style_profile") or {}).get("user_note") or "")[:400]),
             "from_parent": project_id,
             "edl_version": latest_row["version"] if latest_row else None,
         }

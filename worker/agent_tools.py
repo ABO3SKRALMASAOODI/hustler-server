@@ -23811,6 +23811,11 @@ def wait_for_job(ctx, job_id):
                 fresh = ctx.db.run(dbx.get_project, ctx.project_id)
                 if fresh and fresh.get('user_id') == owner:
                     ctx.project = fresh
+                    clips = ((fresh.get('meta') or {}).get('shorts') or {}).get('clips') or []
+                    if any(c.get('child_project_id') for c in clips):
+                        completed = set(getattr(ctx, 'shorts_jobs_completed', None) or [])
+                        completed.add(job_id)
+                        ctx.shorts_jobs_completed = sorted(completed)
                 note += (" The source-story cards are ready; they are not finished edits. "
                          "Each card's Edit action starts its own editor.")
             return note
@@ -23828,6 +23833,12 @@ def wait_for_job(ctx, job_id):
                     "The queue exhausted its safe attempts; do not repeat unchanged.")
         if state not in {'running', 'queued'}:
             return f"UNAVAILABLE: job {job_id} is {state}; it was not restarted."
+        if (state == 'queued' and job.get('type') == 'shorts_plan'
+                and ctx.job.get('type') == 'agent_turn'
+                and (job.get('payload') or {}).get('parent_agent_job_id') == ctx.job.get('id')):
+            ctx.serial_job_id = job_id
+            return (f"PREREQUISITE: job {job_id} needs this project's writer. "
+                    "The editor will checkpoint and resume automatically after it completes.")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return (f"PREREQUISITE: job {job_id} is still {state} ({job.get('progress') or 0}%). "
@@ -29717,8 +29728,12 @@ def make_shorts(ctx, count=None, style_note=None, clips=None, snap=None):
     if planned:
         payload["clips"] = planned
         payload["count"] = len(planned)
+    if ctx.job.get("type") == "agent_turn" and ctx.job.get("id"):
+        payload["parent_agent_job_id"] = ctx.job["id"]
     job_id = ctx.db.run(dbx.enqueue_job, ctx.project_id,
                         ctx.job["user_id"], "shorts_plan", payload)
+    if payload.get("parent_agent_job_id"):
+        ctx.serial_job_id = job_id
     evidence = ("whole transcript" if has_speech else
                 "full-video visual filmstrips")
     selection = ("uses the story arcs you selected" if planned else

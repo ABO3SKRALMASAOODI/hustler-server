@@ -111,4 +111,8 @@ def test_edit_press_boots_one_fresh_child_agent(monkeypatch):
     assert "Do not apply a formula" in prompt
     assert "render a complete preview" in prompt
     assert cur.prompts[0]["meta"]["shorts_boot"] is True
+    contract = cur.prompts[0]["meta"]["customer_request"]
+    assert "opening hook" in contract
+    assert "broll-inserts" not in contract
+    assert "Opening words:" not in prompt
     assert len(cur.updates) == 1

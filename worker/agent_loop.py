@@ -90,6 +90,7 @@ def _shift_turn_clocks_for_provider_wait(t_start, turn_started,
 _NON_PRODUCTIVE_CONTINUATION_REASONS = {
     "platform drain",
     "awaiting complete preview",
+    "awaiting serial background job",
 }
 
 # A request keeps working until it is fulfilled (owner, 25 Oct 2026: "is
@@ -1909,6 +1910,18 @@ def _user_facing_failure(e):
 
 
 def _customer_verification_request(worker_db, session_id, message, continuation):
+    generated = request_intent.generated_customer_request(message)
+    if generated is not None:
+        saved = continuation.get("verification_request")
+        if isinstance(saved, str):
+            old_template = str(message.get("content") or "")[:4000]
+            # Preserve later customer steering while replacing an old
+            # checkpoint's generated template. New structured contracts can
+            # be restored verbatim, including every adopted follow-up.
+            if old_template and saved.startswith(old_template):
+                return generated + saved[len(old_template):]
+            return saved
+        return generated
     if "verification_request" in continuation:
         return continuation["verification_request"]
     text = str(message.get("content") or "")[:4000]
@@ -2011,6 +2024,7 @@ def run_agent_job(worker_db, job):
     ctx.tool_failure_memory = dict(
         list((continuation_state.get("tool_failure_memory") or {}).items())[-64:])
     ctx.turn_tool_outcomes = list(continuation_state.get("turn_tool_outcomes") or [])[-500:]
+    ctx.shorts_jobs_completed = list(continuation_state.get("shorts_jobs_completed") or [])
     # Historical coverage is separate from current-pixel evidence. Coordinates
     # still require fresh frames after a process boundary.
     ctx._prior_inspected_asset_times = continuation_state.get('inspected_asset_times') or {}
@@ -2870,7 +2884,8 @@ def _unmet_ask_hold(ctx, name, args, user_text):
         import ask_ledger
         latest = (ctx.latest_edl() or {}).get("json") or {}
         start = (getattr(ctx, "turn_start_edl", None) or {}).get("json") or {}
-        led = ask_ledger.ledger(user_text, start, latest,
+        contract = getattr(ctx, "verification_request", None)
+        led = ask_ledger.ledger(contract if contract is not None else user_text, start, latest,
                                 bool(getattr(ctx, "versions_written", None)),
                                 index=getattr(ctx, "index", None))
         missing = [t for t, st in led.items() if st == "not_done" and t in _ASK_HOLD_HOW]
@@ -4651,7 +4666,31 @@ def _turn_has_asset_progress(ctx):
     return any(getattr(ctx, name, None) for name in (
         "images_generated", "videos_generated", "urls_fetched",
         "web_recordings", "audio_extracted", "audio_fetched",
-        "stock_added"))
+        "stock_added", "shorts_jobs_completed"))
+
+
+def _serial_background_handoff(ctx):
+    """Release the project writer before waiting for work needing that writer."""
+    job_id = getattr(ctx, "serial_job_id", None)
+    if not job_id:
+        return None
+    row = ctx.db.run(dbx.get_job, job_id)
+    if (row and row.get("type") == "shorts_plan"
+            and row.get("project_id") == ctx.project_id
+            and row.get("user_id") == ctx.job.get("user_id")
+            and (row.get("payload") or {}).get("parent_agent_job_id") == ctx.job.get("id")
+            and row.get("state") in {"queued", "running"}):
+        return job_id
+    return None
+
+
+def _resume_serial_background(ctx, continuation):
+    job_id = (continuation or {}).get("serial_job_id")
+    if not job_id:
+        return ""
+    result = agent_tools.wait_for_job(ctx, job_id)
+    _record_outer_tool_outcome(ctx, "wait_for_job", result)
+    return "\nBackground work from this same request: " + result
 
 
 def _turn_edl_changed(ctx):
@@ -5094,6 +5133,11 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
 
     if status == "awaiting_user" and not failed:
         # a question to the user: the request waits on their answer
+        outcome = AWAITING_USER
+    elif (getattr(ctx, "shorts_jobs_completed", None) and not has_edit_deliverable
+          and status == "replied" and not failed and not prerequisite):
+        # The story cards arrived; their explicit Edit actions own the next
+        # step. Scouting is useful, but it is not three finished creative edits.
         outcome = AWAITING_USER
     elif not has_value and (failed or status in {"timeout", "shutdown"}):
         outcome = "internal_error"
@@ -5611,6 +5655,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     active_base_url = lanes[lane_index].get("base_url") or config.OPENAI_BASE_URL
     active_api_key = lanes[lane_index].get("api_key") or config.OPENAI_API_KEY
     _cont = _cont or {}
+    attachment_note += _resume_serial_background(ctx, _cont)
     semantic_start = (_cont.get("semantic0")
                       if _cont.get("semantic0") is not None
                       else _semantic_progress_marker(ctx))
@@ -5835,6 +5880,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "tool_failure_memory": getattr(ctx, "tool_failure_memory", {}),
             "verification_request": ctx.verification_request,
             "turn_tool_outcomes": ctx.turn_tool_outcomes[-500:],
+            "serial_job_id": getattr(ctx, "serial_job_id", None),
+            "shorts_jobs_completed": list(getattr(ctx, "shorts_jobs_completed", None) or []),
             "inspected_asset_times": _inspection_checkpoint(ctx),
             "editorial_observations": _observation_checkpoint(ctx),
             "loaded_tool_domains": sorted(
@@ -6666,14 +6713,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                              f"changed{_assets_made_note(ctx)}.")
             final = _enforce_honesty(ctx, client, messages, tools, draft,
                                      start_version, honesty,
-                                     user_text=user_message["content"] or "")
+                                     user_text=quality_verifier.request_text_for(ctx))
             # Language MUST run on the model draft before the English
             # quality advisory is appended — otherwise a Cyrillic reply
             # plus a long Latin advisory fails the 60% script threshold
             # and ships (Robbie / project 755).
             final = _enforce_reply_language(
                 ctx, client, messages, tools, final,
-                user_text=user_message["content"] or "", honesty=honesty)
+                user_text=quality_verifier.request_text_for(ctx), honesty=honesty)
             final = _disclose_outstanding_quality(ctx, final)
             final += _unused_fetched_audio_note(ctx)
             if fail_note:
@@ -6717,7 +6764,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             # 2665: audio muted, the library listed, nothing offered).
             import music_offer
             _music_ask = music_offer.turn_end_offer(
-                ctx, user_message.get("content") or "")
+                ctx, quality_verifier.request_text_for(ctx))
             if _music_ask:
                 final = music_offer.append_offer(final, _music_ask)
                 honesty["music_offer"] = True
@@ -6897,6 +6944,9 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                       creative_blueprint=None)
             messages.append({"role": "tool", "tool_call_id": tc.id,
                              "content": result})
+
+        if _serial_background_handoff(ctx):
+            return _durable_continuation("awaiting serial background job")
 
         # Round 67 — direct sight. A look tool captured frames for the
         # AGENT'S OWN eyes this step; deliver them as image parts in a user

@@ -15,6 +15,25 @@ IMPROVE_IT_PREFIX = "Improve it: keep what works and fix these review notes:"
 REVIEW_REPAIR_PREFIXES = (REVIEW_REPAIR_PREFIX, IMPROVE_IT_PREFIX)
 
 
+def generated_customer_request(message):
+    """Read the structured contract of a server-generated Shorts Edit press.
+
+    Legacy rows have a known template boundary. Never parse a customer's
+    ordinary message as that template just because its wording looks similar.
+    """
+    meta = message.get("meta") or {}
+    if not isinstance(meta, dict) or meta.get("shorts_boot") is not True:
+        return None
+    request = meta.get("customer_request")
+    if isinstance(request, str) and request.strip():
+        return request[:4000]
+    text = str(message.get("content") or "")
+    direction = text.partition("The user's preserved direction: ")[2]
+    direction = direction.partition("\n\nBefore making edits,")[0].strip()
+    return ("Edit this selected source story into a finished short with an opening hook.\n"
+            + direction[:400])
+
+
 def is_review_repair(text):
     """Identify the literal request emitted by Studio's Repair edit or
     Improve it button.

@@ -1187,6 +1187,9 @@ def finish(draft, facts):
 # ── the worker's side ────────────────────────────────────────────────────
 
 def facts_from_ctx(ctx, user_text=""):
+    contract = getattr(ctx, "verification_request", None)
+    if contract is not None:
+        user_text = contract
     try:
         latest = ctx.latest_edl() or {}
     except Exception:  # noqa: BLE001
@@ -1241,6 +1244,13 @@ def facts_from_ctx(ctx, user_text=""):
 def finish_for_ctx(ctx, draft, user_text="", subscriber=False):
     """finish() for a live trial turn (or a new subscriber's Claude-lane
     turn); fail-open to the draft."""
+    if (getattr(ctx, "shorts_jobs_completed", None)
+            and not getattr(ctx, "versions_written", None)
+            and not getattr(ctx, "rendered_versions", None)):
+        # This is a source-card handoff, not a timeline edit. The normal
+        # factual/language guards already ran; an EDL-only summary would say
+        # "your cut already does what you asked" or suggest shortening it.
+        return draft, {"dropped": []}
     try:
         f = facts_from_ctx(ctx, user_text)
         f.subscriber = bool(subscriber)

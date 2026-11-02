@@ -15,6 +15,50 @@ import db
 import queue_admission
 
 
+@pytest.mark.parametrize('terminal_state', ['done', 'failed'])
+def test_serial_short_job_runs_before_its_waiting_editor_and_new_followups(queue_db, terminal_state):
+    """Real PostgreSQL: the parent must yield, and its dependency inherits priority."""
+    with queue_db() as conn, conn.cursor() as cur:
+        cur.execute('''INSERT INTO video_jobs
+            (id,project_id,user_id,type,state,heartbeat_at,payload) VALUES
+            (10,1,1,'agent_turn','running',now(),'{}'),
+            (11,1,1,'agent_turn','queued',NULL,'{}'),
+            (12,1,1,'shorts_plan','queued',NULL,'{"parent_agent_job_id":10}'),
+            (13,1,1,'agent_turn','queued',NULL,'{"logical_turn_continuation":true,"root_agent_job_id":10}')''')
+    with queue_db() as conn:
+        assert db.claim_job(conn, ('shorts_plan',), 3) is None
+        assert db.claim_job(conn, ('agent_turn',), 3) is None
+    with queue_db() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE video_jobs SET state='done' WHERE id=10")
+    with queue_db() as conn:
+        child = db.claim_job(conn, ('shorts_plan',), 3)
+        assert child and child['id'] == 12
+        assert db.claim_job(conn, ('agent_turn',), 3) is None
+    with queue_db() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE video_jobs SET state=%s WHERE id=12", (terminal_state,))
+    with queue_db() as conn:
+        assert db.claim_job(conn, ('agent_turn',), 3)['id'] == 13
+    with queue_db() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE video_jobs SET state='done' WHERE id=13")
+    with queue_db() as conn:
+        assert db.claim_job(conn, ('agent_turn',), 3)['id'] == 11
+
+
+@pytest.mark.parametrize('parent_id,project_id,user_id,expected', [
+    ('10', 1, 1, 0), ('10', 2, 1, 1), ('10', 1, 2, 1),
+    ('999', 1, 1, 1), ('bad', 1, 1, 1), ('99999999999999999999999', 1, 1, 1)])
+def test_serial_dependency_priority_requires_a_valid_same_owner_parent(
+        queue_db, parent_id, project_id, user_id, expected):
+    with queue_db() as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO video_jobs (id,project_id,user_id,type,state) VALUES (10,1,1,'agent_turn','done')")
+        cur.execute('''INSERT INTO video_jobs (id,project_id,user_id,type,payload)
+                       VALUES (12,%s,%s,'shorts_plan',%s::jsonb)''',
+                    (project_id, user_id, json.dumps({'parent_agent_job_id': parent_id})))
+        cur.execute('SELECT ' + db._serial_priority_sql('video_jobs') +
+                    ' AS priority FROM video_jobs WHERE id=12')
+        assert cur.fetchone()['priority'] == expected
+
+
 def test_limits_leave_room_for_other_accounts(monkeypatch):
     monkeypatch.setattr(config, '_CLOUDFLARE_REMOTE_EXEC', True)
     for family, total, account in queue_admission.policies():
