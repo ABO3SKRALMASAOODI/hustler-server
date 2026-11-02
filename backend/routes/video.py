@@ -228,6 +228,15 @@ def _image_api_key():
     return ""
 
 
+# Generation tools the live editor no longer has, whatever the provider keys
+# say: worker/agent_tools.py pops them from TOOLS ("Retired from the live
+# agent/MCP catalog"). Ticket #123 (2 Nov 2026): FAL_KEY was still set, so the
+# concierge told a Pro customer "Yes, I can generate genuinely moving clips
+# from your photos" and the editor then had to retract it. Keep in lockstep
+# with that list (backend/tests/test_concierge_retired_generation.py).
+_RETIRED_GENERATION_TOOLS = frozenset(("generate_video", "generate_image"))
+
+
 def _image_gen_enabled():
     """Mirrors the worker's generate_image availability check (worker/llm.
     image_available) so the concierge never promises (or denies) AI images out
@@ -240,6 +249,8 @@ def _image_gen_enabled():
     inherited only when both providers are the same one — otherwise it must be
     set explicitly, and until it is, images are honestly OFF rather than a 404
     per attempt. Keep in lockstep with worker/llm.image_available."""
+    if "generate_image" in _RETIRED_GENERATION_TOOLS:
+        return False
     if not os.getenv("IMAGE_GEN_MODEL", "grok-imagine-image-quality"):
         return False
     if not _image_api_key():
@@ -414,6 +425,8 @@ def _video_gen_enabled():
     """Mirrors the worker's generate_video availability (worker/videogen.
     video_gen_available) — a fal.ai key + the fal provider. Empty key: the
     concierge must keep saying moving-video generation isn't available."""
+    if "generate_video" in _RETIRED_GENERATION_TOOLS:
+        return False
     return (bool(os.getenv("FAL_KEY", ""))
             and os.getenv("VIDEO_PROVIDER", "fal") == "fal")
 
@@ -510,9 +523,12 @@ def _concierge_reply(stage, history, attachments, index_error=None,
         else:
             fallback = ("Drop a video — or images, clips or audio — into the "
                         "panel on the right and I'll build your edit from them.")
+        made_from = ("AI-generated and/or uploaded"
+                     if (_image_gen_enabled() or _video_gen_enabled())
+                     else "uploaded")
         state = ("No main video is uploaded yet — but they do NOT need one to "
                  "start. The studio is a blank canvas: they build a program "
-                 "from AI-generated and/or uploaded images, clips and sounds, "
+                 f"from {made_from} images, clips and sounds, "
                  "in any order, and can add a main video whenever they want "
                  "(or never).")
         if gen_now:

@@ -50,7 +50,27 @@ def wants_music(text):
     if not t.strip() or _NO_MUSIC.search(t) and not re.search(
             r"\b(?:play|add|put)\s+(?:some|a|new|other|different)\b", t, re.I):
         return False
-    return bool(_MUSIC.search(t))
+    # Ticket #123 (2 Nov): "Do NOT continue the previous music-only
+    # instruction" ended a reply that admitted a missing capability on a
+    # track list. A music word a negation leads counts only when a fresh
+    # ask ("..., so add some music") stands between them.
+    for clause in _CLAUSE.split(t):
+        for m in _MUSIC.finditer(clause):
+            negs = list(_NEGATED.finditer(clause[:m.start()]))
+            if not negs:
+                return True
+            after = clause[negs[-1].end():m.start()]
+            ask = _ASK_VERB.search(after)
+            if ask and len(after[:ask.start()].split()) > 2:
+                return True
+    return False
+
+
+_CLAUSE = re.compile(r"[.!?;\n]+|\s+(?:but|instead|rather)\s+", re.I)
+_NEGATED = re.compile(r"\b(?:no|not|never|stop|don'?t|doesn'?t|without)\b",
+                      re.I)
+_ASK_VERB = re.compile(r"\b(?:add|play|put|use|place|give|include|want|need)\b",
+                       re.I)
 
 
 def choice_outcome(before_reply, outcome, unmet, offer):
