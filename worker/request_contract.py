@@ -99,6 +99,14 @@ Each quote must be an exact excerpt from a customer message in this input.
 Use preserve lanes only for existing EDL state the customer explicitly protects;
 protecting original subtitles also prevents duplicating them with new captions.
 When an authorized change affects part of a lane, do not freeze that whole lane.
+Retaining the full original content is a coverage requirement, not a freeze of
+an earlier shortened preview's keep list. A request to restore/rebuild a full
+episode authorizes that change; 'cleaned-up episode' alone does not require
+identical historic cut coordinates. Protect cuts only when their existing
+boundaries are explicitly requested unchanged. In recovery, compare the
+historical preservation baseline with the current saved work before assigning
+whole-lane protections; completed recovery work must not be undone to recreate
+the earlier defect.
 Keep narrower preservation (such as wording while changing style/depth) as a
 semantic requirement with lanes=[] unless another lane expresses it exactly.
 Logo visibility and semantic visual coverage remain requirements even when no
@@ -303,34 +311,17 @@ def _pointer(document, pointer):
     return value
 
 
-def _evidence_catalog(evidence):
-    """Only real, readable paths are legal citations; parents cover long lists."""
-    out = []
-    def visit(value, path, depth, per_root):
-        out.append(path)
-        per_root[0] += 1
-        if depth >= 3 or per_root[0] >= 80:
-            return
-        children = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else []
-        for key, child in children:
-            if per_root[0] >= 80:
-                break
-            token = str(key).replace("~", "~0").replace("/", "~1")
-            visit(child, path + "/" + token, depth + 1, per_root)
-    for key, value in evidence.items():
-        visit(value, "/" + key, 1, [0])
-    return out
-
-
-def current_assessment(ctx):
+def current_assessment(ctx, draft=None):
     result = getattr(ctx, "request_assessment", None)
     if (result and result.get("request_digest") == digest(ctx)
-            and result.get("edl_version") == ctx.latest_edl()["version"]):
+            and result.get("edl_version") == ctx.latest_edl()["version"]
+            and (draft is None or result.get("draft_digest") ==
+                 hashlib.sha256(str(draft).encode()).hexdigest())):
         return result
     return None
 
 
-def _visual_proofs(ctx, latest, verification, preflight):
+def _visual_proofs(ctx, latest, verification, preflight, media=None):
     """Attach the actual immutable preview and source sheets, not just a QC label."""
     workdir = getattr(ctx, "workdir", None)
     if not workdir:
@@ -341,16 +332,21 @@ def _visual_proofs(ctx, latest, verification, preflight):
     if not preflight and render.get("edl_version") == latest["version"]:
         for kind in ("sheet_key", "caption_sheet_key"):
             if render.get(kind):
-                candidates.append(("current_output", render[kind]))
+                candidates.append(("current_output", render[kind], None))
+    for asset_key, asset in (media or {}).items():
+        storyboard = (asset.get("analysis") or {}).get("visual_storyboard") or {}
+        sheets = (storyboard.get("sheets") or []) if isinstance(storyboard, dict) else []
+        if sheets and isinstance(sheets[0], dict) and sheets[0].get("key"):
+            candidates.append(("inspected_asset", sheets[0]["key"], asset_key))
     index = getattr(ctx, "index", None) or {}
     storyboard = index.get("visual_storyboard") or {}
     source_sheets = ([page["key"] for page in (storyboard.get("sheets") or [])
                       if isinstance(page, dict) and page.get("key")]
                      if isinstance(storyboard, dict) else []) or index.get("sheet_keys") or index.get("tile_keys") or []
     if source_sheets:
-        candidates.append(("original_source", source_sheets[0]))
+        candidates.append(("original_source", source_sheets[0], None))
     proofs, parts = [], []
-    for origin, key in candidates[:3]:
+    for origin, key, asset_key in candidates[:4]:
         try:
             path = Path(workdir) / ("request-proof-" + hashlib.sha256(key.encode()).hexdigest()[:20] + ".image")
             if not path.exists():
@@ -361,6 +357,8 @@ def _visual_proofs(ctx, latest, verification, preflight):
             mime = "image/png" if raw.startswith(b"\x89PNG") else "image/jpeg"
             label = {"origin": origin, "storage_key": key,
                      "edl_version": latest["version"] if origin == "current_output" else None}
+            if asset_key:
+                label["asset_key"] = asset_key
             proofs.append(label)
             parts.extend([{"type": "text", "text": "Visual proof: " + json.dumps(label)},
                           {"type": "image_url", "image_url": {"url": "data:" + mime + ";base64," + base64.b64encode(raw).decode()}}])
@@ -377,11 +375,30 @@ def _media_evidence(ctx):
     try:
         assets = ctx.db.run(db.assets_by_kinds, ctx.project_id,
                            ["original", "video_clip", "image_ref", "music", "audio"])
-        return {asset["storage_key"]: {
+        evidence = {asset["storage_key"]: {
             **{key: asset.get(key) for key in ("kind", "duration_s", "width", "height")},
             **{key: (asset.get("meta") or {}).get(key)
                for key in ("filename", "title", "artist", "description", "library_slug")},
         } for asset in assets or []}
+        inspected = getattr(ctx, "_looked_asset_times", None) or {}
+        for asset in assets or []:
+            key = asset["storage_key"]
+            if key not in inspected or not asset.get("sha256"):
+                continue
+            try:
+                indexed = ctx.db.run(db.get_index_by_sha, asset["sha256"])
+            except Exception as exc:
+                evidence[key]["analysis_unavailable"] = type(exc).__name__
+                continue
+            index = (indexed or {}).get("json") or {}
+            sentences = index.get("sentences") or []
+            evidence[key]["analysis"] = {
+                "video": index.get("video"), "sentences": sentences[:300],
+                "transcript_complete": len(sentences) <= 300,
+                "inspected_times": sorted(inspected[key]),
+                "visual_storyboard": index.get("visual_storyboard"),
+            }
+        return evidence
     except Exception as exc:
         print(f"[request_contract] media evidence unavailable: {type(exc).__name__}", flush=True)
         return None
@@ -408,9 +425,11 @@ def assess(ctx, draft="", preflight=False):
         "media": _media_evidence(ctx),
     }
     evidence["render_evidence"] = evidence["verification"].get("render_evidence", {})
-    evidence["visual_proofs"], images = _visual_proofs(ctx, latest, evidence["verification"], preflight)
+    evidence["visual_proofs"], images = _visual_proofs(
+        ctx, latest, evidence["verification"], preflight, evidence["media"])
     schema = json.loads(json.dumps(ASSESSMENT_SCHEMA))
-    schema["properties"]["requirements"]["items"]["properties"]["evidence"]["items"]["enum"] = _evidence_catalog(evidence)
+    # Validate citations against the actual object below. A bounded enum of
+    # shallow paths rejected real nested title/mask evidence and later assets.
     error = None
     value = None
     expected = {r["id"] for r in contract["requirements"]}
@@ -428,6 +447,12 @@ def assess(ctx, draft="", preflight=False):
             if len(rows) != len(expected) or {r["id"] for r in rows} != expected:
                 value = None
                 raise ValueError("The completion assessment omitted or duplicated a requirement")
+            for row in rows:
+                for pointer in row["evidence"]:
+                    try:
+                        _pointer(evidence, pointer)
+                    except (ValueError, KeyError, IndexError, TypeError) as exc:
+                        raise ValueError("Completion evidence does not exist: " + pointer) from exc
             break
         except ValueError as exc:
             error = str(exc)[:800]
@@ -485,7 +510,8 @@ def assess(ctx, draft="", preflight=False):
     if not complete and not value["remaining"].strip():
         value["remaining"] = "Remaining: " + "; ".join(
             r["reason"] for r in rows if r["status"] != "satisfied")
-    value.update(request_digest=contract["request_digest"], edl_version=latest["version"], complete=complete)
+    value.update(request_digest=contract["request_digest"], edl_version=latest["version"],
+                 draft_digest=hashlib.sha256(str(draft).encode()).hexdigest(), complete=complete)
     if not preflight:
         ctx.request_assessment = value
     return value

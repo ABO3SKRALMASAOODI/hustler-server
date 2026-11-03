@@ -981,9 +981,19 @@ def _interpret_executor_data(data, job):
     if data.get("error"):
         # 2000 = what the job row keeps (db.py); ffmpeg's cause is at the end.
         msg = error_text.excerpt(data["error"], 2000)
-        skew = (check_agent_executor_version(quiet=True)
-                if job.get("type") == "agent_turn"
-                else check_executor_version(quiet=True))
+        executed_version = str((data.get("timings") or {}).get("executor_code_version") or "")
+        if executed_version and executed_version != "unknown":
+            # The responding box may be current while a different fallback
+            # provider is rolling out. Diagnose the executor that ran this
+            # job, not the global default health endpoint.
+            mine = version.code_version()
+            skew = (f"the responding executor is running DIFFERENT code than this "
+                    f"dispatcher (executor {executed_version}, dispatcher {mine})"
+                    if mine != "unknown" and executed_version != mine else "")
+        else:
+            skew = (check_agent_executor_version(quiet=True)
+                    if job.get("type") == "agent_turn"
+                    else check_executor_version(quiet=True))
         if skew:
             msg = f"{msg} [{skew}]"
         failure = data.get("failure") or {}

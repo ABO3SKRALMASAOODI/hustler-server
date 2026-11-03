@@ -114,11 +114,97 @@ def test_recovery_yields_to_new_customer_work(version, message):
     assert result["outcome"] == "superseded" and result["billable"] is False
 
 
-def test_evidence_catalog_only_contains_real_paths():
-    evidence = {"after": {"effects": {"transition": None}}, "preview": {"edl_version": 2}}
-    for pointer in rc._evidence_catalog(evidence):
-        rc._pointer(evidence, pointer)
-    assert "/after/effects/transition" in rc._evidence_catalog(evidence)
+def test_real_nested_evidence_survives_completion_review(monkeypatch):
+    ctx = context()
+    ctx.latest_edl()["json"]["motion"] = [{"params": {"text": "Original title"}}]
+    value = {"completed": "Verified.", "remaining": "", "requirements": [
+        {"id": "subtitles", "status": "satisfied", "blocker_kind": "none",
+         "reason": "Unchanged.", "evidence": ["/after/captions"]},
+        {"id": "type", "status": "satisfied", "blocker_kind": "none",
+         "reason": "Actual title.", "evidence": ["/after/motion/0/params/text"]},
+    ]}
+    def record(_ctx, _name, schema, *_args, **_kwargs):
+        # Exercise the real schema validator; replacing the LLM wrapper alone
+        # had concealed its depth-limited citation enum.
+        rc._validate(value, schema)
+        return deepcopy(value)
+    monkeypatch.setattr(rc, "_call", record)
+    assert rc.assess(ctx)["complete"]
+
+
+def test_assessment_does_not_certify_a_replaced_customer_answer(monkeypatch):
+    ctx = context()
+    ctx.semantic_contract["mode"] = "inspect"
+    for row in ctx.semantic_contract["requirements"]:
+        row.update(action="inspect", lanes=[])
+    monkeypatch.setattr(rc, "_call", lambda *a, **kw: {
+        "completed": "Analysis delivered.", "remaining": "", "requirements": [
+            {"id": row["id"], "status": "satisfied", "blocker_kind": "none",
+             "reason": "Answers the question.", "evidence": ["/draft"]}
+            for row in ctx.semantic_contract["requirements"]]})
+    draft = "Hook: 7/10 at 0:03. Top fix: move the payoff earlier."
+    rc.assess(ctx, draft)
+    assert rc.current_assessment(ctx, draft)["complete"]
+    assert rc.current_assessment(ctx, "I cannot review this file.") is None
+
+
+def test_semantic_multi_asset_review_is_not_rewritten_using_primary_only(monkeypatch):
+    ctx = context()
+    monkeypatch.setattr(agent_loop, "_grounding_violations", lambda *a:
+                        pytest.fail("Single-source regex checker ran"))
+    draft = 'In the uploaded FINAL, the line "rebuild collagen" needs a claims review.'
+    assert agent_loop._enforce_honesty(ctx, None, [], [], draft, 1, {}) == draft
+
+
+@pytest.mark.parametrize("index_unavailable", [False, True])
+def test_inspected_secondary_file_keeps_its_own_transcript_evidence(index_unavailable):
+    import db
+    ctx = context()
+    ctx.project_id = 7
+    ctx._looked_asset_times = {"clips/final.mp4": {3.0, 24.0}}
+    assets = [{"storage_key": "clips/final.mp4", "kind": "video_clip", "sha256": "final-sha",
+               "meta": {"filename": "FINAL.mp4"}}]
+    calls = []
+    def run(fn, *args):
+        calls.append((fn, args))
+        if fn is db.assets_by_kinds:
+            return assets
+        assert fn is db.get_index_by_sha and args == ("final-sha",)
+        if index_unavailable:
+            raise TimeoutError("temporary index read failure")
+        return {"json": {"sentences": [{"text": "Final-specific speech."}],
+                         "video": {"duration": 42.83}}}
+    ctx.db = NS(run=run)
+    evidence = rc._media_evidence(ctx)["clips/final.mp4"]
+    assert evidence["filename"] == "FINAL.mp4"
+    if index_unavailable:
+        assert evidence["analysis_unavailable"] == "TimeoutError"
+        return
+    assert evidence["analysis"]["sentences"] == [{"text": "Final-specific speech."}]
+    assert evidence["analysis"]["inspected_times"] == [3.0, 24.0]
+
+
+def test_repair_can_progress_without_approving_preexisting_damage():
+    baseline = {"keep": [[0, 10]], "captions": None, "music": []}
+    damaged = {"keep": [[0, 5]], "captions": {"mode": "from_transcript"}, "music": []}
+    protected = {"cuts", "captions"}
+    # Restore captions without first having to restore the entire timeline.
+    one_repair = {**damaged, "captions": None}
+    assert not scope_guard.recovery_update_violations(damaged, one_repair, baseline, protected)
+    assert scope_guard.preservation_violations(baseline, one_repair, protected=protected) == ["picture cuts"]
+    assert scope_guard.recovery_update_violations(
+        damaged, {**one_repair, "keep": [[0, 3]]}, baseline, protected) == ["picture cuts"]
+    assert not scope_guard.recovery_update_violations(one_repair, baseline, baseline, protected)
+
+
+def test_new_intro_is_not_blocked_by_an_older_incomplete_episode_snapshot():
+    historical = {"keep": [[16, 27], [129, 133]]}
+    current = {"keep": [[0, 3600]], "inserts": []}
+    with_intro = {**current, "inserts": [{"asset_key": "original", "at_output_s": 0,
+                                         "duration_s": 11, "source_start_s": 16}]}
+    assert not scope_guard.recovery_update_violations(current, with_intro, historical, {"cuts"})
+    assert scope_guard.recovery_update_violations(
+        current, {**with_intro, "keep": [[0, 40]]}, historical, {"cuts"})
 
 
 def test_missing_customer_input_waits_without_claiming_completion(monkeypatch):

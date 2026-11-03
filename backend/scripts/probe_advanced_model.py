@@ -33,7 +33,12 @@ def main():
             started = time.monotonic()
             response = llm.responses_create(
                 lane['base_url'], lane['api_key'], model, messages, tools,
-                max_tokens=1500, effort='high', timeout=55, tool_choice='required')
+                max_tokens=1500, effort='high', timeout=55,
+                # Exercise the application's named-decision transport too.
+                # A generic 'required' check missed a broken tool_choice
+                # translation even while ordinary agent calls succeeded.
+                tool_choice=('required' if attempt == 0 else {
+                    'type': 'function', 'function': {'name': 'check_connection'}}))
             usage = response.usage
             calls = response.choices[0].message.tool_calls or []
             assert any(c.function.name == 'check_connection'

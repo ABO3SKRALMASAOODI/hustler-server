@@ -713,10 +713,15 @@ class ToolContext:
             if forbidden:
                 return (f"REJECTED (EDL v{prev['version']} unchanged): the request "
                         "excludes these output channels: " + ", ".join(forbidden))
-        violations = scope_guard.preservation_violations(
-            (getattr(self, "request_preservation_baseline", None) or prev["json"])
-            if protected is not None else prev["json"], normalized, self.user_message,
-            source_shape=_source_shape(self), protected=protected)
+        preservation_baseline = getattr(self, "request_preservation_baseline", None)
+        if protected is not None and preservation_baseline:
+            violations = scope_guard.recovery_update_violations(
+                prev["json"], normalized, preservation_baseline, protected,
+                source_shape=_source_shape(self))
+        else:
+            violations = scope_guard.preservation_violations(
+                prev["json"], normalized, self.user_message,
+                source_shape=_source_shape(self), protected=protected)
         if violations:
             return scope_guard.rejection_message(prev["version"], violations)
         # WAVE_C: on a classified follow-up of the new Claude lanes, a write

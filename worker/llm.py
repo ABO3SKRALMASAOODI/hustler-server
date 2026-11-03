@@ -1289,6 +1289,19 @@ def _to_responses_tools(tools):
     return out
 
 
+def _to_responses_tool_choice(choice):
+    """Named chat selections need the same flattening as their tool schemas."""
+    if not isinstance(choice, dict) or choice.get("type") != "function":
+        return choice
+    function = choice.get("function")
+    name = function.get("name") if isinstance(function, dict) else choice.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("A named function tool choice requires a non-empty name")
+    if choice.get("name") is not None and choice["name"] != name:
+        raise ValueError("Conflicting function names in tool choice")
+    return {"type": "function", "name": name}
+
+
 def _from_responses(payload):
     """Responses output -> a chat-completions-shaped object.
 
@@ -1559,7 +1572,7 @@ def responses_create(base_url, api_key, model, messages, tools,
         if effort in (None, "", "none", "minimal"):
             effort = "low"
     if tool_choice is not None:
-        body["tool_choice"] = tool_choice
+        body["tool_choice"] = _to_responses_tool_choice(tool_choice)
     if max_tokens:
         body["max_output_tokens"] = int(max_tokens)
     if effort:

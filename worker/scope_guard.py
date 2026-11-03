@@ -329,6 +329,21 @@ def preservation_violations(previous: Dict[str, Any],
     return violations
 
 
+def recovery_update_violations(previous, proposed, baseline, protected,
+                               source_shape=None):
+    """Permit independent repair steps and exact restorations, never new drift.
+
+    Existing damage is judged against the historical baseline at handoff. It
+    must not block an unrelated repair or require every lane to be restored
+    atomically. A changed protected lane must either stay as it is or reach
+    the requested baseline exactly.
+    """
+    unrestored = {lane for lane in protected if preservation_violations(
+        baseline, proposed, protected={lane}, source_shape=source_shape)}
+    return preservation_violations(previous, proposed, protected=unrestored,
+                                   source_shape=source_shape)
+
+
 def rejection_message(version: int, violations: Iterable[str]) -> str:
     labels = list(violations)
     return (

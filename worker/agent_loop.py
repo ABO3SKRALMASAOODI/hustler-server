@@ -4535,6 +4535,12 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     honest reply; the discarded text goes to the job result for admin
     inspection. (A wrote-but-denies redraft keeps the corrective-note path:
     a denial is wrong but not a fabrication worth suppressing.)"""
+    if getattr(ctx, "request_contract_required", False):
+        # The semantic delivery review runs after all reply transformations
+        # and sees the inspected media. This legacy checker only sees the
+        # primary upload's transcript and can erase a valid secondary-file
+        # review by declaring its quotations fabricated.
+        return draft
     wrote = bool(ctx.versions_written)
     acted = bool(ctx.versions_written or ctx.images_generated
                  or ctx.urls_fetched
@@ -6804,31 +6810,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 # a full repair slice): deliver the best version with an
                 # export button and the open findings as notes.
                 ctx.critics_advisory = True
-            if semantic_request.enabled(ctx):
-                assessment = semantic_request.assess(ctx, body)
-                repairs = list(getattr(ctx, "request_contract_repairs", None) or [])
-                missing = [r for r in assessment["requirements"]
-                           if r["status"] in {"unmet", "unknown"}]
-                # One decision per immutable version, bounded across durable
-                # continuations. Tool typos and omitted treatments get an
-                # actionable repair, not a misleading success or an endless loop.
-                marker = [assessment["request_digest"], assessment["edl_version"]]
-                if (missing and marker not in repairs and len(repairs) < 3
-                        and not ctx.over_budget()
-                        and time.monotonic() + 30 < turn_deadline):
-                    ctx.request_contract_repairs = repairs + [marker]
-                    messages.append({"role": "assistant", "content": body or "Checking delivery."})
-                    messages.append({"role": "system", "content": (
-                        "The exact saved edit has not fulfilled these customer "
-                        "requirements. For unknown findings inspect or prove the "
-                        "existing work first; do not change it speculatively. "
-                        "Repair unmet work using the available "
-                        "tools, preserve completed work, and verify the new version. "
-                        "A malformed tool argument is recoverable: inspect the "
-                        "actual tool schema and retry correctly. Do not ask for "
-                        "permission to perform work already requested.\n"
-                        + json.dumps(missing, ensure_ascii=False))})
-                    continue
             draft = body
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
@@ -6856,6 +6837,31 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final += _unused_fetched_audio_note(ctx)
             if fail_note:
                 final += fail_note
+            if semantic_request.enabled(ctx):
+                assessment = semantic_request.assess(ctx, final)
+                repairs = list(getattr(ctx, "request_contract_repairs", None) or [])
+                missing = [r for r in assessment["requirements"]
+                           if r["status"] in {"unmet", "unknown"}]
+                # One decision per immutable version, bounded across durable
+                # continuations. Tool typos and omitted treatments get an
+                # actionable repair, not a misleading success or an endless loop.
+                marker = [assessment["request_digest"], assessment["edl_version"], assessment["draft_digest"]]
+                if (missing and marker not in repairs and len(repairs) < 3
+                        and not ctx.over_budget()
+                        and time.monotonic() + 30 < turn_deadline):
+                    ctx.request_contract_repairs = repairs + [marker]
+                    messages.append({"role": "assistant", "content": final or "Checking delivery."})
+                    messages.append({"role": "system", "content": (
+                        "The exact saved edit has not fulfilled these customer "
+                        "requirements. For unknown findings inspect or prove the "
+                        "existing work first; do not change it speculatively. "
+                        "Repair unmet work using the available "
+                        "tools, preserve completed work, and verify the new version. "
+                        "A malformed tool argument is recoverable: inspect the "
+                        "actual tool schema and retry correctly. Do not ask for "
+                        "permission to perform work already requested.\n"
+                        + json.dumps(missing, ensure_ascii=False))})
+                    continue
             honesty["auto_render"] = ctx.autorendered
             outcome, billable = _turn_completion(
                 ctx, "replied", fail_note=fail_note,

@@ -111,6 +111,19 @@ def test_unknown_fingerprint_never_claims_skew(monkeypatch):
     assert remote.check_executor_version(quiet=True) == ""
 
 
+@pytest.mark.parametrize("actual", ["current", "old-box"])
+def test_failure_uses_the_executor_that_actually_ran_the_job(monkeypatch, actual):
+    monkeypatch.setattr(remote, "check_agent_executor_version", lambda **kw:
+                        pytest.fail("Unrelated fallback health was queried"))
+    code = version.code_version() if actual == "current" else actual
+    with pytest.raises(remote.RemoteExecutorError) as error:
+        remote._interpret_executor_data({"error": "Missing tool_choice.name",
+            "timings": {"compute_provider": "box", "executor_code_version": code}},
+            {"type": "agent_turn"})
+    assert ("DIFFERENT code" in str(error.value)) is (actual != "current")
+    assert "Missing tool_choice.name" in str(error.value)
+
+
 def test_skew_is_appended_to_a_failing_job_error(monkeypatch):
     """The sentence has to land where a human already looks — the job error in
     the admin list, beside "the render is the wrong length"."""
