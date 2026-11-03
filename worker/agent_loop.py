@@ -1499,7 +1499,11 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
     # weight. Everything durable about the project lives in the STATE
     # above — the EDL, the scene map, the index — not in old chat. The
     # current request plus the last few messages of context is the job.
-    chat = worker_db.run(dbx.recent_chat, ctx.session_id, 4)
+    chat = [m for m in worker_db.run(dbx.recent_chat, ctx.session_id, 4, user_message["id"])
+            if m["id"] <= user_message["id"]]
+    if not getattr(ctx, "request_contract_required", False):
+        import request_contract as semantic_request
+        ctx.request_contract_history = semantic_request.history(chat, user_message["id"])
     user_texts = []
     for m in chat:
         if m["id"] == user_message["id"]:
@@ -1530,9 +1534,10 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
     # contract it is judged by. 1918 asked "Make a 10 minute wedding video"
     # and "Use all 50 clips" and got a 12-second montage.
     brief = quality_verifier.request_text_for(ctx)
-    contract = request_scope.contract_lines(
+    semantic = getattr(ctx, "request_contract_required", False)
+    contract = [] if semantic else request_scope.contract_lines(
         brief, quality_verifier.requested_duration_target(brief))
-    _parts_line = quality_verifier.part_lengths_line(brief)
+    _parts_line = None if semantic else quality_verifier.part_lengths_line(brief)
     if _parts_line:
         contract = list(contract) + [_parts_line]
     if contract:
@@ -1540,15 +1545,16 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
                              + "\n- ".join(contract))
     msgs.append({"role": "system", "content": request_contract})
     import music_gate
-    previous_reply = next((m.get('content') for m in reversed(chat)
+    previous_reply = next((m for m in reversed(chat)
                            if m.get('role') == 'assistant'
-                           and m['id'] < user_message['id']), None)
+                           and m['id'] < user_message['id']), {})
     choice_note = music_gate.choice_note(ctx, user_message["content"] or "",
-                                        previous_reply)
+                                        previous_reply.get('content'),
+                                        previous_reply_id=previous_reply.get('id'))
     if choice_note:
         msgs.append({"role": "system", "content": choice_note})
         _component("customer_music_choice", choice_note)
-    current_request = (user_message["content"][:4000] + attachment_note
+    current_request = (user_message["content"] + attachment_note
                        + _reply_language_note(user_texts))
     msgs.append({"role": "user", "content": current_request})
     _component("recent_conversation_and_request", [
@@ -1823,17 +1829,36 @@ def _adopt_steering_messages(ctx, worker_db, job, session_id, messages,
     newest = int(after_message_id or 0)
     joined = []
     for row in rows:
-        content = str(row.get("content") or "")[:4000]
+        content = str(row.get("content") or "")
         note = _attachment_context(worker_db, ctx, row)
         messages.append({"role": "user", "content": content + note})
         joined.append(content)
         newest = max(newest, int(row["id"]))
     if joined:
+        if getattr(ctx, "request_contract_required", False):
+            ctx.request_preservation_baseline = ctx.latest_edl()["json"]
+            ctx._music_turn_choice = None
+            try:
+                import request_contract as semantic_request
+                import music_gate
+                prior = worker_db.run(dbx.recent_chat, session_id, 24, newest)
+                if isinstance(prior, list):
+                    ctx.request_contract_history = semantic_request.history(prior, newest)
+                    previous = next((m for m in reversed(prior)
+                                     if m.get('role') == 'assistant' and m['id'] < newest), {})
+                    latest_input = max(rows, key=lambda row: int(row['id']))
+                    choice = music_gate.choice_note(
+                        ctx, latest_input.get('content') or '', previous.get('content'),
+                        previous_reply_id=previous.get('id'))
+                    if choice:
+                        messages.append({'role': 'system', 'content': choice})
+            except Exception as exc:
+                print(f"[steering] request context unavailable: {type(exc).__name__}", flush=True)
         ctx.verification_request = (
             str(quality_verifier.request_text_for(ctx)) + "\n" +
-            "\n".join(joined))[-8000:]
+            "\n".join(joined))
         ctx.user_message = (str(getattr(ctx, "user_message", "")) + "\n" +
-                            "\n".join(joined))[-8000:]
+                            "\n".join(joined))
         ctx.editing_metrics["steering_messages_adopted"] = (
             ctx.editing_metrics.get("steering_messages_adopted", 0)
             + len(rows))
@@ -1932,14 +1957,16 @@ def _customer_verification_request(worker_db, session_id, message, continuation)
             return saved
         return generated
     if "verification_request" in continuation:
-        return continuation["verification_request"]
-    text = str(message.get("content") or "")[:4000]
+        saved = continuation["verification_request"]
+        full = str(message.get("content") or "")
+        return full if saved == full[:4000] else saved
+    text = str(message.get("content") or "")
     if request_intent.is_review_repair(text):
         original = worker_db.run(
             dbx.customer_request_before_repair, session_id,
             message["id"], request_intent.REVIEW_REPAIR_PREFIXES)
         if original:
-            return str(original["content"])[:4000]
+            return str(original["content"])
     return text
 
 
@@ -2026,6 +2053,16 @@ def run_agent_job(worker_db, job):
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"] if index_row else None,
                                   workdir)
+    ctx.request_contract_required = True
+    import operator_recovery
+    superseded = operator_recovery.superseded(ctx)
+    if superseded:
+        return superseded
+    if payload.get("operator_preservation_version"):
+        preserved = worker_db.run(dbx.get_edl_version, job["project_id"],
+                                  int(payload["operator_preservation_version"]))
+        if preserved:
+            ctx.request_preservation_baseline = preserved["json"]
     ctx._loaded_tool_domains = set(
         continuation_state.get("loaded_tool_domains") or [])
     ctx._loaded_tool_names = set(
@@ -2094,7 +2131,8 @@ def run_agent_job(worker_db, job):
         operator_instruction = ""
     # Keep verbatim customer constraints separate from private repair prose.
     # A recovery note can discuss a wrong duration; it is not a new target.
-    ctx.user_message = (user_message.get("content") or "")[:4000]
+    ctx.user_message = user_message.get("content") or ""
+    ctx.operator_instruction = operator_instruction
     ctx.verification_request = _customer_verification_request(
         worker_db, session_id, user_message, continuation_state)
     ctx.request_media_keys = _request_media_keys(worker_db, ctx)
@@ -2332,6 +2370,10 @@ def run_agent_job(worker_db, job):
         claude_trial.activate(ctx.claude_trial, recorder=_llm_recorder)
     try:
         attachment_note = _attachment_context(worker_db, ctx, user_message)
+        import request_contract as semantic_request
+        prior_chat = worker_db.run(dbx.recent_chat, ctx.session_id, 24, user_message["id"])
+        ctx.request_contract_history = semantic_request.history(prior_chat, user_message["id"])
+        semantic_request.ensure(ctx)
         if operator_instruction:
             attachment_note += (
                 "\n[system: INTERNAL PRODUCTION RECOVERY. This is a "
@@ -2786,6 +2828,8 @@ def _look_only_cut_refusal(ctx, name, user_text):
     the judge marked it unrequested both times (4 of 4 judgements), and the
     replay before this build did the same (3 of 3). A request that names no
     cut, length, part or pacing keeps every second of the video."""
+    if getattr(ctx, "request_contract_required", False):
+        return None  # the typed timing policy protects the actual EDL write
     if name not in _CUT_TOOLS:
         return None
     if getattr(ctx, "claude_trial", None) is None \
@@ -2820,6 +2864,8 @@ def _broll_throughout_hold(ctx, name, user_text):
     result, when the trial's one preview was spent. The new Claude lanes
     only (the trial, new subscribers); grandfathered lanes are untouched.
     None = render as asked."""
+    if getattr(ctx, "request_contract_required", False):
+        return None  # the shared semantic preflight checks coverage
     if name != "render_preview" or getattr(ctx, "broll_hold_done", False):
         return None
     if getattr(ctx, "claude_trial", None) is None \
@@ -2890,6 +2936,12 @@ def _unmet_ask_hold(ctx, name, args, user_text):
     throughout; every deliverable ask now gets the same look before the
     render. A report-only call renders nothing and does not spend it. None =
     render as asked."""
+    import request_contract
+    if request_contract.enabled(ctx):
+        if name == "render_preview" and not (
+                isinstance(args, dict) and args.get("report") and not args.get("complete")):
+            return request_contract.preflight(ctx)
+        return None
     if name != "render_preview" or getattr(ctx, "ask_hold_done", False):
         return None
     if getattr(ctx, "claude_trial", None) is None \
@@ -3239,6 +3291,9 @@ _EXPLICIT_MICRO_EDIT = re.compile(
 # receipt alongside rendered_versions; otherwise auto-render skips the file
 # and the final handoff has neither a preview attachment nor its review.
 _PREVIEW_CHECKPOINT_FIELDS = (
+    "request_preservation_baseline",
+    "semantic_contract", "request_assessment", "request_contract_repairs", "request_preflights",
+    "render_dependency_state", "render_dependency_key",
     "last_preview", "last_visual_critic", "last_story_review",
     "last_audio_review", "last_audio_qc_findings",
     "last_picture_qc_findings", "last_taste",
@@ -5147,8 +5202,18 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     ctx.delivery_requirement = delivery
     if delivery and not delivery['complete']:
         unfinished_edit = True
+    import request_contract
+    if request_contract.enabled(ctx) and not request_contract.completion(ctx):
+        unfinished_edit = bool(has_value)
+        attempted_edit = True
+    elif request_contract.enabled(ctx) and has_edit_deliverable:
+        # A corrected intermediate tool failure is not an unfinished request
+        # once every requirement has independent current-version evidence.
+        failed = prerequisite = refused = False
 
-    if status == "awaiting_user" and not failed:
+    request_waiting = request_contract.awaiting_input(ctx) and (
+        not has_edit_deliverable or quality.get("export_ready") is True)
+    if (status == "awaiting_user" and not failed) or request_waiting:
         # a question to the user: the request waits on their answer
         outcome = AWAITING_USER
     elif (getattr(ctx, "shorts_jobs_completed", None) and not has_edit_deliverable
@@ -5694,6 +5759,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     messages = _build_messages(
         ctx, worker_db, user_message, attachment_note,
         include_visual_overview=needs_visual_orientation)
+    import request_contract as semantic_request
+    if semantic_request.enabled(ctx):
+        messages.append({"role": "system", "content": (
+            "AUTHORITATIVE REQUEST REQUIREMENTS. Fulfill every change and "
+            "preserve every protected element. These requirements are also "
+            "checked against the delivered preview. A successful render alone "
+            "is not completion.\n" + json.dumps(ctx.semantic_contract, ensure_ascii=False))})
     if _cont:
         cont_timings = _cont.get("timings") or {"tools": {}}
         done = ", ".join(
@@ -6105,6 +6177,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
 
         seen_message_id = _adopt_steering_messages(
             ctx, worker_db, job, session_id, messages, seen_message_id)
+        if (semantic_request.enabled(ctx) and
+                (getattr(ctx, "semantic_contract", None) or {}).get("request_digest")
+                != semantic_request.digest(ctx)):
+            contract = semantic_request.ensure(ctx)
+            messages.append({"role": "system", "content": (
+                "The updated customer request supersedes the old contract:\n"
+                + json.dumps(contract, ensure_ascii=False))})
 
         # Graceful spend cap: stop before starting another (expensive) model
         # call once this turn's model cost has reached the budget. Honest stop
@@ -6647,6 +6726,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 if body:
                     messages.append({"role": "assistant", "content": body})
                 continue
+            preflight = semantic_request.preflight(ctx)
+            if preflight:
+                messages.append({"role": "assistant", "content": body or "Preparing the edit."})
+                messages.append({"role": "system", "content": preflight})
+                continue
             # Auto-render first so the turn facts include the real preview.
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings,
@@ -6720,6 +6804,31 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 # a full repair slice): deliver the best version with an
                 # export button and the open findings as notes.
                 ctx.critics_advisory = True
+            if semantic_request.enabled(ctx):
+                assessment = semantic_request.assess(ctx, body)
+                repairs = list(getattr(ctx, "request_contract_repairs", None) or [])
+                missing = [r for r in assessment["requirements"]
+                           if r["status"] in {"unmet", "unknown"}]
+                # One decision per immutable version, bounded across durable
+                # continuations. Tool typos and omitted treatments get an
+                # actionable repair, not a misleading success or an endless loop.
+                marker = [assessment["request_digest"], assessment["edl_version"]]
+                if (missing and marker not in repairs and len(repairs) < 3
+                        and not ctx.over_budget()
+                        and time.monotonic() + 30 < turn_deadline):
+                    ctx.request_contract_repairs = repairs + [marker]
+                    messages.append({"role": "assistant", "content": body or "Checking delivery."})
+                    messages.append({"role": "system", "content": (
+                        "The exact saved edit has not fulfilled these customer "
+                        "requirements. For unknown findings inspect or prove the "
+                        "existing work first; do not change it speculatively. "
+                        "Repair unmet work using the available "
+                        "tools, preserve completed work, and verify the new version. "
+                        "A malformed tool argument is recoverable: inspect the "
+                        "actual tool schema and retry correctly. Do not ask for "
+                        "permission to perform work already requested.\n"
+                        + json.dumps(missing, ensure_ascii=False))})
+                    continue
             draft = body
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
@@ -6756,7 +6865,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final = fulfillment.disclose(ctx, final)
             _new_sub = (not _trial_lane(ctx)
                         and getattr(ctx, "claude_paid", None) is not None)
-            if (_trial_lane(ctx) or _new_sub) and config.CLAUDE_TRIAL_REPLY_GUARD:
+            if semantic_request.enabled(ctx):
+                final = semantic_request.reply(ctx, final)
+                assessment = semantic_request.current_assessment(ctx)
+                honesty["request_requirements"] = assessment
+                honesty["unmet_asks"] = [r["id"] for r in assessment["requirements"]
+                                         if r["status"] != "satisfied"]
+            elif (_trial_lane(ctx) or _new_sub) and config.CLAUDE_TRIAL_REPLY_GUARD:
                 # Q8: the trial reply says only what the turn's facts back
                 # (EDL diff, the latest preview, the transcript), short and
                 # warm: what changed, where to look, one next step.
@@ -6807,6 +6922,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "preview": ctx.last_preview,
                 **quality,
                 **_outcome_meta(ctx, outcome),
+                **({"request_completion": semantic_request.current_assessment(ctx)}
+                   if semantic_request.enabled(ctx) else {}),
             }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           message_meta)

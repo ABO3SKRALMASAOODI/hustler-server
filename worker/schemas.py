@@ -2027,6 +2027,10 @@ class OverlayItem(BaseModel):
     opacity: Optional[AnimFloat] = None  # 0-1; None = fully opaque
     rotation: Optional[AnimFloat] = None # degrees; curves may cross 0/360
     source_start_s: Optional[float] = None   # video overlays: seek into clip
+    # Preserve a region of uploaded footage above a cutaway (for example
+    # burned-in subtitles or a logo), without transcribing/recreating pixels.
+    source_crop: Optional[List[float]] = None
+    z_index: Optional[int] = Field(default=None, ge=-1000, le=1000)
     entrance: Optional[Literal["fade", "slide_left", "slide_right",
                                "slide_up"]] = None
     exit: Optional[Literal["fade", "slide_left", "slide_right",
@@ -2042,6 +2046,17 @@ class OverlayItem(BaseModel):
     # drops nested None keys, so no stored EDL changes signature.
     screen: Optional[ScreenLock] = None
     motion_motif: Optional[MotionMotif] = None
+
+    @field_validator("source_crop")
+    @classmethod
+    def _crop_source(cls, value):
+        return _source_rectangle(value)
+
+    @model_validator(mode="after")
+    def _crop_is_not_screen_locked(self):
+        if self.source_crop is not None and self.screen is not None:
+            raise ValueError("source_crop and screen locking are separate overlay modes")
+        return self
 
 
 # ── Text overlays (round 35): the motion-graphics layer ──────────────────
@@ -3564,7 +3579,7 @@ def validate_edl(data, duration=None, *, render_fragment=False):
                     "keyframes cannot be combined with it.")
             _check_screen_lock(ov.screen, f"overlays[{i}].screen",
                                ov.duration_s)
-    edl.overlays.sort(key=lambda o: (o.start, o.id))
+    edl.overlays.sort(key=lambda o: (o.z_index or 0, o.start, o.id))
 
     # Text overlays: program-time windows, template-driven geometry.
     seen_tx = set()

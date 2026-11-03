@@ -5654,6 +5654,12 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             chain.append(f"trim=start={off:.3f}:end={off + o_dur + .15:.3f}")
             chain.append("tpad=stop_mode=clone:stop_duration=0.15")
             chain.append("setpts=PTS-STARTPTS")
+        if item.get("source_crop"):
+            left, top, right, bottom = item["source_crop"]
+            chain.append(
+                f"crop=w='trunc(iw*{right-left:.6f}/2)*2':"
+                f"h='trunc(ih*{bottom-top:.6f}/2)*2':"
+                f"x='trunc(iw*{left:.6f}/2)*2':y='trunc(ih*{top:.6f}/2)*2'")
         if opacity_animated:
             # geq negotiates its output dimensions from its first frame.  Run
             # it while the asset is still a stable size; putting it after an
@@ -9354,6 +9360,9 @@ def _run_render_job(worker_db, job):
     # is served forever after the transcript gains words.
     cached = (None if force or proof_only else
               worker_db.run(dbx.find_render_asset, project_id, variant, version))
+    dependency_key = job["payload"].get("render_dependency_key")
+    if cached and dependency_key and (cached.get("meta") or {}).get("render_dependency_key") != dependency_key:
+        cached = None
     if cached and (_PREVIEW_QUALITY.get() != "approval" or
                    (cached.get("meta") or {}).get("quality") == "approval") and \
             (cached.get("meta") or {}).get("src_sha256") == \
@@ -9379,6 +9388,7 @@ def _run_render_job(worker_db, job):
                     audio_model_review, edl_row["json"], cached.get("meta")):
             cached_meta = cached.get("meta") or {}
             return {"render_asset_id": cached["id"],
+                    **({"render_dependency_key": dependency_key} if dependency_key else {}),
                     "sheet_key": cached_meta.get("sheet_key"),
                     "verify_sheet_key": cached_meta.get("verify_sheet_key"),
                     "screening_pages": cached_meta.get("screening_pages") or [],
@@ -10100,6 +10110,7 @@ def _run_render_job(worker_db, job):
             width=out_info["width"], height=out_info["height"],
             fps=out_info["fps"],
             meta={"variant": asset_variant, "edl_version": version,
+                  **({"render_dependency_key": dependency_key} if dependency_key else {}),
                   "render_job_id": job_id,
                   "quality": _quality_label(),
                   "sha256": render_sha,
@@ -10208,6 +10219,7 @@ def _run_render_job(worker_db, job):
             print(f"[render {job_id}] MID-WORD AUDIT: {'; '.join(mw)}",
                   flush=True)
         return {"render_asset_id": asset_id, "sheet_key": sheet_key,
+                **({"render_dependency_key": dependency_key} if dependency_key else {}),
                 "render_job_id": job_id, "quality": _quality_label(),
                 "sha256": render_sha,
                 "verify_sheet_key": verify_sheet_key,

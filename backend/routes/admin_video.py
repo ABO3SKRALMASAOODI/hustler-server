@@ -3498,30 +3498,73 @@ def repair_project_edit(project_id):
     """Queue a company-funded completion pass for an affected customer."""
     body = request.get_json(silent=True) or {}
     instruction = str(body.get("instruction") or "").strip()
+    request_key = str(body.get("idempotency_key") or "").strip()
     if len(instruction) > 8000:
         return jsonify({"error": "instruction is too long"}), 400
+    if len(request_key) > 128:
+        return jsonify({"error": "idempotency_key is too long"}), 400
+    expected_version = body.get("expected_edl_version")
+    failed_job_id = body.get("failed_job_id")
+    if ((expected_version is not None and (type(expected_version) is not int or expected_version < 1))
+            or (failed_job_id is not None and (type(failed_job_id) is not int or failed_job_id < 1))):
+        return jsonify({"error": "expected_edl_version and failed_job_id must be positive integers"}), 400
     with adb() as conn:
         cur = conn.cursor()
         cur.execute("""SELECT id, user_id, chat_session_id FROM projects
-                       WHERE id = %s""", (project_id,))
+                       WHERE id = %s FOR UPDATE""", (project_id,))
         project = cur.fetchone()
         if not project:
             return jsonify({"error": "project not found"}), 404
+        if request_key:
+            cur.execute("""SELECT id FROM video_jobs WHERE project_id=%s
+                           AND payload->>'operator_source'='admin_repair'
+                           AND payload->>'operator_request_key'=%s
+                           ORDER BY id DESC LIMIT 1""", (project_id, request_key))
+            existing = cur.fetchone()
+            if existing:
+                return jsonify({"ok": True, "job_id": existing["id"],
+                                "project_id": project_id, "reused": True})
         cur.execute("""SELECT id FROM video_jobs
-                       WHERE project_id = %s AND type = 'agent_turn'
+                       WHERE project_id = %s AND type IN ('agent_turn','index','final')
                          AND state IN ('queued','running')
                        ORDER BY id DESC LIMIT 1""", (project_id,))
         active = cur.fetchone()
         if active:
             return jsonify({"error": "an edit is already active",
                             "job_id": active["id"]}), 409
-        cur.execute("""SELECT id FROM chat_messages
+        cur.execute("""SELECT version FROM edls WHERE project_id=%s
+                       ORDER BY version DESC LIMIT 1""", (project_id,))
+        latest = cur.fetchone()
+        if not latest or (expected_version is not None and latest["version"] != expected_version):
+            return jsonify({"error": "project changed; inspect its current edit before repairing"}), 409
+        cur.execute("""SELECT id, meta FROM chat_messages
                        WHERE session_id = %s AND role = 'user'
                        ORDER BY id DESC LIMIT 1""",
                     (project["chat_session_id"],))
         message = cur.fetchone()
-        if not message:
-            return jsonify({"error": "project has no customer request"}), 409
+        retry_first_cut = False
+        if failed_job_id is not None:
+            if message or expected_version is None:
+                return jsonify({"error": "automatic recovery requires an unchanged upload with no later customer request"}), 409
+            cur.execute("""SELECT payload, result, state FROM video_jobs
+                           WHERE id=%s AND project_id=%s AND type='agent_turn'""",
+                        (failed_job_id, project_id))
+            failed = cur.fetchone()
+            if not (failed and (failed.get("payload") or {}).get("first_cut") is True
+                    and failed["state"] in ("done", "failed")
+                    and (failed.get("result") or {}).get("outcome") != "fulfilled"):
+                return jsonify({"error": "failed_job_id is not an unfinished automatic first cut for this project"}), 409
+            retry_first_cut = True
+        elif not message:
+            return jsonify({"error": "project has no customer request; provide its failed automatic job and expected version"}), 409
+        preservation_version = (message.get("meta") or {}).get("edl_version") if message else None
+        if preservation_version is not None:
+            try:
+                preservation_version = int(preservation_version)
+            except (TypeError, ValueError):
+                return jsonify({"error": "customer request has an invalid baseline version"}), 409
+            if not 1 <= preservation_version <= latest["version"]:
+                return jsonify({"error": "customer request baseline is outside the project history"}), 409
         if not instruction:
             instruction = (
                 "Company-funded completion repair. Inspect the customer's "
@@ -3533,10 +3576,15 @@ def repair_project_edit(project_id):
                 "the specific blocker; do not repeat unchanged failed attempts."
             )
         job_id = _enqueue(cur, project_id, project["user_id"], "agent_turn", {
-            "message_id": int(message["id"]),
+            **({"first_cut": True, "operator_failed_job_id": failed_job_id}
+               if retry_first_cut else {"message_id": int(message["id"])}),
             "operator_repair": True,
             "operator_instruction": instruction,
             "operator_source": "admin_repair",
+            "operator_request_key": request_key or None,
+            "operator_expected_edl_version": latest["version"],
+            "operator_expected_message_id": int(message["id"]) if message else 0,
+            "operator_preservation_version": preservation_version,
         })
     return jsonify({"ok": True, "job_id": job_id, "project_id": project_id})
 

@@ -247,3 +247,24 @@ def test_repetition_cannot_cherry_pick_clean_tokens_inside_ambiguous_alignment()
     rows = words('unreliable water shortage water shortage',
                  [1, 1, 1.25, 1.5, 1.75])
     assert not audit.repeated_phrases([[0, 10]], rows)
+
+
+@pytest.mark.parametrize('cache_state', ['replaced', 'expired', 'same_job'])
+def test_a_retry_binds_the_original_visible_offer_even_after_cache_changes(cache_state):
+    ctx, db = tool_context(default_edl(20), user_message='2', job_id=1)
+    tracks = music_library.catalog()[:3]
+    question = '; '.join(f'{i}. "{t["title"]}"' for i, t in enumerate(tracks, 1))
+    music_gate.open_offer(ctx, question)
+    ctx.job['id'] = 2
+    if cache_state == 'expired':
+        ctx._music_offer['at'] = 0
+    else:
+        music_gate.open_offer(ctx, '; '.join(t['title'] for t in tracks[1:] + tracks[:1]))
+        if cache_state == 'replaced':
+            ctx.job['id'] = 3
+    note = music_gate.choice_note(ctx, '2', question, previous_reply_id=100)
+    assert tracks[1]['slug'] in note
+    picked, error = music_gate.resolve_pick(ctx, tracks[1]['slug'])
+    assert error is None
+    assert picked['offer_message_id'] == 100
+    assert picked['evidence'] == '2'

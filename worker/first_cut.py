@@ -2052,6 +2052,35 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                 windows, getattr(ctx, "first_cut_montage_boxes", None),
                 montage_cut.crop_share(ctx.index))
             windows = montage_cut.fit_length(windows, shots, duration)
+        if not windows:
+            # A shot-diversity quota cannot select a single continuous take.
+            # Inspect the actual action and preserve its continuity instead
+            # of falling through with zero edits and a generic blocked reply.
+            import continuous_cut
+            plan = continuous_cut.plan(ctx, spend)
+            selected = plan["keep"]
+            if selected != _keep(ctx):
+                result = _run(ctx, steps, "keep_segments",
+                              {"segments": selected, "snap_to_words": False}, started)
+                if not _ok(result):
+                    raise ValueError("The inspected continuous edit could not be saved")
+                applied.append("a continuous excerpt with its original sound")
+            else:
+                applied.append("the complete action and original sound preserved")
+            adjustments = {k: v for k, v in plan["adjustments"].items() if abs(v) > .001}
+            if adjustments:
+                result = _run(ctx, steps, "set_grade_custom", adjustments, started)
+                if not _ok(result):
+                    raise ValueError("The inspected exposure correction could not be saved")
+                applied.append("a subtle colour and exposure correction")
+            if _orientation(ctx.index) != "vertical":
+                result = _run(ctx, steps, "set_frame",
+                              {"ratio": "9:16", "mode": "pad_blur"}, started)
+                if not _ok(result):
+                    raise ValueError("The continuous scene could not be fitted to vertical")
+                applied.append("the full scene fitted to vertical")
+            return steps, applied, {"how": "continuous", "plan": plan,
+                                    "s": round(sum(b - a for a, b in selected), 3)}
         if windows and _ok(_run(ctx, steps, "keep_segments",
                                 {"segments": windows, "snap_to_words": False},
                                 started)):
@@ -3406,6 +3435,10 @@ def run(worker_db, job, project, index_row):
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"] if index_row else None,
                                   workdir)
+    import operator_recovery
+    superseded = operator_recovery.superseded(ctx)
+    if superseded:
+        return superseded
     # Deterministic: no paid second-opinion critics or listening model, no
     # images queued for an agent (MCP's own settings), a render budget.
     ctx.sight_out = True
@@ -3449,7 +3482,8 @@ def run(worker_db, job, project, index_row):
         subscribed, plan = False, "free"
     trial_scope, recorder = None, None
     decision = claude_trial.resolve(worker_db, job.get("user_id"), subscribed,
-                                    project_id=project["id"], via="first_cut")
+                                    project_id=project["id"], via="first_cut",
+                                    operator_repair=payload.get("operator_repair") is True)
     if decision.kind == claude_trial.Decision.ACTIVE:
         trial_scope = decision.scope
         trial_scope.job_id = job.get("id")
@@ -3459,7 +3493,8 @@ def run(worker_db, job, project, index_row):
             recorder = _ScopeRecorder()
             llm.set_recorder(recorder)
         claude_trial.activate(trial_scope, recorder)
-    elif subscribed and claude_trial.credit_status(worker_db).get("on"):
+    elif payload.get("operator_repair") is True or (
+            subscribed and claude_trial.credit_status(worker_db).get("on")):
         ctx.first_cut_model = claude_trial.flag(worker_db)["model"]
     # Q1 (30 Oct): the visual-variety devices reach trial accounts and NEW
     # subscribers only; a grandfathered payer's First cut is unchanged (D1)
@@ -3488,7 +3523,7 @@ def run(worker_db, job, project, index_row):
                 steps, applied, picked = video_chain(ctx, worker_db, started,
                                                      spend)
         render = None
-        keep_whole = bool(picked and picked.get("how") == "finished_piece")
+        keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
         if ctx.versions_written or keep_whole:
             _say(ctx, "render", "Rendering your preview")
             if config.FIRST_CUT_DRAFT_FIRST and \

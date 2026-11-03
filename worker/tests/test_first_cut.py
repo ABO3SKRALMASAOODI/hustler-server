@@ -64,10 +64,17 @@ def test_short_landscape_talk_gets_the_whole_clean_chain(monkeypatch):
 
 def test_vertical_phone_video_without_speech_skips_speech_and_reframe(
         monkeypatch):
+    import continuous_cut
     ctx = Ctx(_index(40, width=1080, height=1920, words=0))
+    ctx.latest_edl = lambda: {"version": 1, "json": {"keep": [[0.0, 40.0]]}}
     calls = _record(monkeypatch, ctx)
-    first_cut.video_chain(ctx, None, _clock(), {"usd": 0})
+    monkeypatch.setattr(continuous_cut, "plan", lambda *_: {
+        "keep": [[0.0, 40.0]], "adjustments": {},
+        "subject": "continuous performance", "reason": "preserve the full phrase"})
+    _, applied, picked = first_cut.video_chain(ctx, None, _clock(), {"usd": 0})
     assert [c[0] for c in calls] == []
+    assert picked["how"] == "continuous"  # render even when preservation is the right edit
+    assert "original sound preserved" in applied[0]
 
 
 def test_a_screen_recording_keeps_its_shape(monkeypatch):

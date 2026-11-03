@@ -268,7 +268,7 @@ def latest_offer(ctx):
     return offer
 
 
-def bind_turn_choice(ctx, text, previous_reply=None):
+def bind_turn_choice(ctx, text, previous_reply=None, previous_reply_id=None):
     """Resolve the incoming answer against the offer the customer actually saw.
 
     Freeze it before the editor can open another offer. Durable pick provenance
@@ -282,11 +282,12 @@ def bind_turn_choice(ctx, text, previous_reply=None):
     if bound:
         return bound
     offer = latest_offer(ctx)
-    if offer and offer.get('job_id') == (getattr(ctx, 'job', None) or {}).get('id'):
-        return None
     # A bare number answers the latest visible offer, not any week-old offer
     # left in storage. "Make 2 clips" is a new instruction, not a music pick.
-    slugs = (offer or {}).get('slugs') or ()
+    # The preceding visible message is authoritative. A later retry can have
+    # overwritten the mutable offer cache, or that cache may have expired.
+    # Neither changes what the customer's original answer selected.
+    slugs = offered_slugs(previous_reply) if previous_reply else ()
     selection_words = (set(_STRONG_ORDINALS) | set(_NUMBER_WORDS)
                        | set(_POSITION_CUES) | {'the', 'last', 'please', 'use',
                                                'pick', 'choose', 'go', 'with', 'one',
@@ -294,7 +295,7 @@ def bind_turn_choice(ctx, text, previous_reply=None):
     answer = _norm(text).split()
     positional = bool(answer) and all(w in selection_words or w.isdigit()
                                      or w.startswith('#') for w in answer)
-    if not positional or not previous_reply or offered_slugs(previous_reply) != list(slugs):
+    if not positional:
         slugs = ()
     slug = identify(text, slugs)
     if not slug:
@@ -306,15 +307,18 @@ def bind_turn_choice(ctx, text, previous_reply=None):
         if any(w not in selection_words for w in _norm(remainder).split()):
             return None  # naming a track while rejecting/discussing it is no pick
     record = {'slug': slug, 'at': time.time(), 'via': 'chat',
-              'offer': (offer or {}).get('token'), 'evidence': str(text)[:200]}
+              'offer': ((offer or {}).get('token')
+                        if list(slugs) == (offer or {}).get('slugs') else None),
+              'offer_message_id': previous_reply_id,
+              'evidence': str(text)[:200]}
     _remember_pick(ctx, record)
     root._music_turn_choice = record
     return record
 
 
-def choice_note(ctx, text, previous_reply=None):
+def choice_note(ctx, text, previous_reply=None, previous_reply_id=None):
     try:
-        choice = bind_turn_choice(ctx, text, previous_reply)
+        choice = bind_turn_choice(ctx, text, previous_reply, previous_reply_id)
     except Exception:  # unavailable catalog/storage is not a fabricated choice
         return ''
     if not choice:

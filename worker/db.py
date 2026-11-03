@@ -1906,15 +1906,17 @@ def get_or_enqueue_preview_job(conn, project_id, user_id, payload):
                                (payload->>'audio_model_review')::boolean,
                                true) = %s
                          AND COALESCE(payload->>'quality', 'draft') = %s
+                         AND COALESCE(payload->>'render_dependency_key', '') = %s
                        ORDER BY id DESC LIMIT 1""",
                     (project_id, str(version), audio_model_review,
-                     (payload or {}).get("quality", "draft")))
+                     (payload or {}).get("quality", "draft"),
+                     (payload or {}).get("render_dependency_key") or ""))
         row = cur.fetchone()
         if row:
             if (payload or {}).get("quality") == "approval":
                 _retire_player_drafts(cur, project_id, version)
             return row["id"], False
-        if not audio_model_review:
+        if not audio_model_review and not (payload or {}).get("render_dependency_key"):
             joined = _join_studio_preview(cur, project_id, version, payload)
             if joined is not None:
                 if (payload or {}).get("quality") == "approval":
@@ -3666,14 +3668,23 @@ def add_index_greet(conn, session_id, content, meta, greet_key):
         return row["id"] if row else None
 
 
-def recent_chat(conn, session_id, limit=24):
-    """Recent user/assistant turns (activity rows excluded), oldest first."""
+def recent_chat(conn, session_id, limit=24, before_id=None):
+    """Conversation at a request's immutable position, oldest first.
+
+    Apply the position before LIMIT: later retry replies must not evict or
+    redefine the conversation the customer answered.
+    """
     with conn.cursor() as cur:
-        cur.execute("""
+        sql = """
             SELECT id, role, content, meta FROM chat_messages
             WHERE session_id = %s AND role IN ('user', 'assistant')
-            ORDER BY id DESC LIMIT %s
-        """, (session_id, limit))
+        """
+        params = [session_id]
+        if before_id is not None:
+            sql += " AND id <= %s"
+            params.append(int(before_id))
+        sql += " ORDER BY id DESC LIMIT %s"
+        cur.execute(sql, tuple(params + [limit]))
         return list(reversed(cur.fetchall()))
 
 

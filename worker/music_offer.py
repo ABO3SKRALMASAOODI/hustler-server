@@ -177,7 +177,10 @@ def turn_end_offer(ctx, request_text):
     """The offer sentence to end this turn's reply with, or ''. Opens the
     music_gate offer. Never raises."""
     try:
-        if not wants_music(request_text):
+        import request_contract
+        requested = ((getattr(ctx, "semantic_contract", None) or {}).get("music_requested", False)
+                     if request_contract.enabled(ctx) else wants_music(request_text))
+        if not requested:
             return ""
         if getattr(ctx, "_music_offer_made", False):
             return ""

@@ -1,5 +1,5 @@
 {
- "bytes": 81898,
- "sha256": "6006e8aeab2a7e0a6e16bbb441dcb7c793e13c6a6f07a4cd100aca722d2eb6b8",
- "_doc": "Core compact catalog with Wave 1's automatic growth set aside (tests/test_w1_seams.py). Base 81,688 B at the interface pass (e8a775f + 46c1bf9). Track 1F added 180 B for look_at overlays, the fx layer and devices skill. Customer reliability 3 Nov adds 30 B: get_words now accepts asset_key for scoped uploaded-clip timing and describes its coordinate space. With the live verify department the full core catalog is 81916 B (ceiling 82,700; budget 83,000)."
+ "bytes": 82030,
+ "sha256": "e262fed241ebb3fd1fbcd770a746e64fe002e8e6eff550f9bff63bc4001543e9",
+ "_doc": "Core compact catalog with automatic wave growth set aside. Customer recovery adds source-region cropping, explicit overlay stacking and reusable original-source excerpts. Full compact catalog 82504 B; existing 82,700 B ceiling unchanged. Previous 3 Nov catalog: 81,898 B."
 }

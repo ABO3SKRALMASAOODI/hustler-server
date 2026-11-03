@@ -181,6 +181,22 @@ def _lane_state(edl: Dict[str, Any], lane: str,
         return _grade_state(edl)
     if lane == "cuts":
         return edl.get("keep") or []
+    if lane == "frame_ratio":
+        return (edl.get("frame") or {}).get("ratio", "source")
+    if lane == "source_audio":
+        return {key: copy.deepcopy(edl.get(key)) for key in ("volume", "master", "stem_mix")}
+    if lane == "timeline_timing":
+        # Splitting a continuous source interval at a composition boundary
+        # does not change the viewer's clock or remove a frame.
+        keep = []
+        for start, end in edl.get("keep") or []:
+            if keep and abs(float(start) - float(keep[-1][1])) < 1e-7:
+                keep[-1][1] = end
+            else:
+                keep.append([start, end])
+        return {"keep": keep, "speed": edl.get("speed") or [],
+                "inserts": [{key: item.get(key) for key in ("at_output_s", "duration_s")}
+                            for item in edl.get("inserts") or []]}
     if lane == "audio_mix":
         # Insert positions may move, but their mute state is part of the mix.
         insert_audio = [{"id": item.get("id"), "mute": item.get("mute")}
@@ -263,12 +279,14 @@ def picture_timing(edl):
 def preservation_violations(previous: Dict[str, Any],
                             proposed: Dict[str, Any],
                             user_message: str = "",
-                            source_shape=None) -> List[str]:
+                            source_shape=None, protected=None) -> List[str]:
     """Human labels for explicitly protected lanes changed by a proposal.
     source_shape: the source's display (width, height), which decides the
     default mastering of a 'source' frame."""
-    protected = protected_lanes(user_message)
-    audio_only = audio_revision_only(user_message)
+    # A supplied semantic contract is authoritative, including an empty set.
+    # Legacy standalone callers can still use the old text interface.
+    audio_only = audio_revision_only(user_message) if protected is None else False
+    protected = protected_lanes(user_message) if protected is None else set(protected)
     if not protected and not audio_only:
         return []
     timeline_changed = _program_structure(previous) != \
@@ -277,6 +295,16 @@ def preservation_violations(previous: Dict[str, Any],
     if audio_only and _canon(picture_timing(previous)) != _canon(picture_timing(proposed)):
         violations.append("picture timing and duration during an audio-only revision")
     for lane in sorted(protected):
+        if lane == "frame_ratio":
+            def ratio(edl):
+                value = (edl.get("frame") or {}).get("ratio", "source")
+                if value == "source":
+                    return source_shape[0] / source_shape[1] if source_shape and all(source_shape) else value
+                width, height = value.split(":")
+                return float(width) / float(height)
+            if ratio(previous) != ratio(proposed):
+                violations.append("the output aspect ratio")
+            continue
         if lane == "audio_mix":
             if not _audio_mix_preserved(previous, proposed,
                                         timeline_changed, source_shape):
@@ -294,7 +322,10 @@ def preservation_violations(previous: Dict[str, Any],
         before = _lane_state(previous, lane, timeline_changed)
         after = _lane_state(proposed, lane, timeline_changed)
         if _canon(before) != _canon(after):
-            violations.append(LANE_LABELS[lane])
+            violations.append(LANE_LABELS.get(lane, {
+                "frame_ratio": "the output aspect ratio", "source_audio": "the original source sound",
+                "timeline_timing": "the picture timing and duration"
+            }.get(lane, lane)))
     return violations
 
 

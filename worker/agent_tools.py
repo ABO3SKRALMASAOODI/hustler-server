@@ -702,9 +702,21 @@ class ToolContext:
                 clock.src_to_out, self.user_message)
             if counter_refusal:
                 return f"REJECTED (EDL v{prev['version']} unchanged): {counter_refusal}"
+        import request_contract
+        protected = None
+        if request_contract.enabled(self):
+            try:
+                protected = request_contract.protected_lanes(self)
+            except ValueError as exc:
+                return f"REJECTED (EDL v{prev['version']} unchanged): {exc}"
+            forbidden = request_contract.forbidden_additions(self, normalized)
+            if forbidden:
+                return (f"REJECTED (EDL v{prev['version']} unchanged): the request "
+                        "excludes these output channels: " + ", ".join(forbidden))
         violations = scope_guard.preservation_violations(
-            prev["json"], normalized, self.user_message,
-            source_shape=_source_shape(self))
+            (getattr(self, "request_preservation_baseline", None) or prev["json"])
+            if protected is not None else prev["json"], normalized, self.user_message,
+            source_shape=_source_shape(self), protected=protected)
         if violations:
             return scope_guard.rejection_message(prev["version"], violations)
         # WAVE_C: on a classified follow-up of the new Claude lanes, a write
@@ -13050,7 +13062,7 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
     if pending_review:
         return pending_review
     asset, err = _resolve_media_asset(ctx, asset_key,
-                                      ("video_clip", "image_ref"))
+                                      ("video_clip", "image_ref", "original"))
     if err:
         return err
     kind = "image" if asset["kind"] == "image_ref" else "video"
@@ -14254,15 +14266,19 @@ def _parse_text_motion(motion, allow_empty=False):
 def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
                 scale=0.4, opacity=None, entrance=None, exit=None,
                 source_start_s=None, fit=None, allow_repeat=False,
-                motion_motif=None):
+                motion_motif=None, source_crop=None, z_index=None):
     """Draw an asset OVER the program picture for a program-time window —
     picture-in-picture, a corner logo, or (fit='cover') a full-frame B-ROLL
     cutaway while the program's audio keeps playing."""
     pending_review = _pending_visual_review(ctx, asset_key)
     if pending_review:
         return pending_review
+    try:
+        source_crop = _source_rectangle(source_crop)
+    except (TypeError, ValueError):
+        return "REJECTED: source_crop must be [left, top, right, bottom] within 0..1, at least 4% on each axis."
     asset, err = _resolve_media_asset(ctx, asset_key,
-                                      ("video_clip", "image_ref"))
+                                      ("video_clip", "image_ref", "original"))
     if err:
         return err
     kind = "image" if asset["kind"] == "image_ref" else "video"
@@ -14357,6 +14373,12 @@ def add_overlay(ctx, asset_key, start, duration_s=None, x=0.5, y=0.5,
             "scale": sc, "fit": fitv, "opacity": op,
             "entrance": entrance, "exit": exit,
             "source_start_s": off if kind == "video" else None}
+    if source_crop is not None:
+        item["source_crop"] = source_crop
+    if z_index is not None:
+        if type(z_index) is not int or not -1000 <= z_index <= 1000:
+            return "REJECTED: z_index must be an integer from -1000 to 1000."
+        item["z_index"] = z_index
     motif, motif_err = _motion_motif_value(ctx, motion_motif)
     if motif_err:
         return motif_err
@@ -23713,6 +23735,9 @@ def speculative_preview(ctx):
     if ctx.write_calls and ctx.write_calls[-1] in GRADE_ONLY_TOOLS:
         return
     row = ctx.latest_edl()
+    import render_dependencies
+    if render_dependencies.needed(ctx, row):
+        return  # The explicit preview waits for the measured composition.
     version = row["version"]
     if version in ctx.rendered_versions or version in ctx.spec_enqueued:
         return
@@ -23746,7 +23771,7 @@ def speculative_preview(ctx):
 
 
 
-def _render_signature(row, kind, ranges=None, audio_model_review=True, quality="draft"):
+def _render_signature(row, kind, ranges=None, audio_model_review=True, quality="draft", dependency_key=None):
     """Identify the exact pixels requested under this deployed renderer.
 
     EDL versions are cheap history and two versions may contain identical
@@ -23765,6 +23790,8 @@ def _render_signature(row, kind, ranges=None, audio_model_review=True, quality="
         "quality": quality,
         "code": worker_version.code_version(),
     }
+    if dependency_key:
+        material["render_dependency_key"] = dependency_key
     raw = json.dumps(material, sort_keys=True, separators=(",", ":"),
                      ensure_ascii=False, default=str).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
@@ -24030,6 +24057,15 @@ def _split_preexisting(ctx, row, lines, prefix):
 
 def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                    report=False):
+    if quality not in ("draft", "approval"):
+        return "REJECTED: quality must be draft or approval."
+    if not report or complete or quality == "approval":
+        import render_dependencies
+        waiting = render_dependencies.before_preview(ctx, ctx.latest_edl(),
+            wait_s=60 if _wait_timeout_s is None else min(60, _wait_timeout_s))
+        if waiting:
+            return waiting
+    dependency_key = getattr(ctx, "render_dependency_key", None)
     if report:
         # report=true reads a stored report; a caller that also asks for a
         # COMPLETE preview wants one, so when the current version has none it
@@ -24043,6 +24079,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             try:
                 current = ctx.db.run(dbx.find_render_asset, ctx.project_id,
                                      "preview", ctx.latest_edl()["version"])
+                if current and dependency_key and (current.get("meta") or {}).get("render_dependency_key") != dependency_key:
+                    current = None
             except Exception:  # noqa: BLE001 — fall back to the plain report
                 current = True
         if not wants_render or current:
@@ -24111,17 +24149,20 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                "audio_model_review": audio_model_review,
                "render_signature": _render_signature(
                    row, "preview",
-                   audio_model_review=audio_model_review, quality=quality)})
+                   audio_model_review=audio_model_review, quality=quality,
+                   dependency_key=dependency_key),
+               **({"render_dependency_key": dependency_key} if dependency_key else {})})
     if plan:
         payload["verify_times"] = [t for t, _ in plan]
     sequence_frames = _sequence_screening_frames(ctx, row)
     if sequence_frames:
         payload["screening_frames"] = sequence_frames
-    job_id = ctx.spec_preview_jobs.get(version) if quality == "draft" else None
+    job_id = ctx.spec_preview_jobs.get(version) if quality == "draft" and not dependency_key else None
     if not job_id:
         job_id = _mcp_adopted_render(
             ctx, "preview", version,
             lambda body: (body.get("quality", "draft") == quality
+                          and body.get("render_dependency_key") == dependency_key
                           and (body.get("audio_model_review", True)
                                is not False) == bool(audio_model_review)))
         if job_id and quality == "draft":
@@ -31398,7 +31439,7 @@ TOOLS = {
                     "enum": ["zoom_in", "zoom_out",
                              "pan_left", "pan_right"]},
          "motion_motif": _MOTION_MOTIF_PROP}),
-    "insert_media": (insert_media, "Splice an uploaded video clip or image "
+    "insert_media": (insert_media, "Splice an uploaded video clip, original-source excerpt or image "
                      "INTO the edit at ANY position in the FINAL edited "
                      "video — mid-take positions split the take cleanly at a "
                      "word edge, so 'in the middle of the talk' works "
@@ -32366,10 +32407,17 @@ TOOLS = {
                     "fit='cover'). opacity 0.05-1.0 (omit = opaque). "
                     "entrance/exit: fade, slide_left, slide_right, "
                     "slide_up. source_start_s seeks into a video overlay. "
+                    "Higher z_index draws above other overlays regardless of start time. source_crop=[left,top,right,bottom] selects a region of "
+                    "the ASSET in 0..1 fractions, before scaling. The original "
+                    "uploaded video is also allowed. To preserve burned-in "
+                    "subtitles/logos over a cutaway, overlay their actual "
+                    "source regions after the B-roll, matching source_start_s "
+                    "to each kept interval and their original screen position. "
                     "HONEST LIMITS: a video overlay's audio does NOT play "
                     "(silent), overlays render above footage but BELOW "
-                    "captions (captions stay visible over b-roll), and "
-                    "they do NOT track objects in the footage. "
+                    "authored caption layers. Burned-in source text/branding "
+                    "is hidden by a cover unless explicitly protected. Overlays "
+                    "do NOT track objects in the footage. "
                     "insert_media PAUSES the talk and adds time; "
                     "fit='cover' does not — pick by whether the speech "
                     "should continue. Assets may be reused whenever the edit "
@@ -32387,6 +32435,9 @@ TOOLS = {
                      "exit": {"type": "string",
                               "enum": list(OVERLAY_ANIMS)},
                      "source_start_s": {"type": "number"},
+                     "z_index": {"type": "integer"},
+                     "source_crop": {"type": "array", "minItems": 4, "maxItems": 4,
+                                     "items": {"type": "number", "minimum": 0, "maximum": 1}},
                      "motion_motif": _MOTION_MOTIF_PROP}),
     "move_overlay": (move_overlay, "Reposition/retime/resize an EXISTING "
                      "overlay — 'move the logo to the other corner', 'make "

@@ -34,8 +34,12 @@ def _ready_projects(conn, project_id, user_id):
 
 
 def delivery_requirement(ctx):
-    required=requested_video_count(getattr(ctx,'verification_request',None)
-                                   or getattr(ctx,'user_message',''))
+    import request_contract
+    if request_contract.enabled(ctx):
+        required = (getattr(ctx, 'semantic_contract', None) or {}).get('output_count', 1)
+    else:
+        required=requested_video_count(getattr(ctx,'verification_request',None)
+                                       or getattr(ctx,'user_message',''))
     if required <= 1: return None
     try:
         ready=ctx.db.run(_ready_projects,ctx.project_id,ctx.project['user_id'])
