@@ -488,8 +488,12 @@ REPEAT_MAX_N = 3
 
 
 def _tok(w):
-    import re
-    return re.sub(r"[^\w']", "", str(w or "")).lower().strip("'")
+    import unicodedata
+    # Combining marks carry meaning (Hindi/Marathi vowel signs, accents).
+    # Python's \w drops them and can equate different spoken words.
+    text = unicodedata.normalize("NFC", str(w or "")).casefold()
+    return "".join(c for c in text if c == "'" or
+                   unicodedata.category(c)[0] in "LNM").strip("'")
 
 
 def repeated_phrases(keep, words, ducks=None):
@@ -503,6 +507,17 @@ def repeated_phrases(keep, words, ducks=None):
     first instance)}], one per repeat, longest n first at a position."""
     if not keep or not words:
         return []
+    ordered = sorted((w for w in words if isinstance(w, dict)),
+                     key=lambda w: float(w['t0']))
+    reliable = set()
+    previous_end = float('-inf')
+    for i, w in enumerate(ordered):
+        start, end = float(w['t0']), float(w['t1'])
+        next_start = (float(ordered[i + 1]['t0']) if i + 1 < len(ordered)
+                      else float('inf'))
+        if end > start and start >= previous_end - 1e-3 and end <= next_start + 1e-3:
+            reliable.add(id(w))
+        previous_end = max(previous_end, end)
     seq = []
     for k, (a, b) in enumerate(keep):
         a, b = float(a), float(b)
@@ -517,7 +532,7 @@ def repeated_phrases(keep, words, ducks=None):
                 continue
             tok = _tok(w.get("w"))
             if tok:
-                seq.append((tok, t0, t1, k))
+                seq.append((tok, t0, t1, k, id(w) in reliable))
     seq.sort(key=lambda r: (r[3], r[1]))
     spans = [[float(a), float(b)] for a, b in keep]
 
@@ -538,6 +553,18 @@ def repeated_phrases(keep, words, ducks=None):
             if any(j in used for j in range(i, i + 2 * n)):
                 continue
             first, second = seq[i:i + n], seq[i + n:i + 2 * n]
+            # ASR sometimes assigns repeated tokens to the same instant or
+            # overlapping intervals. That is not evidence of two utterances,
+            # and cutting it can remove the only real saying. Require ordered,
+            # non-overlapping evidence for every word and both phrases.
+            pair = first + second
+            if any(not r[4] for r in pair) or any(
+                    right[1] < left[2] - 1e-3
+                    for left, right in zip(pair, pair[1:])
+                    if left[3] == right[3]):
+                continue
+            if second[0][1] - first[0][1] < 0.05:
+                continue
             # a long pause between them is a new sentence, not a stutter
             if second[0][1] - first[-1][2] > 1.0 and \
                     not joined(first[-1][3], second[0][3]):

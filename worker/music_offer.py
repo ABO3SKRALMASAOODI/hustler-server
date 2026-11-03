@@ -183,6 +183,8 @@ def turn_end_offer(ctx, request_text):
             return ""
         import music_gate
         import music_library
+        if getattr(music_gate._root(ctx), "_music_turn_choice", None):
+            return ""          # place the answer to the existing offer
         if getattr(music_gate._root(ctx), "_music_offer", None):
             return ""          # the editor already asked this turn
         edl = ctx.latest_edl()["json"]

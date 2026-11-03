@@ -3188,7 +3188,8 @@ def _within_keep(new_keep, prev_keep):
 
 
 def _write_keep(ctx, new_keep, desc, snap_to_words=None,
-                check_regression=False, place_all=False, never_grow=False):
+                check_regression=False, place_all=False, never_grow=False,
+                repetition_repair=False):
     """Shared tail for every keep-modifying write: audio-safe cut edges
     (snap_to_words None/True; True first snaps outward to word edges),
     insert re-snap + program-item re-anchoring (the shared remap above,
@@ -3207,7 +3208,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     prev = ctx.latest_edl()
     prev_keep = prev["json"]["keep"]
     sentence_line = ""
-    if words and _sentence_snap_on(ctx, snap_to_words):
+    if words and not repetition_repair and _sentence_snap_on(ctx, snap_to_words):
         # TRIAL_QUALITY_BUILD: the Claude lanes' editor never starts or ends
         # a piece mid-sentence (sentence_snap; new edges only)
         import sentence_snap
@@ -3843,8 +3844,18 @@ def cut_range(ctx, start, end, snap_to_words=None):
     if not new:
         return ("REJECTED: cutting {:.2f}-{:.2f} would remove everything "
                 "that's currently kept.".format(s, e))
+    # A proven repeated saying is an intentional in-sentence edit. Snapping
+    # it to the surrounding clause would silently restore the removed words.
+    try:
+        repeats = audit.repeated_phrases(cur, ctx.index.get("words", []),
+                                        audit.ducked_spans(ctx.latest_edl()["json"]))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        repeats = []  # uncertain alignment retains the ordinary clause guard
+    repetition_repair = any(abs(s - r["cut"][0]) <= 0.02 and
+                            abs(e - r["cut"][1]) <= 0.02 for r in repeats)
     return _write_keep(ctx, new, f"cut {s}-{e}s ({e - s:.2f}s removed)",
-                       snap_to_words=_snap_choice(snap_to_words))
+                       snap_to_words=_snap_choice(snap_to_words),
+                       repetition_repair=repetition_repair)
 
 
 def restore_range(ctx, start, end, snap_to_words=None):
@@ -25953,6 +25964,9 @@ def ask_user(ctx, question):
     q = (question or "").strip()
     if not q:
         return "REJECTED: question is empty."
+    repeat_offer = music_gate.repeat_offer_refusal(ctx, q)
+    if repeat_offer:
+        return repeat_offer
     q = q[:600]
     # Owner rule (Wave 0, 0C): a question that offers library tracks opens
     # a pick offer — the only way a library track becomes the user's pick
@@ -30275,11 +30289,13 @@ TOOLS = {
                             "how you verify nothing repeated survived.", {}),
     "get_words": (get_words, "Word-level timestamps [{t0-t1 word}] for any "
                   "source-time range (the response caps at 400 words and "
-                  "says how to page for the rest). THE source of truth "
-                  "for cut points inside a sentence — never estimate word "
-                  "timing from sentence ranges.",
+                  "says how to page for the rest). Pass asset_key for another "
+                  "uploaded clip; times then belong to THAT clip, never the "
+                  "main source or output timeline. Check low-confidence or "
+                  "overlapping words against actual audio before cutting.",
                   {"start": {"type": "number"},
-                   "end": {"type": "number"}}),
+                   "end": {"type": "number"},
+                   "asset_key": {"type": "string"}}),
     "search_transcript": (search_transcript, "Find where something is said "
                           "(substring + fuzzy over sentences).",
                           {"query": {"type": "string"}}),

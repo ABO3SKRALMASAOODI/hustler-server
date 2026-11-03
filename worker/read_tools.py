@@ -608,21 +608,37 @@ def get_kept_transcript(ctx):
 GET_WORDS_MAX_WORDS = 400
 
 
-def get_words(ctx, start=0, end=None):
-    """Word-level timestamps straight from the index — the ONLY correct
-    source for cut points inside a sentence."""
-    start = ctx.clamp(start or 0)
-    end = ctx.clamp(end if end is not None else ctx.duration)
+def get_words(ctx, start=0, end=None, asset_key=None):
+    """Indexed word timing in the selected source's own coordinate space."""
+    index = ctx.index
+    prefix = ""
+    if asset_key:
+        asset = ctx.db.run(asset_by_key, ctx.project_id, asset_key)
+        if not asset:
+            return f"REJECTED: no asset with storage_key {asset_key!r}."
+        indexed = (ctx.db.run(get_index_by_sha, asset['sha256'])
+                   if asset.get('sha256') else None)
+        index = (indexed or {}).get('json') or {}
+        if not index:
+            return "PREREQUISITE: that upload's word analysis is not available yet."
+        duration = float((index.get('video') or {}).get('duration')
+                         or asset.get('duration_s') or 0)
+        start = min(duration, max(0.0, float(start or 0)))
+        end = min(duration, max(0.0, float(end if end is not None else duration)))
+        prefix = f"Words of {asset_key} (CLIP seconds, not output seconds):\n"
+    else:
+        start = ctx.clamp(start or 0)
+        end = ctx.clamp(end if end is not None else ctx.duration)
     if end <= start:
         return "REJECTED: end must be greater than start."
-    words = ctx.index.get("words", [])
+    words = index.get("words", [])
     rows = [w for w in words if w["t1"] > start and w["t0"] < end]
     if not rows:
         return (f"No transcribed words between {start}s and {end}s."
                 if words else
                 "This video has no transcript (no speech or no audio track).")
     shown = rows[:GET_WORDS_MAX_WORDS]
-    multi = (ctx.index.get("speakers") or 0) > 1
+    multi = (index.get("speakers") or 0) > 1
     out = [f"{_fmt_t(w['t0'])}-{_fmt_t(w['t1'])} {w['w']}"
            + (f" [S{w['speaker']}]" if multi and w.get("speaker") is not None
               else "")
@@ -639,11 +655,12 @@ def get_words(ctx, start=0, end=None):
         # printed exactly for the same reason.
         tail = (f"\n...{len(rows) - len(shown)} more words (up to {end}s) "
                 f"not shown — narrow the range and call again "
-                f"(e.g. get_words({int(shown[-1]['t1'])}, {end:g})).")
+                f"(e.g. get_words({int(shown[-1]['t1'])}, {end:g}"
+                + (f", asset_key={asset_key!r}" if asset_key else "") + ")).")
     unknown = sum(w.get("confidence") is None for w in shown)
     confidence_note = (f"\nConfidence unavailable for {unknown} displayed token(s)."
                        if unknown else "")
-    return _cap("\n".join(out) + confidence_note + tail,
+    return _cap(prefix + "\n".join(out) + confidence_note + tail,
                 budget=TRANSCRIPT_CHAR_BUDGET)
 
 

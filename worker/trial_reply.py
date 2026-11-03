@@ -66,6 +66,7 @@ class Facts:
     # WAVE_A (31 Oct): {graphic id: rendered type size now / at the turn's
     # start} for the titles whose size changed (motion_tools._type_size_note)
     type_scale: dict = field(default_factory=dict)
+    outcome: str = "fulfilled"  # authoritative execution result, not prose
 
 
 # ── sentence classes ─────────────────────────────────────────────────────
@@ -1049,6 +1050,24 @@ def finish(draft, facts):
     draft, pixels = scrub_pixels(draft)
     if pixels:
         report["dropped"].append({"why": "pixels", "sentence": f"{pixels} size(s)"})
+    if facts.outcome in {"partial", "blocked", "internal_error"}:
+        # Presentation must never upgrade an incomplete execution to "Done".
+        # Keep grounded explanations intact, including mixed sentences with
+        # both customer consequences and technical details. The success-only
+        # shortening/suggestion pipeline cannot decide which failures to hide.
+        text, report = _assessment(draft, facts, report)
+        text = _DONE_LEAD.sub("", text, count=1).strip()
+        report.pop("assessment", None)
+        report["outcome"] = facts.outcome
+        status = {
+            "es": "La edición solicitada sigue incompleta.",
+            "fr": "Le montage demandé est encore incomplet.",
+            "de": "Die gewünschte Bearbeitung ist noch nicht abgeschlossen.",
+            "pt": "A edição solicitada ainda está incompleta.",
+            "hi": "अनुरोधित संपादन अभी अधूरा है।",
+            "ar": "التعديل المطلوب لم يكتمل بعد.",
+        }.get(language(draft), "The requested edit is incomplete.")
+        return (status + " " + text).strip(), report
     import ask_ledger
     if not facts.wrote and ask_ledger.assessment_only(facts.user_text):
         return _assessment(draft, facts, report)
@@ -1241,7 +1260,7 @@ def facts_from_ctx(ctx, user_text=""):
                  followup_lead=lead)
 
 
-def finish_for_ctx(ctx, draft, user_text="", subscriber=False):
+def finish_for_ctx(ctx, draft, user_text="", subscriber=False, outcome="fulfilled"):
     """finish() for a live trial turn (or a new subscriber's Claude-lane
     turn); fail-open to the draft."""
     if (getattr(ctx, "shorts_jobs_completed", None)
@@ -1254,6 +1273,7 @@ def finish_for_ctx(ctx, draft, user_text="", subscriber=False):
     try:
         f = facts_from_ctx(ctx, user_text)
         f.subscriber = bool(subscriber)
+        f.outcome = outcome
         text, report = finish(draft, f)
     except Exception as exc:  # noqa: BLE001 — never lose the reply
         print(f"[trial_reply] skipped: {type(exc).__name__}: {exc}", flush=True)

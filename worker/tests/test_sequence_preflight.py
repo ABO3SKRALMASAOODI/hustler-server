@@ -73,7 +73,8 @@ def test_sequence_check_preserves_the_existing_render_allowance():
     agent_loop._count_trial_preview(ctx, sp.REFUSAL_PREFIX + ' Correct the order.')
     assert ctx.trial_previews == 0
     assert agent_loop._trial_render_refusal(ctx, 'keep_segments') is None
-    for _ in range(2):
+    for version in range(1, 3):
+        ctx.last_preview = {'edl_version': version, 'asset_id': version}
         agent_loop._count_trial_preview(ctx, 'Preview rendered and attached')
     assert ctx.trial_previews == 2
     assert agent_loop._trial_render_refusal(ctx, 'render_preview').startswith('REJECTED')

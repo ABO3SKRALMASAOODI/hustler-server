@@ -83,6 +83,16 @@ def read_edl(row, duration, program_map, sections=None, compact=False, offset=0,
     if sections is not None and not isinstance(sections, (list, tuple, str)):
         return ("REJECTED: sections must be a section name or array of names "
                 f"from {sorted(edl.keys())}.")
+    # Providers can double-encode a scalar/array inside valid tool JSON.
+    # Decode only this read selector, never reinterpret write arguments.
+    if isinstance(sections, str) and sections.lstrip().startswith(('"', '[')):
+        try:
+            decoded = json.loads(sections)
+        except (ValueError, TypeError):
+            decoded = None
+        if isinstance(decoded, str) or (isinstance(decoded, list) and
+                                       all(isinstance(s, str) for s in decoded)):
+            sections = decoded
     requested = (sections.split(",") if isinstance(sections, str)
                  else list(sections or []))
     wanted, resolved = [], {}

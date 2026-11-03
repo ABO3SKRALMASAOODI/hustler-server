@@ -890,16 +890,19 @@ FIRST_RESULT_NOTE = (
     "named the steps, then showcase_demo, then the site's name as a "
     "hook_title; 15-30 s. A long source asked for a short or the "
     "best moment: one 20-45 s moment with a hook line and a payoff, 9:16 on "
-    "the speaker, captioned. Music: never pick a track and never ask the "
-    "user to choose one (no list_music_library, no ask_user). When the "
-    "request asks for music, deliver the video without it and say in one "
-    "clause that Valmera does not pick music and their own track can be "
-    "added; a silent source is delivered silent.\n"
+    "the speaker, captioned. Music: never choose a track for the user. Use "
+    "their uploaded/named track or the exact library track they picked. If "
+    "they requested music without choosing a track, offer 2-4 fitting library "
+    "tracks once. Their next number/name answers that offer: place that "
+    "selection, never replace the list and ask again.\n"
     "Render once, look at the frames, fix MAJOR defects only (a fragment at "
     "the start or end, a face cut off, unreadable text) and render once "
-    "more at most. A picture finding still there after one repair is the "
-    "footage's own: keep it and say so in one clause; do not loop. Reply "
-    "briefly with what you made, and end on a statement, never a question.")
+    "more for the repair. Diagnostic proof clips are not complete previews. "
+    "A proven blocking defect can use the execution policy's bounded repair "
+    "passes while the outstanding defect count decreases. A repeated failure "
+    "is not proof that the original footage caused it. When progress stops, "
+    "state the unfinished work accurately; never turn a refusal into 'Done'. "
+    "Reply briefly with what you made and any required next step.")
 
 EXHAUSTED_TEXT = (
     "That used up your free trial — everything I finished is saved and you "

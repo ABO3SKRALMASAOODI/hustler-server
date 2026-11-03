@@ -189,11 +189,12 @@ def test_a_brief_s_sections_all_get_a_chapter_name():
 
 # ---- the trial turn's note --------------------------------------------------
 
-def test_the_trial_turn_records_a_named_page_and_never_asks_for_music():
+def test_the_trial_turn_records_a_named_page_and_honors_a_music_choice():
     note = claude_trial.FIRST_RESULT_NOTE
     assert "never offer to or ask which" in note
-    assert "never pick a track and never ask the user to choose one" in note
-    assert "does not pick music" in note
+    assert "never choose a track for the user" in note
+    assert "never replace the list and ask again" in note
+    assert "exact library track they picked" in note
 
 
 # ---- the closing line, the product page, the preview quality ----------------
@@ -259,12 +260,12 @@ def test_a_brief_that_opens_a_product_page_ends_on_it_not_the_footer_form():
     assert s._closing(s._page())["t"] == "Join Us"
 
 
-def test_the_render_refusal_never_tells_the_user_about_limits():
+def test_the_render_refusal_requires_an_honest_incomplete_handoff():
     import agent_loop
     ctx = type("C", (), {"trial_preview_cap": 2, "trial_previews": 2})()
     text = agent_loop._trial_render_refusal(ctx, "render_preview")
-    assert "Never mention previews, limits" in text and "limit" not in \
-        text.split("Never mention")[0]
+    assert "remains incomplete" in text
+    assert "Do not claim completion" in text
 
 
 def test_a_page_loading_under_its_header_is_a_blank_span(tmp_path):

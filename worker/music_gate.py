@@ -268,6 +268,79 @@ def latest_offer(ctx):
     return offer
 
 
+def bind_turn_choice(ctx, text, previous_reply=None):
+    """Resolve the incoming answer against the offer the customer actually saw.
+
+    Freeze it before the editor can open another offer. Durable pick provenance
+    then survives both context compaction and continuation into another job.
+    Ambiguous answers and MCP calls retain the existing explicit-pick flow.
+    """
+    if is_mcp(ctx):
+        return None
+    root = _root(ctx)
+    bound = getattr(root, '_music_turn_choice', None)
+    if bound:
+        return bound
+    offer = latest_offer(ctx)
+    if offer and offer.get('job_id') == (getattr(ctx, 'job', None) or {}).get('id'):
+        return None
+    # A bare number answers the latest visible offer, not any week-old offer
+    # left in storage. "Make 2 clips" is a new instruction, not a music pick.
+    slugs = (offer or {}).get('slugs') or ()
+    selection_words = (set(_STRONG_ORDINALS) | set(_NUMBER_WORDS)
+                       | set(_POSITION_CUES) | {'the', 'last', 'please', 'use',
+                                               'pick', 'choose', 'go', 'with', 'one',
+                                               'add', 'play', 'music'})
+    answer = _norm(text).split()
+    positional = bool(answer) and all(w in selection_words or w.isdigit()
+                                     or w.startswith('#') for w in answer)
+    if not positional or not previous_reply or offered_slugs(previous_reply) != list(slugs):
+        slugs = ()
+    slug = identify(text, slugs)
+    if not slug:
+        return None
+    if not positional:
+        remainder = str(text)
+        for start, end, _slug in reversed(_mentions(text)):
+            remainder = remainder[:start] + ' ' + remainder[end:]
+        if any(w not in selection_words for w in _norm(remainder).split()):
+            return None  # naming a track while rejecting/discussing it is no pick
+    record = {'slug': slug, 'at': time.time(), 'via': 'chat',
+              'offer': (offer or {}).get('token'), 'evidence': str(text)[:200]}
+    _remember_pick(ctx, record)
+    root._music_turn_choice = record
+    return record
+
+
+def choice_note(ctx, text, previous_reply=None):
+    try:
+        choice = bind_turn_choice(ctx, text, previous_reply)
+    except Exception:  # unavailable catalog/storage is not a fabricated choice
+        return ''
+    if not choice:
+        return ''
+    return ("The customer's current answer selects library track "
+            + choice['slug'] + " from the previously displayed offer. This is "
+            "an explicit user pick, not permission for you to choose. Load the "
+            "audio tools, place that exact track with add_library_music, and "
+            "verify it. Do not offer a replacement list or ask them to pick again.")
+
+
+def repeat_offer_refusal(ctx, question):
+    choice = getattr(_root(ctx), '_music_turn_choice', None)
+    failed = any(r.get('tool') == 'add_library_music' and r.get('kind') == 'failed'
+                 and not r.get('resolved')
+                 for r in getattr(ctx, 'turn_tool_outcomes', []) or [])
+    if failed:
+        return None  # an actual placement failure may require another choice
+    if choice and offered_slugs(question):
+        return ("REJECTED: this user already selected " + choice['slug']
+                + ". Place their selection with add_library_music; do not "
+                  "replace the list they answered. If that track is unavailable, "
+                  "explain the concrete failure before asking for an alternative.")
+    return None
+
+
 def _picks(ctx):
     rows = _kv_get(ctx, _PICKS_KEY.format(pid=_pid(ctx)))
     return rows if isinstance(rows, dict) else {}

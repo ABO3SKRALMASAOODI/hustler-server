@@ -1539,6 +1539,15 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
         request_contract += ("\nTHIS BRIEF FIXES:\n- "
                              + "\n- ".join(contract))
     msgs.append({"role": "system", "content": request_contract})
+    import music_gate
+    previous_reply = next((m.get('content') for m in reversed(chat)
+                           if m.get('role') == 'assistant'
+                           and m['id'] < user_message['id']), None)
+    choice_note = music_gate.choice_note(ctx, user_message["content"] or "",
+                                        previous_reply)
+    if choice_note:
+        msgs.append({"role": "system", "content": choice_note})
+        _component("customer_music_choice", choice_note)
     current_request = (user_message["content"][:4000] + attachment_note
                        + _reply_language_note(user_texts))
     msgs.append({"role": "user", "content": current_request})
@@ -2687,10 +2696,8 @@ def _restore_tighten(ctx, cont):
 
 
 def _trial_preview_cap(ctx, cap, operator_run=False):
-    """The request's preview cap. A trial request renders at most
-    CLAUDE_TRIAL_MAX_PREVIEWS (one look, one repair; Q3, 30 Oct: C1/C2
-    measured 3-7 renders and 170-445 s per trial turn, the extra renders
-    chasing critic findings without a gain). Every other lane: unchanged."""
+    """Trial exploration allowance; proven repairs use a bounded progress
+    policy after it. Money and provider limits remain unchanged."""
     if not _trial_lane(ctx) or operator_run \
             or not config.CLAUDE_TRIAL_MAX_PREVIEWS:
         return cap
@@ -2699,30 +2706,40 @@ def _trial_preview_cap(ctx, cap, operator_run=False):
 
 
 def _count_trial_preview(ctx, result):
-    import sequence_preflight
-    if (getattr(ctx, "trial_preview_cap", None)
-            and not (isinstance(result, str)
-                     and result.startswith(sequence_preflight.REFUSAL_PREFIX))):
-        ctx.trial_previews = int(getattr(ctx, "trial_previews", 0) or 0) + 1
+    import preview_budget
+    preview_budget.count(ctx)
 
 
-def _trial_render_refusal(ctx, name):
-    """A refusal text once a trial request has rendered its
-    CLAUDE_TRIAL_MAX_PREVIEWS previews, for another render or an edit that
-    could never be previewed; else None. Only ctx.trial_preview_cap, which
-    _trial_preview_cap sets on the trial lane alone, arms it: every other
-    lane renders until its request is fulfilled (main, 25 Oct)."""
+def _trial_render_refusal(ctx, name, args=None):
+    """Stop exploration at the allowance, retaining a complete repair cycle
+    for proven defects. Other lanes keep their existing progress guards."""
     cap = getattr(ctx, "trial_preview_cap", None)
     if not cap or (name != "render_preview"
                    and name not in agent_tools.WRITE_TOOLS):
         return None
+    if name == 'render_preview':
+        args = args or {}
+        quality = agent_tools._deliverable_quality(ctx, args.get('quality', 'draft'))
+        if args.get('report') and not args.get('complete') and quality != 'approval':
+            return None  # a stored report is a read, not a new render
+        try:
+            version = ctx.latest_edl()['version']
+        except (AttributeError, KeyError, TypeError):
+            version = None
+        preview = getattr(ctx, 'last_preview', None) or {}
+        if version in (getattr(ctx, 'rendered_versions', None) or ()) \
+                and preview.get('edl_version') == version \
+                and (quality == 'draft' or preview.get('quality') == 'approval'):
+            return None  # the renderer's own idempotent receipt fast path
     if int(getattr(ctx, "trial_previews", 0) or 0) < int(cap):
         return None
-    return ("REJECTED: no further render or edit can be shown in this turn "
-            "(a preview for it is already rendered). Reply now with what the "
-            "latest preview delivers, in two or three sentences ending on a "
-            "statement. Never mention previews, limits, allowances, trials "
-            "or accounts in the reply.")
+    import preview_budget
+    if preview_budget.repair_allowed(ctx):
+        return None
+    return ("REJECTED: the bounded edit/review cycle has stopped because no "
+            "further verified repair progress is available. Preserve the saved "
+            "version and state which requested work remains incomplete. Do not "
+            "claim completion or invent a cause in the original footage.")
 
 
 def _outcome_after_reply(outcome, report, honesty):
@@ -5655,6 +5672,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     active_base_url = lanes[lane_index].get("base_url") or config.OPENAI_BASE_URL
     active_api_key = lanes[lane_index].get("api_key") or config.OPENAI_API_KEY
     _cont = _cont or {}
+    if _cont.get('music_turn_choice'):
+        ctx._music_turn_choice = dict(_cont['music_turn_choice'])
     attachment_note += _resume_serial_background(ctx, _cont)
     semantic_start = (_cont.get("semantic0")
                       if _cont.get("semantic0") is not None
@@ -5812,15 +5831,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     _responses_warned = False      # say the lane fell back ONCE, not per step
     unread_tool_images = False
     visual_handoff = False
-    # A free-trial request renders at most CLAUDE_TRIAL_MAX_PREVIEWS previews
-    # (Q3, 30 Oct; QI kept it trial-only when main removed the general
-    # request cap on 25 Oct). Every other lane has no render cap.
+    # Trial exploration is bounded; evidence-backed repairs get a separate,
+    # diminishing allowance rather than being rejected halfway through.
     ctx.trial_preview_cap = _trial_preview_cap(
         ctx, None, payload.get("operator_repair") is True)
     try:
         ctx.trial_previews = max(0, int(_cont.get("trial_previews") or 0))
     except (TypeError, ValueError):
         ctx.trial_previews = 0
+    import preview_budget
+    preview_budget.restore(ctx, _cont)
     _restore_tighten(ctx, _cont)
     def _durable_continuation(reason, blocker_fingerprint=None,
                               blocker_repeats=0, progress_frontier=None,
@@ -5864,6 +5884,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             "preview_repair_pushed": preview_repair_pushed,
             "quality_repair_versions": sorted(quality_repair_versions),
             "trial_previews": int(getattr(ctx, "trial_previews", 0) or 0),
+            **preview_budget.checkpoint(ctx),
+            "music_turn_choice": getattr(ctx, '_music_turn_choice', None),
             **_tighten_checkpoint(ctx),
             "plan_write_pushed": plan_write_pushed,
             "plan_close_pushed": plan_close_pushed,
@@ -6746,7 +6768,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 import trial_reply
                 final, _report = trial_reply.finish_for_ctx(
                     ctx, final, user_message.get("content") or "",
-                    subscriber=_new_sub)
+                    subscriber=_new_sub, outcome=outcome)
                 if _report and _report.get("dropped"):
                     honesty["trial_reply_dropped"] = _report["dropped"][:12]
                 outcome = _outcome_after_reply(outcome, _report, honesty)
@@ -6836,8 +6858,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             elif (followup_refused := followup_recipes.refusal(
                     ctx, name, args)):
                 result = followup_refused
-            elif _trial_render_refusal(ctx, name):
-                result = _trial_render_refusal(ctx, name)
+            elif (_preview_refusal := _trial_render_refusal(ctx, name, args)):
+                result = _preview_refusal
             elif (broll_hold := _broll_throughout_hold(
                     ctx, name, user_message.get("content") or "")):
                 result = broll_hold

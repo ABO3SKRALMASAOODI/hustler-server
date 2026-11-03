@@ -340,7 +340,7 @@ def test_the_trial_note_no_longer_sends_the_model_to_restore_the_take():
     import claude_trial
     note = claude_trial.FIRST_RESULT_NOTE
     assert "keep_segments([[0" not in note
-    assert "TRIAL TURN PREPARED" in note and "never a question" in note
+    assert "TRIAL TURN PREPARED" in note and "unfinished work accurately" in note
 
 
 def test_a_screen_recording_gets_a_reading_zoom_on_its_text(monkeypatch):
