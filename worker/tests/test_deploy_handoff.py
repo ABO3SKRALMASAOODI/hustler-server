@@ -70,6 +70,24 @@ class _Ledger:
         pass
 
 
+@pytest.mark.parametrize('call_id,safe,waiting,expected', [
+    ('bx-crash-window', True, True, {'unstarted_box_wait': True}),
+    ('cf-crash-window', True, True, {}),
+    ('bx-crash-window', False, True, {}),
+    ('bx-crash-window', True, 'true', {}),
+])
+def test_box_pre_execution_refusal_retains_durable_retry_proof(
+        monkeypatch, call_id, safe, waiting, expected):
+    job = {"id": 135063, "total_claims": 1, "type": "agent_turn"}
+    with pytest.raises(remote.CloudflareStartInterrupted):
+        remote._refused_before_run(job, call_id, "agent", 503, {
+            "error": "Release is changing", "safe_to_fallback": safe,
+            "box_wait": waiting})
+    writes = [kw for fn, _args, kw in _Ledger.events
+              if fn is dbx.finish_remote_execution]
+    assert writes == [expected]
+
+
 def _job(job_id, tool, mutation, project):
     return {"id": job_id, "type": "mcp_tool", "project_id": project,
             "user_id": 60, "attempts": 1, "total_claims": 1,

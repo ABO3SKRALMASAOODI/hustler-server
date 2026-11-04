@@ -616,9 +616,40 @@ def fail_ceilinged_jobs(conn):
         return cur.fetchall()
 
 
+def recover_unstarted_box_waits(conn):
+    """Recover only a stale claim with durable, typed no-execution proof.
+
+    Never infer safety from error wording or a missing start timestamp alone.
+    The Box refusal and queue claim identities must still match; normal
+    deferral limits and the final queue-state compare-and-set remain in force.
+    """
+    if not remote_executions_table_ready(conn):
+        return []
+    with conn.cursor() as cur:
+        cur.execute("""SELECT j.id, j.total_claims, r.error
+                       FROM video_jobs j JOIN remote_executions r
+                         ON r.job_id = j.id AND r.total_claims = j.total_claims
+                       WHERE j.state = 'running'
+                         AND j.heartbeat_at < NOW() - make_interval(secs => %s)
+                         AND r.provider = 'box' AND r.state = 'cancelled'
+                         AND r.started_at IS NULL
+                         AND r.meta @> '{"unstarted_box_wait":true}'::jsonb
+                         AND r.meta->>'unstarted_box_wait_call_id' = r.call_id
+                       FOR UPDATE OF j, r SKIP LOCKED""",
+                    (config.STALE_AFTER_S,))
+        refused = cur.fetchall()
+    return [row["id"] for row in refused
+            if defer_box_wait(conn, row["id"], row["total_claims"],
+                              row["error"] or "Box admission deferred before execution")]
+
+
 def fail_exhausted_jobs(conn):
     """Reaper: stale running jobs with no attempts left become failed.
     Returns the failed rows so the caller can surface each in chat."""
+    # A dispatcher can stop after recording a no-execution refusal but before
+    # its normal BoxWaiting handler refunds the claim. Recover that durable
+    # proof before treating the stale heartbeat as a consumed editing attempt.
+    recover_unstarted_box_waits(conn)
     remote_where = "" if not remote_executions_table_ready(conn) else """
               AND NOT EXISTS (
                 SELECT 1 FROM remote_executions remote_live
@@ -1603,9 +1634,11 @@ def heartbeat_remote_execution(conn, job_id, total_claims):
 
 
 def finish_remote_execution(conn, job_id, total_claims, state, error=None,
-                            provider=None, call_id=None):
+                            provider=None, call_id=None, unstarted_box_wait=False):
     if state not in {"done", "failed", "cancelled"}:
         raise ValueError("remote execution terminal state is invalid")
+    if unstarted_box_wait and (state != "cancelled" or provider != "box" or not call_id):
+        raise ValueError("an unstarted Box wait needs its exact cancelled call identity")
     if job_id is None or total_claims is None \
             or not remote_executions_table_ready(conn):
         return False
@@ -1617,11 +1650,20 @@ def finish_remote_execution(conn, job_id, total_claims, state, error=None,
                   job_id, total_claims]
         if identity_where:
             params.extend([provider, str(call_id)])
+        proof_set = ""
+        proof_where = ""
+        if unstarted_box_wait:
+            proof_set = """, meta = COALESCE(meta, '{}'::jsonb)
+                           || jsonb_build_object('unstarted_box_wait', true,
+                               'unstarted_box_wait_call_id', call_id)"""
+            # Executor adoption and this refusal cannot both win. An already
+            # started, completed, or replaced call must never gain retry proof.
+            proof_where = " AND state = 'submitted' AND started_at IS NULL"
         cur.execute("""UPDATE remote_executions
                        SET state = %s, completed_at = NOW(),
-                           last_observed_at = NOW(), error = %s
+                           last_observed_at = NOW(), error = %s""" + proof_set + """
                        WHERE job_id = %s AND total_claims = %s"""
-                    + identity_where, params)
+                    + identity_where + proof_where, params)
         return cur.rowcount > 0
 
 

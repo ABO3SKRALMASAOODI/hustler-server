@@ -79,6 +79,100 @@ def test_local_dispatcher_keeps_its_existing_small_limits(monkeypatch):
 
 
 @pytest.fixture
+def box_wait_db(queue_db, monkeypatch):
+    """A dispatcher died after persisting Box's pre-execution refusal."""
+    with queue_db() as conn, conn.cursor() as cur:
+        cur.execute("""ALTER TABLE video_jobs ADD COLUMN progress float DEFAULT 0;
+            CREATE TABLE remote_executions (
+                job_id int, total_claims int, provider text, call_id text,
+                function_name text, state text, deadline_at timestamptz,
+                submitted_at timestamptz DEFAULT now(), started_at timestamptz,
+                last_observed_at timestamptz, completed_at timestamptz,
+                error text, meta jsonb DEFAULT '{}', PRIMARY KEY(job_id,total_claims));
+            INSERT INTO video_jobs (id,project_id,user_id,type,state,attempts,
+                total_claims,heartbeat_at,payload)
+                VALUES (1,1,1,'agent_turn','running',1,1,now()-interval '1 hour',
+                        '{"execution_provider":"box"}');
+            INSERT INTO remote_executions (job_id,total_claims,provider,call_id,
+                function_name,state,deadline_at,error,meta)
+                VALUES (1,1,'box','bx-refused','agent','cancelled',now()+interval '1 hour',
+                        'No compatible slot; nothing ran',
+                        '{"unstarted_box_wait":true,"unstarted_box_wait_call_id":"bx-refused"}');""")
+    monkeypatch.setattr(db, 'remote_executions_table_ready', lambda conn: True)
+    monkeypatch.setattr(config, 'MAX_ATTEMPTS_AGENT', 1)
+    return queue_db
+
+
+@pytest.mark.parametrize('state,started,recorded', [
+    ('submitted', False, True), ('running', True, False), ('done', False, False),
+])
+def test_box_refusal_proof_is_bound_to_an_unadopted_call(box_wait_db, state, started, recorded):
+    with box_wait_db() as conn, conn.cursor() as cur:
+        cur.execute("UPDATE remote_executions SET state=%s, meta='{}', started_at=CASE WHEN %s THEN now() ELSE NULL END",
+                    (state, started))
+        assert db.finish_remote_execution(conn, 1, 1, 'cancelled', 'Box refused',
+                                          'box', 'bx-refused',
+                                          unstarted_box_wait=True) is recorded
+        cur.execute('SELECT state,meta FROM remote_executions WHERE job_id=1')
+        row = cur.fetchone()
+        if recorded:
+            assert row['state'] == 'cancelled'
+            assert row['meta'] == {'unstarted_box_wait': True,
+                                   'unstarted_box_wait_call_id': 'bx-refused'}
+        else:
+            assert row['state'] == state and row['meta'] == {}
+
+
+def test_restart_after_box_refusal_refunds_only_the_unstarted_attempt(box_wait_db):
+    with box_wait_db() as conn:
+        assert db.fail_exhausted_jobs(conn) == []
+    with box_wait_db() as conn, conn.cursor() as cur:
+        cur.execute('SELECT state,attempts,total_claims,payload FROM video_jobs WHERE id=1')
+        row = cur.fetchone()
+        assert (row['state'], row['attempts'], row['total_claims']) == ('queued', 0, 1)
+        assert row['payload']['box_wait_claims'] == 1
+        assert row['payload']['box_wait_deferrals'] == 1
+        assert db.fail_ceilinged_jobs(conn) == []
+        assert db.claim_job(conn, ('agent_turn',), 3) is None  # Keep the normal cooldown.
+        cur.execute('UPDATE video_jobs SET updated_at=now()-make_interval(secs => %s)',
+                    (config.CLOUDFLARE_BUSY_RETRY_DELAY_S + 1,))
+        claimed = db.claim_job(conn, ('agent_turn',), 3)
+        assert claimed and claimed['total_claims'] == 2
+        # The old call cannot adopt the replacement claim or apply edits.
+        assert not db.lease_is_current(conn, 1, 1)
+
+
+@pytest.mark.parametrize('change,expected_state', [
+    ("UPDATE remote_executions SET started_at=now()", 'failed'),
+    ("UPDATE remote_executions SET meta='{}'", 'failed'),
+    ('''UPDATE remote_executions SET meta='{"unstarted_box_wait":"true"}' ''', 'failed'),
+    ("UPDATE remote_executions SET total_claims=0", 'failed'),
+    ("UPDATE remote_executions SET provider='cloudflare'", 'failed'),
+    ("UPDATE remote_executions SET call_id='bx-another-launch'", 'failed'),
+    ("UPDATE video_jobs SET state='cancelled'", 'cancelled'),
+    ("UPDATE video_jobs SET heartbeat_at=now()", 'running'),
+    ("UPDATE remote_executions SET state='running',started_at=now()", 'running'),
+])
+def test_box_refusal_recovery_preserves_ambiguous_started_cancelled_and_newer_work(
+        box_wait_db, change, expected_state):
+    with box_wait_db() as conn, conn.cursor() as cur:
+        cur.execute(change)
+        db.fail_exhausted_jobs(conn)
+        cur.execute('SELECT state,attempts FROM video_jobs WHERE id=1')
+        row = cur.fetchone()
+        assert row['state'] == expected_state and row['attempts'] == 1
+
+
+def test_box_refusal_recovery_keeps_the_existing_deferral_limit(box_wait_db, monkeypatch):
+    monkeypatch.setattr(config, 'BOX_MAX_WAIT_DEFERRALS', 1)
+    with box_wait_db() as conn, conn.cursor() as cur:
+        cur.execute('''UPDATE video_jobs SET payload=payload || '{"box_wait_deferrals":1}'::jsonb''')
+        assert [r['id'] for r in db.fail_exhausted_jobs(conn)] == [1]
+        cur.execute('SELECT state FROM video_jobs WHERE id=1')
+        assert cur.fetchone()['state'] == 'failed'
+
+
+@pytest.fixture
 def queue_db(monkeypatch):
     url = os.getenv('QUEUE_TEST_DATABASE_URL')
     if not url:

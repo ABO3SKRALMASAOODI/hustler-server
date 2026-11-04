@@ -2355,10 +2355,14 @@ def _refused_before_run(job, call_id, lane, status_code, body):
     if queue_backed:
         ledger = dbx.Db()
         try:
+            proof = ({"unstarted_box_wait": True}
+                     if _call_target(call_id) == "box"
+                     and body.get("safe_to_fallback") is True
+                     and body.get("box_wait") is True else {})
             ledger.run(dbx.finish_remote_execution, job["id"],
                        job.get("total_claims"), "cancelled",
                        body.get("error") or "Cloudflare launch refused",
-                       _call_target(call_id), call_id)
+                       _call_target(call_id), call_id, **proof)
         except Exception:
             pass
         finally:
