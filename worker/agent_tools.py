@@ -3217,13 +3217,15 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     the list is placed, not only those the previous keep lacked."""
     words = ctx.index.get("words", [])
     silences = ctx.index.get("silences", [])
+    prev = ctx.latest_edl()
+    prev_keep = prev["json"]["keep"]
     if snap_to_words and words:
-        new_keep = audit.snap_keep_to_words(new_keep, words, ctx.duration)
+        new_keep = audit.snap_keep_to_words(
+            new_keep, words, ctx.duration,
+            prev_keep=None if place_all else prev_keep)
     new_keep = [x for x in new_keep if x[1] - x[0] >= 0.05]
     if not new_keep:
         return "REJECTED: nothing would survive that keep list."
-    prev = ctx.latest_edl()
-    prev_keep = prev["json"]["keep"]
     sentence_line = ""
     if words and not repetition_repair and _sentence_snap_on(ctx, snap_to_words):
         # TRIAL_QUALITY_BUILD: the Claude lanes' editor never starts or ends

@@ -333,12 +333,14 @@ def kept_share(side, b, t0, t1):
     return (float(t1) - b) / span if side == "start" else (b - float(t0)) / span
 
 
-def snap_keep_to_words(keep, words, duration):
+def snap_keep_to_words(keep, words, duration, prev_keep=None):
     """Move any keep boundary that lands inside a word OUTWARD to the word
     edge (span start -> word start, span end -> word end), so whole words
     survive — unless it keeps less than KEEP_WORD_FRAC of the word: then it
     moves to the word's far edge and the word is cut. Returns a new merged,
-    sorted keep list.
+    sorted keep list. With prev_keep, only newly introduced edges move.
+    Re-snapping an established edit against overlapping ASR alignments can
+    delete a retained word even when the requested change is elsewhere.
 
     Round 100 — BREATH PADDING on the snapped edges. Whisper's word t1 runs
     consistently early (the model marks the end of the voiced core, not the
@@ -349,6 +351,8 @@ def snap_keep_to_words(keep, words, duration):
     clamped so the pad can never swallow a neighbouring word."""
     starts = sorted(float(w["t0"]) for w in words) if words else []
     ends = sorted(float(w["t1"]) for w in words) if words else []
+    existing_starts = {round(float(s), 6) for s, _ in (prev_keep or [])}
+    existing_ends = {round(float(e), 6) for _, e in (prev_keep or [])}
 
     # A word that TOUCHES the edge (starts exactly where the snapped word
     # ends: 'What|what is', 'an|an AI') is the neighbour the pad must not
@@ -364,8 +368,10 @@ def snap_keep_to_words(keep, words, duration):
 
     snapped = []
     for s, e in keep:
-        hs = word_at_boundary(words, s)
-        he = word_at_boundary(words, e)
+        new_start = round(float(s), 6) not in existing_starts
+        new_end = round(float(e), 6) not in existing_ends
+        hs = word_at_boundary(words, s) if new_start else None
+        he = word_at_boundary(words, e) if new_end else None
         if hs and kept_share("start", s, hs["t0"], hs["t1"]) < KEEP_WORD_FRAC:
             s, hs = float(hs["t1"]), None        # the word is cut: start after it
         if he and kept_share("end", e, he["t0"], he["t1"]) < KEEP_WORD_FRAC:
@@ -378,7 +384,7 @@ def snap_keep_to_words(keep, words, duration):
             if nxt is not None:
                 pad_to = min(pad_to, nxt - 0.01)
             ne = round(max(ne, pad_to), 2)
-        elif words:
+        elif words and new_end:
             # Boundary sitting AT a word edge (the sentence-timestamp case —
             # every shorts clip) still ends at whisper's early t1; give the
             # same breath whenever the edge rides a word's tail.
@@ -395,7 +401,7 @@ def snap_keep_to_words(keep, words, duration):
             if prv is not None:
                 pad_to = max(pad_to, prv + 0.01)
             ns = round(min(ns, pad_to), 2)
-        elif words:
+        elif words and new_start:
             nxt = _next_start_after(s - 0.02)
             if nxt is not None and 0 <= nxt - s <= 0.15:
                 pad_to = nxt - 0.05
