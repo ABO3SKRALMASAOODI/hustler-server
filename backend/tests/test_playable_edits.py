@@ -20,12 +20,14 @@ def api(monkeypatch):
         busy=False
         subscribed=True
         owned=True
+        latest_message=123
         def cursor(self):return self
         def execute(self,sql,args=()):
             self.one=None;self.many=[]
             q=' '.join(sql.split())
             if 'pg_advisory_xact_lock' in q:return
             if q.startswith('SELECT id FROM video_jobs'):self.one={'id':9} if self.busy else None
+            elif q.startswith('SELECT id FROM chat_messages'):self.one={'id':self.latest_message}
             elif q.startswith('SELECT storage_key,duration_s FROM assets'):self.many=[{'storage_key':'song','duration_s':20}]
             elif q.startswith('INSERT INTO edls'):
                 _,version,edl,_=args;self.edls[version]=copy.deepcopy(edl.adapted);self.one={'version':version}
@@ -75,6 +77,49 @@ def test_bad_last_operation_leaves_no_saved_edits(api):
     data=batch();data['operations'].append(dict(action='set',layer='music',value=['bad']))
     result,status=video.apply_edit_batch_core(1,2,data)
     assert status==400 and len(api.edls)==1 and not api.messages
+
+
+def test_operator_repair_refuses_a_new_customer_request(api):
+    data=batch(expected_message_id=122)
+    assert video.apply_edit_batch_core(1,2,data,origin='operator_repair')[1]==409
+    assert len(api.edls)==1 and not api.messages
+    data['expected_message_id']=123
+    assert video.apply_edit_batch_core(1,2,data,origin='operator_repair')[1]==200
+
+
+def test_operator_repair_renders_once_and_retry_reuses_receipt(api,monkeypatch):
+    jobs=[]
+    monkeypatch.setattr(video,'_enqueue',lambda *args:jobs.append(args) or 99)
+    data=batch(expected_message_id=123,render_preview=True)
+    first,status=video.apply_edit_batch_core(1,2,data,origin='operator_repair')
+    assert status==200 and first['preview_job_id']==99
+    assert jobs[0][-2:]==('preview',{'edl_version':2,'source':'user_edit'})
+    api.latest_message=124
+    again,status=video.apply_edit_batch_core(1,2,data,origin='operator_repair')
+    assert status==200 and again['replayed'] and again['preview_job_id']==99
+    assert len(jobs)==1 and len(api.messages)==1
+
+
+def test_operator_repair_route_is_owner_only_and_uses_actual_owner(monkeypatch):
+    import jwt
+    from routes import admin_video
+    app=Flask(__name__);app.config['SECRET_KEY']='operator-repair-test-key-not-a-real-credential'
+    app.register_blueprint(admin_video.admin_video_bp)
+    class Cur:
+        def execute(self,sql,args):assert args==(7,)
+        def fetchone(self):return {'user_id':91}
+    @contextlib.contextmanager
+    def connect():yield type('Conn',(),{'cursor':lambda _:Cur()})()
+    monkeypatch.setattr(admin_video,'adb',connect)
+    called=[]
+    monkeypatch.setattr(video,'apply_edit_batch_core',lambda *a,**k:called.append((a,k)) or ({'version':2},200))
+    client=app.test_client();path='/admin/video/projects/7/repair-batch'
+    def auth(email):return {'Authorization':'Bearer '+jwt.encode({'email':email},app.config['SECRET_KEY'],algorithm='HS256')}
+    assert client.post(path,json=batch()).status_code==401
+    assert client.post(path,json=batch(),headers=auth('customer@example.test')).status_code==403
+    assert not called
+    assert client.post(path,json=batch(),headers=auth('thevalmera@gmail.com')).status_code==200
+    assert called[0][0][:2]==(91,7) and called[0][1]=={'origin':'operator_repair'}
 
 
 @pytest.mark.parametrize('field,value,status',[('owned',False,404),('subscribed',False,402),('busy',True,409)])

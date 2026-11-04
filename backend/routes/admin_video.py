@@ -3527,6 +3527,30 @@ def video_studio_plus_set():
     return jsonify(dict(out, ok=True))
 
 
+@admin_video_bp.route("/admin/video/projects/<int:project_id>/repair-batch", methods=["POST"])
+@admin_required
+def repair_project_batch(project_id):
+    """Apply an inspected deterministic repair with the normal edit safeguards.
+
+    No model is called and no customer credits are charged. The shared engine
+    holds the project lock, rejects a newer request/edit or active writer, and
+    records an idempotent receipt. Originals and earlier revisions remain.
+    """
+    from routes.video import apply_edit_batch_core
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "Expected an edit batch object."}), 400
+    with adb() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM projects WHERE id=%s", (project_id,))
+        project = cur.fetchone()
+    if not project:
+        return jsonify({"error": "Project not found"}), 404
+    result, status = apply_edit_batch_core(project["user_id"], project_id, body,
+                                         origin="operator_repair")
+    return jsonify(result), status
+
+
 @admin_video_bp.route("/admin/video/projects/<int:project_id>/repair",
                       methods=["POST"])
 @admin_required

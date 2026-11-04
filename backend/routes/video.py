@@ -6111,6 +6111,16 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
         if receipt:
             saved = _edl_at(cur, project_id, receipt["version"])
             return {**receipt, "edl": saved["json"], "replayed": True}, 200
+        if origin == "operator_repair":
+            expected = data.get("expected_message_id")
+            if type(expected) is not int or expected < 1:
+                return {"error": "Supply the inspected customer message id."}, 400
+            cur.execute("""SELECT id FROM chat_messages WHERE session_id=%s
+                           AND role='user' ORDER BY id DESC LIMIT 1""",
+                        (project["chat_session_id"],))
+            message = cur.fetchone()
+            if not message or message["id"] != expected:
+                return {"error": "The customer request changed; inspect it before repairing."}, 409
         if _subscribe_gate_applies(cur, user_id):
             return {"error": "A subscription is required to edit this project."}, 402
         purged = _media_purged(_active_original(cur, project_id))
@@ -6193,7 +6203,8 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
         if changed:
             cur.execute("""INSERT INTO edls (project_id,version,json,created_by)
                            VALUES (%s,%s,%s,%s) RETURNING version""",
-                        (project_id, base + 1, Json(normalized), "agent" if origin == "mcp" else "user"))
+                        (project_id, base + 1, Json(normalized),
+                         "agent" if origin in ("mcp", "operator_repair") else "user"))
             version = cur.fetchone()["version"]
             # Stop obsolete compute at the receipt boundary, even when this
             # version will play directly and no replacement render is queued.
@@ -6205,6 +6216,9 @@ def apply_edit_batch_core(user_id, project_id, data, *, origin="user"):
                         (Json({"superseded_by": version}), project_id, version))
         result = dict(version=version, no_change=not changed, preview_on_demand=True,
                       work=work, review_status="pending" if changed else "unchanged")
+        if origin == "operator_repair" and data.get("render_preview") is True:
+            result["preview_job_id"] = _enqueue(cur, project_id, user_id, "preview",
+                {"edl_version": version, "source": "user_edit"})
         if notes:
             result["notes"] = notes
         cur.execute("""INSERT INTO chat_messages (session_id,role,content,meta)
