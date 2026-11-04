@@ -146,7 +146,7 @@ draft can also understate existing work. Judge visible behavior, not whether a
 particular tool or template name was used; equivalent compositions count.
 For each satisfied EDIT requirement cite at least one supplied evidence ref.
 Evidence entries have a ref, a path identifying the original data, and its full
-value. Select refs from the tool's enum; never construct paths or indices.
+value. Select only refs supplied in those records; never invent refs, paths or indices.
 Explain which facts inside the selected value substantiate the requirement.
 For preserved settings cite after too, including an unchanged or null field;
 source dimensions alone do not prove the output frame stayed unchanged.
@@ -224,12 +224,36 @@ def _compile_schema(sources):
 
 
 def _call(ctx, name, schema, system, evidence, images=None):
+    wire_schema = schema
+    if name == "assess_request":
+        # Dynamic enums precede every cache breakpoint on Anthropic. Changing
+        # a preview's evidence count used to invalidate even the instructions.
+        # Keep the wire grammar stable, while validating the returned IDs and
+        # evidence references against the exact original enums below.
+        wire_schema = json.loads(json.dumps(schema))
+        properties = wire_schema["properties"]["requirements"]["items"]["properties"]
+        properties["evidence"]["items"].pop("enum", None)
+        properties["id"].pop("enum", None)
     tool = {"type": "function", "function": {
         "name": name, "description": "Record the requested structured result.",
-        "parameters": schema, "strict": True}}
-    content = json.dumps(evidence, ensure_ascii=False, default=str)
-    if images:
-        content = [{"type": "text", "text": content}] + images
+        "parameters": wire_schema, "strict": True}}
+    if name == "assess_request":
+        # Reusable reference data first; changing edits, proofs and drafts
+        # follow it. Keep all data at user priority, never as instructions.
+        stable = {k: v for k, v in evidence.items()
+                  if k not in {"evidence", "phase"}}
+        stable["evidence"] = [e for e in evidence["evidence"]
+                              if e["path"].split("/")[1] in _STABLE_REVIEW_ROOTS]
+        changing = {"phase": evidence.get("phase"), "evidence": [
+            e for e in evidence["evidence"]
+            if e["path"].split("/")[1] not in _STABLE_REVIEW_ROOTS]}
+        content = [{"type": "text", "text": json.dumps(part, sort_keys=True,
+                   ensure_ascii=False, default=str)} for part in (stable, changing)]
+        content += images or []
+    else:
+        content = json.dumps(evidence, ensure_ascii=False, default=str)
+        if images:
+            content = [{"type": "text", "text": content}] + images
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     client, model = ctx.llm_client, ctx.agent_model
     if images and not llm.agent_sees(model):
@@ -477,6 +501,9 @@ def _evidence_pointer(path):
                            for part in path)
 
 
+_STABLE_REVIEW_ROOTS = ("before", "preservation_baseline", "source")
+
+
 def _assessment_evidence(evidence):
     """Partition actual evidence into selectable, lossless records.
 
@@ -486,7 +513,12 @@ def _assessment_evidence(evidence):
     later material. Persisted assessments still use canonical JSON Pointers.
     """
     entries, pointers = [], {}
-    for root, value in evidence.items():
+    # Stable references must not shift when a new overlay, observation or
+    # rendered proof is added to a later, changing section.
+    roots = [r for r in _STABLE_REVIEW_ROOTS if r in evidence]
+    roots += [r for r in evidence if r not in _STABLE_REVIEW_ROOTS]
+    for root in roots:
+        value = evidence[root]
         children = (list(value.items()) if isinstance(value, dict) else
                     list(enumerate(value)) if isinstance(value, list) else [])
         selections = [([root, key], item) for key, item in children] or [([root], value)]

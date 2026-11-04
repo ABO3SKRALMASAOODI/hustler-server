@@ -412,10 +412,16 @@ def _mark_cache(system, msgs, tools, model=""):
     if str(model or "").lower().startswith(_ONE_CALL_MODELS):
         return
     if _one_shot(msgs, tools):
-        # Only the shared instructions can repeat across calls; the request
-        # itself (frames, this cut) never does.
+        # A critic's unique frames are one-shot. A structured edit assessment
+        # separates reusable request/source evidence into its first text block
+        # and changing edit/proof/draft data into the next block.
         if system:
             system[0] = dict(system[0], cache_control={"type": "ephemeral"})
+        if (len(tools) == 1 and tools[0].get("name") == "assess_request"
+                and msgs and len(msgs[0]["content"]) >= 2
+                and all(b.get("type") == "text" for b in msgs[0]["content"][:2])):
+            msgs[0]["content"][0] = dict(msgs[0]["content"][0],
+                                         cache_control={"type": "ephemeral"})
         return
     if tools:
         tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral"})

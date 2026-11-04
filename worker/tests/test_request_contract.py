@@ -180,6 +180,56 @@ def test_bad_assessment_does_not_repeat_an_expensive_review(monkeypatch):
                for r in result["requirements"])
 
 
+def test_review_cache_prefix_survives_changed_edits_proofs_and_enum_sizes(monkeypatch):
+    import json
+    import claude_lane
+    ctx = context()
+    ctx.llm_client = object()
+    ctx.agent_model = "claude-haiku-5-5"
+    requests = []
+    def send(client, model, messages, **kwargs):
+        system, msgs, tools = claude_lane.to_anthropic(messages, kwargs["tools"], model)
+        claude_lane._mark_cache(system, msgs, tools, model)
+        requests.append((system, msgs, tools))
+        reply = {"requirements": [{"id": r["id"], "status": "unknown",
+                 "reason": "Needs proof", "evidence": [], "blocker_kind": "none"}
+                 for r in ctx.semantic_contract["requirements"]], "completed": "", "remaining": "Needs proof"}
+        return NS(choices=[NS(finish_reason="tool_use", message=NS(tool_calls=[
+            NS(function=NS(name="assess_request", arguments=json.dumps(reply)))]))], usage=None)
+    monkeypatch.setattr(rc.llm, "create_with_dialect", send)
+    monkeypatch.setattr(rc.llm, "record", lambda *a: None)
+    monkeypatch.setattr(rc, "_media_evidence", lambda _: {})
+    monkeypatch.setattr(rc, "_visual_proofs", lambda *a: ({}, []))
+    rc.assess(ctx, "First draft", preflight=True)
+    ctx.latest_edl()["json"]["new_layer"] = "changed output"
+    ctx._editorial_observations = [{"seen": "new proof"}]
+    rc.assess(ctx, "Rewritten draft", preflight=False)
+    first, second = requests
+    assert first[0] == second[0] and first[2] == second[2]
+    assert first[1][0]["content"][0] == second[1][0]["content"][0]
+    assert "cache_control" in first[1][0]["content"][0]
+    assert first[1][0]["content"][1] != second[1][0]["content"][1]
+    assert "cache_control" not in second[1][0]["content"][1]
+
+
+def test_stable_wire_schema_still_rejects_invented_model_references(monkeypatch):
+    import json
+    ctx = context();ctx.llm_client=object();ctx.agent_model="claude-haiku-5-5"
+    schema=deepcopy(rc.ASSESSMENT_SCHEMA)
+    props=schema["properties"]["requirements"]["items"]["properties"]
+    props["evidence"]["items"]["enum"]=["e1"]
+    props["id"]["enum"]=["type"]
+    bad={"completed":"Done", "remaining":"", "requirements":[{
+        "id":"type", "status":"satisfied", "reason":"Done", "evidence":["invented"], "blocker_kind":"none"}]}
+    def send(*a,**kw):
+        assert "enum" not in kw["tools"][0]["function"]["parameters"]["properties"]["requirements"]["items"]["properties"]["evidence"]["items"]
+        return NS(choices=[NS(message=NS(tool_calls=[NS(function=NS(name="assess_request",arguments=json.dumps(bad)))]))],usage=None)
+    monkeypatch.setattr(rc.llm,"create_with_dialect",send)
+    monkeypatch.setattr(rc.llm,"record",lambda *a:None)
+    with pytest.raises(ValueError):
+        rc._call(ctx,"assess_request",schema,rc.ASSESS,{"evidence":[]})
+
+
 def test_review_selects_output_source_evidence_without_indexer_vectors():
     index = {"video": {"duration": 6321},
              "sentences": [{"t0": i, "t1": i + 1, "text": f"Sentence {i}", "wi0": i}
