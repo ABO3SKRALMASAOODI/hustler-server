@@ -1,9 +1,8 @@
-"""GATING PROOF (T1, 30 Oct 2026): with EVERY trial flag on, an existing
-subscriber's Studio turn runs on exactly today's lanes, models and effort.
+"""Paid/trial separation through the owner's 4 Nov 2026 provider recovery.
 
-Owner rule (DECISIONS.md, D1): "EXISTING subscribers keep exactly their
-current lanes and behaviour (grandfathered by start date)". Engine changes on
-the trial branch reach only trial users and NEW subscribers.
+Older subscribers use funded Anthropic while retaining contracted credit
+prices, feature entitlements and their original fallback lanes. They never
+become free-trial accounts. This supersedes the earlier provider restriction.
 
 Every flag is on at once: app_kv free_result (on, Haiku, test accounts),
 studio_for_all_plans (on, cutoff yesterday, Claude lane, credit parity), the
@@ -130,7 +129,7 @@ def test_every_flag_really_is_on(every_flag_on):
 
 
 @pytest.mark.parametrize("plan", PLANS)
-def test_an_existing_subscriber_keeps_todays_lane_model_and_effort(
+def test_existing_subscriber_uses_anthropic_preserving_prices_and_fallback(
         every_flag_on, plan):
     db = every_flag_on
     todays = _todays(plan)
@@ -138,9 +137,14 @@ def test_an_existing_subscriber_keeps_todays_lane_model_and_effort(
     # 1. Not a trial turn (the trial lane is for never-paid accounts only).
     decision = claude_trial.resolve(db, EXISTING, True, project_id=9)
     assert decision.kind == claude_trial.Decision.NOT_TRIAL
-    # 2. Not the new-subscriber Claude lane (grandfathered by start date).
-    assert agent_loop._claude_paid_lane(db, job, True, plan, {}) is None
-    # 3. So the turn's lanes are exactly today's, model for model.
+    # 2. Paid routing includes older accounts without changing credit prices.
+    paid = agent_loop._claude_paid_lane(db, job, True, plan, {})
+    assert paid["lane"]["provider"] == "anthropic"
+    assert paid["lane"]["model"] == "claude-haiku-5-5"
+    assert paid["credit_model"] == (
+        "gpt-6.1-sol" if plan in {"pro_2026", "max_2026", "advanced"}
+        else "gpt-6-luna")
+    # 3. The fallback lane list is unchanged, model for model.
     assert _lanes(True, plan) == todays
     assert all(not model.startswith("claude-") for _, model in todays)
     # 4. Same reasoning effort as today.
@@ -148,9 +152,8 @@ def test_an_existing_subscriber_keeps_todays_lane_model_and_effort(
         llm.editor_reasoning_effort(plan, iteration=0)
 
 
-def test_the_proof_is_sensitive_a_new_subscriber_does_move(every_flag_on):
-    """The same setup moves a subscriber who joined after the cutoff, so the
-    test above would fail if grandfathering broke."""
+def test_new_subscriber_uses_the_same_paid_route(every_flag_on):
+    """Both subscription cohorts now receive the configured funded route."""
     db = every_flag_on
     job = {"id": 2, "user_id": NEW, "project_id": 10}
     got = agent_loop._claude_paid_lane(db, job, True, "pro_2026", {})

@@ -11,11 +11,10 @@ worker half.
   ``claude_paid``) and is charged credits at Plus's contracted card
   (gpt-6-luna), which is Haiku 5.5's own card: what the customer is charged
   per turn is the Haiku cost / USD_PER_CREDIT.
-* A turn that STARTS while the switch is off or the credit line is AUTO-OFF
-  never takes the Claude lane (a Plus request accepted before then finishes
-  on the account's OpenAI lane; new requests meet the MCP path at the
-  backend gate).
-* A grandfathered subscriber never takes it, on any plan.
+* The manual feature switch and actual provider funding failures still apply.
+* Owner clarification, 4 Nov: all subscribers use funded Anthropic, including
+  older accounts and while free trials are paused. Contracted prices and
+  subscription-cohort feature entitlements remain unchanged.
 """
 import json
 from datetime import datetime, timedelta, timezone
@@ -144,7 +143,7 @@ def test_new_pro_and_max_subscribers_run_on_haiku_too_owner_decision_1030(
             assert got["credit_model"] == card       # prices unchanged
 
 
-def test_switch_off_or_credit_line_off_never_starts_a_claude_turn(lane_up):
+def test_manual_switch_off_or_unfunded_credit_never_starts_a_claude_turn(lane_up):
     assert agent_loop._claude_paid_lane(_Db(SWITCHED_OFF), JOB, True,
                                         "plus_2026", {}) is None
     lane_up["on"] = False                      # AUTO-OFF
@@ -158,9 +157,18 @@ def test_switch_off_or_credit_line_off_never_starts_a_claude_turn(lane_up):
 @pytest.mark.parametrize("plan", ["plus_2026", "pro_2026", "max_2026",
                                   "advanced", "ai", "ai_pro", "ai_max",
                                   "mcp_connect", "plus", "pro", "ultra"])
-def test_a_grandfathered_subscriber_never_takes_the_claude_lane(lane_up, plan):
-    assert agent_loop._claude_paid_lane(_Db(SWITCHED_ON, grandfathered=True),
-                                        JOB, True, plan, {}) is None
+@pytest.mark.parametrize("trial_paused", [False, True])
+def test_older_paid_accounts_use_anthropic_with_contracted_prices(
+        lane_up, plan, trial_paused):
+    if trial_paused:
+        lane_up.update(on=False, reason="budget", spent_usd=55.3, budget_usd=62.22)
+    got = agent_loop._claude_paid_lane(_Db(SWITCHED_ON, grandfathered=True),
+                                      JOB, True, plan, {})
+    assert got["lane"]["provider"] == "anthropic"
+    assert got["lane"]["model"] == "claude-haiku-5-5"
+    assert got["credit_model"] == (
+        "gpt-6.1-sol" if plan in {"pro_2026", "max_2026", "advanced"}
+        else "gpt-6-luna")
 
 
 def test_the_worker_copy_has_the_credit_line_predicates():
