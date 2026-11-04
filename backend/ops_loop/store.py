@@ -538,6 +538,39 @@ def set_fixing(cur, ticket_id, note=None):
        (_history("fixing", note=_clean(note, 500, "note")), int(ticket_id)))
 
 
+def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None):
+    """Return an unfinished claim with evidence, without hiding new intake.
+
+    The caller must have reviewed this exact ticket revision. A failure filed
+    since that review must be inspected before its urgency can be changed.
+    """
+    note = _clean(note, 2000, "note", required=True)
+    if severity is not None and severity not in SEVERITIES:
+        raise StoreError(f"severity must be one of {', '.join(SEVERITIES)}")
+    try:
+        expected = datetime.fromisoformat(expected_updated_at)
+    except (TypeError, ValueError):
+        raise StoreError("expected_updated_at must be an ISO timestamp") from None
+    if expected.tzinfo is None:
+        raise StoreError("expected_updated_at must include a timezone")
+    cur.execute("SELECT * FROM tickets WHERE id = %s FOR UPDATE", (int(ticket_id),))
+    ticket = cur.fetchone()
+    if not ticket:
+        raise StoreError(f"no ticket {ticket_id}")
+    if ticket["status"] != "fixing":
+        raise StoreError(f"ticket {ticket_id} is {ticket['status']}, not fixing")
+    if ticket["updated_at"] != expected:
+        raise StoreError(f"ticket {ticket_id} changed; inspect its latest failures first")
+    severity = severity or ticket["severity"]
+    _w(cur, """UPDATE tickets SET status = 'open', severity = %s,
+                   history = history || %s, updated_at = NOW()
+               WHERE id = %s RETURNING *""",
+       (severity, _history("released", note=note,
+                           previous_severity=ticket["severity"], severity=severity),
+        int(ticket_id)))
+    return dict(cur.fetchone())
+
+
 def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
           regression_check=None, reason=None):
     """fixed: root_cause + fix_sha + regression_check are all required.

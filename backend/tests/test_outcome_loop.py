@@ -403,6 +403,60 @@ def test_reopening_a_fixed_cause_counts_the_recurrence():
     assert json.loads(hist)[0]["previous_fix_sha"] == "abc1234"
 
 
+def test_unfinished_work_can_be_released_without_claiming_it_was_fixed():
+    ticket = {"id": 77, "status": "fixing", "severity": "P0", "updated_at": NOW}
+    result = dict(ticket, status="open", severity="P1")
+    cur = Cur([ticket, result])
+    assert store.release_fixing(cur, 77, NOW.isoformat(),
+                               "Trial is paused; unfinished edits remain tracked.",
+                               severity="P1") == result
+    assert "FOR UPDATE" in cur.sql[0][0]
+    query, params = cur.sql[-1]
+    assert "status = 'open'" in query and "closed_at" not in query
+    event = json.loads(params[1])[0]
+    assert event["event"] == "released" and event["previous_severity"] == "P0"
+    assert event["severity"] == "P1" and "remain tracked" in event["note"]
+    # A later real P0 still escalates an open ticket, unlike wont_fix.
+    assert store.decide(result, NOW + timedelta(minutes=1), "P0") == "escalate"
+
+
+def test_a_handoff_cannot_downgrade_new_failure_intake():
+    newer = NOW + timedelta(microseconds=1)
+    cur = Cur([{"id": 77, "status": "fixing", "severity": "P0",
+                "updated_at": newer}])
+    with pytest.raises(store.StoreError, match="changed; inspect"):
+        store.release_fixing(cur, 77, NOW.isoformat(), "old review", severity="P1")
+    assert len(cur.sql) == 1  # The locked read must precede every mutation.
+
+
+@pytest.mark.parametrize("status", ["open", "fixed", "wont_fix"])
+def test_release_only_changes_a_claimed_ticket(status):
+    cur = Cur([{"id": 77, "status": status, "severity": "P0", "updated_at": NOW}])
+    with pytest.raises(store.StoreError, match="not fixing"):
+        store.release_fixing(cur, 77, NOW.isoformat(), "unfinished")
+    assert len(cur.sql) == 1
+
+
+@pytest.mark.parametrize("timestamp,note,severity,message", [
+    ("bad", "unfinished", None, "ISO timestamp"),
+    ("2026-11-04T12:00:00", "unfinished", None, "timezone"),
+    (NOW.isoformat(), "", None, "note is required"),
+    (NOW.isoformat(), "unfinished", "P9", "severity"),
+])
+def test_incomplete_handoff_is_rejected_before_writing(timestamp, note, severity, message):
+    cur = Cur()
+    with pytest.raises(store.StoreError, match=message):
+        store.release_fixing(cur, 77, timestamp, note, severity=severity)
+    assert not cur.sql
+
+
+def test_release_keeps_priority_unless_explicitly_changed():
+    ticket = {"id": 77, "status": "fixing", "severity": "P0", "updated_at": NOW}
+    cur = Cur([ticket, dict(ticket, status="open")])
+    store.release_fixing(cur, 77, NOW.isoformat(), "Needs more work")
+    assert cur.sql[-1][1][0] == "P0"
+
+
 def test_a_cause_is_a_slug_and_closing_needs_proof():
     with pytest.raises(store.StoreError, match="slug"):
         store.open_or_attach(Cur(), "The index failed!", "x", "P1",

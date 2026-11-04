@@ -370,7 +370,7 @@ def cmd_verdict(a):
     if a.json:
         with open(a.json, encoding="utf-8") as fh:
             spec = json.load(fh)
-        for k in ("verdict", "score", "reasoning", "root_cause",
+        for k in ("verdict", "score", "reasoning", "root_cause", "reviewer",
                   "request_summary"):
             if getattr(a, k, None) in (None, "") and spec.get(k) is not None:
                 setattr(a, k, spec[k])
@@ -389,7 +389,8 @@ def cmd_verdict(a):
         row = store.write_verdict(
             w, s, a.verdict, a.score, a.reasoning, _evidence_items(a),
             root_cause=a.root_cause, request_summary=a.request_summary,
-            signals=_signals(ctx), journey=journey)
+            signals=_signals(ctx), journey=journey,
+            reviewer=getattr(a, "reviewer", None) or "claude-opus")
     out({"review_id": row["id"], "review_count": row["review_count"],
          "session_key": s["key"], "verdict": a.verdict, "score": int(a.score),
          "dry_run": bool(a.dry_run)})
@@ -453,6 +454,21 @@ def cmd_fixing(a):
     with Writer(a.dry_run) as w:
         store.set_fixing(w, a.ticket, a.note)
     out({"ticket_id": a.ticket, "status": "fixing"})
+    return 0
+
+
+def cmd_release(a):
+    from ops_loop import store
+    with Writer(a.dry_run) as w:
+        ticket = store.release_fixing(w, a.ticket, a.expected_updated_at,
+                                     a.note, severity=a.severity)
+    if not a.dry_run:
+        if ticket["severity"] == "P0":
+            _mark_p0(ticket)
+        else:
+            _clear_p0(ticket["id"])
+    out({"ticket_id": ticket["id"], "status": ticket["status"],
+         "severity": ticket["severity"], "dry_run": bool(a.dry_run)})
     return 0
 
 
@@ -648,6 +664,7 @@ def parser():
                                          "not_delivered"))
     p.add_argument("--score", type=int)
     p.add_argument("--reasoning")
+    p.add_argument("--reviewer", help="actual reviewer identity (default: claude-opus)")
     p.add_argument("--root-cause", dest="root_cause")
     p.add_argument("--request-summary", dest="request_summary")
     p.add_argument("--evidence-json", dest="evidence_json")
@@ -701,6 +718,14 @@ def parser():
     p.add_argument("--note")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_fixing)
+    p = sub.add_parser("release", help="return an unfinished claim to open with a note")
+    p.add_argument("--ticket", type=int, required=True)
+    p.add_argument("--expected-updated-at", required=True,
+                   help="updated_at from the reviewed ticket; rejects newer intake")
+    p.add_argument("--note", required=True)
+    p.add_argument("--severity", choices=("P0", "P1", "P2"))
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_release)
     p = sub.add_parser("close", help="close a ticket (fixed or wont_fix)")
     p.add_argument("--ticket", type=int, required=True)
     p.add_argument("--status", required=True, choices=("fixed", "wont_fix"))
