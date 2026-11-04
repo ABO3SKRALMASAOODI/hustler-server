@@ -236,8 +236,10 @@ def switch(conn, on, actor="admin", now=None):
 def features(conn, now=None):
     """The "Claude features" card: both switches and the shared line."""
     import trial_toggle
+    import opus_supervision
     now = now or datetime.now(timezone.utc)
     trial = trial_toggle.status(conn, now=now)
     studio = status(conn, now=now)
     return {"trial": trial, "studio_plus": studio,
+            "opus_supervision": opus_supervision.status(conn),
             "spend": studio["spend"], "takes_effect_s": 30}

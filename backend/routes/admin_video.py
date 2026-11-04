@@ -3472,6 +3472,23 @@ def video_studio_plus_get():
         return jsonify(studio_plus_toggle.status(conn))
 
 
+@admin_video_bp.route("/admin/video/opus-supervision", methods=["POST"])
+@admin_required
+def video_opus_supervision_set():
+    """Toggle the optional Opus planning pass without changing paid access."""
+    import opus_supervision
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or type(body.get("on")) is not bool:
+        return jsonify({"error": 'send {"on": true} or {"on": false}'}), 400
+    with adb() as conn:
+        opus_supervision.switch(conn, body["on"], actor="admin")
+        conn.commit()
+        out = opus_supervision.status(conn)
+    current_app.logger.info("Opus supervision switched %s by the admin",
+                            "ON" if body["on"] else "OFF")
+    return jsonify(dict(out, ok=True))
+
+
 @admin_video_bp.route("/admin/video/studio-plus", methods=["POST"])
 @admin_required
 def video_studio_plus_set():
