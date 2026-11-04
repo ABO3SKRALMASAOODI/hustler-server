@@ -147,6 +147,9 @@ particular tool or template name was used; equivalent compositions count.
 For each satisfied EDIT requirement cite at least one supplied evidence ref.
 Evidence entries have a ref, a path identifying the original data, and its full
 value. Select only refs supplied in those records; never invent refs, paths or indices.
+Source tables use columns and rows; each row's cells follow columns, with common
+fields applying to every row. They preserve the entire source, including material
+omitted from the edit. Check omitted material against requested coverage too.
 Explain which facts inside the selected value substantiate the requirement.
 For preserved settings cite after too, including an unchanged or null field;
 source dimensions alone do not prove the output frame stayed unchanged.
@@ -241,10 +244,11 @@ def _call(ctx, name, schema, system, evidence, images=None):
         # Reusable reference data first; changing edits, proofs and drafts
         # follow it. Keep all data at user priority, never as instructions.
         stable = {k: v for k, v in evidence.items()
-                  if k not in {"evidence", "phase"}}
-        stable["evidence"] = [e for e in evidence["evidence"]
+                  if k not in {"evidence", "phase", "validation_error"}}
+        stable["evidence"] = [_compact_source_entry(e) for e in evidence["evidence"]
                               if e["path"].split("/")[1] in _STABLE_REVIEW_ROOTS]
-        changing = {"phase": evidence.get("phase"), "evidence": [
+        changing = {"phase": evidence.get("phase"),
+                    "validation_error": evidence.get("validation_error"), "evidence": [
             e for e in evidence["evidence"]
             if e["path"].split("/")[1] not in _STABLE_REVIEW_ROOTS]}
         content = [{"type": "text", "text": json.dumps(part, sort_keys=True,
@@ -479,7 +483,7 @@ def _media_evidence(ctx):
                 "video": index.get("video"), "sentences": sentences[:300],
                 "transcript_complete": len(sentences) <= 300,
                 "inspected_times": sorted(inspected[key]),
-                "visual_storyboard": _source_evidence(index, None).get("visual_storyboard"),
+                "visual_storyboard": _source_evidence(index).get("visual_storyboard"),
             }
         return evidence
     except Exception as exc:
@@ -530,27 +534,18 @@ def _assessment_evidence(evidence):
     return entries, pointers
 
 
-def _source_evidence(index, keep):
-    """Review the actual selected source, not the indexer's feature database.
+def _source_evidence(index):
+    """Preserve the whole semantic source, excluding retrieval machinery.
 
     Embeddings, cluster hashes and duplicated chapter transcripts are retrieval
-    machinery, not semantic proof. Keep every overlapping sentence and visual
-    observation with its source coordinates. Coverage is explicit: excluded
-    source ranges cannot establish claims about the whole original.
+    machinery, not semantic proof. The reviewer must also see omitted material
+    to detect missing requested subjects, context, or the ending of a story.
+    This stable reference must not change every time the editor adjusts a cut.
     """
-    def intersects(start, end):
-        if keep is None:
-            return True
-        try:
-            return any(float(start) <= float(b) and float(end) >= float(a)
-                       for a, b in keep)
-        except (TypeError, ValueError):
-            return True  # Unknown coordinates must not silently hide evidence.
-
     sentences = index.get("sentences") or []
     selected = [{key: row[key] for key in ("id", "t0", "t1", "text", "speaker")
                  if key in row} for row in sentences
-                if isinstance(row, dict) and intersects(row.get("t0"), row.get("t1"))]
+                if isinstance(row, dict)]
     storyboard = index.get("visual_storyboard") or {}
     if not isinstance(storyboard, dict):
         storyboard = {}
@@ -558,16 +553,15 @@ def _source_evidence(index, keep):
     for row in storyboard.get("evidence") or []:
         if not isinstance(row, dict):
             continue
-        ranges = row.get("covered_ranges") or [row.get("covered_time_range") or
-                   [row.get("representative_t"), row.get("representative_t")]]
-        if not any(intersects(a, b) for a, b in ranges):
-            continue
         visual.append({key: row[key] for key in (
             "evidence_id", "representative_t", "covered_ranges", "covered_time_range",
             "semantic_description", "subjects", "actions", "objects", "setting",
-            "visible_text", "faces", "text_geometry") if row.get(key) not in (None, "", [])})
+            "visible_text", "faces", "text_geometry", "composition", "motion_state",
+            "dense_ui", "source_clock", "shot_id", "shot_ids", "selection_reasons",
+            "sample_count_collapsed")
+            if row.get(key) not in (None, "", [])})
     return {"video": index.get("video"), "sentences": selected,
-            "coverage": {"source_ranges": keep, "sentence_count": len(selected),
+            "coverage": {"source_ranges": "entire original", "sentence_count": len(selected),
                          "total_source_sentences": len(sentences),
                          "complete_source_transcript": len(selected) == len(sentences)},
             "visual_storyboard": {"semantic_status": storyboard.get("semantic_status"),
@@ -575,9 +569,46 @@ def _source_evidence(index, keep):
                                   "chapters": [{key: row[key] for key in (
                                       "chapter_id", "t0", "t1", "description", "evidence_ids")
                                       if key in row} for row in storyboard.get("chapters") or []
-                                      if isinstance(row, dict) and row.get("description")
-                                      and intersects(row.get("t0"), row.get("t1"))],
+                                      if isinstance(row, dict)],
                                   "evidence": visual}}
+
+
+def _source_table(rows):
+    """Remove repeated field names/constant cells, never source rows or text."""
+    if not rows or not all(isinstance(row, dict) for row in rows):
+        return rows
+    # Preserve absent versus null fields: heterogeneous rows retain their
+    # original shape instead of inventing empty cells.
+    fields = list(rows[0])
+    if any(set(row) != set(fields) for row in rows):
+        return rows
+    common = {k: rows[0][k] for k in fields
+              if all(row[k] == rows[0][k] for row in rows)}
+    columns = [k for k in fields if k not in common]
+    return {"columns": columns, "common": common,
+            "rows": [[row[k] for k in columns] for row in rows]}
+
+
+def _compact_source_entry(entry):
+    """Lossless wire encoding; local pointer validation uses original data."""
+    if entry["path"] == "/source/sentences":
+        return dict(entry, value=_source_table(entry["value"]))
+    if entry["path"] == "/source/visual_storyboard":
+        return dict(entry, value={k: _source_table(v) if k in {
+            "chapters", "sheets", "evidence"} else v
+            for k, v in entry["value"].items()})
+    return entry
+
+
+def _review_outcomes(rows):
+    """New tool evidence matters even without a timeline write; repeats don't."""
+    unique = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("kind") == "no_change":
+            continue
+        value = {k: v for k, v in row.items() if k != "writes"}
+        unique[json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)] = value
+    return [unique[k] for k in sorted(unique)]
 
 
 def assess(ctx, draft="", preflight=False):
@@ -593,8 +624,7 @@ def assess(ctx, draft="", preflight=False):
         "verification": (getattr(ctx, "verification_records", None) or {}).get(latest["version"], {}),
         "tool_outcomes": getattr(ctx, "turn_tool_outcomes", []),
         "observations": getattr(ctx, "_editorial_observations", []),
-        "source": _source_evidence(getattr(ctx, "index", None) or {},
-                                   latest["json"].get("keep")),
+        "source": _source_evidence(getattr(ctx, "index", None) or {}),
         "edit_plan": getattr(ctx, "edit_plan", None),
         "draft": draft,
         "dependencies": getattr(ctx, "render_dependency_state", None),
@@ -603,27 +633,30 @@ def assess(ctx, draft="", preflight=False):
     evidence["render_evidence"] = evidence["verification"].get("render_evidence", {})
     evidence["visual_proofs"], images = _visual_proofs(
         ctx, latest, evidence["verification"], preflight, evidence["media"])
-    # A rewritten reply or another failed/no-change tool call is not new edit
-    # evidence. The repair loop uses this to avoid reassessing the same defect
-    # merely because its explanation changed. Inspection answers remain draft-
-    # sensitive because the answer itself is the requested deliverable.
+    # The repair loop counts changed evidence, not changed wording or duplicate
+    # receipts. New tool facts still matter without an EDL write. Inspection
+    # answers are themselves deliverables, so their wording counts as progress.
     progress = {key: value for key, value in evidence.items()
                 if key not in {"draft", "tool_outcomes"}}
+    progress["tool_outcomes"] = _review_outcomes(evidence["tool_outcomes"])
     if contract["mode"] != "edit" or any(r["action"] == "inspect" for r in contract["requirements"]):
         progress["draft"] = draft
     evidence_digest = hashlib.sha256(json.dumps(progress, sort_keys=True,
         ensure_ascii=False, default=str).encode()).hexdigest()
     previous = getattr(ctx, "request_assessment", None) or {}
+    draft_digest = hashlib.sha256(str(draft).encode()).hexdigest()
     if (not preflight and contract["mode"] == "edit"
             and not any(r["action"] == "inspect" for r in contract["requirements"])
             and previous.get("request_digest") == contract["request_digest"]
             and previous.get("edl_version") == latest["version"]
             and previous.get("evidence_digest") == evidence_digest
+            and previous.get("draft_digest") == draft_digest
             and not previous.get("complete")
             and any(r.get("status") == "unmet" for r in previous.get("requirements", []))):
-        # The model already identified missing work. Rephrasing an admission
-        # cannot fix it. Reuse that finding until actual evidence changes.
-        value = dict(previous, draft_digest=hashlib.sha256(str(draft).encode()).hexdigest())
+        # Reuse only the exact same evidence AND answer. A revised answer can
+        # address a conditional instruction or correct an inaccurate admission,
+        # so it still receives an independent review.
+        value = dict(previous)
         ctx.request_assessment = value
         return value
     schema = json.loads(json.dumps(ASSESSMENT_SCHEMA))
@@ -634,36 +667,42 @@ def assess(ctx, draft="", preflight=False):
     value = None
     expected = {r["id"] for r in contract["requirements"]}
     failure_kind = "none"
-    # One independent assessment per invocation. A malformed citation must
-    # not buy a second full review of an hour-long program. Remain unknown;
-    # the normal editor can supply new evidence in a later explicit review.
-    try:
-        value = _call(ctx, "assess_request", schema, ASSESS,
+    # One correction opportunity for an invalid structured answer. The source
+    # stays in the same cached prefix; only the validation error changes.
+    # A valid unmet verdict is never retried to obtain a more favorable one.
+    error = None
+    for attempt in range(2):
+        try:
+            value = _call(ctx, "assess_request", schema, ASSESS,
                   {"contract": contract, "evidence": entries,
+                   "validation_error": error,
                    "customer_request": getattr(ctx, "verification_request", None) or ctx.user_message,
                    "conversation": getattr(ctx, "request_contract_history", None) or [],
                    "internal_recovery": getattr(ctx, "operator_instruction", None),
                    "phase": ("Pre-render: identify missing timeline work now; mark "
                              "visual/audible proof unknown until rendered."
                              if preflight else "Delivery: require current rendered evidence.")}, images=images)
-        rows = value["requirements"]
-        if len(rows) != len(expected) or {r["id"] for r in rows} != expected:
-            raise ValueError("The completion assessment omitted or duplicated a requirement")
-        for row in rows:
-            # _call strictly validates new model refs against the enum.
-            # Internal/replayed results may already use the persisted format.
-            row["evidence"] = [_evidence_pointer(pointers.get(ref, ref) if isinstance(ref, str) else ref)
-                               for ref in row["evidence"]]
-            for pointer in row["evidence"]:
-                _pointer(evidence, pointer)
-    except (ValueError, KeyError, IndexError, TypeError):
-        value = None
-    except Exception as exc:
-        # Losing the independent review must not lose an already rendered
-        # edit or manufacture fulfillment. The existing preview survives.
-        print(f"[request_contract] completion review unavailable: {type(exc).__name__}", flush=True)
-        value = None
-        failure_kind = "provider"
+            rows = value["requirements"]
+            if len(rows) != len(expected) or {r["id"] for r in rows} != expected:
+                raise ValueError("The completion assessment omitted or duplicated a requirement")
+            for row in rows:
+                # _call strictly validates new model refs against the enum.
+                # Internal/replayed results may already use the persisted format.
+                row["evidence"] = [_evidence_pointer(pointers.get(ref, ref) if isinstance(ref, str) else ref)
+                                   for ref in row["evidence"]]
+                for pointer in row["evidence"]:
+                    _pointer(evidence, pointer)
+            break
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            error = "Correct the structured result: " + str(exc)[:800]
+            value = None
+        except Exception as exc:
+            # A provider outage is not a formatting error. Preserve the edit
+            # and report unknown without making another expensive request.
+            print(f"[request_contract] completion review unavailable: {type(exc).__name__}", flush=True)
+            value = None
+            failure_kind = "provider"
+            break
     if value is None:
         value = {"requirements": [{"id": r["id"], "status": "unknown", "blocker_kind": failure_kind,
                   "reason": "Completion evidence could not be validated.", "evidence": []}

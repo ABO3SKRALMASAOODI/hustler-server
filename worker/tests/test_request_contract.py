@@ -166,7 +166,7 @@ def test_assessment_registry_loses_no_deep_or_later_evidence():
     assert next(e for e in entries if e["path"] == "/after/overlays")["value"] == evidence["after"]["overlays"]
 
 
-def test_bad_assessment_does_not_repeat_an_expensive_review(monkeypatch):
+def test_bad_assessment_gets_one_correction_then_remains_unknown(monkeypatch):
     ctx = context()
     calls = []
     def invalid(*args, **kwargs):
@@ -174,7 +174,7 @@ def test_bad_assessment_does_not_repeat_an_expensive_review(monkeypatch):
         raise ValueError("An evidence ref was not supplied")
     monkeypatch.setattr(rc, "_call", invalid)
     result = rc.assess(ctx)
-    assert calls == [1]
+    assert calls == [1, 1]
     assert not result["complete"]
     assert all(r["status"] == "unknown" and r["blocker_kind"] == "none"
                for r in result["requirements"])
@@ -186,6 +186,9 @@ def test_review_cache_prefix_survives_changed_edits_proofs_and_enum_sizes(monkey
     ctx = context()
     ctx.llm_client = object()
     ctx.agent_model = "claude-haiku-5-5"
+    ctx.index = {"sentences": [
+        {"id": "a", "t0": 0, "t1": 5, "text": "Opening"},
+        {"id": "b", "t0": 100, "t1": 105, "text": "Required ending"}]}
     requests = []
     def send(client, model, messages, **kwargs):
         system, msgs, tools = claude_lane.to_anthropic(messages, kwargs["tools"], model)
@@ -202,6 +205,7 @@ def test_review_cache_prefix_survives_changed_edits_proofs_and_enum_sizes(monkey
     monkeypatch.setattr(rc, "_visual_proofs", lambda *a: ({}, []))
     rc.assess(ctx, "First draft", preflight=True)
     ctx.latest_edl()["json"]["new_layer"] = "changed output"
+    ctx.latest_edl()["json"]["keep"] = [[100, 105]]
     ctx._editorial_observations = [{"seen": "new proof"}]
     rc.assess(ctx, "Rewritten draft", preflight=False)
     first, second = requests
@@ -230,7 +234,7 @@ def test_stable_wire_schema_still_rejects_invented_model_references(monkeypatch)
         rc._call(ctx,"assess_request",schema,rc.ASSESS,{"evidence":[]})
 
 
-def test_review_selects_output_source_evidence_without_indexer_vectors():
+def test_review_keeps_omitted_source_context_without_indexer_vectors():
     index = {"video": {"duration": 6321},
              "sentences": [{"t0": i, "t1": i + 1, "text": f"Sentence {i}", "wi0": i}
                            for i in range(6321)],
@@ -240,17 +244,39 @@ def test_review_selects_output_source_evidence_without_indexer_vectors():
                  {"evidence_id": "elsewhere", "covered_ranges": [[5000, 5100]],
                   "semantic_description": "A whiteboard"}],
                  "chapters": [{"transcript_excerpt": "repeated text " * 100000}]}}
-    result = rc._source_evidence(index, [[170, 205]])
-    assert [r["t0"] for r in result["sentences"]] == list(range(169, 206))
-    assert result["coverage"]["complete_source_transcript"] is False
+    result = rc._source_evidence(index)
+    assert [r["t0"] for r in result["sentences"]] == list(range(6321))
+    assert result["coverage"]["complete_source_transcript"] is True
     assert result["coverage"]["total_source_sentences"] == 6321
-    assert result["visual_storyboard"]["evidence"] == [{
+    assert result["visual_storyboard"]["evidence"][0] == {
         "evidence_id": "selected", "covered_ranges": [[170, 205]],
-        "semantic_description": "A teacher"}]
-    whole = rc._source_evidence(index, None)
-    assert len(whole["sentences"]) == 6321
-    assert whole["coverage"]["complete_source_transcript"] is True
-    assert len(whole["visual_storyboard"]["evidence"]) == 2
+        "semantic_description": "A teacher"}
+    assert result["visual_storyboard"]["evidence"][1]["evidence_id"] == "elsewhere"
+    assert "transcript_excerpt" not in str(result)
+    assert "retrieval_embedding" not in str(result)
+
+
+def test_source_table_is_lossless_and_does_not_invent_null_fields():
+    rows = [{"id": i, "text": f"Exact sentence {i}", "speaker": None,
+             "range": [i / 3, (i + 1) / 3]} for i in range(2000)]
+    table = rc._source_table(rows)
+    recovered = [dict(table["common"], **dict(zip(table["columns"], row)))
+                 for row in table["rows"]]
+    assert recovered == rows
+    assert table["common"] == {"speaker": None}
+    heterogeneous = [{"text": "One"}, {"text": "Two", "speaker": None}]
+    assert rc._source_table(heterogeneous) == heterogeneous
+
+
+def test_source_projection_keeps_composition_and_motion_evidence():
+    row = {"evidence_id": "end", "representative_t": 999,
+           "composition": {"mean_luma": .1}, "motion_state": "fast",
+           "dense_ui": False, "source_clock": "source", "shot_ids": [12],
+           "faces": [[.1, .2, .3, .4]], "text_geometry": [[1, 2, 3, 4]],
+           "retrieval_embedding": [1, 2, 3], "frame_hash": "private feature"}
+    result = rc._source_evidence({"visual_storyboard": {"evidence": [row]}})
+    assert result["visual_storyboard"]["evidence"] == [
+        {k: v for k, v in row.items() if k not in {"retrieval_embedding", "frame_hash"}}]
 
 
 def test_reworded_edit_reply_is_not_new_repair_evidence(monkeypatch):
@@ -267,6 +293,66 @@ def test_reworded_edit_reply_is_not_new_repair_evidence(monkeypatch):
     assert first["evidence_digest"] == second["evidence_digest"]
     ctx.latest_edl()["json"]["texts"] = [{"text": "New delivered work"}]
     assert rc.assess(ctx, "Draft two")["evidence_digest"] != second["evidence_digest"]
+
+
+def test_revised_answer_and_new_tool_evidence_receive_fresh_reviews(monkeypatch):
+    ctx = context()
+    calls = []
+    def review(*args, **kwargs):
+        calls.append(args[4])
+        return {"requirements": [{"id": r["id"], "status": "unmet", "reason": "Missing",
+                 "evidence": [], "blocker_kind": "none"} for r in ctx.semantic_contract["requirements"]],
+                "completed": "", "remaining": "Missing"}
+    monkeypatch.setattr(rc, "_call", review)
+    first = rc.assess(ctx, "Draft one")
+    assert rc.assess(ctx, "Draft one") == first and len(calls) == 1
+    second = rc.assess(ctx, "A corrected explanation")
+    assert len(calls) == 2 and first["evidence_digest"] == second["evidence_digest"]
+    receipt = {"tool": "inspect_source", "kind": "success", "fingerprint": "Source has no audio", "writes": 0}
+    ctx.turn_tool_outcomes.append(receipt)
+    third = rc.assess(ctx, "A corrected explanation")
+    assert len(calls) == 3 and third["evidence_digest"] != second["evidence_digest"]
+    ctx.turn_tool_outcomes.append(dict(receipt))
+    assert rc.assess(ctx, "A corrected explanation") == third and len(calls) == 3
+
+
+def test_invalid_review_can_correct_itself_without_changing_cached_source(monkeypatch):
+    import json, claude_lane
+    ctx = context(); ctx.llm_client = object(); ctx.agent_model = "claude-haiku-5-5"
+    ctx.latest_edl()["json"]["motion"] = [{"text": "Delivered typography"}]
+    requests = []
+    def send(client, model, messages, **kwargs):
+        system, msgs, tools = claude_lane.to_anthropic(messages, kwargs["tools"], model)
+        claude_lane._mark_cache(system, msgs, tools, model)
+        requests.append((system, msgs, tools))
+        stable, changing = [json.loads(b["text"]) for b in msgs[0]["content"][:2]]
+        refs = {e["path"]: e["ref"] for e in stable["evidence"] + changing["evidence"]}
+        reply = {"completed": "Verified", "remaining": "", "requirements": [
+            {"id": "subtitles", "status": "satisfied", "reason": "Preserved", "blocker_kind": "none",
+             "evidence": [refs["/after/captions"]]},
+            {"id": "type", "status": "satisfied", "reason": "Typography exists", "blocker_kind": "none",
+             "evidence": ["invented" if len(requests) == 1 else refs["/after/motion"]]}]}
+        if len(requests) == 2:
+            assert changing["validation_error"]
+        return NS(choices=[NS(message=NS(tool_calls=[NS(function=NS(
+            name="assess_request", arguments=json.dumps(reply)))]))], usage=None)
+    monkeypatch.setattr(rc.llm, "create_with_dialect", send)
+    monkeypatch.setattr(rc.llm, "record", lambda *args: None)
+    assert rc.assess(ctx, "Typography is present")["complete"]
+    assert len(requests) == 2
+    assert requests[0][0] == requests[1][0] and requests[0][2] == requests[1][2]
+    assert requests[0][1][0]["content"][0] == requests[1][1][0]["content"][0]
+
+
+def test_provider_failure_is_not_retried_as_a_format_correction(monkeypatch):
+    calls = []
+    def unavailable(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("Provider unavailable")
+    monkeypatch.setattr(rc, "_call", unavailable)
+    result = rc.assess(context())
+    assert calls == [1] and not result["complete"]
+    assert all(r["blocker_kind"] == "provider" for r in result["requirements"])
 
 
 @pytest.mark.parametrize("path", [[], ["after", True], ["after", -1], ["after", {}]])
