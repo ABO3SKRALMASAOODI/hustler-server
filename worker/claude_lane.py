@@ -39,6 +39,7 @@ never returned and never placed in a recorded payload.
 """
 
 import json
+import hashlib
 import threading
 import time
 from types import SimpleNamespace
@@ -391,39 +392,40 @@ def _strict_schema(schema):
             for key, value in schema.items() if key not in unsupported}
 
 
-# Calls whose prompt is never sent again inside the cache's 5 minutes: a
-# write there is a 25% surcharge with no read behind it. Measured 1 Nov 2026
-# (72 h, llm_calls): the trial's Opus planner (one call per request, the rest
-# of the turn runs on Haiku, a separate cache) read 7.9% of what it wrote,
-# $1.21 for 5 calls; the one-shot preview critic read 0% (its message carries
-# that preview's unique frames). Anthropic flagged the account's hit rate.
-_ONE_CALL_MODELS = ("claude-opus",)
-
-
 def _one_shot(msgs, tools):
     """Single reviews do not reuse their project payload after this call."""
-    structured_review = len(tools) == 1 and tools[0].get("name") == "assess_request"
+    structured_review = len(tools) == 1 and tools[0].get("name") in {
+        "assess_request", "record_request_contract"}
     return (not tools or structured_review) and all(m["role"] != "assistant" for m in msgs)
 
 
-def _mark_cache(system, msgs, tools, model=""):
+def _mark_cache(system, msgs, tools, model="", cache_policy=None):
     """Up to four ephemeral breakpoints at the stability boundaries, and none
     where nothing would be read back."""
-    if str(model or "").lower().startswith(_ONE_CALL_MODELS):
-        return
-    if _one_shot(msgs, tools):
+    # A model name cannot tell us whether the call is reusable. Opus also
+    # runs multi-step paid edits and repeated structured assessments. Only
+    # the caller that actually switches planners may opt out of caching the
+    # unique project payload; shared instructions still earn cache reads.
+    if cache_policy == "shared_only" or _one_shot(msgs, tools):
         # A critic's unique frames are one-shot. A structured edit assessment
         # separates reusable request/source evidence into its first text block
         # and changing edit/proof/draft data into the next block.
+        if tools:
+            tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral"})
         if system:
-            system[0] = dict(system[0], cache_control={"type": "ephemeral"})
+            stable = min(1, len(system) - 1) if cache_policy == "shared_only" else 0
+            system[stable] = dict(system[stable], cache_control={"type": "ephemeral"})
         if (len(tools) == 1 and tools[0].get("name") == "assess_request"
                 and msgs and len(msgs[0]["content"]) >= 2
                 and all(b.get("type") == "text" for b in msgs[0]["content"][:2])):
             msgs[0]["content"][0] = dict(msgs[0]["content"][0],
                                          cache_control={"type": "ephemeral"})
         return
-    if tools:
+    # A large batch of images/observations can put the previous request's
+    # write beyond Anthropic's 20-position lookback. Keep an explicit read
+    # anchor there in that case, using the otherwise redundant tools slot.
+    anchor = _previous_cache_anchor(msgs)
+    if tools and anchor is None:
         tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral"})
     if system:
         # The editor kernel + capability directory are identical for every
@@ -441,6 +443,88 @@ def _mark_cache(system, msgs, tools, model=""):
         if content:
             content[-1] = dict(content[-1], cache_control={"type": "ephemeral"})
         break
+    if anchor is not None:
+        content, index = anchor
+        content[index] = dict(content[index], cache_control={"type": "ephemeral"})
+
+
+def _previous_cache_anchor(msgs):
+    """Previous user boundary when the growing tail exceeds cache lookback.
+
+    Consecutive tool_use or tool_result blocks count as one position at the
+    provider. Images and text count separately. No customer content changes.
+    """
+    assistant = next((i for i in range(len(msgs) - 1, -1, -1)
+                      if msgs[i]["role"] == "assistant"), None)
+    if assistant is None:
+        return None
+    previous = next((m for m in reversed(msgs[:assistant])
+                     if m["role"] == "user" and m["content"]), None)
+    if previous is None:
+        return None
+    positions, last_kind = 0, None
+    for msg in msgs[assistant:]:
+        if msg["role"] == "system":
+            positions += 1
+            last_kind = None
+            continue
+        for block in msg["content"]:
+            kind = block.get("type")
+            if kind not in {"tool_use", "tool_result"} or kind != last_kind:
+                positions += 1
+            last_kind = kind
+    return (previous["content"], len(previous["content"]) - 1) if positions >= 20 else None
+
+
+def _cache_diagnostics(body, policy=None):
+    """Content-free fingerprints of the prefixes we actually send.
+
+    Persist with provider usage, so reads/writes can be audited across
+    workers without storing another copy of the customer's prompt/images.
+    Settings are deliberately conservative: a changed effort or image set
+    must not be reported as an unexplained provider cache miss.
+    """
+    digest = hashlib.sha256()
+    prefixes = []
+
+    def add(value):
+        digest.update(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                 separators=(",", ":")).encode())
+        digest.update(b"\n")
+
+    def block(value, kind):
+        add({k: v for k, v in value.items() if k != "cache_control"})
+        if "cache_control" in value:
+            prefixes.append({"kind": kind, "sha256": digest.hexdigest()})
+
+    add({"model": body["model"], "effort": body.get("output_config")})
+    for value in body.get("tools", []):
+        block(value, "tools")
+    tools_sha = digest.hexdigest()
+    for value in body.get("system", []):
+        block(value, "system")
+    system_sha = digest.hexdigest()
+    add({"tool_choice": body.get("tool_choice")})
+    images = hashlib.sha256()
+    image_count = 0
+    for message in body["messages"]:
+        for value in message["content"] if isinstance(message["content"], list) else []:
+            if value.get("type") == "image":
+                images.update(json.dumps(value, sort_keys=True).encode())
+                image_count += 1
+    add({"images": images.hexdigest()})
+    for message in body["messages"]:
+        add({"role": message["role"]})
+        content = message["content"]
+        if isinstance(content, str):
+            add(content)
+        else:
+            for value in content:
+                block(value, "messages")
+    return {"version": 1, "policy": policy or "automatic_boundaries",
+            "started_at": time.time(), "tools_sha": tools_sha,
+            "system_sha": system_sha, "image_count": image_count,
+            "prefixes": prefixes}
 
 
 def _effort(kw):
@@ -575,7 +659,7 @@ def from_anthropic(message, model):
 # ------------------------------------------------------------------ #
 
 def create(model, messages, tools=None, max_tokens=None, effort=None,
-           tool_choice=None, timeout=None):
+           tool_choice=None, timeout=None, cache_policy=None):
     """One Messages call in chat-completions shape. Raises on any failure."""
     if not configured():
         raise ClaudeLaneUnavailable(
@@ -588,7 +672,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
     import claude_trial            # metering + hard per-account ceiling
     claude_trial.guard_call()
     system, msgs, tool_defs = to_anthropic(messages, tools, model)
-    _mark_cache(system, msgs, tool_defs, model)
+    _mark_cache(system, msgs, tool_defs, model, cache_policy)
     body = {"model": model, "max_tokens": int(max_tokens or 8000),
             "messages": msgs}
     if system:
@@ -600,6 +684,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
             body["tool_choice"] = choice
     if effort:
         body["output_config"] = {"effort": effort}
+    cache_info = _cache_diagnostics(body, cache_policy)
     client = _sdk()
     if timeout:
         client = client.with_options(timeout=float(timeout))
@@ -623,6 +708,7 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
                 continue
             raise
     result = from_anthropic(message, model)
+    result.usage.prompt_cache = cache_info
     if claude_trial.current() is not None:
         claude_trial.meter(model, result.usage.provider_cost_usd)
     else:
@@ -643,6 +729,7 @@ class _Completions:
                       max_tokens=max_tokens,
                       effort=self._owner.effort or _effort(kw),
                       tool_choice=kw.get("tool_choice"),
+                      cache_policy=kw.get("cache_policy"),
                       timeout=kw.get("timeout") or self._owner.timeout)
 
 

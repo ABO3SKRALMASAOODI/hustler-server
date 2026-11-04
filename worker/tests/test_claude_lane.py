@@ -141,17 +141,28 @@ def test_cache_breakpoints_sit_on_stability_boundaries():
     assert "cache_control" in msgs[-1]["content"][-1]
 
 
-def test_the_one_call_opus_planner_writes_no_cache():
-    # 1 Nov 2026: 7.9% read of what it wrote; its turn continues on Haiku.
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-opus-5-5"])
+def test_repeated_editing_is_cached_regardless_of_model(model):
     system, msgs, tools = claude_lane.to_anthropic([
         {"role": "system", "content": "kernel"},
         {"role": "system", "content": "project"},
         {"role": "user", "content": "go"},
-    ], TOOLS, "claude-opus-5-5")
-    claude_lane._mark_cache(system, msgs, tools, "claude-opus-5-5")
-    assert not any("cache_control" in b for b in system)
-    assert not any("cache_control" in t for t in tools)
-    assert not any("cache_control" in b for m in msgs for b in m["content"])
+    ], TOOLS, model)
+    claude_lane._mark_cache(system, msgs, tools, model)
+    assert "cache_control" in system[-1]
+    assert "cache_control" in tools[-1]
+    assert "cache_control" in msgs[-1]["content"][-1]
+
+
+def test_one_call_planner_explicitly_caches_only_shared_prefix():
+    system = [{"type": "text", "text": text}
+              for text in ("kernel", "capabilities", "unique project")]
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "unique frames"}]}]
+    tools = [{"name": "edit", "input_schema": {"type": "object"}}]
+    claude_lane._mark_cache(system, msgs, tools, "claude-opus-5-5", "shared_only")
+    assert "cache_control" in system[1]
+    assert "cache_control" not in system[-1]
+    assert "cache_control" not in msgs[0]["content"][0]
 
 
 def test_a_one_shot_critic_caches_only_its_shared_instructions():
@@ -172,9 +183,108 @@ def test_structured_completion_review_does_not_buy_an_unused_payload_cache():
     tools = [{"name": "assess_request", "input_schema": {"type": "object"}}]
     claude_lane._mark_cache(system, msgs, tools, "claude-haiku-5-5")
     assert "cache_control" in system[0]
-    assert "cache_control" not in tools[0]
+    assert "cache_control" in tools[0]
     assert "cache_control" not in msgs[0]["content"][0]
     assert not claude_lane._one_shot(msgs + [{"role": "assistant", "content": []}], tools)
+
+
+def test_large_observation_batch_keeps_previous_read_with_four_breakpoints():
+    import copy
+    original = [{"role": "system", "content": s} for s in ("kernel", "directory", "project")]
+    original.append({"role": "user", "content": "inspect"})
+    before = claude_lane.to_anthropic(original, TOOLS, "claude-haiku-5-5")
+    grown = copy.deepcopy(original) + [
+        {"role": "assistant", "content": "Looking at the evidence."},
+        {"role": "user", "content": [
+            {"type": "text", "text": f"observation {i}"} for i in range(25)]}]
+    after = claude_lane.to_anthropic(grown, TOOLS, "claude-haiku-5-5")
+    diagnostics = []
+    for system, msgs, tools in (before, after):
+        claude_lane._mark_cache(system, msgs, tools, "claude-haiku-5-5")
+        diagnostics.append(claude_lane._cache_diagnostics({
+            "model": "claude-haiku-5-5", "system": system,
+            "messages": msgs, "tools": tools}))
+    prior_messages = {p["sha256"] for p in diagnostics[0]["prefixes"] if p["kind"] == "messages"}
+    current_messages = {p["sha256"] for p in diagnostics[1]["prefixes"] if p["kind"] == "messages"}
+    assert prior_messages & current_messages  # explicit entry, outside tail's lookback
+    assert len(diagnostics[1]["prefixes"]) == 4
+    assert "cache_control" not in after[2][-1]  # spare tools slot used by anchor
+    assert "cache_control" in after[1][-1]["content"][-1]  # also writes next tail
+    assert grown[-1]["content"][0] == {"type": "text", "text": "observation 0"}
+
+
+@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-opus-5-5"])
+def test_assessment_read_prefix_survives_changed_proof_and_draft(model):
+    prefixes = []
+    for changing in ("first draft", "new proof and revised draft"):
+        system = [{"type": "text", "text": "review"}]
+        msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "same request and source evidence"},
+            {"type": "text", "text": changing}]}]
+        tools = [{"name": "assess_request", "input_schema": {"type": "object"}}]
+        claude_lane._mark_cache(system, msgs, tools, model)
+        prefixes.append(claude_lane._cache_diagnostics({"model": model,
+            "system": system, "messages": msgs, "tools": tools})["prefixes"])
+    assert prefixes[0] == prefixes[1]
+    assert prefixes[0][-1]["kind"] == "messages"
+
+
+def test_contract_compilation_caches_schema_and_instructions_not_unique_payload():
+    system = [{"type": "text", "text": "compile request"}]
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "customer request"}]}]
+    tools = [{"name": "record_request_contract", "input_schema": {"type": "object"}}]
+    claude_lane._mark_cache(system, msgs, tools, "claude-haiku-5-5")
+    assert "cache_control" in tools[0] and "cache_control" in system[0]
+    assert "cache_control" not in msgs[0]["content"][0]
+
+
+def test_central_recorder_retains_reads_for_non_editor_callers():
+    rows = []
+    llm.set_recorder(lambda purpose, request, response, usage: rows.append(response))
+    try:
+        usage = claude_lane._Usage("claude-haiku-5-5", SimpleNamespace(
+            input_tokens=17, output_tokens=25, cache_read_input_tokens=2000,
+            cache_creation_input_tokens=40))
+        usage.prompt_cache = {"version": 1, "prefixes": [{"kind": "system", "sha256": "hash"}]}
+        for purpose in ("vision_visual_search", "shorts_plan", "mcp"):
+            llm.record(purpose, {"model": "claude-haiku-5-5"}, {"content": "ok"}, usage)
+        assert len(rows) == 3
+        for row in rows:
+            assert row["cached_in"] == 2000
+            assert row["cache_write_in"] == 40
+            assert row["uncached_in"] == 17
+            assert row["prompt_cache"] == usage.prompt_cache
+            assert row["provider_cost_usd"] == usage.provider_cost_usd
+    finally:
+        llm.set_recorder(None)
+
+
+def test_first_cut_and_indexing_recorders_persist_usage_and_carry_scope():
+    import first_cut
+    import indexer
+    rows = []
+    worker_db = SimpleNamespace(run=lambda fn, *args: rows.append(args))
+    job = {"id": 101, "project_id": 202}
+    scope = object()
+    recorders = [first_cut._ScopeRecorder(worker_db, job),
+                 indexer._TrialRecorder(scope, worker_db, job)]
+    assert recorders[1].claude_trial_scope is scope
+    usage = SimpleNamespace(prompt_tokens=1050, completion_tokens=20,
+                            prompt_tokens_details={"cached_tokens": 1000})
+    try:
+        for recorder in recorders:
+            llm.set_recorder(recorder)
+            # Use an unset lane scope: recording must never meter twice or
+            # alter the customer charge; create() owns provider metering.
+            recorder.claude_trial_scope = None
+            llm.record("vision", {"model": "claude-haiku-5-5"}, {"content": "ok"}, usage)
+        assert len(rows) == 2
+        for row in rows:
+            assert row[:4] == (202, 101, "vision", "claude-haiku-5-5")
+            assert row[5]["cached_in"] == 1000
+            assert row[6:] == (1050, 20)
+    finally:
+        llm.set_recorder(None)
 
 
 def _message(blocks, stop="tool_use", **usage):
@@ -301,6 +411,7 @@ def test_the_shim_is_a_drop_in_client_and_meters_each_call(lane):
     body = sdk.bodies[0]
     assert body["max_tokens"] == 4000
     assert body["output_config"] == {"effort": "low"}
+    assert resp.usage.prompt_cache["prefixes"]
     assert "temperature" not in body and "service_tier" not in body
     # no trial scope on this thread: a subscriber's call, metered into the
     # credit cycle's ledger (claude_credit), never into a trial budget

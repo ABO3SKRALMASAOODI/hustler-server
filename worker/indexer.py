@@ -336,15 +336,12 @@ def _stream_index_source(worker_db, job, asset, workdir):
     return src, sha, info, proxy_kbps
 
 
-class _TrialRecorder:
-    """A no-op llm recorder that carries the Claude trial scope into the
-    index's pool threads (they install the caller's recorder)."""
+class _TrialRecorder(llm.JobRecorder):
+    """Carry scope into caption pools and retain their cost/cache usage."""
 
-    def __init__(self, scope):
+    def __init__(self, scope, worker_db, job):
+        super().__init__(worker_db, job)
         self.claude_trial_scope = scope
-
-    def __call__(self, purpose, request, response, usage):
-        return None
 
 
 def _claude_trial_index_scope(worker_db, job):
@@ -367,7 +364,7 @@ def _claude_trial_index_scope(worker_db, job):
     scope.job_id = job.get("id")
     recorder = llm.get_recorder()
     if recorder is None:
-        recorder = _TrialRecorder(scope)
+        recorder = _TrialRecorder(scope, worker_db, job)
         llm.set_recorder(recorder)
     claude_trial.activate(scope, recorder)
     print(f"[index {job.get('id')}] Claude trial lane for user "

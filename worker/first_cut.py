@@ -3490,12 +3490,15 @@ def run(worker_db, job, project, index_row):
         ctx.first_cut_model = trial_scope.model
         recorder = llm.get_recorder()
         if recorder is None:
-            recorder = _ScopeRecorder()
+            recorder = _ScopeRecorder(worker_db, job)
             llm.set_recorder(recorder)
         claude_trial.activate(trial_scope, recorder)
     elif payload.get("operator_repair") is True or (
             subscribed and claude_trial.credit_status(worker_db).get("on")):
         ctx.first_cut_model = claude_trial.flag(worker_db)["model"]
+        if llm.get_recorder() is None:
+            recorder = _ScopeRecorder(worker_db, job)
+            llm.set_recorder(recorder)
     # Q1 (30 Oct): the visual-variety devices reach trial accounts and NEW
     # subscribers only; a grandfathered payer's First cut is unchanged (D1)
     try:
@@ -3558,9 +3561,9 @@ def run(worker_db, job, project, index_row):
         llm.clear_turn_plan()
         if trial_scope is not None:
             claude_trial.deactivate(recorder)
-            if isinstance(recorder, _ScopeRecorder) and \
-                    llm.get_recorder() is recorder:
-                llm.set_recorder(None)
+        if isinstance(recorder, _ScopeRecorder) and \
+                llm.get_recorder() is recorder:
+            llm.set_recorder(None)
     elapsed = round(time.monotonic() - started, 1)
     try:
         latest = ctx.latest_edl()
@@ -3675,14 +3678,8 @@ def _feature_gate_stop(worker_db, job, session_id, ctx, workdir):
             "credits_charged": 0.0}
 
 
-class _ScopeRecorder:
-    """A no-op llm recorder that carries the trial scope to pool threads."""
-
-    def __init__(self):
-        self.claude_trial_scope = None
-
-    def __call__(self, purpose, request, response, usage):
-        return None
+class _ScopeRecorder(llm.JobRecorder):
+    """Carry trial scope to pool threads and retain real cost/cache usage."""
 
 
 def _renders_done(steps):

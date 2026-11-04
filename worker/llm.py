@@ -165,11 +165,37 @@ def cached_assistant_message(message, model):
     return {"reasoning_content": value} if str(model).startswith("grok-") and isinstance(value, str) and value else {}
 
 
+class JobRecorder:
+    """Persist usage for job paths that do not need the editor's context."""
+
+    def __init__(self, worker_db, job):
+        self.worker_db = worker_db
+        self.project_id = job["project_id"]
+        self.job_id = job["id"]
+        self.claude_trial_scope = None
+
+    def __call__(self, purpose, request, response, usage):
+        import db as dbx
+        self.worker_db.run(dbx.insert_llm_call, self.project_id, self.job_id,
+                           purpose, (request or {}).get("model"), request, response,
+                           getattr(usage, "prompt_tokens", None),
+                           getattr(usage, "completion_tokens", None))
+
+
 def record(purpose, request, response, usage=None):
     fn = get_recorder()
     if not fn:
         return
     try:
+        if usage is not None and isinstance(response, dict):
+            # All callers (indexing, Shorts, MCP, first cut and the editor)
+            # need the same actual cache-read accounting. Previously only
+            # the editor's recorder reliably persisted it; other consumers
+            # could report/charge a full-price input despite a provider hit.
+            response = dict(response, cached_in=cached_input_tokens(usage))
+            cache_info = getattr(usage, 'prompt_cache', None)
+            if isinstance(cache_info, dict):
+                response['prompt_cache'] = cache_info
         actual = provider_cost_usd(usage, (request or {}).get("model"))
         if actual is not None and isinstance(response, dict):
             response = dict(response, provider_cost_usd=actual)
@@ -187,6 +213,9 @@ def record(purpose, request, response, usage=None):
                 response['cache_write_in'] = (
                     details.get('cache_write_tokens', 0)
                     if isinstance(details, dict) else 0)
+                response['uncached_in'] = max(0,
+                    int(getattr(usage, 'prompt_tokens', 0) or 0)
+                    - response['cached_in'] - int(response['cache_write_in'] or 0))
                 response['provider'] = 'anthropic'
                 response['cost_basis'] = 'anthropic_usage_official_rates'
                 try:

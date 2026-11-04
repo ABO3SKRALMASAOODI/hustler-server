@@ -6122,7 +6122,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             unread_tool_images and not total_expired and not ctx.over_budget()
             and time.monotonic() - t_start > config.AGENT_TURN_TIMEOUT_S)
         if visual_handoff:
-            tools = []
+            # Keep the Claude tool prefix; tool_choice=none below disables
+            # execution without discarding the entire cached conversation.
+            if not claude_lane.is_claude_model(model):
+                tools = []
             max_tokens = min(max_tokens, 2000)
             messages.append({'role': 'system', 'content': (
                 'This execution slice is ending. Read the newly returned '
@@ -6346,6 +6349,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             active_kw = llm.completion_kwargs(
                 active_model, max_tokens, config.AGENT_TEMPERATURE)
             active_kw.update(active_extra)
+            if visual_handoff and tools:
+                # Preserve the no-tools handoff if a funded fallback answers.
+                active_kw["tool_choice"] = "none"
+            if claude_lane.is_claude_model(active_model):
+                if iteration == 0 and call_model != model:
+                    active_kw["cache_policy"] = "shared_only"
             affinity = llm.cache_affinity(active_model)
             if affinity:
                 active_kw["extra_headers"] = affinity
