@@ -3504,7 +3504,10 @@ def repair_project_edit(project_id):
     if len(request_key) > 128:
         return jsonify({"error": "idempotency_key is too long"}), 400
     expected_version = body.get("expected_edl_version")
+    expected_message = body.get("expected_message_id")
     failed_job_id = body.get("failed_job_id")
+    if expected_message is not None and (type(expected_message) is not int or expected_message < 0):
+        return jsonify({"error": "expected_message_id must be a nonnegative integer"}), 400
     if ((expected_version is not None and (type(expected_version) is not int or expected_version < 1))
             or (failed_job_id is not None and (type(failed_job_id) is not int or failed_job_id < 1))):
         return jsonify({"error": "expected_edl_version and failed_job_id must be positive integers"}), 400
@@ -3542,6 +3545,8 @@ def repair_project_edit(project_id):
                        ORDER BY id DESC LIMIT 1""",
                     (project["chat_session_id"],))
         message = cur.fetchone()
+        if expected_message is not None and expected_message != (int(message["id"]) if message else 0):
+            return jsonify({"error": "customer request changed; inspect the latest request before repairing"}), 409
         retry_first_cut = False
         if failed_job_id is not None:
             if message or expected_version is None:

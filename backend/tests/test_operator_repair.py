@@ -90,3 +90,24 @@ def test_invalid_customer_baseline_cannot_queue_an_unrecoverable_job(monkeypatch
     _, status, queued, _ = invoke(monkeypatch, {}, latest=21,
         message={"id": 40, "meta": {"edl_version": "missing"}})
     assert status == 409 and not queued
+
+
+def test_new_customer_request_without_an_edl_change_invalidates_reviewed_repair(monkeypatch):
+    _, status, queued, _ = invoke(monkeypatch,
+        {"expected_edl_version": 21, "expected_message_id": 39},
+        latest=21, message={"id": 40, "meta": {"edl_version": 21}})
+    assert status == 409 and not queued
+
+
+def test_matching_reviewed_request_is_captured_under_project_lock(monkeypatch):
+    _, status, queued, queries = invoke(monkeypatch,
+        {"expected_edl_version": 21, "expected_message_id": 40},
+        latest=21, message={"id": 40, "meta": {"edl_version": 17}})
+    assert status == 200 and queued[0]["operator_expected_message_id"] == 40
+    assert "FOR UPDATE" in queries[0][0]
+
+
+@pytest.mark.parametrize("value", [-1, True, "40", 40.5])
+def test_invalid_message_fence_is_rejected_before_database_access(monkeypatch, value):
+    _, status, queued, queries = invoke(monkeypatch, {"expected_message_id": value})
+    assert status == 400 and not queued and not queries
