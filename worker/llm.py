@@ -26,6 +26,19 @@ from openai import OpenAI
 import config
 
 
+class ProviderHTTPError(RuntimeError):
+    """An HTTP refusal with machine-readable provider error metadata."""
+
+    def __init__(self, provider, status_code, detail, payload=None):
+        self.provider = provider
+        self.status_code = status_code
+        error = payload.get("error") if isinstance(payload, dict) else None
+        error = error if isinstance(error, dict) else {}
+        self.error_code = error.get("code")
+        self.error_type = error.get("type")
+        super().__init__(f"{provider} HTTP {status_code}: {detail}")
+
+
 _client = None
 _paid_client = None
 _frontier_client = None
@@ -1607,7 +1620,11 @@ def responses_create(base_url, api_key, model, messages, tools,
                       headers={"Authorization": f"Bearer {api_key}",
                                "Content-Type": "application/json"})
     if r.status_code >= 400:
-        raise RuntimeError(f"responses HTTP {r.status_code}: {r.text[:300]}")
+        try:
+            error_payload = r.json()
+        except (ValueError, AttributeError):
+            error_payload = None
+        raise ProviderHTTPError("responses", r.status_code, r.text[:300], error_payload)
     payload = r.json()
     result = _from_responses(payload)
     result.usage.service_tier = payload.get('service_tier')
