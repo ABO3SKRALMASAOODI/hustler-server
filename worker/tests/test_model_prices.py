@@ -330,13 +330,22 @@ def test_reasoning_effort_never_applies_to_the_first_iteration():
     """Iteration 0 is where the model reads the state and plans the edit. That
     is the thinking being paid for; only tool dispatch gets downgraded."""
     import inspect
+    import ast
     import agent_loop
     src = inspect.getsource(agent_loop._run_loop)
     # Round 100 tiering: the chat path still sends effort only from the
     # second iteration on, and the value it sends is the per-step tier
     # (configured effort on the planning step, dispatch effort after).
     assert "step_effort and iteration > 0" in src
-    assert "llm.editor_reasoning_effort(ctx.plan, iteration)" in src
+    assert any(isinstance(node, ast.Call)
+               and isinstance(node.func, ast.Attribute)
+               and isinstance(node.func.value, ast.Name)
+               and node.func.value.id == "llm"
+               and node.func.attr == "editor_reasoning_effort"
+               and len(node.args) >= 2
+               and ast.unparse(node.args[0]) == "ctx.plan"
+               and ast.unparse(node.args[1]) == "iteration"
+               for node in ast.walk(ast.parse(src)))
     assert llm.editor_reasoning_effort("ai", 0) == config.AGENT_REASONING_EFFORT
     assert llm.editor_reasoning_effort("ai", 1) == (
         config.AGENT_REASONING_EFFORT_DISPATCH or config.AGENT_REASONING_EFFORT)
