@@ -376,9 +376,9 @@ def paid_editor_lanes(plan=None):
     return lanes
 
 
-def editor_reasoning_effort(plan, iteration=0):
+def editor_reasoning_effort(plan, iteration=0, operator_repair=False):
     """New Advanced contracts reason at high; preserve legacy configuration."""
-    if plan in {"advanced", "pro_2026", "max_2026"}:
+    if operator_repair or plan in {"advanced", "pro_2026", "max_2026"}:
         return "high"
     return (config.AGENT_REASONING_EFFORT if iteration == 0 else
             (config.AGENT_REASONING_EFFORT_DISPATCH or config.AGENT_REASONING_EFFORT))
@@ -429,7 +429,7 @@ def agent_client_for(subscribed, plan=None, first_turn=False):
     return client(), config.AGENT_MODEL
 
 
-def agent_lanes_for(subscribed, plan=None, first_turn=False):
+def agent_lanes_for(subscribed, plan=None, first_turn=False, operator_repair=False):
     """Ordered, independently funded agent lanes for one logical turn.
 
     ``agent_client_for`` remains the product-tier selector.  This companion
@@ -442,6 +442,13 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False):
     changing models on an empty provider wallet is not a fallback.  Keys stay
     in process memory and are never returned by config_report or logged.
     """
+    if operator_repair:
+        # A company-funded remediation already exists because the ordinary
+        # turn failed. Use the configured Advanced editor for that repair;
+        # the customer's subscription and billing state are not rewritten.
+        recovery = paid_editor_lanes("advanced")
+        if recovery:
+            return recovery
     if subscribed:
         return paid_editor_lanes(plan)
     primary_client, primary_model = agent_client_for(
@@ -1286,6 +1293,8 @@ def _to_responses_tools(tools):
                     "description": fn.get("description") or "",
                     "parameters": fn.get("parameters")
                     or {"type": "object", "properties": {}}})
+        if "strict" in fn:
+            out[-1]["strict"] = fn["strict"]
     return out
 
 

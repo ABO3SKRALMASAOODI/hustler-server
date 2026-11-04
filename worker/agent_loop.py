@@ -2268,7 +2268,8 @@ def run_agent_job(worker_db, job):
               f"${ctx.claude_trial.cap_usd:.2f} spent)", flush=True)
     else:
         ctx.agent_lanes = llm.agent_lanes_for(
-            subscribed, plan, first_turn=first_turn)
+            subscribed, plan, first_turn=first_turn,
+            operator_repair=payload.get("operator_repair") is True)
         # NEW SUBSCRIBERS ON THE CLAUDE LANE (owner, 25 Oct 2026; flag
         # app_kv.studio_for_all_plans, default off). Accounts that subscribed
         # after the release cutoff run their Studio agent on Claude with the
@@ -6295,7 +6296,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # the project state and plans the edit — that is the thinking worth
         # paying for. New Advanced contracts use high on every editing step;
         # existing contracts retain their configured planning/dispatch split.
-        step_effort = llm.editor_reasoning_effort(ctx.plan, iteration)
+        step_effort = llm.editor_reasoning_effort(
+            ctx.plan, iteration, operator_repair=payload.get("operator_repair") is True)
         if claude_lane.is_claude_model(model):
             step_effort = (config.CLAUDE_TRIAL_PLAN_EFFORT if iteration == 0
                            else config.CLAUDE_TRIAL_EFFORT)

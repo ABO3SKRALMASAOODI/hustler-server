@@ -366,7 +366,29 @@ def to_anthropic(messages, tools=None, model=None):
         tool_defs.append({"name": fn["name"],
                           "description": str(fn.get("description") or "")[:10000],
                           "input_schema": schema})
+        if fn.get("strict") is True:
+            tool_defs[-1]["strict"] = True
+            tool_defs[-1]["input_schema"] = _strict_schema(schema)
     return system, out, tool_defs
+
+
+def _strict_schema(schema):
+    """Translate only opt-in strict tools to Claude's supported grammar.
+
+    Numeric bounds and array maxima remain in the caller's schema and must
+    still pass local validation. Unsupported wire keywords cause HTTP 400;
+    object shapes, required fields and enums are enforced by both providers.
+    """
+    unsupported = {"minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+                   "multipleOf", "maxItems"}
+    if isinstance(schema, list):
+        return [_strict_schema(item) for item in schema]
+    if not isinstance(schema, dict):
+        return schema
+    return {key: ({name: _strict_schema(child) for name, child in value.items()}
+                  if key in {"properties", "$defs", "definitions"}
+                  else _strict_schema(value))
+            for key, value in schema.items() if key not in unsupported}
 
 
 # Calls whose prompt is never sent again inside the cache's 5 minutes: a

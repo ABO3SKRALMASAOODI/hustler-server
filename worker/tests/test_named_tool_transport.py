@@ -23,6 +23,7 @@ def test_named_decision_reaches_responses_and_returns_tool_result(monkeypatch, n
         assert url.endswith("/responses")
         assert body["tool_choice"] == {"type": "function", "name": name}
         assert body["tools"][0]["name"] == name
+        assert body["tools"][0]["strict"] is True
         calls.append(body)
         payload = {"status": "completed", "output": [{
             "type": "function_call", "call_id": "decision-1", "name": name,
@@ -35,7 +36,7 @@ def test_named_decision_reaches_responses_and_returns_tool_result(monkeypatch, n
     result = llm.create_with_dialect(
         client, "gpt-6.1-sol", [{"role": "user", "content": "Record the decision."}],
         tools=[{"type": "function", "function": {
-            "name": name, "parameters": {"type": "object", "properties": {
+            "name": name, "strict": True, "parameters": {"type": "object", "properties": {
                 "ok": {"type": "boolean"}}, "required": ["ok"],
                 "additionalProperties": False}}}],
         tool_choice=choice, max_tokens=100)
