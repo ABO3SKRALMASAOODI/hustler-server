@@ -216,6 +216,7 @@ check("a tool with no name raises", raises(llm._to_responses_tools,
 print("== the loop cannot lose a turn to this lane ==")
 
 import inspect                                               # noqa: E402
+import ast                                                   # noqa: E402
 import agent_loop                                            # noqa: E402
 src = inspect.getsource(agent_loop._run_loop)
 check("the responses call is wrapped in try/except",
@@ -239,8 +240,18 @@ check("reasoning effort is MAX (gpt-5.6: none|low|medium|high|xhigh|max)",
 check("...and the per-step effort is what the lane sends",
       "effort=step_effort" in _src)
 check("...planning keeps the configured effort",
-      "llm.editor_reasoning_effort(ctx.plan, iteration)" in _src
-      and llm.editor_reasoning_effort("ai", 0) == config.AGENT_REASONING_EFFORT)
+      any(isinstance(node, ast.Call)
+          and isinstance(node.func, ast.Attribute)
+          and isinstance(node.func.value, ast.Name)
+          and node.func.value.id == "llm"
+          and node.func.attr == "editor_reasoning_effort"
+          and len(node.args) >= 2
+          and ast.unparse(node.args[0]) == "ctx.plan"
+          and ast.unparse(node.args[1]) == "iteration"
+          for node in ast.walk(ast.parse(_src)))
+      and llm.editor_reasoning_effort("ai", 0) == config.AGENT_REASONING_EFFORT
+      and llm.editor_reasoning_effort("ai", 0, operator_repair=False)
+          == config.AGENT_REASONING_EFFORT)
 check("...and dispatch defaults below the planning effort",
       config.AGENT_REASONING_EFFORT_DISPATCH == "medium")
 check("the lane call gets the thinking-sized timeout, not the 90s dispatch "
