@@ -401,9 +401,9 @@ _ONE_CALL_MODELS = ("claude-opus",)
 
 
 def _one_shot(msgs, tools):
-    """A single request with no tools and no assistant turn: nothing after
-    the shared system prefix will ever be sent again."""
-    return not tools and all(m["role"] != "assistant" for m in msgs)
+    """Single reviews do not reuse their project payload after this call."""
+    structured_review = len(tools) == 1 and tools[0].get("name") == "assess_request"
+    return (not tools or structured_review) and all(m["role"] != "assistant" for m in msgs)
 
 
 def _mark_cache(system, msgs, tools, model=""):

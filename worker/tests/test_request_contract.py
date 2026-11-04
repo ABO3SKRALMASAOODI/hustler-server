@@ -128,28 +128,56 @@ def test_invented_evidence_cannot_establish_completion(monkeypatch, pointer):
     assert result["remaining"]
 
 
-def test_model_paths_preserve_slashes_tildes_and_nested_array_indices(monkeypatch):
+def test_model_refs_preserve_slashes_tildes_and_nested_asset_evidence(monkeypatch):
     ctx = context()
     key = "generated/42/a~b.png"
     ctx.latest_edl()["json"]["overlays"] = [{"asset_key": key}]
     monkeypatch.setattr(rc, "_media_evidence", lambda _: {
         key: {"analysis": {"sentences": [{"text": "Original-source proof."}]}}})
     def record(_ctx, _name, schema, _system, evidence, **kwargs):
+        refs = {entry["path"]: entry["ref"] for entry in evidence["evidence"]}
+        asset_path = "/media/generated~142~1a~0b.png"
+        asset = next(entry["value"] for entry in evidence["evidence"] if entry["path"] == asset_path)
+        assert asset["analysis"]["sentences"][0]["text"] == "Original-source proof."
         result = {"completed": "Verified.", "remaining": "", "requirements": [
             {"id": "subtitles", "status": "satisfied", "blocker_kind": "none",
-             "reason": "Unchanged.", "evidence": [["after", "captions"]]},
+             "reason": "Unchanged.", "evidence": [refs["/after/captions"]]},
             {"id": "type", "status": "satisfied", "blocker_kind": "none",
              "reason": "The cited asset is present.", "evidence": [
-                 ["after", "overlays", 0, "asset_key"],
-                 ["media", key, "analysis", "sentences", 0, "text"]]}]}
+                 refs["/after/overlays"], refs[asset_path]]}]}
         rc._validate(result, schema)
         return result
     monkeypatch.setattr(rc, "_call", record)
     result = rc.assess(ctx)
     assert result["complete"]
     assert result["requirements"][1]["evidence"] == [
-        "/after/overlays/0/asset_key",
-        "/media/generated~142~1a~0b.png/analysis/sentences/0/text"]
+        "/after/overlays", "/media/generated~142~1a~0b.png"]
+
+
+def test_assessment_registry_loses_no_deep_or_later_evidence():
+    evidence = {"after": {"overlays": [{"mask": {"shapes": [{"points": [[1, 2]]}]}}]},
+                "media": {f"clips/{i}/a~b.mp4": {"analysis": {"sentences": [{"text": str(i)}]}}
+                          for i in range(150)}, "preview": None, "visual_proofs": []}
+    entries, pointers = rc._assessment_evidence(evidence)
+    assert len(entries) == 153
+    for entry in entries:
+        assert rc._pointer(evidence, pointers[entry["ref"]]) == entry["value"]
+    assert "/media/clips~1149~1a~0b.mp4" in pointers.values()
+    assert next(e for e in entries if e["path"] == "/after/overlays")["value"] == evidence["after"]["overlays"]
+
+
+def test_bad_assessment_does_not_repeat_an_expensive_review(monkeypatch):
+    ctx = context()
+    calls = []
+    def invalid(*args, **kwargs):
+        calls.append(1)
+        raise ValueError("An evidence ref was not supplied")
+    monkeypatch.setattr(rc, "_call", invalid)
+    result = rc.assess(ctx)
+    assert calls == [1]
+    assert not result["complete"]
+    assert all(r["status"] == "unknown" and r["blocker_kind"] == "none"
+               for r in result["requirements"])
 
 
 @pytest.mark.parametrize("path", [[], ["after", True], ["after", -1], ["after", {}]])
@@ -186,11 +214,16 @@ def test_real_nested_evidence_survives_completion_review(monkeypatch):
         {"id": "type", "status": "satisfied", "blocker_kind": "none",
          "reason": "Actual title.", "evidence": [["after", "motion", 0, "params", "text"]]},
     ]}
-    def record(_ctx, _name, schema, *_args, **_kwargs):
+    def record(_ctx, _name, schema, _system, payload, **_kwargs):
         # Exercise the real schema validator; replacing the LLM wrapper alone
         # had concealed its depth-limited citation enum.
-        rc._validate(value, schema)
-        return deepcopy(value)
+        entries = {entry["path"]: entry for entry in payload["evidence"]}
+        assert entries["/after/motion"]["value"][0]["params"]["text"] == "Original title"
+        selected = deepcopy(value)
+        selected["requirements"][0]["evidence"] = [entries["/after/captions"]["ref"]]
+        selected["requirements"][1]["evidence"] = [entries["/after/motion"]["ref"]]
+        rc._validate(selected, schema)
+        return selected
     monkeypatch.setattr(rc, "_call", record)
     assert rc.assess(ctx)["complete"]
 

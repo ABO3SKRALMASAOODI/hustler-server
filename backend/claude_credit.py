@@ -22,9 +22,9 @@ automatically, without changing anything."
   wrong), the state flips OFF: no new trial grants, never-paid accounts meet
   today's pre-edit paywall, a trial turn already running finishes (budget)
   or ends on the plan cards (refusal). Paid subscriptions keep their Studio
-  access. Since the owner's 4 Nov instruction, remaining credit below the
-  total budget is reserved for paid Anthropic work; actual billing/auth
-  refusals require a configured funded fallback.
+  access. Since the owner's 4 Nov instruction, this trial ledger must not
+  switch paid editing off. Internal repairs stop at the configured budget;
+  actual billing/auth refusals require a configured funded paid fallback.
 * ON AGAIN. While OFF, a probe (GitHub Actions every 3 h,
   backend/scripts/claude_credit_probe.py) makes one minimal call. When it
   succeeds in a NEW cycle, the state flips back ON by itself. A switch that
@@ -238,12 +238,19 @@ def status(conn, now=None):
 # ------------------------------------------------------------------ #
 
 def paid_available(credit):
-    """Paid work may use the reserve after the free-trial soft cutoff.
+    """The trial ledger does not disable paid editing (owner, 4 Nov 2026).
 
-    The owner explicitly reserved remaining credit for subscribers on
-    4 Nov 2026. Actual billing/auth refusals and the total cycle budget
-    remain hard boundaries; this never switches the free trial back on.
+    Its estimate can pass the configured trial budget while Anthropic still
+    accepts requests. Actual billing/auth refusals remain authoritative. This
+    changes neither the trial switch nor its budget, and buys no credits.
     """
+    return bool(credit.get("on") or credit.get("reason") == REASON_BUDGET
+                or (credit.get("reason") in (REASON_BILLING, REASON_AUTH)
+                    and credit.get("last_probe_ok") is True))
+
+
+def repair_available(credit):
+    """Internal recovery may use only the remaining configured allowance."""
     if credit.get("on"):
         return True
     if credit.get("reason") != REASON_BUDGET:
@@ -301,19 +308,22 @@ def switch_off(conn, reason, detail="", now=None):
     with conn.cursor() as cur:
         _lock(cur)
         state = parse_state(_kv(cur, STATE_KEY))
-        if state["state"] == OFF:
+        hard_refusal = reason in (REASON_BILLING, REASON_AUTH)
+        if state["state"] == OFF and not (
+                hard_refusal and (state.get("reason") == REASON_BUDGET
+                                  or state.get("last_probe_ok") is True)):
             return False
         spent = cycle_spend(conn, start, end)
         new = {"state": OFF, "reason": str(reason), "since": now.isoformat(),
                "cycle_start": start.isoformat(), "cycle_end": end.isoformat(),
                "spent_usd": round(spent, 4), "detail": _scrub(detail),
                "last_probe_at": state.get("last_probe_at"),
-               "last_probe_ok": state.get("last_probe_ok")}
+               "last_probe_ok": False if hard_refusal else state.get("last_probe_ok")}
         _write_state(cur, new)
         why = _REASON_TEXT.get(str(reason), str(reason))
         queue_alert(
-            cur, f"credit_off_{end:%Y%m%d}_{now:%Y%m%d%H%M%S}", "credit_switch_off",
-            f"Free-trial lane OFF: {why} (${spent:.2f} of "
+            cur, f"credit_off_{end:%Y%m%d}_{now:%Y%m%d%H%M%S}_{reason}", "credit_switch_off",
+            f"{'Anthropic provider unavailable' if hard_refusal else 'Free-trial lane OFF'}: {why} (${spent:.2f} of "
             f"${cfg['cycle_budget_usd']:.0f} this cycle)",
             "<p>The free-trial lane switched <b>OFF</b> by itself: "
             f"{why}.</p>"
@@ -324,8 +334,8 @@ def switch_off(conn, reason, detail="", now=None):
             "see today's pre-edit paywall; trial turns already running "
             "finish or end on the plan cards. Paid subscribers keep their "
             "included Studio access. The trial cutoff reserves remaining "
-            "Anthropic credit for paid work; only an actual provider refusal "
-            "or exhaustion of the total cycle budget requires a funded fallback.</p>"
+            "Anthropic credit for paid work. The trial ledger does not disable "
+            "paid editing; an actual provider refusal requires a funded fallback.</p>"
             "<p>It comes back on by itself when a probe succeeds in the next "
             "cycle (a key problem: as soon as a probe succeeds). Override: "
             "app_kv claude_credit_state = {\"state\": \"on\", \"reason\": "

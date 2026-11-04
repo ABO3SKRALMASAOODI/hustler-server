@@ -71,7 +71,9 @@ def test_trial_cutoff_preserves_paid_claude_and_paid_recovery(lane_up):
     with pytest.raises(RuntimeError, match="credit line is paused"):
         agent_loop._require_recovery_credit_line(_Db(ON), subscribed=False)
     lane_up["spent_usd"] = 62.22
-    assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "plus_2026", {}) is None
+    assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "plus_2026", {})
+    with pytest.raises(RuntimeError, match="credit line is paused"):
+        agent_loop._require_recovery_credit_line(_Db(ON), subscribed=True)
 
 
 def test_a_new_subscriber_runs_on_the_plans_claude_model(lane_up):

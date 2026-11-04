@@ -70,11 +70,7 @@ ASSESSMENT_SCHEMA = {
                 "status": {"type": "string", "enum": ["satisfied", "unmet", "blocked", "unknown"]},
                 "reason": {"type": "string"},
                 "blocker_kind": {"type": "string", "enum": ["none", "customer_input", "provider", "unsupported"]},
-                "evidence": {"type": "array", "items": {
-                    "type": "array", "minItems": 1,
-                    "description": "Actual object keys and array indices from the evidence root; keep each filename/storage key as one component.",
-                    "items": {"anyOf": [{"type": "string"},
-                                          {"type": "integer", "minimum": 0}]}}},
+                "evidence": {"type": "array", "items": {"type": "string"}},
             }, "additionalProperties": False}},
     }, "additionalProperties": False,
 }
@@ -148,11 +144,10 @@ names. Read the draft's admissions of missing work; never silently discard them.
 Resolve conflicts using the actual current visual and timeline evidence: the
 draft can also understate existing work. Judge visible behavior, not whether a
 particular tool or template name was used; equivalent compositions count.
-For each satisfied EDIT requirement cite at least one existing path into the
-supplied evidence object. Each path is an array of actual object keys and
-zero-based array indices. Keep a filename/storage key containing slashes as ONE
-component; do not split or escape its characters. Only cite fields and indices
-that exist in the supplied data, never invent proof containers.
+For each satisfied EDIT requirement cite at least one supplied evidence ref.
+Evidence entries have a ref, a path identifying the original data, and its full
+value. Select refs from the tool's enum; never construct paths or indices.
+Explain which facts inside the selected value substantiate the requirement.
 For preserved settings cite after too, including an unchanged or null field;
 source dimensions alone do not prove the output frame stayed unchanged.
 Paths must substantiate the specific claim: an unrelated preview is not proof
@@ -482,6 +477,27 @@ def _evidence_pointer(path):
                            for part in path)
 
 
+def _assessment_evidence(evidence):
+    """Partition actual evidence into selectable, lossless records.
+
+    A lane or asset retains its entire nested value. References are generated
+    here, so the reviewer never has to guess JSON roots, escape storage keys,
+    or enumerate an array's last index. No depth or asset-count cutoff hides
+    later material. Persisted assessments still use canonical JSON Pointers.
+    """
+    entries, pointers = [], {}
+    for root, value in evidence.items():
+        children = (list(value.items()) if isinstance(value, dict) else
+                    list(enumerate(value)) if isinstance(value, list) else [])
+        selections = [([root, key], item) for key, item in children] or [([root], value)]
+        for path, item in selections:
+            ref = f"e{len(entries) + 1}"
+            pointer = _evidence_pointer(path)
+            entries.append({"ref": ref, "path": pointer, "value": item})
+            pointers[ref] = pointer
+    return entries, pointers
+
+
 def assess(ctx, draft="", preflight=False):
     if not enabled(ctx):
         return None
@@ -506,46 +522,43 @@ def assess(ctx, draft="", preflight=False):
     evidence["visual_proofs"], images = _visual_proofs(
         ctx, latest, evidence["verification"], preflight, evidence["media"])
     schema = json.loads(json.dumps(ASSESSMENT_SCHEMA))
-    # Validate citations against the actual object below. A bounded enum of
-    # shallow paths rejected real nested title/mask evidence and later assets.
-    error = None
+    entries, pointers = _assessment_evidence(evidence)
+    properties = schema["properties"]["requirements"]["items"]["properties"]
+    properties["evidence"]["items"]["enum"] = list(pointers)
+    properties["id"]["enum"] = [r["id"] for r in contract["requirements"]]
     value = None
     expected = {r["id"] for r in contract["requirements"]}
     failure_kind = "none"
-    for _ in range(2):
-        try:
-            value = _call(ctx, "assess_request", schema, ASSESS,
-                  {"contract": contract, "evidence": evidence, "validation_error": error,
+    # One independent assessment per invocation. A malformed citation must
+    # not buy a second full review of an hour-long program. Remain unknown;
+    # the normal editor can supply new evidence in a later explicit review.
+    try:
+        value = _call(ctx, "assess_request", schema, ASSESS,
+                  {"contract": contract, "evidence": entries,
                    "customer_request": getattr(ctx, "verification_request", None) or ctx.user_message,
                    "conversation": getattr(ctx, "request_contract_history", None) or [],
                    "internal_recovery": getattr(ctx, "operator_instruction", None),
                    "phase": ("Pre-render: identify missing timeline work now; mark "
                              "visual/audible proof unknown until rendered."
                              if preflight else "Delivery: require current rendered evidence.")}, images=images)
-            rows = value["requirements"]
-            if len(rows) != len(expected) or {r["id"] for r in rows} != expected:
-                value = None
-                raise ValueError("The completion assessment omitted or duplicated a requirement")
-            invalid = []
-            for row in rows:
-                row["evidence"] = [_evidence_pointer(path) for path in row["evidence"]]
-                for pointer in row["evidence"]:
-                    try:
-                        _pointer(evidence, pointer)
-                    except (ValueError, KeyError, IndexError, TypeError):
-                        invalid.append({"requirement": row["id"], "path": pointer})
-            if invalid:
-                raise ValueError("Completion evidence does not exist: " + json.dumps(invalid))
-            break
-        except ValueError as exc:
-            error = str(exc)[:800]
-            value = None
-        except Exception as exc:
-            # Losing the independent review must not lose an already rendered
-            # edit or manufacture fulfillment. The existing preview survives.
-            print(f"[request_contract] completion review unavailable: {type(exc).__name__}", flush=True)
-            failure_kind = "provider"
-            break
+        rows = value["requirements"]
+        if len(rows) != len(expected) or {r["id"] for r in rows} != expected:
+            raise ValueError("The completion assessment omitted or duplicated a requirement")
+        for row in rows:
+            # _call strictly validates new model refs against the enum.
+            # Internal/replayed results may already use the persisted format.
+            row["evidence"] = [_evidence_pointer(pointers.get(ref, ref) if isinstance(ref, str) else ref)
+                               for ref in row["evidence"]]
+            for pointer in row["evidence"]:
+                _pointer(evidence, pointer)
+    except (ValueError, KeyError, IndexError, TypeError):
+        value = None
+    except Exception as exc:
+        # Losing the independent review must not lose an already rendered
+        # edit or manufacture fulfillment. The existing preview survives.
+        print(f"[request_contract] completion review unavailable: {type(exc).__name__}", flush=True)
+        value = None
+        failure_kind = "provider"
     if value is None:
         value = {"requirements": [{"id": r["id"], "status": "unknown", "blocker_kind": failure_kind,
                   "reason": "Completion evidence could not be validated.", "evidence": []}

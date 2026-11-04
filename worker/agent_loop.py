@@ -2362,6 +2362,9 @@ def run_agent_job(worker_db, job):
                       request, response,
                       getattr(usage, "prompt_tokens", None) if usage else None,
                       getattr(usage, "completion_tokens", None) if usage else None)
+    if payload.get("operator_repair") is True:
+        _llm_recorder.operator_repair_guard = lambda: _require_recovery_credit_line(
+            worker_db, subscribed=subscribed, fresh=True)
     llm.set_recorder(_llm_recorder)
     if getattr(ctx, "credit_price_aliases", None):
         # Credit parity for a new subscriber's Claude lane (llm.record).
@@ -2511,10 +2514,11 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _require_recovery_credit_line(worker_db, subscribed=False):
+def _require_recovery_credit_line(worker_db, subscribed=False, fresh=False):
     import claude_credit
-    credit = claude_trial.credit_status(worker_db)
-    available = claude_credit.paid_available(credit) if subscribed else credit.get("on")
+    credit = (worker_db.run(claude_credit.status) if fresh
+              else claude_trial.credit_status(worker_db))
+    available = claude_credit.repair_available(credit) if subscribed else credit.get("on")
     if not available:
         raise RuntimeError("The configured Anthropic credit line is paused; saved edits are preserved.")
 
@@ -2522,8 +2526,8 @@ def _require_recovery_credit_line(worker_db, subscribed=False):
 def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
     """A funded paid Claude primary, independent of the trial cutoff.
 
-    Trial soft cutoffs do not disable this paid route. Actual provider
-    refusals and the total cycle budget still apply. Never raises.
+    Trial budget cutoffs do not disable this paid route. Actual provider
+    billing/auth refusals still apply. Never raises.
     """
     if not subscribed or payload.get("operator_repair") is True:
         return None

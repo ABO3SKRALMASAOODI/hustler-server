@@ -25,11 +25,15 @@ def test_paid_reserve_does_not_reopen_free_trials_or_ignore_hard_failures():
     credit = {"on": False, "reason": "budget", "spent_usd": 55.3, "budget_usd": 62.22}
     assert cc.paid_available(credit)
     assert credit["on"] is False
-    assert not cc.paid_available({**credit, "spent_usd": 62.22})
-    assert not cc.paid_available({**credit, "spent_usd": 63.0})
+    assert cc.paid_available({**credit, "spent_usd": 62.22})
+    assert cc.paid_available({**credit, "spent_usd": 63.0})
+    assert cc.repair_available(credit)
+    assert not cc.repair_available({**credit, "spent_usd": 62.22})
+    assert not cc.repair_available({**credit, "spent_usd": 63.0})
     assert not cc.paid_available({**credit, "reason": "billing_error"})
     assert not cc.paid_available({**credit, "reason": "auth_error"})
-    assert not cc.paid_available({"on": False, "reason": "budget"})
+    assert cc.paid_available({"on": False, "reason": "budget"})
+    assert not cc.repair_available({"on": False, "reason": "budget"})
 
 
 class FakeConn:
@@ -178,6 +182,28 @@ def test_a_billing_refusal_turns_it_off_and_never_leaks_the_key():
     assert state["state"] == "off" and state["reason"] == "billing_error"
     assert "sk-ant-" not in conn.kv[cc.STATE_KEY]
     assert all("sk-ant-" not in a["html"] for a in conn.alerts.values())
+
+
+def test_provider_refusal_supersedes_a_trial_budget_pause_and_probe_restores_only_paid():
+    conn = FakeConn()
+    now = _at(2026, 11, 4)
+    conn.spend(now.date(), paid=201.0)
+    assert cc.switch_off(conn, cc.REASON_BUDGET, now=now)
+    assert cc.paid_available(cc.status(conn, now=now))
+    assert cc.switch_off(conn, cc.REASON_BILLING, now=now)
+    assert not cc.paid_available(cc.status(conn, now=now))
+    assert len(conn.alerts) == 2
+    assert not cc.switch_off(conn, cc.REASON_BILLING, now=now)
+    later = now + timedelta(hours=3)
+    cc.after_probe(conn, cc.probe_plan(conn, now=later), True, now=later)
+    credit = cc.status(conn, now=later)
+    assert credit["on"] is False
+    assert cc.paid_available(credit)
+    assert not cc.repair_available(credit)
+    assert cc.switch_off(conn, cc.REASON_AUTH, now=later)
+    assert not cc.paid_available(cc.status(conn, now=later))
+    assert not cc.switch_off(conn, cc.REASON_BUDGET, now=later)
+    assert _state(conn)["reason"] == cc.REASON_AUTH
 
 
 def test_the_probe_switches_on_only_in_a_new_cycle_after_a_credit_stop():

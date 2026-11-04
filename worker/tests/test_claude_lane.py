@@ -166,6 +166,17 @@ def test_a_one_shot_critic_caches_only_its_shared_instructions():
     assert not any("cache_control" in b for m in msgs for b in m["content"])
 
 
+def test_structured_completion_review_does_not_buy_an_unused_payload_cache():
+    system = [{"type": "text", "text": "review instructions"}]
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "one program's evidence"}]}]
+    tools = [{"name": "assess_request", "input_schema": {"type": "object"}}]
+    claude_lane._mark_cache(system, msgs, tools, "claude-haiku-5-5")
+    assert "cache_control" in system[0]
+    assert "cache_control" not in tools[0]
+    assert "cache_control" not in msgs[0]["content"][0]
+    assert not claude_lane._one_shot(msgs + [{"role": "assistant", "content": []}], tools)
+
+
 def _message(blocks, stop="tool_use", **usage):
     u = dict(input_tokens=20, output_tokens=50, cache_read_input_tokens=1000,
              cache_creation_input_tokens=100)

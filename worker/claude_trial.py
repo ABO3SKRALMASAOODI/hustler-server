@@ -540,6 +540,14 @@ def _metering_db():
 def guard_call():
     """Hard backstop under the loop's own graceful stop: a scope that is
     15 % past its ceiling makes no further Claude calls (critics, vision)."""
+    # Operator recoveries have no customer-wallet cap. Recheck their company
+    # allowance before every call, including reviews/vision on pool threads;
+    # checking only at turn admission allowed repeated assessments to overrun
+    # the remaining reserve. Ordinary subscriber calls have no such guard.
+    import llm
+    repair_guard = getattr(llm.get_recorder(), "operator_repair_guard", None)
+    if callable(repair_guard):
+        repair_guard()
     scope = current()
     if scope is None or scope.is_test:
         return
