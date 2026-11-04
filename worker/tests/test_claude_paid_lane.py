@@ -17,6 +17,7 @@ import claude_trial
 import config
 import db as dbx
 import llm
+import model_prices
 
 
 class _Db:
@@ -237,3 +238,19 @@ def test_the_in_turn_cap_uses_the_same_parity_rate():
     ctx.credit_price_aliases = {"claude-sonnet-5-5": "gpt-6-luna"}
     parity = agent_tools.ToolContext.running_credits(ctx)
     assert parity < true_cost
+
+
+def test_long_context_provider_surcharge_does_not_exhaust_paid_allowance():
+    # One real incident-shaped assessment: the provider charged ~20 cents,
+    # while the plan's parity ledger charged ~4 cents. The in-turn guard
+    # formerly added the provider surcharge to the customer's price.
+    usage = SimpleNamespace(prompt_tokens=400000, completion_tokens=1000,
+                            prompt_tokens_details={"cached_tokens": 0})
+    ctx = SimpleNamespace(model_usage={"claude-haiku-5-5": {
+        "in": 400000, "out": 1000, "cached": 0, "reasoning": 0,
+        "cost_adjustment_usd": .162}}, images_generated=[], gen_extra_cost_usd=0,
+        credit_price_aliases={"claude-haiku-5-5": "gpt-6-luna"})
+    expected = llm.credit_parity_cost_usd(usage, "gpt-6-luna") / model_prices.USD_PER_CREDIT
+    assert agent_tools.ToolContext.running_credits(ctx) == pytest.approx(expected)
+    ctx.credit_price_aliases = {}
+    assert agent_tools.ToolContext.running_credits(ctx) > expected * 4

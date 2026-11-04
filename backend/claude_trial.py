@@ -284,6 +284,11 @@ def start_scheduler(app):
 
         def job():
             try:
+                import anthropic_wallet
+                anthropic_wallet.tick()
+            except Exception as exc:
+                app.logger.error("Anthropic wallet estimate monitor failed: %s", type(exc).__name__)
+            try:
                 result = send_due()
                 if result.get("due") or result.get("error"):
                     app.logger.info("claude trial alerts: %s", result)

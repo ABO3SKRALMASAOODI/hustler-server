@@ -557,7 +557,12 @@ class ToolContext:
                          + audio_in * p["audio_in"]
                          + out * p["out"]
                          + audio_out * p["audio_out"]) / 1e6
-                cost += float(u.get("cost_adjustment_usd") or 0)
+                # Provider surcharges (notably Haiku's long-context tier) are
+                # our cost. A parity plan's ledger deliberately charges the
+                # contracted model rate instead. Applying the surcharge here
+                # stopped paid turns with hundreds of credits still available.
+                if not aliases.get(model):
+                    cost += float(u.get("cost_adjustment_usd") or 0)
         else:
             cached_in = min(max(self.tokens_cached_in, 0), self.tokens_in)
             cost = ((self.tokens_in - cached_in) * config.LLM_PRICE_IN_PER_M +

@@ -3472,6 +3472,25 @@ def video_studio_plus_get():
         return jsonify(studio_plus_toggle.status(conn))
 
 
+@admin_video_bp.route("/admin/video/anthropic-wallet", methods=["GET", "POST"])
+@admin_required
+def anthropic_wallet_settings():
+    import anthropic_wallet
+    if request.method == "POST":
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify({"error": "send balance_usd from the Anthropic billing page"}), 400
+        with adb() as conn:
+            try:
+                anthropic_wallet.confirm_balance(conn, body.get("balance_usd"))
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            conn.commit()
+            return jsonify(anthropic_wallet.status(conn))
+    with adb() as conn:
+        return jsonify(anthropic_wallet.status(conn))
+
+
 @admin_video_bp.route("/admin/video/opus-supervision", methods=["POST"])
 @admin_required
 def video_opus_supervision_set():
