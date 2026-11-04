@@ -38,7 +38,7 @@ def _wire(monkeypatch, delay=0.2):
         time.sleep(delay)
         calls.append({"thread": threading.get_ident() != main,
                       "family": family, "request": user_request,
-                      "plan": llm.turn_plan()})
+                      "plan": llm.turn_plan(), "lane": llm.turn_lane()})
         llm.record("independent_story_critic", {"model": "m"}, {"text": "{}"})
         return {"verdict": "pass", "findings": []}
     monkeypatch.setattr(story_critic, "review", review)
@@ -58,7 +58,8 @@ def test_a_claude_lane_review_starts_with_the_render(monkeypatch):
     calls = _wire(monkeypatch)
     rows = []
     llm.set_recorder(_recorder(rows))
-    llm.set_turn_plan("plus_2026", 7)
+    lane = {"model": "claude-haiku-5-5", "client": object()}
+    llm.set_turn_plan("plus_2026", 7, lane=lane)
     try:
         ctx = _ctx(claude_paid={"lane": {}})
         started = time.monotonic()
@@ -75,6 +76,7 @@ def test_a_claude_lane_review_starts_with_the_render(monkeypatch):
     assert report["editorial_family"] == "talking_head"
     assert len(calls) == 1 and calls[0]["thread"]
     assert calls[0]["plan"] == "plus_2026"
+    assert calls[0]["lane"] is lane
     assert calls[0]["request"] == "make the captions bigger"
     # the model-I/O row was written on the turn's own thread
     assert rows == [("independent_story_critic", True)]

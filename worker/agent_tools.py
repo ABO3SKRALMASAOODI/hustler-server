@@ -25200,12 +25200,13 @@ def _prefetch_story_review(ctx, row):
         real = llm.get_recorder()
         deferred = _DeferredRecorder(real) if real is not None else None
         plan = llm.turn_plan()
+        lane = llm.turn_lane()
         project_id = getattr(ctx, "project_id", None)
 
         def run():
             if deferred is not None:
                 llm.set_recorder(deferred)
-            llm.set_turn_plan(plan, project_id)
+            llm.set_turn_plan(plan, project_id, lane=lane)
             try:
                 return _story_review_call(ctx, inputs)
             finally:
@@ -30805,7 +30806,8 @@ TOOLS = {
                  "rendered": {"type": "boolean"},
                  "native_resolution": {"type": "boolean", "description": "With rendered=true, keep width up to 1920px: each time is its own full-detail image (no contact sheet), no re-encode."},
                  "overlay": {"type": "string",
-                             "enum": ["matte", "free_space", "beats"]}}),
+                             "enum": ["none", "matte", "free_space", "beats"],
+                             "description": "none when rendered=true."}}),
     "look_at_asset": (look_at_asset, "YOUR OWN EYES on an UPLOADED clip or "
                       "image, or a finished RENDER (storage_key from "
                       "list_assets; kind='render' lists past previews/"

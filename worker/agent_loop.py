@@ -2267,6 +2267,8 @@ def run_agent_job(worker_db, job):
               f"{ctx.claude_trial.model} (${ctx.claude_trial.spent_usd:.4f} of "
               f"${ctx.claude_trial.cap_usd:.2f} spent)", flush=True)
     else:
+        if payload.get("operator_repair") is True:
+            _require_recovery_credit_line(worker_db)
         ctx.agent_lanes = llm.agent_lanes_for(
             subscribed, plan, first_turn=first_turn,
             operator_repair=payload.get("operator_repair") is True)
@@ -2297,7 +2299,9 @@ def run_agent_job(worker_db, job):
     # Vision is reached from eight places that know nothing about plans, so the
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).
-    llm.set_turn_plan(plan if subscribed else "", project_id=ctx.project_id)
+    llm.set_turn_plan(plan if subscribed else "", project_id=ctx.project_id,
+                      lane=(ctx.agent_lanes[0] if ctx.agent_lanes and
+                            ctx.claude_trial is None else None))
     if ctx.agent_model != config.AGENT_MODEL:
         print(f"[agent] job {job['id']}: plan {plan} -> {ctx.agent_model}",
               flush=True)
@@ -2510,6 +2514,11 @@ def run_agent_job(worker_db, job):
         llm.clear_turn_plan()
         claude_trial.deactivate(_llm_recorder)
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _require_recovery_credit_line(worker_db):
+    if not claude_trial.credit_status(worker_db).get("on"):
+        raise RuntimeError("The configured Anthropic credit line is paused; saved edits are preserved.")
 
 
 def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
@@ -6454,6 +6463,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 active_api_key = lane.get("api_key") or config.OPENAI_API_KEY
                 kw, extra = _chat_request(model)
                 ctx.llm_client, ctx.agent_model = client, model
+                llm.set_turn_plan(llm.turn_plan(), ctx.project_id, lane=lane)
                 agent_tools._metric(ctx, "provider_quota_fallbacks", 1)
                 print(f"[agent {job['id']}] provider wallet for {previous} "
                       f"is unavailable — continuing the same logical turn "

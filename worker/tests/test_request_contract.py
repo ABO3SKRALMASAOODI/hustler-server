@@ -47,6 +47,23 @@ def test_preservation_is_not_an_instruction_to_add_captions():
         protected=rc.protected_lanes(ctx)) == []
 
 
+def test_completion_receives_the_same_recovery_scope_as_compilation(monkeypatch):
+    ctx = context()
+    ctx.operator_instruction = "Correct only the selected music gain; preserve the accepted picture."
+    captured = []
+    def assess(_ctx, _name, _schema, _system, request, **kwargs):
+        captured.append(request)
+        return {"requirements": [{"id": row["id"], "status": "unknown",
+                 "reason": "Awaiting rendered proof", "evidence": [], "blocker_kind": "none"}
+                for row in ctx.semantic_contract["requirements"]],
+                "completed": "", "remaining": "Awaiting rendered proof"}
+    monkeypatch.setattr(rc, "_call", assess)
+    rc.assess(ctx, preflight=True)
+    assert captured[0]["internal_recovery"] == ctx.operator_instruction
+    assert captured[0]["customer_request"] == ctx.verification_request
+    assert captured[0]["contract"] == ctx.semantic_contract
+
+
 def test_focused_grade_cannot_silently_shorten_the_video():
     ctx = context()
     after = deepcopy(ctx.latest_edl()["json"])

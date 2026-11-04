@@ -82,7 +82,7 @@ def test_core_catalog_growth_is_within_1fs_share():
     assert stripped - 81688 <= 250 + W2_CORE_GROWTH_MAX, stripped
     assert size <= seams.W1_CORE_CEILING < 83_000, size
     look = agent_tools.TOOLS["look_at"][2]["overlay"]
-    assert look["enum"] == ["matte", "free_space", "beats"]
+    assert look["enum"] == ["none", "matte", "free_space", "beats"]
 
 
 # ── look_at(overlay=...) ─────────────────────────────────────────────────
@@ -106,6 +106,22 @@ def test_look_at_rejects_an_unknown_overlay_and_rendered_overlays(tmp_path):
         "REJECTED: overlay is one of matte, free_space, beats")
     assert agent_tools.look_at(ctx, output_times=[1.0], rendered=True,
                                overlay="beats").startswith("REJECTED")
+
+
+def test_rendered_inspection_has_an_explicit_valid_no_overlay_choice(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    ctx = _Ctx(tmp_path)
+    ctx.db = SimpleNamespace(run=lambda *args: {"storage_key": "current-preview.mp4"})
+    captured = []
+    def inspect(_ctx, key, **kwargs):
+        captured.append((key, kwargs))
+        return "Current rendered frames"
+    monkeypatch.setattr(agent_tools, "look_at_asset", inspect)
+    assert "none" in agent_tools.TOOLS["look_at"][2]["overlay"]["enum"]
+    assert agent_tools.look_at(ctx, output_times=[1.0], rendered=True,
+                              native_resolution=True, overlay="none") == "Current rendered frames"
+    assert captured == [("current-preview.mp4", {"question": "", "times": [1.0],
+                                               "native_resolution": True})]
 
 
 def _frame(tmp_path, w=360, h=640, name="f.jpg"):

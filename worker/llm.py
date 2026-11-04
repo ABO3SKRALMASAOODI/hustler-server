@@ -443,12 +443,15 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False, operator_repair=Fal
     in process memory and are never returned by config_report or logged.
     """
     if operator_repair:
-        # A company-funded remediation already exists because the ordinary
-        # turn failed. Use the configured Advanced editor for that repair;
-        # the customer's subscription and billing state are not rewritten.
-        recovery = paid_editor_lanes("advanced")
-        if recovery:
-            return recovery
+        # Recovery follows the owner's Anthropic route, independently of
+        # the customer's wallet/tier. Never reopen the exhausted OpenAI wallet.
+        import claude_lane
+        if not claude_lane.available():
+            raise RuntimeError("The Anthropic recovery provider is unavailable; saved edits are preserved.")
+        model = config.CLAUDE_TRIAL_PLANNER_MODEL
+        if not str(model).startswith("claude-"):
+            model = config.CLAUDE_TRIAL_MODEL
+        return [claude_lane.lane(model, name="claude_recovery")]
     if subscribed:
         return paid_editor_lanes(plan)
     primary_client, primary_model = agent_client_for(
@@ -620,15 +623,20 @@ def config_report():
 
 
 def claude_trial_lane():
-    """(client, model) when THIS thread's job runs on the Claude trial lane,
-    else None. The trial's vision, critics and short text calls go to the
-    same funded lane as its agent — never the paid OpenAI wallet."""
+    """The thread's Claude route for agent, vision, critics and text helpers.
+
+    Trial accounting remains in its own scope; a company/paid route carries
+    only its provider, without consuming or granting a customer's trial.
+    """
     try:
         import claude_trial
         scope = claude_trial.current()
     except Exception:  # pragma: no cover - import failure means no lane
         return None
     if scope is None:
+        lane = turn_lane()
+        if lane and str(lane.get("model", "")).startswith("claude-"):
+            return lane["client"], lane["model"]
         return None
     import claude_lane
     return claude_lane.ClaudeLaneClient(), scope.model
@@ -670,17 +678,23 @@ def vision_client_for(plan):
 _turn = threading.local()
 
 
-def set_turn_plan(plan, project_id=None):
+def set_turn_plan(plan, project_id=None, lane=None):
     """Called once at the top of an agent turn. Pair with clear_turn_plan() in
     a finally — worker threads are reused, so a plan left behind would apply to
     the next job that lands on this thread."""
     _turn.plan = plan or ""
+    _turn.lane = lane
     _turn.cache_key = f"valmera-project-{int(project_id)}" if project_id is not None else None
 
 
 def clear_turn_plan():
     _turn.plan = ""
+    _turn.lane = None
     _turn.cache_key = None
+
+
+def turn_lane():
+    return getattr(_turn, "lane", None)
 
 
 def cache_affinity(model):
