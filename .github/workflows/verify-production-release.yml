@@ -63,6 +63,7 @@ jobs:
       - name: Verify backend behavior before certifying Render
         env:
           DATABASE_URL: postgresql://stub/stub
+          ADMIN_TEST_DATABASE_URL: postgresql://valmera:valmera@localhost:5432/valmera_migration_test
         run: |
           python backend/scripts/scan_tracked_secrets.py
           python -m pip install --disable-pip-version-check \

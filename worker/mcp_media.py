@@ -63,6 +63,12 @@ LADDER = ((540, 900), (480, 700), (360, 450), (288, 320), (240, 220),
 # carrying information at any resolution.
 _PAYLOAD_FRAC = 0.94
 _MIN_VIDEO_KBPS = 90
+# A transfer allowance is not an encoder bitrate target. Keep generous
+# headroom for CRF quality even on detailed/moving 540p watch copies, while
+# bounding the two-second VBV buffer well inside ffmpeg's signed int32 bits.
+# Otherwise a 512 MB allowance for a 3.5s window asks for a 2.3 Gbit buffer
+# and fails before encoding its first frame. Smaller byte budgets still win.
+_MAX_VIDEO_KBPS = 25_000
 
 KINDS = ("timeline", "source", "asset")
 
@@ -320,7 +326,8 @@ def encode_plan(duration, budget_bytes, src_height, max_height, src_fps):
     footage."""
     duration = max(float(duration or 0), 0.1)
     total_kbps = (budget_bytes * 8.0 / 1000.0) / duration
-    video_kbps = total_kbps * _PAYLOAD_FRAC - config.MCP_VIDEO_AUDIO_KBPS
+    video_kbps = min(_MAX_VIDEO_KBPS,
+                     total_kbps * _PAYLOAD_FRAC - config.MCP_VIDEO_AUDIO_KBPS)
 
     ceiling = min(config.MCP_VIDEO_HEIGHT, int(max_height or 10 ** 6))
     if src_height:

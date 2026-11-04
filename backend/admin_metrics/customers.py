@@ -528,13 +528,22 @@ def customer_exports(cur, user_id, presign, limit=50):
 def customer_activity(cur, user_id, payments, limit=40):
     """What they did lately: messages to the editor, uploads, exports, failed
     jobs and payments, newest first."""
+    # Scope messages before applying the global newest-first limit. Otherwise
+    # PostgreSQL can walk the entire message primary key backwards, joining
+    # each row to this customer's projects until it finds enough matches.
+    # An active MCP account with few chat requests hit millions of rejected
+    # join pairs and timed out. Materializing the owned messages lets the
+    # planner use the account/session scope without the misleading LIMIT.
     cur.execute("""
-        (SELECT 'message' AS kind, cm.created_at AT TIME ZONE 'UTC' AS at,
+        WITH customer_messages AS MATERIALIZED (
+         SELECT cm.id, cm.created_at AT TIME ZONE 'UTC' AS at,
                 p.id AS project_id, p.title, left(cm.content, 160) AS text
            FROM projects p JOIN chat_messages cm
                 ON cm.session_id = p.chat_session_id
           WHERE p.user_id = %(u)s AND cm.role = 'user'
-          ORDER BY cm.id DESC LIMIT %(n)s)
+        )
+        (SELECT 'message' AS kind, at, project_id, title, text
+           FROM customer_messages ORDER BY id DESC LIMIT %(n)s)
         UNION ALL
         (SELECT 'upload', a.created_at, p.id, p.title, a.meta->>'filename'
            FROM projects p JOIN assets a ON a.project_id = p.id

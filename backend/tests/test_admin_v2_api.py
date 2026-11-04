@@ -642,7 +642,7 @@ def test_customer_page_contract(app, monkeypatch):
             "email": "customer1@example.com", "plan": "ai", "status": "paying",
             "storage_key": "media/11/90-x.mp4", "duration_s": 32.5,
             "fs_key": "filmstrip/11/a.jpg", "fs_cols": 10, "fs_rows": 18}]),
-        ("AS kind, cm.created_at", [
+        ("'message' AS kind", [
             {"kind": "message", "at": T0, "project_id": 11,
              "title": "Real edit", "text": "make it punchier"}]),
     ]
