@@ -180,6 +180,45 @@ def test_bad_assessment_does_not_repeat_an_expensive_review(monkeypatch):
                for r in result["requirements"])
 
 
+def test_review_selects_output_source_evidence_without_indexer_vectors():
+    index = {"video": {"duration": 6321},
+             "sentences": [{"t0": i, "t1": i + 1, "text": f"Sentence {i}", "wi0": i}
+                           for i in range(6321)],
+             "visual_storyboard": {"semantic_status": "observed", "evidence": [
+                 {"evidence_id": "selected", "covered_ranges": [[170, 205]],
+                  "semantic_description": "A teacher", "retrieval_embedding": [0.1] * 10000},
+                 {"evidence_id": "elsewhere", "covered_ranges": [[5000, 5100]],
+                  "semantic_description": "A whiteboard"}],
+                 "chapters": [{"transcript_excerpt": "repeated text " * 100000}]}}
+    result = rc._source_evidence(index, [[170, 205]])
+    assert [r["t0"] for r in result["sentences"]] == list(range(169, 206))
+    assert result["coverage"]["complete_source_transcript"] is False
+    assert result["coverage"]["total_source_sentences"] == 6321
+    assert result["visual_storyboard"]["evidence"] == [{
+        "evidence_id": "selected", "covered_ranges": [[170, 205]],
+        "semantic_description": "A teacher"}]
+    whole = rc._source_evidence(index, None)
+    assert len(whole["sentences"]) == 6321
+    assert whole["coverage"]["complete_source_transcript"] is True
+    assert len(whole["visual_storyboard"]["evidence"]) == 2
+
+
+def test_reworded_edit_reply_is_not_new_repair_evidence(monkeypatch):
+    ctx = context()
+    monkeypatch.setattr(rc, "_call", lambda *args, **kwargs: {
+        "requirements": [{"id": r["id"], "status": "unmet", "reason": "Still missing",
+                          "evidence": [], "blocker_kind": "none"}
+                         for r in ctx.semantic_contract["requirements"]],
+        "completed": "", "remaining": "Still missing"})
+    first = rc.assess(ctx, "Draft one")
+    ctx.turn_tool_outcomes.append({"tool": "keep_segments", "kind": "no_change"})
+    second = rc.assess(ctx, "Draft two")
+    assert first["draft_digest"] != second["draft_digest"]
+    assert first["evidence_digest"] == second["evidence_digest"]
+    ctx.latest_edl()["json"]["texts"] = [{"text": "New delivered work"}]
+    assert rc.assess(ctx, "Draft two")["evidence_digest"] != second["evidence_digest"]
+
+
 @pytest.mark.parametrize("path", [[], ["after", True], ["after", -1], ["after", {}]])
 def test_evidence_components_reject_invalid_selector_types(path):
     with pytest.raises(ValueError):

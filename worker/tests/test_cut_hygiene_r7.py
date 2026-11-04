@@ -240,6 +240,22 @@ def test_a_context_without_sound_still_never_cuts_a_word():
     assert any("keep_segments would move" in a for a in advice)
 
 
+def test_exact_cuts_skip_sentence_and_shot_movement_on_paid_lane(monkeypatch):
+    ctx = _Ctx(sound=None)
+    ctx.claude_paid = {"lane": 1}
+    ctx._executing_tool = ctx._editor_tool = "keep_segments"
+    ctx.user_message = "Del 0:01 al 0:02 exactos."
+    def forbidden(*args, **kwargs):
+        pytest.fail("Exact-time tool choice reached an automatic placement pass")
+    monkeypatch.setattr(agent_tools, "_snap_keep_to_shots", forbidden)
+    monkeypatch.setattr(agent_tools, "_audio_safe_keep", forbidden)
+    import sentence_snap
+    monkeypatch.setattr(sentence_snap, "snap_keep", forbidden)
+    result = agent_tools.keep_segments(ctx, [[1.0, 2.0]], snap_to_words=False)
+    assert result.startswith("EDL v")
+    assert ctx._edl["keep"] == [[1.0, 2.0]]
+
+
 def test_a_story_seed_is_the_same_cut_within_the_audio_safe_reach():
     import shorts
     assert shorts._same_story_cut([[10.02, 29.4]], ([[10.0, 29.33]],), 30.0)

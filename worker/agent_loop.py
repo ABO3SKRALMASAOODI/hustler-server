@@ -6871,7 +6871,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 # One decision per immutable version, bounded across durable
                 # continuations. Tool typos and omitted treatments get an
                 # actionable repair, not a misleading success or an endless loop.
-                marker = [assessment["request_digest"], assessment["edl_version"], assessment["draft_digest"]]
+                marker = [assessment["request_digest"], assessment["edl_version"],
+                          assessment.get("evidence_digest", assessment["draft_digest"])]
                 if (missing and marker not in repairs and len(repairs) < 3
                         and not ctx.over_budget()
                         and time.monotonic() + 30 < turn_deadline):

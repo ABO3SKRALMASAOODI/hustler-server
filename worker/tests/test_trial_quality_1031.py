@@ -202,6 +202,19 @@ def test_exact_times_kept_for_part_lengths():
     assert agent_tools._sentence_snap_on(ctx, snap_to_words=None)
 
 
+@pytest.mark.parametrize("text", [
+    "Del 2:50 al 3:25, un silencio de dos segundos.",
+    "Use exactly 170 to 205; keep the original intact.",
+    "قص من ٢:٥٠ إلى ٣:٢٥", "",
+])
+def test_exact_tool_choice_does_not_depend_on_language_or_part_length(text):
+    ctx = SimpleNamespace(claude_trial=None, claude_paid={"lane": 1},
+                          _executing_tool="keep_segments", _editor_tool="keep_segments",
+                          user_message=text)
+    assert not agent_tools._sentence_snap_on(ctx, False)
+    assert agent_tools._sentence_snap_on(ctx, None)
+
+
 # ── 3. designed open / middle / close for a single-shot clip ──────────────
 
 def _edl(keep, **kw):

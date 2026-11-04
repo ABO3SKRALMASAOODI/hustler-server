@@ -455,7 +455,7 @@ def _media_evidence(ctx):
                 "video": index.get("video"), "sentences": sentences[:300],
                 "transcript_complete": len(sentences) <= 300,
                 "inspected_times": sorted(inspected[key]),
-                "visual_storyboard": index.get("visual_storyboard"),
+                "visual_storyboard": _source_evidence(index, None).get("visual_storyboard"),
             }
         return evidence
     except Exception as exc:
@@ -498,6 +498,56 @@ def _assessment_evidence(evidence):
     return entries, pointers
 
 
+def _source_evidence(index, keep):
+    """Review the actual selected source, not the indexer's feature database.
+
+    Embeddings, cluster hashes and duplicated chapter transcripts are retrieval
+    machinery, not semantic proof. Keep every overlapping sentence and visual
+    observation with its source coordinates. Coverage is explicit: excluded
+    source ranges cannot establish claims about the whole original.
+    """
+    def intersects(start, end):
+        if keep is None:
+            return True
+        try:
+            return any(float(start) <= float(b) and float(end) >= float(a)
+                       for a, b in keep)
+        except (TypeError, ValueError):
+            return True  # Unknown coordinates must not silently hide evidence.
+
+    sentences = index.get("sentences") or []
+    selected = [{key: row[key] for key in ("id", "t0", "t1", "text", "speaker")
+                 if key in row} for row in sentences
+                if isinstance(row, dict) and intersects(row.get("t0"), row.get("t1"))]
+    storyboard = index.get("visual_storyboard") or {}
+    if not isinstance(storyboard, dict):
+        storyboard = {}
+    visual = []
+    for row in storyboard.get("evidence") or []:
+        if not isinstance(row, dict):
+            continue
+        ranges = row.get("covered_ranges") or [row.get("covered_time_range") or
+                   [row.get("representative_t"), row.get("representative_t")]]
+        if not any(intersects(a, b) for a, b in ranges):
+            continue
+        visual.append({key: row[key] for key in (
+            "evidence_id", "representative_t", "covered_ranges", "covered_time_range",
+            "semantic_description", "subjects", "actions", "objects", "setting",
+            "visible_text", "faces", "text_geometry") if row.get(key) not in (None, "", [])})
+    return {"video": index.get("video"), "sentences": selected,
+            "coverage": {"source_ranges": keep, "sentence_count": len(selected),
+                         "total_source_sentences": len(sentences),
+                         "complete_source_transcript": len(selected) == len(sentences)},
+            "visual_storyboard": {"semantic_status": storyboard.get("semantic_status"),
+                                  "sheets": storyboard.get("sheets") or [],
+                                  "chapters": [{key: row[key] for key in (
+                                      "chapter_id", "t0", "t1", "description", "evidence_ids")
+                                      if key in row} for row in storyboard.get("chapters") or []
+                                      if isinstance(row, dict) and row.get("description")
+                                      and intersects(row.get("t0"), row.get("t1"))],
+                                  "evidence": visual}}
+
+
 def assess(ctx, draft="", preflight=False):
     if not enabled(ctx):
         return None
@@ -511,8 +561,8 @@ def assess(ctx, draft="", preflight=False):
         "verification": (getattr(ctx, "verification_records", None) or {}).get(latest["version"], {}),
         "tool_outcomes": getattr(ctx, "turn_tool_outcomes", []),
         "observations": getattr(ctx, "_editorial_observations", []),
-        "source": {key: (getattr(ctx, "index", None) or {}).get(key)
-                   for key in ("video", "sentences", "visual_storyboard")},
+        "source": _source_evidence(getattr(ctx, "index", None) or {},
+                                   latest["json"].get("keep")),
         "edit_plan": getattr(ctx, "edit_plan", None),
         "draft": draft,
         "dependencies": getattr(ctx, "render_dependency_state", None),
@@ -521,6 +571,29 @@ def assess(ctx, draft="", preflight=False):
     evidence["render_evidence"] = evidence["verification"].get("render_evidence", {})
     evidence["visual_proofs"], images = _visual_proofs(
         ctx, latest, evidence["verification"], preflight, evidence["media"])
+    # A rewritten reply or another failed/no-change tool call is not new edit
+    # evidence. The repair loop uses this to avoid reassessing the same defect
+    # merely because its explanation changed. Inspection answers remain draft-
+    # sensitive because the answer itself is the requested deliverable.
+    progress = {key: value for key, value in evidence.items()
+                if key not in {"draft", "tool_outcomes"}}
+    if contract["mode"] != "edit" or any(r["action"] == "inspect" for r in contract["requirements"]):
+        progress["draft"] = draft
+    evidence_digest = hashlib.sha256(json.dumps(progress, sort_keys=True,
+        ensure_ascii=False, default=str).encode()).hexdigest()
+    previous = getattr(ctx, "request_assessment", None) or {}
+    if (not preflight and contract["mode"] == "edit"
+            and not any(r["action"] == "inspect" for r in contract["requirements"])
+            and previous.get("request_digest") == contract["request_digest"]
+            and previous.get("edl_version") == latest["version"]
+            and previous.get("evidence_digest") == evidence_digest
+            and not previous.get("complete")
+            and any(r.get("status") == "unmet" for r in previous.get("requirements", []))):
+        # The model already identified missing work. Rephrasing an admission
+        # cannot fix it. Reuse that finding until actual evidence changes.
+        value = dict(previous, draft_digest=hashlib.sha256(str(draft).encode()).hexdigest())
+        ctx.request_assessment = value
+        return value
     schema = json.loads(json.dumps(ASSESSMENT_SCHEMA))
     entries, pointers = _assessment_evidence(evidence)
     properties = schema["properties"]["requirements"]["items"]["properties"]
@@ -607,7 +680,8 @@ def assess(ctx, draft="", preflight=False):
         value["remaining"] = "Remaining: " + "; ".join(
             r["reason"] for r in rows if r["status"] != "satisfied")
     value.update(request_digest=contract["request_digest"], edl_version=latest["version"],
-                 draft_digest=hashlib.sha256(str(draft).encode()).hexdigest(), complete=complete)
+                 draft_digest=hashlib.sha256(str(draft).encode()).hexdigest(),
+                 evidence_digest=evidence_digest, complete=complete)
     if not preflight:
         ctx.request_assessment = value
     return value

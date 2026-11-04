@@ -3242,7 +3242,11 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     else:
         audio_notes = _exact_keep_onset_notes(
             ctx, new_keep, None if place_all else prev_keep, words)
-    new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
+    # The typed exact-time choice applies to every automatic placement pass,
+    # including shot hygiene. Warnings may explain a rough edge, not move it.
+    shot_notes = []
+    if snap_to_words is not False:
+        new_keep, shot_notes = _snap_keep_to_shots(new_keep, ctx.index, words)
     if never_grow:
         clipped = _within_keep(new_keep, prev_keep)
         if clipped:
@@ -3309,8 +3313,10 @@ def _sentence_snap_on(ctx, snap_to_words=None):
     """Sentence-boundary snapping applies to THIS keep write: the editor's
     own cut tool (the model's tool call, never the First cut's engine or a
     filler/silence pass, which cut inside sentences by design) on a Claude
-    lane (the free trial or a new subscriber). An explicit
-    snap_to_words=false on a request with part lengths keeps exact times."""
+    lane (the free trial or a new subscriber). The tool's explicit exact-time
+    choice is authoritative in every language, without reparsing the request."""
+    if snap_to_words is False:
+        return False
     if getattr(ctx, "claude_trial", None) is None \
             and getattr(ctx, "claude_paid", None) is None:
         return False
@@ -3318,13 +3324,6 @@ def _sentence_snap_on(ctx, snap_to_words=None):
     if tool not in SENTENCE_SNAP_TOOLS \
             or getattr(ctx, "_editor_tool", None) not in SENTENCE_SNAP_TOOLS:
         return False
-    if snap_to_words is False:
-        try:
-            if quality_verifier.requested_part_lengths(
-                    quality_verifier.request_text_for(ctx)):
-                return False
-        except Exception:  # noqa: BLE001 - snap when unsure
-            pass
     return True
 
 
