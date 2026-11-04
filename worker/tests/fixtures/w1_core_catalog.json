@@ -1,5 +1,5 @@
 {
- "bytes": 82030,
- "sha256": "e262fed241ebb3fd1fbcd770a746e64fe002e8e6eff550f9bff63bc4001543e9",
- "_doc": "Core compact catalog with automatic wave growth set aside. Customer recovery adds source-region cropping, explicit overlay stacking and reusable original-source excerpts. Full compact catalog 82504 B; existing 82,700 B ceiling unchanged. Previous 3 Nov catalog: 81,898 B."
+ "bytes": 82078,
+ "sha256": "d340bb09589faa29db875f4dd2f5db990fd80fe99984929dbf3c56d4154cf6bd",
+ "_doc": "Core compact catalog with automatic wave growth set aside. Customer recovery adds source-region cropping, overlay stacking and original-source excerpts. look_at now exposes the supported none overlay for rendered frames (+48 B). Full compact catalog 82552 B; existing 82,700 B ceiling unchanged. Previous pin: 82,030 B."
 }

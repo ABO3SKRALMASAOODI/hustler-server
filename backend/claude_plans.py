@@ -6,12 +6,12 @@ connection.
 
 Owner (25 Oct 2026): accounts that subscribe AFTER the release get the Studio
 agent on the Claude lane, with the model the bake-off picks per plan, plus
-MCP, and Plus includes the Studio AI editor (D1). EXISTING subscribers keep
-EXACTLY their current contracted lanes and behaviour: they are grandfathered
-by subscription start date. A paying user never breaks when the promotional
-credit runs out: the Claude lane is only used while the automatic credit
-switch (claude_credit.py) is on, and an Anthropic billing refusal mid-turn
-fails over to the account's existing OpenAI lane for that turn.
+MCP, and Plus includes the Studio AI editor (D1). Existing Plus access remains
+grandfathered by subscription start date. The 4 Nov provider recovery keeps
+entitled subscribers on funded Anthropic, including older accounts, with
+contracted credit prices preserved. A free-trial funding cutoff reserves
+remaining credit for paid work; actual billing/auth refusals require a
+configured funded fallback.
 
 One app_kv row, ``studio_for_all_plans`` (JSON), default OFF:
 
@@ -20,7 +20,7 @@ One app_kv row, ``studio_for_all_plans`` (JSON), default OFF:
    "studio_plans": ["plus_2026"], # MCP-only plans whose NEW subscribers get
                                   # the Studio AI editor (MCP Connect stays
                                   # MCP-only)
-   "claude_lane": true,           # new subscribers' Studio agent on Claude
+   "claude_lane": true,           # paid Studio agent on Claude
    "plan_models": {...},          # per plan (the bake-off's pick)
    "default_model": "claude-haiku-5-5",
    "credit_parity": true,         # credits charged at the plan's contracted
@@ -34,19 +34,12 @@ paid) before it, and no Paddle snapshot of the account's subscription with
 ``started_at`` before it. Every one of the 23 accounts subscribed on 25 Oct
 2026 has a paid payment row, so every one of them is grandfathered.
 
-STUDIO IN PLUS RIDES THE TRIAL'S CREDIT LINE (owner, 30 Oct 2026: "include
-the studio in the plus, but that would be with the trial release. So we can
-turn it off if we wanted. Or if we run out of credits, it turns off
-automatically. just like the trial thing."). The owner's switch is ``on``
-(the admin's "Claude features" card, backend/studio_plus_toggle.py). Plus
-includes the Studio for a new subscriber only while the automatic credit
-switch (claude_credit.py) is ON and its ledger (migration 040) is installed
-(``lane_open``): when the line goes AUTO-OFF, Plus is MCP-only again at once
-(the Studio gate, the held-request resume and the plan cards all read
-``studio_included`` / ``plus_studio_live``), and it comes back by itself
-with the credit line's next-cycle probe. ``paused_for`` names the accounts
-that then see the plain "not included right now" copy: new Plus subscribers
-only; grandfathered Plus keeps today's words.
+PAID ACCESS SURVIVES THE TRIAL CUTOFF (owner, 4 Nov 2026). The automatic
+credit switch pauses free trials; it never removes included Studio access
+from a subscriber. The owner's separate studio_for_all_plans switch and
+subscription cohort still determine which Plus accounts include Studio.
+Provider funding is checked separately: remaining Anthropic credit is
+reserved for paid work after the trial cutoff.
 """
 
 import json
@@ -204,30 +197,32 @@ def lane_open(conn, now=None):
 
 def studio_included(conn, user_id, plan, subscribed, flag=None):
     """True when a plan that is MCP-only today includes the Studio AI editor
-    for THIS account (a new subscriber, D1) RIGHT NOW: the owner's switch is
-    on and the Claude credit line is open. False means today's rule."""
+    for THIS account under the owner's switch and subscription cohort.
+    Free-trial funding does not change a paid entitlement."""
     flag = flag if flag is not None else read_flag(conn)
     if str(plan or "") not in flag["studio_plans"]:
         return False
     if not applies(conn, user_id, subscribed, flag):
         return False
-    return lane_open(conn)
+    # Owner, 4 Nov 2026: pausing the free trial must not revoke a paid
+    # subscriber's included Studio. Provider funding is a separate decision.
+    return True
 
 
 def plus_studio_live(conn, flag=None):
     """Plus includes the Studio for new subscribers right now: what the plan
-    cards describe (the owner's switch on, with a cutoff, and the credit line
-    open). Global, not per account."""
+    cards describe (the owner's switch on, with a cutoff). Global, not per
+    account; independent of the free-trial credit cutoff."""
     flag = flag if flag is not None else read_flag(conn)
     if not flag["on"] or "plus_2026" not in flag["studio_plans"]:
         return False
-    return lane_open(conn)
+    return True
 
 
 def paused_for(conn, user_id, plan, subscribed, flag=None):
     """A subscriber on a Studio-in-Plus plan who joined after the cutoff,
     while Plus does not include the Studio right now (the owner switched it
-    off, or the credit line is AUTO-OFF). Only they see the plain "not
+    off). Only they see the plain "not
     included right now" copy; grandfathered accounts, a flag that never had a
     cutoff, other plans and any doubt: False (today's words)."""
     if not subscribed or user_id is None:

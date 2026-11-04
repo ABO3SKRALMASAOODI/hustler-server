@@ -312,12 +312,11 @@ def test_the_admin_read_counts_on_an_autocommit_connection():
     ("auto_billing", "billing_error", "billing", "next cycle"),
     ("no_ledger", "ledger_missing", "migration 040", "migration 040"),
 ])
-def test_auto_off_names_the_reason_and_when_it_comes_back(state, reason, text,
-                                                          back):
+def test_provider_state_does_not_revoke_paid_studio(state, reason, text, back):
     st = studio_plus_toggle.status(World(**STATES[state]), now=NOW)
-    assert st["state"] == "auto_off" and st["owner_on"] is True
-    assert st["reason"] == reason
-    assert text in st["reason_text"] and back in st["comes_back"]
+    assert st["state"] == "on" and st["owner_on"] is True
+    assert st["reason"] is None and st["comes_back"] is None
+    assert st["paid_provider_available"] is (state == "auto_budget")
 
 
 def test_on_while_auto_off_stays_auto_off_and_never_writes_the_credit():
@@ -325,7 +324,8 @@ def test_on_while_auto_off_stays_auto_off_and_never_writes_the_credit():
         "state": "off", "reason": "budget"})
     studio_plus_toggle.switch(w, True, now=NOW)
     st = studio_plus_toggle.status(w, now=NOW)
-    assert st["state"] == "auto_off" and st["owner_on"] is True
+    assert st["state"] == "on" and st["owner_on"] is True
+    assert st["trial_credit_on"] is False
     assert "claude_credit_state" not in w.writes
 
 
@@ -336,12 +336,13 @@ def test_the_card_shows_both_switches_on_one_shared_line():
     assert out["trial"]["state"] == "off"
     assert out["studio_plus"]["state"] == "on"
     assert out["spend"]["budget_usd"] == out["trial"]["spend"]["budget_usd"]
-    # the line going AUTO-OFF takes both down together
+    # The free-trial cutoff preserves the subscriber's included Studio.
     w.cycle_usd = 195.0
     w.kv["free_result"] = json.dumps({"on": True})
     out = studio_plus_toggle.features(w, now=NOW)
     assert out["trial"]["state"] == "auto_off"
-    assert out["studio_plus"]["state"] == "auto_off"
+    assert out["studio_plus"]["state"] == "on"
+    assert out["studio_plus"]["paid_provider_available"] is True
 
 
 def test_the_routes_are_admin_only_and_validate_the_body():
@@ -421,8 +422,7 @@ def test_a_new_plus_subscriber_has_the_studio_while_on(app):
     assert status == 403 and body == TODAY_BODY
 
 
-@pytest.mark.parametrize("state", ["off", "auto_budget", "auto_billing",
-                                   "no_ledger"])
+@pytest.mark.parametrize("state", ["off"])
 def test_off_or_auto_off_a_new_plus_subscriber_is_mcp_only_and_told_so(app,
                                                                        state):
     w = World(**STATES[state])
@@ -435,11 +435,18 @@ def test_off_or_auto_off_a_new_plus_subscriber_is_mcp_only_and_told_so(app,
     assert claude_plans.plus_studio_live(w) is False
 
 
+@pytest.mark.parametrize("state", ["auto_budget", "auto_billing", "no_ledger"])
+def test_trial_cutoff_or_provider_outage_preserves_paid_access(app, state):
+    w = World(**STATES[state])
+    assert _gate(w, NEW_PLUS) is None
+    assert claude_plans.plus_studio_live(w) is True
+
+
 def test_auto_off_and_back(app):
     w = World(**ON)
     assert _gate(w, NEW_PLUS) is None
     w.cycle_usd = 190.0                                # the line
-    assert _gate(w, NEW_PLUS)[0] == 403
+    assert _gate(w, NEW_PLUS) is None
     # the next cycle's probe switched the credit line back on (claude_credit
     # .switch_on writes state on; the spend counts from the new cycle)
     w.cycle_usd = 0.4
@@ -475,7 +482,7 @@ def _balance_keys(w, uid):
 def test_the_balance_says_which_plus_this_account_has():
     assert _balance_keys(World(**ON), NEW_PLUS) == {"studio_ai_included": True}
     assert _balance_keys(World(**OFF), NEW_PLUS)["studio_ai_paused"] is True
-    assert _balance_keys(World(**AUTO_BUDGET), NEW_PLUS)["studio_ai_paused"]
+    assert _balance_keys(World(**AUTO_BUDGET), NEW_PLUS) == {"studio_ai_included": True}
     for state in STATES.values():
         assert _balance_keys(World(**state), GRANDFATHERED) == {}
     # the code in credits.get_balance is exactly this block
@@ -487,9 +494,9 @@ def test_the_balance_says_which_plus_this_account_has():
 # --------------------------------------------------------- the plan cards
 
 @pytest.mark.parametrize("state,live", [("on", True), ("off", False),
-                                        ("auto_budget", False),
-                                        ("auto_billing", False),
-                                        ("no_ledger", False)])
+                                        ("auto_budget", True),
+                                        ("auto_billing", True),
+                                        ("no_ledger", True)])
 def test_the_offer_describes_plus_truthfully_in_each_state(state, live):
     w = World(**STATES[state])
     credits._D1_FLAG_CACHE.update(value=None, expires=0.0)
@@ -555,7 +562,7 @@ def test_held_request_runs_as_a_studio_turn_while_on(held_world):
     assert held_world["sent"] == [(NEW_PLUS, 800, "replay-77")]
 
 
-@pytest.mark.parametrize("state", ["off", "auto_budget", "auto_billing"])
+@pytest.mark.parametrize("state", ["off"])
 def test_held_request_goes_to_the_mcp_hand_off_while_off(held_world, state):
     from video_services import held_request
     held_world["world"] = World(**STATES[state])
@@ -565,6 +572,15 @@ def test_held_request_goes_to_the_mcp_hand_off_while_off(held_world, state):
     assert held_world["sent"] == []
     # ...and the customer's own assistant is the one shown the request
     assert held_request.studio_lane_open(held_world["world"], NEW_PLUS) is False
+
+
+@pytest.mark.parametrize("state", ["auto_budget", "auto_billing"])
+def test_held_paid_request_keeps_studio_routing_at_trial_cutoff(held_world, state):
+    from video_services import held_request
+    held_world["world"] = World(**STATES[state])
+    out = held_request.resume(NEW_PLUS, "transaction.paid")
+    assert out["resumed"] is True
+    assert held_world["sent"] == [(NEW_PLUS, 800, "replay-77")]
 
 
 def test_held_request_lane_for_a_grandfathered_plus_is_always_mcp(held_world):

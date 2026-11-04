@@ -126,9 +126,9 @@ _D1_FLAG_CACHE = {"value": None, "expires": 0.0}
 
 def _studio_for_all_plans_on(conn=None):
     """Plus includes the Studio for new subscribers right now (D1;
-    claude_plans.plus_studio_live: the owner's switch on AND the Claude
-    credit line open): the plan cards then say that Plus includes the Studio
-    AI editor. Off, AUTO-OFF, missing or unreadable: False, and the cards are
+    claude_plans.plus_studio_live: the owner's paid-feature switch on): the
+    plan cards then say that Plus includes the Studio AI editor. The trial
+    credit cutoff does not change this. Off, missing or unreadable: False, and the cards are
     exactly today's (Plus = MCP). Cached 30 s."""
     import time as _time
     if _D1_FLAG_CACHE["value"] is not None \

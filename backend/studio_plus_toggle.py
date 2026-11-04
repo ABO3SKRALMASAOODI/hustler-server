@@ -1,32 +1,16 @@
 """The owner's switch for "Studio in Plus" (owner decision D1, 30 Oct 2026).
 
-Owner: "include the studio in the plus, but that would be with the trial
-release. So we can turn it off if we wanted. Or if we run out of credits, it
-turns off automatically. just like the trial thing."
-
-It mirrors the free-trial switch (trial_toggle.py) exactly; the admin's
-"Claude features" card shows both, side by side:
-
-* **ON**: Plus subscribers whose subscription started after the release
-  cutoff (``studio_for_all_plans.cutoff_at``) have the Studio AI editor, on
-  Claude (``plan_models``: claude-haiku-5-5 for Plus, Pro and Max) through the credited key,
-  metered into the same cycle ledger as the trial, and charged credits per
-  turn like every subscriber (worker db.charge_turn_credits). Every other
-  existing subscriber, grandfathered Plus included, is unchanged.
-* **OFF**: the owner switched it off. Plus is MCP-only again for everyone,
-  within 30 seconds (the Studio gate, the held-request resume and the plan
-  cards read claude_plans.studio_included / plus_studio_live).
-* **AUTO-OFF with the reason**: the owner left it on, but the shared Claude
-  credit line (claude_credit.py: this cycle's spend reached the line, or
-  Anthropic refused for billing or the key) or its ledger (migration 040) is
-  not there. Plus is MCP-only by itself, and it comes back by itself with the
-  credit line's next-cycle probe, exactly like the trial.
+Owner clarification, 4 Nov 2026: a free-trial funding cutoff must not remove
+paid subscribers' included Studio access. The card shows paid entitlement
+separately from trial credit and paid-provider availability. The manual
+Studio-in-Plus switch and original subscription cohort still apply; no
+subscriptions, plan prices, customer balances or free-trial grants change.
 
 The switch writes ONLY ``app_kv.studio_for_all_plans.on`` (plus who and
 when; the first ON also fixes ``cutoff_at`` at that moment if the row has
 none, so everyone subscribed before it stays grandfathered). It never writes
-``claude_credit_state``: pressing ON while AUTO-OFF records the owner's
-intent and the card keeps saying AUTO-OFF until the credit is back.
+``claude_credit_state``: pressing ON during a trial cutoff records the owner's
+paid-feature intent without reopening free-trial funding.
 """
 import json
 from datetime import datetime, timezone
@@ -157,10 +141,6 @@ def status(conn, now=None):
         # D1V: a hand-written studio_plans without Plus keeps Plus MCP-only
         # (claude_plans.plus_studio_live); the card must not say ON.
         state, reason = "auto_off", "plus_not_listed"
-    elif not ledger:
-        state, reason = "auto_off", "ledger_missing"
-    elif not credit.get("on"):
-        state = "auto_off"
     else:
         state, reason = "on", None
     if state == "off":
@@ -209,6 +189,8 @@ def status(conn, now=None):
         "accounts": {"new_plus": _new_plus_count(conn, flag["cutoff_at"])},
         "test_user_ids": sorted(flag["test_user_ids"]),
         "ledger_ready": ledger,
+        "trial_credit_on": bool(credit.get("on")),
+        "paid_provider_available": bool(ledger and claude_credit.paid_available(credit)),
         "updated_at": _iso(updated_at),
         "updated_by": stored.get("updated_by"),
         "takes_effect_s": 30,

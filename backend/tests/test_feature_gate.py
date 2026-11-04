@@ -128,10 +128,10 @@ def test_new_plus_subscribers_with_the_studio_are_gated():
     for uid in (GRANDFATHERED, NEW_PRO, NEW_MAX, OLD_PRO, NEW_MCP):
         for studio in (STUDIO_ON, STUDIO_OFF):
             assert why(uid, studio=studio, trial=TRIAL_ON) is None, uid
-    # Studio in Plus off or AUTO-OFF: Plus is MCP-only again and the Studio's
-    # own mcp_only panel answers first; the gate itself stays out of it
+    # A manual feature switch still applies; the trial's funding cutoff
+    # preserves the subscriber's existing Studio feature boundaries.
     assert why(NEW_PLUS, studio=STUDIO_OFF) is None
-    assert why(NEW_PLUS, **_d1.AUTO_BUDGET) is None
+    assert why(NEW_PLUS, **_d1.AUTO_BUDGET) == "plus"
 
 
 def test_any_doubt_reads_as_not_gated():

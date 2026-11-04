@@ -70,7 +70,11 @@ ASSESSMENT_SCHEMA = {
                 "status": {"type": "string", "enum": ["satisfied", "unmet", "blocked", "unknown"]},
                 "reason": {"type": "string"},
                 "blocker_kind": {"type": "string", "enum": ["none", "customer_input", "provider", "unsupported"]},
-                "evidence": {"type": "array", "items": {"type": "string"}},
+                "evidence": {"type": "array", "items": {
+                    "type": "array", "minItems": 1,
+                    "description": "Actual object keys and array indices from the evidence root; keep each filename/storage key as one component.",
+                    "items": {"anyOf": [{"type": "string"},
+                                          {"type": "integer", "minimum": 0}]}}},
             }, "additionalProperties": False}},
     }, "additionalProperties": False,
 }
@@ -144,11 +148,14 @@ names. Read the draft's admissions of missing work; never silently discard them.
 Resolve conflicts using the actual current visual and timeline evidence: the
 draft can also understate existing work. Judge visible behavior, not whether a
 particular tool or template name was used; equivalent compositions count.
-For each satisfied EDIT requirement cite at least one existing JSON Pointer into
-the supplied evidence object, e.g. /after/overlays/0 or /verification/proofs/0.
-For preserved settings cite /after too, including an unchanged or null field;
+For each satisfied EDIT requirement cite at least one existing path into the
+supplied evidence object. Each path is an array of actual object keys and
+zero-based array indices. Keep a filename/storage key containing slashes as ONE
+component; do not split or escape its characters. Only cite fields and indices
+that exist in the supplied data, never invent proof containers.
+For preserved settings cite after too, including an unchanged or null field;
 source dimensions alone do not prove the output frame stayed unchanged.
-Pointers must substantiate the specific claim: an unrelated preview is not proof
+Paths must substantiate the specific claim: an unrelated preview is not proof
 of typography, a single cutaway is not sentence-by-sentence visual coverage,
 new ASR captions do not preserve original burned-in subtitles. Missing visual
 or audible proof is unknown, not satisfied. Unavailable assets may be blocked;
@@ -461,6 +468,20 @@ def _media_evidence(ctx):
         return None
 
 
+def _evidence_pointer(path):
+    """Encode typed model references into the persisted RFC 6901 format."""
+    if isinstance(path, str):
+        # Existing persisted/internal assessments already use JSON Pointers.
+        # New model output is separately validated against the component schema.
+        return path
+    if not isinstance(path, list) or not path or any(
+            isinstance(part, bool) or not isinstance(part, (str, int))
+            or (isinstance(part, int) and part < 0) for part in path):
+        raise ValueError("Evidence must select existing object keys and array indices")
+    return "/" + "/".join(str(part).replace("~", "~0").replace("/", "~1")
+                           for part in path)
+
+
 def assess(ctx, draft="", preflight=False):
     if not enabled(ctx):
         return None
@@ -505,12 +526,16 @@ def assess(ctx, draft="", preflight=False):
             if len(rows) != len(expected) or {r["id"] for r in rows} != expected:
                 value = None
                 raise ValueError("The completion assessment omitted or duplicated a requirement")
+            invalid = []
             for row in rows:
+                row["evidence"] = [_evidence_pointer(path) for path in row["evidence"]]
                 for pointer in row["evidence"]:
                     try:
                         _pointer(evidence, pointer)
-                    except (ValueError, KeyError, IndexError, TypeError) as exc:
-                        raise ValueError("Completion evidence does not exist: " + pointer) from exc
+                    except (ValueError, KeyError, IndexError, TypeError):
+                        invalid.append({"requirement": row["id"], "path": pointer})
+            if invalid:
+                raise ValueError("Completion evidence does not exist: " + json.dumps(invalid))
             break
         except ValueError as exc:
             error = str(exc)[:800]

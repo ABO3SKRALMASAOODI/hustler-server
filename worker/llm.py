@@ -448,9 +448,9 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False, operator_repair=Fal
         import claude_lane
         if not claude_lane.available():
             raise RuntimeError("The Anthropic recovery provider is unavailable; saved edits are preserved.")
-        model = config.CLAUDE_TRIAL_PLANNER_MODEL
-        if not str(model).startswith("claude-"):
-            model = config.CLAUDE_TRIAL_MODEL
+        # Use the configured editing model, not the optional expensive
+        # first-step planner for every tool call and review in a recovery.
+        model = config.CLAUDE_TRIAL_MODEL
         return [claude_lane.lane(model, name="claude_recovery")]
     if subscribed:
         return paid_editor_lanes(plan)

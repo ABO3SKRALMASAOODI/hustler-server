@@ -57,9 +57,21 @@ def test_flag_off_means_todays_lanes_exactly(lane_up):
         _Db(json.dumps({"on": True})), JOB, True, "pro_2026", {}) is None
 
 
-def test_grandfathered_subscribers_keep_their_lanes(lane_up):
-    assert agent_loop._claude_paid_lane(_Db(ON, applies=False), JOB, True,
-                                        "pro_2026", {}) is None
+def test_older_subscribers_also_use_funded_anthropic_with_credit_parity(lane_up):
+    route = agent_loop._claude_paid_lane(_Db(ON, applies=False), JOB, True,
+                                           "pro_2026", {})
+    assert route["lane"]["model"].startswith("claude-")
+    assert route["credit_model"] == "gpt-6.1-sol"
+
+
+def test_trial_cutoff_preserves_paid_claude_and_paid_recovery(lane_up):
+    lane_up.update(on=False, reason="budget", spent_usd=55.3, budget_usd=62.22)
+    assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "plus_2026", {})
+    agent_loop._require_recovery_credit_line(_Db(ON), subscribed=True)
+    with pytest.raises(RuntimeError, match="credit line is paused"):
+        agent_loop._require_recovery_credit_line(_Db(ON), subscribed=False)
+    lane_up["spent_usd"] = 62.22
+    assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "plus_2026", {}) is None
 
 
 def test_a_new_subscriber_runs_on_the_plans_claude_model(lane_up):

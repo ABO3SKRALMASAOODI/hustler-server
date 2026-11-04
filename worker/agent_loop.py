@@ -2268,17 +2268,13 @@ def run_agent_job(worker_db, job):
               f"${ctx.claude_trial.cap_usd:.2f} spent)", flush=True)
     else:
         if payload.get("operator_repair") is True:
-            _require_recovery_credit_line(worker_db)
+            _require_recovery_credit_line(worker_db, subscribed=subscribed)
         ctx.agent_lanes = llm.agent_lanes_for(
             subscribed, plan, first_turn=first_turn,
             operator_repair=payload.get("operator_repair") is True)
-        # NEW SUBSCRIBERS ON THE CLAUDE LANE (owner, 25 Oct 2026; flag
-        # app_kv.studio_for_all_plans, default off). Accounts that subscribed
-        # after the release cutoff run their Studio agent on Claude with the
-        # plan's model, their existing OpenAI lanes kept BEHIND it: an
-        # Anthropic billing refusal moves the same turn onto them
-        # (_switch_quota_lane) and alerts the admin. Grandfathered
-        # subscribers, a closed lane or the credit switch off: today's lanes.
+        # Paid Anthropic routing is independent of the free-trial cutoff.
+        # Keep contracted credit prices and the existing fallback lanes;
+        # subscription cohorts still control Studio feature entitlements.
         paid_claude = _claude_paid_lane(worker_db, job, subscribed, plan,
                                         payload)
         if paid_claude is not None:
@@ -2287,9 +2283,8 @@ def run_agent_job(worker_db, job):
             if paid_claude.get("credit_model"):
                 ctx.credit_price_aliases = {
                     paid_claude["lane"]["model"]: paid_claude["credit_model"]}
-            print(f"[agent] job {job['id']}: new-subscriber Claude lane "
-                  f"{paid_claude['lane']['model']} (plan {plan}; OpenAI lanes "
-                  f"kept as failover)", flush=True)
+            print(f"[agent] job {job['id']}: paid Claude lane "
+                  f"{paid_claude['lane']['model']} (plan {plan})", flush=True)
         if ctx.agent_lanes:
             ctx.llm_client = ctx.agent_lanes[0]["client"]
             ctx.agent_model = ctx.agent_lanes[0]["model"]
@@ -2516,14 +2511,20 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _require_recovery_credit_line(worker_db):
-    if not claude_trial.credit_status(worker_db).get("on"):
+def _require_recovery_credit_line(worker_db, subscribed=False):
+    import claude_credit
+    credit = claude_trial.credit_status(worker_db)
+    available = claude_credit.paid_available(credit) if subscribed else credit.get("on")
+    if not available:
         raise RuntimeError("The configured Anthropic credit line is paused; saved edits are preserved.")
 
 
 def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
-    """{"lane", "credit_model"} when THIS subscriber's Studio turn runs on
-    the Claude lane, else None (today's lanes, exactly). Never raises."""
+    """A funded paid Claude primary, independent of the trial cutoff.
+
+    Trial soft cutoffs do not disable this paid route. Actual provider
+    refusals and the total cycle budget still apply. Never raises.
+    """
     if not subscribed or payload.get("operator_repair") is True:
         return None
     try:
@@ -2534,11 +2535,12 @@ def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
             return None
         if not claude_lane.available():
             return None
-        if not claude_trial.credit_status(worker_db).get("on"):
+        import claude_credit
+        if not claude_credit.paid_available(claude_trial.credit_status(worker_db)):
             return None
-        if not worker_db.run(claude_plans.applies, job.get("user_id"),
-                             subscribed, flag):
-            return None
+        # 4 Nov: subscribers keep the funded Anthropic route, including
+        # older accounts. Cohort checks still own feature entitlements;
+        # they must not send an entitled subscriber to an empty wallet.
         model = claude_plans.lane_model(flag, plan)
         return {"lane": claude_lane.lane(model, name="claude_paid"),
                 "credit_model": (claude_plans.contracted_model(plan)
@@ -5222,6 +5224,14 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     if request_contract.enabled(ctx) and not request_contract.completion(ctx):
         unfinished_edit = bool(has_value)
         attempted_edit = True
+    elif request_contract.enabled(ctx) and (getattr(ctx, "semantic_contract", None) or {}).get("mode") in {"inspect", "clarify"}:
+        # A verified explanation/review is the requested deliverable even on
+        # a photos-only or empty timeline. It must not become a false editing
+        # failure merely because this answer correctly made no new video.
+        has_value = True
+        blank_canvas_no_value = blank_canvas_asset_only = False
+        attempted_edit = False
+        failed = prerequisite = refused = False
     elif request_contract.enabled(ctx) and has_edit_deliverable:
         # A corrected intermediate tool failure is not an unfinished request
         # once every requirement has independent current-version evidence.

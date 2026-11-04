@@ -119,15 +119,14 @@ def test_a_subscriber_who_joined_after_the_release_gets_the_offer():
     # never for MCP Connect, never for an account without a plan
     assert claude_plans.studio_included(conn, 8, "mcp_connect", True) is False
     assert claude_plans.applies(conn, 8, False) is False
-    # the Studio rides the trial's credit line: AUTO-OFF or no ledger -> MCP
-    # only again (the lane itself still "applies": Pro/Max keep the Studio)
+    # Paid entitlement survives the free-trial cutoff and metering outages.
     off = Conn(flag=_on(), payments=after, credit_state=json.dumps(
         {"state": "off", "reason": "budget"}))
     assert claude_plans.applies(off, 8, True) is True
-    assert claude_plans.studio_included(off, 8, "plus_2026", True) is False
-    assert claude_plans.paused_for(off, 8, "plus_2026", True) is True
+    assert claude_plans.studio_included(off, 8, "plus_2026", True) is True
+    assert claude_plans.paused_for(off, 8, "plus_2026", True) is False
     bare = Conn(flag=_on(), payments=after, ledger=False)
-    assert claude_plans.studio_included(bare, 8, "plus_2026", True) is False
+    assert claude_plans.studio_included(bare, 8, "plus_2026", True) is True
 
 
 def test_flag_off_changes_nobody_except_internal_test_accounts():

@@ -100,16 +100,62 @@ def test_completed_review_cannot_follow_a_later_timeline_version():
         rc.protected_lanes(ctx)
 
 
-def test_invented_evidence_cannot_establish_completion(monkeypatch):
+@pytest.mark.parametrize("complete,expected", [(True, "fulfilled"), (False, "blocked")])
+def test_photos_only_conditional_answer_is_judged_as_an_answer(complete, expected):
+    ctx = context()
+    ctx.has_main_video = False
+    ctx.versions_written = []
+    ctx.rendered_versions = set()
+    ctx.last_preview = None
+    ctx.write_attempts = 0
+    ctx.turn_tool_outcomes = []
+    ctx.semantic_contract["mode"] = "inspect"
+    ctx.request_assessment = {"request_digest": rc.digest(ctx), "edl_version": 2,
+                              "complete": complete, "requirements": []}
+    assert agent_loop._turn_completion(ctx)[0] == expected
+
+
+@pytest.mark.parametrize("pointer", ["/after/invented", ["after", "invented"]])
+def test_invented_evidence_cannot_establish_completion(monkeypatch, pointer):
     ctx = context()
     monkeypatch.setattr(rc, "_call", lambda *args, **kwargs: {
         "requirements": [{"id": r["id"], "status": "satisfied", "reason": "Done",
-                          "evidence": ["/after/invented"]} for r in ctx.semantic_contract["requirements"]],
+                          "evidence": [pointer]} for r in ctx.semantic_contract["requirements"]],
         "completed": "", "remaining": ""})
     result = rc.assess(ctx)
     assert not result["complete"]
     assert {r["status"] for r in result["requirements"]} == {"unknown"}
     assert result["remaining"]
+
+
+def test_model_paths_preserve_slashes_tildes_and_nested_array_indices(monkeypatch):
+    ctx = context()
+    key = "generated/42/a~b.png"
+    ctx.latest_edl()["json"]["overlays"] = [{"asset_key": key}]
+    monkeypatch.setattr(rc, "_media_evidence", lambda _: {
+        key: {"analysis": {"sentences": [{"text": "Original-source proof."}]}}})
+    def record(_ctx, _name, schema, _system, evidence, **kwargs):
+        result = {"completed": "Verified.", "remaining": "", "requirements": [
+            {"id": "subtitles", "status": "satisfied", "blocker_kind": "none",
+             "reason": "Unchanged.", "evidence": [["after", "captions"]]},
+            {"id": "type", "status": "satisfied", "blocker_kind": "none",
+             "reason": "The cited asset is present.", "evidence": [
+                 ["after", "overlays", 0, "asset_key"],
+                 ["media", key, "analysis", "sentences", 0, "text"]]}]}
+        rc._validate(result, schema)
+        return result
+    monkeypatch.setattr(rc, "_call", record)
+    result = rc.assess(ctx)
+    assert result["complete"]
+    assert result["requirements"][1]["evidence"] == [
+        "/after/overlays/0/asset_key",
+        "/media/generated~142~1a~0b.png/analysis/sentences/0/text"]
+
+
+@pytest.mark.parametrize("path", [[], ["after", True], ["after", -1], ["after", {}]])
+def test_evidence_components_reject_invalid_selector_types(path):
+    with pytest.raises(ValueError):
+        rc._evidence_pointer(path)
 
 
 def test_durable_checkpoint_keeps_contract_and_exact_version_assessment():
@@ -136,9 +182,9 @@ def test_real_nested_evidence_survives_completion_review(monkeypatch):
     ctx.latest_edl()["json"]["motion"] = [{"params": {"text": "Original title"}}]
     value = {"completed": "Verified.", "remaining": "", "requirements": [
         {"id": "subtitles", "status": "satisfied", "blocker_kind": "none",
-         "reason": "Unchanged.", "evidence": ["/after/captions"]},
+         "reason": "Unchanged.", "evidence": [["after", "captions"]]},
         {"id": "type", "status": "satisfied", "blocker_kind": "none",
-         "reason": "Actual title.", "evidence": ["/after/motion/0/params/text"]},
+         "reason": "Actual title.", "evidence": [["after", "motion", 0, "params", "text"]]},
     ]}
     def record(_ctx, _name, schema, *_args, **_kwargs):
         # Exercise the real schema validator; replacing the LLM wrapper alone

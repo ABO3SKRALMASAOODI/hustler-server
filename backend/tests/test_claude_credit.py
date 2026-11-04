@@ -21,6 +21,17 @@ ROOT = Path(__file__).resolve().parents[2]
 UTC = timezone.utc
 
 
+def test_paid_reserve_does_not_reopen_free_trials_or_ignore_hard_failures():
+    credit = {"on": False, "reason": "budget", "spent_usd": 55.3, "budget_usd": 62.22}
+    assert cc.paid_available(credit)
+    assert credit["on"] is False
+    assert not cc.paid_available({**credit, "spent_usd": 62.22})
+    assert not cc.paid_available({**credit, "spent_usd": 63.0})
+    assert not cc.paid_available({**credit, "reason": "billing_error"})
+    assert not cc.paid_available({**credit, "reason": "auth_error"})
+    assert not cc.paid_available({"on": False, "reason": "budget"})
+
+
 class FakeConn:
     """app_kv + trial_budget_days + trial_alerts, by SQL shape."""
 

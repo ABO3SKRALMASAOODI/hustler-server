@@ -21,8 +21,10 @@ automatically, without changing anything."
   or on any Anthropic billing/credit refusal (or an auth refusal: the key is
   wrong), the state flips OFF: no new trial grants, never-paid accounts meet
   today's pre-edit paywall, a trial turn already running finishes (budget)
-  or ends on the plan cards (refusal), and paying subscribers run on their
-  existing OpenAI lane.
+  or ends on the plan cards (refusal). Paid subscriptions keep their Studio
+  access. Since the owner's 4 Nov instruction, remaining credit below the
+  total budget is reserved for paid Anthropic work; actual billing/auth
+  refusals require a configured funded fallback.
 * ON AGAIN. While OFF, a probe (GitHub Actions every 3 h,
   backend/scripts/claude_credit_probe.py) makes one minimal call. When it
   succeeds in a NEW cycle, the state flips back ON by itself. A switch that
@@ -235,6 +237,22 @@ def status(conn, now=None):
 #  Writes (this module owns claude_credit_state)                      #
 # ------------------------------------------------------------------ #
 
+def paid_available(credit):
+    """Paid work may use the reserve after the free-trial soft cutoff.
+
+    The owner explicitly reserved remaining credit for subscribers on
+    4 Nov 2026. Actual billing/auth refusals and the total cycle budget
+    remain hard boundaries; this never switches the free trial back on.
+    """
+    if credit.get("on"):
+        return True
+    if credit.get("reason") != REASON_BUDGET:
+        return False
+    try:
+        return 0 <= float(credit["spent_usd"]) < float(credit["budget_usd"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
 def _write_state(cur, state):
     cur.execute("""INSERT INTO app_kv (key, value, updated_at)
                    VALUES (%s, %s, NOW())
@@ -295,17 +313,19 @@ def switch_off(conn, reason, detail="", now=None):
         why = _REASON_TEXT.get(str(reason), str(reason))
         queue_alert(
             cur, f"credit_off_{end:%Y%m%d}_{now:%Y%m%d%H%M%S}", "credit_switch_off",
-            f"Claude lane OFF: {why} (${spent:.2f} of "
+            f"Free-trial lane OFF: {why} (${spent:.2f} of "
             f"${cfg['cycle_budget_usd']:.0f} this cycle)",
-            "<p>The Claude lane switched <b>OFF</b> by itself: "
+            "<p>The free-trial lane switched <b>OFF</b> by itself: "
             f"{why}.</p>"
             f"<p>Cycle {start:%d %b} - {end:%d %b %Y} UTC: "
             f"<b>${spent:.2f}</b> of ${cfg['cycle_budget_usd']:.0f} "
             f"(line ${line_usd(cfg):.2f}).</p>"
             "<p>What changed: no new free-trial grants; never-paid accounts "
             "see today's pre-edit paywall; trial turns already running "
-            "finish or end on the plan cards; paying subscribers continue "
-            "on their OpenAI lane.</p>"
+            "finish or end on the plan cards. Paid subscribers keep their "
+            "included Studio access. The trial cutoff reserves remaining "
+            "Anthropic credit for paid work; only an actual provider refusal "
+            "or exhaustion of the total cycle budget requires a funded fallback.</p>"
             "<p>It comes back on by itself when a probe succeeds in the next "
             "cycle (a key problem: as soon as a probe succeeds). Override: "
             "app_kv claude_credit_state = {\"state\": \"on\", \"reason\": "
