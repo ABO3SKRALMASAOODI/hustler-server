@@ -104,11 +104,15 @@ def main(argv=None):
     import psycopg2
     from psycopg2.extras import RealDictCursor
     conn = psycopg2.connect(dsn, cursor_factory=RealDictCursor,
-                            connect_timeout=15,
-                            options="-c statement_timeout=30000")
+                            connect_timeout=15)
     try:
         if args.dry_run:
             conn.set_session(readonly=True)
+        # Transaction poolers reject statement_timeout in startup options.
+        # Apply it inside the transaction, after selecting read-only mode,
+        # so both direct PostgreSQL and pooled routes keep the same timeout.
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = 30000")
         out = run(conn, os.environ.get("ANTHROPIC_API_KEY", "").strip(),
                   dry_run=args.dry_run)
     finally:
