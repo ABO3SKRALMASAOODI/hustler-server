@@ -1830,6 +1830,8 @@ def lens_ending(path, edl, info, *, final, report=None, budget_s=10.0):
                                         time.monotonic() + budget_s)
     out = []
     for kind, a, b, code, words in rows or []:
+        if code == "graphic":
+            continue  # Reading cards retain their observation without a motion defect.
         sev = ("blocking" if code == "join" else
                "advisory" if code in ("fade_out", "footage") else "fix")
         out.append(_f(sev, "motion", "stall_before_end_card",

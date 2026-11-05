@@ -151,8 +151,25 @@ def _prefer_child_for_oom(proc):
         pass
 
 
+def _progress_deadline(deadline, hard_limit, elapsed, out_s, expected_s, idle_s):
+    """Extend an estimate only when measured progress can finish in its lease.
+
+    This does not parse FFmpeg's speed string. The actual output clock and
+    elapsed time determine whether the encode is productive and has room.
+    Stalls, overruns and cancellation retain their independent watchdogs.
+    """
+    if (not hard_limit or elapsed >= hard_limit or idle_s > 30
+            or elapsed <= 0 or out_s <= 0 or not expected_s):
+        return deadline
+    remaining = max(0.0, expected_s - out_s)
+    eta = remaining / (out_s / elapsed)
+    if elapsed + eta >= hard_limit:
+        return deadline
+    return max(deadline, min(hard_limit, elapsed + max(30.0, eta * 1.5 + 15.0)))
+
+
 def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
-        cancelled_cb=None, clock_stall_s=None):
+        cancelled_cb=None, clock_stall_s=None, hard_timeout=None):
     """Run ffmpeg/ffprobe. With progress_cb, parses -progress pipe:1 output
     and reports percent of expected_out_s.
 
@@ -239,12 +256,17 @@ def run(cmd, timeout=None, progress_cb=None, expected_out_s=None,
 
         def _watchdog():
             start = time.monotonic()
+            deadline = min(timeout, hard_timeout) if hard_timeout else timeout
             while not finished.is_set() and proc.poll() is None:
                 now = time.monotonic()
-                if now - start > timeout:
-                    kill_reason.append(f"wall-clock {timeout}s exceeded")
-                    proc.kill()
-                    return
+                if now - start > deadline:
+                    deadline = _progress_deadline(
+                        deadline, hard_timeout, now - start,
+                        progress_state["out_s"], expected_out_s, now - advanced[0])
+                    if now - start > deadline:
+                        kill_reason.append(f"wall-clock {deadline:g}s exceeded")
+                        proc.kill()
+                        return
                 if now - last[0] > stall_s:
                     kill_reason.append(f"no progress for {stall_s}s")
                     proc.kill()

@@ -170,6 +170,11 @@ Source tables use columns and rows; each row's cells follow columns, with common
 fields applying to every row. They preserve the entire source, including material
 omitted from the edit. Check omitted material against requested coverage too.
 Explain which facts inside the selected value substantiate the requirement.
+visual_timeline measures current placements, counts by kind, and gaps without
+authored treatments. Use those numbers rather than guessing from a draft.
+Keep archive inserts, zooms, graphics and source-credit texts distinct. Judge
+their relevance from source/visual evidence, and respect intentional presenter
+passages; a numerical gap is not automatically a defect or permission to cut.
 For preserved settings cite after too, including an unchanged or null field;
 source dimensions alone do not prove the output frame stayed unchanged.
 Paths must substantiate the specific claim: an unrelated preview is not proof
@@ -635,10 +640,12 @@ def assess(ctx, draft="", preflight=False):
         return None
     contract = ensure(ctx)
     latest = ctx.latest_edl()
+    import visual_coverage
     evidence = {
         "before": (getattr(ctx, "turn_start_edl", None) or {}).get("json", {}),
         "preservation_baseline": getattr(ctx, "request_preservation_baseline", None),
         "after": latest["json"],
+        "visual_timeline": visual_coverage.measure(latest["json"]),
         "preview": getattr(ctx, "last_preview", None),
         "verification": (getattr(ctx, "verification_records", None) or {}).get(latest["version"], {}),
         "tool_outcomes": getattr(ctx, "turn_tool_outcomes", []),

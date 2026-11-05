@@ -2694,7 +2694,36 @@ def tail_plan(edl, tl=None, program_s=None):
             if f < STALL_SLOW and t + n > lo:
                 slow.append([round(t, 3), round(t + n, 3), round(float(f), 3)])
             t += n
-    return {"fade_out_s": fade_out, "stills": stills, "slow": slow}
+    # An authored full-frame text card is meant to hold for reading. Keep
+    # its typed composition separate from an unexplained frozen source.
+    graphic_cards = []
+    for panel in edl.get("vectors") or []:
+        if panel.get("kind") != "rectangle" or panel.get("motion"):
+            continue
+        try:
+            def value(key, default):
+                v = panel.get(key)
+                return float(default if v is None else v)
+            if (value("opacity", 1) < .999 or value("width", 0) < 1
+                    or value("height", 0) < 1
+                    or abs(value("x", .5) - .5) > .001
+                    or abs(value("y", .5) - .5) > .001):
+                continue
+            pa, pb = float(panel["start"]), float(panel["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        for text in edl.get("texts") or []:
+            if not str(text.get("text") or "").strip():
+                continue
+            try:
+                a = max(pa, float(text["start"]))
+                b = min(pb, float(text["end"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if b > max(a, lo):
+                graphic_cards.append([a, b, text.get("id")])
+    return {"fade_out_s": fade_out, "stills": stills, "slow": slow,
+            "graphic_cards": graphic_cards}
 
 
 def tail_causes(edl):
@@ -2752,6 +2781,10 @@ def _stall_cause(kind, t0, t1, plan_):
     if t1 > prog + 1e-3:
         return ("join", "the programme's last frame repeats into the card's "
                 "start — a gap at the renderer's join; report it")
+    for a, b, iid in tp.get("graphic_cards") or []:
+        if a <= t0 + 1e-3 and b >= t1 - 1e-3:
+            return ("graphic", f"authored text card '{iid}' holds for reading; "
+                    "review its legibility, not source motion behind the card")
     return ("footage", "the footage itself does not move there (a static "
             "shot, a still web page or duplicated source frames) — end on a "
             "moving moment, or, when the source has none (a screen recording, "
@@ -3149,6 +3182,8 @@ def stall_findings(rows, plan_=None):
     """The STALL BEFORE END CARD advisories for boundary_stall's rows."""
     out = []
     for kind, a, b, _code, words in rows or []:
+        if _code == "graphic":
+            continue  # The structured observation remains in picture_qc.stall.
         n = b - a
         what = ("black" if kind == "black" else "a held picture")
         out.append(f"STALL BEFORE END CARD {a:.2f}-{b:.2f}s: {n:.2f}s of "

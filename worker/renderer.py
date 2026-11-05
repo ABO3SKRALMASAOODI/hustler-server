@@ -143,6 +143,8 @@ def _render_media_run(cmd, **kwargs):
         # decodes through a gap between distant keeps; it keeps the
         # wall-clock, silence and overrun watchdogs (media.run).
         kwargs.setdefault("clock_stall_s", 0)
+        if kwargs.get("timeout") and kwargs.get("expected_out_s"):
+            kwargs.setdefault("hard_timeout", _render_ffmpeg_lease_limit(False))
     with _measure_render_detail("ffmpeg_read_and_render_s"):
         return media.run(cmd, **kwargs)
 
@@ -7972,6 +7974,18 @@ def _output_clock(fps):
     return ["-fps_mode", "cfr", "-r", f"{max(1.0, min(float(fps or 30.0), 120.0)):.3f}"]
 
 
+def _render_ffmpeg_lease_limit(preview):
+    """Absolute encode ceiling, with staging/review time reserved in the lease."""
+    provider = os.getenv("EXECUTOR_PROVIDER", "")
+    if provider not in {"cloudflare", "modal", "box"} or (preview and provider == "modal"):
+        return config.FFMPEG_TIMEOUT_S
+    kind = _RENDER_JOB_TYPE.get() or ("preview" if preview else "final")
+    envelope = (config.cloudflare_timeout_for(kind)
+                if provider in {"cloudflare", "box"} else config.modal_timeout_for(kind))
+    margin = min(600, max(30, int(envelope * .2)))
+    return max(1, min(config.FINAL_FFMPEG_TIMEOUT_MAX_S, envelope - margin))
+
+
 def _render_ffmpeg_timeout(preview, expected_out_s):
     """Budget healthy encodes by output duration within the provider lease.
 
@@ -7984,16 +7998,9 @@ def _render_ffmpeg_timeout(preview, expected_out_s):
     if provider not in {"cloudflare", "modal", "box"} or (
             preview and provider == "modal"):
         return config.FFMPEG_TIMEOUT_S
-    kind = _RENDER_JOB_TYPE.get() or ("preview" if preview else "final")
-    # The box serves the Cloudflare call contract and its lease envelopes.
-    envelope = (config.cloudflare_timeout_for(kind)
-                if provider in {"cloudflare", "box"}
-                else config.modal_timeout_for(kind))
     requested = max(config.FFMPEG_TIMEOUT_S,
                     int(float(expected_out_s or 0.0) * 2.0 + 600.0))
-    margin = min(600, max(30, int(envelope * .2)))
-    return max(1, min(config.FINAL_FFMPEG_TIMEOUT_MAX_S, requested,
-                      envelope - margin))
+    return min(requested, _render_ffmpeg_lease_limit(preview))
 
 
 def _stream_report(path):
