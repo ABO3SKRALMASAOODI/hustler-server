@@ -134,7 +134,13 @@ def test_keep_segments_preserves_speech_across_camera_cut(snap_to_words):
                                    snap_to_words=snap_to_words)
     assert res.startswith("EDL v1"), res
     assert ctx.latest_edl()["json"]["keep"][0][1] >= 152.68
-    assert "SHOT-CUT HYGIENE" in res and "protects 'characters'" in res
+    if snap_to_words is False:
+        # Exact timing bypasses automatic placement, including shot hygiene.
+        # The whole word still survives, but no snap/protection was applied.
+        assert ctx.latest_edl()["json"]["keep"] == [[149.6, 152.7]]
+        assert "SHOT-CUT HYGIENE" not in res
+    else:
+        assert "SHOT-CUT HYGIENE" in res and "protects 'characters'" in res
     assert "trims 'characters'" not in res
 
 
