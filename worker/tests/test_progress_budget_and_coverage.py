@@ -82,6 +82,14 @@ def test_authored_reading_card_is_not_a_frozen_source_or_black_frame():
         report={"picture_qc": {"stall": [["held", 18.5, 20, *cause]]}})
     assert not findings
     assert evidence["stall"]
+    old_row = ["held", 18.5, 20, "footage", "old source-motion advice"]
+    cached = {"version": 7, "stall": [old_row],
+              "findings": render_qc.stall_findings([old_row]) + ["Unrelated real defect"]}
+    refreshed = render_qc.refresh_tail_classification(cached, edl)
+    assert refreshed["findings"] == ["Unrelated real defect"]
+    assert refreshed["stall"][0][3] == "graphic"
+    assert cached["stall"][0][3] == "footage"
+    assert render_qc.refresh_tail_classification(refreshed, edl) == refreshed
     assert render_qc._stall_cause("black", 18.5, 20, plan)[0] == "picture"
     assert render_qc._stall_cause("held", 19.5, 20.2, plan)[0] == "join"
     edl["texts"][0]["end"] = 18

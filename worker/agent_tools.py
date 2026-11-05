@@ -23946,6 +23946,8 @@ def _stored_render_report(ctx, row):
     except Exception:  # noqa: BLE001 — the asset's own meta still reports
         result = {}
     pq = result.get("picture_qc") or meta.get("picture_qc") or {}
+    if asset_current:
+        pq = render_qc.refresh_tail_classification(pq, row["json"])
     aq = result.get("audio_qc") or meta.get("audio_qc") or {}
     rv = meta.get("edl_version")
     lines = ([lead] if not asset_current else []) + [
@@ -24427,6 +24429,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             # audio check: never a change to the edit; the editor repairs
             # each one or keeps it deliberately and says why.
             pq = result.get("picture_qc") or {}
+            pq = render_qc.refresh_tail_classification(pq, row["json"])
+            result["picture_qc"] = pq
             pqf = pq.get("findings") or []
             # A finding that survives repair after repair is the footage's
             # own, or a measurement the edit cannot move: after

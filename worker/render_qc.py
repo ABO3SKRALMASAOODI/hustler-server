@@ -73,7 +73,8 @@ import time
 
 import http_inputs
 
-QC_VERSION = 7              # v7: graphics on the eyes or mouth, measured ink
+QC_VERSION = 8              # v8: authored reading cards are not frozen footage
+                            # v7: graphics on the eyes or mouth, measured ink
                             # v5: the stall before the end card
                             # v4: card faces read on the source, type and picture measures
                             # v3: orphan shots, reframes off a cut, the hook frame
@@ -3190,6 +3191,28 @@ def stall_findings(rows, plan_=None):
                    f"{what} where the programme hands over to the end card "
                    f"— {words}")
     return out
+
+
+def refresh_tail_classification(qc, edl):
+    """Reuse measured frames while updating their EDL-based explanation.
+
+    Callers must pass the EDL belonging to this exact render. This changes
+    neither pixels nor measurements, and preserves every unrelated finding.
+    """
+    if (not qc or int(qc.get("version") or 0) >= QC_VERSION
+            or not isinstance(edl, dict) or "keep" not in edl):
+        return qc
+    rows = qc.get("stall")
+    if not rows:
+        return qc
+    from schemas import program_duration
+    plan_ = {"program_s": program_duration(edl), "tail": tail_plan(edl)}
+    updated = [[kind, a, b, *_stall_cause(kind, a, b, plan_)]
+               for kind, a, b, _code, _words in rows]
+    old_lines = set(stall_findings(rows))
+    findings = [s for s in qc.get("findings") or [] if s not in old_lines]
+    return {**qc, "version": QC_VERSION, "stall": updated,
+            "findings": findings + stall_findings(updated, plan_)}
 
 
 def findings(res, plan_):

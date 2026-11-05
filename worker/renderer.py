@@ -9393,6 +9393,7 @@ def _run_render_job(worker_db, job):
                                wm_settings=wm_settings, index_of=_index_of) \
                 and _audio_model_review_cache_compatible(
                     audio_model_review, edl_row["json"], cached.get("meta")):
+            import render_qc
             cached_meta = cached.get("meta") or {}
             return {"render_asset_id": cached["id"],
                     **({"render_dependency_key": dependency_key} if dependency_key else {}),
@@ -9405,7 +9406,8 @@ def _run_render_job(worker_db, job):
                           "times": cached_meta.get("caption_review_times") or []}]
                         if cached_meta.get("caption_sheet_key") else []),
                     "audio_qc": cached_meta.get("audio_qc"),
-                    "picture_qc": cached_meta.get("picture_qc"),
+                    "picture_qc": render_qc.refresh_tail_classification(
+                        cached_meta.get("picture_qc"), edl_row["json"]),
                     # New renders retain exact program windows. Historical
                     # metadata stored keys only; those clips are still valid
                     # heard evidence and get generic labels on reuse.

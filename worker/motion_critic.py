@@ -1809,7 +1809,8 @@ def lens_ending(path, edl, info, *, final, report=None, budget_s=10.0):
     read from the render's own picture check when it carries it, else
     measured here (about two seconds of 64 px frames)."""
     import render_qc
-    qc = (report or {}).get("picture_qc") or {}
+    qc = render_qc.refresh_tail_classification(
+        (report or {}).get("picture_qc") or {}, edl)
     rows = qc.get("stall")
     if rows is None:
         import config
