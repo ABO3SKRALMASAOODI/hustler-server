@@ -144,6 +144,16 @@ names. Read the draft's admissions of missing work; never silently discard them.
 Resolve conflicts using the actual current visual and timeline evidence: the
 draft can also understate existing work. Judge visible behavior, not whether a
 particular tool or template name was used; equivalent compositions count.
+Creative adjectives describe the requested result, not a hidden checklist of
+specific effects. A mood can be expressed through typography, color and rhythm;
+do not require particular decorative motifs or named animations unless the
+customer requested them. Evaluate the pixels.
+render_state identifies the current version's completed preview and verification
+record. Tool outcomes and observations include HISTORICAL attempts and model
+opinions. An earlier refused render or admission does not invalidate a later
+completed preview. Never claim the current version was not rendered when
+render_state.preview_completed is true. It can still have visible defects;
+describe those defects using the current proof, not superseded failure notes.
 For each satisfied EDIT requirement cite at least one supplied evidence ref.
 Evidence entries have a ref, a path identifying the original data, and its full
 value. Select only refs supplied in those records; never invent refs, paths or indices.
@@ -631,6 +641,14 @@ def assess(ctx, draft="", preflight=False):
         "media": _media_evidence(ctx),
     }
     evidence["render_evidence"] = evidence["verification"].get("render_evidence", {})
+    evidence["render_state"] = {
+        "edl_version": latest["version"],
+        "preview_completed": bool(evidence["preview"] and
+            evidence["preview"].get("edl_version") == latest["version"]),
+        "verification_record_current": bool(evidence["render_evidence"] and
+            evidence["render_evidence"].get("edl_version") == latest["version"]),
+        "tool_outcomes_and_observations_include_history": True,
+    }
     evidence["visual_proofs"], images = _visual_proofs(
         ctx, latest, evidence["verification"], preflight, evidence["media"])
     # The repair loop counts changed evidence, not changed wording or duplicate
@@ -759,23 +777,46 @@ def assess(ctx, draft="", preflight=False):
 
 
 def preflight(ctx):
+    """Check concrete scope protections; creative judgments need rendered pixels.
+
+    A semantic completion review here created an evidence cycle: the reviewer
+    rejected an aesthetic for lacking a current preview, thereby preventing
+    that preview from being made. Each style change restarted the same paid
+    review. Delivery still uses the full semantic/visual assessment. Structural
+    schema/asset checks remain in the renderer and writes retain scope guards.
+    """
     if not enabled(ctx):
         return None
     contract = ensure(ctx)
     if contract["mode"] != "edit":
         return None
-    key = f"{contract['request_digest']}:{ctx.latest_edl()['version']}"
-    checked = list(getattr(ctx, "request_preflights", None) or [])
-    if key in checked:
-        return None
-    assessment = assess(ctx, preflight=True)
-    ctx.request_preflights = (checked + [key])[-32:]
-    missing = [r for r in assessment["requirements"] if r["status"] == "unmet"]
-    if missing:
-        return ("The requested timeline work is not ready for rendering. Complete "
-                "these requirements first; preserve completed work. If an input is "
-                "truly unavailable, render the saved work and disclose it rather "
-                "than repeat unchanged attempts.\n" + json.dumps(missing, ensure_ascii=False))
+    import scope_guard
+    before = (getattr(ctx, "turn_start_edl", None) or {}).get("json", {})
+    baseline = getattr(ctx, "request_preservation_baseline", None) or before
+    after = ctx.latest_edl()["json"]
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    violations = []
+    requirements = list(contract["requirements"])
+    if contract.get("timing_policy") == "preserve" and not any(
+            r["action"] == "preserve" and "timeline_timing" in r["lanes"]
+            for r in requirements):
+        requirements.append({"id": "system:timing", "action": "preserve",
+                             "lanes": ["timeline_timing"]})
+    for requirement in requirements:
+        lanes = set(requirement["lanes"])
+        if requirement["action"] == "preserve":
+            changed = scope_guard.preservation_violations(baseline, after, protected=lanes,
+                source_shape=(video.get("width"), video.get("height")))
+        elif requirement["action"] == "avoid":
+            changed = [lane for lane in lanes if after.get(lane)]
+        else:
+            changed = []
+        if changed:
+            violations.append({"id": requirement["id"], "violations": sorted(changed)})
+    if violations:
+        return ("Restore the customer's concrete protected settings before rendering. "
+                "The current timeline violates these requirements:\n" +
+                json.dumps(violations, ensure_ascii=False))
     return None
 
 

@@ -33,6 +33,70 @@ def context():
     return ctx
 
 
+def test_caption_render_does_not_require_proof_that_only_rendering_can_create(monkeypatch):
+    ctx = context()
+    ctx.semantic_contract["requirements"] = [{"id": "nature", "action": "change", "lanes": [],
+        "description": "Aesthetically pleasing nature-like captions"}]
+    ctx.latest_edl()["json"]["captions"] = {"mode": "from_transcript", "style": {
+        "font": "Instrument Serif", "color": "#F3EFE4", "highlight_color": "#D9B26F"}}
+    ctx.last_preview = None
+    ctx.verification_records = {}
+    calls = []
+    def unsupported_judgment(*args, **kwargs):
+        calls.append(1)
+        return {"requirements": [{"id": "nature", "status": "unmet", "blocker_kind": "none",
+            "reason": "The current captions were not rendered, so their aesthetic cannot be verified."}]}
+    monkeypatch.setattr(rc, "assess", unsupported_judgment)
+    assert rc.preflight(ctx) is None
+    assert calls == []
+    # A new stylistic revision still needs pixels before it can be judged.
+    revised = deepcopy(ctx.latest_edl()["json"])
+    revised["captions"]["style"]["color"] = "#CCD6B2"
+    ctx.latest_edl = lambda: {"version": 3, "json": revised}
+    assert rc.preflight(ctx) is None
+    assert calls == []
+
+
+def test_pre_render_still_rejects_concrete_preservation_and_exclusion_violations(monkeypatch):
+    ctx = context()
+    ctx.latest_edl()["json"]["captions"] = {"mode": "from_transcript"}
+    ctx.semantic_contract["requirements"].append({"id": "no_music", "action": "avoid", "lanes": ["music"]})
+    ctx.latest_edl()["json"]["music"] = [{"asset_key": "not-requested.mp3"}]
+    monkeypatch.setattr(rc, "assess", lambda *a, **k: pytest.fail("Pre-render must not call a creative reviewer"))
+    message = rc.preflight(ctx)
+    assert "subtitles" in message and "no_music" in message
+    ctx.latest_edl()["json"]["captions"] = None
+    ctx.latest_edl()["json"]["music"] = []
+    assert rc.preflight(ctx) is None
+    ctx.latest_edl()["json"]["keep"] = [[0, 12]]
+    assert "system:timing" in rc.preflight(ctx)
+
+
+def test_current_render_receipt_overrides_historical_attempt_state_but_not_quality(monkeypatch):
+    ctx = context()
+    ctx.turn_tool_outcomes = [{"kind": "failed", "tool": "render_preview", "reason": "Earlier preflight refused"}]
+    ctx._editorial_observations = ["The earlier style was never rendered."]
+    ctx.last_preview = {"edl_version": 2, "render_asset_id": 123}
+    ctx.verification_records = {2: {"render_evidence": {"edl_version": 2}}}
+    seen = []
+    def review(_ctx, _name, _schema, _system, payload, **_kwargs):
+        seen.append({e["path"]: e["value"] for e in payload["evidence"]})
+        return {"completed": "", "remaining": "Text still needs a legibility correction.",
+            "requirements": [{"id": r["id"], "status": "unmet", "reason": "Needs legibility correction",
+                              "blocker_kind": "none", "evidence": []}
+                             for r in ctx.semantic_contract["requirements"]]}
+    monkeypatch.setattr(rc, "_call", review)
+    result = rc.assess(ctx, "The old render attempt failed.")
+    assert seen[-1]["/render_state/preview_completed"] is True
+    assert seen[-1]["/render_state/verification_record_current"] is True
+    assert not result["complete"]  # A successful render does not certify the creative result.
+    ctx.last_preview["edl_version"] = 1
+    ctx.verification_records = {}
+    rc.assess(ctx, "Changed reply")
+    assert seen[-1]["/render_state/preview_completed"] is False
+    assert seen[-1]["/render_state/verification_record_current"] is False
+
+
 def test_preservation_is_not_an_instruction_to_add_captions():
     ctx = context()
     before = ctx.latest_edl()["json"]
