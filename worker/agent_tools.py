@@ -21305,6 +21305,20 @@ def fetch_url(ctx, url, as_kind=None):
         # where a stale fragment would then be a candidate for the
         # largest-file pick.
         shutil.rmtree(workdir, ignore_errors=True)
+        # A Drive link only its owner can repair: a precondition, not a
+        # retryable failure of ours (ticket 10). The customer gets the one
+        # step that fixes it, and repeating the call cannot help until then.
+        if url_media.drive_needs_customer(e):
+            repair = ("in Google Drive open Share, set General access to "
+                      "'Anyone with the link', and send the link again"
+                      if url_media.DRIVE_PRIVATE in str(e)
+                      else "send a working link")
+            return (f"PREREQUISITE: nothing was added, {e}. Tell the user "
+                    f"that plainly, with the fix: {repair} (or upload the "
+                    "file with the paperclip). "
+                    "Do not call fetch_url on this link again until they say "
+                    "it is done. Continue the current edit NOW with any "
+                    "already-attached music or clips.")
         # A bot-walled candidate is the one failure that is NOT final: the
         # wall is per-upload, so the error itself instructs the model to
         # try the next find_song link. Bolting the generic "tell the user /

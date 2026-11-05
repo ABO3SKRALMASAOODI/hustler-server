@@ -465,6 +465,24 @@ def head_kind(url, *, allowed_hosts=None, timeout_s=15,
         _close(resp)
 
 
+def final_url(url, *, allowed_hosts=None, timeout_s=15,
+              user_agent="Mozilla/5.0 (compatible; valmera/1.0)"):
+    """Where a URL ends up after its redirects, without reading a body.
+
+    Advisory like head_kind: None means "I could not tell", never "no". An
+    address refusal still raises, for the same reason as there."""
+    try:
+        resp, final = _open(url, allowed_hosts, timeout_s, user_agent,
+                            headers={"Range": "bytes=0-0"},
+                            deadline=time.monotonic() + timeout_s)
+    except PolicyError:
+        raise
+    except Exception:
+        return None
+    _close(resp)
+    return final
+
+
 def download(url, out_path, *, allowed_hosts=None, max_bytes, timeout_s,
              user_agent="valmera/1.0 (+https://valmera.io)"):
     """GET url to out_path with address, size and wall-clock limits."""

@@ -487,6 +487,58 @@ def _cloudflare_challenged(text):
     return "cloudflare" in low and ("anti-bot" in low or "challenge" in low)
 
 
+# The sentences a Drive refusal becomes. They cross the executor boundary as
+# plain text (run_fetch_job returns them as data), so agent_tools recognises
+# them by these words: see drive_needs_customer.
+DRIVE_PRIVATE = ("that Google Drive file is private: Google asks for a "
+                 "sign-in before anyone can open it")
+DRIVE_MISSING = ("that Google Drive link points to no file: it was deleted, "
+                 "or the link is incomplete")
+_DRIVE_FILE = re.compile(
+    r"^https?://(?:drive|docs)\.google\.com/(?:[^?#]*/)?"
+    r"(?:file/d/([\w-]{20,})|(?:open|uc)\?(?:[^#]*&)?id=([\w-]{20,}))")
+_DRIVE_REFUSED = re.compile(r"\[GoogleDrive\].*HTTP Error (403|404)", re.S)
+
+
+def drive_file_id(url):
+    """The file id of a Google Drive file link, else None."""
+    m = _DRIVE_FILE.match(str(url or "").strip())
+    return (m.group(1) or m.group(2)) if m else None
+
+
+def drive_needs_customer(text):
+    """Is this fetch failure a Drive link only its owner can repair?"""
+    return DRIVE_PRIVATE in str(text) or DRIVE_MISSING in str(text)
+
+
+def _drive_refusal(url, error_text):
+    """The honest sentence for a Drive link Google refused, else None.
+
+    Ticket 10 (5 Nov 2026): a private Drive link answered "[GoogleDrive] ...
+    HTTP Error 403" and went out as TRANSIENT_FAILURE, so the caller was told
+    a retryable failure of ours had happened and the customer never learned
+    the one thing that fixes it. Measured on the box the same day: a public
+    file extracts, a deleted one is a 404, a private one is a 403.
+
+    A 403 alone does not prove "private": Google refusing our IP looks the
+    same, and calling that the customer's sharing would hide an outage of
+    ours. So it counts only when the public download door really ends on
+    Google's sign-in page; anything else stays the raw failure and is filed.
+    """
+    file_id = drive_file_id(url)
+    found = _DRIVE_REFUSED.search(str(error_text or ""))
+    if not (file_id and found):
+        return None
+    if found.group(1) == "404":
+        return DRIVE_MISSING
+    final = net_fetch.final_url(
+        f"https://drive.usercontent.google.com/download?id={file_id}"
+        "&export=download")
+    return (DRIVE_PRIVATE
+            if final and urlparse(final).hostname == "accounts.google.com"
+            else None)
+
+
 def _extract_with_fallback(url, workdir, prefer=None):
     """_extract, walking alternate player clients on YouTube's bot wall.
 
@@ -526,6 +578,9 @@ def _extract_with_fallback(url, workdir, prefer=None):
                 print("[fetch_url] vimeo page failed; trying its player URL",
                       flush=True)
                 return _extract(alt, workdir, prefer=prefer)
+            refusal = _drive_refusal(url, str(err))
+            if refusal:
+                raise FetchMediaError(refusal)
             if not _cloudflare_challenged(str(err)):
                 raise
         # 30 Oct, ticket 10: a customer's link died on "[generic] Got HTTP
