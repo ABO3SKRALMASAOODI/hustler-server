@@ -1017,6 +1017,8 @@ def test_signup_rate_never_divides_all_signups_by_tracked_visitors(
 def test_channel_rates_use_one_window_when_the_period_starts_before_sources(
         app, monkeypatch):
     acquisition_fixtures(monkeypatch)
+    # Keep the 30-day range spanning the fixed October source-start fixture.
+    monkeypatch.setattr(ranges, "utc_now", lambda: T0)
     since = datetime(2026, 10, 7, 12, 34, 12, tzinfo=timezone.utc)
     g = {"source": "www.google.com", "medium": "organic", "at": 1}
     whole = [{"device_id": f"w{i}", "first_attribution": {"first": g,

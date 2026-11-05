@@ -4210,18 +4210,28 @@ def server_card():
         "name": "io.valmera/video-editor",
         "title": "Valmera — agentic AI video editor",
         "description":
-            "Edit real video from inside an AI conversation. Upload footage, "
-            "describe the edit in plain English, and the connected model cuts silences "
-            "and filler words, adds word-timed captions, reframes to 9:16, "
-            "mixes music, grades the picture, renders a preview, and looks at "
-            "the frames it produced. When the user approves, export_final "
-            "renders the full-quality MP4 from the ORIGINAL file (Studio "
-            "export works too). It edits footage you already have — it is "
-            "not a text-to-video generator.",
+            "Valmera is an agentic AI video editor for creators. Edit video "
+            "through an AI conversation: select your project, provide source "
+            "media and a creative brief, and use the current editing tools "
+            "to shape the story, captions, framing, sound and supporting "
+            "visuals. Review a representative preview and refine the approved "
+            "version. For final delivery, call export_final, wait_for_job "
+            "and download_url; Studio export is also available. The workflow "
+            "is versioned and non-destructive.",
         "version": SERVER_INFO["version"],
         "websiteUrl": "https://valmera.io",
         "documentationUrl": "https://valmera.io/mcp",
         "toolReferenceUrl": "https://valmera.io/mcp/tools",
+        "guides": [
+            {"title": "Connect your AI assistant",
+             "url": "https://valmera.io/mcp/setup"},
+            {"title": "Start an edit and find a task",
+             "url": "https://valmera.io/docs"},
+            {"title": "Plan creative media and generated visuals",
+             "url": "https://valmera.io/docs/ai-generation"},
+            {"title": "Build an editing brief",
+             "url": "https://valmera.io/prompts"},
+        ],
         "iconUrl": "https://valmera.io/icon-512.png",
         "remotes": [{"type": "streamable-http",
                      "url": mcp_oauth.resource_url()}],
@@ -4239,6 +4249,14 @@ def server_card():
         "toolGroups": {k: sorted(v) for k, v in sorted(groups.items())},
         "sessionTools": sorted(t["name"] for t in SESSION_TOOLS),
         "notes": [
+            "Discover available actions through tools/list and follow each "
+            "tool's current input schema. This public card describes the "
+            "published catalog; connected-account and project requirements "
+            "still apply. See https://valmera.io/mcp/tools.",
+            "For a specialized request, state the required sources, creative "
+            "treatment and delivery files, then review a representative "
+            "preview before extending the approach. See "
+            "https://valmera.io/docs/ai-generation.",
             "Slow work (renders and pixel repainting) returns a job id "
             "and a wait_for_job tool rather than a fabricated completion.",
             "Tools edit a versioned edit decision list. The uploaded file is "
@@ -4253,15 +4271,6 @@ def server_card():
         ],
         "notSupported": [
             "delegating edits to Valmera's in-house agent",
-            "text-to-video generation of a whole video",
-            "SRT/VTT import or export (captions are burned in)",
-            "team seats or collaboration",
-            "direct publishing to YouTube or TikTok",
-            "custom font uploads",
-            "true crossfade/dissolve transitions",
-            "motion-tracked overlays or stickers",
-            "denoise / studio sound",
-            "AI music generation",
         ],
         "pricing": {
             "free": "Account creation and upload are free; editing requires a subscription",
