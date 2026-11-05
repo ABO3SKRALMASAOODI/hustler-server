@@ -2326,6 +2326,32 @@ def test_upload_start_returns_its_plan_as_structured_content(
     assert "f.seek(x['offset'])" in prose and "parts=[" in prose
 
 
+def test_opus_upload_identifies_audio_lane_without_reporting_an_outage(client, monkeypatch):
+    monkeypatch.setattr(mcpmod.storage, "is_configured", lambda: True)
+    prepared = []
+
+    def presign(key, size, content_type, **kwargs):
+        prepared.append((key, size, content_type))
+        return {"mode": "single", "url": "https://storage.example/audio"}
+
+    monkeypatch.setattr(mcpmod.storage, "presign_upload", presign)
+    args = {"project_id": 3, "filename": "call.opus", "size_bytes": 1234}
+    refused = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_start", "arguments": args}).get_json()["result"]
+    assert refused["isError"] is True
+    assert "kind 'music'" in refused["content"][0]["text"]
+    assert not prepared and not DB["enqueued"]
+    detail = mcpmod._public_error_detail("upload_start", refused)
+    assert detail["category"] == "invalid_request"
+    assert detail["outcome"] == "correction_needed"
+    accepted = rpc(client, "tools/call", STATIC_TOKEN, {
+        "name": "upload_start", "arguments": {**args, "kind": "music"}}).get_json()["result"]
+    assert not accepted["isError"]
+    assert prepared[0][0].startswith("music/3/")
+    assert prepared[0][2] == "audio/ogg"
+    assert accepted["structuredContent"]["upload_finish_arguments"]["kind"] == "music"
+
+
 def test_index_status_says_where_a_queued_analysis_stands(client, monkeypatch):
     class Cur(FakeCur):
         def execute(self, sql, params=()):

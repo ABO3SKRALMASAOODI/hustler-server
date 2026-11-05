@@ -108,6 +108,7 @@ ALLOWED_MUSIC_EXT = {
     ".m4a": "audio/mp4",
     ".aac": "audio/aac",
     ".ogg": "audio/ogg",
+    ".opus": "audio/ogg",
 }
 ALLOWED_IMAGE_EXT = {
     ".png": "image/png",

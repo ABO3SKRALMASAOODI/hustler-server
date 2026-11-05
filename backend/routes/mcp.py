@@ -2359,7 +2359,12 @@ def _t_upload_start(tok, args):
     try:
         ext, content_type = storage.validate_upload(filename, nbytes, kind)
     except ValueError as e:
-        return _session_error(str(e))
+        return {"content": [{"type": "text", "text": str(e)}],
+                "structuredContent": {
+                    "code": "invalid_upload",
+                    "tool_outcome": {"status": "correction_needed",
+                                     "retryable": False}},
+                "isError": True}
     with vdb() as conn:
         if not _project_for_user(conn.cursor(), project_id, tok["user_id"]):
             return _session_error(
@@ -3767,6 +3772,7 @@ OWN_FAILURE_OUTCOMES = {"transient_failure", "unavailable", "unsafe"}
 # held tail, analysis not ready, the plan gate).
 GATE_CODES = {"verification_open": "prerequisite", "held_tail": "prerequisite",
               "invalid_edit_batch": "invalid_request",
+              "invalid_upload": "invalid_request",
               "edit_conflict": "version_conflict", "edit_busy": "prerequisite",
               "project_missing": "invalid_request", "media_purged": "prerequisite",
               "index_not_ready": "prerequisite",
@@ -3830,7 +3836,7 @@ def _public_error_detail(name, result):
         # The product's own gates answering as designed: the caller must
         # repair, wait or subscribe; not a failure of ours.
         if code in GATE_CODES and (category == "unclassified" or code in {
-                "invalid_edit_batch", "edit_conflict", "edit_busy", "project_missing"}):
+                "invalid_edit_batch", "invalid_upload", "edit_conflict", "edit_busy", "project_missing"}):
             category = detail["category"] = GATE_CODES[code]
     outcome = structured.get("tool_outcome") if isinstance(structured, dict) else None
     if isinstance(outcome, dict) and outcome.get("status") in {
