@@ -60,8 +60,17 @@ TOPICS = tuple(a[0] for a in ASKS)
 # marked partial and the reply told them "I didn't add B-roll this time".
 # Asks are matched on words that read the same in many languages (B-roll,
 # LUT, captions), so their negations must be read in those languages too.
+# Ticket #77 (journey j15, request 134968, 3 Nov): "Preserve all original
+# subtitles and branding" was read as a captions ask because only "keep" and
+# "leave" said "do not touch this". The reply said "I didn't change the
+# captions this time", and the next turn laid new captions over the burned-in
+# subtitles the customer had told us to preserve. Every word for preserving
+# something is the same instruction as "keep", in every language.
 _NEG_BEFORE = re.compile(
     r"(?i)\b(?:don'?t|do not|never|no|without|not|keep(?:ing)?|leave|remove|"
+    r"preserv\w*|retain\w*|maintain\w*|"
+    r"beibehalt\w*|behalt\w*|behalte|bewahr\w*|conserv\w*|gard(?:e|er|ez)|"
+    r"mant(?:[e\u00e9]|ie)\w*|behoud\w*|bewaar\w*|zachowaj\w*|koru\w*|"
     r"avoid\w*|skip|exclude|"
     r"cut out|turn off|get rid of|delete|drop|lose|"
     r"kein\w*|ohne|nicht|niemals|sans|aucun\w*|pas de|jamais|sin|sem|nunca|"
