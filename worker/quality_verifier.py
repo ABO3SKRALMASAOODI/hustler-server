@@ -826,7 +826,7 @@ def _requested_transitions(request_text):
     return requested
 
 
-def _request_findings(edl, request_text, media_keys=None):
+def _request_findings(edl, request_text, media_keys=None, semantic_contract=None):
     """The customer's own explicit constraints (the request contract).
 
     ``media_keys``: the customer's supplied clips/photos, passed only when
@@ -902,7 +902,7 @@ def _request_findings(edl, request_text, media_keys=None):
             "turn captions off (add_captions mode='off') and render-check "
             "it"))
     ask = str(request_text or "").lower()
-    if _requested_transitions(ask) \
+    if not semantic_contract and _requested_transitions(ask) \
             and not ((edl.get("effects") or {}).get("transition")):
         findings.append(_finding(
             "requested_transitions_missing", "motion",
@@ -1222,7 +1222,7 @@ def _flash_findings(edl, index=None, request_text=None):
 
 
 def deterministic_findings(edl, index=None, request_text=None,
-                           media_keys=None):
+                           media_keys=None, semantic_contract=None):
     return (_text_corruption_findings(edl)
             + _caption_findings(edl)
             + _sound_off_findings(edl, index or {})
@@ -1233,10 +1233,99 @@ def deterministic_findings(edl, index=None, request_text=None,
             + _media_findings(edl)
             + _cleanup_findings(edl)
             + _audio_findings(edl)
-            + _request_findings(edl, request_text, media_keys)
+            + _request_findings(edl, request_text, media_keys, semantic_contract)
             + _flash_findings(edl, index or {}, request_text)
             + _earn_its_place_findings(edl, index or {}, request_text)
             + _repeat_findings(edl, index or {}))
+
+
+def _audio_window_identity(edl, index, start, end):
+    """Conservative identity for a measured pause on the original clock.
+
+    Visual-only edits and sounds outside this window cannot invalidate its
+    accepted rationale. Unknown audio extents are retained, never guessed.
+    """
+    import scope_guard
+    import sound_library
+
+    def relevant(items, start_key, end_key=None, duration_key=None, library=False):
+        selected = []
+        for item in items or []:
+            try:
+                at = float(item.get(start_key, 0) or 0)
+                if at >= end:
+                    continue
+                stop = item.get(end_key) if end_key else None
+                duration = item.get(duration_key) if duration_key else None
+                if duration is None and library:
+                    sound = sound_library.id_for_key(item.get("storage_key"))
+                    if sound:
+                        length = sound_library.max_s(sound) or (sound_library.get(sound) or {}).get("duration_s")
+                        if length is not None:
+                            duration = max(0.0, float(length) - float(item.get("offset_s") or 0))
+                if stop is None and duration is not None:
+                    stop = at + float(duration)
+                if stop is not None and float(stop) <= start:
+                    continue
+            except (TypeError, ValueError, KeyError):
+                pass  # An unknown extent might affect this window.
+            selected.append(item)
+        return selected
+
+    state = {
+        "source_index": hashlib.sha256(_canon(index or {}).encode()).hexdigest(),
+        "clock": scope_guard._lane_state(edl, "timeline_timing", False),
+        "global_audio": {k: edl.get(k) for k in
+                         ("volume", "master", "stem_mix", "source_clean", "canvas", "frame")},
+        "insert_sources": edl.get("inserts") or [],
+        "audio_effects": {k: (edl.get("effects") or {}).get(k) for k in
+                          ("transition", "fade_in_s", "fade_out_s")},
+        "sfx": relevant(edl.get("sfx"), "at", duration_key="dur_s", library=True),
+        "music": relevant(edl.get("music"), "start", end_key="end"),
+        "voiceover": relevant(edl.get("voiceover"), "start_output_s", duration_key="duration_s"),
+        "overlays": relevant(edl.get("overlays"), "start", duration_key="duration_s"),
+    }
+    def numeric_identity(value):
+        # JSON distinguishes 20 from 20.0; the renderer does not.
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+        if isinstance(value, list):
+            return [numeric_identity(v) for v in value]
+        if isinstance(value, dict):
+            return {k: numeric_identity(v) for k, v in value.items()}
+        return value
+
+    return hashlib.sha256(_canon(numeric_identity(state)).encode()).hexdigest()
+
+
+def _pause_observation(message, preview, edl, index):
+    """Bind known QC text to its structured measurement, without parsing prose."""
+    import audio_qc
+    for start, end in (preview.get("audio_qc") or {}).get("silences") or []:
+        if message == audio_qc.silence_finding(start, end):
+            return {"kind": "measured_pause", "start": start, "end": end,
+                    "audio_state": _audio_window_identity(edl, index, start, end)}
+    return None
+
+
+def _inherited_pause_justifications(findings, prior_records, project_id, version):
+    # Only an identical structured audio observation is eligible. Never
+    # inherit an arbitrary opinion, safety waiver or broad finding code.
+    eligible = {r["finding_id"] for r in findings if
+                (r.get("evidence") or {}).get("audio_observation")}
+    inherited = {}
+    for prior in (prior_records or {}).values():
+        prior = (prior or {}).get("record", prior) or {}
+        if prior.get("project_id") != project_id or prior.get("edl_version", version) > version:
+            continue
+        prior_ids = {r.get("finding_id") for r in prior.get("findings") or []
+                     if (r.get("evidence") or {}).get("audio_observation")}
+        for item in prior.get("justifications") or []:
+            fid = item.get("finding_id")
+            if fid in eligible and fid in prior_ids:
+                inherited[fid] = dict(item, inherited_from_version=item.get(
+                    "inherited_from_version", prior["edl_version"]))
+    return list(inherited.values())
 
 
 def build_verification_record(project_id, version, manifest, edl, index,
@@ -1246,7 +1335,7 @@ def build_verification_record(project_id, version, manifest, edl, index,
                               justified=None, request_text=None,
                               advisory_findings=None, prior_records=None,
                               media_keys=None, baseline_keys=None,
-                              start_edl=None):
+                              start_edl=None, semantic_contract=None):
     """Version-stamped verification. ``visual/audio/story_findings`` are
     review lines that already passed their reviewer's blocking bar; taste
     notes and other craft observations go in ``advisory_findings`` and are
@@ -1257,14 +1346,19 @@ def build_verification_record(project_id, version, manifest, edl, index,
     here (request_scope.demote_recurring): one repair per category, so a
     reviewer that re-raises the same complaint after every repair cannot
     hold a finished edit open."""
+    preview = preview or {}
     findings = deterministic_findings(edl, index, request_text=request_text,
-                                      media_keys=media_keys)
+                                      media_keys=media_keys,
+                                      semantic_contract=semantic_contract)
     for department, rows in (("visual_review", visual_findings or []),
                              ("audio_review", audio_findings or []),
                              ("story_review", story_findings or [])):
         for row in rows:
+            observation = (_pause_observation(str(row), preview, edl, index)
+                           if department == "audio_review" else None)
             findings.append(_finding(
                 "review_finding", department, str(row)[:1000],
+                evidence={"audio_observation": observation} if observation else {},
                 severity="error", repair="repair or explicitly justify from direct evidence"))
     for row in advisory_findings or []:
         findings.append(_finding(
@@ -1312,8 +1406,10 @@ def build_verification_record(project_id, version, manifest, edl, index,
         seen_finding_ids.add(row["finding_id"])
         deduped.append(row)
     findings = deduped
+    justified = list(justified or []) + _inherited_pause_justifications(
+        findings, prior_records, int(project_id), int(version))
     justified_codes = {str(row.get("code")) for row in (justified or [])
-                       if isinstance(row, dict)}
+                       if isinstance(row, dict) and not row.get("finding_id")}
     justified_ids = {str(row.get("finding_id")) for row in (justified or [])
                      if isinstance(row, dict) and row.get("finding_id")}
     unresolved = [row for row in findings

@@ -99,6 +99,11 @@ creative changes that would violate the latest instruction to keep those parts
 unchanged. An explicit conditional request to explain a missing capability and
 stop can be fulfilled by that truthful explanation; do not make the unavailable
 alternative an unconditional editing requirement.
+Retain explicit acceptable alternatives and their conditions within the same
+requirement. 'If authentic material is unavailable, keep the presenter' is an
+authorized fallback, not a failed demand for footage. Permission to use several
+source types does not require using every type. Keep aspirational quantities
+conditional when the customer explicitly prioritizes accuracy over quantity.
 Recovery notes do not authorize new creative requirements. For each requirement,
 select its source_ref from customer_sources. These references identify verbatim
 customer instructions; do not reproduce or paraphrase a quotation or invent IDs.
@@ -133,6 +138,10 @@ the requested state, not adding improvements from an earlier broad brief.
 Internal recovery notes provide defect/scope evidence, not new authorization.
 If the latest request explicitly says to explain and stop when a capability is
 unavailable, assess that conditional answer; do not demand the unavailable edit.
+Honor other explicit acceptable alternatives too: verify the condition and the
+chosen authorized result against the search/media/current timeline evidence.
+Do not call the preferred alternative mandatory when the customer permits a
+fallback. A permission to use an asset type is not a demand to use every type.
 The brief may omit details. If currently authorized requested work is still
 missing, mark its closest recorded requirement unmet and explain the omission;
 do not approve a narrower interpretation while the actual request is unfinished.
@@ -744,6 +753,7 @@ def assess(ctx, draft="", preflight=False):
     baseline = evidence["preservation_baseline"] or evidence["before"]
     by_id = {row["id"]: row for row in rows}
     source_video = evidence["source"].get("video") or {}
+    timing_adjudicated = False
     for requirement in contract["requirements"]:
         lanes = set(requirement["lanes"])
         if requirement["action"] == "preserve":
@@ -760,6 +770,19 @@ def assess(ctx, draft="", preflight=False):
                 reason="The saved edit violates the request's protection of " + ", ".join(violations) + ".",
                 evidence=["/after", "/preservation_baseline" if evidence["preservation_baseline"] else "/before"])
             value["remaining"] = (value["remaining"].strip() + " " + row["reason"]).strip()
+        elif (requirement["id"] == "system:timing" and baseline
+              and requirement["action"] == "preserve" and lanes == {"timeline_timing"}):
+            # This generated requirement has one exact meaning. Existing
+            # black frames or pauses cannot make an unchanged clock violate
+            # preservation, or manufacture permission to shorten it.
+            by_id[requirement["id"]].update(
+                status="satisfied", blocker_kind="none",
+                reason="The saved picture timing and duration match the protected baseline.",
+                evidence=["/after", "/preservation_baseline" if evidence["preservation_baseline"] else "/before"])
+            timing_adjudicated = True
+    if timing_adjudicated:
+        value["remaining"] = "; ".join(r["reason"] for r in rows
+                                        if r["status"] != "satisfied")
     complete = all(r["status"] == "satisfied" for r in rows)
     dependencies = evidence["dependencies"] or {}
     if dependencies.get("edl_version") == latest["version"] and not dependencies.get("ready"):

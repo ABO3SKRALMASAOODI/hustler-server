@@ -24558,6 +24558,7 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                 prior_records=getattr(ctx, "verification_records", None),
                 media_keys=getattr(ctx, "request_media_keys", None),
                 baseline_keys=_baseline_keys(ctx),
+                semantic_contract=getattr(ctx, "semantic_contract", None),
                 start_edl=(getattr(ctx, "turn_start_edl", None)
                            or {}).get("json"))
             if not hasattr(ctx, "verification_records"):
@@ -26020,7 +26021,8 @@ def ask_user(ctx, question):
     repeat_offer = music_gate.repeat_offer_refusal(ctx, q)
     if repeat_offer:
         return repeat_offer
-    q = q[:600]
+    # A question is a user decision, not a log excerpt. Truncating it can
+    # remove the actual choice, source list or a later music option.
     # Owner rule (Wave 0, 0C): a question that offers library tracks opens
     # a pick offer — the only way a library track becomes the user's pick
     # (music_gate). The in-app user's reply is checked against it next turn;

@@ -201,12 +201,16 @@ def measure(path, duration_s=None, master=None, silent_by_design=False):
             continue
         dead.append([round(s, 2), round(e, 2)])
     for s, e in dead[:3]:
-        findings.append(
-            f"dead air: {s:.1f}-{e:.1f}s is silent for {e - s:.1f}s — "
-            "tighten the cut, or let music/room tone cover it if the "
-            "pause is deliberate")
+        findings.append(silence_finding(s, e))
     return {"i": i, "tp": tp, "lra": lra, "silences": dead,
             "findings": findings}
+
+
+def silence_finding(start, end):
+    """Display text for a structured measured pause; shared with verification."""
+    return (f"dead air: {start:.1f}-{end:.1f}s is silent for {end - start:.1f}s — "
+            "tighten the cut, or let music/room tone cover it if the "
+            "pause is deliberate")
 
 
 def listen_windows(verify_times, duration, max_windows=2, halo_s=2.5,
