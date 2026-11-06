@@ -3525,6 +3525,15 @@ def _rendered_this_turn(ctx):
         and not bool(isinstance(preview, dict) and preview.get("cached"))
 
 
+def _note_unread_brief(ctx, honesty):
+    """On the job's own record, so a turn that ended fulfilled still files that
+    its request ran with nothing protected (ops_loop.gaps). The reason lives on
+    the brief, which survives a continuation."""
+    contract = getattr(ctx, "semantic_contract", None) or {}
+    if contract.get("mode") == "open":
+        honesty["brief_unavailable"] = contract.get("unavailable") or "unknown"
+
+
 def _landed_before_restart(ctx):
     """The worker died after this request's write landed. versions_written is
     this process's list, so a successor starts it empty and only the durable
@@ -5917,6 +5926,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
 
     honesty = _cont.get("honesty") or \
         {"false_claims": 0, "corrective_note": False}
+    _note_unread_brief(ctx, honesty)
     start_version = int(_cont.get("start_version")
                         or getattr(ctx, "prep_start_version", None)
                         or ctx.latest_edl()["version"])
@@ -6215,6 +6225,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 (getattr(ctx, "semantic_contract", None) or {}).get("request_digest")
                 != semantic_request.digest(ctx)):
             contract = semantic_request.ensure(ctx)
+            _note_unread_brief(ctx, honesty)
             messages.append({"role": "system", "content": (
                 "The updated customer request supersedes the old contract:\n"
                 + json.dumps(contract, ensure_ascii=False))})

@@ -162,6 +162,30 @@ def test_an_open_brief_that_delivered_an_edit_is_charged(monkeypatch):
     assert agent_loop._turn_completion(ctx, "replied")[1] is True
 
 
+def test_an_open_brief_stays_on_the_jobs_record_of_a_fulfilled_turn(monkeypatch):
+    """Nothing else files it: the turn succeeded."""
+    ctx, db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    ctx.semantic_contract["mode"] = "open"
+    ctx.semantic_contract["unavailable"] = "Contract field matches no allowed shape"
+    result = _run(ctx, db)
+    assert result["outcome"] == "fulfilled"
+    assert result["honesty"]["brief_unavailable"].startswith("Contract field")
+
+
+def test_a_read_brief_leaves_nothing_on_the_record(monkeypatch):
+    ctx, db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    assert "brief_unavailable" not in _run(ctx, db)["honesty"]
+
+
+def test_the_reason_survives_a_continuation_on_the_brief(monkeypatch):
+    ctx = NS(request_contract_required=True, verification_request=ASK, user_message=ASK,
+             semantic_contract=None, editing_metrics={})
+    request_contract._open_brief(ctx, ASK, "key", "provider down")
+    honesty = {}
+    agent_loop._note_unread_brief(ctx, honesty)
+    assert honesty == {"brief_unavailable": "provider down"}
+
+
 # ---- told once is not cleared ----------------------------------------------------
 
 def _broken(monkeypatch):

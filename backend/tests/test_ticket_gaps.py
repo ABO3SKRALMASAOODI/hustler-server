@@ -154,6 +154,31 @@ def test_a_continued_chain_is_judged_at_its_end(world):    # noqa: F811
     assert fired(world, gaps._request_changed_nothing) == []
 
 
+def test_a_request_that_ran_with_its_brief_unread_fires(world):    # noqa: F811
+    """It can end fulfilled, so no failure row would say it happened."""
+    jid = turn(world, honesty={"brief_unavailable": "Contract field matches "
+                               "no allowed shape at /"})
+    got = fired(world, gaps._brief_unread)
+    assert [f["ref"] for f in got] == [f"gap:brief:{jid}"]
+    assert got[0]["cause_key"].startswith("auto-gap-brief-unread-")
+    assert got[0]["severity"] == "P1" and got[0]["job_id"] == jid
+
+
+def test_a_brief_that_was_read_is_silent(world):    # noqa: F811
+    turn(world, honesty={"false_claims": 0})
+    turn(world)
+    assert fired(world, gaps._brief_unread) == []
+
+
+def test_an_unread_brief_is_judged_at_the_end_of_its_chain(world):    # noqa: F811
+    turn(world, continued_job_id="9", honesty={"brief_unavailable": "x"})
+    assert fired(world, gaps._brief_unread) == []
+
+
+def test_the_scan_runs_the_unread_brief_check():
+    assert gaps._brief_unread in gaps.CHECKS
+
+
 def test_the_first_cut_that_is_the_upload_fires(world):    # noqa: F811
     jid = turn(world, payload={"first_cut": True}, edl_version=1)
     got = fired(world, gaps._first_cut_is_the_upload)

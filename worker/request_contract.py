@@ -370,6 +370,7 @@ def _open_brief(ctx, request, key, why):
     ctx.semantic_contract = {
         "mode": "open", "music_requested": False, "timing_policy": "edit",
         "output_count": 1, "request_digest": key, "schema_version": 1,
+        "unavailable": str(why)[:300],
         "requirements": [{
             "id": "r1", "action": "change", "lanes": [], "quote": str(request),
             "inherited": False,
