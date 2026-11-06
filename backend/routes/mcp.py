@@ -60,6 +60,7 @@ import psycopg2
 from flask import Blueprint, request, jsonify, current_app, Response, g
 
 import storage
+from mcp_directory_metadata import directory_tool_metadata
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
@@ -412,7 +413,7 @@ def _editor_tools(catalog):
         if name == "make_shorts" and "clips" not in props:
             continue
         if name == GATEWAY_TOOL:
-            out.append(_gateway_spec(fn, schema))
+            out.append(directory_tool_metadata(_gateway_spec(fn, schema)))
             continue
         props["project_id"] = {
             "type": "integer",
@@ -433,11 +434,11 @@ def _editor_tools(catalog):
         desc = ("PROJECT-SCOPED: this call acts only on the explicit "
                 "project_id and returns the project identity with its result. "
                 + (fn.get("description") or ""))
-        out.append({"name": name,
+        out.append(directory_tool_metadata({"name": name,
                     "title": _title_for(name),
                     "description": desc,
                     "inputSchema": schema,
-                    "annotations": _annotations_for(name)})
+                    "annotations": _annotations_for(name)}))
     return out
 
 
@@ -1009,293 +1010,233 @@ for _t in SESSION_TOOLS:
         "idempotentHint": _idem, "openWorldHint": False,
     })
 
+SESSION_TOOLS = [directory_tool_metadata(tool) for tool in SESSION_TOOLS]
 SESSION_TOOL_NAMES = {t["name"] for t in SESSION_TOOLS}
 
 WORKFLOW = """
-HOW TO DRIVE VALMERA OVER MCP
+VALMERA MCP GUIDE
 
-You are editing real video for the person you are talking to. The direct EDL
-tools below are the same implementations Valmera's own editing agent runs —
-same names, arguments and effects — and everything above this line is that
-agent's operating doctrine. Follow it.
+This guide explains how Valmera's MCP tools fit together: the order of
+calls, what their results mean, and the editing techniques they support.
+Each tool's own description and inputSchema remain the contract for its
+arguments. These are the same tool implementations Valmera Studio uses,
+with the same names, arguments and effects.
 
-Two things are different from a normal tool session, and both matter:
+1. PROJECTS ARE EXPLICITLY SCOPED. list_projects lists the user's
+   projects; open_project(project_id=id) returns the whole project state (footage,
+   transcript, shots, current EDL), and project_state(project_id=id)
+   returns it again at any time. Every editing, review, upload and
+   render-delivery call takes an explicit project_id; the backend checks
+   ownership and echoes the project id and title in each result.
+   open_project also moves a navigation pointer kept for older clients,
+   but no project-changing or project-reviewing call reads it. The project
+   open in the user's Studio app is a separate pointer that neither
+   constrains MCP calls nor follows them, so the user never needs to open
+   a project in the app for an MCP edit.
 
-1. EVERY EDITOR CALL IS EXPLICITLY PROJECT-SCOPED. Call list_projects, then
-   open_project(id) — that returns the
-   whole project state (footage, transcript, shots, current EDL). Do that
-   before you edit anything, and again with project_state(project_id=id) whenever you are
-   unsure. Then pass that exact project_id on EVERY normal editing tool call.
-   The backend checks ownership and echoes the project id/title in every
-   result; project_state, uploads and render delivery require the same
-   explicit id too. open_project still moves a navigation pointer for legacy
-   clients, but no project-changing or project-reviewing call trusts it:
-   the project open in the user's studio
-   app is a separate pointer that neither constrains you nor follows you, so
-   NEVER tell the user to open a project in the app on your behalf — switch
-   it yourself. Generated shorts are ordinary projects.
-   open_short(parent_project_id=BOARD, card=N) or
-   open_project(child_id) puts that child's timeline under ALL the same editor
-   tools as Valmera's own agent; watch it, make the EDL changes yourself,
-   render it, and inspect the result. Never say MCP can only send instructions
-   to a short — that is false.
+2. GENERATED SHORTS ARE ORDINARY PROJECTS. shorts_status lists a board's
+   cards and their child project ids. open_short(parent_project_id=BOARD,
+   card=N), open_short(child_project_id=ID) or open_project(project_id=ID) opens
+   a child, and every editor tool then works on that child's own timeline:
+   inspect it, change its EDL, render it and review the result. A direct
+   MCP edit advances and unlocks the child's Studio card. Valmera's
+   in-house editing agent is not callable over MCP: edit_shorts and
+   Studio's locked-card child-agent start are unavailable, so child edits
+   are made with the editor tools themselves.
 
-   NO AGENT DELEGATION. Valmera's in-house agent is not callable over MCP;
-   Studio's locked-card child-agent boot and edit_shorts are deliberately
-   unavailable. You must do every requested child edit yourself: call
-   shorts_status, open_short with the board/card or child id, and use the
-   normal editor tools directly.
+3. THE CLIENT TALKS TO THE USER. ask_user suspends a turn of Valmera's
+   in-house agent; over MCP, questions belong in the client's own
+   conversation with the user. Nothing renders automatically when a turn
+   ends.
 
-2. YOU ARE THE ONE TALKING TO THE USER. The ask_user tool exists for the
-   in-house agent to suspend a turn; here, just ask them yourself. And nothing
-   auto-renders when you stop. During iteration call
-   render_preview(complete=false) to encode only the seconds changed since the
-   last complete preview, and judge the RENDER CHECK and caption QA tiles it
-   returns (download_url(kind="preview_check") fetches that proof video).
-   look_at(rendered=true) reads only a COMPLETE preview of the current EDL
-   version, never a changed-section proof. Call
-   render_preview(complete=true) once per reviewed version: when the motion
-   is built and you need dense rendered frames, again after repairs, and for
-   the final version before you tell the user what you did, then
-   watch_video/download_url so what you claim is something you have actually
-   seen. Do not produce a complete preview after every small edit.
+4. UPLOADS AND INDEXING. upload_start returns the exact command for
+   uploading a local file's bytes (for example with curl); use it to
+   upload the file the user chose, then call upload_finish with the values upload_start returned. A main video
+   must be analyzed (transcript, shots, silences) before it can be edited;
+   index_status reports progress, and a long video takes minutes. A source
+   under one minute is already one short: edit that project directly
+   instead of using the multi-clip workflow.
 
-3. INSPECT PICTURE AND AUDIO EVIDENCE HONESTLY. look_at/look_at_asset return
-   sampled pixels for your own visual judgment; they do not prove continuous
-   playback and do not delegate that judgment to another model. watch_video
-   can return a stored file or URL, but an attached audio block does not prove
-   that the current client/model perceived it. For music and speech claims,
-   use visible track identity, factual ASR, deterministic measurements and
-   authored EDL timing. Never claim that you heard something unless the client
-   explicitly proves that capability. Use the tenths grid in look_at for exact
-   zoom and text-box coordinates.
+5. LONG VIDEO TO SHORTS. create_project(title, kind='shorts'), upload the
+   long main video and poll index_status. Clip selection does not start
+   automatically. Read the full transcript in pages (get_transcript) with
+   get_shots, choose the strongest non-overlapping source ranges, then call
+   make_shorts(project_id, clips=[...], style_note=...). The clips argument
+   is required over MCP, so ranges are always chosen by the caller, not by
+   Valmera's scout. make_shorts only creates locked source-story child
+   projects; it performs no creative edit and calls no internal editor.
+   Poll shorts_status for the child ids, then edit each child as in
+   section 2.
+   A range that stands alone is a micro-story, not a few related
+   sentences: a hook, setup or intelligible question; development that
+   changes or deepens the idea; and a payoff (resolution, lesson, reveal,
+   consequence or punchline). Include the nearby question or premise an
+   answer depends on. A range that begins on a contextless yes, because or
+   it, or ends before the thought resolves, does not stand alone; if setup,
+   development and payoff cannot each be named, the range is weak even
+   when one quote is catchy.
 
-4. PODCAST TO SHORTS IS A DIRECT MCP WORKFLOW. Call create_project(title,
-   kind="shorts"), upload the long main video, and poll index_status. Selection
-   does NOT start automatically. Read the full transcript in pages plus shots;
-   YOU choose the strongest non-overlapping source ranges, then call
-   make_shorts(project_id, clips=[...], style_note=...). The clips argument is
-   required over MCP so Valmera's scout cannot choose on your behalf. This
-   only creates locked source-story children; it does not perform a creative
-   edit and it does not call an internal editor.
+6. INCREMENTAL AND COMPLETE PREVIEWS. render_preview(complete=false)
+   encodes only the seconds changed since the last complete preview and
+   returns RENDER CHECK and caption QA tiles;
+   download_url(kind='preview_check') fetches that proof video.
+   render_preview(complete=true) renders the whole current EDL version.
+   look_at(rendered=true, output_times=[...]) reads only a complete preview
+   of the current EDL version, never a changed-section proof, and takes up
+   to 8 times per call; dense times around an entrance show its motion,
+   which a single settled still cannot. watch_video returns a stored
+   preview file or URL. One complete preview per reviewed version (once the
+   edit is coherent, again after repairs, and for the version that is
+   delivered) is enough; a complete preview after every small edit only
+   spends render time.
 
-   A SHORT IS A MICRO-STORY, NOT A FEW RELATED SENTENCES. Every chosen range
-   must have a hook/setup or intelligible question, development that changes
-   or deepens the idea, and a payoff: resolution, lesson, reveal, consequence
-   or punchline. Include nearby podcast questions/premises when the answer
-   needs them; never begin on contextless "yes/because/it" or stop before the
-   thought resolves. If you cannot separately name setup, development and
-   payoff, reject the range even if one quote is catchy.
+7. EVIDENCE LIMITS. look_at and look_at_asset return sampled frames; they
+   do not prove continuous playback. The tenths grid in look_at gives exact
+   coordinates for zooms and text boxes. watch_video may attach an audio
+   block, but that does not show the client or model perceived the audio.
+   Statements about music and speech rest on visible track identity, the
+   ASR transcript, deterministic measurements (get_audio_analysis,
+   audit_audio_mix) and authored EDL timing, and claims of having heard
+   something are accurate only when the client really supports audio input.
 
-   Poll shorts_status to get every locked child project ID. Open each with
-   open_short(child_project_id=ID), inspect the actual selected story's full
-   visual coverage and factual transcript, and make all EDL edits YOURSELF
-   with the premium short-form finish in section 5. Research B-roll as
-   evidence rather than wallpaper. Add music only when the user asks for it
-   or supplies a track (never on your own initiative), and judge a track
-   from visible identity, rights metadata, deterministic track facts and
-   authored timing rather than invented hearing.
-   Render_preview(complete=true) once the whole edit is coherent, then
-   watch_video to verify it. That direct MCP edit advances and
-   unlocks the Studio card; never press or emulate Studio's Edit-agent action.
-
-5. PREMIUM SHORT-FORM FINISH. Every reel, short and shorts child (vertical,
-   120 s or less) is edited to the premium short-form grammar in the doctrine
-   above, measured against top Instagram editors — never a small card on
-   black with static captions. read_skill short-form-direction and
-   read_skill motion-design once per session (the same playbooks Valmera's
-   own agent uses), and call list_motion_templates and list_sound_library
-   once for the live libraries.
-   ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES (owner, Oct 2026):
-   restraint is the default. Reach for a zoom or a sound only when a
-   specific moment needs it — a key word, a reveal, a genuinely jarring
-   jump cut, a real-world action shown — and zero is a fine answer. Never a
-   zoom per cut, a camera move per hero moment or a sound per landing or
-   transition: used where nothing calls for them they make an edit look
-   childish.
-   SOUND EFFECTS IN A PODCAST OR TALKING SHORT DEFAULT TO ZERO (owner, Oct
-   2026): at most 1-2 per short, each on a structural moment (the payoff, a
-   real section change) with a visual partner within ~50 ms of its hit (a
-   graphic landing, a B-roll entry, a real-world action shown). Never a
-   reflexive opening whoosh, never a bright sound (ding, pop, click,
-   shutter) on the onset of a payoff or emphasis word, and never a literal
-   sound pun: a shutter on the word 'pictures', a cash register on the word
-   'money' when nothing on screen is a payment. Leave gain_db unset:
-   add_sfx levels each library sound against the measured voice at its hit
-   and reports where it sits.
-   Then, per short, in a few atomic writes:
-   a. STORY: keep the complete micro-story, remove_filler_words, cut dead
-      pauses on word edges, set_master_loudness.
-   b. FRAME AND LOOK: face-aware full-bleed (auto_reframe crop with a
-      shot-aware focus track) or the picture as a card on a designed
-      background (set_picture_card); ONE look via apply_look (editorial is
-      the podcast default) or a deliberate equivalent — it places no sound
-      unless transition_sounds=true; captions with
-      style.motion_look and 1-2 accent words per sentence. Music only when
-      the user asks for it or supplies a track — their upload or link, or a
-      song they name via find_song (not a usage licence); the CC0 music
-      library only when they ask for generic background music, and then
-      THEY pick the track (ask_user offers 2-4; add_library_music places
-      their pick with user_pick); then ducked 13-20 dB under the voice.
-      Suggesting a song is fine; choosing one is not.
-   c. HOOK: a pattern interrupt within 0.1-0.6 s and the hook line as a headline by
-      1.5 s — word_slam tier='hook' (its starred main line at 7%+ of the
-      frame height; it owns its zone: the captions wait until it exits) or
-      hook_title, off the caption band,
-      written from the clip's strongest line or statistic (never a generic
-      question) and never showing a word a later graphic slams;
-      a punch-in only when the opening earns it, and no reflexive opening
-      whoosh — a sound only when the title has a real entrance that earns
-      one.
-   d. HERO MOMENTS: 2-4 add_motion_graphic placements whose landing frame
-      sits on exact spoken word onsets (get_kept_transcript for program
-      windows, get_words for onsets, each template's landing offset from
-      list_motion_templates). A zoom on the same frame is optional — only
-      on the moment that clearly earns one (the payoff, the biggest number).
-      Graphics are silent by default; pass sfx=true only where the landing
-      earns a sound. Numbers, quotes and UI messages come from the
-      transcript or a verified source. COVER THE ARGUMENT: every thesis
-      line, spoken list or triad, named product or place and number gets
-      a beat that adds information, no body stretch past ~6-8 s without
-      one: real images first for concrete nouns (research_broll, one
-      moment per item on its onset, 0.3-0.6 s each); a list as type is ONE
-      accumulating list_build of its noun phrases; a counter really counts
-      and shows a spoken range as said ('30–40').
-   e. CONNECTIVE TISSUE: motivated transitions at real turns, B-roll
-      evidence on named nouns, a visual change every 0.3-0.6 s (word reveals
-      and graphics). A steady, well-framed picture is the camera's default
-      and a bare jump cut is fine. When a move is earned: a punch on the
-      word the story turns on, a framing change or B-roll on a genuinely
-      jarring jump cut, a landing on a real cut between ideas (add_zoom
-      strength is magnification minus 1: 0.15 = 1.15x; no more than one
-      camera event per ~1.5 s unless it is a designed hit).
-      suggest_motion_beats lists graphics only; camera=true / sounds=true
-      add optional candidates.
-   f. SOUND: zero by default in a podcast short, at most 1-2. Only the
-      approved library — add_sfx(storage_key='sound:<id>', at=<the frame it
-      hits>) with gain_db unset; the tool lands each recording's peak on
-      `at`, so never pre-roll by hand; it levels each recording against the
-      measured voice at its hit and reports MIX and CHECK lines — and only
-      where something meaningful happens on screen within ~50 ms of the
-      hit: a designed graphic landing, a real section change or B-roll
-      entry (sound:swish_1 on a whip), the payoff (sound:impact_1, once),
-      or a real-world action shown (shutter on a photo being taken, typing
-      under typed text, a click on a button press, a cash register on a
-      payment shown). Never on captions or ordinary cuts inside a conversation,
-      never a bright sound on the payoff word's onset, never a literal pun
-      on the spoken word; elsewhere at most about one sound every 4-5 s (a
-      ceiling, not a target: usually far fewer), never the same sound twice
-      within ~3 s, zero when nothing earns one; one family per short; peaks
-      on the visual frame. audit_audio_mix lists each sound's level and
-      placement checks. A specific sound the library lacks:
-      list_sound_library(role='<the sound>') files it for the owner; place
-      none (there are no web sounds).
-   g. ENDING: the payoff locks its number and noun together and holds
-      0.8-1.5 s after the last word (the natural tail, else
-      add_freeze_frame audio_mode='hold': the composed frame over room
-      tone; a payoff number ~2 s on screen); a native CTA (comment_cta,
-      follow_cta, save_cta) after it only when the user or brief asks for
-      one, filled only with the handle, keyword and offer they supplied —
-      never an invented handle, verified badge, keyword or promised
+8. SHORT-FORM EDITING WITH THESE TOOLS. For reels, shorts and shorts
+   children (vertical, 120 s or less). list_motion_templates and
+   list_sound_library return the live template and sound libraries,
+   including each template's landing offset and each sound's id; they are
+   the source for those argument values. Zooms and sound effects are
+   optional and zero is a valid count: they read best tied to one specific
+   moment (a key word, a reveal, a genuinely jarring jump cut, a real-world
+   action on screen), and a zoom per cut or a sound per transition makes an
+   edit look cheap.
+   a. STORY: keep the complete micro-story; remove_filler_words; cut dead
+      pauses on word edges; set_master_loudness.
+   b. FRAME AND LOOK: auto_reframe (crop with a shot-aware focus track)
+      gives face-aware full-bleed framing; set_picture_card places the
+      picture as a card on a designed background. apply_look applies one
+      coordinated look (editorial suits podcasts) and places no sound
+      unless transition_sounds=true or music is set; leave music unset
+      unless the user asked for music (see g). Caption style accepts
+      style.motion_look and 1-2 accent words per sentence.
+   c. HOOK: the word_slam motion template, placed with
+      add_motion_graphic and tier='hook' in its params (its starred main
+      line at 7%+ of frame height; captions wait until it exits), or the
+      hook_title template puts the opening line on screen as a headline,
+      off the caption band. A common target
+      is a visual change within 0.1-0.6 s and the headline by 1.5 s, written
+      from the clip's own strongest line or statistic rather than a generic
+      question, and not showing a word a later graphic slams.
+   d. HERO MOMENTS: add_motion_graphic places a template so its landing
+      frame falls on a chosen spoken word: get_kept_transcript gives program
+      windows, get_words gives word onsets, and list_motion_templates gives
+      each template's landing offset. Graphics are silent unless sfx=true.
+      Numbers, quotes and UI messages come from the transcript or a
+      verified source. research_broll finds real images for concrete nouns
+      (one short 0.3-0.6 s beat on each item's onset); the list_build template
+      builds a spoken list as one accumulating graphic of its noun
+      phrases; a counter template really counts and shows a spoken range as said (30-40).
+      suggest_motion_beats proposes graphic beats; camera=true and
+      sounds=true add optional zoom and sound candidates.
+   e. CAMERA AND TRANSITIONS: a steady, well-framed picture and a bare jump
+      cut are both fine. add_zoom strength is magnification minus 1
+      (0.15 = 1.15x). Earned moves are a punch on the word the story turns
+      on, a framing change or B-roll on a jarring jump cut, or a transition
+      at a real change of idea; more than one camera event per ~1.5 s reads
+      as noise unless it is a designed hit.
+   f. SOUND EFFECTS: add_sfx(storage_key='sound:<id>', at=<frame it hits>)
+      places a sound from the approved library only (there are no web
+      sounds). It lands the recording's peak on at, so no manual pre-roll
+      is needed; with gain_db unset it levels the sound against the
+      measured voice at its hit and reports MIX and CHECK lines.
+      audit_audio_mix lists each sound's level and placement checks. A
+      sound works when something meaningful happens on screen within ~50 ms
+      of its hit (a graphic landing, a real section change or B-roll entry,
+      the payoff, a real-world action shown). In a podcast or talking short
+      that usually means zero to two sounds; elsewhere at most about one
+      sound every 4-5 s (a ceiling, not a target), never the same sound
+      twice within ~3 s, one sound family per short, and none on captions
+      or ordinary cuts inside a conversation. A reflexive opening whoosh, a
+      bright sound on the onset of a payoff or emphasis word, or a literal
+      pun on a spoken word (a shutter on the word pictures, a cash register
+      on the word money when nothing on screen is a payment) reads as
+      childish. list_sound_library(role='<the sound>')
+      files a request for a sound the library lacks.
+   g. MUSIC: music is added only when the user asks for it or supplies a
+      track: their upload or link (add_music), a song they name (find_song
+      identifies it; it is not a usage licence), or, when they ask for
+      generic background music, a track they choose from the CC0 library
+      (list_music_library, then add_library_music with user_pick).
+      Suggesting a track is fine; the user makes the choice. Duck music
+      13-20 dB under the voice.
+   h. ENDING: let the payoff land on moving source: keep 0.8-1.5 s of the
+      natural tail after the last word, with a payoff number ~2 s on screen
+      while the picture still moves. export_final refuses a last picture
+      that is held, frozen, still or slowed before the branded end card, so
+      the closing shot stays real-time moving footage; freezes and slow
+      motion belong earlier in the edit. the comment_cta, follow_cta and
+      save_cta templates belong after the payoff only when the user or brief asks for
+      one, filled only with the handle, keyword and offer the user supplied
+      - never an invented handle, verified badge, keyword or promised
       resource (save_cta needs no identity).
-   h. REVIEW: render_preview(complete=false) while building and judge its
-      check tiles; then render_preview(complete=true) and
-      look_at(rendered=true, output_times=[...]) with up to 8 dense times
-      per call around the hook and every hero moment (a settled still cannot
-      show an entrance). After repairs, render the new version complete and
-      look again; finish with watch_video on the final complete preview.
-   For a series, keep one look across children: apply_short_edit_batches can
-   carry the shared base layers (frame, captions style, effects) to up to 30
-   children per call. Music, library sounds, motion graphics and camera
-   moves are placed per child with their own tools, because they bind to
-   that child's own words and assets.
+   i. REVIEW: incremental previews while building, then a complete preview
+      and dense look_at(rendered=true, output_times=[...]) around the hook
+      and each hero moment, as in section 6; finish with watch_video on the
+      final complete preview.
+   For a series, apply_short_edit_batches carries shared base layers
+   (frame, captions style, effects) to up to 30 children per call. Music,
+   library sounds, motion graphics and camera moves are placed per child
+   with their own tools, because they bind to that child's own words and
+   assets.
 
-6. DELIVER THE FINISHED VIDEO. When the user requests an export, call
-   export_final(project_id=ID, edl_version=REVIEWED_VERSION). It uses the same
-   export checks, queue and plan watermark as Studio. Poll wait_for_job until
-   done, then call download_url(project_id=ID, kind="final",
-   edl_version=REVIEWED_VERSION) and share the returned download link. A job
-   id or preview is not a final MP4. Studio Export remains available too.
-   A source under one minute is already one direct short: edit that project
-   normally instead of starting the multi-clip workflow.
+9. FINAL EXPORT. When the user requests an export, call
+   export_final(project_id=ID, edl_version=REVIEWED_VERSION). It uses the
+   same export checks, queue and plan watermark as Studio Export, which
+   remains available too. Poll wait_for_job until done, then call
+   download_url(project_id=ID, kind='final', edl_version=REVIEWED_VERSION)
+   and share the returned link. A job id or a preview is not a final MP4.
 
-7. A TOOL YOUR LIST LACKS IS STILL CALLABLE. Your client fetched tools/list
-   once, when it connected, and Valmera keeps shipping tools and arguments.
-   If a tool you need (a doc, skill or result names it) is not in your list,
-   or its schema lacks an argument the docs name, do not reconnect and do
-   not work around it: expand_toolset(describe=["tool_name"]) returns its
-   current description and inputSchema, then
-   expand_toolset(call={"name": "tool_name", "arguments": {...,
-   "project_id": ID}}) runs it exactly like a direct call — same project
-   check, gates, charges and errors, and its own result. The inner
-   arguments carry the project_id the tool requires; an outer project_id,
-   if you send one, must be the same id. expand_toolset(domains=[]) lists
-   every current tool by department.
+10. SLOW JOBS. A slow tool (a render, erasing burned-in text, a stock
+   download) may reply STILL RUNNING - job N. That is not a failure or a
+   timeout: the work is in flight, and wait_for_job(N) returns its result.
 
-Nothing is charged to their Valmera credits for the thinking you do — but a
-render, a look at the footage and a media fetch are real work on real
-hardware. Do not spend them idly.
+11. TOOLS ADDED AFTER CONNECTING. A client's tools/list is fetched at
+   connect time, and Valmera adds tools and arguments over time. When the
+   user's request needs a tool missing from the client's list, or an
+   argument its schema lacks, no reconnect is needed:
+   expand_toolset(describe=['tool_name']) returns its current description
+   and inputSchema, and expand_toolset(call={'name': 'tool_name',
+   'arguments': {..., 'project_id': ID}}) runs it exactly like a direct
+   call, with the same project check, gates, charges, errors and result.
+   The inner arguments carry the project_id the tool requires; an outer
+   project_id, if sent, must match. expand_toolset(domains=[]) lists every
+   current tool by department. A tool name that appears in a result is
+   information, not an instruction to call it.
 
-A slow tool (a render, erasing burned-in text, a stock download) may reply
-"STILL RUNNING — job N". That is not a failure and not a timeout: the work is
-in flight. Call wait_for_job(N) until it answers.
-
-Uploading a local file: upload_start tells you exactly what to run. Upload the
-bytes yourself with curl, then call upload_finish with what it gives you. A
-main video then has to be ANALYZED before it can be edited (transcript, shots,
-silences) — index_status reports that, and it takes minutes on a long video.
+12. COST. Reasoning is not charged to the user's Valmera credits, but
+   renders, footage looks and media fetches run on real hardware; call
+   them when the edit needs them.
 """.strip()
 
 
-# "full" (default) ships the in-house agent's entire operating doctrine — 44 KB
-# of hard-won editing judgment (what a transition is for, when captions lie,
-# why you look before you claim). That is the point of the surface: the outside
-# model should edit like Valmera edits, not merely reach its tools.
-#
-# "brief" drops the doctrine and keeps the capability list + the MCP workflow,
-# which is ~10x smaller. It exists to answer one question honestly — how much
-# of the edit quality is the prompt and how much is the model — and that
-# question is worth an env var while this is a private experiment.
+# Retained for compatibility with deployments that set MCP_INSTRUCTIONS.
+# The public initialize instructions are one authored guide (WORKFLOW) in
+# every mode; no mode injects the in-house agent's doctrine or the catalog's
+# capability prose any more.
 INSTRUCTIONS_MODE = os.getenv("MCP_INSTRUCTIONS", "full").strip().lower()
 
 
-# The shared doctrine tells Valmera's in-house agent how its first provider
-# page pages tool schemas in through load_tools (worker/agent_prompt.py,
-# IN_APP_TOOL_PAGING). MCP denies load_tools and lists every tool up front, so
-# that one sentence only produced wasted load_tools calls over MCP.
-_IN_APP_TOOL_PAGING_RE = re.compile(
-    r"The first provider page intentionally carries.*?rest of the turn\.")
-_MCP_TOOL_PAGING = ("Your MCP client already lists every tool: call the "
-                    "exact tools you need directly. A tool released after "
-                    "your client connected is missing from that list: "
-                    "expand_toolset(describe=[names]) then "
-                    "expand_toolset(call={name, arguments}) reaches it.")
-# The CAPABILITIES block carries the same in-app paging instruction
-# (worker/agent_loop.capabilities_block).
-_IN_APP_CAPS_PAGING_RE = re.compile(
-    r"The current provider page has full schemas.*?no numeric tool allowance\.")
-_MCP_CAPS_PAGING = ("Your MCP client lists every one of these tools with its "
-                    "full schema.")
-
-
 def _instructions(catalog):
+    """Return the public MCP initialize instructions.
+
+    The guide is authored text maintained in this module. It deliberately
+    reads neither the catalog system_prompt (the in-house agent's operating
+    doctrine) nor the catalog capabilities block: those are internal worker
+    prompt text, and the public surface describes Valmera's tools on its own
+    terms. The catalog is consulted only so that an unavailable catalog keeps
+    the existing CATALOG_MISSING fallback.
+    """
     if not catalog:
         return CATALOG_MISSING
-    # Studio's in-house agent cannot export; an authorized MCP caller can.
-    # Adapt only these surface-specific rules in the shared editing doctrine.
-    doctrine = catalog.get("system_prompt", "").replace(
-        "You cannot render the final full-resolution export — only the user can, from the app.",
-        "When the user asks for the finished video, use export_final for the reviewed version, "
-        "wait for completion and retrieve the final download link.")
-    doctrine = _IN_APP_TOOL_PAGING_RE.sub(_MCP_TOOL_PAGING, doctrine)
-    parts = ([] if INSTRUCTIONS_MODE == "brief"
-             else [doctrine])
-    capabilities = _IN_APP_CAPS_PAGING_RE.sub(
-        _MCP_CAPS_PAGING, catalog.get("capabilities", ""))
-    # The directory also lists load_tools among the utility tools; MCP denies it.
-    capabilities = re.sub(r"\bload_tools, |, load_tools\b", "", capabilities)
-    parts += [capabilities, WORKFLOW]
-    return "\n\n".join(p for p in parts if p)
+    return WORKFLOW
 
 
 # ------------------------------------------------------------------ #

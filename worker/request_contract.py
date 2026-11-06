@@ -188,7 +188,12 @@ Use blocker_kind=customer_input only for a genuinely missing customer-supplied
 file, choice or essential instruction, never for work already authorized or a
 selection already made in the brief. Provider failure is not customer_input.
 Produce one status per requirement, no omissions. 'completed' and 'remaining'
-are concise factual customer-facing sentences in the customer's language.
+are concise factual customer-facing sentences, written in the language of the
+customer's own words in this request (not the language of the evidence, of the
+product's messages or of a suggestion chip the customer tapped). They speak to
+someone who has never seen our tools: no version numbers, no layer, patch or
+requirement ids (v17, rg1, pa1, r2), no tool or QC terms; "the blur boxes", not
+"regions". Say what is on the video now and what is not done, plainly.
 remaining must name every unmet/unknown/blocked requirement (group related ones).
 Do not say Done/ready/complete while any requirement remains. No new upsell or
 permission request for already authorized edits. Use assess_request once."""

@@ -34,6 +34,7 @@ MAX_DZ = 0.45               # the push changes by at most this per keyframe
 END_PUSH = 0.1              # the last keyframe pushes a little further: live
 LOOKS = 6                   # frames the model boxes
 TAKE_STEPS = 6              # a long take's push: this many keyframes end to end
+TAKE_LEAST_Z = 1.2          # ... and never less than this, whatever fills the frame
 
 SYSTEM = (
     "You direct the camera on a short silent clip. Each numbered image is one "
@@ -179,14 +180,16 @@ def _window(cx, cy, z):
             round(y0 + 2 * half, 4)]
 
 
-def keyframes(samples, prog, start_s=START_S, step_s=STEP_S, max_dz=MAX_DZ):
+def keyframes(samples, prog, start_s=START_S, step_s=STEP_S, max_dz=MAX_DZ,
+              least_z=1.0):
     """add_zoom_path keyframes [{t, rect, strength}] from the looks
     [(second, box)], or [] when they hold no subject worth a camera: the
     untouched frame until the camera starts, then an eased push whose depth
     follows the subject's height and whose window follows its centre, a
     keyframe every ``step_s``, the last one a little deeper (live to the
     end). A longer take passes a longer step and a smaller ``max_dz``: its
-    push lasts the take instead of landing in five seconds and holding."""
+    push lasts the take instead of landing in five seconds and holding, and
+    ``least_z`` keeps it moving when the subject already fills the frame."""
     if len(samples) < 3 or prog < 3.0:
         return []
     samples = sorted(samples)
@@ -199,7 +202,7 @@ def keyframes(samples, prog, start_s=START_S, step_s=STEP_S, max_dz=MAX_DZ):
         b = _at(samples, min(t, prog))
         cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
         bh, bw = max(MIN_H, b[3] - b[1]), max(0.05, b[2] - b[0])
-        z = max(1.0, min(Z_MAX, FILL / bh, 0.9 / bw))
+        z = max(least_z, min(Z_MAX, FILL / bh, 0.9 / bw))
         z = min(max(z, z_prev - max_dz), z_prev + max_dz)
         pts.append((t, cx, cy, z))
         z_prev = z
@@ -249,7 +252,8 @@ def camera(ctx, steps, started, run, spend, samples=None, across_take=False):
     if samples is None:
         samples = whole_looks(ctx, spend)
     pace = {"step_s": max(STEP_S, prog / TAKE_STEPS),
-            "max_dz": (Z_MAX - 1.0) / TAKE_STEPS} if across_take else {}
+            "max_dz": (Z_MAX - 1.0) / TAKE_STEPS,
+            "least_z": TAKE_LEAST_Z} if across_take else {}
     keys = keyframes(samples, prog, **pace)
     if not keys:
         return None

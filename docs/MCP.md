@@ -16,23 +16,64 @@ thinking; Valmera does the editing. That is exactly the trade the `mcp` plan
 was always written around ("brings its own model").
 
 **There is no second editor.** The tools are not re-declared for MCP. The
-worker publishes its live registry on boot; the backend clones each live
-schema only to add the transport-level required `project_id`, title and MCP
-behavior hints. Every actual editor argument, description and honest-off gate
-still comes from the same registry (a tool whose backing service has no key is
-hidden from both). Agent orchestration is the intentional exception: Studio's
+worker publishes its live registry on boot, and every MCP call executes the
+same live tool in the worker. The backend clones each live schema to add the
+transport-level required `project_id`, title and MCP behavior hints; every
+editor argument still comes from the same registry. Each tool's public
+description is authored directory metadata: a concise functional description
+of what the tool does, kept separate from the in-house agent's prompt text.
+Directory metadata also supplies the missing parameter types for three
+parameters whose live schema omitted them, without changing what those
+arguments mean. Honest-off gates still come from the registry (a tool whose
+backing service has no key is hidden from both). Agent orchestration is the intentional exception: Studio's
 card-level Edit action and `edit_shorts` are excluded because MCP must edit a
 child EDL directly, never delegate to Valmera's agent. Execution happens in
 the worker, in the same `ToolContext` an
-agent turn uses. There is no capability copy to keep in sync —
-`worker/tests/test_mcp_surface.py` fails if one appears.
+agent turn uses. There is no copy of tool schemas to keep in sync —
+`worker/tests/test_mcp_surface.py` fails if one appears. This applies to
+`tools/list` and `tools/call` only. The `initialize` instructions are a
+separately authored guide (see below) and carry no worker prompt text.
 
 On top of that, **session tools** the studio UI normally covers and a
 headless model cannot: `list_projects`, `open_project`, `open_short`,
 `create_project`, `project_state`, `upload_start`, `upload_finish`,
 `index_status`, `shorts_status`, `wait_for_job`, `download_url`, `watch_video`.
-Final export is intentionally absent: MCP prepares and verifies the edit, and
-the user creates the deliverable from Valmera Studio.
+Final export is available over MCP: when the user requests the finished video,
+`export_final(project_id, edl_version)` exports a reviewed EDL version through
+the same export checks, queue and plan watermark as Studio Export.
+`wait_for_job` reports completion and `download_url(kind="final")` returns
+the link. Studio Export remains available too.
+
+## Initialize instructions
+
+The `initialize` response carries one authored guide, `WORKFLOW` in
+`backend/routes/mcp.py`. It describes Valmera's real MCP tools on its own
+terms. It covers:
+
+- explicit project scoping
+- uploads and indexing
+- direct editing of generated short children
+- `make_shorts` with caller-chosen clip ranges
+- incremental versus complete previews
+- the limits of frame and audio evidence
+- short-form techniques expressed through real tool arguments
+- versioned final export
+- slow-job handling with `wait_for_job`
+- `expand_toolset` for tools added after a client connected
+
+The guide is self-contained. It never includes the in-house agent's operating
+doctrine or the catalog's capability prose, and it does not direct clients to
+load behavioral instructions from any tool or external source. `read_skill`
+remains an ordinary tool a user can ask for, and nothing in the guide depends
+on it.
+
+When the tool catalog is unavailable, `initialize` returns the existing
+`CATALOG_MISSING` text. `MCP_INSTRUCTIONS` is still read for compatibility,
+but it no longer changes the instructions.
+
+The guide is maintained by editing `WORKFLOW` and updating its tests in
+`backend/tests/test_mcp.py`. Tool names, schemas and execution do not depend
+on it.
 
 ## Turning it on (once)
 
@@ -52,9 +93,10 @@ adds the four OAuth tables claude.ai needs.
 **2. Deploy** backend + worker (push to `main`) — DONE. The worker publishes
 its tool catalog on boot and, if that fails (migration not applied yet), keeps
 retrying from the reaper until it lands: look for `[mcp] published tool
-catalog`. The backend adds the session tools above and explicitly filters final
-export and agent delegation even if an old worker catalog or connected client
-still remembers them.
+catalog`. The backend adds the session tools above and explicitly filters agent
+delegation (Studio's card-level Edit action and `edit_shorts`) even if an old
+worker catalog or connected client still remembers them. Final export is not
+filtered: it is available as `export_final`.
 
 **Capabilities currently OFF on the worker**, so they are hidden from the
 connector rather than failing when called: `search_stock` / `add_stock_media`
@@ -359,12 +401,11 @@ encode settings, so asking for the same window twice encodes once.
   Advanced contracts enforce server-side tool/generation budgets; older
   contracts retain their own policy. Never infer free provider usage from
   an MCP connection. Media work executes remotely, not on Render.
-- **The instructions are the whole doctrine.** `initialize` returns the agent's
-  44 KB system prompt + the generated capability list + an MCP workflow note,
-  so your model edits the way Valmera edits rather than merely reaching its
-  tools. Set `MCP_INSTRUCTIONS=brief` on the backend to drop the doctrine and
-  keep only the capability list — that is the A/B for "how much of the quality
-  is the prompt and how much is the model".
+- **The instructions are an authored guide.** `initialize` returns the
+  self-contained MCP guide described under Initialize instructions. It does not
+  include the in-house agent's system prompt or the generated capability list.
+  `MCP_INSTRUCTIONS` is still read for compatibility but no longer changes the
+  guide.
 - **Capacity.** The worker runs MCP on its own lane (`WORKER_MCP_SLOTS`, 3), so
   a tool call never queues behind a customer's agent turn and never takes a
   slot from one. Renders still share the single media lane with everyone else.
@@ -414,7 +455,7 @@ Cloudflare container ceilings; a regression test enforces that relationship.
 | `MCP_REFRESH_TTL_S` | backend | 7776000 | refresh-token lifetime |
 | `MCP_SYNC_WAIT_S` | backend | 110 | longest a call blocks before ticketing |
 | `MCP_INDEX_WAIT_S` | backend | 90 | longest an editor call waits for running analysis |
-| `MCP_INSTRUCTIONS` | backend | `full` | `brief` drops the doctrine |
+| `MCP_INSTRUCTIONS` | backend | `full` | retained for compatibility; does not change the `initialize` guide |
 | `MCP_AUDIO_OUT` | worker | on | attach the window's sound to `watch_video` |
 | `MCP_AUDIO_MAX_KB` / `MCP_AUDIO_MAX_KBPS` / `MCP_AUDIO_MIN_KBPS` | worker | 256 / 48 / 24 | the audio budget, and the floor below which a long window gets no sound rather than an unlistenable one |
 | `MCP_AUDIO_MAX_MB` | backend | 4 | outer bound on audio carried in a reply |
