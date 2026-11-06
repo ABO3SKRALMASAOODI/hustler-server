@@ -285,19 +285,18 @@ def test_a_four_letter_message_no_longer_blinds_the_check():
     assert agent_loop._dominant_script(RU_REPLY, min_letters=10) == "Cyrillic"
 
 
-def test_the_enforcement_reads_the_whole_conversation():
-    import inspect
-    src = inspect.getsource(agent_loop._enforce_reply_language)
-    assert 'm.get("role") == "user"' in src, "must scan the message history"
-    # ...and BOTH halves of the decision must use that same evidence, or a
-    # bilingual user's deliberate Cyrillic reply gets rewritten because their
-    # last message happened to be "ok". Round 96c moved the decision into
-    # _language_flip; the whole-conversation `joined` text must feed every
-    # clause there — the user-script fallback, the wrote-that-script-anywhere
-    # veto, and the same-script marker measurement.
-    assert "joined" in src and "_language_flip(joined" in src
-    flip_src = inspect.getsource(agent_loop._language_flip)
-    assert flip_src.count("joined") >= 3
+def test_the_enforcement_reads_the_whole_conversation(monkeypatch):
+    # A short "Sure" is measured with everything the customer typed before.
+    ctx = _ctx()
+    ctx.customer_texts = ["What happened", "How many pictures do you see",
+                          "Enhance the video and make it look viral"]
+    monkeypatch.setattr(llm, "create_with_dialect",
+                        lambda *a, **kw: _fake_resp(_EN_REPLY))
+    monkeypatch.setattr(llm, "record", lambda *a, **k: None)
+    honesty = {}
+    out = agent_loop._enforce_reply_language(
+        ctx, None, [], [], _RU_REPLY, "Sure", honesty)
+    assert out == _EN_REPLY and honesty["language_fixed"] is True
 
 
 def test_a_user_who_writes_cyrillic_is_still_left_alone():

@@ -2,11 +2,9 @@
 
 2026-08-09, production: English-writing users received replies in Russian
 (via ask_user), Spanish, Turkish, Albanian, Portuguese and Romanized Hindi
-within twelve hours. The script check caught only the Russian; the marker
-vote missed the rest because a two-sentence reply rarely carries three
-distinctive function words. These are those exact replies (trimmed), pinned
-as fixtures: every one must flip, and the legitimate replies beside them
-must not.
+within twelve hours. The script count catches the cross-script ones and these
+fixtures pin it; same-script flips belong to the model
+(tests/test_reply_language.py).
 """
 
 import agent_loop as al
@@ -39,36 +37,6 @@ def test_english_advisory_must_not_run_before_the_language_check():
         "independent visual review at 12.2s: two text cards compete.")
     # Documents the failure mode the call-site order must avoid.
     assert al._dominant_script(diluted) in (None, "Latin")
-
-
-def test_spanish_reply_to_english_user_flips():
-    assert _flip("Descargué y añadí “Hans Zimmer - Interstellar Main "
-                 "Theme” (versión no oficial de SoundCloud) como pista "
-                 "musical con ducking suave durante todo el programa. La "
-                 "mezcla quedó aplicada al video actual; el proyecto no "
-                 "contiene shorts separados en este momento.") is not None
-
-
-def test_turkish_reply_to_english_user_flips():
-    assert _flip("Edit teslim edildi: 19,83 saniyelik dikey klasik anime "
-                 "tarzı kamera tanıtımı; sinematik siyah-beyaz görünüm, "
-                 "kırmızı vurgu, ritmik altyazılar ve temiz vignette "
-                 "kullanıldı.") is not None
-
-
-def test_albanian_reply_to_english_user_flips():
-    assert _flip("Editimi tani është një Reel 7,6-sekondësh me fillim të "
-                 "drejtpërdrejtë, dy tekstet vetëm gjatë 2,8 sekondave të "
-                 "para dhe një payoff të pastër të outfit-it pa "
-                 "mbishkrime shtesë; audioja është normalizuar.") is not None
-
-
-def test_portuguese_reply_to_english_user_flips():
-    assert _flip("O vídeo ficou como um desafio completo de 3:18, com "
-                 "cortes de dead time, hook visual, ritmo acelerado, "
-                 "captions em hindi, zooms de reação, grade quente, "
-                 "música funk com ducking e mix normalizado. A prévia "
-                 "confirmou o corte.") is not None
 
 
 def test_english_reply_with_accented_quote_does_not_flip():

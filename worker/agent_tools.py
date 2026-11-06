@@ -576,6 +576,27 @@ class ToolContext:
         return (self.credit_budget is not None and
                 self.running_credits() >= self.credit_budget)
 
+    def start_asset_index(self, asset):
+        """What the model is told about an asset with no analysis: the job
+        that is producing it, started now when nothing was (ticket #386)."""
+        if asset.get("kind") not in ("video_clip", "music"):
+            return ("That asset has no reusable media index. Use look_at_asset "
+                    "for its picture or get_audio_analysis for its sound.")
+        failed = self.db.run(dbx.last_index_failure, self.project_id,
+                             asset["id"])
+        if failed:
+            return (f"UNAVAILABLE: the analysis of that clip failed "
+                    f"({str(failed)[:300]}) and was not restarted. Use "
+                    "look_at_asset for its picture or get_audio_analysis for "
+                    "its sound, and tell the user plainly what could not be "
+                    "read.")
+        owner = self.project.get("user_id") or self.job.get("user_id")
+        job_id = self.db.run(dbx.enqueue_asset_index, self.project_id, owner,
+                             asset["id"])
+        return (f"PREREQUISITE: that clip's analysis is running as job "
+                f"{job_id}. Call wait_for_job(job_id={job_id}) until it "
+                "finishes, then repeat this call.")
+
     def clamp(self, t):
         return read_tools.clamp_seconds(self.duration, t)
 
@@ -1074,16 +1095,11 @@ def _editorial_source_index(ctx, asset_key=None):
             lambda conn: dbx.asset_by_key(conn, ctx.project_id, asset_key))
         if not asset:
             return None, None, f"REJECTED: no asset with storage_key {asset_key!r}."
-        if not asset.get("sha256"):
-            return None, None, (
-                "That asset has no reusable media index yet. Use look_at_asset "
-                "for its picture or get_audio_analysis for its sound.")
-        row = ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+        row = (ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+               if asset.get("sha256") else None)
         idx = (row or {}).get("json") or {}
         if not idx:
-            return None, None, (
-                "That asset's analysis has not finished yet. It remains in "
-                "the project; retry after indexing completes.")
+            return None, None, ctx.start_asset_index(asset)
         return dict(idx), _asset_name(asset), None
     if not getattr(ctx, "has_main_video", bool(ctx.index.get("video"))):
         return None, None, (
@@ -21449,7 +21465,8 @@ def fetch_url(ctx, url, as_kind=None):
                    "named_song": music_gate.named_song_for(
                        ctx, got.get("source_url") or url)}
                   if kind == url_media.KIND_AUDIO else {})
-    ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
+    asset_id = ctx.db.run(
+        dbx.insert_asset, ctx.project_id, kind, key,
                bytes_=got.get("bytes"), duration_s=got.get("duration_s"),
                width=got.get("width"), height=got.get("height"),
                fps=got.get("fps"),
@@ -21474,6 +21491,19 @@ def fetch_url(ctx, url, as_kind=None):
                                                        "worker")})
     if kind in (url_media.KIND_VIDEO, url_media.KIND_IMAGE):
         _mark_visual_review_pending(ctx, key, reviewed)
+    index_note = ""
+    if kind == url_media.KIND_VIDEO:
+        # A clip given by link is analysed like an uploaded clip (ticket
+        # #386: 152 of 152 fetched clips never had a transcript). Failing to
+        # queue it costs the transcript, not the download.
+        try:
+            index_job = ctx.db.run(
+                dbx.enqueue_asset_index, ctx.project_id,
+                ctx.project.get("user_id") or ctx.job.get("user_id"), asset_id)
+            index_note = (f" Its transcript and shots are being analysed as "
+                          f"job {index_job}.")
+        except Exception as e:
+            print(f"[fetch] analysis not queued for {key}: {e}", flush=True)
 
     bits = []
     if got.get("duration_s"):
@@ -21498,7 +21528,7 @@ def fetch_url(ctx, url, as_kind=None):
         review += " " + measured
     return (f"Downloaded \"{got['filename']}\"{detail} as a "
             f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
-            f"the project but NOT in the video yet — {nxt}.{review} RIGHTS CHECK: "
+            f"the project but NOT in the video yet — {nxt}.{index_note}{review} RIGHTS CHECK: "
             "source title/uploader identify the file, but fetching does not "
             "determine usage rights; downloading it does not by itself grant "
             "republication rights. Use it only when the user has the needed "
