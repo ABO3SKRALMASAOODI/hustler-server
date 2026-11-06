@@ -47,13 +47,12 @@ def test_duration_cap_keeps_field_recordings_out(monkeypatch):
                         lambda *a, **k: {"results": rows})
     hits = sfx_search.search("click")
     assert [h["title"] for h in hits] == ["Click"]      # 1hr filtered
-    # ND is refused outright; NC passes and is labeled by the shared
-    # music_search note (its own tests own the wording).
+    # ND and NC are refused outright (music_rights.commercial_ok).
     rows[0]["license"] = "by-nc-nd"
     assert sfx_search.search("click") == []
 
 
-def test_openverse_query_is_modification_only(monkeypatch):
+def test_openverse_query_asks_for_commercial_and_modification(monkeypatch):
     seen = {}
 
     def fake(url, params=None, **kw):
@@ -61,7 +60,7 @@ def test_openverse_query_is_modification_only(monkeypatch):
         return {"results": []}
     monkeypatch.setattr(sfx_search.net_fetch, "get_json", fake)
     sfx_search.search("whoosh")
-    assert seen.get("license_type") == "modification"
+    assert seen.get("license_type") == "commercial,modification"
 
 
 def test_verified_cc0_outage_catalog_survives_openverse_401(monkeypatch):

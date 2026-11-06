@@ -1964,11 +1964,12 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
 
 
 def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
-             reasoning_effort=None, retry_empty=False):
-    """One plain-text completion using the current plan’s editor model. Returns
+             reasoning_effort=None, retry_empty=False, lane=None):
+    """One plain-text completion using the current plan’s editor model, or
+    ``lane`` ((client, model)) when the caller's thread holds no turn. Returns
     {"text", "model", "prompt_tokens", "completion_tokens"} or None on any
     failure — callers must keep a non-LLM fallback."""
-    trial = claude_trial_lane()
+    trial = lane or claude_trial_lane()
     if trial is None and not config.OPENAI_API_KEY \
             and not paid_editor_plan(turn_plan()):
         return None

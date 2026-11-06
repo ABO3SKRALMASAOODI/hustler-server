@@ -65,6 +65,16 @@ def _license_capabilities(license_id):
     }
 
 
+def commercial_ok(license_id):
+    """The one rule of every picture and sound library: a recognised licence
+    that allows commercial use and edits. NC never reaches a customer (their
+    video may be a business's), ND cannot be cut, and unknown terms grant
+    nothing."""
+    rights = _license_capabilities(license_id)
+    return rights["commercial_use_allowed"] is True and \
+        rights["derivatives_allowed"] is True
+
+
 def provenance(item):
     """Stable, JSON-safe provider provenance with explicit unknowns.
 

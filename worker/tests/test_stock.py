@@ -227,6 +227,8 @@ def test_openverse_photos_carry_their_license_line(monkeypatch):
     # Openverse auth/retry is shared by music, SFX and photos; stub that
     # shared request boundary rather than the unrelated Pexels/Pixabay client.
     monkeypatch.setattr(music_search, "_openverse_get_json", fake)
+    import llm
+    monkeypatch.setattr(llm, "ask_text", lambda *a, **k: {"text": "[]"})
     hits = stock.search("elon musk", kind=stock.KIND_PHOTO,
                         orientation="portrait")
     # ND is unusable in an edit and filtered; the BY hit survives with the
@@ -237,7 +239,7 @@ def test_openverse_photos_carry_their_license_line(monkeypatch):
     assert "wikimedia" in hits[0]["description"]
     # Orientation rode the request as Openverse's aspect_ratio vocabulary.
     assert seen.get("aspect_ratio") == "tall"
-    assert seen.get("license_type") == "modification"
+    assert seen.get("license_type") == "commercial,modification"
     # A relevant thumbnail is not enough for professional B-roll: only the
     # provider's large originals should enter the candidate board.
     assert seen.get("size") == "large"

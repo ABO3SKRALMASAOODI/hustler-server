@@ -12,11 +12,12 @@ Three providers, searched together:
             Wikimedia Commons / Flickr / museum collections, which is where
             pictures of REAL subjects live — a named person, a company, a
             rocket on its pad. Stock libraries answer "a busy city";
-            Openverse answers "Elon Musk". Licenses are labels, not walls
-            (the music_search rules): public domain / credit /
-            NON-COMMERCIAL-ONLY stated per hit, only no-derivatives
-            excluded. Real topical VIDEO is find_footage's job (the web's
-            video search), not a stock library's.
+            Openverse answers "Elon Musk". A customer's video may be a
+            business's, so only commercial-use licences that allow edits
+            pass (music_rights.commercial_ok), with the credit stated per
+            hit, and Commons' files pass broll_source.drop_ai_made. Real
+            topical VIDEO is find_footage's job (the web's video search),
+            not a stock library's.
 
 Design notes that matter for quality, because "a stock clip appeared" and "the
 RIGHT stock clip appeared, at the right size" are very different products:
@@ -78,14 +79,14 @@ def _openverse_search(query, kind, orientation, count):
     happens in search()."""
     if kind != KIND_PHOTO:
         return []
-    from music_search import (_license_note, _license_ok,
-                              _openverse_get_json)
+    from music_rights import commercial_ok
+    from music_search import _license_note, _openverse_get_json
     # Ask Openverse for production-sized originals up front. Relevance-only
     # search can otherwise lead with a perfectly topical 333px Flickr image;
     # it passes validation but visibly falls apart on a 1080x1920 canvas.
     # Pull a wider slate because licensing and dead-link checks may remove
     # several candidates before the editor sees the contact sheet.
-    params = {"q": query, "license_type": "modification",
+    params = {"q": query, "license_type": "commercial,modification",
               "size": "large", "mature": "false", "filter_dead": "true",
               "unstable__authority": "true",
               "page_size": max(12, count * 3)}
@@ -96,7 +97,7 @@ def _openverse_search(query, kind, orientation, count):
     data = _openverse_get_json(OPENVERSE_IMAGE_API, params=params)
     out = []
     for p in (data.get("results") or []):
-        if not _license_ok(p.get("license") or ""):
+        if not commercial_ok(p.get("license")):
             continue
         url = p.get("url")
         if not url:
@@ -119,6 +120,10 @@ def _openverse_search(query, kind, orientation, count):
             "page_url": p.get("foreign_landing_url"),
             "_url": url,
             "_thumb": p.get("thumbnail") or url,
+            "_origin": src or None,
+            "_categories": ", ".join(
+                str(t.get("name")) for t in p.get("tags") or []
+                if isinstance(t, dict))[:300] or None,
         })
     return out
 
@@ -369,6 +374,11 @@ def search(query, kind=KIND_VIDEO, orientation=None, count=MAX_RESULTS):
             except Exception as e:
                 # One provider being down must not take the capability with it.
                 errors.append(f"{name}: {str(e)[:120]}")
+    if got.get("openverse"):
+        import broll_source
+        got["openverse"], note = broll_source.drop_ai_made(got["openverse"])
+        if note:
+            errors.append(f"openverse: {note}")
     provider_hits = [(name, got.get(name) or []) for name, _fn in lanes]
     if any(hits for _name, hits in provider_hits):
         return _diverse_rank(provider_hits, query, orientation, count)
