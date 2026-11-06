@@ -181,6 +181,10 @@ def classify(error, job_type=None):
     # a larger shape can (remote.py switches provider / takes the heavy lane
     # for this kind). Like render_budget_exceeded, an infrastructure limit is
     # no reason to rewrite a valid final; a preview may be made lighter.
+    # Measured from the file's boxes before anything read it (media.mp4_state).
+    # ffprobe's "moov atom not found" is no such measurement: a streamed index
+    # prints those same words when a read of a whole file breaks before its
+    # moov, so they stay an ordinary media failure that gets its second try.
     if isinstance(error, media.UnfinishedFile):
         return FailureDecision("unfinished_file", False, 0, False)
     if isinstance(error, media.MediaOOMError) or (
@@ -196,12 +200,6 @@ def classify(error, job_type=None):
     if "no video stream found" in text \
             or "could not determine video duration" in text:
         return FailureDecision("invalid_media", False, 0, False)
-    # ffprobe's own reading of the bytes, for a file the box walk could not
-    # judge. Only the index reads the customer's upload: anywhere else the file
-    # may be our own intermediate.
-    if job_type == "index" and "moov atom not found" in text:
-        return FailureDecision("unfinished_file", False, 0, False)
-
     # A stalled source/download can recover once.  More than one repeat is no
     # longer a blip and used to turn one bad object into hours of Cloud Run.
     if "no progress" in text or "stalled" in text:

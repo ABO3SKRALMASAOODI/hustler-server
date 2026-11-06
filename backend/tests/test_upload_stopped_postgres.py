@@ -123,6 +123,22 @@ def test_a_resumed_transfer_is_judged_by_its_last_sign_of_life(cur):
     assert "3825205248" in out[0]["detail"]
 
 
+def test_a_link_import_has_no_transfer_to_lose(cur):
+    """routes/video.py records upload_started with no bytes for a pasted link.
+    It never lands by size: its index job reports it, and it is not a stop."""
+    cur.execute("""INSERT INTO client_events (user_id, project_id, kind, detail,
+                   created_at) VALUES (2837, 5499, 'upload_started', %s, %s)""",
+                (Json({"kind": "original", "source": "link", "host": "x.test"}),
+                 NOW - GONE - JUST))
+    assert stopped(cur) == []
+
+
+def test_a_heartbeat_says_how_much_was_sent(cur):
+    event(cur, "upload_started", GONE * 2)
+    event(cur, "upload_progress", GONE + JUST, sent_bytes=123_456_789)
+    assert "123456789" in stopped(cur)[0]["detail"]
+
+
 def test_a_stop_outside_this_window_is_someone_elses(cur):
     event(cur, "upload_started", GONE + timedelta(minutes=5))
     assert stopped(cur) == []

@@ -150,10 +150,10 @@ def file_state(fetch, total_bytes):
     """{"state", "present", "expected"} for a file of ``total_bytes``.
 
     Header reads only, whatever the size. UNFINISHED only when the file's own
-    boxes prove there is no complete moov; UNKNOWN for everything this cannot
+    boxes prove there is no moov at all; UNKNOWN for everything this cannot
     read or does not recognise, because it may name a file that cannot open
-    but must never refuse one it does not understand. ``expected`` is how long
-    the boxes say the file is, when they say."""
+    but must never refuse one that can. ``expected`` is how long the boxes say
+    the file is, when they say."""
     out = {"state": UNKNOWN, "present": total_bytes, "expected": None}
     if not total_bytes or total_bytes < _HEADER:
         return out
@@ -178,9 +178,11 @@ def file_state(fetch, total_bytes):
             return out
         end = offset + size
         if btype == b"moov":
+            # A moov cut short is no proof: ffmpeg reads what is there, and a
+            # file missing only the tail of its moov opens and plays. Judged by
+            # the worker, which can try it (indexer._refuse_unfinished_source).
             return (dict(out, state=FINISHED, expected=total_bytes)
-                    if end <= total_bytes
-                    else dict(out, state=UNFINISHED, expected=end))
+                    if end <= total_bytes else out)
         if end > total_bytes:
             return dict(out, state=UNFINISHED, expected=end)
         offset = end

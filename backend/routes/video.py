@@ -2256,6 +2256,8 @@ def _transfer_of_content(project_id, kind, ext, nbytes, content_type,
                                             content_type)
         except storage.UploadGone:
             pass
+        except Exception:  # noqa: BLE001 — continuing is a saving, never a gate
+            current_app.logger.warning("could not continue %s", found[0])
     key = stem + ext
     with vdb() as conn:
         cur = conn.cursor()
@@ -2263,7 +2265,7 @@ def _transfer_of_content(project_id, kind, ext, nbytes, content_type,
                        AND storage_key = %s LIMIT 1""", (project_id, key))
         if cur.fetchone():
             return None
-    if storage.head_bytes(key) == int(nbytes):
+    if storage.head_bytes(key, fast=True) == int(nbytes):
         # Every part arrived and the tab died before /uploads/complete.
         return {"mode": "multipart", "storage_key": key, "upload_id": None,
                 "assembled": True, "part_urls": [], "completed_parts": [],

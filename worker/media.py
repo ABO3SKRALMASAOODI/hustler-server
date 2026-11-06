@@ -460,11 +460,14 @@ _FIRST_BOXES = {b"ftyp", b"styp", b"wide", b"free", b"skip", b"mdat", b"moov",
 
 
 def mp4_state(read, total):
-    """"complete", "unfinished" or "unknown" from an MP4's top-level boxes.
+    """"complete", "unfinished", "cut_moov" or "unknown" from an MP4's top-level
+    boxes.
 
     ``read(offset, length)`` gives bytes or None. The walk of
     backend/mp4probe.py file_state: header reads only, and "unknown" for
-    anything it cannot read or does not recognise."""
+    anything it cannot read or does not recognise. "cut_moov" is a moov that
+    runs past the end: not proof by itself, because ffmpeg reads what is there
+    and a file missing only the tail of its moov opens and plays."""
     if not total or total < 8:
         return "unknown"
     offset = 0
@@ -490,7 +493,7 @@ def mp4_state(read, total):
             return "unknown"
         end = offset + size
         if btype == b"moov":
-            return "complete" if end <= total else "unfinished"
+            return "complete" if end <= total else "cut_moov"
         if end > total:
             return "unfinished"
         offset = end

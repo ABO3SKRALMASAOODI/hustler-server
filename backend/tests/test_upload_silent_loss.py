@@ -58,10 +58,12 @@ def test_the_finished_file_is_complete():
         "complete"
 
 
-def test_moov_first_is_complete_and_a_cut_moov_is_not():
+def test_moov_first_is_complete_and_a_cut_moov_is_not_judged_here():
+    # ffmpeg opens a file that lost only the tail of its moov: real cuts of 1 to
+    # 100 bytes opened and played, so refusing here would refuse a working file.
     head = {0: box(b"ftyp", 32), 32: box(b"moov", 1000)}
     assert mp4probe.file_state(reader(head), 500_000)["state"] == "complete"
-    assert mp4probe.file_state(reader(head), 500)["state"] == "unfinished"
+    assert mp4probe.file_state(reader(head), 500)["state"] == "unknown"
 
 
 def test_a_64_bit_mdat_is_walked_past():
@@ -229,6 +231,17 @@ def test_a_renamed_file_continues_from_what_storage_holds(api):
     assert api.events[0][1]["by_content"] is True
 
 
+def test_a_store_that_ignores_the_prefix_never_hands_over_another_upload(api):
+    """The key decides, as find_multipart_upload does: an upload of another
+    project must never be continued because a store listed it."""
+    s3 = api.use(_S3(NBYTES))
+    s3.list_multipart_uploads = lambda Bucket, Prefix: {"Uploads": [
+        {"Key": "originals/1/other.mp4", "UploadId": "theirs", "Initiated": "9"}]}
+    out, status = api.post(NBYTES, content_id=CONTENT)
+    assert status == 200 and not out.get("resumed")
+    assert out["storage_key"].startswith(stem()) and s3.created
+
+
 def test_a_new_extension_is_still_the_same_upload(api):
     api.use(_S3(NBYTES, [stem() + ".mov"]))
     out, _ = api.post(NBYTES, filename="clip.mp4", content_id=CONTENT)
@@ -382,10 +395,25 @@ def test_the_failure_kind_of_the_latest_job_is_read_for_the_heal():
     assert project_state.index_job_state(cur, 5498, None)["failure_kind"] is None
 
 
+def test_only_a_measurement_ends_the_heal():
+    """invalid_media is ffprobe's words and input_limit_exceeded a limit that
+    can change: both stay healable, as they were, or a broken read or a fixed
+    bug would leave the project dead."""
+    assert project_state.PERMANENT_INDEX_FAILURES == {"unfinished_file"}
+
+
+def test_a_storage_blip_while_continuing_is_a_fresh_upload_not_a_502(api, monkeypatch):
+    s3 = api.use(_S3(NBYTES, [stem() + ".mp4"]))
+    monkeypatch.setattr(storage, "resume_multipart", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("ListParts timed out")))
+    out, status = api.post(NBYTES, content_id=CONTENT)
+    assert status == 200 and not out.get("resumed")
+    assert s3.created, "a new transfer, not a refused one"
+
+
 def test_opening_a_project_never_requeues_a_file_that_cannot_work():
     """Jobs 137254/5/6: the heal re-ran the same bytes on every open."""
-    assert {"unfinished_file", "invalid_media"} <= \
-        project_state.PERMANENT_INDEX_FAILURES
+    assert "unfinished_file" in project_state.PERMANENT_INDEX_FAILURES
     import inspect
     source = inspect.getsource(video)
     healing = source.split('heal_reason = "last index job failed"')[0][-260:]
