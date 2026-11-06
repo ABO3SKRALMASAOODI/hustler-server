@@ -18,6 +18,22 @@ except ImportError:
 PLAN_VERSION = 1
 AUDIO_LAYERS = ("music", "sfx", "voiceover", "volume", "master", "stem_mix")
 
+# The layers the Studio's browser player draws or names in playback_limitations.
+# Any other layer has no drawing code there, so playing without it would delete
+# part of the edit with no message: it asks for a render by default, and a layer
+# added later is safe before anyone remembers this file. The same contract is in
+# the frontend's src/lib/playbackPlan.js, proved by the shared fixture.
+PLAYER_LAYERS = frozenset(("keep", "split_keep_boundaries", "canvas", "frame",
+    "captions", "caption_mutes", "music", "sfx", "voiceover", "volume", "master",
+    "stem_mix", "inserts", "speed", "effects", "texts", "vectors", "overlays",
+    "source_clean", "patches"))
+PLAYER_EFFECTS = frozenset(("grade", "grade_custom", "zooms", "fade_in_s", "fade_out_s",
+    "transition", "regions", "stylize", "screen_frame", "frame_shifts", "picture_cards",
+    "custom", "freeze_frames", "cursor"))
+RENDER_ONLY = {"motion": "motion graphics", "fx": "layered effects",
+               "scene": "the designed scene"}
+EDITORIAL_TYPE = ("font_size", "max_width", "text_align", "italic", "tracking")
+
 
 def identity(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True,
@@ -71,6 +87,61 @@ def compile_plan(edl, source_key="source"):
                 captions=edl.get("captions"), caption_mutes=edl.get("caption_mutes") or [],
                 texts=edl.get("texts") or [], vectors=edl.get("vectors") or [],
                 effects=edl.get("effects") or {}, overlays=edl.get("overlays") or [])
+
+
+def _holds_unread(layers, read):
+    return any(k not in read and v not in (None, [], {}) for k, v in (layers or {}).items())
+
+
+def render_only_layers(edl):
+    found = [name for key, name in RENDER_ONLY.items()
+             if (edl or {}).get(key) not in (None, [], {})]
+    if (_holds_unread(edl, PLAYER_LAYERS | set(RENDER_ONLY))
+            or _holds_unread((edl or {}).get("effects"), PLAYER_EFFECTS)):
+        found.append("effects that need a full render")
+    return found
+
+
+def playback_limitations(edl):
+    """What the browser player cannot show of this EDL, in the same words and
+    order as playbackLimitations. Non-empty means a render, never a player
+    that quietly leaves part of the edit out."""
+    if not edl:
+        return ["no edit"]
+    missing, fx = render_only_layers(edl), edl.get("effects") or {}
+    frame, texts = edl.get("frame") or {}, edl.get("texts") or []
+    inserts, music = edl.get("inserts") or [], edl.get("music") or []
+
+    def note(present, phrase):
+        if present:
+            missing.append(phrase)
+
+    note(frame.get("picture"), "the composed picture layout")
+    note(frame.get("follow"), "the moving crop")
+    note(edl.get("source_clean") or edl.get("patches"), "erased areas")
+    note(edl.get("overlays"), "overlays")
+    note(fx.get("transition"), "transitions")
+    note(fx.get("regions"), "blurred regions")
+    note(fx.get("screen_frame") or fx.get("frame_shifts") or edl.get("screen_takeovers"),
+         "screen effects")
+    note(fx.get("picture_cards"), "animated picture cards")
+    note(any(t.get(k) is not None for t in texts for k in EDITORIAL_TYPE), "editorial typography")
+    note(fx.get("custom"), "custom effects")
+    note(fx.get("stylize") or fx.get("freeze_frames") or fx.get("cursor"), "special effects")
+    note(any(t.get("behind") for t in texts), "text behind the subject")
+    note(any(i.get("motion") or i.get("motion_motif") or i.get("rotation") for i in inserts),
+         "clip motion")
+    note(edl.get("stem_mix"), "separated audio")
+    note((edl.get("master") or {}).get("loudness"), "loudness mastering")
+    note(any(not m.get("mute") and m.get("duck") is not False
+             and m.get("duck_mode") == "smooth" for m in music), "automatic audio ducking")
+    note(any(not m.get("mute") and m.get("loop") for m in music), "looped music")
+    note(len(music) + len(edl.get("voiceover") or []) + len(edl.get("sfx") or []) > 8,
+         "a complex audio mix")
+    note(any(s.get("factor") != 1 for s in edl.get("speed") or [])
+         or any(not i.get("mute") and i.get("rate") and i.get("rate") != 1 for i in inserts),
+         "pitch-preserving speed")
+    return missing
 
 
 def _canon(value, top=False):

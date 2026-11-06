@@ -279,6 +279,22 @@ def test_playback_leaves_a_swept_source_out(monkeypatch):
     assert set(body.get_json()["sources"]) == {"source"}
 
 
+def test_playback_gives_no_sources_for_a_version_the_browser_cannot_draw(monkeypatch):
+    """Any Studio bundle, including a tab open across a release, reads empty
+    sources as "ask for a render", so a motion item never plays as if absent."""
+    edl = {"keep": [[0, 10]], "motion": [{"id": "hook"}]}
+    _fake_db(monkeypatch, Cursor([]))
+    monkeypatch.setattr(video, "_project_for_user", lambda *_: {"id": 9})
+    monkeypatch.setattr(video, "_latest_edl",
+                        lambda *_: {"version": 2, "json": edl})
+    app = Flask(__name__)
+    with app.test_request_context("/projects/9/playback"):
+        body = video.playback_endpoint.__wrapped__(user_id=8, project_id=9).get_json()
+    assert body["sources"] == {}
+    assert body["limitations"] == ["motion graphics"]
+    assert body["version"] == 2
+
+
 # ── direct timeline edits ─────────────────────────────────────────────────
 
 def test_edits_on_a_swept_project_are_refused_after_the_wall():
