@@ -697,3 +697,41 @@ def test_a_fix_is_product_code_on_main(monkeypatch):
     monkeypatch.setattr(ops, "_git", Git(["worker/agent_loop.py",
                                           "worker/tests/test_x.py"]))
     ops.check_fix_sha("abc1234,fe:def5678")
+
+
+def test_the_digest_says_what_is_held_and_who_stopped():
+    import cockpit_alerts
+    now = datetime(2026, 11, 6, 8, 0, tzinfo=timezone.utc)
+    sections = cockpit_alerts.digest_sections({"failures": {
+        "total": 2, "customers": 1, "by_ticket": [], "fixed": [], "unhandled": [],
+        "open": 1, "fixing": 0, "p0_active": 0, "intake_stale": False,
+        "held_for_owner": [{"id": 3, "title": "Finals over 4K", "failures": 2,
+                            "users": 1, "reason": "owner decision: the 4K cap",
+                            "url": "https://valmera.io/admin?ticket=3"}],
+        "silent_agents": [{"agent": "p0_watch", "last_at": now, "silent_min": 90}]}})
+    text = " ".join(str(s) for s in sections)
+    assert "Held on your decision" in text and "the 4K cap" in text
+    assert "Not running" in text and "p0_watch" in text
+
+
+def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeypatch):
+    import cockpit_alerts
+    now = datetime(2026, 11, 6, 8, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(intake, "unhandled", lambda cur, at: [{
+        "id": 77, "title": "A request ended partial", "status": "fixing",
+        "users": 3, "waiting_min": 400, "opened_at": now}])
+    monkeypatch.setattr(intake, "silent_agents", lambda cur, at: [{
+        "agent": "p0_watch", "last_at": now, "silent_min": 125}])
+
+    class C:
+        def execute(self, sql, params=None):
+            pass
+
+        def fetchone(self):
+            return {}
+    got = cockpit_alerts.event_alerts(C(), now, now)
+    text = " ".join(line for _k, _s, line in got)
+    assert "no fix landed" in text and "#77" in text
+    assert "p0_watch" in text and "2 h 5 min" in text
+    assert {s for _k, s, _l in got} == {"Customer blocked, not handled yet",
+                                        "An automatic agent stopped"}
