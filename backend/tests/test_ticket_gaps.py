@@ -70,7 +70,7 @@ def test_an_overdue_analysis_that_finishes_is_not_paged(world):    # noqa: F811
 
 def test_an_analysis_that_stays_stuck_pages(world):    # noqa: F811
     index_job(world, "queued", 5, 599)
-    world.ticks(13)
+    world.ticks(48)
     assert world.only_ticket()["severity"] == "P0"
 
 
@@ -288,7 +288,7 @@ def test_a_turn_that_goes_silent_fires_and_pages_if_it_stays_silent(world):    #
     at_deadline(world, gaps.TURN_SILENCE)
     got = fired(world, gaps._turn_went_silent, minutes=2)
     assert got[0]["cause_key"] == "auto-gap-turn-silent-running"
-    world.ticks(13)
+    world.ticks(48)
     assert world.only_ticket()["severity"] == "P0"
 
 
@@ -315,7 +315,7 @@ def test_the_customer_asking_is_not_the_turn_speaking(world):    # noqa: F811
     world.job("agent_turn", state="running", project=5600, user=2846)
     world.ticks(3)
     customer_says(world)
-    world.ticks(12)
+    world.ticks(47)
     assert world.only_ticket()["severity"] == "P0"
 
 
@@ -329,9 +329,11 @@ def test_a_customer_asking_does_not_put_off_the_silence(world):    # noqa: F811
 
 def test_a_request_moving_through_slices_in_silence_pages(world):    # noqa: F811
     """A slice hands over every few minutes, so each one ended before its second
-    look and read `recovered`, while the customer watched nothing for 15 minutes."""
+    look and read `recovered`, while the customer watched nothing for 15 minutes.
+    Each slice now ends inside the look, and the chain still pages when it runs
+    past the slow grace."""
     root = jid = world.job("agent_turn", state="running", project=5600, user=2846)
-    for _ in range(3):
+    for _ in range(int(recovery.SLOW_GRACE / (5 * MIN)) + 1):
         world.ticks(5)
         world.c.execute(
             "UPDATE video_jobs SET state = 'done', updated_at = %s, result = %s "
@@ -400,7 +402,7 @@ def test_a_render_that_stays_stuck_pages_and_one_that_ends_does_not(world):    #
     jid = render_job(world, age=1199)
     world.ticks(2)
     assert world.only_ticket()["severity"] == "P1"
-    world.ticks(11)
+    world.ticks(46)
     assert world.only_ticket()["severity"] == "P0"
     world.c.execute("DELETE FROM tickets")
     jid = render_job(world, age=1199)

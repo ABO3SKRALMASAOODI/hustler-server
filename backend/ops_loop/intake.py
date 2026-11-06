@@ -93,6 +93,10 @@ UPLOAD_ALIVE_KINDS = ("upload_started", "upload_resumed", "upload_progress",
 P1_JOB_TYPES = ("preview_check", "filmstrip")
 # agent_turn result.status of a request the trial or plan budget held.
 BUDGET_STATUSES = ("budget",)
+# A turn an operator started on a customer's project, not one they asked for. An
+# error is still a ticket, but nobody is waiting on it: 8 of 58 pages in 14 days
+# were the repair batch of 3-4 Nov, "stuck" with no customer there to get past it.
+OPERATOR_REPAIR = "COALESCE(j.payload->>'operator_repair', '') <> ''"
 MCP_OURS = ("internal_error", "unclassified", "timeout", "upload_error",
             "executor_version_mismatch")
 MCP_OURS_OUTCOMES = ("transient_failure", "unavailable", "unsafe")
@@ -191,7 +195,8 @@ def scan(cur, since, now):
     out = []
     cur.execute(f"""
         SELECT j.id, j.type, j.user_id, j.project_id, j.updated_at AS at,
-               LEFT(j.error, 600) AS error, j.payload->>'tool' AS tool
+               LEFT(j.error, 600) AS error, j.payload->>'tool' AS tool,
+               {OPERATOR_REPAIR} AS operator_repair
           FROM video_jobs j JOIN users u ON u.id = j.user_id
          WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
            AND j.state = 'failed' AND {_customers()}
@@ -204,7 +209,8 @@ def scan(cur, since, now):
         out.append({
             "ref": f"job:{r['id']}", "source": "job", "at": r["at"],
             "user_id": r["user_id"], "project_id": r["project_id"],
-            "severity": "P1" if r["type"] in P1_JOB_TYPES else "P0",
+            "severity": "P1" if r["type"] in P1_JOB_TYPES
+                        or r.get("operator_repair") else "P0",
             "cause_key": cause_key("job", kind, sig),
             "title": _short(f"{kind} job failed: {r['error'] or 'no error'}"),
             "detail": _short(r["error"], 600), "job_id": r["id"],
@@ -247,7 +253,7 @@ def scan(cur, since, now):
                j.result->>'outcome' AS outcome,
                COALESCE(j.result->>'status', '') AS status,
                LEFT(COALESCE(j.result->>'honesty', j.result->>'text', ''),
-                    600) AS why
+                    600) AS why, {OPERATOR_REPAIR} AS operator_repair
           FROM video_jobs j JOIN users u ON u.id = j.user_id
          WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
            AND j.type = 'agent_turn' AND j.state = 'done'
@@ -266,7 +272,8 @@ def scan(cur, since, now):
         out.append({
             "ref": f"request:{r['id']}", "source": "request", "at": r["at"],
             "user_id": r["user_id"], "project_id": r["project_id"],
-            "severity": "P2" if status in BUDGET_STATUSES else "P0",
+            "severity": "P2" if status in BUDGET_STATUSES
+                        else "P1" if r.get("operator_repair") else "P0",
             "cause_key": cause_key("request", r["outcome"],
                                    "" if status == r["outcome"] else status),
             "title": f"A Studio request ended {r['outcome']} (not fulfilled)",
@@ -441,7 +448,7 @@ def _event_failure(r):
         # whether a finished copy landed. Left stuck, the cause gets the product
         # change that stops it hurting the customer (FIXER.md section 11).
         return dict(base, source="upload", bytes=size, file_kind=d.get("kind"),
-                    severity="P0",
+                    severity="P0", refused=True,
                     cause_key=cause_key("upload-rejected", reason),
                     title=_short(f"Upload refused: {reason}"),
                     detail=_short(f"{reason} · {size} bytes · "

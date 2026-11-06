@@ -22,6 +22,13 @@ a budget stop) are not looked at twice: their severity is already the truth.
 from datetime import datetime, timedelta, timezone
 
 GRACE = timedelta(minutes=10)
+# Work still running is slow, not stuck. On 14 days of real rows a 10 minute look
+# called 54 overdue analyses, silent turns and long renders stuck, and 8 of them
+# still were 45 minutes on. A page is only worth what a Fixer can reach, and the
+# watch runs every 30 minutes: work that will be over by then stays on its ticket
+# from the first minute, and only what is really hung pages.
+SLOW_GRACE = timedelta(minutes=45)
+SLOW_SOURCES = ("analysis", "turn")
 # The client says the customer's own line is down: it comes back on its own.
 OFFLINE_GRACE = timedelta(minutes=30)
 # Getting a file in again takes as long as it takes: the p10 of 330 real
@@ -39,6 +46,13 @@ PLAYED = ("player_recovered", "free_result_watched_pct")
 EXPORT_REACHED = ("download_url_ready", "download_triggered",
                   "mcp_export_delivered")
 OPEN_JOB = ("queued", "running")
+# A customer who went on with what a request gave them is not stuck on it.
+WENT_ON = ("free_result_watched_pct", "export_clicked", "export_job_started",
+           "download_triggered", "mcp_export_delivered")
+# New work on the project after the player failed.
+WORK = ("preview", "final", "agent_turn")
+# An assistant reading state has not carried on: it reads, and it stops.
+MCP_READS = ("__state__", "__media__")
 RECOVERED, TRYING, STUCK = "recovered", "trying", "stuck"
 
 
@@ -95,10 +109,18 @@ def _upload(cur, w, now):
 
 
 def _player(cur, w, now):
+    """It played, or new work started on the project: nothing writes a row when
+    a video simply plays, so without the second half account 2647, back at work
+    5 minutes later, was "stuck" on one network error for good."""
     cur.execute("""SELECT 1 FROM client_events
                     WHERE project_id = %s AND user_id = %s AND kind = ANY(%s)
-                      AND created_at > %s AND created_at <= %s LIMIT 1""",
+                      AND created_at > %s AND created_at <= %s
+                    UNION ALL
+                   SELECT 1 FROM video_jobs
+                    WHERE project_id = %s AND type = ANY(%s) AND state = 'done'
+                      AND created_at > %s AND updated_at <= %s LIMIT 1""",
                 (w["project_id"], w["user_id"], list(PLAYED),
+                 _aware(w["at"]), now, w["project_id"], list(WORK),
                  _aware(w["at"]), now))
     return RECOVERED if _one(cur) else STUCK
 
@@ -118,6 +140,21 @@ def _job(cur, w, now):
     return RECOVERED if _one(cur) else STUCK
 
 
+def _request(cur, w, now):
+    """A request that ended short is behind the customer when a later turn did
+    it, or when they went on with what it gave them: watched it or asked for the
+    export. In 14 days 7 requests were called stuck with the customer already
+    doing that. The ticket stays open: the cause is still fixed."""
+    if _job(cur, w, now) == RECOVERED:
+        return RECOVERED
+    cur.execute("""SELECT 1 FROM client_events
+                    WHERE project_id = %s AND user_id = %s AND kind = ANY(%s)
+                      AND created_at > %s AND created_at <= %s LIMIT 1""",
+                (w["project_id"], w["user_id"], list(WENT_ON),
+                 _aware(w["at"]), now))
+    return RECOVERED if _one(cur) else STUCK
+
+
 def _reply(cur, w, now):
     cur.execute("""SELECT 1 FROM chat_messages m
                      JOIN projects p ON p.chat_session_id = m.session_id
@@ -129,14 +166,21 @@ def _reply(cur, w, now):
 
 
 def _mcp(cur, w, now):
+    """The same tool worked afterwards, or the assistant carried on with its
+    work. Waiting for that one tool alone could never end: wait_for_job,
+    project_state, open_project, apply_edit_batch, export_final, upload_start and
+    watch_video write no job under their own name, so account 2555, 15 tool calls
+    past an error, stayed "stuck" on it."""
     cur.execute("""SELECT 1 FROM video_jobs
                     WHERE user_id = %s AND type = 'mcp_tool' AND state = 'done'
                       AND updated_at > %s AND updated_at <= %s
-                      AND payload->>'tool' = %s
+                      AND (payload->>'tool' = %s
+                           OR NOT COALESCE(payload->>'tool', '') = ANY(%s))
                       AND COALESCE(result->'tool_outcome'->>'status',
                                    'success') = 'success'
                     LIMIT 1""",
-                (w["user_id"], _aware(w["at"]), now, w.get("tool")))
+                (w["user_id"], _aware(w["at"]), now, w.get("tool"),
+                 list(MCP_READS)))
     return RECOVERED if _one(cur) else STUCK
 
 
@@ -183,7 +227,7 @@ def _turn(cur, w, now):
 
 
 CHECKS = {"upload": _upload, "proxy": _upload, "player": _player, "job": _job,
-          "request": _job, "reply": _reply, "mcp": _mcp, "analysis": _analysis,
+          "request": _request, "reply": _reply, "mcp": _mcp, "analysis": _analysis,
           "export": _export, "checkout": _checkout, "turn": _turn}
 
 
@@ -209,7 +253,11 @@ def _stop_bytes(cur, ref):
 def grace(f, cur=None):
     if f.get("offline"):
         return OFFLINE_GRACE
-    if f.get("source") != "upload":
+    if f.get("source") in SLOW_SOURCES:
+        return SLOW_GRACE
+    # A refused file never started moving: it needs no time to transfer, and a
+    # customer stopped at the door should not wait 2 hours for someone to know.
+    if f.get("source") != "upload" or f.get("refused"):
         return GRACE
     if str(f.get("ref")).startswith("stopped:") and cur is not None:
         return _upload_wait(_stop_bytes(cur, f["ref"]))
