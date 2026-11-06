@@ -245,6 +245,8 @@ def _frontier_on(monkeypatch, key="xai-test-key"):
 
 @pytest.mark.parametrize("plan", ["ai", "ai_pro", "ai_max", "plus", "mcp"])
 def test_every_paid_plan_and_trial_uses_luna(monkeypatch, plan):
+    # With OpenAI cleared to edit; off, see test_urgent_1106.py.
+    monkeypatch.setattr(config, "OPENAI_EDITS", True)
     _frontier_on(monkeypatch)
     _paid_on(monkeypatch)
     monkeypatch.setattr(config, "OPENAI_API_KEY", "openai-test-key")
@@ -268,6 +270,7 @@ def test_missing_luna_credentials_never_falls_back_to_xai(monkeypatch):
 
 
 def test_legacy_xai_wallets_are_not_free_agent_fallbacks(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_EDITS", True)
     _paid_on(monkeypatch)
     _frontier_on(monkeypatch, key="second-wallet")
     monkeypatch.setattr(config, "OPENAI_API_KEY", "openai-test-key")

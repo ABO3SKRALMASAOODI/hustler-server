@@ -112,7 +112,7 @@ def _run(monkeypatch, ctx):
                         lambda c, w, s, title_only=False: (w, "Mirror *flex*"))
     seen = []
     monkeypatch.setattr(short_clip, "camera",
-                        lambda c, st, started, run, spend, samples=None:
+                        lambda c, st, started, run, spend, samples=None, **_k:
                         seen.append(1) or "EDL v9 -> v10: add_zoom_path")
     monkeypatch.setattr(short_clip, "whole_looks",
                         lambda c, spend: [(1.0, (0.1, 0.5, 0.4, 0.7))] * 3)

@@ -1218,6 +1218,12 @@ def main():
                 seen = {k: st.get(k) for k in (
                     "mode", "requested", "degraded", "legacy", "next",
                     "next_host", "next_source")}
+                # Where this process's model keys come from (the same row
+                # reasoning): source words only, never a key.
+                import provider_creds as _providers
+                st["providers"] = _providers.status()
+                seen["providers"] = {k: st["providers"].get(k)
+                                     for k in ("openai", "anthropic")}
                 if seen != last:
                     st["at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                              time.gmtime())

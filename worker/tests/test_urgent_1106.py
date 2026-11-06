@@ -57,8 +57,11 @@ VECTOR = json.dumps({
 
 def _live_key(monkeypatch):
     """config.__getattr__ again, whatever an earlier suite left assigned."""
-    if "OPENAI_API_KEY" in vars(config):
-        monkeypatch.delattr(config, "OPENAI_API_KEY")
+    for name in ("OPENAI_API_KEY", "VISION_API_KEY"):
+        if name in vars(config):
+            monkeypatch.delattr(config, name)
+    monkeypatch.delenv("VISION_API_KEY", raising=False)
+    monkeypatch.setattr(config, "VISION_BASE_URL", config.OPENAI_BASE_URL)
 
 
 @pytest.fixture
@@ -448,6 +451,15 @@ def test_a_waiting_request_is_the_first_edit_whatever_key_is_set(monkeypatch,
     indexer._finish_setup(db, 1, 9, {"duration": 12.0},
                           {"words": [], "shots": []}, user_id=3, asset_id=4)
     assert resolved == [157774] and first_cuts == []
+
+
+def test_the_editor_does_what_is_clear_in_a_cut_off_request():
+    """p5297's ask stopped mid-sentence and the first edit was a question."""
+    import agent_prompt
+    text = " ".join(str(v) for v in vars(agent_prompt).values()
+                    if isinstance(v, str))
+    assert "Never answer a request you can partly do with only a question" \
+        in text
 
 
 def test_no_waiting_request_gets_the_first_cut(monkeypatch):

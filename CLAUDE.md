@@ -101,6 +101,12 @@ waits in its claim and then in the Postgres queue (`remote._run_box_with_wait`,
 - A worker push updates the box within minutes (no CI gate, like Render);
   the executor-release budget above is about Cloudflare's lanes.
 
+## Provider keys
+
+Render's and the box's `OPENAI_API_KEY` env values are dead. The funded keys live in one sealed `app_kv` row, `provider_api_keys` (`provider_creds.py`, byte-identical in `backend/` and `worker/`), which outranks the env in every process and is re-read every 5 minutes. To rotate, run `.valmera/week-1106/reliability/put_provider_keys.py`. Nothing is typed into a dashboard.
+
+No customer's edit runs on OpenAI: `llm.editing_lanes` drops those lanes unless `OPENAI_EDITS=1`, and only the Gauntlet's scoreboard may justify that. The key serves the concierge, greetings, critics, the index's look and the checkout readiness probe.
+
 ## Database Access
 
 ```bash

@@ -131,6 +131,7 @@ def test_retry_after_is_honoured_and_capped():
 
 def test_agent_lanes_do_not_fall_back_to_legacy_xai_wallets(monkeypatch):
     base_client, paid_client, frontier_client = object(), object(), object()
+    monkeypatch.setattr(llm.config, "OPENAI_EDITS", True)
     monkeypatch.setattr(llm, "client", lambda: base_client)
     monkeypatch.setattr(llm, "paid_client", lambda: paid_client)
     monkeypatch.setattr(llm, "frontier_client", lambda: frontier_client)
