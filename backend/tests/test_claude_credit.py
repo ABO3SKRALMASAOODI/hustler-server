@@ -27,13 +27,9 @@ def test_paid_reserve_does_not_reopen_free_trials_or_ignore_hard_failures():
     assert credit["on"] is False
     assert cc.paid_available({**credit, "spent_usd": 62.22})
     assert cc.paid_available({**credit, "spent_usd": 63.0})
-    assert cc.repair_available(credit)
-    assert not cc.repair_available({**credit, "spent_usd": 62.22})
-    assert not cc.repair_available({**credit, "spent_usd": 63.0})
     assert not cc.paid_available({**credit, "reason": "billing_error"})
     assert not cc.paid_available({**credit, "reason": "auth_error"})
     assert cc.paid_available({"on": False, "reason": "budget"})
-    assert not cc.repair_available({"on": False, "reason": "budget"})
 
 
 class FakeConn:
@@ -199,16 +195,31 @@ def test_provider_refusal_supersedes_a_trial_budget_pause_and_probe_restores_onl
     credit = cc.status(conn, now=later)
     assert credit["on"] is False
     assert cc.paid_available(credit)
-    assert not cc.repair_available(credit)
     assert cc.switch_off(conn, cc.REASON_AUTH, now=later)
     assert not cc.paid_available(cc.status(conn, now=later))
     assert not cc.switch_off(conn, cc.REASON_BUDGET, now=later)
     assert _state(conn)["reason"] == cc.REASON_AUTH
 
 
-def test_the_probe_switches_on_only_in_a_new_cycle_after_a_credit_stop():
+def test_a_budget_stop_comes_back_when_the_line_moves_and_not_before():
     conn = FakeConn()
-    cc.switch_off(conn, cc.REASON_BUDGET, now=_at(2026, 11, 1))
+    conn.kv[cc.CONFIG_KEY] = json.dumps({"cycle_budget_usd": 100})
+    conn.spend(date(2026, 11, 1), paid=95.0)
+    now = _at(2026, 11, 2)
+    assert cc.check_line(conn, now=now)
+    later = now + timedelta(hours=3)
+    out = probe.run(conn, "k", call=lambda k: (True, "ok"), now=later)
+    assert out["result"] == "recorded" and _state(conn)["state"] == "off"
+    # the owner adds credit mid-cycle: nobody has to write the state row
+    conn.kv[cc.CONFIG_KEY] = json.dumps({"cycle_budget_usd": 200})
+    later += timedelta(hours=3)
+    out = probe.run(conn, "k", call=lambda k: (True, "ok"), now=later)
+    assert out["result"] == "switched_on" and _state(conn)["state"] == "on"
+
+
+def test_the_probe_switches_on_only_in_a_new_cycle_after_a_billing_stop():
+    conn = FakeConn()
+    cc.switch_off(conn, cc.REASON_BILLING, now=_at(2026, 11, 1))
     calls = []
 
     def call(key):

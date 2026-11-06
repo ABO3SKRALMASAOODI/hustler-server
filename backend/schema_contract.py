@@ -5,6 +5,6 @@ DATABASE_REQUIRED_RELATIONS = (
     "payments", "job_credits", "client_events", "page_visits",
     "onboarding_responses", "plan_intents", "remote_executions",
     "mcp_tokens", "mcp_oauth_clients", "mcp_oauth_tokens", "mcp_catalog",
-    "subscription_credit_cycles",
+    "subscription_credit_cycles", "spend_ledger",
     "newsletter_permissions", "kit_daily_runs", "kit_webhook_events",
 )

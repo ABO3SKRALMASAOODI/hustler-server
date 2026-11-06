@@ -156,12 +156,6 @@ def test_a_funded_key_gives_an_unsubscribed_turn_no_openai_lane(funded):
     assert llm.agent_lanes_for(False, "free") == []
 
 
-def test_a_recovery_stays_on_claude(funded, monkeypatch):
-    monkeypatch.setattr(claude_lane, "available", lambda: True)
-    lanes = llm.agent_lanes_for(True, "plus_2026", operator_repair=True)
-    assert [lane["name"] for lane in lanes] == ["claude_recovery"]
-
-
 def test_only_the_explicit_switch_gives_openai_a_lane(funded, monkeypatch):
     monkeypatch.setattr(config, "OPENAI_EDITS", True)
     models = [lane["model"] for lane in llm.agent_lanes_for(True, "plus_2026")]
@@ -203,8 +197,6 @@ def _turn(monkeypatch, tmp_path, subscribed, plan, paid_lane):
         ctx_box["ctx"] = ctx
         return ctx
     monkeypatch.setattr(agent_tools, "ToolContext", fake_ctx)
-    import operator_recovery
-    monkeypatch.setattr(operator_recovery, "superseded", lambda ctx: None)
     monkeypatch.setattr(claude_trial, "resolve", lambda *a, **k:
                         claude_trial.Decision(claude_trial.Decision.NOT_TRIAL))
     monkeypatch.setattr(agent_loop, "_claude_paid_lane",
@@ -384,8 +376,6 @@ def test_a_dying_chain_still_answers_the_customer(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "TMP_DIR", str(tmp_path))
     monkeypatch.setattr(agent_tools, "ToolContext",
                         lambda *a: Ctx(duration=5.0, project_id=1))
-    import operator_recovery
-    monkeypatch.setattr(operator_recovery, "superseded", lambda ctx: None)
     monkeypatch.setattr(claude_trial, "resolve", lambda *a, **k:
                         claude_trial.Decision(claude_trial.Decision.NOT_TRIAL))
     monkeypatch.setattr(claude_trial, "credit_status", lambda *a, **k: {})

@@ -278,13 +278,16 @@ def test_a_claude_turn_list_opens_on_the_user(row, monkeypatch):
 def test_a_claude_answer_is_on_the_credit_ledger(monkeypatch):
     import claude_credit
     import claude_plans
+    import spend_ledger
     spent = []
-    monkeypatch.setattr(claude_plans, "safe", lambda conn, fn, usd:
-                        spent.append((fn, usd)))
+    monkeypatch.setattr(claude_plans, "safe", lambda conn, fn, *args:
+                        spent.append((fn, args[-1])))
     v._meter_concierge(object(), {"model": "claude-haiku-5-5",
                                   "prompt_tokens": 1000,
                                   "completion_tokens": 100})
-    assert spent[0][0] is claude_credit.record_paid_spend and spent[0][1] > 0
+    assert [fn for fn, _ in spent] == [spend_ledger.charge,
+                                       claude_credit.record_paid_spend]
+    assert all(usd > 0 for _, usd in spent)
     spent.clear()
     v._meter_concierge(object(), {"model": "gpt-6-luna"})
-    assert spent == []
+    assert [fn for fn, _ in spent] == [spend_ledger.charge]

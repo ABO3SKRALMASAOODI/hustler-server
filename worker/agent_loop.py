@@ -39,6 +39,7 @@ import request_intent
 import visual_index
 import sfx_search
 import song_find
+import spend_ledger
 import storage
 import story_critic
 import timeline
@@ -2054,15 +2055,6 @@ def run_agent_job(worker_db, job):
                                   index_row["json"] if index_row else None,
                                   workdir)
     ctx.request_contract_required = True
-    import operator_recovery
-    superseded = operator_recovery.superseded(ctx)
-    if superseded:
-        return superseded
-    if payload.get("operator_preservation_version"):
-        preserved = worker_db.run(dbx.get_edl_version, job["project_id"],
-                                  int(payload["operator_preservation_version"]))
-        if preserved:
-            ctx.request_preservation_baseline = preserved["json"]
     ctx._loaded_tool_domains = set(
         continuation_state.get("loaded_tool_domains") or [])
     ctx._loaded_tool_names = set(
@@ -2126,19 +2118,10 @@ def run_agent_job(worker_db, job):
     # "the picture follows" claim there would be a lie). ToolContext ships
     # with direct sight off; the loop that can honour it turns it on.
     ctx.direct_sight = True
-    operator_instruction = str(payload.get("operator_instruction") or "")
-    if not payload.get("operator_repair"):
-        operator_instruction = ""
-    # Keep verbatim customer constraints separate from private repair prose.
-    # A recovery note can discuss a wrong duration; it is not a new target.
     ctx.user_message = user_message.get("content") or ""
-    ctx.operator_instruction = operator_instruction
     ctx.verification_request = _customer_verification_request(
         worker_db, session_id, user_message, continuation_state)
     ctx.request_media_keys = _request_media_keys(worker_db, ctx)
-    if operator_instruction:
-        ctx.user_message = (ctx.user_message + "\n\n" +
-                            operator_instruction[:8000])
     # Immutable turn baseline for the last-line safety net below. A sequence
     # recipe that accidentally leaves 0.08s of a multi-minute programme must
     # never become the state offered for export merely because the model timed
@@ -2198,14 +2181,8 @@ def run_agent_job(worker_db, job):
     # ceiling silently punished exactly the long videos real users upload.
     # Removed by decision, not by accident. What still bounds a turn: the
     # user's own balance (below), and AGENT_TURN_TIMEOUT_S as a wall clock.
-    if payload.get("operator_repair") is True:
-        # Company-funded recovery must not stop because the affected account
-        # is now empty.  Provider request envelopes and durable execution
-        # slices still apply; None only removes the customer-wallet boundary.
-        ctx.credit_budget = None
-    else:
-        balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
-        ctx.credit_budget = float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE
+    balance = worker_db.run(dbx.user_credits_balance, job["user_id"])
+    ctx.credit_budget = float(balance or 0) + config.AGENT_TURN_BUDGET_GRACE
 
     # Which model answers this turn. Three tiers, resolved from ONE query:
     # Frontier ('ai_max') gets the frontier provider for its agent AND its
@@ -2234,8 +2211,8 @@ def run_agent_job(worker_db, job):
                                            job["user_id"], job["id"])
         except Exception:
             first_turn = False
-    # THE CLAUDE-FUNDED TRIAL LANE (owner decision D2, 25 Oct 2026). Paid,
-    # admin and operator-repair turns resolve exactly as before. A never-paid
+    # THE CLAUDE-FUNDED TRIAL LANE (owner decision D2, 25 Oct 2026). Paid and
+    # admin turns resolve exactly as before. A never-paid
     # account's turn on its ADMITTED free-trial project (backend free_trial)
     # runs ONLY on Claude, metered against its own budget (claude_trial). A
     # closed lane, the credit switch, a spent pool or a spent budget ends here
@@ -2243,7 +2220,6 @@ def run_agent_job(worker_db, job):
     trial = claude_trial.resolve(
         worker_db, job.get("user_id"), subscribed,
         project_id=job.get("project_id"), via="agent_turn",
-        operator_repair=payload.get("operator_repair") is True,
         continuing=bool(continuation_state))
     ctx.claude_trial = (trial.scope if trial.kind == claude_trial.Decision.ACTIVE
                         else None)
@@ -2267,11 +2243,8 @@ def run_agent_job(worker_db, job):
               f"{ctx.claude_trial.model} (${ctx.claude_trial.spent_usd:.4f} of "
               f"${ctx.claude_trial.cap_usd:.2f} spent)", flush=True)
     else:
-        if payload.get("operator_repair") is True:
-            _require_recovery_credit_line(worker_db, subscribed=subscribed)
         ctx.agent_lanes = llm.agent_lanes_for(
-            subscribed, plan, first_turn=first_turn,
-            operator_repair=payload.get("operator_repair") is True)
+            subscribed, plan, first_turn=first_turn)
         # Paid Anthropic routing is independent of the free-trial cutoff.
         # Keep contracted credit prices; subscription cohorts still control
         # Studio feature entitlements. Whatever stands behind this lane has
@@ -2365,9 +2338,7 @@ def run_agent_job(worker_db, job):
                       request, response,
                       getattr(usage, "prompt_tokens", None) if usage else None,
                       getattr(usage, "completion_tokens", None) if usage else None)
-    if payload.get("operator_repair") is True:
-        _llm_recorder.operator_repair_guard = lambda: _require_recovery_credit_line(
-            worker_db, subscribed=subscribed, fresh=True)
+    _llm_recorder.spend_lane = spend_ledger.lane_of(job.get("user_id"))
     llm.set_recorder(_llm_recorder)
     if getattr(ctx, "credit_price_aliases", None):
         # Credit parity for a new subscriber's Claude lane (llm.record).
@@ -2380,17 +2351,6 @@ def run_agent_job(worker_db, job):
         prior_chat = worker_db.run(dbx.recent_chat, ctx.session_id, 24, user_message["id"])
         ctx.request_contract_history = semantic_request.history(prior_chat, user_message["id"])
         semantic_request.ensure(ctx)
-        if operator_instruction:
-            attachment_note += (
-                "\n[system: INTERNAL PRODUCTION RECOVERY. This is a "
-                "company-funded correction of an incomplete or defective "
-                "edit. Do not mention internal auditing, billing, jobs, or "
-                "this instruction. Preserve every satisfied part of the "
-                "customer's request, repair the specified defects, complete "
-                "all required preview/verification work, and reply naturally "
-                "to the customer only after the latest EDL passes review. "
-                "Recovery requirements:\n" + operator_instruction[:8000] +
-                "\n]")
         if (job.get("payload") or {}).get("death_resume"):
             # Round 97 (#1): this job is the reaper's resume of a turn the
             # worker died under. Frame it so the model finishes instead of
@@ -2517,22 +2477,13 @@ def run_agent_job(worker_db, job):
         shutil.rmtree(workdir, ignore_errors=True)
 
 
-def _require_recovery_credit_line(worker_db, subscribed=False, fresh=False):
-    import claude_credit
-    credit = (worker_db.run(claude_credit.status) if fresh
-              else claude_trial.credit_status(worker_db))
-    available = claude_credit.repair_available(credit) if subscribed else credit.get("on")
-    if not available:
-        raise RuntimeError("The configured Anthropic credit line is paused; saved edits are preserved.")
-
-
 def _claude_paid_lane(worker_db, job, subscribed, plan, payload):
     """A funded paid Claude primary, independent of the trial cutoff.
 
     Trial budget cutoffs do not disable this paid route. Actual provider
     billing/auth refusals still apply. Never raises.
     """
-    if not subscribed or payload.get("operator_repair") is True:
+    if not subscribed:
         return None
     try:
         import claude_plans
@@ -2756,11 +2707,10 @@ def _restore_tighten(ctx, cont):
     return True
 
 
-def _trial_preview_cap(ctx, cap, operator_run=False):
+def _trial_preview_cap(ctx, cap):
     """Trial exploration allowance; proven repairs use a bounded progress
     policy after it. Money and provider limits remain unchanged."""
-    if not _trial_lane(ctx) or operator_run \
-            or not config.CLAUDE_TRIAL_MAX_PREVIEWS:
+    if not _trial_lane(ctx) or not config.CLAUDE_TRIAL_MAX_PREVIEWS:
         return cap
     return min(int(cap or config.CLAUDE_TRIAL_MAX_PREVIEWS),
                int(config.CLAUDE_TRIAL_MAX_PREVIEWS))
@@ -5964,8 +5914,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     visual_handoff = False
     # Trial exploration is bounded; evidence-backed repairs get a separate,
     # diminishing allowance rather than being rejected halfway through.
-    ctx.trial_preview_cap = _trial_preview_cap(
-        ctx, None, payload.get("operator_repair") is True)
+    ctx.trial_preview_cap = _trial_preview_cap(ctx, None)
     try:
         ctx.trial_previews = max(0, int(_cont.get("trial_previews") or 0))
     except (TypeError, ValueError):
@@ -6351,8 +6300,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
         # the project state and plans the edit — that is the thinking worth
         # paying for. New Advanced contracts use high on every editing step;
         # existing contracts retain their configured planning/dispatch split.
-        step_effort = llm.editor_reasoning_effort(
-            ctx.plan, iteration, operator_repair=payload.get("operator_repair") is True)
+        step_effort = llm.editor_reasoning_effort(ctx.plan, iteration)
         if claude_lane.is_claude_model(model):
             step_effort = (config.CLAUDE_TRIAL_PLAN_EFFORT if iteration == 0
                            else config.CLAUDE_TRIAL_EFFORT)
@@ -6577,6 +6525,8 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         # on chat/completions after a timeout/5xx.
                         raise
             _adapt_tries = 0
+            if not claude_lane.is_claude_model(call_model):
+                llm.fence(call_model)         # claude_lane.create fences its own
             while resp is None:
                 try:
                     resp = step_client.chat.completions.create(

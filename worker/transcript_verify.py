@@ -171,6 +171,7 @@ def _verify(words, wav_path, language, warnings):
                     target.setparams(params)
                     target.writeframes(frames)
                 extra = {'languages': [str(language).lower()]} if language else {}
+                llm.fence(MODEL)
                 with open(path, 'rb') as audio:
                     response = client.audio.transcriptions.create(
                         model=MODEL, file=audio, extra_body=extra)

@@ -7,7 +7,6 @@ import pytest
 import agent_loop
 import request_contract as rc
 import scope_guard
-import operator_recovery
 from test_turn_outcomes import _ctx, _changed
 
 
@@ -435,15 +434,6 @@ def test_durable_checkpoint_keeps_contract_and_exact_version_assessment():
     assert fresh.request_assessment == ctx.request_assessment
 
 
-@pytest.mark.parametrize("version,message", [(2, 10), (1, 11)])
-def test_recovery_yields_to_new_customer_work(version, message):
-    ctx = NS(job={"payload": {"operator_repair": True, "operator_expected_edl_version": 1,
-                             "operator_expected_message_id": 10}}, project_id=9, session_id=8,
-             db=NS(run=lambda *args: {"version": version, "message_id": message}))
-    result = operator_recovery.superseded(ctx)
-    assert result["outcome"] == "superseded" and result["billable"] is False
-
-
 def test_real_nested_evidence_survives_completion_review(monkeypatch):
     ctx = context()
     ctx.latest_edl()["json"]["motion"] = [{"params": {"text": "Original title"}}]
@@ -630,22 +620,6 @@ def test_only_current_rendered_images_are_attached(tmp_path, monkeypatch):
     assert len([i for i in images if i["type"] == "image_url"]) == 2
     proofs, _ = rc._visual_proofs(ctx, {"version": 3}, verification, False)
     assert [p["origin"] for p in proofs] == ["original_source"]
-
-
-@pytest.mark.parametrize('kind', ['continuation', 'retry'])
-def test_operator_recovery_resumes_its_own_committed_work(kind):
-    payload = {'operator_repair': True, 'operator_expected_edl_version': 1,
-               'operator_expected_message_id': 10}
-    if kind == 'continuation':
-        payload['continuation_state'] = {'durable_slice': True, 'versions_written': [2, 3], 'seen_message_id': 10}
-    else:
-        payload['mutation_receipt'] = {'job_id': 91, 'committed': True, 'after_version': 3}
-    current = {'version': 3, 'message_id': 10}
-    ctx = NS(job={'id': 91, 'payload': payload}, project_id=9, session_id=8,
-             db=NS(run=lambda *args: current))
-    assert operator_recovery.superseded(ctx) is None
-    current['version'] = 4
-    assert operator_recovery.superseded(ctx)['outcome'] == 'superseded'
 
 
 def test_live_steering_keeps_the_whole_brief_and_the_new_preservation_baseline(monkeypatch):

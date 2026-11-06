@@ -252,7 +252,7 @@ def test_live_loop_repairs_known_metadata_before_render_then_finishes(monkeypatc
     original_run = db.run
     db.run = lambda fn, *args: original_run(fn, *args) or 0
     result = agent_loop._run_loop(ctx, db, {'id': 3, 'project_id': 9, 'user_id': 8,
-        'payload': {'operator_repair': True}}, 2, {'id': 1, 'content': ctx.user_message})
+        'payload': {}}, 2, {'id': 1, 'content': ctx.user_message})
     assert result['export_ready'] is True
     assert result['steps'] == 2
     assert len(calls) == 3

@@ -20,17 +20,10 @@ def _result_is_billable(job, result):
     read-only Q&A while defaulting ambiguous/no-change results to the user's
     favour.  Shorts keeps its historical default for rolling deploys.
     """
-    payload = job.get("payload") or {}
     if job.get("_claude_trial") is not None or (
             isinstance(result, dict) and result.get("claude_trial")):
         # The Claude-funded trial is metered in USD on its own ledger
         # (claude_trial); an account with no plan is never charged credits.
-        return False
-    if payload.get("operator_repair") is True:
-        # Production recovery jobs correct work the product previously
-        # delivered incorrectly or failed to finish.  They are created only
-        # by the internal operator path; charging the customer a second time
-        # would turn our reliability incident into their bill.
         return False
     if job["type"] != "agent_turn":
         return bool(result.get("billable", True))
@@ -44,8 +37,6 @@ def _result_is_billable(job, result):
 
 def _qualifies_subscribe_gate(job, result):
     """Whether this committed result consumed the account's free real edit."""
-    if (job.get("payload") or {}).get("operator_repair") is True:
-        return False
     if job["type"] == "agent_turn":
         return (result.get("status") == "replied"
                 and result.get("outcome") in {"fulfilled", "partial"}

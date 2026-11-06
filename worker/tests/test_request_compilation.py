@@ -108,23 +108,10 @@ def test_trial_provider_keeps_strict_shapes_and_local_bounds():
     assert "maximum" in claude_lane._strict_schema(properties)["properties"]
 
 
-def test_company_repair_stays_on_anthropic_even_without_openai_credentials(monkeypatch):
-    import llm, claude_lane, config
-    monkeypatch.setattr(config, "OPENAI_API_KEY", "")
-    monkeypatch.setattr(claude_lane, "available", lambda: True)
-    monkeypatch.setattr(llm, "paid_editor_lanes", lambda *args: pytest.fail("OpenAI recovery route"))
-    monkeypatch.setattr(llm, "agent_client_for", lambda *args, **kwargs:
-                        pytest.fail("Failed ordinary route selected for company repair"))
-    lanes = llm.agent_lanes_for(False, "free", operator_repair=True)
-    assert len(lanes) == 1 and lanes[0]["provider"] == "anthropic"
-    assert lanes[0]["model"].startswith("claude-")
-    assert llm.editor_reasoning_effort("free", 8, operator_repair=True) == "high"
-
-
-def test_recovery_auxiliary_calls_use_the_same_provider_and_clear_after_turn(monkeypatch):
+def test_a_turn_lane_carries_auxiliary_calls_and_clears_after_turn(monkeypatch):
     import llm, claude_lane, claude_trial
     monkeypatch.setattr(claude_trial, "current", lambda: None)
-    lane = claude_lane.lane("claude-opus-5-5", name="claude_recovery")
+    lane = claude_lane.lane("claude-opus-5-5", name="claude_paid")
     llm.set_turn_plan("free", project_id=9, lane=lane)
     try:
         assert llm.claude_trial_lane() == (lane["client"], lane["model"])
@@ -133,21 +120,3 @@ def test_recovery_auxiliary_calls_use_the_same_provider_and_clear_after_turn(mon
     finally:
         llm.clear_turn_plan()
     assert llm.claude_trial_lane() is None and llm.turn_lane() is None
-
-
-def test_unavailable_anthropic_does_not_silently_restore_openai_recovery(monkeypatch):
-    import llm, claude_lane
-    monkeypatch.setattr(claude_lane, "available", lambda: False)
-    with pytest.raises(RuntimeError, match="Anthropic recovery"):
-        llm.agent_lanes_for(True, "advanced", operator_repair=True)
-
-
-@pytest.mark.parametrize("on", [True, False])
-def test_company_recovery_respects_the_existing_anthropic_credit_line(monkeypatch, on):
-    import agent_loop, claude_trial
-    monkeypatch.setattr(claude_trial, "credit_status", lambda db: {"on": on})
-    if on:
-        agent_loop._require_recovery_credit_line(object())
-    else:
-        with pytest.raises(RuntimeError, match="credit line is paused"):
-            agent_loop._require_recovery_credit_line(object())

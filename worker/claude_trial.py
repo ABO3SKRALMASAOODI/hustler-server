@@ -367,10 +367,13 @@ def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
             "reason": "granted" if inserted else "existing"}
 
 
-def add_spend(conn, user_id, usd, granted=True, calls=1, extras=False):
+def add_spend(conn, user_id, usd, granted=True, calls=1, extras=False,
+              customer=True):
     """Atomically add one cost to the account total and the day ledger.
     ``extras`` marks a non-Anthropic generation (images, sfx): it counts
     against the account's $1 and the pool, not against the Anthropic credit.
+    An internal test account on the trial lane (``customer`` False) spends its
+    own budget and never touches the pool or the credit line.
     Returns (account_spent or None, pool_total for this credit cycle)."""
     usd = max(0.0, float(usd or 0.0))
     import claude_credit
@@ -390,7 +393,7 @@ def add_spend(conn, user_id, usd, granted=True, calls=1, extras=False):
                         RETURNING spent_usd""",
                         (usd, int(calls), usd, int(user_id)))
             spent = _v(cur.fetchone(), "spent_usd", 0)
-        if with_extras:
+        if customer and with_extras:
             cur.execute("""INSERT INTO trial_budget_days
                              (day, spent_usd, calls, extras_usd)
                            VALUES ((NOW() AT TIME ZONE 'UTC')::date, %s, %s, %s)
@@ -401,7 +404,7 @@ def add_spend(conn, user_id, usd, granted=True, calls=1, extras=False):
                                             + EXCLUDED.extras_usd,
                                updated_at = NOW()""",
                         (usd, int(calls), usd if extras else 0.0))
-        else:
+        elif customer:
             cur.execute("""INSERT INTO trial_budget_days (day, spent_usd, calls)
                            VALUES ((NOW() AT TIME ZONE 'UTC')::date, %s, %s)
                            ON CONFLICT (day) DO UPDATE
@@ -412,11 +415,12 @@ def add_spend(conn, user_id, usd, granted=True, calls=1, extras=False):
     return (float(spent) if spent is not None else None), pool
 
 
-def _meter_tx(conn, user_id, usd, granted, extras):
+def _meter_tx(conn, user_id, usd, granted, extras, customer=True):
     """One metered cost and, in the same transaction, the credit line."""
     import claude_credit
-    spent, pool = add_spend(conn, user_id, usd, granted, extras=extras)
-    if usd > 0 and not extras:
+    spent, pool = add_spend(conn, user_id, usd, granted, extras=extras,
+                            customer=customer)
+    if usd > 0 and not extras and customer:
         claude_credit.check_line(conn)
     return spent, pool
 
@@ -538,16 +542,11 @@ def _metering_db():
 
 
 def guard_call():
-    """Hard backstop under the loop's own graceful stop: a scope that is
-    15 % past its ceiling makes no further Claude calls (critics, vision)."""
-    # Operator recoveries have no customer-wallet cap. Recheck their company
-    # allowance before every call, including reviews/vision on pool threads;
-    # checking only at turn admission allowed repeated assessments to overrun
-    # the remaining reserve. Ordinary subscriber calls have no such guard.
+    """Before every Claude call: company spend stops at its share, and as a
+    hard backstop under the loop's own graceful stop a scope that is 15 % past
+    its ceiling makes no further calls (critics, vision)."""
     import llm
-    repair_guard = getattr(llm.get_recorder(), "operator_repair_guard", None)
-    if callable(repair_guard):
-        repair_guard()
+    llm.fence("claude")
     scope = current()
     if scope is None or scope.is_test:
         return
@@ -564,6 +563,9 @@ def meter(model, usd, kind="llm"):
     if scope is None:
         return None
     usd = max(0.0, float(usd or 0.0))
+    import llm
+    import spend_ledger
+    customer = llm.spend_lane() == spend_ledger.CUSTOMER
     with _meter_lock:
         scope.calls += 1
         scope.spent_usd += usd
@@ -572,7 +574,7 @@ def meter(model, usd, kind="llm"):
         try:
             spent, pool = _metering_db().run(
                 _meter_tx, scope.user_id, usd, scope.granted,
-                kind == "extras")
+                kind == "extras", customer)
             if spent is not None:
                 scope.spent_usd = max(scope.spent_usd, float(spent))
         except Exception as exc:  # noqa: BLE001 - the live scope still caps
@@ -593,10 +595,16 @@ def _paid_tx(conn, usd):
 
 def meter_paid(model, usd):
     """A subscriber's Claude-lane call: the credit cycle's ledger and line.
-    Never raises (the turn is the customer's; metering is ours)."""
+    The line is the customers': a company call never lands on it. Never raises
+    (the turn is the customer's; metering is ours)."""
     usd = max(0.0, float(usd or 0.0))
     try:
-        _metering_db().run(_paid_tx, usd)
+        import llm
+        import spend_ledger
+        if llm.spend_lane() != spend_ledger.CUSTOMER:
+            return
+        with _meter_lock:
+            _metering_db().run(_paid_tx, usd)
     except Exception as exc:  # noqa: BLE001
         print(f"[claude-lane] paid meter write failed ({model}): "
               f"{str(exc)[:160]}", flush=True)
@@ -748,8 +756,7 @@ def credit_status(worker_db, max_age_s=20.0):
 
 
 def resolve(worker_db, user_id, subscribed, project_id=None,
-            via="agent_turn", operator_repair=False, allow_grant=True,
-            continuing=False):
+            via="agent_turn", allow_grant=True, continuing=False):
     """Which lane a job for this account runs on. Never raises.
 
     NOT_TRIAL (today's behaviour, exactly) unless ALL of: the flag is on (or
@@ -757,8 +764,8 @@ def resolve(worker_db, user_id, subscribed, project_id=None,
     the project is its admitted free-trial project. ``continuing`` is a later
     slice of a request that already started: when the credit switch went off
     only because the cycle reached its line, that request still finishes."""
-    if operator_repair or user_id is None:
-        return Decision(Decision.NOT_TRIAL, reason="operator_or_anonymous")
+    if user_id is None:
+        return Decision(Decision.NOT_TRIAL, reason="anonymous")
     value = flag(worker_db)
     is_test = int(user_id) in value["test_user_ids"]
     if not value["on"] and not is_test:

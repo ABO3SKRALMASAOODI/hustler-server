@@ -42,6 +42,7 @@ import llm
 import reference_profile as reference_grammar
 import shorts_judge
 import source_layout
+import spend_ledger
 import storage
 from psycopg2.extras import Json
 from schemas import GRADE_PRESETS, Frame
@@ -1338,8 +1339,7 @@ def run_shorts_plan(worker_db, job):
     # admin accounts resolve to NOT_TRIAL, so nothing here changes for them.
     trial = claude_trial.resolve(
         worker_db, job.get("user_id"), subscribed, project_id=project_id,
-        via="shorts", operator_repair=(job.get("payload") or {}).get(
-            "operator_repair") is True)
+        via="shorts")
     trial_scope = (trial.scope if trial.kind == claude_trial.Decision.ACTIVE
                    else None)
     if trial_scope is not None:
@@ -1376,6 +1376,7 @@ def run_shorts_plan(worker_db, job):
             print(f"[shorts {job_id}] llm_call record failed: {e}",
                   flush=True)
 
+    _recorder.spend_lane = spend_ledger.lane_of(job.get("user_id"))
     llm.set_recorder(_recorder)
     # A subscriber's clip picks run on the paid Claude lane, as their edits do
     # (the turn's helpers follow a Claude lane on this thread).

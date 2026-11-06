@@ -37,6 +37,7 @@ import motion_judge
 import scenes
 import source_layout
 import spatial
+import spend_ledger
 import storage
 import tiles as tilestrip
 import transcribe
@@ -463,6 +464,12 @@ def run_index_job(worker_db, job):
               f"rather than the browser proxy", flush=True)
 
     trial_scope, trial_recorder = _claude_trial_index_scope(worker_db, job)
+    # Our own account's upload: its captions and greeting are company spend.
+    company_recorder = None
+    if (llm.get_recorder() is None and
+            spend_ledger.lane_of(job.get("user_id")) != spend_ledger.CUSTOMER):
+        company_recorder = llm.JobRecorder(worker_db, job)
+        llm.set_recorder(company_recorder)
     try:
         warnings_pre = []
         if from_client_proxy:
@@ -892,6 +899,9 @@ def run_index_job(worker_db, job):
             if isinstance(trial_recorder, _TrialRecorder) and \
                     llm.get_recorder() is trial_recorder:
                 llm.set_recorder(None)
+        if company_recorder is not None and \
+                llm.get_recorder() is company_recorder:
+            llm.set_recorder(None)
         shutil.rmtree(workdir, ignore_errors=True)
 
 

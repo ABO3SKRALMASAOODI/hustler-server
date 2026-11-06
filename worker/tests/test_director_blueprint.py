@@ -1103,7 +1103,7 @@ def test_slow_visual_tool_is_read_once_before_durable_handoff(monkeypatch, tmp_p
             return 99
         return original_run(fn, *args) or 0
     fake.run = run
-    result = agent_loop._run_loop(ctx, fake, {'id': 3, 'project_id': 9, 'user_id': 8, 'payload': {'operator_repair': True}}, 2, {'id': 1, 'content': 'edit wedding'})
+    result = agent_loop._run_loop(ctx, fake, {'id': 3, 'project_id': 9, 'user_id': 8, 'payload': {}}, 2, {'id': 1, 'content': 'edit wedding'})
     assert result['status'] == 'continued'
     assert checkpoint['editorial_observations'][-1] == 'clip/a @2.25: groom by window; use as opening.'
     assert checkpoint['work_slices'] == 1

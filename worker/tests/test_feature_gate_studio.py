@@ -126,15 +126,10 @@ def test_make_shorts_on_own_short_footage_is_an_ordinary_edit(monkeypatch):
     assert ran == ["make_shorts"] and ran2 == ["make_shorts"]
 
 
-def test_ordinary_tools_and_operator_repairs_are_untouched(monkeypatch):
+def test_ordinary_tools_are_untouched(monkeypatch):
     ctx, db, _ran = _ctx(monkeypatch, why="trial")
     out = agent_tools.execute(ctx, "set_color_grade", {"preset": "warm"})
     assert out.startswith("EDL v1 -> v2") and db.gate_reads == 0
-    ctx, db, ran = _ctx(monkeypatch, why="trial",
-                        payload={"operator_repair": True})
-    agent_tools.execute(ctx, "record_website", dict(GATED_CALLS[
-        "record_website"]))
-    assert ran == ["record_website"]
 
 
 def test_the_gate_is_read_once_per_turn(monkeypatch):

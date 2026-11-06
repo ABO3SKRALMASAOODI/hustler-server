@@ -13,23 +13,26 @@ The current cycle ends 8 Nov 2026 00:00 UTC.
 Owner: "If we finish our Claude quota we return to the pre-edit paywall
 automatically, without changing anything."
 
-* SPEND. Every Claude call's exact provider cost lands in the daily ledger
-  ``trial_budget_days`` (migration 040): ``spent_usd - extras_usd`` for the
-  trial (extras are its non-Anthropic generations), ``paid_usd`` for
-  subscribers. The cycle total is their sum over the cycle's UTC days.
+* SPEND. Every CUSTOMER Claude call's exact provider cost lands in the daily
+  ledger ``trial_budget_days`` (migration 040): ``spent_usd - extras_usd`` for
+  the trial (extras are its non-Anthropic generations), ``paid_usd`` for
+  subscribers. The cycle total is their sum over the cycle's UTC days. Company
+  spend (spend_ledger.py) is never written here, so it cannot turn the trial
+  off; it stops at its own share instead.
 * OFF. When the cycle total reaches ``cycle_budget_usd - safety_margin_usd``,
   or on any Anthropic billing/credit refusal (or an auth refusal: the key is
   wrong), the state flips OFF: no new trial grants, never-paid accounts meet
   today's pre-edit paywall, a trial turn already running finishes (budget)
   or ends on the plan cards (refusal). Paid subscriptions keep their Studio
   access. Since the owner's 4 Nov instruction, this trial ledger must not
-  switch paid editing off. Internal repairs stop at the configured budget;
-  actual billing/auth refusals require a configured funded paid fallback.
+  switch paid editing off. Actual billing/auth refusals require a configured
+  funded paid fallback.
 * ON AGAIN. While OFF, a probe (GitHub Actions every 3 h,
-  backend/scripts/claude_credit_probe.py) makes one minimal call. When it
-  succeeds in a NEW cycle, the state flips back ON by itself. A switch that
-  went off on an auth refusal (a key problem, not the credit) comes back on
-  as soon as a probe succeeds and the cycle is under the line.
+  backend/scripts/claude_credit_probe.py) makes one minimal call. A billing
+  refusal comes back when the probe succeeds in a NEW cycle. A switch that
+  went off on the budget or on an auth refusal comes back on as soon as a
+  probe succeeds and the cycle is under the line (a raised budget, a fixed
+  key): only a real provider refusal has to wait for new credit.
 * Each switch queues ONE admin alert (``trial_alerts``; the backend's alert
   scheduler sends it to the admin address, never a customer).
 
@@ -65,11 +68,10 @@ DEFAULTS = {
 }
 
 ON, OFF = "on", "off"
-# Why the switch went off. Credit reasons come back only in a new cycle.
+# Why the switch went off. A billing refusal comes back only in a new cycle.
 REASON_BUDGET = "budget"
 REASON_BILLING = "billing_error"
 REASON_AUTH = "auth_error"
-CREDIT_REASONS = (REASON_BUDGET, REASON_BILLING)
 
 
 def _v(row, key, index=0):
@@ -249,17 +251,6 @@ def paid_available(credit):
                     and credit.get("last_probe_ok") is True))
 
 
-def repair_available(credit):
-    """Internal recovery may use only the remaining configured allowance."""
-    if credit.get("on"):
-        return True
-    if credit.get("reason") != REASON_BUDGET:
-        return False
-    try:
-        return 0 <= float(credit["spent_usd"]) < float(credit["budget_usd"])
-    except (KeyError, TypeError, ValueError):
-        return False
-
 def _write_state(cur, state):
     cur.execute("""INSERT INTO app_kv (key, value, updated_at)
                    VALUES (%s, %s, NOW())
@@ -430,13 +421,12 @@ def probe_plan(conn, now=None):
                 "spent_usd": spent, "line_usd": line}
     off_end = _parse_time(state.get("cycle_end"))
     new_cycle = off_end is None or now >= off_end
-    reason = state.get("reason")
-    if reason in CREDIT_REASONS:
+    if state.get("reason") == REASON_BILLING:
         may = new_cycle and spent < line
     else:
         may = spent < line
     return {"action": "probe", "may_switch_on": may, "new_cycle": new_cycle,
-            "reason": reason, "spent_usd": spent, "line_usd": line}
+            "reason": state.get("reason"), "spent_usd": spent, "line_usd": line}
 
 
 def after_probe(conn, plan, ok, error="", now=None):
