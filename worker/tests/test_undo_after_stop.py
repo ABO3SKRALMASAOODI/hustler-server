@@ -1,0 +1,129 @@
+"""p5518 (ticket #77): a stopped edit cycle can still take back what it added,
+and the reply that replaces the draft keeps the customer's language."""
+from types import SimpleNamespace
+
+import pytest
+
+import agent_loop
+import agent_tools
+import preview_budget
+import request_contract
+
+
+def stopped(version=17):
+    row = {'version': version, 'json': {}}
+    ctx = SimpleNamespace(latest_edl=lambda: row, trial_preview_cap=2,
+                          trial_previews=3, trial_preview_versions=[6, 10, 13],
+                          last_preview={'edl_version': version, 'asset_id': 1},
+                          verification_records={}, rendered_versions=(),
+                          trial_preview_repairs={'history': [
+                              {'version': 13, 'remaining': 1, 'findings': []}]},
+                          row=row)
+    return ctx
+
+
+def rendered(ctx, version):
+    ctx.row['version'] = version
+    ctx.last_preview = {'edl_version': version, 'asset_id': 2}
+    agent_loop._count_trial_preview(ctx, 'Preview rendered')
+
+
+def test_undo_tools_are_real_write_tools():
+    assert preview_budget.UNDO_TOOLS <= set(agent_tools.WRITE_TOOLS)
+    assert 'reset_edit' not in preview_budget.UNDO_TOOLS
+    assert 'remove_filler_words' not in preview_budget.UNDO_TOOLS
+
+
+def test_new_work_stays_refused_but_the_turn_can_undo_and_show_it():
+    ctx = stopped()
+    assert agent_loop._trial_render_refusal(ctx, 'blur_region').startswith('REJECTED')
+    assert agent_loop._trial_render_refusal(ctx, 'remove_blur') is None
+    # nothing was actually removed yet: no render of the same version
+    assert 'REJECTED' in agent_loop._trial_render_refusal(ctx, 'render_preview')
+    ctx.row['version'] = 18
+    assert agent_loop._trial_render_refusal(ctx, 'render_preview') is None
+    assert agent_loop._trial_render_refusal(ctx, 'add_text').startswith('REJECTED')
+    rendered(ctx, 18)
+    assert ctx.trial_preview_repairs.get('undo_from') is None
+    assert ctx.trial_preview_repairs['undo_renders'] == 1
+    assert 'REJECTED' in agent_loop._trial_render_refusal(ctx, 'render_preview')
+
+
+def test_a_failed_undo_render_can_be_retried():
+    ctx = stopped()
+    agent_loop._trial_render_refusal(ctx, 'remove_blur')
+    ctx.row['version'] = 18
+    assert agent_loop._trial_render_refusal(ctx, 'render_preview') is None
+    # the render failed: last_preview never moved
+    agent_loop._count_trial_preview(ctx, 'TRANSIENT_FAILURE')
+    assert agent_loop._trial_render_refusal(ctx, 'render_preview') is None
+
+
+def test_undo_is_bounded_and_survives_a_checkpoint():
+    ctx = stopped()
+    for version in (18, 19):
+        assert agent_loop._trial_render_refusal(ctx, 'remove_erase') is None
+        ctx.row['version'] = version
+        assert agent_loop._trial_render_refusal(ctx, 'render_preview') is None
+        rendered(ctx, version)
+    assert agent_loop._trial_render_refusal(ctx, 'remove_erase').startswith('REJECTED')
+    resumed = stopped(19)
+    preview_budget.restore(resumed, preview_budget.checkpoint(ctx))
+    assert agent_loop._trial_render_refusal(resumed, 'remove_erase').startswith('REJECTED')
+
+
+def test_an_open_undo_survives_a_checkpoint():
+    ctx = stopped()
+    agent_loop._trial_render_refusal(ctx, 'remove_blur')
+    ctx.row['version'] = 18
+    resumed = stopped(17)
+    resumed.row['version'] = 18
+    preview_budget.restore(resumed, preview_budget.checkpoint(ctx))
+    assert agent_loop._trial_render_refusal(resumed, 'render_preview') is None
+
+
+def test_the_refusal_names_the_way_back():
+    assert 'remove_blur' in agent_loop._trial_render_refusal(stopped(), 'add_text')
+
+
+def test_assessor_is_told_the_customers_language_and_plain_words():
+    text = request_contract.__dict__
+    prompt = next(v for k, v in text.items()
+                  if isinstance(v, str) and 'Use assess_request once' in v)
+    assert "customer's own words" in prompt
+    assert 'rg1' in prompt  # internal ids are named as forbidden
+
+
+def _reply_ctx():
+    return SimpleNamespace(job={'id': 1}, agent_model='m')
+
+
+def test_assessed_english_reply_to_an_arabic_request_is_rewritten(monkeypatch):
+    calls = []
+
+    def create(client, model, msgs, **kw):
+        calls.append(msgs)
+        message = SimpleNamespace(content='أزلنا الشريط السفلي، لكن الشعار على الملابس ما زال ظاهرا.')
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
+
+    monkeypatch.setattr(agent_loop.llm, 'create_with_dialect', create)
+    monkeypatch.setattr(agent_loop.llm, 'record', lambda *a, **k: None)
+    honesty = {}
+    english = ('The bottom band was removed, but the repeated logo on the '
+               'clothes is still visible in the video.')
+    # an English upload name earlier in the thread must not excuse it
+    messages = [{'role': 'user', 'content': 'Making Oral Health Easier.mp4'}]
+    out = agent_loop._enforce_reply_language(
+        _reply_ctx(), None, messages, [], english, 'شيل العلامة المائية',
+        honesty, this_request_only=True)
+    assert calls and out != english
+    assert honesty['language_fixed'] is True
+
+
+def test_a_reply_in_the_customers_language_is_left_alone(monkeypatch):
+    monkeypatch.setattr(agent_loop.llm, 'create_with_dialect',
+                        lambda *a, **k: pytest.fail('no rewrite expected'))
+    text = 'أزلنا الشريط السفلي، لكن الشعار على الملابس ما زال ظاهرا.'
+    assert agent_loop._enforce_reply_language(
+        _reply_ctx(), None, [], [], text, 'شيل العلامة المائية', {},
+        this_request_only=True) == text
