@@ -327,6 +327,29 @@ def test_a_customer_asking_does_not_put_off_the_silence(world):    # noqa: F811
     assert fired(world, gaps._turn_went_silent, minutes=2)
 
 
+def test_a_request_moving_to_its_next_slice_is_still_silent(world):    # noqa: F811
+    """A continuation is created every few minutes, so the clock read from it
+    never reached 120 s, and the first slice ending read as the turn ending."""
+    root = world.job("agent_turn", state="done", project=5600, user=2846, age=200,
+                     result={"outcome": "in_progress", "status": "continued",
+                             "continued_job_id": "2"})
+    world.job("agent_turn", state="running", project=5600, user=2846, age=90,
+              payload={"root_agent_job_id": str(root)})
+    world.tick()
+    assert world.only_ticket()["cause_key"] == "auto-gap-turn-silent-running"
+    world.ticks(11)
+    assert world.only_ticket()["severity"] == "P0"
+
+
+def test_a_request_that_ended_is_past_the_silence(world):    # noqa: F811
+    jid = world.job("agent_turn", state="running", project=5600, user=2846)
+    world.ticks(3)
+    world.c.execute("UPDATE video_jobs SET state = 'done', updated_at = %s "
+                    "WHERE id = %s", (world.clock.now, jid))
+    world.ticks(11)
+    assert world.ticket("auto-gap-turn-silent-running")["severity"] == "P1"
+
+
 def render_job(world, type_="final", state="running", age=1201, seconds=None):    # noqa: F811
     if seconds is not None:
         world.c.execute("INSERT INTO assets (project_id, kind, duration_s, bytes)"

@@ -852,8 +852,8 @@ def test_nothing_about_payment_or_error_words_decides_severity():
     src = open(intake.__file__, encoding="utf-8").read()
     assert "DEVICE_SIDE" not in src and "paying" not in src
     assert not re.search(r"defs\.paying", src)
-    assert "device_side" not in src and "truncated-media\"" not in src.split(
-        "ERROR_CLASSES = (")[1].split(")\n_NUM")[1], "the text keys, never ranks"
+    # The error text names the cause and never ranks it.
+    assert "device_side" not in src and src.count('"truncated-media"') == 1
 
 
 # ── The CLI reads the proof, it does not take the closer's word ──────────

@@ -21,8 +21,8 @@ from ops_loop import store
 
 ANALYSIS_FLOOR_S = 600          # 10 min, or 1.5 x the source
 ANALYSIS_RATIO = 1.5
-# 20 min, or 1.5 x the source: over 30 days 2 of 118 finals and about 3% of
-# previews took longer, so it fires on what a customer really sat through.
+# 20 min, or 1.5 x the source: back-tested on 14 days it fires on 1 of 8 finals
+# and 6 of 400 previews (3 accounts), what a customer really sat through.
 RENDER_FLOOR_S = 1200
 RENDER_JOBS = ("final", "preview", "shorts_plan")
 EXPORT_WAIT = timedelta(minutes=10)
@@ -406,19 +406,23 @@ def _below_the_bar(cur, since, now, p):
 def _turn_went_silent(cur, since, now, p):
     """27 of 88 typed turns had a silence over 120 s, while the customer watched
     nothing happen. Only the product speaking resets the clock: a customer
-    asking "hello?" is still waiting. Judged only while the turn is open, so a
-    past window is not replayed by this one."""
+    asking "hello?" is still waiting, and so is one whose request moved on to
+    its next slice. Judged only while the turn is open, so a past window is not
+    replayed by this one."""
     q = dict(p, silence=TURN_SILENCE, lookback=now - timedelta(days=1))
     cur.execute(f"""
         SELECT s.* FROM (
             SELECT j.id, j.user_id, j.project_id, j.state,
-                   GREATEST(j.created_at, (
+                   GREATEST(COALESCE(root.created_at, j.created_at), (
                        SELECT max(m.created_at) FROM chat_messages m
                         WHERE m.session_id = pr.chat_session_id
                           AND m.role = 'assistant'
                        ) AT TIME ZONE 'UTC') AS heard
               FROM video_jobs j JOIN users u ON u.id = j.user_id
               JOIN projects pr ON pr.id = j.project_id
+              LEFT JOIN video_jobs root ON root.id = CASE
+                   WHEN j.payload->>'root_agent_job_id' ~ '^[0-9]+$'
+                   THEN (j.payload->>'root_agent_job_id')::int END
              WHERE j.type = 'agent_turn' AND j.state IN ('queued', 'running')
                AND j.created_at > %(lookback)s
                AND COALESCE(j.payload->>'operator_repair', '') = ''

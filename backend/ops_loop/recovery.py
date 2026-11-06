@@ -164,13 +164,15 @@ def _checkout(cur, w, now):
 
 
 def _turn(cur, w, now):
-    """A turn that went silent: it spoke again, or it ended. The customer's own
-    "hello?" is the opposite of the turn speaking (account 2752 sent "؟" two
-    minutes in and waited another 1,060 s)."""
-    cur.execute("SELECT state, updated_at FROM video_jobs WHERE id = %s",
-                (w["job_id"],))
-    row = cur.fetchone()
-    if not row or (row["state"] not in OPEN_JOB and row["updated_at"] <= now):
+    """A turn that went silent: it spoke again, or the request ended. A slice
+    handing over to the next is not an end: 127 turns in 14 days ended that way.
+    The customer's own "hello?" is the opposite of the turn speaking (account
+    2752 sent "؟" two minutes in and waited another 1,060 s)."""
+    cur.execute("""SELECT 1 FROM video_jobs
+                    WHERE project_id = %s AND type = 'agent_turn'
+                      AND state = ANY(%s) LIMIT 1""",
+                (w["project_id"], list(OPEN_JOB)))
+    if not _one(cur):
         return RECOVERED
     cur.execute("""SELECT 1 FROM chat_messages m
                      JOIN projects p ON p.chat_session_id = m.session_id

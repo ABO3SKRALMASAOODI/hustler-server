@@ -738,8 +738,10 @@ def _link_review(cur, ticket_id, f):
 def settle_failure(cur, item, blocked, note=None):
     """The second look at a failure (ops_loop.recovery): the customer got past
     it or was left stuck. Left stuck raises its open ticket to P0, whoever the
-    customer is; got past it leaves the ticket where it is, open, because the
-    cause is still to be fixed. Returns the ticket, or None if there is none."""
+    customer is, and reopens one that closed meanwhile; an owner decision stays
+    closed and says so in its history. Got past it leaves the ticket where it
+    is, open, because the cause is still to be fixed. Returns the ticket, or
+    None if there is none."""
     cur.execute("SELECT * FROM tickets WHERE cause_key = %s FOR UPDATE",
                 (item["cause_key"],))
     row = cur.fetchone()
