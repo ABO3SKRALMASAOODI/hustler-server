@@ -399,15 +399,18 @@ def test_the_two_new_beacons_are_accepted():
 
 
 def test_a_bad_file_gets_no_alarm_but_a_ticket_says_it_happened():
+    from ops_loop import recovery
     base = {"id": 1, "user_id": 7, "project_id": 8,
-            "at": datetime(2026, 11, 6, tzinfo=timezone.utc), "paying": True}
+            "at": datetime(2026, 11, 6, tzinfo=timezone.utc)}
     row = dict(base, kind="upload_rejected", detail={
         "reason": "unfinished file", "device_side": True, "bytes": 15_728_640})
     assert intake._event_failure(row)["severity"] == "P1"
-    gone = dict(base, kind="upload_failed", paying=False, detail={
+    gone = dict(base, kind="upload_failed", detail={
         "reason": "Your browser can't read this file any more",
         "file_gone": True})
-    assert intake._event_failure(gone)["severity"] == "P1"
+    severity, look = recovery.plan(intake._event_failure(gone))
+    assert severity == "P1", "on a ticket at once, with no alarm yet"
+    assert look, "and looked at again: a customer left stuck is a P0"
 
 
 def test_a_closed_ticket_can_be_reopened_with_its_reason_kept():
