@@ -14,6 +14,7 @@ import pytest
 import agent_loop
 import agent_tools
 import db as dbx
+import followup_recipes
 import request_contract
 from schemas import edl_signature
 from test_review_loop_after_preview import (AUTO_RENDER, ASK, _auto_render_returns,
@@ -317,3 +318,65 @@ def test_a_brief_with_no_change_row_is_not_asked_what_it_writes(monkeypatch):
     reading["requirements"] = [reading["requirements"][1]]
     _ctx, seen = _reads(monkeypatch, reading)
     assert len(seen) == 1
+
+
+# ---- a word list never outranks the model's reading -----------------------------
+
+P5388 = "Turn this into a punchy original 16:9 short with big kinetic captions"
+
+
+def _followup(text, mode="edit", changed=()):
+    ctx = NS(semantic_contract={"mode": mode, "changed_lanes": list(changed)},
+             latest_edl=lambda: {"version": 3, "json": {"keep": [[0, 20]]}})
+    followup_recipes.start(ctx, text)
+    return ctx
+
+
+def test_a_frame_the_customer_typed_is_not_refused_as_not_asked():
+    """p5388, replayed: the frame stayed 9:16 and the reply said it was
+    "refused as outside this request"."""
+    ctx = _followup(P5388, changed=["frame_ratio", "captions", "timeline_timing"])
+    assert followup_recipes.classify(P5388) == ["punchier"]
+    assert not followup_recipes.active(ctx)
+    assert followup_recipes.refusal(ctx, "set_frame", {"ratio": "16:9"}) is None
+    assert followup_recipes.note(ctx, P5388) == ""
+    assert followup_recipes.check_write(
+        ctx, {"frame": {"ratio": "9:16"}}, {"frame": {"ratio": "16:9"}}) is None
+
+
+def test_the_frame_alone_is_enough_to_stand_the_recipe_down():
+    assert not followup_recipes.active(_followup(P5388, changed=["frame_ratio"]))
+
+
+def test_an_interjection_is_not_a_request_to_remove_filler():
+    text = "Umm you didn't do anything that I asked and made me wait around 2 hours"
+    assert not followup_recipes.active(_followup(
+        text, changed=["cuts", "timeline_timing", "music", "texts"]))
+
+
+def test_a_reading_that_agrees_keeps_the_recipe_and_its_guard():
+    """The one real firing in 14 days: an unasked zoom on a title request."""
+    text = "make the opening title a little bigger"
+    ctx = _followup(text, changed=["texts"])
+    assert followup_recipes.active(ctx)
+    assert "NOT ASKED" in followup_recipes.refusal(ctx, "add_zoom", {})
+
+
+def test_effects_beside_a_cut_keeps_the_recipe():
+    """The recipe's own case: "cut the boring parts" came back longer."""
+    ctx = _followup("cut the boring parts",
+                    changed=["cuts", "timeline_timing", "effects"])
+    assert followup_recipes.active(ctx)["direction"] == "shorter"
+
+
+@pytest.mark.parametrize("mode", ["open", "inspect", "clarify"])
+def test_no_edit_brief_means_no_recipe(mode):
+    """An open brief promises nothing frozen, and writes are refused in the
+    other two, so a recipe would tell the editor to do what cannot land."""
+    assert not followup_recipes.active(_followup("make the captions bigger", mode))
+
+
+def test_with_no_brief_at_all_the_words_stand():
+    ctx = NS(semantic_contract=None,
+             latest_edl=lambda: {"version": 3, "json": {"keep": [[0, 20]]}})
+    assert followup_recipes.start(ctx, "make the captions bigger")
