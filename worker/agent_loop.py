@@ -3595,25 +3595,27 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
     return True
 
 
-_PLAN_WITHOUT_WRITE_NUDGE = (
-    "You have not written the EDL. A concrete brief is permission to cut "
-    "— write NOW in this same turn. Do not ask the user to approve a clip "
-    "order. Stop before writing only if a required asset is missing or a "
-    "listed capability does not exist; otherwise use the write tools and "
-    "render_preview."
+_EDIT_WITHOUT_WRITE_NUDGE = (
+    "Measured: this request asks for a change and the timeline has not "
+    "changed. A concrete brief is permission to edit: make the change NOW "
+    "with the write tools, in this same turn, then render_preview. Do not ask "
+    "the customer to approve anything they already asked for. If a required "
+    "asset is missing or a capability does not exist, ask_user for it or say "
+    "plainly that nothing has changed yet."
 )
 
 
-def _plan_without_write_pushback(ctx, messages, already_pushed):
-    """A recorded plan with no EDL write is not a finished turn."""
-    if already_pushed:
+def _edit_without_write_pushback(ctx, messages, already_pushed):
+    """A fact, not an opinion: the brief says edit and this request left
+    nothing new to watch. Once per request, so a refusal or an honest "this
+    cannot be done" still delivers."""
+    if already_pushed \
+            or (getattr(ctx, "semantic_contract", None) or {}).get("mode") != "edit" \
+            or getattr(ctx, "versions_written", None) \
+            or getattr(ctx, "rendered_versions", None) \
+            or _turn_has_asset_progress(ctx):
         return False
-    plan = getattr(ctx, "edit_plan", None) or {}
-    if not plan.get("steps"):
-        return False
-    if getattr(ctx, "versions_written", None):
-        return False
-    messages.append({"role": "system", "content": _PLAN_WITHOUT_WRITE_NUDGE})
+    messages.append({"role": "system", "content": _EDIT_WITHOUT_WRITE_NUDGE})
     return True
 
 
@@ -6780,6 +6782,11 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if preflight:
                 messages.append({"role": "assistant", "content": body or "Preparing the edit."})
                 messages.append({"role": "system", "content": preflight})
+                continue
+            if _edit_without_write_pushback(ctx, messages, plan_write_pushed):
+                plan_write_pushed = True
+                if body:
+                    messages.insert(-1, {"role": "assistant", "content": body})
                 continue
             # Auto-render first so the turn facts include the real preview.
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,

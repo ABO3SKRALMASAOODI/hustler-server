@@ -32,7 +32,7 @@ def test_clean_current_preview_is_export_ready():
     }
 
 
-def test_major_current_finding_keeps_verification_and_export_open():
+def test_a_critic_opinion_is_no_open_finding_on_the_handoff():
     report = {
         "verdict": "repair",
         "findings": [{
@@ -43,11 +43,19 @@ def test_major_current_finding_keeps_verification_and_export_open():
     }
     ctx = _ctx(last_visual_critic=report)
     quality = agent_loop._quality_handoff(ctx)
+    assert quality["quality_status"] != "repair_required"
+    assert quality["quality_findings"] == []
+    assert agent_loop._disclose_outstanding_quality(ctx, "Done.") == "Done."
+
+
+def test_a_measured_finding_keeps_verification_and_export_open():
+    ctx = _ctx(last_picture_qc_findings=["FACE AT THE LEFT EDGE 4.2-5.0s"])
+    quality = agent_loop._quality_handoff(ctx)
     assert quality["quality_status"] == "repair_required"
     assert quality["export_ready"] is False
-    assert "move the crop left" in quality["quality_findings"][0]
-    reply = agent_loop._disclose_outstanding_quality(ctx, "Done.")
-    assert "Verification remains open" in reply
+    assert "FACE AT THE LEFT EDGE" in quality["quality_findings"][0]
+    assert "Verification remains open" in \
+        agent_loop._disclose_outstanding_quality(ctx, "Done.")
 
 
 def test_stale_preview_is_unchecked_but_does_not_lock_export():
@@ -56,20 +64,25 @@ def test_stale_preview_is_unchecked_but_does_not_lock_export():
     assert quality == {"quality_status": "unchecked", "export_ready": True}
 
 
-def test_plan_without_write_is_pushed_once():
-    ctx = SimpleNamespace(edit_plan={"steps": ["cut the kills", "add music"]},
-                          versions_written=[])
+def test_edit_without_write_is_pushed_once():
+    ctx = SimpleNamespace(semantic_contract={"mode": "edit"}, versions_written=[])
     messages = []
-    assert agent_loop._plan_without_write_pushback(ctx, messages, False)
-    assert "permission to cut" in messages[0]["content"]
-    assert not agent_loop._plan_without_write_pushback(ctx, messages, True)
+    assert agent_loop._edit_without_write_pushback(ctx, messages, False)
+    assert "permission to edit" in messages[0]["content"]
+    assert not agent_loop._edit_without_write_pushback(ctx, messages, True)
 
 
-def test_plan_pushback_skips_once_the_edl_moved():
-    ctx = SimpleNamespace(edit_plan={"steps": ["cut"]},
-                          versions_written=[3])
+def test_edit_pushback_skips_once_the_edl_moved_or_for_an_answer():
     messages = []
-    assert not agent_loop._plan_without_write_pushback(ctx, messages, False)
+    for ctx in (SimpleNamespace(semantic_contract={"mode": "edit"}, versions_written=[3]),
+                SimpleNamespace(semantic_contract={"mode": "edit"}, versions_written=[],
+                                rendered_versions={2}),
+                SimpleNamespace(semantic_contract={"mode": "edit"}, versions_written=[],
+                                images_generated=["a.png"]),
+                SimpleNamespace(semantic_contract={"mode": "inspect"}, versions_written=[]),
+                SimpleNamespace(semantic_contract=None, versions_written=[])):
+        assert not agent_loop._edit_without_write_pushback(ctx, messages, False)
+    assert messages == []
 
 
 def test_audio_qc_finding_requires_repair_even_after_visual_pass():

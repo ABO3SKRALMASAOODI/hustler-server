@@ -604,7 +604,7 @@ def test_later_turn_can_hear_uploaded_audio_by_persistent_storage_key(
     assert ctx.editing_metrics == {"audio_asset_reviews": 1, "audio_review_clips": 1}
 
 
-def test_actual_audio_fix_gets_one_targeted_repair_decision():
+def test_a_listening_opinion_alone_asks_for_no_render():
     ctx = SimpleNamespace(
         last_visual_critic=None,
         last_audio_review={"verdict": "fix",
@@ -613,12 +613,9 @@ def test_actual_audio_fix_gets_one_targeted_repair_decision():
         latest_edl=lambda: {"version": 6})
     messages, pushed = [], set()
 
-    assert agent_loop._quality_repair_pushback(
-        ctx, messages, time.monotonic(), pushed)
-    assert "music masks speech" in messages[-1]["content"]
-    assert pushed == {6}
     assert not agent_loop._quality_repair_pushback(
         ctx, messages, time.monotonic(), pushed)
+    assert messages == [] and pushed == set()
 
 
 def test_review_program_audio_reuses_current_proof_without_full_render(monkeypatch, tmp_path):

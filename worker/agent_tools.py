@@ -24369,10 +24369,10 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             story_report = _review_program_story(ctx, row)
             if story_report is not None:
                 note += story_critic.summary_line(story_report)
-            # The two reviews above are another model's reading of stills,
-            # not measurements. On 13 customer chains no repair they asked
-            # for lifted a delivered edit, so they inform the editor and stay
-            # on the record, and they never reopen a finished request.
+            # The two reviews above are another model's reading of the render,
+            # not measurements. 10 of 99 customer repair verdicts closed and
+            # the outcomes show no lift (census, 6 Nov), so they inform the
+            # editor and stay on the record; they never reopen a request.
             if (critic_report or {}).get("findings") \
                     or (story_report or {}).get("findings"):
                 note += (" Those reviews are a second opinion, not a check: "

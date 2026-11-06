@@ -186,7 +186,7 @@ def test_muted_insert_dialogue_is_not_claimed_as_program_story():
     assert "insert audible CLIP" in evidence["program_transcript"]
 
 
-def test_story_repair_joins_existing_quality_pushback(monkeypatch):
+def test_a_story_opinion_alone_asks_for_no_render(monkeypatch):
     monkeypatch.setattr(agent_loop.config, "AGENT_TURN_TIMEOUT_S", 600)
 
     class Ctx:
@@ -208,9 +208,9 @@ def test_story_repair_joins_existing_quality_pushback(monkeypatch):
             return {"version": 9}
 
     messages = []
-    assert agent_loop._quality_repair_pushback(
+    assert not agent_loop._quality_repair_pushback(
         Ctx(), messages, agent_loop.time.monotonic(), set())
-    assert "answer lost its question" in messages[0]["content"]
+    assert messages == []
 
 
 def test_story_review_attempt_is_not_multiplied_on_same_version(monkeypatch):

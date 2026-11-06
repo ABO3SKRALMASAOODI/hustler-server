@@ -157,6 +157,21 @@ def test_a_protected_lane_is_measured_before_the_render(monkeypatch):
     assert not calls
 
 
+def test_a_reply_with_no_write_gets_one_measured_nudge_then_is_delivered(monkeypatch):
+    """What the review did catch, measured for nothing: the brief says edit,
+    the timeline did not change. A refusal or "this cannot be done" stands."""
+    refusal = "I can't do that on this footage, so nothing has changed."
+    ctx, db, posted, _checkpoint, calls = _delivered(monkeypatch, refusal)
+    ctx.versions_written = []
+    ctx.rendered_versions = set()
+    ctx.last_preview = None
+    result = _run(ctx, db)
+    assert len(calls) == 2
+    assert "timeline has not changed" in calls[1]["messages"][-1]["content"]
+    assert posted[-1][0] == refusal
+    assert result["outcome"] == "blocked" and result["billable"] is False
+
+
 def _nothing_changed(**overrides):
     values = dict(
         request_contract_required=True, versions_written=[], images_generated=[],
@@ -285,7 +300,7 @@ def test_the_brief_is_the_one_structured_call_and_stays_one_shot():
 
 
 def test_a_two_hour_source_costs_the_turn_no_extra_tokens(monkeypatch):
-    """User 2744: 90 minutes of transcript and storyboard re-sent on every
+    """User 2744: 105 minutes of transcript and storyboard re-sent on every
     assessment, 7.24 M tokens in 18 calls. The source no longer enters any call
     after the preview, whatever its size."""
     ctx, db, _posted, _checkpoint, calls = _delivered(monkeypatch)

@@ -388,8 +388,8 @@ def test_critic_compares_framing_treatment_across_shots(monkeypatch):
 
 def test_a_critic_opinion_alone_never_asks_for_another_render(monkeypatch):
     """Repairs come from measurements. A second model's reading of stills
-    informs the editor; on 13 customer chains no repair it asked for lifted a
-    delivered edit."""
+    informs the editor; 10 of 99 customer repair verdicts closed and the
+    outcomes show no lift (census, 6 Nov)."""
     monkeypatch.setattr(agent_loop.config, "AGENT_TURN_TIMEOUT_S", 600)
 
     class Ctx:
