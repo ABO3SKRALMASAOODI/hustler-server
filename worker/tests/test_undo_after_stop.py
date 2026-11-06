@@ -6,6 +6,7 @@ import pytest
 import agent_loop
 import agent_tools
 import preview_budget
+import request_contract
 
 
 def stopped(version=17):
@@ -94,3 +95,34 @@ def test_a_reply_in_the_customers_language_is_left_alone(monkeypatch):
     text = 'أزلنا الشريط السفلي، لكن الشعار على الملابس ما زال ظاهرا.'
     assert agent_loop._enforce_reply_language(
         _reply_ctx(), None, [], [], text, 'شيل العلامة المائية', {}) == text
+
+
+def test_preserve_of_the_source_never_locks_this_edits_lane(monkeypatch):
+    """p5520: 'natural colours' locked the grade we added."""
+    ctx = SimpleNamespace(
+        request_contract_required=True, semantic_contract=None,
+        user_message='Restore my original colours, remove the grade.',
+        verification_request=None, request_contract_history=[],
+        index={}, latest_edl=lambda: {'json': {'effects': {'grade': 'cinematic'}}})
+    row = dict(description='Natural colour of the source', source_ref=0,
+               action='preserve', lanes=['grade'], relative_to='source_footage')
+    keep = dict(description='Keep the song', source_ref=0, action='preserve',
+                lanes=['audio_mix'], relative_to='current_edit')
+    monkeypatch.setattr(request_contract, '_call', lambda *a, **k: {
+        'mode': 'edit', 'music_requested': False, 'timing_policy': 'edit',
+        'output_count': 1, 'requirements': [row, keep]})
+    contract = request_contract.ensure(ctx)
+    assert 'grade' not in request_contract.protected_lanes(ctx)
+    assert 'audio_mix' in request_contract.protected_lanes(ctx)
+    assert all('relative_to' not in r for r in contract['requirements'])
+
+
+def test_exposing_baked_cuts_is_not_a_cut_change():
+    import scope_guard
+    before = {'keep': [[0.0, 30.0]]}
+    after = {'keep': [[0.0, 10.0], [10.0, 30.0]]}
+    assert scope_guard.preservation_violations(
+        before, after, protected={'cuts', 'timeline_timing'}) == []
+    real = {'keep': [[0.0, 10.0], [12.0, 30.0]]}
+    assert scope_guard.preservation_violations(
+        before, real, protected={'cuts'})

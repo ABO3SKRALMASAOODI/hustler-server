@@ -185,16 +185,18 @@ def test_what_was_said_survives_a_continuation():
 
 def _compiled(monkeypatch, requirements, timing_policy):
     ctx = _ctx()
+    changed = sorted({lane for row in requirements
+                      for lane in row.pop("writes", [])})
     monkeypatch.setattr(request_contract, "_call", lambda *_a: {
         "mode": "edit", "music_requested": False, "timing_policy": timing_policy,
-        "output_count": 1, "requirements": requirements})
+        "output_count": 1, "changed_lanes": changed, "requirements": requirements})
     request_contract.ensure(ctx)
     return ctx
 
 
 def _change(*lanes):
     return {"description": "Trim the intro", "action": "change", "source_ref": 0,
-            "lanes": list(lanes)}
+            "writes": list(lanes)}
 
 
 def test_a_change_that_writes_the_cuts_ends_the_timing_policy(monkeypatch):

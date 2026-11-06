@@ -45,7 +45,8 @@ ACCENT_SHAPE = {"white_hit": (1, 5), "colour_hit": (2, 2),
 JUNCTION_CARDS = {
     "dissolve": "junction_dissolve", "fadegrays": "junction_xfade",
     "pixelize": "junction_xfade", "radial": "junction_xfade",
-    "slices": "junction_xfade", "wipe_left": "junction_wipe",
+    "slices": "junction_xfade", "slide_left": "junction_xfade",
+    "slide_right": "junction_xfade", "wipe_left": "junction_wipe",
     "wipe_right": "junction_wipe", "wipe_up": "junction_wipe",
     "wipe_down": "junction_wipe", "iris": "junction_iris",
     "columns": "junction_columns", "staircase": "junction_staircase",
@@ -58,7 +59,8 @@ JUNCTION_CARDS = {
     "whip_down": "junction_whip", "zoom_blur": "junction_zoom_blur",
     "radial_blur": "junction_zoom_blur", "datamosh": "junction_datamosh"}
 # style -> default window (seconds); the cards' params agree
-JUNCTION_DURATION = {"dissolve": 0.5, "iris": 0.4, "columns": 0.5,
+JUNCTION_DURATION = {"dissolve": 0.5, "slide_left": 0.8, "slide_right": 0.8,
+                     "iris": 0.4, "columns": 0.5,
                      "staircase": 0.5, "box_steps": 0.8, "bands": 0.5,
                      "letter_window": 0.8, "matte_cut": 0.5,
                      "double_exposure": 0.6, "pixel_stretch": 0.4,
@@ -242,13 +244,16 @@ def _music_moments(ctx, edl, tl, kind):
     return out, None
 
 
-def _cut_moments(edl, tl):
+def _cut_moments(edl, tl, baked=()):
+    """``baked``: indexed shot starts. A split on one of them is a cut the
+    upload already carries, not an organizational split."""
     import timeline
     out = []
     blocks = timeline.program_blocks(edl)
     for a, b in zip(blocks, blocks[1:]):
         if a.get("kind") == b.get("kind") == "footage" and \
-                abs(float(b["src_start"]) - float(a["src_end"])) < 1e-3:
+                abs(float(b["src_start"]) - float(a["src_end"])) < 1e-3 and \
+                not any(abs(float(b["src_start"]) - c) < 1e-2 for c in baked):
             continue                         # a split, not a cut
         t = float(a["out_end"])
         ref = float(b["src_start"]) if b.get("kind") == "footage" else t
@@ -679,7 +684,8 @@ def _parse_origin(origin, edl):
 
 
 def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
-                 count=None, direction=None, colour=None):
+                 count=None, direction=None, colour=None, start=None,
+                 end=None):
     from fx_schemas.accents import JUNCTION_STYLES
     style = str(style or "").strip().lower()
     if style not in JUNCTION_STYLES + ("none",):
@@ -689,11 +695,35 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
     if refused:
         return refused
     edl = _edl(ctx)
+    keep_ops, baked = [], ()
+    if style != "none" and not edl.get("split_keep_boundaries"):
+        # An upload that is already a montage (p5520, a slideshow of 83
+        # photos) arrives as one kept span, so its cuts were invisible here
+        # and a cross-dissolve was refused three requests running. Exposing
+        # them changes no frame, order, timing or sound (set_transitions
+        # does the same); the renderer freezes the edge frame across a cut
+        # that is baked into the source.
+        import agent_tools
+        index = getattr(ctx, "index", None)
+        split, exposed = agent_tools._split_keeps_at_shot_boundaries(
+            edl.get("keep") or [], index)
+        if exposed:
+            edl = {**edl, "keep": split}
+            keep_ops = [{"action": "set", "layer": "keep", "value": split}]
+        # set_transitions may have split them already: they are cuts either way
+        baked = tuple(float(s["start"]) for s in (index or {}).get("shots") or []
+                      if isinstance(s, dict) and s.get("start") is not None)
     tl = _timeline(edl)
     fps = _fps(ctx, edl)
-    all_cuts = _cut_moments(edl, tl)
+    all_cuts = _cut_moments(edl, tl, baked)
     if not all_cuts:
         return _r("this program has no cut to decorate.")
+    if start is not None or end is not None:
+        lo = float(start) if start is not None else 0.0
+        hi = float(end) if end is not None else float("inf")
+        all_cuts = [c for c in all_cuts if lo <= c[0] <= hi]
+        if not all_cuts:
+            return _r(f"no cut between {lo:g}s and {hi:g}s.")
     targets = []
     if at is not None:
         ats = at if isinstance(at, (list, tuple)) else [at]
@@ -706,6 +736,8 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
             targets.append(near)
     else:
         mode = (cuts or "scene")
+        if isinstance(mode, str):
+            mode = mode.strip().strip('"\'').strip()
         if isinstance(mode, (list, tuple)):
             for t in mode:
                 near = min(all_cuts, key=lambda c: abs(c[0] - float(t)))
@@ -788,7 +820,7 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
                       "program already flashes there. Use a style that "
                       "does not flash, or ask the user whether they want "
                       "flashing.")
-    ops += [w.upsert_fx(it) for it in items]
+    ops = keep_ops + ops + [w.upsert_fx(it) for it in items]
     where = ", ".join(f"{it['at']:g}" for it in items[:10])
     out = w.commit(ctx, ops, f"set_junction: {style} at {where}s"
                    + (f" (replaced {', '.join(removed)})" if removed else "")
@@ -910,18 +942,23 @@ TOOL_SPECS = {
     "set_junction": (
         set_junction,
         "A designed cut device at real cuts, duration-preserving (sound and "
-        "timing untouched): dissolve, fadegrays, pixelize, radial, slices, "
-        "wipe_left/right/up/down, iris, columns, staircase, box_steps, bands, "
+        "timing untouched), also on shot changes inside one uploaded file "
+        "(a slideshow): the edge frames hold through the window. dissolve "
+        "(cross-dissolve), slide_left/right (film strip), fadegrays, pixelize, "
+        "radial, slices, wipe_left/right/up/down, iris, columns, staircase, box_steps, bands, "
         "letter_window (origin = a motion item id), matte_cut, "
         "double_exposure, pixel_stretch, hit_flash, whip_up/down, zoom_blur, "
         "radial_blur, datamosh; 'none' removes. at= one cut (program "
         "seconds) or cuts='scene' (default: real shot changes; jump cuts stay "
-        "bare)|'every'|[seconds]. origin: centre|face|point:x,y|<motion id>. "
+        "bare)|'every'|[seconds]; start/end keep only the cuts in that "
+        "program-time window. origin: centre|face|point:x,y|<motion id>. "
         "One device per cut (it replaces the cut's previous one). Content-"
         "born transitions first; one family per section.",
         {"style": {"type": "string"},
          "at": {"type": ["number", "array"], "items": {"type": "number"}},
          "cuts": {"type": ["string", "array"], "items": {"type": "number"}},
+         "start": {"type": "number", "minimum": 0},
+         "end": {"type": "number", "minimum": 0},
          "origin": {"type": ["string", "object"]},
          "duration": {"type": "number", "minimum": 0.04, "maximum": 2},
          "count": {"type": "integer", "minimum": 2, "maximum": 32},
@@ -956,8 +993,10 @@ COMPACT = {
         "negate none|alternate|all, fit cover|contain|register. Timeline-"
         "neutral. >3 changes/s needs the user's ask."),
     "set_junction": (
-        "Cut device at real cuts (at= or cuts='scene'|'every'), duration-"
-        "preserving: dissolve, fadegrays, pixelize, radial, slices, wipe_*, "
+        "Cut device at real cuts, including shot changes inside one uploaded "
+        "file (at= or cuts='scene'|'every', start/end window), duration-"
+        "preserving: dissolve (cross-dissolve), slide_left/right (film strip), "
+        "fadegrays, pixelize, radial, slices, wipe_*, "
         "iris, columns, staircase, box_steps, bands, letter_window, "
         "matte_cut, double_exposure, pixel_stretch, hit_flash, whip_up/down, "
         "zoom_blur, radial_blur, datamosh; 'none' removes. origin centre|"

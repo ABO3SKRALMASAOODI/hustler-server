@@ -577,7 +577,7 @@ P5339 = "i need the text to slide in way fast and change the font, make them bol
 EARLIER = "Make the title pass behind my body with tracked masking"
 
 
-def _compiled(monkeypatch, requirements, request=P5339):
+def _compiled(monkeypatch, requirements, request=P5339, changed=()):
     """The real ensure() on what the model returned, with no model."""
     ctx = NS(request_contract_required=True, verification_request=request,
              user_message=request, semantic_contract=None, index={},
@@ -586,14 +586,15 @@ def _compiled(monkeypatch, requirements, request=P5339):
              operator_instruction=None, request_preservation_baseline=None)
     monkeypatch.setattr(request_contract, "_call", lambda *_a: {
         "mode": "edit", "music_requested": False, "timing_policy": "edit",
-        "output_count": 1, "requirements": requirements})
+        "output_count": 1, "changed_lanes": list(changed),
+        "requirements": requirements})
     request_contract.ensure(ctx)
     return ctx
 
 
-def _title_change(lanes):
+def _title_change():
     return {"description": "Change the title font", "action": "change",
-            "source_ref": 0, "lanes": lanes}
+            "source_ref": 0}
 
 
 def _inherited_freeze():
@@ -602,23 +603,35 @@ def _inherited_freeze():
 
 
 def test_a_lane_a_change_writes_cannot_be_frozen_in_the_same_brief(monkeypatch):
-    ctx = _compiled(monkeypatch, [_title_change(["texts"]), _inherited_freeze()])
+    ctx = _compiled(monkeypatch, [_title_change(), _inherited_freeze()],
+                    changed=["texts"])
     protected = request_contract.protected_lanes(ctx)
     assert "texts" not in protected
     assert "cuts" in protected
 
 
+def test_the_render_preflight_agrees_with_the_write_guard(monkeypatch):
+    """preflight reads the rows. Lifting the freeze in protected_lanes alone
+    let a write through that the render then called a violation."""
+    ctx = _compiled(monkeypatch, [_title_change(), _inherited_freeze()],
+                    changed=["texts"])
+    ctx.turn_start_edl = {"json": {"texts": [{"id": "t", "text": "old"}]}}
+    ctx.latest_edl = lambda: {"version": 16, "json": {
+        "texts": [{"id": "t", "text": "new"}]}}
+    assert request_contract.preflight(ctx) is None
+
+
 def test_a_channel_a_change_writes_is_not_forbidden_by_an_old_avoid(monkeypatch):
     ctx = _compiled(monkeypatch, [
-        {"description": "Add a new track", "action": "change", "source_ref": 0,
-         "lanes": ["music"]},
+        {"description": "Add a new track", "action": "change", "source_ref": 0},
         {"description": "No music", "action": "avoid", "source_ref": 1,
-         "lanes": ["music"]}])
+         "lanes": ["music"]}], changed=["music"])
     assert request_contract.forbidden_additions(ctx, {"music": [{}]}) == []
 
 
 def test_the_brief_records_which_message_asked(monkeypatch):
-    ctx = _compiled(monkeypatch, [_title_change(["texts"]), _inherited_freeze()])
+    ctx = _compiled(monkeypatch, [_title_change(), _inherited_freeze()],
+                    changed=["texts"])
     rows = ctx.semantic_contract["requirements"]
     assert [row["inherited"] for row in rows] == [False, True]
 
@@ -630,22 +643,16 @@ def test_every_line_of_a_multi_line_request_is_the_latest_request(monkeypatch):
     assert ctx.semantic_contract["requirements"][0]["inherited"] is False
 
 
-def test_the_compile_schema_makes_a_change_name_its_lanes():
+def test_the_compile_schema_makes_the_brief_name_what_it_writes():
     schema = request_contract._compile_schema({0: "request"})
-    variants = schema["properties"]["requirements"]["items"]["anyOf"]
-    change = next(v for v in variants
-                  if v["properties"]["action"]["enum"] == ["change"])
-    assert "lanes" in change["required"]
-    assert set(change["properties"]["lanes"]["items"]["enum"]) \
+    assert "changed_lanes" in schema["required"]
+    assert set(schema["properties"]["changed_lanes"]["items"]["enum"]) \
         == set(request_contract.LANES)
-    inspect = next(v for v in variants
-                   if v["properties"]["action"]["enum"] == ["inspect"])
-    assert "lanes" not in inspect["properties"]
 
 
-def test_a_change_that_omits_its_lanes_never_fails_the_turn():
-    """Strict tools enforce the field. This brief runs before the first action
-    (#136, #138): an omission must not become a new way to fail a request."""
+def test_a_brief_that_omits_what_it_writes_keeps_its_requirements():
+    """Strict tools enforce the field. An omission must only lose the
+    protection against a self-contradiction, not the whole read."""
     call = NS(function=NS(name="record_request_contract", arguments=json.dumps({
         "mode": "edit", "music_requested": False, "timing_policy": "edit",
         "output_count": 1, "requirements": [
@@ -656,7 +663,8 @@ def test_a_change_that_omits_its_lanes_never_fails_the_turn():
              agent_model="gpt-test")
     schema = request_contract._compile_schema({0: "request"})
     value = request_contract._call(ctx, "record_request_contract", schema, "s", {})
-    assert value["requirements"][0]["lanes"] == []
+    assert value["changed_lanes"] == []
+    assert value["requirements"][0]["description"] == "Bolder"
 
 
 def test_every_refusal_label_maps_back_to_its_lane():

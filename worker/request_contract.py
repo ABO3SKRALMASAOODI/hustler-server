@@ -18,9 +18,15 @@ import llm
 LANES = ("music", "sfx", "voiceover", "audio_mix", "captions", "texts",
          "effects", "grade", "cuts", "frame_ratio", "source_audio", "timeline_timing")
 CONTRACT_SCHEMA = {
-    "type": "object", "required": ["mode", "requirements", "output_count", "timing_policy", "music_requested"],
+    "type": "object", "required": ["mode", "requirements", "output_count", "timing_policy", "music_requested", "changed_lanes"],
     "properties": {
         "mode": {"type": "string", "enum": ["edit", "inspect", "clarify"]},
+        "changed_lanes": {"type": "array", "description": (
+            "Lanes the requested changes must write. Restyling, retiming or "
+            "rewording titles writes texts; a caption look writes captions; "
+            "removing a grade writes grade; fades or transitions at existing "
+            "cuts write effects, never cuts or timeline_timing."),
+            "items": {"type": "string", "enum": list(LANES)}},
         "music_requested": {"type": "boolean", "description": (
             "True only when adding/replacing/selecting music is requested; "
             "preserving sound or cutting to an existing beat is not a new music request.")},
@@ -52,12 +58,10 @@ CONTRACT_SCHEMA = {
                     "audio_mix=ALL sound layers, only for an explicitly frozen "
                     "whole mix; captions=caption definitions and mutes; texts= "
                     "all authored text; effects=all non-grade effects; grade= "
-                    "colour; sfx=sound effects. Voice preservation does not "
+                    "the colour treatment this edit applies, never the "
+                    "source's own colours; sfx=sound effects. Voice preservation does not "
                     "freeze added music or legitimate volume correction; format preservation never freezes "
-                    "cuts. For change, list every lane the change must write: "
-                    "restyling, retiming or rewording titles writes texts, a "
-                    "caption look writes captions, a new track writes music. "
-                    "For inspect use []. For avoid, ONLY entire "
+                    "cuts. For change/inspect use []. For avoid, ONLY entire "
                     "explicitly forbidden output channels may be listed: captions, "
                     "music, voiceover, sfx, texts. 'No generic icons' does NOT ban "
                     "all text/effects; use [] for qualitative exclusions."),
@@ -97,12 +101,16 @@ conditional when the customer explicitly prioritizes accuracy over quantity.
 Recovery notes do not authorize new creative requirements. For each requirement,
 select its source_ref from customer_sources. These references identify verbatim
 customer instructions; do not reproduce or paraphrase a quotation or invent IDs.
-Use preserve lanes only for existing EDL state the customer explicitly protects;
+Use preserve lanes only for existing EDL state the customer explicitly protects.
+A lane holds what THIS EDIT applied, not the upload: 'keep the natural colours',
+'match my original', 'remove the filters' while current_edl carries a grade is
+a change that removes it (relative_to=source_footage), never a lock on it.
 protecting original subtitles also prevents duplicating them with new captions.
 When an authorized change affects part of a lane, do not freeze that whole lane.
-List on every change requirement the lanes it must write. A lane a change writes
-cannot also be frozen: what must survive that change, such as an earlier look
-while its font changes, is a semantic requirement with lanes=[].
+List in changed_lanes what the changes must write. Those lanes are not frozen,
+so a later instruction to fix colour or add transitions overrides an earlier or
+broader preservation of that lane. Preserving photo order, song or sync is not
+a freeze of effects, grade or transitions.
 Retaining the full original content is a coverage requirement, not a freeze of
 an earlier shortened preview's keep list. A request to restore/rebuild a full
 episode authorizes that change; 'cleaned-up episode' alone does not require
@@ -160,12 +168,21 @@ def _compile_schema(sources):
         "description": "The ID of the supporting verbatim customer_sources entry."}
     variants = []
     for actions, lanes in (
-            (["inspect"], None),
-            (["change"], list(LANES)),
+            (["change", "inspect"], None),
             (["preserve"], list(LANES)),
             (["avoid"], ["captions", "music", "voiceover", "sfx", "texts"])):
         variant = json.loads(json.dumps(item))
         variant["properties"]["action"]["enum"] = actions
+        if actions == ["preserve"]:
+            variant["required"].append("relative_to")
+            variant["properties"]["relative_to"] = {
+                "type": "string", "enum": ["current_edit", "source_footage"],
+                "description": (
+                    "current_edit: keep what the edit holds now. "
+                    "source_footage: the customer wants the ORIGINAL upload's "
+                    "look or content back or kept ('natural colours', 'match "
+                    "my original', 'remove the filters'); what this edit "
+                    "added is not protected, it may have to go.")}
         if lanes is None:
             variant["required"].remove("lanes")
             del variant["properties"]["lanes"]
@@ -195,12 +212,11 @@ def _call(ctx, name, schema, system, evidence):
     if len(calls) != 1 or calls[0].function.name != name:
         raise ValueError("The request contract requires one structured tool result")
     value = json.loads(calls[0].function.arguments)
-    for row in value.get("requirements") or []:
-        # Strict tools enforce this on the wire. An omission only loses the
-        # protection against a self-contradicting brief; it must never become
-        # a way to fail the turn before its first action.
-        if isinstance(row, dict) and row.get("action") == "change":
-            row.setdefault("lanes", [])
+    # Strict tools enforce this on the wire. An omission only loses the
+    # protection against a self-contradicting brief, so it must not cost the
+    # read: _validate raising here sends the turn to an open brief.
+    if isinstance(value, dict):
+        value.setdefault("changed_lanes", [])
     _validate(value, schema)
     return value
 
@@ -276,11 +292,17 @@ def ensure(ctx):
                 # source, so a later recovery never has to guess at meaning.
                 row["inherited"] = source_ref >= latest_lines
                 row.setdefault("lanes", [])
+                if row.pop("relative_to", None) == "source_footage":
+                    # p5520: "preserve the photos' natural colour" locked the
+                    # grade WE had added, and every attempt to remove it was
+                    # refused. A lane holds this edit's state, so a promise
+                    # about the source stays a requirement judged on pixels.
+                    row["lanes"] = []
                 if value["mode"] == "inspect":
                     # The mode forbids all writes. Preservation criteria in
                     # a review are questions to assess, not editing work.
                     row.update(action="inspect", lanes=[])
-            if {"cuts", "timeline_timing"} & _unfreeze_written_lanes(value["requirements"]):
+            if {"cuts", "timeline_timing"} & _unfreeze_written_lanes(value):
                 # The same fact as a lane: the policy would freeze what a
                 # change just said it writes.
                 value["timing_policy"] = "edit"
@@ -327,18 +349,22 @@ def _open_brief(ctx, request, key, why):
     return ctx.semantic_contract
 
 
-def _unfreeze_written_lanes(requirements):
+def _unfreeze_written_lanes(contract):
     """A brief cannot freeze what it also asks to change. p5339: "change the
     font" compiled beside preserve=[texts] carried over from the last request
     on 10 of 12 real compiles, so the write guard refused every title edit and
     the customer was asked to approve what they had just typed. The model
-    names the lanes; this is set arithmetic on what it named. Returns them."""
-    written = {lane for row in requirements if row["action"] == "change"
-               for lane in row["lanes"]}
+    names the lanes; this is set arithmetic on what it named.
+
+    It rewrites the rows rather than only the guard's answer, because the
+    render preflight and forbidden_additions read the rows. Lifting it in
+    protected_lanes alone lets a write through that the preflight then calls
+    a violation. Returns the lanes written."""
+    written = set(contract.get("changed_lanes") or ())
     # Timing is the keeps plus inserts and speed: a change to the keeps moves
     # it. The reverse does not hold: "keep the cuts, speed up the middle".
     frozen_out = written | ({"timeline_timing"} if "cuts" in written else set())
-    for row in requirements:
+    for row in contract["requirements"]:
         if row["action"] in {"preserve", "avoid"}:
             row["lanes"] = [lane for lane in row["lanes"] if lane not in frozen_out]
     return written
@@ -390,8 +416,11 @@ def protected_lanes(ctx):
         raise ValueError("Clarify the conflicting request before changing the edit")
     if contract["mode"] == "inspect":
         raise ValueError("This request asks for analysis; inspect and answer without changing the edit")
+    # What the customer asks to change this turn cannot also be frozen by a
+    # broader preservation in the same brief: both readings are the model's,
+    # and the specific ask wins.
     protected = {lane for row in contract["requirements"] if row["action"] == "preserve"
-                 for lane in row["lanes"]}
+                 for lane in row["lanes"]} - set(contract.get("changed_lanes") or ())
     if contract["timing_policy"] == "preserve":
         protected.add("timeline_timing")
     return protected

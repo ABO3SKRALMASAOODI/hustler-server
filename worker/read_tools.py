@@ -419,6 +419,21 @@ def _program_map(ctx, edl_json):
         return ""
 
 
+class NeedsQueuedPath(Exception):
+    """This read has to start work, which the backend's read path cannot."""
+
+
+def _asset_index_pending(ctx, asset):
+    """The answer for an asset with no analysis: start it, name the job. On
+    the backend's fast read path nothing can be started, so run_read hands
+    the call to the queued path (ticket #386: "not available yet" for a clip
+    nothing was ever going to analyse left the model no move)."""
+    start = getattr(ctx, "start_asset_index", None)
+    if start is None:
+        raise NeedsQueuedPath(asset.get("storage_key"))
+    return start(asset)
+
+
 def get_transcript(ctx, start=0, end=None, asset_key=None):
     if asset_key:
         # Round 84: every uploaded clip/music file is indexed too — read ITS
@@ -430,10 +445,12 @@ def get_transcript(ctx, start=0, end=None, asset_key=None):
         row = asset.get("sha256") and \
             ctx.db.run(get_index_by_sha, asset["sha256"])
         idx = (row or {}).get("json") or {}
+        if not idx:
+            return _asset_index_pending(ctx, asset)
         sents = idx.get("sentences") or []
         if not sents:
-            return ("That upload has no transcript (no speech, no audio "
-                    "track, or its analysis has not finished yet).")
+            return ("That upload has no transcript (no speech or no audio "
+                    "track).")
         multi = (idx.get("speakers") or 0) > 1
         out = [f"[{s['id']} {_fmt_t(s['t0'])}-{_fmt_t(s['t1'])}]"
                + (f" S{s['speaker']}:" if multi
@@ -620,7 +637,7 @@ def get_words(ctx, start=0, end=None, asset_key=None):
                    if asset.get('sha256') else None)
         index = (indexed or {}).get('json') or {}
         if not index:
-            return "PREREQUISITE: that upload's word analysis is not available yet."
+            return _asset_index_pending(ctx, asset)
         duration = float((index.get('video') or {}).get('duration')
                          or asset.get('duration_s') or 0)
         start = min(duration, max(0.0, float(start or 0)))

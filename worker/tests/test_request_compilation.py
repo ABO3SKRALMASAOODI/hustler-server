@@ -15,9 +15,10 @@ def context(text, conversation=()):
 
 def wire(action="change", lanes=(), source=0, mode="edit"):
     return {"mode": mode, "music_requested": False, "timing_policy": "edit",
-            "output_count": 1, "requirements": [{"description": "Requested work",
+            "output_count": 1, "changed_lanes": [], "requirements": [{"description": "Requested work",
                 "source_ref": source, "action": action,
-                **({"lanes": list(lanes)} if lanes or action in {"change", "preserve", "avoid"} else {})}]}
+                **({"lanes": list(lanes)} if lanes or action in {"preserve", "avoid"} else {}),
+                **({"relative_to": "current_edit"} if action == "preserve" else {})}]}
 
 
 @pytest.mark.parametrize("text", [
@@ -51,7 +52,7 @@ def test_prior_customer_direction_is_available_but_assistant_promises_are_not(mo
 
 
 @pytest.mark.parametrize("action,lanes", [
-    ("inspect", ["cuts"]), ("avoid", ["effects"]),
+    ("change", ["music"]), ("inspect", ["cuts"]), ("avoid", ["effects"]),
 ])
 def test_invalid_protection_shapes_cannot_pass_the_provider_schema(action, lanes):
     schema = rc._compile_schema({0: "Customer direction"})
@@ -60,8 +61,8 @@ def test_invalid_protection_shapes_cannot_pass_the_provider_schema(action, lanes
 
 
 @pytest.mark.parametrize("action,lanes", [
-    ("change", []), ("change", ["music"]), ("inspect", []),
-    ("preserve", ["timeline_timing"]), ("avoid", ["music"]), ("avoid", []),
+    ("change", []), ("inspect", []), ("preserve", ["timeline_timing"]),
+    ("avoid", ["music"]), ("avoid", []),
 ])
 def test_allowed_action_shapes_remain_available(action, lanes):
     rc._validate(wire(action, lanes), rc._compile_schema({0: "Customer direction"}))
@@ -99,7 +100,7 @@ def test_trial_provider_keeps_strict_shapes_and_local_bounds():
     wire_schema = translated[0]["input_schema"]
     for candidate in (schema, wire_schema):
         with pytest.raises(ValueError):
-            rc._validate(wire("inspect", ["cuts"]), candidate)
+            rc._validate(wire("change", ["music"]), candidate)
     assert schema["properties"]["output_count"]["maximum"] == 100
     assert "maximum" not in wire_schema["properties"]["output_count"]
     with pytest.raises(ValueError):

@@ -33,6 +33,7 @@ import followup_recipes
 import read_tools
 import reference_profile
 import reply_grounding
+import reply_language
 import remote
 import request_intent
 import visual_index
@@ -1268,120 +1269,6 @@ def _dominant_script(text, min_letters=6):
     return name if counts[name] > 0.6 * total else None
 
 
-# Function-word fingerprints for the same-script flips the script check is
-# blind to BY CONSTRUCTION (round 96c: an English "Cut the silences, add big
-# captions…" was answered in German — Latin to Latin, so round 85's guard
-# passed it; the pt/en walls have the same hole). Only words unique to ONE
-# list survive _disjoint_markers, so pt/es/fr cognates can never vote; the
-# flip additionally requires ZERO of the user's own markers in the reply, so
-# a quoted foreign word in an otherwise faithful reply never trips it. The
-# detector never NAMES a language to the user (round 85's worry) — the
-# rewrite asks for "the USER'S language", nothing more.
-_LANG_MARKERS_RAW = {
-    "en": ("the", "and", "is", "are", "was", "were", "this", "that", "with",
-           "your", "have", "from", "of", "it's", "i'll", "you're", "should"),
-    "de": ("der", "die", "das", "und", "ist", "nicht", "ein", "eine",
-           "wurde", "wurden", "werden", "auf", "für", "noch", "aber",
-           "auch", "dem", "den", "zum", "zur", "jetzt", "wieder"),
-    "pt": ("não", "você", "está", "são", "foi", "também", "já", "uma",
-           "com", "para", "mais", "isso", "como", "os", "dos", "mas"),
-    # 2026-08-09: "Descargué y añadí…" went out to an English user carrying
-    # exactly 2 es hits — the original 15-word list was too thin for a short
-    # reply. Widened with function words Spanish doesn't share spelling-wise
-    # with pt/fr/it/ro ("hasta", "ahora", "hay", "qué", "sí", "aún", "según").
-    "es": ("el", "los", "las", "es", "una", "pero", "también", "está",
-           "para", "con", "como", "más", "muy", "esto", "ya", "hay",
-           "hasta", "ahora", "qué", "sí", "aún", "según", "añadí",
-           "quedó"),
-    "fr": ("le", "les", "est", "une", "avec", "pour", "dans", "vous",
-           "cette", "mais", "été", "sur", "pas", "aussi", "déjà"),
-    "it": ("il", "gli", "è", "una", "con", "per", "anche", "questo",
-           "sono", "già", "più", "ma", "della", "delle"),
-    # Project 501 (2026-08-09): an English documentary brief got a Romanian
-    # handoff. Latin-vs-Latin is invisible to the script guard, just like the
-    # earlier English->German incident. Diacritics and common function words
-    # give a conservative fingerprint without treating one borrowed word as a
-    # language change.
-    "ro": ("și", "sau", "este", "sunt", "fost", "are", "cu", "pentru", "din",
-           "care", "secunde", "subtitrări", "muzică", "eliminat",
-           "adăugat", "păstrat", "redus"),
-    # Project 505: the English user got a Romanized-Hindi/Hinglish delivery.
-    # These short particles only trigger in combination (>=3 hits, 2:1 lead)
-    # and only when the reply contains zero markers from the user's language.
-    "hi_latn": ("hai", "hain", "aur", "ka", "ki", "ke", "se", "mein",
-                "par", "gaya", "gayi", "kiya", "liye", "nahi", "karo",
-                "wala"),
-}
-
-
-def _disjoint_markers(raw):
-    counts = {}
-    for ws in raw.values():
-        for w in ws:
-            counts[w] = counts.get(w, 0) + 1
-    return {lang: frozenset(w for w in ws if counts[w] == 1)
-            for lang, ws in raw.items()}
-
-
-_LANG_MARKERS = _disjoint_markers(_LANG_MARKERS_RAW)
-
-_MARKER_WORD_RE = re.compile(r"[a-zà-öø-ÿœß']+")
-
-
-def _marker_hits(text, lang):
-    ws = _LANG_MARKERS.get(lang) or frozenset()
-    return sum(1 for w in _MARKER_WORD_RE.findall((text or "").lower())
-               if w in ws)
-
-
-def _marker_lang(text):
-    """The language whose distinctive function words dominate `text`, or
-    None when nothing clears 3 hits with a 2:1 lead over the runner-up —
-    abstaining is always safe (None means "don't act"), same contract as
-    _dominant_script."""
-    words = _MARKER_WORD_RE.findall((text or "").lower())
-    if not words:
-        return None
-    scores = sorted(((sum(1 for w in words if w in ws), lang)
-                     for lang, ws in _LANG_MARKERS.items()), reverse=True)
-    (s1, lang1), (s2, _) = scores[0], scores[1]
-    if s1 >= 3 and s1 >= 2 * s2:
-        return lang1
-    return None
-
-
-# Latin letters that plain English never uses. One real day (2026-08-09)
-# produced replies in Albanian, Turkish, Portuguese, Spanish and French to
-# users who wrote only English — every one of them same-script, and every one
-# of them under the 3-hit marker threshold (a 2-sentence reply simply doesn't
-# carry three distinctive function words). What those replies DO carry is
-# accent mass: ë/ş/ã/é/ó in quantity, where an English reply has none.
-_ACCENTED_LATIN_RE = re.compile(
-    "[À-ÿĀ-ſȘ-ț]")
-
-
-def _accented_flip(joined, final):
-    """True when the user writes plain-ASCII English and the reply is a
-    Latin-script text soaked in accented letters with ZERO English function
-    words — the same-script flip the marker vote is too coarse to catch.
-    Conservative on purpose: a reply that quotes one accented title ("Café
-    del Mar") keeps its English markers and never trips this."""
-    if not joined or not final:
-        return False
-    # The user side must be unambiguously English-shaped: ASCII-dominant
-    # AND carrying English function words of its own.
-    non_ascii_u = sum(1 for ch in joined if ord(ch) > 127)
-    if non_ascii_u > max(2, 0.01 * len(joined)):
-        return False
-    if _marker_hits(joined, "en") < 2:
-        return False
-    if _marker_hits(final, "en") > 0:
-        return False
-    accents = len(_ACCENTED_LATIN_RE.findall(final))
-    letters = sum(1 for ch in final if ch.isalpha())
-    return accents >= 3 and letters > 0 and accents / letters >= 0.01
-
-
 def _reply_language_note(user_texts):
     """The anchor line appended to the user's message. It names the SCRIPT (a
     measurement), never a guessed language — 'their language' plus the script
@@ -1514,6 +1401,10 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             if m["role"] == "user":
                 user_texts.append(content)
     user_texts.append(user_message["content"] or "")
+    # What the customer typed, and nothing else. `msgs` also carries the
+    # product's own English notes under role "user", so language is never
+    # measured from it (ticket #387).
+    ctx.customer_texts = list(user_texts)
     if request_intent.is_review_repair(user_message.get("content")):
         brief = quality_verifier.request_text_for(ctx)
         if brief and brief != user_message.get("content"):
@@ -1832,6 +1723,8 @@ def _adopt_steering_messages(ctx, worker_db, job, session_id, messages,
         note = _attachment_context(worker_db, ctx, row)
         messages.append({"role": "user", "content": content + note})
         joined.append(content)
+        if hasattr(ctx, "customer_texts"):
+            ctx.customer_texts.append(content)
         newest = max(newest, int(row["id"]))
     if joined:
         if getattr(ctx, "request_contract_required", False):
@@ -4745,64 +4638,52 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     return FALLBACK_REPLY + (f"\n\n{hint}" if hint else "")
 
 
-def _language_flip(joined, user_text, final):
-    """(kind, user_side, reply_side) when `final` is written in a different
-    script OR language than the user's own messages, else None.
+def _language_flip(joined, user_text, final, verdict=None):
+    """(kind, user_side, reply_side) when `final` is not in the customer's
+    language, else None. `joined` is only what the customer typed.
 
-    Script first (round 85's check, unchanged): fires only when the reply is
-    dominated by a script that appears NOWHERE in the user's conversation —
-    if the user has written in that script ANYWHERE it is their call, not a
-    flip; checking only the latest message here while deciding their script
-    from the history would rewrite a bilingual user's deliberate reply.
-
-    Then the same-script class the script check is blind to by construction
-    (round 96c: English "Cut the silences, add big captions…" answered in
-    German — Latin to Latin): function-word fingerprints on both sides, and
-    the reply must additionally contain ZERO of the user's own markers, so
-    a reply that quotes a foreign word or mixes languages is left alone."""
+    The script count is a measurement and catches a reply in a script the
+    customer never used, even when the model is unavailable. `verdict` is
+    reply_language.judge's reading and has the last word: it sees the flip a
+    script count cannot (English answered in German), and it clears a script
+    change the customer asked for."""
     user_script = _dominant_script(user_text) or _dominant_script(joined)
     reply_script = _dominant_script(final, min_letters=10)
+    same = (verdict or {}).get("same_language")
     if user_script and reply_script and reply_script != user_script \
-            and _script_counts(joined).get(reply_script, 0) == 0:
+            and _script_counts(joined).get(reply_script, 0) == 0 \
+            and same is not True:
         return ("script", user_script, reply_script)
-    u_lang, r_lang = _marker_lang(joined), _marker_lang(final)
-    if u_lang and r_lang and u_lang != r_lang \
-            and _marker_hits(final, u_lang) == 0:
-        return ("words", u_lang, r_lang)
-    # The accent-mass net under the marker vote: same-script flips into
-    # languages the marker table doesn't know (Albanian, Turkish) or knows
-    # too thinly for a two-sentence reply (es/pt/fr under 3 hits).
-    if _accented_flip(joined, final):
-        return ("words", "en", "a non-English Latin-script language")
+    if same is False:
+        return ("words", verdict.get("customer_language") or "their language",
+                verdict.get("draft_language") or "another language")
     return None
+
+
+def _customer_texts(ctx, user_text):
+    """The customer's typed messages. Never the prompt's role-"user" rows:
+    those carry the product's own English notes (ticket #387)."""
+    texts = list(getattr(ctx, "customer_texts", None) or [])
+    if user_text and user_text not in texts:
+        texts.append(user_text)
+    return texts
 
 
 def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
                             honesty):
-    """Deterministic cross-script check of the drafted reply against the
-    user's own message, with one forced rewrite — _enforce_honesty's shape
-    applied to round 85's bug (an English one-liner answered in Russian).
+    """Check the drafted reply against what the customer typed, with one
+    forced rewrite: _enforce_honesty's shape applied to round 85's bug (an
+    English one-liner answered in Russian). Fail-open at every step: any
+    doubt returns the draft unchanged.
 
-    Fires ONLY when the reply is dominated by a script that appears NOWHERE
-    in the user's message — never on same-script language pairs, never when
-    either side is too short to measure — so it cannot cage a legitimate
-    reply; it only catches the flip the system prompt already forbids.
-    Fail-open at every step: any doubt returns the draft unchanged."""
-    # MEASURE THE USER FROM THE WHOLE CONVERSATION, NOT THE LAST MESSAGE.
-    # _dominant_script needs a handful of letters to name a script, so a short
-    # reply ("Sure", "ok", "نعم") measured nothing, the check failed open, and
-    # the flip it exists to catch went out. That is not hypothetical: on
-    # 2026-08-05 21:11 a user who had written "What happened", "How many
-    # pictures do you see" and "Enhance the video..." answered "Sure" — four
-    # letters — and got a reply in Russian. Their language was never in doubt;
-    # it just was not in THAT message. The prompt anchor already reads every
-    # user message for exactly this reason (_reply_language_note); the
-    # enforcement now agrees with it instead of being strictly weaker.
-    history = " ".join(
-        m["content"] for m in messages
-        if m.get("role") == "user" and isinstance(m.get("content"), str))
-    joined = " ".join(x for x in (history, user_text) if x)
-    flip = _language_flip(joined, user_text, final)
+    The customer is measured from the whole conversation, not the last
+    message: on 2026-08-05 a user who had written whole sentences in English
+    answered "Sure", four letters, and got a reply in Russian."""
+    texts = _customer_texts(ctx, user_text)
+    joined = " ".join(x for x in texts if x)
+    model = ctx.agent_model or config.AGENT_MODEL
+    verdict = reply_language.judge(client, model, texts, final)
+    flip = _language_flip(joined, user_text, final, verdict)
     if flip is None:
         return final
     kind, u_side, r_side = flip
@@ -4814,9 +4695,8 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
         why = (f"Your reply above is written in {r_side} script, "
                f"but the user's own messages are {u_side}-script. ")
     else:
-        why = ("Your reply above reads as a DIFFERENT LANGUAGE than the "
-               "user's own messages (none of their function words appear "
-               "in it). ")
+        why = (f"Your reply above is written in {r_side}, but the user's "
+               f"own messages are in {u_side}. ")
     msgs = messages + [
         {"role": "assistant", "content": final},
         {"role": "system",
@@ -4826,7 +4706,6 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
                      "identical, nothing added. Output only the rewritten "
                      "reply.")},
     ]
-    model = ctx.agent_model or config.AGENT_MODEL
     try:
         resp = llm.create_with_dialect(
             client, model, msgs, tools=tools, tool_choice="none",
@@ -4845,8 +4724,9 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
     if kind == "script":
         ok = redraft and _dominant_script(redraft, min_letters=10) == u_side
     else:
-        ok = redraft and _marker_hits(redraft, u_side) >= 1 \
-            and _marker_lang(redraft) != r_side
+        recheck = reply_language.judge(client, model, texts, redraft) \
+            if redraft else None
+        ok = redraft and (recheck or {}).get("same_language") is not False
     if ok:
         honesty["language_fixed"] = True
         return redraft
@@ -7092,16 +6972,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     # that skipped the language guard (a Russian ask_user
                     # reached an English user that morning). Same
                     # deterministic check, but as a tool REJECTION: the
-                    # model rephrases in-loop, no extra LLM call, no posted
-                    # wrong-language text.
-                    _u_joined = " ".join(
-                        [m["content"] for m in messages
-                         if m.get("role") == "user"
-                         and isinstance(m.get("content"), str)]
-                        + [user_message["content"] or ""])
-                    if _language_flip(_u_joined,
-                                      user_message["content"] or "",
-                                      q.question):
+                    # model rephrases in-loop, no posted wrong-language text.
+                    _u_text = user_message["content"] or ""
+                    _u_texts = _customer_texts(ctx, _u_text)
+                    if _language_flip(" ".join(_u_texts), _u_text, q.question,
+                                      reply_language.judge(
+                                          client,
+                                          ctx.agent_model or config.AGENT_MODEL,
+                                          _u_texts, q.question)):
                         result = ("REJECTED: that question is not in the "
                                   "USER'S language (the language of the "
                                   "messages they typed — never the "
