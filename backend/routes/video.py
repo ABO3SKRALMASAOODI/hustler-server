@@ -40,6 +40,7 @@ from video_services.jobs import (
     STARTED_JOB_TYPES as _STARTED_JOB_TYPES,
 )
 from video_services.project_state import (
+    PERMANENT_INDEX_FAILURES,
     active_original as _active_original,
     edl_at as _edl_at,
     index_job_state as _index_job_state,
@@ -2190,9 +2191,12 @@ def create_upload(user_id, project_id):
             body["subscribe_gated"] = True
             return jsonify(body), 402
 
-    key = storage.new_original_key(project_id, ext, kind)
     try:
-        out = storage.presign_upload(key, nbytes, content_type)
+        out = _transfer_of_content(project_id, kind, ext, nbytes, content_type,
+                                   data.get("content_id"))
+        if out is None:
+            key = storage.new_original_key(project_id, ext, kind)
+            out = storage.presign_upload(key, nbytes, content_type)
     except Exception as e:
         current_app.logger.exception("presign failed")
         return jsonify({"error": f"Could not prepare upload: {e}"}), 502
@@ -2203,6 +2207,15 @@ def create_upload(user_id, project_id):
     # can say "too big to route through us, try a different network" up front
     # instead of after a 4 GB upload earns a 413.
     out["relay_max_bytes"] = storage.RELAY_MAX_BYTES
+    if out.get("resumed") or out.get("assembled"):
+        # The same bytes, already part way up: this is not a new upload.
+        record_client_event(user_id, project_id, "upload_resumed", detail={
+            "filename": filename, "bytes": nbytes, "kind": kind,
+            "assembled": bool(out.get("assembled")), "by_content": True,
+            "parts_done": len(out.get("completed_parts") or []),
+            "n_parts": len(out.get("part_urls") or []),
+            "bytes_done": out.get("bytes_done")}, origin="server")
+        return jsonify(out)
     # The one beacon that is NOT a failure. Without a start there is no
     # denominator: an upload that dies mid-transfer looks identical to one that
     # was never attempted, and "how many big uploads never finish" is the
@@ -2217,6 +2230,47 @@ def create_upload(user_id, project_id):
             "n_parts": len(out.get("part_urls") or [])}
            if out.get("mode") == "multipart" else {})}, origin="server")
     return jsonify(out)
+
+
+def _transfer_of_content(project_id, kind, ext, nbytes, content_type,
+                         content_id):
+    """Continue these bytes where they stopped, or give them a key that can.
+
+    Account 2837 renamed a 7.8 GB file with 5.47 GB of it in storage, and the
+    pick started from zero: nothing tied the parts to the file but a name in
+    one browser's localStorage. content_id is the hash of the file's two ends
+    (the same one /uploads/dedup compares), so the key follows the bytes and
+    storage's own list of open uploads answers from any browser, under any
+    name. None when there is no usable id or this content already landed in
+    the project: then the caller mints an ordinary key, as it always did."""
+    content_id = str(content_id or "").strip().lower()
+    if kind == "proxy" or len(content_id) != 64 or \
+            not all(c in "0123456789abcdef" for c in content_id) or \
+            int(nbytes) <= storage.SINGLE_PUT_LIMIT:
+        return None
+    stem = storage.content_key_stem(project_id, kind, content_id, nbytes)
+    found = storage.find_open_upload(stem)
+    if found:
+        try:
+            return storage.resume_multipart(found[0], found[1], int(nbytes),
+                                            content_type)
+        except storage.UploadGone:
+            pass
+        except Exception:  # noqa: BLE001 — continuing is a saving, never a gate
+            current_app.logger.warning("could not continue %s", found[0])
+    key = stem + ext
+    with vdb() as conn:
+        cur = conn.cursor()
+        cur.execute("""SELECT 1 FROM assets WHERE project_id = %s
+                       AND storage_key = %s LIMIT 1""", (project_id, key))
+        if cur.fetchone():
+            return None
+    if storage.head_bytes(key, fast=True) == int(nbytes):
+        # Every part arrived and the tab died before /uploads/complete.
+        return {"mode": "multipart", "storage_key": key, "upload_id": None,
+                "assembled": True, "part_urls": [], "completed_parts": [],
+                "content_type": content_type}
+    return storage.presign_upload(key, int(nbytes), content_type)
 
 
 def _upload_key_for_project(key, kind, project_id):
@@ -2898,6 +2952,24 @@ def complete_upload_core(user_id, project_id, data, studio=False):
                      "renamed or corrupted. Please upload a real "
                      f"{'video' if kind in ('original', 'clip') else kind} "
                      "file."}, 400
+
+    # A file that cannot open, from its own boxes, no analysis needed. Nothing
+    # is registered, so no failed job, no failed project, and the finished
+    # file goes straight into this project when it arrives. The studio says
+    # this before uploading; this is every other way in (MCP, an old tab).
+    if kind in ("original", "clip"):
+        found = mp4probe.state_of_key(storage, key, nbytes)
+        if found["state"] == mp4probe.UNFINISHED:
+            said = mp4probe.unfinished_message(filename, found)
+            record_client_event(user_id, project_id, "upload_rejected", detail={
+                "reason": "unfinished file", "filename": filename,
+                "bytes": nbytes, "kind": kind, "stage": "complete",
+                "device_side": True, "read_bytes": found["present"],
+                "expected_bytes": found["expected"]}, origin="server")
+            storage.delete_key(key)
+            return {"error": said, "code": "unfinished_file",
+                    "bytes_present": found["present"],
+                    "bytes_expected": found["expected"]}, 422
 
     asset_kind = {"original": "original", "music": "music",
                   "image": "image_ref", "clip": "video_clip"}[kind]
@@ -4017,7 +4089,8 @@ def project_state(user_id, project_id):
         # genuinely blind pre-v10 row is already caught by the pipeline
         # mismatch above.
         elif (not subscription_locked and original and not idx_row
-              and ij and ij["state"] == "failed"):
+              and ij and ij["state"] == "failed"
+              and ij.get("failure_kind") not in PERMANENT_INDEX_FAILURES):
             heal_reason = "last index job failed"
         elif (not subscription_locked and original and idx_row
               and ij and ij["state"] == "failed"):
@@ -7667,6 +7740,12 @@ CLIENT_EVENT_KINDS = {"player_error", "player_error_probe", "player_composition_
                       # held (reload, sleep, dropped network) instead of
                       # starting from zero (/uploads/resume).
                       "upload_resumed",
+                      # A running transfer's heartbeat and the page going away
+                      # under one. Without them an upload that stops looks the
+                      # same as one still going: 18 of the 23 accounts that
+                      # lost an upload left no row at all. ops_loop/intake.py
+                      # files every one that falls silent without landing.
+                      "upload_progress", "upload_interrupted",
                       # Proxy-first upload: the browser built a 540p proxy and
                       # sent that first. Recorded as its own kind so the split
                       # between the fast path and the legacy whole-file path is

@@ -34,7 +34,7 @@ def _notify_failure(worker_db, job, error):
                   "again, or a different format like mp4."),
     }.get(job.get("type"))
     if job.get("type") == "index" and failure_policy.decision_for(
-            error, "index").kind not in ("invalid_media",
+            error, "index").kind not in ("invalid_media", "unfinished_file",
                                          "input_limit_exceeded"):
         # Same rule as main._notify_failure (ticket #7): our own budget or
         # capacity failure never sends the customer off to re-encode.

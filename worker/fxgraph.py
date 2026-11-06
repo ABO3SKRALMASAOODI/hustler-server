@@ -973,7 +973,29 @@ def apply_junction(parts, a_label, b_label, junction, plan):
 def junction_overlay(parts, vlabel, windows, plan):
     """Lay compiled junction windows over the concatenated program.
     ``windows``: [(cut_frame, h, label)]. Each label (2h frames from 0) is
-    re-padded to the program clock and replaces frames [cut-h, cut+h)."""
+    re-padded to the program clock and replaces frames [cut-h, cut+h).
+
+    Windows that do not overlap share ONE track and ONE overlay. A full-length
+    overlay per window costs windows x frames: 82 dissolves on a 348 s
+    slideshow rendered at 0.08x (p5520)."""
+    ordered = sorted(windows, key=lambda w: int(w[0]) - int(w[1]))
+    spans = [(int(c) - int(h), int(c) + int(h)) for c, h, _l in ordered]
+    if len(ordered) > 1 and all(a[1] <= b[0]
+                                for a, b in zip(spans, spans[1:])):
+        uid, pads, cursor = plan.uid("jx"), [], 0
+        for k, ((_c, _h, label), (f0, f1)) in enumerate(zip(ordered, spans)):
+            gap = f0 - cursor
+            lead = (f",tpad=start={gap}:start_mode=add:color=black"
+                    if gap > 0 else "")
+            parts.append(f"[{label}]format=yuv420p{lead}[{uid}w{k}]")
+            pads.append(f"[{uid}w{k}]")
+            cursor = f1
+        parts.append(f"{''.join(pads)}concat=n={len(pads)}:v=1:a=0"
+                     f"{fxprims.repad(0, plan.fps)}[{uid}p]")
+        parts.append(f"[{vlabel}][{uid}p]"
+                     f"{fxprims.composite_overlay(parts, vlabel)}:"
+                     f"enable='{fxprims.enable_expr(spans)}'[{uid}o]")
+        return f"{uid}o"
     for cut, h, label in windows:
         uid = plan.uid("jx")
         f0 = int(cut) - int(h)

@@ -14,7 +14,7 @@ os.environ.setdefault("SKIP_DB_INIT", "1")
 os.environ.setdefault("DATABASE_URL", "postgresql://stub/stub")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ops_loop import intake, store                     # noqa: E402
+from ops_loop import gaps, intake, store               # noqa: E402
 
 NOW = datetime(2026, 10, 29, 16, 0, tzinfo=timezone.utc)
 
@@ -73,6 +73,7 @@ class TicketsCur:
             if "status = 'open'" in flat:
                 row.update(status="open", fix_sha=None,
                            regression_check=None, closed_at=None,
+                           wont_fix_reason=None,
                            recurrence_count=row["recurrence_count"] + 1)
         elif flat.startswith("SELECT * FROM tickets WHERE id"):
             self._one = dict(self._by_id(params[0]))
@@ -157,7 +158,7 @@ def test_a_fixed_cause_that_fails_again_after_the_fix_reopens():
     assert recurred[0]["previous_fix_sha"] == "abc1234"
 
 
-def test_a_p0_failure_escalates_a_p1_cause_and_wont_fix_only_counts():
+def test_a_p0_failure_escalates_a_p1_cause_and_wont_fix_reopens():
     db = TicketsDB()
     store.record_failure(db.cursor(), _f("event:1", NOW, key="auto-upload-x",
                                          severity="P1"))
@@ -165,11 +166,15 @@ def test_a_p0_failure_escalates_a_p1_cause_and_wont_fix_only_counts():
         db.cursor(), _f("event:2", NOW, key="auto-upload-x", severity="P0"))
     assert t["severity"] == "P0"
     assert any(h["event"] == "escalated" for h in t["history"])
-    db.rows["auto-upload-x"].update(status="wont_fix",
+    db.rows["auto-upload-x"].update(status="wont_fix", wont_fix_reason="x",
                                     closed_at=NOW - timedelta(days=1))
     t, action = store.record_failure(
         db.cursor(), _f("event:3", NOW, key="auto-upload-x"))
-    assert action == "attached_to_closed" and t["status"] == "wont_fix"
+    assert action == "reopened" and t["status"] == "open"
+    assert t["recurrence_count"] == 1 and t.get("wont_fix_reason") is None
+    recurred = [h for h in t["history"] if h["event"] == "recurred"]
+    assert recurred[0]["previous_status"] == "wont_fix"
+    assert recurred[0]["previous_wont_fix_reason"] == "x"
 
 
 def test_history_keeps_a_bounded_number_of_refs():
@@ -196,9 +201,9 @@ def test_the_intakes_only_app_kv_write_is_its_watermark():
 
 # ── What counts as a customer failure ────────────────────────────────────
 
-def _ev(kind, detail, paying=False):
+def _ev(kind, detail):
     return {"id": 9, "kind": kind, "user_id": 7, "project_id": 70,
-            "at": NOW, "detail": json.dumps(detail), "paying": paying}
+            "at": NOW, "detail": json.dumps(detail)}
 
 
 def test_which_client_events_are_failures_and_how_severe():
@@ -212,24 +217,25 @@ def test_which_client_events_are_failures_and_how_severe():
                                      "bytes": 109805883163}))
     assert got["severity"] == "P0" and \
         got["cause_key"] == "auto-upload-rejected-over-size-cap"
-    # A cloud placeholder with no bytes on the device: P1 for a free account,
-    # P0 for a paying one.
-    empty = {"reason": "empty or incomplete file", "bytes": 0}
-    assert ev(_ev("upload_rejected", empty))["severity"] == "P1"
-    assert ev(_ev("upload_rejected", empty, paying=True))["severity"] == "P0"
-    # Ticket #12: the Studio now READS a file that says 0 bytes before it
-    # refuses it; a proven-empty or unreadable file is device-side too.
-    for reason in ("empty file", "unreadable file on this device"):
-        got = ev(_ev("upload_rejected", {"reason": reason, "bytes": 0,
-                                         "proven": True}))
-        assert got["severity"] == "P1", reason
-        assert ev(_ev("upload_rejected", {"reason": reason},
-                      paying=True))["severity"] == "P0"
-    # The browser cannot decode a gated free upload (no server proxy yet).
+    # Owner, 6 Nov: payment never lowers severity. An empty or unreadable file
+    # stops the customer as much as a cap does, and the sentence decides
+    # nothing. Whether they got past it is measured after (recovery.py).
+    for reason in ("empty or incomplete file", "empty file",
+                   "unreadable file on this device"):
+        got = ev(_ev("upload_rejected", {"reason": reason, "bytes": 0}))
+        assert got["severity"] == "P0", reason
+    lost = {"reason": "Your browser lost access to this file", "bytes": 5,
+            "file_gone": True, "resumable": True, "offline": False}
+    assert ev(_ev("upload_failed", lost))["severity"] == "P0"
+    assert ev(_ev("upload_failed", dict(lost, offline=True)))["offline"] is True
+    # A cut-short copy too: whose fault it is decides nothing. The second look
+    # says whether the finished file landed.
+    assert ev(_ev("upload_rejected", {"reason": "unfinished file",
+                                      "device_side": True}))["severity"] == "P0"
+    # The browser cannot decode the upload, whoever the account is.
     player = {"media_error": 4, "src_path": "/valmera-media/originals/1/a.mp4",
               "is_proxy": True}
-    assert ev(_ev("player_error", player))["severity"] == "P1"
-    got = ev(_ev("player_error", player, paying=True))
+    got = ev(_ev("player_error", player))
     assert got["severity"] == "P0" and \
         got["cause_key"] == "auto-player-error-code4-mp4"
     # MCP: the AI app's corrections are not our failures; ours are P0 and
@@ -243,8 +249,9 @@ def test_which_client_events_are_failures_and_how_severe():
     got = ev(_ev("mcp_error_response", {
         "tool": "export_final", "category": "unclassified",
         "message": "export_final could not start the render"}))
-    # Unclassified: often the caller's to fix; filed with its sentence, P1.
-    assert got["severity"] == "P1" and \
+    # Unclassified: often the caller's to fix. The second look tells them apart
+    # by what happened next, not by the category (recovery._mcp).
+    assert got["severity"] == "P0" and \
         got["cause_key"] == "auto-mcp-export-final-unclassified"
     assert "could not start the render" in got["title"]
     got = ev(_ev("mcp_error_response", {
@@ -259,14 +266,14 @@ def test_which_client_events_are_failures_and_how_severe():
 
 
 class ScanCur:
-    """Answers scan()'s six reads in order."""
+    """Answers scan()'s seven reads in order."""
 
     def __init__(self, jobs=(), replies=(), reply_jobs=(), requests=(),
                  events=(), held=()):
         self.answers = [list(jobs), list(replies)]
         if any((r.get("job") or "").isdigit() for r in replies):
             self.answers.append(list(reply_jobs))
-        self.answers += [list(requests), list(events), list(held)]
+        self.answers += [list(requests), list(events), list(held), []]
         self.sql = []
 
     def execute(self, sql, params=None):
@@ -361,6 +368,7 @@ def test_a_pass_never_counts_the_overlap_twice(monkeypatch):
     seen = [_f("job:1", NOW - timedelta(minutes=3)),
             _f("job:2", NOW - timedelta(minutes=1))]
     monkeypatch.setattr(intake, "scan", lambda cur, since, now: list(seen))
+    monkeypatch.setattr(gaps, "scan", lambda cur, since, now: [])
     monkeypatch.setattr(intake, "_tables_ready", lambda cur: True)
 
     class R:
@@ -384,6 +392,7 @@ def test_one_bad_failure_never_loses_the_others(monkeypatch):
     db = TicketsDB()
     seen = [_f("job:1", NOW, key="NOT A SLUG"), _f("job:2", NOW)]
     monkeypatch.setattr(intake, "scan", lambda cur, since, now: list(seen))
+    monkeypatch.setattr(gaps, "scan", lambda cur, since, now: [])
     monkeypatch.setattr(intake, "_tables_ready", lambda cur: True)
 
     class R:
@@ -411,8 +420,9 @@ def test_the_p0_watch_takes_open_p0s_and_stale_fixing_ones():
     c = C()
     intake.pending_p0(c, NOW)
     assert "severity = 'P0'" in c.sql and "status = 'open'" in c.sql
-    assert "status = 'fixing' AND updated_at <" in c.sql
-    assert c.params == (NOW - timedelta(hours=6),)
+    assert "status = 'fixing' AND COALESCE(" in c.sql
+    assert "h->>'event' = 'fixing'" in c.sql
+    assert c.params == (NOW - timedelta(hours=6), NOW - timedelta(hours=6))
 
 
 def test_the_intake_runs_every_minute_from_the_web_process():

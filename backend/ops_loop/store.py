@@ -19,6 +19,10 @@ _WRITE_RE = re.compile(
     r"^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([a-z_\.\"]+)", re.I)
 CAUSE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
 SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
+CLOSED = ("fixed", "wont_fix")
+# The only wont_fix there is (AGENTS.md: a ticket closes with a root fix plus a
+# replay on a copy reaching the bar). FIXER.md section 11.
+OWNER_DECISION = "owner decision"
 KEY_TTL = timedelta(hours=8)
 # Verdict and score must tell the same story (RUBRIC_V3.md, "The verdict
 # words"). delivered_good starts at today's podcast-short grade; everything
@@ -495,16 +499,31 @@ def _review(cur, review_id=None, session_key=None):
     return dict(row)
 
 
-def decide(ticket, review_started_at, severity):
-    """What one more session showing a cause does to its ticket:
-    open | attach | escalate | reopen | attach_closed."""
+def is_owner_decision(ticket):
+    """Closed because only the owner can settle it (a price, a plan, the trial,
+    a product rule). The one closed state a new failure does not reopen."""
+    return ticket.get("status") == "wont_fix" and (
+        ticket.get("wont_fix_reason") or "").strip().lower().startswith(
+            OWNER_DECISION)
+
+
+def decide(ticket, happened_at, severity):
+    """What one more session or failure showing a cause does to its ticket:
+    open | attach | escalate | reopen | report | attach_closed.
+
+    A closed ticket can never hide what comes after it (owner, 6 Nov 2026: "an
+    issue must be solved"): #48 sat at wont_fix while account 2837 lost a 7.8 GB
+    upload onto it, and only a counter moved. What happened after the closing
+    reopens it, however it was closed; an owner decision stays closed and is
+    reported. Only what happened BEFORE the closing just counts: it says
+    nothing about the fix."""
     if ticket is None:
         return "open"
-    if ticket["status"] == "fixed" and ticket.get("closed_at") \
-            and review_started_at > ticket["closed_at"]:
-        return "reopen"
-    if ticket["status"] in ("fixed", "wont_fix"):
-        return "attach_closed"
+    if ticket["status"] in CLOSED:
+        closed = ticket.get("closed_at")
+        if closed and happened_at <= closed:
+            return "attach_closed"
+        return "report" if is_owner_decision(ticket) else "reopen"
     if _worst(ticket["severity"], severity) != ticket["severity"]:
         return "escalate"
     return "attach"
@@ -513,10 +532,10 @@ def decide(ticket, review_started_at, severity):
 def open_or_attach(cur, cause_key, title, severity, review_id=None,
                    session_key=None, summary=None):
     """One ticket per cause. A new cause opens a ticket; a known open one
-    gains the session (and the worse severity); a FIXED one that shows up
+    gains the session (and the worse severity); a closed one that shows up
     again in a session that STARTED after it was closed reopens with
-    recurrence + 1 (its previous fix moves to history, so the fixer goes
-    deeper). A won't-fix cause only counts the new occurrence.
+    recurrence + 1 (how it was closed moves to history, so the fixer goes
+    deeper). An owner decision stays closed and reports the new occurrence.
     Returns (ticket, action)."""
     cause_key = (cause_key or "").strip().lower()
     if not CAUSE_RE.match(cause_key):
@@ -547,16 +566,24 @@ def open_or_attach(cur, cause_key, title, severity, review_id=None,
             _w(cur, """UPDATE tickets SET status = 'open',
                            recurrence_count = recurrence_count + 1,
                            fix_sha = NULL, regression_check = NULL,
+                           wont_fix_reason = NULL,
                            closed_at = NULL, severity = %s,
                            history = history || %s, updated_at = NOW()
                        WHERE id = %s""",
-               (_worst(t["severity"], severity),
+               (severity,
                 _history("recurred", review=review["id"],
+                         previous_status=t["status"],
+                         previous_wont_fix_reason=t.get("wont_fix_reason"),
                          previous_fix_sha=t["fix_sha"],
                          previous_root_cause=t["root_cause"],
                          previous_regression_check=t["regression_check"],
                          previous_closed_at=t["closed_at"]), t["id"]))
             action = "reopened"
+        elif action == "report":
+            _w(cur, """UPDATE tickets SET history = history || %s,
+                           updated_at = NOW() WHERE id = %s""",
+               (_history("reported", review=review["id"]), t["id"]))
+            action = "reported"
         elif action == "escalate":
             _w(cur, """UPDATE tickets SET severity = %s,
                            history = history || %s, updated_at = NOW()
@@ -590,6 +617,12 @@ def _worst(a, b):
 
 FAILURE_REFS_KEPT = 60       # history keeps this many failure refs a ticket
 AUTO_PREFIX = "auto-"
+QUALITY_PREFIX = "auto-quality-"    # filed by a rating below the bar
+# Measured outcomes of a run that raised no error: a replay with no failure
+# proves nothing about them, only the score does.
+QUALITY_KEYS = (QUALITY_PREFIX, "auto-gap-first-cut-is-the-upload",
+                "auto-gap-request-no-change")
+QUALITY_BAR = 10.0                  # AGENTS.md: the floor, on rubric v3
 
 
 def record_failure(cur, f):
@@ -598,9 +631,10 @@ def record_failure(cur, f):
     `f` comes from intake.scan: ref, source, at, user_id, project_id,
     severity, cause_key, title, detail. Idempotent per ref (a ref already in
     the ticket's history is a duplicate). Opens the ticket, attaches to an
-    open one (escalating severity), reopens a FIXED one when the failure
-    happened after the fix was closed (recurrence + 1), and only counts it on
-    a won't-fix one. Returns (ticket, action)."""
+    open one (escalating severity), reopens a closed one when the failure
+    happened after the closing (recurrence + 1), whatever it was closed as,
+    and reports it on an owner decision, which stays closed. A failure from
+    before the closing only counts. Returns (ticket, action)."""
     key = (f.get("cause_key") or "").strip().lower()
     if not CAUSE_RE.match(key):
         raise StoreError(f"bad cause key {key!r}")
@@ -628,6 +662,7 @@ def record_failure(cur, f):
             "ref": ref}, entry], default=str)))
     row = cur.fetchone()
     if row:
+        _link_review(cur, row["id"], f)
         return dict(row), "opened"
     cur.execute("SELECT * FROM tickets WHERE cause_key = %s FOR UPDATE",
                 (key,))
@@ -649,15 +684,24 @@ def record_failure(cur, f):
     if action == "reopen":
         events.insert(0, {"event": "recurred", "at": _now().isoformat(
             timespec="seconds"), "ref": ref, "auto": True,
+            "previous_status": t["status"],
+            "previous_wont_fix_reason": t.get("wont_fix_reason"),
             "previous_fix_sha": t["fix_sha"],
             "previous_root_cause": t["root_cause"],
             "previous_regression_check": t["regression_check"],
             "previous_closed_at": t["closed_at"]})
-        sev = _worst(t["severity"], severity)
+        # A new episode starts from this failure, not from the last one's
+        # severity: a customer who then recovers alone pages nobody.
+        sev = severity
         status_sql = """, status = 'open', recurrence_count =
                          recurrence_count + 1, fix_sha = NULL,
-                         regression_check = NULL, closed_at = NULL"""
+                         regression_check = NULL, wont_fix_reason = NULL,
+                         closed_at = NULL"""
         action = "reopened"
+    elif action == "report":
+        events.insert(0, {"event": "reported", "at": _now().isoformat(
+            timespec="seconds"), "ref": ref})
+        action = "reported"
     elif action == "escalate":
         events.insert(0, {"event": "escalated", "at": _now().isoformat(
             timespec="seconds"), "severity": severity, "ref": ref})
@@ -678,8 +722,66 @@ def record_failure(cur, f):
        (at, at, sev, _auto_summary(f, int(t["occurrences"] or 0) + 1,
                                    len(users - {None})),
         json.dumps(events, default=str), t["id"]))
+    _link_review(cur, t["id"], f)
     cur.execute("SELECT * FROM tickets WHERE id = %s", (t["id"],))
     return dict(cur.fetchone()), action
+
+
+def _link_review(cur, ticket_id, f):
+    """A rating below the bar shows up on its ticket with its pictures."""
+    if f.get("review_id"):
+        _w(cur, """INSERT INTO ticket_reviews (ticket_id, review_id)
+                   VALUES (%s, %s) ON CONFLICT DO NOTHING""",
+           (ticket_id, f["review_id"]))
+
+
+def settle_failure(cur, item, blocked, note=None):
+    """The second look at a failure (ops_loop.recovery): the customer got past
+    it or was left stuck. Left stuck raises its open ticket to P0, whoever the
+    customer is, and reopens one that closed meanwhile; an owner decision stays
+    closed and says so in its history. Got past it leaves the ticket where it
+    is, open, because the cause is still to be fixed. Returns the ticket, or
+    None if there is none."""
+    cur.execute("SELECT * FROM tickets WHERE cause_key = %s FOR UPDATE",
+                (item["cause_key"],))
+    row = cur.fetchone()
+    if not row:
+        return None
+    t = dict(row)
+    entry = {"at": _now().isoformat(timespec="seconds"), "ref": item.get("ref"),
+             "user": item.get("user_id"), "project": item.get("project_id")}
+    if note:
+        entry["note"] = note[:300]
+    if blocked and t["status"] in CLOSED and not is_owner_decision(t):
+        # The ticket closed during the grace, or the failure was filed after
+        # the closing that followed it. The customer is still stuck, and this
+        # look is the only thing that knows: left closed, nobody ever would.
+        entry.update(event="recurred", severity="P0", why="left_blocked",
+                     previous_status=t["status"],
+                     previous_wont_fix_reason=t.get("wont_fix_reason"),
+                     previous_fix_sha=t["fix_sha"],
+                     previous_root_cause=t["root_cause"],
+                     previous_regression_check=t["regression_check"],
+                     previous_closed_at=t["closed_at"])
+        _w(cur, """UPDATE tickets SET status = 'open', severity = 'P0',
+                       recurrence_count = recurrence_count + 1, fix_sha = NULL,
+                       regression_check = NULL, wont_fix_reason = NULL,
+                       closed_at = NULL, history = history || %s,
+                       updated_at = NOW() WHERE id = %s""",
+           (json.dumps([entry], default=str), t["id"]))
+        t.update(status="open", severity="P0")
+        return t
+    if blocked and t["status"] in ("open", "fixing") and t["severity"] != "P0":
+        entry.update(event="escalated", severity="P0", why="left_blocked")
+        _w(cur, """UPDATE tickets SET severity = 'P0', history = history || %s,
+                       updated_at = NOW() WHERE id = %s""",
+           (json.dumps([entry], default=str), t["id"]))
+        t["severity"] = "P0"
+        return t
+    entry["event"] = "left_blocked" if blocked else "recovered"
+    _w(cur, "UPDATE tickets SET history = history || %s WHERE id = %s",
+       (json.dumps([entry], default=str), t["id"]))
+    return t
 
 
 def _auto_summary(f, occurrences, users):
@@ -697,7 +799,10 @@ def _auto_summary(f, occurrences, users):
 
 # The intake's own bookkeeping row in app_kv (its watermark). Nothing else
 # in app_kv is ever written from here.
-STATE_KEYS = ("ops_intake_watermark",)
+STATE_KEYS = ("ops_intake_watermark",
+              # When each scheduled agent last ran (ops_review.py heartbeat).
+              "ops_heartbeat_p0_watch", "ops_heartbeat_fixer",
+              "ops_heartbeat_reviewer")
 
 
 def guard_state(sql, key):
@@ -730,6 +835,43 @@ def set_fixing(cur, ticket_id, note=None):
        (_history("fixing", note=_clean(note, 500, "note")), int(ticket_id)))
 
 
+def reopen(cur, ticket_id, note):
+    """A closed ticket whose closing turned out to be wrong goes back to open,
+    with why it was closed kept in its history. #48 sat at wont_fix ("device
+    side, recovery works as designed") while the class hit 7 customers."""
+    note = _clean(note, 2000, "note", required=True)
+    cur.execute("SELECT * FROM tickets WHERE id = %s FOR UPDATE", (int(ticket_id),))
+    t = cur.fetchone()
+    if not t:
+        raise StoreError(f"no ticket {ticket_id}")
+    if t["status"] not in ("fixed", "wont_fix"):
+        raise StoreError(f"ticket {ticket_id} is {t['status']}, not closed")
+    _w(cur, """UPDATE tickets SET status = 'open', fix_sha = NULL,
+                   regression_check = NULL, wont_fix_reason = NULL,
+                   closed_at = NULL, history = history || %s,
+                   updated_at = NOW()
+               WHERE id = %s RETURNING *""",
+       (_history("reopened", note=note, previous_status=t["status"],
+                 previous_wont_fix_reason=t["wont_fix_reason"],
+                 previous_fix_sha=t["fix_sha"],
+                 previous_closed_at=t["closed_at"]), int(ticket_id)))
+    return dict(cur.fetchone())
+
+
+def unmute(cur, ticket_id, note):
+    """A wont_fix that is not an owner decision goes back to open: it was only
+    ever a mute. Nobody is blocked by it this minute, so it waits for the daily
+    Fixer instead of paging; the next customer left stuck raises it."""
+    t = reopen(cur, ticket_id, note)
+    if t["severity"] != "P0":
+        return t
+    _w(cur, """UPDATE tickets SET severity = 'P1', history = history || %s,
+                   updated_at = NOW() WHERE id = %s RETURNING *""",
+       (_history("lowered", severity="P1", why="unmuted, nobody blocked now"),
+        int(ticket_id)))
+    return dict(cur.fetchone())
+
+
 def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None):
     """Return an unfinished claim with evidence, without hiding new intake.
 
@@ -754,6 +896,12 @@ def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None):
     if ticket["updated_at"] != expected:
         raise StoreError(f"ticket {ticket_id} changed; inspect its latest failures first")
     severity = severity or ticket["severity"]
+    if SEVERITY_RANK[severity] > SEVERITY_RANK[ticket["severity"]]:
+        raise StoreError(f"a release never lowers a ticket ({ticket['severity']} "
+                         f"to {severity}): a downgrade took #77, #93 and #123 out "
+                         "of the watch with their customers unfinished "
+                         "(FIXER.md section 11). Hand it back at its severity, "
+                         "with the work named in the note")
     _w(cur, """UPDATE tickets SET status = 'open', severity = %s,
                    history = history || %s, updated_at = NOW()
                WHERE id = %s RETURNING *""",
@@ -763,17 +911,92 @@ def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None):
     return dict(cur.fetchone())
 
 
+def ticket_projects(cur, ticket):
+    """The projects a ticket is about: its failures and its linked reviews."""
+    found = {h.get("project") for h in (ticket.get("history") or [])
+             if isinstance(h, dict) and h.get("event") == "failure"}
+    cur.execute("""SELECT r.project_id FROM ticket_reviews tr
+                     JOIN session_reviews r ON r.id = tr.review_id
+                    WHERE tr.ticket_id = %s""", (ticket["id"],))
+    found |= {r["project_id"] for r in cur.fetchall()}
+    return {int(p) for p in found if p is not None}
+
+
+def is_quality(ticket):
+    """Filed by a rating or a measured empty result, not by something that
+    failed: its bar is the score."""
+    key = ticket.get("cause_key") or ""
+    return not key.startswith(AUTO_PREFIX) or key.startswith(QUALITY_KEYS)
+
+
+def check_replay(cur, ticket, replay):
+    """The proof a `fixed` needs (AGENTS.md): that exact request, on a copy,
+    through the product, reaching the bar. `replay` is what ops_review.py read
+    from the run on disk: session, run, state, failures, and for a quality
+    ticket score_exact, rubric, rated_by; fixer is who closes. Below the bar
+    the ticket stays open."""
+    if not isinstance(replay, dict) or not replay.get("session"):
+        raise StoreError(
+            "a ticket closes only with a root fix plus a replay of that "
+            "request on a copy, through the product (AGENTS.md): pass --replay "
+            "<gauntlet run>/<session> (FIXER.md section 7)")
+    session = str(replay["session"])
+    projects = ticket_projects(cur, ticket)
+    number = session[1:] if session[:1] == "p" else session
+    if projects and not (number.isdigit() and int(number) in projects):
+        raise StoreError(f"replay {session} is not a session of this ticket "
+                         f"(its projects: "
+                         f"{', '.join(str(p) for p in sorted(projects)[:12])})")
+    if replay.get("state") != "done":
+        raise StoreError(f"replay {session} did not finish "
+                         f"(state {replay.get('state')!r}): the ticket stays "
+                         "open")
+    if replay.get("failures"):
+        raise StoreError(f"replay {session} failed "
+                         f"({', '.join(map(str, replay['failures']))[:200]}): "
+                         "the ticket stays open")
+    out = {k: replay.get(k) for k in ("run", "session", "be_sha", "fe_sha",
+                                      "score_exact", "tier", "rated_by")
+           if replay.get(k) is not None}
+    if not is_quality(ticket):
+        return out
+    try:
+        exact = float(replay.get("score_exact"))
+    except (TypeError, ValueError):
+        raise StoreError(f"replay {session} has no rating: a quality ticket "
+                         f"closes at {QUALITY_BAR} on rubric {RUBRIC}, rated by "
+                         "a session that did not make the fix") from None
+    if replay.get("rubric") != RUBRIC or exact < QUALITY_BAR:
+        raise StoreError(f"replay {session} scored {exact} on rubric "
+                         f"{replay.get('rubric')}: below the bar of "
+                         f"{QUALITY_BAR} the ticket stays open, with the score "
+                         "in its note")
+    rated_by = str(replay.get("rated_by") or "")
+    if not rated_by.startswith(RATER_PREFIXES):
+        raise StoreError("--rated-by must name the Reviewer session, Claude "
+                         "Opus or above (RUBRIC_V3.md)")
+    if rated_by == str(replay.get("fixer") or ""):
+        raise StoreError("a fixer never rates its own fix (AGENTS.md)")
+    return out
+
+
 def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
-          regression_check=None, reason=None):
-    """fixed: root_cause + fix_sha + regression_check are all required.
-    wont_fix: a reason is required."""
-    if status not in ("fixed", "wont_fix"):
+          regression_check=None, reason=None, replay=None):
+    """fixed: root_cause + fix_sha + regression_check and a replay on a copy
+    that reached the bar (check_replay). wont_fix: only an owner decision,
+    with the reason saying which; nothing else is closed without a fix
+    (AGENTS.md; owner, 6 Nov 2026: nothing is closed as device-side, noise,
+    expected or "the customer recovered alone")."""
+    if status not in CLOSED:
         raise StoreError("close with --status fixed or --status wont_fix")
     cur.execute("SELECT * FROM tickets WHERE id = %s FOR UPDATE",
                 (int(ticket_id),))
     t = cur.fetchone()
     if not t:
         raise StoreError(f"no ticket {ticket_id}")
+    if t["status"] in CLOSED:
+        raise StoreError(f"ticket {ticket_id} is already {t['status']}; "
+                         "reopen it first")
     if status == "fixed":
         root_cause = _clean(root_cause, 3000, "root_cause", required=True)
         fix_sha = _clean(fix_sha, 80, "fix_sha", required=True)
@@ -784,16 +1007,24 @@ def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
                              "with fe: (e.g. abc1234,fe:def5678)")
         regression_check = _clean(regression_check, 500, "regression_check",
                                   required=True)
+        proof = check_replay(cur, dict(t), replay)
         _w(cur, """UPDATE tickets SET status = 'fixed', root_cause = %s,
                        fix_sha = %s, regression_check = %s,
                        wont_fix_reason = NULL, closed_at = NOW(),
                        history = history || %s, updated_at = NOW()
                    WHERE id = %s""",
            (root_cause, fix_sha, regression_check,
-            _history("fixed", fix_sha=fix_sha,
+            _history("fixed", fix_sha=fix_sha, replay=proof,
                      regression_check=regression_check), int(ticket_id)))
     else:
         reason = _clean(reason, 2000, "reason", required=True)
+        if not reason.lower().startswith(OWNER_DECISION):
+            raise StoreError(
+                "wont_fix is only for a decision the owner must make: start "
+                "the reason with \"owner decision:\" and name it. A customer "
+                "failure is never closed as device-side, noise, expected or "
+                "recovered: it stays open until the product change that stops "
+                "it hurting the customer ships (FIXER.md section 11)")
         _w(cur, """UPDATE tickets SET status = 'wont_fix',
                        wont_fix_reason = %s, closed_at = NOW(),
                        root_cause = COALESCE(%s, root_cause),
@@ -803,4 +1034,3 @@ def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
             _history("wont_fix", reason=reason), int(ticket_id)))
     cur.execute("SELECT * FROM tickets WHERE id = %s", (int(ticket_id),))
     return dict(cur.fetchone())
-

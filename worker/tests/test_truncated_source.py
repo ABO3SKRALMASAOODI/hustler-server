@@ -1,6 +1,7 @@
-"""An MP4 cut short before its moov box is the customer's copy, and the chat
-says so (ticket 189, 5 Nov 2026): it used to be retried, then answered "nothing
-is wrong with your file ... you don't need to upload it again"."""
+"""An MP4 measured as cut short before its moov box is the customer's copy, and
+the chat says so (ticket 189, 5 Nov 2026): it used to be retried, then answered
+"nothing is wrong with your file ... you don't need to upload it again". The
+measurement is media.UnfinishedFile; ffprobe's words alone prove nothing."""
 
 import os
 import sys
@@ -39,9 +40,18 @@ def _notes(monkeypatch, err, job=None):
 
 
 def test_a_missing_moov_is_not_retried():
-    decision = failure_policy.classify(media.MediaError(ERROR), "index")
-    assert decision.kind == "invalid_media"
+    decision = failure_policy.classify(media.UnfinishedFile("no moov"), "index")
+    assert decision.kind == "unfinished_file"
     assert decision.retryable is False
+
+
+def test_the_measured_refusal_needs_no_text_at_all():
+    err = media.UnfinishedFile("anything")
+    for job_type in ("index", "preview", "final"):
+        decision = failure_policy.classify(err, job_type)
+        assert decision.kind == "unfinished_file" and not decision.retryable
+    assert failure_policy.user_reason(
+        err, failure_policy.classify(err, "index")) == "the file is incomplete"
 
 
 @pytest.mark.parametrize("job_type", ["final", "preview", "preview_check"])
@@ -49,11 +59,11 @@ def test_a_missing_moov_in_our_own_render_is_not_blamed_on_the_customer(
         job_type):
     # There the file may be OUR intermediate; only the index reads the upload.
     decision = failure_policy.classify(media.MediaError(ERROR), job_type)
-    assert decision.kind != "invalid_media"
+    assert decision.kind != "unfinished_file"
 
 
 def test_the_customer_is_told_the_truth_once(monkeypatch):
-    posted = _notes(monkeypatch, media.MediaError(ERROR))
+    posted = _notes(monkeypatch, media.UnfinishedFile("no moov"))
     assert len(posted) == 1
     note = posted[0][1]
     assert note == main.INDEX_TRUNCATED_NOTE
@@ -74,7 +84,7 @@ def test_another_media_failure_keeps_its_note(monkeypatch):
 
 
 def test_the_reason_words_name_the_file():
-    err = media.MediaError(ERROR)
+    err = media.UnfinishedFile("no moov")
     decision = failure_policy.classify(err, "index")
     assert failure_policy.user_reason(err, decision) == "the file is incomplete"
     assert failure_policy.user_reason(

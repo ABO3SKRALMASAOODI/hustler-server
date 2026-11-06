@@ -26,9 +26,15 @@ class Body(io.BytesIO):
 def object_client(monkeypatch, data, declared=None):
     body = Body(data)
     monkeypatch.setattr(storage, "client", lambda: SimpleNamespace(
-        get_object=lambda **kw: {"Body": body, "ContentLength": (
-            len(data) if declared is None else declared)}))
+        get_object=lambda **kw: _ranged(data, kw["Range"]) if "Range" in kw else {
+            "Body": body, "ContentLength": (
+                len(data) if declared is None else declared)}))
     return body
+
+
+def _ranged(data, header):
+    start, end = header.removeprefix("bytes=").split("-")
+    return {"Body": io.BytesIO(data[int(start):int(end) + 1])}
 
 
 def test_streamed_hash_matches_full_file_and_closes_body(monkeypatch):

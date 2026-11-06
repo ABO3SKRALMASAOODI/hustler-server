@@ -125,3 +125,96 @@ def duration_of_key(storage, key, total_bytes):
         return duration_seconds(fetch, total_bytes)
     except Exception:
         return None
+
+
+# ── Is this file finished? ───────────────────────────────────────────────────
+#
+# Without `moov` an MP4 cannot open, and re-reading it changes nothing. A file
+# picked or sent while it is still being copied says so in its own boxes: asset
+# 40278 (account 2123, 5 Nov 2026) announced an mdat of 590,450,793 bytes in a
+# file of 15,728,640, and its bytes are the exact start of the finished file.
+# It uploaded, failed six analyses across three jobs, and stranded the project.
+# The same walk runs in the browser before a byte moves (lib/uploadSource.js)
+# and in the worker (media.py), which is what stands behind every other way in.
+FINISHED, UNFINISHED, UNKNOWN = "complete", "unfinished", "unknown"
+_WALK_BOXES = 512
+_FIRST_BOXES = {b"ftyp", b"styp", b"wide", b"free", b"skip", b"mdat", b"moov",
+                b"pnot", b"uuid", b"junk", b"pict"}
+
+
+def _printable(btype):
+    return all(0x20 <= c <= 0x7e or c == 0xa9 for c in btype)
+
+
+def file_state(fetch, total_bytes):
+    """{"state", "present", "expected"} for a file of ``total_bytes``.
+
+    Header reads only, whatever the size. UNFINISHED only when the file's own
+    boxes prove there is no moov at all; UNKNOWN for everything this cannot
+    read or does not recognise, because it may name a file that cannot open
+    but must never refuse one that can. ``expected`` is how long the boxes say
+    the file is, when they say."""
+    out = {"state": UNKNOWN, "present": total_bytes, "expected": None}
+    if not total_bytes or total_bytes < _HEADER:
+        return out
+    offset = 0
+    for n in range(_WALK_BOXES):
+        if offset >= total_bytes:
+            return dict(out, state=UNFINISHED)
+        head = fetch(offset, min(16, total_bytes - offset))
+        if not head:
+            return out
+        parsed = _parse_header(head)
+        if not parsed:
+            return out
+        size, btype, hlen = parsed
+        if not _printable(btype) or (n == 0 and btype not in _FIRST_BOXES):
+            return out
+        if size == 0:                  # runs to the end: nothing can follow
+            if btype == b"moov":
+                return dict(out, state=FINISHED, expected=total_bytes)
+            return dict(out, state=UNFINISHED)
+        if size < hlen:
+            return out
+        end = offset + size
+        if btype == b"moov":
+            # A moov cut short is no proof: ffmpeg reads what is there, and a
+            # file missing only the tail of its moov opens and plays. Judged by
+            # the worker, which can try it (indexer._refuse_unfinished_source).
+            return (dict(out, state=FINISHED, expected=total_bytes)
+                    if end <= total_bytes else out)
+        if end > total_bytes:
+            return dict(out, state=UNFINISHED, expected=end)
+        offset = end
+    return out
+
+
+def state_of_key(storage, key, total_bytes):
+    """file_state against an object in our bucket. Never raises."""
+    def fetch(off, length):
+        try:
+            return storage.get_range_at(key, off, length)
+        except Exception:
+            return None
+    try:
+        return file_state(fetch, total_bytes)
+    except Exception:
+        return {"state": UNKNOWN, "present": total_bytes, "expected": None}
+
+
+def _size_words(nbytes):
+    if nbytes >= 1024 ** 3:
+        return f"{nbytes / 1024 ** 3:.1f} GB"
+    return f"{max(1, round(nbytes / 1024 ** 2))} MB"
+
+
+def unfinished_message(filename, found):
+    """The customer's sentence: what is there, and what to do."""
+    expected = found.get("expected")
+    how = (f"only {_size_words(found['present'])} of about "
+           f"{_size_words(expected)} arrived, so it was still being copied or "
+           "the copy stopped") if expected else (
+        "the recording or the copy never finished")
+    return (f"{filename or 'This file'} isn't finished: {how}. Wait for it to "
+            "finish, or copy it again from the camera or card, then add it "
+            "here. This project is ready for it.")

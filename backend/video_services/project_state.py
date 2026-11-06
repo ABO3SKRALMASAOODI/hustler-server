@@ -30,6 +30,15 @@ def index_row(cur, sha256):
     return cur.fetchone()
 
 
+# A failure measured on the file itself: another run of the same bytes ends the
+# same way, so opening the project again must not queue one. 2123's project ran
+# three jobs of two attempts on a file with no moov (5 Nov 2026). Only a
+# measurement belongs here. Every other kind stays healable: its verdict comes
+# from a tool's words, the heal is bounded, and it is the only way back from a
+# broken read or a fixed bug.
+PERMANENT_INDEX_FAILURES = frozenset({"unfinished_file"})
+
+
 def index_job_state(cur, project_id, asset_id):
     """Latest, active, and recent index work for one concrete asset.
 
@@ -41,7 +50,7 @@ def index_job_state(cur, project_id, asset_id):
     """
     if not asset_id:
         return {"id": None, "state": None, "progress": None,
-                "error": None, "updated_at": None,
+                "error": None, "failure_kind": None, "updated_at": None,
                 "active": False, "recent_count": 0}
     cur.execute(
         """SELECT
@@ -49,6 +58,8 @@ def index_job_state(cur, project_id, asset_id):
              (ARRAY_AGG(state ORDER BY id DESC))[1] AS state,
              (ARRAY_AGG(progress ORDER BY id DESC))[1] AS progress,
              (ARRAY_AGG(error ORDER BY id DESC))[1] AS error,
+             (ARRAY_AGG(result->'failure'->>'kind' ORDER BY id DESC))[1]
+               AS failure_kind,
              (ARRAY_AGG(updated_at ORDER BY id DESC))[1] AS updated_at,
              COALESCE(BOOL_OR(state IN ('queued', 'running')), FALSE)
                AS active,
@@ -64,6 +75,7 @@ def index_job_state(cur, project_id, asset_id):
     return {
         "id": row.get("id"), "state": row.get("state"),
         "progress": row.get("progress"), "error": row.get("error"),
+        "failure_kind": row.get("failure_kind"),
         "updated_at": row.get("updated_at"),
         "active": bool(row.get("active")),
         "recent_count": int(row.get("recent_count") or 0),

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import subprocess
 import threading
 import time
@@ -19,6 +20,13 @@ class MediaError(RuntimeError):
     """A failed media command. ``stderr_tail`` (when set) is the last
     ~STDERR_TAIL_CHARS of the command's real log lines, newest last."""
     stderr_tail = ""
+
+
+class UnfinishedFile(MediaError):
+    """The source is an MP4/MOV that cannot open: its own boxes prove there is
+    no complete moov. A measurement of the bytes, and the same bytes end the
+    same way, so it is never retried (failure_policy) and the customer hears
+    what to do (main.INDEX_TRUNCATED_NOTE)."""
 
 
 class MediaOOMError(MediaError):
@@ -445,6 +453,51 @@ def rotation_of(stream):
         return int(round(float((stream.get("tags") or {}).get("rotate"))))
     except (TypeError, ValueError):
         return 0
+
+
+_FIRST_BOXES = {b"ftyp", b"styp", b"wide", b"free", b"skip", b"mdat", b"moov",
+                b"pnot", b"uuid", b"junk", b"pict"}
+
+
+def mp4_state(read, total):
+    """"complete", "unfinished", "cut_moov" or "unknown" from an MP4's top-level
+    boxes.
+
+    ``read(offset, length)`` gives bytes or None. The walk of
+    backend/mp4probe.py file_state: header reads only, and "unknown" for
+    anything it cannot read or does not recognise. "cut_moov" is a moov that
+    runs past the end: not proof by itself, because ffmpeg reads what is there
+    and a file missing only the tail of its moov opens and plays."""
+    if not total or total < 8:
+        return "unknown"
+    offset = 0
+    for n in range(512):
+        if offset >= total:
+            return "unfinished"
+        head = read(offset, min(16, total - offset))
+        if not head or len(head) < 8:
+            return "unknown"
+        size, btype = struct.unpack(">I4s", head[:8])
+        hlen = 8
+        if not all(0x20 <= c <= 0x7e or c == 0xa9 for c in btype) or \
+                (n == 0 and btype not in _FIRST_BOXES):
+            return "unknown"
+        if size == 1:
+            if len(head) < 16:
+                return "unknown"
+            size = struct.unpack(">Q", head[8:16])[0]
+            hlen = 16
+        elif size == 0:                # runs to the end: nothing can follow
+            return "complete" if btype == b"moov" else "unfinished"
+        if size < hlen:
+            return "unknown"
+        end = offset + size
+        if btype == b"moov":
+            return "complete" if end <= total else "cut_moov"
+        if end > total:
+            return "unfinished"
+        offset = end
+    return "unknown"
 
 
 def probe(path):
