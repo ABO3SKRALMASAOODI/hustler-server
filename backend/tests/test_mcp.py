@@ -391,6 +391,7 @@ def test_non_object_params_are_invalid_params(client):
 def test_tools_list_is_session_tools_plus_the_worker_registry(client):
     tools = rpc(client, "tools/list", STATIC_TOKEN).get_json()["result"]["tools"]
     names = [t["name"] for t in tools]
+    assert all(t["annotations"]["title"] == t["title"] for t in tools)
     assert "open_project" in names and "get_transcript" in names
     assert names.count("export_final") == 1
     assert "edit_shorts" not in names
@@ -2596,7 +2597,8 @@ def test_download_without_kind_hands_out_the_finished_export(client,
     }).get_json()["result"]
     assert "DRAFT PREVIEW" in got["content"][0]["text"]
     tool = next(t for t in mcpmod.SESSION_TOOLS if t["name"] == "download_url")
-    assert "never the user's finished video" in tool["description"]
+    assert "low-resolution review drafts" in tool["description"]
+    assert "does not create an export" in tool["description"]
 
 
 # ── Ticket #45 / #39 / #4 (30 Oct 2026): a preview is judged by its facts ──
