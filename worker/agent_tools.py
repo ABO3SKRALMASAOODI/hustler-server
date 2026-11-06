@@ -21125,6 +21125,9 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
     if not ok:
         return (f"Video generation FAILED: {err}. Try again or tell the user it "
                 "didn't work — do NOT claim a clip was created.")
+    # The provider has billed it, whatever happens to the file from here.
+    llm.charge_generation("video_gen", config.VIDEO_GEN_MODEL,
+                          videogen.price_for(seconds))
     key = f"generated_video/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp4"
     try:
         storage.upload_file(out_path, key, "video/mp4")
@@ -21141,7 +21144,6 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
                      "caption": f"AI-generated video: {p[:300]}",
                      "generated": True, "model": config.VIDEO_GEN_MODEL})
     cost = videogen.price_for(seconds)
-    llm.charge_generation("video_gen", config.VIDEO_GEN_MODEL, cost)
     ctx.videos_generated.append({"storage_key": key, "prompt": p[:200],
                                  "seconds": seconds})
     reviewed = _queue_download_review(
