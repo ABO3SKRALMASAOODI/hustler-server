@@ -808,7 +808,7 @@ def test_worker_skills_plugin_and_core_prompt_carry_the_same_rules():
     mcp = _read(_ROOT, "backend", "routes", "mcp.py")
     assert "strongest line or statistic" in mcp and "generic question" in mcp
     assert "a word a later graphic slams" in mcp
-    assert "holds 0.8-1.5 s after the last word" in mcp
+    for phrase in ("keep 0.8-1.5 s of the natural tail after the last word", "a payoff number ~2 s on screen while the picture still moves", "export_final refuses a last picture that is held, frozen, still or slowed before the branded end card", "the closing shot stays real-time moving footage"): assert phrase in mcp, phrase
     assert "tier='hook'" in mcp and "list_build" in mcp
     assert "hold the payoff 1.0-1.5 s" not in mcp
     assert "earn its place" in worker["review"]
