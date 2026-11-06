@@ -76,6 +76,17 @@ def test_a_declared_defect_sets_its_ceiling():
                            "delivered_poor", 2)
 
 
+def test_one_typo_stops_at_nine_and_a_half():
+    # A reference in the owner's folder has one misspelled card: a stray word
+    # is a 9.5, running captions that say the wrong thing are a 7.
+    typo = [{"id": "typo", "at_s": 1.0, "note": "one word on one card"}]
+    with pytest.raises(store.StoreError, match="ceiling 9.5"):
+        store.check_rating(rating(score_exact=10, edit_delta=EDITED, defects=typo),
+                           "delivered_good", 10)
+    store.check_rating(rating(score_exact=9.5, edit_delta=EDITED, defects=typo),
+                       "delivered_good", 9)
+
+
 def test_alien_needs_its_proof():
     tens = {k: 10 for k in store.CRAFT_DIMENSIONS}
     tens.update(fidelity=None, defects=10)

@@ -216,7 +216,7 @@ NO_NEW_PICTURES_CEILING = 6.0
 DEFECT_CEILING = {"broken_render": 3.0, "ask_missed": 4.0,
                   "caption_over_face": 6.0, "wrong_words": 7.0,
                   "off_centre_card": 8.0, "low_quality_text": 8.0,
-                  "slop_visual": 8.0}
+                  "slop_visual": 8.0, "typo": 9.5}
 CRAFT_DIMENSIONS = ("story_hook", "cuts_pacing", "type_captions",
                     "motion_design", "footage_broll", "colour_light", "sound")
 GATE_DIMENSIONS = ("fidelity", "defects")
