@@ -607,3 +607,65 @@ def test_nothing_about_payment_or_error_words_decides_severity():
     src = open(intake.__file__, encoding="utf-8").read()
     assert "DEVICE_SIDE" not in src and "paying" not in src
     assert not re.search(r"defs\.paying", src)
+
+
+# ── The CLI reads the proof, it does not take the closer's word ──────────
+
+def cli():
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "scripts"))
+    import ops_review
+    return ops_review
+
+
+class Args:
+    rated_by, fixer = "claude-opus-reviewer", "claude-opus-fixer"
+
+    def __init__(self, replay):
+        self.replay = replay
+
+
+def test_the_replay_is_read_from_the_run_on_disk(tmp_path, monkeypatch):
+    ops = cli()
+    monkeypatch.setattr(ops, "GAUNTLET_RUNS", str(tmp_path))
+    session = tmp_path / "r1" / "sessions" / "p5345"
+    (session / "judge").mkdir(parents=True)
+    (session / "journey.json").write_text(json.dumps({
+        "run": "r1", "sid": "p5345", "state": "done", "be_sha": "abc",
+        "failures": [{"kind": "download_event", "detail": "no download"}]}))
+    (session / "judge" / "verdict3.json").write_text(json.dumps({
+        "rubric": "v3", "score_exact": 10, "tier": "standard"}))
+    got = ops.load_replay(Args("r1/p5345"))
+    assert got["session"] == "p5345" and got["failures"] == ["download_event"]
+    assert got["score_exact"] == 10 and got["rubric"] == "v3"
+    assert got["rated_by"] == "claude-opus-reviewer"
+    assert ops.load_replay(Args(None)) is None
+    with pytest.raises(ops.CliError, match="cannot read the replay"):
+        ops.load_replay(Args("r1/p1"))
+
+
+class Git:
+    def __init__(self, files, on_main=True):
+        self.files, self.on_main = files, on_main
+
+    def __call__(self, *args):
+        ok = self.on_main or args[0] == "cat-file"
+        return type("R", (), {"returncode": 0 if ok else 1,
+                              "stdout": "\n".join(self.files)})
+
+
+def test_a_fix_is_product_code_on_main(monkeypatch):
+    """Six tickets cite 0bc9a5b9, which is the ops CLI; #12 cites a docstring."""
+    ops = cli()
+    monkeypatch.setattr(ops, "_git", Git(["backend/ops_loop/store.py",
+                                          "backend/scripts/ops_review.py",
+                                          "backend/tests/test_x.py"]))
+    with pytest.raises(ops.CliError, match="not the product"):
+        ops.check_fix_sha("0bc9a5b9")
+    monkeypatch.setattr(ops, "_git", Git(["worker/agent_loop.py"], on_main=False))
+    with pytest.raises(ops.CliError, match="not on main"):
+        ops.check_fix_sha("33c8764f")
+    monkeypatch.setattr(ops, "_git", Git(["worker/agent_loop.py",
+                                          "worker/tests/test_x.py"]))
+    ops.check_fix_sha("abc1234,fe:def5678")

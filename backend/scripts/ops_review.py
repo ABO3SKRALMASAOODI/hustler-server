@@ -585,8 +585,10 @@ def load_replay(a):
     journey.json of the same shape from another replay tool."""
     if not a.replay:
         return None
-    path = a.replay if os.path.isabs(a.replay) else \
-        os.path.join(GAUNTLET_RUNS, a.replay)
+    path = a.replay
+    if not os.path.isabs(path):
+        run, _, session = path.partition("/")
+        path = os.path.join(GAUNTLET_RUNS, run, "sessions", session)
     folder = path if os.path.isdir(path) else os.path.dirname(path)
     journey = os.path.join(path, "journey.json") if os.path.isdir(path) else path
     try:
@@ -620,7 +622,8 @@ def _git(*args):
 def check_fix_sha(fix_sha):
     """Six tickets cite a commit of this CLI as their fix, and others a test
     docstring. A backend fix is a commit on this checkout's history that
-    changes the product; this checkout follows main (ops.sh)."""
+    changes the product, not only tests or how tickets are counted; this
+    checkout follows main (ops.sh)."""
     for part in (fix_sha or "").split(","):
         repo, _, sha = part.strip().rpartition(":")
         if repo == "fe" or not sha:
@@ -630,10 +633,11 @@ def check_fix_sha(fix_sha):
             raise CliError(f"fix_sha {sha} is not on main")
         names = _git("diff", "--name-only", f"{sha}^1", sha).stdout.split()
         product = [n for n in names if "/tests/" not in n
+                   and "/ops_loop/" not in n
                    and not n.endswith("scripts/ops_review.py")]
         if names and not product:
-            raise CliError(f"fix_sha {sha} changes only tests or this CLI, "
-                           "not the product")
+            raise CliError(f"fix_sha {sha} changes only tests or the ticket "
+                           "tooling, not the product")
 
 
 def cmd_close(a):
@@ -692,7 +696,7 @@ def cmd_tickets(a):
 
 def sync_p0_marker(rows):
     """P0_PENDING mirrors the database: the P0 tickets the Fixer should take
-    now (open, or 'fixing' with no update for 6 h). Written atomically;
+    now (open, or 'fixing' on a claim over 6 h old). Written atomically;
     removed when there are none."""
     if not rows:
         if os.path.exists(P0_MARKER):
