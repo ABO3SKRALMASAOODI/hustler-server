@@ -242,13 +242,16 @@ def _music_moments(ctx, edl, tl, kind):
     return out, None
 
 
-def _cut_moments(edl, tl):
+def _cut_moments(edl, tl, baked=()):
+    """``baked``: indexed shot starts. A split on one of them is a cut the
+    upload already carries, not an organizational split."""
     import timeline
     out = []
     blocks = timeline.program_blocks(edl)
     for a, b in zip(blocks, blocks[1:]):
         if a.get("kind") == b.get("kind") == "footage" and \
-                abs(float(b["src_start"]) - float(a["src_end"])) < 1e-3:
+                abs(float(b["src_start"]) - float(a["src_end"])) < 1e-3 and \
+                not any(abs(float(b["src_start"]) - c) < 1e-2 for c in baked):
             continue                         # a split, not a cut
         t = float(a["out_end"])
         ref = float(b["src_start"]) if b.get("kind") == "footage" else t
@@ -689,9 +692,27 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
     if refused:
         return refused
     edl = _edl(ctx)
+    keep_ops, baked = [], ()
+    if style != "none" and not edl.get("split_keep_boundaries"):
+        # An upload that is already a montage (p5520, a slideshow of 83
+        # photos) arrives as one kept span, so its cuts were invisible here
+        # and a cross-dissolve was refused three requests running. Exposing
+        # them changes no frame, order, timing or sound (set_transitions
+        # does the same); the renderer freezes the edge frame across a cut
+        # that is baked into the source.
+        import agent_tools
+        index = getattr(ctx, "index", None)
+        split, exposed = agent_tools._split_keeps_at_shot_boundaries(
+            edl.get("keep") or [], index)
+        if exposed:
+            edl = {**edl, "keep": split}
+            keep_ops = [{"action": "set", "layer": "keep", "value": split}]
+        # set_transitions may have split them already: they are cuts either way
+        baked = tuple(float(s["start"]) for s in (index or {}).get("shots") or []
+                      if isinstance(s, dict) and s.get("start") is not None)
     tl = _timeline(edl)
     fps = _fps(ctx, edl)
-    all_cuts = _cut_moments(edl, tl)
+    all_cuts = _cut_moments(edl, tl, baked)
     if not all_cuts:
         return _r("this program has no cut to decorate.")
     targets = []
@@ -706,6 +727,8 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
             targets.append(near)
     else:
         mode = (cuts or "scene")
+        if isinstance(mode, str):
+            mode = mode.strip().strip('"\'').strip()
         if isinstance(mode, (list, tuple)):
             for t in mode:
                 near = min(all_cuts, key=lambda c: abs(c[0] - float(t)))
@@ -788,7 +811,7 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
                       "program already flashes there. Use a style that "
                       "does not flash, or ask the user whether they want "
                       "flashing.")
-    ops += [w.upsert_fx(it) for it in items]
+    ops = keep_ops + ops + [w.upsert_fx(it) for it in items]
     where = ", ".join(f"{it['at']:g}" for it in items[:10])
     out = w.commit(ctx, ops, f"set_junction: {style} at {where}s"
                    + (f" (replaced {', '.join(removed)})" if removed else "")
