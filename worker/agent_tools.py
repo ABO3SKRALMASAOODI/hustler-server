@@ -11483,9 +11483,10 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
         return (f"REJECTED: style must be one of "
                 f"{', '.join(TRANSITION_STYLES)} — or 'none' to clear. "
                 + "; ".join(f"{k} = {v}" for k, v in TRANSITION_DESC.items())
-                + ". All are duration-preserving junction effects. True "
-                "crossfades (overlapping footage) are not supported — say "
-                "so if asked.")
+                + ". All are duration-preserving junction effects. For a "
+                "cross-dissolve use set_junction(style='dissolve', "
+                "cuts='scene', duration=...): it also works on the cuts "
+                "baked into an uploaded montage.")
     try:
         d = round(min(max(float(duration_s if duration_s is not None
                                 else 0.3), TRANSITION_MIN_S),
@@ -32264,9 +32265,8 @@ TOOLS = {
                         "'flash' = additive white pop peaking ON the cut "
                         "(beat-synced edits). duration_s 0.1-1.5 (default "
                         "0.3; keep whip/flash short, 0.15-0.4). 'none' "
-                        "removes them (hard cuts again). True crossfades "
-                        "(overlapping footage) are NOT supported — offer "
-                        "one of these instead and say so.",
+                        "removes them (hard cuts again). For a cross-dissolve "
+                        "use set_junction(style='dissolve').",
                         {"style": {"type": "string",
                                    "enum": list(TRANSITION_STYLES)
                                    + ["none"]},
