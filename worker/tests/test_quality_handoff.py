@@ -65,7 +65,8 @@ def test_stale_preview_is_unchecked_but_does_not_lock_export():
 
 
 def test_edit_without_write_is_pushed_once():
-    ctx = SimpleNamespace(semantic_contract={"mode": "edit"}, versions_written=[])
+    ctx = SimpleNamespace(semantic_contract={"mode": "edit"}, versions_written=[],
+                          over_budget=lambda: False)
     messages = []
     assert agent_loop._edit_without_write_pushback(ctx, messages, False)
     assert "reach the same result another way" in messages[0]["content"]

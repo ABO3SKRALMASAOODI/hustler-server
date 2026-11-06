@@ -348,3 +348,189 @@ def test_a_two_hour_source_costs_the_turn_no_extra_tokens(monkeypatch):
     _run(ctx, db)
     assert len(calls) == 1
     assert "palabra" not in json.dumps(calls[0]["messages"], default=str)
+
+
+# ---- adversarial verification: nothing can be lost once the render exists --
+#
+# Production, 14 days: 15 of 108 finished turns ended on the automatic render,
+# so the rewrite below is a mainstream path. It runs after the customer's video
+# exists: whatever goes wrong in it must leave the delivery standing.
+
+def _rendered_by_the_loop(monkeypatch, first=DRAFT):
+    ctx, db, posted, checkpoint, calls = _delivered(monkeypatch, first)
+    ctx.last_preview = {"edl_version": 72}
+
+    def auto_render(*_args):
+        ctx.last_preview = {"edl_version": 73, "duration_s": 20, "asset_id": 5}
+        return ctx.latest_edl(), ""
+    monkeypatch.setattr(agent_loop, "_auto_render_if_needed", auto_render)
+    return ctx, db, posted, checkpoint, calls
+
+
+def _reply(text, finish="stop"):
+    return NS(choices=[NS(message=NS(content=text, tool_calls=[]),
+                          finish_reason=finish)], usage=None)
+
+
+def test_a_provider_failure_on_the_rewrite_keeps_the_delivered_turn(monkeypatch):
+    ctx, db, posted, _checkpoint, calls = _rendered_by_the_loop(monkeypatch)
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        if len(calls) > 1:
+            raise RuntimeError("529 overloaded")
+        return _reply(DRAFT)
+    ctx.llm_client = NS(chat=NS(completions=NS(create=create)))
+    result = _run(ctx, db)
+    assert result["status"] == "replied"
+    assert posted[-1][0] == DRAFT
+
+
+def test_a_spent_budget_does_not_replace_the_delivery_with_a_stop_message(monkeypatch):
+    ctx, db, posted, _checkpoint, calls = _rendered_by_the_loop(monkeypatch)
+    ctx.over_budget = lambda: bool(calls)
+    result = _run(ctx, db)
+    assert len(calls) == 1
+    assert result["status"] == "replied"
+    assert posted[-1][0] == DRAFT
+
+
+def test_a_long_render_does_not_start_a_new_slice_for_one_sentence(monkeypatch):
+    """Execution slices end at 420 s. A render that crossed that line must not
+    turn the rewrite into a whole new planning slice."""
+    ctx, db, posted, checkpoint, _calls = _rendered_by_the_loop(monkeypatch)
+
+    def auto_render(*_args):
+        monkeypatch.setattr(agent_loop.config, "AGENT_TURN_TIMEOUT_S", -1.0)
+        ctx.last_preview = {"edl_version": 73, "duration_s": 20, "asset_id": 5}
+        return ctx.latest_edl(), ""
+    monkeypatch.setattr(agent_loop, "_auto_render_if_needed", auto_render)
+    result = _run(ctx, db)
+    assert result["status"] == "replied"
+    assert checkpoint == {}
+    assert posted
+
+
+def test_the_rewrite_cannot_start_new_work(monkeypatch):
+    ctx, db, _posted, _checkpoint, calls = _rendered_by_the_loop(monkeypatch)
+    _run(ctx, db)
+    assert len(calls) == 2
+    assert calls[1]["tool_choice"] == "none"
+
+
+def test_a_cut_off_rewrite_keeps_the_complete_draft(monkeypatch):
+    ctx, db, posted, _checkpoint, calls = _rendered_by_the_loop(monkeypatch)
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return _reply(DRAFT) if len(calls) == 1 else _reply("The new cu", "length")
+    ctx.llm_client = NS(chat=NS(completions=NS(create=create)))
+    _run(ctx, db)
+    assert posted[-1][0] == DRAFT
+
+
+# ---- adversarial verification: the facts that replaced the verdict ----------
+
+def test_a_failure_the_same_tool_recovered_from_stays_a_delivered_request(monkeypatch):
+    """Production 165718: "Add the music remove the sound" was delivered with
+    2 failed receipts and reported fulfilled, because the assessor cleared them.
+    38 of 40 failed receipts in 14 days recovered through the same tool. With
+    the assessor gone each one would file a P0 "ended partial" ticket."""
+    ctx, _db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    agent_loop._record_outer_tool_outcome(
+        ctx, "erase_region", "TRANSIENT_FAILURE: The repaint failed.")
+    assert agent_loop._turn_completion(ctx)[0] == "partial"
+    agent_loop._record_outer_tool_outcome(ctx, "erase_region", "EDL v74 saved.")
+    assert agent_loop._turn_completion(ctx)[0] == "fulfilled"
+
+
+def test_a_clarifying_reply_waits_on_the_customer_and_is_not_charged():
+    outcome, billable = agent_loop._turn_completion(
+        _nothing_changed(semantic_contract={"mode": "clarify"}))
+    assert outcome == "awaiting_user" and billable is False
+
+
+def test_a_clarifying_turn_ends_waiting_through_the_loop(monkeypatch):
+    ctx, db, posted, _checkpoint, calls = _delivered(
+        monkeypatch, "Do you want the serif or the script caption?")
+    ctx.semantic_contract["mode"] = "clarify"
+    ctx.versions_written = []
+    ctx.rendered_versions = set()
+    ctx.last_preview = None
+    result = _run(ctx, db)
+    assert len(calls) == 1
+    assert result["status"] == "awaiting_user"
+    assert result["billable"] is False
+    assert posted[-1][1]["outcome"] == "awaiting_user"
+
+
+def test_a_music_offer_on_a_turn_that_wrote_nothing_waits_on_the_customer(monkeypatch):
+    """Production 166495: the assessor marked this turn waiting. Without it an
+    open track choice would end blocked, which files a P0 for a question."""
+    ctx, db, _posted, _checkpoint, calls = _delivered(
+        monkeypatch, "Nothing has changed yet.")
+    ctx.versions_written = []
+    ctx.rendered_versions = set()
+    ctx.last_preview = None
+    monkeypatch.setattr(music_offer, "turn_end_offer",
+                        lambda *_a: "Pick one of these three tracks.")
+    result = _run(ctx, db)
+    assert result["outcome"] == "awaiting_user"
+    assert result["status"] == "awaiting_user"
+    assert result["billable"] is False
+
+
+def test_a_write_that_ended_where_it_began_is_a_request_that_changed_nothing(monkeypatch):
+    """The credit rule of 25 Oct: versions that end where they began are not a
+    delivery. The assessor was the only thing catching this on a reply that
+    claimed success; versions_written alone reads it as fulfilled and charged."""
+    ctx, db, _posted, _checkpoint, calls = _delivered(monkeypatch, "All done.")
+    monkeypatch.setattr(agent_loop, "_turn_edl_changed", lambda _ctx: False)
+    result = _run(ctx, db)
+    assert len(calls) == 2
+    assert any("timeline has not changed" in str(m.get("content"))
+               for m in calls[1]["messages"])
+    assert result["outcome"] != "fulfilled"
+    assert result["billable"] is False
+
+
+def test_a_cached_preview_of_the_old_cut_is_not_a_change(monkeypatch):
+    """The brief says edit, the editor re-opened the existing render and said
+    done. The turn would end blocked, so it must get its nudge first."""
+    ctx, db, _posted, _checkpoint, calls = _delivered(monkeypatch, "All done.")
+    ctx.versions_written = []
+    ctx.last_preview = {"edl_version": 73, "cached": True}
+    result = _run(ctx, db)
+    assert len(calls) == 2
+    assert result["outcome"] == "blocked" and result["billable"] is False
+
+
+def test_a_render_only_request_is_not_nudged(monkeypatch):
+    ctx, db, _posted, _checkpoint, calls = _delivered(monkeypatch)
+    ctx.versions_written = []
+    result = _run(ctx, db)
+    assert len(calls) == 1
+    assert result["status"] == "replied"
+
+
+def test_the_nudge_sends_a_real_question_to_ask_user_and_is_the_only_hold(monkeypatch):
+    ctx, db, _posted, _checkpoint, calls = _delivered(monkeypatch, "Which file?")
+    ctx.versions_written = []
+    ctx.rendered_versions = set()
+    ctx.last_preview = None
+    _run(ctx, db)
+    assert "ask_user" in calls[1]["messages"][-1]["content"]
+    # ask_user's own first hold would make the same point a second time.
+    assert ctx._question_held is True
+
+
+def test_a_spent_budget_skips_the_nudge_and_keeps_the_editors_words(monkeypatch):
+    honest = "Nothing has changed: that capability does not exist."
+    ctx, db, posted, _checkpoint, calls = _delivered(monkeypatch, honest)
+    ctx.versions_written = []
+    ctx.rendered_versions = set()
+    ctx.last_preview = None
+    ctx.over_budget = lambda: bool(calls)
+    _run(ctx, db)
+    assert len(calls) == 1
+    assert posted[-1][0] == honest

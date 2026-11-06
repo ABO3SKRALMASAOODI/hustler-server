@@ -77,10 +77,13 @@ def choice_outcome(outcome, offer):
     """A real track choice is waiting for the user, not a finished request.
 
     The brief asked for music, none is on the timeline and the offer is open,
-    so a turn otherwise fulfilled waits on the customer. An existing tool or
-    quality failure stays what it was; no open offer changes nothing.
+    so a turn otherwise fulfilled waits on the customer, and so does one that
+    wrote nothing and hit no failure: "blocked" would file a P0 for a question
+    (ops_loop.intake). A delivered edit left open by a failure stays what it
+    was; no open offer changes nothing.
     """
-    return "awaiting_user" if offer and outcome == "fulfilled" else outcome
+    return "awaiting_user" if offer and outcome in {"fulfilled", "blocked"} \
+        else outcome
 
 
 def moods_for(text):
