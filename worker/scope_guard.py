@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from typing import Any, Dict, Iterable, List, Set
 
@@ -179,6 +180,10 @@ def _joined_keep(edl: Dict[str, Any]) -> List[List[float]]:
             keep[-1][1] = end
         else:
             keep.append([start, end])
+    if keep:
+        # The last end sits on the centisecond grid either side of the
+        # source's last frame (picture_map.expose): the same frames.
+        keep[-1][1] = math.floor(float(keep[-1][1]) * 10.0) / 10.0
     return keep
 
 

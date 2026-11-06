@@ -52,10 +52,25 @@ never overlaps): dip_black (calm), dip_white (soft, bright), whip_left /
 whip_right (fast directional smear with motion blur), zoom_punch (an
 accelerating push whose momentum carries through the cut), glitch (RGB/noise
 burst), flash (white pop peaking ON the cut). Fast reels: whip, zoom_punch
-or flash at 0.15–0.3 s; calm or emotional: dip_black 0.3–0.5 s. A
-cross-dissolve is `set_junction(style='dissolve', cuts='scene', duration=1)`:
-per cut, duration-preserving, and it reaches the cuts baked into an uploaded
-montage or slideshow (the outgoing frame holds while the next one fades in).
+or flash at 0.15–0.3 s; calm or emotional: dip_black 0.3–0.5 s.
+
+CROSS-DISSOLVES, SLIDES, FADE THROUGH BLACK: `set_junction(style='dissolve'|
+'slide'|'fade_black', duration=0.3-2)`. One call covers the whole film, or
+`start`/`end` (program seconds) covers a range; never call it per cut. It
+sees every change of picture the upload carries, measured on the pixels, so
+a slideshow baked into one MP4 needs nothing else. Length and sound never
+move: the outgoing picture holds while the next one comes in. A later call
+on the same cuts replaces what is there; `style='none'` with a range or
+`only='dissolve'` takes some off. Zooms that end or start on a transition
+ease across it by themselves.
+
+SLIDESHOWS: `add_filmstrip(start, end)` runs the pictures past horizontally,
+two or more in view, each its own frame, in its own colour and aspect.
+`set_photo_fill()` puts every picture with bars (a tall photo in a wide
+frame, a wide one in a tall frame) over a blurred, enlarged copy of itself;
+`set_photo_fill(start=, end=)` or `at=` does a range or one picture,
+`mode='none'` undoes it. One call each. Neither is drawn by the Studio's
+live draft: render a preview to see them.
 
 PER-JUNCTION MOTION TRANSITIONS: to give one specific junction its own
 treatment, place a motion graphic centred on that cut —

@@ -1,0 +1,6 @@
+{
+  "wave": "baked-cut-1107",
+  "doc": "Craft for pictures baked into one upload (fx_schemas/photo.py, tools_ext/photo_tools.py)",
+  "fx_tags": ["photo_fill", "filmstrip"],
+  "verbs": ["add_filmstrip", "remove_filmstrip", "set_photo_fill"]
+}

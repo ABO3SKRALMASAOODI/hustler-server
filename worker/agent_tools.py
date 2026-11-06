@@ -11461,6 +11461,12 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                     motion_motif=None, max_transitions=None):
     p = (style or "").strip().lower()
     sc = (scope or "scene").strip().lower()
+    from tools_ext import punctuation_tools as _pt
+    if p in ("dissolve", "slide", "fade_black") or p in _pt.STYLE_NAMES \
+            and p != "dip_black":
+        # The cut devices that show both pictures: one call, every cut.
+        return _pt.set_junction(ctx, p, duration=duration_s,
+                                scope="every" if sc == "every_cut" else sc)
     if sc not in TRANSITION_SCOPES:
         return (f"REJECTED: scope must be one of "
                 f"{', '.join(TRANSITION_SCOPES)}. 'scene' (the default) puts "
@@ -11474,6 +11480,9 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
     fx = dict(edl.get("effects") or {})
     if p in ("none", "off"):
         if not fx.get("transition"):
+            if any(isinstance(i, dict) and i.get("type") == "junction"
+                   for i in edl.get("fx") or []):
+                return _pt.set_junction(ctx, "none")
             return ("NO CHANGE: there are no transitions to remove. Do NOT "
                     "tell the user you changed anything.")
         fx["transition"] = None
@@ -11483,10 +11492,11 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
         return (f"REJECTED: style must be one of "
                 f"{', '.join(TRANSITION_STYLES)} — or 'none' to clear. "
                 + "; ".join(f"{k} = {v}" for k, v in TRANSITION_DESC.items())
-                + ". All are duration-preserving junction effects. For a "
-                "cross-dissolve use set_junction(style='dissolve', "
-                "cuts='scene', duration=...): it also works on the cuts "
-                "baked into an uploaded montage.")
+                + ". All are duration-preserving junction effects. A cross-"
+                "dissolve, a slide or a fade through black is "
+                "set_junction(style='dissolve'|'slide'|'fade_black', "
+                "duration=...): one call, every cut, the cuts baked into an "
+                "uploaded montage included.")
     try:
         d = round(min(max(float(duration_s if duration_s is not None
                                 else 0.3), TRANSITION_MIN_S),
@@ -11561,7 +11571,10 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 f"{prog / hit:.1f}s, which is too often and reads as an "
                 "automated effect pass. The EDL was NOT changed. Use hard "
                 "cuts, or call set_transitions again with max_transitions="
-                f"{safe_max} or fewer to mark only selected changes.")
+                f"{safe_max} or fewer to mark only selected changes. When "
+                "the customer asked for a transition on every picture, "
+                "set_junction(style='fade_black'|'dissolve'|'slide', "
+                "cuts='every') does that in one call.")
 
     if limit is not None and hit > limit:
         ordered = sorted(eligible)
@@ -32265,8 +32278,10 @@ TOOLS = {
                         "'flash' = additive white pop peaking ON the cut "
                         "(beat-synced edits). duration_s 0.1-1.5 (default "
                         "0.3; keep whip/flash short, 0.15-0.4). 'none' "
-                        "removes them (hard cuts again). For a cross-dissolve "
-                        "use set_junction(style='dissolve').",
+                        "removes them (hard cuts again). A dissolve, a slide "
+                        "or a fade through black is set_junction: one call "
+                        "for the whole film, cuts baked into an uploaded "
+                        "slideshow included.",
                         {"style": {"type": "string",
                                    "enum": list(TRANSITION_STYLES)
                                    + ["none"]},
@@ -33544,6 +33559,9 @@ TOOL_DOMAINS = {
         "set_frame", "auto_reframe", "add_zoom", "remove_zoom", "add_zoom_path",
         "remove_zoom_path", "set_text_motion", "set_overlay_motion",
         "punch_in_on_emphasis", "conceal_jump_cuts",
+        # The first thing a transition ask loads: without these beside
+        # set_transitions a model looped add_zoom over 83 baked photos.
+        "set_junction", "add_filmstrip", "remove_filmstrip", "set_photo_fill",
         "set_transitions",
         "set_fades", "bind_motion_motif", "add_aspect_shift",
         "remove_aspect_shift", "add_color_screen", "add_corrupt_screen",

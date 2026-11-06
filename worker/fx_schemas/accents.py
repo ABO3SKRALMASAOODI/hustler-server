@@ -49,7 +49,8 @@ ACCENT_KINDS = ("negative", "white_hit", "colour_hit", "threshold",
 # xfade built-ins | mask wipes (precomputed gray mask clip + maskedmerge) |
 # composites and smears.
 XFADE_STYLES = ("dissolve", "fadegrays", "pixelize", "radial", "slices",
-                "wipe_left", "wipe_right", "wipe_up", "wipe_down")
+                "wipe_left", "wipe_right", "wipe_up", "wipe_down",
+                "slide", "fade_black")
 MASK_STYLES = ("iris", "columns", "staircase", "box_steps", "bands",
                "letter_window", "matte_cut")
 OTHER_STYLES = ("double_exposure", "pixel_stretch", "hit_flash", "whip_up",
@@ -359,6 +360,7 @@ class JunctionFx(FxItemBase):
     type: Literal["junction"] = "junction"
     style: Literal["dissolve", "fadegrays", "pixelize", "radial", "slices",
                    "wipe_left", "wipe_right", "wipe_up", "wipe_down",
+                   "slide", "fade_black",
                    "iris", "columns", "staircase", "box_steps", "bands",
                    "letter_window", "matte_cut", "double_exposure",
                    "pixel_stretch", "hit_flash", "whip_up", "whip_down",
@@ -370,6 +372,9 @@ class JunctionFx(FxItemBase):
     direction: Optional[Literal["left", "right", "up", "down", "in",
                                 "out"]] = None
     colour: Optional[FxColour] = None
+    # Both edges hold their frame: the footage past this cut is the next
+    # picture (a cut baked into the upload), never a handle.
+    hold: Optional[bool] = None
 
     @model_validator(mode="after")
     def _style_fields(self):

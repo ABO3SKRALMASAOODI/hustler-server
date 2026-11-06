@@ -737,9 +737,13 @@ def _prepare_item(plan, item):
         return
     rung, reason = "full", "ok"
     if item.get("device"):
+        # A transition keeps its place whatever the render's device budget
+        # says: a customer's dissolves on a 2 s slideshow were dropped from
+        # the budget's end, and a woven window costs its own frames only.
         d = _device_detail(item, _sidecar_status(item, plan.source, plan),
                            frames=_item_frames(item, plan.fps),
-                           budget_ms=plan.budget_ms)
+                           budget_ms=(None if item.get("stage") == "junction"
+                                      else plan.budget_ms))
         rung, reason = d["rung"], d.get("reason") or d["rung"]
         plan.devices[item.get("id")] = d
         if rung == "omit":
@@ -968,9 +972,9 @@ def apply_junction(parts, a_label, b_label, junction, plan):
 
 def junction_overlay(parts, vlabel, windows, plan):
     """Lay compiled junction windows over the concatenated program.
-    ``windows``: [(cut_frame, h, label)]. Each label (2h frames from 0) is
-    re-padded to the program clock and replaces frames [cut-h, cut+h)."""
-    for cut, h, label in windows:
+    ``windows``: [(cut_frame, h, label, ...)]. Each label (2h frames from 0)
+    is re-padded to the program clock and replaces frames [cut-h, cut+h)."""
+    for cut, h, label, *_rest in windows:
         uid = plan.uid("jx")
         f0 = int(cut) - int(h)
         parts.append(f"[{label}]format=yuv420p"

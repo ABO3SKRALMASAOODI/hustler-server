@@ -36,6 +36,7 @@ import db as dbx
 import dialogue_level
 import follow
 import fxgraph
+import fxprims
 import gradelut
 import graphics
 import matte_track
@@ -44,6 +45,7 @@ import render_plan
 import screenframe
 import motion_captions
 import motion_layer
+import photo_craft
 import picture_cards
 import plate
 import screening
@@ -1107,7 +1109,7 @@ def final_video_encode(W, H, fps):
 
 def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
                      focus=None, seg_dur=None, picture=None, grade=None,
-                     src_size=None, frames=None):
+                     src_size=None, frames=None, fill=None):
     """Append graph parts that bring in_label to exactly WxH @ fps, sar 1.
     mode: crop (center-crop), pad (black bars), pad_blur (blurred backdrop).
 
@@ -1164,7 +1166,17 @@ def _normalize_video(parts, in_label, out_label, W, H, fps, mode, uid,
     where the source's frame grid falls or on how an ffmpeg build's `fps`
     ends a stream, and the cut lands on the frame the camera, captions and
     sound expect.
+
+    fill: (photo_fill item, span): this block's picture on a blurred copy of
+    itself (photo_craft.fill_chain), whatever the frame's mode.
     """
+    if fill and src_size and not picture:
+        late = f",{grade},format=yuv420p" if grade else ""
+        photo_craft.fill_chain(parts, in_label, out_label, W, H, uid,
+                               item=fill[0], span=fill[1], src_size=src_size,
+                               tail=block_tail(fps, seg_dur, frames),
+                               late=late, frames=frames, fps=fps)
+        return
     if picture:
         x, y, pw, ph = picture_pixels(W, H, picture)
         inner = f"pic_{uid}"
@@ -1692,6 +1704,31 @@ def stacked_card_windows(edl):
             if isinstance(c, dict) and c.get("panels")]
 
 
+def transition_windows(edl, tl):
+    """[(program second of the cut, half its window)] for the junction items
+    a render draws: both pictures are on screen for the window, so the camera
+    must not step inside it (camera.cross_zooms). The window is capped as
+    fxgraph.junction_specs caps it, at half the shorter neighbour."""
+    items = [i for i in (edl or {}).get("fx") or []
+             if isinstance(i, dict) and i.get("type") == "junction"]
+    if not items or tl is None:
+        return []
+    marks = sorted({0.0, float(tl.out_duration),
+                    *(float(i.get("at") or 0.0) for i in items)})
+    marks = sorted(set(marks) | {float(c) for c in caplib.program_cuts(tl)})
+    out = []
+    for it in items:
+        c = float(it.get("at") or 0.0)
+        before = max((m for m in marks if m < c - 1e-6), default=0.0)
+        after = min((m for m in marks if m > c + 1e-6),
+                    default=float(tl.out_duration))
+        half = min(float(it.get("duration_s") or 0.4) / 2.0,
+                   (c - before) / 2.0, (after - c) / 2.0)
+        if half > 0.02:
+            out.append((c, round(half, 3)))
+    return out
+
+
 def camera_zooms(edl, index, tl=None, fps=None, src_fps=None, origin=None,
                  zooms=None):
     """The EDL's zooms as the camera renders them: cut out of stacked
@@ -1719,7 +1756,7 @@ def camera_zooms(edl, index, tl=None, fps=None, src_fps=None, origin=None,
         fps = 30.0
     return camera.hold_through_cuts(
         zooms, camera_cuts(edl, index, tl, fps, src_fps, origin), fps,
-        tl.out_duration)
+        tl.out_duration, soft=transition_windows(edl, tl))
 
 
 def first_frame_at(t, fps):
@@ -3294,6 +3331,107 @@ def _fx_cuts(order, keep, edl_keep, blk_frames):
     return cuts
 
 
+# Junction windows laid over the program each cost a full program of padding:
+# fxprims.repad keeps a branch in step with the program by generating its
+# frames ahead of the window, so N windows push N * (frames before each) black
+# W x H frames through N overlays. Below this, that is nothing. p5520's 82
+# dissolves on a 348 s slideshow took 505 s, 350 of them in the kernel.
+WEAVE_MIN_WINDOWS = 4
+
+
+# A scale filter starts one thread per core for itself, on top of the graph's
+# pool, and keeps them for the life of the graph: 300 scalers measured 4,537
+# threads on a 15-core Mac. Past the process's limit (6,144 here; a box slot's
+# PidsLimit is 4,096) a scaler fails to start on its first frame, its block
+# comes out empty and ffmpeg still exits 0: p5520 lost the last 16 s of its
+# picture, with the sound running on. Under this budget nothing changes.
+FILTER_THREAD_BUDGET = 1500
+
+
+def _filter_thread_args(graph):
+    """ffmpeg's -filter_complex_threads for a graph with many scalers: the
+    most each filter may take with the whole graph inside the budget."""
+    text = graph if isinstance(graph, str) else str(graph)
+    scalers = (text.count("scale=") - text.count("threads=1")
+               + text.count("format=yuva420p") + text.count("format=gray"))
+    cores = (os.cpu_count() or 8) + 1
+    if scalers * cores <= FILTER_THREAD_BUDGET:
+        return []
+    return ["-filter_complex_threads",
+            str(max(1, FILTER_THREAD_BUDGET // max(1, scalers)))]
+
+
+def _require_whole_picture(path, expected_s):
+    """A picture track that stops short of the program is a failed render,
+    whatever ffmpeg's exit code said: the container's length is the sound's,
+    so nothing downstream would notice."""
+    info = media.probe(path)
+    have = info.get("video_duration")
+    if have is not None and float(have) < float(expected_s) - 1.0:
+        raise media.MediaError(
+            f"the render's picture stops at {float(have):.1f}s of "
+            f"{float(expected_s):.1f}s")
+
+
+def _weaves_windows(windows, pm, card_runs):
+    """Weave this render's junction windows instead of overlaying them? Not
+    when the matte's own program runs beside the picture, and not on a card
+    program: an overlay keeps each entering frame and its layout tags."""
+    return len(windows) >= WEAVE_MIN_WINDOWS and pm is None and not card_runs
+
+
+def _weave_windows(parts, blocks, frames, windows, fps):
+    """Build [vc] and [ac] with each compiled junction window IN the picture.
+
+    ``frames``: each block's frame count. ``windows``: [(cut, h, label, k)],
+    the window replacing the last h frames of block k and the first h of
+    block k+1. Each block's picture becomes the end of the window before it,
+    what is left of its own frames, and the start of the window after it:
+    the same number of frames, so it pairs with its own sound in the one
+    concat the plain program uses, and the work grows with the frames shown,
+    not with windows times frames.
+
+    Picture and sound stay in ONE concat on purpose. In two, the sound runs
+    ahead of a slow picture chain, and at the source's end ffmpeg 8 closed
+    the picture with the frames it still held: 32 s of a 348 s film gone,
+    every last block empty, exit code 0."""
+    by_k = {int(w[3]): w for w in windows}
+    halves = {}
+    for k, (_cut, h, label, *_rest) in by_k.items():
+        h = int(h)
+        parts.append(f"[{label}]split[fxw{k}p][fxw{k}n]")
+        parts.append(f"[fxw{k}p]trim=end_frame={h},setpts=PTS-STARTPTS"
+                     f"[fxw{k}a]")
+        parts.append(f"[fxw{k}n]trim=start_frame={h},setpts=PTS-STARTPTS"
+                     f"[fxw{k}b]")
+        halves[k] = (f"fxw{k}a", f"fxw{k}b")
+    woven = []
+    for k, (vlab, alab, bd) in enumerate(blocks):
+        nb = int(frames[k])
+        head = int(by_k[k - 1][1]) if k - 1 in by_k else 0
+        tail = int(by_k[k][1]) if k in by_k else 0
+        if not head and not tail:
+            woven.append((vlab, alab, bd))
+            continue
+        pieces = [halves[k - 1][1]] if head else []
+        if head + tail >= nb:
+            parts.append(f"[{vlab}]nullsink")
+        else:
+            parts.append(f"[{vlab}]trim=start_frame={head}:end_frame="
+                         f"{nb - tail},setpts=PTS-STARTPTS[fxk{k}]")
+            pieces.append(f"fxk{k}")
+        if tail:
+            pieces.append(halves[k][0])
+        chain = ("".join(f"[{p}]" for p in pieces)
+                 + f"concat=n={len(pieces)}:v=1:a=0,") if len(pieces) > 1 \
+            else f"[{pieces[0]}]"
+        parts.append(f"{chain}settb=AVTB,"
+                     f"setpts='round(N/{fxprims.fps3(fps):.3f}/TB)'[fxv{k}]")
+        woven.append((f"fxv{k}", alab, bd))
+    pairs = "".join(f"[{v}][{a}]" for v, a, _d in woven)
+    parts.append(f"{pairs}concat=n={len(woven)}:v=1:a=1[vc][ac]")
+
+
 def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
                    card_layout, src_dur, shot_starts=()):
     """Where a junction side's source handle comes from: the main footage
@@ -3328,6 +3466,13 @@ def _fx_handle_src(entry, keep, blk_frames, h, fps, side, no_source,
     if any(start < c <= s_ + eps for c in shot_starts):
         return None
     return {"seg": idx, "start": round(start, 6)}
+
+
+def _joined_in_source(a, b, keep):
+    """Do these two blocks' spans touch on the source clock?"""
+    if a[0] != "seg" or b[0] != "seg":
+        return False
+    return abs(float(keep[a[1]][1]) - float(keep[b[1]][0])) < 0.02
 
 
 def _index_shot_starts(index):
@@ -3696,6 +3841,9 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         _gc = grade_custom_chain(grade_custom)
         if _gc:
             _grade_parts.append(gradelut.fast_chain(_gc))
+    if fx_plan is not None:
+        # A picture stage that brings in its own frames grades them alike.
+        fx_plan.grade_chain = ",".join(_grade_parts) or None
     block_grade = (",".join(_grade_parts)
                    if _grade_parts and do_norm
                    and (not transition or tstyle == "zoom_punch")
@@ -3887,11 +4035,17 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         shot_starts = _index_shot_starts(index)
         for spec in fx_juncs:
             ka, kb = spec["k"], spec["k"] + 1
-            spec["a_src"] = _fx_handle_src(
+            # Past a join between two spans that touch in the source lies the
+            # other side's own picture, and an item a tool measured against
+            # a baked cut says so: both edges hold.
+            hold = _joined_in_source(order[ka], order[kb], keep) or any(
+                it.get("hold") for it in spec["items"])
+            spec["spread"] = hold
+            spec["a_src"] = None if hold else _fx_handle_src(
                 order[ka], keep, blk_frames, spec["h"], fps, "out",
                 speed or regions or patch_inputs or src_pad > 0,
                 card_layout, src_dur, shot_starts)
-            spec["b_src"] = _fx_handle_src(
+            spec["b_src"] = None if hold else _fx_handle_src(
                 order[kb], keep, blk_frames, spec["h"], fps, "in",
                 speed or regions or patch_inputs or src_pad > 0,
                 card_layout, src_dur, shot_starts)
@@ -4305,6 +4459,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
         follow_interp = ("linear" if preview
                          and _PREVIEW_QUALITY.get() != "approval" else None)
         _fspans = follow.frame_spans(edl)
+        _fills = photo_craft.fill_items(edl)
 
         def _follow_of(i, span):
             """The block's follow on its own clock: (time_map, key_span,
@@ -4316,6 +4471,11 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             return (tmap, None if tmap is None else (0.0, e_ - s_),
                     [t - s_ for t in ts_], xs_, ys_)
 
+        def _fill_of(i):
+            """(item, span) when block i's picture is on its blurred copy."""
+            return photo_craft.fill_at(_fills, _block_mid(*keep[i])) \
+                if _fills else None
+
         def _full_frame(i, in_label, out_label, uid, mask=False):
             """Block i composed as the program shows it full-frame.
             ``mask``: the same geometry for a program-matte block (no grade;
@@ -4325,6 +4485,14 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             grade = None if mask else block_grade
             if mask and seg_mode == "pad_blur":
                 seg_mode = "pad"
+            fill = _fill_of(i) if not mask else None
+            if fill:
+                _normalize_video(parts, in_label, out_label, W, H, fps,
+                                 seg_mode, uid, seg_dur=seg_out_len[i],
+                                 frames=blk_frames.get(("seg", i)),
+                                 grade=grade, src_size=main_src_size,
+                                 fill=fill)
+                return
             fspan = (follow.span_at(_fspans, _block_mid(*keep[i]))
                      if _fspans and seg_mode == "crop" else None)
             if fspan and main_src_size and follow.moves(fspan):
@@ -4902,14 +5070,24 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                              seg_mode, f"{u}{side}n", focus=seg_focus,
                              seg_dur=h / f3, frames=h,
                              picture=(edl.get("frame") or {}).get("picture"),
-                             grade=block_grade, src_size=main_src_size)
+                             grade=block_grade, src_size=main_src_size,
+                             fill=_fill_of(i))
             return f"{u}{side}h"
 
         a_own, b_own = _own(ka, "a"), _own(kb, "b")
+        # A cut baked into the source has no footage past it. Its h frames
+        # run at half speed across the 2h of the window rather than stopping
+        # dead on the edge frame: a still is the same either way, and moving
+        # footage never freezes. It ends on the frame the program goes on
+        # from, so the join is continuous.
+        spread = (f"setpts=2*(PTS-STARTPTS),fps={f3:.3f},"
+                  f"tpad=stop_mode=clone:stop=2,trim=end_frame={2 * h},{tail}")
         if spec.get("a_src"):
             a_h = _handle(spec["a_src"], "a")
             parts.append(f"[{a_own}][{a_h}]concat=n=2:v=1:a=0,{tail}"
                          f"[{u}A]")
+        elif spec.get("spread"):
+            parts.append(f"[{a_own}]{spread}[{u}A]")
         else:
             parts.append(f"[{a_own}]tpad=stop_mode=clone:stop={h},{tail}"
                          f"[{u}A]")
@@ -4917,6 +5095,8 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
             b_h = _handle(spec["b_src"], "b")
             parts.append(f"[{b_h}][{b_own}]concat=n=2:v=1:a=0,{tail}"
                          f"[{u}B]")
+        elif spec.get("spread"):
+            parts.append(f"[{b_own}]{spread}[{u}B]")
         else:
             parts.append(f"[{b_own}]tpad=start_mode=clone:start={h},{tail}"
                          f"[{u}B]")
@@ -4931,10 +5111,16 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 if pm is not None and pm_blk else {})},
             fx_plan)
         if jw:
-            fx_windows.append((spec["frame"], h, jw))
+            fx_windows.append((spec["frame"], h, jw, ka))
 
-    pairs = "".join(f"[{v}][{a}]" for v, a, _d in blocks)
-    parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
+    if _weaves_windows(fx_windows, pm, card_runs):
+        # Many windows are woven in, not laid over: see _weave_windows.
+        _weave_windows(parts, blocks, [blk_frames[o[:2]] for o in order],
+                       fx_windows, fps)
+        fx_windows = []
+    else:
+        pairs = "".join(f"[{v}][{a}]" for v, a, _d in blocks)
+        parts.append(f"{pairs}concat=n={len(blocks)}:v=1:a=1[vc][ac]")
     if pm is not None:
         # the matte's blocks in the very order the picture's were joined
         for lab in pm.streams():
@@ -5475,7 +5661,7 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
     if zooms:
         zooms = camera.hold_through_cuts(
             zooms, camera_cuts(edl, index, tl, fps, src_fps, focus_origin),
-            fps, tl.out_duration)
+            fps, tl.out_duration, soft=transition_windows(edl, tl))
     for z in zooms:
         a = max(0.0, float(z["start"]))
         b = min(tl.out_duration, float(z["end"]))
@@ -6890,7 +7076,8 @@ def _prune_graph_to_audio(graph, target="aout"):
             if not keep[i]:
                 rewritten.append(chain)                 # dropped on second pass
                 continue
-            m = re.match(r"^concat(?:=(\S*))?$", body)
+            # A concat may lead a chain (a junction side, a woven block).
+            m = re.match(r"^concat(?:=([^\s,]*))?(?:,.*)?$", body)
             if m:
                 args = dict(kv.split("=", 1) for kv in (m.group(1) or "").split(
                     ":") if "=" in kv)
@@ -7904,7 +8091,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
                       + music_tail_ext(edl, tl.out_duration) + outro_s)
 
     def _video_cmd(g):
-        return ["ffmpeg", "-y",
+        return ["ffmpeg", "-y", *_filter_thread_args(g),
                 *_stable_video_inputs(main_input_args + extra_inputs),
                 *_graph_args(g, workdir), "-map", "[vout]", "-map", "[aout]",
                 *encode, *_output_clock(fps), "-t", f"{expected_out_s:.3f}",
@@ -7918,6 +8105,7 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             cancelled_cb,
             timeout=_render_ffmpeg_timeout(preview, expected_out_s),
             progress_cb=progress_cb, expected_out_s=expected_out_s)
+    _require_whole_picture(out_path, expected_out_s)
     return media.duration_of(out_path)
 
 

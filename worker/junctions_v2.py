@@ -97,7 +97,8 @@ def junction_h(plan, item):
 class _Junction:
     FILTERS = ("split", "trim", "setpts", "concat", "format", "overlay",
                "alphamerge", "xfade", "color", "geq", "scale", "blend",
-               "crop", "vstack", "gblur", "remap", "loop", "zoompan",
+               "crop", "vstack", "hstack", "gblur", "remap", "loop",
+               "fade", "zoompan",
                "negate", "dilation", "nullsink", "tpad", "null", "settb")
 
     # -- prepare ---------------------------------------------------------
@@ -206,7 +207,7 @@ class _Junction:
                                ("incoming", "b_handle"))
                 if j.get(k) == "freeze"]
         why = []
-        if held:
+        if held and not item.get("hold"):
             why.append(f"no source handle on the {' and '.join(held)} side: "
                        "its edge frame is held")
         if h < junction_h(ctx.plan, item):
@@ -336,6 +337,38 @@ class _Junction:
         d = N / ctx.fps3
         ctx.parts.append(f"[{ctx.a_label}][{ctx.b_label}]xfade=transition="
                          f"{name}:duration={d:.6f}:offset=0[{u}]")
+        return self._settle(ctx, u, N), None
+
+    def _fade_black(self, ctx, item, h, N):
+        """Out to true black on the cut, and in from it. xfade's own
+        fadeblack never reaches black (75 of 255 on its middle frame)."""
+        u = ctx.uid("jb")
+        ctx.parts.append(f"[{ctx.a_label}]trim=end_frame={h},"
+                         f"setpts=PTS-STARTPTS,fade=t=out:s=0:n={h}[{u}a]")
+        ctx.parts.append(f"[{ctx.b_label}]trim=start_frame={h}:end_frame={N},"
+                         f"setpts=PTS-STARTPTS,fade=t=in:s=0:n={h}[{u}b]")
+        ctx.parts.append(f"[{u}a][{u}b]concat=n=2:v=1:a=0,"
+                         f"{wipe_masks.pts(ctx.fps3)}[{u}]")
+        return self._settle(ctx, u, N), None
+
+    def _slide(self, ctx, item, h, N):
+        """The incoming picture pushes the outgoing one out, eased at both
+        ends: a double-size strip of the two and a window moving across."""
+        d = item.get("direction") if item.get("direction") in (
+            "left", "right", "up", "down") else "left"
+        W, H = int(ctx.W), int(ctx.H)
+        u = ctx.uid("jl")
+        a, b = ctx.a_label, ctx.b_label
+        first, second = (a, b) if d in ("left", "up") else (b, a)
+        wide = d in ("left", "right")
+        stack = "hstack" if wide else "vstack"
+        p = f"(0.5-0.5*cos(PI*n/{max(1, N - 1)}))"
+        if d in ("right", "down"):
+            p = f"(1-{p})"
+        pos = f"{(W if wide else H)}*{p}"
+        win = (f"crop={W}:{H}:x='floor({pos}/2)*2':y=0" if wide
+               else f"crop={W}:{H}:x=0:y='floor({pos}/2)*2'")
+        ctx.parts.append(f"[{first}][{second}]{stack}=inputs=2,{win}[{u}]")
         return self._settle(ctx, u, N), None
 
     def _dissolve(self, ctx, item, h, N):

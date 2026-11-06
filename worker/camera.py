@@ -528,12 +528,48 @@ def window_gate(t, a, b):
     return gte(t, a) * lt(t, b)
 
 
+def _cross_weight(z, t):
+    """How much of a zoom that crosses a transition (cross_zooms) is left at
+    t: it eases in or out across the window instead of stepping at the cut."""
+    w = 1.0
+    span = z.get("_cross_in")
+    if span:
+        w = let(_R_U, clip((t - span[0]) / max(span[1] - span[0], 1e-3),
+                           0.0, 1.0), smootherstep)
+    span = z.get("_cross_out")
+    if span:
+        fall = 1.0 - let(_R_U, clip((t - span[0]) / max(span[1] - span[0],
+                                                       1e-3), 0.0, 1.0),
+                         smootherstep)
+        w = fall if w == 1.0 else w * fall
+    return w
+
+
+def _crossed(z, t, a, b):
+    """The envelope of a zoom cross_zooms stretched over a transition: its
+    own curve on its own window (held at the cut it ended or started on),
+    times the crossing."""
+    cin, cout = z.get("_cross_in"), z.get("_cross_out")
+    base = {k: v for k, v in z.items() if k not in ("_cross_in", "_cross_out")}
+    a0, b0 = a, b
+    if cin:
+        a0 = round((cin[0] + cin[1]) / 2.0, 3)
+        base["_hold_in"] = True
+    if cout:
+        b0 = round((cout[0] + cout[1]) / 2.0, 3)
+        base["_hold_out"] = True
+    inner = envelope(base, clip(t, a0, b0 - 1e-3), a0, b0)
+    return inner * _cross_weight(z, t) * window_gate(t, a, b)
+
+
 def envelope(z, t, a, b):
     """0..1 (more with overshoot): how far this zoom's move has got at t.
     Zero outside [a, b) for every mode. A zoom edge hold_through_cuts put on
     a program cut (`_hold_in` / `_hold_out`) has no ramp at that edge: the
     move is already complete on the cut's first frame, or still held on the
     last frame before it."""
+    if z.get("_cross_in") or z.get("_cross_out"):
+        return _crossed(z, t, round(float(a), 3), round(float(b), 3))
     mode = z.get("mode") or "punch"
     a, b = round(float(a), 3), round(float(b), 3)
     r = ramp_seconds(z, a, b)
@@ -630,6 +666,8 @@ def zoom_terms(z, t, a, b, targeted=True):
     if targeted:
         gate = window_gate(t, round(a, 3), round(b, 3))
         cx, cy = _f(z.get("cx")), _f(z.get("cy"))
+        if z.get("_cross_in") or z.get("_cross_out"):
+            gate = gate * _cross_weight(z, t)
         if cx is not None and abs(cx - 0.5) > 1e-6:
             out.cx = round(cx - 0.5, 3) * gate
         if cy is not None and abs(cy - 0.5) > 1e-6:
@@ -1218,7 +1256,53 @@ def _scale_at(zooms, t, skip=None):
     return s
 
 
-def hold_through_cuts(zooms, cuts, fps, out_duration=None):
+def cross_zooms(zooms, soft, fps):
+    """Zooms that end or start on a transition, carried across it.
+
+    A cut may change the framing: the frame before it and the frame after it
+    are different pictures. A dissolve shows both, so a zoom that steps on
+    the cut pops half-way through it, on a picture still half visible. Each
+    zoom with an edge on a transition (``soft``: [(cut, half window)]) runs
+    on past the window's far edge, easing out across it, and the next one
+    eases in the same way; their sum is one continuous camera. A zoom that
+    spans the whole transition is the same camera already and is untouched.
+    Moved zooms are copies; a zoom no transition touches is the same dict."""
+    out = []
+    near = cut_reach_s(fps)
+
+    def on(t):
+        best = None
+        for c, hw in soft:
+            d = abs(c - t)
+            if d <= max(near, hw) and (best is None or d < abs(best[0] - t)):
+                best = (c, hw)
+        return best
+
+    for z in zooms:
+        if (z.get("mode") or "punch") in ("follow", "path", "shake"):
+            out.append(z)
+            continue
+        try:
+            a, b = float(z["start"]), float(z["end"])
+        except (KeyError, TypeError, ValueError):
+            out.append(z)
+            continue
+        flags = {}
+        hit = on(a)
+        if hit and b - hit[0] >= _CUT_SNAP_MIN_SPAN_S:
+            flags["_cross_in"] = [round(hit[0] - hit[1], 3),
+                                  round(hit[0] + hit[1], 3)]
+            flags["start"] = max(0.0, flags["_cross_in"][0])
+        hit = on(b)
+        if hit and hit[0] - a >= _CUT_SNAP_MIN_SPAN_S:
+            flags["_cross_out"] = [round(hit[0] - hit[1], 3),
+                                   round(hit[0] + hit[1], 3)]
+            flags["end"] = flags["_cross_out"][1]
+        out.append(dict(z, **flags) if flags else z)
+    return out
+
+
+def hold_through_cuts(zooms, cuts, fps, out_duration=None, soft=()):
     """The zooms as the camera renders them around program cuts.
 
     A zoom whose start or end lies within CUT_HOLD_FRAMES of a cut is moved
@@ -1238,8 +1322,16 @@ def hold_through_cuts(zooms, cuts, fps, out_duration=None):
     a zoom nothing touches is the SAME dict object, so an edit with no zoom
     near a cut renders byte-identically to the camera before this rule, and
     `changed()` can tell. Moved zooms are copies — the EDL is never edited.
+
+    `soft`: [(cut, half window)], the cuts a transition covers. Those are no
+    cuts to hold through: see cross_zooms.
     """
     zooms = list(zooms or [])
+    if soft:
+        zooms = cross_zooms(zooms, soft, fps)
+        crossing = 1.5 / max(float(fps or 30.0), 1.0)
+        cuts = [c for c in cuts or []
+                if not any(abs(float(c) - sc) <= crossing for sc, _h in soft)]
     pts = sorted({round(float(c), 4) for c in cuts or []})
     reach = cut_reach_s(fps)
     end_pts = list(pts)

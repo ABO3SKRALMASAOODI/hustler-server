@@ -6,6 +6,8 @@
   "stage": "junction",
   "params": {
     "style": [
+      "fade_black",
+      "slide",
       "fadegrays",
       "pixelize",
       "radial",
@@ -13,7 +15,8 @@
     ],
     "duration_s": [
       0.4,
-      0.5
+      0.5,
+      1.0
     ]
   },
   "needs": {
