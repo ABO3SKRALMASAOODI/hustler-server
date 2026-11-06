@@ -493,15 +493,28 @@ def test_the_sound_rule_is_stated_verbatim_on_every_surface():
                    "a cash register on the word 'money' when nothing on "
                    "screen is a payment", "Leave gain_db unset"):
         assert phrase in rule, phrase
-    mcp = _read(_ROOT, "backend", "routes", "mcp.py")
     surfaces = {"core prompt": agent_prompt.CORE_PROMPT,
-                "mcp workflow": mcp[mcp.index('WORKFLOW = """'):],
                 "plugin SKILL.md": _read(_PLUGIN, "SKILL.md")}
     for name in ("audio", "short-form-direction", "motion-design",
                  "transitions", "review"):
         surfaces["skill " + name] = agent_prompt.read_skill_text(name)
     for where, text in surfaces.items():
         assert rule in _flat(text), where
+    # The public MCP guide states the same sound behaviour in its own words
+    # rather than the internal SOUND_RULE text.
+    src = _read(_ROOT, "backend", "routes", "mcp.py")
+    start = src.index('WORKFLOW = """')
+    mcp = _flat(src[start:src.index('""".strip()', start)])
+    for phrase in ("that usually means zero to two sounds",
+                   "within ~50 ms of its hit",
+                   "A reflexive opening whoosh",
+                   "on the onset of a payoff or emphasis word",
+                   "a shutter on the word pictures",
+                   "a cash register on the word money when nothing on "
+                   "screen is a payment",
+                   "with gain_db unset it levels the sound against the "
+                   "measured voice"):
+        assert phrase in mcp, phrase
 
 
 def test_no_surface_prescribes_a_pun_or_a_fixed_gain():

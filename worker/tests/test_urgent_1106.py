@@ -347,6 +347,37 @@ def test_an_unusable_plan_keeps_the_whole_take(monkeypatch):
     assert picked["plan"]["keep"] == [[0.0, 51.267]]
 
 
+def test_a_stray_field_or_an_overshoot_does_not_cost_the_plan(monkeypatch):
+    """Haiku's "_note": "" beside a good exposure lift threw the plan away."""
+    args = {"subject": "night street", "reason": "one take",
+            "start_boundary": 0, "end_boundary": 12,
+            "adjustments": {"exposure": 0.08, "shadows": 0.4, "_note": "",
+                            "contrast": "more"}}
+    call = NS(function=NS(name="plan_continuous_take",
+                          arguments=json.dumps(args)))
+    reply = NS(choices=[NS(message=NS(tool_calls=[call]))], usage=None)
+    monkeypatch.setattr(llm, "create_with_dialect", lambda *a, **k: reply)
+    monkeypatch.setattr(llm, "provider_cost_usd", lambda *a: 0)
+    monkeypatch.setattr(continuous_cut.subprocess, "run",
+                        lambda *a, **k: NS(returncode=0, stdout=b"jpg"))
+    ctx = NS(index={"video": {"duration": 51.267}}, first_cut_model="claude-x",
+             proxy_path=lambda: "/nonexistent")
+    got = continuous_cut.plan(ctx, {"usd": 0})
+    assert got["adjustments"] == {"exposure": 0.08, "shadows": 0.15}
+    assert got["keep"] == [[0.0, 51.267]]
+
+
+def test_a_subject_that_fills_the_frame_still_gets_a_moving_camera(monkeypatch):
+    """p5374: the bench filled the frame, so no push and no camera at all."""
+    calls = _chain(monkeypatch, {"keep": [[0.0, 51.267]], "adjustments": {}})
+    monkeypatch.setattr(short_clip, "look", lambda *a, **k: [
+        (t, [0.0, 0.1, 1.0, 1.0]) for t in (5.0, 15.0, 25.0, 35.0, 45.0)])
+    _s, applied, _p = first_cut.video_chain(_Ctx(), None, time.monotonic(),
+                                            {"usd": 0})
+    assert "add_zoom_path" in dict(calls)
+    assert "a camera that follows the subject" in applied
+
+
 def test_a_landscape_take_is_fitted_whole(monkeypatch):
     calls = _chain(monkeypatch, {"keep": [[0.0, 51.267]], "adjustments": {}})
     ctx = _Ctx()
@@ -450,6 +481,65 @@ def test_the_editor_does_what_is_clear_in_a_cut_off_request():
                     if isinstance(v, str))
     assert "Never answer a request you can partly do with only a question" \
         in text
+
+
+class _Turn(NS):
+    pass
+
+
+def _editing_turn(**kw):
+    return _Turn(agent_lanes=[{"model": "claude-x"}], versions_written=[],
+                 project_id=1, job={"id": 1}, **kw)
+
+
+def test_a_turn_that_changed_nothing_does_the_edit_before_it_asks(monkeypatch):
+    import music_gate
+    monkeypatch.setattr(music_gate, "repeat_offer_refusal", lambda *a: None)
+    ctx = _editing_turn()
+    first = agent_tools.ask_user(ctx, "Which colour should the SUV become?")
+    assert first.startswith("CORRECTION_NEEDED") and "choose" in first
+    with pytest.raises(agent_tools.AskUser):
+        agent_tools.ask_user(ctx, "Which colour should the SUV become?")
+
+
+def test_a_question_after_an_edit_or_outside_a_turn_is_asked(monkeypatch):
+    import music_gate
+    monkeypatch.setattr(music_gate, "repeat_offer_refusal", lambda *a: None)
+    edited = _editing_turn()
+    edited.versions_written = [2]
+    with pytest.raises(agent_tools.AskUser):
+        agent_tools.ask_user(edited, "Which of these two?")
+    with pytest.raises(agent_tools.AskUser):
+        agent_tools.ask_user(NS(), "An MCP caller's question")
+
+
+def test_a_music_offer_stays_the_customers_pick(monkeypatch):
+    import music_gate
+    monkeypatch.setattr(music_gate, "repeat_offer_refusal", lambda *a: None)
+    monkeypatch.setattr(music_gate, "offered_slugs", lambda q: ["calm-1"])
+    monkeypatch.setattr(music_gate, "open_offer", lambda *a: None)
+    with pytest.raises(agent_tools.AskUser):
+        agent_tools.ask_user(_editing_turn(), "Calm One or Calm Two?")
+
+
+@pytest.mark.parametrize("status,failed", [
+    ("ERROR: required visual measurements are unavailable: {}", True),
+    ("IN_PROGRESS: required visual measurements are still being prepared", False),
+])
+def test_a_failed_measurement_ends_the_wait_a_running_one_does_not(
+        monkeypatch, status, failed):
+    """A failed measurement looped "awaiting complete preview" forever: no
+    reply to the customer, 139 empty slices in the p5297 replay."""
+    import render_dependencies
+    monkeypatch.setattr(render_dependencies, "before_preview",
+                        lambda *a, **k: status)
+    ctx = NS(latest_edl=lambda: {"version": 3, "json": {}},
+             last_preview_failure=None)
+    assert agent_tools.render_preview(ctx) == status
+    got = ctx.last_preview_failure
+    assert bool(got) is failed
+    if failed:
+        assert got["agent_repairable"] is True
 
 
 def test_no_waiting_request_gets_the_first_cut(monkeypatch):

@@ -2745,12 +2745,18 @@ def _trial_render_refusal(ctx, name, args=None):
     if int(getattr(ctx, "trial_previews", 0) or 0) < int(cap):
         return None
     import preview_budget
+    if preview_budget.undo_allowed(ctx, name):
+        return None
     if preview_budget.repair_allowed(ctx):
         return None
     return ("REJECTED: the bounded edit/review cycle has stopped because no "
             "further verified repair progress is available. Preserve the saved "
             "version and state which requested work remains incomplete. Do not "
-            "claim completion or invent a cause in the original footage.")
+            "claim completion or invent a cause in the original footage. "
+            "Taking back something this request added (remove_blur, "
+            "remove_erase, remove_text, restore_range and the like) is still "
+            "open: if it made the video worse, remove all of it in one go, "
+            "then call render_preview once.")
 
 
 def _outcome_after_reply(outcome, report, honesty):
@@ -4660,7 +4666,7 @@ def _language_flip(joined, user_text, final):
 
 
 def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
-                            honesty):
+                            honesty, this_request_only=False):
     """Deterministic cross-script check of the drafted reply against the
     user's own message, with one forced rewrite — _enforce_honesty's shape
     applied to round 85's bug (an English one-liner answered in Russian).
@@ -4684,6 +4690,10 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
         m["content"] for m in messages
         if m.get("role") == "user" and isinstance(m.get("content"), str))
     joined = " ".join(x for x in (history, user_text) if x)
+    if this_request_only and user_text:
+        # The request assessor's text answers this request. An English file
+        # name or chip earlier in the thread must not excuse it.
+        joined = user_text
     flip = _language_flip(joined, user_text, final)
     if flip is None:
         return final
@@ -6887,7 +6897,16 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             _new_sub = (not _trial_lane(ctx)
                         and getattr(ctx, "claude_paid", None) is not None)
             if semantic_request.enabled(ctx):
-                final = semantic_request.reply(ctx, final)
+                assessed_reply = semantic_request.reply(ctx, final)
+                if assessed_reply != final:
+                    # p5518: this text replaced the checked draft, so an
+                    # Arabic customer was answered in English. It gets the
+                    # same language check as any other reply.
+                    assessed_reply = _enforce_reply_language(
+                        ctx, client, messages, tools, assessed_reply,
+                        quality_verifier.request_text_for(ctx), honesty,
+                        this_request_only=True)
+                final = assessed_reply
                 assessment = semantic_request.current_assessment(ctx)
                 honesty["request_requirements"] = assessment
                 honesty["unmet_asks"] = [r["id"] for r in assessment["requirements"]
