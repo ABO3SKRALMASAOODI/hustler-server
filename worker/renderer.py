@@ -106,13 +106,41 @@ def _measure_render_detail(name):
 GRAPH_ARG_MAX_BYTES = 96 * 1024
 
 
+# Every scaler in a graph, written or auto-inserted at a format change, starts
+# its own pool of one thread per filter thread, and it starts them when the
+# first frame reaches it. A graph with hundreds of scalers therefore runs out
+# of threads part-way through the programme (slot pids limit 4096, macOS 6144 a
+# process): the scaler fails with EAGAIN, ffmpeg still exits 0, and every block
+# after it comes out empty. 82 dissolves on a 348 s slideshow: 448 scalers on
+# 15 cores, the picture ended at the block where the threads ran out, 33 s
+# early, on every retry (p5520). A big graph gets fewer threads per filter, so
+# its thread count stays under the budget; a normal graph is left alone.
+GRAPH_THREAD_BUDGET = 2400
+
+
+def _cpus():
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+def _graph_thread_args(graph):
+    scalers = graph.count("scale") + graph.count("format")
+    if scalers * _cpus() <= GRAPH_THREAD_BUDGET:
+        return []
+    return ["-filter_complex_threads",
+            str(max(1, GRAPH_THREAD_BUDGET // scalers))]
+
+
 def _graph_args(graph, workdir):
+    threads = _graph_thread_args(graph)
     if len(graph.encode("utf-8")) <= GRAPH_ARG_MAX_BYTES:
-        return ["-filter_complex", graph]
+        return [*threads, "-filter_complex", graph]
     path = os.path.join(workdir, f"filtergraph-{uuid.uuid4().hex[:12]}.txt")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(graph)
-    return [_graph_file_flag(), path]
+    return [*threads, _graph_file_flag(), path]
 
 
 _GRAPH_FILE_FLAG = []
