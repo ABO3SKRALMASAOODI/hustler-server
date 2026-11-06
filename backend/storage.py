@@ -854,7 +854,9 @@ def find_open_upload(stem):
     (content_key_stem), or None. Storage is the record of what is in flight, so
     a transfer can be picked up from any browser, under any filename. Asked on
     the way into every large upload, so it never waits long on a slow store."""
-    return _newest_open_upload(stem + ".", lambda u: True, fast=True)
+    prefix = stem + "."
+    return _newest_open_upload(
+        prefix, lambda u: str(u.get("Key") or "").startswith(prefix), fast=True)
 
 
 def _newest_open_upload(prefix, wanted, fast=False):

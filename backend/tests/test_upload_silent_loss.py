@@ -231,6 +231,17 @@ def test_a_renamed_file_continues_from_what_storage_holds(api):
     assert api.events[0][1]["by_content"] is True
 
 
+def test_a_store_that_ignores_the_prefix_never_hands_over_another_upload(api):
+    """The key decides, as find_multipart_upload does: an upload of another
+    project must never be continued because a store listed it."""
+    s3 = api.use(_S3(NBYTES))
+    s3.list_multipart_uploads = lambda Bucket, Prefix: {"Uploads": [
+        {"Key": "originals/1/other.mp4", "UploadId": "theirs", "Initiated": "9"}]}
+    out, status = api.post(NBYTES, content_id=CONTENT)
+    assert status == 200 and not out.get("resumed")
+    assert out["storage_key"].startswith(stem()) and s3.created
+
+
 def test_a_new_extension_is_still_the_same_upload(api):
     api.use(_S3(NBYTES, [stem() + ".mov"]))
     out, _ = api.post(NBYTES, filename="clip.mp4", content_id=CONTENT)
