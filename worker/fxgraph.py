@@ -737,15 +737,19 @@ def _prepare_item(plan, item):
         return
     rung, reason = "full", "ok"
     if item.get("device"):
+        # A junction is what the customer asked for at that cut, a window of
+        # a few frames: past the budget it was left out silently, 51 of the 82
+        # dissolves of p5520's slideshow. The budget paces extras, not that.
+        asked = item.get("stage") == "junction"
         d = _device_detail(item, _sidecar_status(item, plan.source, plan),
                            frames=_item_frames(item, plan.fps),
-                           budget_ms=plan.budget_ms)
+                           budget_ms=None if asked else plan.budget_ms)
         rung, reason = d["rung"], d.get("reason") or d["rung"]
         plan.devices[item.get("id")] = d
         if rung == "omit":
             plan.note(item, "omit", reason)
             return
-        if plan.budget_ms is not None:
+        if plan.budget_ms is not None and not asked:
             plan.budget_ms = max(0.0, plan.budget_ms
                                  - float(d.get("est_ms") or 0.0))
     stage = item.get("stage")

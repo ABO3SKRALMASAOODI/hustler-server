@@ -219,3 +219,23 @@ def test_the_two_photos_really_meet_on_screen(style, moves, tmp_path,
     else:                            # a true blend of the two
         assert first.mean() - 60 > mid.mean() > last.mean() + 60
         assert mid.std() < 12
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+def test_every_asked_dissolve_is_drawn_past_the_render_budget(tmp_path,
+                                                              monkeypatch):
+    """The budget paces extras. It left out 51 of 82 dissolves, silently."""
+    import devices
+    from w1d_support import IDX, lossless, make_montage, render
+    src = make_montage(str(tmp_path / "montage.mp4"), w=320, h=180)
+    lossless(monkeypatch)
+    monkeypatch.setattr(devices, "render_budget_ms", lambda *a, **k: 0.0)
+    edl = {"keep": [[0.0, 3.0], [3.0, 6.0], [6.0, 9.0], [9.0, 12.0]],
+           "captions": {"enabled": False},
+           "fx": [{"id": f"j{i}", "type": "junction", "stage": "junction",
+                   "device": "junction_dissolve", "at": t, "style": "dissolve",
+                   "duration_s": 0.5} for i, t in enumerate((3.0, 6.0, 9.0))]}
+    idx = dict(IDX, shots=[{"id": i, "start": i * 3.0, "end": i * 3.0 + 3.0}
+                           for i in range(4)])
+    _, rep = render(edl, src, str(tmp_path / "out.mp4"), idx=idx)
+    assert len(rep) == 3 and {r["rung"] for r in rep} == {"full"}, rep
