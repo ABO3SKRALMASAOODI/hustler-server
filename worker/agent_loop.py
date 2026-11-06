@@ -2273,8 +2273,9 @@ def run_agent_job(worker_db, job):
             subscribed, plan, first_turn=first_turn,
             operator_repair=payload.get("operator_repair") is True)
         # Paid Anthropic routing is independent of the free-trial cutoff.
-        # Keep contracted credit prices and the existing fallback lanes;
-        # subscription cohorts still control Studio feature entitlements.
+        # Keep contracted credit prices; subscription cohorts still control
+        # Studio feature entitlements. Whatever stands behind this lane has
+        # passed llm.editing_lanes.
         paid_claude = _claude_paid_lane(worker_db, job, subscribed, plan,
                                         payload)
         if paid_claude is not None:
@@ -2285,12 +2286,14 @@ def run_agent_job(worker_db, job):
                     paid_claude["lane"]["model"]: paid_claude["credit_model"]}
             print(f"[agent] job {job['id']}: paid Claude lane "
                   f"{paid_claude['lane']['model']} (plan {plan})", flush=True)
-        if ctx.agent_lanes:
-            ctx.llm_client = ctx.agent_lanes[0]["client"]
-            ctx.agent_model = ctx.agent_lanes[0]["model"]
-        else:  # The route already rejects an unconfigured standard provider.
-            ctx.llm_client, ctx.agent_model = llm.agent_client_for(
-                subscribed, plan, first_turn=first_turn)
+        if not ctx.agent_lanes:
+            # No model may edit this turn (llm.editing_lanes): say so, never
+            # fall back to a provider the owner has not cleared.
+            shutil.rmtree(workdir, ignore_errors=True)
+            return _no_editing_lane_stop(worker_db, ctx, job, session_id,
+                                         user_message, subscribed)
+        ctx.llm_client = ctx.agent_lanes[0]["client"]
+        ctx.agent_model = ctx.agent_lanes[0]["model"]
     # Vision is reached from eight places that know nothing about plans, so the
     # plan is published to this THREAD for the duration of the turn and cleared
     # in the finally below (worker threads are reused across jobs).
@@ -3296,6 +3299,32 @@ def _claude_trial_stop(worker_db, ctx, job, session_id, user_message,
             "outcome": "blocked", "billable": False,
             "claude_trial": {"decision": kind,
                              "reason": str(decision.reason)[:120]}}
+
+
+def _no_editing_lane_stop(worker_db, ctx, job, session_id, user_message,
+                          subscribed):
+    """A turn no permitted model can run (the Claude lane is closed for it and
+    OpenAI may not edit). An account without a plan gets the plan cards; a
+    subscriber is told plainly, uncharged, that the fault is ours."""
+    if not subscribed:
+        return _claude_trial_stop(
+            worker_db, ctx, job, session_id, user_message,
+            claude_trial.Decision(claude_trial.Decision.UNAVAILABLE,
+                                  reason="no_editing_lane"))
+    print(f"[agent] job {job.get('id')}: no editing lane for a subscriber "
+          "(the Claude lane is closed, OpenAI may not edit)", flush=True)
+    try:
+        version = ctx.latest_edl()["version"]
+    except Exception:
+        version = None
+    worker_db.run(dbx.add_message, session_id, "assistant",
+                  "I can't reach the editing model right now — that's a "
+                  "problem on my side, not with your video. Your footage and "
+                  "edit history are safe and this didn't use any of your "
+                  "credits. We're on it; please try again a little later.",
+                  {"edl_version": version} if version is not None else None)
+    return {"status": "blocked", "steps": 0, "timings": {},
+            "outcome": "blocked", "billable": False}
 
 
 _EXPLICIT_MICRO_EDIT = re.compile(

@@ -52,6 +52,8 @@ def test_healthz_refuses_to_certify_missing_security_configuration(
     assert st["mode"] in ("legacy", "copy", "dual_write", "next",
                           "rollback", "next_only")
     assert not any("secret" in k for k in st)
+    # And where the model keys come from: source words, never a key.
+    assert body.pop("providers")["openai"] in (None, "env", "app_kv")
 
     assert response.status_code == 503
     assert response.headers["Cache-Control"] == "no-store, max-age=0"

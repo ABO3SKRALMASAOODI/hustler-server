@@ -584,7 +584,7 @@ def test_shorts_children_receive_the_parent_audio_sidecar(monkeypatch):
     monkeypatch.setattr(shorts, "_seed_story_child",
                         lambda *a: (2, "seeded"))
     monkeypatch.setattr(shorts.llm, "set_recorder", lambda *_: None)
-    monkeypatch.setattr(shorts.llm, "set_turn_plan", lambda *_: None)
+    monkeypatch.setattr(shorts.llm, "set_turn_plan", lambda *_, **__: None)
     out = shorts.run_shorts_plan(worker_db, {
         "id": 8, "project_id": 3, "user_id": 4,
         "payload": {"clips": [{"start": 10, "end": 50}]}})

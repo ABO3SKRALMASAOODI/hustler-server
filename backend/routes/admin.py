@@ -1600,6 +1600,33 @@ def editing_provider_readiness():
     return jsonify(result), (200 if result['ready'] else 503)
 
 
+@admin_bp.route('/concierge-probe', methods=['POST'])
+@admin_required
+def concierge_probe():
+    """One real concierge answer from THIS process on the named provider
+    (openai or claude), so each key delivered by the sealed row is proven by
+    behaviour. No project, nothing written, no key in the answer."""
+    from routes.video import _concierge_claude, _concierge_openai
+    provider = str((request.get_json(silent=True) or {}).get('provider')
+                   or 'openai')
+    answer = {'openai': _concierge_openai,
+              'claude': _concierge_claude}.get(provider)
+    if answer is None:
+        return jsonify({'error': 'provider is openai or claude'}), 400
+    msgs = [{'role': 'system', 'content': 'You are Valmera, an AI video '
+             'editor. Answer in one short sentence.'},
+            {'role': 'user', 'content': 'What can you do with a product photo?'}]
+    try:
+        raw, rec = answer(msgs, False)
+    except Exception as exc:  # noqa: BLE001 - the provider's refusal is the answer
+        return jsonify({'provider': provider, 'answered': False,
+                        'error': type(exc).__name__,
+                        'detail': str(exc)[:200]}), 503
+    return jsonify({'provider': provider, 'model': rec['model'],
+                    'answered': bool(raw), 'reply': raw[:240]}), \
+        (200 if raw else 503)
+
+
 @admin_bp.route('/conversion', methods=['GET'])
 @admin_required
 def conversion_report():

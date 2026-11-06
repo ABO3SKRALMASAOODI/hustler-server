@@ -3112,6 +3112,8 @@ def _capped_payload(obj):
     s = json.dumps(obj, ensure_ascii=False, default=str)
     if config.OPENAI_API_KEY:
         s = s.replace(config.OPENAI_API_KEY, "[REDACTED]")
+    if config._OPENAI_ENV_KEY:
+        s = s.replace(config._OPENAI_ENV_KEY, "[REDACTED]")
     if config.IMAGE_API_KEY:
         s = s.replace(config.IMAGE_API_KEY, "[REDACTED]")
     if config.VISION_API_KEY:

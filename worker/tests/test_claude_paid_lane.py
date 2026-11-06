@@ -1,8 +1,7 @@
 """New subscribers' Studio agent on the Claude lane (owner, 25 Oct 2026):
-app_kv.studio_for_all_plans (default OFF). Existing subscribers keep EXACTLY
-their contracted lanes; a paying user never breaks when the promotional
-credit runs out (the OpenAI lanes stay behind the Claude lane and take the
-same turn on a billing refusal); credits are charged at the contracted rate."""
+app_kv.studio_for_all_plans (default OFF). Credits are charged at the
+contracted rate. Since 6 Nov 2026 no OpenAI lane stands behind the Claude lane
+in an editing turn unless config.OPENAI_EDITS says so (test_urgent_1106.py)."""
 
 import json
 from types import SimpleNamespace

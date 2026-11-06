@@ -76,6 +76,12 @@ start cold). October 2026 had 76 releases, 16 on one day. The rule:
   can wait; check `video_jobs` for running `final`/`index` rows of real users
   first.
 
+## Provider keys
+
+Render's and the box's `OPENAI_API_KEY` env values are dead. The funded keys live in one sealed `app_kv` row, `provider_api_keys` (`provider_creds.py`, byte-identical in `backend/` and `worker/`), which outranks the env in every process and is re-read every 5 minutes. To rotate, run `.valmera/week-1106/reliability/put_provider_keys.py`. Nothing is typed into a dashboard.
+
+No customer's edit runs on OpenAI: `llm.editing_lanes` drops those lanes unless `OPENAI_EDITS=1`, and only the Gauntlet's scoreboard may justify that. The key serves the concierge, greetings, critics, the index's look and the checkout readiness probe.
+
 ## Database Access
 
 ```bash

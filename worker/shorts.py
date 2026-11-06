@@ -147,6 +147,13 @@ def _ask_json(worker_db, job, subscribed, plan, system, user, purpose,
     to llm_calls under this job (the recorder is set by run_shorts_plan).
     Returns a dict or None."""
     client, model = llm.agent_client_for(subscribed, plan)
+    if not llm.may_edit(model):
+        # Picking the clips is an edit (llm.editing_lanes): with no Claude
+        # lane for this job it goes to the deterministic pick, not to OpenAI.
+        llm.record(purpose, {"model": model, "system": system[:2000],
+                             "user_chars": len(user)},
+                   {"error": "no editing lane"}, None)
+        return None
     messages = [{"role": "system", "content": system},
                 {"role": "user", "content": user}]
     for attempt in (1, 2):
@@ -1370,7 +1377,15 @@ def run_shorts_plan(worker_db, job):
                   flush=True)
 
     llm.set_recorder(_recorder)
-    llm.set_turn_plan(plan if subscribed else "")
+    # A subscriber's clip picks run on the paid Claude lane, as their edits do
+    # (the turn's helpers follow a Claude lane on this thread).
+    paid_lane = None
+    if subscribed and trial_scope is None:
+        import agent_loop
+        paid = agent_loop._claude_paid_lane(worker_db, job, subscribed, plan,
+                                            job.get("payload") or {})
+        paid_lane = paid["lane"] if paid else None
+    llm.set_turn_plan(plan if subscribed else "", lane=paid_lane)
     if trial_scope is not None:
         claude_trial.activate(trial_scope, _recorder)
     try:

@@ -9,6 +9,8 @@ import threading
 import time
 import requests
 
+import provider_creds
+
 _lock = threading.Lock()
 _cache = {}
 
@@ -17,7 +19,7 @@ def advanced_readiness():
     with _lock:
         if _cache and now < _cache['expires']:
             return dict(_cache['result'])
-        key = os.getenv('OPENAI_API_KEY', '')
+        key = provider_creds.key('OPENAI_API_KEY')
         result = {'ready': False, 'model': 'gpt-6.1-sol', 'reason': 'provider_unavailable'}
         if key:
             try:

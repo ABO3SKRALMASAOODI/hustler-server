@@ -40,6 +40,8 @@ class ProviderHTTPError(RuntimeError):
 
 
 _client = None
+_client_built = None            # (client, key): the one client() made
+_vision_client_built = None
 _paid_client = None
 _frontier_client = None
 _image_client = None
@@ -268,12 +270,16 @@ def client():
     """One pooled client per process (the OpenAI SDK's httpx client is
     thread-safe) — connection reuse across turns instead of a new TLS
     handshake per call."""
-    global _client
-    if _client is None:
+    global _client, _client_built
+    key = config.OPENAI_API_KEY
+    rotated = (_client_built is not None and _client is _client_built[0]
+               and key != _client_built[1])    # provider_creds.py
+    if _client is None or rotated:
         _client = OpenAI(base_url=config.OPENAI_BASE_URL,
-                         api_key=config.OPENAI_API_KEY,
+                         api_key=key,
                          timeout=config.LLM_TIMEOUT_S,
                          max_retries=config.LLM_MAX_RETRIES)
+        _client_built = (_client, key)
     return _client
 
 
@@ -418,6 +424,24 @@ def paid_editor_lanes(plan=None):
     return lanes
 
 
+def may_edit(model):
+    """May this model decide a customer's edit? Not an OpenAI model while
+    config.OPENAI_EDITS is off (the owner, 6 Nov 2026; see config.py)."""
+    return bool(config.OPENAI_EDITS) or not str(model or "").startswith("gpt-")
+
+
+def editing_lanes(lanes):
+    """The lanes a customer's edit may run on. One filter, where an editing
+    turn's lanes are chosen, so a funded key cannot move a turn onto Luna as
+    its primary, as the failover after a Claude refusal, or for an account no
+    Claude lane covers."""
+    if config.OPENAI_EDITS:
+        return list(lanes)
+    openai_host = str(config.OPENAI_BASE_URL or "").rstrip("/")
+    return [lane for lane in lanes if may_edit(lane.get("model"))
+            and str(lane.get("base_url") or "").rstrip("/") != openai_host]
+
+
 def editor_reasoning_effort(plan, iteration=0, operator_repair=False):
     """New Advanced contracts reason at high; preserve legacy configuration."""
     if operator_repair or plan in {"advanced", "pro_2026", "max_2026"}:
@@ -495,7 +519,7 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False, operator_repair=Fal
         model = config.CLAUDE_TRIAL_MODEL
         return [claude_lane.lane(model, name="claude_recovery")]
     if subscribed:
-        return paid_editor_lanes(plan)
+        return editing_lanes(paid_editor_lanes(plan))
     primary_client, primary_model = agent_client_for(
         subscribed, plan, first_turn=first_turn)
 
@@ -544,19 +568,24 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False, operator_repair=Fal
             continue
         provider_wallets.add(wallet)
         out.append(lane)
-    return out
+    return editing_lanes(out)
 
 
 def vision_client():
     """Separate pooled client for vision — VISION_BASE_URL is configured
     independently of the chat provider (a text-only chat provider is normal),
     so this must NOT reuse client()."""
-    global _vision_client
-    if _vision_client is None:
+    global _vision_client, _vision_client_built
+    key = config.VISION_API_KEY
+    rotated = (_vision_client_built is not None
+               and _vision_client is _vision_client_built[0]
+               and key != _vision_client_built[1])
+    if _vision_client is None or rotated:
         _vision_client = OpenAI(base_url=config.VISION_BASE_URL,
-                                api_key=config.VISION_API_KEY,
+                                api_key=key,
                                 timeout=config.VISION_TIMEOUT_S,
                                 max_retries=config.LLM_MAX_RETRIES)
+        _vision_client_built = (_vision_client, key)
     return _vision_client
 
 
@@ -623,6 +652,14 @@ def _host(url):
         return None
 
 
+def _provider_keys_report():
+    try:
+        import provider_creds
+        return provider_creds.status()
+    except Exception:  # noqa: BLE001 — a health route never fails on this
+        return None
+
+
 def config_report():
     """Which PROVIDER this process is actually wired to, as plain JSON.
 
@@ -658,6 +695,8 @@ def config_report():
         "agent_model": config.AGENT_MODEL or None,
         "llm_host": _host(config.OPENAI_BASE_URL),
         "llm_key_set": bool(config.OPENAI_API_KEY),
+        "provider_keys": _provider_keys_report(),
+        "openai_edits": bool(config.OPENAI_EDITS),
         "vision": vision,
         "vision_host": vhost,
         "vision_model": vmodel,

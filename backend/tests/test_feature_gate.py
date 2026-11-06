@@ -371,8 +371,7 @@ def test_the_same_request_from_an_ungated_account_runs_as_before(routes,
     monkeypatch.setattr(v.plan_gate, "needs_plan", lambda *a: False)
     monkeypatch.setattr(v, "_running_jobs_count", lambda *_: 0)
     monkeypatch.setattr(v, "_queue_depth_notice", lambda *a: None)
-    monkeypatch.setattr(v.os, "getenv", lambda k, d=None: "x"
-                        if k == "OPENAI_API_KEY" else os.environ.get(k, d))
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
     body, status = _call(v.post_message,
                          {"text": "make 5 shorts from this podcast"},
                          user_id=8, project_id=9)

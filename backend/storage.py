@@ -32,6 +32,7 @@ except ImportError:  # pragma: no cover — the web image has psycopg2
     psycopg2 = None
 
 import kv_feed
+import provider_creds
 import storage_creds as creds
 import storage_routing as routing
 
@@ -272,6 +273,9 @@ def _fetch_routing_row():
 # app_kv row (storage_creds.py). creds.ENV is os.environ with that row filled
 # in, so the router and every next-store client below see one configuration.
 creds.install(lambda: _fetch_kv(creds.KV_KEY))
+# The model providers' keys travel the same way, and that row outranks the
+# environment (provider_creds.py).
+provider_creds.install(lambda: _fetch_kv(provider_creds.KV_KEY))
 
 
 # The mode (kv_feed.py): ONE background reader per process, every

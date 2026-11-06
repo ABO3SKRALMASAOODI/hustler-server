@@ -3,6 +3,8 @@ import llm, config, model_prices
 
 @pytest.mark.parametrize('plan', ['ai','ai_pro','ai_max','mcp','plus','pro','ultra','titan','ace'])
 def test_legacy_model_is_unchanged(monkeypatch,plan):
+    # The contracted lanes, for the day the Gauntlet clears OpenAI to edit.
+    monkeypatch.setattr(config,'OPENAI_EDITS',True)
     monkeypatch.setattr(config,'OPENAI_API_KEY','unit-test')
     monkeypatch.setattr(llm,'client',lambda: object())
     assert llm.agent_client_for(True,plan)[1] == config.EDITOR_MODEL
@@ -10,6 +12,7 @@ def test_legacy_model_is_unchanged(monkeypatch,plan):
 
 @pytest.mark.parametrize("plan", ["advanced", "pro_2026", "max_2026"])
 def test_advanced_is_sol_without_cheap_fallback(monkeypatch, plan):
+    monkeypatch.setattr(config,'OPENAI_EDITS',True)
     monkeypatch.setattr(config,'OPENAI_API_KEY','unit-test')
     monkeypatch.setattr(llm,'client',lambda: object())
     assert llm.agent_client_for(True,plan)[1]=='gpt-6.1-sol'
