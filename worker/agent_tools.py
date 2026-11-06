@@ -24091,6 +24091,14 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         waiting = render_dependencies.before_preview(ctx, ctx.latest_edl(),
             wait_s=60 if _wait_timeout_s is None else min(60, _wait_timeout_s))
         if waiting:
+            if str(waiting).startswith("ERROR:"):
+                # A measurement that failed will not arrive by waiting. As a
+                # preview failure the turn repairs it, restores the last
+                # usable edit and answers; "awaiting complete preview" ran
+                # 139 empty slices with no reply (p5297 replay, 6 Nov 2026).
+                ctx.last_preview_failure = {
+                    "error": waiting, "kind": "measurement",
+                    "agent_repairable": True}
             return waiting
     dependency_key = getattr(ctx, "render_dependency_key", None)
     if report:
@@ -26032,6 +26040,22 @@ def _aimed_zoom_note(edl):
             "close-up centres on empty space. ")
 
 
+def _question_can_wait(ctx, question):
+    """Has this editing turn changed nothing yet? Then the first question goes
+    back to the model once, as a repair, never a refusal: asking again goes
+    through. p5297's first ask, a colour change cut off mid-sentence, got a
+    question and no edit, and the next message got the same question. Music
+    offers are the customer's to pick (music_gate) and MCP callers are their
+    own editors."""
+    if (not getattr(ctx, "agent_lanes", None)
+            or getattr(ctx, "versions_written", None)
+            or getattr(ctx, "_question_held", False)
+            or music_gate.offered_slugs(question)):
+        return False
+    ctx._question_held = True
+    return True
+
+
 def ask_user(ctx, question):
     q = (question or "").strip()
     if not q:
@@ -26039,6 +26063,14 @@ def ask_user(ctx, question):
     repeat_offer = music_gate.repeat_offer_refusal(ctx, q)
     if repeat_offer:
         return repeat_offer
+    if _question_can_wait(ctx, q):
+        return ("CORRECTION_NEEDED: not asked yet. Nothing has changed in this "
+                "turn, and the customer is waiting for an edit, not a "
+                "question. Do what the request clearly asks now: choose any "
+                "open detail yourself (a colour, a length, a style) and name "
+                "your choice in the reply, so one line from them changes it. "
+                "Only if you cannot go on without something only they have, "
+                "such as a file or a fact about them, call ask_user again.")
     # A question is a user decision, not a log excerpt. Truncating it can
     # remove the actual choice, source list or a later music option.
     # Owner rule (Wave 0, 0C): a question that offers library tracks opens
