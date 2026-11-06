@@ -56,7 +56,8 @@ def test_the_owners_internal_ids_are_excluded():
 def test_no_language_model_is_called_from_the_loop():
     # The judging is done by Claude Code sessions on the owner's Mac.
     for path in (ROOT / "backend" / "ops_loop").glob("*.py"):
-        text = path.read_text().lower()
+        # ops_loop.gaps reads the record of calls; it never makes one.
+        text = path.read_text().lower().replace("from llm_calls", "")
         for banned in ("openai", "anthropic", "chat.completions", "llm_call",
                        "messages.create"):
             assert banned not in text, (path.name, banned)
@@ -391,8 +392,18 @@ def test_ticket_transitions():
     # A session from before the fix, reviewed late: attach, do not reopen.
     assert store.decide(fixed, closed - timedelta(hours=1), "P1") == \
         "attach_closed"
-    wont = {"status": "wont_fix", "severity": "P2", "closed_at": closed}
-    assert store.decide(wont, NOW, "P2") == "attach_closed"
+    # However it was closed: a closing never mutes what comes after it (#48).
+    for reason in ("device-side: the phone released the file", "expected",
+                   "content policy: one customer's footage", None):
+        wont = {"status": "wont_fix", "severity": "P2", "closed_at": closed,
+                "wont_fix_reason": reason}
+        assert store.decide(wont, NOW, "P2") == "reopen"
+        assert store.decide(wont, closed - timedelta(hours=1), "P0") == \
+            "attach_closed"
+    # Only the owner's own decision stays closed, and it is reported.
+    owner = {"status": "wont_fix", "severity": "P2", "closed_at": closed,
+             "wont_fix_reason": "Owner decision: finals over 4K"}
+    assert store.decide(owner, NOW, "P0") == "report"
 
 
 def test_reopening_a_fixed_cause_counts_the_recurrence():
@@ -471,7 +482,7 @@ def test_a_cause_is_a_slug_and_closing_needs_proof():
     with pytest.raises(store.StoreError, match="slug"):
         store.open_or_attach(Cur(), "The index failed!", "x", "P1",
                              session_key="k")
-    ticket = {"id": 3, "status": "open"}
+    ticket = {"id": 3, "status": "open", "cause_key": "auto-job-index-oom"}
     with pytest.raises(store.StoreError, match="regression_check"):
         store.close(Cur([ticket]), 3, "fixed", root_cause="r",
                     fix_sha="abc1234")
@@ -480,10 +491,12 @@ def test_a_cause_is_a_slug_and_closing_needs_proof():
                     fix_sha="not a sha", regression_check="t")
     with pytest.raises(store.StoreError, match="reason"):
         store.close(Cur([ticket]), 3, "wont_fix")
-    cur = Cur([ticket, dict(ticket, status="fixed")])
+    cur = Cur([ticket, [], dict(ticket, status="fixed")])
     store.close(cur, 3, "fixed", root_cause="disk sized by RAM",
                 fix_sha="abc1234,fe:def5678",
-                regression_check="tests/test_x.py::y")
+                regression_check="tests/test_x.py::y",
+                replay={"session": "p5302", "run": "r1", "state": "done",
+                        "failures": []})
     assert any("status = 'fixed'" in q for q, _ in cur.sql)
 
 

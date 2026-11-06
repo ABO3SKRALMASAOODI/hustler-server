@@ -367,13 +367,12 @@ def failures_between(cur, start, end, now=None):
             d["users"].add(r["u"])
             users.add(r["u"])
         d["last_project"] = r["project"] or d["last_project"]
-    cur.execute("""
+    cur.execute(f"""
         SELECT id, cause_key, title, severity, status, root_cause, fix_sha,
                regression_check, recurrence_count, closed_at, created_at,
-               (SELECT max((h->>'at')::timestamptz) FROM
-                  jsonb_array_elements(history) h
-                 WHERE h->>'event' IN ('opened', 'recurred', 'escalated'))
-                   AS opened_at
+               updated_at, wont_fix_reason,
+               {intake.OPENED_AT} AS opened_at,
+               {intake.CLAIMED_AT} AS claimed_at
           FROM tickets
          WHERE id = ANY(%(ids)s) OR status IN ('open', 'fixing')
             OR (status = 'fixed' AND closed_at >= %(s)s
@@ -412,15 +411,29 @@ def failures_between(cur, start, end, now=None):
                           "url": TICKET_URL + str(t["id"]),
                           "commits": commit_links(t.get("fix_sha"))})
         opened = t.get("opened_at") or t.get("created_at")
-        if t["status"] == "open" and t["severity"] == "P0" and opened and \
-                now - opened >= intake.UNHANDLED_AFTER:
+        claimed = t.get("claimed_at") or t.get("updated_at")
+        late = (t["status"] == "open" and opened and
+                now - opened >= intake.UNHANDLED_AFTER) or \
+            (t["status"] == "fixing" and claimed and
+             now - claimed >= intake.FIXING_STALE)
+        if t["severity"] == "P0" and late:
+            since = opened if t["status"] == "open" else claimed
             unhandled.append({"id": t["id"], "title": t["title"],
-                              "waiting_min": int((now - opened)
+                              "status": t["status"],
+                              "waiting_min": int((now - since)
                                                  .total_seconds() // 60),
                               "url": TICKET_URL + str(t["id"])})
     active = [t for t in tickets.values() if t["status"] in ("open",
                                                              "fixing")]
     last_pass = intake_last_pass(cur)
+    # What landed on a cause that stays closed for the owner: reported, because
+    # nothing is counted in silence.
+    held = [dict(x, reason=(tickets[x["id"]].get("wont_fix_reason") or "")[:220])
+            for x in by_ticket if x["status"] == "wont_fix"]
+    try:
+        silent = intake.silent_agents(cur, now)
+    except Exception:
+        silent = []
     return {"intake_last_at": _iso(last_pass),
             "intake_stale": last_pass is None
             or now - last_pass > INTAKE_STALE,
@@ -429,7 +442,8 @@ def failures_between(cur, start, end, now=None):
             "open": sum(1 for t in active if t["status"] == "open"),
             "fixing": sum(1 for t in active if t["status"] == "fixing"),
             "p0_active": sum(1 for t in active if t["severity"] == "P0"),
-            "unhandled": unhandled}
+            "unhandled": unhandled, "held_for_owner": held,
+            "silent_agents": silent}
 
 
 def people_between(cur, start, end):

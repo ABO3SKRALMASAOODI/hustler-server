@@ -29,15 +29,22 @@ an advisory lock) reads what failed since the last tick and files it:
             wall held before it has still not run (ticket #11), on a plan
             whose Studio could run it (an MCP-only plan hands it to the
             customer's own assistant instead)
+  gaps      what should have happened by a measured deadline and did not, or
+            a measured fact no failure row carries (ops_loop.gaps)
 
 One ticket per CAUSE: the cause key is derived from the failure's own
 signature (`auto-<source>-<kind>-<signature>`), so one customer's retry loop
 and the same failure in other accounts fold into one ticket. A new failure
-of a FIXED cause that happened after the fix reopens it (recurrence + 1),
-exactly like the Reviewer's tickets. Severity P0 means a customer is blocked
-now; the Mac's P0 watch (check_fixer.sh p0, every few minutes) starts the
-Fixer on it, and an open P0 nobody picked up within UNHANDLED_AFTER is the
-only thing the owner is emailed about (cockpit_alerts).
+after a ticket closed reopens it (recurrence + 1), however it was closed; only
+an owner decision stays closed, and is reported in the digest (store.decide).
+
+Severity is what happened to the customer, never who pays and never what an
+error sentence says. A failure is filed at once at P1 and looked at again when
+its grace runs out (ops_loop.recovery): still stuck, it goes to P0, and the
+Mac's P0 watch (check_fixer.sh p0, every 30 minutes) starts the Fixer; got past
+it, the ticket stays open for the daily Fixer and nobody is paged. A P0 nobody
+picked up within UNHANDLED_AFTER, or a claim gone stale, and a scheduled agent
+that stopped running are what the owner is emailed about (cockpit_alerts).
 
 Writes go through ops_loop.store (tickets only, guarded); reads are bounded
 by time and use the existing (updated_at|created_at, ...) indexes.
@@ -58,7 +65,17 @@ MAX_PER_TICK = 400
 # The webhook resumes a held request seconds after the payment; this long
 # after it, a request still waiting was dropped.
 HELD_GRACE = timedelta(minutes=3)
-UNHANDLED_AFTER = timedelta(minutes=30)
+# The watch runs every 30 minutes with up to 7 of jitter, and a run takes a
+# minute or two to mark the ticket: this long means it really did not.
+UNHANDLED_AFTER = timedelta(minutes=45)
+FIXING_STALE = timedelta(hours=6)
+# A scheduled agent's own heartbeat (ops_review.py heartbeat). For 70 hours from
+# 2 Nov nothing ran and nothing said so; the alert can only live here, because
+# whatever stopped them stops anything else on the Mac too.
+HEARTBEAT_LATE = {"p0_watch": timedelta(minutes=75),
+                  "fixer": timedelta(hours=26),
+                  "reviewer": timedelta(hours=3)}
+REVIEWS_LATE = timedelta(hours=24)
 # A running transfer beats every 4 minutes (lib/upload.js HEARTBEAT_MS), so this
 # long with nothing heard is a transfer that stopped.
 UPLOAD_SILENT_AFTER = timedelta(minutes=15)
@@ -184,7 +201,8 @@ def scan(cur, since, now):
                         or sig == "truncated-media" else "P0",
             "cause_key": cause_key("job", kind, sig),
             "title": _short(f"{kind} job failed: {r['error'] or 'no error'}"),
-            "detail": _short(r["error"], 600), "job_id": r["id"]})
+            "detail": _short(r["error"], 600), "job_id": r["id"],
+            "job_type": r["type"], "tool": r.get("tool")})
     cur.execute(f"""
         SELECT m.id, m.created_at AS at, m.meta->>'error' AS error,
                NULLIF(m.meta->>'job', '') AS job, LEFT(m.content, 600) AS text,
@@ -249,7 +267,7 @@ def scan(cur, since, now):
             "detail": _short(r["why"], 600), "job_id": r["id"]})
     cur.execute(f"""
         SELECT ce.id, ce.kind, ce.user_id, ce.project_id, ce.created_at AS at,
-               ce.detail, ({defs.paying('u')}) AS paying
+               ce.detail
           FROM client_events ce JOIN users u ON u.id = ce.user_id
          WHERE ce.kind IN ('upload_failed', 'upload_rejected', 'player_error',
                            'upload_proxy_failed', 'mcp_error_response')
@@ -399,34 +417,21 @@ def _detail(row):
     return d if isinstance(d, dict) else {}
 
 
-# Device-side conditions the product already explains and recovers from
-# (a cloud placeholder with no bytes on the device, a transfer the browser
-# lost and resumes): a customer still failed, so they are filed, but as P1
-# for the daily Fixer unless the customer pays.
-DEVICE_SIDE = re.compile(r"empty or incomplete|empty file|unreadable file|"
-                         r"lost access to this file|"
-                         r"lost its connection|timed out|offline", re.I)
-
-
 def _event_failure(r):
     d = _detail(r)
     base = {"ref": f"event:{r['id']}", "at": _aware(r["at"]),
             "user_id": r["user_id"], "project_id": r["project_id"]}
     kind = r["kind"]
-    paying = bool(r.get("paying"))
     if kind == "upload_rejected":
         if d.get("accepted"):
             return None             # stored and analysed: not a failure
         reason = str(d.get("reason") or "rejected")
         size = d.get("bytes")
         # A measured fact about the customer's own file (a copy that never
-        # finished): explained on the spot, nothing of ours to repair.
-        if d.get("device_side"):
-            severity = "P1"
-        else:
-            severity = "P1" if DEVICE_SIDE.search(reason) and not paying \
-                else "P0"
-        return dict(base, source="upload", severity=severity,
+        # finished): explained on the spot, only the finished file repairs it,
+        # so paging an agent changes nothing. Any other refusal stopped them.
+        return dict(base, source="upload", bytes=size,
+                    severity="P1" if d.get("device_side") else "P0",
                     cause_key=cause_key("upload-rejected", reason),
                     title=_short(f"Upload refused: {reason}"),
                     detail=_short(f"{reason} · {size} bytes · "
@@ -435,10 +440,8 @@ def _event_failure(r):
                                   600))
     if kind == "upload_failed":
         reason = str(d.get("reason") or "failed")
-        return dict(base, source="upload",
-                    severity="P1" if (d.get("file_gone")
-                                      or DEVICE_SIDE.search(reason))
-                    and not paying else "P0",
+        return dict(base, source="upload", severity="P0", bytes=d.get("bytes"),
+                    offline=bool(d.get("offline")),
                     cause_key=cause_key("upload-failed", signature(reason)
                                         if len(reason) > 40 else reason),
                     title=_short(f"Upload failed: {reason}"),
@@ -448,11 +451,7 @@ def _event_failure(r):
         media = d.get("media_error") or {}
         code = media.get("code") if isinstance(media, dict) else media
         ext = (str(d.get("src_path") or "").rsplit(".", 1) + [""])[1][:5]
-        # A free account's upload waits for a subscription before it is
-        # analysed (the subscribe wall, owner decision), so it has no server
-        # proxy yet: P0 only when the customer pays.
-        return dict(base, source="player",
-                    severity="P0" if paying else "P1",
+        return dict(base, source="player", severity="P0",
                     cause_key=cause_key("player-error", f"code{code}"
                                         if code is not None else "", ext),
                     title=_short(f"The editor could not play the video "
@@ -462,7 +461,9 @@ def _event_failure(r):
                         "video_h", "src_path")}, default=str), 600))
     if kind == "upload_proxy_failed":
         reason = str(d.get("reason") or "failed")
-        return dict(base, source="proxy", severity="P1",
+        # 8 of 9 proxy read failures were followed by a failed upload or no
+        # landing within 6 minutes, so it blocks unless the file lands anyway.
+        return dict(base, source="proxy", severity="P0",
                     cause_key=cause_key("proxy-failed", reason),
                     title=_short(f"The browser could not build the playback "
                                  f"proxy: {reason}"),
@@ -479,7 +480,7 @@ def _event_failure(r):
         # proven failures (internal, timeout, transient, unavailable) are P0.
         sev = "P1" if cat == "unclassified" and outcome not in \
             MCP_OURS_OUTCOMES else "P0"
-        return dict(base, source="mcp", severity=sev,
+        return dict(base, source="mcp", severity=sev, tool=tool,
                     cause_key=cause_key("mcp", tool, outcome or cat),
                     title=_short(f"MCP {tool} answered an error ({outcome or cat})"
                                  + (f": {d['message']}" if d.get("message")
@@ -508,42 +509,53 @@ def run(rcur, wcur, now=None):
     The window overlaps the previous one by OVERLAP so a row committed late
     is still seen; refs filed in that overlap are remembered in the
     watermark (`recent`), so nothing is counted twice whatever the ticket's
-    history holds."""
-    from ops_loop import store
+    history holds. A failure the customer might still get past is filed at P1
+    and looked at again when its grace runs out (ops_loop.recovery)."""
+    from ops_loop import gaps, recovery, store
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(rcur):
         return {"seen": 0, "filed": 0, "tickets": [], "skipped": "no tables"}
     mark, state = _watermark(rcur, now)
-    recent = dict((state or {}).get("recent") or {}) \
-        if isinstance(state, dict) else {}
-    failures = [f for f in scan(rcur, min(mark, now) - OVERLAP, now)
+    state = state if isinstance(state, dict) else {}
+    recent = dict(state.get("recent") or {})
+    watching = dict(state.get("watching") or {})
+    since = min(mark, now) - OVERLAP
+    failures = [f for f in scan(rcur, since, now) + gaps.scan(rcur, since, now)
                 if f["ref"] not in recent]
     filed, touched = 0, {}
     for f in failures:
         # One failure's savepoint: a bad row never loses the others.
         wcur.execute("SAVEPOINT ops_intake_one")
         try:
-            t, action = store.record_failure(wcur, f)
+            severity, look = recovery.plan(f, rcur)
+            t, action = store.record_failure(wcur, dict(f, severity=severity))
         except Exception as e:
             wcur.execute("ROLLBACK TO SAVEPOINT ops_intake_one")
             print(f"⚠️ [ops_intake] {f.get('ref')}: {type(e).__name__}: {e}",
                   flush=True)
             continue
         wcur.execute("RELEASE SAVEPOINT ops_intake_one")
-        recent[f["ref"]] = _aware(f["at"]).isoformat(timespec="seconds")
+        # When it was seen, not when it happened: a stop or a re-rating is
+        # filed long after its own moment and must still be remembered.
+        recent[f["ref"]] = now.isoformat(timespec="seconds")
         if action != "duplicate":
             filed += 1
             touched[t["id"]] = {"id": t["id"], "cause_key": t["cause_key"],
                                 "severity": t["severity"],
                                 "status": t["status"], "action": action}
+            if look and action in ("opened", "attached", "reopened") and \
+                    len(watching) < recovery.MAX_WATCHED:
+                watching[f["ref"]] = look
+    blocked = recovery.settle(rcur, wcur, watching, now)
     keep_after = now - OVERLAP - timedelta(minutes=5)
     recent = {r: at for r, at in recent.items()
               if _aware(at) >= keep_after}
     store.put_state(wcur, WATERMARK_KEY, {"at": now.isoformat(),
                                           "seen": len(failures),
-                                          "filed": filed, "recent": recent})
+                                          "filed": filed, "recent": recent,
+                                          "watching": watching})
     return {"seen": len(failures), "filed": filed,
-            "tickets": list(touched.values())}
+            "tickets": list(touched.values()), "left_blocked": blocked}
 
 
 def _tables_ready(cur):
@@ -553,52 +565,89 @@ def _tables_ready(cur):
 
 # ── What needs a person now ──────────────────────────────────────────────
 
-def unhandled(cur, now=None, after=UNHANDLED_AFTER):
-    """Open P0 tickets nobody started on within `after` of their latest
-    (re)opening: the Fixer did not pick them up (the Mac asleep, the P0
-    watch off, or the run failed). The only alert the owner gets."""
+# When a ticket last became someone's to act on, and when it was last claimed.
+# Never updated_at: every new failure bumps it, so a stuck P0 looked more alive
+# the more customers it hurt (#77 sat 22 h in 'fixing' and took 5 failures).
+OPENED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' IN ('opened', 'recurred', 'reopened',
+                                       'escalated', 'released'))"""
+CLAIMED_AT = """COALESCE((SELECT max((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' = 'fixing'), updated_at)"""
+
+
+def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
+    """P0 tickets no agent is acting on: open ones nobody started within `after`
+    of their latest (re)opening (the Mac asleep, the P0 watch off, or the run
+    failed) and 'fixing' ones whose claim is older than `stale` (the run died).
+    What the owner is emailed about."""
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(cur):
         return []
-    cur.execute("""
+    cur.execute(f"""
         SELECT id, cause_key, title, severity, status, occurrences,
                recurrence_count, first_seen, last_seen, created_at,
-               updated_at,
-               (SELECT max((h->>'at')::timestamptz) FROM
-                  jsonb_array_elements(history) h
-                 WHERE h->>'event' IN ('opened', 'recurred', 'escalated'))
-                   AS opened_at,
+               updated_at, {OPENED_AT} AS opened_at, {CLAIMED_AT} AS claimed_at,
                (SELECT count(DISTINCT h->>'user') FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'failure') AS users
           FROM tickets
-         WHERE status = 'open' AND severity = 'P0'
+         WHERE status IN ('open', 'fixing') AND severity = 'P0'
          ORDER BY id""")
     out = []
     for r in cur.fetchall():
-        opened = _aware(r["opened_at"] or r["created_at"])
-        if opened and now - opened >= after:
+        fixing = r["status"] == "fixing"
+        since = _aware(r["claimed_at"] if fixing else
+                       (r["opened_at"] or r["created_at"]))
+        if since and now - since >= (stale if fixing else after):
             d = dict(r)
-            d["opened_at"] = opened
-            d["waiting_min"] = int((now - opened).total_seconds() // 60)
+            d["opened_at"] = since
+            d["waiting_min"] = int((now - since).total_seconds() // 60)
             out.append(d)
     return out
 
 
-def pending_p0(cur, now=None, stale=timedelta(hours=6)):
+def pending_p0(cur, now=None, stale=FIXING_STALE):
     """P0 tickets the Mac's Fixer should take now: open ones, and 'fixing'
-    ones with no update for `stale` (a run that died)."""
+    ones claimed more than `stale` ago (a run that died)."""
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(cur):
         return []
-    cur.execute("""SELECT id, cause_key, title, status, occurrences,
+    cur.execute(f"""SELECT id, cause_key, title, status, occurrences,
                           recurrence_count, updated_at, last_seen
                      FROM tickets
                     WHERE severity = 'P0'
                       AND (status = 'open'
-                           OR (status = 'fixing' AND updated_at < %s))
+                           OR (status = 'fixing' AND {CLAIMED_AT} < %s))
                     ORDER BY id""", (now - stale,))
     return [dict(r) for r in cur.fetchall()]
+
+
+def silent_agents(cur, now=None):
+    """The scheduled agents that stopped, read from their own heartbeats, and
+    the reviews that stopped arriving. An agent that never beat yet says
+    nothing: its first beat arms it. Nobody watched the watcher for 70 hours."""
+    now = _aware(now) or datetime.now(timezone.utc)
+    keys = {f"ops_heartbeat_{a}": a for a in HEARTBEAT_LATE}
+    cur.execute("SELECT key, value FROM app_kv WHERE key = ANY(%s)",
+                (sorted(keys),))
+    out = []
+    for r in cur.fetchall():
+        try:
+            at = _aware(json.loads(r["value"])["at"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        agent = keys[r["key"]]
+        if now - at > HEARTBEAT_LATE[agent]:
+            out.append({"agent": agent, "last_at": at,
+                        "silent_min": int((now - at).total_seconds() // 60)})
+    cur.execute("SELECT max(reviewed_at) AS at FROM session_reviews")
+    at = _aware((cur.fetchone() or {}).get("at"))
+    if at and now - at > REVIEWS_LATE:
+        out.append({"agent": "session reviews", "last_at": at,
+                    "silent_min": int((now - at).total_seconds() // 60)})
+    return out
 
 
 # ── The scheduler ────────────────────────────────────────────────────────

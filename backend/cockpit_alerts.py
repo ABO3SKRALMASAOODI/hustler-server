@@ -113,16 +113,26 @@ def event_alerts(rcur, since, now):
     try:
         from ops_loop import intake
         for t in intake.unhandled(rcur, now):
+            state = (f"claimed {t['waiting_min']} min ago and no fix landed "
+                     f"(the run may have died)" if t["status"] == "fixing" else
+                     f"open {t['waiting_min']} min and the Fixer has not "
+                     f"started (the Mac may be asleep or the P0 watch off)")
             out.append((f"unhandled:{t['id']}:"
                         f"{t['opened_at']:%Y%m%dT%H%M}",
                         "Customer blocked, not handled yet",
                         f"<b>P0 #{t['id']}</b> {_e(t['title'])} · "
                         f"{_e(t['users'])} customer"
-                        f"{'s' if t['users'] != 1 else ''} · open "
-                        f"{t['waiting_min']} min and the Fixer has not "
-                        f"started (the Mac may be asleep or the P0 watch "
-                        f"off) · <a href=\"{ADMIN_URL}?tab=tickets&ticket="
+                        f"{'s' if t['users'] != 1 else ''} · {state} · "
+                        f"<a href=\"{ADMIN_URL}?tab=tickets&ticket="
                         f"{t['id']}\" style=\"color:#f87171\">ticket</a>"))
+        for a in intake.silent_agents(rcur, now):
+            out.append((f"silent:{a['agent']}:{now:%Y%m%d}",
+                        "An automatic agent stopped",
+                        f"<b>{_e(a['agent'])}</b> has not run for "
+                        f"{a['silent_min'] // 60} h {a['silent_min'] % 60} min "
+                        f"(last {a['last_at']:%d %b %H:%M} UTC). New failures "
+                        f"wait on tickets until it runs: the Claude weekly "
+                        f"limit, the Mac asleep, or the scheduled task off."))
     except Exception as e:
         print(f"⚠️ [cockpit] unhandled-P0 check failed: "
               f"{type(e).__name__}: {e}", flush=True)
@@ -330,6 +340,16 @@ def digest_sections(f):
             failed.append(f"<b>Waiting for a person</b>: "
                           f"{_link(u['url'], '#' + str(u['id']))} "
                           f"{_e(u['title'])} ({u['waiting_min']} min)")
+        for t in fail.get("held_for_owner") or []:
+            failed.append(f"<b>Held on your decision</b>: "
+                          f"{_link(t['url'], '#' + str(t['id']))} "
+                          f"{_e(t['title'])}: {t['failures']} failure"
+                          f"{'s' if t['failures'] != 1 else ''} from "
+                          f"{t['users']} customer"
+                          f"{'s' if t['users'] != 1 else ''} · {_e(t['reason'])}")
+        for a in fail.get("silent_agents") or []:
+            failed.append(f"<b>Not running</b>: {_e(a['agent'])}, last "
+                          f"{a['last_at']:%d %b %H:%M} UTC")
         failed.append(f"Tickets now: {fail['open']} open, {fail['fixing']} "
                       f"being fixed"
                       + (f" ({fail['p0_active']} P0)" if fail["p0_active"]
