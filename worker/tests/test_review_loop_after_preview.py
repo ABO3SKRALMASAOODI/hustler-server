@@ -172,6 +172,44 @@ def test_a_reply_with_no_write_gets_one_measured_nudge_then_is_delivered(monkeyp
     assert result["outcome"] == "blocked" and result["billable"] is False
 
 
+def test_a_draft_written_before_the_automatic_render_is_rewritten_once(monkeypatch):
+    """Replay p5450: the editor skipped render_preview, wrote "I have not
+    rendered it yet", the loop rendered, and that sentence reached the customer
+    beside the attached preview."""
+    ctx, db, posted, _checkpoint, calls = _delivered(monkeypatch)
+    drafts = iter(["I have not rendered it yet.", "The new cut is in the player."])
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return NS(choices=[NS(message=NS(content=next(drafts), tool_calls=[]),
+                              finish_reason="stop")], usage=None)
+    ctx.llm_client = NS(chat=NS(completions=NS(create=create)))
+    ctx.last_preview = {"edl_version": 72}
+
+    def auto_render(*_args):
+        ctx.last_preview = {"edl_version": 73, "duration_s": 20, "asset_id": 5}
+        return ctx.latest_edl(), ""
+    monkeypatch.setattr(agent_loop, "_auto_render_if_needed", auto_render)
+    result = _run(ctx, db)
+    assert len(calls) == 2
+    assert any("predates it" in str(m.get("content")) for m in calls[1]["messages"])
+    assert posted[-1][0] == "The new cut is in the player."
+    assert result["status"] == "replied"
+
+
+def test_a_failed_automatic_render_keeps_the_draft_and_its_note(monkeypatch):
+    ctx, db, posted, _checkpoint, calls = _delivered(monkeypatch)
+    ctx.last_preview = {"edl_version": 72}
+
+    def auto_render(*_args):
+        ctx.last_preview = {"edl_version": 73, "duration_s": 20, "asset_id": 5}
+        return ctx.latest_edl(), "\n\n(Heads up: the preview render failed.)"
+    monkeypatch.setattr(agent_loop, "_auto_render_if_needed", auto_render)
+    _run(ctx, db)
+    assert len(calls) == 1
+    assert posted[-1][0].startswith(DRAFT) and "Heads up" in posted[-1][0]
+
+
 def _nothing_changed(**overrides):
     values = dict(
         request_contract_required=True, versions_written=[], images_generated=[],

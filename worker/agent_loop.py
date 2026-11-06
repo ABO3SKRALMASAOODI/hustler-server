@@ -3595,6 +3595,12 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
     return True
 
 
+_RENDERED_AFTER_DRAFT = (
+    "Your latest version has now been rendered and is attached to the chat, "
+    "so the reply you just wrote predates it. Write your reply to the customer "
+    "again, true to what exists now. Do not say a render is still to come. "
+    "Do not start new work."
+)
 _EDIT_WITHOUT_WRITE_NUDGE = (
     "Measured: this request asks for a change and the timeline has not "
     "changed. A concrete brief is permission to edit: make the change NOW "
@@ -6789,6 +6795,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                     messages.insert(-1, {"role": "assistant", "content": body})
                 continue
             # Auto-render first so the turn facts include the real preview.
+            preview_before = (getattr(ctx, "last_preview", None) or {}).get("edl_version")
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings,
                                                        turn_deadline)
@@ -6861,6 +6868,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 # a full repair slice): deliver the best version with an
                 # export button and the open findings as notes.
                 ctx.critics_advisory = True
+            if body and not fail_note and (getattr(ctx, "last_preview", None) or {}).get(
+                    "edl_version") not in (None, preview_before):
+                # The editor wrote this before the render it did not ask for
+                # (replay p5450: "I have not rendered it yet", preview attached).
+                # Its words go out, so they must describe what now exists.
+                messages.append({"role": "assistant", "content": body})
+                messages.append({"role": "system", "content": _RENDERED_AFTER_DRAFT})
+                continue
             draft = body
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
