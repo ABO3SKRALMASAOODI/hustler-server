@@ -250,7 +250,7 @@ def ensure(ctx):
     history = list(getattr(ctx, "request_contract_history", None) or [])
     sources = _customer_sources(request, history)
     if not sources:
-        raise ValueError("The request has no customer instruction source")
+        return _open_brief(ctx, request, key, "no customer instruction source")
     schema = _compile_schema(sources)
     evidence = {"request": request, "conversation": history,
                 "customer_sources": sources,
@@ -280,7 +280,10 @@ def ensure(ctx):
                     # The mode forbids all writes. Preservation criteria in
                     # a review are questions to assess, not editing work.
                     row.update(action="inspect", lanes=[])
-            _unfreeze_written_lanes(value["requirements"])
+            if {"cuts", "timeline_timing"} & _unfreeze_written_lanes(value["requirements"]):
+                # The same fact as a lane: the policy would freeze what a
+                # change just said it writes.
+                value["timing_policy"] = "edit"
             if value["mode"] == "edit" and value["timing_policy"] == "preserve" and not any(
                     r["action"] == "preserve" and "timeline_timing" in r["lanes"]
                     for r in value["requirements"]):
@@ -293,7 +296,35 @@ def ensure(ctx):
             return value
         except ValueError as exc:
             error = str(exc)[:800]
-    raise ValueError("Could not establish a grounded request contract: " + error)
+        except Exception as exc:
+            import db as dbx
+            if isinstance(exc, dbx.JobLeaseLost):
+                raise
+            # A provider fault. The editing call meets the same provider next,
+            # and the loop has the recovery for it; a retry here only waits.
+            error = f"{type(exc).__name__}: {str(exc)[:300]}"
+            break
+    return _open_brief(ctx, request, key, error)
+
+
+def _open_brief(ctx, request, key, why):
+    """This call reads the request so that code can protect it. It does not
+    do the edit, so it must never be what stops one: #136 and #138 failed a
+    whole turn before its first action on a reply this call could not parse.
+    The editor goes on from the customer's own words with nothing frozen."""
+    print(f"[request brief] unavailable, the editor goes on without it: "
+          f"{str(why)[:300]}", flush=True)
+    metrics = getattr(ctx, "editing_metrics", None)
+    if isinstance(metrics, dict):
+        metrics["brief_unavailable"] = str(why)[:300]
+    ctx.semantic_contract = {
+        "mode": "open", "music_requested": False, "timing_policy": "edit",
+        "output_count": 1, "request_digest": key, "schema_version": 1,
+        "requirements": [{
+            "id": "r1", "action": "change", "lanes": [], "quote": str(request),
+            "inherited": False,
+            "description": "Do what the customer asked in this message."}]}
+    return ctx.semantic_contract
 
 
 def _unfreeze_written_lanes(requirements):
@@ -301,12 +332,16 @@ def _unfreeze_written_lanes(requirements):
     font" compiled beside preserve=[texts] carried over from the last request
     on 10 of 12 real compiles, so the write guard refused every title edit and
     the customer was asked to approve what they had just typed. The model
-    names the lanes; this is set arithmetic on what it named."""
+    names the lanes; this is set arithmetic on what it named. Returns them."""
     written = {lane for row in requirements if row["action"] == "change"
                for lane in row["lanes"]}
+    # Timing is the keeps plus inserts and speed: a change to the keeps moves
+    # it. The reverse does not hold: "keep the cuts, speed up the middle".
+    frozen_out = written | ({"timeline_timing"} if "cuts" in written else set())
     for row in requirements:
         if row["action"] in {"preserve", "avoid"}:
-            row["lanes"] = [lane for lane in row["lanes"] if lane not in written]
+            row["lanes"] = [lane for lane in row["lanes"] if lane not in frozen_out]
+    return written
 
 
 def note_refused(ctx, lanes):
@@ -403,8 +438,16 @@ def preflight(ctx):
             changed = []
         if changed:
             violations.append({"id": requirement["id"], "violations": sorted(changed)})
-    if violations:
-        return ("Restore the customer's concrete protected settings before rendering. "
-                "The current timeline violates these requirements:\n" +
-                json.dumps(violations, ensure_ascii=False))
-    return None
+    if not violations:
+        return None
+    # Said once per finding, on the brief so it survives a continuation. The
+    # render gate and the reply both ask here, and neither had an end: a
+    # finding the editor could not clear held every render and every reply.
+    # The editor has the evidence; its reply says what stayed.
+    finding = json.dumps(violations, ensure_ascii=False, sort_keys=True)
+    told = contract.setdefault("preflight_told", [])
+    if finding in told:
+        return None
+    told.append(finding)
+    return ("Restore the customer's concrete protected settings before rendering. "
+            "The current timeline violates these requirements:\n" + finding)
