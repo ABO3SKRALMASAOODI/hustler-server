@@ -196,8 +196,10 @@ never calls a model for it. The Reviewer (hourly) runs
 `backend/scripts/ops_review.py pending`, looks at each settled session of a
 real user frame by frame, uploads picture evidence (R2 `ops/evidence/<session>/`)
 and writes `session_reviews` and one `tickets` row per cause (migration 041).
-The Fixer (daily 03:10 Dubai, within 10 minutes on a P0) fixes causes, guards each with
-a test or journey and closes tickets with `fix_sha` and `regression_check`.
+The Fixer (daily 03:10 Dubai, within 30 minutes on a P0) fixes causes, guards each with
+a test or journey and closes tickets with `fix_sha`, `regression_check` and a
+replay on a copy reaching the bar (`store.check_replay`; `wont_fix` is only an
+owner decision, and a failure after any other closing reopens the ticket).
 `ops_review.py` is the agents' ONLY production write path and writes only the
 four outcome tables (`ops_loop/store.guard`). Views: admin Overview strip
 (signups, outcome rate, tickets), Sessions and Tickets tabs
@@ -208,11 +210,17 @@ four outcome tables (`ops_loop/store.guard`). Views: admin Overview strip
 (failed job, error reply, unfulfilled request, upload / player failure, our
 own MCP error) is filed as a ticket within a minute by
 `ops_loop/intake.py` (a 1-minute advisory-locked tick in the web process;
-cause keys `auto-*`; P0 = a customer is blocked, P1 = device-side or a gated
-free account). The Mac's P0 watch (`check_fixer.sh p0`, every 10 minutes,
-also catches a backend or database outage) starts the Fixer. The owner gets
-ONE alert kind: a P0 nobody marked 'fixing' within 30 minutes (plus a model
-provider out of credit), and ONE daily email answering four questions:
+cause keys `auto-*`), and so is what writes no failure row by a measured
+deadline (`ops_loop/gaps.py`: stopped uploads, overdue analysis, undelivered
+exports, failed checkouts, requests that changed nothing, ratings below 10).
+Severity is what happened to the customer, never who pays or what an error says
+(`ops_loop/recovery.py`): filed at P1, and P0 only if they are still stuck when a
+measured grace runs out; a customer who got past it pages nobody and the cause
+stays open. The Mac's P0 watch (`check_fixer.sh p0`, every 30 minutes, also
+catches a backend or database outage and a daily run 26 h late) starts the
+Fixer. The owner gets ONE alert kind: a customer nobody is acting on (a P0
+unmarked after 45 minutes, a 'fixing' claim over 6 h old), a scheduled agent that
+stopped, or a model provider out of credit, and ONE daily email answering four questions:
 results judged, failures and what was fixed (links), signups and active
 customers, box / queue / spend; the same four answers top the admin
 (`GET /admin/video/ops/today`). No billing advice anywhere: no flag, alert or
