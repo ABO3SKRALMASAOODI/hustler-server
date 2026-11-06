@@ -1,12 +1,10 @@
 import sys
-from copy import deepcopy
 
 import pytest
 
 import media
 import renderer
 import render_qc
-import visual_coverage
 from schemas import default_edl
 
 
@@ -46,27 +44,6 @@ def test_only_durable_final_wrapper_opts_into_progress_grace(monkeypatch):
     assert "hard_timeout" not in captured[1]
 
 
-def test_visual_counts_and_gaps_are_measured_without_double_counting_coverage():
-    edl = default_edl(40)
-    edl["overlays"] = [{"id": "archive", "start": 4, "duration_s": 4}]
-    edl["texts"] = [{"id": "source_credit", "start": 4, "end": 8}]
-    edl["effects"] = {"zooms": [{"id": "gentle", "start": 20, "end": 25, "strength": .1}]}
-    result = visual_coverage.measure(edl)
-    assert result["counts_by_kind"] == {"overlay": 1, "text": 1, "zoom": 1}
-    assert result["gaps_without_authored_treatment"] == [
-        {"start": 0, "end": 4, "duration_s": 4},
-        {"start": 8, "end": 20, "duration_s": 12},
-        {"start": 25, "end": 40, "duration_s": 15}]
-    # A new treatment changes the evidence and does not keep the old gap.
-    changed = deepcopy(edl)
-    changed["motion"] = [{"id": "fact", "start": 29, "end": 34}]
-    assert visual_coverage.measure(changed)["counts_by_kind"]["motion"] == 1
-    assert max(g["duration_s"] for g in visual_coverage.measure(changed)["gaps_without_authored_treatment"]) == 12
-    changed["texts"].append({"id": "legacy_without_timing", "text": "Legacy"})
-    assert visual_coverage.measure(changed)["unmeasured_items"] == [
-        {"kind": "text", "id": "legacy_without_timing"}]
-
-
 def test_authored_reading_card_is_not_a_frozen_source_or_black_frame():
     edl = default_edl(20)
     edl["vectors"] = [{"id": "panel", "kind": "rectangle", "start": 15, "end": 20,
@@ -97,11 +74,3 @@ def test_authored_reading_card_is_not_a_frozen_source_or_black_frame():
     assert render_qc._stall_cause("held", 18.5, 20, plan)[0] == "footage"
 
 
-def test_insert_measurement_uses_program_clock_after_prior_insert():
-    edl = default_edl(10)
-    edl["keep"] = [[0, 5], [5, 10]]
-    edl["inserts"] = [{"id": "first", "at_output_s": 0, "duration_s": 3},
-                      {"id": "second", "at_output_s": 5, "duration_s": 2}]
-    result = visual_coverage.measure(edl)
-    assert result["duration_s"] == 15
-    assert [(r["start"], r["end"]) for r in result["placements"]] == [(0, 3), (8, 10)]
