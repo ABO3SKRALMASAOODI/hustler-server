@@ -60,6 +60,7 @@ import psycopg2
 from flask import Blueprint, request, jsonify, current_app, Response, g
 
 import storage
+from mcp_directory_metadata import directory_tool_metadata
 import routes.mcp_oauth as mcp_oauth
 from routes.admin import ADMIN_EMAIL
 from routes.auth import token_required
@@ -412,7 +413,7 @@ def _editor_tools(catalog):
         if name == "make_shorts" and "clips" not in props:
             continue
         if name == GATEWAY_TOOL:
-            out.append(_gateway_spec(fn, schema))
+            out.append(directory_tool_metadata(_gateway_spec(fn, schema)))
             continue
         props["project_id"] = {
             "type": "integer",
@@ -433,11 +434,11 @@ def _editor_tools(catalog):
         desc = ("PROJECT-SCOPED: this call acts only on the explicit "
                 "project_id and returns the project identity with its result. "
                 + (fn.get("description") or ""))
-        out.append({"name": name,
+        out.append(directory_tool_metadata({"name": name,
                     "title": _title_for(name),
                     "description": desc,
                     "inputSchema": schema,
-                    "annotations": _annotations_for(name)})
+                    "annotations": _annotations_for(name)}))
     return out
 
 
@@ -1009,6 +1010,7 @@ for _t in SESSION_TOOLS:
         "idempotentHint": _idem, "openWorldHint": False,
     })
 
+SESSION_TOOLS = [directory_tool_metadata(tool) for tool in SESSION_TOOLS]
 SESSION_TOOL_NAMES = {t["name"] for t in SESSION_TOOLS}
 
 WORKFLOW = """
