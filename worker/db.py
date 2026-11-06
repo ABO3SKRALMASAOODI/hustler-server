@@ -2928,6 +2928,35 @@ def live_index_job(conn, project_id, asset_id=None):
         return cur.fetchone()
 
 
+def enqueue_asset_index(conn, project_id, user_id, asset_id):
+    """The live analysis job of one asset, started if there is none. The
+    asset's row lock makes two reads of the same clip start one job."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM assets WHERE id = %s AND project_id = %s "
+                    "FOR UPDATE", (asset_id, project_id))
+        if not cur.fetchone():
+            return None
+        live = live_index_job(conn, project_id, asset_id)
+        if live:
+            return live["id"]
+    return enqueue_job(conn, project_id, user_id, "index",
+                       {"asset_id": asset_id})
+
+
+def last_index_failure(conn, project_id, asset_id):
+    """The error of this asset's newest analysis job when that job failed."""
+    with conn.cursor() as cur:
+        cur.execute("""SELECT state, error FROM video_jobs
+                       WHERE project_id = %s AND type = 'index'
+                         AND payload->>'asset_id' = %s
+                       ORDER BY id DESC LIMIT 1""",
+                    (project_id, str(asset_id)))
+        row = cur.fetchone()
+    if row and row["state"] == "failed":
+        return row["error"] or "unknown error"
+    return None
+
+
 def upsert_index(conn, project_id, sha256, index_json):
     with conn.cursor() as cur:
         cur.execute("""
