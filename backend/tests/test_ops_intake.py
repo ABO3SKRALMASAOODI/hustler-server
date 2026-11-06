@@ -499,3 +499,12 @@ def test_the_days_failures_by_ticket_with_fixes_and_waiting_p0s():
         ["hustler-server", "startup_frontend"]
     assert [u["id"] for u in got["unhandled"]] == [3]
     assert (got["open"], got["fixing"], got["p0_active"]) == (1, 1, 1)
+
+
+def test_a_cut_short_upload_is_not_filed_with_missing_objects():
+    # Ticket 189: "moov atom not found" read as the "not-found" class, the
+    # cause key of our own objects going missing, and raised a P0.
+    moov = ("ffprobe failed: [mov,mp4 @ 0x5f487f47d040] moov atom not found | "
+            "/tmp/valmera/index_1/src.mp4: Invalid data found")
+    assert intake.signature(moov) == "truncated-media"
+    assert intake.signature("HeadObject 404 NoSuchKey") == "not-found"

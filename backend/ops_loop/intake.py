@@ -66,6 +66,9 @@ MCP_OURS_OUTCOMES = ("transient_failure", "unavailable", "unsafe")
 # Error classes worth naming in a cause key (first match wins); anything
 # else is keyed by a hash of the normalised error text.
 ERROR_CLASSES = (
+    # Before "not-found": "moov atom not found" is a customer's cut-short file,
+    # not one of our objects going missing.
+    ("truncated-media", re.compile(r"moov atom not found", re.I)),
     ("no-executor", re.compile(r"no remote executor|modal or cloudflare is "
                                r"required", re.I)),
     ("scratch-space", re.compile(r"scratch space", re.I)),
@@ -166,7 +169,10 @@ def scan(cur, since, now):
         out.append({
             "ref": f"job:{r['id']}", "source": "job", "at": r["at"],
             "user_id": r["user_id"], "project_id": r["project_id"],
-            "severity": "P1" if r["type"] in P1_JOB_TYPES else "P0",
+            # A cut-short file is explained in chat and only the customer's
+            # own copy can repair it: seen by the daily Fixer, no P0 alarm.
+            "severity": "P1" if r["type"] in P1_JOB_TYPES
+                        or sig == "truncated-media" else "P0",
             "cause_key": cause_key("job", kind, sig),
             "title": _short(f"{kind} job failed: {r['error'] or 'no error'}"),
             "detail": _short(r["error"], 600), "job_id": r["id"]})

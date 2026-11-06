@@ -194,6 +194,8 @@ def classify(error, job_type=None):
     if "no video stream found" in text \
             or "could not determine video duration" in text:
         return FailureDecision("invalid_media", False, 0, False)
+    if job_type == "index" and truncated_source(text):
+        return FailureDecision("invalid_media", False, 0, False)
 
     # A stalled source/download can recover once.  More than one repeat is no
     # longer a blip and used to turn one bad object into hours of Cloud Run.
@@ -252,6 +254,15 @@ def defer_prerequisite(worker_db, job, error, decision, claim):
         print(f"[job {job.get('id')}] prerequisite deferral failed: "
               f"{str(exc)[:160]}", flush=True)
         return False
+
+
+def truncated_source(error):
+    """The uploaded MP4/MOV has no moov box: the copy ends before its index,
+    so the recording or the copy never finished. Every complete MP4 has one,
+    and re-reading the same bytes cannot create it (ticket 189, 5 Nov 2026:
+    a 590 MB DJI clip cut at 15 MiB on the customer's disk was retried and
+    then told "nothing is wrong with your file")."""
+    return "moov atom not found" in str(error).lower()
 
 
 def decision_for(error, job_type=None):
@@ -361,6 +372,8 @@ def user_reason(error, decision=None):
     if decision.kind == "input_limit_exceeded":
         return "the video is longer than this plan can process"
     if decision.kind == "invalid_media":
+        if truncated_source(error):
+            return "the file is incomplete"
         return "the file has no video track we could read"
     if decision.kind in ("invalid_edl", "deterministic_input",
                          "deterministic_ffmpeg"):
