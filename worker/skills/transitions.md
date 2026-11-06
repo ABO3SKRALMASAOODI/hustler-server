@@ -53,7 +53,7 @@ whip_right (fast directional smear with motion blur), zoom_punch (an
 accelerating push whose momentum carries through the cut), glitch (RGB/noise
 burst), flash (white pop peaking ON the cut). Fast reels: whip, zoom_punch
 or flash at 0.15–0.3 s; calm or emotional: dip_black 0.3–0.5 s. A
-cross-dissolve is `set_junction(style='dissolve', cuts='scene', duration=1)`:
+cross-dissolve is `set_transitions(style='dissolve', duration_s=1)`:
 per cut, duration-preserving, and it reaches the cuts baked into an uploaded
 montage or slideshow (the outgoing frame holds while the next one fades in).
 

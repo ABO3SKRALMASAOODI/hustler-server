@@ -11457,6 +11457,31 @@ def _split_keeps_at_shot_boundaries(keep, index):
     return out, added
 
 
+def _dissolve_at_cuts(ctx, duration_s, scope):
+    """A cross-dissolve is a per-cut device (set_junction), which replaces a
+    global transition: both on one cut would leave only one of them."""
+    from tools_ext import punctuation_tools
+    try:
+        d = min(max(float(duration_s if duration_s is not None else 0.8),
+                    TRANSITION_MIN_S), TRANSITION_MAX_S)
+    except (TypeError, ValueError):
+        return ("REJECTED: duration_s must be a number of seconds "
+                f"({TRANSITION_MIN_S:g}-{TRANSITION_MAX_S:g}).")
+    out = punctuation_tools.set_junction(
+        ctx, "dissolve", cuts="every" if scope == "every_cut" else "scene",
+        duration=d)
+    if not out.startswith("EDL"):
+        return out
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    if fx.get("transition"):
+        fx["transition"] = None
+        edl["effects"] = fx
+        return out + "\n" + ctx.write_edl(
+            edl, "cleared the earlier global transition: dissolves replace it")
+    return out
+
+
 def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                     motion_motif=None, max_transitions=None):
     p = (style or "").strip().lower()
@@ -11470,6 +11495,10 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "cut_silences — only right for a montage built from separate "
                 "clips. 'media' puts one only where B-roll, a still or a "
                 "card enters or leaves (camera changes stay hard cuts).")
+    if p == "dissolve":
+        # p5520: asked three times for cross-dissolves, the editor reached
+        # for this tool, found dips only and told the customer it could not.
+        return _dissolve_at_cuts(ctx, duration_s, sc)
     edl = dict(ctx.latest_edl()["json"])
     fx = dict(edl.get("effects") or {})
     if p in ("none", "off"):
@@ -32265,10 +32294,12 @@ TOOLS = {
                         "'flash' = additive white pop peaking ON the cut "
                         "(beat-synced edits). duration_s 0.1-1.5 (default "
                         "0.3; keep whip/flash short, 0.15-0.4). 'none' "
-                        "removes them (hard cuts again). For a cross-dissolve "
-                        "use set_junction(style='dissolve').",
+                        "removes them (hard cuts again). style='dissolve' is a "
+                        "true cross-dissolve at every scene change, including "
+                        "the cuts baked into an uploaded montage (0.8-1.5 s "
+                        "suits photographs).",
                         {"style": {"type": "string",
-                                   "enum": list(TRANSITION_STYLES)
+                                   "enum": list(TRANSITION_STYLES) + ["dissolve"]
                                    + ["none"]},
                          "duration_s": {"type": "number"},
                          "max_transitions": {
@@ -34046,9 +34077,9 @@ _COMPACT_CONTRACTS = {
         "cuts that visibly pop; at=[s] picks; mode='off' undoes."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
-        "cuts — report the junction count it returns. Styles dip_black, "
-        "dip_white, whip_left/right, zoom_punch, glitch, flash (fast ones "
-        "0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
+        "cuts — report the junction count it returns. Styles dissolve, "
+        "dip_black, dip_white, whip_left/right, zoom_punch, glitch, flash "
+        "(fast ones 0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
         "sound:swish_1 at the cut (it peaks there) unless a look already placed one "
         "there (get_edl sfx); ordinary cuts stay silent. One specific "
         "junction: a motion transition template."),

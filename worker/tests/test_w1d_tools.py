@@ -403,3 +403,18 @@ def test_a_split_off_a_shot_boundary_is_still_no_cut():
     ctx = Ctx({**CUTS, "keep": [[0.0, 9.0], [9.0, 18.0]]})
     ctx.index = {**ctx.index, "shots": [{"start": 0.0, "end": 18.0}]}
     assert "no cut" in P.set_junction(ctx, "dissolve", cuts="scene")
+
+
+def test_set_transitions_dissolve_replaces_a_global_transition():
+    ctx = Ctx({**CUTS, "keep": [[0.0, 18.0]]})
+    ctx.index = {**ctx.index, "shots": [{"start": 0.0, "end": 6.0},
+                                        {"start": 6.0, "end": 12.0},
+                                        {"start": 12.0, "end": 18.0}]}
+    agent_tools.set_transitions(ctx, "dip_black", 0.5)
+    assert ctx.latest_edl()["json"]["effects"]["transition"]["style"] == "dip_black"
+    out = agent_tools.set_transitions(ctx, "dissolve", 1.2)
+    assert out.startswith("EDL"), out
+    assert ctx.latest_edl()["json"]["effects"]["transition"] is None
+    junctions = _fx(ctx, "junction")
+    assert len(junctions) == 2 and junctions[0]["style"] == "dissolve"
+    assert junctions[0]["duration_s"] == 1.2
