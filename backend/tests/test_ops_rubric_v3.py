@@ -66,6 +66,14 @@ def test_no_new_pictures_stops_at_six():
                        "delivered_poor", 6)
 
 
+def test_a_failed_comparison_sets_no_ceiling():
+    # "unknown": the picture could not be compared with the upload, so zero
+    # matched shots prove nothing about new pictures.
+    failed = dict(NO_PICTURES, **{"class": "unknown"})
+    assert store.delta_ceiling(failed) is None
+    assert store.nothing_edited(failed) is None
+
+
 def test_a_declared_defect_sets_its_ceiling():
     bad = [{"id": "off_centre_card", "at_s": 12.3, "note": "the card sits left"}]
     with pytest.raises(store.StoreError, match="ceiling 8.0"):

@@ -237,7 +237,7 @@ def delta_ceiling(delta):
     caps = []
     if delta.get("class") in CLASS_CEILING:
         caps.append(CLASS_CEILING[delta["class"]])
-    if delta.get("mode") == "paired" and \
+    if delta.get("mode") == "paired" and delta.get("class") != "unknown" and \
             float(delta.get("shots_added", 99)) <= 1 and \
             float(delta.get("overlay_pct", 100)) < 25:
         caps.append(NO_NEW_PICTURES_CEILING)
