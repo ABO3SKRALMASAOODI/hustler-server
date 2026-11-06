@@ -2557,6 +2557,15 @@ def _t_index_status(tok, args):
                     "After the deployment finishes, retry upload_finish "
                     "with the same project_id and storage_key to restart "
                     "analysis; do not upload the video again.")
+        if "moov atom not found" in str(job["error"]).lower():
+            # Ticket 189: re-uploading the same bytes cannot create the index
+            # the file never received; only a whole copy can.
+            return ("Analysis FAILED: this video file is incomplete: it stops "
+                    "before its index, so the recording or the copy never "
+                    "finished. Uploading the same copy again cannot help. "
+                    "Tell the user to copy it again from the camera or card "
+                    "(or wait for their cloud sync to finish), check that it "
+                    "plays on their device, and upload that copy.")
         return (f"Analysis FAILED: {job['error']}. The video cannot be "
                 "edited until it is re-uploaded and analyzed.")
     if job["state"] == "queued":
@@ -3810,7 +3819,8 @@ def _public_error_detail(name, result):
         (("internal error",), "internal_error"),
         (("readiness mismatch",), "executor_version_mismatch"),
         (("stale", "base version", "version conflict"), "version_conflict"),
-        (("prerequisite", "hasn't finished analyzing", "no complete preview"), "prerequisite"),
+        (("prerequisite", "hasn't finished analyzing", "no complete preview",
+          "video analysis is not ready"), "prerequisite"),
         (("rejected", "correction_needed", "must be", "requires", "supply "), "invalid_request"),
         (("no tool called", "not enabled", "reserved for"), "unavailable_tool"),
         (("upload", "size cap"), "upload_error"),

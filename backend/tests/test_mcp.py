@@ -2838,3 +2838,45 @@ def test_download_url_and_the_worker_judge_previews_by_one_rule():
                     meta["audio_model_review"] = stamp
                 assert mcpmod._listener_policy(meta) == \
                     tools.listener_policy(meta), meta
+
+
+def test_open_project_on_an_unanalyzed_video_is_a_prerequisite():
+    # Ticket 193: open_project repeats the gate's sentence as plain text, and
+    # its word "upload" filed the product's own gate as a P0 upload_error.
+    detail = mcpmod._public_error_detail("open_project", mcpmod._text(
+        "Opened project 5498, but its state could not be read. PROJECT 5498 "
+        "\u2014 video analysis is not ready. No editing job was started. Call "
+        "index_status to inspect the analysis failure or missing upload, "
+        "then resolve it before editing.", True))
+    assert detail["category"] == "prerequisite" and "message" not in detail
+    # A real upload failure stays ours.
+    real = mcpmod._public_error_detail("upload_finish", mcpmod._text(
+        "The upload could not be finished.", True))
+    assert real["category"] == "upload_error"
+
+
+def test_index_status_names_a_cut_short_file(monkeypatch):
+    class Cur:
+        def execute(self, *a):
+            pass
+
+        def fetchone(self):
+            return {"id": 9, "state": "failed", "progress": 0, "result": {},
+                    "error": "ffprobe failed: moov atom not found | src.mp4"}
+
+    class Conn:
+        def cursor(self):
+            return Cur()
+
+    @contextlib.contextmanager
+    def vdb():
+        yield Conn()
+
+    monkeypatch.setattr(mcpmod, "vdb", vdb)
+    monkeypatch.setattr(mcpmod, "_project_for_user", lambda *a: {"id": 5498})
+    monkeypatch.setattr(mcpmod, "_active_original",
+                        lambda *a: {"id": 1, "sha256": None})
+    said = mcpmod._t_index_status({"user_id": 7}, {"project_id": 5498})
+    assert "incomplete" in said
+    assert "same copy again cannot help" in said
+    assert "moov" not in said
