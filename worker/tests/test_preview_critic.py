@@ -386,8 +386,10 @@ def test_critic_compares_framing_treatment_across_shots(monkeypatch):
     assert "STILLS CANNOT PROVE MOTION" in seen["prompt"]
 
 
-def test_new_preview_version_with_proven_craft_defect_gets_repair_decision(
-        monkeypatch):
+def test_a_critic_opinion_alone_never_asks_for_another_render(monkeypatch):
+    """Repairs come from measurements. A second model's reading of stills
+    informs the editor; on 13 customer chains no repair it asked for lifted a
+    delivered edit."""
     monkeypatch.setattr(agent_loop.config, "AGENT_TURN_TIMEOUT_S", 600)
 
     class Ctx:
@@ -401,9 +403,6 @@ def test_new_preview_version_with_proven_craft_defect_gets_repair_decision(
             return {"version": 7}
 
     messages, pushed = [], set()
-    assert agent_loop._quality_repair_pushback(
-        Ctx(), messages, agent_loop.time.monotonic(), pushed)
-    assert pushed == {7}
-    assert "caption family changes" in messages[0]["content"]
     assert not agent_loop._quality_repair_pushback(
         Ctx(), messages, agent_loop.time.monotonic(), pushed)
+    assert pushed == set() and messages == []

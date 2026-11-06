@@ -3337,7 +3337,7 @@ _EXPLICIT_MICRO_EDIT = re.compile(
 # and the final handoff has neither a preview attachment nor its review.
 _PREVIEW_CHECKPOINT_FIELDS = (
     "request_preservation_baseline",
-    "semantic_contract", "request_assessment", "request_contract_repairs", "request_preflights",
+    "semantic_contract",
     "render_dependency_state", "render_dependency_key",
     "last_preview", "last_visual_critic", "last_story_review",
     "last_audio_review", "last_audio_qc_findings",
@@ -3560,19 +3560,6 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
         return False
     _latest, verification = _latest_verification(ctx)
     findings = []
-    if not verification:
-        # No durable record for this exact version (it is written on every
-        # complete render): fall back to the reviewers' own blocking lines.
-        report = getattr(ctx, "last_visual_critic", None) or {}
-        findings = preview_critic.repair_lines(report)
-        findings.extend(story_critic.repair_lines(
-            getattr(ctx, "last_story_review", None) or {}))
-        audio_review = getattr(ctx, "last_audio_review", None) or {}
-        if agent_tools.audio_review_blocks(audio_review) and \
-                audio_review.get("text"):
-            findings.append(
-                "independent actual-audio review: "
-                + str(audio_review["text"])[:700])
     for row in verification.get("unresolved_findings") or []:
         line = (f"{row.get('finding_id') or row.get('code')}: "
                 f"{row.get('message') or row}")
@@ -4120,12 +4107,6 @@ def _strict_quality_handoff(ctx):
                 "export_ready": True}
 
     findings = []
-    report = getattr(ctx, "last_visual_critic", None) or {}
-    for line in preview_critic.repair_lines(report)[:3]:
-        findings.append(line)
-    for line in story_critic.repair_lines(
-            getattr(ctx, "last_story_review", None) or {})[:2]:
-        findings.append(line)
     for line in (getattr(ctx, "last_audio_qc_findings", None) or [])[:2]:
         findings.append("audio QC: " + str(line))
     for line in (getattr(ctx, "last_picture_qc_findings", None) or [])[:2]:
@@ -4135,9 +4116,9 @@ def _strict_quality_handoff(ctx):
             and agent_tools.audio_review_blocks(audio_review):
         findings.append("actual-audio review: "
                         + str(audio_review.get("text") or "needs repair"))
-    # Blocking review lines recorded at render time (critic repairs, edit
-    # duplication, audio QC, execution gaps) count too, but only for the
-    # exact latest version. Taste notes are advisory and live separately in
+    # Measured lines recorded at render time (edit duplication, audio QC,
+    # execution gaps) count too, but only for the exact latest version. Taste
+    # notes and critic opinions are advisory and live separately in
     # ctx.last_taste_advisory; they never reach this list.
     if getattr(ctx, "last_taste_version", None) == latest:
         for line in (getattr(ctx, "last_taste", None) or []):
@@ -4158,6 +4139,7 @@ def _strict_quality_handoff(ctx):
     if verification.get("status") in {"passed", "justified"}:
         status = verification["status"]
     else:
+        report = getattr(ctx, "last_visual_critic", None) or {}
         story_report = getattr(ctx, "last_story_review", None) or {}
         status = ("pass" if report.get("verdict") == "pass" or
                   story_report.get("verdict") == "pass" else "unchecked")
@@ -4581,8 +4563,7 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     inspection. (A wrote-but-denies redraft keeps the corrective-note path:
     a denial is wrong but not a fabrication worth suppressing.)"""
     if getattr(ctx, "request_contract_required", False):
-        # The semantic delivery review runs after all reply transformations
-        # and sees the inspected media. This legacy checker only sees the
+        # The editor writes the reply. This legacy checker only sees the
         # primary upload's transcript and can erase a valid secondary-file
         # review by declaring its quotations fabricated.
         return draft
@@ -5254,25 +5235,23 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     if delivery and not delivery['complete']:
         unfinished_edit = True
     import request_contract
-    if request_contract.enabled(ctx) and not request_contract.completion(ctx):
-        unfinished_edit = bool(has_value)
-        attempted_edit = True
-    elif request_contract.enabled(ctx) and (getattr(ctx, "semantic_contract", None) or {}).get("mode") in {"inspect", "clarify"}:
-        # A verified explanation/review is the requested deliverable even on
-        # a photos-only or empty timeline. It must not become a false editing
-        # failure merely because this answer correctly made no new video.
+    request_mode = (getattr(ctx, "semantic_contract", None) or {}).get("mode")
+    if request_contract.enabled(ctx) and request_mode in {"inspect", "clarify"}:
+        # The answer is the requested deliverable even on a photos-only or
+        # empty timeline. It must not become a false editing failure merely
+        # because this answer correctly made no new video.
         has_value = True
         blank_canvas_no_value = blank_canvas_asset_only = False
         attempted_edit = False
         failed = prerequisite = refused = False
-    elif request_contract.enabled(ctx) and has_edit_deliverable:
-        # A corrected intermediate tool failure is not an unfinished request
-        # once every requirement has independent current-version evidence.
-        failed = prerequisite = refused = False
+    elif request_contract.enabled(ctx) and request_mode == "edit" \
+            and not has_edit_deliverable:
+        # Measured, not judged: the customer asked for a change and this
+        # request's timeline did not change. Never fulfilled, never charged.
+        unfinished_edit = bool(has_value)
+        attempted_edit = True
 
-    request_waiting = request_contract.awaiting_input(ctx) and (
-        not has_edit_deliverable or quality.get("export_ready") is True)
-    if (status == "awaiting_user" and not failed) or request_waiting:
+    if status == "awaiting_user" and not failed:
         # a question to the user: the request waits on their answer
         outcome = AWAITING_USER
     elif (getattr(ctx, "shorts_jobs_completed", None) and not has_edit_deliverable
@@ -5625,8 +5604,8 @@ def _outcome_meta(ctx, outcome):
                     "findings") or [])],
             # Same meaning across the Oct 2026 change: the taste audit's
             # finding count (now advisory). ctx.last_taste holds only the
-            # BLOCKING review lines (critic, audio QC, duplication,
-            # execution gaps), reported under their own key.
+            # MEASURED lines (audio QC, duplication, execution gaps),
+            # reported under their own key.
             "deterministic_taste_findings": len(
                 getattr(ctx, "last_taste_advisory", None) or []),
             "blocking_review_lines": len(
@@ -5822,9 +5801,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     if semantic_request.enabled(ctx):
         messages.append({"role": "system", "content": (
             "AUTHORITATIVE REQUEST REQUIREMENTS. Fulfill every change and "
-            "preserve every protected element. These requirements are also "
-            "checked against the delivered preview. A successful render alone "
-            "is not completion.\n" + json.dumps(ctx.semantic_contract, ensure_ascii=False))})
+            "preserve every protected element. When your complete preview "
+            "shows this done, reply: your reply is what the customer reads "
+            "and nothing reviews it after you. Say plainly anything you did "
+            "not finish.\n" + json.dumps(ctx.semantic_contract, ensure_ascii=False))})
     if _cont:
         cont_timings = _cont.get("timings") or {"tools": {}}
         done = ", ".join(
@@ -6901,72 +6881,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final += _unused_fetched_audio_note(ctx)
             if fail_note:
                 final += fail_note
-            if semantic_request.enabled(ctx):
-                assessment = semantic_request.assess(ctx, final)
-                repairs = list(getattr(ctx, "request_contract_repairs", None) or [])
-                missing = [r for r in assessment["requirements"]
-                           if r["status"] in {"unmet", "unknown"}]
-                # One decision per immutable version, bounded across durable
-                # continuations. Tool typos and omitted treatments get an
-                # actionable repair, not a misleading success or an endless loop.
-                marker = [assessment["request_digest"], assessment["edl_version"],
-                          assessment.get("evidence_digest", assessment["draft_digest"])]
-                if (missing and marker not in repairs and len(repairs) < 3
-                        and not ctx.over_budget()
-                        and time.monotonic() + 30 < turn_deadline):
-                    ctx.request_contract_repairs = repairs + [marker]
-                    messages.append({"role": "assistant", "content": final or "Checking delivery."})
-                    messages.append({"role": "system", "content": (
-                        "The exact saved edit has not fulfilled these customer "
-                        "requirements. For unknown findings inspect or prove the "
-                        "existing work first; do not change it speculatively. "
-                        "Repair unmet work using the available "
-                        "tools, preserve completed work, and verify the new version. "
-                        "A malformed tool argument is recoverable: inspect the "
-                        "actual tool schema and retry correctly. Do not ask for "
-                        "permission to perform work already requested.\n"
-                        + json.dumps(missing, ensure_ascii=False))})
-                    continue
             honesty["auto_render"] = ctx.autorendered
             outcome, billable = _turn_completion(
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
-            outcome_before_reply = outcome
             import fulfillment
             final = fulfillment.disclose(ctx, final)
-            _new_sub = (not _trial_lane(ctx)
-                        and getattr(ctx, "claude_paid", None) is not None)
-            if semantic_request.enabled(ctx):
-                final = semantic_request.reply(ctx, final)
-                assessment = semantic_request.current_assessment(ctx)
-                honesty["request_requirements"] = assessment
-                honesty["unmet_asks"] = [r["id"] for r in assessment["requirements"]
-                                         if r["status"] != "satisfied"]
-            elif (_trial_lane(ctx) or _new_sub) and config.CLAUDE_TRIAL_REPLY_GUARD:
-                # Q8: the trial reply says only what the turn's facts back
-                # (EDL diff, the latest preview, the transcript), short and
-                # warm: what changed, where to look, one next step.
-                # REAL_USER_BRUTE (31 Oct): a NEW subscriber's Claude-lane
-                # turn (D1, the same Haiku model) read raw: "The 19-second
-                # cut passes the current preview. I left the opening 'But'
-                # fragment and the sagging middle section unchanged."
-                # Grandfathered subscribers' lanes are untouched.
-                import trial_reply
-                final, _report = trial_reply.finish_for_ctx(
-                    ctx, final, user_message.get("content") or "",
-                    subscriber=_new_sub, outcome=outcome)
-                if _report and _report.get("dropped"):
-                    honesty["trial_reply_dropped"] = _report["dropped"][:12]
-                outcome = _outcome_after_reply(outcome, _report, honesty)
-                # TRIAL_QUALITY_BUILD: the reply says what the designed
-                # single-shot structure added (title, cut-ins, ending)
-                _applied = getattr(ctx, "single_shot_applied", None)
-                if _applied and trial_reply.language(final) == "en":
-                    import single_shot_design
-                    _line = single_shot_design.reply_line(_applied, final)
-                    if _line:
-                        final = _insert_after_lead(final, _line)
-                        honesty["single_shot_design"] = _applied
             # RS_ENGINE (31 Oct): music the user asked for ends on a choice
             # of 2-4 library tracks, never on silence told as done (user
             # 2665: audio muted, the library listed, nothing offered).
@@ -6976,9 +6896,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if _music_ask:
                 final = music_offer.append_offer(final, _music_ask)
                 honesty["music_offer"] = True
-                outcome = music_offer.choice_outcome(
-                    outcome_before_reply, outcome,
-                    honesty.get("unmet_asks"), _music_ask)
+                outcome = music_offer.choice_outcome(outcome, _music_ask)
             if _trial_lane(ctx):
                 # Q8: a trial turn always ends on a version the user can take
                 # to the export paywall: the reviewers' open notes advise
@@ -6993,8 +6911,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "preview": ctx.last_preview,
                 **quality,
                 **_outcome_meta(ctx, outcome),
-                **({"request_completion": semantic_request.current_assessment(ctx)}
-                   if semantic_request.enabled(ctx) else {}),
             }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           message_meta)

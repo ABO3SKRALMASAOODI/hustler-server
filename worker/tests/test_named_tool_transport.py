@@ -9,7 +9,7 @@ import llm
 
 
 @pytest.mark.parametrize("name", [
-    "compile_request", "assess_request", "plan_continuous_take",
+    "compile_request", "record_request_contract", "plan_continuous_take",
 ])
 @pytest.mark.parametrize("shape", ["chat", "responses"])
 def test_named_decision_reaches_responses_and_returns_tool_result(monkeypatch, name, shape):

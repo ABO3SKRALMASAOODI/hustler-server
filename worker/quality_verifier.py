@@ -1331,15 +1331,16 @@ def _inherited_pause_justifications(findings, prior_records, project_id, version
 def build_verification_record(project_id, version, manifest, edl, index,
                               preview=None, proof_ranges=None,
                               visual_findings=None, audio_findings=None,
-                              story_findings=None, repairs=None,
+                              repairs=None,
                               justified=None, request_text=None,
                               advisory_findings=None, prior_records=None,
                               media_keys=None, baseline_keys=None,
                               start_edl=None, semantic_contract=None):
-    """Version-stamped verification. ``visual/audio/story_findings`` are
-    review lines that already passed their reviewer's blocking bar; taste
-    notes and other craft observations go in ``advisory_findings`` and are
-    recorded without ever making the version ``repair_required``.
+    """Version-stamped verification. ``visual/audio_findings`` are MEASURED
+    defects of the render (picture QC, audio QC, duplication, execution gaps).
+    Taste notes, a second model's opinion of the render and other craft
+    observations go in ``advisory_findings`` and are recorded without ever
+    making the version ``repair_required``.
 
     ``prior_records``: this request's records for earlier versions. A
     reviewer category they already asked the editor to repair is advisory
@@ -1351,8 +1352,7 @@ def build_verification_record(project_id, version, manifest, edl, index,
                                       media_keys=media_keys,
                                       semantic_contract=semantic_contract)
     for department, rows in (("visual_review", visual_findings or []),
-                             ("audio_review", audio_findings or []),
-                             ("story_review", story_findings or [])):
+                             ("audio_review", audio_findings or [])):
         for row in rows:
             observation = (_pause_observation(str(row), preview, edl, index)
                            if department == "audio_review" else None)

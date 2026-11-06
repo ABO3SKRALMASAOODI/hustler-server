@@ -7,9 +7,7 @@ import pytest
 import agent_tools
 import audio_qc
 import quality_verifier as qv
-import request_contract as rc
 from schemas import default_edl
-from test_request_contract import context
 
 
 PAUSE = (4.0, 6.0)
@@ -92,24 +90,6 @@ def test_audio_justification_cannot_clear_a_new_visual_defect_or_other_project()
     assert [r["department"] for r in after["unresolved_findings"]] == ["visual_review"]
     other = record(2, edl, {1: prior}, project=8)
     assert any(r["department"] == "audio_review" for r in other["unresolved_findings"])
-
-
-def test_preserved_clock_is_not_unmet_because_source_contains_a_pause(monkeypatch):
-    ctx = context()
-    ctx.semantic_contract["requirements"] = [{"id": "system:timing", "action": "preserve",
-        "lanes": ["timeline_timing"], "description": "Preserve picture timing and duration"}]
-    monkeypatch.setattr(rc, "_call", lambda *a, **k: {
-        "completed": "The full duration is retained.",
-        "remaining": "Cutting a source pause would change the protected duration.",
-        "requirements": [{"id": "system:timing", "status": "unmet", "blocker_kind": "customer_input",
-            "reason": "Cutting a source pause would change the protected duration.", "evidence": []}]})
-    result = rc.assess(ctx)
-    assert result["complete"]
-    assert result["remaining"] == ""
-    # Actual timing damage is still an error, regardless of model confidence.
-    ctx.latest_edl()["json"]["keep"] = [[0, 12]]
-    result = rc.assess(ctx, "Changed timeline")
-    assert not result["complete"]
 
 
 def test_semantic_contract_owns_transition_intent_not_a_sound_keyword():

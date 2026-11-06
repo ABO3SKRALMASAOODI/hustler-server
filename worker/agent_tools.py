@@ -24285,7 +24285,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             # exact frames as image content, so paying a Valmera-funded model
             # to inspect them again would duplicate the caller's own vision.
             critic_report = _preview_critic_report(ctx, result, plan)
-            critic_repairs = preview_critic.repair_lines(critic_report)
             if critic_report is not None:
                 ctx.last_visual_critic = critic_report
                 note += preview_critic.summary_line(critic_report)
@@ -24370,6 +24369,16 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             story_report = _review_program_story(ctx, row)
             if story_report is not None:
                 note += story_critic.summary_line(story_report)
+            # The two reviews above are another model's reading of stills,
+            # not measurements. On 13 customer chains no repair they asked
+            # for lifted a delivered edit, so they inform the editor and stay
+            # on the record, and they never reopen a finished request.
+            if (critic_report or {}).get("findings") \
+                    or (story_report or {}).get("findings"):
+                note += (" Those reviews are a second opinion, not a check: "
+                         "take one up only if it names a real defect you can "
+                         "see or a part of the customer's request you missed. "
+                         "They do not hold your reply.")
             # Taste audit (round 52): the craft reviewer. Everything above
             # asks whether the edit is CORRECT; this asks whether it is any
             # GOOD. Its findings are ADVISORY craft notes (Oct 2026): they
@@ -24378,8 +24387,8 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             # never trigger a repair loop and never gate the Studio export.
             # A premium reel's dense camera, type and sound design used to
             # be blocked by exactly these density heuristics. ctx.last_taste
-            # now carries only BLOCKING review lines for this version.
-            ctx.last_taste = list(critic_repairs) + repetition_repairs
+            # carries only MEASURED defects of this version.
+            ctx.last_taste = repetition_repairs
             ctx.last_taste_version = row.get("version")
             ctx.last_taste_advisory = []
             try:
@@ -24547,17 +24556,15 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             # second visual defect with a different stable ID.
             visual_record_findings = [line for line in ctx.last_taste or []
                                       if not str(line).startswith("audio QC: ")]
-            visual_record_findings += preview_critic.repair_lines(
-                ctx.last_visual_critic or {})
             advisory_record_findings = list(
                 getattr(ctx, "last_taste_advisory", None) or [])
             advisory_record_findings += [
                 line for line in (
-                    preview_critic.advisory_lines(ctx.last_visual_critic or {})
+                    preview_critic.repair_lines(ctx.last_visual_critic or {})
+                    + story_critic.repair_lines(ctx.last_story_review or {})
+                    + preview_critic.advisory_lines(ctx.last_visual_critic or {})
                     + _audio_review_advisories(ctx))
                 if line not in advisory_record_findings]
-            story_record_findings = story_critic.repair_lines(
-                ctx.last_story_review or {})
             audio_record_findings = _audio_verification_findings(ctx)
             manifest = (getattr(ctx, "change_manifests", None) or {}).get(version) or \
                 quality_verifier.build_change_manifest(
@@ -24570,7 +24577,6 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
                               or {}).get(version) or [],
                 visual_findings=visual_record_findings,
                 audio_findings=audio_record_findings,
-                story_findings=story_record_findings,
                 request_text=quality_verifier.request_text_for(ctx),
                 advisory_findings=advisory_record_findings,
                 prior_records=getattr(ctx, "verification_records", None),

@@ -177,17 +177,6 @@ def test_a_one_shot_critic_caches_only_its_shared_instructions():
     assert not any("cache_control" in b for m in msgs for b in m["content"])
 
 
-def test_structured_completion_review_does_not_buy_an_unused_payload_cache():
-    system = [{"type": "text", "text": "review instructions"}]
-    msgs = [{"role": "user", "content": [{"type": "text", "text": "one program's evidence"}]}]
-    tools = [{"name": "assess_request", "input_schema": {"type": "object"}}]
-    claude_lane._mark_cache(system, msgs, tools, "claude-haiku-5-5")
-    assert "cache_control" in system[0]
-    assert "cache_control" in tools[0]
-    assert "cache_control" not in msgs[0]["content"][0]
-    assert not claude_lane._one_shot(msgs + [{"role": "assistant", "content": []}], tools)
-
-
 def test_large_observation_batch_keeps_previous_read_with_four_breakpoints():
     import copy
     original = [{"role": "system", "content": s} for s in ("kernel", "directory", "project")]
@@ -211,22 +200,6 @@ def test_large_observation_batch_keeps_previous_read_with_four_breakpoints():
     assert "cache_control" not in after[2][-1]  # spare tools slot used by anchor
     assert "cache_control" in after[1][-1]["content"][-1]  # also writes next tail
     assert grown[-1]["content"][0] == {"type": "text", "text": "observation 0"}
-
-
-@pytest.mark.parametrize("model", ["claude-haiku-5-5", "claude-opus-5-5"])
-def test_assessment_read_prefix_survives_changed_proof_and_draft(model):
-    prefixes = []
-    for changing in ("first draft", "new proof and revised draft"):
-        system = [{"type": "text", "text": "review"}]
-        msgs = [{"role": "user", "content": [
-            {"type": "text", "text": "same request and source evidence"},
-            {"type": "text", "text": changing}]}]
-        tools = [{"name": "assess_request", "input_schema": {"type": "object"}}]
-        claude_lane._mark_cache(system, msgs, tools, model)
-        prefixes.append(claude_lane._cache_diagnostics({"model": model,
-            "system": system, "messages": msgs, "tools": tools})["prefixes"])
-    assert prefixes[0] == prefixes[1]
-    assert prefixes[0][-1]["kind"] == "messages"
 
 
 def test_contract_compilation_caches_schema_and_instructions_not_unique_payload():
