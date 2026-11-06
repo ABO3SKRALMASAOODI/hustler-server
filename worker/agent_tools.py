@@ -576,6 +576,27 @@ class ToolContext:
         return (self.credit_budget is not None and
                 self.running_credits() >= self.credit_budget)
 
+    def start_asset_index(self, asset):
+        """What the model is told about an asset with no analysis: the job
+        that is producing it, started now when nothing was (ticket #386)."""
+        if asset.get("kind") not in ("video_clip", "music"):
+            return ("That asset has no reusable media index. Use look_at_asset "
+                    "for its picture or get_audio_analysis for its sound.")
+        failed = self.db.run(dbx.last_index_failure, self.project_id,
+                             asset["id"])
+        if failed:
+            return (f"UNAVAILABLE: the analysis of that clip failed "
+                    f"({str(failed)[:300]}) and was not restarted. Use "
+                    "look_at_asset for its picture or get_audio_analysis for "
+                    "its sound, and tell the user plainly what could not be "
+                    "read.")
+        owner = self.project.get("user_id") or self.job.get("user_id")
+        job_id = self.db.run(dbx.enqueue_asset_index, self.project_id, owner,
+                             asset["id"])
+        return (f"PREREQUISITE: that clip's analysis is running as job "
+                f"{job_id}. Call wait_for_job(job_id={job_id}) until it "
+                "finishes, then repeat this call.")
+
     def clamp(self, t):
         return read_tools.clamp_seconds(self.duration, t)
 
@@ -1074,16 +1095,11 @@ def _editorial_source_index(ctx, asset_key=None):
             lambda conn: dbx.asset_by_key(conn, ctx.project_id, asset_key))
         if not asset:
             return None, None, f"REJECTED: no asset with storage_key {asset_key!r}."
-        if not asset.get("sha256"):
-            return None, None, (
-                "That asset has no reusable media index yet. Use look_at_asset "
-                "for its picture or get_audio_analysis for its sound.")
-        row = ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+        row = (ctx.db.run(dbx.get_index_by_sha, asset["sha256"])
+               if asset.get("sha256") else None)
         idx = (row or {}).get("json") or {}
         if not idx:
-            return None, None, (
-                "That asset's analysis has not finished yet. It remains in "
-                "the project; retry after indexing completes.")
+            return None, None, ctx.start_asset_index(asset)
         return dict(idx), _asset_name(asset), None
     if not getattr(ctx, "has_main_video", bool(ctx.index.get("video"))):
         return None, None, (
@@ -11457,8 +11473,35 @@ def _split_keeps_at_shot_boundaries(keep, index):
     return out, added
 
 
+def _dissolve_at_cuts(ctx, duration_s, scope, style="dissolve", start=None,
+                      end=None):
+    """A cross-dissolve or a slide is a per-cut device (set_junction), which
+    replaces a global transition: both on one cut would leave only one."""
+    from tools_ext import punctuation_tools
+    try:
+        d = min(max(float(duration_s if duration_s is not None else 0.8),
+                    TRANSITION_MIN_S), TRANSITION_MAX_S)
+    except (TypeError, ValueError):
+        return ("REJECTED: duration_s must be a number of seconds "
+                f"({TRANSITION_MIN_S:g}-{TRANSITION_MAX_S:g}).")
+    out = punctuation_tools.set_junction(
+        ctx, style, cuts="every" if scope == "every_cut" else "scene",
+        duration=d, start=start, end=end)
+    if not out.startswith("EDL"):
+        return out
+    edl = dict(ctx.latest_edl()["json"])
+    fx = dict(edl.get("effects") or {})
+    if fx.get("transition"):
+        fx["transition"] = None
+        edl["effects"] = fx
+        return out + "\n" + ctx.write_edl(
+            edl, "cleared the earlier global transition: dissolves replace it")
+    return out
+
+
 def set_transitions(ctx, style, duration_s=0.3, scope="scene",
-                    motion_motif=None, max_transitions=None):
+                    motion_motif=None, max_transitions=None, start=None,
+                    end=None):
     p = (style or "").strip().lower()
     sc = (scope or "scene").strip().lower()
     if sc not in TRANSITION_SCOPES:
@@ -11470,6 +11513,10 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "cut_silences — only right for a montage built from separate "
                 "clips. 'media' puts one only where B-roll, a still or a "
                 "card enters or leaves (camera changes stay hard cuts).")
+    if p in ("dissolve", "slide_left", "slide_right"):
+        # p5520: asked three times for cross-dissolves, the editor reached
+        # for this tool, found dips only and told the customer it could not.
+        return _dissolve_at_cuts(ctx, duration_s, sc, p, start, end)
     edl = dict(ctx.latest_edl()["json"])
     fx = dict(edl.get("effects") or {})
     if p in ("none", "off"):
@@ -11483,9 +11530,10 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
         return (f"REJECTED: style must be one of "
                 f"{', '.join(TRANSITION_STYLES)} — or 'none' to clear. "
                 + "; ".join(f"{k} = {v}" for k, v in TRANSITION_DESC.items())
-                + ". All are duration-preserving junction effects. True "
-                "crossfades (overlapping footage) are not supported — say "
-                "so if asked.")
+                + ". All are duration-preserving junction effects. For a "
+                "cross-dissolve or a film-strip slide use style='dissolve' or "
+                "'slide_left'/'slide_right' here: they work on the cuts baked "
+                "into an uploaded montage too.")
     try:
         d = round(min(max(float(duration_s if duration_s is not None
                                 else 0.3), TRANSITION_MIN_S),
@@ -11501,6 +11549,15 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
             return "REJECTED: max_transitions must be a positive integer."
         if limit < 1 or limit > 1000:
             return "REJECTED: max_transitions must be between 1 and 1000."
+    window = None
+    if start is not None or end is not None:
+        try:
+            window = (float(start) if start is not None else 0.0,
+                      float(end) if end is not None else float("inf"))
+        except (TypeError, ValueError):
+            return "REJECTED: start and end must be program seconds."
+        if window[1] <= window[0]:
+            return "REJECTED: end must be after start."
     previous = fx.get("transition") or {}
     motif = previous.get("motion_motif") if motion_motif is None else None
     if motion_motif is not None:
@@ -11551,16 +11608,31 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "are meant to be invisible), or set_transitions(scope="
                 "'every_cut') if they really do want one on every cut.")
 
+    if window is not None:
+        # The customer named a stretch: every change inside it, none outside.
+        blocks = timeline_mod.program_blocks(edl)
+        eligible = {k for k in eligible if 0 <= k < len(blocks) - 1
+                    and window[0] <= float(blocks[k]["out_end"]) <= window[1]}
+        if not eligible:
+            return (f"NOT APPLIED: no scene change between {window[0]:g}s and "
+                    f"{window[1]:g}s. The EDL was NOT changed.")
+        transition["junctions"] = sorted(eligible)
+        hit = len(eligible)
+        eligible_count = hit
+
     prog = program_duration(edl)
-    if sc == "scene" and limit is None and hit >= 3 and prog > 0 \
-            and prog / hit < TRANSITION_MIN_SPACING_S:
+    if sc == "scene" and limit is None and window is None and hit >= 3 \
+            and prog > 0 and prog / hit < TRANSITION_MIN_SPACING_S:
         safe_max = max(1, int(prog / TRANSITION_MIN_SPACING_S))
         return (f"NOT APPLIED: {hit} eligible scene changes across {prog:.0f}s "
                 f"would put a full-screen {p} transition every "
                 f"{prog / hit:.1f}s, which is too often and reads as an "
                 "automated effect pass. The EDL was NOT changed. Use hard "
                 "cuts, or call set_transitions again with max_transitions="
-                f"{safe_max} or fewer to mark only selected changes.")
+                f"{safe_max} or fewer to mark only selected changes. If the "
+                f"customer asked for every change, pass max_transitions={hit}; "
+                "if they named a stretch, pass start= and end= to cover every "
+                "change inside it. A soft cross-dissolve is set_junction.")
 
     if limit is not None and hit > limit:
         ordered = sorted(eligible)
@@ -21393,7 +21465,8 @@ def fetch_url(ctx, url, as_kind=None):
                    "named_song": music_gate.named_song_for(
                        ctx, got.get("source_url") or url)}
                   if kind == url_media.KIND_AUDIO else {})
-    ctx.db.run(dbx.insert_asset, ctx.project_id, kind, key,
+    asset_id = ctx.db.run(
+        dbx.insert_asset, ctx.project_id, kind, key,
                bytes_=got.get("bytes"), duration_s=got.get("duration_s"),
                width=got.get("width"), height=got.get("height"),
                fps=got.get("fps"),
@@ -21418,6 +21491,19 @@ def fetch_url(ctx, url, as_kind=None):
                                                        "worker")})
     if kind in (url_media.KIND_VIDEO, url_media.KIND_IMAGE):
         _mark_visual_review_pending(ctx, key, reviewed)
+    index_note = ""
+    if kind == url_media.KIND_VIDEO:
+        # A clip given by link is analysed like an uploaded clip (ticket
+        # #386: 152 of 152 fetched clips never had a transcript). Failing to
+        # queue it costs the transcript, not the download.
+        try:
+            index_job = ctx.db.run(
+                dbx.enqueue_asset_index, ctx.project_id,
+                ctx.project.get("user_id") or ctx.job.get("user_id"), asset_id)
+            index_note = (f" Its transcript and shots are being analysed as "
+                          f"job {index_job}.")
+        except Exception as e:
+            print(f"[fetch] analysis not queued for {key}: {e}", flush=True)
 
     bits = []
     if got.get("duration_s"):
@@ -21442,7 +21528,7 @@ def fetch_url(ctx, url, as_kind=None):
         review += " " + measured
     return (f"Downloaded \"{got['filename']}\"{detail} as a "
             f"{url_media.KIND_LABEL[kind]}: storage_key={key}. It is saved to "
-            f"the project but NOT in the video yet — {nxt}.{review} RIGHTS CHECK: "
+            f"the project but NOT in the video yet — {nxt}.{index_note}{review} RIGHTS CHECK: "
             "source title/uploader identify the file, but fetching does not "
             "determine usage rights; downloading it does not by itself grant "
             "republication rights. Use it only when the user has the needed "
@@ -32264,12 +32350,14 @@ TOOLS = {
                         "'flash' = additive white pop peaking ON the cut "
                         "(beat-synced edits). duration_s 0.1-1.5 (default "
                         "0.3; keep whip/flash short, 0.15-0.4). 'none' "
-                        "removes them (hard cuts again). True crossfades "
-                        "(overlapping footage) are NOT supported — offer "
-                        "one of these instead and say so.",
+                        "removes them (hard cuts again). style='dissolve' is a "
+                        "true cross-dissolve at every scene change, including "
+                        "the cuts baked into an uploaded montage (0.8-1.5 s "
+                        "suits photographs).",
                         {"style": {"type": "string",
                                    "enum": list(TRANSITION_STYLES)
-                                   + ["none"]},
+                                   + ["dissolve", "slide_left", "slide_right",
+                                      "none"]},
                          "duration_s": {"type": "number"},
                          "max_transitions": {
                              "type": "integer", "minimum": 1,
@@ -32279,6 +32367,8 @@ TOOLS = {
                                  "most this many eligible scene changes; use "
                                  "2-4 when the user asks for subtle or not "
                                  "excessive transitions."},
+                         "start": {"type": "number"},
+                         "end": {"type": "number"},
                          "scope": {"type": "string",
                                    "enum": list(TRANSITION_SCOPES_PUBLIC),
                                    "description":
@@ -34046,9 +34136,10 @@ _COMPACT_CONTRACTS = {
         "cuts that visibly pop; at=[s] picks; mode='off' undoes."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
-        "cuts — report the junction count it returns. Styles dip_black, "
-        "dip_white, whip_left/right, zoom_punch, glitch, flash (fast ones "
-        "0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
+        "cuts — report its junction count. start/end: only that "
+        "stretch. Styles dissolve, slide_left/right (film strip), "
+        "dip_black, dip_white, whip_left/right, zoom_punch, glitch, flash "
+        "(fast ones 0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
         "sound:swish_1 at the cut (it peaks there) unless a look already placed one "
         "there (get_edl sfx); ordinary cuts stay silent. One specific "
         "junction: a motion transition template."),

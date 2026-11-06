@@ -112,7 +112,7 @@ def _program_structure(edl: Dict[str, Any]) -> str:
         inserts.append({k: item.get(k) for k in (
             "id", "asset_key", "kind", "at_output_s", "duration_s",
             "source_start_s", "rate")})
-    return _canon({"keep": edl.get("keep") or [], "inserts": inserts})
+    return _canon({"keep": _joined_keep(edl), "inserts": inserts})
 
 
 def _items(edl: Dict[str, Any], lane: str, timeline_changed: bool) -> Any:
@@ -169,6 +169,19 @@ def _grade_state(edl: Dict[str, Any]) -> Any:
             "grade_custom": effects.get("grade_custom")}
 
 
+def _joined_keep(edl: Dict[str, Any]) -> List[List[float]]:
+    """Splitting a continuous source interval (at a composition boundary, or
+    at a cut baked into the upload) does not change the viewer's clock or
+    remove a frame, so it changes neither the cuts nor the timing."""
+    keep = []
+    for start, end in edl.get("keep") or []:
+        if keep and abs(float(start) - float(keep[-1][1])) < 1e-7:
+            keep[-1][1] = end
+        else:
+            keep.append([start, end])
+    return keep
+
+
 def _lane_state(edl: Dict[str, Any], lane: str,
                 timeline_changed: bool) -> Any:
     if lane in {"music", "sfx", "voiceover", "texts"}:
@@ -180,21 +193,13 @@ def _lane_state(edl: Dict[str, Any], lane: str,
     if lane == "grade":
         return _grade_state(edl)
     if lane == "cuts":
-        return edl.get("keep") or []
+        return _joined_keep(edl)
     if lane == "frame_ratio":
         return (edl.get("frame") or {}).get("ratio", "source")
     if lane == "source_audio":
         return {key: copy.deepcopy(edl.get(key)) for key in ("volume", "master", "stem_mix")}
     if lane == "timeline_timing":
-        # Splitting a continuous source interval at a composition boundary
-        # does not change the viewer's clock or remove a frame.
-        keep = []
-        for start, end in edl.get("keep") or []:
-            if keep and abs(float(start) - float(keep[-1][1])) < 1e-7:
-                keep[-1][1] = end
-            else:
-                keep.append([start, end])
-        return {"keep": keep, "speed": edl.get("speed") or [],
+        return {"keep": _joined_keep(edl), "speed": edl.get("speed") or [],
                 "inserts": [{key: item.get(key) for key in ("at_output_s", "duration_s")}
                             for item in edl.get("inserts") or []]}
     if lane == "audio_mix":

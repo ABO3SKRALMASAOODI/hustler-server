@@ -15,9 +15,14 @@ import llm
 LANES = ("music", "sfx", "voiceover", "audio_mix", "captions", "texts",
          "effects", "grade", "cuts", "frame_ratio", "source_audio", "timeline_timing")
 CONTRACT_SCHEMA = {
-    "type": "object", "required": ["mode", "requirements", "output_count", "timing_policy", "music_requested"],
+    "type": "object", "required": ["mode", "requirements", "output_count", "timing_policy", "music_requested", "changed_lanes"],
     "properties": {
         "mode": {"type": "string", "enum": ["edit", "inspect", "clarify"]},
+        "changed_lanes": {"type": "array", "description": (
+            "Lanes the requested changes must write. Removing a grade writes "
+            "grade; fades or transitions at existing cuts write effects, "
+            "never cuts or timeline_timing."),
+            "items": {"type": "string", "enum": list(LANES)}},
         "music_requested": {"type": "boolean", "description": (
             "True only when adding/replacing/selecting music is requested; "
             "preserving sound or cutting to an existing beat is not a new music request.")},
@@ -49,7 +54,8 @@ CONTRACT_SCHEMA = {
                     "audio_mix=ALL sound layers, only for an explicitly frozen "
                     "whole mix; captions=caption definitions and mutes; texts= "
                     "all authored text; effects=all non-grade effects; grade= "
-                    "colour; sfx=sound effects. Voice preservation does not "
+                    "the colour treatment this edit applies, never the "
+                    "source's own colours; sfx=sound effects. Voice preservation does not "
                     "freeze added music or legitimate volume correction; format preservation never freezes "
                     "cuts. For change/inspect use []. For avoid, ONLY entire "
                     "explicitly forbidden output channels may be listed: captions, "
@@ -107,9 +113,16 @@ conditional when the customer explicitly prioritizes accuracy over quantity.
 Recovery notes do not authorize new creative requirements. For each requirement,
 select its source_ref from customer_sources. These references identify verbatim
 customer instructions; do not reproduce or paraphrase a quotation or invent IDs.
-Use preserve lanes only for existing EDL state the customer explicitly protects;
+Use preserve lanes only for existing EDL state the customer explicitly protects.
+A lane holds what THIS EDIT applied, not the upload: 'keep the natural colours',
+'match my original', 'remove the filters' while current_edl carries a grade is
+a change that removes it (relative_to=source_footage), never a lock on it.
 protecting original subtitles also prevents duplicating them with new captions.
 When an authorized change affects part of a lane, do not freeze that whole lane.
+List in changed_lanes what the changes must write. Those lanes are not frozen,
+so a later instruction to fix colour or add transitions overrides an earlier or
+broader preservation of that lane. Preserving photo order, song or sync is not
+a freeze of effects, grade or transitions.
 Retaining the full original content is a coverage requirement, not a freeze of
 an earlier shortened preview's keep list. A request to restore/rebuild a full
 episode authorizes that change; 'cleaned-up episode' alone does not require
@@ -245,6 +258,16 @@ def _compile_schema(sources):
             (["avoid"], ["captions", "music", "voiceover", "sfx", "texts"])):
         variant = json.loads(json.dumps(item))
         variant["properties"]["action"]["enum"] = actions
+        if actions == ["preserve"]:
+            variant["required"].append("relative_to")
+            variant["properties"]["relative_to"] = {
+                "type": "string", "enum": ["current_edit", "source_footage"],
+                "description": (
+                    "current_edit: keep what the edit holds now. "
+                    "source_footage: the customer wants the ORIGINAL upload's "
+                    "look or content back or kept ('natural colours', 'match "
+                    "my original', 'remove the filters'); what this edit "
+                    "added is not protected, it may have to go.")}
         if lanes is None:
             variant["required"].remove("lanes")
             del variant["properties"]["lanes"]
@@ -375,6 +398,12 @@ def ensure(ctx):
                 row["quote"] = sources[row.pop("source_ref")]
                 row["id"] = f"r{ordinal}"
                 row.setdefault("lanes", [])
+                if row.pop("relative_to", None) == "source_footage":
+                    # p5520: "preserve the photos' natural colour" locked the
+                    # grade WE had added, and every attempt to remove it was
+                    # refused. A lane holds this edit's state, so a promise
+                    # about the source stays a requirement judged on pixels.
+                    row["lanes"] = []
                 if value["mode"] == "inspect":
                     # The mode forbids all writes. Preservation criteria in
                     # a review are questions to assess, not editing work.
@@ -403,8 +432,11 @@ def protected_lanes(ctx):
         raise ValueError("Clarify the conflicting request before changing the edit")
     if contract["mode"] == "inspect":
         raise ValueError("This request asks for analysis; inspect and answer without changing the edit")
+    # What the customer asks to change this turn cannot also be frozen by a
+    # broader preservation in the same brief: both readings are the model's,
+    # and the specific ask wins.
     protected = {lane for row in contract["requirements"] if row["action"] == "preserve"
-                 for lane in row["lanes"]}
+                 for lane in row["lanes"]} - set(contract.get("changed_lanes") or ())
     if contract["timing_policy"] == "preserve":
         protected.add("timeline_timing")
     return protected

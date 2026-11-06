@@ -137,11 +137,14 @@ def _drop_orphan_junctions(old_edl, new_edl, old_tl=None, new_tl=None):
              and i.get("type") == "junction"]
     if not juncs:
         return new_edl, []
+    tlm = _timeline_module()
+    if tlm is None:
+        return new_edl, []
     try:
-        cuts = program_cuts(new_edl)
+        # Every block boundary seats a junction, as the renderer's _fx_cuts
+        # has it: a split on a shot change inside one file is a cut too.
+        cuts = [float(b["out_end"]) for b in tlm.program_blocks(new_edl)[:-1]]
     except Exception:  # noqa: BLE001
-        cuts = None
-    if cuts is None:
         return new_edl, []
     gone = [j["id"] for j in juncs
             if not any(abs(float(j.get("at") or -9) - c) <= 0.06

@@ -15,7 +15,7 @@ frame held (reported in the device row, not a degrade).
 
 Styles
 
-  xfade built-ins   fadegrays, pixelize, radial, slices (hl/hr/vu/vd by
+  xfade built-ins   fadegrays, pixelize, radial, slide_left/right, slices (hl/hr/vu/vd by
                     direction): ffmpeg's own transitions
   eased masks       dissolve, wipe_*, iris, columns, staircase, box_steps,
                     bands — gray mask clips computed before ffmpeg runs
@@ -53,8 +53,10 @@ import fxprims
 import wipe_masks
 from fx_schemas.accents import DEFAULT_BOX_STEPS, decay_strengths
 
+# slide_*: both pictures travel together, side by side, like a film strip.
 XFADE_NAMES = {"fadegrays": "fadegrays", "pixelize": "pixelize",
-               "radial": "radial"}
+               "radial": "radial", "slide_left": "slideleft",
+               "slide_right": "slideright"}
 SLICE_NAMES = {"left": "hlslice", "right": "hrslice", "up": "vuslice",
                "down": "vdslice", None: "hrslice"}
 MASK_SEQ_STYLES = ("wipe_left", "wipe_right", "wipe_up", "wipe_down",
