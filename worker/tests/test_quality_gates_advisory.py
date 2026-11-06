@@ -67,14 +67,12 @@ def test_audio_verification_findings_keep_only_objective_defects():
 
 
 def test_quality_repair_pushback_is_once_per_version_with_a_backstop():
-    report = {"verdict": "repair", "findings": [{
-        "severity": "major", "category": "caption_collision", "time_s": 2.0,
-        "target_id": None, "motion_motif": None,
-        "evidence": "captions sit across the speaker's mouth",
-        "repair": "move the captions below the chin", "confidence": .95}]}
+    measured = [{"code": "corrupt_glyph", "severity": "error",
+                 "message": "Text contains replacement glyphs."}]
     version = {"v": 6}
-    ctx = NS(last_visual_critic=report, last_audio_review=None,
-             last_story_review=None, last_preview={"edl_version": 6},
+    records = {v: {"status": "repair_required", "unresolved_findings": measured}
+               for v in range(6, 20)}
+    ctx = NS(verification_records=records, last_preview={"edl_version": 6},
              latest_edl=lambda: {"version": version["v"]})
     messages, pushed = [], set()
     assert agent_loop._quality_repair_pushback(

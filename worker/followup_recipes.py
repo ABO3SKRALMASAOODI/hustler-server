@@ -388,12 +388,44 @@ def changed_lanes(prev, new):
     return out
 
 
+# ── the model's reading outranks these words ──
+# The lanes of request_contract's changed_lanes, in this module's lanes.
+# "effects" is left out: it is every non-grade effect, so naming it beside a
+# cut says nothing about what the customer asked for.
+BRIEF_LANES = {
+    "cuts": {"cuts"}, "timeline_timing": {"cuts"}, "captions": {"captions"},
+    "texts": {"title", "graphics"}, "frame_ratio": {"frame"}, "grade": {"grade"},
+    "music": {"audio"}, "sfx": {"audio"}, "voiceover": {"audio"},
+    "audio_mix": {"audio"}, "source_audio": {"audio"},
+}
+
+
+def _brief_disagrees(ctx, keys):
+    """classify() is a word list: it may only narrow a turn the model read the
+    same way. p5388 typed "Turn this into a punchy original 16:9 short with big
+    kinetic captions"; "punchy" matched, the brief named frame_ratio and
+    captions, and set_frame was refused as "which the request did not mention".
+    "Umm you didn't do anything that I asked" matched "remove the ums". A lane
+    the recipe cannot hold means the words misread the request, so there is no
+    recipe, in note or guard. An open brief read nothing, and a question has
+    nothing to narrow. With no brief at all (an older caller) the words stand."""
+    contract = getattr(ctx, "semantic_contract", None)
+    if not contract:
+        return False
+    if contract.get("mode") != "edit":
+        return True
+    may = allowed(keys)
+    return any(BRIEF_LANES[lane].isdisjoint(may)
+               for lane in contract.get("changed_lanes") or ()
+               if lane in BRIEF_LANES)
+
+
 # ── the turn's state (agent_loop.start) ───────────────────────────────────
 
 def start(ctx, text):
     """The follow-up state for this turn, or None. Sets ctx.followup."""
     keys = classify(text)
-    if not keys:
+    if not keys or _brief_disagrees(ctx, keys):
         ctx.followup = None
         return None
     try:

@@ -394,32 +394,24 @@ def _strict_schema(schema):
 
 def _one_shot(msgs, tools):
     """Single reviews do not reuse their project payload after this call."""
-    structured_review = len(tools) == 1 and tools[0].get("name") in {
-        "assess_request", "record_request_contract"}
-    return (not tools or structured_review) and all(m["role"] != "assistant" for m in msgs)
+    structured_brief = len(tools) == 1 and tools[0].get("name") == "record_request_contract"
+    return (not tools or structured_brief) and all(m["role"] != "assistant" for m in msgs)
 
 
 def _mark_cache(system, msgs, tools, model="", cache_policy=None):
     """Up to four ephemeral breakpoints at the stability boundaries, and none
     where nothing would be read back."""
     # A model name cannot tell us whether the call is reusable. Opus also
-    # runs multi-step paid edits and repeated structured assessments. Only
-    # the caller that actually switches planners may opt out of caching the
-    # unique project payload; shared instructions still earn cache reads.
+    # runs multi-step paid edits. Only the caller that actually switches
+    # planners may opt out of caching the unique project payload; shared
+    # instructions still earn cache reads.
     if cache_policy == "shared_only" or _one_shot(msgs, tools):
-        # A critic's unique frames are one-shot. A structured edit assessment
-        # separates reusable request/source evidence into its first text block
-        # and changing edit/proof/draft data into the next block.
+        # A critic's unique frames are one-shot.
         if tools:
             tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral"})
         if system:
             stable = min(1, len(system) - 1) if cache_policy == "shared_only" else 0
             system[stable] = dict(system[stable], cache_control={"type": "ephemeral"})
-        if (len(tools) == 1 and tools[0].get("name") == "assess_request"
-                and msgs and len(msgs[0]["content"]) >= 2
-                and all(b.get("type") == "text" for b in msgs[0]["content"][:2])):
-            msgs[0]["content"][0] = dict(msgs[0]["content"][0],
-                                         cache_control={"type": "ephemeral"})
         return
     # A large batch of images/observations can put the previous request's
     # write beyond Anthropic's 20-position lookback. Keep an explicit read

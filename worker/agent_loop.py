@@ -26,7 +26,6 @@ import model_prices
 import motion_contract
 import motion_judge
 import music_search
-import preview_critic
 import preference_memory
 import quality_verifier
 import request_scope
@@ -3236,7 +3235,7 @@ _EXPLICIT_MICRO_EDIT = re.compile(
 # and the final handoff has neither a preview attachment nor its review.
 _PREVIEW_CHECKPOINT_FIELDS = (
     "request_preservation_baseline",
-    "semantic_contract", "request_assessment", "request_contract_repairs", "request_preflights",
+    "semantic_contract",
     "render_dependency_state", "render_dependency_key",
     "last_preview", "last_visual_critic", "last_story_review",
     "last_audio_review", "last_audio_qc_findings",
@@ -3359,7 +3358,7 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
                      f"({recovery['collapsed_duration_s']:.2f}s) and restored "
                      "the last usable edit before preview/export. The broken "
                      "intermediate version was not delivered.)")
-    if ctx.versions_written and (
+    if (ctx.versions_written or _landed_before_restart(ctx)) and (
             latest["version"] not in ctx.rendered_versions
             or (getattr(ctx, "last_preview", None) or {}).get("edl_version")
             != latest["version"]):
@@ -3384,6 +3383,9 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
         _activity(worker_db, session_id, "render_preview",
                   {"auto": "model skipped it"}, result,
                   edl_version=latest["version"])
+        # The same tool the editor calls, so this render corrects a failed
+        # call of it. Unrecorded, that delivered turn stayed "partial".
+        _record_outer_tool_outcome(ctx, "render_preview", result)
         # Successful proof text deliberately contains rubric phrases such as
         # "FAILED if the subject is clipped". A substring check read that as
         # an encode failure and appended a false warning even though the v4
@@ -3459,19 +3461,6 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
         return False
     _latest, verification = _latest_verification(ctx)
     findings = []
-    if not verification:
-        # No durable record for this exact version (it is written on every
-        # complete render): fall back to the reviewers' own blocking lines.
-        report = getattr(ctx, "last_visual_critic", None) or {}
-        findings = preview_critic.repair_lines(report)
-        findings.extend(story_critic.repair_lines(
-            getattr(ctx, "last_story_review", None) or {}))
-        audio_review = getattr(ctx, "last_audio_review", None) or {}
-        if agent_tools.audio_review_blocks(audio_review) and \
-                audio_review.get("text"):
-            findings.append(
-                "independent actual-audio review: "
-                + str(audio_review["text"])[:700])
     for row in verification.get("unresolved_findings") or []:
         line = (f"{row.get('finding_id') or row.get('code')}: "
                 f"{row.get('message') or row}")
@@ -3507,26 +3496,126 @@ def _quality_repair_pushback(ctx, messages, t_start, pushed_versions,
     return True
 
 
-_PLAN_WITHOUT_WRITE_NUDGE = (
-    "You have not written the EDL. A concrete brief is permission to cut "
-    "— write NOW in this same turn. Do not ask the user to approve a clip "
-    "order. Stop before writing only if a required asset is missing or a "
-    "listed capability does not exist; otherwise use the write tools and "
-    "render_preview."
+_RENDERED_AFTER_DRAFT = (
+    "Your latest version has now been rendered and is attached to the chat, "
+    "so the reply you just wrote predates it. Write your reply to the customer "
+    "again, true to what exists now. Do not say a render is still to come. "
+    "Output only the rewritten reply."
+)
+_EDIT_WITHOUT_WRITE_NUDGE = (
+    "Measured: this request asks for a change and the timeline has not "
+    "changed. Do the work now, then render_preview. A refused or malformed "
+    "call is recoverable: read the refusal and reach the same result another "
+    "way, for example remove the layer and add it again as the customer asked. "
+    "Choose any open detail yourself and name it in your reply. Do not ask "
+    "the customer to approve what they already asked for. If you cannot go on "
+    "without something only the customer has, such as a file or a track "
+    "choice, call ask_user with that one question. If the capability does "
+    "not exist, say plainly that nothing has changed."
 )
 
 
-def _plan_without_write_pushback(ctx, messages, already_pushed):
-    """A recorded plan with no EDL write is not a finished turn."""
-    if already_pushed:
-        return False
-    plan = getattr(ctx, "edit_plan", None) or {}
-    if not plan.get("steps"):
+def _rendered_this_turn(ctx):
+    """``last_preview`` is not evidence that THIS turn delivered anything. A
+    context can carry the project's already-cached preview while a later edit
+    attempt fails before its first write. Only versions rendered by this
+    ToolContext are current-turn preview value."""
+    preview = getattr(ctx, "last_preview", None) or {}
+    return bool(getattr(ctx, "rendered_versions", None)) \
+        and not bool(isinstance(preview, dict) and preview.get("cached"))
+
+
+def _note_unread_brief(ctx, honesty):
+    """On the job's own record, so a turn that ended fulfilled still files that
+    its request ran with nothing protected (ops_loop.gaps). The reason lives on
+    the brief, which survives a continuation."""
+    contract = getattr(ctx, "semantic_contract", None) or {}
+    if contract.get("mode") == "open":
+        honesty["brief_unavailable"] = contract.get("unavailable") or "unknown"
+
+
+def _landed_before_restart(ctx):
+    """The worker died after this request's write landed. versions_written is
+    this process's list, so a successor starts it empty and only the durable
+    baseline digest says the timeline moved."""
+    return bool(getattr(ctx, "turn_baseline_from_death_resume", False)
+                and _turn_edl_changed(ctx))
+
+
+def _edit_ended_where_it_began(ctx):
+    """Versions were written and the timeline is back at the request's start.
+    An unknown baseline is not evidence of that."""
+    return bool(getattr(ctx, "versions_written", None)
+                and getattr(ctx, "turn_start_edl", None)
+                and not _turn_edl_changed(ctx))
+
+
+def _edit_changed_nothing(ctx):
+    """A fact, not an opinion: the brief says edit and this request left
+    nothing new to watch. Version churn that ended where it began counts."""
+    if (getattr(ctx, "semantic_contract", None) or {}).get("mode") != "edit" \
+            or _turn_has_asset_progress(ctx):
         return False
     if getattr(ctx, "versions_written", None):
+        return _edit_ended_where_it_began(ctx)
+    return not (_rendered_this_turn(ctx) or _landed_before_restart(ctx))
+
+
+def _edit_without_write_pushback(ctx, messages, already_pushed):
+    """Once per request, so a refusal or an honest "this cannot be done" still
+    delivers. The one exception is a lane that opens: prose first and a refused
+    write after it would otherwise leave the wall standing with the nudge
+    spent. Each lane opens once, so this ends. Never at a spent budget: the
+    loop's stop message would replace the editor's own words."""
+    if not _edit_changed_nothing(ctx) or ctx.over_budget():
         return False
-    messages.append({"role": "system", "content": _PLAN_WITHOUT_WRITE_NUDGE})
+    import request_contract
+    released = request_contract.release_inherited(ctx)
+    if already_pushed and not released:
+        return False
+    # This is the "do it before you ask" repair. ask_user's own first hold
+    # would make the same point a second time.
+    ctx._question_held = True
+    messages.append({"role": "system", "content": (
+        _EDIT_WITHOUT_WRITE_NUDGE + request_contract.released_note(released))})
     return True
+
+
+def _reply_after_auto_render(ctx, client, messages, tools, draft, honesty):
+    """The editor wrote this before the render it did not ask for (replay
+    p5450: "I have not rendered it yet", preview attached). Its words go out,
+    so they get one tools-off rewrite to describe what now exists.
+
+    The video already exists, so this can only improve a sentence, and 15 of
+    108 finished turns end on the automatic render. It stays out of the main
+    loop on purpose: there a spent budget replaced the delivery with a stop
+    message, a render past the execution window opened a whole new slice, a
+    provider error failed the turn and the editor could start new work. Any
+    doubt keeps the draft."""
+    if ctx.over_budget():
+        return draft
+    msgs = messages + [{"role": "assistant", "content": draft},
+                       {"role": "system", "content": _RENDERED_AFTER_DRAFT}]
+    model = ctx.agent_model or config.AGENT_MODEL
+    try:
+        resp = llm.create_with_dialect(
+            client, model, msgs, tools=tools, tool_choice="none",
+            temperature=config.AGENT_TEMPERATURE,
+            max_tokens=config.AGENT_REPLY_MAX_TOKENS)
+        choice = resp.choices[0]
+        redraft = (choice.message.content or "").strip()
+        llm.record("reply_after_render",
+                   {"model": model, "messages": msgs[-2:],
+                    "note": "rewrite after the automatic render"},
+                   {"content": redraft}, getattr(resp, "usage", None))
+    except Exception as e:
+        print(f"[reply] rewrite failed ({e}) — posting the draft as-is",
+              flush=True)
+        return draft
+    if not redraft or getattr(choice, "finish_reason", None) == "length":
+        return draft
+    honesty["reply_after_render"] = True
+    return redraft
 
 
 def _plan_completion_pushback(ctx, messages, already_pushed):
@@ -4019,12 +4108,6 @@ def _strict_quality_handoff(ctx):
                 "export_ready": True}
 
     findings = []
-    report = getattr(ctx, "last_visual_critic", None) or {}
-    for line in preview_critic.repair_lines(report)[:3]:
-        findings.append(line)
-    for line in story_critic.repair_lines(
-            getattr(ctx, "last_story_review", None) or {})[:2]:
-        findings.append(line)
     for line in (getattr(ctx, "last_audio_qc_findings", None) or [])[:2]:
         findings.append("audio QC: " + str(line))
     for line in (getattr(ctx, "last_picture_qc_findings", None) or [])[:2]:
@@ -4034,9 +4117,9 @@ def _strict_quality_handoff(ctx):
             and agent_tools.audio_review_blocks(audio_review):
         findings.append("actual-audio review: "
                         + str(audio_review.get("text") or "needs repair"))
-    # Blocking review lines recorded at render time (critic repairs, edit
-    # duplication, audio QC, execution gaps) count too, but only for the
-    # exact latest version. Taste notes are advisory and live separately in
+    # Measured lines recorded at render time (edit duplication, audio QC,
+    # execution gaps) count too, but only for the exact latest version. Taste
+    # notes and critic opinions are advisory and live separately in
     # ctx.last_taste_advisory; they never reach this list.
     if getattr(ctx, "last_taste_version", None) == latest:
         for line in (getattr(ctx, "last_taste", None) or []):
@@ -4057,6 +4140,7 @@ def _strict_quality_handoff(ctx):
     if verification.get("status") in {"passed", "justified"}:
         status = verification["status"]
     else:
+        report = getattr(ctx, "last_visual_critic", None) or {}
         story_report = getattr(ctx, "last_story_review", None) or {}
         status = ("pass" if report.get("verdict") == "pass" or
                   story_report.get("verdict") == "pass" else "unchecked")
@@ -4480,8 +4564,7 @@ def _enforce_honesty(ctx, client, messages, tools, draft, start_version,
     inspection. (A wrote-but-denies redraft keeps the corrective-note path:
     a denial is wrong but not a fabrication worth suppressing.)"""
     if getattr(ctx, "request_contract_required", False):
-        # The semantic delivery review runs after all reply transformations
-        # and sees the inspected media. This legacy checker only sees the
+        # The editor writes the reply. This legacy checker only sees the
         # primary upload's transcript and can erase a valid secondary-file
         # review by declaring its quotations fabricated.
         return draft
@@ -4598,11 +4681,9 @@ def _language_flip(joined, user_text, final, verdict=None):
     return None
 
 
-def _customer_texts(ctx, user_text, this_request_only=False):
+def _customer_texts(ctx, user_text):
     """The customer's typed messages. Never the prompt's role-"user" rows:
     those carry the product's own English notes (ticket #387)."""
-    if this_request_only and user_text:
-        return [user_text]
     texts = list(getattr(ctx, "customer_texts", None) or [])
     if user_text and user_text not in texts:
         texts.append(user_text)
@@ -4610,7 +4691,7 @@ def _customer_texts(ctx, user_text, this_request_only=False):
 
 
 def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
-                            honesty, this_request_only=False):
+                            honesty):
     """Check the drafted reply against what the customer typed, with one
     forced rewrite: _enforce_honesty's shape applied to round 85's bug (an
     English one-liner answered in Russian). Fail-open at every step: any
@@ -4618,10 +4699,8 @@ def _enforce_reply_language(ctx, client, messages, tools, final, user_text,
 
     The customer is measured from the whole conversation, not the last
     message: on 2026-08-05 a user who had written whole sentences in English
-    answered "Sure", four letters, and got a reply in Russian. With
-    this_request_only the request assessor's text answers this request alone,
-    so an English file name earlier in the thread cannot excuse it."""
-    texts = _customer_texts(ctx, user_text, this_request_only)
+    answered "Sure", four letters, and got a reply in Russian."""
+    texts = _customer_texts(ctx, user_text)
     joined = " ".join(x for x in texts if x)
     model = ctx.agent_model or config.AGENT_MODEL
     verdict = reply_language.judge(client, model, texts, final)
@@ -5080,9 +5159,15 @@ def _record_outer_tool_outcome(ctx, name, result):
         # first") is met once the same tool later succeeds. Left open, it
         # labelled a delivered request partial (ticket #58, 31 Oct: report
         # before the complete render, then the render, reply sent). A wait
-        # on a named background job is resolved only by that job.
+        # on a named background job is resolved only by that job. A tool
+        # failure is corrected the same way: 38 of 40 failed receipts in 14
+        # days (6 Nov) recovered through the same tool, and a recovered one
+        # must not file "ended partial" against a delivered request.
         for row in ctx.turn_tool_outcomes:
-            if (row.get("tool") == name and row.get("kind") == "prerequisite"
+            if row.get("tool") != name:
+                continue
+            if row.get("kind") == "failed" or (
+                    row.get("kind") == "prerequisite"
                     and not row.get("pending_job_id")):
                 row["resolved"] = True
     ctx.turn_tool_outcomes.append(receipt)
@@ -5103,14 +5188,8 @@ def _repeated_tool_failure(ctx):
 
 def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     """Return (outcome, billable) from value delivered, not job state."""
-    # ``last_preview`` is not evidence that THIS turn delivered anything.  A
-    # context can carry the project's already-cached preview while a later
-    # edit attempt fails before its first write.  Only versions rendered by
-    # this ToolContext are current-turn preview value.
-    preview = getattr(ctx, "last_preview", None) or {}
-    rendered_now = bool(getattr(ctx, "rendered_versions", None)) \
-        and not bool(isinstance(preview, dict) and preview.get("cached"))
-    has_edit_deliverable = bool(ctx.versions_written or rendered_now)
+    has_edit_deliverable = bool(ctx.versions_written or _rendered_this_turn(ctx)
+                                or _landed_before_restart(ctx))
     has_value = bool(has_edit_deliverable or _turn_has_asset_progress(ctx))
     blank_canvas_no_value = (
         not has_value and getattr(ctx, "has_main_video", True) is False)
@@ -5144,25 +5223,32 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     if delivery and not delivery['complete']:
         unfinished_edit = True
     import request_contract
-    if request_contract.enabled(ctx) and not request_contract.completion(ctx):
-        unfinished_edit = bool(has_value)
-        attempted_edit = True
-    elif request_contract.enabled(ctx) and (getattr(ctx, "semantic_contract", None) or {}).get("mode") in {"inspect", "clarify"}:
-        # A verified explanation/review is the requested deliverable even on
-        # a photos-only or empty timeline. It must not become a false editing
-        # failure merely because this answer correctly made no new video.
+    request_mode = (getattr(ctx, "semantic_contract", None) or {}).get("mode")
+    # The brief found the request conflicting and writes are refused, so this
+    # reply is a question: the same fact as ask_user, not an answer delivered.
+    clarifying = bool(request_contract.enabled(ctx) and request_mode == "clarify"
+                      and status == "replied" and not has_edit_deliverable)
+    if request_contract.enabled(ctx) and request_mode in {"inspect", "clarify"}:
+        # The answer is the requested deliverable even on a photos-only or
+        # empty timeline. It must not become a false editing failure merely
+        # because this answer correctly made no new video.
         has_value = True
         blank_canvas_no_value = blank_canvas_asset_only = False
         attempted_edit = False
         failed = prerequisite = refused = False
-    elif request_contract.enabled(ctx) and has_edit_deliverable:
-        # A corrected intermediate tool failure is not an unfinished request
-        # once every requirement has independent current-version evidence.
-        failed = prerequisite = refused = False
+    elif request_contract.enabled(ctx) and request_mode == "edit" \
+            and (not has_edit_deliverable or _edit_ended_where_it_began(ctx)):
+        # Measured, not judged: the customer asked for a change and this
+        # request's timeline did not change. Never fulfilled. Charged only
+        # for an asset it did create (_deliverable_changed below).
+        unfinished_edit = bool(has_value)
+        attempted_edit = True
+    elif has_edit_deliverable and request_contract.broken_protections(ctx):
+        # The check says a finding once and the work goes out. Told is not
+        # cleared: what the customer protected is measurably broken.
+        unfinished_edit = True
 
-    request_waiting = request_contract.awaiting_input(ctx) and (
-        not has_edit_deliverable or quality.get("export_ready") is True)
-    if (status == "awaiting_user" and not failed) or request_waiting:
+    if (status == "awaiting_user" and not failed) or clarifying:
         # a question to the user: the request waits on their answer
         outcome = AWAITING_USER
     elif (getattr(ctx, "shorts_jobs_completed", None) and not has_edit_deliverable
@@ -5207,8 +5293,11 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     # (25 Oct 2026; CLAUDE.md credit rules). 77% of credits in the 30
     # days before were charged on partial/blocked requests, many of which
     # only churned versions that ended where they began or never rendered.
-    if billable and outcome in {"partial", "blocked"} \
-            and not _deliverable_changed(ctx):
+    # Nobody read an open brief's request, so an answer stays an answer, but
+    # it may have been an edit that never happened: the doubt is the customer's.
+    if billable and (clarifying or ((request_mode == "open"
+                                     or outcome in {"partial", "blocked"})
+                                    and not _deliverable_changed(ctx))):
         billable = False
     return outcome, billable
 
@@ -5225,7 +5314,8 @@ def _deliverable_changed(ctx):
         # watchable preview when this context rendered it.
         return bool(getattr(ctx, "rendered_versions", None)
                     and isinstance(preview, dict)
-                    and not preview.get("cached"))
+                    and not preview.get("cached")) \
+            or _landed_before_restart(ctx)
     if not _turn_edl_changed(ctx):
         return False
     try:
@@ -5515,8 +5605,8 @@ def _outcome_meta(ctx, outcome):
                     "findings") or [])],
             # Same meaning across the Oct 2026 change: the taste audit's
             # finding count (now advisory). ctx.last_taste holds only the
-            # BLOCKING review lines (critic, audio QC, duplication,
-            # execution gaps), reported under their own key.
+            # MEASURED lines (audio QC, duplication, execution gaps),
+            # reported under their own key.
             "deterministic_taste_findings": len(
                 getattr(ctx, "last_taste_advisory", None) or []),
             "blocking_review_lines": len(
@@ -5712,9 +5802,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     if semantic_request.enabled(ctx):
         messages.append({"role": "system", "content": (
             "AUTHORITATIVE REQUEST REQUIREMENTS. Fulfill every change and "
-            "preserve every protected element. These requirements are also "
-            "checked against the delivered preview. A successful render alone "
-            "is not completion.\n" + json.dumps(ctx.semantic_contract, ensure_ascii=False))})
+            "preserve every protected element. When your complete preview "
+            "shows this done, reply: your reply is what the customer reads "
+            "and nothing reviews it after you. Say plainly anything you did "
+            "not finish.\n" + json.dumps(ctx.semantic_contract, ensure_ascii=False))})
     if _cont:
         cont_timings = _cont.get("timings") or {"tools": {}}
         done = ", ".join(
@@ -5835,6 +5926,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
 
     honesty = _cont.get("honesty") or \
         {"false_claims": 0, "corrective_note": False}
+    _note_unread_brief(ctx, honesty)
     start_version = int(_cont.get("start_version")
                         or getattr(ctx, "prep_start_version", None)
                         or ctx.latest_edl()["version"])
@@ -6133,6 +6225,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 (getattr(ctx, "semantic_contract", None) or {}).get("request_digest")
                 != semantic_request.digest(ctx)):
             contract = semantic_request.ensure(ctx)
+            _note_unread_brief(ctx, honesty)
             messages.append({"role": "system", "content": (
                 "The updated customer request supersedes the old contract:\n"
                 + json.dumps(contract, ensure_ascii=False))})
@@ -6691,7 +6784,13 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 messages.append({"role": "assistant", "content": body or "Preparing the edit."})
                 messages.append({"role": "system", "content": preflight})
                 continue
+            if _edit_without_write_pushback(ctx, messages, plan_write_pushed):
+                plan_write_pushed = True
+                if body:
+                    messages.insert(-1, {"role": "assistant", "content": body})
+                continue
             # Auto-render first so the turn facts include the real preview.
+            preview_before = (getattr(ctx, "last_preview", None) or {}).get("edl_version")
             latest, fail_note = _auto_render_if_needed(ctx, worker_db,
                                                        session_id, timings,
                                                        turn_deadline)
@@ -6765,6 +6864,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 # export button and the open findings as notes.
                 ctx.critics_advisory = True
             draft = body
+            if body and not fail_note and (getattr(ctx, "last_preview", None) or {}).get(
+                    "edl_version") not in (None, preview_before):
+                draft = _reply_after_auto_render(ctx, client, messages, tools,
+                                                 body, honesty)
             if not draft:
                 if ctx.versions_written or ctx.last_preview:
                     draft = "Done — check the preview on the right."
@@ -6791,81 +6894,12 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             final += _unused_fetched_audio_note(ctx)
             if fail_note:
                 final += fail_note
-            if semantic_request.enabled(ctx):
-                assessment = semantic_request.assess(ctx, final)
-                repairs = list(getattr(ctx, "request_contract_repairs", None) or [])
-                missing = [r for r in assessment["requirements"]
-                           if r["status"] in {"unmet", "unknown"}]
-                # One decision per immutable version, bounded across durable
-                # continuations. Tool typos and omitted treatments get an
-                # actionable repair, not a misleading success or an endless loop.
-                marker = [assessment["request_digest"], assessment["edl_version"],
-                          assessment.get("evidence_digest", assessment["draft_digest"])]
-                if (missing and marker not in repairs and len(repairs) < 3
-                        and not ctx.over_budget()
-                        and time.monotonic() + 30 < turn_deadline):
-                    ctx.request_contract_repairs = repairs + [marker]
-                    messages.append({"role": "assistant", "content": final or "Checking delivery."})
-                    messages.append({"role": "system", "content": (
-                        "The exact saved edit has not fulfilled these customer "
-                        "requirements. For unknown findings inspect or prove the "
-                        "existing work first; do not change it speculatively. "
-                        "Repair unmet work using the available "
-                        "tools, preserve completed work, and verify the new version. "
-                        "A malformed tool argument is recoverable: inspect the "
-                        "actual tool schema and retry correctly. Do not ask for "
-                        "permission to perform work already requested.\n"
-                        + json.dumps(missing, ensure_ascii=False))})
-                    continue
             honesty["auto_render"] = ctx.autorendered
             outcome, billable = _turn_completion(
                 ctx, "replied", fail_note=fail_note,
                 truncated=truncated_out)
-            outcome_before_reply = outcome
             import fulfillment
             final = fulfillment.disclose(ctx, final)
-            _new_sub = (not _trial_lane(ctx)
-                        and getattr(ctx, "claude_paid", None) is not None)
-            if semantic_request.enabled(ctx):
-                assessed_reply = semantic_request.reply(ctx, final)
-                if assessed_reply != final:
-                    # p5518: this text replaced the checked draft, so an
-                    # Arabic customer was answered in English. It gets the
-                    # same language check as any other reply.
-                    assessed_reply = _enforce_reply_language(
-                        ctx, client, messages, tools, assessed_reply,
-                        quality_verifier.request_text_for(ctx), honesty,
-                        this_request_only=True)
-                final = assessed_reply
-                assessment = semantic_request.current_assessment(ctx)
-                honesty["request_requirements"] = assessment
-                honesty["unmet_asks"] = [r["id"] for r in assessment["requirements"]
-                                         if r["status"] != "satisfied"]
-            elif (_trial_lane(ctx) or _new_sub) and config.CLAUDE_TRIAL_REPLY_GUARD:
-                # Q8: the trial reply says only what the turn's facts back
-                # (EDL diff, the latest preview, the transcript), short and
-                # warm: what changed, where to look, one next step.
-                # REAL_USER_BRUTE (31 Oct): a NEW subscriber's Claude-lane
-                # turn (D1, the same Haiku model) read raw: "The 19-second
-                # cut passes the current preview. I left the opening 'But'
-                # fragment and the sagging middle section unchanged."
-                # Grandfathered subscribers' lanes are untouched.
-                import trial_reply
-                final, _report = trial_reply.finish_for_ctx(
-                    ctx, final, user_message.get("content") or "",
-                    subscriber=_new_sub, outcome=outcome)
-                if _report and _report.get("dropped"):
-                    honesty["trial_reply_dropped"] = _report["dropped"][:12]
-                outcome = _outcome_after_reply(outcome, _report, honesty)
-                # TRIAL_QUALITY_BUILD: the reply says what the designed
-                # single-shot structure added (title, cut-ins, ending)
-                _applied = getattr(ctx, "single_shot_applied", None)
-                if _applied and trial_reply.language(final) == "en":
-                    import single_shot_design
-                    _line = single_shot_design.reply_line(_applied, final)
-                    if _line:
-                        final = _insert_after_lead(final, _line)
-                        honesty["single_shot_design"] = _applied
             # RS_ENGINE (31 Oct): music the user asked for ends on a choice
             # of 2-4 library tracks, never on silence told as done (user
             # 2665: audio muted, the library listed, nothing offered).
@@ -6875,9 +6909,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if _music_ask:
                 final = music_offer.append_offer(final, _music_ask)
                 honesty["music_offer"] = True
-                outcome = music_offer.choice_outcome(
-                    outcome_before_reply, outcome,
-                    honesty.get("unmet_asks"), _music_ask)
+                outcome = music_offer.choice_outcome(outcome, _music_ask)
             if _trial_lane(ctx):
                 # Q8: a trial turn always ends on a version the user can take
                 # to the export paywall: the reviewers' open notes advise
@@ -6892,8 +6924,6 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                 "preview": ctx.last_preview,
                 **quality,
                 **_outcome_meta(ctx, outcome),
-                **({"request_completion": semantic_request.current_assessment(ctx)}
-                   if semantic_request.enabled(ctx) else {}),
             }
             worker_db.run(dbx.add_message, session_id, "assistant", final,
                           message_meta)

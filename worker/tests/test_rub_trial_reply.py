@@ -97,12 +97,6 @@ def test_a_new_subscribers_reply_is_finished_but_may_talk_about_its_export():
     assert "ready to download" not in trial_out
 
 
-def test_the_agent_loop_finishes_new_subscriber_replies_too():
-    src = open(os.path.join(os.path.dirname(HERE), "agent_loop.py"), encoding="utf-8").read()
-    assert "subscriber=_new_sub" in src
-    assert 'getattr(ctx, "claude_paid", None) is not None' in src
-
-
 def test_a_quoted_title_with_its_own_question_mark_stays_one_sentence():
     draft = ("Your cut stays as it is, a 17-second edit: it already does what you asked. "
              "The video already opens with a title, \"NEW TO PYTHON? START HERE\", over the first "

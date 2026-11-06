@@ -289,6 +289,29 @@ def _reply_hid_a_failure(cur, since, now, p):
     return out
 
 
+def _brief_unread(cur, since, now, p):
+    """The call that reads a request failed and the editor went on from the
+    customer's own words with nothing protected. That keeps the turn alive, so
+    it can end fulfilled and no failure row says it happened (#136, #138 failed
+    the whole turn instead). Reads the stored reason, no customer words."""
+    cur.execute(f"""
+        SELECT j.id, j.user_id, j.project_id, j.updated_at AS at,
+               j.result->'honesty'->>'brief_unavailable' AS why
+          FROM video_jobs j JOIN users u ON u.id = j.user_id
+         WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
+           AND j.type = 'agent_turn' AND j.state = 'done'
+           AND j.result->'honesty' ? 'brief_unavailable'
+           AND COALESCE(j.result->>'continued_job_id', '') = ''
+           AND {_customers()}
+         ORDER BY j.updated_at LIMIT %(limit)s""", p)
+    i = _i()
+    return [_item(f"gap:brief:{r['id']}", "result", r["at"], r, "P1",
+                  ("gap", "brief-unread", i.signature(r["why"])),
+                  "A request ran with nothing protected: its brief could not be read",
+                  f"job {r['id']} · {r['why']}", job_id=r["id"])
+            for r in cur.fetchall()]
+
+
 def _model_failing(cur, since, now, p):
     """24 byte-identical canned replies went to 8 accounts over 39 hours while
     one provider was dry. Three failures in a row would have fired on the
@@ -497,7 +520,8 @@ def _unread_endings(cur, since, now, p):
 
 CHECKS = (_analysis_overdue, _render_overdue, _export_never_arrived, _checkout,
           _request_changed_nothing, _first_cut_is_the_upload,
-          _reply_hid_a_failure, _model_failing, _cancelled_within_a_day,
+          _reply_hid_a_failure, _brief_unread, _model_failing,
+          _cancelled_within_a_day,
           _below_the_bar, _turn_went_silent, _unread_endings)
 
 

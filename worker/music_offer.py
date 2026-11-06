@@ -73,17 +73,17 @@ _ASK_VERB = re.compile(r"\b(?:add|play|put|use|place|give|include|want|need)\b",
                        re.I)
 
 
-def choice_outcome(before_reply, outcome, unmet, offer):
-    """A real track choice is waiting for the user, not a failed edit.
+def choice_outcome(outcome, offer):
+    """A real track choice is waiting for the user, not a finished request.
 
-    Only reclassify a turn otherwise fulfilled before the ask ledger found
-    missing music. Existing tool/quality failures and other unmet asks stay
-    partial; a generic suggestion without an opened offer is not a choice.
+    The brief asked for music, none is on the timeline and the offer is open,
+    so a turn otherwise fulfilled waits on the customer, and so does one that
+    wrote nothing and hit no failure: "blocked" would file a P0 for a question
+    (ops_loop.intake). A delivered edit left open by a failure stays what it
+    was; no open offer changes nothing.
     """
-    if offer and before_reply == "fulfilled" and outcome == "partial" \
-            and set(unmet or []) == {"music"}:
-        return "awaiting_user"
-    return outcome
+    return "awaiting_user" if offer and outcome in {"fulfilled", "blocked"} \
+        else outcome
 
 
 def moods_for(text):

@@ -1,5 +1,4 @@
-"""p5518 (ticket #77): a stopped edit cycle can still take back what it added,
-and the reply that replaces the draft keeps the customer's language."""
+"""p5518 (ticket #77): a stopped edit cycle can still take back what it added."""
 from types import SimpleNamespace
 
 import pytest
@@ -86,38 +85,8 @@ def test_the_refusal_names_the_way_back():
     assert 'remove_blur' in agent_loop._trial_render_refusal(stopped(), 'add_text')
 
 
-def test_assessor_is_told_the_customers_language_and_plain_words():
-    text = request_contract.__dict__
-    prompt = next(v for k, v in text.items()
-                  if isinstance(v, str) and 'Use assess_request once' in v)
-    assert "customer's own words" in prompt
-    assert 'rg1' in prompt  # internal ids are named as forbidden
-
-
 def _reply_ctx():
     return SimpleNamespace(job={'id': 1}, agent_model='m')
-
-
-def test_assessed_english_reply_to_an_arabic_request_is_rewritten(monkeypatch):
-    calls = []
-
-    def create(client, model, msgs, **kw):
-        calls.append(msgs)
-        message = SimpleNamespace(content='أزلنا الشريط السفلي، لكن الشعار على الملابس ما زال ظاهرا.')
-        return SimpleNamespace(choices=[SimpleNamespace(message=message)], usage=None)
-
-    monkeypatch.setattr(agent_loop.llm, 'create_with_dialect', create)
-    monkeypatch.setattr(agent_loop.llm, 'record', lambda *a, **k: None)
-    honesty = {}
-    english = ('The bottom band was removed, but the repeated logo on the '
-               'clothes is still visible in the video.')
-    # an English upload name earlier in the thread must not excuse it
-    messages = [{'role': 'user', 'content': 'Making Oral Health Easier.mp4'}]
-    out = agent_loop._enforce_reply_language(
-        _reply_ctx(), None, messages, [], english, 'شيل العلامة المائية',
-        honesty, this_request_only=True)
-    assert calls and out != english
-    assert honesty['language_fixed'] is True
 
 
 def test_a_reply_in_the_customers_language_is_left_alone(monkeypatch):
@@ -125,8 +94,7 @@ def test_a_reply_in_the_customers_language_is_left_alone(monkeypatch):
                         lambda *a, **k: pytest.fail('no rewrite expected'))
     text = 'أزلنا الشريط السفلي، لكن الشعار على الملابس ما زال ظاهرا.'
     assert agent_loop._enforce_reply_language(
-        _reply_ctx(), None, [], [], text, 'شيل العلامة المائية', {},
-        this_request_only=True) == text
+        _reply_ctx(), None, [], [], text, 'شيل العلامة المائية', {}) == text
 
 
 def test_preserve_of_the_source_never_locks_this_edits_lane(monkeypatch):

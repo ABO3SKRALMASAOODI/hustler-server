@@ -87,5 +87,4 @@ def test_the_plain_offer_when_the_song_is_there_or_never_named(monkeypatch):
 def test_only_music_left_is_a_choice_not_a_partial():
     unmet = [t for t in ask_ledger.asks(ASK_2728) if t in ("music", "captions")]
     assert unmet == ["music"]
-    assert music_offer.choice_outcome("fulfilled", "partial", unmet, "offer") \
-        == "awaiting_user"
+    assert music_offer.choice_outcome("fulfilled", "offer") == "awaiting_user"

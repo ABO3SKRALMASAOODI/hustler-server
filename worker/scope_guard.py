@@ -35,6 +35,18 @@ LANE_LABELS = {
     "grade": "color grade",
     "cuts": "picture cuts",
 }
+_CONTRACT_LANE_LABELS = {
+    "frame_ratio": "the output aspect ratio",
+    "source_audio": "the original source sound",
+    "timeline_timing": "the picture timing and duration",
+}
+
+
+def lanes_of(violations: Iterable[str]) -> Set[str]:
+    """The lanes behind the human labels of a refused write."""
+    named = set(violations)
+    return {lane for lane, label in {**LANE_LABELS, **_CONTRACT_LANE_LABELS}.items()
+            if label in named}
 
 
 # Targets are intentionally concrete EDL concepts.  In particular, generic
@@ -327,10 +339,7 @@ def preservation_violations(previous: Dict[str, Any],
         before = _lane_state(previous, lane, timeline_changed)
         after = _lane_state(proposed, lane, timeline_changed)
         if _canon(before) != _canon(after):
-            violations.append(LANE_LABELS.get(lane, {
-                "frame_ratio": "the output aspect ratio", "source_audio": "the original source sound",
-                "timeline_timing": "the picture timing and duration"
-            }.get(lane, lane)))
+            violations.append(LANE_LABELS.get(lane, _CONTRACT_LANE_LABELS.get(lane, lane)))
     return violations
 
 

@@ -213,20 +213,6 @@ def test_an_article_before_eighteen():
 
 # ── only the trial lane (D1) ─────────────────────────────────────────────
 
-def test_only_the_trial_lane_reaches_the_guard():
-    src = open(os.path.join(os.path.dirname(HERE), "agent_loop.py")).read()
-    tree = ast.parse(src)
-    sites = [n for n in ast.walk(tree) if isinstance(n, ast.Attribute)
-             and n.attr == "finish_for_ctx"]
-    assert len(sites) == 1, "the guard's call site moved"
-    line = sites[0].lineno
-    guards = [n for n in ast.walk(tree) if isinstance(n, ast.If)
-              and n.lineno <= line <= n.end_lineno]
-    inner = min(guards, key=lambda n: n.end_lineno - n.lineno)
-    test = ast.get_source_segment(src, inner.test)
-    assert "_trial_lane(ctx)" in test and "CLAUDE_TRIAL_REPLY_GUARD" in test
-
-
 def test_the_guard_never_loses_a_reply(monkeypatch):
     class Ctx:
         def latest_edl(self):

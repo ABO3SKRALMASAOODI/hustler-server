@@ -308,6 +308,7 @@ def test_successful_auto_preview_rubric_is_not_reported_as_render_failure(
         rendered_versions = set()
         autorendered = False
         autorendering = False
+        turn_tool_outcomes = []
         job = {"id": 99}
 
         def latest_edl(self):
@@ -330,6 +331,7 @@ def test_terminal_auto_preview_uses_only_remaining_absolute_turn_time(
         rendered_versions = set()
         autorendered = False
         autorendering = False
+        turn_tool_outcomes = []
         job = {"id": 99}
 
         @staticmethod

@@ -126,12 +126,6 @@ def repair_allowed(ctx):
     findings = record.get('unresolved_findings') or []
     blocking = [f for f in findings if isinstance(f, dict)
                 and f.get('severity') == 'error']
-    import request_contract
-    assessment = request_contract.current_assessment(ctx) if request_contract.enabled(ctx) else None
-    if assessment:
-        blocking += [dict(finding_id='request:' + row['id'], severity='error')
-                     for row in assessment['requirements']
-                     if row['status'] in {'unmet', 'unknown'}]
     history = state.get('history') or []
     if not blocking or len(history) >= MAX_REPAIR_PASSES:
         return False
