@@ -501,6 +501,8 @@ def test_a_backfill_files_history_and_pages_nobody(world, monkeypatch, capsys,  
 
     class Same:
         """The CLI's connections, on the world's one transaction."""
+        closed = 0
+
         def __init__(self, conn):
             self.conn = conn
 
@@ -552,3 +554,40 @@ def test_a_backfill_files_history_and_pages_nobody(world, monkeypatch, capsys,  
     report = json.loads(capsys.readouterr().out)
     assert report["failures"] == 2 and report["filed"] == 0
     assert [f["ref"] for f in report["failed"]] == ["gap:model:x"]
+
+
+def test_a_dropped_connection_redoes_the_window_not_the_scan(monkeypatch):
+    """The Mac ran out of ports 20 minutes into a backfill, and every check then
+    read as broken on a dead cursor."""
+    import psycopg2
+    from test_ticket_truth import cli
+    ops = cli()
+
+    class Conn:
+        def __init__(self, closed=0):
+            self.closed = closed
+
+        def cursor(self):
+            return None
+    calls = []
+
+    def scan(cur, since, until):
+        calls.append(since)
+        if len(calls) == 1:
+            raise psycopg2.OperationalError("SSL SYSCALL error: EOF detected")
+        return [{"ref": "a"}]
+    monkeypatch.setattr(intake, "scan", scan)
+    monkeypatch.setattr(gaps, "scan", lambda *a: [{"ref": "b"}])
+    monkeypatch.setattr(ops.time, "sleep", lambda s: None)
+    fresh = Conn()
+    monkeypatch.setattr(ops, "connect", lambda read_only=True: fresh)
+    conn, rows = ops._scan_window(Conn(closed=2), T0, T0 + MIN)
+    assert conn is fresh and [r["ref"] for r in rows] == ["a", "b"]
+
+    # A check that dies with the connection is swallowed by gaps.scan, so the
+    # window is redone on the connection's state, not only on an exception.
+    calls.clear()
+    calls.append("already past the first call")
+    dead = Conn(closed=2)
+    conn, rows = ops._scan_window(dead, T0, T0 + MIN)
+    assert conn is fresh and len(calls) == 3, "both tries of the window ran"

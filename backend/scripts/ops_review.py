@@ -536,12 +536,31 @@ def cmd_heartbeat(a):
     return 0
 
 
+def _scan_window(conn, since, until):
+    """One window of the replay. A dropped connection redoes the window: gaps.scan
+    would otherwise read it as every check being broken."""
+    import psycopg2
+    from ops_loop import gaps, intake
+    for attempt in range(1, CONNECT_TRIES + 1):
+        rows = None
+        try:
+            rows = (intake.scan(conn.cursor(), since, until)
+                    + gaps.scan(conn.cursor(), since, until))
+        except (psycopg2.InterfaceError, psycopg2.OperationalError):
+            pass
+        if rows is not None and not conn.closed:
+            return conn, rows
+        time.sleep(5 * attempt)
+        conn = connect()
+    raise CliError("the database keeps dropping the connection")
+
+
 def cmd_gaps(a):
     """Replay the intake and the gap checks over a past window, hour by hour:
     what they find, by cause. Read-only unless --file, which files it all on
     tickets at P1 (P2 stays P2), once per ref. The scan takes most of an hour from
     the Mac: --save keeps it, and --load reads or files it without scanning."""
-    from ops_loop import gaps, intake, store
+    from ops_loop import store
     if a.load:
         with open(a.load, encoding="utf-8") as fh:
             saved = json.load(fh)
@@ -552,19 +571,20 @@ def cmd_gaps(a):
         now = _now()
         lo = now - timedelta(days=a.days)
         conn = connect()
-        cur = conn.cursor()
         found, step = {}, timedelta(hours=1)
         t = lo
         while t < now:
             hi = min(t + step, now)
-            for f in intake.scan(cur, t, hi) + gaps.scan(cur, t, hi):
+            conn, rows = _scan_window(conn, t, hi)
+            for f in rows:
                 found.setdefault(f["ref"], f)
             t = hi
+            if a.save:
+                with open(a.save, "w", encoding="utf-8") as fh:
+                    json.dump({"from": lo, "to": hi,
+                               "failures": list(found.values())}, fh,
+                              default=str)
         conn.close()
-        if a.save:
-            with open(a.save, "w", encoding="utf-8") as fh:
-                json.dump({"from": lo, "to": now,
-                           "failures": list(found.values())}, fh, default=str)
     by = {}
     for f in found.values():
         b = by.setdefault(f["cause_key"], {"cause_key": f["cause_key"],
