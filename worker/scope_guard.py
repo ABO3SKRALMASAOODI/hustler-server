@@ -112,7 +112,7 @@ def _program_structure(edl: Dict[str, Any]) -> str:
         inserts.append({k: item.get(k) for k in (
             "id", "asset_key", "kind", "at_output_s", "duration_s",
             "source_start_s", "rate")})
-    return _canon({"keep": edl.get("keep") or [], "inserts": inserts})
+    return _canon({"keep": _joined_keep(edl), "inserts": inserts})
 
 
 def _items(edl: Dict[str, Any], lane: str, timeline_changed: bool) -> Any:

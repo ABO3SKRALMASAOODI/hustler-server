@@ -401,7 +401,7 @@ def test_a_strobe_with_no_reachable_image_is_omitted(work, monkeypatch):
 JBASE = {"keep": [[0.4, 2.6], [3.4, 5.6]], "captions": {"enabled": False},
          "frame": {"ratio": "9:16"}}
 STYLES = ["dissolve", "fadegrays", "pixelize", "radial", "slices",
-          "wipe_left", "wipe_right", "wipe_up", "wipe_down", "iris",
+          "slide_left", "slide_right", "wipe_left", "wipe_right", "wipe_up", "wipe_down", "iris",
           "columns", "staircase", "box_steps", "bands", "letter_window",
           "matte_cut", "double_exposure", "pixel_stretch", "hit_flash",
           "whip_up", "whip_down", "zoom_blur", "radial_blur", "datamosh"]

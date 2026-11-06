@@ -11457,9 +11457,10 @@ def _split_keeps_at_shot_boundaries(keep, index):
     return out, added
 
 
-def _dissolve_at_cuts(ctx, duration_s, scope):
-    """A cross-dissolve is a per-cut device (set_junction), which replaces a
-    global transition: both on one cut would leave only one of them."""
+def _dissolve_at_cuts(ctx, duration_s, scope, style="dissolve", start=None,
+                      end=None):
+    """A cross-dissolve or a slide is a per-cut device (set_junction), which
+    replaces a global transition: both on one cut would leave only one."""
     from tools_ext import punctuation_tools
     try:
         d = min(max(float(duration_s if duration_s is not None else 0.8),
@@ -11468,8 +11469,8 @@ def _dissolve_at_cuts(ctx, duration_s, scope):
         return ("REJECTED: duration_s must be a number of seconds "
                 f"({TRANSITION_MIN_S:g}-{TRANSITION_MAX_S:g}).")
     out = punctuation_tools.set_junction(
-        ctx, "dissolve", cuts="every" if scope == "every_cut" else "scene",
-        duration=d)
+        ctx, style, cuts="every" if scope == "every_cut" else "scene",
+        duration=d, start=start, end=end)
     if not out.startswith("EDL"):
         return out
     edl = dict(ctx.latest_edl()["json"])
@@ -11483,7 +11484,8 @@ def _dissolve_at_cuts(ctx, duration_s, scope):
 
 
 def set_transitions(ctx, style, duration_s=0.3, scope="scene",
-                    motion_motif=None, max_transitions=None):
+                    motion_motif=None, max_transitions=None, start=None,
+                    end=None):
     p = (style or "").strip().lower()
     sc = (scope or "scene").strip().lower()
     if sc not in TRANSITION_SCOPES:
@@ -11495,10 +11497,10 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "cut_silences — only right for a montage built from separate "
                 "clips. 'media' puts one only where B-roll, a still or a "
                 "card enters or leaves (camera changes stay hard cuts).")
-    if p == "dissolve":
+    if p in ("dissolve", "slide_left", "slide_right"):
         # p5520: asked three times for cross-dissolves, the editor reached
         # for this tool, found dips only and told the customer it could not.
-        return _dissolve_at_cuts(ctx, duration_s, sc)
+        return _dissolve_at_cuts(ctx, duration_s, sc, p, start, end)
     edl = dict(ctx.latest_edl()["json"])
     fx = dict(edl.get("effects") or {})
     if p in ("none", "off"):
@@ -11513,9 +11515,9 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 f"{', '.join(TRANSITION_STYLES)} — or 'none' to clear. "
                 + "; ".join(f"{k} = {v}" for k, v in TRANSITION_DESC.items())
                 + ". All are duration-preserving junction effects. For a "
-                "cross-dissolve use set_junction(style='dissolve', "
-                "cuts='scene', duration=...): it also works on the cuts "
-                "baked into an uploaded montage.")
+                "cross-dissolve or a film-strip slide use style='dissolve' or "
+                "'slide_left'/'slide_right' here: they work on the cuts baked "
+                "into an uploaded montage too.")
     try:
         d = round(min(max(float(duration_s if duration_s is not None
                                 else 0.3), TRANSITION_MIN_S),
@@ -11531,6 +11533,15 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
             return "REJECTED: max_transitions must be a positive integer."
         if limit < 1 or limit > 1000:
             return "REJECTED: max_transitions must be between 1 and 1000."
+    window = None
+    if start is not None or end is not None:
+        try:
+            window = (float(start) if start is not None else 0.0,
+                      float(end) if end is not None else float("inf"))
+        except (TypeError, ValueError):
+            return "REJECTED: start and end must be program seconds."
+        if window[1] <= window[0]:
+            return "REJECTED: end must be after start."
     previous = fx.get("transition") or {}
     motif = previous.get("motion_motif") if motion_motif is None else None
     if motion_motif is not None:
@@ -11581,16 +11592,31 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "are meant to be invisible), or set_transitions(scope="
                 "'every_cut') if they really do want one on every cut.")
 
+    if window is not None:
+        # The customer named a stretch: every change inside it, none outside.
+        blocks = timeline_mod.program_blocks(edl)
+        eligible = {k for k in eligible if 0 <= k < len(blocks) - 1
+                    and window[0] <= float(blocks[k]["out_end"]) <= window[1]}
+        if not eligible:
+            return (f"NOT APPLIED: no scene change between {window[0]:g}s and "
+                    f"{window[1]:g}s. The EDL was NOT changed.")
+        transition["junctions"] = sorted(eligible)
+        hit = len(eligible)
+        eligible_count = hit
+
     prog = program_duration(edl)
-    if sc == "scene" and limit is None and hit >= 3 and prog > 0 \
-            and prog / hit < TRANSITION_MIN_SPACING_S:
+    if sc == "scene" and limit is None and window is None and hit >= 3 \
+            and prog > 0 and prog / hit < TRANSITION_MIN_SPACING_S:
         safe_max = max(1, int(prog / TRANSITION_MIN_SPACING_S))
         return (f"NOT APPLIED: {hit} eligible scene changes across {prog:.0f}s "
                 f"would put a full-screen {p} transition every "
                 f"{prog / hit:.1f}s, which is too often and reads as an "
                 "automated effect pass. The EDL was NOT changed. Use hard "
                 "cuts, or call set_transitions again with max_transitions="
-                f"{safe_max} or fewer to mark only selected changes.")
+                f"{safe_max} or fewer to mark only selected changes. If the "
+                f"customer asked for every change, pass max_transitions={hit}; "
+                "if they named a stretch, pass start= and end= to cover every "
+                "change inside it. A soft cross-dissolve is set_junction.")
 
     if limit is not None and hit > limit:
         ordered = sorted(eligible)
@@ -32299,8 +32325,9 @@ TOOLS = {
                         "the cuts baked into an uploaded montage (0.8-1.5 s "
                         "suits photographs).",
                         {"style": {"type": "string",
-                                   "enum": list(TRANSITION_STYLES) + ["dissolve"]
-                                   + ["none"]},
+                                   "enum": list(TRANSITION_STYLES)
+                                   + ["dissolve", "slide_left", "slide_right",
+                                      "none"]},
                          "duration_s": {"type": "number"},
                          "max_transitions": {
                              "type": "integer", "minimum": 1,
@@ -32310,6 +32337,8 @@ TOOLS = {
                                  "most this many eligible scene changes; use "
                                  "2-4 when the user asks for subtle or not "
                                  "excessive transitions."},
+                         "start": {"type": "number"},
+                         "end": {"type": "number"},
                          "scope": {"type": "string",
                                    "enum": list(TRANSITION_SCOPES_PUBLIC),
                                    "description":
@@ -34077,7 +34106,8 @@ _COMPACT_CONTRACTS = {
         "cuts that visibly pop; at=[s] picks; mode='off' undoes."),
     "set_transitions": (
         "One junction style at real scene changes; scope='scene' skips jump "
-        "cuts — report the junction count it returns. Styles dissolve, "
+        "cuts — report its junction count. start/end: only that "
+        "stretch. Styles dissolve, slide_left/right (film strip), "
         "dip_black, dip_white, whip_left/right, zoom_punch, glitch, flash "
         "(fast ones 0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
         "sound:swish_1 at the cut (it peaks there) unless a look already placed one "

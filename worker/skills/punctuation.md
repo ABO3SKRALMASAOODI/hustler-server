@@ -35,6 +35,10 @@ kick in a track the user supplied). It marks structure; it never decorates.
 - The transcript and its stresses: add_accent on='stress' reads the prosody
   grid (word onsets, stressed words, phrase ends, pauses) mapped through the
   current cut, so every placement is a real word time.
+- One uploaded file with its cuts inside it (a photo slideshow, a finished
+  video): set_junction reaches those shot changes too, holding each side's edge
+  frame. dissolve is the cross-dissolve, slide_left/right the film strip. Name
+  the stretch with start/end when the customer names one.
 - The cuts: get_edl / the program's keep and inserts. set_junction lists the
   real cut times when asked for one that is not there.
 - The picture card (effects.picture_cards): a card-clipped white hit needs a

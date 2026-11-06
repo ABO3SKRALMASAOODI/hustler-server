@@ -9,7 +9,9 @@
       "fadegrays",
       "pixelize",
       "radial",
-      "slices"
+      "slices",
+      "slide_left",
+      "slide_right"
     ],
     "duration_s": [
       0.4,
