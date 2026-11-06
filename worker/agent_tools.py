@@ -34135,14 +34135,12 @@ _COMPACT_CONTRACTS = {
         "writes nothing. Optional, never a default: hard 10-15% steps on "
         "cuts that visibly pop; at=[s] picks; mode='off' undoes."),
     "set_transitions": (
-        "One junction style at real scene changes; scope='scene' skips jump "
-        "cuts — report its junction count. start/end: only that "
-        "stretch. Styles dissolve, slide_left/right (film strip), "
-        "dip_black, dip_white, whip_left/right, zoom_punch, glitch, flash "
-        "(fast ones 0.15-0.4s). Adds no sound: a real turn may take one add_sfx "
-        "sound:swish_1 at the cut (it peaks there) unless a look already placed one "
-        "there (get_edl sfx); ordinary cuts stay silent. One specific "
-        "junction: a motion transition template."),
+        "One style at real scene changes (scope='scene' skips jump cuts); "
+        "report its count. start/end: only that stretch. Styles dissolve, "
+        "slide_left/right, dip_black, dip_white, whip_left/right, zoom_punch, "
+        "glitch, flash (fast: 0.15-0.4s). Silent: a real turn may take one "
+        "add_sfx sound:swish_1 at the cut unless a look placed one. "
+        "One cut: a motion template."),
     "set_picture_card": (
         "Footage-only rounded card for start/end program seconds (box, radius, "
         "border, shadow, entrance/exit). Its footage comes from the full SOURCE "
