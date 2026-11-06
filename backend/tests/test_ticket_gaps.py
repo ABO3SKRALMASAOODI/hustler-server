@@ -488,3 +488,44 @@ def test_a_broken_check_files_itself(world):    # noqa: F811
 def test_every_check_runs_on_a_tick_together(world):    # noqa: F811
     world.ticks(3)
     assert intake.run(world.c, world.conn.cursor(), world.clock.now)["filed"] == 0
+
+
+def test_a_backfill_files_history_and_pages_nobody(world, monkeypatch, capsys):    # noqa: F811
+    """`ops.sh gaps --days 14 --file`. A failed model or a held request has no
+    second look, so the intake files it at P0, which is right the minute it
+    happens. Filed from last week it would start a Fixer for nobody stuck now."""
+    from test_ticket_truth import cli
+    ops = cli()
+
+    class Same:
+        """The CLI's connections, on the world's one transaction."""
+        def __init__(self, conn):
+            self.conn = conn
+
+        def cursor(self):
+            return self.conn.cursor()
+
+        def commit(self):
+            pass
+
+        rollback = close = commit
+    past = T0 - timedelta(days=3)
+
+    def item(ref, severity, key):
+        return {"ref": ref, "source": "model", "at": past, "user_id": None,
+                "project_id": None, "severity": severity, "cause_key": key,
+                "title": key, "detail": key}
+    monkeypatch.setattr(ops, "connect", lambda read_only=True: Same(world.conn))
+    monkeypatch.setattr(ops, "_now", lambda: T0)
+    monkeypatch.setattr(intake, "scan", lambda *a: [])
+    monkeypatch.setattr(gaps, "scan", lambda *a: [
+        item("gap:model:x", "P0", "auto-gap-model-failing-x"),
+        item("gap:budget:y", "P2", "auto-request-budget-y")])
+    a = ops.parser().parse_args(["gaps", "--days", "1", "--file"])
+    assert a.fn is ops.cmd_gaps and a.fn(a) == 0
+    capsys.readouterr()
+    world.c.execute("SELECT cause_key, severity, status FROM tickets ORDER BY id")
+    got = {r["cause_key"]: (r["severity"], r["status"]) for r in world.c.fetchall()}
+    assert got == {"auto-gap-model-failing-x": ("P1", "open"),
+                   "auto-request-budget-y": ("P2", "open")}
+    assert intake.pending_p0(world.c, T0) == []

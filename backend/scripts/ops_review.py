@@ -529,7 +529,7 @@ def cmd_gaps(a):
     """Replay the intake and the gap checks over a past window, hour by hour:
     what they find, by cause. Read-only unless --file, which files it all on
     tickets at P1, once per ref."""
-    from ops_loop import gaps, intake, recovery, store
+    from ops_loop import gaps, intake, store
     now = _now()
     lo = now - timedelta(days=a.days)
     conn = connect()
@@ -554,7 +554,9 @@ def cmd_gaps(a):
     filed = 0
     if a.file:
         for f in sorted(found.values(), key=lambda f: f["at"]):
-            severity, _look = recovery.plan(f, cur)
+            # History pages nobody: no second look can run on a past failure,
+            # and a P0 from last week would start a Fixer for no one stuck now.
+            severity = "P2" if f.get("severity") == "P2" else "P1"
             with Writer(a.dry_run) as w:
                 _t, action = store.record_failure(w, dict(f, severity=severity))
             filed += action != "duplicate"
