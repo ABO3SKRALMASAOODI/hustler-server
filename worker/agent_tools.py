@@ -24091,6 +24091,14 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
         waiting = render_dependencies.before_preview(ctx, ctx.latest_edl(),
             wait_s=60 if _wait_timeout_s is None else min(60, _wait_timeout_s))
         if waiting:
+            if str(waiting).startswith("ERROR:"):
+                # A measurement that failed will not arrive by waiting. As a
+                # preview failure the turn repairs it, restores the last
+                # usable edit and answers; "awaiting complete preview" ran
+                # 139 empty slices with no reply (p5297 replay, 6 Nov 2026).
+                ctx.last_preview_failure = {
+                    "error": waiting, "kind": "measurement",
+                    "agent_repairable": True}
             return waiting
     dependency_key = getattr(ctx, "render_dependency_key", None)
     if report:

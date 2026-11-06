@@ -532,6 +532,26 @@ def test_a_music_offer_stays_the_customers_pick(monkeypatch):
         agent_tools.ask_user(_editing_turn(), "Calm One or Calm Two?")
 
 
+@pytest.mark.parametrize("status,failed", [
+    ("ERROR: required visual measurements are unavailable: {}", True),
+    ("IN_PROGRESS: required visual measurements are still being prepared", False),
+])
+def test_a_failed_measurement_ends_the_wait_a_running_one_does_not(
+        monkeypatch, status, failed):
+    """A failed measurement looped "awaiting complete preview" forever: no
+    reply to the customer, 139 empty slices in the p5297 replay."""
+    import render_dependencies
+    monkeypatch.setattr(render_dependencies, "before_preview",
+                        lambda *a, **k: status)
+    ctx = NS(latest_edl=lambda: {"version": 3, "json": {}},
+             last_preview_failure=None)
+    assert agent_tools.render_preview(ctx) == status
+    got = ctx.last_preview_failure
+    assert bool(got) is failed
+    if failed:
+        assert got["agent_repairable"] is True
+
+
 def test_no_waiting_request_gets_the_first_cut(monkeypatch):
     db, resolved, first_cuts = _setup(monkeypatch, None)
     indexer._finish_setup(db, 1, 9, {"duration": 12.0},
