@@ -852,14 +852,15 @@ def find_multipart_upload(key):
 def find_open_upload(stem):
     """(key, upload id) of the newest open multipart upload under ``stem``
     (content_key_stem), or None. Storage is the record of what is in flight, so
-    a transfer can be picked up from any browser, under any filename."""
-    return _newest_open_upload(stem + ".", lambda u: True)
+    a transfer can be picked up from any browser, under any filename. Asked on
+    the way into every large upload, so it never waits long on a slow store."""
+    return _newest_open_upload(stem + ".", lambda u: True, fast=True)
 
 
-def _newest_open_upload(prefix, wanted):
+def _newest_open_upload(prefix, wanted, fast=False):
     for name in _upload_order():
         try:
-            res = store_client(name).list_multipart_uploads(
+            res = store_client(name, fast=fast).list_multipart_uploads(
                 Bucket=store_bucket(name), Prefix=prefix)
         except Exception:  # noqa: BLE001 — unsupported or transient
             continue

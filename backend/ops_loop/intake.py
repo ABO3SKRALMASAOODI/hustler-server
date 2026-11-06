@@ -269,7 +269,8 @@ def scan(cur, since, now):
 def _stopped_uploads(cur, since, now, p):
     """Transfers whose last sign of life fell into this window, and that never
     landed and never said why. An `upload_failed` row was filed on its own; a
-    proxy's bytes land as part of the original they belong to. One row per
+    proxy's bytes land as part of the original they belong to, and a link
+    import has no transfer (no bytes): its index job reports it. One row per
     project and size: a resumed transfer is the same upload, judged by its last
     sign of life, and its ref is that row, so a transfer that comes back and
     stops again is a new stop."""
@@ -286,6 +287,7 @@ def _stopped_uploads(cur, since, now, p):
                AND ce.created_at > %(silent_from)s
                AND ce.created_at <= %(now)s
                AND ce.project_id IS NOT NULL
+               AND ce.detail->>'bytes' IS NOT NULL
                AND COALESCE(ce.detail->>'kind', 'original') <> 'proxy'
                AND {_customers()}
              ORDER BY ce.user_id, ce.project_id, ce.detail->>'bytes',
@@ -308,7 +310,7 @@ def _stopped_uploads(cur, since, now, p):
     for r in cur.fetchall():
         d = _detail(r)
         left = r["kind"] == "upload_interrupted"
-        sent = d.get("sent_bytes") if left else d.get("bytes_done")
+        sent = d.get("sent_bytes", d.get("bytes_done"))
         out.append({
             "ref": f"stopped:{r['id']}", "source": "upload", "at": _aware(r["at"]),
             "user_id": r["user_id"], "project_id": r["project_id"],

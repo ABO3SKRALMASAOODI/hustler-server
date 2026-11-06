@@ -1,6 +1,7 @@
-"""An MP4 cut short before its moov box is the customer's copy, and the chat
-says so (ticket 189, 5 Nov 2026): it used to be retried, then answered "nothing
-is wrong with your file ... you don't need to upload it again"."""
+"""An MP4 measured as cut short before its moov box is the customer's copy, and
+the chat says so (ticket 189, 5 Nov 2026): it used to be retried, then answered
+"nothing is wrong with your file ... you don't need to upload it again". The
+measurement is media.UnfinishedFile; ffprobe's words alone prove nothing."""
 
 import os
 import sys
@@ -39,7 +40,7 @@ def _notes(monkeypatch, err, job=None):
 
 
 def test_a_missing_moov_is_not_retried():
-    decision = failure_policy.classify(media.MediaError(ERROR), "index")
+    decision = failure_policy.classify(media.UnfinishedFile("no moov"), "index")
     assert decision.kind == "unfinished_file"
     assert decision.retryable is False
 
@@ -83,7 +84,7 @@ def test_another_media_failure_keeps_its_note(monkeypatch):
 
 
 def test_the_reason_words_name_the_file():
-    err = media.MediaError(ERROR)
+    err = media.UnfinishedFile("no moov")
     decision = failure_policy.classify(err, "index")
     assert failure_policy.user_reason(err, decision) == "the file is incomplete"
     assert failure_policy.user_reason(

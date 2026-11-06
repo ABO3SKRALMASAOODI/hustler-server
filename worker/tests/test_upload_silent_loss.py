@@ -68,13 +68,15 @@ def test_a_copy_cut_anywhere_is_unfinished_and_ffprobe_agrees(whole, tmp_path, f
         media.probe(path)
 
 
-def test_a_cut_through_the_moov_is_unfinished(whole, tmp_path):
+def test_a_cut_through_the_moov_proves_nothing_alone(whole, tmp_path):
+    # moov sits last in a default mp4: 30 bytes short cuts into it, and that
+    # file opens and plays. The walk may not refuse it.
     with open(whole, "rb") as fh:
         data = fh.read()
-    # moov sits last in a default mp4: 30 bytes short cuts into it.
     path = tmp_path / "cut.mp4"
     path.write_bytes(data[:-30])
-    assert state(str(path)) == "unfinished"
+    assert state(str(path)) == "cut_moov"
+    assert media.probe(str(path))["duration"] > 3
 
 
 def test_other_containers_are_not_judged(tmp_path):
@@ -104,24 +106,60 @@ ASSET = {"id": 40278, "kind": "original", "bytes": 15_728_640,
          "storage_key": "originals/5498/3c071d485b9f.mp4", "meta": {}}
 
 
-def test_the_index_refuses_before_it_reads_the_file(whole, tmp_path, monkeypatch):
-    path = cut(whole, tmp_path, 0.3)
-    size = os.path.getsize(path)
-
+def serve(monkeypatch, path):
     def read_range(key, offset, length):
         with open(path, "rb") as fh:
             fh.seek(offset)
             return fh.read(length)
     monkeypatch.setattr(storage, "read_range", read_range)
+    monkeypatch.setattr(storage, "object_bytes", lambda key: os.path.getsize(path))
+    monkeypatch.setattr(storage, "presign_get", lambda key, expires=0: path)
+
+
+def test_the_index_refuses_before_it_reads_the_file(whole, tmp_path, monkeypatch):
+    path = cut(whole, tmp_path, 0.3)
+    serve(monkeypatch, path)
     with pytest.raises(media.UnfinishedFile) as err:
-        indexer._refuse_unfinished_source(dict(ASSET, bytes=size))
+        indexer._refuse_unfinished_source(ASSET)
     decision = failure_policy.decision_for(err.value, "index")
     assert decision.kind == "unfinished_file" and decision.retryable is False
     assert decision.max_attempts == 0
 
 
 def test_a_failed_read_or_a_music_file_is_never_refused(monkeypatch):
+    monkeypatch.setattr(storage, "object_bytes", lambda key: 15_728_640)
     monkeypatch.setattr(storage, "read_range", lambda *a: None)
     indexer._refuse_unfinished_source(ASSET)
     indexer._refuse_unfinished_source(dict(ASSET, kind="music"))
-    indexer._refuse_unfinished_source(dict(ASSET, bytes=None))
+    monkeypatch.setattr(storage, "object_bytes", lambda key: None)
+    indexer._refuse_unfinished_source(ASSET)
+
+
+def test_the_walk_is_sized_from_the_object_never_its_row(whole, monkeypatch):
+    # A row that disagrees with the object must not prove a good file cut.
+    serve(monkeypatch, whole)
+    indexer._refuse_unfinished_source(dict(ASSET, bytes=1000))
+
+
+def test_a_cut_moov_that_opens_is_indexed_and_one_that_cannot_is_refused(
+        whole, tmp_path, monkeypatch):
+    with open(whole, "rb") as fh:
+        data = fh.read()
+    path = tmp_path / "tail.mp4"
+    path.write_bytes(data[:-30])
+    serve(monkeypatch, str(path))
+    indexer._refuse_unfinished_source(ASSET)
+    monkeypatch.setattr(media, "probe", lambda src: (_ for _ in ()).throw(
+        media.MediaError("error reading header")))
+    with pytest.raises(media.UnfinishedFile):
+        indexer._refuse_unfinished_source(ASSET)
+
+
+def test_ffprobes_words_alone_never_condemn_a_file(tmp_path):
+    """A streamed index prints "moov atom not found" when a read of a whole file
+    breaks before its moov. Measured on real ffprobe over HTTP, 6 Nov 2026."""
+    err = media.MediaError("ffprobe failed: [mov,mp4,m4a,3gp,3g2,mj2 @ 0x1] moov "
+                           "atom not found | https://x/o: Invalid data found")
+    decision = failure_policy.classify(err, "index")
+    assert decision.kind != "unfinished_file"
+    assert decision.retryable is True and decision.max_attempts == 2

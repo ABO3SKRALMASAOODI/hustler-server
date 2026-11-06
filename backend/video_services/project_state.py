@@ -30,11 +30,13 @@ def index_row(cur, sha256):
     return cur.fetchone()
 
 
-# Failures about the file itself: another run of the same bytes ends the same
-# way, so opening the project again must not queue one. 2123's project ran three
-# jobs of two attempts on a file with no moov (5 Nov 2026).
-PERMANENT_INDEX_FAILURES = frozenset({"unfinished_file", "invalid_media",
-                                      "input_limit_exceeded"})
+# A failure measured on the file itself: another run of the same bytes ends the
+# same way, so opening the project again must not queue one. 2123's project ran
+# three jobs of two attempts on a file with no moov (5 Nov 2026). Only a
+# measurement belongs here. Every other kind stays healable: its verdict comes
+# from a tool's words, the heal is bounded, and it is the only way back from a
+# broken read or a fixed bug.
+PERMANENT_INDEX_FAILURES = frozenset({"unfinished_file"})
 
 
 def index_job_state(cur, project_id, asset_id):
