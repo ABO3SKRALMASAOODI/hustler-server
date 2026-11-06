@@ -33,6 +33,19 @@ These controls use small signed deltas: zero is neutral. Return the typed plan
 with plan_continuous_take, grounded in what these frames actually show."""
 
 
+def _controls(adjustments):
+    """The colour controls the model named, inside their range. A stray field
+    or an overshoot must not cost the plan: Haiku's "_note": "" beside a good
+    exposure lift threw the whole plan away (p5374, replay of 6 Nov 2026)."""
+    known = SCHEMA["properties"]["adjustments"]["properties"]
+    out = {}
+    for key, value in (adjustments if isinstance(adjustments, dict) else {}).items():
+        if key in known and isinstance(value, (int, float)) \
+                and not isinstance(value, bool):
+            out[key] = max(-.15, min(.15, float(value)))
+    return out
+
+
 def whole_take(ctx):
     """The plan with nothing decided: the whole take, untouched."""
     return {"subject": "", "reason": "kept whole", "start_boundary": 0,
@@ -93,6 +106,7 @@ def plan(ctx, spend):
     if len(calls) != 1 or calls[0].function.name != "plan_continuous_take":
         raise ValueError("Continuous footage needs a grounded edit plan")
     chosen = json.loads(calls[0].function.arguments)
+    chosen["adjustments"] = _controls(chosen.get("adjustments"))
     request_contract._validate(chosen, SCHEMA)
     start, end = chosen["start_boundary"], chosen["end_boundary"]
     if start >= end or boundaries[end] - boundaries[start] < min(3.0, duration):
