@@ -26,8 +26,15 @@ never touches billing, credits, plans or Paddle.
     ops_review.py tickets  [--status active] [--urls]
     ops_review.py fixing   --ticket 7 [--note "..."]
     ops_review.py close    --ticket 7 --status fixed --root-cause "..." \
-        --fix-sha abc1234 --regression-check "tests/test_x.py::test_y"
-    ops_review.py close    --ticket 7 --status wont_fix --reason "..."
+        --fix-sha abc1234 --regression-check "tests/test_x.py::test_y" \
+        --replay <gauntlet run>/<session> --fixer <this session> \
+        [--rated-by <the Reviewer session, for a quality ticket>]
+    ops_review.py close    --ticket 7 --status wont_fix \
+        --reason "owner decision: <which>"     # nothing else closes unfixed
+    ops_review.py reopen   --ticket 7 --note "why the closing was wrong"
+    ops_review.py unmute   [--dry-run]           # every wont_fix not the owner's
+    ops_review.py heartbeat --agent p0_watch|fixer|reviewer
+    ops_review.py gaps     --days 14 [--file]    # replay the failures and gaps
     ops_review.py fetch    --key ops/evidence/<slug>/x.jpg --out /tmp/x.jpg
     ops_review.py reviews  [--days 7]
     ops_review.py p0       [--count] [--sync-marker]     # the P0 watch
@@ -61,6 +68,8 @@ P0_MARKER = os.path.join(OPS_DIR, "P0_PENDING")
 BACKEND_URL = os.getenv("OPS_BACKEND_URL",
                         "https://entrepreneur-bot-backend.onrender.com")
 KEY_CACHE = os.path.expanduser("~/.valmera-ops/key.json")
+GAUNTLET_RUNS = ("/Users/masaoodi/Documents/Valmera/.valmera/week-1106/gauntlet/"
+                 "runs")
 READ_ONLY = "-c default_transaction_read_only=on"
 KEY_RE = re.compile(r"^p(\d+)-(\d+)$")
 
@@ -467,6 +476,94 @@ def cmd_fixing(a):
     return 0
 
 
+def cmd_reopen(a):
+    from ops_loop import store
+    with Writer(a.dry_run) as w:
+        t = store.reopen(w, a.ticket, a.note)
+    if t["severity"] == "P0" and not a.dry_run:
+        _mark_p0(t)
+    out({"ticket_id": t["id"], "status": t["status"],
+         "severity": t["severity"], "dry_run": bool(a.dry_run)})
+    return 0
+
+
+def cmd_unmute(a):
+    """Every wont_fix that is not an owner decision goes back to open (one
+    sweep at release; after it store.close refuses to make new ones)."""
+    from ops_loop import store
+    conn = connect()
+    cur = conn.cursor()
+    cur.execute("""SELECT id, cause_key, status, severity, wont_fix_reason
+                     FROM tickets WHERE status = 'wont_fix' ORDER BY id""")
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    done, kept = [], []
+    for r in rows:
+        if store.is_owner_decision(r):
+            kept.append(r["id"])
+            continue
+        with Writer(a.dry_run) as w:
+            t = store.unmute(w, r["id"], "Reopened 6 Nov 2026: wont_fix is only "
+                             "for an owner decision (AGENTS.md, FIXER.md section "
+                             "11). It was a mute: failures after it were only "
+                             "counted.")
+        done.append({"ticket_id": t["id"], "cause_key": t["cause_key"],
+                     "severity": t["severity"], "status": t["status"]})
+    out({"reopened": done, "kept_owner_decisions": kept,
+         "dry_run": bool(a.dry_run)})
+    return 0
+
+
+def cmd_heartbeat(a):
+    """One row per scheduled agent, read by the backend's alert: it is the only
+    thing still running when these stop."""
+    from ops_loop import store
+    with Writer(a.dry_run) as w:
+        store.put_state(w, f"ops_heartbeat_{a.agent}",
+                        {"at": _now().isoformat(timespec="seconds")})
+    out({"agent": a.agent, "dry_run": bool(a.dry_run)})
+    return 0
+
+
+def cmd_gaps(a):
+    """Replay the intake and the gap checks over a past window, hour by hour:
+    what they find, by cause. Read-only unless --file, which files it all on
+    tickets at P1, once per ref."""
+    from ops_loop import gaps, intake, recovery, store
+    now = _now()
+    lo = now - timedelta(days=a.days)
+    conn = connect()
+    cur = conn.cursor()
+    found, step = {}, timedelta(hours=1)
+    t = lo
+    while t < now:
+        hi = min(t + step, now)
+        for f in intake.scan(cur, t, hi) + gaps.scan(cur, t, hi):
+            found.setdefault(f["ref"], f)
+        t = hi
+    by = {}
+    for f in found.values():
+        b = by.setdefault(f["cause_key"], {"cause_key": f["cause_key"],
+                                           "failures": 0, "users": set(),
+                                           "severity": f["severity"]})
+        b["failures"] += 1
+        b["users"].add(f.get("user_id"))
+    table = sorted(({**b, "users": len(b["users"] - {None})}
+                    for b in by.values()),
+                   key=lambda b: -b["failures"])
+    filed = 0
+    if a.file:
+        for f in sorted(found.values(), key=lambda f: f["at"]):
+            severity, _look = recovery.plan(f, cur)
+            with Writer(a.dry_run) as w:
+                _t, action = store.record_failure(w, dict(f, severity=severity))
+            filed += action != "duplicate"
+    conn.close()
+    out({"from": lo, "to": now, "failures": len(found), "filed": filed,
+         "causes": table})
+    return 0
+
+
 def cmd_release(a):
     from ops_loop import store
     with Writer(a.dry_run) as w:
@@ -482,13 +579,94 @@ def cmd_release(a):
     return 0
 
 
+def load_replay(a):
+    """What the run on disk says, never what the closer says. --replay is a
+    Gauntlet session (<run>/<session>, or a folder with journey.json) or a
+    journey.json of the same shape from another replay tool."""
+    if not a.replay:
+        return None
+    path = a.replay
+    if not os.path.isabs(path):
+        run, _, session = path.partition("/")
+        path = os.path.join(GAUNTLET_RUNS, run, "sessions", session)
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    journey = os.path.join(path, "journey.json") if os.path.isdir(path) else path
+    try:
+        with open(journey, encoding="utf-8") as fh:
+            j = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise CliError(f"cannot read the replay {journey}: {e}")
+    rating = {}
+    try:
+        with open(os.path.join(folder, "judge", "verdict3.json"),
+                  encoding="utf-8") as fh:
+            rating = json.load(fh)
+    except (OSError, ValueError):
+        pass
+    failures = [f.get("kind") if isinstance(f, dict) else f
+                for f in j.get("failures") or []]
+    # What the scoreboard also counts (runner/score.py), and a run that never
+    # reached the end of the session cannot say it replayed that request.
+    failures += ["canned_reply" for s in j.get("steps") or []
+                 if isinstance(s, dict) and s.get("kind") == "canned"]
+    if j.get("prompts_capped"):
+        failures.append("prompts_capped")
+    if j.get("budget_stopped"):
+        failures.append("budget_stopped")
+    return {"run": j.get("run"), "session": j.get("sid"),
+            "state": j.get("state"), "be_sha": j.get("be_sha"),
+            "fe_sha": j.get("fe_sha"), "failures": failures,
+            "score_exact": rating.get("score_exact"),
+            "rubric": rating.get("rubric"), "tier": rating.get("tier"),
+            "rated_by": a.rated_by, "fixer": a.fixer}
+
+
+def _git(*args):
+    import subprocess
+    return subprocess.run(["git", "-C", BACKEND, *args], capture_output=True,
+                          text=True, timeout=30)
+
+
+def _is_product(name):
+    """Not a test, not how tickets are counted, not prose about the product. A
+    skill under plugins/ is written in Markdown and is the product."""
+    return ("/tests/" not in name and "/ops_loop/" not in name
+            and not name.endswith("scripts/ops_review.py")
+            and (name.startswith("plugins/") or not name.endswith(".md")))
+
+
+def check_fix_sha(fix_sha):
+    """Six tickets cite a commit of this CLI as their fix, and others a test
+    docstring. A backend fix is a commit on main that changes the product, not
+    only tests, docs or how tickets are counted. This checkout follows main
+    (ops.sh); from a branch (OPS_BACKEND) "on main" cannot be proven."""
+    head = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if head not in ("HEAD", "main"):
+        raise CliError(f"this checkout is on {head}: a fix is proven against "
+                       "main, so close without OPS_BACKEND")
+    for part in (fix_sha or "").split(","):
+        repo, _, sha = part.strip().rpartition(":")
+        if repo == "fe" or not sha:
+            continue
+        if _git("cat-file", "-e", f"{sha}^{{commit}}").returncode != 0 or \
+                _git("merge-base", "--is-ancestor", sha, "HEAD").returncode != 0:
+            raise CliError(f"fix_sha {sha} is not on main")
+        names = _git("diff", "--name-only", f"{sha}^1", sha).stdout.split()
+        if not [n for n in names if _is_product(n)]:
+            raise CliError(f"fix_sha {sha} changes only tests, docs or the "
+                           "ticket tooling, not the product")
+
+
 def cmd_close(a):
     from ops_loop import store
+    if a.status == "fixed":
+        check_fix_sha(a.fix_sha)
+    replay = load_replay(a)
     with Writer(a.dry_run) as w:
         t = store.close(w, a.ticket, a.status, root_cause=a.root_cause,
                         fix_sha=a.fix_sha,
                         regression_check=a.regression_check,
-                        reason=a.reason)
+                        reason=a.reason, replay=replay)
     _clear_p0(t["id"])
     out({"ticket_id": t["id"], "status": t["status"],
          "fix_sha": t["fix_sha"], "regression_check": t["regression_check"],
@@ -535,7 +713,7 @@ def cmd_tickets(a):
 
 def sync_p0_marker(rows):
     """P0_PENDING mirrors the database: the P0 tickets the Fixer should take
-    now (open, or 'fixing' with no update for 6 h). Written atomically;
+    now (open, or 'fixing' on a claim over 6 h old). Written atomically;
     removed when there are none."""
     if not rows:
         if os.path.exists(P0_MARKER):
@@ -728,6 +906,11 @@ def parser():
     p.add_argument("--note")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_fixing)
+    p = sub.add_parser("reopen", help="reopen a closed ticket whose closing was wrong")
+    p.add_argument("--ticket", type=int, required=True)
+    p.add_argument("--note", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_reopen)
     p = sub.add_parser("release", help="return an unfinished claim to open with a note")
     p.add_argument("--ticket", type=int, required=True)
     p.add_argument("--expected-updated-at", required=True,
@@ -736,15 +919,36 @@ def parser():
     p.add_argument("--severity", choices=("P0", "P1", "P2"))
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_release)
-    p = sub.add_parser("close", help="close a ticket (fixed or wont_fix)")
+    p = sub.add_parser("close", help="close a ticket: fixed with a replay on a "
+                                     "copy at the bar, or wont_fix for an "
+                                     "owner decision")
     p.add_argument("--ticket", type=int, required=True)
     p.add_argument("--status", required=True, choices=("fixed", "wont_fix"))
     p.add_argument("--root-cause", dest="root_cause")
     p.add_argument("--fix-sha", dest="fix_sha")
     p.add_argument("--regression-check", dest="regression_check")
-    p.add_argument("--reason")
+    p.add_argument("--replay", help="<gauntlet run>/<session>, or a journey.json")
+    p.add_argument("--rated-by", dest="rated_by",
+                   help="the Reviewer session that rated the replay")
+    p.add_argument("--fixer", help="this session; never the rater")
+    p.add_argument("--reason", help="wont_fix: 'owner decision: <which>'")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_close)
+    p = sub.add_parser("unmute", help="reopen every wont_fix that is not an "
+                                      "owner decision")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_unmute)
+    p = sub.add_parser("heartbeat", help="record that a scheduled agent ran")
+    p.add_argument("--agent", required=True,
+                   choices=("p0_watch", "fixer", "reviewer"))
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_heartbeat)
+    p = sub.add_parser("gaps", help="replay intake and gap checks over a window")
+    p.add_argument("--days", type=float, default=14)
+    p.add_argument("--file", action="store_true",
+                   help="file what it finds (idempotent per ref)")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_gaps)
     p = sub.add_parser("p0", help="P0 tickets the Fixer should take now")
     p.add_argument("--count", action="store_true")
     p.add_argument("--sync-marker", action="store_true",

@@ -591,6 +591,16 @@ def new_original_key(project_id, ext, kind="original"):
     return f"{prefix}/{project_id}/{uuid.uuid4().hex[:12]}{ext}"
 
 
+def content_key_stem(project_id, kind, content_id, nbytes):
+    """The key prefix one file's bytes get in one project, whatever it is
+    called. Size is in the hash because content_id covers the file's two ends,
+    not its length. Everything after the stem is the extension, so a rename
+    that changes that still finds the upload."""
+    prefix = KEY_PREFIX.get(kind, "originals")
+    digest = hashlib.sha256(f"{content_id}:{int(nbytes)}".encode()).hexdigest()
+    return f"{prefix}/{project_id}/{digest[:24]}"
+
+
 # ── The way in when the browser cannot reach storage (round 61) ─────────────
 #
 # Every upload goes browser -> object storage directly, on a presigned URL.
@@ -835,17 +845,29 @@ def find_multipart_upload(key):
     reloaded, another device), this recovers the id from storage itself so
     the parts already sent are kept. Every store an upload may live in is
     searched, the one browser uploads go to now first."""
+    found = _newest_open_upload(key, lambda u: u.get("Key") == key)
+    return found[1] if found else None
+
+
+def find_open_upload(stem):
+    """(key, upload id) of the newest open multipart upload under ``stem``
+    (content_key_stem), or None. Storage is the record of what is in flight, so
+    a transfer can be picked up from any browser, under any filename."""
+    return _newest_open_upload(stem + ".", lambda u: True)
+
+
+def _newest_open_upload(prefix, wanted):
     for name in _upload_order():
         try:
             res = store_client(name).list_multipart_uploads(
-                Bucket=store_bucket(name), Prefix=key)
+                Bucket=store_bucket(name), Prefix=prefix)
         except Exception:  # noqa: BLE001 — unsupported or transient
             continue
-        ups = [u for u in res.get("Uploads") or [] if u.get("Key") == key]
+        ups = [u for u in res.get("Uploads") or [] if wanted(u)]
         if not ups:
             continue
         ups.sort(key=lambda u: str(u.get("Initiated") or ""))
-        return ups[-1].get("UploadId")
+        return ups[-1].get("Key"), ups[-1].get("UploadId")
     return None
 
 

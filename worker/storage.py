@@ -409,6 +409,20 @@ def evict_source_cache(cache_dir=None):
     return released
 
 
+def read_range(key, offset, length):
+    """``length`` bytes of an object from ``offset``. None on any failure."""
+    if length <= 0:
+        return b""
+    try:
+        name = locate(key)
+        obj = store_client(name).get_object(
+            Bucket=store_bucket(name), Key=key,
+            Range=f"bytes={int(offset)}-{int(offset) + int(length) - 1}")
+        return obj["Body"].read()
+    except Exception:  # noqa: BLE001 — the caller treats it as "cannot tell"
+        return None
+
+
 def download_to(key, path, check_capacity=True):
     """Stream one object to local scratch, refusing up front if it cannot fit."""
     name = locate(key)

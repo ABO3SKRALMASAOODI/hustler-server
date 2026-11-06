@@ -16,7 +16,10 @@ an advisory lock) reads what failed since the last tick and files it:
             awaiting_user, or an older worker's status awaiting_user with
             outcome blocked) is waiting on the customer, not a failure.
   upload    an upload the customer could not get in (upload_failed, or
-            upload_rejected unless the file was accepted anyway)
+            upload_rejected unless the file was accepted anyway), and any
+            transfer that fell silent without landing and without saying why
+            (no heartbeat for UPLOAD_SILENT_AFTER; 18 of 23 lost uploads left
+            nothing else behind, census 6 Nov 2026)
   player    the editor could not play the customer's video (player_error)
   mcp       an MCP tool error that was ours, not the AI app's mistake
             (internal, unclassified, timeout, upload, unavailable or
@@ -26,15 +29,22 @@ an advisory lock) reads what failed since the last tick and files it:
             wall held before it has still not run (ticket #11), on a plan
             whose Studio could run it (an MCP-only plan hands it to the
             customer's own assistant instead)
+  gaps      what should have happened by a measured deadline and did not, or
+            a measured fact no failure row carries (ops_loop.gaps)
 
 One ticket per CAUSE: the cause key is derived from the failure's own
 signature (`auto-<source>-<kind>-<signature>`), so one customer's retry loop
 and the same failure in other accounts fold into one ticket. A new failure
-of a FIXED cause that happened after the fix reopens it (recurrence + 1),
-exactly like the Reviewer's tickets. Severity P0 means a customer is blocked
-now; the Mac's P0 watch (check_fixer.sh p0, every few minutes) starts the
-Fixer on it, and an open P0 nobody picked up within UNHANDLED_AFTER is the
-only thing the owner is emailed about (cockpit_alerts).
+after a ticket closed reopens it (recurrence + 1), however it was closed; only
+an owner decision stays closed, and is reported in the digest (store.decide).
+
+Severity is what happened to the customer, never who pays and never what an
+error sentence says. A failure is filed at once at P1 and looked at again when
+its grace runs out (ops_loop.recovery): still stuck, it goes to P0, and the
+Mac's P0 watch (check_fixer.sh p0, every 30 minutes) starts the Fixer; got past
+it, the ticket stays open for the daily Fixer and nobody is paged. A P0 nobody
+picked up within UNHANDLED_AFTER, or a claim gone stale, and a scheduled agent
+that stopped running are what the owner is emailed about (cockpit_alerts).
 
 Writes go through ops_loop.store (tickets only, guarded); reads are bounded
 by time and use the existing (updated_at|created_at, ...) indexes.
@@ -55,10 +65,38 @@ MAX_PER_TICK = 400
 # The webhook resumes a held request seconds after the payment; this long
 # after it, a request still waiting was dropped.
 HELD_GRACE = timedelta(minutes=3)
-UNHANDLED_AFTER = timedelta(minutes=30)
+# The watch runs every 30 minutes with up to 7 of jitter, and a run takes a
+# minute or two to mark the ticket: this long means it really did not.
+UNHANDLED_AFTER = timedelta(minutes=45)
+FIXING_STALE = timedelta(hours=6)
+# A P0 handed back with a note is waiting on something (a replay, a rating, a
+# release): the next run could only repeat the last. Without this quiet every
+# watch would start a Fixer on it, and the weekly limit is what stopped them all
+# for 70 hours. A new failure on it ends the quiet at once.
+RELEASE_QUIET = timedelta(hours=6)
+# A scheduled agent's own heartbeat (ops_review.py heartbeat). For 70 hours from
+# 2 Nov nothing ran and nothing said so; the alert can only live here, because
+# whatever stopped them stops anything else on the Mac too.
+HEARTBEAT_LATE = {"p0_watch": timedelta(minutes=75),
+                  "fixer": timedelta(hours=26),
+                  "reviewer": timedelta(hours=3)}
+REVIEWS_LATE = timedelta(hours=24)
+# The intake's own last pass. It ticks every minute; a pass that keeps raising
+# leaves no ticket and no row, and until now only the next morning's digest said
+# so. The alert runs on its own scheduler, so it outlives a broken tick.
+INTAKE_LATE = timedelta(minutes=15)
+# A running transfer beats every 4 minutes (lib/upload.js HEARTBEAT_MS), so this
+# long with nothing heard is a transfer that stopped.
+UPLOAD_SILENT_AFTER = timedelta(minutes=15)
+UPLOAD_ALIVE_KINDS = ("upload_started", "upload_resumed", "upload_progress",
+                      "upload_interrupted")
 P1_JOB_TYPES = ("preview_check", "filmstrip")
 # agent_turn result.status of a request the trial or plan budget held.
 BUDGET_STATUSES = ("budget",)
+# A turn an operator started on a customer's project, not one they asked for. An
+# error is still a ticket, but nobody is waiting on it: 8 of 58 pages in 14 days
+# were the repair batch of 3-4 Nov, "stuck" with no customer there to get past it.
+OPERATOR_REPAIR = "COALESCE(j.payload->>'operator_repair', '') <> ''"
 MCP_OURS = ("internal_error", "unclassified", "timeout", "upload_error",
             "executor_version_mismatch")
 MCP_OURS_OUTCOMES = ("transient_failure", "unavailable", "unsafe")
@@ -68,7 +106,8 @@ MCP_OURS_OUTCOMES = ("transient_failure", "unavailable", "unsafe")
 ERROR_CLASSES = (
     # Before "not-found": "moov atom not found" is a customer's cut-short file,
     # not one of our objects going missing.
-    ("truncated-media", re.compile(r"moov atom not found", re.I)),
+    ("truncated-media", re.compile(r"moov atom not found|unfinished file",
+                                   re.I)),
     ("no-executor", re.compile(r"no remote executor|modal or cloudflare is "
                                r"required", re.I)),
     ("scratch-space", re.compile(r"scratch space", re.I)),
@@ -156,7 +195,8 @@ def scan(cur, since, now):
     out = []
     cur.execute(f"""
         SELECT j.id, j.type, j.user_id, j.project_id, j.updated_at AS at,
-               LEFT(j.error, 600) AS error, j.payload->>'tool' AS tool
+               LEFT(j.error, 600) AS error, j.payload->>'tool' AS tool,
+               {OPERATOR_REPAIR} AS operator_repair
           FROM video_jobs j JOIN users u ON u.id = j.user_id
          WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
            AND j.state = 'failed' AND {_customers()}
@@ -169,13 +209,12 @@ def scan(cur, since, now):
         out.append({
             "ref": f"job:{r['id']}", "source": "job", "at": r["at"],
             "user_id": r["user_id"], "project_id": r["project_id"],
-            # A cut-short file is explained in chat and only the customer's
-            # own copy can repair it: seen by the daily Fixer, no P0 alarm.
             "severity": "P1" if r["type"] in P1_JOB_TYPES
-                        or sig == "truncated-media" else "P0",
+                        or r.get("operator_repair") else "P0",
             "cause_key": cause_key("job", kind, sig),
             "title": _short(f"{kind} job failed: {r['error'] or 'no error'}"),
-            "detail": _short(r["error"], 600), "job_id": r["id"]})
+            "detail": _short(r["error"], 600), "job_id": r["id"],
+            "job_type": r["type"], "tool": r.get("tool")})
     cur.execute(f"""
         SELECT m.id, m.created_at AS at, m.meta->>'error' AS error,
                NULLIF(m.meta->>'job', '') AS job, LEFT(m.content, 600) AS text,
@@ -214,7 +253,7 @@ def scan(cur, since, now):
                j.result->>'outcome' AS outcome,
                COALESCE(j.result->>'status', '') AS status,
                LEFT(COALESCE(j.result->>'honesty', j.result->>'text', ''),
-                    600) AS why
+                    600) AS why, {OPERATOR_REPAIR} AS operator_repair
           FROM video_jobs j JOIN users u ON u.id = j.user_id
          WHERE j.updated_at > %(since)s AND j.updated_at <= %(now)s
            AND j.type = 'agent_turn' AND j.state = 'done'
@@ -233,14 +272,15 @@ def scan(cur, since, now):
         out.append({
             "ref": f"request:{r['id']}", "source": "request", "at": r["at"],
             "user_id": r["user_id"], "project_id": r["project_id"],
-            "severity": "P2" if status in BUDGET_STATUSES else "P0",
+            "severity": "P2" if status in BUDGET_STATUSES
+                        else "P1" if r.get("operator_repair") else "P0",
             "cause_key": cause_key("request", r["outcome"],
                                    "" if status == r["outcome"] else status),
             "title": f"A Studio request ended {r['outcome']} (not fulfilled)",
             "detail": _short(r["why"], 600), "job_id": r["id"]})
     cur.execute(f"""
         SELECT ce.id, ce.kind, ce.user_id, ce.project_id, ce.created_at AS at,
-               ce.detail, ({defs.paying('u')}) AS paying
+               ce.detail
           FROM client_events ce JOIN users u ON u.id = ce.user_id
          WHERE ce.kind IN ('upload_failed', 'upload_rejected', 'player_error',
                            'upload_proxy_failed', 'mcp_error_response')
@@ -252,7 +292,71 @@ def scan(cur, since, now):
         if item:
             out.append(item)
     out.extend(_held_not_resumed(cur, since, now, p))
+    out.extend(_stopped_uploads(cur, since, now, p))
     out.sort(key=lambda f: _aware(f["at"]))
+    return out
+
+
+def _stopped_uploads(cur, since, now, p):
+    """Transfers whose last sign of life fell into this window, and that never
+    landed and never said why. An `upload_failed` row was filed on its own; a
+    proxy's bytes land as part of the original they belong to. One row per
+    project and size: a resumed transfer is the same upload, judged by its last
+    sign of life, and its ref is that row, so a transfer that comes back and
+    stops again is a new stop. Only a row about this file ends it: another file
+    landing or failing in the project says nothing about this one. A row with no
+    size cannot be told apart, so it counts."""
+    q = dict(p, kinds=list(UPLOAD_ALIVE_KINDS),
+             silent_from=_naive(since - UPLOAD_SILENT_AFTER),
+             silent_to=_naive(now - UPLOAD_SILENT_AFTER))
+    cur.execute(f"""
+        SELECT last.* FROM (
+            SELECT DISTINCT ON (ce.user_id, ce.project_id, ce.detail->>'bytes')
+                   ce.id, ce.kind, ce.user_id, ce.project_id, ce.created_at AS at,
+                   ce.detail
+              FROM client_events ce JOIN users u ON u.id = ce.user_id
+             WHERE ce.kind = ANY(%(kinds)s)
+               AND ce.created_at > %(silent_from)s
+               AND ce.created_at <= %(now)s
+               AND ce.project_id IS NOT NULL
+               AND COALESCE(ce.detail->>'kind', 'original') <> 'proxy'
+               AND {_customers()}
+             ORDER BY ce.user_id, ce.project_id, ce.detail->>'bytes',
+                      ce.created_at DESC) last
+         WHERE last.at <= %(silent_to)s
+           AND EXISTS (SELECT 1 FROM projects pr WHERE pr.id = last.project_id)
+           AND NOT EXISTS (
+                 SELECT 1 FROM client_events done
+                  WHERE done.project_id = last.project_id
+                    AND done.user_id = last.user_id
+                    AND done.created_at >= last.at
+                    AND (done.detail->>'bytes' = last.detail->>'bytes'
+                         OR done.detail->>'bytes' IS NULL
+                         OR last.detail->>'bytes' IS NULL)
+                    AND (done.kind IN ('upload_failed', 'upload_original_ready')
+                         OR (done.kind IN ('upload_landed', 'upload_deduped')
+                             AND COALESCE(done.detail->>'original_pending',
+                                          'false') <> 'true')))
+         ORDER BY last.at LIMIT %(limit)s""", q)
+    out = []
+    for r in cur.fetchall():
+        d = _detail(r)
+        left = r["kind"] == "upload_interrupted"
+        sent = d.get("sent_bytes") if left else d.get("bytes_done")
+        out.append({
+            "ref": f"stopped:{r['id']}", "source": "upload", "at": _aware(r["at"]),
+            "user_id": r["user_id"], "project_id": r["project_id"],
+            "severity": "P1", "bytes": d.get("bytes"),
+            "file_kind": d.get("kind"),
+            "cause_key": cause_key("upload-stopped",
+                                   "page-left" if left else "no-signal"),
+            "title": ("An upload stopped without landing: the page went away"
+                      if left else
+                      "An upload stopped without landing: nothing heard"),
+            "detail": _short(f"{d.get('filename') or 'file'} · {d.get('bytes')} "
+                             f"bytes · {d.get('kind') or 'original'} · sent "
+                             f"{sent if sent is not None else 'unknown'} · last "
+                             f"heard {r['kind']}", 600)})
     return out
 
 
@@ -330,29 +434,21 @@ def _detail(row):
     return d if isinstance(d, dict) else {}
 
 
-# Device-side conditions the product already explains and recovers from
-# (a cloud placeholder with no bytes on the device, a transfer the browser
-# lost and resumes): a customer still failed, so they are filed, but as P1
-# for the daily Fixer unless the customer pays.
-DEVICE_SIDE = re.compile(r"empty or incomplete|empty file|unreadable file|"
-                         r"lost access to this file|"
-                         r"lost its connection|timed out|offline", re.I)
-
-
 def _event_failure(r):
     d = _detail(r)
     base = {"ref": f"event:{r['id']}", "at": _aware(r["at"]),
             "user_id": r["user_id"], "project_id": r["project_id"]}
     kind = r["kind"]
-    paying = bool(r.get("paying"))
     if kind == "upload_rejected":
         if d.get("accepted"):
             return None             # stored and analysed: not a failure
         reason = str(d.get("reason") or "rejected")
         size = d.get("bytes")
-        return dict(base, source="upload",
-                    severity="P1" if DEVICE_SIDE.search(reason)
-                    and not paying else "P0",
+        # Whoever's file it is, a refusal stopped them: the second look says
+        # whether a finished copy landed. Left stuck, the cause gets the product
+        # change that stops it hurting the customer (FIXER.md section 11).
+        return dict(base, source="upload", bytes=size, file_kind=d.get("kind"),
+                    severity="P0", refused=True,
                     cause_key=cause_key("upload-rejected", reason),
                     title=_short(f"Upload refused: {reason}"),
                     detail=_short(f"{reason} · {size} bytes · "
@@ -361,9 +457,8 @@ def _event_failure(r):
                                   600))
     if kind == "upload_failed":
         reason = str(d.get("reason") or "failed")
-        return dict(base, source="upload",
-                    severity="P1" if DEVICE_SIDE.search(reason)
-                    and not paying else "P0",
+        return dict(base, source="upload", severity="P0", bytes=d.get("bytes"),
+                    file_kind=d.get("kind"), offline=bool(d.get("offline")),
                     cause_key=cause_key("upload-failed", signature(reason)
                                         if len(reason) > 40 else reason),
                     title=_short(f"Upload failed: {reason}"),
@@ -373,11 +468,7 @@ def _event_failure(r):
         media = d.get("media_error") or {}
         code = media.get("code") if isinstance(media, dict) else media
         ext = (str(d.get("src_path") or "").rsplit(".", 1) + [""])[1][:5]
-        # A free account's upload waits for a subscription before it is
-        # analysed (the subscribe wall, owner decision), so it has no server
-        # proxy yet: P0 only when the customer pays.
-        return dict(base, source="player",
-                    severity="P0" if paying else "P1",
+        return dict(base, source="player", severity="P0",
                     cause_key=cause_key("player-error", f"code{code}"
                                         if code is not None else "", ext),
                     title=_short(f"The editor could not play the video "
@@ -387,7 +478,9 @@ def _event_failure(r):
                         "video_h", "src_path")}, default=str), 600))
     if kind == "upload_proxy_failed":
         reason = str(d.get("reason") or "failed")
-        return dict(base, source="proxy", severity="P1",
+        # 8 of 9 proxy read failures were followed by a failed upload or no
+        # landing within 6 minutes, so it blocks unless the file lands anyway.
+        return dict(base, source="proxy", severity="P0",
                     cause_key=cause_key("proxy-failed", reason),
                     title=_short(f"The browser could not build the playback "
                                  f"proxy: {reason}"),
@@ -398,13 +491,10 @@ def _event_failure(r):
                 cat not in MCP_OURS and outcome not in MCP_OURS_OUTCOMES):
             return None             # the AI app's correction, not our failure
         tool = str(d.get("tool") or "tool")
-        # "unclassified" means none of our markers matched: often a
-        # validation the caller must fix, sometimes ours. Filed with its
-        # sentence (since 29 Oct) as P1 so the daily Fixer sorts it; our
-        # proven failures (internal, timeout, transient, unavailable) are P0.
-        sev = "P1" if cat == "unclassified" and outcome not in \
-            MCP_OURS_OUTCOMES else "P0"
-        return dict(base, source="mcp", severity=sev,
+        # "unclassified" means none of our markers matched: often a validation
+        # the caller fixes, sometimes ours. The second look tells them apart by
+        # what happened: the same tool worked afterwards, or it did not.
+        return dict(base, source="mcp", severity="P0", tool=tool,
                     cause_key=cause_key("mcp", tool, outcome or cat),
                     title=_short(f"MCP {tool} answered an error ({outcome or cat})"
                                  + (f": {d['message']}" if d.get("message")
@@ -433,42 +523,54 @@ def run(rcur, wcur, now=None):
     The window overlaps the previous one by OVERLAP so a row committed late
     is still seen; refs filed in that overlap are remembered in the
     watermark (`recent`), so nothing is counted twice whatever the ticket's
-    history holds."""
-    from ops_loop import store
+    history holds. A failure the customer might still get past is filed at P1
+    and looked at again when its grace runs out (ops_loop.recovery)."""
+    from ops_loop import gaps, recovery, store
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(rcur):
         return {"seen": 0, "filed": 0, "tickets": [], "skipped": "no tables"}
     mark, state = _watermark(rcur, now)
-    recent = dict((state or {}).get("recent") or {}) \
-        if isinstance(state, dict) else {}
-    failures = [f for f in scan(rcur, min(mark, now) - OVERLAP, now)
+    state = state if isinstance(state, dict) else {}
+    recent = dict(state.get("recent") or {})
+    watching = dict(state.get("watching") or {})
+    since = min(mark, now) - OVERLAP
+    failures = [f for f in scan(rcur, since, now) + gaps.scan(rcur, since, now)
                 if f["ref"] not in recent]
     filed, touched = 0, {}
     for f in failures:
         # One failure's savepoint: a bad row never loses the others.
         wcur.execute("SAVEPOINT ops_intake_one")
         try:
-            t, action = store.record_failure(wcur, f)
+            severity, look = recovery.plan(f, rcur)
+            t, action = store.record_failure(wcur, dict(f, severity=severity))
         except Exception as e:
             wcur.execute("ROLLBACK TO SAVEPOINT ops_intake_one")
             print(f"⚠️ [ops_intake] {f.get('ref')}: {type(e).__name__}: {e}",
                   flush=True)
             continue
         wcur.execute("RELEASE SAVEPOINT ops_intake_one")
-        recent[f["ref"]] = _aware(f["at"]).isoformat(timespec="seconds")
+        # When it was seen, not when it happened: a stop or a re-rating is
+        # filed long after its own moment and must still be remembered.
+        recent[f["ref"]] = now.isoformat(timespec="seconds")
         if action != "duplicate":
             filed += 1
             touched[t["id"]] = {"id": t["id"], "cause_key": t["cause_key"],
                                 "severity": t["severity"],
                                 "status": t["status"], "action": action}
+            if look and action in ("opened", "attached", "reopened",
+                                   "attached_to_closed") and \
+                    len(watching) < recovery.MAX_WATCHED:
+                watching[f["ref"]] = look
+    blocked = recovery.settle(rcur, wcur, watching, now)
     keep_after = now - OVERLAP - timedelta(minutes=5)
     recent = {r: at for r, at in recent.items()
               if _aware(at) >= keep_after}
     store.put_state(wcur, WATERMARK_KEY, {"at": now.isoformat(),
                                           "seen": len(failures),
-                                          "filed": filed, "recent": recent})
+                                          "filed": filed, "recent": recent,
+                                          "watching": watching})
     return {"seen": len(failures), "filed": filed,
-            "tickets": list(touched.values())}
+            "tickets": list(touched.values()), "left_blocked": blocked}
 
 
 def _tables_ready(cur):
@@ -478,52 +580,103 @@ def _tables_ready(cur):
 
 # ── What needs a person now ──────────────────────────────────────────────
 
-def unhandled(cur, now=None, after=UNHANDLED_AFTER):
-    """Open P0 tickets nobody started on within `after` of their latest
-    (re)opening: the Fixer did not pick them up (the Mac asleep, the P0
-    watch off, or the run failed). The only alert the owner gets."""
+# When a ticket last became someone's to act on, and when it was last claimed.
+# Never updated_at: every new failure bumps it, so a stuck P0 looked more alive
+# the more customers it hurt (#77 sat 22 h in 'fixing' and took 5 failures).
+OPENED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' IN ('opened', 'recurred', 'reopened',
+                                       'escalated', 'released'))"""
+CLAIMED_AT = """COALESCE((SELECT max((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' = 'fixing'), updated_at)"""
+RELEASED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' = 'released')"""
+
+
+def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
+    """P0 tickets no agent is acting on: open ones nobody started within `after`
+    of their latest (re)opening (the Mac asleep, the P0 watch off, or the run
+    failed) and 'fixing' ones whose claim is older than `stale` (the run died).
+    What the owner is emailed about."""
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(cur):
         return []
-    cur.execute("""
+    cur.execute(f"""
         SELECT id, cause_key, title, severity, status, occurrences,
                recurrence_count, first_seen, last_seen, created_at,
-               updated_at,
-               (SELECT max((h->>'at')::timestamptz) FROM
-                  jsonb_array_elements(history) h
-                 WHERE h->>'event' IN ('opened', 'recurred', 'escalated'))
-                   AS opened_at,
+               updated_at, {OPENED_AT} AS opened_at, {CLAIMED_AT} AS claimed_at,
+               {RELEASED_AT} AS released_at,
                (SELECT count(DISTINCT h->>'user') FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'failure') AS users
           FROM tickets
-         WHERE status = 'open' AND severity = 'P0'
+         WHERE status IN ('open', 'fixing') AND severity = 'P0'
          ORDER BY id""")
     out = []
     for r in cur.fetchall():
-        opened = _aware(r["opened_at"] or r["created_at"])
-        if opened and now - opened >= after:
+        fixing = r["status"] == "fixing"
+        since = _aware(r["claimed_at"] if fixing else
+                       (r["opened_at"] or r["created_at"]))
+        released = _aware(r.get("released_at"))
+        if not fixing and released and now - released < RELEASE_QUIET and \
+                _aware(r["last_seen"]) <= released:
+            continue
+        if since and now - since >= (stale if fixing else after):
             d = dict(r)
-            d["opened_at"] = opened
-            d["waiting_min"] = int((now - opened).total_seconds() // 60)
+            d["opened_at"] = since
+            d["waiting_min"] = int((now - since).total_seconds() // 60)
             out.append(d)
     return out
 
 
-def pending_p0(cur, now=None, stale=timedelta(hours=6)):
-    """P0 tickets the Mac's Fixer should take now: open ones, and 'fixing'
-    ones with no update for `stale` (a run that died)."""
+def pending_p0(cur, now=None, stale=FIXING_STALE):
+    """P0 tickets the Mac's Fixer should take now: open ones, unless a Fixer
+    handed one back within RELEASE_QUIET and nothing failed on it since, and
+    'fixing' ones claimed more than `stale` ago (a run that died)."""
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(cur):
         return []
-    cur.execute("""SELECT id, cause_key, title, status, occurrences,
+    cur.execute(f"""SELECT id, cause_key, title, status, occurrences,
                           recurrence_count, updated_at, last_seen
                      FROM tickets
                     WHERE severity = 'P0'
-                      AND (status = 'open'
-                           OR (status = 'fixing' AND updated_at < %s))
-                    ORDER BY id""", (now - stale,))
+                      AND ((status = 'open'
+                            AND (COALESCE({RELEASED_AT}, 'epoch') < %s
+                                 OR last_seen > {RELEASED_AT}))
+                           OR (status = 'fixing' AND {CLAIMED_AT} < %s))
+                    ORDER BY id""", (now - RELEASE_QUIET, now - stale))
     return [dict(r) for r in cur.fetchall()]
+
+
+def silent_agents(cur, now=None):
+    """The scheduled agents that stopped, read from their own heartbeats, the
+    intake's own last pass, and the reviews that stopped arriving. An agent that
+    never beat yet says nothing: its first beat arms it. Nobody watched the
+    watcher for 70 hours."""
+    now = _aware(now) or datetime.now(timezone.utc)
+    keys = {f"ops_heartbeat_{a}": a for a in HEARTBEAT_LATE}
+    keys[WATERMARK_KEY] = "intake"
+    late = dict(HEARTBEAT_LATE, intake=INTAKE_LATE)
+    cur.execute("SELECT key, value FROM app_kv WHERE key = ANY(%s)",
+                (sorted(keys),))
+    out = []
+    for r in cur.fetchall():
+        try:
+            at = _aware(json.loads(r["value"])["at"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        agent = keys[r["key"]]
+        if now - at > late[agent]:
+            out.append({"agent": agent, "last_at": at,
+                        "silent_min": int((now - at).total_seconds() // 60)})
+    cur.execute("SELECT max(reviewed_at) AS at FROM session_reviews")
+    at = _aware((cur.fetchone() or {}).get("at"))
+    if at and now - at > REVIEWS_LATE:
+        out.append({"agent": "session reviews", "last_at": at,
+                    "silent_min": int((now - at).total_seconds() // 60)})
+    return out
 
 
 # ── The scheduler ────────────────────────────────────────────────────────
