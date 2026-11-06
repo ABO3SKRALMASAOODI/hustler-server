@@ -68,7 +68,7 @@ def test_edit_without_write_is_pushed_once():
     ctx = SimpleNamespace(semantic_contract={"mode": "edit"}, versions_written=[])
     messages = []
     assert agent_loop._edit_without_write_pushback(ctx, messages, False)
-    assert "permission to edit" in messages[0]["content"]
+    assert "reach the same result another way" in messages[0]["content"]
     assert not agent_loop._edit_without_write_pushback(ctx, messages, True)
 
 

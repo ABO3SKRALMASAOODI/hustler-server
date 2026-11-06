@@ -3608,11 +3608,13 @@ _RENDERED_AFTER_DRAFT = (
 )
 _EDIT_WITHOUT_WRITE_NUDGE = (
     "Measured: this request asks for a change and the timeline has not "
-    "changed. A concrete brief is permission to edit: make the change NOW "
-    "with the write tools, in this same turn, then render_preview. Do not ask "
-    "the customer to approve anything they already asked for. If a required "
-    "asset is missing or a capability does not exist, ask_user for it or say "
-    "plainly that nothing has changed yet."
+    "changed. Do the work now, then render_preview. A refused or malformed "
+    "call is recoverable: read the refusal and reach the same result another "
+    "way, for example remove the layer and add it again as the customer asked. "
+    "Choose any open detail yourself and name it in your reply. Do not ask "
+    "the customer to approve what they already asked for. Stop only if you "
+    "need something only the customer has or the capability does not exist; "
+    "then say plainly that nothing has changed."
 )
 
 
