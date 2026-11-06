@@ -45,7 +45,8 @@ ACCENT_SHAPE = {"white_hit": (1, 5), "colour_hit": (2, 2),
 JUNCTION_CARDS = {
     "dissolve": "junction_dissolve", "fadegrays": "junction_xfade",
     "pixelize": "junction_xfade", "radial": "junction_xfade",
-    "slices": "junction_xfade", "wipe_left": "junction_wipe",
+    "slices": "junction_xfade", "slide_left": "junction_xfade",
+    "slide_right": "junction_xfade", "wipe_left": "junction_wipe",
     "wipe_right": "junction_wipe", "wipe_up": "junction_wipe",
     "wipe_down": "junction_wipe", "iris": "junction_iris",
     "columns": "junction_columns", "staircase": "junction_staircase",
@@ -58,7 +59,8 @@ JUNCTION_CARDS = {
     "whip_down": "junction_whip", "zoom_blur": "junction_zoom_blur",
     "radial_blur": "junction_zoom_blur", "datamosh": "junction_datamosh"}
 # style -> default window (seconds); the cards' params agree
-JUNCTION_DURATION = {"dissolve": 0.5, "iris": 0.4, "columns": 0.5,
+JUNCTION_DURATION = {"dissolve": 0.5, "slide_left": 0.8, "slide_right": 0.8,
+                     "iris": 0.4, "columns": 0.5,
                      "staircase": 0.5, "box_steps": 0.8, "bands": 0.5,
                      "letter_window": 0.8, "matte_cut": 0.5,
                      "double_exposure": 0.6, "pixel_stretch": 0.4,
@@ -682,7 +684,8 @@ def _parse_origin(origin, edl):
 
 
 def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
-                 count=None, direction=None, colour=None):
+                 count=None, direction=None, colour=None, start=None,
+                 end=None):
     from fx_schemas.accents import JUNCTION_STYLES
     style = str(style or "").strip().lower()
     if style not in JUNCTION_STYLES + ("none",):
@@ -715,6 +718,12 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
     all_cuts = _cut_moments(edl, tl, baked)
     if not all_cuts:
         return _r("this program has no cut to decorate.")
+    if start is not None or end is not None:
+        lo = float(start) if start is not None else 0.0
+        hi = float(end) if end is not None else float("inf")
+        all_cuts = [c for c in all_cuts if lo <= c[0] <= hi]
+        if not all_cuts:
+            return _r(f"no cut between {lo:g}s and {hi:g}s.")
     targets = []
     if at is not None:
         ats = at if isinstance(at, (list, tuple)) else [at]
@@ -933,18 +942,23 @@ TOOL_SPECS = {
     "set_junction": (
         set_junction,
         "A designed cut device at real cuts, duration-preserving (sound and "
-        "timing untouched): dissolve, fadegrays, pixelize, radial, slices, "
-        "wipe_left/right/up/down, iris, columns, staircase, box_steps, bands, "
+        "timing untouched), also on shot changes inside one uploaded file "
+        "(a slideshow): the edge frames hold through the window. dissolve "
+        "(cross-dissolve), slide_left/right (film strip), fadegrays, pixelize, "
+        "radial, slices, wipe_left/right/up/down, iris, columns, staircase, box_steps, bands, "
         "letter_window (origin = a motion item id), matte_cut, "
         "double_exposure, pixel_stretch, hit_flash, whip_up/down, zoom_blur, "
         "radial_blur, datamosh; 'none' removes. at= one cut (program "
         "seconds) or cuts='scene' (default: real shot changes; jump cuts stay "
-        "bare)|'every'|[seconds]. origin: centre|face|point:x,y|<motion id>. "
+        "bare)|'every'|[seconds]; start/end keep only the cuts in that "
+        "program-time window. origin: centre|face|point:x,y|<motion id>. "
         "One device per cut (it replaces the cut's previous one). Content-"
         "born transitions first; one family per section.",
         {"style": {"type": "string"},
          "at": {"type": ["number", "array"], "items": {"type": "number"}},
          "cuts": {"type": ["string", "array"], "items": {"type": "number"}},
+         "start": {"type": "number", "minimum": 0},
+         "end": {"type": "number", "minimum": 0},
          "origin": {"type": ["string", "object"]},
          "duration": {"type": "number", "minimum": 0.04, "maximum": 2},
          "count": {"type": "integer", "minimum": 2, "maximum": 32},
@@ -979,8 +993,10 @@ COMPACT = {
         "negate none|alternate|all, fit cover|contain|register. Timeline-"
         "neutral. >3 changes/s needs the user's ask."),
     "set_junction": (
-        "Cut device at real cuts (at= or cuts='scene'|'every'), duration-"
-        "preserving: dissolve, fadegrays, pixelize, radial, slices, wipe_*, "
+        "Cut device at real cuts, including shot changes inside one uploaded "
+        "file (at= or cuts='scene'|'every', start/end window), duration-"
+        "preserving: dissolve (cross-dissolve), slide_left/right (film strip), "
+        "fadegrays, pixelize, radial, slices, wipe_*, "
         "iris, columns, staircase, box_steps, bands, letter_window, "
         "matte_cut, double_exposure, pixel_stretch, hit_flash, whip_up/down, "
         "zoom_blur, radial_blur, datamosh; 'none' removes. origin centre|"

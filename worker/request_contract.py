@@ -15,9 +15,14 @@ import llm
 LANES = ("music", "sfx", "voiceover", "audio_mix", "captions", "texts",
          "effects", "grade", "cuts", "frame_ratio", "source_audio", "timeline_timing")
 CONTRACT_SCHEMA = {
-    "type": "object", "required": ["mode", "requirements", "output_count", "timing_policy", "music_requested"],
+    "type": "object", "required": ["mode", "requirements", "output_count", "timing_policy", "music_requested", "changed_lanes"],
     "properties": {
         "mode": {"type": "string", "enum": ["edit", "inspect", "clarify"]},
+        "changed_lanes": {"type": "array", "description": (
+            "Lanes the requested changes must write. Removing a grade writes "
+            "grade; fades or transitions at existing cuts write effects, "
+            "never cuts or timeline_timing."),
+            "items": {"type": "string", "enum": list(LANES)}},
         "music_requested": {"type": "boolean", "description": (
             "True only when adding/replacing/selecting music is requested; "
             "preserving sound or cutting to an existing beat is not a new music request.")},
@@ -114,6 +119,10 @@ A lane holds what THIS EDIT applied, not the upload: 'keep the natural colours',
 a change that removes it (relative_to=source_footage), never a lock on it.
 protecting original subtitles also prevents duplicating them with new captions.
 When an authorized change affects part of a lane, do not freeze that whole lane.
+List in changed_lanes what the changes must write. Those lanes are not frozen,
+so a later instruction to fix colour or add transitions overrides an earlier or
+broader preservation of that lane. Preserving photo order, song or sync is not
+a freeze of effects, grade or transitions.
 Retaining the full original content is a coverage requirement, not a freeze of
 an earlier shortened preview's keep list. A request to restore/rebuild a full
 episode authorizes that change; 'cleaned-up episode' alone does not require
@@ -423,8 +432,11 @@ def protected_lanes(ctx):
         raise ValueError("Clarify the conflicting request before changing the edit")
     if contract["mode"] == "inspect":
         raise ValueError("This request asks for analysis; inspect and answer without changing the edit")
+    # What the customer asks to change this turn cannot also be frozen by a
+    # broader preservation in the same brief: both readings are the model's,
+    # and the specific ask wins.
     protected = {lane for row in contract["requirements"] if row["action"] == "preserve"
-                 for lane in row["lanes"]}
+                 for lane in row["lanes"]} - set(contract.get("changed_lanes") or ())
     if contract["timing_policy"] == "preserve":
         protected.add("timeline_timing")
     return protected

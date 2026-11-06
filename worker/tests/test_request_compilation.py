@@ -15,7 +15,7 @@ def context(text, conversation=()):
 
 def wire(action="change", lanes=(), source=0, mode="edit"):
     return {"mode": mode, "music_requested": False, "timing_policy": "edit",
-            "output_count": 1, "requirements": [{"description": "Requested work",
+            "output_count": 1, "changed_lanes": [], "requirements": [{"description": "Requested work",
                 "source_ref": source, "action": action,
                 **({"lanes": list(lanes)} if lanes or action in {"preserve", "avoid"} else {}),
                 **({"relative_to": "current_edit"} if action == "preserve" else {})}]}
