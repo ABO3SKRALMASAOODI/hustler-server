@@ -18,6 +18,7 @@ import time
 import requests
 
 import config
+import llm
 
 
 def video_gen_available():
@@ -93,6 +94,10 @@ def generate_video(prompt, out_path, image_url=None, duration_s=5):
     seconds = _snap_seconds(model, duration_s)
     body = _build_body(model, prompt, image_url, seconds)
     submit_url = f"{config.FAL_QUEUE_URL.rstrip('/')}/{model}"
+    try:
+        llm.fence(model)
+    except llm.SpendFenceReached as exc:
+        return False, str(exc), 0.0
     try:
         r = requests.post(submit_url, json=body, headers=_headers(),
                           timeout=30)

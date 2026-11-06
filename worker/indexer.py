@@ -384,6 +384,20 @@ def _claude_trial_indexed(worker_db, job, scope):
               f"{(got or {}).get('reason', 'error')}", flush=True)
 
 
+def _company_recorders(worker_db, job):
+    """An upload of ours is company spend on every thread that calls a model.
+    (job recorder or None, what the sound lane's thread wears or None); a
+    customer's upload gets neither and stays as it was."""
+    lane = spend_ledger.lane_of(job.get("user_id"))
+    if lane == spend_ledger.CUSTOMER:
+        return None, None
+    recorder = None
+    if llm.get_recorder() is None:
+        recorder = llm.JobRecorder(worker_db, job)
+        llm.set_recorder(recorder)
+    return recorder, llm.LaneRecorder(lane)
+
+
 def run_index_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     asset = worker_db.run(dbx.get_asset, job["payload"].get("asset_id"))
@@ -465,11 +479,7 @@ def run_index_job(worker_db, job):
 
     trial_scope, trial_recorder = _claude_trial_index_scope(worker_db, job)
     # Our own account's upload: its captions and greeting are company spend.
-    company_recorder = None
-    if (llm.get_recorder() is None and
-            spend_ledger.lane_of(job.get("user_id")) != spend_ledger.CUSTOMER):
-        company_recorder = llm.JobRecorder(worker_db, job)
-        llm.set_recorder(company_recorder)
+    company_recorder, sound_recorder = _company_recorders(worker_db, job)
     try:
         warnings_pre = []
         if from_client_proxy:
@@ -719,6 +729,8 @@ def run_index_job(worker_db, job):
             _lane_progress("picture", 1.0)
 
         def _sound_lane():
+            if sound_recorder is not None:      # the transcript check calls a model
+                llm.set_recorder(sound_recorder)
             _lane_progress("sound", 0.02)
             wav_local = None
             if info["has_audio"]:

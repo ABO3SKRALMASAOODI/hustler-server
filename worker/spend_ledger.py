@@ -18,12 +18,15 @@ A LANE says who a call was for:
 The rules:
 
 * Every call lands here, on every provider, with or without a recorder:
-  llm.record in the worker, _meter_concierge in the backend.
+  llm.record in the worker, _meter_concierge in the backend. Images and clips
+  land at their price card; speech to text does not land here.
 * A customer's call is never refused here and this module never reads a
   customer row to decide anything. Their limits stay what they were: the
   account's own credits, the trial's own budget, the provider's own refusal.
 * internal and replay stop at their share, BEFORE the call (llm.fence). When a
-  share runs out the purpose stops; nothing a customer sees changes.
+  share runs out the purpose stops; nothing a customer sees changes. A replay
+  stack has its own empty ledger, so the Gauntlet seeds it with what production
+  says the replay lane has left: the day and cycle shares hold across runs.
 * The credit switch (claude_credit.py) keeps reading trial_budget_days, and
   only customer calls are written there now, so company spend cannot turn the
   trial off. The shares come out of what the budget leaves unallocated:
@@ -74,7 +77,7 @@ def provider_of(model):
     for prefix, provider in (("gpt-", "openai"), ("o1", "openai"),
                              ("o3", "openai"), ("o4", "openai"),
                              ("whisper", "openai"), ("grok", "xai"),
-                             ("deepseek", "deepseek")):
+                             ("deepseek", "deepseek"), ("fal-ai", "fal")):
         if name.startswith(prefix):
             return provider
     return "other"
@@ -92,10 +95,18 @@ def lane_of(user_id=None):
         return CUSTOMER
 
 
+_migrated = False
+
+
 def ready(conn):
-    with conn.cursor() as cur:
-        cur.execute("SELECT to_regclass('public.spend_ledger') AS t")
-        return bool(_v(cur.fetchone(), "t", 0))
+    """Whether migration 043 has landed. Once it has, a process stops asking:
+    every model call charges here and a round trip is the customer's time."""
+    global _migrated
+    if not _migrated:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.spend_ledger') AS t")
+            _migrated = bool(_v(cur.fetchone(), "t", 0))
+    return _migrated
 
 
 def charge(conn, provider, lane, purpose, usd, calls=1):

@@ -21141,6 +21141,7 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
                      "caption": f"AI-generated video: {p[:300]}",
                      "generated": True, "model": config.VIDEO_GEN_MODEL})
     cost = videogen.price_for(seconds)
+    llm.charge_generation("video_gen", config.VIDEO_GEN_MODEL, cost)
     ctx.videos_generated.append({"storage_key": key, "prompt": p[:200],
                                  "seconds": seconds})
     reviewed = _queue_download_review(

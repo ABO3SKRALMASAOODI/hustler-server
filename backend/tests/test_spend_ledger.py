@@ -22,6 +22,13 @@ from schema_contract import DATABASE_REQUIRED_RELATIONS  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.fixture(autouse=True)
+def asks_again():
+    spend_ledger._migrated = False
+    yield
+    spend_ledger._migrated = False
+
+
 class Conn:
     def __init__(self, migrated=True):
         self.migrated = migrated

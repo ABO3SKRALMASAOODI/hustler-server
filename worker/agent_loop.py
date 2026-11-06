@@ -6535,9 +6535,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
                         # on chat/completions after a timeout/5xx.
                         raise
             _adapt_tries = 0
-            if not claude_lane.is_claude_model(call_model):
-                llm.fence(call_model)         # claude_lane.create fences its own
             while resp is None:
+                # Inside the loop: _switch_quota_lane changes the provider here.
+                if not claude_lane.is_claude_model(call_model):
+                    llm.fence(call_model)     # claude_lane.create fences its own
                 try:
                     resp = step_client.chat.completions.create(
                         model=call_model, messages=messages, tools=tools,

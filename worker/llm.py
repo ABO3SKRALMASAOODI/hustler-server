@@ -190,6 +190,18 @@ class SpendFenceReached(RuntimeError):
     """A company lane spent its share (spend_ledger). Never a customer."""
 
 
+class LaneRecorder:
+    """Says whose calls these are and writes no row: for a pool thread of a job
+    whose own recorder holds that job's connection."""
+
+    def __init__(self, lane):
+        self.spend_lane = lane
+        self.claude_trial_scope = None
+
+    def __call__(self, purpose, request, response, usage):
+        pass
+
+
 def spend_lane():
     """Who the call on this thread is for. It rides on the recorder because
     pool threads install the turn's recorder; a stack's SPEND_LANE decides
@@ -233,15 +245,20 @@ def fence(model):
         "this cycle); saved edits are preserved.")
 
 
-def _call_cost_usd(request, response, usage):
+def _call_cost_usd(purpose, request, response, usage):
     """What one model call cost: the provider's own figures, the recorded
-    figure of a call with no token usage, else the price card. An unpriced
-    model is an estimate, never zero."""
+    figure of a call with no token usage, an image at its price (counted as
+    db.charge_turn_credits counts it), else the price card. An unpriced model
+    is an estimate, never zero."""
     model = (request or {}).get("model")
     if usage is None:
-        recorded = (response or {}).get("provider_cost_usd") \
-            if isinstance(response, dict) else None
-        return float(recorded) if isinstance(recorded, (int, float)) else 0.0
+        answer = response if isinstance(response, dict) else {}
+        recorded = answer.get("provider_cost_usd")
+        if isinstance(recorded, (int, float)):
+            return float(recorded)
+        if purpose in ("image_gen", "image_edit") and "image_url" in answer:
+            return float(config.IMAGE_PRICE_USD)
+        return 0.0
     actual = provider_cost_usd(usage, model)
     return float(actual) if actual is not None else credit_parity_cost_usd(usage, model)
 
@@ -250,7 +267,7 @@ def _charge(purpose, request, response, usage):
     """Every model dollar lands on the ledger, recorder or not. Never raises:
     the turn is the customer's, metering is ours."""
     try:
-        usd = _call_cost_usd(request, response, usage)
+        usd = _call_cost_usd(purpose, request, response, usage)
         if usd > 0:
             _on_ledger(spend_ledger.charge,
                        spend_ledger.provider_of((request or {}).get("model")),
@@ -258,6 +275,11 @@ def _charge(purpose, request, response, usage):
     except Exception as exc:  # noqa: BLE001
         print(f"[spend] ledger write failed ({purpose}): {str(exc)[:160]}",
               flush=True)
+
+
+def charge_generation(purpose, model, usd):
+    """A generation bought outside llm.record (a clip) lands the same way."""
+    _charge(purpose, {"model": model}, {"provider_cost_usd": usd}, None)
 
 
 def record(purpose, request, response, usage=None):
@@ -2214,6 +2236,7 @@ def _openai_image_gen(model, prompt, out_path):
     (xAI Grok). Uses the IMAGE client — the chat provider may not have this
     endpoint at all (DeepSeek does not)."""
     try:
+        fence(model)
         resp = image_client().images.generate(model=model, prompt=prompt, n=1)
         d = resp.data[0]
         b64 = getattr(d, "b64_json", None)
