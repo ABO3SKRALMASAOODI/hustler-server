@@ -28,6 +28,7 @@ from admin_metrics.projects import (PROJECT_TIMINGS as _PROJECT_TIMINGS,
                                     TIMING_COLS as _TIMING_COLS,
                                     timing_out as _timing_out)
 import billing
+import provider_creds
 import credits
 import model_prices
 import storage
@@ -671,7 +672,7 @@ def video_overview():
                 "health": {
                     "storage_configured": bool(os.getenv("S3_ENDPOINT")
                                                and os.getenv("S3_BUCKET")),
-                    "llm_configured": bool(os.getenv("OPENAI_API_KEY")),
+                    "llm_configured": bool(provider_creds.key("OPENAI_API_KEY")),
                     "vision_live": None,
                 },
                 "ops": {
@@ -997,7 +998,7 @@ def video_overview():
         "health": {
             "storage_configured": bool(os.getenv("S3_ENDPOINT")
                                        and os.getenv("S3_BUCKET")),
-            "llm_configured": bool(os.getenv("OPENAI_API_KEY")),
+            "llm_configured": bool(provider_creds.key("OPENAI_API_KEY")),
             # IS THE AGENT STILL LOOKING AT THE FOOTAGE. Vision is honest-off
             # by contract — when its provider is unconfigured every tool says
             # "visual inspection unavailable" and nothing fails — which is

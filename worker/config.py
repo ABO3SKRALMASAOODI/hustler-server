@@ -32,7 +32,9 @@ S3_REGION = os.getenv("S3_REGION", "auto")
 # Model id: use the exact "gpt-6-luna" — unqualified family aliases route to
 # Sol, a different (pricier) model.
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# The environment's value. config.OPENAI_API_KEY itself is read live (see
+# __getattr__ at the end of this file): the sealed row outranks this.
+_OPENAI_ENV_KEY = os.getenv("OPENAI_API_KEY", "")
 # Dedicated ASR validates uncertain transcript words before they become the
 # most prominent caption. Independent of subjective AUDIO_REVIEW_ENABLED.
 TRANSCRIPT_VERIFY_ENABLED = os.getenv("TRANSCRIPT_VERIFY_ENABLED", "1") == "1"
@@ -57,7 +59,7 @@ AUDIO_REVIEW_MODEL = os.getenv(
     "AUDIO_REVIEW_MODEL", "gpt-audio-1.5").strip()
 AUDIO_REVIEW_API_KEY = (
     os.getenv("AUDIO_REVIEW_API_KEY", "").strip()
-    or (OPENAI_API_KEY if AUDIO_REVIEW_BASE_URL == OPENAI_BASE_URL else ""))
+    or (_OPENAI_ENV_KEY if AUDIO_REVIEW_BASE_URL == OPENAI_BASE_URL else ""))
 AUDIO_REVIEW_TIMEOUT_S = float(os.getenv("AUDIO_REVIEW_TIMEOUT_S", "45"))
 LLM_TIMEOUT_S = float(os.getenv("LLM_TIMEOUT_S", "90"))
 
@@ -138,7 +140,7 @@ IMAGE_TIMEOUT_S = float(os.getenv("IMAGE_TIMEOUT_S", "150"))
 # The image provider's own endpoint + key (see the block comment above).
 IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "https://api.x.ai/v1")
 IMAGE_API_KEY = os.getenv("IMAGE_API_KEY", "") or (
-    OPENAI_API_KEY if IMAGE_BASE_URL == OPENAI_BASE_URL else "")
+    _OPENAI_ENV_KEY if IMAGE_BASE_URL == OPENAI_BASE_URL else "")
 
 # ── Vision (look_at / look_at_asset / contact-sheet captions / self-check) ───
 # Its OWN provider, for the same reason images have one: the chat provider may
@@ -160,9 +162,10 @@ VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://api.openai.com/v1")
 VISION_MODEL = os.getenv("VISION_MODEL", "gpt-6-luna")
 if VISION_MODEL == "gpt-5.6-luna":
     VISION_MODEL = "gpt-6-luna"
-VISION_API_KEY = (
+# (config.VISION_API_KEY is read live too, see __getattr__ at the end.)
+_VISION_ENV_KEY = (
     os.getenv("VISION_API_KEY", "")
-    or (OPENAI_API_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
+    or (_OPENAI_ENV_KEY if VISION_BASE_URL == OPENAI_BASE_URL else "")
     or (IMAGE_API_KEY if VISION_BASE_URL == IMAGE_BASE_URL else ""))
 
 # Historical provider settings remain readable for compatibility. Editing
@@ -178,9 +181,9 @@ PAID_BASE_URL = os.getenv("PAID_BASE_URL", "https://api.x.ai/v1").strip()
 PAID_AGENT_MODEL = os.getenv("PAID_AGENT_MODEL", "grok-4.5").strip()
 PAID_API_KEY = (
     os.getenv("PAID_API_KEY", "").strip()
-    or (VISION_API_KEY if PAID_BASE_URL == VISION_BASE_URL else "")
+    or (_VISION_ENV_KEY if PAID_BASE_URL == VISION_BASE_URL else "")
     or (IMAGE_API_KEY if PAID_BASE_URL == IMAGE_BASE_URL else "")
-    or (OPENAI_API_KEY if PAID_BASE_URL == OPENAI_BASE_URL else ""))
+    or (_OPENAI_ENV_KEY if PAID_BASE_URL == OPENAI_BASE_URL else ""))
 
 # EMPTY = this lane is off and every non-Frontier plan runs AGENT_MODEL. The
 # provider above stays configured so switching it on is one variable, not four.
@@ -209,8 +212,8 @@ FIRST_TURN_BASE_URL = os.getenv("FIRST_TURN_BASE_URL", OPENAI_BASE_URL).strip()
 FIRST_TURN_AGENT_MODEL = os.getenv("FIRST_TURN_AGENT_MODEL", "").strip()
 FIRST_TURN_API_KEY = (
     os.getenv("FIRST_TURN_API_KEY", "").strip()
-    or (OPENAI_API_KEY if FIRST_TURN_BASE_URL == OPENAI_BASE_URL else "")
-    or (VISION_API_KEY if FIRST_TURN_BASE_URL == VISION_BASE_URL else "")
+    or (_OPENAI_ENV_KEY if FIRST_TURN_BASE_URL == OPENAI_BASE_URL else "")
+    or (_VISION_ENV_KEY if FIRST_TURN_BASE_URL == VISION_BASE_URL else "")
     or (IMAGE_API_KEY if FIRST_TURN_BASE_URL == IMAGE_BASE_URL else ""))
 # Primary paid provider credentials. Historical model settings remain for
 # compatibility; EDITOR_MODEL is authoritative for all subscribed editing.
@@ -219,10 +222,10 @@ FRONTIER_AGENT_MODEL = os.getenv("FRONTIER_AGENT_MODEL", "grok-4.5").strip()
 FRONTIER_VISION_MODEL = os.getenv("FRONTIER_VISION_MODEL", "grok-4.5").strip()
 FRONTIER_API_KEY = (
     os.getenv("FRONTIER_API_KEY", "").strip()
-    or (VISION_API_KEY if FRONTIER_BASE_URL == VISION_BASE_URL else "")
+    or (_VISION_ENV_KEY if FRONTIER_BASE_URL == VISION_BASE_URL else "")
     or (IMAGE_API_KEY if FRONTIER_BASE_URL == IMAGE_BASE_URL else "")
     or (PAID_API_KEY if FRONTIER_BASE_URL == PAID_BASE_URL else "")
-    or (OPENAI_API_KEY if FRONTIER_BASE_URL == OPENAI_BASE_URL else ""))
+    or (_OPENAI_ENV_KEY if FRONTIER_BASE_URL == OPENAI_BASE_URL else ""))
 
 # Plans that route to the frontier provider. A set, so adding a higher tier
 # later is one edit and no new branch.
@@ -272,6 +275,14 @@ FIRST_CUT_UPGRADE_PARALLEL = os.getenv("FIRST_CUT_UPGRADE_PARALLEL", "0") == "1"
 # rollback explicit: stale EDITOR_MODEL / PAID_* / FRONTIER_* environment
 # settings must not silently put paid editing back onto Grok.
 EDITOR_MODEL = "gpt-6-luna"
+# WHO MAY EDIT. Since 4 Nov 2026 every customer edit runs on Claude. The owner,
+# 6 Nov, on delivering the funded OpenAI key: "be cautious from openai as their
+# luna model was terrible for users and was editing nothing". That key serves
+# the concierge, the greetings, the critics and the index's own look; it moves
+# no edit. With this at 0 (the default) llm.editing_lanes leaves no OpenAI lane
+# in an editing turn, so a funded wallet can neither be picked nor be failed
+# over to. "1" lifts that, and only the Gauntlet's scoreboard may justify it.
+OPENAI_EDITS = os.getenv("OPENAI_EDITS", "0") == "1"
 
 # ── The Claude-funded trial lane (owner decision D2, 25 Oct 2026) ────────────
 #
@@ -3041,3 +3052,18 @@ def require_core():
             "Orchestration worker cannot start without REMOTE_EXECUTOR_URL "
             "or Cloudflare/Modal remote compute — "
             "refusing to pull media work onto the orchestration service")
+
+
+def __getattr__(name):
+    """The two OpenAI keys every reader takes from this module, live: the
+    sealed row outranks the environment (provider_creds.py, 6 Nov 2026), and
+    a rotated key lands without a restart."""
+    if name == "OPENAI_API_KEY":
+        import provider_creds
+        return provider_creds.key("OPENAI_API_KEY") or _OPENAI_ENV_KEY
+    if name == "VISION_API_KEY":
+        explicit = os.getenv("VISION_API_KEY", "")
+        if not explicit and VISION_BASE_URL == OPENAI_BASE_URL:
+            return __getattr__("OPENAI_API_KEY")
+        return _VISION_ENV_KEY
+    raise AttributeError(f"module 'config' has no attribute {name!r}")

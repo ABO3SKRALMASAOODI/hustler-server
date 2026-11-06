@@ -216,6 +216,12 @@ def create_app():
             payload["storage"] = _storage.routing_status()
         except Exception:
             pass
+        # Where this process's model keys come from: names only, never a key.
+        try:
+            import provider_creds
+            payload["providers"] = provider_creds.status()
+        except Exception:
+            pass
         # Release certification must observe this process and this database,
         # not a stale edge/proxy response from before a deploy or outage.
         return (

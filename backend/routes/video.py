@@ -31,6 +31,7 @@ from routes.auth import token_required
 from credits import check_and_reserve, get_balance
 import plan_gate
 import mp4probe
+import provider_creds
 import storage
 from video_services.jobs import (
     enqueue as _enqueue,
@@ -189,18 +190,30 @@ CONCIERGE_MODEL = os.getenv("CONCIERGE_MODEL",
 if CONCIERGE_MODEL == "gpt-5.6-luna":
     CONCIERGE_MODEL = "gpt-6-luna"
 CONCIERGE_TIMEOUT_S = float(os.getenv("CONCIERGE_TIMEOUT_S", "14"))
+# The second provider: when the first is dry or down, this one answers (the
+# owner, 6 Nov 2026: 24 customers were sent one canned line because a wallet
+# was empty). Metered on the Claude credit line like every other Claude call.
+CONCIERGE_CLAUDE_MODEL = os.getenv("CONCIERGE_CLAUDE_MODEL",
+                                   "claude-haiku-5-5")
+CONCIERGE_CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 
 _concierge_client = None
+_concierge_built = None         # (client, key): the one this module made
 
 
 def _concierge_llm():
-    global _concierge_client
-    if _concierge_client is None:
+    global _concierge_client, _concierge_built
+    key = provider_creds.key("OPENAI_API_KEY")
+    rotated = (_concierge_built is not None
+               and _concierge_client is _concierge_built[0]
+               and key != _concierge_built[1])
+    if _concierge_client is None or rotated:
         from openai import OpenAI
         _concierge_client = OpenAI(base_url=CONCIERGE_BASE_URL,
-                                   api_key=os.getenv("OPENAI_API_KEY", ""),
+                                   api_key=key,
                                    timeout=CONCIERGE_TIMEOUT_S,
                                    max_retries=0)
+        _concierge_built = (_concierge_client, key)
     return _concierge_client
 
 
@@ -516,13 +529,10 @@ def _concierge_reply(stage, history, attachments, index_error=None,
                  "start until a video is successfully analyzed — "
                  "re-uploading is the fix.")
     else:  # no_video — a blank CapCut-style canvas, no main video required
-        if gen_now:
-            fallback = ("Tell me what to make and I'll start on it now — you "
-                        "don't need to upload a video first. You can also drop "
-                        "images, clips or audio into the panel on the right.")
-        else:
-            fallback = ("Drop a video — or images, clips or audio — into the "
-                        "panel on the right and I'll build your edit from them.")
+        # (A typed request here never reads this: with no model to answer it,
+        # it starts the turn. See the end of this function.)
+        fallback = ("Drop a video — or images, clips or audio — into the "
+                    "panel on the right and I'll build your edit from them.")
         made_from = ("AI-generated and/or uploaded"
                      if (_image_gen_enabled() or _video_gen_enabled())
                      else "uploaded")
@@ -557,8 +567,6 @@ def _concierge_reply(stage, history, attachments, index_error=None,
             fallback = ("Your uploads are staged — arrange them in the strip "
                         "and press Submit, and I'll analyze them and set up "
                         "your timeline.")
-    if not os.getenv("OPENAI_API_KEY"):
-        return fallback, {"kind": "canned", "stage": stage}, None, False
 
     facts = [
         state,
@@ -714,79 +722,19 @@ def _concierge_reply(stage, history, attachments, index_error=None,
     for h in history[-10:]:
         msgs.append({"role": h["role"],
                      "content": (h["content"] or "")[:800]})
-    req = {"model": CONCIERGE_MODEL, "messages": msgs}
-    try:
-        # Concierge classification/copy does not need sampling. Reasoning
-        # models reject custom temperature, so omitting it avoids spending the
-        # first request of every pre-index conversation on a known 400.
-        # The cap must leave room for a reasoning model's hidden thinking:
-        # at 300, 12 of 67 concierge replies in the two weeks to 15 Oct were
-        # EMPTY (every one had used exactly 300 completion tokens) and the
-        # user got the canned line. Low effort keeps the reply fast and
-        # cheap; a model that rejects the field has it dropped below.
-        create_kwargs = dict(model=CONCIERGE_MODEL, messages=msgs,
-                             max_tokens=CONCIERGE_MAX_TOKENS,
-                             reasoning_effort="low")
-        if want_act:
-            # Force the {act, reply} object so a plain-prose answer to a real
-            # create request can't be silently misread as chat (act=False) and
-            # dropped with no agent turn.
-            create_kwargs["response_format"] = {"type": "json_object"}
-        # A model can reject more than one field, one response at a time. Luna
-        # first rejected ``temperature`` in production and then rejected
-        # ``max_tokens`` on the retry; the old one-shot adapter treated that
-        # second, equally mechanical dialect error as an outage and returned
-        # the canned English fallback. Adapt each named field in a bounded
-        # loop, including an SDK that is too old to express the replacement
-        # cap. A non-dialect provider failure still escapes to the outer
-        # retry/fallback below.
-        for _dialect_attempt in range(4):
-            try:
-                resp = _concierge_llm().chat.completions.create(
-                    **create_kwargs)
-                break
-            except Exception as adapt_e:
-                msg = str(adapt_e).lower()
-                adapted = False
-                had_max_tokens = "max_tokens" in create_kwargs
-                had_max_completion = "max_completion_tokens" in create_kwargs
-                if "temperature" in create_kwargs and "temperature" in msg:
-                    create_kwargs.pop("temperature")
-                    adapted = True
-                if "reasoning_effort" in create_kwargs and (
-                        "reasoning_effort" in msg or "reasoning" in msg
-                        or isinstance(adapt_e, TypeError)):
-                    create_kwargs.pop("reasoning_effort")
-                    adapted = True
-                if had_max_tokens and "max_tokens" in msg:
-                    create_kwargs["max_completion_tokens"] = \
-                        create_kwargs.pop("max_tokens")
-                    adapted = True
-                if (had_max_completion
-                        and "max_completion_tokens" in msg
-                        and (isinstance(adapt_e, TypeError)
-                             or "unsupported" in msg
-                             or "unexpected" in msg)):
-                    # A token cap is a nicety; an answer in the user's own
-                    # language is not. This also covers an older OpenAI SDK
-                    # rejecting the keyword before the request leaves us.
-                    create_kwargs.pop("max_completion_tokens", None)
-                    adapted = True
-                if not adapted:
-                    raise
-        else:
-            raise RuntimeError("concierge dialect adaptation did not settle")
-        if not (resp.choices[0].message.content or "").strip():
-            # One quiet retry on an empty completion — same class of
-            # transient as the except below.
-            resp = _concierge_llm().chat.completions.create(**create_kwargs)
-        raw = (resp.choices[0].message.content or "").strip()
-        usage = getattr(resp, "usage", None)
-        rec = {"model": CONCIERGE_MODEL, "request": req,
-               "response": {"reply": raw},
-               "prompt_tokens": getattr(usage, "prompt_tokens", None),
-               "completion_tokens": getattr(usage, "completion_tokens",
-                                            None)}
+    rec = None
+    for answer in _concierge_providers():
+        try:
+            raw, rec = answer(msgs, want_act)
+        except Exception as e:  # the next provider answers
+            print(f"[concierge] LLM call failed: {e}", flush=True)
+            rec = {"model": getattr(answer, "model", CONCIERGE_MODEL),
+                   "request": {"model": getattr(answer, "model",
+                                                CONCIERGE_MODEL),
+                               "messages": msgs},
+                   "response": {"error": str(e)[:300]},
+                   "prompt_tokens": None, "completion_tokens": None}
+            continue
         text, act = (raw, False)
         if want_act:
             text, act = _parse_act(raw)
@@ -802,38 +750,175 @@ def _concierge_reply(stage, history, attachments, index_error=None,
         if text and not _CONCIERGE_CLAIM.search(text):
             return text, {"kind": "concierge", "stage": stage}, rec, False
         rec["response"] = {"rejected": raw or "(empty completion)"}
-        return fallback, {"kind": "canned", "stage": stage}, rec, False
+    if want_act:
+        # No model answered. A line about what they could type is no answer
+        # to what they typed: the request goes to the editor, which has its
+        # own provider and either does it or says why not.
+        return "On it — starting that now.", {
+            "kind": "concierge", "stage": stage, "act": True,
+            "no_concierge_model": True}, rec, True
+    return fallback, {"kind": "canned", "stage": stage}, rec, False
+
+
+def _concierge_providers():
+    """Who may answer, in order, each ``fn(msgs, want_act) -> (raw, record)``.
+    OpenAI first, for the concierge that already runs there; Claude when
+    OpenAI is dry, down or unkeyed."""
+    out = []
+    if provider_creds.key("OPENAI_API_KEY"):
+        out.append(_concierge_openai)
+    if provider_creds.key("ANTHROPIC_API_KEY"):
+        out.append(_concierge_claude)
+    return out
+
+
+def _concierge_openai(msgs, want_act):
+    # Concierge classification/copy does not need sampling. Reasoning models
+    # reject custom temperature, so omitting it avoids spending the first
+    # request of every pre-index conversation on a known 400. The cap must
+    # leave room for a reasoning model's hidden thinking: at 300, 12 of 67
+    # concierge replies in the two weeks to 15 Oct were EMPTY (every one had
+    # used exactly 300 completion tokens) and the user got the canned line.
+    # Low effort keeps the reply fast and cheap; a model that rejects the
+    # field has it dropped below.
+    create_kwargs = dict(model=CONCIERGE_MODEL, messages=msgs,
+                         max_tokens=CONCIERGE_MAX_TOKENS,
+                         reasoning_effort="low")
+    if want_act:
+        # Force the {act, reply} object so a plain-prose answer to a real
+        # create request can't be silently misread as chat (act=False) and
+        # dropped with no agent turn.
+        create_kwargs["response_format"] = {"type": "json_object"}
+    try:
+        resp = _concierge_create(create_kwargs)
     except Exception as e:
-        # ONE retry after a beat before surrendering to the canned line —
-        # on 2026-08-09 three real users asked real questions ("how many
-        # files did i share?") during transient provider blips and each got
-        # the same tone-deaf template. A second attempt is cheap; the
-        # canned line costs a user.
+        if "insufficient_quota" in str(e) or "no credits" in str(e).lower():
+            raise   # an empty wallet is the next provider's cue, at once
+        # ONE retry after a beat. On 2026-08-09 three real users asked real
+        # questions ("how many files did i share?") during transient provider
+        # blips and each got the same tone-deaf template.
+        print(f"[concierge] retrying after: {e}", flush=True)
+        time.sleep(1.5)
+        resp = _concierge_llm().chat.completions.create(**create_kwargs)
+    raw = (resp.choices[0].message.content or "").strip()
+    usage = getattr(resp, "usage", None)
+    return raw, {"model": CONCIERGE_MODEL,
+                 "request": {"model": CONCIERGE_MODEL, "messages": msgs},
+                 "response": {"reply": raw},
+                 "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                 "completion_tokens": getattr(usage, "completion_tokens",
+                                              None)}
+
+
+def _concierge_create(create_kwargs):
+    # A model can reject more than one field, one response at a time. Luna
+    # first rejected ``temperature`` in production and then rejected
+    # ``max_tokens`` on the retry; the old one-shot adapter treated that
+    # second, equally mechanical dialect error as an outage and returned
+    # the canned English fallback. Adapt each named field in a bounded
+    # loop, including an SDK that is too old to express the replacement
+    # cap. A non-dialect provider failure still escapes to the caller.
+    for _dialect_attempt in range(4):
         try:
-            time.sleep(1.5)
             resp = _concierge_llm().chat.completions.create(**create_kwargs)
-            raw = (resp.choices[0].message.content or "").strip()
-            text, act = (raw, False)
-            if want_act:
-                text, act = _parse_act(raw)
-            rec = {"model": CONCIERGE_MODEL, "request": req,
-                   "response": {"reply": raw, "retried": True},
-                   "prompt_tokens": None, "completion_tokens": None}
-            if act:
-                if _CONCIERGE_CLAIM.search(text or ""):
-                    text = "On it — starting that now."
-                return text, {"kind": "concierge", "stage": stage,
-                              "act": True}, rec, True
-            if text and not _CONCIERGE_CLAIM.search(text):
-                return text, {"kind": "concierge", "stage": stage}, rec, \
-                    False
-        except Exception as e2:
-            e = e2
-        print(f"[concierge] LLM call failed: {e}", flush=True)
-        return fallback, {"kind": "canned", "stage": stage}, {
-            "model": CONCIERGE_MODEL, "request": req,
-            "response": {"error": str(e)[:300]},
-            "prompt_tokens": None, "completion_tokens": None}, False
+            break
+        except Exception as adapt_e:
+            msg = str(adapt_e).lower()
+            adapted = False
+            had_max_tokens = "max_tokens" in create_kwargs
+            had_max_completion = "max_completion_tokens" in create_kwargs
+            if "temperature" in create_kwargs and "temperature" in msg:
+                create_kwargs.pop("temperature")
+                adapted = True
+            if "reasoning_effort" in create_kwargs and (
+                    "reasoning_effort" in msg or "reasoning" in msg
+                    or isinstance(adapt_e, TypeError)):
+                create_kwargs.pop("reasoning_effort")
+                adapted = True
+            if had_max_tokens and "max_tokens" in msg:
+                create_kwargs["max_completion_tokens"] = \
+                    create_kwargs.pop("max_tokens")
+                adapted = True
+            if (had_max_completion
+                    and "max_completion_tokens" in msg
+                    and (isinstance(adapt_e, TypeError)
+                         or "unsupported" in msg
+                         or "unexpected" in msg)):
+                # A token cap is a nicety; an answer in the user's own
+                # language is not. This also covers an older OpenAI SDK
+                # rejecting the keyword before the request leaves us.
+                create_kwargs.pop("max_completion_tokens", None)
+                adapted = True
+            if not adapted:
+                raise
+    else:
+        raise RuntimeError("concierge dialect adaptation did not settle")
+    if not (resp.choices[0].message.content or "").strip():
+        # One quiet retry on an empty completion.
+        resp = _concierge_llm().chat.completions.create(**create_kwargs)
+    return resp
+
+
+def _concierge_claude(msgs, want_act):
+    """The same conversation on the Messages API. Plain HTTP: the concierge
+    needs one text answer, and this process holds no other Claude client."""
+    import requests
+    system = "\n\n".join(m["content"] for m in msgs if m["role"] == "system")
+    turns = []
+    for m in msgs:
+        text = str(m.get("content") or "").strip()
+        if m["role"] == "system" or not text:
+            continue
+        if turns and turns[-1]["role"] == m["role"]:
+            turns[-1]["content"] += "\n\n" + text
+        else:
+            turns.append({"role": m["role"], "content": text})
+    while turns and turns[0]["role"] != "user":   # the API opens on a user turn
+        turns.pop(0)
+    if not turns:
+        turns = [{"role": "user", "content": "(no message)"}]
+    r = requests.post(
+        CONCIERGE_CLAUDE_URL,
+        headers={"x-api-key": provider_creds.key("ANTHROPIC_API_KEY"),
+                 "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": CONCIERGE_CLAUDE_MODEL, "max_tokens": 600,
+              "system": system, "messages": turns},
+        timeout=(3.05, CONCIERGE_TIMEOUT_S))
+    if not r.ok:
+        raise RuntimeError(f"claude concierge HTTP {r.status_code}: "
+                           f"{r.text[:200]}")
+    body = r.json()
+    raw = "".join(block.get("text", "") for block in body.get("content") or []
+                  if block.get("type") == "text").strip()
+    usage = body.get("usage") or {}
+    return raw, {"model": CONCIERGE_CLAUDE_MODEL,
+                 "request": {"model": CONCIERGE_CLAUDE_MODEL,
+                             "messages": msgs},
+                 "response": {"reply": raw},
+                 "prompt_tokens": usage.get("input_tokens"),
+                 "completion_tokens": usage.get("output_tokens")}
+
+
+_concierge_openai.model = CONCIERGE_MODEL
+_concierge_claude.model = CONCIERGE_CLAUDE_MODEL
+
+
+def _meter_concierge(conn, rec):
+    """A concierge reply on Claude is a Claude call: on the credit line's
+    ledger like every other. Never fails the reply."""
+    if not str((rec or {}).get("model") or "").startswith("claude-"):
+        return
+    try:
+        import claude_credit
+        import claude_plans
+        import model_prices
+        usd = model_prices.claude_usage_cost(
+            rec["model"], int(rec.get("prompt_tokens") or 0),
+            int(rec.get("completion_tokens") or 0))
+        claude_plans.safe(conn, claude_credit.record_paid_spend, usd)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[concierge] Claude meter failed: {str(exc)[:160]}", flush=True)
 
 
 # A request thread must never wait on the operating system's TCP timeout
@@ -1780,7 +1865,7 @@ def video_health():
     return jsonify({
         "ok": True,
         "storage_configured": storage.is_configured(),
-        "llm_configured": bool(os.getenv("OPENAI_API_KEY")),
+        "llm_configured": bool(provider_creds.key("OPENAI_API_KEY")),
     })
 
 
@@ -4806,7 +4891,7 @@ def post_message(user_id, project_id, data=None):
             # A free-trial turn runs on the Claude lane in the executors and
             # needs no OpenAI key here; without the Claude lane the worker
             # answers it with the plan cards itself.
-            if not os.getenv("OPENAI_API_KEY") and not trial_lane:
+            if not provider_creds.key("OPENAI_API_KEY") and not trial_lane:
                 cur.execute("""INSERT INTO chat_messages (session_id, role,
                                                           content)
                                VALUES (%s, 'assistant',
@@ -5118,6 +5203,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                              Json(llm_rec["response"]),
                              llm_rec["prompt_tokens"],
                              llm_rec["completion_tokens"]))
+                _meter_concierge(conn, llm_rec)
             conn.commit()
             if feature_blocked:
                 record_client_event(ctx["user_id"], project_id,
@@ -8037,7 +8123,7 @@ def start_short_editor(user_id, project_id, child_project_id):
             return jsonify({"error": "A few edits are still processing. "
                                      "Start this reel when one finishes.",
                             "code": "busy_capacity"}), 429
-        if not os.getenv("OPENAI_API_KEY"):
+        if not provider_creds.key("OPENAI_API_KEY"):
             return jsonify({"error": "The editing agent is not configured."}), 503
 
         prompt = _short_editor_boot_prompt(

@@ -290,11 +290,15 @@ def trial_remaining_usd(conn, user_id):
 
 
 def enqueue(conn, project_id, user_id, extra=None):
-    """One First-cut job per project (idempotent)."""
+    """One First-cut job per project (idempotent), and none while the
+    customer's own request is queued or running: that request is the brief
+    (a message sent the moment analysis ended got its turn before this ran)."""
     with conn.cursor() as cur:
         cur.execute("""SELECT id FROM video_jobs
                        WHERE project_id = %s AND type = 'agent_turn'
-                         AND payload->>'first_cut' = 'true'
+                         AND (payload->>'first_cut' = 'true'
+                              OR (payload ? 'message_id'
+                                  AND state IN ('queued', 'running')))
                        LIMIT 1""", (int(project_id),))
         row = cur.fetchone()
         if row:
@@ -1915,7 +1919,7 @@ def kept_share_restore(keep, duration, picked=None):
         return None
     if duration <= 0 or duration > config.FIRST_CUT_SHORT_SOURCE_S:
         return None
-    if (picked or {}).get("how") == "motion":
+    if (picked or {}).get("how") in ("motion", "continuous"):
         return None
     if kept >= KEPT_SHARE_FLOOR * duration or duration - kept <= 6.0:
         return None
@@ -1975,6 +1979,45 @@ def _faceless_reframe_args(speech, faces, picked):
     return args
 
 
+def _same_keep(a, b, tolerance_s=0.05):
+    """Do two keep lists play the same footage? A plan's boundaries are
+    rounded and the stored keep is not, so ``!=`` read a whole-take plan as a
+    change (FINDINGS #2, 6 Nov 2026)."""
+    a, b = a or [], b or []
+    return len(a) == len(b) and all(
+        abs(float(x) - float(y)) <= tolerance_s
+        for pair_a, pair_b in zip(a, b) for x, y in zip(pair_a, pair_b))
+
+
+def continuous_take(ctx, steps, applied, started, spend, q1=False):
+    """One continuous take with no speech: keep what the plan keeps, grade
+    what it grades. Returns the ``picked`` record. A step that changes nothing
+    or fails leaves the take as it is and the chain going: the customer's
+    first cut never ends on this (FINDINGS #2: "NO CHANGE" on a whole-take
+    plan raised, and they were left with their own clip and no reply)."""
+    import continuous_cut
+    plan = continuous_cut.plan_or_whole(ctx, spend)
+    selected = plan["keep"]
+    trimmed = (not _same_keep(selected, _keep(ctx)) and _ok(_run(
+        ctx, steps, "keep_segments",
+        {"segments": selected, "snap_to_words": False}, started)))
+    applied.append("a continuous excerpt with its original sound" if trimmed
+                   else "the complete action and original sound preserved")
+    adjustments = {k: v for k, v in (plan.get("adjustments") or {}).items()
+                   if abs(v) > .001}
+    if adjustments and _ok(_run(ctx, steps, "set_grade_custom", adjustments,
+                                started)):
+        applied.append("a subtle colour and exposure correction")
+    if q1:
+        # the poster title, from the same look a short silent clip gets
+        step = float(ctx.duration or 0) / 6.0
+        _w, ctx.first_cut_hook = montage_scout(
+            ctx, [[k * step, (k + 1) * step] for k in range(6)], spend,
+            title_only=True)
+    return {"how": "continuous", "plan": plan,
+            "s": round(sum(b - a for a, b in (_keep(ctx) or selected)), 3)}
+
+
 def video_chain(ctx, worker_db, started, spend, whole=False):
     """The First cut's chain. whole=True (the trial turn's clean-up of the
     whole take, trial_turn.whole_cleanup): no best-moment pick, the source's
@@ -2027,6 +2070,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
                 applied.append("reframed to 9:16")
         return steps, applied, {"how": "finished_piece"}
     short_silent = False
+    continuous = False
     _f = _faces(ctx.index)
     montage = (not cut_speech and duration >= MONTAGE_MIN_SOURCE_S
                and (not _f or _f["share"] < 0.35)
@@ -2054,33 +2098,10 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             windows = montage_cut.fit_length(windows, shots, duration)
         if not windows:
             # A shot-diversity quota cannot select a single continuous take.
-            # Inspect the actual action and preserve its continuity instead
-            # of falling through with zero edits and a generic blocked reply.
-            import continuous_cut
-            plan = continuous_cut.plan(ctx, spend)
-            selected = plan["keep"]
-            if selected != _keep(ctx):
-                result = _run(ctx, steps, "keep_segments",
-                              {"segments": selected, "snap_to_words": False}, started)
-                if not _ok(result):
-                    raise ValueError("The inspected continuous edit could not be saved")
-                applied.append("a continuous excerpt with its original sound")
-            else:
-                applied.append("the complete action and original sound preserved")
-            adjustments = {k: v for k, v in plan["adjustments"].items() if abs(v) > .001}
-            if adjustments:
-                result = _run(ctx, steps, "set_grade_custom", adjustments, started)
-                if not _ok(result):
-                    raise ValueError("The inspected exposure correction could not be saved")
-                applied.append("a subtle colour and exposure correction")
-            if _orientation(ctx.index) != "vertical":
-                result = _run(ctx, steps, "set_frame",
-                              {"ratio": "9:16", "mode": "pad_blur"}, started)
-                if not _ok(result):
-                    raise ValueError("The continuous scene could not be fitted to vertical")
-                applied.append("the full scene fitted to vertical")
-            return steps, applied, {"how": "continuous", "plan": plan,
-                                    "s": round(sum(b - a for a, b in selected), 3)}
+            # Inspect the actual action and keep its continuity; the rest of
+            # the chain then gives the take its title and camera.
+            picked = continuous_take(ctx, steps, applied, started, spend, q1)
+            continuous = True
         if windows and _ok(_run(ctx, steps, "keep_segments",
                                 {"segments": windows, "snap_to_words": False},
                                 started)):
@@ -2192,7 +2213,13 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
     vertical_source = _orientation(ctx.index) == "vertical"
     vertical_out = vertical_source
     screen_kept = False
-    if not vertical_source:
+    if not vertical_source and (picked or {}).get("how") == "continuous":
+        # the whole scene, fitted: a crop would cut the action it preserves
+        if _ok(_run(ctx, steps, "set_frame",
+                    {"ratio": "9:16", "mode": "pad_blur"}, started)):
+            applied.append("the full scene fitted to vertical")
+            vertical_out = True
+    elif not vertical_source:
         if _screen_like(ctx.index) and not talking:
             # Screen text at 9:16 is unreadable (bake-off vfr runs); the
             # references keep tutorials landscape (R07, R11).
@@ -2280,6 +2307,14 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
             subject = short_clip.whole_looks(ctx, spend)
         if subject and hook:
             hook_y = short_clip.title_y(subject)
+    if q1 and continuous and vertical_source and not screen_kept:
+        # One take with no words is not the upload handed back: a camera
+        # that finds what it shows, moving across the whole take. No jump
+        # cuts: the plan kept this take continuous on purpose.
+        import short_clip
+        subject = short_clip.whole_looks(ctx, spend)
+        if subject and hook:
+            hook_y = short_clip.title_y(subject)
     # (Q1 tried the scout's promise above the head: the band above a
     # vertical talking head is the brand corner mark's (y 0.115-0.192), and
     # the corner-mark guard removed every such title, scoring hook 2.5-4.
@@ -2342,7 +2377,7 @@ def video_chain(ctx, worker_db, started, spend, whole=False):
         # camera finds its subject, pushes in, follows it and ends moving
         import short_clip
         if _ok(short_clip.camera(ctx, steps, started, _run, spend,
-                                 samples=subject)):
+                                 samples=subject, across_take=continuous)):
             applied.append("a camera that follows the subject")
     cutaways = []
     if q1 and talking:
@@ -3514,17 +3549,34 @@ def run(worker_db, job, project, index_row):
         # payer's and the owner's included. A URL First cut makes no model
         # call, so no lane or model changes with it.
         ctx.first_cut_q1 = True
-    llm.set_turn_plan(plan if subscribed else "", project_id=project["id"])
+    # A payer's First cut looks with the same Claude model it scouts with, so
+    # its checks follow the Claude route (llm.claude_trial_lane) like their
+    # edits do. A trial account's scope already does that.
+    first_cut_lane = None
+    if getattr(ctx, "first_cut_model", None) and trial_scope is None:
+        import claude_lane
+        first_cut_lane = claude_lane.lane(ctx.first_cut_model,
+                                          name="claude_paid")
+    llm.set_turn_plan(plan if subscribed else "", project_id=project["id"],
+                      lane=first_cut_lane)
+    steps, applied, picked = [], [], None
     try:
-        if url:
-            steps, applied = url_chain(ctx, worker_db, url, started,
-                                       _message_text(worker_db,
-                                                     payload.get("message_id")))
-            picked = None
-        else:
-            with _timed(ctx, "chain"):
-                steps, applied, picked = video_chain(ctx, worker_db, started,
-                                                     spend)
+        try:
+            if url:
+                steps, applied = url_chain(
+                    ctx, worker_db, url, started,
+                    _message_text(worker_db, payload.get("message_id")))
+            else:
+                with _timed(ctx, "chain"):
+                    steps, applied, picked = video_chain(
+                        ctx, worker_db, started, spend)
+        except Exception as exc:  # noqa: BLE001
+            # A chain that dies still answers the customer: what it saved is
+            # rendered, or the reply below says plainly that it stopped.
+            print(f"[first_cut] job {job.get('id')}: the chain stopped: "
+                  f"{type(exc).__name__}: {str(exc)[:200]}", flush=True)
+            steps.append({"tool": "chain", "ok": False,
+                          "note": f"{type(exc).__name__}: {str(exc)[:160]}"})
         render = None
         keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
         if ctx.versions_written or keep_whole:

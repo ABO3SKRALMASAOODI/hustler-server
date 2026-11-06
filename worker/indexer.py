@@ -1612,7 +1612,11 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
 
     pending, out_of_credits, subscribe_gated = None, False, False
     pending_job_id = None
-    if session_id and user_id and config.OPENAI_API_KEY:
+    # Not behind any provider's key: the turn picks its own lane, and a request
+    # typed during analysis IS the first edit. Behind config.OPENAI_API_KEY an
+    # unset key skipped this and the customer got a generic First cut instead
+    # (FINDINGS #3, 6 Nov 2026).
+    if session_id and user_id:
         try:
             found = worker_db.run(dbx.pending_user_message,
                                   project_id, session_id)

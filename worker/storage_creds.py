@@ -49,6 +49,9 @@ Nobody should have to paste them into four dashboards, so:
   and no secret or key value is ever logged or reported (status() carries
   names and reason words only).
 
+The same seal carries a second row: provider_creds.py (the model providers'
+keys, 6 Nov 2026) passes its own ``Spec`` to seal, open_row and Credentials.
+
 AES-GCM comes from ``cryptography`` (the web service, the sealing CLI) or,
 where that is not installed (the worker images), from yt-dlp's pure-Python
 ``yt_dlp.aes`` (verified tag). Importing yt-dlp costs an executor ~30 MB that
@@ -68,6 +71,7 @@ import sys
 import threading
 import time
 import weakref
+from collections import namedtuple
 from collections.abc import Mapping
 
 KV_KEY = "storage_next_credentials"
@@ -81,6 +85,10 @@ REQUIRED = ("S3_NEXT_ENDPOINT", "S3_NEXT_ACCESS_KEY_ID",
             "S3_NEXT_SECRET_ACCESS_KEY", "S3_NEXT_BUCKET")
 FIELDS = REQUIRED + ("S3_NEXT_REGION", "S3_NEXT_PUBLIC_ENDPOINT",
                      "S3_NEXT_ADDRESSING_STYLE")
+# What one sealed row may carry: its HKDF info, the names allowed in and out
+# of it, and the names it cannot go without.
+Spec = namedtuple("Spec", "info fields required")
+STORAGE = Spec(INFO, FIELDS, REQUIRED)
 TTL_S = 300.0
 RETRY_S = 30.0
 FIRST_WAIT_S = 1.0
@@ -118,12 +126,12 @@ def _ikm(secret):
     return str(secret).strip().encode("utf-8")
 
 
-def key_for(secret):
-    return hkdf_sha256(_ikm(secret), INFO.encode("ascii"))
+def key_for(secret, info=INFO):
+    return hkdf_sha256(_ikm(secret), info.encode("ascii"))
 
 
-def key_id(secret):
-    return hkdf_sha256(_ikm(secret), (INFO + "/kid").encode("ascii"), 8).hex()
+def key_id(secret, info=INFO):
+    return hkdf_sha256(_ikm(secret), (info + "/kid").encode("ascii"), 8).hex()
 
 
 def _b64(data):
@@ -216,21 +224,23 @@ def _decrypt_in_child(key, nonce, ct, tag, timeout_s=60):
 
 # ── the row ─────────────────────────────────────────────────────────────────
 
-def clean_values(values):
-    """The allowed S3_NEXT_* names with non-empty string values."""
+def clean_values(values, fields=FIELDS):
+    """The allowed names (S3_NEXT_* unless told otherwise) with non-empty
+    string values."""
     out = {}
-    for name in FIELDS:
+    for name in fields:
         v = (values or {}).get(name)
         if isinstance(v, str) and v.strip():
             out[name] = v.strip()
     return out
 
 
-def seal(values, secrets, now=None, rand=os.urandom):
-    """The app_kv row text sealing ``values`` (S3_NEXT_* names) under each
-    secret in ``secrets`` ({kek name: secret}). Needs ``cryptography``."""
-    plain = clean_values(values)
-    missing = [n for n in REQUIRED if n not in plain]
+def seal(values, secrets, now=None, rand=os.urandom, spec=STORAGE):
+    """The app_kv row text sealing ``values`` (the names ``spec`` allows)
+    under each secret in ``secrets`` ({kek name: secret}). Needs
+    ``cryptography``."""
+    plain = clean_values(values, spec.fields)
+    missing = [n for n in spec.required if n not in plain]
     if missing:
         raise ValueError("missing required: " + ", ".join(missing))
     unknown = sorted(set(secrets or {}) - set(KEKS))
@@ -246,13 +256,13 @@ def seal(values, secrets, now=None, rand=os.urandom):
         if not secret:
             continue
         nonce = rand(NONCE_BYTES)
-        ct = AESGCM(key_for(secret)).encrypt(nonce, text.encode("utf-8"),
-                                             None)
-        entries.append({"kek": name, "kid": key_id(secret),
+        ct = AESGCM(key_for(secret, spec.info)).encrypt(
+            nonce, text.encode("utf-8"), None)
+        entries.append({"kek": name, "kid": key_id(secret, spec.info),
                         "nonce": _b64(nonce), "ct": _b64(ct)})
     if not entries:
         raise ValueError("no sealing secret given")
-    row = {"v": VERSION, "alg": ALG, "kdf": KDF, "info": INFO}
+    row = {"v": VERSION, "alg": ALG, "kdf": KDF, "info": spec.info}
     row.update(entries[0])
     row["also"] = entries[1:]
     row["fields"] = len(plain)
@@ -260,7 +270,7 @@ def seal(values, secrets, now=None, rand=os.urandom):
     return json.dumps(row, sort_keys=True)
 
 
-def open_row(raw, env, impl=None):
+def open_row(raw, env, impl=None, spec=STORAGE):
     """(values, kek name) from the row text, using the sealing secrets in
     ``env``; else CredentialsError with one of: missing, malformed,
     unsupported, no_secret, wrong_key, damaged, incomplete, no_aes."""
@@ -275,7 +285,7 @@ def open_row(raw, env, impl=None):
     if not isinstance(row, dict):
         raise CredentialsError("malformed")
     if (row.get("v"), row.get("alg"), row.get("kdf"), row.get("info")) != \
-            (VERSION, ALG, KDF, INFO):
+            (VERSION, ALG, KDF, spec.info):
         raise CredentialsError("unsupported")
     also = row.get("also") if isinstance(row.get("also"), list) else []
     entries = [row] + [e for e in also if isinstance(e, dict)]
@@ -289,7 +299,7 @@ def open_row(raw, env, impl=None):
             continue
         held = True
         if not hmac.compare_digest(str(entry.get("kid") or ""),
-                                   key_id(secret)):
+                                   key_id(secret, spec.info)):
             continue
         try:
             nonce, data = _unb64(entry["nonce"]), _unb64(entry["ct"])
@@ -297,16 +307,18 @@ def open_row(raw, env, impl=None):
             reason = "damaged"
             continue
         try:
-            plain = _decrypt(key_for(secret), nonce, data, impl=impl)
+            plain = _decrypt(key_for(secret, spec.info), nonce, data,
+                             impl=impl)
         except CredentialsError as exc:
             reason = exc.reason
             continue
         try:
-            values = clean_values(json.loads(plain.decode("utf-8")))
+            values = clean_values(json.loads(plain.decode("utf-8")),
+                                  spec.fields)
         except Exception:  # noqa: BLE001
             reason = "damaged"
             continue
-        if any(n not in values for n in REQUIRED):
+        if any(n not in values for n in spec.required):
             reason = "incomplete"
             continue
         return values, name
@@ -324,8 +336,11 @@ class Credentials:
     returns the raw app_kv value (None when absent) and may raise."""
 
     def __init__(self, fetch=None, env=None, ttl_s=None, retry_s=None,
-                 clock=None, log=None, impl=None, background=True):
+                 clock=None, log=None, impl=None, background=True,
+                 spec=STORAGE, what="next store"):
         self._fetch = fetch
+        self._spec = spec
+        self._what = what
         self._background = background
         self._env = os.environ if env is None else env
         self._ttl = float(TTL_S if ttl_s is None else ttl_s)
@@ -397,7 +412,7 @@ class Credentials:
                 try:
                     threading.Thread(target=self._run_first, args=(event,),
                                      daemon=True,
-                                     name="storage-creds-first").start()
+                                     name="sealed-creds-first").start()
                 except Exception:
                     self._first = None
                     raise
@@ -447,7 +462,7 @@ class Credentials:
                     try:
                         threading.Thread(target=self._refresh_then_release,
                                          daemon=True,
-                                         name="storage-creds").start()
+                                         name="sealed-creds").start()
                     except Exception:  # noqa: BLE001
                         self._lock.release()
                 else:
@@ -483,21 +498,22 @@ class Credentials:
                                else self._retry)
             return
         try:
-            values, kek = open_row(raw, self._env, impl=self._impl)
+            values, kek = open_row(raw, self._env, impl=self._impl,
+                                   spec=self._spec)
         except CredentialsError as exc:
             self._values, self._kek, self._raw = None, None, raw
             self._reason = exc.reason
             self._read_at = now
             self._due = now + (self._ttl if exc.reason in
                                ("missing", "no_secret") else self._retry)
-            self._say(f"next store not configured from app_kv "
+            self._say(f"{self._what} not configured from app_kv "
                       f"({exc.reason})")
             return
         self._values, self._kek, self._raw = values, kek, raw
         self._reason = "ok"
         self._read_at = now
         self._due = now + self._ttl
-        self._say(f"next store keys from app_kv ({len(values)} fields, "
+        self._say(f"{self._what} keys from app_kv ({len(values)} fields, "
                   f"sealed with {kek})")
 
     def _say(self, msg):

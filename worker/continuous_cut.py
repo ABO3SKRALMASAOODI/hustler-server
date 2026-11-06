@@ -4,7 +4,6 @@ import json
 import subprocess
 from types import SimpleNamespace
 
-import config
 import llm
 import request_contract
 
@@ -34,6 +33,27 @@ These controls use small signed deltas: zero is neutral. Return the typed plan
 with plan_continuous_take, grounded in what these frames actually show."""
 
 
+def whole_take(ctx):
+    """The plan with nothing decided: the whole take, untouched."""
+    return {"subject": "", "reason": "kept whole", "start_boundary": 0,
+            "end_boundary": 12, "adjustments": {},
+            "keep": [[0.0, round(float(ctx.index["video"]["duration"]), 3)]]}
+
+
+def plan_or_whole(ctx, spend):
+    """The model's plan, or the whole take when there is no Claude lane or no
+    usable answer. Choosing the excerpt is an edit, so it never runs on
+    another provider, and an unanswered look never sinks the First cut."""
+    if not getattr(ctx, "first_cut_model", None):
+        return whole_take(ctx)
+    try:
+        return plan(ctx, spend)
+    except Exception as exc:  # noqa: BLE001 - the take is still the first cut
+        print(f"[first_cut] continuous plan failed: {type(exc).__name__}: "
+              f"{str(exc)[:160]}", flush=True)
+        return whole_take(ctx)
+
+
 def plan(ctx, spend):
     video = ctx.index["video"]
     duration = float(video["duration"])
@@ -55,12 +75,9 @@ def plan(ctx, spend):
             {"type": "text", "text": f"Source {at:.3f}s, between boundaries {i} and {i + 1}:"},
             {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," +
                                                      base64.b64encode(result.stdout).decode()}}])
-    model = getattr(ctx, "first_cut_model", None)
-    if model:
-        import claude_lane
-        client = claude_lane.ClaudeLaneClient(timeout=90)
-    else:
-        client, model = llm.vision_client(), config.VISION_MODEL
+    import claude_lane
+    model = ctx.first_cut_model
+    client = claude_lane.ClaudeLaneClient(timeout=90)
     tool = {"type": "function", "function": {
         "name": "plan_continuous_take", "description": "Record the evidence-based continuous edit.",
         "parameters": SCHEMA}}
