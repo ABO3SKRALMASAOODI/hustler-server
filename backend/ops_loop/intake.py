@@ -69,6 +69,11 @@ HELD_GRACE = timedelta(minutes=3)
 # minute or two to mark the ticket: this long means it really did not.
 UNHANDLED_AFTER = timedelta(minutes=45)
 FIXING_STALE = timedelta(hours=6)
+# A P0 handed back with a note is waiting on something (a replay, a rating, a
+# release): the next run could only repeat the last. Without this quiet every
+# watch would start a Fixer on it, and the weekly limit is what stopped them all
+# for 70 hours. A new failure on it ends the quiet at once.
+RELEASE_QUIET = timedelta(hours=6)
 # A scheduled agent's own heartbeat (ops_review.py heartbeat). For 70 hours from
 # 2 Nov nothing ran and nothing said so; the alert can only live here, because
 # whatever stopped them stops anything else on the Mac too.
@@ -575,6 +580,9 @@ OPENED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
 CLAIMED_AT = """COALESCE((SELECT max((h->>'at')::timestamptz) FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'fixing'), updated_at)"""
+RELEASED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
+                  jsonb_array_elements(history) h
+                 WHERE h->>'event' = 'released')"""
 
 
 def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
@@ -589,6 +597,7 @@ def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
         SELECT id, cause_key, title, severity, status, occurrences,
                recurrence_count, first_seen, last_seen, created_at,
                updated_at, {OPENED_AT} AS opened_at, {CLAIMED_AT} AS claimed_at,
+               {RELEASED_AT} AS released_at,
                (SELECT count(DISTINCT h->>'user') FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'failure') AS users
@@ -600,6 +609,10 @@ def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
         fixing = r["status"] == "fixing"
         since = _aware(r["claimed_at"] if fixing else
                        (r["opened_at"] or r["created_at"]))
+        released = _aware(r.get("released_at"))
+        if not fixing and released and now - released < RELEASE_QUIET and \
+                _aware(r["last_seen"]) <= released:
+            continue
         if since and now - since >= (stale if fixing else after):
             d = dict(r)
             d["opened_at"] = since
@@ -609,8 +622,9 @@ def unhandled(cur, now=None, after=UNHANDLED_AFTER, stale=FIXING_STALE):
 
 
 def pending_p0(cur, now=None, stale=FIXING_STALE):
-    """P0 tickets the Mac's Fixer should take now: open ones, and 'fixing'
-    ones claimed more than `stale` ago (a run that died)."""
+    """P0 tickets the Mac's Fixer should take now: open ones, unless a Fixer
+    handed one back within RELEASE_QUIET and nothing failed on it since, and
+    'fixing' ones claimed more than `stale` ago (a run that died)."""
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(cur):
         return []
@@ -618,9 +632,11 @@ def pending_p0(cur, now=None, stale=FIXING_STALE):
                           recurrence_count, updated_at, last_seen
                      FROM tickets
                     WHERE severity = 'P0'
-                      AND (status = 'open'
+                      AND ((status = 'open'
+                            AND (COALESCE({RELEASED_AT}, 'epoch') < %s
+                                 OR last_seen > {RELEASED_AT}))
                            OR (status = 'fixing' AND {CLAIMED_AT} < %s))
-                    ORDER BY id""", (now - stale,))
+                    ORDER BY id""", (now - RELEASE_QUIET, now - stale))
     return [dict(r) for r in cur.fetchall()]
 
 

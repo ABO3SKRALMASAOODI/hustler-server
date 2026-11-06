@@ -419,7 +419,7 @@ def test_the_p0_watch_takes_open_p0s_and_stale_fixing_ones():
     assert "severity = 'P0'" in c.sql and "status = 'open'" in c.sql
     assert "status = 'fixing' AND COALESCE(" in c.sql
     assert "h->>'event' = 'fixing'" in c.sql
-    assert c.params == (NOW - timedelta(hours=6),)
+    assert c.params == (NOW - timedelta(hours=6), NOW - timedelta(hours=6))
 
 
 def test_the_intake_runs_every_minute_from_the_web_process():

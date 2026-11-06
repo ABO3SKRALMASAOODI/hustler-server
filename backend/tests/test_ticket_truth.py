@@ -567,6 +567,34 @@ def test_the_alert_gives_the_30_minute_watch_its_turn(world):
         world.c, world.clock.now + intake.UNHANDLED_AFTER)] == [tid]
 
 
+def test_a_p0_handed_back_waits_quietly_until_a_new_failure_lands(world):
+    """A strict close means a P0 can wait on a replay or a rating. Starting a
+    Fixer on it every 30 minutes would burn the weekly limit that stopped every
+    agent for 70 hours; a customer hit by it ends the quiet at once."""
+    tid = p0(world, "fixing")
+    t = world.only_ticket()
+    store.release_fixing(world.conn.cursor(), tid,
+                         t["updated_at"].isoformat(), "waiting on the replay")
+    world.clock.now += timedelta(hours=1)
+    assert intake.pending_p0(world.c, world.clock.now) == []
+    assert intake.unhandled(world.c, world.clock.now) == []
+    store.record_failure(world.conn.cursor(), {
+        "ref": "job:2", "source": "job", "at": world.clock.now, "user_id": 2846,
+        "cause_key": "auto-x", "project_id": 5600, "severity": "P0",
+        "title": "x", "detail": "d"})
+    assert [r["id"] for r in intake.pending_p0(world.c, world.clock.now)] == [tid]
+
+
+def test_a_quiet_ends_by_itself(world):
+    tid = p0(world, "fixing")
+    t = world.only_ticket()
+    store.release_fixing(world.conn.cursor(), tid,
+                         t["updated_at"].isoformat(), "waiting on the replay")
+    later = world.clock.now + intake.RELEASE_QUIET + MIN
+    assert [r["id"] for r in intake.pending_p0(world.c, later)] == [tid]
+    assert [t["id"] for t in intake.unhandled(world.c, later)] == [tid]
+
+
 def test_a_stopped_agent_is_reported_and_a_never_armed_one_is_not(world):
     assert intake.silent_agents(world.c, world.clock.now) == []
     store.put_state(world.c, "ops_heartbeat_p0_watch",

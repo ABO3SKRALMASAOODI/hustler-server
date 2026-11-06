@@ -119,9 +119,9 @@ def _mcp(cur, w, now):
 
 
 def _analysis(cur, w, now):
-    cur.execute("SELECT state FROM video_jobs WHERE id = %s", (w["job_id"],))
-    row = cur.fetchone()
-    return RECOVERED if row and row["state"] == "done" else STUCK
+    cur.execute("""SELECT 1 FROM video_jobs WHERE id = %s AND state = 'done'
+                      AND updated_at <= %s""", (w["job_id"], now))
+    return RECOVERED if _one(cur) else STUCK
 
 
 def _export(cur, w, now):
@@ -143,14 +143,16 @@ def _checkout(cur, w, now):
 
 def _turn(cur, w, now):
     """A turn that went silent: it spoke again, or it ended."""
-    cur.execute("SELECT state FROM video_jobs WHERE id = %s", (w["job_id"],))
+    cur.execute("SELECT state, updated_at FROM video_jobs WHERE id = %s",
+                (w["job_id"],))
     row = cur.fetchone()
-    if not row or row["state"] not in OPEN_JOB:
+    if not row or (row["state"] not in OPEN_JOB and row["updated_at"] <= now):
         return RECOVERED
     cur.execute("""SELECT 1 FROM chat_messages m
                      JOIN projects p ON p.chat_session_id = m.session_id
-                    WHERE p.id = %s AND m.created_at > %s LIMIT 1""",
-                (w["project_id"], _naive(w["at"])))
+                    WHERE p.id = %s AND m.created_at > %s
+                      AND m.created_at <= %s LIMIT 1""",
+                (w["project_id"], _naive(w["at"]), _naive(now)))
     return RECOVERED if _one(cur) else STUCK
 
 
