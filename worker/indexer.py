@@ -345,6 +345,20 @@ class _TrialRecorder(llm.JobRecorder):
         self.claude_trial_scope = scope
 
 
+def _company_recorders(worker_db, job):
+    """An upload of ours is company spend on every thread that calls a model.
+    (job recorder or None, what the sound lane's thread wears or None); a
+    customer's upload gets neither and stays as it was."""
+    lane = spend_ledger.lane_of(job.get("user_id"))
+    if lane == spend_ledger.CUSTOMER:
+        return None, None
+    recorder = None
+    if llm.get_recorder() is None:
+        recorder = llm.JobRecorder(worker_db, job)
+        llm.set_recorder(recorder)
+    return recorder, llm.LaneRecorder(lane)
+
+
 def _claude_trial_index_scope(worker_db, job):
     """A trial account's upload indexes on the Claude lane (D2: the first
     cut runs inside the same $1), so its captions and greeting never reach
@@ -382,20 +396,6 @@ def _claude_trial_indexed(worker_db, job, scope):
                                         via="index")
         print(f"[index {job.get('id')}] trial grant: "
               f"{(got or {}).get('reason', 'error')}", flush=True)
-
-
-def _company_recorders(worker_db, job):
-    """An upload of ours is company spend on every thread that calls a model.
-    (job recorder or None, what the sound lane's thread wears or None); a
-    customer's upload gets neither and stays as it was."""
-    lane = spend_ledger.lane_of(job.get("user_id"))
-    if lane == spend_ledger.CUSTOMER:
-        return None, None
-    recorder = None
-    if llm.get_recorder() is None:
-        recorder = llm.JobRecorder(worker_db, job)
-        llm.set_recorder(recorder)
-    return recorder, llm.LaneRecorder(lane)
 
 
 def run_index_job(worker_db, job):
