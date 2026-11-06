@@ -323,11 +323,17 @@ def _evidence(s, n=1):
 JOURNEY = {"asks": [{"text": "cut to the payoff", "status": "not_done",
                      "note": "the payoff line is cut"}],
            "why_short": "The cut drops the line the user asked to keep."}
+DIMS = {k: 3 for k in store.CRAFT_DIMENSIONS + store.GATE_DIMENSIONS}
+RATING = {"rubric": "v3", "score_exact": 3, "tier": "standard",
+          "dimensions": DIMS,
+          "edit_delta": {"class": "edited", "mode": "paired",
+                         "shots_added": 4, "overlay_pct": 31.0,
+                         "proof": "A real change of the picture"}}
 
 
 def test_a_verdict_needs_pictures_under_the_sessions_own_folder():
     s = _session()
-    cur = Cur([{"id": 1, "review_count": 1}])
+    cur = Cur([None, {"id": 1, "review_count": 1}])
     with pytest.raises(store.StoreError, match="evidence"):
         store.write_verdict(cur, s, "delivered_good", 8, "fine", [])
     with pytest.raises(store.StoreError, match="under"):
@@ -338,7 +344,7 @@ def test_a_verdict_needs_pictures_under_the_sessions_own_folder():
         store.write_verdict(cur, s, "delivered_poor", 3, "bad", _evidence(s))
     with pytest.raises(store.StoreError, match="score"):
         store.write_verdict(cur, s, "delivered_good", 11, "x", _evidence(s))
-    with pytest.raises(store.StoreError, match="scores 6-10"):
+    with pytest.raises(store.StoreError, match="scores 7-10"):
         store.write_verdict(cur, s, "delivered_good", 4, "x", _evidence(s))
     with pytest.raises(store.StoreError, match="scores 1-3"):
         store.write_verdict(cur, s, "not_delivered", 8, "x", _evidence(s),
@@ -346,9 +352,13 @@ def test_a_verdict_needs_pictures_under_the_sessions_own_folder():
     with pytest.raises(store.StoreError, match="asks"):
         store.write_verdict(cur, s, "delivered_poor", 3, "cuts the payoff",
                             _evidence(s, 2), root_cause="story selection")
+    with pytest.raises(store.StoreError, match="rubric"):
+        store.write_verdict(Cur([None]), s, "delivered_poor", 3, "x",
+                            _evidence(s, 2), root_cause="story selection",
+                            journey=JOURNEY)
     row = store.write_verdict(cur, s, "delivered_poor", 3, "cuts the payoff",
                               _evidence(s, 2), root_cause="story selection",
-                              journey=JOURNEY)
+                              journey=JOURNEY, rating=RATING)
     assert row == {"id": 1, "review_count": 1}
     sql, p = cur.sql[-1]
     assert sql.strip().startswith("INSERT INTO session_reviews")

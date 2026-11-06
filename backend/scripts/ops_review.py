@@ -16,7 +16,10 @@ never touches billing, credits, plans or Paddle.
         verdict, score, reasoning, root_cause, request_summary, evidence,
         asks [{text, status: done|partly|not_done, note <= 20 words}],
         why_short (<= 25 words), next_actions, source_asset_id,
-        delivered_asset_id (the journey fields: required)
+        delivered_asset_id (the journey fields: required),
+        rubric "v3", score_exact, tier (standard|alien), dimensions,
+        edit_delta, defects, alien_what, alien_nearest (RUBRIC_V3.md,
+        required; a score above a measured ceiling is refused)
     ops_review.py annotate --session KEY --json journey.json [--backfilled-from reasoning]
     ops_review.py ticket   --session KEY --cause index-scratch-too-small \
         --title "..." --severity P0 [--summary "..."]
@@ -346,6 +349,8 @@ def _signals(ctx):
 
 JOURNEY_KEYS = ("asks", "why_short", "next_actions", "source_asset_id",
                 "delivered_asset_id")
+RATING_KEYS = ("rubric", "score_exact", "tier", "dimensions", "edit_delta",
+               "defects", "alien_what", "alien_nearest")
 
 
 def _journey(a, spec=None):
@@ -378,8 +383,10 @@ def cmd_verdict(a):
             a.evidence_json = a.json
         a.session = a.session or spec.get("session_key")
     journey = _journey(a, spec)
-    # Refuse a bad journey before any database work.
+    rating = {k: spec[k] for k in RATING_KEYS if spec.get(k) is not None}
+    # Refuse a bad journey or a disproved score before any database work.
     store.check_journey(journey, required=True)
+    store.check_rating(rating, a.verdict, a.score)
     conn = connect()
     cur = conn.cursor()
     s = find_session(cur, a.session)
@@ -389,10 +396,13 @@ def cmd_verdict(a):
         row = store.write_verdict(
             w, s, a.verdict, a.score, a.reasoning, _evidence_items(a),
             root_cause=a.root_cause, request_summary=a.request_summary,
-            signals=_signals(ctx), journey=journey,
+            signals=_signals(ctx), journey=journey, rating=rating,
             reviewer=getattr(a, "reviewer", None) or "claude-opus")
     out({"review_id": row["id"], "review_count": row["review_count"],
          "session_key": s["key"], "verdict": a.verdict, "score": int(a.score),
+         "score_exact": rating.get("score_exact"),
+         "tier": rating.get("tier") or "standard",
+         "edit_delta_class": (rating.get("edit_delta") or {}).get("class"),
          "dry_run": bool(a.dry_run)})
     return 0
 

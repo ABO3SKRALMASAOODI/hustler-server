@@ -20,8 +20,11 @@ _WRITE_RE = re.compile(
 CAUSE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
 SEVERITY_RANK = {"P0": 0, "P1": 1, "P2": 2}
 KEY_TTL = timedelta(hours=8)
-# Verdict and score must tell the same story (REVIEWER.md, step 4).
-SCORE_BANDS = {"delivered_good": (6, 10), "delivered_poor": (3, 6),
+# Verdict and score must tell the same story (RUBRIC_V3.md, "The verdict
+# words"). delivered_good starts at today's podcast-short grade; everything
+# below it that reached the user is delivered_poor, down to 1 for "nothing
+# really edited".
+SCORE_BANDS = {"delivered_good": (7, 10), "delivered_poor": (1, 6),
                "not_delivered": (1, 3)}
 
 
@@ -196,6 +199,184 @@ def check_journey(fields, required=True):
     return out
 
 
+# ── Rubric v3 (owner, 6 Nov 2026) ─────────────────────────────────────────
+# "the agent that is rating the videos is actually overrating them ... the
+# same upload, nothing changed, and the rater gave the 6." And: "give the
+# rater the capability of actually saying incredible edits, not only 10 out
+# of 10." A verdict carries what was MEASURED (edit_delta: signal processing,
+# no model) and the tier; the ceilings below are checked here, so a score the
+# signal disproves cannot reach the database. RUBRIC_V3.md is the scale.
+RUBRIC = "v3"
+TIERS = ("standard", "alien")
+# Only Opus or above rates (owner: Opus 5.5 surpasses Fable 5.1 on benchmarks).
+RATER_PREFIXES = ("claude-opus",)
+CLASS_CEILING = {"same_upload": 2.0, "trim_only": 3.0, "light_touch": 4.0}
+DELTA_CLASSES = tuple(CLASS_CEILING) + ("edited", "standalone", "unknown")
+NO_NEW_PICTURES_CEILING = 6.0
+DEFECT_CEILING = {"broken_render": 3.0, "ask_missed": 4.0,
+                  "caption_over_face": 6.0, "wrong_words": 7.0,
+                  "off_centre_card": 8.0, "low_quality_text": 8.0,
+                  "slop_visual": 8.0}
+CRAFT_DIMENSIONS = ("story_hook", "cuts_pacing", "type_captions",
+                    "motion_design", "footage_broll", "colour_light", "sound")
+GATE_DIMENSIONS = ("fidelity", "defects")
+# What the admin shows and the ceilings read; the raw series stay on the Mac.
+DELTA_KEYS = ("class", "proof", "mode", "unchanged_pct", "unmatched_pct",
+              "overlay_pct", "shots", "shots_added", "cuts", "cuts_added",
+              "cuts_per_min", "type_events", "type_events_added",
+              "camera_moves", "camera_moves_added", "audio_events",
+              "audio_events_added", "audio_added_pct", "audio_source_pct",
+              "duration_change_s", "duration_ratio", "colour_shift_de",
+              "source_used_pct", "program_s", "reorders")
+ALIEN_WORDS = 30
+
+
+def delta_ceiling(delta):
+    """The measured ceiling for this edit_delta, or None."""
+    delta = delta or {}
+    caps = []
+    if delta.get("class") in CLASS_CEILING:
+        caps.append(CLASS_CEILING[delta["class"]])
+    if delta.get("mode") == "paired" and \
+            float(delta.get("shots_added", 99)) <= 1 and \
+            float(delta.get("overlay_pct", 100)) < 25:
+        caps.append(NO_NEW_PICTURES_CEILING)
+    return min(caps) if caps else None
+
+
+def nothing_edited(delta):
+    """The truth of a delta in one sentence, or None for a real edit. The
+    journey's one line starts with it."""
+    delta = delta or {}
+    cls = delta.get("class")
+    kept = delta.get("unchanged_pct")
+    kept = f"{float(kept):.0f}%" if kept is not None else "almost all"
+    if cls == "same_upload":
+        return f"Nothing really edited: {kept} of the picture is the upload unchanged."
+    if cls == "trim_only":
+        return ("Nothing really edited: the upload with parts removed, "
+                f"{kept} of the picture unchanged, no new pictures.")
+    if cls == "light_touch":
+        return ("Barely edited: one thin layer over the upload, "
+                f"{kept} of the picture unchanged.")
+    return None
+
+
+def check_rating(fields, verdict, score):
+    """The validated rating fields of a v3 verdict, or StoreError naming what
+    to fix. fields: rubric, score_exact, tier, dimensions, edit_delta,
+    defects, alien_what, alien_nearest. A session with no delivered render
+    has no edit_delta (a not_delivered verdict)."""
+    fields = dict(fields or {})
+    if fields.get("rubric") != RUBRIC:
+        raise StoreError(f"a verdict needs rubric \"{RUBRIC}\" (RUBRIC_V3.md, "
+                         "written by judge3.py finish)")
+    try:
+        exact = float(fields.get("score_exact", score))
+    except (TypeError, ValueError):
+        raise StoreError("score_exact must be a number")
+    if exact * 2 != int(exact * 2) or not 1 <= exact <= 10:
+        raise StoreError("score_exact goes from 1 to 10 in half points")
+    if int(exact) != int(score):
+        raise StoreError(f"score {score} is not score_exact {exact} rounded "
+                         "down; a score is never rounded up")
+    tier = (fields.get("tier") or "standard").strip().lower()
+    if tier not in TIERS:
+        raise StoreError(f"tier must be one of {', '.join(TIERS)}")
+    delta = fields.get("edit_delta")
+    if delta is None and verdict != "not_delivered":
+        raise StoreError("a delivered result needs its edit_delta numbers "
+                         "(edit_delta.py, written into the verdict by "
+                         "judge3.py finish)")
+    clean_delta = None
+    if delta is not None:
+        if not isinstance(delta, dict):
+            raise StoreError("edit_delta must be an object")
+        if delta.get("class") not in DELTA_CLASSES:
+            raise StoreError("edit_delta.class must be one of "
+                             + ", ".join(DELTA_CLASSES))
+        clean_delta = {k: delta[k] for k in DELTA_KEYS if k in delta}
+    defects = fields.get("defects") or []
+    if not isinstance(defects, list):
+        raise StoreError("defects must be a list")
+    clean_defects, caps = [], []
+    for i, d in enumerate(defects):
+        if not isinstance(d, dict) or d.get("id") not in DEFECT_CEILING:
+            raise StoreError(f"defects[{i}].id must be one of "
+                             + ", ".join(sorted(DEFECT_CEILING)))
+        clean_defects.append({"id": d["id"], "at_s": d.get("at_s"),
+                              "note": _clean(d.get("note"), 300,
+                                             f"defects[{i}].note")})
+        caps.append(DEFECT_CEILING[d["id"]])
+    measured = delta_ceiling(clean_delta)
+    if measured is not None:
+        caps.append(measured)
+    if caps and exact > min(caps):
+        why = ("the signal proves it" if measured == min(caps)
+               else "a declared defect sets it")
+        raise StoreError(f"score {exact} is above the ceiling {min(caps)}: "
+                         f"{why} (RUBRIC_V3.md, Hard ceilings). "
+                         f"{(clean_delta or {}).get('proof') or ''}".strip())
+    dims = fields.get("dimensions")
+    if verdict != "not_delivered" or dims:
+        if not isinstance(dims, dict):
+            raise StoreError("dimensions is required: the nine scores of "
+                             "RUBRIC_V3.md")
+        for k in CRAFT_DIMENSIONS + GATE_DIMENSIONS:
+            if k not in dims:
+                raise StoreError(f"dimensions.{k} is missing (null only when "
+                                 "it truly does not apply)")
+    what = _clean(fields.get("alien_what"), 400, "alien_what")
+    nearest = _clean(fields.get("alien_nearest"), 80, "alien_nearest")
+    if tier == "alien":
+        if exact < 10:
+            raise StoreError("tier alien sits above 10: score 10 first")
+        if any(dims.get(k) is not None and float(dims[k]) < 10
+               for k in CRAFT_DIMENSIONS):
+            raise StoreError("tier alien needs 10 on every craft dimension")
+        if not what or _words(what) > ALIEN_WORDS:
+            raise StoreError(f"tier alien needs alien_what: at most "
+                             f"{ALIEN_WORDS} words naming what the reference "
+                             "folder does not contain")
+        if not nearest:
+            raise StoreError("tier alien needs alien_nearest: the closest "
+                             "reference, which you looked at")
+    return {"rubric": RUBRIC, "score_exact": exact, "tier": tier,
+            "dimensions": dims, "edit_delta": clean_delta,
+            "nothing_edited": nothing_edited(clean_delta),
+            "defects": clean_defects, "alien_what": what,
+            "alien_nearest": nearest}
+
+
+def _keep_old_score(cur, session_key, new_evidence, signals):
+    """A re-rating replaces the old score; the old score stays in the record:
+    in signals.previous_scores, and in the evidence, on its own picture."""
+    cur.execute("""SELECT verdict, score, reviewer, reviewed_at, evidence,
+                          signals FROM session_reviews
+                    WHERE session_key = %s""", (session_key,))
+    old = cur.fetchone()
+    if not old:
+        return new_evidence
+    old_sig = old.get("signals") or {}
+    rubric = old_sig.get("rubric") or "v2"
+    at = old["reviewed_at"]
+    day = at.strftime("%-d %b %Y") if hasattr(at, "strftime") else str(at)[:10]
+    entry = {"score": old["score"], "score_exact": old_sig.get("score_exact"),
+             "tier": old_sig.get("tier"), "verdict": old["verdict"],
+             "rubric": rubric, "reviewer": old["reviewer"], "at": str(at),
+             "why_short": old_sig.get("why_short")}
+    signals["previous_scores"] = (old_sig.get("previous_scores") or []) + [entry]
+    kept = [dict(e) for e in (old.get("evidence") or [])
+            if isinstance(e, dict) and e.get("storage_key")]
+    if not kept or rubric == RUBRIC:
+        return new_evidence
+    first = kept[0]
+    first["caption"] = (f"Old score {old['score']}/10 ({old['verdict']}, "
+                        f"rubric {rubric}, {day}): "
+                        f"{first.get('caption') or ''}")[:400]
+    return list(new_evidence) + [first]
+
+
 def annotate(cur, session_key, fields, backfilled_from=None):
     """Add or replace the journey fields of an EXISTING review without
     touching its verdict, score, reasoning or review count (the backfill of
@@ -216,12 +397,15 @@ def annotate(cur, session_key, fields, backfilled_from=None):
 
 def write_verdict(cur, session, verdict, score, reasoning, evidence,
                   root_cause=None, request_summary=None, signals=None,
-                  reviewer="claude-opus", journey=None):
+                  reviewer="claude-opus", journey=None, rating=None):
     """Insert or replace the review of one settled session. `session` is the
     discovered session (key, surface, user, project, times, fingerprint and
     request ids come from the database, not from the agent). `journey` (the
     asks, why_short, next_actions and the two asset ids) is required: it is
-    what the admin's Journeys view shows first."""
+    what the admin's Journeys view shows first. `rating` carries rubric v3:
+    the half-point score, the tier, the nine dimensions, the defects and the
+    edit_delta numbers; `check_rating` refuses a score above a ceiling. A
+    replaced score stays in the evidence and in signals.previous_scores."""
     if verdict not in VERDICTS:
         raise StoreError(f"verdict must be one of {', '.join(VERDICTS)}")
     try:
@@ -244,9 +428,14 @@ def write_verdict(cur, session, verdict, score, reasoning, evidence,
         raise StoreError("a delivered_poor or not_delivered verdict needs a "
                          "root-cause hypothesis (--root-cause)")
     request_summary = _clean(request_summary, 1000, "request_summary")
+    if not str(reviewer or "").startswith(RATER_PREFIXES):
+        raise StoreError(f"reviewer {reviewer!r}: only Claude Opus or above "
+                         "rates (RUBRIC_V3.md)")
     evidence = check_evidence(evidence, session["key"])
     signals = dict(signals or {})
     signals.update(check_journey(journey, required=True))
+    signals.update(check_rating(rating, verdict, score))
+    evidence = _keep_old_score(cur, session["key"], evidence, signals)
     from ops_loop.sessions import request_ids
     _w(cur, """
         INSERT INTO session_reviews

@@ -575,10 +575,22 @@ def _review_card(r):
     sig = r.get("signals") or {}
     asks = sig.get("asks") or []
     fmt = "v2" if sig.get("journey_format") and asks else "older"
+    previous = sig.get("previous_scores") or []
     return {
         "id": r["id"], "session_key": r["session_key"],
         "verdict": r["verdict"], "score": r["score"],
         "format": fmt,
+        # Rubric v3 (6 Nov): the half point, the tier above 10, what was
+        # measured, and the one line that says "nothing really edited".
+        "rubric": sig.get("rubric") or "older",
+        "score_exact": sig.get("score_exact"),
+        "tier": sig.get("tier") or "standard",
+        "edit_delta": sig.get("edit_delta"),
+        "nothing_edited": sig.get("nothing_edited"),
+        "dimensions": sig.get("dimensions"),
+        "defects": sig.get("defects") or [],
+        "alien_what": sig.get("alien_what"),
+        "previous_score": previous[-1] if previous else None,
         "backfilled_from": sig.get("backfilled_from"),
         "asks": asks, "why_short": sig.get("why_short"),
         "next_actions": sig.get("next_actions") or [],
