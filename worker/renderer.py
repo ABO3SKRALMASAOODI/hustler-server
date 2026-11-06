@@ -7925,6 +7925,11 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
 #  Job entrypoint (types: preview | final)                             #
 # ------------------------------------------------------------------ #
 
+# What a render's checks may take beyond the picture check's own budget: the
+# sound measures and listening excerpts, which run after it.
+RENDER_CHECKS_GRACE_S = 15.0
+
+
 def _stable_video_inputs(args, decoder_threads=None):
     """Preserve the program clock when a clip changes pixel/color properties.
 
@@ -9305,6 +9310,31 @@ def silent_by_design(edl, index, insert_meta):
     return True
 
 
+def _stored_render(worker_db, project_id, variant, version, job_id):
+    """The stored render of this version, once its checks have reported.
+
+    A preview's row is written before its checks (the picture goes on screen
+    the moment it exists), so another job can find the row while the job that
+    made it is still measuring it. The checks' fields are absent until they
+    finish: wait for that job, within the checks' own ceiling, and read the row
+    again. A row whose job ended without them answers as it stands: a render
+    never fails over its own review."""
+    asset = worker_db.run(dbx.find_render_asset, project_id, variant, version)
+    meta = (asset or {}).get("meta") or {}
+    owner = meta.get("render_job_id")
+    if not asset or "picture_qc" in meta or not owner or owner == job_id:
+        return asset
+    import render_qc
+    deadline = time.monotonic() + render_qc.BUDGET_S + RENDER_CHECKS_GRACE_S
+    while time.monotonic() < deadline:
+        running = worker_db.run(dbx.get_job, owner)
+        if (running or {}).get("state") != "running":
+            break
+        time.sleep(1.0)
+    return worker_db.run(dbx.find_render_asset, project_id, variant,
+                         version) or asset
+
+
 def _run_render_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     # Which run of this job we are. The dispatcher ships it (remote._job_payload)
@@ -9366,7 +9396,7 @@ def _run_render_job(worker_db, job):
     # must match too (see _caption_index_fp) — otherwise a caption-less render
     # is served forever after the transcript gains words.
     cached = (None if force or proof_only else
-              worker_db.run(dbx.find_render_asset, project_id, variant, version))
+              _stored_render(worker_db, project_id, variant, version, job_id))
     dependency_key = job["payload"].get("render_dependency_key")
     if cached and dependency_key and (cached.get("meta") or {}).get("render_dependency_key") != dependency_key:
         cached = None
@@ -9467,6 +9497,7 @@ def _run_render_job(worker_db, job):
     workdir = os.path.join(config.TMP_DIR, f"render_{job_id}")
     os.makedirs(workdir, exist_ok=True)
     timings, t0 = {}, time.monotonic()
+    job_t0 = t0
     detail = {}
     detail_token = _RENDER_DETAIL.set(detail)
     # Motion items that degrade to absent (motion_layer.warn) must reach
@@ -9508,6 +9539,8 @@ def _run_render_job(worker_db, job):
             "true_peak_s": "sheet_s",
             "sheet_s": "upload_s",
             "upload_s": "register_s",
+            "register_s": "qc_s",
+            "qc_s": "register_s",
         }.get(stage)
 
     # Set the moment a progress write reports the row is no longer ours. The
@@ -10020,98 +10053,119 @@ def _run_render_job(worker_db, job):
         _mark("upload_s")
 
         out_info = media.probe(out_local)
-        # The picture side of the same deterministic review (render_qc):
-        # clipped faces, single-frame jumps off a cut, the end card and the
-        # watermark this variant should carry — measured on the file that
-        # ships, advisory to the editor, never a change to the edit.
-        picture_qc_res = None
-        if not proof_only and variant in ("preview", "final"):
-            picture_qc_res = picture_qc(
-                edl_row["json"], index, out_local, out_info, variant,
-                want_wm, wm_settings, src_shape, job_id, src_path=src_local)
-        # Deterministic measurements are always-on.  When the edit authors
-        # music/SFX/voiceover, also cut a few tiny excerpts while the finished
-        # render is already local.  The dispatcher can hand those to the
-        # bounded audio reviewer without downloading/decoding the whole MP4.
-        # These clips are evidence, never a render gate, and failures here do
-        # not fail the valid preview.
-        audio_qc_res = None
-        listen_keys = []
-        if variant == "preview" and not proof_only:
-            try:
-                _explicit = ((edl_row["json"].get("master") or {})
-                             .get("loudness"))
-                audio_qc_res = audio_qc.measure(
-                    out_local, duration_s=out_dur,
-                    master=(master_loudness(edl_row["json"], *src_shape)
-                            or _explicit),
-                    silent_by_design=silent_by_design(
-                        edl_row["json"], index,
-                        lambda key: _insert_asset_meta(
-                            worker_db, project_id, key)))
-            except Exception:
-                audio_qc_res = None
-            authored = edl_row["json"]
-            has_designed_audio = bool(
-                authored.get("music") or authored.get("sfx") or
-                authored.get("voiceover"))
-            if has_designed_audio and audio_model_review:
-                review_times = list(vtimes or [])
-                # Ensure the bounded actual-audio listener hears the beginning,
-                # middle and end of the final mix even when all authored SFX
-                # happen near the opening. Event times below then compete on
-                # real program position rather than insertion order.
-                review_times.extend(
-                    out_dur * fraction for fraction in (0.08, 0.5, 0.92))
-                # The dispatcher already maps measured Blueprint sequence
-                # beats onto the output clock for visual screening. Reuse
-                # those same semantic anchors for the final-mix listener so
-                # intentional silence, build and payoff can be heard even
-                # when no SFX happens to create an audio event there.
-                for frame in job["payload"].get("screening_frames") or []:
-                    try:
-                        review_times.append(float(frame.get("time_s")))
-                    except (AttributeError, TypeError, ValueError):
-                        pass
-                for item, field in (
-                        *((row, "start") for row in
-                          (authored.get("music") or [])),
-                        *((row, "at") for row in
-                          (authored.get("sfx") or [])),
-                        *((row, "start_output_s") for row in
-                          (authored.get("voiceover") or []))):
-                    try:
-                        review_times.append(float(item.get(field) or 0.0))
-                    except (TypeError, ValueError):
-                        pass
-                try:
-                    for i, (ls, le) in enumerate(audio_qc.listen_windows(
-                            review_times, out_dur, max_windows=3)):
-                        local = os.path.join(workdir, f"listen_{i}.mp3")
-                        media.extract_audio_clip(out_local, ls, le, local)
-                        key = f"media/{project_id}/{stamp}_l{i}.mp3"
-                        upload_output(local, key, "audio/mpeg")
-                        listen_keys.append({
-                            "key": key, "t0": round(ls, 2),
-                            "t1": round(le, 2)})
-                except Exception as exc:
-                    print(f"[render {job_id}] listening excerpts skipped: "
-                          f"{str(exc)[:160]}", flush=True)
-                    try:
-                        storage.delete_keys(
-                            [item["key"] for item in listen_keys])
-                    except Exception:
-                        pass
-                    listen_keys = []
-        if not _still_ours(98):
-            storage.delete_keys(uploaded_keys)
-            raise dbx.JobLeaseLost(
-                "job was cancelled or handed to another worker")
         digest = hashlib.sha256()
         with open(out_local, "rb") as rendered_file:
             for block in iter(lambda: rendered_file.read(1024 * 1024), b""):
                 digest.update(block)
         render_sha = digest.hexdigest()
+        # The checks below read the finished file and take as long as the
+        # encode. A preview goes on screen first: the Studio plays the row the
+        # moment it exists, and the checks' result updates it. Nothing about
+        # them changes: this job still waits for them and returns their
+        # findings, which is what the editor and First cut repair from. A final
+        # keeps its row behind them: its checks can hold the export.
+        picture_qc_res = None
+        audio_qc_res = None
+        listen_keys = []
+        picture_first = variant == "preview" and not proof_only
+
+        def check_fields():
+            return {"listen_keys": [item["key"] for item in listen_keys],
+                    "listen_clips": listen_keys,
+                    "audio_qc": audio_qc_res,
+                    "picture_qc": picture_qc_res}
+
+        def run_checks():
+            nonlocal picture_qc_res, audio_qc_res, listen_keys
+            active_stage[0] = "qc_s"
+            # The picture side of the same deterministic review (render_qc):
+            # clipped faces, single-frame jumps off a cut, the end card and the
+            # watermark this variant should carry — measured on the file that
+            # ships, advisory to the editor, never a change to the edit.
+            if not proof_only and variant in ("preview", "final"):
+                picture_qc_res = picture_qc(
+                    edl_row["json"], index, out_local, out_info, variant,
+                    want_wm, wm_settings, src_shape, job_id, src_path=src_local)
+            # Deterministic measurements are always-on.  When the edit authors
+            # music/SFX/voiceover, also cut a few tiny excerpts while the finished
+            # render is already local.  The dispatcher can hand those to the
+            # bounded audio reviewer without downloading/decoding the whole MP4.
+            # These clips are evidence, never a render gate, and failures here do
+            # not fail the valid preview.
+            if variant == "preview" and not proof_only:
+                try:
+                    _explicit = ((edl_row["json"].get("master") or {})
+                                 .get("loudness"))
+                    audio_qc_res = audio_qc.measure(
+                        out_local, duration_s=out_dur,
+                        master=(master_loudness(edl_row["json"], *src_shape)
+                                or _explicit),
+                        silent_by_design=silent_by_design(
+                            edl_row["json"], index,
+                            lambda key: _insert_asset_meta(
+                                worker_db, project_id, key)))
+                except Exception:
+                    audio_qc_res = None
+                authored = edl_row["json"]
+                has_designed_audio = bool(
+                    authored.get("music") or authored.get("sfx") or
+                    authored.get("voiceover"))
+                if has_designed_audio and audio_model_review:
+                    review_times = list(vtimes or [])
+                    # Ensure the bounded actual-audio listener hears the beginning,
+                    # middle and end of the final mix even when all authored SFX
+                    # happen near the opening. Event times below then compete on
+                    # real program position rather than insertion order.
+                    review_times.extend(
+                        out_dur * fraction for fraction in (0.08, 0.5, 0.92))
+                    # The dispatcher already maps measured Blueprint sequence
+                    # beats onto the output clock for visual screening. Reuse
+                    # those same semantic anchors for the final-mix listener so
+                    # intentional silence, build and payoff can be heard even
+                    # when no SFX happens to create an audio event there.
+                    for frame in job["payload"].get("screening_frames") or []:
+                        try:
+                            review_times.append(float(frame.get("time_s")))
+                        except (AttributeError, TypeError, ValueError):
+                            pass
+                    for item, field in (
+                            *((row, "start") for row in
+                              (authored.get("music") or [])),
+                            *((row, "at") for row in
+                              (authored.get("sfx") or [])),
+                            *((row, "start_output_s") for row in
+                              (authored.get("voiceover") or []))):
+                        try:
+                            review_times.append(float(item.get(field) or 0.0))
+                        except (TypeError, ValueError):
+                            pass
+                    try:
+                        for i, (ls, le) in enumerate(audio_qc.listen_windows(
+                                review_times, out_dur, max_windows=3)):
+                            local = os.path.join(workdir, f"listen_{i}.mp3")
+                            media.extract_audio_clip(out_local, ls, le, local)
+                            key = f"media/{project_id}/{stamp}_l{i}.mp3"
+                            upload_output(local, key, "audio/mpeg")
+                            listen_keys.append({
+                                "key": key, "t0": round(ls, 2),
+                                "t1": round(le, 2)})
+                    except Exception as exc:
+                        print(f"[render {job_id}] listening excerpts skipped: "
+                              f"{str(exc)[:160]}", flush=True)
+                        try:
+                            storage.delete_keys(
+                                [item["key"] for item in listen_keys])
+                        except Exception:
+                            pass
+                        listen_keys = []
+
+        if not picture_first:
+            run_checks()
+            _mark("qc_s")
+            if not _still_ours(98):
+                storage.delete_keys(uploaded_keys)
+                raise dbx.JobLeaseLost(
+                    "job was cancelled or handed to another worker")
         asset_id = worker_db.run(
             dbx.insert_asset, project_id, "render", render_key,
             sha256=render_sha,
@@ -10129,11 +10183,8 @@ def _run_render_job(worker_db, job):
                   "caption_review_times": caption_times,
                   "screening_pages": screening_pages,
                   "screening_frame_count": len(screening_frames),
-                  "listen_keys": [item["key"] for item in listen_keys],
-                  "listen_clips": listen_keys,
                   "audio_model_review": audio_model_review,
-                  "audio_qc": audio_qc_res,
-                  "picture_qc": picture_qc_res,
+                  **({} if picture_first else check_fields()),
                   "src_sha256": src_sha,
                   **({"stitched_from": stitched_from}
                      if stitched_from is not None else {}),
@@ -10211,6 +10262,21 @@ def _run_render_job(worker_db, job):
                   **({"matte_status": drawn_matte}
                      if drawn_matte in ("ready", "partial", "absent")
                      else {})})
+        timings["visible_s"] = round(time.monotonic() - job_t0, 2)
+        _mark("register_s")
+        if picture_first:
+            run_checks()
+            try:
+                worker_db.run(dbx.update_asset_meta, asset_id, check_fields())
+            except Exception as exc:  # noqa: BLE001 — the job's result has them
+                print(f"[render {job_id}] checks not stored on asset "
+                      f"{asset_id}: {str(exc)[:160]}", flush=True)
+            _mark("qc_s")
+            # The row stands either way: a good render of an immutable version,
+            # perhaps already on screen, that a retry serves from cache.
+            if not _still_ours(98):
+                raise dbx.JobLeaseLost(
+                    "job was cancelled or handed to another worker")
         # Completed renders, including proof reels, remain recoverable history.
         # Never delete an asset referenced by an issued receipt.
         # Deterministic mid-word audit: keep boundaries that clip a word,
