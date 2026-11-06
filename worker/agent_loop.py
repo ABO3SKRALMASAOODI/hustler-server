@@ -3358,7 +3358,7 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
                      f"({recovery['collapsed_duration_s']:.2f}s) and restored "
                      "the last usable edit before preview/export. The broken "
                      "intermediate version was not delivered.)")
-    if ctx.versions_written and (
+    if (ctx.versions_written or _landed_before_restart(ctx)) and (
             latest["version"] not in ctx.rendered_versions
             or (getattr(ctx, "last_preview", None) or {}).get("edl_version")
             != latest["version"]):
@@ -3525,6 +3525,14 @@ def _rendered_this_turn(ctx):
         and not bool(isinstance(preview, dict) and preview.get("cached"))
 
 
+def _landed_before_restart(ctx):
+    """The worker died after this request's write landed. versions_written is
+    this process's list, so a successor starts it empty and only the durable
+    baseline digest says the timeline moved."""
+    return bool(getattr(ctx, "turn_baseline_from_death_resume", False)
+                and _turn_edl_changed(ctx))
+
+
 def _edit_ended_where_it_began(ctx):
     """Versions were written and the timeline is back at the request's start.
     An unknown baseline is not evidence of that."""
@@ -3541,22 +3549,26 @@ def _edit_changed_nothing(ctx):
         return False
     if getattr(ctx, "versions_written", None):
         return _edit_ended_where_it_began(ctx)
-    return not _rendered_this_turn(ctx)
+    return not (_rendered_this_turn(ctx) or _landed_before_restart(ctx))
 
 
 def _edit_without_write_pushback(ctx, messages, already_pushed):
     """Once per request, so a refusal or an honest "this cannot be done" still
-    delivers. Never at a spent budget: the loop's stop message would replace
-    the editor's own words."""
-    if already_pushed or not _edit_changed_nothing(ctx) or ctx.over_budget():
+    delivers. The one exception is a lane that opens: prose first and a refused
+    write after it would otherwise leave the wall standing with the nudge
+    spent. Each lane opens once, so this ends. Never at a spent budget: the
+    loop's stop message would replace the editor's own words."""
+    if not _edit_changed_nothing(ctx) or ctx.over_budget():
+        return False
+    import request_contract
+    released = request_contract.release_inherited(ctx)
+    if already_pushed and not released:
         return False
     # This is the "do it before you ask" repair. ask_user's own first hold
     # would make the same point a second time.
     ctx._question_held = True
-    import request_contract
     messages.append({"role": "system", "content": (
-        _EDIT_WITHOUT_WRITE_NUDGE + request_contract.released_note(
-            request_contract.release_inherited(ctx)))})
+        _EDIT_WITHOUT_WRITE_NUDGE + request_contract.released_note(released))})
     return True
 
 
@@ -5167,7 +5179,8 @@ def _repeated_tool_failure(ctx):
 
 def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     """Return (outcome, billable) from value delivered, not job state."""
-    has_edit_deliverable = bool(ctx.versions_written or _rendered_this_turn(ctx))
+    has_edit_deliverable = bool(ctx.versions_written or _rendered_this_turn(ctx)
+                                or _landed_before_restart(ctx))
     has_value = bool(has_edit_deliverable or _turn_has_asset_progress(ctx))
     blank_canvas_no_value = (
         not has_value and getattr(ctx, "has_main_video", True) is False)
@@ -5221,6 +5234,10 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
         # for an asset it did create (_deliverable_changed below).
         unfinished_edit = bool(has_value)
         attempted_edit = True
+    elif has_edit_deliverable and request_contract.broken_protections(ctx):
+        # The check says a finding once and the work goes out. Told is not
+        # cleared: what the customer protected is measurably broken.
+        unfinished_edit = True
 
     if (status == "awaiting_user" and not failed) or clarifying:
         # a question to the user: the request waits on their answer
@@ -5267,7 +5284,10 @@ def _turn_completion(ctx, status="replied", fail_note=None, truncated=False):
     # (25 Oct 2026; CLAUDE.md credit rules). 77% of credits in the 30
     # days before were charged on partial/blocked requests, many of which
     # only churned versions that ended where they began or never rendered.
-    if billable and (clarifying or (outcome in {"partial", "blocked"}
+    # Nobody read an open brief's request, so an answer stays an answer, but
+    # it may have been an edit that never happened: the doubt is the customer's.
+    if billable and (clarifying or ((request_mode == "open"
+                                     or outcome in {"partial", "blocked"})
                                     and not _deliverable_changed(ctx))):
         billable = False
     return outcome, billable
@@ -5285,7 +5305,8 @@ def _deliverable_changed(ctx):
         # watchable preview when this context rendered it.
         return bool(getattr(ctx, "rendered_versions", None)
                     and isinstance(preview, dict)
-                    and not preview.get("cached"))
+                    and not preview.get("cached")) \
+            or _landed_before_restart(ctx)
     if not _turn_edl_changed(ctx):
         return False
     try:

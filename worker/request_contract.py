@@ -127,6 +127,11 @@ does not freeze every other lane. Do not turn 'no generic effects' into a ban
 on all effects. Use output_count only for explicitly separate deliverables.
 Use the record_request_contract tool once. No prose answer."""
 
+_UNNAMED_CHANGE = ("A change requirement needs changed_lanes: list every lane "
+                   "the requested changes write. A lane listed there is not "
+                   "frozen, so a preserve row must not keep what a change edits.")
+
+
 def enabled(ctx):
     return getattr(ctx, "request_contract_required", False) is True
 
@@ -277,45 +282,17 @@ def ensure(ctx):
     if getattr(ctx, "request_preservation_baseline", None):
         evidence["preservation_baseline"] = ctx.request_preservation_baseline
     error = None
-    for _ in range(2):
+    unnamed = None
+    for attempt in range(2):
         try:
             value = _call(ctx, "record_request_contract", schema,
                           COMPILE, {**evidence, "validation_error": error})
             if value["mode"] == "edit" and not value["requirements"]:
                 raise ValueError("An edit needs at least one requirement")
-            latest_lines = len(_customer_sources(request, []))
-            for ordinal, row in enumerate(value["requirements"], 1):
-                source_ref = row.pop("source_ref")
-                row["quote"] = sources[source_ref]
-                row["id"] = f"r{ordinal}"
-                # Which message asked for this is a fact of the selected
-                # source, so a later recovery never has to guess at meaning.
-                row["inherited"] = source_ref >= latest_lines
-                row.setdefault("lanes", [])
-                if row.pop("relative_to", None) == "source_footage":
-                    # p5520: "preserve the photos' natural colour" locked the
-                    # grade WE had added, and every attempt to remove it was
-                    # refused. A lane holds this edit's state, so a promise
-                    # about the source stays a requirement judged on pixels.
-                    row["lanes"] = []
-                if value["mode"] == "inspect":
-                    # The mode forbids all writes. Preservation criteria in
-                    # a review are questions to assess, not editing work.
-                    row.update(action="inspect", lanes=[])
-            if {"cuts", "timeline_timing"} & _unfreeze_written_lanes(value):
-                # The same fact as a lane: the policy would freeze what a
-                # change just said it writes.
-                value["timing_policy"] = "edit"
-            if value["mode"] == "edit" and value["timing_policy"] == "preserve" and not any(
-                    r["action"] == "preserve" and "timeline_timing" in r["lanes"]
-                    for r in value["requirements"]):
-                value["requirements"].append({"id": "system:timing", "action": "preserve",
-                    "lanes": ["timeline_timing"], "quote": str(request),
-                    "description": "Preserve picture timing and duration within this focused request."})
-            value["request_digest"] = key
-            value["schema_version"] = 1
-            ctx.semantic_contract = value
-            return value
+            if attempt == 0 and _names_no_lane(value):
+                unnamed = value
+                raise ValueError(_UNNAMED_CHANGE)
+            return _settle(ctx, value, sources, request, key)
         except ValueError as exc:
             error = str(exc)[:800]
         except Exception as exc:
@@ -326,7 +303,58 @@ def ensure(ctx):
             # and the loop has the recovery for it; a retry here only waits.
             error = f"{type(exc).__name__}: {str(exc)[:300]}"
             break
+    if unnamed is not None:
+        # The first reading is still the customer's request, read. A failed
+        # correction must not cost it, and the guard's recovery remains.
+        return _settle(ctx, unnamed, sources, request, key)
     return _open_brief(ctx, request, key, error)
+
+
+def _names_no_lane(value):
+    """A brief that says it changes something and names nothing it writes
+    cannot tell its own freeze from the customer's request. "make the opening
+    title a little bigger" read this way on 1 of 12 real compiles beside
+    preserve=[texts], the p5339 wall. Set logic on the model's own answer: the
+    model is asked once more and it stays the model's reading."""
+    return value["mode"] == "edit" and not value.get("changed_lanes") and any(
+        row["action"] == "change" for row in value["requirements"])
+
+
+def _settle(ctx, value, sources, request, key):
+    """The model's reading becomes the brief."""
+    latest_lines = len(_customer_sources(request, []))
+    for ordinal, row in enumerate(value["requirements"], 1):
+        source_ref = row.pop("source_ref")
+        row["quote"] = sources[source_ref]
+        row["id"] = f"r{ordinal}"
+        # Which message asked for this is a fact of the selected source, so a
+        # later recovery never has to guess at meaning.
+        row["inherited"] = source_ref >= latest_lines
+        row.setdefault("lanes", [])
+        if row.pop("relative_to", None) == "source_footage":
+            # p5520: "preserve the photos' natural colour" locked the grade WE
+            # had added, and every attempt to remove it was refused. A lane
+            # holds this edit's state, so a promise about the source stays a
+            # requirement judged on pixels.
+            row["lanes"] = []
+        if value["mode"] == "inspect":
+            # The mode forbids all writes. Preservation criteria in a review
+            # are questions to assess, not editing work.
+            row.update(action="inspect", lanes=[])
+    if {"cuts", "timeline_timing"} & _unfreeze_written_lanes(value):
+        # The same fact as a lane: the policy would freeze what a change just
+        # said it writes.
+        value["timing_policy"] = "edit"
+    if value["mode"] == "edit" and value["timing_policy"] == "preserve" and not any(
+            r["action"] == "preserve" and "timeline_timing" in r["lanes"]
+            for r in value["requirements"]):
+        value["requirements"].append({"id": "system:timing", "action": "preserve",
+            "lanes": ["timeline_timing"], "quote": str(request),
+            "description": "Preserve picture timing and duration within this focused request."})
+    value["request_digest"] = key
+    value["schema_version"] = 1
+    ctx.semantic_contract = value
+    return value
 
 
 def _open_brief(ctx, request, key, why):
@@ -444,13 +472,45 @@ def preflight(ctx):
     contract = ensure(ctx)
     if contract["mode"] != "edit":
         return None
+    violations = _violations(ctx, contract)
+    if not violations:
+        return None
+    # Said once per finding, on the brief so it survives a continuation. The
+    # render gate and the reply both ask here, and neither had an end: a
+    # finding the editor could not clear held every render and every reply.
+    # The editor has the evidence; its reply says what stayed.
+    finding = json.dumps(violations, ensure_ascii=False, sort_keys=True)
+    told = contract.setdefault("preflight_told", [])
+    if finding in told:
+        return None
+    told.append(finding)
+    return ("Restore the customer's concrete protected settings before rendering. "
+            "The current timeline violates these requirements:\n" + finding)
+
+
+def broken_protections(ctx):
+    """What the delivered timeline breaks of what the brief protects: exact
+    state, the same measure as preflight. preflight says a finding once and the
+    work goes out, so "told" must not read as "cleared" at delivery. A fault
+    here reads as nothing: it must not cost a delivered turn."""
+    contract = getattr(ctx, "semantic_contract", None) or {}
+    if contract.get("mode") != "edit":
+        return []
+    try:
+        return _violations(ctx, contract)
+    except Exception as exc:
+        print(f"[request brief] could not measure protections: {exc}", flush=True)
+        return []
+
+
+def _violations(ctx, contract):
     import scope_guard
     before = (getattr(ctx, "turn_start_edl", None) or {}).get("json", {})
     baseline = getattr(ctx, "request_preservation_baseline", None) or before
     after = ctx.latest_edl()["json"]
     video = (getattr(ctx, "index", None) or {}).get("video") or {}
     violations = []
-    requirements = list(contract["requirements"])
+    requirements = list(contract.get("requirements") or [])
     if contract.get("timing_policy") == "preserve" and not any(
             r["action"] == "preserve" and "timeline_timing" in r["lanes"]
             for r in requirements):
@@ -467,16 +527,4 @@ def preflight(ctx):
             changed = []
         if changed:
             violations.append({"id": requirement["id"], "violations": sorted(changed)})
-    if not violations:
-        return None
-    # Said once per finding, on the brief so it survives a continuation. The
-    # render gate and the reply both ask here, and neither had an end: a
-    # finding the editor could not clear held every render and every reply.
-    # The editor has the evidence; its reply says what stayed.
-    finding = json.dumps(violations, ensure_ascii=False, sort_keys=True)
-    told = contract.setdefault("preflight_told", [])
-    if finding in told:
-        return None
-    told.append(finding)
-    return ("Restore the customer's concrete protected settings before rendering. "
-            "The current timeline violates these requirements:\n" + finding)
+    return violations

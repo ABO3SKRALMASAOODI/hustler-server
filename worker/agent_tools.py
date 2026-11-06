@@ -26157,8 +26157,15 @@ def ask_user(ctx, question):
     repeat_offer = music_gate.repeat_offer_refusal(ctx, q)
     if repeat_offer:
         return repeat_offer
-    if _question_can_wait(ctx, q):
-        import request_contract
+    import request_contract
+    held = _question_can_wait(ctx, q)
+    # A refused write can come after the first hold was spent, and the refusal
+    # itself says to ask. A question about a lane that just opened is the
+    # "approve what you already asked for" wall, so it goes back too.
+    released = ([] if getattr(ctx, "versions_written", None)
+                or music_gate.offered_slugs(q)
+                else request_contract.release_inherited(ctx))
+    if held or released:
         return ("CORRECTION_NEEDED: not asked yet. Nothing has changed in this "
                 "turn, and the customer is waiting for an edit, not a "
                 "question. Do what the request clearly asks now: choose any "
@@ -26166,8 +26173,7 @@ def ask_user(ctx, question):
                 "your choice in the reply, so one line from them changes it. "
                 "Only if you cannot go on without something only they have, "
                 "such as a file or a fact about them, call ask_user again."
-                + request_contract.released_note(
-                    request_contract.release_inherited(ctx)))
+                + request_contract.released_note(released))
     # A question is a user decision, not a log excerpt. Truncating it can
     # remove the actual choice, source list or a later music option.
     # Owner rule (Wave 0, 0C): a question that offers library tracks opens
