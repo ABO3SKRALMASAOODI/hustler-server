@@ -24,6 +24,7 @@ import request_contract
 from test_quality_gates_advisory import _loop_ctx
 
 
+AUTO_RENDER = agent_loop._auto_render_if_needed
 ASK = "Add really aesthetically pleasing nature like captions, keep them engaging"
 DRAFT = ("I added serif motion captions with gold accent words on the meaning "
          "words, and they run through the whole 75-second edit.")
@@ -442,6 +443,34 @@ def test_a_failure_the_same_tool_recovered_from_stays_a_delivered_request(monkey
     assert agent_loop._turn_completion(ctx)[0] == "partial"
     agent_loop._record_outer_tool_outcome(ctx, "erase_region", "EDL v74 saved.")
     assert agent_loop._turn_completion(ctx)[0] == "fulfilled"
+
+
+def _auto_render_returns(monkeypatch, ctx, db, text):
+    monkeypatch.setattr(agent_loop, "_recover_catastrophic_timeline_collapse",
+                        lambda *_a: None)
+    monkeypatch.setattr(agent_loop, "_single_shot_design", lambda *_a: "")
+    monkeypatch.setattr(agent_tools, "render_preview", lambda *_a, **_k: text)
+    ctx.rendered_versions = set()
+    return AUTO_RENDER(ctx, db, 2, {})
+
+
+def test_the_automatic_render_corrects_a_failed_render_call(monkeypatch):
+    ctx, db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    agent_loop._record_outer_tool_outcome(
+        ctx, "render_preview", "TRANSIENT_FAILURE: The render queue timed out.")
+    _latest, fail_note = _auto_render_returns(monkeypatch, ctx, db, "Preview ready.")
+    ctx.rendered_versions.add(73)
+    assert not fail_note
+    assert agent_loop._turn_completion(ctx)[0] == "fulfilled"
+
+
+def test_a_failed_automatic_render_stays_on_the_record(monkeypatch):
+    ctx, db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    _latest, fail_note = _auto_render_returns(
+        monkeypatch, ctx, db, "TRANSIENT_FAILURE: The render queue timed out.")
+    assert "preview render failed" in fail_note
+    assert ctx.turn_tool_outcomes[-1]["kind"] == "failed"
+    assert agent_loop._turn_completion(ctx, fail_note=fail_note)[0] == "partial"
 
 
 def test_a_clarifying_reply_waits_on_the_customer_and_is_not_charged():

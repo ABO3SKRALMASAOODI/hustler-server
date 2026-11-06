@@ -3490,6 +3490,9 @@ def _auto_render_if_needed(ctx, worker_db, session_id, timings,
         _activity(worker_db, session_id, "render_preview",
                   {"auto": "model skipped it"}, result,
                   edl_version=latest["version"])
+        # The same tool the editor calls, so this render corrects a failed
+        # call of it. Unrecorded, that delivered turn stayed "partial".
+        _record_outer_tool_outcome(ctx, "render_preview", result)
         # Successful proof text deliberately contains rubric phrases such as
         # "FAILED if the subject is clipped". A substring check read that as
         # an encode failure and appended a false warning even though the v4
