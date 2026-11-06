@@ -9,6 +9,23 @@ All state is JSON-safe and belongs to the logical request, across continuations.
 
 MAX_REPAIR_PASSES = 3
 
+# Writes that only take away something an edit added. A stop may end new work,
+# never the turn's way back: on p5518 the cycle stopped with four grey blur
+# boxes on the customer's video and refused remove_blur five times, so the
+# damage stayed in the saved version. This classifies tools, never a request.
+# reset_edit is left out (it also drops the customer's earlier work), and
+# remove_filler_words is a cut.
+UNDO_TOOLS = frozenset((
+    "remove_aspect_shift", "remove_blur", "remove_cursor_enhance",
+    "remove_editorial_graphic", "remove_erase", "remove_insert",
+    "remove_motion_graphic", "remove_music", "remove_overlay",
+    "remove_picture_card", "remove_screen_frame", "remove_screen_takeover",
+    "remove_sfx", "remove_speed", "remove_stem_mix", "remove_stylize",
+    "remove_text", "remove_typography_scene", "remove_vector_graphic",
+    "remove_voiceover", "remove_zoom", "remove_zoom_path", "restore_range",
+))
+MAX_UNDO_RENDERS = 2
+
 
 def restore(ctx, checkpoint):
     # Include a complete render adopted at resume and the prepared first cut.
@@ -41,12 +58,47 @@ def _finish_repair(ctx):
         ctx.trial_preview_repairs = repairs
 
 
+def _finish_undo(ctx, version):
+    """An undo pass ends when a preview of the undone version exists; the
+    render is counted here so a failed one can be retried."""
+    repairs = getattr(ctx, 'trial_preview_repairs', None) or {}
+    if repairs.get('undo_from') is None or int(version) == repairs['undo_from']:
+        return
+    repairs.pop('undo_from', None)
+    repairs['undo_renders'] = int(repairs.get('undo_renders') or 0) + 1
+    ctx.trial_preview_repairs = repairs
+
+
+def undo_allowed(ctx, name):
+    """Past every allowance, the turn may still take back what it added and
+    show the result. Bounded: undo only removes, new work stays refused, and
+    there are at most MAX_UNDO_RENDERS such passes."""
+    state = dict(getattr(ctx, 'trial_preview_repairs', None) or {})
+    if name in UNDO_TOOLS:
+        if int(state.get('undo_renders') or 0) >= MAX_UNDO_RENDERS:
+            return False
+        if state.get('undo_from') is None:
+            version = (getattr(ctx, 'last_preview', None) or {}).get('edl_version')
+            if version is None:
+                return False
+            state['undo_from'] = int(version)
+            ctx.trial_preview_repairs = state
+        return True
+    if name != 'render_preview' or state.get('undo_from') is None:
+        return False
+    try:
+        return int(ctx.latest_edl()['version']) != state['undo_from']
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
 def count(ctx):
     preview = getattr(ctx, 'last_preview', None) or {}
     version = preview.get('edl_version')
     if not getattr(ctx, 'trial_preview_cap', None) or version is None:
         return
     _finish_repair(ctx)
+    _finish_undo(ctx, version)
     if preview.get('cached'):
         return
     # last_preview is set only when the complete preview job finishes. A

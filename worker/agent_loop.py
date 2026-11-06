@@ -2795,12 +2795,18 @@ def _trial_render_refusal(ctx, name, args=None):
     if int(getattr(ctx, "trial_previews", 0) or 0) < int(cap):
         return None
     import preview_budget
+    if preview_budget.undo_allowed(ctx, name):
+        return None
     if preview_budget.repair_allowed(ctx):
         return None
     return ("REJECTED: the bounded edit/review cycle has stopped because no "
             "further verified repair progress is available. Preserve the saved "
             "version and state which requested work remains incomplete. Do not "
-            "claim completion or invent a cause in the original footage.")
+            "claim completion or invent a cause in the original footage. "
+            "Taking back something this request added (remove_blur, "
+            "remove_erase, remove_text, restore_range and the like) is still "
+            "open: if it made the video worse, remove all of it in one go, "
+            "then call render_preview once.")
 
 
 def _outcome_after_reply(outcome, report, honesty):
