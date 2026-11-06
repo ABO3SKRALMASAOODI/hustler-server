@@ -2300,6 +2300,15 @@ MATTE_RVM_MODEL = os.getenv(
 MATTE_RVM_BUDGET = int(os.getenv("MATTE_RVM_BUDGET", "500"))
 
 PREVIEW_PRESET = os.getenv("PREVIEW_PRESET", "ultrafast")
+PREVIEW_CRF = int(os.getenv("PREVIEW_CRF", "27"))
+# The approval render's picture. Against ultrafast CRF 27 on customers' real edits:
+# 1.1-1.2x the encode, a median 1.06x the bytes (0.96-1.93x over ten edits), and
+# SSIM over the lower half of the frame, where captions live, from 0.978-0.993 to
+# 0.986-0.996. ultrafast turns the deblocking filter off, which is what eats small
+# type. No B-frames, because a stitched preview splices stream copies at keyframes
+# (.valmera/week-1106/director/floor/F5.md).
+APPROVAL_PRESET = os.getenv("APPROVAL_PRESET", "superfast")
+APPROVAL_CRF = int(os.getenv("APPROVAL_CRF", "23"))
 
 # ── The preview is a PROOF, not a deliverable (round 88) ────────────────
 #
@@ -2351,6 +2360,21 @@ SPECULATIVE_PREVIEWS_MAX = min(
 # long-edge cap alone. See preview_geometry for the measurement (25%).
 PREVIEW_MAX_HEIGHT = int(os.getenv("PREVIEW_MAX_HEIGHT", "480"))
 PREVIEW_MAX_FPS = float(os.getenv("PREVIEW_MAX_FPS", "30"))
+# The approval render: what a First cut and a Studio request's complete preview
+# are, read from the original. A trial account only ever sees a preview, because
+# export is the paywall, and previews carry no mark, so for an account that has
+# not paid the frame stays inside this box in either orientation: 720x1280 at
+# most, and a square or 4:5 frame no bigger than its 720 short edge. A clean HD
+# file handed to an unpaid account would end the paywall.
+# A Studio request's complete preview is the approval render, up to this long a
+# programme and this many gigapixels of source to decode, which is 128 s of
+# 1080p30 or 32 s of 4K30 (agent_tools._deliverable_quality). A 52 s edit of a
+# 2160x3840 50 fps phone clip, 22 gigapixels, cost 477 CPU seconds at approval
+# against 15 as a draft (.valmera/week-1106/director/floor/F5.md).
+TYPED_APPROVAL_MAX_S = float(os.getenv("TYPED_APPROVAL_MAX_S", "180"))
+TYPED_APPROVAL_MAX_GPX = float(os.getenv("TYPED_APPROVAL_MAX_GPX", "8"))
+APPROVAL_MAX_LONG_EDGE = int(os.getenv("APPROVAL_MAX_LONG_EDGE", "1280"))
+APPROVAL_MAX_SHORT_EDGE = int(os.getenv("APPROVAL_MAX_SHORT_EDGE", "720"))
 
 # Complete-preview perception budget. Unlike the legacy 3x3 overview, these
 # frames are selected from authored cuts, B-roll, text, zooms and reframing as
