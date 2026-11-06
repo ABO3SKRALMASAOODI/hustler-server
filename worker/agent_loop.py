@@ -3660,7 +3660,10 @@ def _edit_without_write_pushback(ctx, messages, already_pushed):
     # This is the "do it before you ask" repair. ask_user's own first hold
     # would make the same point a second time.
     ctx._question_held = True
-    messages.append({"role": "system", "content": _EDIT_WITHOUT_WRITE_NUDGE})
+    import request_contract
+    messages.append({"role": "system", "content": (
+        _EDIT_WITHOUT_WRITE_NUDGE + request_contract.released_note(
+            request_contract.release_inherited(ctx)))})
     return True
 
 

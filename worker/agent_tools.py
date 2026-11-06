@@ -716,6 +716,7 @@ class ToolContext:
                 return f"REJECTED (EDL v{prev['version']} unchanged): {exc}"
             forbidden = request_contract.forbidden_additions(self, normalized)
             if forbidden:
+                request_contract.note_refused(self, forbidden)
                 return (f"REJECTED (EDL v{prev['version']} unchanged): the request "
                         "excludes these output channels: " + ", ".join(forbidden))
         preservation_baseline = getattr(self, "request_preservation_baseline", None)
@@ -728,6 +729,7 @@ class ToolContext:
                 prev["json"], normalized, self.user_message,
                 source_shape=_source_shape(self), protected=protected)
         if violations:
+            request_contract.note_refused(self, scope_guard.lanes_of(violations))
             return scope_guard.rejection_message(prev["version"], violations)
         # WAVE_C: on a classified follow-up of the new Claude lanes, a write
         # outside the request or one moving the length the wrong way
@@ -26070,13 +26072,16 @@ def ask_user(ctx, question):
     if repeat_offer:
         return repeat_offer
     if _question_can_wait(ctx, q):
+        import request_contract
         return ("CORRECTION_NEEDED: not asked yet. Nothing has changed in this "
                 "turn, and the customer is waiting for an edit, not a "
                 "question. Do what the request clearly asks now: choose any "
                 "open detail yourself (a colour, a length, a style) and name "
                 "your choice in the reply, so one line from them changes it. "
                 "Only if you cannot go on without something only they have, "
-                "such as a file or a fact about them, call ask_user again.")
+                "such as a file or a fact about them, call ask_user again."
+                + request_contract.released_note(
+                    request_contract.release_inherited(ctx)))
     # A question is a user decision, not a log excerpt. Truncating it can
     # remove the actual choice, source list or a later music option.
     # Owner rule (Wave 0, 0C): a question that offers library tracks opens

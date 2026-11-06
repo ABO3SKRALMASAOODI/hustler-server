@@ -563,3 +563,182 @@ def test_a_spent_budget_skips_the_nudge_and_keeps_the_editors_words(monkeypatch)
     _run(ctx, db)
     assert len(calls) == 1
     assert posted[-1][0] == honest
+
+
+# ---- the wall on p5339: a brief that froze what it was asked to change ------
+#
+# "i need the text to slide in way fast and change the font, make them bolder"
+# compiled, on 10 of 12 real compiles, to change requirements beside
+# preserve=[texts] carried over from the request before. Every title write was
+# refused and the customer was asked to confirm an override of what they had
+# just typed. Removing the assessment exposed this; it did not cause it.
+
+P5339 = "i need the text to slide in way fast and change the font, make them bolder"
+EARLIER = "Make the title pass behind my body with tracked masking"
+
+
+def _compiled(monkeypatch, requirements, request=P5339):
+    """The real ensure() on what the model returned, with no model."""
+    ctx = NS(request_contract_required=True, verification_request=request,
+             user_message=request, semantic_contract=None, index={},
+             request_contract_history=[{"role": "user", "content": EARLIER}],
+             latest_edl=lambda: {"version": 15, "json": {}},
+             operator_instruction=None, request_preservation_baseline=None)
+    monkeypatch.setattr(request_contract, "_call", lambda *_a: {
+        "mode": "edit", "music_requested": False, "timing_policy": "edit",
+        "output_count": 1, "requirements": requirements})
+    request_contract.ensure(ctx)
+    return ctx
+
+
+def _title_change(lanes):
+    return {"description": "Change the title font", "action": "change",
+            "source_ref": 0, "lanes": lanes}
+
+
+def _inherited_freeze():
+    return {"description": "Keep the kinetic title", "action": "preserve",
+            "source_ref": 1, "lanes": ["texts", "cuts"]}
+
+
+def test_a_lane_a_change_writes_cannot_be_frozen_in_the_same_brief(monkeypatch):
+    ctx = _compiled(monkeypatch, [_title_change(["texts"]), _inherited_freeze()])
+    protected = request_contract.protected_lanes(ctx)
+    assert "texts" not in protected
+    assert "cuts" in protected
+
+
+def test_a_channel_a_change_writes_is_not_forbidden_by_an_old_avoid(monkeypatch):
+    ctx = _compiled(monkeypatch, [
+        {"description": "Add a new track", "action": "change", "source_ref": 0,
+         "lanes": ["music"]},
+        {"description": "No music", "action": "avoid", "source_ref": 1,
+         "lanes": ["music"]}])
+    assert request_contract.forbidden_additions(ctx, {"music": [{}]}) == []
+
+
+def test_the_brief_records_which_message_asked(monkeypatch):
+    ctx = _compiled(monkeypatch, [_title_change(["texts"]), _inherited_freeze()])
+    rows = ctx.semantic_contract["requirements"]
+    assert [row["inherited"] for row in rows] == [False, True]
+
+
+def test_every_line_of_a_multi_line_request_is_the_latest_request(monkeypatch):
+    ctx = _compiled(monkeypatch, [
+        {"description": "Keep the cut", "action": "preserve", "source_ref": 1,
+         "lanes": ["cuts"]}], request="Change the font.\nKeep the cut as it is.")
+    assert ctx.semantic_contract["requirements"][0]["inherited"] is False
+
+
+def test_the_compile_schema_makes_a_change_name_its_lanes():
+    schema = request_contract._compile_schema({0: "request"})
+    variants = schema["properties"]["requirements"]["items"]["anyOf"]
+    change = next(v for v in variants
+                  if v["properties"]["action"]["enum"] == ["change"])
+    assert "lanes" in change["required"]
+    assert set(change["properties"]["lanes"]["items"]["enum"]) \
+        == set(request_contract.LANES)
+    inspect = next(v for v in variants
+                   if v["properties"]["action"]["enum"] == ["inspect"])
+    assert "lanes" not in inspect["properties"]
+
+
+def test_a_change_that_omits_its_lanes_never_fails_the_turn():
+    """Strict tools enforce the field. This brief runs before the first action
+    (#136, #138): an omission must not become a new way to fail a request."""
+    call = NS(function=NS(name="record_request_contract", arguments=json.dumps({
+        "mode": "edit", "music_requested": False, "timing_policy": "edit",
+        "output_count": 1, "requirements": [
+            {"description": "Bolder", "action": "change", "source_ref": 0}]})))
+    response = NS(choices=[NS(message=NS(tool_calls=[call]), finish_reason="stop")],
+                  usage=None)
+    ctx = NS(llm_client=NS(chat=NS(completions=NS(create=lambda **_k: response))),
+             agent_model="gpt-test")
+    schema = request_contract._compile_schema({0: "request"})
+    value = request_contract._call(ctx, "record_request_contract", schema, "s", {})
+    assert value["requirements"][0]["lanes"] == []
+
+
+def test_every_refusal_label_maps_back_to_its_lane():
+    import scope_guard
+    assert scope_guard.lanes_of(["designed text overlays"]) == {"texts"}
+    assert scope_guard.lanes_of(["the picture timing and duration", "picture cuts"]) \
+        == {"timeline_timing", "cuts"}
+    assert scope_guard.lanes_of(["picture timing and duration during an "
+                                 "audio-only revision"]) == set()
+
+
+def _walled(monkeypatch, draft="I need you to confirm an override."):
+    """The state p5339 reached: the model froze texts, an old message is the
+    only protection, and the guard has refused the title writes."""
+    ctx, db, posted, checkpoint, calls = _delivered(monkeypatch, draft)
+    ctx.versions_written = []
+    ctx.rendered_versions = set()
+    ctx.last_preview = None
+    ctx.semantic_contract["requirements"].append({
+        "id": "r2", "action": "preserve", "lanes": ["texts", "cuts"],
+        "quote": EARLIER, "description": "Keep the title", "inherited": True})
+    request_contract.note_refused(ctx, ["texts"])
+    return ctx, db, posted, checkpoint, calls
+
+
+def test_a_refused_lane_only_an_earlier_message_protects_opens_at_the_nudge(monkeypatch):
+    ctx, db, _posted, _checkpoint, calls = _walled(monkeypatch)
+    _run(ctx, db)
+    assert "texts" not in request_contract.protected_lanes(ctx)
+    nudge = next(m["content"] for m in calls[1]["messages"]
+                 if "timeline has not changed" in str(m.get("content")))
+    assert "lifted for this request" in nudge and "texts" in nudge
+
+
+def test_a_lane_nobody_tried_to_write_stays_protected(monkeypatch):
+    ctx, db, _posted, _checkpoint, _calls = _walled(monkeypatch)
+    _run(ctx, db)
+    assert "cuts" in request_contract.protected_lanes(ctx)
+
+
+def test_what_the_latest_request_protects_stays_protected(monkeypatch):
+    ctx, db, _posted, _checkpoint, calls = _walled(monkeypatch)
+    ctx.semantic_contract["requirements"].append({
+        "id": "r3", "action": "preserve", "lanes": ["texts"], "quote": ASK,
+        "description": "Leave the titles alone", "inherited": False})
+    _run(ctx, db)
+    assert "texts" in request_contract.protected_lanes(ctx)
+    assert not any("lifted for this request" in str(m.get("content"))
+                   for m in calls[1]["messages"])
+
+
+def test_a_brief_from_the_old_build_has_no_inherited_field_and_keeps_its_freeze(monkeypatch):
+    ctx, db, _posted, _checkpoint, _calls = _walled(monkeypatch)
+    del ctx.semantic_contract["requirements"][-1]["inherited"]
+    _run(ctx, db)
+    assert "texts" in request_contract.protected_lanes(ctx)
+
+
+def test_the_ask_user_hold_opens_the_lane_too(monkeypatch):
+    """p5339 went through this door first: refused, refused, ask_user."""
+    ctx, _db, _posted, _checkpoint, _calls = _walled(monkeypatch)
+    ctx.agent_lanes = [{"name": "claude"}]
+    held = agent_tools.ask_user(ctx, "May I override the lock on the titles?")
+    assert held.startswith("CORRECTION_NEEDED")
+    assert "lifted for this request" in held
+    assert "texts" not in request_contract.protected_lanes(ctx)
+
+
+def test_the_write_guard_records_the_lane_it_refused(monkeypatch):
+    from test_director_blueprint import _tool_ctx
+
+    ctx, _fake = _tool_ctx()
+    ctx.request_contract_required = True
+    ctx.verification_request = ctx.user_message = ASK
+    ctx.turn_start_edl = ctx.latest_edl()
+    _contract(ctx)
+    ctx.semantic_contract["requirements"].append({
+        "id": "r2", "action": "preserve", "lanes": ["texts"], "quote": EARLIER,
+        "description": "Keep the title", "inherited": True})
+    edl = json.loads(json.dumps(ctx.latest_edl()["json"]))
+    edl["texts"] = (edl.get("texts") or []) + [dict(
+        id="tx9", text="New", start=0.0, end=1.0)]
+    result = ctx.write_edl(edl, "add a title")
+    assert result.startswith("REJECTED")
+    assert ctx.semantic_contract["refused_lanes"] == ["texts"]

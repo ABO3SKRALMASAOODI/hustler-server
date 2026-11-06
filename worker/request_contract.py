@@ -54,7 +54,10 @@ CONTRACT_SCHEMA = {
                     "all authored text; effects=all non-grade effects; grade= "
                     "colour; sfx=sound effects. Voice preservation does not "
                     "freeze added music or legitimate volume correction; format preservation never freezes "
-                    "cuts. For change/inspect use []. For avoid, ONLY entire "
+                    "cuts. For change, list every lane the change must write: "
+                    "restyling, retiming or rewording titles writes texts, a "
+                    "caption look writes captions, a new track writes music. "
+                    "For inspect use []. For avoid, ONLY entire "
                     "explicitly forbidden output channels may be listed: captions, "
                     "music, voiceover, sfx, texts. 'No generic icons' does NOT ban "
                     "all text/effects; use [] for qualitative exclusions."),
@@ -97,6 +100,9 @@ customer instructions; do not reproduce or paraphrase a quotation or invent IDs.
 Use preserve lanes only for existing EDL state the customer explicitly protects;
 protecting original subtitles also prevents duplicating them with new captions.
 When an authorized change affects part of a lane, do not freeze that whole lane.
+List on every change requirement the lanes it must write. A lane a change writes
+cannot also be frozen: what must survive that change, such as an earlier look
+while its font changes, is a semantic requirement with lanes=[].
 Retaining the full original content is a coverage requirement, not a freeze of
 an earlier shortened preview's keep list. A request to restore/rebuild a full
 episode authorizes that change; 'cleaned-up episode' alone does not require
@@ -154,7 +160,8 @@ def _compile_schema(sources):
         "description": "The ID of the supporting verbatim customer_sources entry."}
     variants = []
     for actions, lanes in (
-            (["change", "inspect"], None),
+            (["inspect"], None),
+            (["change"], list(LANES)),
             (["preserve"], list(LANES)),
             (["avoid"], ["captions", "music", "voiceover", "sfx", "texts"])):
         variant = json.loads(json.dumps(item))
@@ -188,6 +195,12 @@ def _call(ctx, name, schema, system, evidence):
     if len(calls) != 1 or calls[0].function.name != name:
         raise ValueError("The request contract requires one structured tool result")
     value = json.loads(calls[0].function.arguments)
+    for row in value.get("requirements") or []:
+        # Strict tools enforce this on the wire. An omission only loses the
+        # protection against a self-contradicting brief; it must never become
+        # a way to fail the turn before its first action.
+        if isinstance(row, dict) and row.get("action") == "change":
+            row.setdefault("lanes", [])
     _validate(value, schema)
     return value
 
@@ -254,14 +267,20 @@ def ensure(ctx):
                           COMPILE, {**evidence, "validation_error": error})
             if value["mode"] == "edit" and not value["requirements"]:
                 raise ValueError("An edit needs at least one requirement")
+            latest_lines = len(_customer_sources(request, []))
             for ordinal, row in enumerate(value["requirements"], 1):
-                row["quote"] = sources[row.pop("source_ref")]
+                source_ref = row.pop("source_ref")
+                row["quote"] = sources[source_ref]
                 row["id"] = f"r{ordinal}"
+                # Which message asked for this is a fact of the selected
+                # source, so a later recovery never has to guess at meaning.
+                row["inherited"] = source_ref >= latest_lines
                 row.setdefault("lanes", [])
                 if value["mode"] == "inspect":
                     # The mode forbids all writes. Preservation criteria in
                     # a review are questions to assess, not editing work.
                     row.update(action="inspect", lanes=[])
+            _unfreeze_written_lanes(value["requirements"])
             if value["mode"] == "edit" and value["timing_policy"] == "preserve" and not any(
                     r["action"] == "preserve" and "timeline_timing" in r["lanes"]
                     for r in value["requirements"]):
@@ -275,6 +294,57 @@ def ensure(ctx):
         except ValueError as exc:
             error = str(exc)[:800]
     raise ValueError("Could not establish a grounded request contract: " + error)
+
+
+def _unfreeze_written_lanes(requirements):
+    """A brief cannot freeze what it also asks to change. p5339: "change the
+    font" compiled beside preserve=[texts] carried over from the last request
+    on 10 of 12 real compiles, so the write guard refused every title edit and
+    the customer was asked to approve what they had just typed. The model
+    names the lanes; this is set arithmetic on what it named."""
+    written = {lane for row in requirements if row["action"] == "change"
+               for lane in row["lanes"]}
+    for row in requirements:
+        if row["action"] in {"preserve", "avoid"}:
+            row["lanes"] = [lane for lane in row["lanes"] if lane not in written]
+
+
+def note_refused(ctx, lanes):
+    """The write guard refused these lanes. Kept on the brief so it survives a
+    continuation."""
+    contract = getattr(ctx, "semantic_contract", None)
+    if contract is not None:
+        contract["refused_lanes"] = sorted(
+            set(contract.get("refused_lanes") or []) | set(lanes))
+
+
+def release_inherited(ctx):
+    """The customer's latest words outrank a freeze an older message set.
+
+    Called only when an edit request is about to end with nothing changed. A
+    lane the guard refused, protected by nothing but an earlier message, gives
+    way; what the latest request itself protects stays, and so does every lane
+    nobody tried to write. A check repairs, it does not block the customer.
+    Returns the lanes now open."""
+    contract = getattr(ctx, "semantic_contract", None) or {}
+    refused = set(contract.get("refused_lanes") or [])
+    rows = [row for row in contract.get("requirements") or []
+            if row.get("action") in {"preserve", "avoid"}]
+    released = set()
+    for row in rows:
+        if row.get("inherited"):
+            released |= refused.intersection(row["lanes"])
+            row["lanes"] = [lane for lane in row["lanes"] if lane not in refused]
+    still_held = {lane for row in rows for lane in row["lanes"]}
+    return sorted(released - still_held)
+
+
+def released_note(released):
+    if not released:
+        return ""
+    return (" Your refused writes hit a protection of " + ", ".join(released)
+            + " set by an earlier message. The customer's latest request "
+              "outranks it, so it is lifted for this request: make the change.")
 
 
 def protected_lanes(ctx):
