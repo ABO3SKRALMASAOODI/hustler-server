@@ -175,6 +175,37 @@ def test_a_replaced_score_stays_in_the_evidence_and_the_signals():
     assert sig["nothing_edited"].startswith("Nothing really edited")
 
 
+def test_a_second_v3_write_keeps_the_older_score():
+    s = _session()
+    key = s["key"]
+    old = {"verdict": "delivered_poor", "score": 2, "reviewer": "claude-opus-5-5",
+           "reviewed_at": NOW,
+           "signals": {"rubric": "v3", "score_exact": 2.5,
+                       "previous_scores": [{"score": 6, "rubric": "v2"}]},
+           "evidence": [{"kind": "contact_sheet", "caption": "Board",
+                         "storage_key": f"ops/evidence/{key}/a.jpg"},
+                        {"kind": "contact_sheet", "caption": "Old score 6/10 (delivered_good, rubric v2, 1 Nov 2026): x",
+                         "storage_key": f"ops/evidence/{key}/old.jpg"}]}
+    cur = Cur([old, {"id": 3, "review_count": 3}])
+    ev = [{"kind": "contact_sheet", "caption": "New board",
+           "storage_key": f"ops/evidence/{key}/board.jpg"}]
+    store.write_verdict(cur, s, "delivered_poor", 2, "nothing was edited", ev,
+                        root_cause="the agent did nothing",
+                        journey={"asks": [{"text": "cut", "status": "not_done"}],
+                                 "why_short": "Nothing really edited."},
+                        rating=rating(reviewer="x"))
+    _, p = cur.sql[-1]
+    evidence, sig = json.loads(p["evidence"]), json.loads(p["signals"])
+    assert [e["storage_key"].rsplit("/", 1)[1] for e in evidence] == ["board.jpg", "old.jpg"]
+    assert [e["rubric"] for e in sig["previous_scores"]] == ["v2", "v3"]
+    card = journeys._review_card({
+        "id": 3, "session_key": key, "verdict": "delivered_poor", "score": 2,
+        "reasoning": "r", "root_cause": "c", "request_summary": "s",
+        "evidence": [], "reviewer": "claude-opus-5-5", "review_count": 3,
+        "reviewed_at": NOW, "tickets": [], "signals": sig})
+    assert card["previous_score"]["score"] == 6
+
+
 def test_the_journey_card_shows_what_was_measured():
     sig = {"journey_format": 2, "why_short": "Nothing really edited.",
            "asks": [{"text": "cut", "status": "not_done", "note": None}],

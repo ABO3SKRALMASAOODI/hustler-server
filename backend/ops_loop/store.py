@@ -368,8 +368,11 @@ def _keep_old_score(cur, session_key, new_evidence, signals):
     signals["previous_scores"] = (old_sig.get("previous_scores") or []) + [entry]
     kept = [dict(e) for e in (old.get("evidence") or [])
             if isinstance(e, dict) and e.get("storage_key")]
+    # Rewriting a v3 verdict keeps the line that carries the older score.
+    carried = [e for e in kept
+               if str(e.get("caption") or "").startswith("Old score")]
     if not kept or rubric == RUBRIC:
-        return new_evidence
+        return list(new_evidence) + carried
     first = kept[0]
     first["caption"] = (f"Old score {old['score']}/10 ({old['verdict']}, "
                         f"rubric {rubric}, {day}): "

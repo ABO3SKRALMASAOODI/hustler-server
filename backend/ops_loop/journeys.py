@@ -576,6 +576,8 @@ def _review_card(r):
     asks = sig.get("asks") or []
     fmt = "v2" if sig.get("journey_format") and asks else "older"
     previous = sig.get("previous_scores") or []
+    # The score on the older scale is the one worth showing, not a v3 rewrite.
+    older = [p for p in previous if p.get("rubric") != sig.get("rubric")]
     return {
         "id": r["id"], "session_key": r["session_key"],
         "verdict": r["verdict"], "score": r["score"],
@@ -590,7 +592,7 @@ def _review_card(r):
         "dimensions": sig.get("dimensions"),
         "defects": sig.get("defects") or [],
         "alien_what": sig.get("alien_what"),
-        "previous_score": previous[-1] if previous else None,
+        "previous_score": (older or previous)[-1] if previous else None,
         "backfilled_from": sig.get("backfilled_from"),
         "asks": asks, "why_short": sig.get("why_short"),
         "next_actions": sig.get("next_actions") or [],
