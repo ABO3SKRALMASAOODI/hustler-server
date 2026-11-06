@@ -16,7 +16,10 @@ an advisory lock) reads what failed since the last tick and files it:
             awaiting_user, or an older worker's status awaiting_user with
             outcome blocked) is waiting on the customer, not a failure.
   upload    an upload the customer could not get in (upload_failed, or
-            upload_rejected unless the file was accepted anyway)
+            upload_rejected unless the file was accepted anyway), and any
+            transfer that fell silent without landing and without saying why
+            (no heartbeat for UPLOAD_SILENT_AFTER; 18 of 23 lost uploads left
+            nothing else behind, census 6 Nov 2026)
   player    the editor could not play the customer's video (player_error)
   mcp       an MCP tool error that was ours, not the AI app's mistake
             (internal, unclassified, timeout, upload, unavailable or
@@ -56,6 +59,11 @@ MAX_PER_TICK = 400
 # after it, a request still waiting was dropped.
 HELD_GRACE = timedelta(minutes=3)
 UNHANDLED_AFTER = timedelta(minutes=30)
+# A running transfer beats every 4 minutes (lib/upload.js HEARTBEAT_MS), so this
+# long with nothing heard is a transfer that stopped.
+UPLOAD_SILENT_AFTER = timedelta(minutes=15)
+UPLOAD_ALIVE_KINDS = ("upload_started", "upload_resumed", "upload_progress",
+                      "upload_interrupted")
 P1_JOB_TYPES = ("preview_check", "filmstrip")
 # agent_turn result.status of a request the trial or plan budget held.
 BUDGET_STATUSES = ("budget",)
@@ -68,7 +76,8 @@ MCP_OURS_OUTCOMES = ("transient_failure", "unavailable", "unsafe")
 ERROR_CLASSES = (
     # Before "not-found": "moov atom not found" is a customer's cut-short file,
     # not one of our objects going missing.
-    ("truncated-media", re.compile(r"moov atom not found", re.I)),
+    ("truncated-media", re.compile(r"moov atom not found|unfinished file",
+                                   re.I)),
     ("no-executor", re.compile(r"no remote executor|modal or cloudflare is "
                                r"required", re.I)),
     ("scratch-space", re.compile(r"scratch space", re.I)),
@@ -252,7 +261,67 @@ def scan(cur, since, now):
         if item:
             out.append(item)
     out.extend(_held_not_resumed(cur, since, now, p))
+    out.extend(_stopped_uploads(cur, since, now, p))
     out.sort(key=lambda f: _aware(f["at"]))
+    return out
+
+
+def _stopped_uploads(cur, since, now, p):
+    """Transfers whose last sign of life fell into this window, and that never
+    landed and never said why. An `upload_failed` row was filed on its own; a
+    proxy's bytes land as part of the original they belong to. One row per
+    project and size: a resumed transfer is the same upload, judged by its last
+    sign of life, and its ref is that row, so a transfer that comes back and
+    stops again is a new stop."""
+    q = dict(p, kinds=list(UPLOAD_ALIVE_KINDS),
+             silent_from=_naive(since - UPLOAD_SILENT_AFTER),
+             silent_to=_naive(now - UPLOAD_SILENT_AFTER))
+    cur.execute(f"""
+        SELECT last.* FROM (
+            SELECT DISTINCT ON (ce.user_id, ce.project_id, ce.detail->>'bytes')
+                   ce.id, ce.kind, ce.user_id, ce.project_id, ce.created_at AS at,
+                   ce.detail
+              FROM client_events ce JOIN users u ON u.id = ce.user_id
+             WHERE ce.kind = ANY(%(kinds)s)
+               AND ce.created_at > %(silent_from)s
+               AND ce.created_at <= %(now)s
+               AND ce.project_id IS NOT NULL
+               AND COALESCE(ce.detail->>'kind', 'original') <> 'proxy'
+               AND {_customers()}
+             ORDER BY ce.user_id, ce.project_id, ce.detail->>'bytes',
+                      ce.created_at DESC) last
+         WHERE last.at <= %(silent_to)s
+           AND EXISTS (SELECT 1 FROM projects pr WHERE pr.id = last.project_id)
+           AND NOT EXISTS (
+                 SELECT 1 FROM client_events done
+                  WHERE done.project_id = last.project_id
+                    AND done.user_id = last.user_id
+                    AND done.created_at >= last.at
+                    AND (done.kind = 'upload_failed'
+                         OR (done.kind IN ('upload_landed', 'upload_deduped')
+                             AND done.detail->>'bytes' = last.detail->>'bytes'
+                             AND COALESCE(done.detail->>'original_pending',
+                                          'false') <> 'true')
+                         OR done.kind = 'upload_original_ready'))
+         ORDER BY last.at LIMIT %(limit)s""", q)
+    out = []
+    for r in cur.fetchall():
+        d = _detail(r)
+        left = r["kind"] == "upload_interrupted"
+        sent = d.get("sent_bytes") if left else d.get("bytes_done")
+        out.append({
+            "ref": f"stopped:{r['id']}", "source": "upload", "at": _aware(r["at"]),
+            "user_id": r["user_id"], "project_id": r["project_id"],
+            "severity": "P1",
+            "cause_key": cause_key("upload-stopped",
+                                   "page-left" if left else "no-signal"),
+            "title": ("An upload stopped without landing: the page went away"
+                      if left else
+                      "An upload stopped without landing: nothing heard"),
+            "detail": _short(f"{d.get('filename') or 'file'} · {d.get('bytes')} "
+                             f"bytes · {d.get('kind') or 'original'} · sent "
+                             f"{sent if sent is not None else 'unknown'} · last "
+                             f"heard {r['kind']}", 600)})
     return out
 
 
@@ -350,9 +419,14 @@ def _event_failure(r):
             return None             # stored and analysed: not a failure
         reason = str(d.get("reason") or "rejected")
         size = d.get("bytes")
-        return dict(base, source="upload",
-                    severity="P1" if DEVICE_SIDE.search(reason)
-                    and not paying else "P0",
+        # A measured fact about the customer's own file (a copy that never
+        # finished): explained on the spot, nothing of ours to repair.
+        if d.get("device_side"):
+            severity = "P1"
+        else:
+            severity = "P1" if DEVICE_SIDE.search(reason) and not paying \
+                else "P0"
+        return dict(base, source="upload", severity=severity,
                     cause_key=cause_key("upload-rejected", reason),
                     title=_short(f"Upload refused: {reason}"),
                     detail=_short(f"{reason} · {size} bytes · "
@@ -362,7 +436,8 @@ def _event_failure(r):
     if kind == "upload_failed":
         reason = str(d.get("reason") or "failed")
         return dict(base, source="upload",
-                    severity="P1" if DEVICE_SIDE.search(reason)
+                    severity="P1" if (d.get("file_gone")
+                                      or DEVICE_SIDE.search(reason))
                     and not paying else "P0",
                     cause_key=cause_key("upload-failed", signature(reason)
                                         if len(reason) > 40 else reason),

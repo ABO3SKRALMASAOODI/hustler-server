@@ -26,7 +26,7 @@ def test_index_job_state_is_scoped_to_the_active_asset():
 
     assert state == {
         "id": 91, "state": "failed", "progress": 37,
-        "error": "capacity", "updated_at": "then",
+        "error": "capacity", "failure_kind": None, "updated_at": "then",
         "active": False, "recent_count": 1,
     }
     sql, params = cur.executed[0]

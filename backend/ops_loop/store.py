@@ -727,6 +727,29 @@ def set_fixing(cur, ticket_id, note=None):
        (_history("fixing", note=_clean(note, 500, "note")), int(ticket_id)))
 
 
+def reopen(cur, ticket_id, note):
+    """A closed ticket whose closing turned out to be wrong goes back to open,
+    with why it was closed kept in its history. #48 sat at wont_fix ("device
+    side, recovery works as designed") while the class hit 7 customers."""
+    note = _clean(note, 2000, "note", required=True)
+    cur.execute("SELECT * FROM tickets WHERE id = %s FOR UPDATE", (int(ticket_id),))
+    t = cur.fetchone()
+    if not t:
+        raise StoreError(f"no ticket {ticket_id}")
+    if t["status"] not in ("fixed", "wont_fix"):
+        raise StoreError(f"ticket {ticket_id} is {t['status']}, not closed")
+    _w(cur, """UPDATE tickets SET status = 'open', fix_sha = NULL,
+                   regression_check = NULL, wont_fix_reason = NULL,
+                   closed_at = NULL, history = history || %s,
+                   updated_at = NOW()
+               WHERE id = %s RETURNING *""",
+       (_history("reopened", note=note, previous_status=t["status"],
+                 previous_wont_fix_reason=t["wont_fix_reason"],
+                 previous_fix_sha=t["fix_sha"],
+                 previous_closed_at=t["closed_at"]), int(ticket_id)))
+    return dict(cur.fetchone())
+
+
 def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None):
     """Return an unfinished claim with evidence, without hiding new intake.
 

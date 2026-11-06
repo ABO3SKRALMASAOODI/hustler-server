@@ -383,6 +383,20 @@ def _claude_trial_indexed(worker_db, job, scope):
               f"{(got or {}).get('reason', 'error')}", flush=True)
 
 
+def _refuse_unfinished_source(asset):
+    """Measure the object before reading it. The upload routes refuse a file
+    with no moov, but a link import, a dedup copy or an upload from before them
+    arrives here, and a download, a hash and six ffprobe failures later is the
+    wrong moment to find out."""
+    key, total = asset["storage_key"], asset.get("bytes")
+    if asset["kind"] == "music" or not total:
+        return
+    if media.mp4_state(lambda off, n: storage.read_range(key, off, n),
+                       int(total)) == "unfinished":
+        raise media.UnfinishedFile(
+            f"unfinished file: {key} ({total} bytes) has no complete moov box")
+
+
 def run_index_job(worker_db, job):
     job_id, project_id = job["id"], job["project_id"]
     asset = worker_db.run(dbx.get_asset, job["payload"].get("asset_id"))
@@ -454,6 +468,8 @@ def run_index_job(worker_db, job):
                         upload_meta.get("client_proxy_key") or "").strip()
     from_client_proxy = bool(client_proxy_key) and \
         not storage.exists(asset["storage_key"])
+    if not from_client_proxy:
+        _refuse_unfinished_source(asset)
     streamed_source = not from_client_proxy and config.index_source_should_stream(
         asset["kind"], asset.get("bytes"))
     # Set from the scratch plan once the streamed source is probed.
@@ -905,6 +921,7 @@ def _run_clip_index(worker_db, job, asset):
     indexed so every reader (state, agent context) can find it."""
     job_id, project_id = job["id"], job["project_id"]
     is_music = asset["kind"] == "music"
+    _refuse_unfinished_source(asset)
     workdir = os.path.join(config.TMP_DIR, f"index_{job_id}")
     os.makedirs(workdir, exist_ok=True)
     timings, _t = {}, time.monotonic()

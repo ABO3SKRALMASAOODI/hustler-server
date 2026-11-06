@@ -467,6 +467,17 @@ def cmd_fixing(a):
     return 0
 
 
+def cmd_reopen(a):
+    from ops_loop import store
+    with Writer(a.dry_run) as w:
+        t = store.reopen(w, a.ticket, a.note)
+    if t["severity"] == "P0" and not a.dry_run:
+        _mark_p0(t)
+    out({"ticket_id": t["id"], "status": t["status"],
+         "severity": t["severity"], "dry_run": bool(a.dry_run)})
+    return 0
+
+
 def cmd_release(a):
     from ops_loop import store
     with Writer(a.dry_run) as w:
@@ -728,6 +739,11 @@ def parser():
     p.add_argument("--note")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_fixing)
+    p = sub.add_parser("reopen", help="reopen a closed ticket whose closing was wrong")
+    p.add_argument("--ticket", type=int, required=True)
+    p.add_argument("--note", required=True)
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_reopen)
     p = sub.add_parser("release", help="return an unfinished claim to open with a note")
     p.add_argument("--ticket", type=int, required=True)
     p.add_argument("--expected-updated-at", required=True,

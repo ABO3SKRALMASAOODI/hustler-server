@@ -544,9 +544,9 @@ INDEX_SERVICE_FAIL_NOTE = (
     "Your video uploaded safely, and nothing is wrong with your file. Our "
     "processing service couldn't analyze it this time. That's on our side, "
     "not yours, and we're on it. You don't need to upload it again.")
-# An MP4/MOV cut short before its index (failure_policy.truncated_source).
-# The bytes we hold are the bytes the device sent, so uploading the same copy
-# again cannot help: the customer needs a whole copy.
+# An MP4/MOV cut short before its index (media.UnfinishedFile, measured from
+# its boxes). The bytes we hold are the bytes the device sent, so uploading the
+# same copy again cannot help: the customer needs a whole copy.
 INDEX_TRUNCATED_NOTE = (
     "This video file is incomplete, so I can't open it. The upload worked, "
     "but the file itself stops early: the recording or the copy never "
@@ -556,7 +556,8 @@ INDEX_TRUNCATED_NOTE = (
 # The only index decisions that are about the customer's file, so the only
 # ones FAIL_NOTES["index"] ("try uploading it again, or a different format")
 # could help (failure_policy.user_reason words them the same way).
-INDEX_FILE_KINDS = frozenset({"invalid_media", "input_limit_exceeded"})
+INDEX_FILE_KINDS = frozenset({"invalid_media", "input_limit_exceeded",
+                              "unfinished_file"})
 # indexer's own duration refusal ("Video is 4.5h — the limit is 3h").
 _TOO_LONG = re.compile(r"Video is ([0-9.]+)h \S+ the limit is ([0-9.]+)h")
 # A link pasted as the main video that could not be imported
@@ -706,7 +707,7 @@ def _notify_failure(worker_db, job, err):
     elif job["type"] == "index" and decision.kind in {
             "executor_unavailable", "executor_capacity", "provider_budget_exhausted"}:
         note = INDEX_SERVICE_FAIL_NOTE
-    elif job["type"] == "index" and failure_policy.truncated_source(err):
+    elif job["type"] == "index" and decision.kind == "unfinished_file":
         note = INDEX_TRUNCATED_NOTE
     elif job["type"] == "index" and _LINK_IMPORT in str(err).lower():
         note = (LINK_IMPORT_WALL_NOTE if "youtube blocked" in

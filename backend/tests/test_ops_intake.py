@@ -259,14 +259,14 @@ def test_which_client_events_are_failures_and_how_severe():
 
 
 class ScanCur:
-    """Answers scan()'s six reads in order."""
+    """Answers scan()'s seven reads in order."""
 
     def __init__(self, jobs=(), replies=(), reply_jobs=(), requests=(),
                  events=(), held=()):
         self.answers = [list(jobs), list(replies)]
         if any((r.get("job") or "").isdigit() for r in replies):
             self.answers.append(list(reply_jobs))
-        self.answers += [list(requests), list(events), list(held)]
+        self.answers += [list(requests), list(events), list(held), []]
         self.sql = []
 
     def execute(self, sql, params=None):
