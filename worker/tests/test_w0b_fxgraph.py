@@ -536,3 +536,32 @@ def test_world_and_screen_keep_card_layout_tags_when_a_card_needs_them(fake):
     assert renderer._fx_picture_stage("world", parts, "v", empty,
                                       {"c": []}, 25.0) == "v"
     assert parts == []
+
+
+def test_many_junction_windows_share_one_overlay():
+    """p5520: one overlay per window cost windows x frames (0.08x)."""
+    plan = type("P", (), {"fps": 30.0, "n": 0})()
+    def uid(prefix):
+        plan.n += 1
+        return f"{prefix}{plan.n}"
+    plan.uid = uid
+    parts = []
+    out = fxgraph.junction_overlay(
+        parts, "vc", [(300, 5, "c"), (100, 5, "a"), (200, 5, "b")], plan)
+    graph = ";".join(parts)
+    assert graph.count("overlay") == 1 and graph.count("concat=n=3") == 1
+    assert "between(n,95,104)+between(n,195,204)+between(n,295,304)" in graph
+    # the track lines up on the program clock: gaps of 95, 90, 90 black frames
+    assert "tpad=start=95:" in parts[0] and "tpad=start=90:" in parts[1]
+    assert out.endswith("o")
+
+
+def test_overlapping_junction_windows_keep_their_own_overlays():
+    plan = type("P", (), {"fps": 30.0, "n": 0})()
+    def uid(prefix):
+        plan.n += 1
+        return f"{prefix}{plan.n}"
+    plan.uid = uid
+    parts = []
+    fxgraph.junction_overlay(parts, "vc", [(100, 10, "a"), (105, 10, "b")], plan)
+    assert ";".join(parts).count("overlay") == 2
