@@ -17,6 +17,7 @@ import json
 from datetime import timedelta
 
 from admin_metrics import defs
+from ops_loop import store
 
 ANALYSIS_FLOOR_S = 600          # 10 min, or 1.5 x the source
 ANALYSIS_RATIO = 1.5
@@ -312,6 +313,25 @@ def _cancelled_within_a_day(cur, since, now, p):
             for r in cur.fetchall()]
 
 
+def _quality_trait(review, signals):
+    """The one measured thing that names the problem, so ratings fold into
+    causes a fixer can take, not one umbrella: nothing edited, not delivered, a
+    declared defect, else the weakest craft dimension of rubric v3."""
+    delta = (signals.get("edit_delta") or {}).get("class")
+    if delta in QUALITY_CLASSES:
+        return delta
+    if review["verdict"] == "not_delivered":
+        return "not-delivered"
+    defects = [d.get("id") for d in signals.get("defects") or []
+               if isinstance(d, dict) and d.get("id")]
+    if defects:
+        return sorted(defects)[0]
+    dims = signals.get("dimensions") or {}
+    scored = [(float(dims[k]), k) for k in store.CRAFT_DIMENSIONS
+              if isinstance(dims.get(k), (int, float))]
+    return min(scored)[1] if scored else "below-the-bar"
+
+
 def _below_the_bar(cur, since, now, p):
     """AGENTS.md: an edit that ran without an error and delivered 2/10 is an
     open ticket like any crash. A rating used to touch no ticket, so 42 honest
@@ -334,12 +354,7 @@ def _below_the_bar(cur, since, now, p):
     out = []
     for r in cur.fetchall():
         s = r["signals"] if isinstance(r["signals"], dict) else {}
-        delta = (s.get("edit_delta") or {}).get("class")
-        defects = [d.get("id") for d in s.get("defects") or []
-                   if isinstance(d, dict) and d.get("id")]
-        trait = (delta if delta in QUALITY_CLASSES else None) or (
-            "not-delivered" if r["verdict"] == "not_delivered" else None) or (
-            sorted(defects)[0] if defects else "below-the-bar")
+        trait = _quality_trait(r, s)
         out.append(_item(
             f"review:{r['id']}:{r['review_count']}", "review", r["at"], r, "P1",
             ("quality", trait),

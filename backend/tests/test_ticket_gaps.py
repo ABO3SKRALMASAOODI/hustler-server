@@ -241,6 +241,18 @@ def test_a_rating_below_the_bar_files_by_what_was_measured(world):    # noqa: F8
     assert got[0]["review_id"] == rid and got[0]["severity"] == "P1"
 
 
+def test_ratings_fold_into_causes_not_one_umbrella(world):    # noqa: F811
+    trait = gaps._quality_trait
+    r = {"verdict": "delivered_poor"}
+    dims = {"edit_delta": {"class": "edited"},
+            "dimensions": {"cuts_pacing": 3, "type_captions": 1.5, "sound": None}}
+    assert trait(r, dims) == "type_captions"
+    assert trait(r, dict(dims, defects=[{"id": "ask_missed"}])) == "ask_missed"
+    assert trait(r, {"edit_delta": {"class": "trim_only"}}) == "trim_only"
+    assert trait({"verdict": "not_delivered"}, {}) == "not-delivered"
+    assert trait(r, {}) == "below-the-bar"
+
+
 def test_a_rating_at_the_bar_or_already_on_an_open_ticket_files_nothing(world):    # noqa: F811
     review(world, score=10, cls="edited")
     rid = review(world, score=3, cls="edited", defects=["ask_missed"])
