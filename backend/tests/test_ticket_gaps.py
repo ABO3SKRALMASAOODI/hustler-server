@@ -3,6 +3,7 @@ check on real PostgreSQL, on the rows the customers' cases actually left.
 
 CI: QUEUE_TEST_DATABASE_URL; locally any throwaway database.
 """
+import json
 import os
 from datetime import timedelta
 
@@ -490,7 +491,8 @@ def test_every_check_runs_on_a_tick_together(world):    # noqa: F811
     assert intake.run(world.c, world.conn.cursor(), world.clock.now)["filed"] == 0
 
 
-def test_a_backfill_files_history_and_pages_nobody(world, monkeypatch, capsys):    # noqa: F811
+def test_a_backfill_files_history_and_pages_nobody(world, monkeypatch, capsys,    # noqa: F811
+                                                   tmp_path):
     """`ops.sh gaps --days 14 --file`. A failed model or a held request has no
     second look, so the intake files it at P0, which is right the minute it
     happens. Filed from last week it would start a Fixer for nobody stuck now."""
@@ -529,3 +531,24 @@ def test_a_backfill_files_history_and_pages_nobody(world, monkeypatch, capsys): 
     assert got == {"auto-gap-model-failing-x": ("P1", "open"),
                    "auto-request-budget-y": ("P2", "open")}
     assert intake.pending_p0(world.c, T0) == []
+
+    # The scan takes most of an hour: a saved one files without scanning, and one
+    # bad row costs that row, not the run.
+    saved = tmp_path / "scan.json"
+    a = ops.parser().parse_args(["gaps", "--days", "1", "--save", str(saved)])
+    assert a.fn(a) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(gaps, "scan", lambda *a: pytest.fail("scanned again"))
+    monkeypatch.setattr(intake, "scan", lambda *a: pytest.fail("scanned again"))
+    real = store.record_failure
+
+    def bad_row(w, f):
+        if f["ref"] == "gap:model:x":
+            raise store.StoreError("a bad row")
+        return real(w, f)
+    monkeypatch.setattr(store, "record_failure", bad_row)
+    a = ops.parser().parse_args(["gaps", "--load", str(saved), "--file"])
+    assert a.fn(a) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["failures"] == 2 and report["filed"] == 0
+    assert [f["ref"] for f in report["failed"]] == ["gap:model:x"]

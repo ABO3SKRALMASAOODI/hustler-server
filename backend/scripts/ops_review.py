@@ -34,7 +34,8 @@ never touches billing, credits, plans or Paddle.
     ops_review.py reopen   --ticket 7 --note "why the closing was wrong"
     ops_review.py unmute   [--dry-run]           # every wont_fix not the owner's
     ops_review.py heartbeat --agent p0_watch|fixer|reviewer
-    ops_review.py gaps     --days 14 [--file]    # replay the failures and gaps
+    ops_review.py gaps     --days 14 [--save F | --load F] [--file]
+                                                 # replay the failures and gaps
     ops_review.py fetch    --key ops/evidence/<slug>/x.jpg --out /tmp/x.jpg
     ops_review.py reviews  [--days 7]
     ops_review.py p0       [--count] [--sync-marker]     # the P0 watch
@@ -52,6 +53,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -72,6 +74,7 @@ GAUNTLET_RUNS = ("/Users/masaoodi/Documents/Valmera/.valmera/week-1106/gauntlet/
                  "runs")
 READ_ONLY = "-c default_transaction_read_only=on"
 KEY_RE = re.compile(r"^p(\d+)-(\d+)$")
+CONNECT_TRIES = 3
 
 
 class CliError(Exception):
@@ -105,8 +108,16 @@ def connect(read_only=True):
     opts = "-c statement_timeout=60000 -c lock_timeout=5000"
     if read_only:
         opts += " " + READ_ONLY
-    conn = psycopg2.connect(database_url(), cursor_factory=RealDictCursor,
-                            connect_timeout=15, options=opts)
+    for attempt in range(1, CONNECT_TRIES + 1):
+        try:
+            conn = psycopg2.connect(database_url(),
+                                    cursor_factory=RealDictCursor,
+                                    connect_timeout=15, options=opts)
+            break
+        except psycopg2.OperationalError:
+            if attempt == CONNECT_TRIES:
+                raise
+            time.sleep(5 * attempt)
     conn.autocommit = read_only
     return conn
 
@@ -528,19 +539,32 @@ def cmd_heartbeat(a):
 def cmd_gaps(a):
     """Replay the intake and the gap checks over a past window, hour by hour:
     what they find, by cause. Read-only unless --file, which files it all on
-    tickets at P1, once per ref."""
+    tickets at P1 (P2 stays P2), once per ref. The scan takes most of an hour from
+    the Mac: --save keeps it, and --load reads or files it without scanning."""
     from ops_loop import gaps, intake, store
-    now = _now()
-    lo = now - timedelta(days=a.days)
-    conn = connect()
-    cur = conn.cursor()
-    found, step = {}, timedelta(hours=1)
-    t = lo
-    while t < now:
-        hi = min(t + step, now)
-        for f in intake.scan(cur, t, hi) + gaps.scan(cur, t, hi):
-            found.setdefault(f["ref"], f)
-        t = hi
+    if a.load:
+        with open(a.load, encoding="utf-8") as fh:
+            saved = json.load(fh)
+        lo, now = saved["from"], saved["to"]
+        found = {f["ref"]: dict(f, at=datetime.fromisoformat(f["at"]))
+                 for f in saved["failures"]}
+    else:
+        now = _now()
+        lo = now - timedelta(days=a.days)
+        conn = connect()
+        cur = conn.cursor()
+        found, step = {}, timedelta(hours=1)
+        t = lo
+        while t < now:
+            hi = min(t + step, now)
+            for f in intake.scan(cur, t, hi) + gaps.scan(cur, t, hi):
+                found.setdefault(f["ref"], f)
+            t = hi
+        conn.close()
+        if a.save:
+            with open(a.save, "w", encoding="utf-8") as fh:
+                json.dump({"from": lo, "to": now,
+                           "failures": list(found.values())}, fh, default=str)
     by = {}
     for f in found.values():
         b = by.setdefault(f["cause_key"], {"cause_key": f["cause_key"],
@@ -551,19 +575,24 @@ def cmd_gaps(a):
     table = sorted(({**b, "users": len(b["users"] - {None})}
                     for b in by.values()),
                    key=lambda b: -b["failures"])
-    filed = 0
+    filed, failed = 0, []
     if a.file:
         for f in sorted(found.values(), key=lambda f: f["at"]):
             # History pages nobody: no second look can run on a past failure,
             # and a P0 from last week would start a Fixer for no one stuck now.
             severity = "P2" if f.get("severity") == "P2" else "P1"
-            with Writer(a.dry_run) as w:
-                _t, action = store.record_failure(w, dict(f, severity=severity))
+            try:
+                with Writer(a.dry_run) as w:
+                    _t, action = store.record_failure(
+                        w, dict(f, severity=severity))
+            except Exception as e:      # one bad row never loses the others
+                failed.append({"ref": f["ref"],
+                               "error": f"{type(e).__name__}: {e}"[:200]})
+                continue
             filed += action != "duplicate"
-    conn.close()
     out({"from": lo, "to": now, "failures": len(found), "filed": filed,
-         "causes": table})
-    return 0
+         "failed": failed, "causes": table})
+    return 1 if failed else 0
 
 
 def cmd_release(a):
@@ -949,6 +978,8 @@ def parser():
     p.add_argument("--days", type=float, default=14)
     p.add_argument("--file", action="store_true",
                    help="file what it finds (idempotent per ref)")
+    p.add_argument("--save", help="keep the scan in this file")
+    p.add_argument("--load", help="use a saved scan instead of scanning")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_gaps)
     p = sub.add_parser("p0", help="P0 tickets the Fixer should take now")
