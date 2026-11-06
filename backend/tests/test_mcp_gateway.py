@@ -412,9 +412,11 @@ def test_instructions_teach_the_gateway(client, released):
     instructions = rpc(client, "initialize", STATIC_TOKEN).get_json()[
         "result"]["instructions"]
     flat = " ".join(instructions.split())
-    assert "A TOOL YOUR LIST LACKS IS STILL CALLABLE" in flat
-    assert 'expand_toolset(describe=["tool_name"])' in flat
-    assert 'expand_toolset(call={"name": "tool_name"' in flat
+    assert "TOOLS ADDED AFTER CONNECTING" in flat
+    assert "expand_toolset(describe=['tool_name'])" in flat
+    assert "expand_toolset(call={'name': 'tool_name'" in flat
+    assert "expand_toolset(domains=[])" in flat
+    assert "no reconnect is needed" in flat
     assert "reconnect to refresh the catalog" not in flat
 
 

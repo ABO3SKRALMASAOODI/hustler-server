@@ -232,8 +232,9 @@ _QUOTAS = (
 
 def test_one_restraint_rule_is_stated_verbatim_on_every_surface():
     """Owner, Oct 10 2026: zooms and sound effects are optional, never
-    rules. The same rule, word for word, reaches Valmera's agent, MCP
-    clients, the worker playbooks and the podcast-shorts plugin."""
+    rules. The same rule, word for word, reaches Valmera's agent, the worker
+    playbooks and the podcast-shorts plugin; MCP clients get the same
+    behaviour in the authored MCP guide's own words."""
     rule = _flat(agent_prompt.RESTRAINT_RULE)
     assert rule.startswith("ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES")
     for phrase in ("restraint is the default", "zero is a fine answer",
@@ -242,7 +243,6 @@ def test_one_restraint_rule_is_stated_verbatim_on_every_surface():
                    "sound per landing or transition", "childish"):
         assert phrase in rule, phrase
     surfaces = {"core prompt": agent_prompt.CORE_PROMPT,
-                "mcp workflow": _mcp_workflow(),
                 "plugin SKILL.md": _read(_PLUGIN, "SKILL.md"),
                 "plugin looks.md": _read(_PLUGIN, "references", "looks.md")}
     for name in ("short-form-direction", "zooms", "audio", "transitions",
@@ -250,6 +250,16 @@ def test_one_restraint_rule_is_stated_verbatim_on_every_surface():
         surfaces["skill " + name] = _skill(name)
     for where, text in surfaces.items():
         assert rule in _flat(text), where
+    # The public MCP guide is authored independently of internal doctrine;
+    # it must still carry the same concrete restraint.
+    mcp = _flat(_mcp_workflow())
+    for phrase in ("Zooms and sound effects are optional and zero is a valid count",
+                   "a genuinely jarring jump cut",
+                   "a real-world action on screen",
+                   "a zoom per cut or a sound per transition makes an edit look cheap",
+                   "a bare jump cut are both fine",
+                   "reads as childish"):
+        assert phrase in mcp, phrase
 
 
 def test_no_surface_turns_a_zoom_or_a_sound_into_a_quota():
@@ -310,10 +320,11 @@ def test_zooms_and_sounds_are_optional_never_quotas():
     assert "never a required pass" in contracts["punch_in_on_emphasis"].lower()
     assert "never a rule" in contracts["add_sfx"].lower()
     assert "no sound unless transition_sounds=true" in contracts["apply_look"]
-    mcp = _mcp_workflow()
-    assert "ZOOMS AND SOUND EFFECTS ARE OPTIONAL, NEVER RULES" in mcp
+    mcp = _flat(_mcp_workflow())
+    assert "Zooms and sound effects are optional and zero is a valid count" in mcp
+    assert "a bare jump cut are both fine" in mcp
     assert "with one add_zoom on the same frame" not in mcp
-    assert "transition_sounds=true" in mcp
+    assert "no sound unless transition_sounds=true" in mcp
 
 
 def test_zoom_strength_is_taught_as_magnification_minus_one():

@@ -416,7 +416,7 @@ def test_mcp_clients_are_not_told_to_preroll_by_hand():
     path = os.path.join(os.path.dirname(__file__), "..", "..", "backend", "routes", "mcp.py")
     text = " ".join(open(path).read().split())
     assert "pre-rolled" not in text
-    assert "lands each recording's peak on `at`, so never pre-roll by hand" in text
+    for phrase in ("add_sfx(storage_key='sound:<id>', at=<frame it hits>)", "It lands the recording's peak on at, so no manual pre-roll is needed"): assert phrase in text, phrase
 
 
 def test_backend_loads_the_remap_standalone():
