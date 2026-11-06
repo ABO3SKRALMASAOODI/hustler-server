@@ -14,7 +14,7 @@ os.environ.setdefault("SKIP_DB_INIT", "1")
 os.environ.setdefault("DATABASE_URL", "postgresql://stub/stub")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ops_loop import intake, store                     # noqa: E402
+from ops_loop import gaps, intake, store               # noqa: E402
 
 NOW = datetime(2026, 10, 29, 16, 0, tzinfo=timezone.utc)
 
@@ -228,10 +228,10 @@ def test_which_client_events_are_failures_and_how_severe():
             "file_gone": True, "resumable": True, "offline": False}
     assert ev(_ev("upload_failed", lost))["severity"] == "P0"
     assert ev(_ev("upload_failed", dict(lost, offline=True)))["offline"] is True
-    # A cut-short copy is measured and explained: only the finished file
-    # repairs it, so it stays open without paging anyone.
+    # A cut-short copy too: whose fault it is decides nothing. The second look
+    # says whether the finished file landed.
     assert ev(_ev("upload_rejected", {"reason": "unfinished file",
-                                      "device_side": True}))["severity"] == "P1"
+                                      "device_side": True}))["severity"] == "P0"
     # The browser cannot decode the upload, whoever the account is.
     player = {"media_error": 4, "src_path": "/valmera-media/originals/1/a.mp4",
               "is_proxy": True}
@@ -249,8 +249,9 @@ def test_which_client_events_are_failures_and_how_severe():
     got = ev(_ev("mcp_error_response", {
         "tool": "export_final", "category": "unclassified",
         "message": "export_final could not start the render"}))
-    # Unclassified: often the caller's to fix; filed with its sentence, P1.
-    assert got["severity"] == "P1" and \
+    # Unclassified: often the caller's to fix. The second look tells them apart
+    # by what happened next, not by the category (recovery._mcp).
+    assert got["severity"] == "P0" and \
         got["cause_key"] == "auto-mcp-export-final-unclassified"
     assert "could not start the render" in got["title"]
     got = ev(_ev("mcp_error_response", {
@@ -367,6 +368,7 @@ def test_a_pass_never_counts_the_overlap_twice(monkeypatch):
     seen = [_f("job:1", NOW - timedelta(minutes=3)),
             _f("job:2", NOW - timedelta(minutes=1))]
     monkeypatch.setattr(intake, "scan", lambda cur, since, now: list(seen))
+    monkeypatch.setattr(gaps, "scan", lambda cur, since, now: [])
     monkeypatch.setattr(intake, "_tables_ready", lambda cur: True)
 
     class R:
@@ -390,6 +392,7 @@ def test_one_bad_failure_never_loses_the_others(monkeypatch):
     db = TicketsDB()
     seen = [_f("job:1", NOW, key="NOT A SLUG"), _f("job:2", NOW)]
     monkeypatch.setattr(intake, "scan", lambda cur, since, now: list(seen))
+    monkeypatch.setattr(gaps, "scan", lambda cur, since, now: [])
     monkeypatch.setattr(intake, "_tables_ready", lambda cur: True)
 
     class R:

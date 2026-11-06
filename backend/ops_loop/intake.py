@@ -81,6 +81,10 @@ HEARTBEAT_LATE = {"p0_watch": timedelta(minutes=75),
                   "fixer": timedelta(hours=26),
                   "reviewer": timedelta(hours=3)}
 REVIEWS_LATE = timedelta(hours=24)
+# The intake's own last pass. It ticks every minute; a pass that keeps raising
+# leaves no ticket and no row, and until now only the next morning's digest said
+# so. The alert runs on its own scheduler, so it outlives a broken tick.
+INTAKE_LATE = timedelta(minutes=15)
 # A running transfer beats every 4 minutes (lib/upload.js HEARTBEAT_MS), so this
 # long with nothing heard is a transfer that stopped.
 UPLOAD_SILENT_AFTER = timedelta(minutes=15)
@@ -200,10 +204,7 @@ def scan(cur, since, now):
         out.append({
             "ref": f"job:{r['id']}", "source": "job", "at": r["at"],
             "user_id": r["user_id"], "project_id": r["project_id"],
-            # A cut-short file is explained in chat and only the customer's
-            # own copy can repair it: seen by the daily Fixer, no P0 alarm.
-            "severity": "P1" if r["type"] in P1_JOB_TYPES
-                        or sig == "truncated-media" else "P0",
+            "severity": "P1" if r["type"] in P1_JOB_TYPES else "P0",
             "cause_key": cause_key("job", kind, sig),
             "title": _short(f"{kind} job failed: {r['error'] or 'no error'}"),
             "detail": _short(r["error"], 600), "job_id": r["id"],
@@ -295,7 +296,9 @@ def _stopped_uploads(cur, since, now, p):
     proxy's bytes land as part of the original they belong to. One row per
     project and size: a resumed transfer is the same upload, judged by its last
     sign of life, and its ref is that row, so a transfer that comes back and
-    stops again is a new stop."""
+    stops again is a new stop. Only a row about this file ends it: another file
+    landing or failing in the project says nothing about this one. A row with no
+    size cannot be told apart, so it counts."""
     q = dict(p, kinds=list(UPLOAD_ALIVE_KINDS),
              silent_from=_naive(since - UPLOAD_SILENT_AFTER),
              silent_to=_naive(now - UPLOAD_SILENT_AFTER))
@@ -320,12 +323,13 @@ def _stopped_uploads(cur, since, now, p):
                   WHERE done.project_id = last.project_id
                     AND done.user_id = last.user_id
                     AND done.created_at >= last.at
-                    AND (done.kind = 'upload_failed'
+                    AND (done.detail->>'bytes' = last.detail->>'bytes'
+                         OR done.detail->>'bytes' IS NULL
+                         OR last.detail->>'bytes' IS NULL)
+                    AND (done.kind IN ('upload_failed', 'upload_original_ready')
                          OR (done.kind IN ('upload_landed', 'upload_deduped')
-                             AND done.detail->>'bytes' = last.detail->>'bytes'
                              AND COALESCE(done.detail->>'original_pending',
-                                          'false') <> 'true')
-                         OR done.kind = 'upload_original_ready'))
+                                          'false') <> 'true')))
          ORDER BY last.at LIMIT %(limit)s""", q)
     out = []
     for r in cur.fetchall():
@@ -335,7 +339,8 @@ def _stopped_uploads(cur, since, now, p):
         out.append({
             "ref": f"stopped:{r['id']}", "source": "upload", "at": _aware(r["at"]),
             "user_id": r["user_id"], "project_id": r["project_id"],
-            "severity": "P1",
+            "severity": "P1", "bytes": d.get("bytes"),
+            "file_kind": d.get("kind"),
             "cause_key": cause_key("upload-stopped",
                                    "page-left" if left else "no-signal"),
             "title": ("An upload stopped without landing: the page went away"
@@ -432,11 +437,11 @@ def _event_failure(r):
             return None             # stored and analysed: not a failure
         reason = str(d.get("reason") or "rejected")
         size = d.get("bytes")
-        # A measured fact about the customer's own file (a copy that never
-        # finished): explained on the spot, only the finished file repairs it,
-        # so paging an agent changes nothing. Any other refusal stopped them.
-        return dict(base, source="upload", bytes=size,
-                    severity="P1" if d.get("device_side") else "P0",
+        # Whoever's file it is, a refusal stopped them: the second look says
+        # whether a finished copy landed. Left stuck, the cause gets the product
+        # change that stops it hurting the customer (FIXER.md section 11).
+        return dict(base, source="upload", bytes=size, file_kind=d.get("kind"),
+                    severity="P0",
                     cause_key=cause_key("upload-rejected", reason),
                     title=_short(f"Upload refused: {reason}"),
                     detail=_short(f"{reason} · {size} bytes · "
@@ -446,7 +451,7 @@ def _event_failure(r):
     if kind == "upload_failed":
         reason = str(d.get("reason") or "failed")
         return dict(base, source="upload", severity="P0", bytes=d.get("bytes"),
-                    offline=bool(d.get("offline")),
+                    file_kind=d.get("kind"), offline=bool(d.get("offline")),
                     cause_key=cause_key("upload-failed", signature(reason)
                                         if len(reason) > 40 else reason),
                     title=_short(f"Upload failed: {reason}"),
@@ -479,13 +484,10 @@ def _event_failure(r):
                 cat not in MCP_OURS and outcome not in MCP_OURS_OUTCOMES):
             return None             # the AI app's correction, not our failure
         tool = str(d.get("tool") or "tool")
-        # "unclassified" means none of our markers matched: often a
-        # validation the caller must fix, sometimes ours. Filed with its
-        # sentence (since 29 Oct) as P1 so the daily Fixer sorts it; our
-        # proven failures (internal, timeout, transient, unavailable) are P0.
-        sev = "P1" if cat == "unclassified" and outcome not in \
-            MCP_OURS_OUTCOMES else "P0"
-        return dict(base, source="mcp", severity=sev, tool=tool,
+        # "unclassified" means none of our markers matched: often a validation
+        # the caller fixes, sometimes ours. The second look tells them apart by
+        # what happened: the same tool worked afterwards, or it did not.
+        return dict(base, source="mcp", severity="P0", tool=tool,
                     cause_key=cause_key("mcp", tool, outcome or cat),
                     title=_short(f"MCP {tool} answered an error ({outcome or cat})"
                                  + (f": {d['message']}" if d.get("message")
@@ -548,7 +550,8 @@ def run(rcur, wcur, now=None):
             touched[t["id"]] = {"id": t["id"], "cause_key": t["cause_key"],
                                 "severity": t["severity"],
                                 "status": t["status"], "action": action}
-            if look and action in ("opened", "attached", "reopened") and \
+            if look and action in ("opened", "attached", "reopened",
+                                   "attached_to_closed") and \
                     len(watching) < recovery.MAX_WATCHED:
                 watching[f["ref"]] = look
     blocked = recovery.settle(rcur, wcur, watching, now)
@@ -641,11 +644,14 @@ def pending_p0(cur, now=None, stale=FIXING_STALE):
 
 
 def silent_agents(cur, now=None):
-    """The scheduled agents that stopped, read from their own heartbeats, and
-    the reviews that stopped arriving. An agent that never beat yet says
-    nothing: its first beat arms it. Nobody watched the watcher for 70 hours."""
+    """The scheduled agents that stopped, read from their own heartbeats, the
+    intake's own last pass, and the reviews that stopped arriving. An agent that
+    never beat yet says nothing: its first beat arms it. Nobody watched the
+    watcher for 70 hours."""
     now = _aware(now) or datetime.now(timezone.utc)
     keys = {f"ops_heartbeat_{a}": a for a in HEARTBEAT_LATE}
+    keys[WATERMARK_KEY] = "intake"
+    late = dict(HEARTBEAT_LATE, intake=INTAKE_LATE)
     cur.execute("SELECT key, value FROM app_kv WHERE key = ANY(%s)",
                 (sorted(keys),))
     out = []
@@ -655,7 +661,7 @@ def silent_agents(cur, now=None):
         except (TypeError, ValueError, KeyError):
             continue
         agent = keys[r["key"]]
-        if now - at > HEARTBEAT_LATE[agent]:
+        if now - at > late[agent]:
             out.append({"agent": agent, "last_at": at,
                         "silent_min": int((now - at).total_seconds() // 60)})
     cur.execute("SELECT max(reviewed_at) AS at FROM session_reviews")

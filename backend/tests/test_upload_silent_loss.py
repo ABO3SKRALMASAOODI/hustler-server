@@ -398,13 +398,14 @@ def test_the_two_new_beacons_are_accepted():
     assert {"upload_progress", "upload_interrupted"} <= video.CLIENT_EVENT_KINDS
 
 
-def test_a_bad_file_gets_no_alarm_but_a_ticket_says_it_happened():
+def test_a_bad_file_is_on_a_ticket_at_once_and_looked_at_like_any_other():
     from ops_loop import recovery
     base = {"id": 1, "user_id": 7, "project_id": 8,
             "at": datetime(2026, 11, 6, tzinfo=timezone.utc)}
     row = dict(base, kind="upload_rejected", detail={
         "reason": "unfinished file", "device_side": True, "bytes": 15_728_640})
-    assert intake._event_failure(row)["severity"] == "P1"
+    severity, look = recovery.plan(intake._event_failure(row))
+    assert severity == "P1" and look, "whose file it is decides nothing"
     gone = dict(base, kind="upload_failed", detail={
         "reason": "Your browser can't read this file any more",
         "file_gone": True})

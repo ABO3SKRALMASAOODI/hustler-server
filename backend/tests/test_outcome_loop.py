@@ -425,20 +425,29 @@ def test_reopening_a_fixed_cause_counts_the_recurrence():
 
 
 def test_unfinished_work_can_be_released_without_claiming_it_was_fixed():
-    ticket = {"id": 77, "status": "fixing", "severity": "P0", "updated_at": NOW}
-    result = dict(ticket, status="open", severity="P1")
+    ticket = {"id": 77, "status": "fixing", "severity": "P1", "updated_at": NOW}
+    result = dict(ticket, status="open", severity="P0")
     cur = Cur([ticket, result])
     assert store.release_fixing(cur, 77, NOW.isoformat(),
                                "Trial is paused; unfinished edits remain tracked.",
-                               severity="P1") == result
+                               severity="P0") == result
     assert "FOR UPDATE" in cur.sql[0][0]
     query, params = cur.sql[-1]
     assert "status = 'open'" in query and "closed_at" not in query
     event = json.loads(params[1])[0]
-    assert event["event"] == "released" and event["previous_severity"] == "P0"
-    assert event["severity"] == "P1" and "remain tracked" in event["note"]
-    # A later real P0 still escalates an open ticket, unlike wont_fix.
-    assert store.decide(result, NOW + timedelta(minutes=1), "P0") == "escalate"
+    assert event["event"] == "released" and event["previous_severity"] == "P1"
+    assert event["severity"] == "P0" and "remain tracked" in event["note"]
+
+
+@pytest.mark.parametrize("was,asked", [("P0", "P1"), ("P0", "P2"), ("P1", "P2")])
+def test_a_handoff_never_lowers_a_ticket(was, asked):
+    """#77, #93 and #123 were lowered this way five times on 4-5 Nov, which took
+    them out of the watch and the alert with their customers unfinished."""
+    cur = Cur([{"id": 77, "status": "fixing", "severity": was, "updated_at": NOW}])
+    with pytest.raises(store.StoreError, match="never lowers"):
+        store.release_fixing(cur, 77, NOW.isoformat(), "customer recovered",
+                             severity=asked)
+    assert len(cur.sql) == 1
 
 
 def test_a_handoff_cannot_downgrade_new_failure_intake():

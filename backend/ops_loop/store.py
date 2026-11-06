@@ -618,6 +618,10 @@ def _worst(a, b):
 FAILURE_REFS_KEPT = 60       # history keeps this many failure refs a ticket
 AUTO_PREFIX = "auto-"
 QUALITY_PREFIX = "auto-quality-"    # filed by a rating below the bar
+# Measured outcomes of a run that raised no error: a replay with no failure
+# proves nothing about them, only the score does.
+QUALITY_KEYS = (QUALITY_PREFIX, "auto-gap-first-cut-is-the-upload",
+                "auto-gap-request-no-change")
 QUALITY_BAR = 10.0                  # AGENTS.md: the floor, on rubric v3
 
 
@@ -746,6 +750,25 @@ def settle_failure(cur, item, blocked, note=None):
              "user": item.get("user_id"), "project": item.get("project_id")}
     if note:
         entry["note"] = note[:300]
+    if blocked and t["status"] in CLOSED and not is_owner_decision(t):
+        # The ticket closed during the grace, or the failure was filed after
+        # the closing that followed it. The customer is still stuck, and this
+        # look is the only thing that knows: left closed, nobody ever would.
+        entry.update(event="recurred", severity="P0", why="left_blocked",
+                     previous_status=t["status"],
+                     previous_wont_fix_reason=t.get("wont_fix_reason"),
+                     previous_fix_sha=t["fix_sha"],
+                     previous_root_cause=t["root_cause"],
+                     previous_regression_check=t["regression_check"],
+                     previous_closed_at=t["closed_at"])
+        _w(cur, """UPDATE tickets SET status = 'open', severity = 'P0',
+                       recurrence_count = recurrence_count + 1, fix_sha = NULL,
+                       regression_check = NULL, wont_fix_reason = NULL,
+                       closed_at = NULL, history = history || %s,
+                       updated_at = NOW() WHERE id = %s""",
+           (json.dumps([entry], default=str), t["id"]))
+        t.update(status="open", severity="P0")
+        return t
     if blocked and t["status"] in ("open", "fixing") and t["severity"] != "P0":
         entry.update(event="escalated", severity="P0", why="left_blocked")
         _w(cur, """UPDATE tickets SET severity = 'P0', history = history || %s,
@@ -871,6 +894,12 @@ def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None):
     if ticket["updated_at"] != expected:
         raise StoreError(f"ticket {ticket_id} changed; inspect its latest failures first")
     severity = severity or ticket["severity"]
+    if SEVERITY_RANK[severity] > SEVERITY_RANK[ticket["severity"]]:
+        raise StoreError(f"a release never lowers a ticket ({ticket['severity']} "
+                         f"to {severity}): a downgrade took #77, #93 and #123 out "
+                         "of the watch with their customers unfinished "
+                         "(FIXER.md section 11). Hand it back at its severity, "
+                         "with the work named in the note")
     _w(cur, """UPDATE tickets SET status = 'open', severity = %s,
                    history = history || %s, updated_at = NOW()
                WHERE id = %s RETURNING *""",
@@ -892,9 +921,10 @@ def ticket_projects(cur, ticket):
 
 
 def is_quality(ticket):
-    """Filed by a rating, not by something that failed: its bar is the score."""
+    """Filed by a rating or a measured empty result, not by something that
+    failed: its bar is the score."""
     key = ticket.get("cause_key") or ""
-    return not key.startswith(AUTO_PREFIX) or key.startswith(QUALITY_PREFIX)
+    return not key.startswith(AUTO_PREFIX) or key.startswith(QUALITY_KEYS)
 
 
 def check_replay(cur, ticket, replay):

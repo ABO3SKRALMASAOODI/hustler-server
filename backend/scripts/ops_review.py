@@ -603,11 +603,19 @@ def load_replay(a):
             rating = json.load(fh)
     except (OSError, ValueError):
         pass
+    failures = [f.get("kind") if isinstance(f, dict) else f
+                for f in j.get("failures") or []]
+    # What the scoreboard also counts (runner/score.py), and a run that never
+    # reached the end of the session cannot say it replayed that request.
+    failures += ["canned_reply" for s in j.get("steps") or []
+                 if isinstance(s, dict) and s.get("kind") == "canned"]
+    if j.get("prompts_capped"):
+        failures.append("prompts_capped")
+    if j.get("budget_stopped"):
+        failures.append("budget_stopped")
     return {"run": j.get("run"), "session": j.get("sid"),
             "state": j.get("state"), "be_sha": j.get("be_sha"),
-            "fe_sha": j.get("fe_sha"),
-            "failures": [f.get("kind") if isinstance(f, dict) else f
-                         for f in j.get("failures") or []],
+            "fe_sha": j.get("fe_sha"), "failures": failures,
             "score_exact": rating.get("score_exact"),
             "rubric": rating.get("rubric"), "tier": rating.get("tier"),
             "rated_by": a.rated_by, "fixer": a.fixer}
@@ -619,11 +627,23 @@ def _git(*args):
                           text=True, timeout=30)
 
 
+def _is_product(name):
+    """Not a test, not how tickets are counted, not prose about the product. A
+    skill under plugins/ is written in Markdown and is the product."""
+    return ("/tests/" not in name and "/ops_loop/" not in name
+            and not name.endswith("scripts/ops_review.py")
+            and (name.startswith("plugins/") or not name.endswith(".md")))
+
+
 def check_fix_sha(fix_sha):
     """Six tickets cite a commit of this CLI as their fix, and others a test
-    docstring. A backend fix is a commit on this checkout's history that
-    changes the product, not only tests or how tickets are counted; this
-    checkout follows main (ops.sh)."""
+    docstring. A backend fix is a commit on main that changes the product, not
+    only tests, docs or how tickets are counted. This checkout follows main
+    (ops.sh); from a branch (OPS_BACKEND) "on main" cannot be proven."""
+    head = _git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+    if head not in ("HEAD", "main"):
+        raise CliError(f"this checkout is on {head}: a fix is proven against "
+                       "main, so close without OPS_BACKEND")
     for part in (fix_sha or "").split(","):
         repo, _, sha = part.strip().rpartition(":")
         if repo == "fe" or not sha:
@@ -632,12 +652,9 @@ def check_fix_sha(fix_sha):
                 _git("merge-base", "--is-ancestor", sha, "HEAD").returncode != 0:
             raise CliError(f"fix_sha {sha} is not on main")
         names = _git("diff", "--name-only", f"{sha}^1", sha).stdout.split()
-        product = [n for n in names if "/tests/" not in n
-                   and "/ops_loop/" not in n
-                   and not n.endswith("scripts/ops_review.py")]
-        if names and not product:
-            raise CliError(f"fix_sha {sha} changes only tests or the ticket "
-                           "tooling, not the product")
+        if not [n for n in names if _is_product(n)]:
+            raise CliError(f"fix_sha {sha} changes only tests, docs or the "
+                           "ticket tooling, not the product")
 
 
 def cmd_close(a):

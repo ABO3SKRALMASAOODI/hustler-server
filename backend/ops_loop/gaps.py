@@ -21,6 +21,10 @@ from ops_loop import store
 
 ANALYSIS_FLOOR_S = 600          # 10 min, or 1.5 x the source
 ANALYSIS_RATIO = 1.5
+# 20 min, or 1.5 x the source: over 30 days 2 of 118 finals and about 3% of
+# previews took longer, so it fires on what a customer really sat through.
+RENDER_FLOOR_S = 1200
+RENDER_JOBS = ("final", "preview", "shorts_plan")
 EXPORT_WAIT = timedelta(minutes=10)
 CHECKOUT_WAIT = timedelta(seconds=60)
 TURN_SILENCE = timedelta(seconds=120)
@@ -30,6 +34,11 @@ CANCEL_WITHIN = timedelta(hours=24)
 BAR = 10
 LOOKBACK = timedelta(days=3)
 CHECKOUT_FAILED = ("setup_failed", "error", "load_timeout", "payment_failed")
+# An export refusal that is not a failure: the paywall, a second click, and the
+# two holds whose cause has its own check (the turn, the upload). Any other
+# code, today's or tomorrow's, stopped a customer pressing Export.
+EXPORT_HOLDS = ("subscription_required", "already_running", "edit_in_progress",
+                "original_uploading")
 # Sentences the trial's reply filter removed for saying what failed. "length"
 # and most of "internal" are tidying, so they are not read as hiding anything.
 HIDING_REASONS = ("deny", "limit", "review_note")
@@ -87,6 +96,36 @@ def _analysis_overdue(cur, since, now, p):
             f"job {r['id']} · {r['state']} · attempts {r['attempts']} · source "
             f"{r['duration_s']} s, {r['bytes']} bytes", job_id=r["id"]))
     return out
+
+
+def _render_overdue(cur, since, now, p):
+    """Account 2820's final ran 4,397 s and the ticket came only at its death.
+    A render that sits writes nothing, so it is judged like an analysis: by a
+    deadline, while it is open."""
+    q = dict(p, floor=RENDER_FLOOR_S, ratio=ANALYSIS_RATIO,
+             lookback=now - LOOKBACK, kinds=list(RENDER_JOBS))
+    cur.execute(f"""
+        SELECT o.* FROM (
+            SELECT j.id, j.type, j.user_id, j.project_id, j.state, j.attempts,
+                   j.updated_at, s.duration_s,
+                   j.created_at + make_interval(secs => GREATEST(
+                       %(floor)s, %(ratio)s * COALESCE(s.duration_s, 0))) AS due
+              FROM video_jobs j JOIN users u ON u.id = j.user_id
+              LEFT JOIN LATERAL (
+                   SELECT max(a.duration_s) AS duration_s FROM assets a
+                    WHERE a.project_id = j.project_id
+                      AND a.kind IN ('original', 'video_clip')) s ON TRUE
+             WHERE j.type = ANY(%(kinds)s) AND j.created_at > %(lookback)s
+               AND j.created_at <= %(now)s AND {_customers()}) o
+         WHERE o.due > %(since)s AND o.due <= %(now)s
+           AND (o.state NOT IN {TERMINAL} OR o.updated_at > o.due)
+         ORDER BY o.due LIMIT %(limit)s""", q)
+    return [_item(f"gap:render:{r['id']}", "analysis", r["due"], r, "P0",
+                  ("gap", "render-overdue", r["type"]),
+                  f"A {r['type']} render overran its deadline",
+                  f"job {r['id']} · {r['state']} · attempts {r['attempts']} · "
+                  f"source {r['duration_s']} s", job_id=r["id"])
+            for r in cur.fetchall()]
 
 
 def _export_never_arrived(cur, since, now, p):
@@ -366,8 +405,9 @@ def _below_the_bar(cur, since, now, p):
 
 def _turn_went_silent(cur, since, now, p):
     """27 of 88 typed turns had a silence over 120 s, while the customer watched
-    nothing happen. Judged only while the turn is open, so a past window is
-    not replayed by this one."""
+    nothing happen. Only the product speaking resets the clock: a customer
+    asking "hello?" is still waiting. Judged only while the turn is open, so a
+    past window is not replayed by this one."""
     q = dict(p, silence=TURN_SILENCE, lookback=now - timedelta(days=1))
     cur.execute(f"""
         SELECT s.* FROM (
@@ -375,6 +415,7 @@ def _turn_went_silent(cur, since, now, p):
                    GREATEST(j.created_at, (
                        SELECT max(m.created_at) FROM chat_messages m
                         WHERE m.session_id = pr.chat_session_id
+                          AND m.role = 'assistant'
                        ) AT TIME ZONE 'UTC') AS heard
               FROM video_jobs j JOIN users u ON u.id = j.user_id
               JOIN projects pr ON pr.id = j.project_id
@@ -395,8 +436,10 @@ def _turn_went_silent(cur, since, now, p):
 
 def _unread_endings(cur, since, now, p):
     """A request can end in an outcome the intake does not list (job 135056:
-    internal_error), and the player's fallback writes a row nothing reads."""
-    q = dict(p, known=list(KNOWN_OUTCOMES))
+    internal_error), the player's fallback writes a row nothing reads, and so
+    does Export refusing a customer: a render that failed, a verification repair
+    still open, a network error, a download link that would not come."""
+    q = dict(p, known=list(KNOWN_OUTCOMES), holds=list(EXPORT_HOLDS))
     cur.execute(f"""
         SELECT j.id, j.user_id, j.project_id, j.updated_at AS at,
                j.result->>'outcome' AS outcome
@@ -428,10 +471,27 @@ def _unread_endings(cur, since, now, p):
                           _i().signature(json.dumps(d, default=str))),
                          "The preview fell back from the live composition",
                          json.dumps(d, default=str)))
+    cur.execute(f"""
+        SELECT ce.id, ce.kind, ce.user_id, ce.project_id, ce.created_at AS at,
+               ce.detail
+          FROM client_events ce JOIN users u ON u.id = ce.user_id
+         WHERE ce.kind IN ('export_blocked', 'download_failed')
+           AND ce.created_at > %(since)s AND ce.created_at <= %(now)s
+           AND NOT COALESCE(ce.detail->>'code', '') = ANY(%(holds)s)
+           AND {_customers()}
+         ORDER BY ce.created_at LIMIT %(limit)s""", q)
+    for r in cur.fetchall():
+        d = _i()._detail(r)
+        code = d.get("code") or "unknown"
+        said = "refused" if r["kind"] == "export_blocked" else "could not download"
+        out.append(_item(f"event:{r['id']}", "export", r["at"], r, "P0",
+                         ("gap", r["kind"].replace("_", "-"), code),
+                         f"Export {said}: {code}",
+                         f"v{d.get('version')} · {code} · {d.get('reason') or ''}"))
     return out
 
 
-CHECKS = (_analysis_overdue, _export_never_arrived, _checkout,
+CHECKS = (_analysis_overdue, _render_overdue, _export_never_arrived, _checkout,
           _request_changed_nothing, _first_cut_is_the_upload,
           _reply_hid_a_failure, _model_failing, _cancelled_within_a_day,
           _below_the_bar, _turn_went_silent, _unread_endings)
@@ -439,15 +499,24 @@ CHECKS = (_analysis_overdue, _export_never_arrived, _checkout,
 
 def scan(cur, since, now, checks=CHECKS):
     """What should have happened by now and did not, in (since, now]. One check
-    that breaks never costs the intake its tick or the other checks."""
+    that breaks never costs the intake its tick or the other checks, and files
+    itself: a check that dies in a log line sees nothing, for as long as nobody
+    reads the log."""
     i = _i()
-    p = {"since": i._aware(since), "now": i._aware(now),
+    now = i._aware(now)
+    p = {"since": i._aware(since), "now": now,
          "internal": list(i.EXCLUDED_USER_IDS), "limit": i.MAX_PER_TICK}
     out = []
     for check in checks:
         try:
-            out.extend(check(cur, i._aware(since), i._aware(now), p))
+            out.extend(check(cur, i._aware(since), now, p))
         except Exception as e:
             print(f"⚠️ [ops_gaps] {check.__name__}: {type(e).__name__}: {e}",
                   flush=True)
+            name = check.__name__.strip("_")
+            out.append(_item(
+                f"gap:broken:{name}:{now.strftime('%Y%m%d%H')}", "gap", now, {},
+                "P1", ("gap", "check-broken", name),
+                f"A failure check is broken: {name}",
+                f"{type(e).__name__}: {e}"))
     return out

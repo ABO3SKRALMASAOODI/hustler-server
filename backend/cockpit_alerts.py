@@ -130,9 +130,13 @@ def event_alerts(rcur, since, now):
                         "An automatic agent stopped",
                         f"<b>{_e(a['agent'])}</b> has not run for "
                         f"{a['silent_min'] // 60} h {a['silent_min'] % 60} min "
-                        f"(last {a['last_at']:%d %b %H:%M} UTC). New failures "
-                        f"wait on tickets until it runs: the Claude weekly "
-                        f"limit, the Mac asleep, or the scheduled task off."))
+                        f"(last {a['last_at']:%d %b %H:%M} UTC). "
+                        + ("New failures are not reaching a ticket: the "
+                           "backend's intake pass is failing."
+                           if a["agent"] == "intake" else
+                           "New failures wait on tickets until it runs: the "
+                           "Claude weekly limit, the Mac asleep, or the "
+                           "scheduled task off.")))
     except Exception as e:
         print(f"⚠️ [cockpit] unhandled-P0 check failed: "
               f"{type(e).__name__}: {e}", flush=True)

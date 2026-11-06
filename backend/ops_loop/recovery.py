@@ -56,8 +56,28 @@ def _one(cur):
     return bool(cur.fetchone())
 
 
+def _family(kind):
+    """What a file is for: a song landing does not bring back a lost video."""
+    return {"music": "music", "image": "image",
+            "image_ref": "image"}.get(str(kind or "original"), "video")
+
+
+def _same_upload(w, row, detail):
+    """This row is about what the customer failed to get in: the same kind of
+    file, in the same project or with the same size (a new project for the same
+    file). A failure that names neither has only the kind to go on. Before this,
+    any file of the account counted: 24 refused videos of account 2649 were
+    called recovered by one song, and another clip starting would have dropped
+    the look at a lost 7.8 GB upload for good."""
+    if _family(detail.get("kind")) != _family(w.get("file_kind")):
+        return False
+    size = w.get("bytes")
+    return (not size or w.get("project_id") in (None, row.get("project_id"))
+            or str(detail.get("bytes")) == str(size))
+
+
 def _upload(cur, w, now):
-    cur.execute("""SELECT kind, detail FROM client_events
+    cur.execute("""SELECT kind, project_id, detail FROM client_events
                     WHERE user_id = %s AND kind = ANY(%s)
                       AND created_at > %s AND created_at <= %s
                       AND COALESCE(detail->>'kind', 'original') <> 'proxy'
@@ -66,6 +86,8 @@ def _upload(cur, w, now):
     moving = False
     for r in cur.fetchall():
         d = r.get("detail") if isinstance(r.get("detail"), dict) else {}
+        if not _same_upload(w, r, d):
+            continue
         if r["kind"] in LANDED and not d.get("original_pending"):
             return RECOVERED
         moving = moving or r["kind"] in MOVING
@@ -142,7 +164,9 @@ def _checkout(cur, w, now):
 
 
 def _turn(cur, w, now):
-    """A turn that went silent: it spoke again, or it ended."""
+    """A turn that went silent: it spoke again, or it ended. The customer's own
+    "hello?" is the opposite of the turn speaking (account 2752 sent "؟" two
+    minutes in and waited another 1,060 s)."""
     cur.execute("SELECT state, updated_at FROM video_jobs WHERE id = %s",
                 (w["job_id"],))
     row = cur.fetchone()
@@ -150,8 +174,8 @@ def _turn(cur, w, now):
         return RECOVERED
     cur.execute("""SELECT 1 FROM chat_messages m
                      JOIN projects p ON p.chat_session_id = m.session_id
-                    WHERE p.id = %s AND m.created_at > %s
-                      AND m.created_at <= %s LIMIT 1""",
+                    WHERE p.id = %s AND m.role = 'assistant'
+                      AND m.created_at > %s AND m.created_at <= %s LIMIT 1""",
                 (w["project_id"], _naive(w["at"]), _naive(now)))
     return RECOVERED if _one(cur) else STUCK
 
@@ -201,7 +225,8 @@ def plan(f, cur=None):
         "at": _aware(f["at"]).isoformat(), "user_id": f.get("user_id"),
         "due": (_aware(f["at"]) + grace(f, cur)).isoformat(),
         "project_id": f.get("project_id"), "job_id": f.get("job_id"),
-        "job_type": f.get("job_type"), "tool": f.get("tool")}
+        "job_type": f.get("job_type"), "tool": f.get("tool"),
+        "bytes": f.get("bytes"), "file_kind": f.get("file_kind")}
 
 
 def outcome(cur, item, now):
@@ -216,23 +241,25 @@ def due(watching, now):
 
 def settle(rcur, wcur, watching, now):
     """Look again at every failure whose grace ran out. Returns who was left
-    stuck. A read that fails is tried again on the next ticks."""
+    stuck. A read that fails is tried again on the next ticks; one that never
+    works counts as stuck, because nobody can say the customer got past it."""
     from ops_loop import store
     blocked = []
     for w in due(watching, now):
+        note = None
         try:
             got = outcome(rcur, w, now)
         except Exception as e:
             w["tries"] = int(w.get("tries") or 0) + 1
             print(f"⚠️ [ops_intake] second look at {w['ref']}: "
                   f"{type(e).__name__}: {e}", flush=True)
-            if w["tries"] >= MAX_TRIES:
-                watching.pop(w["ref"], None)
-            continue
+            if w["tries"] < MAX_TRIES:
+                continue
+            got, note = STUCK, f"the second look failed: {type(e).__name__}"
         wcur.execute("SAVEPOINT ops_intake_look")
         try:
             if got != TRYING:
-                store.settle_failure(wcur, w, got == STUCK)
+                store.settle_failure(wcur, w, got == STUCK, note)
         except Exception as e:
             wcur.execute("ROLLBACK TO SAVEPOINT ops_intake_look")
             print(f"⚠️ [ops_intake] settling {w['ref']}: "

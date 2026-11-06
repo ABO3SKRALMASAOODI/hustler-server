@@ -331,6 +331,15 @@ def quality_ticket(world):
     return t["id"]
 
 
+@pytest.mark.parametrize("key", ["auto-gap-first-cut-is-the-upload",
+                                 "auto-gap-request-no-change-fulfilled"])
+def test_a_result_that_changed_nothing_closes_on_the_score(key):
+    """Neither raised an error, so "the replay finished with no failure" is what
+    they already did for the customer."""
+    assert store.is_quality({"cause_key": key})
+    assert not store.is_quality({"cause_key": "auto-job-index-oom"})
+
+
 def test_a_quality_ticket_closes_at_10_rated_by_someone_else(world):
     tid = quality_ticket(world)
     with pytest.raises(store.StoreError, match="no rating"):
@@ -405,6 +414,206 @@ def test_an_offline_customer_gets_longer(world):
     assert world.ticket(key)["severity"] == "P1"
     world.ticks(11)
     assert world.ticket(key)["severity"] == "P0"
+
+
+def test_a_song_landing_does_not_bring_back_a_refused_video(world):
+    """Account 2649: 22 refused videos read `recovered` because one song landed
+    in the project a minute later. It never got a video in."""
+    world.event("upload_rejected", reason="empty or incomplete file", bytes=0)
+    world.tick()
+    world.ticks(2)
+    world.event("upload_landed", kind="music", bytes=215_279)
+    world.ticks(11)
+    assert world.only_ticket()["severity"] == "P0"
+
+
+def test_another_file_does_not_drop_the_look_at_a_lost_upload(world):
+    """The 7.8 GB film is still not in. A small clip in another project starting,
+    or landing, says nothing about it, and `trying` ended the look for good."""
+    lost_upload(world, bytes_=20_000_000)
+    world.tick()
+    world.ticks(2)
+    world.event("upload_started", project=5600, kind="original", bytes=4_000)
+    world.tick()
+    world.event("upload_landed", project=5600, kind="original", bytes=4_000)
+    world.ticks(11)
+    assert world.only_ticket()["severity"] == "P0"
+
+
+def test_the_same_file_in_a_new_project_is_past_it(world):
+    """Account 2701 started again in a new project with the same file."""
+    lost_upload(world, bytes_=42_971_432)
+    world.tick()
+    world.ticks(2)
+    world.event("upload_landed", project=5600, kind="original", bytes=42_971_432)
+    world.ticks(15)
+    t = world.only_ticket()
+    assert t["severity"] == "P1" and events_of(t, "recovered")
+
+
+def test_a_smaller_copy_in_the_same_project_is_past_it(world):
+    lost_upload(world, bytes_=20_000_000)
+    world.tick()
+    world.ticks(2)
+    world.event("upload_landed", kind="original", bytes=9_000_000)
+    world.ticks(15)
+    t = world.only_ticket()
+    assert t["severity"] == "P1" and events_of(t, "recovered")
+
+
+def test_a_failure_that_names_no_file_takes_any_video(world):
+    """A proxy failure carries no size: 2701 again, past it in a new project."""
+    world.event("upload_proxy_failed", reason="error in input stream")
+    world.tick()
+    world.ticks(2)
+    world.event("upload_landed", project=5600, kind="original", bytes=42_971_432)
+    world.ticks(11)
+    t = world.only_ticket()
+    assert t["severity"] == "P1" and events_of(t, "recovered")
+
+
+def test_a_stop_is_not_hidden_by_another_file_in_the_project(world):
+    """A song landing, or another file failing, is no news of this transfer."""
+    world.event("upload_started", kind="original", bytes=500_000)
+    world.ticks(2)
+    world.event("upload_landed", kind="music", bytes=215_279)
+    world.event("upload_failed", reason="network", bytes=9_999, kind="clip")
+    world.ticks(16)
+    assert world.ticket(intake.cause_key("upload-stopped", "no-signal"))
+
+
+def test_a_stop_ends_with_a_row_about_its_own_file(world):
+    world.event("upload_started", kind="original", bytes=500_000)
+    world.ticks(2)
+    world.event("upload_original_ready", bytes=500_000)
+    world.ticks(16)
+    assert not world.ticket(intake.cause_key("upload-stopped", "no-signal"))
+
+
+def test_a_cut_short_file_left_stuck_pages_like_any_customer(world):
+    """Severity read the error text: "moov atom not found" was P1 for good, and
+    the owner saw account 2123's three failed jobs with no agent on them."""
+    for _ in range(3):
+        world.job("index", state="failed", project=5498, user=2123,
+                  error="ffprobe failed: moov atom not found | a.mp4")
+    world.tick()
+    assert world.only_ticket()["severity"] == "P1", "on a ticket within a minute"
+    world.ticks(11)
+    assert world.only_ticket()["severity"] == "P0"
+
+
+def test_a_cut_short_file_replaced_pages_nobody(world):
+    world.job("index", state="failed", project=5498, user=2123,
+              error="ffprobe failed: moov atom not found | a.mp4")
+    world.tick()
+    world.ticks(3)
+    world.job("index", state="done", project=5498, user=2123)
+    world.ticks(11)
+    t = world.only_ticket()
+    assert t["severity"] == "P1" and t["status"] == "open"
+
+
+def test_a_refused_unfinished_file_left_stuck_pages(world):
+    world.event("upload_rejected", reason="unfinished file", device_side=True,
+                bytes=15_728_640)
+    world.tick()
+    assert world.only_ticket()["severity"] == "P1"
+    world.ticks(40)
+    assert world.only_ticket()["severity"] == "P0"
+
+
+def test_an_unclassified_mcp_error_is_judged_by_what_happened(world):
+    world.event("mcp_error_response", project=None, user=2123, tool="export_final",
+                category="unclassified")
+    world.tick()
+    key = "auto-mcp-export-final-unclassified"
+    assert world.ticket(key)["severity"] == "P1"
+    world.ticks(11)
+    assert world.ticket(key)["severity"] == "P0"
+
+
+def test_an_unclassified_mcp_error_the_caller_corrected_pages_nobody(world):
+    world.event("mcp_error_response", project=None, user=2123, tool="export_final",
+                category="unclassified")
+    world.tick()
+    world.ticks(2)
+    world.job("mcp_tool", state="done", project=5498, user=2123,
+              payload={"tool": "export_final"}, result={})
+    world.ticks(11)
+    assert world.ticket("auto-mcp-export-final-unclassified")["severity"] == "P1"
+
+
+def test_a_customer_stuck_when_the_ticket_closed_is_not_lost(world):
+    """The Fixer closes inside the grace: the look used to write `left_blocked`
+    on a closed ticket, the one thing that knew, and nobody read it."""
+    lost_upload(world, bytes_=20_000_000)
+    world.tick()
+    world.ticks(2)
+    world.c.execute("""UPDATE tickets SET status = 'fixed', root_cause = 'x',
+                       fix_sha = 'abc1234', regression_check = 't.py',
+                       closed_at = %s""", (world.clock.now,))
+    world.ticks(11)
+    t = world.only_ticket()
+    assert t["status"] == "open" and t["severity"] == "P0"
+    assert t["recurrence_count"] == 1 and t["fix_sha"] is None
+    assert events_of(t, "recurred")[0]["why"] == "left_blocked"
+    assert events_of(t, "recurred")[0]["previous_fix_sha"] == "abc1234"
+
+
+def test_a_customer_who_got_past_it_leaves_the_closing_alone(world):
+    lost_upload(world, bytes_=20_000_000)
+    world.tick()
+    world.ticks(2)
+    world.c.execute("""UPDATE tickets SET status = 'fixed', root_cause = 'x',
+                       fix_sha = 'abc1234', regression_check = 't.py',
+                       closed_at = %s""", (world.clock.now,))
+    world.event("upload_landed", kind="original", bytes=20_000_000)
+    world.ticks(11)
+    assert world.only_ticket()["status"] == "fixed"
+
+
+def test_a_stop_filed_behind_a_closing_still_gets_its_look(world):
+    """A stop is filed 15 minutes after its last sign of life, so a closing in
+    between put it `attached_to_closed`: a counter moved, as on #48."""
+    key = intake.cause_key("upload-stopped", "no-signal")
+    world.event("upload_started", kind="original", bytes=500_000)
+    world.tick()
+    world.closed(key, "fixed", days=0)
+    world.c.execute("UPDATE tickets SET closed_at = %s", (T0 + 5 * MIN,))
+    world.ticks(13)
+    assert world.ticket(key)["status"] == "fixed", "nothing filed yet"
+    world.ticks(3)
+    t = world.ticket(key)
+    assert t["status"] == "open" and t["severity"] == "P0"
+    assert events_of(t, "recurred")[0]["why"] == "left_blocked"
+
+
+def test_a_stuck_customer_on_an_owner_decision_stays_reported(world):
+    lost_upload(world, bytes_=20_000_000)
+    world.tick()
+    world.ticks(2)
+    world.c.execute("""UPDATE tickets SET status = 'wont_fix', closed_at = %s,
+                       wont_fix_reason = 'owner decision: the size cap'""",
+                    (world.clock.now,))
+    world.ticks(11)
+    t = world.only_ticket()
+    assert t["status"] == "wont_fix" and events_of(t, "left_blocked")
+
+
+def test_a_second_look_that_cannot_be_made_counts_as_stuck(world, monkeypatch):
+    from ops_loop import recovery
+    lost_upload(world, bytes_=20_000_000)
+    world.tick()
+
+    def broken(cur, w, now):
+        raise RuntimeError("no such column")
+    monkeypatch.setitem(recovery.CHECKS, "upload", broken)
+    world.ticks(10)
+    assert world.only_ticket()["severity"] == "P1", "tried again first"
+    world.ticks(6)
+    t = world.only_ticket()
+    assert t["severity"] == "P0" and "second look failed" in \
+        events_of(t, "escalated")[0]["note"]
 
 
 def test_a_big_upload_gets_the_time_its_file_needs(world):
@@ -601,11 +810,19 @@ def test_a_stopped_agent_is_reported_and_a_never_armed_one_is_not(world):
                     {"at": world.clock.now.isoformat()})
     store.put_state(world.c, "ops_heartbeat_fixer",
                     {"at": (world.clock.now - timedelta(hours=27)).isoformat()})
-    later = world.clock.now + timedelta(minutes=30)
+    later = world.clock.now + timedelta(minutes=14)
     assert [a["agent"] for a in intake.silent_agents(world.c, later)] == ["fixer"]
     later = world.clock.now + timedelta(hours=2)
     assert {a["agent"] for a in intake.silent_agents(world.c, later)} == \
-        {"p0_watch", "fixer"}
+        {"p0_watch", "fixer", "intake"}
+
+
+def test_an_intake_that_stops_passing_is_reported_within_minutes(world):
+    """It writes its watermark every minute, so a pass that keeps raising leaves
+    nothing behind. Until now only the next morning's digest said so."""
+    assert intake.silent_agents(world.c, T0 + 14 * MIN) == []
+    got = intake.silent_agents(world.c, T0 + 16 * MIN)
+    assert [a["agent"] for a in got] == ["intake"] and got[0]["silent_min"] == 16
 
 
 def test_reviews_that_stop_arriving_are_reported(world):
@@ -635,6 +852,8 @@ def test_nothing_about_payment_or_error_words_decides_severity():
     src = open(intake.__file__, encoding="utf-8").read()
     assert "DEVICE_SIDE" not in src and "paying" not in src
     assert not re.search(r"defs\.paying", src)
+    assert "device_side" not in src and "truncated-media\"" not in src.split(
+        "ERROR_CLASSES = (")[1].split(")\n_NUM")[1], "the text keys, never ranks"
 
 
 # ── The CLI reads the proof, it does not take the closer's word ──────────
@@ -675,12 +894,12 @@ def test_the_replay_is_read_from_the_run_on_disk(tmp_path, monkeypatch):
 
 class Git:
     def __init__(self, files, on_main=True):
-        self.files, self.on_main = files, on_main
+        self.files, self.on_main, self.branch = files, on_main, "HEAD"
 
     def __call__(self, *args):
         ok = self.on_main or args[0] == "cat-file"
-        return type("R", (), {"returncode": 0 if ok else 1,
-                              "stdout": "\n".join(self.files)})
+        out = self.branch if args[0] == "rev-parse" else "\n".join(self.files)
+        return type("R", (), {"returncode": 0 if ok else 1, "stdout": out})
 
 
 def test_a_fix_is_product_code_on_main(monkeypatch):
@@ -697,6 +916,51 @@ def test_a_fix_is_product_code_on_main(monkeypatch):
     monkeypatch.setattr(ops, "_git", Git(["worker/agent_loop.py",
                                           "worker/tests/test_x.py"]))
     ops.check_fix_sha("abc1234,fe:def5678")
+
+
+@pytest.mark.parametrize("files", [[], ["AGENTS.md", "CLAUDE.md"],
+                                   ["worker/CLOUDFLARE_EXECUTOR.md"]])
+def test_an_empty_or_docs_only_commit_is_not_a_fix(monkeypatch, files):
+    """8645c9a0 on this very branch changes only the project brief."""
+    ops = cli()
+    monkeypatch.setattr(ops, "_git", Git(files))
+    with pytest.raises(ops.CliError, match="not the product"):
+        ops.check_fix_sha("8645c9a0")
+
+
+def test_a_skill_in_markdown_is_the_product(monkeypatch):
+    ops = cli()
+    monkeypatch.setattr(ops, "_git", Git(["plugins/valmera/skills/edit/SKILL.md"]))
+    ops.check_fix_sha("abc1234")
+
+
+def test_a_branch_checkout_cannot_prove_a_fix_is_on_main(monkeypatch):
+    """ops.sh runs a branch with OPS_BACKEND, where HEAD holds the unmerged fix."""
+    ops = cli()
+    git = Git(["worker/agent_loop.py"])
+    git.branch = "claude/fix-1106"
+    monkeypatch.setattr(ops, "_git", git)
+    with pytest.raises(ops.CliError, match="close without OPS_BACKEND"):
+        ops.check_fix_sha("abc1234")
+
+
+@pytest.mark.parametrize("field,value,says", [
+    ("steps", [{"name": "request 1", "kind": "canned"}], "canned_reply"),
+    ("prompts_capped", {"replayed": 2, "of": 9}, "prompts_capped"),
+    ("budget_stopped", True, "budget_stopped")])
+def test_a_replay_that_did_not_do_the_request_proves_nothing(tmp_path, monkeypatch,
+                                                             field, value, says):
+    """A journey can end `done` with no failure while the request reached no
+    editor, or was never sent: the scoreboard counts these, so the gate does."""
+    ops = cli()
+    monkeypatch.setattr(ops, "GAUNTLET_RUNS", str(tmp_path))
+    session = tmp_path / "r1" / "sessions" / "p5345"
+    session.mkdir(parents=True)
+    (session / "journey.json").write_text(json.dumps({
+        "run": "r1", "sid": "p5345", "state": "done", "failures": [],
+        field: value}))
+    replay = ops.load_replay(Args("r1/p5345"))
+    assert replay["failures"] == [says]
 
 
 def test_the_digest_says_what_is_held_and_who_stopped():

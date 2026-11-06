@@ -303,6 +303,118 @@ def test_a_turn_that_speaks_again_is_not_paged(world):    # noqa: F811
     assert t and t["severity"] == "P1"
 
 
+def customer_says(world, text="?"):    # noqa: F811
+    world.c.execute("INSERT INTO chat_messages (session_id, role, content, "
+                    "created_at) VALUES (3, 'user', %s, %s)",
+                    (text, world.clock.now.replace(tzinfo=None)))
+
+
+def test_the_customer_asking_is_not_the_turn_speaking(world):    # noqa: F811
+    """Account 2752 sent "؟" and waited another 1,060 s. That row called the turn
+    alive, and the look called the customer recovered."""
+    world.job("agent_turn", state="running", project=5600, user=2846)
+    world.ticks(3)
+    customer_says(world)
+    world.ticks(12)
+    assert world.only_ticket()["severity"] == "P0"
+
+
+def test_a_customer_asking_does_not_put_off_the_silence(world):    # noqa: F811
+    world.job("agent_turn", state="running", project=5600, user=2846)
+    world.clock.now += timedelta(seconds=100)
+    customer_says(world)
+    world.clock.now += timedelta(seconds=25)
+    assert fired(world, gaps._turn_went_silent, minutes=2)
+
+
+def render_job(world, type_="final", state="running", age=1201, seconds=None):    # noqa: F811
+    if seconds is not None:
+        world.c.execute("INSERT INTO assets (project_id, kind, duration_s, bytes)"
+                        " VALUES (5499, 'original', %s, 1000)", (seconds,))
+    return world.job(type_, state=state, age=age)
+
+
+def test_a_render_past_its_deadline_fires_while_it_is_open(world):    # noqa: F811
+    """Account 2820's final ran 4,397 s and the first signal was its death."""
+    jid = render_job(world)
+    got = fired(world, gaps._render_overdue)
+    assert [f["ref"] for f in got] == [f"gap:render:{jid}"]
+    assert got[0]["cause_key"] == "auto-gap-render-overdue-final"
+    assert got[0]["severity"] == "P0" and got[0]["job_id"] == jid
+
+
+def test_a_render_of_a_long_source_has_a_longer_deadline(world):    # noqa: F811
+    render_job(world, seconds=3600)
+    assert fired(world, gaps._render_overdue) == []
+    world.clock.now += timedelta(seconds=4200)
+    assert len(fired(world, gaps._render_overdue)) == 1
+
+
+@pytest.mark.parametrize("type_", ["preview_check", "filmstrip", "agent_turn"])
+def test_only_what_a_customer_waits_on_is_a_render(world, type_):    # noqa: F811
+    render_job(world, type_=type_)
+    assert fired(world, gaps._render_overdue) == []
+
+
+def test_a_render_that_finished_in_time_never_fires(world):    # noqa: F811
+    render_job(world, state="done")
+    world.c.execute("UPDATE video_jobs SET updated_at = created_at")
+    assert fired(world, gaps._render_overdue) == []
+
+
+def test_a_render_that_stays_stuck_pages_and_one_that_ends_does_not(world):    # noqa: F811
+    jid = render_job(world, age=1199)
+    world.ticks(2)
+    assert world.only_ticket()["severity"] == "P1"
+    world.ticks(11)
+    assert world.only_ticket()["severity"] == "P0"
+    world.c.execute("DELETE FROM tickets")
+    jid = render_job(world, age=1199)
+    world.ticks(3)
+    world.c.execute("UPDATE video_jobs SET state = 'done', updated_at = %s "
+                    "WHERE id = %s", (world.clock.now, jid))
+    world.ticks(10)
+    assert world.only_ticket()["severity"] == "P1"
+
+
+@pytest.mark.parametrize("code", ["render_failed", "repair_required", "http_0",
+                                  "http_502", "device_degraded", "edit_required",
+                                  "obsolete_failed_render", "a_code_of_tomorrow"])
+def test_an_export_refused_is_a_failure(world, code):    # noqa: F811
+    world.event("export_blocked", code=code, version=5)
+    world.tick()
+    t = world.only_ticket()
+    assert t["cause_key"] == intake.cause_key("gap", "export-blocked", code)
+    assert t["severity"] == "P1", "on a ticket within a minute"
+    world.ticks(11)
+    assert world.only_ticket()["severity"] == "P0"
+
+
+@pytest.mark.parametrize("code", gaps.EXPORT_HOLDS)
+def test_the_paywall_and_a_hold_are_not_failures(world, code):    # noqa: F811
+    world.event("export_blocked", code=code, version=5)
+    world.tick()
+    world.c.execute("SELECT count(*) AS n FROM tickets")
+    assert world.c.fetchone()["n"] == 0
+
+
+def test_an_export_refused_then_downloaded_pages_nobody(world):    # noqa: F811
+    world.event("export_blocked", code="render_failed", version=5)
+    world.tick()
+    world.ticks(3)
+    world.event("download_url_ready", version=5)
+    world.ticks(11)
+    t = world.only_ticket()
+    assert t["severity"] == "P1" and t["status"] == "open"
+
+
+def test_a_download_that_failed_files(world):    # noqa: F811
+    world.event("download_failed", code="http_500", version=5)
+    world.tick()
+    assert world.only_ticket()["cause_key"] == \
+        "auto-gap-download-failed-http-500"
+
+
 def test_an_outcome_nobody_listed_is_a_failure(world):    # noqa: F811
     """Job 135056 ended internal_error; intake reads partial and blocked."""
     jid = turn(world, outcome="internal_error")
@@ -318,8 +430,23 @@ def test_one_broken_check_never_costs_the_tick(world, capsys):    # noqa: F811
     def fine(cur, since, now, p):
         return [{"ref": "x"}]
     got = gaps.scan(world.c, T0, T0 + MIN, checks=(broken, fine))
-    assert got == [{"ref": "x"}]
+    assert {"ref": "x"} in got and len(got) == 2
     assert "no such column" in capsys.readouterr().out
+
+
+def test_a_broken_check_files_itself(world):    # noqa: F811
+    """A check that dies in a log line sees nothing for as long as nobody reads
+    the log, which is how every other silence in this audit began."""
+    def broken(*a):
+        raise RuntimeError("no such column")
+    world.clock.now = T0 + MIN
+    got = gaps.scan(world.c, T0, world.clock.now, checks=(broken,))[0]
+    assert got["cause_key"] == "auto-gap-check-broken-broken"
+    assert got["severity"] == "P1" and "no such column" in got["detail"]
+    t, action = store.record_failure(world.conn.cursor(), got)
+    assert action == "opened" and t["status"] == "open"
+    again = gaps.scan(world.c, T0, world.clock.now + MIN, checks=(broken,))[0]
+    assert again["ref"] == got["ref"], "once an hour, not once a minute"
 
 
 def test_every_check_runs_on_a_tick_together(world):    # noqa: F811
