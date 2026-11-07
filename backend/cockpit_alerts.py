@@ -349,32 +349,19 @@ def p0_alerts(rcur, now):
                 out.append((ep + "fixed", *p0_fixed_mail(s, now)))
             continue
         if s["status"] == "wont_fix":
-            if "blocked:wont-fix" not in sent and s.get("wont_fix_at") and \
-                    s["wont_fix_at"] >= FIXED_MAIL_FROM:
-                why = ("Closed as won't fix"
-                       + (f": {_one(s.get('wont_fix_reason'), 400)}"
-                          if s.get("wont_fix_reason") else "")
-                       + ". No fix was proven; a new failure reopens it.")
-                out.append((ep + "blocked:wont-fix",
-                            *p0_blocked_mail(s, now, "wont-fix", why, None)))
+            # Owner, 7 Nov: Blocked is only for what he alone can clear. A
+            # won't-fix close is listed in the daily digest, never emailed.
             continue
         if s["status"] not in ("open", "fixing"):
             continue
+        # Owner, 7 Nov: "Blocked" only for failures nobody but him can clear
+        # (the Mac asleep or the usage limit, a provider out of credit). Every
+        # other hold-up is the system's own work: the VERIFY lane and the
+        # Fixers take it, and the daily digest lists it until it is proven.
         causes = [c for c in p0_blocked(s, now, beat, late)
-                  if "blocked:" + c[0] not in sent]
+                  if c[0].split(":")[0] in OWNER_STEPS
+                  and "blocked:" + c[0] not in sent]
         issue_at = _issue_at(s)
-        over = now - issue_at - intake.P0_PROOF_BOUND
-        if over >= timedelta():
-            n = int(over // intake.P0_BLOCKED_REPEAT)
-            blocked_before = any(k.startswith("blocked:") for k in sent)
-            if f"blocked:unproven:{n}" not in sent and not (
-                    n == 0 and blocked_before):
-                hours = int((intake.P0_PROOF_BOUND
-                             + n * intake.P0_BLOCKED_REPEAT).total_seconds()
-                            // 3600)
-                causes.append((f"unproven:{n}", f"Not proven fixed after "
-                               f"{hours} h. {_in_the_way(s, now, beat)}",
-                               None))
         if causes:
             cause, reason, step = causes[0]
             out.append((ep + "blocked:" + cause,

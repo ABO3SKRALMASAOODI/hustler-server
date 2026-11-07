@@ -330,27 +330,18 @@ def test_issue_ten_minutes_after_opening_when_nobody_claimed(db):
         (T0 + 10 * MIN, f"Issue: {TITLE} (P0 #1), being fixed")]
 
 
-def test_883_replayed_is_an_issue_then_blocked_on_the_customer_then_fixed(db):
+def test_883_replayed_is_an_issue_then_nothing_until_fixed(db):
     """#883, 7 Nov: opened 15:56, claimed 16:05:29, handed back at 16:09:30
-    because customer 2878 left mid-upload (43 of 200 parts)."""
+    because customer 2878 left mid-upload. Owner, 7 Nov: Blocked only for what
+    he alone can clear, so waiting on the customer sends nothing more."""
     title = "An upload stopped without landing: the page went away"
     db.open(883, D883, user=2878, detail=UPLOAD, title=title)
     db.claim(883, D883 + timedelta(minutes=9, seconds=29))
     db.release(883, D883 + timedelta(minutes=13, seconds=30),
                note="customer 2878 left mid-upload at part 43 of 200",
-               waiting="the studio resumes from part 44 of 200 when they pick "
-                       "the same file again in the same browser (6 days)")
-    got = run(db, D883, D883 + timedelta(hours=8),
-              step=timedelta(seconds=15))
-    assert [(at, s) for at, s, _ in got] == [
-        (D883 + timedelta(minutes=9, seconds=30),
-         f"Issue: {title} (P0 #883), being fixed"),
-        (D883 + timedelta(minutes=23, seconds=30),
-         f"Blocked: {title} (P0 #883)")]
-    from routes.newsletter_content import plain_text
-    text = plain_text(got[1][2])
-    assert "waits on the customer" in text and "part 44 of 200" in text
-    # The product side proven: FIXED, once.
+               waiting="the studio resumes from part 44 of 200")
+    got = run(db, D883, D883 + timedelta(hours=8), step=timedelta(minutes=1))
+    assert subjects(got) == [f"Issue: {title} (P0 #883), being fixed"]
     db.live(883, D883 + timedelta(hours=9))
     db.verified(883, D883 + timedelta(hours=9, minutes=30))
     got = run(db, D883 + timedelta(hours=9), D883 + timedelta(hours=10))
@@ -414,37 +405,18 @@ def test_blocked_with_the_step_when_a_provider_is_out_of_credit(db):
     assert "top up Anthropic" in got[0][2]
 
 
-def test_blocked_when_the_proof_failed_twice_not_once(db):
+def test_failed_proofs_and_slow_proofs_never_email_blocked(db):
+    """Owner, 7 Nov: a failed or slow proof is the system's own work (VERIFY
+    and the Fixers take it again); it is never a Blocked email."""
     db.open(6, T0)
     db.claim(6, T0 + 2 * MIN)
     db.live(6, T0 + 20 * MIN)
     db.verify_failed(6, T0 + 45 * MIN)
     db.claim(6, T0 + 50 * MIN)
     db.live(6, T0 + 70 * MIN, sha=SHA2)
-    assert subjects(run(db, T0, T0 + 90 * MIN)) == [
-        f"Issue: {TITLE} (P0 #6), being fixed"]
     db.verify_failed(6, T0 + 95 * MIN)
-    got = run(db, T0 + 91 * MIN, T0 + 3 * 60 * MIN)
-    assert subjects(got) == [f"Blocked: {TITLE} (P0 #6)"]
-    assert "failed the VERIFY replay 2 times" in got[0][2]
-    assert "Only you can clear it" not in got[0][2]
-
-
-def test_not_proven_after_4_h_is_blocked_then_daily_past_the_window(db):
-    db.open(7, T0)
-    db.claim(7, T0 + 3 * MIN)
-    db.live(7, T0 + 20 * MIN)
     got = run(db, T0, T0 + 80 * 60 * MIN, step=10 * MIN)
-    issue = T0 + 3 * MIN
-    blocked = [at for at, s, _ in got if s.startswith("Blocked:")]
-    assert blocked == [issue + timedelta(hours=h) + 7 * MIN
-                       for h in (4, 28, 52, 76)]    # the 10-min tick grid
-    from routes.newsletter_content import plain_text
-    text = plain_text(got[1][2])
-    assert "Not proven fixed after 4 h" in text
-    assert "is live since 13:20 Dubai and its VERIFY replay has not passed" \
-        in text
-    assert "Not proven fixed after 76 h" in plain_text(got[-1][2])
+    assert subjects(got) == [f"Issue: {TITLE} (P0 #6), being fixed"]
 
 
 def _path(db, name):
@@ -492,15 +464,14 @@ def _path(db, name):
     "released", "waiting", "verify_failed", "wont_fix", "deduped",
     "lowered_to_p1", "closed_fixed", "live_unproven", "failed_after_fix",
     "no_failures"])
-def test_no_silent_end_every_issue_ends_fixed_or_blocked(db, name):
+def test_no_path_emails_blocked_unless_only_the_owner_can_clear_it(db, name):
+    """Every path ends in Fixed, or stays an Issue the digest lists until it
+    is proven; none sends Blocked (no Mac or provider cause here)."""
     _path(db, name)
     got = run(db, T0, T0 + 5 * 60 * MIN, step=5 * MIN)
     kinds = [s.split(":")[0] for s in subjects(got)]
-    assert kinds and kinds[0] in ("Issue", "Blocked", "Fixed"), kinds
-    assert set(kinds[1:] or kinds) & {"Fixed", "Blocked"}, (name, kinds)
-    end = next(at for at, s, _ in got if s.split(":")[0] in ("Fixed",
-                                                            "Blocked"))
-    assert end <= T0 + 10 * MIN + intake.P0_PROOF_BOUND + 5 * MIN, (name, end)
+    assert "Blocked" not in kinds, (name, kinds)
+    assert set(kinds) <= {"Issue", "Fixed"}, (name, kinds)
 
 
 def test_keys_from_the_earlier_versions_count_as_the_issue_told(db):
@@ -512,8 +483,7 @@ def test_keys_from_the_earlier_versions_count_as_the_issue_told(db):
     db.kv[ep + "being-fixed:20261107T160529"] = "1"
     db.kv[ep + "still-stuck:no-fix"] = "1"
     got = run(db, D883 + 20 * MIN, D883 + timedelta(hours=8), step=5 * MIN)
-    assert [s.split(":")[0] for s in subjects(got)] == ["Blocked"]
-    assert "Not proven fixed after 4 h" in got[0][2]
+    assert subjects(got) == []
 
 
 def test_no_backlog_of_fixed_or_issue_at_the_switch(db):
