@@ -5156,6 +5156,15 @@ def _slice_boundary_resolution(frontier, current, blocker_fingerprint,
     }
 
 
+# These read or record. None of them puts anything in front of the customer, so
+# the order a call came in cannot leave a request unfinished. p5388 called
+# justify_verification_findings before its render, the render cleared the
+# finding, nothing called it again, and a delivered 16:9 edit with an honest
+# reply ended partial, which files a P0. This classifies tools, never a request.
+_DELIVERS_NOTHING = frozenset(("get_words", "justify_verification_findings",
+                               "open_visual_page", "proof_device", "set_edit_plan"))
+
+
 def _record_outer_tool_outcome(ctx, name, result):
     """Record one model-visible tool result (a recipe remains one call)."""
     kind = agent_tools.tool_result_kind(result)
@@ -5171,6 +5180,8 @@ def _record_outer_tool_outcome(ctx, name, result):
         pending = re.search(r"\bjob(?:_id=| )(\d+)\b", str(result))
         if pending:
             receipt["pending_job_id"] = int(pending.group(1))
+    if kind == "prerequisite" and name in _DELIVERS_NOTHING:
+        receipt["resolved"] = True
     if kind == "success":
         # An order-only prerequisite ("call render_preview(complete=true)
         # first") is met once the same tool later succeeds. Left open, it
