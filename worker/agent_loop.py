@@ -1962,6 +1962,7 @@ def run_agent_job(worker_db, job):
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"] if index_row else None,
                                   workdir)
+    ctx.studio_request = True
     ctx.request_contract_required = True
     import operator_recovery
     superseded = operator_recovery.superseded(ctx)
@@ -2323,6 +2324,8 @@ def run_agent_job(worker_db, job):
                            _cont=(continuation_state or None))
         if ctx.claude_trial is not None:
             _claude_trial_settle(ctx, result)
+        if (result or {}).get("status") != "continued":
+            agent_tools.queue_sharper_preview(ctx)
         return result
     except dbx.JobLeaseLost:
         raise  # A stopped/replaced execution must never create another slice.
@@ -2689,7 +2692,9 @@ def _trial_render_refusal(ctx, name, args=None):
         return None
     if name == 'render_preview':
         args = args or {}
-        quality = agent_tools._deliverable_quality(ctx, args.get('quality', 'draft'))
+        quality = agent_tools._deliverable_quality(
+            ctx, args.get('quality', 'draft'),
+            bool(args.get('complete')) or args.get('quality') == 'approval')
         if args.get('report') and not args.get('complete') and quality != 'approval':
             return None  # a stored report is a read, not a new render
         try:
@@ -3069,9 +3074,8 @@ def _trial_prerender(ctx, worker_db, session_id, post):
         return ""
     try:
         t0 = time.monotonic()
-        result = agent_tools.execute(ctx, "render_preview",
-                                     {"quality": "draft", "complete": True})
-        post("render_preview", {"quality": "draft", "complete": True}, result)
+        result = agent_tools.execute(ctx, "render_preview", {"complete": True})
+        post("render_preview", {"complete": True}, result)
         ctx.editing_metrics["trial_prerender_s"] = round(
             time.monotonic() - t0, 2)
         preview = getattr(ctx, "last_preview", None) or {}

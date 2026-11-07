@@ -35,7 +35,7 @@ def render_sequence(monkeypatch, tmp_path):
     monkeypatch.setattr(renderer, 'render_edl', render)
     monkeypatch.setattr(renderer, '_reuse_picture_with_new_audio', reuse)
     monkeypatch.setattr(renderer, '_verify_render', lambda *a, **k: None)
-    monkeypatch.setattr(renderer.media, 'probe', lambda p: dict(width=320, height=180, fps=30))
+    monkeypatch.setattr(renderer.media, 'probe', lambda p: dict(width=1280, height=720, fps=30))
     monkeypatch.setattr(renderer.storage, 'exists', lambda key: True)
     monkeypatch.setattr(renderer.storage, 'upload_file', lambda p, key, mime: uploads.append(key))
     monkeypatch.setattr(renderer.storage, 'delete_keys', lambda keys: deleted.extend(keys))
@@ -66,6 +66,9 @@ def render_sequence(monkeypatch, tmp_path):
             if name == 'insert_asset':
                 assets.append(dict(id=len(assets)+1, storage_key=args[2], **kwargs))
                 return len(assets)
+            if name == 'update_asset_meta':
+                assets[args[0] - 1]['meta'].update(args[1])
+                return None
             raise AssertionError(name)
 
     def run(version, **payload):

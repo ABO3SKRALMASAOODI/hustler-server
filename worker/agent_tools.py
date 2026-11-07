@@ -335,6 +335,9 @@ class ToolContext:
         self._last_broll_board_cast = None
         self.direct_sight = False
         self.sight_out = False
+        # A customer's Studio request: its complete previews are what they watch
+        # (_deliverable_quality). Only the agent loop sets it.
+        self.studio_request = False
         # Durable project direction, loaded by the agent/MCP entry point and
         # replaced by set_edit_plan.  The EDL says what to render; this says
         # why the cut, type, footage, motion and sound belong together.
@@ -24150,16 +24153,102 @@ def _stored_render_report(ctx, row):
     return "\n".join(lines)
 
 
-def _deliverable_quality(ctx, quality):
-    """QB: a long-form cut IS the deliverable (longform.tighten sets
-    ctx.approval_previews): the user watches this turn's render, so it is the
-    720p approval render, never the 480p draft. No other turn has the flag, so
-    every other lane and every other trial turn keeps the quality it asked for
-    (approval previews on every trial turn measured no gain and two typed
-    requests lower)."""
-    if quality == "draft" and getattr(ctx, "approval_previews", False) is True:
+def _programme_seconds(row):
+    """How long this version plays; 0.0 when that cannot be read."""
+    try:
+        blocks = timeline_mod.program_blocks((row or {}).get("json") or {})
+        return float(blocks[-1]["out_end"]) if blocks else 0.0
+    except Exception:  # noqa: BLE001 — the caller's default stands
+        return 0.0
+
+
+def _source_outruns_a_typed_wait(ctx):
+    """Is there too much source to decode inside the wait for a request? The
+    approval render reads the original through one ffmpeg input, so it decodes
+    every pixel from the first kept second to the last, whatever the programme
+    keeps of them. That, in gigapixels, is what its cost follows: about 15 CPU
+    seconds plus 20 a gigapixel on eleven customers' edits, 1080p or 4K, H.264 or
+    10-bit HEVC (config.TYPED_APPROVAL_MAX_GPX)."""
+    video = (getattr(ctx, "index", None) or {}).get("video") or {}
+    keep = (ctx.latest_edl().get("json") or {}).get("keep") or []
+    try:
+        span = max(float(k[1]) for k in keep) - min(float(k[0]) for k in keep)
+        pixels = (span * float(video["width"]) * float(video["height"])
+                  * float(video.get("fps") or 30.0))
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False                  # a canvas programme has no main source
+    return pixels / 1e9 > config.TYPED_APPROVAL_MAX_GPX
+
+
+def _approval_in_a_typed_wait(ctx):
+    return (getattr(ctx, "studio_request", False) is True
+            and _programme_seconds(ctx.latest_edl())
+            <= config.TYPED_APPROVAL_MAX_S)
+
+
+def _deliverable_quality(ctx, quality, complete=False):
+    """The quality of a preview someone is going to watch.
+
+    A complete preview of a Studio request is what the customer watches, and
+    for a trial account all they will ever see, because export is the paywall.
+    So it is the approval render, up to 720x1280 from the original, and never
+    the draft: 270x480 on a vertical source, where no caption can be read.
+
+    Three things stay drafts. The changed-section proof (complete=false): nobody
+    watches it, and it is what keeps an editor's iterations cheap. A programme
+    past TYPED_APPROVAL_MAX_S: it stays the 854x480 draft it has always been,
+    and its wait does not double. And a source too heavy to decode inside the
+    wait: its request ends on the draft whatever the editor asked for, and the
+    approval render of that version follows behind the reply
+    (queue_sharper_preview). A replay of p5385 spent 7.7 minutes on one request
+    because the model asked for three approval renders of a 4K clip.
+
+    QB: a long-form cut IS the deliverable (longform.tighten sets
+    ctx.approval_previews), so every render of that turn is the approval
+    render, whatever its length."""
+    if getattr(ctx, "approval_previews", False) is True:
         return "approval"
-    return quality
+    if not _approval_in_a_typed_wait(ctx):
+        return quality
+    if _source_outruns_a_typed_wait(ctx):
+        return "draft"
+    return "approval" if complete else quality
+
+
+def queue_sharper_preview(ctx):
+    """A heavy source's request ended on the draft: queue the approval render
+    of the version it delivered, without waiting. Only when the request is over,
+    because a version the editor goes on to replace would retire it half done.
+    The Studio says "Sharpening to full quality" and swaps it in at the same
+    moment of playback. Returns the job id, or None; it never fails a turn."""
+    preview = getattr(ctx, "last_preview", None) or {}
+    if preview.get("quality") != "draft":
+        return None
+    try:
+        row = ctx.latest_edl()
+        if preview.get("edl_version") != row["version"] \
+                or getattr(ctx, "sharpened_version", None) == row["version"] \
+                or not _approval_in_a_typed_wait(ctx) \
+                or not _source_outruns_a_typed_wait(ctx):
+            return None
+        ctx.sharpened_version = row["version"]
+        dependency_key = getattr(ctx, "render_dependency_key", None)
+        job_id, _created = ctx.db.run(
+            dbx.get_or_enqueue_preview_job, ctx.project_id, ctx.job["user_id"],
+            _child_payload(ctx, {
+                "edl_version": row["version"], "source": "agent_preview",
+                "quality": "approval", "agent_job_id": ctx.job["id"],
+                "audio_model_review": False, "sharpens_draft": True,
+                "render_signature": _render_signature(
+                    row, "preview", audio_model_review=False,
+                    quality="approval", dependency_key=dependency_key),
+                **({"render_dependency_key": dependency_key}
+                   if dependency_key else {})}))
+    except Exception as exc:  # noqa: BLE001 — the draft is already delivered
+        print(f"[preview] sharper render not queued: "
+              f"{type(exc).__name__}: {str(exc)[:160]}", flush=True)
+        return None
+    return job_id
 
 
 def _claude_lane_turn(ctx):
@@ -24255,7 +24344,9 @@ def render_preview(ctx, complete=False, _wait_timeout_s=None, quality="draft",
             return _stored_render_report(ctx, ctx.latest_edl())
     if quality not in ("draft", "approval"):
         return "REJECTED: quality must be draft or approval."
-    quality = _deliverable_quality(ctx, quality)
+    complete = bool(complete) or quality == "approval"
+    quality = _deliverable_quality(
+        ctx, quality, complete or bool(getattr(ctx, "autorendering", False)))
     if quality == "approval":
         complete = True
     row = ctx.latest_edl()
@@ -33517,7 +33608,8 @@ TOOLS = {
         "proof only; this does not create a watchable complete preview. complete=true creates "
         "the complete stored video, even on the first call. quality=approval implies complete=true "
         "and renders from the original at up to 720x1280 portrait using the final composition "
-        "and typography path; draft is the inexpensive 480px preview. The Studio attaches "
+        "and typography path; draft is the inexpensive 480px preview, and in a Studio request "
+        "a complete preview is the approval render unless the program is very long. The Studio attaches "
         "the complete preview. wait_for_job observes pending work; call render_preview again "
         "to review its existing result. MCP clients can retrieve it with watch_video or download_url. "
         "On a short its VERIFICATION ADVISORIES carry an EARN ITS PLACE note (hook, graphic "
