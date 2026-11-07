@@ -39,9 +39,11 @@ class _Cur:
 class _Conn:
     """Answers the statements gate_lift makes; records every one."""
 
-    def __init__(self, *, lifted=False, busy=False, lock=True, cands=()):
+    def __init__(self, *, lifted=False, busy=False, lock=True, cands=(),
+                 lifted_before=False):
         self.sql = []
         self.lifted, self.busy, self.lock = lifted, busy, lock
+        self.lifted_before = lifted_before
         self.cands = list(cands)
 
     def cursor(self):
@@ -55,6 +57,8 @@ class _Conn:
             return None, self.cands
         if "FOR UPDATE" in s and "gate_lifted_at" in s:
             return (None if self.lifted else {"id": 170085}), []
+        if s.startswith("SELECT 1 FROM video_jobs") and "gate_lifted" in s:
+            return ({"x": 1} if self.lifted_before else None), []
         if s.startswith("SELECT 1 FROM video_jobs"):
             return ({"x": 1} if self.busy else None), []
         return None, []
@@ -74,8 +78,10 @@ def lane(monkeypatch):
     seen = {"state": ("enqueue", {"trial_lane": True}), "jobs": [],
             "gated_marks": [], "events": []}
     monkeypatch.setattr(db, "subscribe_gate_applies", lambda conn, uid: True)
-    monkeypatch.setattr(db, "saved_request_admission",
-                        lambda conn, p, u, gated=None: seen["state"])
+    def admission(conn, p, u, gated=None, lane_here=True):
+        seen["lane_here"] = lane_here
+        return seen["state"]
+    monkeypatch.setattr(db, "saved_request_admission", admission)
     monkeypatch.setattr(db, "enqueue_job",
                         lambda conn, p, u, t, payload:
                         seen["jobs"].append((p, u, t, payload)) or 137999)
@@ -213,3 +219,41 @@ def test_admission_is_one_answer_for_the_index_and_the_lift(monkeypatch):
     assert db.saved_request_admission(None, 5543, 2869) == ("no_credits", {})
     monkeypatch.setattr(db, "user_credits_balance", lambda conn, u: 40)
     assert db.saved_request_admission(None, 5543, 2869) == ("enqueue", {})
+
+
+def test_a_request_is_lifted_once_per_lane(lane):
+    # The lifted turn met a closed lane and refused again with the same
+    # request: the sweep must not start it every minute.
+    conn = _Conn(lifted_before=True)
+    assert gate_lift.resume_one(conn, CAND) == {"state": "lifted_before"}
+    assert lane["jobs"] == [] and conn.updates() == []
+    (sql, params), = [(s, p) for s, p in conn.sql if "gate_lifted' =" in s]
+    assert params == (5543, "170081", "true")
+
+
+def test_the_dispatcher_leaves_the_claude_lane_to_the_turn(lane):
+    # 2869 at 14:19 UTC: the sweep runs in the Render dispatcher, which holds
+    # no Claude key, so a lane check there read every trial request gated.
+    gate_lift.resume_one(_Conn(), CAND)
+    assert lane["lane_here"] is False
+
+
+def test_admission_without_the_key_here(monkeypatch):
+    import claude_lane
+    import first_cut
+    monkeypatch.setattr(db, "subscribe_gate_applies", lambda conn, uid: True)
+    monkeypatch.setattr(first_cut, "project_admission",
+                        lambda conn, p: {"kind": "trial"})
+    monkeypatch.setattr(first_cut, "trial_requests_on",
+                        lambda conn, uid=None: True)
+    monkeypatch.setattr(first_cut, "trial_remaining_usd", lambda conn, u: 0.32)
+    monkeypatch.setattr(claude_lane, "configured", lambda: False)
+    monkeypatch.setattr(claude_lane, "available", lambda: False)
+    assert db.saved_request_admission(None, 5543, 2869, lane_here=False) == (
+        "enqueue", {"trial_lane": True})
+    # Where the turn runs (the index's auto-resume), the lane is judged.
+    assert db.saved_request_admission(None, 5543, 2869) == ("gated", {})
+    # A process holding the key judges its own latch either way.
+    monkeypatch.setattr(claude_lane, "configured", lambda: True)
+    assert db.saved_request_admission(None, 5543, 2869, lane_here=False) == (
+        "gated", {})

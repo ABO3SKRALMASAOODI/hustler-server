@@ -3693,14 +3693,19 @@ def resolve_pending_auto_resume(conn, project_id, session_id, user_id,
                 **({"trial": True} if lane.get("trial_lane") else {}))
 
 
-def saved_request_admission(conn, project_id, user_id, gated=None):
+def saved_request_admission(conn, project_id, user_id, gated=None,
+                            lane_here=True):
     """May a saved request of this account run on this project now?
 
     ("enqueue", lane payload) | ("gated", {}) | ("no_credits", {}). The one
     answer for the index's auto-resume and for gate_lift (a request one of
     these gates refused runs once the reason is gone, P0 #861). ``gated`` is
     subscribe_gate_applies' answer when the caller already holds it (that
-    call locks the account row)."""
+    call locks the account row). ``lane_here`` False: this process only
+    enqueues and never runs the turn (the Render dispatcher, whose reaper runs
+    gate_lift, holds no Claude key), so it does not judge the Claude lane:
+    the turn does, and answers with the plan cards when the lane is closed,
+    the backend send path's rule (routes.video._trial_request)."""
     if gated is None:
         gated = subscribe_gate_applies(conn, user_id)
     if gated:
@@ -3710,8 +3715,10 @@ def saved_request_admission(conn, project_id, user_id, gated=None):
         import claude_lane
         import first_cut
         admission = first_cut.project_admission(conn, project_id)
+        lane_open = (claude_lane.available()
+                     if lane_here or claude_lane.configured() else True)
         if (admission and admission.get("kind") == "trial"
-                and claude_lane.available()
+                and lane_open
                 and first_cut.trial_requests_on(conn, user_id)
                 and first_cut.trial_remaining_usd(conn, user_id) > 0.002):
             return "enqueue", {"trial_lane": True}

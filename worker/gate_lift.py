@@ -23,7 +23,10 @@ transaction under the account's row lock and the reply's row lock:
   * no turn is queued or running in the project (it is retried next sweep);
   * ``db.saved_request_admission`` admits it now: the same answer the
     index's auto-resume gives (a subscriber with credits, or the account's
-    trial project with the Claude lane on and trial budget left).
+    trial project with trial requests on and trial budget left). The
+    dispatcher holds no Claude key, so the turn judges the lane, as on the
+    backend's send path; a request is lifted at most once per lane, so a
+    closed lane costs one refused turn, never a loop.
 Then the request is enqueued as an ordinary agent turn and the reply is
 stamped ``gate_lifted_at`` in the same transaction, so it runs exactly once
 however many workers sweep, and its plan cards are retired: the flags the
@@ -138,9 +141,23 @@ def resume_one(conn, cand):
         if cur.fetchone():
             return {"state": "busy_or_ran"}
     state, lane = dbx.saved_request_admission(conn, project_id, user_id,
-                                              gated)
+                                              gated, lane_here=False)
     if state != "enqueue":
         return {"state": state}
+    # One lift per request and lane: a turn that meets a closed lane answers
+    # with a new refusal naming the same request, which must not start the
+    # same turn again every minute. A later payment (another lane) may.
+    with conn.cursor() as cur:
+        cur.execute("""SELECT 1 FROM video_jobs
+                        WHERE project_id = %s AND type = 'agent_turn'
+                          AND payload->>'gate_lifted' = 'true'
+                          AND payload->>'message_id' = %s
+                          AND COALESCE(payload->>'trial_lane', 'false') = %s
+                        LIMIT 1""",
+                    (project_id, str(message_id),
+                     "true" if lane.get("trial_lane") else "false"))
+        if cur.fetchone():
+            return {"state": "lifted_before"}
     payload = {"message_id": message_id, "auto_resumed": True,
                "gate_lifted": True, "gate_reply_id": reply_id}
     payload.update(lane)
