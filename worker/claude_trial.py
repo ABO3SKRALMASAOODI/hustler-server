@@ -21,7 +21,10 @@ THE ONE RUNNING TOTAL (shared contract with track B): ``trial_budgets``
 (migration 040), one row per granted account; ``spent_usd`` is the running
 provider cost of every Claude call made for that account, plus the non-LLM
 generations its turns bought, and ``cap_usd`` is its ceiling. Track B's gate
-reads ``cap_usd - spent_usd`` (or ``exhausted_at``). ``trial_budget_days``
+reads ``cap_usd`` minus the account's EDIT spend: ``spent_usd`` less what
+its uploads' analysis (index jobs) cost, ANALYSIS_USD below. Analysis is the
+product's cost (owner, 7 Nov 2026, #861): it counts against the pool and its
+daily cap, never against the account's allowance. ``trial_budget_days``
 is the pool's daily ledger (every trial dollar, granted or not), which the
 global caps and the 50/80/95 % alerts read. Each call's own cost is also on
 its ``llm_calls`` row (``response->>'provider_cost_usd'``), as for every
@@ -214,11 +217,36 @@ def tables_ready(conn):
     return bool(_v(row, "a", 0) and _v(row, "b", 1))
 
 
+# Every Claude dollar the account's index jobs spent: analysis of its uploads
+# (visual semantics, captions, the greeting), metered into ``spent_usd`` with
+# everything else so the running total still reconciles with llm_calls. It is
+# the product's cost, so the allowance is the cap less the rest. #861: a new
+# trial account's 2 h 39 min upload spent $0.38 of Haiku semantics in its
+# index, more than its whole $0.32 allowance, before it asked for anything.
+# Read by purpose, an allowance spent that way comes back by itself; a second
+# copy lives in backend/claude_trial.py (the backend's gate reads the same).
+ANALYSIS_USD = """COALESCE((
+    SELECT SUM(CASE WHEN jsonb_typeof(l.response->'provider_cost_usd') = 'number'
+                    THEN (l.response->>'provider_cost_usd')::numeric END)
+      FROM video_jobs j JOIN llm_calls l ON l.job_id = j.id
+     WHERE j.user_id = trial_budgets.user_id AND j.type = 'index'
+       AND l.model LIKE 'claude%%'), 0)"""
+ANALYSIS = "analysis"
+
+
 def get_budget(conn, user_id):
+    """The account's row, with ``spent_usd`` its EDIT spend (the total less
+    analysis) and ``exhausted_at`` only while that spend is at the cap."""
     with conn.cursor() as cur:
-        cur.execute("""SELECT user_id, cap_usd, spent_usd, calls, granted_at,
-                              exhausted_at, granted_via
-                         FROM trial_budgets WHERE user_id = %s""",
+        cur.execute(f"""SELECT user_id, cap_usd,
+                               GREATEST(spent_usd - {ANALYSIS_USD}, 0)
+                                   AS spent_usd,
+                               calls, granted_at,
+                               CASE WHEN spent_usd - {ANALYSIS_USD}
+                                         >= cap_usd - 0.005
+                                    THEN exhausted_at END AS exhausted_at,
+                               granted_via, spent_usd AS total_spent_usd
+                          FROM trial_budgets WHERE user_id = %s""",
                     (int(user_id),))
         return cur.fetchone()
 
@@ -296,7 +324,7 @@ def email_is_disposable(email):
 
 
 def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
-          is_test=False, admitted=False):
+          is_test=False, admitted=False, analysis_usd=0.0):
     """Grant the account its trial once, under every D2 limit.
 
     Returns ``{"granted": bool, "row": row|None, "reason": str}``. Idempotent:
@@ -347,6 +375,9 @@ def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
         return {"granted": False, "row": None, "reason": "daily_usd_cap"}
     cap = float(flag_value["per_account_usd_cap"])
     spent = max(0.0, float(pending_usd or 0.0))
+    # The pending spend of an indexing upload is analysis: in the total, never
+    # against the allowance.
+    edit = max(0.0, spent - max(0.0, float(analysis_usd or 0.0)))
     with conn.cursor() as cur:
         cur.execute("""INSERT INTO trial_budgets
                          (user_id, provider, cap_usd, spent_usd, granted_project_id,
@@ -355,7 +386,7 @@ def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
                                CASE WHEN %s >= %s THEN NOW() END)
                        ON CONFLICT (user_id) DO NOTHING""",
                     (int(user_id), cap, spent, project_id, str(via)[:32],
-                     device, spent, cap))
+                     device, edit, cap))
         inserted = cur.rowcount > 0
         if inserted:
             cur.execute("""INSERT INTO trial_budget_days (day, grants)
@@ -368,30 +399,41 @@ def grant(conn, user_id, project_id, via, flag_value, pending_usd=0.0,
 
 
 def add_spend(conn, user_id, usd, granted=True, calls=1, extras=False,
-              customer=True):
+              customer=True, analysis=False):
     """Atomically add one cost to the account total and the day ledger.
     ``extras`` marks a non-Anthropic generation (images, sfx): it counts
     against the account's $1 and the pool, not against the Anthropic credit.
+    ``analysis`` marks an index job's call: in the total and the pool, never
+    against the allowance, so it never marks the account exhausted.
     An internal test account on the trial lane (``customer`` False) spends its
     own budget and never touches the pool or the credit line.
-    Returns (account_spent or None, pool_total for this credit cycle)."""
+    Returns (account EDIT spend or None, pool_total for this credit cycle)."""
     usd = max(0.0, float(usd or 0.0))
     import claude_credit
     with_extras = claude_credit.ledger_ready(conn)
     spent = None
     with conn.cursor() as cur:
         if granted and user_id is not None:
-            cur.execute("""UPDATE trial_budgets
+            # exhausted_at tells the truth on every edit spend: set while
+            # the edit spend is at the cap, cleared when it is not (a stamp
+            # analysis once put there, before #861, goes on the next call).
+            edit_usd = 0.0 if analysis else usd
+            cur.execute(f"""UPDATE trial_budgets
                               SET spent_usd = spent_usd + %s,
                                   calls = calls + %s,
                                   last_spend_at = NOW(),
                                   updated_at = NOW(),
-                                  exhausted_at = COALESCE(exhausted_at,
-                                      CASE WHEN spent_usd + %s >= cap_usd
-                                           THEN NOW() END)
+                                  exhausted_at = CASE
+                                      WHEN %s THEN exhausted_at
+                                      WHEN spent_usd + %s - {ANALYSIS_USD}
+                                           >= cap_usd
+                                      THEN COALESCE(exhausted_at, NOW())
+                                  END
                             WHERE user_id = %s
-                        RETURNING spent_usd""",
-                        (usd, int(calls), usd, int(user_id)))
+                        RETURNING GREATEST(spent_usd - {ANALYSIS_USD}
+                                           - %s, 0) AS spent_usd""",
+                        (usd, int(calls), bool(analysis), edit_usd,
+                         int(user_id), usd - edit_usd))
             spent = _v(cur.fetchone(), "spent_usd", 0)
         if customer and with_extras:
             cur.execute("""INSERT INTO trial_budget_days
@@ -415,11 +457,12 @@ def add_spend(conn, user_id, usd, granted=True, calls=1, extras=False,
     return (float(spent) if spent is not None else None), pool
 
 
-def _meter_tx(conn, user_id, usd, granted, extras, customer=True):
+def _meter_tx(conn, user_id, usd, granted, extras, customer=True,
+              analysis=False):
     """One metered cost and, in the same transaction, the credit line."""
     import claude_credit
     spent, pool = add_spend(conn, user_id, usd, granted, extras=extras,
-                            customer=customer)
+                            customer=customer, analysis=analysis)
     if usd > 0 and not extras and customer:
         claude_credit.check_line(conn)
     return spent, pool
@@ -469,6 +512,11 @@ class Scope:
         self.pool_cap = float(pool_cap if pool_cap is not None
                               else config.CLAUDE_TRIAL_POOL_USD)
         self.pending_usd = 0.0
+        # What this scope is for: "edit" (a turn, the First cut) spends the
+        # allowance; ANALYSIS (an upload's index job) is the product's cost
+        # and spends only the pool.
+        self.purpose = "edit"
+        self.analysis_usd = 0.0
         self.calls = 0
         self.extras_metered_usd = 0.0
         self.meter_errors = 0
@@ -566,16 +614,20 @@ def meter(model, usd, kind="llm"):
     import llm
     import spend_ledger
     customer = llm.spend_lane() == spend_ledger.CUSTOMER
+    analysis = scope.purpose == ANALYSIS and kind != "extras"
     with _meter_lock:
         scope.calls += 1
-        scope.spent_usd += usd
+        if analysis:
+            scope.analysis_usd += usd
+        else:
+            scope.spent_usd += usd
         if not scope.granted:
             scope.pending_usd += usd
         try:
             spent, pool = _metering_db().run(
                 _meter_tx, scope.user_id, usd, scope.granted,
-                kind == "extras", customer)
-            if spent is not None:
+                kind == "extras", customer, analysis)
+            if spent is not None and not analysis:
                 scope.spent_usd = max(scope.spent_usd, float(spent))
         except Exception as exc:  # noqa: BLE001 - the live scope still caps
             scope.meter_errors += 1
@@ -838,7 +890,8 @@ def settle_grant(worker_db, scope, project_id, via="index"):
     try:
         value = flag(worker_db)
         got = worker_db.run(grant, scope.user_id, project_id, via, value,
-                            scope.pending_usd, scope.is_test, True)
+                            scope.pending_usd, scope.is_test, True,
+                            scope.analysis_usd)
     except Exception as exc:  # noqa: BLE001
         print(f"[claude-trial] grant after index failed for "
               f"{scope.user_id}: {str(exc)[:160]}", flush=True)

@@ -2477,6 +2477,18 @@ IMAGE_ATTACH_MAX_PX = int(os.getenv("IMAGE_ATTACH_MAX_PX", "960"))
 VISUAL_SHEET_FRAMES = int(os.getenv("VISUAL_SHEET_FRAMES", "6"))
 VISUAL_SEMANTIC_SHEETS_PER_CALL = int(
     os.getenv("VISUAL_SEMANTIC_SHEETS_PER_CALL", "8"))
+# How many clusters get a model description (visual_index._semantic_sample).
+# Up to FULL every one is described, so a short clip loses nothing; a long
+# source gets an even spread across its clock, one more per LONG_STRIDE
+# clusters past FULL, up to MAX. #861: a 2 h 39 min upload described all of
+# its clusters in 102 Haiku calls ($0.38) when the storyboard digest the editor
+# reads is itself an even sample of about 200 lines. 0 for FULL describes all.
+VISUAL_SEMANTIC_FULL_CLUSTERS = int(
+    os.getenv("VISUAL_SEMANTIC_FULL_CLUSTERS", "480"))
+VISUAL_SEMANTIC_LONG_STRIDE = int(
+    os.getenv("VISUAL_SEMANTIC_LONG_STRIDE", "8"))
+VISUAL_SEMANTIC_MAX_CLUSTERS = int(
+    os.getenv("VISUAL_SEMANTIC_MAX_CLUSTERS", "960"))
 VISUAL_REQUEST_SHEETS_PER_PAGE = int(
     os.getenv("VISUAL_REQUEST_SHEETS_PER_PAGE", "20"))
 VISUAL_FRAME_PARALLELISM = int(os.getenv("VISUAL_FRAME_PARALLELISM", "4"))

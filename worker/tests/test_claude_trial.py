@@ -490,3 +490,139 @@ def test_scout_and_text_calls_follow_the_scope():
         claude_trial.deactivate()
     client, model = llm.agent_client_for(False, "free")
     assert not getattr(client, "is_claude_lane", False)
+
+
+# ── #861: analysis is the product's cost, never the account's allowance ──
+
+def test_an_uploads_analysis_never_spends_the_edit_allowance(monkeypatch):
+    """#861, account 2869: a 2 h 39 min first upload spent $0.38 of Haiku
+    visual semantics in its index, more than the whole $0.32 allowance, so the
+    customer's edits were gone before they asked for anything (and the guard
+    cut the index's own semantics short). The pool still pays analysis."""
+    meter = _Meter()
+    monkeypatch.setattr(claude_trial, "_metering_db", lambda: meter)
+    scope = claude_trial.Scope(2869, 0.32, 0.0, "claude-haiku-5-5",
+                               granted=False)
+    scope.purpose = claude_trial.ANALYSIS
+    claude_trial.activate(scope)
+    try:
+        for _ in range(102):
+            claude_trial.guard_call()
+            claude_trial.meter("claude-haiku-5-5", 0.0037412)
+        assert not claude_trial.budget_stopped()
+    finally:
+        claude_trial.deactivate()
+    assert len(meter.rows) == 102                 # every dollar still metered
+    assert scope.spent_usd == 0.0 and scope.remaining_usd == pytest.approx(0.32)
+    assert scope.analysis_usd == pytest.approx(0.3816, abs=1e-4)
+    assert scope.pending_usd == pytest.approx(0.3816, abs=1e-4)
+
+    granted = []
+
+    class _GrantDb:
+        def run(self, fn, *args):
+            if fn is claude_trial.read_flag:
+                return claude_trial.parse_flag({"on": True})
+            granted.append(args)
+            return {"granted": True, "row": None, "reason": "granted"}
+
+    claude_trial.reset_flag_cache()
+    claude_trial.settle_grant(_GrantDb(), scope, 5543)
+    claude_trial.reset_flag_cache()
+    # The total is carried into the row, and so is how much of it was analysis.
+    (args,) = granted
+    assert args[4] == pytest.approx(0.3816, abs=1e-4)
+    assert args[7] == pytest.approx(0.3816, abs=1e-4)
+
+
+def test_an_edit_turn_still_stops_at_its_allowance(monkeypatch):
+    meter = _Meter()
+    monkeypatch.setattr(claude_trial, "_metering_db", lambda: meter)
+    scope = claude_trial.Scope(2869, 0.32, 0.0, "claude-haiku-5-5")
+    claude_trial.activate(scope)
+    try:
+        claude_trial.meter("claude-haiku-5-5", 0.37)
+        assert claude_trial.budget_stopped()
+    finally:
+        claude_trial.deactivate()
+
+
+def _pg_world():
+    import os
+    url = os.getenv("QUEUE_TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("requires isolated PostgreSQL")
+    import psycopg2
+    import psycopg2.extras
+    conn = psycopg2.connect(url)
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("DROP SCHEMA IF EXISTS trial861 CASCADE; CREATE SCHEMA trial861;"
+                "SET search_path TO trial861")
+    cur.execute("""
+        CREATE TABLE trial_budgets (
+            user_id INTEGER PRIMARY KEY, provider TEXT DEFAULT 'anthropic',
+            cap_usd NUMERIC(10,4) NOT NULL, spent_usd NUMERIC(14,6) DEFAULT 0,
+            calls INTEGER DEFAULT 0, granted_at TIMESTAMPTZ DEFAULT NOW(),
+            granted_project_id INTEGER, granted_via TEXT, device_id TEXT,
+            exhausted_at TIMESTAMPTZ, last_spend_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ DEFAULT NOW());
+        CREATE TABLE trial_budget_days (
+            day DATE PRIMARY KEY, spent_usd NUMERIC(14,6) DEFAULT 0,
+            calls INTEGER DEFAULT 0, grants INTEGER DEFAULT 0,
+            updated_at TIMESTAMPTZ DEFAULT NOW());
+        CREATE TABLE video_jobs (id INTEGER PRIMARY KEY, user_id INTEGER,
+                                 type TEXT);
+        CREATE TABLE llm_calls (id SERIAL PRIMARY KEY, job_id INTEGER,
+                                model TEXT, response JSONB);""")
+    return conn, psycopg2.extras.RealDictCursor
+
+
+def test_2869s_allowance_comes_back_from_spend_by_purpose(monkeypatch):
+    """The row as it stands in production: $0.381583 spent, all of it the
+    index's semantics, exhausted at its grant. Nobody edits the row: read by
+    purpose, the allowance is whole again, and edits spend it as before."""
+    conn, dict_cursor = _pg_world()
+    import claude_credit
+    monkeypatch.setattr(claude_trial, "pool_totals", lambda c: {"pool": 0.0})
+    monkeypatch.setattr(claude_credit, "ledger_ready", lambda c: False)
+    try:
+        cur = conn.cursor()
+        cur.execute("""INSERT INTO trial_budgets (user_id, cap_usd, spent_usd,
+                                                  exhausted_at)
+                       VALUES (2869, 0.32, 0.381583, NOW())""")
+        cur.execute("INSERT INTO video_jobs VALUES (137556, 2869, 'index'), "
+                    "(137600, 2869, 'agent_turn'), (9, 77, 'index')")
+        cur.execute("""INSERT INTO llm_calls (job_id, model, response)
+                       SELECT 137556, 'claude-haiku-5-5',
+                              jsonb_build_object('provider_cost_usd', 0.0037412)
+                         FROM generate_series(1, 102)""")
+        cur.execute("""INSERT INTO llm_calls (job_id, model, response) VALUES
+                       (137556, 'claude-haiku-5-5', '{"provider_cost_usd": null}'),
+                       (9, 'claude-haiku-5-5', '{"provider_cost_usd": 5}')""")
+        row = claude_trial.get_budget(conn.cursor(cursor_factory=dict_cursor)
+                                      .connection, 2869)
+        assert float(row[2]) == 0.0 and row[5] is None       # spent, exhausted
+        assert float(row[7]) == pytest.approx(0.381583)      # the total stays
+
+        spent, _ = claude_trial.add_spend(conn, 2869, 0.05)
+        assert spent == pytest.approx(0.05, abs=1e-4)
+        cur.execute("SELECT spent_usd, exhausted_at FROM trial_budgets")
+        total, exhausted = cur.fetchone()
+        assert float(total) == pytest.approx(0.431583) and exhausted is None
+
+        # An analysis call (a second upload) leaves the allowance alone.
+        spent, _ = claude_trial.add_spend(conn, 2869, 0.2, analysis=True)
+        cur.execute("""INSERT INTO llm_calls (job_id, model, response) VALUES
+                       (137556, 'claude-haiku-5-5', '{"provider_cost_usd": 0.2}')""")
+        assert float(claude_trial.get_budget(conn, 2869)[2]) == \
+            pytest.approx(0.05, abs=1e-4)
+
+        claude_trial.add_spend(conn, 2869, 0.28)              # edits reach the cap
+        cur.execute("SELECT exhausted_at FROM trial_budgets")
+        assert cur.fetchone()[0] is not None
+        row = claude_trial.get_budget(conn, 2869)
+        assert float(row[2]) == pytest.approx(0.33, abs=1e-4) and row[5]
+    finally:
+        conn.cursor().execute("DROP SCHEMA IF EXISTS trial861 CASCADE")
+        conn.close()

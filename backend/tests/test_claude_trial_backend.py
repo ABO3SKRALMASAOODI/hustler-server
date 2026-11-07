@@ -70,3 +70,53 @@ def test_send_due_never_runs_without_the_tables(monkeypatch):
     sent = []
     out = claude_trial.send_due(sender=lambda s, h: sent.append(s) or True)
     assert out["sent"] == 0 and not sent
+
+
+def test_861_the_gate_reads_the_edit_allowance_not_the_analysis(monkeypatch):
+    """Account 2869's row as it stands: $0.381583 spent, all of it its first
+    upload's index semantics, exhausted at the grant. The backend's gate
+    (free_trial) reads the allowance by purpose, so it is whole again with no
+    hand edit; what edits spend still counts."""
+    import os
+    import pytest
+    url = os.getenv("QUEUE_TEST_DATABASE_URL")
+    if not url:
+        pytest.skip("requires isolated PostgreSQL")
+    import psycopg2
+    conn = psycopg2.connect(url)      # one transaction, rolled back
+    cur = conn.cursor()
+    try:
+        cur.execute("DROP SCHEMA IF EXISTS trial861b CASCADE; "
+                    "CREATE SCHEMA trial861b; SET search_path TO trial861b")
+        cur.execute("""
+            CREATE TABLE trial_budgets (user_id INTEGER PRIMARY KEY,
+                cap_usd NUMERIC(10,4), spent_usd NUMERIC(14,6),
+                exhausted_at TIMESTAMPTZ);
+            CREATE TABLE trial_budget_days (day DATE PRIMARY KEY);
+            CREATE TABLE video_jobs (id INTEGER PRIMARY KEY, user_id INTEGER,
+                                     type TEXT);
+            CREATE TABLE llm_calls (id SERIAL PRIMARY KEY, job_id INTEGER,
+                                    model TEXT, response JSONB);
+            INSERT INTO trial_budgets VALUES (2869, 0.32, 0.381583, NOW());
+            INSERT INTO video_jobs VALUES (137556, 2869, 'index'),
+                                          (137600, 2869, 'agent_turn');
+            INSERT INTO llm_calls (job_id, model, response)
+                 SELECT 137556, 'claude-haiku-5-5',
+                        jsonb_build_object('provider_cost_usd', 0.0037412)
+                   FROM generate_series(1, 102);
+            INSERT INTO llm_calls (job_id, model, response) VALUES
+                 (137556, 'claude-haiku-5-5', '{"provider_cost_usd": null}'),
+                 (137600, 'claude-haiku-5-5', '{"provider_cost_usd": 0.1}');""")
+        # the tables live in this test's schema, not public
+        monkeypatch.setattr(claude_trial, "tables_ready", lambda c: True)
+        status = claude_trial.account_status(cur, 2869)
+        assert status["granted"] and not status["exhausted"]
+        assert status["remaining_usd"] == pytest.approx(0.32)
+        cur.execute("UPDATE trial_budgets SET spent_usd = spent_usd + 0.1")
+        status = claude_trial.account_status(cur, 2869)
+        assert status["remaining_usd"] == pytest.approx(0.22, abs=1e-4)
+        cur.execute("UPDATE trial_budgets SET spent_usd = spent_usd + 0.3")
+        assert claude_trial.account_status(cur, 2869)["exhausted"]
+    finally:
+        conn.rollback()
+        conn.close()

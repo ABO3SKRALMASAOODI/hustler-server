@@ -45,11 +45,24 @@ def tables_ready(cur):
     return bool(_v(row, "a", 0) and _v(row, "b", 1))
 
 
+# What the account's index jobs (the analysis of its uploads) spent on Claude.
+# Analysis is the product's cost (owner, 7 Nov 2026, #861): in the running
+# total and the pool, never in the account's allowance. The worker's copy is
+# worker/claude_trial.py ANALYSIS_USD; both read the same rows.
+ANALYSIS_USD = """COALESCE((
+    SELECT SUM(CASE WHEN jsonb_typeof(l.response->'provider_cost_usd') = 'number'
+                    THEN (l.response->>'provider_cost_usd')::numeric END)
+      FROM video_jobs j JOIN llm_calls l ON l.job_id = j.id
+     WHERE j.user_id = trial_budgets.user_id AND j.type = 'index'
+       AND l.model LIKE 'claude%%'), 0)"""
+
+
 def account_status(cur, user_id):
     """{'granted', 'cap_usd', 'spent_usd', 'remaining_usd', 'exhausted'}.
 
-    The shared contract with track B: remaining = cap_usd - spent_usd on
-    trial_budgets. Any failure reads as not granted / nothing remaining."""
+    The shared contract with track B: remaining = cap_usd less the account's
+    EDIT spend, its trial_budgets total less what analysing its uploads cost.
+    Any failure reads as not granted / nothing remaining."""
     empty = {"granted": False, "cap_usd": 0.0, "spent_usd": 0.0,
              "remaining_usd": 0.0, "exhausted": False}
     try:
@@ -57,8 +70,10 @@ def account_status(cur, user_id):
         if not tables_ready(cur):
             cur.execute("RELEASE SAVEPOINT claude_trial_status")
             return empty
-        cur.execute("""SELECT cap_usd, spent_usd, exhausted_at
-                         FROM trial_budgets WHERE user_id = %s""",
+        cur.execute(f"""SELECT cap_usd,
+                               GREATEST(spent_usd - {ANALYSIS_USD}, 0)
+                                   AS spent_usd
+                          FROM trial_budgets WHERE user_id = %s""",
                     (int(user_id),))
         row = cur.fetchone()
         cur.execute("RELEASE SAVEPOINT claude_trial_status")
@@ -78,7 +93,7 @@ def account_status(cur, user_id):
     return {"granted": True, "cap_usd": round(cap, 4),
             "spent_usd": round(spent, 6),
             "remaining_usd": round(max(0.0, cap - spent), 6),
-            "exhausted": bool(_v(row, "exhausted_at", 2)) or spent >= cap - 0.005}
+            "exhausted": spent >= cap - 0.005}
 
 
 def _cycle(cur):

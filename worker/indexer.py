@@ -410,6 +410,9 @@ def _claude_trial_index_scope(worker_db, job):
         return None, None
     scope = decision.scope
     scope.job_id = job.get("id")
+    # Analysis is the product's cost: the pool pays it, never the account's
+    # edit allowance (#861).
+    scope.purpose = claude_trial.ANALYSIS
     recorder = llm.get_recorder()
     if recorder is None:
         recorder = _TrialRecorder(scope, worker_db, job)

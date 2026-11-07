@@ -319,7 +319,32 @@ def _apply_semantic(row, semantic):
         row.setdefault("composition", {})["semantic"] = str(composition)[:500]
 
 
+def _semantic_sample(evidence):
+    """The clusters a model describes: all of them up to
+    VISUAL_SEMANTIC_FULL_CLUSTERS, so a short clip loses nothing. Past that an
+    even spread across the source clock, one more for every
+    VISUAL_SEMANTIC_LONG_STRIDE clusters, up to VISUAL_SEMANTIC_MAX_CLUSTERS:
+    the editor reads the storyboard as an even sample anyway, and every other
+    cluster keeps its measurements and its contact-sheet page, which look_at
+    and open_visual_page read by source time. Analysis is the product's cost
+    and it was the whole bill of #861: 102 calls on a 2 h 39 min upload."""
+    full = int(config.VISUAL_SEMANTIC_FULL_CLUSTERS or 0)
+    count = len(evidence)
+    if full <= 0 or count <= full:
+        return list(evidence)
+    stride = max(1, int(config.VISUAL_SEMANTIC_LONG_STRIDE or 1))
+    ceiling = max(full, int(config.VISUAL_SEMANTIC_MAX_CLUSTERS or full))
+    keep = min(count, ceiling, full + (count - full) // stride)
+    order = sorted(range(count),
+                   key=lambda i: float(evidence[i].get("representative_t") or 0))
+    picks = sorted({order[round(i * (count - 1) / max(1, keep - 1))]
+                    for i in range(keep)})
+    return [evidence[i] for i in picks]
+
+
 def _caption_semantics(evidence, sheets, workdir):
+    sample = _semantic_sample(evidence)
+    sampled = len(sample) < len(evidence)
     cached = {}
     with futures.ThreadPoolExecutor(max_workers=min(8, max(1, len(evidence)))) as pool:
         jobs = {pool.submit(_read_cached_semantics, row["frame_hash"], workdir): row
@@ -330,12 +355,16 @@ def _caption_semantics(evidence, sheets, workdir):
                 cached[row["evidence_id"]] = value
                 _apply_semantic(row, value)
 
-    missing = {row["evidence_id"]: row for row in evidence
+    missing = {row["evidence_id"]: row for row in sample
                if row["evidence_id"] not in cached}
     if not missing:
-        return "cached"
+        return "sampled" if sampled else "cached"
     if not llm.vision_available():
         return "raw_contact_sheets_required"
+    if sampled:
+        # Only the sampled frames travel: the full sheets stay the editor's.
+        sheets = _build_sheets(list(missing.values()),
+                               os.path.join(workdir, "visual_semantic_sheets"))
 
     per_call = max(1, int(config.VISUAL_SEMANTIC_SHEETS_PER_CALL or 8))
     pages = []
@@ -411,11 +440,11 @@ def _caption_semantics(evidence, sheets, workdir):
                 max_workers=max(1, min(int(config.UPLOAD_PARALLELISM or 1),
                                        len(cache_rows)))) as pool:
             list(pool.map(lambda r: _write_cached_semantics(r, workdir), cache_rows))
-    remaining = [row for row in evidence if not row.get("semantic_description")]
+    remaining = [row for row in sample if not row.get("semantic_description")]
     if remaining:
         return ("partial_raw_contact_sheets_required" if any_success else
                 "raw_contact_sheets_required")
-    return "complete"
+    return "sampled" if sampled else "complete"
 
 
 def _chapters(evidence, sentences, duration):

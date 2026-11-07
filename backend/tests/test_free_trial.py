@@ -71,7 +71,7 @@ class DB:
             self._row = {"usd": self.cycle_usd}
         elif "AS cycle" in q:
             self._row = {"month": self.month_usd, "cycle": self.all_usd}
-        elif q.startswith("SELECT cap_usd, spent_usd, exhausted_at FROM trial_budgets"):
+        elif q.startswith("SELECT cap_usd,") and "FROM trial_budgets WHERE" in q:
             self._row = (None if self.account_usd is None else
                          {"cap_usd": self.account_cap,
                           "spent_usd": self.account_usd, "exhausted_at": None})

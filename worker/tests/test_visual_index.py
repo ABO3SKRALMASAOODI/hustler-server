@@ -123,3 +123,66 @@ def test_a_normal_storyboard_digest_is_unchanged():
     assert text == visual_index.compact_text(sb, max_chars=0)
     assert "left out" not in text and text.count("\n- ") == 45
     assert "44 sampled moments carry no description" in text
+
+
+# ── #861: analysis spend is proportionate on long sources ──
+
+def _semantic_world(monkeypatch, clusters):
+    import json
+
+    import llm
+    import storage
+    evidence = [{"evidence_id": f"ve_{i:05d}", "frame_hash": f"{i:064x}",
+                 "representative_t": i * 1.9,
+                 "covered_time_range": [i * 1.9, i * 1.9 + 1], "_path": ""}
+                for i in range(clusters)]
+
+    def sheets(rows, _out):
+        per = int(config.VISUAL_SHEET_FRAMES)
+        return [{"path": f"s{k}", "digest": f"d{k}",
+                 "evidence_ids": [r["evidence_id"] for r in rows[k:k + per]],
+                 "t0": 0, "t1": 1} for k in range(0, len(rows), per)]
+
+    calls = []
+
+    def ask(prompt, paths, **_kw):
+        calls.append(len(paths))
+        return json.dumps([{"evidence_id": i, "semantic_description": "seen"}
+                           for i in json.loads(prompt)])
+
+    monkeypatch.setattr(visual_index, "_build_sheets", sheets)
+    monkeypatch.setattr(visual_index, "_semantic_prompt",
+                        lambda rows: json.dumps([r["evidence_id"] for r in rows]))
+    monkeypatch.setattr(visual_index, "_write_cached_semantics", lambda r, w: None)
+    monkeypatch.setattr(storage, "exists", lambda key: False)
+    monkeypatch.setattr(llm, "vision_available", lambda: True)
+    monkeypatch.setattr(llm, "ask_vision", ask)
+    monkeypatch.setattr(config, "VISION_CAPTION_PARALLELISM", 1)
+    return evidence, sheets(evidence, None), calls
+
+
+def test_861_a_long_source_describes_an_even_sample_not_every_cluster(
+        monkeypatch, tmp_path):
+    """2 h 39 min (p5543): about 4,900 clusters, 102 calls, $0.38 of Haiku."""
+    evidence, sheets, calls = _semantic_world(monkeypatch, 4900)
+    status = visual_index._caption_semantics(evidence, sheets, str(tmp_path))
+    described = [r for r in evidence if r.get("semantic_description")]
+    assert status == "sampled"
+    assert len(calls) <= 20 and sum(calls) <= 160
+    assert len(described) == config.VISUAL_SEMANTIC_MAX_CLUSTERS
+    # spread over the whole clock, first and last moments included
+    assert described[0] is evidence[0] and described[-1] is evidence[-1]
+    gaps = [b["representative_t"] - a["representative_t"]
+            for a, b in zip(described, described[1:])]
+    assert max(gaps) < 3 * (evidence[-1]["representative_t"] / len(described))
+    text = visual_index.compact_text({"version": 1, "semantic_status": status,
+                                      "evidence": evidence})
+    assert "look_at" in text
+
+
+def test_a_short_clip_still_describes_every_cluster(monkeypatch, tmp_path):
+    evidence, sheets, calls = _semantic_world(monkeypatch, 300)
+    status = visual_index._caption_semantics(evidence, sheets, str(tmp_path))
+    assert status == "complete"
+    assert all(r.get("semantic_description") for r in evidence)
+    assert len(calls) == -(-len(sheets) // config.VISUAL_SEMANTIC_SHEETS_PER_CALL)
