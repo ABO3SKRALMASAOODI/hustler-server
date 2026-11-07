@@ -3890,6 +3890,12 @@ def cut_range(ctx, start, end, snap_to_words=None):
     if not new:
         return ("REJECTED: cutting {:.2f}-{:.2f} would remove everything "
                 "that's currently kept.".format(s, e))
+    if new == [list(x) for x in cur]:
+        # 163 calls on one project came back with "may not be supported".
+        return (f"NO CHANGE — source {s:g}-{e:g}s is already out of the edit, "
+                "so there is nothing to cut there. cut_range reads SOURCE "
+                "seconds; to cut what the viewer sees at those times, use "
+                "cut_output_range.")
     # A proven repeated saying is an intentional in-sentence edit. Snapping
     # it to the surrounding clause would silently restore the removed words.
     try:
@@ -13010,6 +13016,7 @@ def _next_item_id(items, prefix):
 
 
 def _resolve_media_asset(ctx, asset_key, kinds):
+    asset_key = tool_dialect.clean_key(asset_key)
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
     if asset and asset["kind"] == "audio" and "audio" not in kinds:
         return None, ("REJECTED: that file is the video's OWN extracted "

@@ -3648,14 +3648,30 @@ def frames_available():
                  "frames" in config.CLOUDFLARE_SYNCHRONOUS_TYPES))
 
 
+def _run_again_past_a_lease(job):
+    """A synchronous call the executor gave up on because its lease ran out
+    while a slot stalled or rolled. Nothing was kept from it and the envelope
+    says retryable, so it runs once more here instead of costing the customer
+    a model call and a failed request (#388)."""
+    try:
+        return _run_remote(dict(job))
+    except Exception as exc:  # noqa: BLE001 - only this one message retries
+        if "exceeded its executor lease" not in str(exc):
+            raise
+        print(f"[remote] {job['type']} retried past a lease: "
+              f"{str(exc)[:160]}", flush=True)
+        return _run_remote(dict(job))
+
+
 def run_frames_remote(project_id, payload, user_id=None):
     """Extract stills from a stored object on the executor. Returns
     frameserve.run_frames_job's dict: per-time storage keys (None where a
     seek failed), errors, and the probed duration. Synchronous, no job row —
     the round-61 capture shape."""
-    return _run_remote({"id": None, "type": "frames",
-                        "project_id": project_id, "user_id": user_id,
-                        "attempts": 0, "payload": payload})
+    return _run_again_past_a_lease({"id": None, "type": "frames",
+                                    "project_id": project_id,
+                                    "user_id": user_id, "attempts": 0,
+                                    "payload": payload})
 
 
 def track_available():
@@ -3850,9 +3866,10 @@ def run_clean_remote(project_id, payload, user_id=None):
     Returns inpaint.run_clean_job's dict — clean_video stats plus the
     before/after ink measurements and object sizes; on success both cleaned
     objects are already uploaded. Synchronous, no job row."""
-    return _run_remote({"id": None, "type": "clean",
-                        "project_id": project_id, "user_id": user_id,
-                        "attempts": 0, "payload": payload})
+    return _run_again_past_a_lease({"id": None, "type": "clean",
+                                    "project_id": project_id,
+                                    "user_id": user_id, "attempts": 0,
+                                    "payload": payload})
 
 
 def stems_available():

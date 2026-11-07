@@ -998,7 +998,7 @@ FAST_READ_FUNCTIONS = {
 
 def main_asset_alias(name, args, notes):
     """agent_tools._normalize_tool_call's repair for the main video's key."""
-    if name in {"get_transcript", "get_audio_analysis"}:
+    if name in {"get_transcript", "get_audio_analysis", "get_words"}:
         key = str(args.get("asset_key") or "").strip().lower()
         if key in {"main", "source", "original", "main_video"}:
             args.pop("asset_key", None)
@@ -1032,6 +1032,8 @@ def run_read(ctx, name, args):
     outcome = tool_outcome.from_legacy(
         out, state_changed=False, idempotent=name in SAFE_READS,
         affected_ranges=[])
+    if outcome.status != "success":
+        return None     # the queued path repairs the call or words the refusal
     return outcome.render_text(), outcome.to_dict()
 
 

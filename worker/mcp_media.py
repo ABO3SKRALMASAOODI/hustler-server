@@ -348,7 +348,9 @@ def _encode(src, dst, *, start, duration, height, video_kbps, fps, has_audio):
     """One small H.264 + AAC copy of a window. CRF for quality, VBV for the
     ceiling: CRF alone cannot promise a size and a fixed bitrate wastes bits
     on a locked-off talking head, so both are set and the cheaper one wins."""
-    cmd = ["ffmpeg", "-y"]
+    # Only errors on stderr: a failure stored its head, which was ffmpeg's
+    # version banner, so the real cause was lost.
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error"]
     if start:
         cmd += ["-ss", f"{start:.3f}"]
     cmd += ["-i", src]

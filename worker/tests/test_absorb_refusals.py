@@ -622,3 +622,68 @@ def test_the_digest_has_one_line_for_each_stretch_of_footage():
              "semantic_description": None}]})
     assert "A silver SUV." in text and "same SUV" not in text
     assert "1 sampled moments carry no description" in text
+
+
+def test_frames_extract_failed_one_more_run_past_a_lease(monkeypatch):
+    import remote
+    calls = []
+
+    def run(job):
+        calls.append(job["type"])
+        if len(calls) == 1:
+            raise RuntimeError("Box frames call exceeded its executor lease "
+                               "while failed")
+        return {"ok": True}
+    monkeypatch.setattr(remote, "_run_remote", run)
+    assert remote.run_frames_remote(1, {}) == {"ok": True} and len(calls) == 2
+
+
+def test_erase_repaint_failed_one_more_run_past_a_lease(monkeypatch):
+    import remote
+    calls = []
+
+    def run(job):
+        calls.append(job["type"])
+        if len(calls) == 1:
+            raise RuntimeError("Box clean call exceeded its executor lease "
+                               "while stopping")
+        return {"ok": True}
+    monkeypatch.setattr(remote, "_run_remote", run)
+    assert remote.run_clean_remote(1, {}) == {"ok": True} and calls == ["clean"] * 2
+
+
+def test_any_other_remote_failure_is_not_retried(monkeypatch):
+    import remote
+
+    def run(job):
+        raise RuntimeError("something else")
+    monkeypatch.setattr(remote, "_run_remote", run)
+    with pytest.raises(RuntimeError):
+        remote.run_frames_remote(1, {})
+
+
+def test_media_copy_failed_keeps_the_real_error(monkeypatch):
+    import mcp_media
+    seen = {}
+    monkeypatch.setattr(mcp_media.media, "run",
+                        lambda cmd, timeout=None: seen.update(cmd=cmd))
+    mcp_media._encode("a.mp4", "b.mp4", start=0, duration=1, height=480,
+                      video_kbps=500, fps=24.0, has_audio=False)
+    assert seen["cmd"][:5] == ["ffmpeg", "-y", "-hide_banner", "-loglevel",
+                               "error"]
+
+
+def test_no_change_says_why_a_cut_found_nothing(monkeypatch):
+    edl = fx_edl()
+    edl["keep"] = [[0.0, 10.0], [20.0, 30.0]]
+    ctx = ctx_with(edl)
+    ctx.clamp = float
+    out = agent_tools.cut_range(ctx, 12.0, 13.0)
+    assert out.startswith("NO CHANGE") and "already out of the edit" in out
+
+
+def test_get_words_main_alias_on_the_fast_path():
+    import read_tools
+    args = {"asset_key": "main", "start": 1}
+    read_tools.main_asset_alias("get_words", args, [])
+    assert args == {"start": 1}
