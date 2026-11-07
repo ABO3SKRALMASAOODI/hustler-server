@@ -72,8 +72,12 @@ def test_the_internal_list_is_the_ops_loops():
     assert spend_ledger.INTERNAL_USER_IDS == set(EXCLUDED_USER_IDS)
 
 
-def test_a_table_the_release_must_have():
-    assert "spend_ledger" in DATABASE_REQUIRED_RELATIONS
+def test_the_table_is_optional_until_migration_043_lands():
+    """Production's schema is applied by hand, and the code runs without this
+    table (ready() is False: charge is a no-op, the fence stays open and says
+    so). Readiness must not answer 503 for it. Once 043 is on production, add
+    spend_ledger back to DATABASE_REQUIRED_RELATIONS and flip this line."""
+    assert "spend_ledger" not in DATABASE_REQUIRED_RELATIONS
     sql = (ROOT / "backend/migrations/043_spend_ledger.sql").read_text()
     assert "CREATE TABLE IF NOT EXISTS spend_ledger" in sql
     assert "CHECK (lane IN ('customer', 'internal', 'replay'))" in sql
