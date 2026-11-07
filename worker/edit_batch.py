@@ -659,6 +659,12 @@ def _fit_operation(op, before, notes):
             op["value"] = {**extra, **op["value"]}
         elif "value" not in op:
             op["value"] = extra
+    if op.get("action") == "set" and "value" in op and op["value"] is None \
+            and layer in ITEM_LAYERS and (before or {}).get(layer):
+        # Nothing does not mean delete what is there: a batch that also sets
+        # effects sent fx null, and 89 dissolves hung on the reading of it.
+        notes.append(f"{layer} left as it is: to clear it, set it to []")
+        return {**op, "action": "noop"}
     value = op.get("value")
     if isinstance(value, str) and value.strip()[:1] in ("[", "{"):
         try:
@@ -842,6 +848,8 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                              '"id"}, for example {"action": "upsert", "layer": '
                              '"texts", "id": "tx1", "value": {"end": 5}}.')
         action, layer = op.get("action"), op.get("layer")
+        if action == "noop":
+            continue
         if layer == "text":
             layer = op["layer"] = "texts"
         # An explicitly named object is an item patch, never a replacement

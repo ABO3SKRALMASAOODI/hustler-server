@@ -987,3 +987,36 @@ def test_an_ease_says_how_little_of_its_window_moves(zoom_ctx):
     moving = agent_tools.add_zoom(zoom_ctx, start=5.0, end=9.0, mode="push_in",
                                   strength=0.05, cx=0.5, cy=0.5)
     assert "holds still" not in moving
+
+
+def test_a_null_set_on_fx_keeps_what_is_there():
+    fx = [{"id": "jn1", "type": "junction", "stage": "junction", "at": 4.0,
+           "style": "dissolve", "duration_s": 1.0, "device": "junction_dissolve"}]
+    out, notes = batch({"keep": [[0.0, 60.0]], "fx": fx}, [
+        {"action": "set", "layer": "effects", "value": {"fade_out_s": 1.0}},
+        {"action": "set", "layer": "fx", "value": None}])
+    assert [i["id"] for i in out["fx"]] == ["jn1"]
+    assert out["effects"]["fade_out_s"] == 1.0
+    assert any("set it to []" in n for n in notes)
+
+
+class _BatchCtx(_ZoomCtx):
+    project_id = 1
+    duration = 60.0
+    db = SimpleNamespace(run=lambda *a, **k: set())
+
+    def __init__(self, version, written):
+        super().__init__()
+        self.version, self.versions_written = version, written
+
+    def latest_edl(self):
+        return {"version": self.version, "json": self.edl}
+
+
+@pytest.mark.parametrize("written,works", [([4, 5], True), ([5], False), ([], False)])
+def test_a_batch_builds_on_this_requests_own_versions_only(written, works):
+    ctx = _BatchCtx(5, written)
+    out = agent_tools.apply_edit_batch(
+        ctx, 3, [{"action": "set", "layer": "effects", "value": {"fade_out_s": 1.0}}], "x")
+    assert out.startswith("EDL") is works, out
+    assert ("current EDL is v5" in out) is (not works)

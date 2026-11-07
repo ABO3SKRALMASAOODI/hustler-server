@@ -30635,7 +30635,16 @@ def apply_edit_batch(ctx, base_version, operations, operation_id):
     import playback_plan
     row = ctx.latest_edl()
     if row["version"] != base_version:
-        return f"REJECTED: current EDL is v{row['version']}; read it before rebuilding this batch."
+        # Versions this request wrote itself are not a conflict: a batch sent
+        # beside other calls in one model step names the version it started
+        # from (p5520's replay). Another writer's version still stops it.
+        ours = set(getattr(ctx, "versions_written", None) or ())
+        if not (isinstance(base_version, int)
+                and base_version in range(1, row["version"])
+                and ours.issuperset(range(base_version + 1, row["version"] + 1))):
+            return f"REJECTED: current EDL is v{row['version']}; read it before rebuilding this batch."
+        call_note(ctx, f"base_version {base_version}: built on v{row['version']}, "
+                       "this request's own latest")
     try:
         keys = ctx.db.run(edit_batch.project_media_keys, ctx.project_id) or set()
         batch_notes = []
