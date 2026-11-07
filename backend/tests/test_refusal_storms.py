@@ -427,17 +427,23 @@ def test_the_daily_email_limit_cannot_swallow_it(world, monkeypatch):
     assert "ran out of credits" in sent[0][1]
 
 
-def test_over_the_limit_the_rest_is_not_marked_sent(world, monkeypatch):
+def test_over_the_limit_only_not_handled_goes_and_the_rest_waits(world,
+                                                                  monkeypatch):
+    """NOT HANDLED is the one to act on (owner, 7 Nov 2026): it goes past the
+    daily cap; a P0 a Fixer holds waits unclaimed for room."""
     t = open_p0(world)
+    other = open_p0(world, key="auto-job-final-oom")
+    store.set_fixing(world.c, other["id"], "on it")
     world.c.execute("INSERT INTO app_kv (key, value) VALUES (%s, %s)",
                     (cockpit._count_key(world.clock.now),
                      json.dumps({"n": cockpit.MAX_ALERT_EMAILS_PER_DAY})))
     world.clock.now += 11 * MIN
     sent = []
     alert_tick(world, monkeypatch, sent)
-    assert sent == []
+    assert [s for s, _ in sent] and len(sent) == 1
+    assert sent[0][0].startswith(f"NOT HANDLED, act now: P0 #{t['id']} ")
     world.c.execute("SELECT count(*) AS n FROM app_kv WHERE key LIKE %s",
-                    (f"cockpit_alert:unhandled:{t['id']}%",))
+                    (f"cockpit_alert:p0:{other['id']}:%",))
     assert world.c.fetchone()["n"] == 0
 
 

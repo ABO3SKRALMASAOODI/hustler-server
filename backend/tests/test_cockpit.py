@@ -466,28 +466,31 @@ class AlertCur:
         return None
 
     def fetchall(self):
-        return list(self.tickets)
+        return list(self.tickets) if "FROM tickets" in self.sql[-1] else []
+
+
+def _p0_row(tid, title, at):
+    return {"id": tid, "title": title, "severity": "P0", "status": "open",
+            "last_seen": at, "created_at": at, "updated_at": at,
+            "history": [
+                {"event": "opened", "at": at.isoformat(), "severity": "P0"},
+                {"event": "failure", "at": at.isoformat(), "user": 2837,
+                 "detail": "out of memory"}]}
 
 
 def test_alerts_are_only_a_blocked_customer_nobody_handled():
-    opened = NOW - timedelta(minutes=45)
-    fresh = NOW - timedelta(minutes=5)
-    cur = AlertCur(tickets=[
-        {"id": 7, "cause_key": "auto-job-index-oom", "title": "index failed",
-         "severity": "P0", "status": "open", "occurrences": 2,
-         "recurrence_count": 0, "first_seen": opened, "last_seen": opened,
-         "created_at": opened, "updated_at": opened, "opened_at": opened,
-         "users": 1},
-        {"id": 8, "cause_key": "auto-job-final-oom", "title": "final failed",
-         "severity": "P0", "status": "open", "occurrences": 1,
-         "recurrence_count": 0, "first_seen": fresh, "last_seen": fresh,
-         "created_at": fresh, "updated_at": fresh, "opened_at": fresh,
-         "users": 1}])
-    items = alerts.event_alerts(cur, NOW - timedelta(minutes=5), NOW)
+    now = alerts.STATE_MAIL_FROM + timedelta(days=1)
+    opened = now - timedelta(minutes=45)
+    fresh = now - timedelta(minutes=5)
+    cur = AlertCur(tickets=[_p0_row(7, "index failed", opened),
+                            _p0_row(8, "final failed", fresh)])
+    items = alerts.event_alerts(cur, now - timedelta(minutes=5), now)
     keys = [k for k, _, _ in items]
     # Ticket 8 is 5 minutes old: the Fixer still has time; 7 waited 45.
-    assert keys == [f"unhandled:7:{opened:%Y%m%dT%H%M}"]
-    assert "the Fixer has not started" in items[0][2]
+    assert keys == [f"p0:7:{opened:%Y%m%dT%H%M%S}:not-handled:"
+                    f"{opened:%Y%m%dT%H%M%S}"]
+    assert items[0][1].startswith("NOT HANDLED, act now: P0 #7 index failed")
+    assert "the Mac may be asleep" in items[0][2]
     assert "ticket=7" in items[0][2]
     # Only the owner can pay a provider: one alert a day while it lasts.
     cur = AlertCur(quota={"n": 3, "users": 2, "error": "insufficient_quota"})

@@ -83,6 +83,9 @@ def world(monkeypatch):
     monkeypatch.setattr(intake, "_customers", lambda: "TRUE")
     monkeypatch.setattr(intake, "_tables_ready", lambda cur: True)
     monkeypatch.setattr(store, "_now", lambda: clock.now)
+    # These P0s open after the owner's state emails were switched on.
+    import cockpit_alerts
+    monkeypatch.setattr(cockpit_alerts, "STATE_MAIL_FROM", T0 - timedelta(days=30))
     # The first pass starts from here, so earlier tests' windows do not apply.
     store.put_state(c, intake.WATERMARK_KEY, {"at": T0.isoformat()})
     yield World(conn, c, clock)
@@ -811,6 +814,36 @@ def test_a_p0_released_with_its_fix_live_is_no_customer_blocked_email(world):
     assert intake.unhandled(world.c, world.clock.now + timedelta(hours=1)) == []
 
 
+def test_every_p0_has_a_state_for_the_owner_read_from_the_table(world):
+    """Owner, 7 Nov: every P0 is mailed with whether it was handled. The
+    states come from the real tickets table and the store's own events."""
+    tid = p0(world)
+    assert intake.p0_states(world.c, world.clock.now + MIN)[0]["state"] is None
+    got = intake.p0_states(world.c, world.clock.now + intake.UNHANDLED_AFTER)
+    assert [(s["id"], s["state"]) for s in got] == [(tid, "NOT HANDLED")]
+    world.clock.now += 12 * MIN
+    store.set_fixing(world.conn.cursor(), tid, "on it")
+    got = intake.p0_states(world.c, world.clock.now)
+    assert got[0]["state"] == "BEING FIXED"
+    assert got[0]["claimed_at"] == world.clock.now
+    world.clock.now += 30 * MIN
+    store.mark_live(world.conn.cursor(), tid, "b" * 40)
+    t = world.only_ticket()
+    store.release_fixing(world.conn.cursor(), tid,
+                         t["updated_at"].isoformat(), "live, waiting on replay")
+    got = intake.p0_states(world.c, world.clock.now + timedelta(hours=7))
+    assert got[0]["state"] == "FIX LIVE" and got[0]["variant"] == "b" * 12
+    assert got[0]["replay_owed"] and not got[0]["stuck_now"]
+    world.clock.now += timedelta(hours=1)
+    store.record_failure(world.conn.cursor(), {
+        "ref": "job:9", "source": "job", "at": world.clock.now, "user_id": 2846,
+        "cause_key": "auto-x", "project_id": 5600, "severity": "P0",
+        "title": "x", "detail": "d"})
+    got = intake.p0_states(world.c, world.clock.now + intake.UNHANDLED_AFTER)
+    assert got[0]["state"] == "NOT HANDLED"
+    assert got[0]["failed_after_fix_at"] == world.clock.now
+
+
 def test_the_alert_gives_the_5_minute_watch_its_turn_and_no_more(world):
     tid = p0(world)
     assert intake.UNHANDLED_AFTER == timedelta(minutes=10)
@@ -1026,10 +1059,19 @@ def test_the_digest_says_what_is_held_and_who_stopped():
 
 def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeypatch):
     import cockpit_alerts
-    now = datetime(2026, 11, 6, 8, 0, tzinfo=timezone.utc)
-    monkeypatch.setattr(intake, "unhandled", lambda cur, at: [{
-        "id": 77, "title": "A request ended partial", "status": "fixing",
-        "users": 3, "waiting_min": 400, "opened_at": now}])
+    now = datetime(2026, 11, 8, 8, 0, tzinfo=timezone.utc)
+    claim, failed = now - timedelta(hours=7), now - timedelta(hours=2)
+    row = {"id": 77, "title": "A request ended partial", "severity": "P0",
+           "status": "fixing", "last_seen": failed, "history": [
+               {"event": "opened", "at": (claim - 5 * MIN).isoformat(),
+                "severity": "P0"},
+               {"event": "failure", "at": (claim - 5 * MIN).isoformat(),
+                "user": 1},
+               {"event": "fixing", "at": claim.isoformat()},
+               {"event": "failure", "at": failed.isoformat(), "user": 2},
+               {"event": "failure", "at": failed.isoformat(), "user": 3}]}
+    monkeypatch.setattr(intake, "p0_states", lambda cur, at: [
+        dict(intake.p0_state(row, at), row=row)])
     monkeypatch.setattr(intake, "silent_agents", lambda cur, at: [{
         "agent": "p0_watch", "last_at": now, "silent_min": 125}])
 
@@ -1039,9 +1081,13 @@ def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeyp
 
         def fetchone(self):
             return {}
+
+        def fetchall(self):
+            return []
     got = cockpit_alerts.event_alerts(C(), now, now)
     text = " ".join(line for _k, _s, line in got)
-    assert "no fix landed" in text and "#77" in text
+    assert "the run has probably died" in text and "P0 #77" in text
+    assert "3 customers" in text
     assert "p0_watch" in text and "2 h 5 min" in text
-    assert {s for _k, s, _l in got} == {"Customer blocked, not handled yet",
-                                        "An automatic agent stopped"}
+    assert got[0][1].startswith("NOT HANDLED, act now: P0 #77 ")
+    assert [s for _k, s, _l in got][1:] == ["An automatic agent stopped"]

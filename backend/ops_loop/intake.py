@@ -47,9 +47,10 @@ error sentence says. A failure is filed at once at P1 and looked at again when
 its grace runs out (ops_loop.recovery): still stuck, it goes to P0, and the
 Mac's P0 watch (check_fixer.sh p0, every 5 minutes, up to 3 Fixers at once)
 starts a Fixer; got past it, the ticket stays open for the daily Fixer and nobody
-is paged. A P0 nobody
-picked up within UNHANDLED_AFTER, or a claim gone stale, and a scheduled agent
-that stopped running are what the owner is emailed about (cockpit_alerts).
+is paged. Every P0 is
+emailed to the owner with where it stands (p0_state: NOT HANDLED, BEING FIXED,
+FIX LIVE, STILL STUCK), as is a scheduled agent that stopped running
+(cockpit_alerts).
 
 Writes go through ops_loop.store (tickets only, guarded); reads are bounded
 by time and use the existing (updated_at|created_at, ...) indexes.
@@ -733,6 +734,172 @@ def pending_p0(cur, now=None, stale=FIXING_STALE):
                            OR (status = 'fixing' AND {CLAIMED_AT} < %s))
                     ORDER BY id""", (now - RELEASE_QUIET, now - stale))
     return [dict(r) for r in cur.fetchall()]
+
+
+# ── Where each P0 stands, for the owner's email (owner, 7 Nov 2026) ───────
+# "i should still receive the mail so i dont miss something and i become blind
+# but its a good idea to indicate whether it was handled correctly or not so i
+# know whether i should freak out or no". Every P0 episode is mailed once its
+# state is known (claimed, or UNHANDLED_AFTER from its opening), then again only
+# when it turns to one of MAILED_CHANGES (cockpit_alerts).
+NOT_HANDLED = "NOT HANDLED"     # nobody on it: the one to act on
+BEING_FIXED = "BEING FIXED"     # a Fixer holds the claim
+FIX_LIVE = "FIX LIVE"           # a fix is live and nobody failed since
+STILL_STUCK = "STILL STUCK"     # failed after the fix, or handed back unfixed
+MAILED_CHANGES = (FIX_LIVE, STILL_STUCK, NOT_HANDLED)
+P0_MAIL_WINDOW = timedelta(days=3)  # a state change always touches the ticket
+
+
+def _hist_at(h):
+    try:
+        return _aware(datetime.fromisoformat(
+            str(h.get("at")).replace("Z", "+00:00")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _episode(history, now):
+    """The latest episode of a ticket as of `now`, read from its history in the
+    order it was written: when it opened and became P0, the Fixers' claims,
+    hand-backs and fixes put live, and the customers' failures."""
+    ep = None
+    for h in history or []:
+        if not isinstance(h, dict):
+            continue
+        at = _hist_at(h)
+        if at is None or at > now:
+            continue
+        ev = h.get("event")
+        if ev in ("opened", "recurred", "reopened"):
+            ep = {"opened_at": at, "declared": h.get("severity"),
+                  "escalated": None, "claims": [], "releases": [],
+                  "lives": [], "failures": [], "closed_at": None}
+        elif ep is None:
+            continue
+        elif ev == "escalated" and h.get("severity", "P0") == "P0":
+            ep["escalated"] = ep["escalated"] or at
+        elif ev == "failure":
+            ep["failures"].append((at, h.get("user"), h.get("detail")))
+        elif ev == "fixing":
+            ep["claims"].append(at)
+        elif ev == "released":
+            ep["releases"].append(at)
+        elif ev == "live":
+            ep["lives"].append((at, str(h.get("sha") or "")))
+        elif ev == "fixed":
+            ep["closed_at"] = at
+            if not ep["lives"] and h.get("fix_sha"):
+                ep["lives"].append((at, str(h["fix_sha"])))
+    if ep:
+        # A P1 raised to P0 is the owner's from the raising.
+        ep["p0_at"] = (ep["escalated"] if ep["declared"] not in (None, "P0")
+                       and ep["escalated"] else ep["opened_at"])
+    return ep
+
+
+def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
+    """Where the latest episode of P0 ticket `t` (a tickets row with its
+    history) stands at `now`, in the owner's four words, or state None while
+    it is not known yet: opened under `after` ago and unclaimed, or a customer
+    failed after the fix under `after` ago and no Fixer answered yet.
+
+      NOT HANDLED  a customer is stuck and no Fixer claimed, shipped or handed
+                   it back since, `after` on (the rule of unhandled()); or a
+                   claim older than `stale` that a customer failed after
+      FIX LIVE     the latest fix is live and no customer failed after it
+      STILL STUCK  a customer failed after the fix went live, or a Fixer
+                   handed it back with no fix live: customers still wait
+      BEING FIXED  a Fixer holds the claim and nothing is live yet
+
+    `variant` tells one occurrence of a state from the next (the sha, the
+    failure that started the wait), so the email is deduplicated per change."""
+    now = _aware(now)
+    ep = _episode(t.get("history"), now)
+    if not ep or t.get("status") not in ("open", "fixing", "fixed"):
+        return None
+    status = t["status"]
+    p0_at = ep["p0_at"]
+    fails = [f[0] for f in ep["failures"]]
+    last_seen = _aware(t.get("last_seen"))
+
+    def first_failure_after(x):
+        later = [f for f in fails if f > x]
+        if later:
+            return min(later)
+        if last_seen and x < last_seen <= now:
+            return last_seen     # past FAILURE_REFS_KEPT: no entry, only the time
+        return None
+
+    claims, releases = ep["claims"], ep["releases"]
+    live_at, sha = ep["lives"][-1] if ep["lives"] else (None, None)
+    handled = max(claims + releases + [x for x, _ in ep["lives"]],
+                  default=None)
+    stuck = (p0_at if handled is None else first_failure_after(handled)) \
+        if status != "fixed" else None
+    after_fix = first_failure_after(live_at) if live_at else None
+    users = {f[1] for f in ep["failures"] if f[1] is not None}
+    users_after = {f[1] for f in ep["failures"]
+                   if f[1] is not None and live_at and f[0] > live_at}
+    details = [f[2] for f in ep["failures"] if f[2]]
+    state = variant = None
+    if stuck and status == "open" and now - stuck >= after:
+        state, variant = NOT_HANDLED, f"{stuck:%Y%m%dT%H%M%S}"
+    elif stuck and status == "fixing" and claims and \
+            now - claims[-1] >= stale:
+        state, variant = NOT_HANDLED, f"stale{claims[-1]:%Y%m%dT%H%M%S}"
+    elif live_at and not after_fix:
+        state, variant = FIX_LIVE, sha[:12]
+    elif live_at:
+        answered = any(x > after_fix for x in claims + releases)
+        if answered or now - after_fix >= after:
+            state, variant = STILL_STUCK, sha[:12]
+    elif status == "fixing":
+        state, variant = BEING_FIXED, (f"{claims[-1]:%Y%m%dT%H%M%S}"
+                                       if claims else "claimed")
+    elif claims:
+        state, variant = STILL_STUCK, "no-fix"
+    last_fail = max(fails + ([last_seen] if last_seen and last_seen > p0_at
+                             and last_seen <= now else []), default=None)
+    return {
+        "id": t["id"], "title": t.get("title") or "", "status": status,
+        "state": state, "variant": variant, "p0_at": p0_at,
+        "claimed_at": claims[0] if claims else None,
+        "last_claim_at": claims[-1] if claims else None,
+        "reclaimed_at": max((c for c in claims if after_fix and c > after_fix),
+                            default=None),
+        "released_at": releases[-1] if releases else None,
+        "live_sha": sha, "live_at": live_at, "closed_at": ep["closed_at"],
+        "replay_owed": bool(live_at) and status != "fixed",
+        "failed_after_fix_at": after_fix,
+        "customers": len(users) or int(t.get("users") or 0) or 1,
+        "customers_after_fix": len(users_after) or (1 if after_fix else 0),
+        "stuck_now": bool(not live_at or after_fix),
+        "stuck_since": stuck, "last_failure_at": last_fail,
+        "what": details[-1] if details else None,
+        "stale_claim": state == NOT_HANDLED and status == "fixing",
+    }
+
+
+def p0_states(cur, now=None):
+    """p0_state for every P0 ticket touched within P0_MAIL_WINDOW, with its
+    row under 'row' (the cockpit re-reads a state as it stood at a moment)."""
+    now = _aware(now) or datetime.now(timezone.utc)
+    if not _tables_ready(cur):
+        return []
+    cur.execute("""SELECT id, title, severity, status, history, last_seen,
+                          created_at, updated_at
+                     FROM tickets
+                    WHERE severity = 'P0'
+                      AND status IN ('open', 'fixing', 'fixed')
+                      AND GREATEST(updated_at, last_seen) >= %s
+                    ORDER BY id""", (now - P0_MAIL_WINDOW,))
+    out = []
+    for r in cur.fetchall():
+        s = p0_state(dict(r), now)
+        if s:
+            s["row"] = dict(r)
+            out.append(s)
+    return out
 
 
 def watch_beat(cur, now=None):
