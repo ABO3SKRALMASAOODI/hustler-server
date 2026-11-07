@@ -18,7 +18,7 @@ MAX_REPAIR_PASSES = 3
 UNDO_TOOLS = frozenset((
     "remove_aspect_shift", "remove_blur", "remove_broll",
     "remove_cursor_enhance", "remove_depth_time",
-    "remove_editorial_graphic", "remove_erase", "remove_finish",
+    "remove_editorial_graphic", "remove_erase", "remove_filmstrip", "remove_finish",
     "remove_insert", "remove_motion_graphic", "remove_music",
     "remove_overlay", "remove_picture_card", "remove_punctuation",
     "remove_region_effect", "remove_screen_frame", "remove_screen_takeover",
