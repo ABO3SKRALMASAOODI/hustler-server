@@ -5,8 +5,10 @@ Writes <work>/perception.json in the shape the compiler and the Brief read:
   shots     per index shot: framing, camera drift, exposure, sharpness, noise, free regions
   text      text-like regions that stay put, from the index's spatial track
   palette   dominant colours and the accents really in the frame
-Faces and text regions come from the index (spatial.py). There is no body or pose track on this
-path, so `body` stays None and the gestures that ride one are not offered.
+Faces and text regions come from the index (spatial.py); where the index saw no face, this pass looks
+again on its own larger frames, and a person seen without a face gives `person` (where type keeps
+off his head). There is no body or pose track, so `body` stays None and the gestures that ride one
+are not offered.
 """
 import json
 import os
@@ -181,6 +183,72 @@ def face_at(spatial_rows, t):
     return max(r["faces"], key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
 
 
+class Subjects:
+    """Faces and people on the frames this pass already decodes, where the index saw none. The index
+    reads a 360 px still with a 24 px smallest face, so a man walking in a showroom (p5302: a face 6.6%
+    of the frame wide) was never seen and every caption sat on his head. Signal only: Haar faces from
+    3% of the width, and the HOG people detector on a spaced subset for a back or a profile."""
+    PEOPLE_MAX = 24
+
+    def __init__(self, n):
+        import subject
+        self.cascades = subject._cascades(cv2)[:1]
+        self.hog = None
+        try:
+            self.hog = cv2.HOGDescriptor()
+            self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+        except Exception:  # noqa: BLE001 no people detector: faces only
+            self.hog = None
+        self.every = max(1, n // self.PEOPLE_MAX)
+        self.i = 0
+
+    def face(self, gray):
+        h, w = gray.shape[:2]
+        best = None
+        for c in self.cascades:
+            try:
+                m = max(16, w // 34)
+                found = c.detectMultiScale(cv2.equalizeHist(gray), scaleFactor=1.08, minNeighbors=6, minSize=(m, m))
+            except Exception:  # noqa: BLE001
+                continue
+            for (x, y, bw, bh) in found:
+                if best is None or bw * bh > best[2] * best[3]:
+                    best = (x, y, bw, bh)
+        if best is None:
+            return None
+        x, y, bw, bh = best
+        return [x / w, y / h, (x + bw) / w, (y + bh) / h]
+
+    def person(self, frame):
+        self.i += 1
+        if self.hog is None or (self.i - 1) % self.every:
+            return None
+        h, w = frame.shape[:2]
+        k = min(1.0, 400.0 / w)
+        small = cv2.resize(frame, (int(w * k) // 2 * 2, int(h * k) // 2 * 2)) if k < 1 else frame
+        try:
+            rects, weights = self.hog.detectMultiScale(small, winStride=(8, 8), padding=(8, 8), scale=1.06)
+        except Exception:  # noqa: BLE001
+            return None
+        best = None
+        for (x, y, bw, bh), wt in zip(rects, np.ravel(weights) if len(rects) else []):
+            if float(wt) < 0.5 or bh < 0.25 * small.shape[0]:
+                continue
+            if best is None or bw * bh > best[2] * best[3]:
+                best = (x, y, bw, bh)
+        if best is None:
+            return None
+        x, y, bw, bh = best
+        sh, sw = small.shape[:2]
+        return [x / sw, y / sh, (x + bw) / sw, (y + bh) / sh]
+
+
+def head_of_person(b):
+    """The head inside a standing person's box: the top fifth, the middle half."""
+    w, h = b[2] - b[0], b[3] - b[1]
+    return [b[0] + 0.28 * w, b[1] + 0.02 * h, b[2] - 0.28 * w, b[1] + 0.2 * h]
+
+
 def run(index, src, work):
     vid = index.get("video") or {}
     dur, W, H = float(vid.get("duration") or 0), int(vid.get("width") or 0), int(vid.get("height") or 0)
@@ -191,13 +259,17 @@ def run(index, src, work):
     h = int(round(H * w / W)) // 2 * 2
     rows = (index.get("spatial") or {}).get("samples") or []
     samples, keep, prev = [], [], None
+    seer = Subjects(int(dur / step) + 1)
     for t, f in frames(src, step, w, h):
         gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)
         st = stats(gray)
-        face = face_at(rows, t)
+        face = face_at(rows, t) or seer.face(gray)
+        person = None if face else seer.person(f)
         diff = None if prev is None else round(float(np.abs(gray.astype(np.int16) - prev).mean()), 2)
         prev = gray.astype(np.int16)
-        samples.append(dict(t=t, face=[round(float(v), 4) for v in face] if face else None, body=None, diff=diff, persons=1 if face else 0, **st))
+        samples.append(dict(t=t, face=[round(float(v), 4) for v in face] if face else None, body=None, diff=diff, persons=1 if face or person else 0, **st))
+        if person:
+            samples[-1]["person"] = [round(float(v), 4) for v in person]
         keep.append((t, f))
     if not samples:
         raise ValueError("no frames could be read from the footage")
