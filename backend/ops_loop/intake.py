@@ -743,39 +743,22 @@ def pending_p0(cur, now=None, stale=FIXING_STALE):
 
 
 # ── Where each P0 stands, for the owner's email (owner, 7 Nov 2026) ───────
-# "i should still receive the mail so i dont miss something and i become blind
-# but its a good idea to indicate whether it was handled correctly or not so i
-# know whether i should freak out or no". Then, the same day, about #883: "try
-# not to make it annoying. I just received 9 minutes ago being fixed, and then
-# 4 minutes later I received still stuck. So how it is being fixed and still
-# stuck?" #883's Fixer handed it back because the customer had left mid-upload,
-# and the hand-back read as STILL STUCK although no fix had shipped. And: "it is
-# stupid that I need to act ... what I'm gonna do is I'm gonna come to you and
-# tell you". So each state says what the SYSTEM is doing; the email asks the
-# owner for nothing unless only the owner can fix the cause (cockpit_alerts).
-NOT_HANDLED = "NOT HANDLED"     # nobody on it, or handed back with no fix while
-#                                 our side could still help: the email says why
+# p0_state reads one P0 episode from the ticket's history: who holds it, what
+# is live, what was proven. The owner's email (cockpit_alerts.p0_alerts) sends
+# only three kinds, and every ISSUE ends in FIXED or BLOCKED: "you need to make
+# sure that you actually don't accidentally start omitting issues or things
+# that gets unfixed".
+NOT_HANDLED = "NOT HANDLED"     # nobody on it, or handed back with no fix
 BEING_FIXED = "BEING FIXED"     # a Fixer holds the claim
 FIX_LIVE = "FIX LIVE"           # the fix is live and nobody failed since
-WAITING_ON_CUSTOMER = "WAITING ON CUSTOMER"  # our side is ready; only the
-#                                 customer's return moves it (release flag)
-STILL_STUCK = "STILL STUCK"     # a fix shipped, a customer failed after it and
-#                                 nobody holds it: the watch takes it again
-# "you must be sure that it's fixed ... we shouldn't just trust a ticket": a
-# live fix is proven by a VERIFY replay (verify_watch.py, FIXER.md VERIFY mode).
+WAITING_ON_CUSTOMER = "WAITING ON CUSTOMER"  # release --waiting-on-customer
+STILL_STUCK = "STILL STUCK"     # a customer failed after the fix, nobody on it
 FIXED = "FIXED"                 # proven: 'verified', or closed through the gate
-NOT_FIXED = "NOT FIXED"         # the proof failed ('verify_failed'): a Fixer
-#                                 takes it again at once, no quiet
-# At most P0_MAILS_PER_EPISODE emails per episode: its first state that held
-# P0_MAIL_HOLD (NOT HANDLED and STILL STUCK at once), then its outcome (never
-# BEING FIXED). A state that changes within the hold replaces the pending one.
-# FIX LIVE, not proven yet, is the outcome only once P0_PROOF_WAIT passed
-# with no proof: the proof (FIXED or NOT FIXED) is the outcome that wins.
-HELD = (BEING_FIXED, FIX_LIVE, WAITING_ON_CUSTOMER, FIXED, NOT_FIXED)
-P0_MAIL_HOLD = timedelta(minutes=10)
-P0_PROOF_WAIT = timedelta(hours=2)
-P0_MAILS_PER_EPISODE = 2
-P0_MAIL_WINDOW = timedelta(days=3)  # a state change always touches the ticket
+NOT_FIXED = "NOT FIXED"         # the proof failed ('verify_failed')
+P0_ISSUE_AFTER = timedelta(minutes=10)   # ISSUE: first claim, or this long
+P0_PROOF_BOUND = timedelta(hours=4)      # BLOCKED if not proven by then,
+P0_BLOCKED_REPEAT = timedelta(hours=24)  # and again every this long
+P0_MAIL_WINDOW = timedelta(days=3)  # closed ones stay this long; open ones always
 
 
 def _hist_at(h):
@@ -803,7 +786,8 @@ def _episode(history, now):
             ep = {"opened_at": at, "declared": h.get("severity"),
                   "escalated": None, "claims": [], "releases": [],
                   "lives": [], "failures": [], "proofs": [],
-                  "closed_at": None}
+                  "verify_failed": [], "release_note": None,
+                  "wont_fix": None, "closed_at": None}
         elif ep is None:
             continue
         elif ev == "escalated" and h.get("severity", "P0") == "P0":
@@ -815,19 +799,25 @@ def _episode(history, now):
         elif ev == "released":       # (at, waiting on customer, quiet)
             ep["releases"].append((at, h.get("waiting_on_customer") or None,
                                    True))
+            ep["release_note"] = h.get("note")
         elif ev == "verify_failed":  # a hand-back the watch takes at once
             ep["releases"].append((at, None, False))
-            ep["proofs"].append((at, False))
+            ep["proofs"].append((at, False, None))
+            ep["verify_failed"].append((at, h.get("note")))
+            ep["release_note"] = h.get("note")
         elif ev == "verified":
-            ep["proofs"].append((at, True))
+            ep["proofs"].append((at, True, h.get("replay")))
+        elif ev == "wont_fix":
+            ep["wont_fix"] = (at, h.get("reason"))
         elif ev == "live":
             ep["lives"].append((at, str(h.get("sha") or "")))
         elif ev == "fixed":
             ep["closed_at"] = at
             if not ep["lives"] and h.get("fix_sha"):
                 ep["lives"].append((at, str(h["fix_sha"])))
-            ep["proofs"].append((at, True))  # closed only through the gate
+            ep["proofs"].append((at, True, h.get("replay")))  # the gate
     if ep:
+        ep["is_p0"] = ep["declared"] in (None, "P0") or bool(ep["escalated"])
         # A P1 raised to P0 is the owner's from the raising.
         ep["p0_at"] = (ep["escalated"] if ep["declared"] not in (None, "P0")
                        and ep["escalated"] else ep["opened_at"])
@@ -861,7 +851,8 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
     is when the state began, for the hold."""
     now = _aware(now)
     ep = _episode(t.get("history"), now)
-    if not ep or t.get("status") not in ("open", "fixing", "fixed"):
+    if not ep or not ep["is_p0"] or t.get("status") not in (
+            "open", "fixing", "fixed", "wont_fix"):
         return None
     status = t["status"]
     p0_at = ep["p0_at"]
@@ -879,15 +870,15 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
     claims, releases = ep["claims"], ep["releases"]
     released_at, waiting, quiet = releases[-1] if releases else (None,) * 3
     live_at, sha = ep["lives"][-1] if ep["lives"] else (None, None)
-    proof_at, proven = max(((a, ok) for a, ok in ep["proofs"]
-                            if live_at and a >= live_at),
-                           default=(None, None), key=lambda p: p[0])
+    proof_at, proven, replay = max(((a, ok, r) for a, ok, r in ep["proofs"]
+                                    if live_at and a >= live_at),
+                                   default=(None,) * 3, key=lambda p: p[0])
     handled = max(claims + [r for r, *_ in releases]
                   + [x for x, _ in ep["lives"]], default=None)
     # The first failure nobody answered: since the opening, or since a Fixer
     # last claimed, shipped or handed it back.
     stuck = (p0_at if handled is None else first_failure_after(handled)) \
-        if status != "fixed" else None
+        if status in ("open", "fixing") else None
     after_fix = first_failure_after(live_at) if live_at else None
     reclaimed = max((c for c in claims if after_fix and c > after_fix),
                     default=None)
@@ -928,6 +919,15 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
                                      + _stamp(released_at), released_at)
     elif status == "open" and stuck and now - stuck >= after:
         state, variant, since = NOT_HANDLED, _stamp(stuck), stuck + after
+    # When the watch should have a Fixer on it and none does (pending_p0):
+    # open past its grace, a plain hand-back's quiet over, or a dead claim.
+    due_at = None
+    if status == "open" and stuck:
+        due_at = stuck + after
+    elif status == "open" and releases and not waiting:
+        due_at = released_at + (RELEASE_QUIET if quiet else timedelta()) + after
+    elif status == "fixing" and claims:
+        due_at = claims[-1] + stale
     last_fail = max(fails + ([last_seen] if last_seen and last_seen > p0_at
                              and last_seen <= now else []), default=None)
     return {
@@ -937,6 +937,18 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
         "last_claim_at": claims[-1] if claims else None,
         "reclaimed_at": reclaimed,
         "verified_at": proof_at if proven else None,
+        "proof": replay if proven else None,
+        "verify_fails": len(ep["verify_failed"]),
+        "verify_note": (ep["verify_failed"][-1][1] if ep["verify_failed"]
+                        else None),
+        "release_note": ep["release_note"],
+        "waiting_now": (waiting if status == "open" and releases and
+                        stuck is None and not proven else None),
+        "due_at": due_at,
+        "wont_fix_at": ep["wont_fix"][0] if ep["wont_fix"] else None,
+        "wont_fix_reason": (ep["wont_fix"][1] if ep["wont_fix"] else None)
+        or t.get("wont_fix_reason"),
+        "root_cause": t.get("root_cause"),
         "verify_failed_at": proof_at if proof_at and not proven else None,
         "retaken_at": max((c for c in claims if proof_at and c > proof_at),
                           default=None),
@@ -965,12 +977,17 @@ def p0_states(cur, now=None):
     now = _aware(now) or datetime.now(timezone.utc)
     if not _tables_ready(cur):
         return []
+    # Any ticket whose history was ever P0 (a P0 lowered to P1 stays the
+    # owner's until it is proven), open ones however old, closed ones for
+    # P0_MAIL_WINDOW: nothing unproven drops out of the email.
     cur.execute("""SELECT id, title, severity, status, history, last_seen,
-                          created_at, updated_at
+                          created_at, updated_at, root_cause, wont_fix_reason
                      FROM tickets
-                    WHERE severity = 'P0'
-                      AND status IN ('open', 'fixing', 'fixed')
-                      AND GREATEST(updated_at, last_seen) >= %s
+                    WHERE (severity = 'P0'
+                           OR history @> '[{"severity": "P0"}]'::jsonb)
+                      AND (status IN ('open', 'fixing')
+                           OR (status IN ('fixed', 'wont_fix')
+                               AND GREATEST(updated_at, last_seen) >= %s))
                     ORDER BY id""", (now - P0_MAIL_WINDOW,))
     out = []
     for r in cur.fetchall():

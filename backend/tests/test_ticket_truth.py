@@ -1151,6 +1151,6 @@ def test_the_owner_hears_when_an_agent_stops_and_when_a_claim_goes_stale(monkeyp
     assert "the run has probably died" in text and "P0 #77" in text
     assert "3 customers" in text
     assert "p0_watch" in text and "2 h 5 min" in text
-    assert got[0][1].startswith("NOT HANDLED, needs you (wake the Mac): "
-                                "P0 #77 ")
+    assert got[0][1] == "Blocked: A request ended partial (P0 #77)"
+    assert "wake the Mac" in got[0][2]
     assert [s for _k, s, _l in got][1:] == ["An automatic agent stopped"]
