@@ -254,6 +254,18 @@ def test_a_burn_is_light_never_an_opaque_white_box_or_white_frames(tmp_path):
     assert rep["burns_as_glow"] == 1 and rep["burns_as_light"] == 2
 
 
+def test_a_two_frame_white_flash_lowers_to_a_flash_validate_edl_accepts(tmp_path):
+    """Every first product replay fell at the write: a 2-frame white flash lowered to a 0.07 s vector."""
+    import schemas
+    beats = [{"k": "b", "id": "b01", "w": "0-20", "job": "j", "cut": "pulse 1", "pic": "main",
+              "do": [{"g": "flash", "at": "w4", "f": 2, "mode": "white"}, {"g": "flash", "at": "w9", "f": 2, "mode": "tint", "c": "#E11F79"}]}]
+    edl, locals_, rep = _lowered(tmp_path, beats)
+    schemas.validate_edl(edl, 20.0)
+    assert not edl["vectors"] and rep["fills_as_flash"] == 2
+    kinds = sorted(f["kind"] for f in edl["fx"] if f["id"].startswith("fl."))
+    assert kinds == ["colour_hit", "white_hit"]
+
+
 def test_a_lowered_film_passes_validate_edl(tmp_path):
     import schemas
     beats = [{"k": "b", "id": "b01", "w": "0-12", "job": "j", "cut": "pulse 0.8", "pic": "main", "type": "0-2|3-5|6-8",
@@ -392,3 +404,26 @@ def test_a_call_inside_its_marks_returns_its_text(monkeypatch):
     r = call.stream("claude-opus-5-5", "s", [], max_tokens=100, effort="medium", purpose="director_direct",
                     deadline=t0 + 3.0, first_text_by=t0 + 2.0)
     assert r.text == '{"k":"film"}\n' and r.stop == "end_turn" and recorded[0][0] == "director_direct"
+
+
+GESTURE_ARGS = {"hold": {"pic": {"plate": "#C2080D"}}, "cuts": {"pic": [{"plate": "#C2080D"}, "main"]}, "salvo": {"pic": [{"plate": "#111111"}, "main"]},
+                "page": {"t": "HELLO"}, "big": {"t": "HELLO"}, "line": {"t": "hello there"}, "card": {"pic": "main", "w": .5, "h": .3, "rot": -4},
+                "band": {"pic": "main"}, "neg_card": {"rect": [.1, .2, .5, .4]}, "flash": {"mode": "white"}, "burn": {}, "tiles": {"mode": "fill", "c": "#FFE600"},
+                "punch": {}, "counter": {"from": 1, "to": 29}, "pile": {"pic": ["main", "main"]}, "split": {"pic": ["main", "main"]},
+                "glitch": {"rect": [.2, .2, .5, .4]}, "boxes": {"rect": [.2, .2, .6, .5]}, "slat": {}, "shake": {}, "chip": {"t": "HEY"}, "echo": {},
+                "type_on": {"t": "typing"}, "wall": {"pic": ["main", "main", "main", "main"]}, "ticker": {"t": "news"}}
+
+
+@pytest.mark.parametrize("gesture", sorted(compiler.TODAY_GESTURES))
+def test_every_offered_gesture_lowers_to_an_edl_the_write_accepts(tmp_path, gesture):
+    """A film the write refuses falls to the chain and costs the customer the wait. Each gesture today's
+    renderer is offered, at short and long spans and up to the last word, must lower to a valid EDL."""
+    import schemas
+    idx = talk_index(30.0)
+    for at, f in (("w3", 2), ("w6..w14", 8), ("w2..w3", 1), ("each_cut", 3)):
+        lines = [FILM, {"k": "b", "id": "b01", "w": "0-200", "job": "j", "cut": "pulse 0.6", "pic": "main",
+                        "do": [{"g": gesture, "at": at, "f": f, **GESTURE_ARGS[gesture]}],
+                        "snd": [{"s": "impact_1", "at": "s9.e"}, {"s": "whoosh_soft_1", "at": at}]}]
+        comp = compiler.compile_score("\n".join(json.dumps(x) for x in lines) + "\n", index=idx)
+        edl, _locals, _rep = lower.lower(comp.l1, str(tmp_path))
+        schemas.validate_edl(edl, 30.0)

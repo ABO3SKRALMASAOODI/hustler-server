@@ -15,7 +15,11 @@ DEADLINE_S = 150.0
 SCOUT_S, SUPPLY_S = 16.0, 26.0
 FILM_USD = 0.70            # what one film may spend: the dearest slice run was $0.56, and a Look and a Scout are under a cent
 DEFAULTS = {"mode": "off", "percent": 100, "test_user_ids": [], "deadline_s": DEADLINE_S, "max_source_s": MAX_SOURCE_S, "film_usd": FILM_USD,
-            "models": {"scout": "claude-haiku-5-5", "direct": "claude-opus-5-5"}, "effort": {"direct": "medium"}}
+            "models": {"scout": "claude-haiku-5-5", "direct": "claude-opus-5-5"}, "effort": {"direct": "low"}}
+# Effort, measured on copies through this path (director/first-result): at medium the slice's Scores ended
+# 68-148 s after the call and a p5302 replay was still writing at 131 s, past the deadline, so about half
+# the films would fall to the chain after the wait. At low, Direct took 19-31 s and its repair 12-22 s on
+# all three sessions. Which effort scores higher is the Gauntlet's question: the row's effort.direct sets it.
 
 
 def parse(raw):
@@ -44,7 +48,8 @@ def parse(raw):
     if not all(m.startswith("claude-") for m in out["models"].values()):
         return dict(DEFAULTS)       # OpenAI is no customer rung until the Gauntlet clears it
     effort = data.get("effort") if isinstance(data.get("effort"), dict) else {}
-    out["effort"] = {"direct": str(effort.get("direct") or "medium")}
+    e = str(effort.get("direct") or DEFAULTS["effort"]["direct"])
+    out["effort"] = {"direct": e if e in ("low", "medium", "high", "xhigh", "max") else DEFAULTS["effort"]["direct"]}
     return out
 
 

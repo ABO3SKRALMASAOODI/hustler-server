@@ -335,6 +335,8 @@ def _make(ctx, worker_db, job, cfg, deadline, work, rec):
         raise Fall("direct", f"refused: {exc}")
     except direct.Empty as exc:
         raise Fall("direct", f"empty: {exc}")
+    with open(os.path.join(work, "score.jsonl"), "w", encoding="utf-8") as f:
+        f.write(text)
     rec["direct"] = {k: usage.get(k) for k in ("rounds", "q_first", "q_repair", "repair_kept", "asks_open", "truncated")}
     m = comp.meter
     rec["meter"] = {k: m.get(k) for k in ("dur_s", "beats", "cuts10", "new_pictures10", "type_events10", "captions", "cards", "flashes", "sounds10", "ceiling")}

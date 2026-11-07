@@ -448,6 +448,20 @@ def lower_flashes(l1, bake, rep):
                 rep["fills_too_short"] = rep.get("fills_too_short", 0) + 1
                 continue
             c = rect_mid(r) or (0, 0, 1, 1)
+            if (b - a) / fps < TX_MIN_S:
+                # A flash cut of a frame or two. A vector is 0.3 s at least (validate_edl refused every
+                # first replay's film on it), so it lands as today's flash: the picture mixed to its colour.
+                ink = (it.get("c") or "#FFFFFF").upper()
+                item = {"id": f"fl.{it['id']}"[:80], "type": "accent", "stage": "pre_captions", "start": r2(a / fps), "end": r2(b / fps),
+                        "intensity": round(min(float(rect_mid([it.get("a", 1)]) if isinstance(it.get("a"), list) else it.get("a", 1)), 1.0), 3)}
+                item.update({"kind": "white_hit"} if ink in ("#FFFFFF", "#FFF") else {"kind": "colour_hit", "colour": ink})
+                if item["end"] <= item["start"]:
+                    item["end"] = r2(item["start"] + 1 / fps)
+                if not full(c):
+                    item["region"] = {"shape": "rect", "box": [round(float(x), 4) for x in c]}
+                fx.append(item)
+                rep["fills_as_flash"] = rep.get("fills_as_flash", 0) + 1
+                continue
             al = it.get("a", 1)
             vec = {"id": f"vc.{it['id']}"[:60], "kind": "rectangle", "start": r2(a / fps), "end": r2(b / fps), "x": round((c[0] + c[2]) / 2, 4),
                    "y": round((c[1] + c[3]) / 2, 4), "width": round(max(c[2] - c[0], 0.002), 4), "height": round(max(c[3] - c[1], 0.002), 4),
@@ -502,7 +516,7 @@ def src_at(l1, f, fps):
     return best
 
 
-def lower_captions(l1, rep):
+def lower_captions(l1, rep, src_dur=0.0):
     """Chunks as dictated items, each at its own height. The second voice falls away: one style to an item."""
     import captions as caplib
     fps, H = float(l1["fps"]), l1["frame"][1]
@@ -558,6 +572,10 @@ def lower_captions(l1, rep):
                 st.update(edge_style(st["color"]))
                 rep["captions_edged"] = rep.get("captions_edged", 0) + 1
             out.append({"text": text.replace("\n", " "), "start": r2(s0), "end": r2(max(s1, s0 + 0.06)), "style": st})
+    if src_dur:
+        for c in out:
+            c["end"] = r2(min(c["end"], src_dur))
+        out = [c for c in out if c["end"] - c["start"] >= 0.06]
     rep["captions"] = len(out)
     return out
 
@@ -773,18 +791,36 @@ def lower(l1, work):
         if s.get("trim_s"):
             item["offset_s"] = r2(s["trim_s"])
         sfx.append(item)
+    # Source time never passes the source: the air after a last word can reach past its end, and
+    # validate_edl refuses the whole film for a caption 0.02 s over it.
+    src_dur = float(((l1.get("assets") or {}).get("main") or {}).get("dur") or 0)
+    if src_dur:
+        keep = [[a, r2(min(b, src_dur))] for a, b in keep if min(b, src_dur) - a > 0.04]
     prog = sum(k[1] - k[0] for k in keep) + sum(float(i.get("duration_s") or 0) for i in inserts)
     for ov in overlays + pool_ov + cards:      # keep spans round to 0.01: the last overlay must not outrun the programme by a rounding
         if isinstance(ov.get("duration_s"), (int, float)) and float(ov["start"]) + float(ov["duration_s"]) > prog:
             ov["duration_s"] = max(OV_MIN_S, math.floor((prog - float(ov["start"])) * 100) / 100)
+    # Programme time never passes the programme: the source clamp above can end it a frame early.
+    lim = math.floor(prog * 100) / 100
+    zooms = [dict(z, end=min(z["end"], lim)) for z in zooms if min(z["end"], lim) - z["start"] >= 0.05]
     effects = {"zooms": zooms}
     if gc:
         effects["grade_custom"] = gc
     if stylize:
         effects["stylize"] = stylize
     edl = {"keep": keep, "frame": {"ratio": "9:16", "mode": "crop"} if l1["frame"][1] > l1["frame"][0] else {"ratio": "16:9", "mode": "crop"},
-           "inserts": inserts, "captions": lower_captions(l1, rep), "sfx": sfx, "overlays": overlays + pool_ov + cards + lower_script_type(l1, bake, rep),
+           "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + lower_script_type(l1, bake, rep),
            "texts": lower_texts(l1, rep, runs), "vectors": vectors, "fx": tr_fx + flash_fx, "effects": effects, "master": {"loudness": "social"}}
+    for lane, least in (("texts", TX_MIN_S), ("vectors", TX_MIN_S), ("fx", 1 / fps)):
+        kept = []
+        for it in edl[lane]:
+            if it["end"] > lim:
+                it["end"] = lim
+                it["start"] = min(it["start"], r2(lim - least))
+            if it["end"] - it["start"] >= least - 1e-6 and it["start"] >= 0:
+                kept.append(it)
+        edl[lane] = kept
+    edl["sfx"] = [s for s in edl["sfx"] if float(s["at"]) <= lim - 0.05]       # validate_edl: a sound within 0.05 s of the end renders nothing
     if "flash_modes_dropped" in rep:
         rep["flash_modes_dropped"] = dict(rep["flash_modes_dropped"])
     rep["counts"] = {k: len(edl[k]) for k in ("keep", "inserts", "overlays", "texts", "vectors", "fx", "sfx", "captions")}
