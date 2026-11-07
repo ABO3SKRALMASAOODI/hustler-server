@@ -869,6 +869,13 @@ def reaper():
     while True:
         time.sleep(60)
         publish_mcp_catalog(worker_db)
+        # A request a budget or subscribe gate refused runs once the gate's
+        # reason is gone, without the customer resending (P0 #861).
+        try:
+            import gate_lift
+            gate_lift.sweep(worker_db)
+        except Exception as e:                          # pragma: no cover
+            print(f"[reaper] gate_lift: {e}", flush=True)
         try:
             # Two ways a job runs out of road, and BOTH have to end visibly.
             # fail_exhausted_jobs is the refundable budget (attempts); the

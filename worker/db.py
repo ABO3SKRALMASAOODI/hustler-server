@@ -3676,6 +3676,33 @@ def resolve_pending_auto_resume(conn, project_id, session_id, user_id,
         if not cur.fetchone():
             return {"state": "consumed", "job_id": None}
 
+    state, lane = saved_request_admission(conn, project_id, user_id, gated)
+    if state == "gated":
+        mark_message_subscribe_gated(conn, message_id)
+        return {"state": "gated", "job_id": None}
+    if state == "no_credits":
+        return {"state": "no_credits", "job_id": None}
+
+    job_payload = dict(payload or {})
+    job_payload["message_id"] = int(message_id)
+    job_payload["auto_resumed"] = True
+    job_payload.update(lane)
+    job_id = enqueue_job(
+        conn, project_id, user_id, "agent_turn", job_payload)
+    return dict({"state": "enqueued", "job_id": job_id},
+                **({"trial": True} if lane.get("trial_lane") else {}))
+
+
+def saved_request_admission(conn, project_id, user_id, gated=None):
+    """May a saved request of this account run on this project now?
+
+    ("enqueue", lane payload) | ("gated", {}) | ("no_credits", {}). The one
+    answer for the index's auto-resume and for gate_lift (a request one of
+    these gates refused runs once the reason is gone, P0 #861). ``gated`` is
+    subscribe_gate_applies' answer when the caller already holds it (that
+    call locks the account row)."""
+    if gated is None:
+        gated = subscribe_gate_applies(conn, user_id)
     if gated:
         # The account's free-trial project (owner decision D2): the saved
         # brief runs as a trial turn on the Claude lane while the trial
@@ -3687,24 +3714,11 @@ def resolve_pending_auto_resume(conn, project_id, session_id, user_id,
                 and claude_lane.available()
                 and first_cut.trial_requests_on(conn, user_id)
                 and first_cut.trial_remaining_usd(conn, user_id) > 0.002):
-            job_payload = dict(payload or {})
-            job_payload.update({"message_id": int(message_id),
-                                "auto_resumed": True, "trial_lane": True})
-            job_id = enqueue_job(
-                conn, project_id, user_id, "agent_turn", job_payload)
-            return {"state": "enqueued", "job_id": job_id, "trial": True}
-        mark_message_subscribe_gated(conn, message_id)
-        return {"state": "gated", "job_id": None}
-
+            return "enqueue", {"trial_lane": True}
+        return "gated", {}
     if user_credits_balance(conn, user_id) < 1.0:
-        return {"state": "no_credits", "job_id": None}
-
-    job_payload = dict(payload or {})
-    job_payload["message_id"] = int(message_id)
-    job_payload["auto_resumed"] = True
-    job_id = enqueue_job(
-        conn, project_id, user_id, "agent_turn", job_payload)
-    return {"state": "enqueued", "job_id": job_id}
+        return "no_credits", {}
+    return "enqueue", {}
 
 
 def has_index_greet(conn, session_id, greet_key):

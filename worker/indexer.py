@@ -1583,14 +1583,19 @@ def _subscribe_gate_message(subject="request"):
             "once the plan is active.")
 
 
-def _subscribe_gate_meta(kind="index_ready"):
+def _subscribe_gate_meta(kind="index_ready", request_message_id=None):
     # The Studio already renders this durable worker reply as its inline plan
     # card.  ``subscribe_gate`` distinguishes it in audits from a zero-balance
     # wall; the generic flags preserve compatibility with older frontends.
-    return {"kind": kind, "auto_resume": False,
+    # ``request_message_id`` names the refused request, so gate_lift runs it
+    # once the gate's reason is gone (P0 #861) and retires this card.
+    meta = {"kind": kind, "auto_resume": False,
             "credits_exhausted": True,
             "free_trial_exhausted": True,
             "subscribe_gate": True}
+    if request_message_id is not None:
+        meta["request_message_id"] = int(request_message_id)
+    return meta
 
 
 def _finish_setup(worker_db, project_id, session_id, info, index,
@@ -1685,7 +1690,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                         worker_db.run(
                             dbx.add_message, session_id, "assistant",
                             _subscribe_gate_message("short-edit request"),
-                            _subscribe_gate_meta("direct_short"))
+                            _subscribe_gate_meta("direct_short", found["id"]))
                     elif state == "enqueued":
                         print(f"[index] project {project_id}: "
                               f"{info['duration']:.1f}s direct short — "
@@ -1715,7 +1720,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
         print(f"[index] shorts routing failed: {e}", flush=True)
 
     pending, out_of_credits, subscribe_gated = None, False, False
-    pending_job_id = None
+    pending_job_id = gated_message_id = None
     # Not behind any provider's key: the turn picks its own lane, and a request
     # typed during analysis IS the first edit. Behind config.OPENAI_API_KEY an
     # unset key skipped this and the customer got a generic First cut instead
@@ -1732,6 +1737,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                 state = resolved.get("state")
                 if state == "gated":
                     subscribe_gated = True
+                    gated_message_id = found["id"]
                 elif state == "enqueued":
                     pending = found
                     pending_job_id = resolved.get("job_id")
@@ -1830,7 +1836,7 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
                            "reindex": True,
                            "credits_exhausted": True})
         elif session_id and subscribe_gated:
-            meta = _subscribe_gate_meta()
+            meta = _subscribe_gate_meta(request_message_id=gated_message_id)
             meta["reindex"] = True
             worker_db.run(dbx.add_message, session_id, "assistant",
                           _subscribe_gate_message(), meta)
@@ -1857,7 +1863,8 @@ def _finish_setup(worker_db, project_id, session_id, info, index,
             if first_cut_job:
                 meta["first_cut_job_id"] = first_cut_job
             if subscribe_gated:
-                meta.update(_subscribe_gate_meta())
+                meta.update(_subscribe_gate_meta(
+                    request_message_id=gated_message_id))
             if asset_id is not None:
                 try:
                     # ON CONFLICT against the partial unique index — two live
