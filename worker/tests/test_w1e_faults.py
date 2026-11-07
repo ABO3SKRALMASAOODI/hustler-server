@@ -138,8 +138,8 @@ def test_every_fault_times_every_1e_device_renders(fault, media, tmp_path,
 
 def test_a_crowded_preview_spends_its_budget_and_says_so(media, tmp_path):
     """Twenty-one devices in a 10 s preview: the resolver spends the +30 %
-    preview budget in program order and omits the rest WITH the reason;
-    the render still ships at its exact length."""
+    preview budget in program order and draws the rest past it WITH the
+    reason; the render still ships at its exact length."""
     norm = validate_edl(_spec(), SRC_S).model_dump()
     rows = []
     tok = fxgraph.collect(rows)
@@ -154,4 +154,5 @@ def test_a_crowded_preview_spends_its_budget_and_says_so(media, tmp_path):
     full = [r for r in report if r["rung"] == "full"]
     over = [r for r in report if "budget" in (r["reason"] or "")]
     assert full and over, report
-    assert all(r["rung"] != "full" for r in over)
+    assert all(r["rung"] != "omit" for r in over), report
+    assert any("drawn past the budget" in r["reason"] for r in over), report
