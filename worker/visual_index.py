@@ -509,9 +509,25 @@ def _digest_line(row):
         f"measured faces={len(row.get('faces') or [])}, "
         f"text_regions={len(row.get('text_geometry') or [])}, "
         f"motion={row.get('motion_state')}")
-    return (f"- {row.get('evidence_id')} | SOURCE {row.get('source_clock')} "
-            f"| covers {ranges or 'exact instant'} | shots "
-            f"{row.get('shot_ids') or [row.get('shot_id')]} | {description}")
+    return f"- {ranges or row.get('source_clock')}: {description}"
+
+
+def _digest_rows(rows):
+    """One line for each stretch of footage, in clock order. Samples of the
+    same shot say the same thing, and an unread sample says nothing a look
+    would not say better: a slideshow's 137 rows repeated 83 shots."""
+    seen, out, unread = set(), [], 0
+    for row in rows:
+        place = tuple(tuple(span) for span in row.get("covered_ranges") or []) \
+            or row.get("evidence_id")
+        if place in seen:
+            continue
+        if not row.get("semantic_description"):
+            unread += 1
+            continue
+        seen.add(place)
+        out.append(row)
+    return out, unread
 
 
 def compact_text(storyboard, include_all=True, max_chars=None):
@@ -532,7 +548,11 @@ def compact_text(storyboard, include_all=True, max_chars=None):
     rows = storyboard.get("evidence") or []
     if not include_all:
         rows = rows[:30]
+    rows, unread = _digest_rows(rows)
     lines = [_digest_line(row) for row in rows]
+    if unread:
+        head += (f" {unread} sampled moments carry no description yet: "
+                 "look_at reads any of them by source time.")
     total = len(head) + sum(len(x) + 1 for x in lines)
     if not max_chars or total <= max_chars:
         return "\n".join([head] + lines)

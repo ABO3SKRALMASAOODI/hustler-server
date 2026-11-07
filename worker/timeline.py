@@ -667,6 +667,9 @@ def broll_coverage(edl, min_scale=0.8):
     return round(total, 2), round(covered, 2), (round(bare[0], 2), round(bare[1], 2))
 
 
+_PROGRAM_RUN_MIN = 4
+
+
 def describe_program(edl, name_of=None):
     """Multi-line, viewer-ordered scene listing of the assembled program.
 
@@ -687,12 +690,39 @@ def describe_program(edl, name_of=None):
              f"{'s' if len(blocks) != 1 else ''}, {total:g}s, in the order "
              "the VIEWER sees them (output seconds). \"The second scene\" "
              "means scene 2 of THIS list:"]
+    # Scenes that simply follow each other in the footage are one line: the
+    # map exists to resolve "the second scene", and 83 lines saying the same
+    # thing were resent on every model call of a slideshow.
+    run = []
+
+    def flush():
+        if len(run) < _PROGRAM_RUN_MIN:
+            for b in run:
+                lines.append(f"  scene {b['n']}  {b['out_start']:g}-"
+                             f"{b['out_end']:g}s: main footage "
+                             f"{b['src_start']:g}-{b['src_end']:g}s "
+                             "(source clock)")
+        else:
+            offset = run[0]["src_start"] - run[0]["out_start"]
+            clock = ("output time = source time" if abs(offset) < 0.01
+                     else f"source time = output time + {offset:g}s")
+            lines.append(
+                f"  scenes {run[0]['n']}-{run[-1]['n']}  "
+                f"{run[0]['out_start']:g}-{run[-1]['out_end']:g}s: main "
+                f"footage in source order ({clock}), scene starts: "
+                + ", ".join(f"{b['out_start']:g}" for b in run))
+        run.clear()
+
     for b in blocks:
         span = f"  scene {b['n']}  {b['out_start']:g}-{b['out_end']:g}s: "
         if b["kind"] == "footage":
-            lines.append(span + f"main footage {b['src_start']:g}-"
-                         f"{b['src_end']:g}s (source clock)")
+            if run and not (
+                    abs(run[-1]["src_end"] - b["src_start"]) < 0.02
+                    and abs(run[-1]["out_end"] - b["out_start"]) < 0.02):
+                flush()
+            run.append(b)
         else:
+            flush()
             name = None
             if name_of:
                 try:
@@ -713,6 +743,7 @@ def describe_program(edl, name_of=None):
                           else "black bars") + ")")
             lines.append(span + f"inserted {b['media']} '{label}' "
                          f"[{b['id']}]{frm}{reg}")
+    flush()
     return "\n".join(lines)
 
 

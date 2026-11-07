@@ -30879,11 +30879,9 @@ TOOLS = {
           "enum": list(AGENT_TOOL_DOMAINS)}}}),
     "load_tools": (
         load_tools,
-        "Load exact capabilities or complete editorial departments for the "
-        "rest of this logical user request. Loading is additive and may be "
-        "expanded at any time; there is no tool-count allowance. Prefer exact "
-        "names when only a few operations are needed and domains for broad "
-        "cross-department work.",
+        "Load tools for the rest of this request. Name exactly the tools you "
+        "will use, all at once: every loaded tool is resent on each later "
+        "step, so a whole department is only for broad work across it.",
         {"names": {"type": "array", "items": {"type": "string"}},
          "domains": {"type": "array", "items": {"type": "string",
                                                    "enum": list(

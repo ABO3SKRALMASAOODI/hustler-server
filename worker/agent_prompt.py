@@ -239,7 +239,8 @@ def system_prompt():
 
 def project_state_block(video, index_summary, edl_line, history_lines,
                         music_assets, keep_line=None, captions_line=None,
-                        program_lines=None, media_lines=None):
+                        program_lines=None, media_lines=None,
+                        follow_up=False):
     lines = ["CURRENT PROJECT STATE", video, "", index_summary, "",
              f"Current EDL: {edl_line}"]
     if program_lines:
@@ -272,6 +273,14 @@ def project_state_block(video, index_summary, edl_line, history_lines,
     # claim. The generic open-catalog chain is retired after production showed
     # it consuming search turns without producing an asset. Keep only paths
     # that work: a user link/upload, or explicit named-song discovery.
+    if follow_up:
+        # The same rules, once, in the words the model already has: it read
+        # them in full on the project's first request.
+        lines.append("Music only when the user asks or supplies a track, "
+                     "never on your own initiative: offer library tracks with "
+                     "ask_user and place the one THEY pick. Sound library: "
+                     "list_sound_library. B-roll: search_stock, find_footage.")
+        return "\n".join(lines)
     import sfx_search
     import song_find
     import music_library

@@ -456,3 +456,169 @@ def test_ask_held_a_question_the_editor_can_decide_goes_back_once(monkeypatch):
 def test_question_judge_any_doubt_lets_the_question_through():
     assert question_need.needed(None, "m", "edit", "which?") is True
     assert question_need.needed(object(), "m", "", "which?") is True
+
+
+# ── the turn's tool list and cache (TURN_COST.md) ──
+
+def _tool(name):
+    return {"type": "function", "function": {
+        "name": name, "description": name,
+        "parameters": {"type": "object", "properties": {}}}}
+
+
+def test_a_turns_tool_list_never_changes_and_a_new_tool_rides_a_reference():
+    import claude_lane
+    plan = claude_lane.tool_plan([_tool("get_edl")],
+                                 [_tool("get_edl"), _tool("add_zoom"),
+                                  _tool("add_text")], "medium")
+    msgs = [{"role": "user", "content": "go"},
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "c1", "type": "function",
+                "function": {"name": "load_tools", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "loaded"}]
+    assert claude_lane.surface_tools(
+        plan, msgs, [_tool("get_edl"), _tool("add_zoom")]) == ["add_zoom"]
+    assert claude_lane.surface_tools(
+        plan, msgs, [_tool("get_edl"), _tool("add_zoom")]) == []
+    first = claude_lane._plan_tools(plan, "claude-haiku-5-5")
+    assert [t["name"] for t in first] == ["get_edl", "add_text", "add_zoom"]
+    assert "defer_loading" not in first[0]
+    assert first[1]["defer_loading"] and first[2]["defer_loading"]
+    _sys, out, _t = claude_lane.to_anthropic(msgs, None, "claude-haiku-5-5",
+                                             plan["refs"])
+    last = out[-1]["content"]
+    assert last[0]["type"] == "tool_result"
+    assert last[0]["content"] == [{"type": "tool_reference",
+                                   "tool_name": "add_zoom"}]
+    assert last[1] == {"type": "text", "text": "loaded"}
+
+
+def test_no_cache_marker_lands_on_a_deferred_tool():
+    import claude_lane
+    tools = [{"name": "a"}, {"name": "b", "defer_loading": True}]
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "x"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "y"}]},
+            {"role": "user", "content": [{"type": "text", "text": "z"}]}]
+    claude_lane._mark_cache([], msgs, tools, "claude-haiku-5-5")
+    assert "cache_control" in tools[0] and "cache_control" not in tools[1]
+
+
+def test_the_cache_write_stops_in_front_of_the_first_calls_pixels():
+    import claude_lane
+    content = [{"type": "text", "text": "the request"},
+               {"type": "text", "text": "FILMSTRIPS & STILLS - a view"},
+               {"type": "image", "source": {}}]
+    assert claude_lane._last_kept_block(content) == 0
+
+
+def test_create_holds_one_effort_and_raises_it_in_a_message(monkeypatch):
+    import claude_lane
+    seen = []
+
+    class Stream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_final_message(self):
+            raise SystemExit
+
+    class Client:
+        def __init__(self):
+            self.messages = SimpleNamespace(
+                stream=lambda **body: seen.append(body) or Stream())
+
+        def with_options(self, **kw):
+            return self
+    monkeypatch.setattr(claude_lane, "available", lambda: True)
+    monkeypatch.setattr(claude_lane, "configured", lambda: True)
+    monkeypatch.setattr(claude_lane, "_sdk", Client)
+    import claude_trial
+    monkeypatch.setattr(claude_trial, "guard_call", lambda: None)
+    plan = claude_lane.tool_plan([_tool("get_edl")], [_tool("get_edl"),
+                                                      _tool("add_zoom")], "medium")
+    with pytest.raises(SystemExit):
+        claude_lane.create("claude-haiku-5-5",
+                           [{"role": "user", "content": "go"}],
+                           tools=[_tool("get_edl")], effort="xhigh",
+                           tool_plan=plan)
+    body = seen[0]
+    assert body["output_config"] == {"effort": "medium"}
+    assert body["messages"][-1] == {"role": "system", "content": [],
+                                    "output_config": {"effort": "xhigh"}}
+    assert [t["name"] for t in body["tools"]] == ["get_edl", "add_zoom"]
+
+
+def test_a_refused_tool_plan_retries_the_old_way_within_the_same_call(monkeypatch):
+    import claude_lane
+    monkeypatch.setattr(claude_lane, "_plan_off", False)
+    seen = []
+
+    class Stream:
+        def __enter__(self):
+            if len(seen) == 1:
+                raise RuntimeError("400: defer_loading is not supported")
+            raise SystemExit
+
+        def __exit__(self, *a):
+            return False
+
+    class Client:
+        def __init__(self):
+            self.messages = SimpleNamespace(
+                stream=lambda **body: seen.append(body) or Stream())
+
+        def with_options(self, **kw):
+            return self
+    monkeypatch.setattr(claude_lane, "available", lambda: True)
+    monkeypatch.setattr(claude_lane, "configured", lambda: True)
+    monkeypatch.setattr(claude_lane, "_sdk", Client)
+    import claude_trial
+    monkeypatch.setattr(claude_trial, "guard_call", lambda: None)
+    plan = claude_lane.tool_plan([_tool("get_edl")], [_tool("get_edl"),
+                                                      _tool("add_zoom")], "medium")
+    with pytest.raises(SystemExit):
+        claude_lane.create("claude-haiku-5-5",
+                           [{"role": "user", "content": "go"}],
+                           tools=[_tool("get_edl")], effort="medium",
+                           tool_plan=plan)
+    assert len(seen) == 2
+    assert [t["name"] for t in seen[1]["tools"]] == ["get_edl"]
+    assert "defer_loading" not in seen[1]["tools"][0]
+    monkeypatch.setattr(claude_lane, "_plan_off", False)
+
+
+def test_a_slideshows_scene_map_is_one_line():
+    import timeline
+    keep = [[float(i), float(i + 1)] for i in range(83)]
+    text = timeline.describe_program({"keep": keep})
+    assert len(text.splitlines()) == 2
+    assert "scenes 1-83" in text and "output time = source time" in text
+    assert ", 41, 42," in text
+    short = timeline.describe_program({"keep": [[0.0, 1.0], [5.0, 6.0]]})
+    assert "scene 2  1-2s: main footage 5-6s" in short
+
+
+def test_touching_keep_spans_read_as_one():
+    import agent_loop
+    line = agent_loop._keep_line([[0.0, 1.0], [1.0, 2.0], [2.0, 3.0],
+                                  [3.0, 4.0], [4.0, 5.0]])
+    assert line.startswith("5 touching spans covering 0-5s")
+    assert agent_loop._keep_line([[0.0, 1.0], [2.0, 3.0]]) == \
+        "[[0.0, 1.0], [2.0, 3.0]]"
+
+
+def test_the_digest_has_one_line_for_each_stretch_of_footage():
+    import visual_index
+    text = visual_index.compact_text({
+        "version": 1, "evidence": [
+            {"evidence_id": "a", "covered_ranges": [[0, 4]],
+             "semantic_description": "A silver SUV."},
+            {"evidence_id": "b", "covered_ranges": [[0, 4]],
+             "semantic_description": "The same SUV again."},
+            {"evidence_id": "c", "covered_ranges": [[4, 8]],
+             "semantic_description": None}]})
+    assert "A silver SUV." in text and "same SUV" not in text
+    assert "1 sampled moments carry no description" in text

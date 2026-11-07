@@ -302,8 +302,12 @@ def _place_system_notes(out, model):
     return clean
 
 
-def to_anthropic(messages, tools=None, model=None):
-    """chat-completions ``messages``/``tools`` -> (system, messages, tools)."""
+def to_anthropic(messages, tools=None, model=None, tool_refs=None):
+    """chat-completions ``messages``/``tools`` -> (system, messages, tools).
+
+    ``tool_refs``: {tool_call_id: [tool names]} surfaced by that result (see
+    ``tool_plan``). A result holding references can hold nothing else, so its
+    text rides beside it in the same user turn."""
     system, out = [], []
     i = 0
     while i < len(messages) and messages[i].get("role") == "system":
@@ -319,6 +323,16 @@ def to_anthropic(messages, tools=None, model=None):
                        else str(body if body is not None else ""))
             if not content:
                 content = "(empty result)"
+            refs = (tool_refs or {}).get(m.get("tool_call_id"))
+            if refs:
+                _append(out, "user", [
+                    {"type": "tool_result",
+                     "tool_use_id": m.get("tool_call_id"),
+                     "content": [{"type": "tool_reference", "tool_name": name}
+                                 for name in refs]},
+                    {"type": "text",
+                     "text": _text(body) or "(empty result)"}])
+                continue
             _append(out, "user", [{"type": "tool_result",
                                    "tool_use_id": m.get("tool_call_id"),
                                    "content": content}])
@@ -349,6 +363,8 @@ def to_anthropic(messages, tools=None, model=None):
             _append(out, "user", _blocks(m.get("content")))
     out = _place_system_notes(out, model)
     out = _repair_tool_pairs(out)
+    if tool_refs:
+        _results_first(out)
     if not out or out[0]["role"] != "user":
         out.insert(0, {"role": "user", "content": [
             {"type": "text", "text": "(The conversation so far follows.)"}]})
@@ -371,6 +387,75 @@ def to_anthropic(messages, tools=None, model=None):
             tool_defs[-1]["strict"] = True
             tool_defs[-1]["input_schema"] = _strict_schema(schema)
     return system, out, tool_defs
+
+
+def _results_first(msgs):
+    """Tool results open their user turn; what rode beside them follows."""
+    for msg in msgs:
+        if msg["role"] == "user" and any(
+                block.get("type") == "tool_result" for block in msg["content"]):
+            msg["content"] = sorted(
+                msg["content"],
+                key=lambda block: block.get("type") != "tool_result")
+
+
+# ── One tool list for a whole turn ─────────────────────────────────────────
+# Tools render first in the prompt, so each change to the list rewrote the
+# entire cache: 979,213 tokens on p5520, and chain 137384 did it five times.
+# Now the list a turn starts with never changes. Every other tool is declared
+# deferred, which costs nothing until it is surfaced, and a tool the turn comes
+# to need is surfaced by a tool_reference on the newest result, behind the
+# cached prefix. Measured on Haiku 5.5, 7 Nov: 210 deferred tools added no
+# tokens, and the call after a load read the whole prefix and wrote 257 tokens.
+_PLAN_BETA = "mid-conversation-output-config-2026-07-01"
+_PLAN_MODELS = ("claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5")
+_plan_off = False
+
+
+def tool_plan(stable, catalog, effort=None):
+    """The turn's fixed list, the catalog behind it, and what was surfaced."""
+    return {"stable": list(stable or []), "catalog": list(catalog or []),
+            "refs": {}, "effort": effort}
+
+
+def plan_usable(plan, model):
+    return bool(plan) and not _plan_off \
+        and str(model or "").lower().startswith(_PLAN_MODELS)
+
+
+def surface_tools(plan, messages, tools):
+    """Attach what ``tools`` needs and the model was not given to the newest
+    tool result. Returns the names surfaced."""
+    if not plan:
+        return []
+    given = {t["function"]["name"] for t in plan["stable"]}
+    for names in plan["refs"].values():
+        given.update(names)
+    known = {t["function"]["name"] for t in plan["catalog"]}
+    fresh = sorted(name for name in (t["function"]["name"] for t in tools or [])
+                   if name not in given and name in known)
+    if not fresh:
+        return []
+    latest = next((m for m in reversed(messages)
+                   if m.get("role") == "tool" and m.get("tool_call_id")), None)
+    if latest is None:
+        return []
+    plan["refs"].setdefault(latest["tool_call_id"], []).extend(fresh)
+    return fresh
+
+
+def _plan_tools(plan, model):
+    stable = to_anthropic([], plan["stable"], model)[2]
+    names = {tool["name"] for tool in stable}
+    rest = to_anthropic([], [t for t in plan["catalog"]
+                             if t["function"]["name"] not in names], model)[2]
+    return stable + [dict(tool, defer_loading=True)
+                     for tool in sorted(rest, key=lambda t: t["name"])]
+
+
+def _plan_refused(exc):
+    text = str(exc).lower()
+    return "defer_loading" in text or "tool_reference" in text
 
 
 def _strict_schema(schema):
@@ -418,7 +503,10 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None):
     # anchor there in that case, using the otherwise redundant tools slot.
     anchor = _previous_cache_anchor(msgs)
     if tools and anchor is None:
-        tools[-1] = dict(tools[-1], cache_control={"type": "ephemeral"})
+        last = max((i for i, tool in enumerate(tools)
+                    if not tool.get("defer_loading")), default=None)
+        if last is not None:
+            tools[last] = dict(tools[last], cache_control={"type": "ephemeral"})
     if system:
         # The editor kernel + capability directory are identical for every
         # project; one breakpoint after them is a cross-account read point,
@@ -433,11 +521,23 @@ def _mark_cache(system, msgs, tools, model="", cache_policy=None):
             continue             # a mid-conversation note cannot carry one
         content = msg["content"]
         if content:
-            content[-1] = dict(content[-1], cache_control={"type": "ephemeral"})
+            at = _last_kept_block(content)
+            content[at] = dict(content[at], cache_control={"type": "ephemeral"})
         break
     if anchor is not None:
         content, index = anchor
         content[index] = dict(content[index], cache_control={"type": "ephemeral"})
+
+
+def _last_kept_block(content):
+    """The newest block the next call will send unchanged. The first call's
+    contact sheets are dropped straight after it, so a write across them is
+    never read: stop in front of them."""
+    for index, block in enumerate(content):
+        if index and block.get("type") == "text" and str(
+                block.get("text") or "").startswith("FILMSTRIPS & STILLS"):
+            return index - 1
+    return len(content) - 1
 
 
 def _previous_cache_anchor(msgs):
@@ -651,7 +751,7 @@ def from_anthropic(message, model):
 # ------------------------------------------------------------------ #
 
 def create(model, messages, tools=None, max_tokens=None, effort=None,
-           tool_choice=None, timeout=None, cache_policy=None):
+           tool_choice=None, timeout=None, cache_policy=None, tool_plan=None):
     """One Messages call in chat-completions shape. Raises on any failure."""
     if not configured():
         raise ClaudeLaneUnavailable(
@@ -663,20 +763,36 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
             "or key): " + closed_reason())
     import claude_trial            # metering + hard per-account ceiling
     claude_trial.guard_call()
-    system, msgs, tool_defs = to_anthropic(messages, tools, model)
-    _mark_cache(system, msgs, tool_defs, model, cache_policy)
-    body = {"model": model, "max_tokens": int(max_tokens or 8000),
-            "messages": msgs}
-    if system:
-        body["system"] = system
-    if tool_defs:
-        body["tools"] = tool_defs
-        choice = _tool_choice(tool_choice, model)
-        if choice:
-            body["tool_choice"] = choice
-    if effort:
-        body["output_config"] = {"effort": effort}
+    plan = tool_plan if plan_usable(tool_plan, model) else None
+
+    def build(active):
+        system, msgs, tool_defs = to_anthropic(
+            messages, tools, model, active["refs"] if active else None)
+        if active:
+            tool_defs = _plan_tools(active, model)
+        _mark_cache(system, msgs, tool_defs, model, cache_policy)
+        body = {"model": model, "max_tokens": int(max_tokens or 8000),
+                "messages": msgs}
+        if system:
+            body["system"] = system
+        if tool_defs:
+            body["tools"] = tool_defs
+            choice = _tool_choice(tool_choice, model)
+            if choice:
+                body["tool_choice"] = choice
+        steady = (active or {}).get("effort")
+        if steady or effort:
+            # One effort for the request, so the cache survives; a call that
+            # thinks harder says so in a message that changes no prefix.
+            body["output_config"] = {"effort": steady or effort}
+        return body
+
+    body = build(plan)
     cache_info = _cache_diagnostics(body, cache_policy)
+    if plan and effort and effort != plan.get("effort") and plan.get("effort"):
+        body["messages"] = body["messages"] + [
+            {"role": "system", "content": [], "output_config": {"effort": effort}}]
+        body["extra_headers"] = {"anthropic-beta": _PLAN_BETA}
     client = _sdk()
     if timeout:
         client = client.with_options(timeout=float(timeout))
@@ -695,6 +811,14 @@ def create(model, messages, tools=None, max_tokens=None, effort=None,
                 raise ClaudeLaneUnavailable(
                     f"Anthropic refused the trial lane ({kind}; credit "
                     f"balance or key): {str(exc)[:300]}") from exc
+            if plan and _plan_refused(exc):
+                # Never a customer's problem: the same request, the old way.
+                global _plan_off
+                _plan_off = True
+                plan = None
+                body = build(None)
+                print(f"[claude] tool plan refused: {str(exc)[:200]}", flush=True)
+                continue
             if _retryable(exc) and attempt <= 2:
                 time.sleep(2.0 * attempt)
                 continue
@@ -722,7 +846,8 @@ class _Completions:
                       effort=self._owner.effort or _effort(kw),
                       tool_choice=kw.get("tool_choice"),
                       cache_policy=kw.get("cache_policy"),
-                      timeout=kw.get("timeout") or self._owner.timeout)
+                      timeout=kw.get("timeout") or self._owner.timeout,
+                      tool_plan=kw.get("tool_plan"))
 
 
 class ClaudeLaneClient:

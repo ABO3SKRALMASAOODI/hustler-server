@@ -658,9 +658,6 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
             "duplicate pixels. Open every distinct asset relevant to the "
             "treatment with look_at_asset; this is transport paging, not an "
             "image allowance.")
-    main_storyboard = (getattr(ctx, "index", None) or {}).get(
-        "visual_storyboard") or {}
-    storyboard_text = visual_index.compact_text(main_storyboard)
     content = [{"type": "text", "text":
                 "FILMSTRIPS & STILLS — a current, labeled visual overview "
                 "of this project's footage and images. Current-message "
@@ -676,7 +673,7 @@ def filmstrip_parts(ctx, worker_db, priority_asset_ids=None):
                 "often as you need. Storyboard contact sheets are transport-"
                 "paged; open_visual_page retrieves any/all remaining pages "
                 "without a logical image quota." + omitted_note
-                + (("\n\n" + storyboard_text) if storyboard_text else "")}]
+                }]
     for label, tiles in strips:
         content.append({"type": "text", "text": f"[{label}]"})
         for _key, local in tiles:
@@ -840,8 +837,7 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
     except Exception:
         program_lines = ""
     keep = edl["json"].get("keep") or []
-    keep_line = json.dumps(keep[:40]) + \
-        (f" ...(+{len(keep) - 40} more spans)" if len(keep) > 40 else "")
+    keep_line = _keep_line(keep)
     caps = edl["json"].get("captions")
     captions_line = json.dumps(caps) if caps else "none"
     history = worker_db.run(dbx.edl_history, ctx.project_id)
@@ -989,11 +985,12 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
         print(f"[state] media inventory failed: {e}", flush=True)
 
     block = project_state_block(video_line, index_summary, edl_line,
-                                history_lines, music_lines,
+                                history_lines[:3], music_lines,
                                 keep_line=keep_line,
                                 captions_line=captions_line,
                                 program_lines=program_lines,
-                                media_lines=media_lines)
+                                media_lines=media_lines,
+                                follow_up=_follow_up_turn(ctx))
     # A SHORTS project's chat is the board's chat. Without this section the
     # parent agent literally does not know its children exist — on
     # 2026-08-09 "add the interstellar music to all of them" got the track
@@ -1169,7 +1166,8 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
             request_text=getattr(ctx, "user_message", None),
             program=program)
         family = cast["family"]
-        block += "\n\n" + editorial_contracts.casting_block(cast)
+        if not _follow_up_turn(ctx):
+            block += "\n\n" + editorial_contracts.casting_block(cast)
     except Exception as e:
         print(f"[editorial-contract] state block failed: {e}", flush=True)
     # Repeated accepted outcomes can teach a per-account taste prior without
@@ -1305,6 +1303,20 @@ CLAUDE_PAID_FIRST_REQUESTS = (
     "a source with no sound stays silent and is still delivered.")
 
 
+def _thin_filmstrip(parts):
+    """Follow-up turns keep an even sample of the contact sheets. The rest
+    stay one open_visual_page or look_at away."""
+    images = [i for i, part in enumerate(parts)
+              if isinstance(part, dict) and part.get("type") == "image_url"]
+    keep = config.FOLLOW_UP_FILMSTRIP_IMAGES
+    if len(images) <= keep:
+        return parts
+    step = (len(images) - 1) / max(1, keep - 1)
+    chosen = {images[round(i * step)] for i in range(keep)}
+    return [part for i, part in enumerate(parts)
+            if i not in images or i in chosen]
+
+
 def _build_messages(ctx, worker_db, user_message, attachment_note="",
                     include_visual_overview=True):
     def _component(name, value):
@@ -1352,13 +1364,8 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
     # blind provider strips these on first rejection (_strip_image_parts)
     # and the turn continues on text + look_at's vision fallback.
     #
-    # BEFORE the state block, deliberately (round 98): the strips are the
-    # LARGEST and most STABLE part of the prompt — identical bytes turn
-    # after turn — while the state block changes with every EDL write. With
-    # the state first, every turn's strip re-tokenized as a cache MISS;
-    # with the strips first they ride the provider's cached prefix and only
-    # the (small, text) state re-processes. Same content, same senses,
-    # meaningfully faster first token and a cheaper turn.
+    # Sent once, on the first call of a turn, behind the request (see below).
+    filmstrip_message = None
     if include_visual_overview and ctx.direct_sight \
             and llm.agent_sees(ctx.agent_model):
         try:
@@ -1370,7 +1377,9 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
             parts = filmstrip_parts(
                 ctx, worker_db, priority_asset_ids=attachment_ids)
             if parts:
-                msgs.append({"role": "user", "content": parts})
+                if _follow_up_turn(ctx) and not attachment_ids:
+                    parts = _thin_filmstrip(parts)
+                filmstrip_message = {"role": "user", "content": parts}
                 _component("selected_visual_evidence", parts)
         except Exception as e:
             print(f"[filmstrip] skipped ({e})", flush=True)
@@ -1447,6 +1456,12 @@ def _build_messages(ctx, worker_db, user_message, attachment_note="",
     current_request = (user_message["content"] + attachment_note
                        + _reply_language_note(user_texts))
     msgs.append({"role": "user", "content": current_request})
+    # The pixels ride behind the request, not in front of the state: they are
+    # dropped after the first call, so anything cached after them was thrown
+    # away with them. On 11 of 11 chains of p5520 the first call wrote about
+    # 62k tokens and the second read none of it.
+    if filmstrip_message:
+        msgs.append(filmstrip_message)
     _component("recent_conversation_and_request", [
         row for row in msgs
         if row.get("role") in {"user", "assistant"}
@@ -5740,6 +5755,27 @@ _CONTINUATION_NOTE = (
     "by any remaining visual decision.]")
 
 
+def _keep_line(keep):
+    """Spans that touch are one span to read: the program map above already
+    gives where each scene starts."""
+    whole = bool(keep) and all(
+        abs(keep[i][0] - keep[i - 1][1]) < 0.02 for i in range(1, len(keep)))
+    if whole and len(keep) > 4:
+        return (f"{len(keep)} touching spans covering {keep[0][0]:g}-"
+                f"{keep[-1][1]:g}s (get_edl sections=['keep'] for the list)")
+    return json.dumps(keep[:40]) + \
+        (f" ...(+{len(keep) - 40} more spans)" if len(keep) > 40 else "")
+
+
+def _follow_up_turn(ctx):
+    """A customer talking about an edit that already exists: the project's
+    first-request guidance and full contact sheets have done their work."""
+    try:
+        return int(ctx.latest_edl()["version"]) > 1
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+
+
 def _tool_schema_refresh_needed(ctx):
     """Whether the next dispatch needs a newly routed tool catalog."""
     return bool(getattr(ctx, "edit_plan", None) or ctx.versions_written
@@ -5899,6 +5935,14 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     ctx.editing_metrics["initial_tool_schemas"] = len(tools)
     ctx.editing_metrics["initial_tool_schema_chars"] = len(
         json.dumps(tools, separators=(",", ":")))
+    # This turn's tool list never changes on Claude (claude_lane.tool_plan).
+    tool_plan = None
+    if claude_lane.is_claude_model(model):
+        tool_plan = claude_lane.tool_plan(
+            tools, agent_tools.openai_tools(
+                model, compact=True, names=set(agent_tools.TOOLS),
+                engine=agent_tools.engine_on(ctx)),
+            config.CLAUDE_TRIAL_EFFORT)
     total_steps = _cont.get("steps", 0)
     t_start = _cont.get("t_start") or time.monotonic()
     turn_started = (time.monotonic() if _cont.get("durable_slice")
@@ -6367,6 +6411,10 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
             if claude_lane.is_claude_model(active_model):
                 if iteration == 0 and call_model != model:
                     active_kw["cache_policy"] = "shared_only"
+                elif active_model == model and claude_lane.plan_usable(
+                        tool_plan, active_model):
+                    claude_lane.surface_tools(tool_plan, messages, tools)
+                    active_kw["tool_plan"] = tool_plan
             affinity = llm.cache_affinity(active_model)
             if affinity:
                 active_kw["extra_headers"] = affinity

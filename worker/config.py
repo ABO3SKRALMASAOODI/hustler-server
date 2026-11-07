@@ -2114,6 +2114,9 @@ AGENT_TPM_OBSERVED_SHARE = min(0.95, max(0.3, float(
 AGENT_TPM_OBSERVED_MAX_AGE_S = float(
     os.getenv("AGENT_TPM_OBSERVED_MAX_AGE_S", "3600"))
 PREVIEW_WAIT_TIMEOUT_S = float(os.getenv("PREVIEW_WAIT_TIMEOUT_S", "900"))
+# Contact sheets on a turn that follows an existing edit. The first request of
+# a project gets all of them; 20 sheets were 24k tokens on every later turn.
+FOLLOW_UP_FILMSTRIP_IMAGES = int(os.getenv("FOLLOW_UP_FILMSTRIP_IMAGES", "6"))
 # Output budgets: defined once in read_tools (the backend's MCP fast path
 # runs the same read tools and must cut them identically).
 from read_tools import (TOOL_OUTPUT_CHAR_BUDGET,  # noqa: E402,F401
