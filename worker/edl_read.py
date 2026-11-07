@@ -69,6 +69,17 @@ _EDL_ALL_ALIASES = {"all", "everything", "full"}
 PAGE_CHARS = 14000
 
 
+def _without_nulls(value):
+    """A field left at its default says nothing: an 82-dissolve fx page was
+    half nulls, and a read is resent on every later call of the turn."""
+    if isinstance(value, dict):
+        return {k: _without_nulls(v) for k, v in value.items()
+                if v is not None}
+    if isinstance(value, list):
+        return [_without_nulls(v) for v in value]
+    return value
+
+
 def _dig(edl, name):
     node = edl
     for part in str(name).split("."):
@@ -80,7 +91,8 @@ def _page_that_fits(payload, wanted, version):
     """The page answers. A large section comes back as its first rows and how
     to read the next ones; the old answer was an error, and p5520 spent five
     model calls in a row halving a limit to reach this."""
-    rendered = json.dumps(payload, indent=1)
+    payload["sections"] = _without_nulls(payload.get("sections") or {})
+    rendered = json.dumps(payload, separators=(",", ":"))
     if len(rendered) <= PAGE_CHARS:
         return rendered
     payload.pop("overview", None)
@@ -92,7 +104,7 @@ def _page_that_fits(payload, wanted, version):
     for name in lists:
         rows, page = sections[name], pages.get(name) or {}
         keep = len(rows)
-        while keep > 1 and len(json.dumps(payload, indent=1)) > PAGE_CHARS:
+        while keep > 1 and len(json.dumps(payload)) > PAGE_CHARS:
             keep = max(1, keep * 2 // 3)
             sections[name] = rows[:keep]
         offset = int(page.get("offset") or 0)
@@ -110,10 +122,10 @@ def _page_that_fits(payload, wanted, version):
                          if isinstance(item, list) and len(item) > 1),
                         key=lambda key: -len(json.dumps(value[key])))
         for key in fields:
-            if len(json.dumps(payload, indent=1)) <= PAGE_CHARS:
+            if len(json.dumps(payload)) <= PAGE_CHARS:
                 break
             rows, keep = value[key], len(value[key])
-            while keep > 1 and len(json.dumps(payload, indent=1)) > PAGE_CHARS:
+            while keep > 1 and len(json.dumps(payload)) > PAGE_CHARS:
                 keep = max(1, keep * 2 // 3)
                 value[key] = rows[:keep]
             pages[f"{name}.{key}"] = {"offset": 0, "returned": keep,

@@ -824,7 +824,7 @@ class ToolContext:
         after = describe_edl(normalized, self.duration,
                              src_shape=_source_shape(self))
         line = (f"EDL v{prev['version']} -> v{version}: {change_desc}. "
-                f"Before: {before}. After: {after}.")
+                f"Now: {after}.")
         if advisories:
             line += "\n" + quality_gate.advisory_message(version, advisories)
         if mono_note:
@@ -26466,6 +26466,21 @@ def _asset_audio_analysis(ctx, asset_key):
                       "add_sfx or add_zoom; beat_align_cuts snaps existing "
                       "cuts to them for you.")
     return _cap(out)
+
+
+def names_only_load(tools):
+    """load_tools without its department argument, for a stable tool list: the
+    capability directory already names every tool, and a department answers
+    with a list that costs one more call."""
+    out = []
+    for tool in tools:
+        fn = tool.get("function") or {}
+        if fn.get("name") == "load_tools":
+            tool = copy.deepcopy(tool)
+            params = tool["function"].get("parameters") or {}
+            (params.get("properties") or {}).pop("domains", None)
+        out.append(tool)
+    return out
 
 
 def _department_listing(domains):

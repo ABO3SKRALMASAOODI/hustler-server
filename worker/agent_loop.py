@@ -5941,6 +5941,7 @@ def _run_loop(ctx, worker_db, job, session_id, user_message,
     tool_plan = None
     if claude_lane.is_claude_model(model):
         ctx._tools_by_name = True
+        tools = agent_tools.names_only_load(tools)
         tool_plan = claude_lane.tool_plan(
             tools, agent_tools.openai_tools(
                 model, compact=True, names=set(agent_tools.TOOLS),

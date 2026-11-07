@@ -853,3 +853,20 @@ def test_a_trim_keeps_the_cuts_baked_into_the_footage():
         [0.0, 4.6], [4.6, 9.4], [9.4, 13.67]]
     assert agent_tools._keep_exposed_cuts([[0.0, 4.0], [6.0, 8.0]],
                                           [[0.0, 3.0]]) == [[0.0, 3.0]]
+
+
+def test_a_read_page_carries_no_nulls():
+    edl = fx_edl()
+    edl["effects"]["zooms"] = [{"id": "zm1", "start": 1.0, "end": 2.0,
+                                "note": None}]
+    page = json.loads(edl_read.read_edl({"version": 3, "json": edl}, 60.0, [],
+                                        sections=["effects"]))
+    assert page["sections"]["effects"]["zooms"] == [
+        {"id": "zm1", "start": 1.0, "end": 2.0}]
+
+
+def test_a_stable_list_loads_by_name():
+    tools = agent_tools.names_only_load(agent_tools.openai_tools(
+        "claude-haiku-5-5", compact=True, names={"load_tools"}))
+    props = tools[0]["function"]["parameters"]["properties"]
+    assert "names" in props and "domains" not in props
