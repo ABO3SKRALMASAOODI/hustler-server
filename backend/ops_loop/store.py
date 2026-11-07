@@ -823,16 +823,107 @@ def put_state(cur, key, value):
                 (key, json.dumps(value, default=str)))
 
 
+# ── The clock of a ticket (owner, 7 Nov 2026: "nor issues neither latency in
+# handling them is accepted") ─────────────────────────────────────────────
+OPENINGS = ("opened", "recurred", "reopened")
+AWAITED = ("escalated", "released")
+
+
+def _event_at(entry):
+    try:
+        at = datetime.fromisoformat(str(entry.get("at")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def clock(history, now=None):
+    """Where the latest episode of a ticket stands, in seconds; a recurrence
+    starts a new one and its history keeps the old.
+
+      seen_s    the failure happening to the ticket opening
+      claim_s   waiting to the first claim, from when it became someone's to
+                act on: a P1 raised to P0 is timed from the raising, because a
+                P1 waits for the daily Fixer by design
+      live_s    the opening to the fix verified in production (`ops.sh live`),
+                never restarted by an escalation or a hand-back: the customer's
+                clock does not stop for those. The latest fix counts: one that
+                fell short fixes forward. A ticket closed with no such mark has
+                the closing as a bound, flagged live_is_closing
+      open_s    how long it has been waiting for that, while it is
+
+    Computed from the history, which is the record; the claim and live events
+    also carry their own number, as it stood when they were written."""
+    c, due = {}, None
+    for h in history or []:
+        at = _event_at(h) if isinstance(h, dict) else None
+        if at is None:
+            continue
+        event = h.get("event")
+        if event in OPENINGS:
+            c, due = {"opened_at": at}, at
+        elif not c:
+            continue
+        elif event == "failure" and "seen_s" not in c:
+            c["seen_s"] = max(0, int((c["opened_at"] - at).total_seconds()))
+        elif event in AWAITED and "claimed_at" not in c:
+            due = at
+        elif event == "fixing" and "claimed_at" not in c:
+            c["claimed_at"] = at
+            c["claim_s"] = int((at - due).total_seconds())
+        elif event == "live" or (event == "fixed" and "live_at" not in c):
+            c["live_at"] = at
+            c["live_s"] = int((at - c["opened_at"]).total_seconds())
+            if event == "fixed":
+                c["live_is_closing"] = True
+            else:
+                c.pop("live_is_closing", None)
+        elif event == "wont_fix":
+            c["closed"] = True
+    if c and now is not None and "live_at" not in c and not c.get("closed"):
+        c["open_s"] = int((now - c["opened_at"]).total_seconds())
+    c.pop("closed", None)
+    for key in ("opened_at", "claimed_at", "live_at"):
+        if key in c:
+            c[key] = c[key].isoformat(timespec="seconds")
+    return c
+
+
 def set_fixing(cur, ticket_id, note=None):
-    cur.execute("SELECT status FROM tickets WHERE id = %s", (int(ticket_id),))
+    cur.execute("SELECT status, history FROM tickets WHERE id = %s",
+                (int(ticket_id),))
     row = cur.fetchone()
     if not row:
         raise StoreError(f"no ticket {ticket_id}")
     if row["status"] != "open":
         raise StoreError(f"ticket {ticket_id} is {row['status']}, not open")
+    claim = _history("fixing", note=_clean(note, 500, "note"))
+    entry = json.loads(claim)
+    seen = clock((row.get("history") or []) + entry)
     _w(cur, """UPDATE tickets SET status = 'fixing', history = history || %s,
                    updated_at = NOW() WHERE id = %s""",
-       (_history("fixing", note=_clean(note, 500, "note")), int(ticket_id)))
+       (json.dumps([dict(entry[0], claim_s=seen.get("claim_s"))], default=str),
+        int(ticket_id)))
+
+
+def mark_live(cur, ticket_id, sha):
+    """The fix is in production, as verified by the caller. It goes live before
+    the replay that closes the ticket, so the closing cannot time it."""
+    sha = _clean(sha, 80, "sha", required=True)
+    cur.execute("SELECT status, history FROM tickets WHERE id = %s FOR UPDATE",
+                (int(ticket_id),))
+    row = cur.fetchone()
+    if not row:
+        raise StoreError(f"no ticket {ticket_id}")
+    if row["status"] == "wont_fix":
+        raise StoreError(f"ticket {ticket_id} is wont_fix: nothing was shipped")
+    entry = json.loads(_history("live", sha=sha))
+    seen = clock((row.get("history") or []) + entry)
+    _w(cur, """UPDATE tickets SET history = history || %s, updated_at = NOW()
+               WHERE id = %s""",
+       (json.dumps([dict(entry[0], live_s=seen.get("live_s"))], default=str),
+        int(ticket_id)))
+    return seen
 
 
 def reopen(cur, ticket_id, note):

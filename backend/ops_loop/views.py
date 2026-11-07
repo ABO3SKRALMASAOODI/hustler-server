@@ -15,7 +15,7 @@ Every query here is a small indexed read; nothing is cached.
 from datetime import timedelta, timezone
 
 from admin_metrics import defs, ranges
-from ops_loop import EXCLUDED_USER_IDS
+from ops_loop import EXCLUDED_USER_IDS, store
 
 TABLES = ("session_reviews", "tickets", "ticket_reviews")
 
@@ -214,9 +214,48 @@ STATUS_ORDER = {"open": 0, "fixing": 1, "fixed": 2, "wont_fix": 3}
 SEVERITY_ORDER = {"P0": 0, "P1": 1, "P2": 2}
 
 
-def tickets(cur, status="all", presign=None, limit=300):
+def _spread(values):
+    values = sorted(values)
+    if not values:
+        return {"n": 0}
+    at = lambda share: values[min(len(values) - 1, int(len(values) * share))]
+    return {"n": len(values), "p50_s": at(0.5), "p90_s": at(0.9),
+            "max_s": values[-1]}
+
+
+def clocks(cur, days=7, ticket=None, now=None):
+    """Time to claim and time to live, per ticket and over the P0s of the last
+    `days`, for the CLI: was each one handled before the owner saw it?"""
+    now = now or ranges.utc_now()
+    if ticket is not None:
+        cur.execute("""SELECT id, cause_key, title, severity, status, history
+                         FROM tickets WHERE id = %s""", (int(ticket),))
+    else:
+        cur.execute("""SELECT id, cause_key, title, severity, status, history
+                         FROM tickets WHERE last_seen >= %s OR updated_at >= %s
+                         ORDER BY id""",
+                    (now - timedelta(days=days), now - timedelta(days=days)))
+    rows = []
+    for r in cur.fetchall():
+        rows.append({k: r[k] for k in ("id", "cause_key", "title", "severity",
+                                       "status")}
+                    | {"clock": store.clock(r["history"], now)})
+    p0 = [r["clock"] for r in rows if r["severity"] == "P0"]
+    return {"tickets": rows, "p0": {
+        "claim": _spread([c["claim_s"] for c in p0 if "claim_s" in c]),
+        "live": _spread([c["live_s"] for c in p0 if "live_s" in c
+                         and not c.get("live_is_closing")]),
+        "live_at_closing": _spread([c["live_s"] for c in p0
+                                    if c.get("live_is_closing")]),
+        "waiting_now": sum(1 for r in rows if r["severity"] == "P0"
+                           and "open_s" in r["clock"]
+                           and "claimed_at" not in r["clock"])}}
+
+
+def tickets(cur, status="all", presign=None, limit=300, now=None):
     if not tables_ready(cur):
         return {"loop_ready": False, "groups": [], "total": 0}
+    now = now or ranges.utc_now()
     where, p = "TRUE", {"limit": max(1, min(int(limit), 500))}
     if status == "active":
         where = "t.status IN ('open', 'fixing')"
@@ -246,6 +285,7 @@ def tickets(cur, status="all", presign=None, limit=300):
             r["evidence"] = _evidence((r.get("evidence") or [])[:2], presign)
         t["reviews"] = reviews[:12]
         t["sessions"] = len(reviews)
+        t["clock"] = store.clock(t.get("history"), now)
         t["users"] = len({r["user_id"] for r in reviews})
         for k in ("first_seen", "last_seen", "closed_at", "created_at",
                   "updated_at"):
@@ -379,7 +419,7 @@ def failures_between(cur, start, end, now=None):
                 AND closed_at < %(e)s)""",
                 {"ids": sorted(per), "s": start, "e": end})
     tickets = {r["id"]: dict(r) for r in cur.fetchall()}
-    by_ticket, fixed, unhandled = [], [], []
+    by_ticket, fixed = [], []
     for tid, agg in per.items():
         t = tickets.get(tid)
         if not t:
@@ -410,21 +450,14 @@ def failures_between(cur, start, end, now=None):
                           "closed_at": _iso(t["closed_at"]),
                           "url": TICKET_URL + str(t["id"]),
                           "commits": commit_links(t.get("fix_sha"))})
-        opened = t.get("opened_at") or t.get("created_at")
-        claimed = t.get("claimed_at") or t.get("updated_at")
-        late = (t["status"] == "open" and opened and
-                now - opened >= intake.UNHANDLED_AFTER) or \
-            (t["status"] == "fixing" and claimed and
-             now - claimed >= intake.FIXING_STALE)
-        if t["severity"] == "P0" and late:
-            since = opened if t["status"] == "open" else claimed
-            unhandled.append({"id": t["id"], "title": t["title"],
-                              "status": t["status"],
-                              "waiting_min": int((now - since)
-                                                 .total_seconds() // 60),
-                              "url": TICKET_URL + str(t["id"])})
     active = [t for t in tickets.values() if t["status"] in ("open",
                                                              "fixing")]
+    # The email's own query, not a second opinion on it: this list counted a
+    # ticket a Fixer had handed back as "waiting for a person" during its quiet.
+    unhandled = [{"id": t["id"], "title": t["title"], "status": t["status"],
+                  "waiting_min": t["waiting_min"],
+                  "url": TICKET_URL + str(t["id"])}
+                 for t in intake.unhandled(cur, now)]
     last_pass = intake_last_pass(cur)
     # What landed on a cause that stays closed for the owner: reported, because
     # nothing is counted in silence.

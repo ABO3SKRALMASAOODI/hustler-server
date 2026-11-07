@@ -24,10 +24,11 @@ from datetime import datetime, timedelta, timezone
 GRACE = timedelta(minutes=10)
 # Work still running is slow, not stuck. On 14 days of real rows a 10 minute look
 # called 54 overdue analyses, silent turns and long renders stuck, and 8 of them
-# still were 45 minutes on. A page is only worth what a Fixer can reach, and the
-# watch runs every 30 minutes: work that will be over by then stays on its ticket
-# from the first minute, and only what is really hung pages.
-SLOW_GRACE = timedelta(minutes=45)
+# still were 45 minutes on. The watch runs every 5 minutes now, so a page reaches a
+# Fixer at once and the look decides alone. Replayed on the 28 overdue analyses of
+# the 14 days to 7 Nov, 18 were called stuck at 10 minutes, 15 at 15, 10 at 20, 4 at
+# 30 and 3 at 45: 30 costs one more page in a fortnight and a customer 15 minutes.
+SLOW_GRACE = timedelta(minutes=30)
 SLOW_SOURCES = ("analysis", "turn")
 # The client says the customer's own line is down: it comes back on its own.
 OFFLINE_GRACE = timedelta(minutes=30)
