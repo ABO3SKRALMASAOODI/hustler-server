@@ -228,6 +228,25 @@ def test_one_success_in_the_last_three_is_no_streak(world):    # noqa: F811
     assert fired(world, gaps._model_failing) == []
 
 
+def test_an_accounts_trial_budget_stops_are_not_a_failing_model(world):    # noqa: F811
+    """Ticket 861: a 55-minute first upload spent its account's trial on
+    indexing; the guard refused the last index pages, recorded as
+    ``stop: budget``, and that was paged P0 as a dead model."""
+    for i in range(4):
+        world.c.execute(
+            "INSERT INTO llm_calls (purpose, response, created_at) VALUES "
+            "(%s, %s, %s)", ("visual_index_semantics_fallback",
+                             Json({"error": "free trial budget used up",
+                                   "stop": "budget"}),
+                             world.clock.now - timedelta(seconds=4 - i)))
+    assert fired(world, gaps._model_failing) == []
+    # A real failure streak behind the budget stops still fires.
+    calls(world, "visual_index_semantics_fallback", True, True, True)
+    got = fired(world, gaps._model_failing)
+    assert [f["cause_key"] for f in got] == [
+        "auto-gap-model-failing-visual-index-semantics-fallback"]
+
+
 def test_a_cancel_within_a_day_of_paying_fires_and_a_later_one_does_not(world):    # noqa: F811
     world.c.execute(
         """INSERT INTO payments (user_id, status, amount_cents, subscription_id,

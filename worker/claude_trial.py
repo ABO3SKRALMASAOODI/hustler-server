@@ -550,9 +550,9 @@ def guard_call():
     scope = current()
     if scope is None or scope.is_test:
         return
-    if scope.spent_usd >= scope.cap_usd * 1.15:
+    if budget_stopped():
         import claude_lane
-        raise claude_lane.ClaudeLaneUnavailable(
+        raise claude_lane.TrialBudgetSpent(
             "free trial budget used up for this account (its credit balance "
             "for the trial is spent)")
 
@@ -945,6 +945,14 @@ def stop_meta(kind, request_message_id=None, extra=None):
         meta["request_message_id"] = int(request_message_id)
     meta.update(extra or {})
     return meta
+
+
+def budget_stopped():
+    """This thread's trial scope can make no further calls (guard_call would
+    refuse): a retry or a fallback call would only be refused again."""
+    scope = current()
+    return bool(scope is not None and not scope.is_test
+                and scope.spent_usd >= scope.cap_usd * 1.15)
 
 
 def is_lane_refusal(exc):

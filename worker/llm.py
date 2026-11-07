@@ -85,6 +85,26 @@ def _note_error(e):
     note_quota_error(e)
 
 
+def is_budget_stop(exc):
+    """One account's own trial budget refused the call (by type, never by
+    its words): not a provider failure and not a provider wallet."""
+    try:
+        import claude_lane
+    except Exception:  # pragma: no cover
+        return False
+    return isinstance(exc, claude_lane.TrialBudgetSpent)
+
+
+def _failure(exc, msg=None, **extra):
+    """The llm_calls response of a failed call. A budget stop says so
+    (``stop: budget``) so ops_loop/gaps.py tells it from a failing model."""
+    out = {"error": (str(exc) if msg is None else msg)[:300]}
+    if is_budget_stop(exc):
+        out["stop"] = "budget"
+    out.update(extra)
+    return out
+
+
 # ── R5 (strategy 1025): the LLM balance watch ────────────────────────────
 _quota_lock = threading.Lock()
 _quota_last = {}
@@ -96,7 +116,7 @@ def note_quota_error(exc, model=None, base_url=None):
     cousins). Tell the owner at once, through the cockpit's alert tick: on
     26 Sep six paying turns failed this way before anyone knew. Throttled
     per provider per process; never raises. Returns whether it was one."""
-    if not is_quota_error(exc):
+    if not is_quota_error(exc) or is_budget_stop(exc):
         return False
     host = _host(base_url or config.OPENAI_BASE_URL) or "provider"
     now = time.monotonic()
@@ -2051,8 +2071,8 @@ def ask_vision(prompt, image_paths, max_tokens=1500, purpose="vision",
         record(purpose,
                {"model": vmodel, "question": prompt,
                 "images": names, "base_url": config.VISION_BASE_URL},
-               {"error": msg[:300],
-                "provider_cannot_see": _vision_blind or None}, None)
+               _failure(e, msg,
+                        provider_cannot_see=_vision_blind or None), None)
         return None
 
 
@@ -2108,7 +2128,7 @@ def ask_text(system, user, max_tokens=300, temperature=0.5, purpose="text",
         _note_error(e)
         record(purpose,
                {"model": model, "system": system, "user": user},
-               {"error": str(e)[:300]}, None)
+               _failure(e), None)
         return None
 
 

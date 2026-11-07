@@ -274,6 +274,36 @@ def test_hard_ceiling_backstops_critics_and_vision():
         claude_trial.deactivate()
 
 
+def test_an_accounts_budget_stop_is_a_stop_not_a_dead_provider(monkeypatch):
+    """Ticket 861: a long first upload spent its trial on indexing; the guard's
+    refusals were paged P0 as a failing model, each one raised the owner's
+    "top up the provider" alarm, and every refused page tried a fallback the
+    same budget refused again."""
+    scope = claude_trial.Scope(5, 0.32, 0.381583, "claude-haiku-5-5")
+    claude_trial.activate(scope)
+    try:
+        assert claude_trial.budget_stopped()
+        with pytest.raises(claude_lane.TrialBudgetSpent) as stop:
+            claude_trial.guard_call()
+    finally:
+        claude_trial.deactivate()
+    assert not claude_trial.budget_stopped()
+    exc = stop.value
+    # Callers still show the plan cards, as for any lane refusal.
+    assert claude_trial.is_lane_refusal(exc)
+    assert llm.is_budget_stop(exc)
+    assert llm._failure(exc)["stop"] == "budget"
+    alarms = []
+    monkeypatch.setattr(llm, "_quota_last", {})
+    import db as dbx
+    monkeypatch.setattr(dbx, "Db", lambda: alarms.append(1) or pytest.fail("alarm"))
+    assert llm.note_quota_error(exc) is False and alarms == []
+    # A provider that really is out of credit is still a failure.
+    wallet = claude_lane.ClaudeLaneUnavailable("credit balance is too low")
+    assert "stop" not in llm._failure(wallet)
+    assert not llm.is_budget_stop(wallet)
+
+
 def test_stop_meta_renders_as_plan_cards_with_keep_going():
     meta = claude_trial.stop_meta("exhausted", 42)
     assert meta["subscribe_required"] and meta["credits_exhausted"]

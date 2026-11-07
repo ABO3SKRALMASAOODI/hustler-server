@@ -325,7 +325,11 @@ def _model_failing(cur, since, now, p):
                                           ORDER BY l.id DESC) AS n
                   FROM llm_calls l
                  WHERE l.created_at > %(lookback)s
-                   AND l.created_at <= %(now)s) c
+                   AND l.created_at <= %(now)s
+                   -- One account's own trial budget refusing a call is a
+                   -- budget stop (P2 by the intake's rule), not a dead model:
+                   -- ticket 861 paged P0 on 18 of them in one index.
+                   AND COALESCE(l.response->>'stop', '') <> 'budget') c
          WHERE c.n <= %(streak)s
          GROUP BY c.purpose
         HAVING count(*) = %(streak)s AND bool_and(c.bad)

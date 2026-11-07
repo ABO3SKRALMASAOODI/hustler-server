@@ -366,7 +366,8 @@ def _caption_semantics(evidence, sheets, workdir):
                 max_tokens=max(900, len(rows) * 140),
                 purpose="visual_index_semantics", image_names=names,
                 reasoning_effort="low")
-            if not answer:
+            import claude_trial
+            if not answer and not claude_trial.budget_stopped():
                 # ask_vision switches to the configured agent-vision fallback
                 # after a proven blind provider; a second attempt also covers a
                 # transient first-provider failure without making indexing fatal.

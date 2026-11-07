@@ -152,6 +152,16 @@ class ClaudeLaneUnavailable(RuntimeError):
     ("credit balance") so every caller treats it as a wallet problem."""
 
 
+class TrialBudgetSpent(ClaudeLaneUnavailable):
+    """ONE trial account's own budget is spent (claude_trial.guard_call).
+    Callers still see a lane refusal (plan cards, no raw error), but it is a
+    budget stop, not a provider: it never raises the owner's "top up the
+    provider" alarm and is recorded as ``stop: budget`` so the model-failing
+    check does not page it as a dead model (ticket 861: a 55-minute first
+    upload spent its account's trial on indexing, the guard refused the last
+    18 index pages, and that was paged P0 as a failing model)."""
+
+
 # ------------------------------------------------------------------ #
 #  Request translation                                                 #
 # ------------------------------------------------------------------ #
