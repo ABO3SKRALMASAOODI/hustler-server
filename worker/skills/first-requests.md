@@ -100,7 +100,8 @@ A VERTICAL SHORT WITH CAPTIONS:
    never a freeze or a slowed tail (read cutting, END ON PURPOSE).
 6. NO SPEECH (a product clip, a silent or music-only video): "captions" or
    "kinetic captions" means big kinetic on-screen TEXT, never "nothing to
-   caption". Write 3-5 `add_kinetic_text` beats across the whole short (the
+   caption". Write 3-5 beats in ONE `add_kinetic_text` call with
+   `phrases=[{text, start, end}]` (program seconds) across the whole short (the
    hook, what it is, two or three things you can SEE: a name legible on
    screen, a feature, the payoff), each readable for at least 1 s. Text the
    user asked for is never thinned "for density"; one small label is not

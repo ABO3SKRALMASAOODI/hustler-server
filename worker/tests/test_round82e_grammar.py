@@ -429,3 +429,30 @@ def test_state_block_measures_the_program_once_from_the_edl_it_holds():
     assert len(shapes) == 1
     assert "This footage classifies as: podcast-reel" in block
     assert "podcast_reel" in block
+
+
+def test_kinetic_text_works_on_silent_footage_with_authored_phrases():
+    # Ticket 859: "big kinetic captions" on gameplay with no speech was
+    # refused three times; the editor must be able to write the words.
+    ctx = _KCtx([], keep=[[0.0, 10.0]])
+    r = agent_tools.add_kinetic_text(ctx)
+    assert r.startswith("REJECTED") and "phrases=" in r
+    ctx = _KCtx([], keep=[[0.0, 10.0]])
+    r = agent_tools.add_kinetic_text(
+        ctx, emphasis_words=["LOOT"], phrases=[
+            {"text": "GOLDEN CHEST", "start": 5.0, "end": 6.2},
+            {"text": "GRAB THE LOOT", "start": 3.0, "end": 4.0},
+            {"text": "", "start": 7.0, "end": 8.0}])
+    assert r.startswith("EDL v"), r
+    texts = ctx.written["texts"]
+    assert [t["text"] for t in texts] == ["GRAB THE LOOT", "GOLDEN CHEST"]
+    assert (texts[0]["start"], texts[0]["end"]) == (3.0, 4.0)
+    assert (texts[1]["start"], texts[1]["end"]) == (5.0, 6.2)
+    assert texts[0]["color"] == "#DC2626"
+    assert "your phrases" in r
+    fn, desc, params = agent_tools.TOOLS["add_kinetic_text"]
+    assert "phrases" in params
+    bad = _KCtx([], keep=[[0.0, 10.0]])
+    assert agent_tools.add_kinetic_text(
+        bad, phrases=[{"text": "x", "start": "a", "end": 1}]
+    ).startswith("REJECTED")
