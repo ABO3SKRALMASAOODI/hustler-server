@@ -91,7 +91,8 @@ def _page_that_fits(payload, wanted, version):
     """The page answers. A large section comes back as its first rows and how
     to read the next ones; the old answer was an error, and p5520 spent five
     model calls in a row halving a limit to reach this."""
-    payload["sections"] = _without_nulls(payload.get("sections") or {})
+    payload["sections"] = {name: _without_nulls(value) for name, value
+                           in (payload.get("sections") or {}).items()}
     rendered = json.dumps(payload, separators=(",", ":"))
     if len(rendered) <= PAGE_CHARS:
         return rendered
