@@ -693,6 +693,19 @@ class ToolContext:
     def end_call_edl_cache(self):
         self._call_edl_cache = None
 
+    def apply_score(self, new_edl_dict, change_desc):
+        """The Director's one write (score.film). validate_edl, counter_facts, music_gate,
+        check_sfx_write and mono_policy run exactly as on every write; the request contract,
+        scope guard and follow-up recipes skip it (write_edl, ``scoring``)."""
+        prev_tool = getattr(self, "_executing_tool", None)
+        self._score_write = True
+        self._executing_tool = "apply_score"
+        try:
+            return self.write_edl(new_edl_dict, change_desc)
+        finally:
+            self._score_write = False
+            self._executing_tool = prev_tool
+
     def write_edl(self, new_edl_dict, change_desc):
         """Validate + append a new version. Returns the diff line, a NO
         CHANGE notice when the result is byte-identical to the current
@@ -733,7 +746,11 @@ class ToolContext:
                 return f"REJECTED (EDL v{prev['version']} unchanged): {counter_refusal}"
         import request_contract
         protected = None
-        if request_contract.enabled(self):
+        # The Director's film (apply_score) is one whole version made from the upload: the request
+        # contract, scope guard and follow-up recipes judge an editor's tool against a typed request,
+        # so they skip it. Every other check below runs as on any write.
+        scoring = getattr(self, "_score_write", False) is True
+        if not scoring and request_contract.enabled(self):
             try:
                 protected = request_contract.protected_lanes(self)
             except ValueError as exc:
@@ -753,7 +770,7 @@ class ToolContext:
             return scope_guard.preservation_violations(
                 prev["json"], normalized, self.user_message,
                 source_shape=_source_shape(self), protected=protected)
-        violations = _guarded()
+        violations = [] if scoring else _guarded()
         if violations and protected is not None \
                 and request_contract.reread_refused(
                     self, scope_guard.lanes_of(violations), violations,
@@ -768,7 +785,7 @@ class ToolContext:
         # WAVE_C: on a classified follow-up of the new Claude lanes, a write
         # outside the request or one moving the length the wrong way
         # ("cut the boring parts" came back longer) is refused.
-        followup_refusal = followup_recipes.check_write(
+        followup_refusal = None if scoring else followup_recipes.check_write(
             self, prev["json"], normalized,
             getattr(self, "_executing_tool", None))
         if followup_refusal:

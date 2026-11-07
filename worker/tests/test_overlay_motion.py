@@ -177,3 +177,38 @@ def test_cover_and_screen_takeover_reject_ignored_or_conflicting_curves():
     assert agent_tools.set_overlay_motion(
         ctx, "ov1", {"opacity": [{"t": 0, "v": 0},
                                    {"t": 0.2, "v": 1}]}).startswith("EDL v")
+
+
+def test_a_tilted_card_that_settles_stays_one_card(tmp_path):
+    """p5374 (Director slice, today's renderer): a card with a fixed tilt and a settling scale showed a
+    wrapped sliver of its picture at one side and a coloured line under it. rotate sized its canvas
+    from the first, largest frame and then read past every smaller one."""
+    edl = default_edl(2.0)
+    edl["overlays"] = [{
+        "id": "card", "asset_key": "images/card.png", "kind": "image", "start": 0.0, "duration_s": 2.0,
+        "x": 0.5, "y": 0.5, "rotation": -3.0,
+        "scale": [{"t": 0.0, "v": 0.6}, {"t": 0.4, "v": 0.32}, {"t": 2.0, "v": 0.3}]}]
+    edl = validate_edl(edl, 2.0).model_dump()
+    graph = renderer.build_filtergraph(
+        edl, 2.0, False, Timeline(edl["keep"]), None, [],
+        {"words": [], "sentences": [], "silences": [], "shots": []},
+        False, W=320, H=320, fps=30.0, frame_mode=None,
+        src_w=320, src_h=320, silence_idx=1, overlay_inputs=[(2, edl["overlays"][0])])
+    assert "pad=w='ceil(hypot(" in graph and "c=black@0.0:ow=iw:oh=ih" in graph
+    out = tmp_path / "card.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=blue:s=320x320:d=2:r=30",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:d=2",
+        "-f", "lavfi", "-i", "color=c=red:s=200x200:d=2:r=30",
+        "-filter_complex", graph, "-map", "[vout]", "-map", "[aout]",
+        "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(out)], check=True, timeout=30)
+    path = tmp_path / "settled.png"
+    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", "1.5", "-i", str(out),
+                    "-frames:v", "1", str(path)], check=True, timeout=15)
+    im = Image.open(path).convert("RGB")
+    red = [(x, y) for y in range(im.height) for x in range(im.width)
+           if (lambda p: p[0] > p[1] + 70 and p[0] > p[2] + 70)(im.getpixel((x, y)))]
+    assert len(red) > 6000                                  # the card is there, about 96 px square
+    half = 0.3 * 320 / 2 * (0.9986 + 0.0523) + 4            # its tilted half-extent, and the encoder's edge
+    assert all(abs(x - 160) <= half and abs(y - 160) <= half for x, y in red)

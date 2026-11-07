@@ -292,7 +292,8 @@ def scan(cur, since, now):
                ce.detail
           FROM client_events ce JOIN users u ON u.id = ce.user_id
          WHERE ce.kind IN ('upload_failed', 'upload_rejected', 'player_error',
-                           'upload_proxy_failed', 'mcp_error_response')
+                           'upload_proxy_failed', 'mcp_error_response',
+                           'director_fell_back')
            AND ce.created_at > %(since)s AND ce.created_at <= %(now)s
            AND {_customers()}
          ORDER BY ce.created_at LIMIT %(limit)s""", p)
@@ -531,6 +532,18 @@ def _event_failure(r):
                                     else "")),
                     detail=_short(d.get("message") or json.dumps(
                         d, default=str), 600))
+    if kind == "director_fell_back":
+        # The Director's First cut did not land and the chain delivered in the
+        # same job (worker/score/film.py). The customer got a result, so it is
+        # never P0, but the film's cause is a ticket like any failure: one per
+        # stage and kind of failure, never per sentence.
+        stage = str(d.get("stage") or "film")
+        reason = str(d.get("reason") or "")
+        head = reason.split(":", 1)[0].strip().lower()[:40] if ":" in reason[:48] else signature(reason)
+        return dict(base, source="director", severity="P1",
+                    cause_key=cause_key("director", stage, head),
+                    title=_short(f"The Director's First cut fell to the chain at {stage}: {reason}"),
+                    detail=_short(json.dumps(d, default=str), 600))
     return None
 
 

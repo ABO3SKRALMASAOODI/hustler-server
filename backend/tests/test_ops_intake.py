@@ -292,6 +292,20 @@ def no_storm_readers(monkeypatch):
     monkeypatch.setattr(paid_out, "scan", lambda cur, since, now, p: [])
 
 
+def test_a_director_fall_is_a_ticket_per_cause_never_a_page():
+    """worker/score/film.py: the Director's First cut fell and the chain delivered in the same job."""
+    def row(reason, stage="direct", rid=7):
+        return {"id": rid, "kind": "director_fell_back", "user_id": 3, "project_id": 1,
+                "at": datetime(2026, 11, 7, 10, tzinfo=timezone.utc),
+                "detail": json.dumps({"stage": stage, "reason": reason, "usd": 0.41})}
+    a = intake._event_failure(row("late: director_direct past its deadline after 150 s"))
+    b = intake._event_failure(row("late: director_direct past its deadline after 151 s", rid=8))
+    c = intake._event_failure(row("write: REJECTED (EDL v1 unchanged): bad span", stage="write"))
+    assert a["severity"] == "P1" and a["source"] == "director"
+    assert a["cause_key"] == b["cause_key"] != c["cause_key"]
+    assert "fell to the chain at direct" in a["title"]
+
+
 def test_scan_files_jobs_requests_and_replies_once(no_storm_readers):
     jobs = [{"id": 115549, "type": "index", "user_id": 2589,
              "project_id": 4911, "at": NOW, "tool": None,

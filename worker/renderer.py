@@ -5985,6 +5985,21 @@ def build_filtergraph(edl, src_dur, has_audio, tl, ass_path,
                 chain.append(
                     f"rotate=angle='{rad}':c=black@0.0:"
                     "ow='hypot(iw,ih)':oh='hypot(iw,ih)'")
+        elif rot and scale_animated:
+            # A tilted card that settles: rotate sizes its canvas once, from
+            # the first frame, and an eval=frame scale then hands it frames
+            # of another size. It read past the smaller frames' edges: a
+            # wrapped sliver of the picture at one side and a coloured line
+            # under it (p5374, rated broken_render / off_centre_card). Every
+            # frame goes onto one fixed canvas first, as for an animated tilt.
+            rad = float(rot) * 3.14159265 / 180.0
+            max_width = _even((W or 1280) * max(float(k["v"])
+                                                for k in scale_value))
+            diagonal = f"ceil(hypot({max_width},ih*{max_width}/iw)/2)*2"
+            chain.append(f"pad=w='{diagonal}':h='{diagonal}':"
+                         "x='(ow-iw)/2':y='(oh-ih)/2':"
+                         "color=black@0:eval=frame")
+            chain.append(f"rotate={rad:.4f}:c=black@0.0:ow=iw:oh=ih")
         elif rot:
             rad = float(rot) * 3.14159265 / 180.0
             chain.append(f"rotate={rad:.4f}:c=black@0.0"

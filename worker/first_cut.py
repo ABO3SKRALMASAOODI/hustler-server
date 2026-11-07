@@ -3561,9 +3561,17 @@ def run(worker_db, job, project, index_row):
                     ctx, worker_db, url, started,
                     _message_text(worker_db, payload.get("message_id")))
             else:
-                with _timed(ctx, "chain"):
-                    steps, applied, picked = video_chain(
-                        ctx, worker_db, started, spend)
+                # The Director's film (worker/score; app_kv.director, off
+                # by default): None means it is off, out of scope or fell,
+                # and the chain runs exactly as before.
+                film = _director_film(ctx, worker_db, job, started, spend,
+                                      trial_scope, subscribed)
+                if film is not None:
+                    steps, applied, picked = film
+                else:
+                    with _timed(ctx, "chain"):
+                        steps, applied, picked = video_chain(
+                            ctx, worker_db, started, spend)
         except Exception as exc:  # noqa: BLE001
             # A chain that dies still answers the customer: what it saved is
             # rendered, or the reply below says plainly that it stopped.
@@ -3571,29 +3579,10 @@ def run(worker_db, job, project, index_row):
                   f"{type(exc).__name__}: {str(exc)[:200]}", flush=True)
             steps.append({"tool": "chain", "ok": False,
                           "note": f"{type(exc).__name__}: {str(exc)[:160]}"})
-        render = None
-        keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
-        if ctx.versions_written or keep_whole:
-            _say(ctx, "render", "Rendering your preview")
-            if config.FIRST_CUT_DRAFT_FIRST and \
-                    getattr(ctx, "first_cut_q1", False):
-                render = _render_draft_first(ctx, steps)
-            else:
-                with _timed(ctx, "render"):
-                    render = agent_tools.execute(
-                        ctx, "render_preview", {"quality": "approval"})
-                steps.append({"tool": "render_preview",
-                              "ok": not _failed(render),
-                              "note": str(render or "")[:160]})
-                if _clear_corner_mark(ctx, steps, render) and \
-                        _renders_done(steps) < config.FIRST_CUT_MAX_RENDERS:
-                    with _timed(ctx, "render"):
-                        render = agent_tools.execute(
-                            ctx, "render_preview", {"quality": "approval"})
-                    steps.append({"tool": "render_preview",
-                                  "ok": not _failed(render),
-                                  "note": str(render or "")[:160]})
-                render = _await_running_render(ctx, steps, render)
+        render = _render_cut(ctx, steps, picked)
+        if picked and picked.get("how") == "director" and not _on_screen(ctx):
+            steps, applied, picked, render = _film_fell_at_render(
+                ctx, worker_db, job, started, spend, steps, start_edl, render)
     finally:
         pf = getattr(ctx, "broll_prefetch", None)
         if pf is not None:
@@ -3684,6 +3673,74 @@ def run(worker_db, job, project, index_row):
             "first_cut": meta["first_cut"],
             "trial_usd": round(spend["usd"], 6),
             "credits_charged": 0.0}
+
+
+def _render_cut(ctx, steps, picked):
+    """The First cut's preview render (the chain's or the Director's film)."""
+    render = None
+    keep_whole = bool(picked and picked.get("how") in {"finished_piece", "continuous"})
+    if ctx.versions_written or keep_whole:
+        _say(ctx, "render", "Rendering your preview")
+        if config.FIRST_CUT_DRAFT_FIRST and \
+                getattr(ctx, "first_cut_q1", False):
+            render = _render_draft_first(ctx, steps)
+        else:
+            with _timed(ctx, "render"):
+                render = agent_tools.execute(
+                    ctx, "render_preview", {"quality": "approval"})
+            steps.append({"tool": "render_preview",
+                          "ok": not _failed(render),
+                          "note": str(render or "")[:160]})
+            if _clear_corner_mark(ctx, steps, render) and \
+                    _renders_done(steps) < config.FIRST_CUT_MAX_RENDERS:
+                with _timed(ctx, "render"):
+                    render = agent_tools.execute(
+                        ctx, "render_preview", {"quality": "approval"})
+                steps.append({"tool": "render_preview",
+                              "ok": not _failed(render),
+                              "note": str(render or "")[:160]})
+            render = _await_running_render(ctx, steps, render)
+    return render
+
+
+def _on_screen(ctx):
+    """The latest version is the one the preview shows."""
+    try:
+        latest = ctx.latest_edl()
+    except Exception:  # noqa: BLE001
+        return False
+    preview = getattr(ctx, "last_preview", None) or {}
+    return bool(latest and preview and preview.get("edl_version") == latest.get("version"))
+
+
+def _director_film(ctx, worker_db, job, started, spend, trial_scope, subscribed):
+    """(steps, applied, picked) from the Director, or None for the chain. Never raises."""
+    try:
+        from score import film
+        return film.attempt(ctx, worker_db, job, started, spend, trial_scope,
+                            subscribed)
+    except Exception as exc:  # noqa: BLE001 — the chain is the floor
+        print(f"[first_cut] director skipped: {type(exc).__name__}: "
+              f"{str(exc)[:200]}", flush=True)
+        return None
+
+
+def _film_fell_at_render(ctx, worker_db, job, started, spend, steps,
+                         start_edl, render):
+    """The film's preview did not land: back to the upload, then the chain,
+    in the same job. The customer sees the chain's cut, never an error."""
+    from score import film
+    film.fell(ctx, worker_db, job, "render", str(render or "no preview")[:200],
+              start_edl=(start_edl or {}).get("json"))
+    try:
+        with _timed(ctx, "chain"):
+            more, applied, picked = video_chain(ctx, worker_db, started, spend)
+    except Exception as exc:  # noqa: BLE001
+        more, applied, picked = [{"tool": "chain", "ok": False,
+                                  "note": f"{type(exc).__name__}: "
+                                          f"{str(exc)[:160]}"}], [], None
+    steps = steps + more
+    return steps, applied, picked, _render_cut(ctx, steps, picked)
 
 
 def _feature_gate_stop(worker_db, job, session_id, ctx, workdir):
