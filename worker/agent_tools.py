@@ -758,7 +758,7 @@ class ToolContext:
                 and request_contract.reread_refused(
                     self, scope_guard.lanes_of(violations), violations,
                     getattr(self, "_executing_tool", None),
-                    getattr(self, "_executing_args", None)):
+                    _what_changed(prev["json"], normalized)):
             protected = request_contract.protected_lanes(self)
             violations = _guarded()
         if violations:
@@ -20805,9 +20805,9 @@ def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
             return f"REJECTED: {axis} must be a number ({lo:g} to {hi:g})."
         delta = False
         if axis in ("contrast", "saturation"):
-            if hi < requested <= 100.0:
+            if hi < requested <= 100.0 or -100.0 <= requested < -1.0:
                 # A percentage: contrast=4 is 4%, never 4x (p5520's replay).
-                call_note(ctx, f"{axis} {requested:g} read as +{requested:g}%")
+                call_note(ctx, f"{axis} {requested:g} read as {requested:+g}%")
                 requested = requested / 100.0
         elif 1.0 < abs(requested) <= 100.0:
             call_note(ctx, f"{axis} {requested:g} read as {requested:g}%")
@@ -30636,6 +30636,20 @@ def _matte_device_notes(ctx, before, after):
     return notes
 
 
+def _what_changed(before, after):
+    """The fields a write changes, as stored: a reader judges the change, not
+    the dialect of its call (contrast=4 reads as a drastic grade, and is 4%)."""
+    def fields(side):
+        out = {k: v for k, v in (side or {}).items()
+               if k not in ("effects", "keep", "fx") and v not in (None, [], {})}
+        for k, v in ((side or {}).get("effects") or {}).items():
+            out[f"effects.{k}"] = ({a: b for a, b in v.items() if b is not None}
+                                   if isinstance(v, dict) else v)
+        return out
+    old, new = fields(before), fields(after)
+    return {k: new.get(k) for k in set(old) | set(new) if old.get(k) != new.get(k)}
+
+
 def verify_tools_matte_person(ctx, edl):
     """verify_tools.matte_state's person flag (False: the index measured no
     face anywhere), or None."""
@@ -34920,7 +34934,6 @@ def _execute(ctx, name, args):
     fn = entry[0]
     previous_executing_tool = getattr(ctx, "_executing_tool", None)
     ctx._executing_tool = name
-    ctx._executing_args = args
     before_version = None
     look_before = None
     try:
