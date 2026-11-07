@@ -66,7 +66,11 @@ def layer_changed(before, after, layer):
 
 
 def has_rendered_transitions(edl, index=None):
-    """A preset is not a visible transition without a qualifying cut (#96)."""
+    """A preset is not a visible transition without a qualifying cut (#96).
+    A per-cut junction device (a dissolve) is one in its own right."""
+    if any(isinstance(item, dict) and item.get("type") == "junction"
+           for item in (edl or {}).get("fx") or []):
+        return True
     transition = ((edl or {}).get("effects") or {}).get("transition")
     if not isinstance(transition, dict) or transition.get("style") in ("none", "cut", "off"):
         return False

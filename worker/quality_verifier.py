@@ -903,7 +903,9 @@ def _request_findings(edl, request_text, media_keys=None, semantic_contract=None
             "it"))
     ask = str(request_text or "").lower()
     if not semantic_contract and _requested_transitions(ask) \
-            and not ((edl.get("effects") or {}).get("transition")):
+            and not ((edl.get("effects") or {}).get("transition")) \
+            and not any(isinstance(item, dict) and item.get("type") == "junction"
+                        for item in edl.get("fx") or []):
         findings.append(_finding(
             "requested_transitions_missing", "motion",
             "The user explicitly requested transitions, but the latest EDL "
