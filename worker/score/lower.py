@@ -283,19 +283,62 @@ def shot_runs(shots, n_min):
     return out
 
 
-def zoom_of(it, a, b, fps, zid):
-    """A crop of the live take is the camera. Every crop stays inside the frame, so a path says it exactly."""
+def in_window(c, win):
+    """A crop in source fractions, as fractions of the renderer's own framing of the upload."""
+    w, h = win[2] - win[0], win[3] - win[1]
+    return [(c[0] - win[0]) / w, (c[1] - win[1]) / h, (c[2] - win[0]) / w, (c[3] - win[1]) / h]
+
+
+def base_window(l1):
+    """How the renderer frames the upload before any camera, in source fractions, and the EDL frame
+    that says it. The Score's crops are in source fractions and the camera works on the framed
+    picture: p5363's 4:3 cartoon read a 9:16 crop as a 2.6x push into the centre 9:16, and cut its
+    title and characters. A crop that holds marks past the source's edge (compiler.keep_marks_whole)
+    fits the upload whole on a blurred copy of itself."""
+    a = (l1.get("assets") or {}).get("main") or {}
+    W, H = l1["frame"]
+    sw, sh = float(a.get("w") or 0), float(a.get("h") or 0)
+    frame = {"ratio": "9:16", "mode": "crop"} if H > W else {"ratio": "16:9", "mode": "crop"}
+    if sw <= 0 or sh <= 0:
+        return [0.0, 0.0, 1.0, 1.0], frame
+    target = (W / H) * (sh / sw)            # the frame's width over height, in source fractions
+    if abs(target - 1.0) <= 0.02:
+        return [0.0, 0.0, 1.0, 1.0], frame
+    fps = float(l1["fps"])
+    rects = []
+    for it in l1["items"]:
+        if it.get("k") == "shot" and it.get("pic") == "main" and "src" in it and it.get("crop") and on_spine(l1, it, fps):
+            rects += [list(c) for c in it["crop"]] if isinstance(it["crop"][0], (list, tuple)) else [list(it["crop"])]
+    past = any(c[0] < -0.004 or c[1] < -0.004 or c[2] > 1.004 or c[3] > 1.004 for c in rects)
+    wide = target < 1.0                      # an upload wider than the frame: the window slides across it
+    span = (target, 1.0) if wide else (1.0, 1.0 / target)
+    lo = min((c[0 if wide else 1] for c in rects), default=0.5)
+    hi = max((c[2 if wide else 3] for c in rects), default=0.5)
+    if not past and hi - lo <= span[0 if wide else 1] + 1e-3:
+        half = span[0 if wide else 1] / 2
+        m = min(max((lo + hi) / 2, half), 1 - half)
+        frame["focus_x" if wide else "focus_y"] = round(m, 4)
+        return ([m - half, 0.0, m + half, 1.0] if wide else [0.0, m - half, 1.0, m + half]), frame
+    frame["mode"] = "pad_blur"
+    hb = 1.0 / target if wide else 1.0
+    wb = 1.0 if wide else target
+    return [0.5 - wb / 2, 0.5 - hb / 2, 0.5 + wb / 2, 0.5 + hb / 2], frame
+
+
+def zoom_of(it, a, b, fps, zid, win=(0.0, 0.0, 1.0, 1.0)):
+    """A crop of the live take is the camera, on the picture as the renderer frames it (`win`)."""
     crops = it.get("crop")
     if isinstance(crops[0], (list, tuple)):
         n = len(crops)
         ix = sorted({0, n - 1, *[int(round(i * (n - 1) / 7)) for i in range(8)]})
     else:
         crops, n, ix = [crops, crops], 2, [0, 1]
+    crops = [in_window(c, win) for c in crops]
     pts = []
     for i in ix:
         c = crops[i]
         pts.append({"f": round(i / max(n - 1, 1), 4), "cx": round((c[0] + c[2]) / 2, 4), "cy": round((c[1] + c[3]) / 2, 4),
-                    "s": round(1 / max(c[2] - c[0], 1e-3) - 1, 4)})
+                    "s": round(max(1 / max(c[2] - c[0], 1e-3) - 1, 0.0), 4)})
     return {"id": zid, "start": r2(a / fps), "end": r2(b / fps), "strength": max(p["s"] for p in pts) or 0.0001, "mode": "path", "path": pts, "ease": "linear"}
 
 
@@ -306,6 +349,8 @@ def full(crop):
 
 def still_crop(it):
     c = rect_mid(it.get("crop"))
+    if c is not None:            # a crop held past the source's edge shows the whole source on a card
+        c = [min(max(float(x), 0.0), 1.0) for x in c]
     return None if full(c) else [round(float(x), 4) for x in c]
 
 
@@ -317,6 +362,7 @@ def lower_pictures(l1, work, bake, rep):
     n_min = int(math.ceil(OV_MIN_S * fps - 1e-6))
     runs = shot_runs(shots, n_min)
     rep["shots"], rep["picture_runs"] = len(shots), len(runs)
+    win, rep["frame"] = base_window(l1)
     for it, a, b, merged in runs:
         pid = it["id"]
         start, dur = r2(a / fps), r2((b - a) / fps)
@@ -324,8 +370,9 @@ def lower_pictures(l1, work, bake, rep):
         if merged > 1:
             rep["merged_shots"] = rep.get("merged_shots", 0) + merged - 1
         if pic == "main" and "src" in it and on_spine(l1, it, fps):
-            if not full(it.get("crop")) or animated([tuple(c) for c in it["crop"]] if isinstance(it["crop"][0], (list, tuple)) else []):
-                zooms.append(zoom_of(it, a, b, fps, f"z.{pid}"))
+            c = it["crop"]
+            if not full(in_window(rect_mid(c), win)) or animated([tuple(x) for x in c] if isinstance(c[0], (list, tuple)) else []):
+                zooms.append(zoom_of(it, a, b, fps, f"z.{pid}", win))
             continue
         ov = {"id": f"ov.{pid}", "start": start, "duration_s": dur, "fit": "cover"}
         asset = assets.get(pic)
@@ -860,7 +907,7 @@ def lower(l1, work):
         effects["grade_custom"] = gc
     if stylize:
         effects["stylize"] = stylize
-    edl = {"keep": keep, "frame": {"ratio": "9:16", "mode": "crop"} if l1["frame"][1] > l1["frame"][0] else {"ratio": "16:9", "mode": "crop"},
+    edl = {"keep": keep, "frame": dict(rep["frame"]),
            "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + script_type,
            "texts": lower_texts(l1, rep, runs), "vectors": vectors, "fx": tr_fx + flash_fx, "effects": effects, "master": {"loudness": "social"}}
     for lane, least in (("texts", TX_MIN_S), ("vectors", TX_MIN_S), ("fx", 1 / fps)):

@@ -141,6 +141,87 @@ def look(sheet_path, cands, wishes, deadline):
     return parse_keep(r.text), r.usd
 
 
+CHECK_SYSTEM = """You check stock pictures for a short film before an editor may use them. Each numbered picture was found for one moment of the film; you get what the moment wants and the words said there. Keep a picture only when a viewer would see at once that it belongs with those words: it shows the thing, the place, the action or the feeling the words are about. Drop it when it shows something the words neither name nor suggest (a material, a tool, a room or an object that just happens to be near the search words), when it would read as a mistake next to the words, or when you cannot tell what it shows.
+Answer with one JSON object and nothing else: {"fit":[{"n":number,"ok":true or false,"why":"five to ten plain words"}]}, one entry per picture."""
+
+
+def clause_of(work, w):
+    """The words said where a wish lands: its word range, read from the session's index."""
+    try:
+        with open(os.path.join(work, "index.json"), encoding="utf-8") as f:
+            words = json.load(f).get("words") or []
+    except (OSError, ValueError):
+        return ""
+    lo = hi = None
+    if isinstance(w, str) and "-" in w.strip("w"):
+        a, _, b = w.strip("w").partition("-")
+        if a.strip().isdigit() and b.strip().isdigit():
+            lo, hi = int(a), int(b)
+    elif isinstance(w, str) and w.strip("w").isdigit():
+        lo = hi = int(w.strip("w"))
+    if lo is not None:
+        return " ".join(str(x.get("w", "")) for x in words[max(0, lo - 2):hi + 3])
+    try:
+        t = float(w)
+    except (TypeError, ValueError):
+        return ""
+    return " ".join(str(x.get("w", "")) for x in words if t - 2.5 <= float(x.get("t0", -9)) <= t + 2.5)
+
+
+def check_fit(work, items, wishes, deadline):
+    """Before a found picture enters the Bin, a model looks at it against the moment it is for and
+    drops it when it doesn't belong there (p5302: chipboard and a screw in a furniture promo; p5374: a
+    bathroom tap in a night song). The cheapest vision model already wired, one call for the Bin.
+    Returns (kept items, usd, report). No answer keeps only what the Look itself chose."""
+    if not items:
+        return items, 0.0, []
+    tmp = tempfile.mkdtemp(prefix="check-", dir=work)
+    try:
+        content, lines = [], []
+        for n, it in enumerate(items):
+            im = Image.open(os.path.join(work, it["path"])).convert("RGB")
+            im.thumbnail((448, 448))
+            p = os.path.join(tmp, f"{n}.jpg")
+            im.save(p, quality=85)
+            w0 = wishes[it["wish"]] if 0 <= int(it.get("wish", -1)) < len(wishes) else {}
+            content += [{"type": "text", "text": f"picture {n}"}, brief.image_block(p)]
+            said = clause_of(work, w0.get("w") or w0.get("at"))
+            lines.append(f"picture {n}: the moment wants: {w0.get('want') or it.get('what') or ''}" + (f" | words said there: \"{said}\"" if said else ""))
+        content.append({"type": "text", "text": "\n".join(lines)})
+        try:
+            r = call.stream(LOOK_MODEL, CHECK_SYSTEM, content, max_tokens=1200, effort="low", purpose="director_bin_check",
+                            deadline=min(deadline, time.monotonic() + 15.0), thinking=False)
+        except Exception as e:  # noqa: BLE001 no verdict: a picture no model chose does not go in
+            kept = [it for it in items if it.get("_looked")]
+            return kept, 0.0, [dict(check_error=str(e)[:120], dropped=[it["id"] for it in items if not it.get("_looked")])]
+        verdict = {}
+        for o in parse_keep(r.text.replace('"n"', '"c"')):
+            if isinstance(o.get("c"), int):
+                verdict[o["c"]] = (o.get("ok") is True, str(o.get("why") or "")[:80])
+        kept, rep = [], []
+        for n, it in enumerate(items):
+            ok, why = verdict.get(n, (bool(it.get("_looked")), "no verdict"))
+            rep.append(dict(id=it["id"], what=it.get("what"), ok=ok, why=why))
+            if ok:
+                kept.append(it)
+        return kept, r.usd, rep
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def renumber(work, items):
+    """Bin ids stay 0..n-1 after a check drops some: the Director reads ids off the board."""
+    out = []
+    for n, it in enumerate(items):
+        if it["id"] != n:
+            ext = os.path.splitext(it["path"])[1]
+            dst = f"bin/{n}{ext}"
+            os.replace(os.path.join(work, it["path"]), os.path.join(work, dst))
+            it = dict(it, id=n, path=dst)
+        out.append(it)
+    return out
+
+
 def bin_board(items, work, path):
     cols, rows = 6, 2
     gap = 4
@@ -283,11 +364,20 @@ def run(work, scout, per, acquire, deadline):
             row = dict(id=iid, kind=kind, path=final, w=got.get("w") or c.get("width"), h=got.get("h") or c.get("height"), storage_key=got["storage_key"])
             if kind == "video":
                 row.update(dur=round(float(got.get("dur") or c.get("duration_s") or 0), 2), fps=got.get("fps"))
+            row["_looked"] = bool(k.get("what"))
             row.update({"what": k.get("what") or c.get("description") or c.get("title") or "", "for": f"w{w0.get('w')}" if w0.get("w") else str(w0.get("at")),
                         "wish": c["_wish"], "class": cls, "licence": lic, "licence_url": lurl, "provider": c.get("provider"), "author": c.get("credit"),
                         "page": c.get("page_url"), "query": c.get("_q")})
             items.append(row)
         pool.shutdown(wait=False, cancel_futures=True)
+        n_before = len(items)
+        items, check_usd, check_rep = check_fit(work, items, wishes, deadline)
+        for it in items:
+            it.pop("_looked", None)
+        dropped = n_before - len(items)
+        items = renumber(work, items)
+        usd += check_usd
+        report.append(dict(check=check_rep, dropped=dropped, usd=round(check_usd, 6)))
         read_pictures(work, items)
         plates = plates_for(per, 3, work)
         for r in report:

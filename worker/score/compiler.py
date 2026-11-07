@@ -1517,6 +1517,8 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
         t = out["src"][0] if "src" in out else 0.0
         base = tracked_crop(ctx, ref, asset, out.get("src"), W, H, n) or base_rect(ctx, ref, asset, t, W, H, rng, repeat)
         out["crop"] = camera(ctx, base, n, ref.get("cam") or ctx.dna.get("cam"))
+        if ref["asset"] == "main" and (W, H) == (ctx.W, ctx.H):        # the frame's own picture, not a card's inset
+            out["crop"] = keep_marks_whole(ctx, out["crop"], out.get("src"), asset, W, H)
     tr = parse_treat(ref.get("treat"))
     if tr:
         out["treat"] = tr
@@ -1526,6 +1528,76 @@ def picture_fields(ctx, b, ref, a, z, W=None, H=None, src=None):
     if isinstance(ref.get("step"), int) and ref["step"] > 1:
         out["step"] = ref["step"]
     return out
+
+
+def head_of(f):
+    """A face box grown to the head it belongs to: hair above, ears at the sides, the chin below."""
+    w, h = f[2] - f[0], f[3] - f[1]
+    return [f[0] - 0.25 * w, f[1] - 0.6 * h, f[2] + 0.25 * w, f[3] + 0.15 * h]
+
+
+def main_marks(ctx, s0, s1, words=True, aspect=1.0):
+    """What a crop of the upload must never cut through between two source seconds: heads, and when
+    the upload's shape is not the frame's, the printed words that stay in it (perception's text
+    clusters), in source fractions. A same-shape upload's punch-in leaving a sign out is a choice."""
+    out = [list(x["box"]) for x in ctx.perc.get("text") or [] if x.get("box") and x["t"][0] - 0.5 <= s1 and x["t"][1] + 0.5 >= s0] if words else []
+    # A text box from the index hugs the strokes it found: a script title's first and last letters lie
+    # past it (p5363: 'La Parka' read as 'a Park'). Each side gains the line's own height, a little above and below.
+    out = [[b[0] - (b[3] - b[1]) * aspect, b[1] - 0.15 * (b[3] - b[1]), b[2] + (b[3] - b[1]) * aspect, b[3] + 0.15 * (b[3] - b[1])] for b in out]
+    for r in ctx.faces or []:
+        if s0 - 0.75 <= r["t"] <= s1 + 0.75:
+            out += [head_of(f) for f in r["boxes"] if (f[2] - f[0]) * (f[3] - f[1]) > 0.0004]
+    return out
+
+
+def _cuts(c, m):
+    inside = c[0] - 1e-3 <= m[0] and c[1] - 1e-3 <= m[1] and m[2] <= c[2] + 1e-3 and m[3] <= c[3] + 1e-3
+    return rects_touch(c, m) and not inside
+
+
+def hold_whole(rect, marks, target):
+    """The smallest frame-shaped rect round `rect` that cuts through none of `marks`. It may pass the
+    source's edges: the lowering then fits the picture whole on a blurred copy of itself."""
+    c = list(rect)
+    for _ in range(4):
+        cut = [m for m in marks if _cuts(c, m)]
+        if not cut:
+            return c
+        u = [min([c[0]] + [m[0] for m in cut]), min([c[1]] + [m[1] for m in cut]), max([c[2]] + [m[2] for m in cut]), max([c[3]] + [m[3] for m in cut])]
+        u = [max(u[0], -0.0), max(u[1], 0.0), min(u[2], 1.0), min(u[3], 1.0)]
+        w, h = u[2] - u[0], u[3] - u[1]
+        if w / max(h, 1e-6) < target:
+            w = h * target
+        else:
+            h = w / target
+        cx, cy = (u[0] + u[2]) / 2, (u[1] + u[3]) / 2
+        cx = clamp(cx, w / 2, 1 - w / 2) if w <= 1 else 0.5
+        cy = clamp(cy, h / 2, 1 - h / 2) if h <= 1 else 0.5
+        c = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
+    return c
+
+
+def keep_marks_whole(ctx, crop, src, asset, W, H):
+    """p5363: the 9:16 crop of a 4:3 cartoon cut its printed title to 'a Parka' and the drawn characters
+    off at the bottom. A crop of the upload holds every printed word and head it touches whole."""
+    if not crop or not src:
+        return crop
+    sw, sh = float(asset.get("w") or 0), float(asset.get("h") or 0)
+    if sw <= 0 or sh <= 0:
+        return crop
+    target = (W / H) * (sh / sw)
+    marks = main_marks(ctx, src[0], src[1], words=abs(target - 1.0) > 0.02, aspect=sh / sw)
+    if not marks:
+        return crop
+    if isinstance(crop[0], (list, tuple)):
+        held = [hold_whole(c, marks, target) for c in crop]
+        if held != [list(c) for c in crop]:
+            ctx.held_whole = getattr(ctx, "held_whole", 0) + 1
+        return held
+    held = hold_whole(crop, marks, target)
+    if held != list(crop):
+        ctx.held_whole = getattr(ctx, "held_whole", 0) + 1
+    return held
 
 
 def video_src(ctx, ref, asset, n, rng):
@@ -1813,10 +1885,43 @@ def face_rects(ctx, shot):
     return out
 
 
+def head_rects(ctx, shot):
+    """Heads in frame fractions on this shot at its middle: each face grown to its head, and the head
+    of a person seen with no face. Type never sits on one (p5302: ESTÁ CHEGANDO across his hair)."""
+    if not shot or not is_take(shot.get("pic")) or "src" not in shot:
+        return []
+    t = (shot["src"][0] + shot["src"][1]) / 2
+    boxes = []
+    if ctx.faces:
+        s = min(ctx.faces, key=lambda r: abs(r["t"] - t))
+        if abs(s["t"] - t) <= 2.0:
+            boxes += [head_of(f) for f in s["boxes"]]
+    if not boxes:
+        rows = [r for r in ctx.perc.get("samples") or [] if r.get("person") and abs(float(r["t"]) - t) <= 2.0]
+        if rows:
+            b = min(rows, key=lambda r: abs(float(r["t"]) - t))["person"]
+            w, h = b[2] - b[0], b[3] - b[1]
+            boxes.append([b[0] + 0.28 * w, b[1] + 0.02 * h, b[2] - 0.28 * w, b[1] + 0.2 * h])
+    c = shot["crop"]
+    c = c[len(c) // 2] if isinstance(c[0], list) else c
+    out = []
+    for f in boxes:
+        r = through_crop(f, c)
+        if r[2] > 0 and r[0] < 1 and r[3] > 0 and r[1] < 1:
+            out.append([clamp(v, 0, 1) for v in r])
+    return out
+
+
 def seen_rows(ctx, pic, t):
     """What Vision read in this picture, nearest its second: (printed text boxes, face boxes), source fractions."""
     if pic == "main":
         boxes = [x["box"] for x in ctx.perc.get("text") or [] if x["t"][0] - 0.5 <= t <= x["t"][1] + 0.5 and x.get("box")]
+        # The index's own reading at this second too: a sign or a printed number seen in one part of the
+        # take never makes a cluster that stays, and type landed on it (p5302: DIA 22 over a printed 22).
+        # A region over a quarter of the frame is a pattern, not words.
+        for r in (ctx.index.get("spatial") or {}).get("samples") or []:
+            if abs(float(r.get("t", -9)) - t) <= 0.75:
+                boxes += [list(b) for b in r.get("text") or [] if len(b) == 4 and (b[2] - b[0]) * (b[3] - b[1]) < 0.25]
         return boxes, []
     if str(pic).startswith("bin:"):
         rows = (ctx.bin.get(str(pic)[4:]) or {}).get("seen") or []
@@ -2019,22 +2124,43 @@ def solve_seat(ctx, seat, block_w, block_h, a, z):
             return [cx, cy + hh + tilt + 0.014 + block_h / 2]
     margin = 0.012
     obstacles = [b[2] for b in ctx.blocks if b[0] < z and b[1] > a] + mark_rects(ctx, a, z)
+    heads = []
     for f in (a, mid, max(a, z - 1)):
         obstacles += face_rects(ctx, shot_at(ctx, f))
-    for _ in range(5):
-        rect = [x - block_w / 2, y - block_h / 2 - margin / 2, x + block_w / 2, y + block_h / 2 + margin / 2]
-        hit = [r for r in obstacles if rects_touch(rect, r)]
+        heads += head_rects(ctx, shot_at(ctx, f))
+    y0 = y
+    y = clear_of(x, y, block_w, block_h, obstacles + heads, margin)
+    if heads and clear_of(x, y, block_w, block_h, heads, margin, probe=True):
+        # No seat clears everything: a head outranks a printed sign or another line
+        y = clear_of(x, y0, block_w, block_h, heads, margin)
+    return [x, y]
+
+
+def clear_of(x, y, block_w, block_h, obstacles, margin, probe=False):
+    """The nearest height, down first, where a block touches none of the obstacles. With probe, is
+    the block at y touching one?"""
+    def hits(yy):
+        rect = [x - block_w / 2, yy - block_h / 2 - margin / 2, x + block_w / 2, yy + block_h / 2 + margin / 2]
+        return [r for r in obstacles if rects_touch(rect, r)]
+    if probe:
+        return bool(hits(y))
+    for _ in range(6):
+        hit = hits(y)
         if not hit:
             break
         low = max(r[3] for r in hit) + margin + block_h / 2
         high = min(r[1] for r in hit) - margin - block_h / 2
-        if low + block_h / 2 < 0.93:
+        if low + block_h / 2 < 0.93 and not hits(low):
+            y = low
+        elif high - block_h / 2 > 0.06 and not hits(high):
+            y = high
+        elif low + block_h / 2 < 0.93:
             y = low
         elif high - block_h / 2 > 0.06:
             y = high
         else:
             break
-    return [x, y]
+    return y
 
 
 def _last(v):
@@ -2361,7 +2487,12 @@ def place_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk=None, region=None,
         if pl:
             m = 1.0 - luma(pl["c0"]) if luma(ink2) > 0.5 else luma(pl["c0"]) - 0.07
         else:
-            m = ink_margin(ctx, s, (f + q) // 2, rect, ink2)
+            # Every stretch under the word, not one frame of it: a punch-in, a walk past a white wall or
+            # a turn of the head changes what a word sits on inside one shot (p5302: white SENSACIONAL
+            # on the wall at 7.7 s). A picture this session cannot read under it gets the edge too.
+            ms = [ink_margin(ctx, s, g, rect, ink2) for g in sorted({f, f + (q - f) // 4, (f + q) // 2, f + 3 * (q - f) // 4, max(f, q - 1)})]
+            ms = [x for x in ms if x is not None]
+            m = min(ms) if ms else (None if s is None else -1.0)
         edge = (m is not None and m < EDGE_BELOW) or clip_by_still(ctx, s)
         if pieces and pieces[-1][2] == ink2 and pieces[-1][3] == edge:
             pieces[-1][1] = q
@@ -2526,7 +2657,11 @@ def display(ctx, iid, text, a, z, opt, b=None):
     y_mid = float(seat[1])
     probe = [x0 - block_w / 2, y_mid - block_h / 2, x0 + block_w / 2, y_mid + block_h / 2]
     on_marks = [r for r in mark_rects(ctx, a, z) if rects_touch(probe, r)]
-    if solve or on_marks:      # words already printed in the picture are the picture's. Type doesn't land on them
+    # Nor on a head: without a matte to set it behind him, a word written on his seat covers his face
+    # (p5302: LAR NOVO MÓVEIS across his hair at 19.0 and 22.25 s).
+    on_head = not (opt.get("behind") and ctx.matte) and any(rects_touch(probe, r) for f in sorted({a, (a + z) // 2, max(a, z - 1)})
+                                                             for r in head_rects(ctx, shot_at(ctx, f)))
+    if solve or on_marks or on_head:      # words already printed in the picture are the picture's. Type doesn't land on them
         x0, y_mid = solve_seat(ctx, [x0, y_mid], block_w, block_h, a, z)
         probe = [x0 - block_w / 2, y_mid - block_h / 2, x0 + block_w / 2, y_mid + block_h / 2]
         if on_marks and any(rects_touch(probe, r) for r in mark_rects(ctx, a, z)):
@@ -2722,7 +2857,9 @@ def rect_of(ctx, b, g, f, n=1):
             return p if n > 2 else p[0]
         for fr in face_rects(ctx, shot_at(ctx, f)):
             return [clamp(fr[0] - 0.04, 0, 1), clamp(fr[1] - 0.04, 0, 1), clamp(fr[2] + 0.04, 0, 1), clamp(fr[3] + 0.04, 0, 1)]
-        return [0.12, 0.19, 0.88, 0.68]
+        # No face and no body on this frame. A made-up box registered to nothing drew a blank cream
+        # rectangle over p5363's cartoon at 0.08 s: the caller falls to its whole-frame form instead.
+        return None
     return None
 
 
@@ -2965,11 +3102,13 @@ def make_card(ctx, b, ref, a, z, g, gid, z_order=1):
     ar = ctx.H / ctx.W
     hw = (W0 * math.cos(rad) + H0 * ar * math.sin(rad)) / 2
     hh = (H0 * math.cos(rad) + W0 / ar * math.sin(rad)) / 2
-    k = min(1.0, 0.49 / max(hw, 1e-6), 0.49 / max(hh, 1e-6))
+    # The type's side margin holds for a card too: at 0.49 a card landed 0.01 from both sides, edge to
+    # edge on its landing frames (p5302's LAR NOVO MÓVEIS pop at 19.0 and 22.25 s).
+    k = min(1.0, (0.5 - SAFE_X) / max(hw, 1e-6), 0.47 / max(hh, 1e-6))
     if k < 1.0:
         w, h, W0, H0, hw, hh = w * k, h * k, W0 * k, H0 * k, hw * k, hh * k
-    x = clamp(x, hw + 0.01, 1 - hw - 0.01)
-    y = clamp(y, hh + 0.01, 1 - hh - 0.01)
+    x = clamp(x, hw + SAFE_X, 1 - hw - SAFE_X)
+    y = clamp(y, hh + 0.03, 1 - hh - 0.03)
     y += dodge_keepout(x - w / 2, y - h / 2, x + w / 2, y + h / 2)
     it = {"id": gid, "k": "card", "f": [a, z], "z": z_order, "x": x, "y": y, "w": W0, "h": H0, "rot": float(g.get("rot", 0)), "op": 1,
           "_cap_edge": g.get("cap", "edge") == "edge"}
@@ -3017,7 +3156,10 @@ def g_neg(ctx, b, g, i):
         g2 = dict(g)
         if "rect" not in g2:
             g2["rect"] = "face"
-        it = {"id": f"{g['_gid']}.{j}", "k": "flash", "f": [f, f + n], "mode": "neg", "rect": rect_of(ctx, b, g2, f, n)}
+        it = {"id": f"{g['_gid']}.{j}", "k": "flash", "f": [f, f + n], "mode": "neg"}
+        r = rect_of(ctx, b, g2, f, n)
+        if r:
+            it["rect"] = r
         if is_hex(g.get("c")):
             it["c"] = norm_hex(g["c"])
         ctx.add(it)
@@ -3235,7 +3377,7 @@ def g_split(ctx, b, g, i):
 def g_glitch(ctx, b, g, i):
     for j, f in enumerate(each_frames(ctx, b, g.get("at", "every 10f"))):
         rng = rng_for(ctx.seed, g["_gid"], j)
-        r = rect_of(ctx, b, {**g, "rect": g.get("rect", "face")}, f)
+        r = rect_of(ctx, b, {**g, "rect": g.get("rect", "face")}, f) or [0.0, 0.0, 1.0, 1.0]
         r = r[0] if isinstance(r[0], list) else r
         w, h = rng.uniform(0.1, 0.14), rng.uniform(0.03, 0.09)
         x = rng.uniform(r[0], max(r[0], r[2] - w))
@@ -3251,6 +3393,10 @@ def g_boxes(ctx, b, g, i):
     if a is None:
         return ctx.find(f"{b.id}: boxes can't place {g.get('at')!r}")
     r = rect_of(ctx, b, {**g, "rect": g.get("rect", "face")}, a)
+    if r is None:           # nobody to box: its declared degrade, a negative registered to the frame
+        ctx.add({"id": f"{g['_gid']}.hold", "k": "flash", "f": [a, a + 2], "mode": "neg"})
+        return g_snd(ctx, b, g, a)
+    r = r[0] if isinstance(r[0], list) else r
     x0, y0, x1, y1 = r
     ctx.add({"id": f"{g['_gid']}.box", "k": "flash", "f": [a, a + 1], "mode": "fill", "c": "#FFFFFF", "a": 0.38, "rect": r})
     for j, q in enumerate(([0, 0, 1, y0], [0, y1, 1, 1], [0, y0, x0, y1], [x1, y0, 1, y1])):
@@ -4133,8 +4279,11 @@ def validate_l1(l1):
             rects = v if isinstance(v[0], list) else [v]
             if isinstance(v[0], list) and len(v) != n:
                 bad.append(f"{i}: {key} has {len(v)} rects for {n} frames")
+            # The upload's own shot may pass its edges when it is held whole in a frame of another shape:
+            # the lowering fits it on a blurred copy of itself (keep_marks_whole, lower.base_window)
+            past_ok = key == "crop" and it["k"] == "shot" and it.get("pic") == "main"
             for r in rects:
-                if key == "crop" and (min(r) < -1e-3 or max(r) > 1 + 1e-3 or r[2] <= r[0] or r[3] <= r[1]):
+                if key == "crop" and (r[2] <= r[0] or r[3] <= r[1] or not past_ok and (min(r) < -1e-3 or max(r) > 1 + 1e-3)):
                     bad.append(f"{i}: crop {r} leaves the source")
         if it["k"] == "shot":
             shots.append(it)
