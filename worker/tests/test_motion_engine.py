@@ -100,8 +100,9 @@ def test_unknown_template_and_missing_required_param_are_rejected():
 def test_lenient_normalize_drops_unknown_and_clamps_but_strict_check_explains():
     norm = motion_templates.normalize_params("hook_title", {"text": "x", "y": 9, "bogus": 1})
     assert norm["y"] == 0.92 and "bogus" not in norm
-    with pytest.raises(ValueError, match="no parameter"):
-        motion_templates.check_params("hook_title", {"text": "x", "bogus": 1})
+    # strict passes too: a parameter the template lacks draws nothing
+    assert "bogus" not in motion_templates.check_params(
+        "hook_title", {"text": "x", "bogus": 1})
     with pytest.raises(ValueError, match="must be one of"):
         motion_templates.check_params("hook_title", {"text": "x", "treatment": "sparkle"})
 

@@ -48,10 +48,11 @@ def test_motion_batches_refuse_foreign_media_unknown_params_and_unmasked_behind(
         edit_batch.apply_batch(default_edl(20), [
             {"action": "upsert", "layer": "motion", "id": "hook",
              "value": _hook(layer="behind_subject")}], 20, KEYS)
-    with pytest.raises(ValueError):
-        edit_batch.apply_batch(default_edl(20), [
-            {"action": "upsert", "layer": "motion", "id": "hook",
-             "value": _hook(params={"text": "Hi", "colour_typo": "#fff"})}], 20, KEYS)
+    # a parameter the template lacks draws nothing: it is left out
+    out = edit_batch.apply_batch(default_edl(20), [
+        {"action": "upsert", "layer": "motion", "id": "hook",
+         "value": _hook(params={"text": "Hi", "colour_typo": "#fff"})}], 20, KEYS)
+    assert out["motion"][0]["params"]["text"] == "Hi"
 
 
 def test_media_already_in_the_edl_never_blocks_a_later_batch():

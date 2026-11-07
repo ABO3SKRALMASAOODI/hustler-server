@@ -933,7 +933,8 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     if foreign:
         raise ValueError(
             "Use media attached to this project: "
-            + ", ".join(sorted(map(str, foreign))[:3]) + " is not. Attached: "
+            + ", ".join(sorted(map(str, foreign))[:3]) + " is not attached. "
+            "Attached: "
             + (", ".join(sorted(map(str, allowed_keys))[:8]) or "none") + ".")
     near = _near_misses(edl, {op["layer"] for op in operations})
     near += _on_keep_boundaries(edl)

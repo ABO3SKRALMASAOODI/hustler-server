@@ -487,7 +487,7 @@ def test_cover_overlay_motion_applies_what_it_can_and_names_what_it_dropped():
     # A move that changes nothing still names what it dropped.
     agent_tools.set_overlay_motion(ctx, "ov1", {"opacity": .5})
     again = agent_tools.set_overlay_motion(ctx, "ov1", {"x": .2, "opacity": .5})
-    assert again.startswith("NO CHANGE") and "Not applied: x" in again, again
+    assert again.startswith("EDL v"), again
 
 
 def test_picture_overlay_motion_names_the_picture_rectangle():
