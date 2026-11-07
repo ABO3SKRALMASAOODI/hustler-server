@@ -27,8 +27,8 @@ def test_all_historical_migrations_are_in_the_canonical_directory():
 
     # 040 is the Claude trial budget and credit ledger (the trial branch);
     # 041 is the outcome loop; 042 adds the render box provider to the
-    # ownership ledger.
-    assert numbers == set(range(43))
+    # ownership ledger; 043 is the spend ledger.
+    assert numbers == set(range(44))
     assert not list((ROOT / "migrations").glob("*.sql"))
     assert "013_index_greet_unique.sql" in names
     assert "018_preview_check.sql" in names

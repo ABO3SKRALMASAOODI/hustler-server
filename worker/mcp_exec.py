@@ -46,6 +46,7 @@ import llm
 import mcp_media
 import read_tools
 import resource_usage
+import spend_ledger
 import storage
 import tool_outcome
 from agent_prompt import system_prompt
@@ -586,6 +587,7 @@ def run_mcp_job(worker_db, job):
                           getattr(usage, "prompt_tokens", None) if usage else None,
                           getattr(usage, "completion_tokens", None) if usage else None)
 
+        _recorder.spend_lane = spend_ledger.lane_of(job.get("user_id"))
         llm.set_recorder(_recorder)
         llm.set_turn_plan(ctx.plan if ctx.subscribed else "", project_id=ctx.project_id)
         ctx.begin_call_edl_cache()

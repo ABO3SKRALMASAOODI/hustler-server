@@ -64,16 +64,11 @@ def test_older_subscribers_also_use_funded_anthropic_with_credit_parity(lane_up)
     assert route["credit_model"] == "gpt-6.1-sol"
 
 
-def test_trial_cutoff_preserves_paid_claude_and_paid_recovery(lane_up):
+def test_trial_cutoff_preserves_paid_claude(lane_up):
     lane_up.update(on=False, reason="budget", spent_usd=55.3, budget_usd=62.22)
     assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "plus_2026", {})
-    agent_loop._require_recovery_credit_line(_Db(ON), subscribed=True)
-    with pytest.raises(RuntimeError, match="credit line is paused"):
-        agent_loop._require_recovery_credit_line(_Db(ON), subscribed=False)
     lane_up["spent_usd"] = 62.22
     assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "plus_2026", {})
-    with pytest.raises(RuntimeError, match="credit line is paused"):
-        agent_loop._require_recovery_credit_line(_Db(ON), subscribed=True)
 
 
 def test_a_new_subscriber_runs_on_the_plans_claude_model(lane_up):
@@ -90,11 +85,8 @@ def test_a_new_subscriber_runs_on_the_plans_claude_model(lane_up):
     assert plus["credit_model"] == "gpt-6-luna"
 
 
-def test_no_claude_lane_without_credit_key_plan_or_for_operator_repairs(
-        lane_up, monkeypatch):
+def test_no_claude_lane_without_credit_key_or_plan(lane_up, monkeypatch):
     assert agent_loop._claude_paid_lane(_Db(ON), JOB, False, "free", {}) is None
-    assert agent_loop._claude_paid_lane(
-        _Db(ON), JOB, True, "pro_2026", {"operator_repair": True}) is None
     lane_up["on"] = False             # the credit switch is off
     assert agent_loop._claude_paid_lane(_Db(ON), JOB, True, "pro_2026",
                                         {}) is None

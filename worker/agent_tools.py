@@ -199,8 +199,6 @@ def _feature_gate_reason(ctx):
     job = getattr(ctx, "job", None) or {}
     if job.get("type") != "agent_turn":
         return None
-    if (job.get("payload") or {}).get("operator_repair") is True:
-        return None
     cached = getattr(ctx, "_feature_gate", "unset")
     if cached != "unset":
         return cached
@@ -21244,6 +21242,9 @@ def generate_video(ctx, prompt, from_image_asset_key=None, duration_s=5):
     if not ok:
         return (f"Video generation FAILED: {err}. Try again or tell the user it "
                 "didn't work — do NOT claim a clip was created.")
+    # The provider has billed it, whatever happens to the file from here.
+    llm.charge_generation("video_gen", config.VIDEO_GEN_MODEL,
+                          videogen.price_for(seconds))
     key = f"generated_video/{ctx.project_id}/{uuid.uuid4().hex[:12]}.mp4"
     try:
         storage.upload_file(out_path, key, "video/mp4")
@@ -25419,6 +25420,8 @@ class _DeferredRecorder:
             self.claude_trial_scope = real.claude_trial_scope
         if hasattr(real, "credit_price_aliases"):
             self.credit_price_aliases = real.credit_price_aliases
+        if hasattr(real, "spend_lane"):
+            self.spend_lane = real.spend_lane
 
     def __call__(self, *args):
         self.rows.append(args)

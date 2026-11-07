@@ -905,19 +905,28 @@ _concierge_openai.model = CONCIERGE_MODEL
 _concierge_claude.model = CONCIERGE_CLAUDE_MODEL
 
 
-def _meter_concierge(conn, rec):
-    """A concierge reply on Claude is a Claude call: on the credit line's
-    ledger like every other. Never fails the reply."""
-    if not str((rec or {}).get("model") or "").startswith("claude-"):
+def _meter_concierge(conn, rec, user_id=None):
+    """A concierge reply is a model call: on the spend ledger like every
+    other, and a customer's reply on Claude is on the credit line too. Never
+    fails the reply."""
+    if not (rec or {}).get("model"):
         return
     try:
         import claude_credit
         import claude_plans
         import model_prices
-        usd = model_prices.claude_usage_cost(
-            rec["model"], int(rec.get("prompt_tokens") or 0),
-            int(rec.get("completion_tokens") or 0))
-        claude_plans.safe(conn, claude_credit.record_paid_spend, usd)
+        import spend_ledger
+        model = rec["model"]
+        prompt = int(rec.get("prompt_tokens") or 0)
+        answer = int(rec.get("completion_tokens") or 0)
+        claude = str(model).startswith("claude-")
+        usd = (model_prices.claude_usage_cost(model, prompt, answer) if claude
+               else model_prices.luna6_usage_cost(prompt, answer, model=model))
+        lane = spend_ledger.lane_of(user_id)
+        claude_plans.safe(conn, spend_ledger.charge,
+                          spend_ledger.provider_of(model), lane, "concierge", usd)
+        if claude and lane == spend_ledger.CUSTOMER:
+            claude_plans.safe(conn, claude_credit.record_paid_spend, usd)
     except Exception as exc:  # noqa: BLE001
         print(f"[concierge] Claude meter failed: {str(exc)[:160]}", flush=True)
 
@@ -5276,7 +5285,7 @@ def _concierge_respond(db_url, project_id, ctx, attachments):
                              Json(llm_rec["response"]),
                              llm_rec["prompt_tokens"],
                              llm_rec["completion_tokens"]))
-                _meter_concierge(conn, llm_rec)
+                _meter_concierge(conn, llm_rec, ctx["user_id"])
             conn.commit()
             if feature_blocked:
                 record_client_event(ctx["user_id"], project_id,

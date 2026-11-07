@@ -124,11 +124,11 @@ def route_url(worker_db, job, user_message):
         return None
     payload = job.get("payload") or {}
     # never inside the trial's own lane (its URL First cut starts at the
-    # post), a continuation, an operator repair, a resumed slice or a First
-    # cut's follow-up: those are the agent's
+    # post), a continuation, a resumed slice or a First cut's follow-up:
+    # those are the agent's
     for key in ("first_cut", "trial_lane", "logical_turn_continuation",
-                "operator_repair", "operator_instruction", "after_first_cut",
-                "continuation_state", "continuation_sequence"):
+                "after_first_cut", "continuation_state",
+                "continuation_sequence"):
         if payload.get(key):
             return None
     # the turn stamps its own id as its root when it starts (a re-claimed

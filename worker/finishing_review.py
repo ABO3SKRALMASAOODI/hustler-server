@@ -63,8 +63,7 @@ def _advisory_block(lines):
 
 
 def directive(ctx):
-    if not (getattr(ctx, "versions_written", None)
-            or ((getattr(ctx, "job", None) or {}).get("payload") or {}).get("operator_repair")):
+    if not getattr(ctx, "versions_written", None):
         return None
     row = ctx.latest_edl()
     version = int(row["version"])

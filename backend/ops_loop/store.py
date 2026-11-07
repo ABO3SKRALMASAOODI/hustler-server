@@ -1,5 +1,6 @@
 """The outcome loop's only production writes: session_reviews, tickets,
-ticket_reviews and ops_review_keys (migration 041). Nothing else.
+ticket_reviews and ops_review_keys (migration 041), and a replay's real
+dollars on spend_ledger (migration 043). Nothing else.
 
 `guard()` refuses any write statement that names another table, so a bug in
 a caller cannot touch customer data, billing or credits through this module.
@@ -14,7 +15,8 @@ from ops_loop import (EVIDENCE_KINDS, EVIDENCE_PREFIX, SEVERITIES, SURFACES,
                       VERDICTS)
 from ops_loop.sessions import evidence_slug
 
-WRITABLE = ("session_reviews", "tickets", "ticket_reviews", "ops_review_keys")
+WRITABLE = ("session_reviews", "tickets", "ticket_reviews", "ops_review_keys",
+            "spend_ledger")
 _WRITE_RE = re.compile(
     r"^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+([a-z_\.\"]+)", re.I)
 CAUSE_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,79}$")
@@ -887,6 +889,21 @@ def clock(history, now=None):
         if key in c:
             c[key] = c[key].isoformat(timespec="seconds")
     return c
+
+
+def add_replay_spend(cur, provider, usd):
+    """A replay on a copy runs against its own database and bills the same
+    provider account: what it spent is reported here, on the replay lane."""
+    usd = float(usd)
+    if not 0 <= usd < 1000:
+        raise StoreError("usd must be a dollar amount of a replay run")
+    _w(cur, """INSERT INTO spend_ledger (day, provider, lane, purpose, usd, calls)
+               VALUES ((NOW() AT TIME ZONE 'UTC')::date, %s, 'replay',
+                       'gauntlet', %s, 1)
+               ON CONFLICT (day, provider, lane, purpose) DO UPDATE
+               SET usd = spend_ledger.usd + EXCLUDED.usd,
+                   calls = spend_ledger.calls + EXCLUDED.calls,
+                   updated_at = NOW()""", (str(provider)[:24], usd))
 
 
 def set_fixing(cur, ticket_id, note=None):

@@ -24,6 +24,7 @@ import requests
 from openai import OpenAI
 
 import config
+import spend_ledger
 
 
 class ProviderHTTPError(RuntimeError):
@@ -175,6 +176,7 @@ class JobRecorder:
         self.project_id = job["project_id"]
         self.job_id = job["id"]
         self.claude_trial_scope = None
+        self.spend_lane = spend_ledger.lane_of(job.get("user_id"))
 
     def __call__(self, purpose, request, response, usage):
         import db as dbx
@@ -184,7 +186,104 @@ class JobRecorder:
                            getattr(usage, "completion_tokens", None))
 
 
+class SpendFenceReached(RuntimeError):
+    """A company lane spent its share (spend_ledger). Never a customer."""
+
+
+class LaneRecorder:
+    """Says whose calls these are and writes no row: for a pool thread of a job
+    whose own recorder holds that job's connection."""
+
+    def __init__(self, lane):
+        self.spend_lane = lane
+        self.claude_trial_scope = None
+
+    def __call__(self, purpose, request, response, usage):
+        pass
+
+
+def spend_lane():
+    """Who the call on this thread is for. It rides on the recorder because
+    pool threads install the turn's recorder; a stack's SPEND_LANE decides
+    when there is none."""
+    return getattr(get_recorder(), "spend_lane", None) or spend_ledger.lane_of()
+
+
+def _on_ledger(fn, *args):
+    import claude_trial
+    with claude_trial._meter_lock:
+        return claude_trial._metering_db().run(fn, *args)
+
+
+_unmigrated_said = False
+
+
+def fence(model):
+    """Before a model call. A customer's call returns here without a read.
+    Company spend stops at its share, and an unreadable ledger stops it too:
+    nothing bought on doubt is worth another 4 Nov."""
+    global _unmigrated_said
+    lane = spend_lane()
+    if lane == spend_ledger.CUSTOMER:
+        return
+    provider = spend_ledger.provider_of(model)
+    try:
+        room = _on_ledger(spend_ledger.room, lane, provider)
+    except Exception as exc:  # noqa: BLE001
+        raise SpendFenceReached(
+            f"The {lane} spend ledger could not be read: {str(exc)[:160]}") from exc
+    if not room["migrated"] and not _unmigrated_said:
+        _unmigrated_said = True
+        print("[spend] migration 043 is missing: company spend is unfenced",
+              flush=True)
+    if room["open"]:
+        return
+    print(f"[spend] {lane} stopped at its {provider} share", flush=True)
+    raise SpendFenceReached(
+        f"The {lane} lane has spent its {provider} share "
+        f"(${room['day_spent_usd']:.2f} today, ${room['cycle_spent_usd']:.2f} "
+        "this cycle); saved edits are preserved.")
+
+
+def _call_cost_usd(purpose, request, response, usage):
+    """What one model call cost: the provider's own figures, the recorded
+    figure of a call with no token usage, an image at its price (counted as
+    db.charge_turn_credits counts it), else the price card. An unpriced model
+    is an estimate, never zero."""
+    model = (request or {}).get("model")
+    if usage is None:
+        answer = response if isinstance(response, dict) else {}
+        recorded = answer.get("provider_cost_usd")
+        if isinstance(recorded, (int, float)):
+            return float(recorded)
+        if purpose in ("image_gen", "image_edit") and "image_url" in answer:
+            return float(config.IMAGE_PRICE_USD)
+        return 0.0
+    actual = provider_cost_usd(usage, model)
+    return float(actual) if actual is not None else credit_parity_cost_usd(usage, model)
+
+
+def _charge(purpose, request, response, usage):
+    """Every model dollar lands on the ledger, recorder or not. Never raises:
+    the turn is the customer's, metering is ours."""
+    try:
+        usd = _call_cost_usd(purpose, request, response, usage)
+        if usd > 0:
+            _on_ledger(spend_ledger.charge,
+                       spend_ledger.provider_of((request or {}).get("model")),
+                       spend_lane(), str(purpose), usd)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[spend] ledger write failed ({purpose}): {str(exc)[:160]}",
+              flush=True)
+
+
+def charge_generation(purpose, model, usd):
+    """A generation bought outside llm.record (a clip) lands the same way."""
+    _charge(purpose, {"model": model}, {"provider_cost_usd": usd}, None)
+
+
 def record(purpose, request, response, usage=None):
+    _charge(purpose, request, response, usage)
     fn = get_recorder()
     if not fn:
         return
@@ -442,9 +541,9 @@ def editing_lanes(lanes):
             and str(lane.get("base_url") or "").rstrip("/") != openai_host]
 
 
-def editor_reasoning_effort(plan, iteration=0, operator_repair=False):
+def editor_reasoning_effort(plan, iteration=0):
     """New Advanced contracts reason at high; preserve legacy configuration."""
-    if operator_repair or plan in {"advanced", "pro_2026", "max_2026"}:
+    if plan in {"advanced", "pro_2026", "max_2026"}:
         return "high"
     return (config.AGENT_REASONING_EFFORT if iteration == 0 else
             (config.AGENT_REASONING_EFFORT_DISPATCH or config.AGENT_REASONING_EFFORT))
@@ -495,7 +594,7 @@ def agent_client_for(subscribed, plan=None, first_turn=False):
     return client(), config.AGENT_MODEL
 
 
-def agent_lanes_for(subscribed, plan=None, first_turn=False, operator_repair=False):
+def agent_lanes_for(subscribed, plan=None, first_turn=False):
     """Ordered, independently funded agent lanes for one logical turn.
 
     ``agent_client_for`` remains the product-tier selector.  This companion
@@ -508,16 +607,6 @@ def agent_lanes_for(subscribed, plan=None, first_turn=False, operator_repair=Fal
     changing models on an empty provider wallet is not a fallback.  Keys stay
     in process memory and are never returned by config_report or logged.
     """
-    if operator_repair:
-        # Recovery follows the owner's Anthropic route, independently of
-        # the customer's wallet/tier. Never reopen the exhausted OpenAI wallet.
-        import claude_lane
-        if not claude_lane.available():
-            raise RuntimeError("The Anthropic recovery provider is unavailable; saved edits are preserved.")
-        # Use the configured editing model, not the optional expensive
-        # first-step planner for every tool call and review in a recovery.
-        model = config.CLAUDE_TRIAL_MODEL
-        return [claude_lane.lane(model, name="claude_recovery")]
     if subscribed:
         return editing_lanes(paid_editor_lanes(plan))
     primary_client, primary_model = agent_client_for(
@@ -1040,6 +1129,7 @@ def ask_audio(prompt, audio_paths, labels=None, max_tokens=260,
         use_responses = False
         responses_without_cap = False
         answer, usage = "", None
+        fence(config.AUDIO_REVIEW_MODEL)
         while True:
             attempts += 1
             if use_responses:
@@ -1683,6 +1773,7 @@ def responses_create(base_url, api_key, model, messages, tools,
         body["reasoning"] = {"effort": effort}
     if config.OPENAI_SERVICE_TIER and "api.openai.com" in (base_url or ""):
         body["service_tier"] = config.OPENAI_SERVICE_TIER
+    fence(model)
     r = requests.post(url, json=body,
                       timeout=timeout or config.LLM_TIMEOUT_S,
                       headers={"Authorization": f"Bearer {api_key}",
@@ -1744,6 +1835,8 @@ def create_with_dialect(client_obj, model, messages, max_tokens=None,
     if "tools" in kw and tools_need_effort_none(model):
         kw["reasoning_effort"] = "none"
     attempts = 0
+    if not str(model or "").startswith("claude-"):   # claude_lane.create fences
+        fence(model)
     while True:
         try:
             return client_obj.chat.completions.create(
@@ -2096,6 +2189,7 @@ def _image_call(model, content, purpose, record_request, size=None):
     if size:
         body["parameters"]["size"] = size
     try:
+        fence(model)
         resp = requests.post(
             url, json=body, timeout=config.IMAGE_TIMEOUT_S,
             headers={"Authorization": f"Bearer {config.IMAGE_API_KEY}",
@@ -2143,6 +2237,7 @@ def _openai_image_gen(model, prompt, out_path):
     (xAI Grok). Uses the IMAGE client — the chat provider may not have this
     endpoint at all (DeepSeek does not)."""
     try:
+        fence(model)
         resp = image_client().images.generate(model=model, prompt=prompt, n=1)
         d = resp.data[0]
         b64 = getattr(d, "b64_json", None)

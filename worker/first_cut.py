@@ -3470,10 +3470,6 @@ def run(worker_db, job, project, index_row):
     ctx = agent_tools.ToolContext(worker_db, job, project,
                                   index_row["json"] if index_row else None,
                                   workdir)
-    import operator_recovery
-    superseded = operator_recovery.superseded(ctx)
-    if superseded:
-        return superseded
     # Deterministic: no paid second-opinion critics or listening model, no
     # images queued for an agent (MCP's own settings), a render budget.
     ctx.sight_out = True
@@ -3517,8 +3513,7 @@ def run(worker_db, job, project, index_row):
         subscribed, plan = False, "free"
     trial_scope, recorder = None, None
     decision = claude_trial.resolve(worker_db, job.get("user_id"), subscribed,
-                                    project_id=project["id"], via="first_cut",
-                                    operator_repair=payload.get("operator_repair") is True)
+                                    project_id=project["id"], via="first_cut")
     if decision.kind == claude_trial.Decision.ACTIVE:
         trial_scope = decision.scope
         trial_scope.job_id = job.get("id")
@@ -3528,8 +3523,7 @@ def run(worker_db, job, project, index_row):
             recorder = _ScopeRecorder(worker_db, job)
             llm.set_recorder(recorder)
         claude_trial.activate(trial_scope, recorder)
-    elif payload.get("operator_repair") is True or (
-            subscribed and claude_trial.credit_status(worker_db).get("on")):
+    elif subscribed and claude_trial.credit_status(worker_db).get("on"):
         ctx.first_cut_model = claude_trial.flag(worker_db)["model"]
         if llm.get_recorder() is None:
             recorder = _ScopeRecorder(worker_db, job)

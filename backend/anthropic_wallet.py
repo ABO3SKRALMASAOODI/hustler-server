@@ -37,7 +37,15 @@ def _spend(cur):
     # Lifetime counter: a new trial/monthly cycle must not replenish a wallet.
     cur.execute("""SELECT COALESCE(SUM(GREATEST(spent_usd-extras_usd,0)+paid_usd),0)
                    AS usd FROM trial_budget_days""")
-    return float(_row(cur.fetchone(), "usd"))
+    customers = float(_row(cur.fetchone(), "usd"))
+    # trial_budget_days is the customers' line; company spend draws on the same
+    # wallet from spend_ledger (migration 043).
+    cur.execute("SELECT to_regclass('public.spend_ledger') AS t")
+    if not _row(cur.fetchone(), "t"):
+        return customers
+    cur.execute("""SELECT COALESCE(SUM(usd),0) AS usd FROM spend_ledger
+                   WHERE provider='anthropic' AND lane<>'customer'""")
+    return customers + float(_row(cur.fetchone(), "usd"))
 
 
 def estimate(config, spend):

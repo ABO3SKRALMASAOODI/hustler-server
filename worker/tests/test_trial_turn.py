@@ -311,8 +311,6 @@ def test_trial_requests_render_at_most_twice():
     ctx = _lane_ctx("trial")
     assert config.CLAUDE_TRIAL_MAX_PREVIEWS == 2
     assert agent_loop._trial_preview_cap(ctx, None) == 2
-    # a company-funded operator repair keeps its own envelope
-    assert agent_loop._trial_preview_cap(ctx, None, operator_run=True) is None
     assert agent_loop._trial_lane(ctx)
     ctx.trial_preview_cap = 2
     ctx.trial_previews = 1

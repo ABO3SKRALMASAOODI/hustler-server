@@ -80,15 +80,13 @@ def test_flag_defaults_are_the_owner_numbers():
     assert custom["test_user_ids"] == {7, 8}
 
 
-def test_flag_off_paid_admin_and_operator_turns_are_untouched(world):
+def test_flag_off_paid_and_admin_turns_are_untouched(world):
     db = _Db()
     world.flag = {"on": False}
     assert claude_trial.resolve(db, 5, False).kind == "not_trial"
     claude_trial.reset_flag_cache()
     world.flag = {"on": True}
     assert claude_trial.resolve(db, 5, True).kind == "not_trial"
-    assert claude_trial.resolve(db, 5, False, operator_repair=True).kind \
-        == "not_trial"
     world.admin = True
     assert claude_trial.resolve(db, 5, False).kind == "not_trial"
     assert world.grants == []
@@ -274,27 +272,6 @@ def test_hard_ceiling_backstops_critics_and_vision():
             claude_trial.guard_call()
     finally:
         claude_trial.deactivate()
-
-
-def test_company_budget_guard_runs_without_a_free_trial_scope():
-    def recorder(*args):
-        pass
-    calls = []
-    def guard():
-        calls.append(1)
-        raise RuntimeError("Company allowance exhausted")
-    recorder.operator_repair_guard = guard
-    llm.set_recorder(recorder)
-    try:
-        assert claude_trial.current() is None
-        for _ in range(2):
-            with pytest.raises(RuntimeError, match="Company allowance"):
-                claude_trial.guard_call()
-        assert calls == [1, 1]
-        del recorder.operator_repair_guard
-        claude_trial.guard_call()  # ordinary paid calls have no company cap
-    finally:
-        llm.set_recorder(None)
 
 
 def test_stop_meta_renders_as_plan_cards_with_keep_going():

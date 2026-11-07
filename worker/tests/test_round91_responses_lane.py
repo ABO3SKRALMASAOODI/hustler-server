@@ -249,9 +249,7 @@ check("...planning keeps the configured effort",
           and ast.unparse(node.args[0]) == "ctx.plan"
           and ast.unparse(node.args[1]) == "iteration"
           for node in ast.walk(ast.parse(_src)))
-      and llm.editor_reasoning_effort("ai", 0) == config.AGENT_REASONING_EFFORT
-      and llm.editor_reasoning_effort("ai", 0, operator_repair=False)
-          == config.AGENT_REASONING_EFFORT)
+      and llm.editor_reasoning_effort("ai", 0) == config.AGENT_REASONING_EFFORT)
 check("...and dispatch defaults below the planning effort",
       config.AGENT_REASONING_EFFORT_DISPATCH == "medium")
 check("the lane call gets the thinking-sized timeout, not the 90s dispatch "

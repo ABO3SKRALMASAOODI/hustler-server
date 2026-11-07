@@ -4,8 +4,8 @@
 /Users/masaoodi/Documents/Valmera/.valmera/ops-loop/REVIEWER.md and FIXER.md.
 
 THE ONLY PRODUCTION WRITE PATH FOR THE AGENTS. It writes session_reviews,
-tickets, ticket_reviews and ops_review_keys and nothing else
-(ops_loop/store.guard refuses any other table); every read runs on a
+tickets, ticket_reviews, ops_review_keys and a replay's dollars on spend_ledger
+and nothing else (ops_loop/store.guard refuses any other table); every read runs on a
 read-only connection. It never sends email, never messages a customer and
 never touches billing, credits, plans or Paddle.
 
@@ -42,6 +42,8 @@ never touches billing, credits, plans or Paddle.
     ops_review.py live     --ticket N --sha S            # the fix is in production
     ops_review.py clock    [--ticket N] [--days 7]       # time to claim and to live
     ops_review.py failures --ticket 7                    # auto-filed failures
+    ops_review.py spend                                  # the cycle by lane
+    ops_review.py spend --replay-usd 1.2 --provider anthropic   # a replay's cost
     ops_review.py whoami
 
 DATABASE_URL comes from the environment, else from
@@ -915,6 +917,25 @@ def cmd_reviews(a):
     return 0
 
 
+def cmd_spend(a):
+    """This cycle's model spend by provider, lane and purpose, and what each
+    company lane may still spend. With --replay-usd, a replay's real dollars
+    land on the ledger first, so nobody subtracts them from a budget by hand."""
+    import spend_ledger
+    if a.replay_usd is not None:
+        from ops_loop import store
+        with Writer(a.dry_run) as w:
+            store.add_replay_spend(w, a.provider, a.replay_usd)
+    conn = connect()
+    report = spend_ledger.cycle_rows(conn)
+    report["room"] = {f"{lane}/{provider}": spend_ledger.room(conn, lane, provider)
+                      for lane in spend_ledger.COMPANY_LANES
+                      for provider in ("anthropic", "openai")}
+    conn.close()
+    out(report)
+    return 0
+
+
 def cmd_whoami(a):
     out(call("GET", "/ops/review/whoami"))
     return 0
@@ -1080,6 +1101,12 @@ def parser():
     p = sub.add_parser("reviews", help="recent reviews")
     p.add_argument("--days", type=int, default=7)
     p.set_defaults(fn=cmd_reviews)
+    p = sub.add_parser("spend", help="this cycle's model spend by lane; "
+                                     "--replay-usd reports a replay's cost")
+    p.add_argument("--replay-usd", type=float)
+    p.add_argument("--provider", default="anthropic")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_spend)
     p = sub.add_parser("whoami", help="check the backend accepts this CLI")
     p.set_defaults(fn=cmd_whoami)
     return ap

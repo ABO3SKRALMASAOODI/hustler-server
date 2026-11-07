@@ -38,6 +38,7 @@ import motion_judge
 import scenes
 import source_layout
 import spatial
+import spend_ledger
 import storage
 import tiles as tilestrip
 import transcribe
@@ -377,6 +378,20 @@ class _TrialRecorder(llm.JobRecorder):
         self.claude_trial_scope = scope
 
 
+def _company_recorders(worker_db, job):
+    """An upload of ours is company spend on every thread that calls a model.
+    (job recorder or None, what the sound lane's thread wears or None); a
+    customer's upload gets neither and stays as it was."""
+    lane = spend_ledger.lane_of(job.get("user_id"))
+    if lane == spend_ledger.CUSTOMER:
+        return None, None
+    recorder = None
+    if llm.get_recorder() is None:
+        recorder = llm.JobRecorder(worker_db, job)
+        llm.set_recorder(recorder)
+    return recorder, llm.LaneRecorder(lane)
+
+
 def _claude_trial_index_scope(worker_db, job):
     """A trial account's upload indexes on the Claude lane (D2: the first
     cut runs inside the same $1), so its captions and greeting never reach
@@ -524,6 +539,8 @@ def run_index_job(worker_db, job):
               f"rather than the browser proxy", flush=True)
 
     trial_scope, trial_recorder = _claude_trial_index_scope(worker_db, job)
+    # Our own account's upload: its captions and greeting are company spend.
+    company_recorder, sound_recorder = _company_recorders(worker_db, job)
     try:
         warnings_pre = []
         if from_client_proxy:
@@ -783,6 +800,8 @@ def run_index_job(worker_db, job):
             _lane_progress("picture", 1.0)
 
         def _sound_lane():
+            if sound_recorder is not None:      # the transcript check calls a model
+                llm.set_recorder(sound_recorder)
             _lane_progress("sound", 0.02)
             wav_local = None
             if info["has_audio"]:
@@ -970,6 +989,9 @@ def run_index_job(worker_db, job):
             if isinstance(trial_recorder, _TrialRecorder) and \
                     llm.get_recorder() is trial_recorder:
                 llm.set_recorder(None)
+        if company_recorder is not None and \
+                llm.get_recorder() is company_recorder:
+            llm.set_recorder(None)
         shutil.rmtree(workdir, ignore_errors=True)
 
 

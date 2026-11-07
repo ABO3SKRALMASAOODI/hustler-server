@@ -7,7 +7,6 @@ import pytest
 import agent_loop
 import request_contract as rc
 import scope_guard
-import operator_recovery
 from test_turn_outcomes import _ctx, _changed
 
 
@@ -60,15 +59,6 @@ def test_explicit_channel_exclusion_allows_removal_but_not_recreation():
     ctx.semantic_contract["requirements"] = [{"id": "no_caps", "action": "avoid", "lanes": ["captions"]}]
     assert rc.forbidden_additions(ctx, {"captions": None}) == []
     assert rc.forbidden_additions(ctx, {"captions": {"mode": "from_transcript"}}) == ["captions"]
-
-
-@pytest.mark.parametrize("version,message", [(2, 10), (1, 11)])
-def test_recovery_yields_to_new_customer_work(version, message):
-    ctx = NS(job={"payload": {"operator_repair": True, "operator_expected_edl_version": 1,
-                             "operator_expected_message_id": 10}}, project_id=9, session_id=8,
-             db=NS(run=lambda *args: {"version": version, "message_id": message}))
-    result = operator_recovery.superseded(ctx)
-    assert result["outcome"] == "superseded" and result["billable"] is False
 
 
 def test_semantic_multi_asset_review_is_not_rewritten_using_primary_only(monkeypatch):
@@ -141,22 +131,6 @@ def test_composition_boundaries_do_not_change_picture_timing():
     assert not scope_guard.preservation_violations(before, after, protected={"timeline_timing"})
     after['keep'][0][1] = 14.87
     assert scope_guard.preservation_violations(before, after, protected={"timeline_timing"})
-
-
-@pytest.mark.parametrize('kind', ['continuation', 'retry'])
-def test_operator_recovery_resumes_its_own_committed_work(kind):
-    payload = {'operator_repair': True, 'operator_expected_edl_version': 1,
-               'operator_expected_message_id': 10}
-    if kind == 'continuation':
-        payload['continuation_state'] = {'durable_slice': True, 'versions_written': [2, 3], 'seen_message_id': 10}
-    else:
-        payload['mutation_receipt'] = {'job_id': 91, 'committed': True, 'after_version': 3}
-    current = {'version': 3, 'message_id': 10}
-    ctx = NS(job={'id': 91, 'payload': payload}, project_id=9, session_id=8,
-             db=NS(run=lambda *args: current))
-    assert operator_recovery.superseded(ctx) is None
-    current['version'] = 4
-    assert operator_recovery.superseded(ctx)['outcome'] == 'superseded'
 
 
 def test_live_steering_keeps_the_whole_brief_and_the_new_preservation_baseline(monkeypatch):
