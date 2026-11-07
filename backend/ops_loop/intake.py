@@ -630,13 +630,18 @@ def _tables_ready(cur):
 OPENED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' IN ('opened', 'recurred', 'reopened',
-                                       'escalated', 'released'))"""
+                                       'escalated', 'released',
+                                       'verify_failed'))"""
 CLAIMED_AT = """COALESCE((SELECT max((h->>'at')::timestamptz) FROM
                   jsonb_array_elements(history) h
                  WHERE h->>'event' = 'fixing'), updated_at)"""
-RELEASED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
-                  jsonb_array_elements(history) h
-                 WHERE h->>'event' = 'released')"""
+# The hand-back RELEASE_QUIET runs from: the latest 'released', unless a
+# 'verify_failed' came after it (a failed proof is taken again at once).
+RELEASED_AT = """(SELECT CASE WHEN h->>'event' = 'released'
+                              THEN (h->>'at')::timestamptz END
+                    FROM jsonb_array_elements(history) WITH ORDINALITY e(h, i)
+                   WHERE h->>'event' IN ('released', 'verify_failed')
+                   ORDER BY i DESC LIMIT 1)"""
 # The last time a Fixer acted on the ticket: claimed it, put its fix live, or
 # handed it back with a note. The owner's test for an email (7 Nov 2026): a
 # customer is stuck and no Fixer has claimed or released the ticket since that
@@ -645,7 +650,8 @@ RELEASED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
 # blocked, not handled" although nobody had failed on it since the release.
 HANDLED_AT = """(SELECT max((h->>'at')::timestamptz) FROM
                   jsonb_array_elements(history) h
-                 WHERE h->>'event' IN ('fixing', 'live', 'released'))"""
+                 WHERE h->>'event' IN ('fixing', 'live', 'released',
+                                       'verify_failed'))"""
 # The first time a customer needed it again after that: a new failure, or the
 # ticket coming back (recurred after a close, reopened, raised to P0).
 STUCK_AGAIN_AT = f"""(SELECT min((h->>'at')::timestamptz) FROM
@@ -755,15 +761,21 @@ WAITING_ON_CUSTOMER = "WAITING ON CUSTOMER"  # our side is ready; only the
 #                                 customer's return moves it (release flag)
 STILL_STUCK = "STILL STUCK"     # a fix shipped, a customer failed after it and
 #                                 nobody holds it: the watch takes it again
+# "you must be sure that it's fixed ... we shouldn't just trust a ticket": a
+# live fix is proven by a VERIFY replay (verify_watch.py, FIXER.md VERIFY mode).
+FIXED = "FIXED"                 # proven: 'verified', or closed through the gate
+NOT_FIXED = "NOT FIXED"         # the proof failed ('verify_failed'): a Fixer
+#                                 takes it again at once, no quiet
 # At most P0_MAILS_PER_EPISODE emails per episode: its first state that held
 # P0_MAIL_HOLD (NOT HANDLED and STILL STUCK at once), then its outcome (never
 # BEING FIXED). A state that changes within the hold replaces the pending one.
-HELD = (BEING_FIXED, FIX_LIVE, WAITING_ON_CUSTOMER)
+# FIX LIVE, not proven yet, is the outcome only once P0_PROOF_WAIT passed
+# with no proof: the proof (FIXED or NOT FIXED) is the outcome that wins.
+HELD = (BEING_FIXED, FIX_LIVE, WAITING_ON_CUSTOMER, FIXED, NOT_FIXED)
 P0_MAIL_HOLD = timedelta(minutes=10)
+P0_PROOF_WAIT = timedelta(hours=2)
 P0_MAILS_PER_EPISODE = 2
 P0_MAIL_WINDOW = timedelta(days=3)  # a state change always touches the ticket
-RELEASE_QUIET = timedelta(hours=6)  # a P0 handed back waits this long for the
-#                                     watch, unless a customer fails on it
 
 
 def _hist_at(h):
@@ -790,7 +802,8 @@ def _episode(history, now):
         if ev in ("opened", "recurred", "reopened"):
             ep = {"opened_at": at, "declared": h.get("severity"),
                   "escalated": None, "claims": [], "releases": [],
-                  "lives": [], "failures": [], "closed_at": None}
+                  "lives": [], "failures": [], "proofs": [],
+                  "closed_at": None}
         elif ep is None:
             continue
         elif ev == "escalated" and h.get("severity", "P0") == "P0":
@@ -799,14 +812,21 @@ def _episode(history, now):
             ep["failures"].append((at, h.get("user"), h.get("detail")))
         elif ev == "fixing":
             ep["claims"].append(at)
-        elif ev == "released":
-            ep["releases"].append((at, h.get("waiting_on_customer") or None))
+        elif ev == "released":       # (at, waiting on customer, quiet)
+            ep["releases"].append((at, h.get("waiting_on_customer") or None,
+                                   True))
+        elif ev == "verify_failed":  # a hand-back the watch takes at once
+            ep["releases"].append((at, None, False))
+            ep["proofs"].append((at, False))
+        elif ev == "verified":
+            ep["proofs"].append((at, True))
         elif ev == "live":
             ep["lives"].append((at, str(h.get("sha") or "")))
         elif ev == "fixed":
             ep["closed_at"] = at
             if not ep["lives"] and h.get("fix_sha"):
                 ep["lives"].append((at, str(h["fix_sha"])))
+            ep["proofs"].append((at, True))  # closed only through the gate
     if ep:
         # A P1 raised to P0 is the owner's from the raising.
         ep["p0_at"] = (ep["escalated"] if ep["declared"] not in (None, "P0")
@@ -857,9 +877,12 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
         return None
 
     claims, releases = ep["claims"], ep["releases"]
-    released_at, waiting = releases[-1] if releases else (None, None)
+    released_at, waiting, quiet = releases[-1] if releases else (None,) * 3
     live_at, sha = ep["lives"][-1] if ep["lives"] else (None, None)
-    handled = max(claims + [r for r, _ in releases]
+    proof_at, proven = max(((a, ok) for a, ok in ep["proofs"]
+                            if live_at and a >= live_at),
+                           default=(None, None), key=lambda p: p[0])
+    handled = max(claims + [r for r, *_ in releases]
                   + [x for x, _ in ep["lives"]], default=None)
     # The first failure nobody answered: since the opening, or since a Fixer
     # last claimed, shipped or handed it back.
@@ -876,6 +899,10 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
     if stuck and status == "fixing" and claims and now - claims[-1] >= stale:
         state, variant, since = (NOT_HANDLED, "stale" + _stamp(claims[-1]),
                                  claims[-1] + stale)
+    elif proof_at and not proven:
+        state, variant, since = NOT_FIXED, _stamp(proof_at), proof_at
+    elif live_at and not after_fix and proven:
+        state, variant, since = FIXED, sha[:12], proof_at
     elif live_at and not after_fix:
         state, variant, since = FIX_LIVE, sha[:12], live_at
     elif live_at and status == "fixing":
@@ -909,14 +936,18 @@ def p0_state(t, now, after=UNHANDLED_AFTER, stale=FIXING_STALE):
         "claimed_at": claims[0] if claims else None,
         "last_claim_at": claims[-1] if claims else None,
         "reclaimed_at": reclaimed,
+        "verified_at": proof_at if proven else None,
+        "verify_failed_at": proof_at if proof_at and not proven else None,
+        "retaken_at": max((c for c in claims if proof_at and c > proof_at),
+                          default=None),
         "released_at": released_at,
         "waiting_on_customer": waiting if state == WAITING_ON_CUSTOMER else None,
         "handed_back": state in (NOT_HANDLED, STILL_STUCK) and stuck is None
         and status == "open" and bool(releases),
         "quiet_until": (released_at + RELEASE_QUIET
-                        if released_at and stuck is None else None),
+                        if released_at and quiet and stuck is None else None),
         "live_sha": sha, "live_at": live_at, "closed_at": ep["closed_at"],
-        "replay_owed": bool(live_at) and status != "fixed",
+        "replay_owed": bool(live_at) and not proven,
         "failed_after_fix_at": after_fix,
         "customers": len(users) or int(t.get("users") or 0) or 1,
         "customers_after_fix": len(users_after) or (1 if after_fix else 0),

@@ -143,8 +143,10 @@ P0_PREFIX = "p0:"
 STATE_MAIL_FROM = datetime(2026, 11, 7, 15, 0, tzinfo=timezone.utc)
 NEEDS_YOU_COLOUR = "#dc2626"
 STATE_COLOURS = {"NOT HANDLED": "#d97706", "STILL STUCK": "#d97706",
-                 "BEING FIXED": "#2563eb", "FIX LIVE": "#16a34a",
-                 "WAITING ON CUSTOMER": "#7c3aed"}
+                 "BEING FIXED": "#2563eb", "FIX LIVE": "#0891b2",
+                 "WAITING ON CUSTOMER": "#7c3aed", "FIXED": "#16a34a",
+                 "NOT FIXED": "#d97706"}
+STATE_LABELS = {"NOT FIXED": "NOT FIXED yet"}
 # The provider error codes the out-of-credit alert below reads (event_alerts),
 # with who to top up. Machine text from the provider, never a customer's.
 PROVIDER_OUT = (("credit balance is too low", "Anthropic"),
@@ -215,9 +217,17 @@ def _p0_doing(s, now, beat, late, fixers):
     if state == "BEING FIXED":
         return None, "A Fixer is on it."
     if state == "FIX LIVE":
-        return None, ("The fix is live. " + (
-            "The replay on a copy runs next; the ticket closes when it "
-            "reaches the bar." if s["replay_owed"] else "The ticket is closed."))
+        return None, ("The fix is live but not proven yet: a VERIFY run "
+                      "replays the customer's request on a copy once it has "
+                      "been live 20 minutes, and the ticket closes only when "
+                      "that replay reaches the bar.")
+    if state == "FIXED":
+        return None, (f"Proven by a replay at {_when(s['verified_at'], now)}"
+                      + (": the ticket is closed." if s["status"] == "fixed"
+                         else "."))
+    if state == "NOT FIXED" and s.get("retaken_at"):
+        return None, (f"The proof failed, and a Fixer took it again "
+                      f"automatically at {_when(s['retaken_at'], now)}.")
     if state == "WAITING ON CUSTOMER":
         return None, ("Waiting on the customer: our side is ready and only "
                       "their return moves it. How the product picks it up: "
@@ -242,7 +252,7 @@ def _p0_doing(s, now, beat, late, fixers):
         return None, (f"{busy}The P0 watch takes it again at "
                       f"{_when(s['quiet_until'], now)} (6 h after a hand-back), "
                       "or at once if a customer fails on it.")
-    again = "again " if state == "STILL STUCK" else ""
+    again = "again " if state in ("STILL STUCK", "NOT FIXED") else ""
     return None, (f"{busy}{'t' if busy else 'T'}he P0 watch starts a Fixer on "
                   f"it {again}automatically at its next run (it last ran "
                   f"{beat} min ago).")
@@ -300,14 +310,24 @@ def p0_mail(s, now, beat=None, late=None, fixers=None):
         else:
             head = "A Fixer holds the claim. No fix is live yet."
     elif state == "FIX LIVE":
-        replay = "replay owed" if s["replay_owed"] else "replay passed"
         tail = (f"fix {sha} live since {_when(s['live_at'], now)}, no failure "
-                f"since, {replay}")
+                "since, not proven yet")
         head = (f"Fix {sha} went live at {_when(s['live_at'], now)} and no "
-                "customer has failed on it since."
-                + ("" if s["replay_owed"] else
-                   f" The replay passed and the ticket closed at "
-                   f"{_when(s['closed_at'], now)}."))
+                "customer has failed on it since. It is not proven yet.")
+    elif state == "FIXED":
+        tail = f"proven by a replay at {_when(s['verified_at'], now)}"
+        head = (f"Fix {sha} went live at {_when(s['live_at'], now)} and a "
+                "replay of the customer's request on a copy proved it at "
+                f"{_when(s['verified_at'], now)}. No customer has failed on "
+                "it since.")
+    elif state == "NOT FIXED":
+        at = _when(s["verify_failed_at"], now)
+        tail = (f"the proof of fix {sha} failed at {at}, a Fixer "
+                + (f"took it again at {_when(s['retaken_at'], now)}"
+                   if s.get("retaken_at") else "takes it again automatically"))
+        head = (f"Fix {sha} went live at {_when(s['live_at'], now)}, but its "
+                f"proof, a replay on a copy, failed at {at}: it is not fixed "
+                "yet.")
     elif state == "WAITING ON CUSTOMER":
         at = _when(s["released_at"], now)
         tail = f"our side ready since {at}, it moves when the customer returns"
@@ -322,8 +342,12 @@ def p0_mail(s, now, beat=None, late=None, fixers=None):
                 + (f" A Fixer handed it back at {_when(s['released_at'], now)}."
                    if s.get("handed_back") else ""))
     ask = f"needs you ({step})" if step else "no action needed"
-    subject = f"{state}, {ask}: P0 #{tid} {title} ({tail})"
-    if not s["stuck_now"]:
+    label = STATE_LABELS.get(state, state)
+    subject = f"{label}, {ask}: P0 #{tid} {title} ({tail})"
+    if state == "NOT FIXED" and not s["stuck_now"]:
+        stuck = ("Nobody has failed on it since the fix went live, but its "
+                 "proof failed, so it may still fail them.")
+    elif not s["stuck_now"]:
         stuck = (f"No. Nobody has failed on it since the fix went live at "
                  f"{_when(s['live_at'], now)}.")
     elif state == "WAITING ON CUSTOMER":
@@ -342,7 +366,7 @@ def p0_mail(s, now, beat=None, late=None, fixers=None):
     colour = NEEDS_YOU_COLOUR if step else STATE_COLOURS.get(state, "#6b6b75")
     verdict = (f"Needs you: {step}" if step else "No action needed")
     lines = [f'<span style="background:{colour};color:#fff;padding:2px 8px;'
-             f'border-radius:6px;font-weight:700">{_e(state)}</span> '
+             f'border-radius:6px;font-weight:700">{_e(label)}</span> '
              f'{_e(head)}',
              f"<b>What the system is doing:</b> {_e(doing)}",
              f"<b>Customers:</b> {_plural(s['customers'], 'customer')} on "
@@ -353,7 +377,7 @@ def p0_mail(s, now, beat=None, late=None, fixers=None):
              f"<b>What happened:</b> {what}",
              f"<b>Ticket:</b> <a href=\"{ADMIN_URL}?tab=tickets&ticket={tid}\" "
              f"style=\"color:#f87171\">P0 #{tid}</a>"]
-    body = _shell(f"{state}: P0 #{tid}", [(verdict, lines)],
+    body = _shell(f"{label}: P0 #{tid}", [(verdict, lines)],
                   "Sent to the admin inbox only, never to a customer. At most "
                   "two emails a P0: its first state once it held 10 minutes "
                   "(at once when nobody is on it), then its outcome. Nothing "
@@ -379,7 +403,10 @@ def p0_alerts(rcur, now):
             continue
         if sent and s["state"] == intake.BEING_FIXED:
             continue                    # the second email is the outcome
-        if s["state"] in intake.HELD and now - s["since"] < intake.P0_MAIL_HOLD:
+        hold = intake.P0_MAIL_HOLD
+        if sent and s["state"] == intake.FIX_LIVE:
+            hold = intake.P0_PROOF_WAIT  # the proof is the outcome that wins
+        if s["state"] in intake.HELD and now - s["since"] < hold:
             continue                    # pending: a change replaces it
         subject, body = p0_mail(s, now, watch["beat"], late,
                                 (watch["running"], watch["top"]))

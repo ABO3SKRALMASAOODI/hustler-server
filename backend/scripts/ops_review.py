@@ -630,7 +630,8 @@ def cmd_release(a):
     with Writer(a.dry_run) as w:
         ticket = store.release_fixing(
             w, a.ticket, a.expected_updated_at, a.note, severity=a.severity,
-            waiting_on_customer=a.waiting_on_customer)
+            waiting_on_customer=a.waiting_on_customer,
+            verify_failed=a.verify_failed)
     if not a.dry_run:
         if ticket["severity"] == "P0":
             _mark_p0(ticket)
@@ -1064,6 +1065,10 @@ def parser():
                         "move it; HOW is how the product resumes or tells them "
                         "(FIXER.md). Without it a P0 handed back with no fix "
                         "live is mailed to the owner as NOT HANDLED")
+    p.add_argument("--verify-failed", action="store_true",
+                   help="VERIFY mode: the live fix did not prove itself on a "
+                        "copy. Records 'verify_failed'; the P0 watch takes it "
+                        "again at once, with no 6 h quiet")
     p.add_argument("--dry-run", action="store_true")
     p.set_defaults(fn=cmd_release)
     p = sub.add_parser("close", help="close a ticket: fixed with a replay on a "

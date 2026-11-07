@@ -507,6 +507,9 @@ def test_a_cause_is_a_slug_and_closing_needs_proof():
                 replay={"session": "p5302", "run": "r1", "state": "done",
                         "failures": []})
     assert any("status = 'fixed'" in q for q, _ in cur.sql)
+    # Closed through the gate is the fix proven (owner, 7 Nov 2026).
+    hist = [p for q, p in cur.sql if "status = 'fixed'" in q][0][3]
+    assert [h["event"] for h in json.loads(hist)] == ["fixed", "verified"]
 
 
 def test_minted_keys_store_only_a_hash():

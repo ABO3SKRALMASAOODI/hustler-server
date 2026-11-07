@@ -828,7 +828,7 @@ def put_state(cur, key, value):
 # ── The clock of a ticket (owner, 7 Nov 2026: "nor issues neither latency in
 # handling them is accepted") ─────────────────────────────────────────────
 OPENINGS = ("opened", "recurred", "reopened")
-AWAITED = ("escalated", "released")
+AWAITED = ("escalated", "released", "verify_failed")
 
 
 def _event_at(entry):
@@ -981,7 +981,7 @@ def unmute(cur, ticket_id, note):
 
 
 def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None,
-                   waiting_on_customer=None):
+                   waiting_on_customer=None, verify_failed=False):
     """Return an unfinished claim with evidence, without hiding new intake.
 
     The caller must have reviewed this exact ticket revision. A failure filed
@@ -992,11 +992,19 @@ def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None,
     resumes or tells them (FIXER.md). The owner's email reads this field, never
     the note's words: with it the P0 is WAITING ON CUSTOMER; without it, a
     hand-back with no fix live is NOT HANDLED (owner, 7 Nov 2026, #883).
+
+    `verify_failed` is the VERIFY run's verdict that the live fix did not
+    prove itself on a copy: the entry is 'verify_failed' instead of
+    'released', and the P0 watch takes it again at once (no RELEASE_QUIET).
     """
     note = _clean(note, 2000, "note", required=True)
     if waiting_on_customer is not None:
         waiting_on_customer = _clean(waiting_on_customer, 500,
                                      "waiting_on_customer", required=True)
+    if verify_failed and waiting_on_customer:
+        raise StoreError("a failed proof is ours to fix, never a wait on the "
+                         "customer: pass one of --verify-failed and "
+                         "--waiting-on-customer")
     if severity is not None and severity not in SEVERITIES:
         raise StoreError(f"severity must be one of {', '.join(SEVERITIES)}")
     try:
@@ -1023,8 +1031,9 @@ def release_fixing(cur, ticket_id, expected_updated_at, note, severity=None,
     _w(cur, """UPDATE tickets SET status = 'open', severity = %s,
                    history = history || %s, updated_at = NOW()
                WHERE id = %s RETURNING *""",
-       (severity, _history("released", note=note,
-                           previous_severity=ticket["severity"], severity=severity,
+       (severity, _history("verify_failed" if verify_failed else "released",
+                           note=note, previous_severity=ticket["severity"],
+                           severity=severity,
                            waiting_on_customer=waiting_on_customer),
         int(ticket_id)))
     return dict(cur.fetchone())
@@ -1133,8 +1142,13 @@ def close(cur, ticket_id, status, root_cause=None, fix_sha=None,
                        history = history || %s, updated_at = NOW()
                    WHERE id = %s""",
            (root_cause, fix_sha, regression_check,
-            _history("fixed", fix_sha=fix_sha, replay=proof,
-                     regression_check=regression_check), int(ticket_id)))
+            # Closed through the replay gate is the fix proven: 'verified'
+            # (owner, 7 Nov 2026: "we shouldn't just trust a ticket").
+            json.dumps(json.loads(_history(
+                "fixed", fix_sha=fix_sha, replay=proof,
+                regression_check=regression_check))
+                + json.loads(_history("verified", fix_sha=fix_sha,
+                                      replay=proof))), int(ticket_id)))
     else:
         reason = _clean(reason, 2000, "reason", required=True)
         if not reason.lower().startswith(OWNER_DECISION):

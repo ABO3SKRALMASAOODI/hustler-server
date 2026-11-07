@@ -874,6 +874,36 @@ def test_a_release_flagged_waiting_on_customer_is_its_own_state(world):
                          "nothing more until they return")
     got = intake.p0_states(world.c, world.clock.now)
     assert got[0]["state"] == "NOT HANDLED" and got[0]["handed_back"]
+    # A plain hand-back waits RELEASE_QUIET for the watch ...
+    assert intake.pending_p0(world.c, world.clock.now + MIN) == []
+
+
+def test_a_failed_proof_is_taken_again_at_once_and_mailed_not_fixed(world):
+    """Owner, 7 Nov: "you must be sure that it's fixed". release
+    --verify-failed records 'verify_failed' and skips the 6 h quiet."""
+    tid = p0(world)
+    store.set_fixing(world.conn.cursor(), tid, "on it")
+    world.clock.now += 20 * MIN
+    store.mark_live(world.conn.cursor(), tid, "c" * 40)
+    t = world.only_ticket()
+    store.release_fixing(world.conn.cursor(), tid, t["updated_at"].isoformat(),
+                         "live, VERIFY next")
+    assert intake.pending_p0(world.c, world.clock.now + MIN) == []
+    world.clock.now += 30 * MIN
+    store.set_fixing(world.conn.cursor(), tid, "VERIFY: replaying on a copy")
+    t = world.only_ticket()
+    with pytest.raises(store.StoreError):
+        store.release_fixing(world.conn.cursor(), tid,
+                             t["updated_at"].isoformat(), "x",
+                             waiting_on_customer="y", verify_failed=True)
+    store.release_fixing(world.conn.cursor(), tid, t["updated_at"].isoformat(),
+                         "the replay still ends partial", verify_failed=True)
+    t = world.only_ticket()
+    assert t["status"] == "open" and t["history"][-1]["event"] == "verify_failed"
+    assert [r["id"] for r in intake.pending_p0(world.c,
+                                               world.clock.now + MIN)] == [tid]
+    got = intake.p0_states(world.c, world.clock.now + MIN)
+    assert got[0]["state"] == "NOT FIXED" and got[0]["quiet_until"] is None
 
 
 def test_the_alert_gives_the_5_minute_watch_its_turn_and_no_more(world):
