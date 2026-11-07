@@ -4,13 +4,19 @@ from pathlib import Path
 
 import pytest
 from edit_batch import apply_batch
-from playback_plan import compile_plan, changed_work
+from playback_plan import compile_plan, changed_work, playback_limitations
 from schemas import default_edl, canvas_edl
 
 
 @pytest.mark.parametrize("fixture", json.loads((Path(__file__).parent / "fixtures/playback-plan.json").read_text()), ids=lambda f:f["name"])
 def test_shared_playback_contract(fixture):
     assert compile_plan(fixture["edl"]) == fixture["expected"]
+    assert playback_limitations(fixture["edl"]) == fixture["limitations"]
+
+
+def test_a_fresh_edit_holds_nothing_the_player_cannot_show():
+    assert playback_limitations(default_edl(20)) == []
+    assert playback_limitations(canvas_edl()) == []
 
 
 def test_invalid_last_operation_does_not_mutate_first():

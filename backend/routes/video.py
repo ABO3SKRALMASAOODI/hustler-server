@@ -6432,6 +6432,13 @@ def playback_endpoint(user_id, project_id):
         row = _edl_at(cur, project_id, version) if version else _latest_edl(cur, project_id)
         if not row:
             return jsonify(error="This project has no edit yet."), 404
+        # No sources for a version the browser cannot draw whole: every Studio
+        # bundle, an open tab from before a release included, then asks for a
+        # render rather than playing the edit with parts of it missing.
+        limitations = wplayback.playback_limitations(row["json"])
+        if limitations:
+            return jsonify(version=row["version"], sources={}, limitations=limitations,
+                           plan=wplayback.compile_plan(row["json"]))
         cur.execute("""SELECT id,kind,storage_key,duration_s,width,height,meta,sha256
                        FROM assets WHERE project_id=%s ORDER BY id""", (project_id,))
         assets = cur.fetchall()
@@ -6458,7 +6465,7 @@ def playback_endpoint(user_id, project_id):
                                 duration=asset.get("duration_s"), width=asset.get("width"),
                                 height=asset.get("height"), kind=asset["kind"],
                                 identity=f"{asset['storage_key']}:{asset.get('sha256') or ''}")
-    return jsonify(version=row["version"], plan=plan, sources=sources)
+    return jsonify(version=row["version"], plan=plan, sources=sources, limitations=[])
 
 
 @video_bp.route("/projects/<int:project_id>/edl", methods=["POST"])
