@@ -20804,6 +20804,14 @@ def set_grade_custom(ctx, exposure=None, contrast=None, saturation=None,
         except (TypeError, ValueError):
             return f"REJECTED: {axis} must be a number ({lo:g} to {hi:g})."
         delta = False
+        if axis in ("contrast", "saturation"):
+            if hi < requested <= 100.0:
+                # A percentage: contrast=4 is 4%, never 4x (p5520's replay).
+                call_note(ctx, f"{axis} {requested:g} read as +{requested:g}%")
+                requested = requested / 100.0
+        elif 1.0 < abs(requested) <= 100.0:
+            call_note(ctx, f"{axis} {requested:g} read as {requested:g}%")
+            requested = requested / 100.0
         if axis in ("contrast", "saturation") and requested < 0.5:
             # 0 clears, +0.08 means a restrained 8% lift, -0.08 an 8% cut.
             # Intentional monochrome belongs to the explicit 'bw' preset;

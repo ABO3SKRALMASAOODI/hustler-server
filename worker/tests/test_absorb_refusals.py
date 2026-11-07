@@ -1027,3 +1027,11 @@ def test_a_slower_zoom_keeps_the_strength_it_asked_for(zoom_ctx):
                                strength=0.03, cx=0.5, cy=0.5)
     assert out.startswith("EDL"), out
     assert zoom_ctx.edl["effects"]["zooms"][-1]["strength"] == 0.03
+
+
+def test_a_grade_given_in_percent_is_read_as_percent(zoom_ctx):
+    out = agent_tools.set_grade_custom(zoom_ctx, highlights=-8, contrast=4)
+    assert out.startswith("EDL"), out
+    grade = zoom_ctx.edl["effects"]["grade_custom"]
+    assert grade["highlights"] == -0.08 and grade["contrast"] == 1.04
+    assert agent_tools.set_grade_custom(zoom_ctx, exposure=500).startswith("REJECTED")
