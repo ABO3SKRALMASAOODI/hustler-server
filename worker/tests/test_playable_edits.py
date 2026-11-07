@@ -64,7 +64,6 @@ def test_review_scope_reuses_picture_after_sound_change_and_keeps_global_checks(
 
 @pytest.mark.parametrize('operation',[
     dict(action='set',layer='music',value=['malformed']),
-    dict(action='set',layer='frame',value=dict(ratio='9:16',focus_xx=.5)),
     dict(action='upsert',layer='music',id='m',value=dict(storage_key=['bad'],start=0,end=4)),
 ])
 def test_malformed_or_misspelled_batch_is_rejected(operation):

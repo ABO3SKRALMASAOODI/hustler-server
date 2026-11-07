@@ -480,9 +480,10 @@ def test_cover_overlay_motion_applies_what_it_can_and_names_what_it_dropped():
         "scale": [{"t": 0, "v": 1}, {"t": 1, "v": 1.2}],
         "opacity": [{"t": 0, "v": 0}, {"t": .2, "v": 1}]})
     assert out.startswith("EDL v"), out
-    assert "Not applied: scale — overlay ov1 has fit=cover, which always fills the whole frame" in out
+    assert "no longer fills the whole frame" in out
     ov = ctx.edl["overlays"][0]
-    assert isinstance(ov["opacity"], list) and not isinstance(ov["scale"], list)
+    assert isinstance(ov["opacity"], list) and isinstance(ov["scale"], list)
+    assert ov["fit"] is None
     # A move that changes nothing still names what it dropped.
     agent_tools.set_overlay_motion(ctx, "ov1", {"opacity": .5})
     again = agent_tools.set_overlay_motion(ctx, "ov1", {"x": .2, "opacity": .5})
@@ -496,10 +497,8 @@ def test_picture_overlay_motion_names_the_picture_rectangle():
     ctx.edl = validate_edl(ctx.edl, 5).model_dump()
     out = agent_tools.set_overlay_motion(ctx, "ov2", {"x": .3, "opacity": .5})
     assert out.startswith("EDL v"), out
-    assert "fit=picture, which always fills the program's picture rectangle" in out
-    assert "full-frame" not in out and "whole frame" not in out
-    only = agent_tools.set_overlay_motion(ctx, "ov2", {"y": .3})
-    assert only.startswith("REJECTED") and "fit=picture" in only and "ignore y" in only
+    assert "no longer fills the program's picture rectangle" in out
+    assert ctx.edl["overlays"][0]["x"] == .3
 
 
 # ── 5. make_shorts: one reply, optional sentence snap ──────────────────────

@@ -165,11 +165,12 @@ def test_bad_1d_shapes_are_refused_with_their_reason(item, match):
     assert match in str(exc.value), str(exc.value)
 
 
-def test_a_misspelled_field_is_refused():
+def test_a_misspelled_field_reaches_the_real_field():
     item = dict(OK[0], kind="negative")
     item["colur"] = "white"
-    with pytest.raises(ValueError, match="Unknown field|Extra inputs"):
-        edit_batch.apply_batch(_base(), [_up(item)], DUR, KEYS)
+    notes = []
+    out = edit_batch.apply_batch(_base(), [_up(item)], DUR, KEYS, notes=notes)
+    assert any("read colur as colour" in n for n in notes), (out, notes)
 
 
 def test_flash_times_by_kind_region_and_stage():

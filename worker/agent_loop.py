@@ -990,7 +990,7 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
                                 captions_line=captions_line,
                                 program_lines=program_lines,
                                 media_lines=media_lines,
-                                follow_up=_follow_up_turn(ctx))
+                                follow_up=int(edl["version"]) > 1)
     # A SHORTS project's chat is the board's chat. Without this section the
     # parent agent literally does not know its children exist — on
     # 2026-08-09 "add the interstellar music to all of them" got the track
@@ -1166,8 +1166,10 @@ def state_block(ctx, worker_db, denied_tools=(), include_blueprint=True):
             request_text=getattr(ctx, "user_message", None),
             program=program)
         family = cast["family"]
-        if not _follow_up_turn(ctx):
+        if int(edl["version"]) <= 1:
             block += "\n\n" + editorial_contracts.casting_block(cast)
+        elif family:
+            block += f"\n\nFORMAT CAST — {family}."
     except Exception as e:
         print(f"[editorial-contract] state block failed: {e}", flush=True)
     # Repeated accepted outcomes can teach a per-account taste prior without

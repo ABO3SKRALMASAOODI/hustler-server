@@ -3593,7 +3593,7 @@ TOOL_SPECS = {
         "motion beats.",
         {"category": {"type": "string", "description": "Optional filter: type, data, callout, social, "
                       "layout, transition, texture, cta, caption."},
-         "template": {"type": "string", "description": "One template's name: reads only that template."}}),
+         "template": {"type": "string"}}),
     "add_motion_graphic": (
         add_motion_graphic,
         "Place a browser-rendered, After-Effects-grade motion graphic on the PROGRAM clock: "

@@ -170,7 +170,7 @@ def test_pending_wait_is_bounded_and_keeps_the_same_job(monkeypatch):
                 'state': 'running', 'progress': 85}
 
     ctx.db.run = run
-    clock = iter([0.0, 46.0])
+    clock = iter([0.0, 901.0])
     monkeypatch.setattr(tools.time, 'monotonic', lambda: next(clock))
     result = tools.wait_for_job(ctx, 11)
     assert result.startswith('PREREQUISITE:')

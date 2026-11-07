@@ -170,8 +170,10 @@ def test_cover_and_screen_takeover_reject_ignored_or_conflicting_curves():
         "start": 0.0, "duration_s": 2.0, "fit": "cover",
     }]
     ctx = _Ctx(cover)
-    assert "ignore x" in agent_tools.set_overlay_motion(
+    assert "no longer fills the whole frame" in agent_tools.set_overlay_motion(
         ctx, "ov1", {"x": [{"t": 0, "v": 0}, {"t": 1, "v": 1}]})
+    assert ctx.latest_edl()["json"]["overlays"][0]["fit"] is None
+    ctx.latest_edl()["json"]["overlays"][0]["fit"] = "cover"
     assert agent_tools.set_overlay_motion(
         ctx, "ov1", {"opacity": [{"t": 0, "v": 0},
                                    {"t": 0.2, "v": 1}]}).startswith("EDL v")

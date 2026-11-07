@@ -171,11 +171,12 @@ def test_an_item_the_batch_names_is_never_moved_and_every_overrun_is_named():
            {"action": "set", "layer": "effects",
             "value": {"picture_cards": [{"id": "main", "start": 0.0, "end": 32.2,
                                          "box": [0.0, 0.24, 1.0, 0.794]}]}}]
-    with pytest.raises(ValueError) as err:
-        edit_batch.apply_batch(before, ops, 4000.0, keys)
-    msg = str(err.value)
-    assert "motion 'context' ends at 32" in msg and "picture card 'main' ends at 32.2" in msg
-    assert "remove_insert" in msg
+    notes = []
+    held = edit_batch.apply_batch(before, ops, 4000.0, keys, notes=notes)
+    new_end = edit_batch.program_duration(held)
+    assert {m["id"]: m["end"] for m in held["motion"]}["context"] == new_end
+    assert held["effects"]["picture_cards"][0]["end"] == new_end
+    assert "motion 'context'" in notes[-1] and "picture card 'main'" in notes[-1]
     # a batch that does not shorten the programme is untouched by the rule
     same = edit_batch.apply_batch(
         before, [{"action": "upsert", "layer": "motion", "id": "beat",

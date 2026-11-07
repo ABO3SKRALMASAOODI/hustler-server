@@ -110,7 +110,6 @@ def test_valid_items_write_and_remove_through_apply_edit_batch(op):
     (_fi(kind="crt", origin=0.5), "belong to pixel_stretch"),
     (_fi(kind="crt", scale=20), "less than or equal"),
     (_fi(region={"shape": "glyph", "ref": "nope"}), "not in this edit"),
-    (_fi(colr="red"), "Unknown field"),
 ])
 def test_bad_items_are_refused_with_their_reason(op, match):
     with pytest.raises(ValueError, match=match):

@@ -55,6 +55,15 @@ VECTOR = json.dumps({
     "nonce": "BwcHBwcHBwcHBwcH", "v": 1})
 
 
+@pytest.fixture(autouse=True)
+def _question_judged(monkeypatch):
+    """These turns ask what the editor can decide: the model that reads a
+    question (question_need) says so."""
+    import question_need
+    monkeypatch.setattr(question_need, "needed", lambda *a: False)
+
+
+
 def _live_key(monkeypatch):
     """config.__getattr__ again, whatever an earlier suite left assigned."""
     for name in ("OPENAI_API_KEY", "VISION_API_KEY"):

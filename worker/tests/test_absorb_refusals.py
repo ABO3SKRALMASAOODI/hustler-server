@@ -224,10 +224,8 @@ def test_batch_shape_other_canvas_from_a_ratio():
 
 def test_batch_patches_can_be_removed_by_id():
     edl = default_edl(60.0)
-    edl["patches"] = []
-    op = edit_batch._fit_operation({"id": "er2", "layer": "patches",
-                                    "action": "remove"}, edl, [])
-    assert op["layer"] in edit_batch.LAYERS
+    out, _ = batch(edl, [{"id": "er2", "layer": "patches", "action": "remove"}])
+    assert not out.get("patches")
 
 
 def test_batch_insert_off_boundary_snaps_within_a_second():

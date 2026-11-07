@@ -14574,6 +14574,18 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
                  f"fills {fills}. Use a PIP overlay for position/scale motion."
                + still)
     before = dict(hit)
+    if ignored == {"scale"} and hit.get("kind") == "image" \
+            and set(motion) == {"scale"}:
+        # A push on a photo that fills the frame: the camera move that exists
+        # for exactly this, which keeps it filling.
+        values = [row.get("v") for row in motion["scale"]
+                  if isinstance(row, dict)] if isinstance(motion["scale"], list) \
+            else []
+        if len(values) >= 2 and None not in values:
+            call_note(ctx, f"a scale move on a full-frame photo is animate_still")
+            return TOOLS["animate_still"][0](
+                ctx, id, path="push_in" if values[-1] >= values[0]
+                else "pull_out")
     if ignored:
         # Asking a filling overlay to move means it should stop filling: it
         # becomes a placed overlay that starts where it was, full width and
@@ -26184,17 +26196,14 @@ def ask_user(ctx, question):
     if repeat_offer:
         return repeat_offer
     import request_contract
-    held_before = bool(getattr(ctx, "_question_held", False))
     held = _question_can_wait(ctx, q)
     # A refused write can come after the first hold was spent, and the refusal
     # itself says to ask. A question about a lane that just opened is the
-    # "approve what you already asked for" wall, so it goes back too, once:
-    # the lane is open either way, and no question is held twice.
+    # "approve what you already asked for" wall, so it goes back too.
     released = ([] if getattr(ctx, "versions_written", None)
                 or music_gate.offered_slugs(q)
                 else request_contract.release_inherited(ctx))
-    if held or (released and not held_before):
-        ctx._question_held = True
+    if held or released:
         return ("CORRECTION_NEEDED: not asked yet. Nothing has changed in this "
                 "turn, and the customer is waiting for an edit, not a "
                 "question. Do what the request clearly asks now: choose any "
@@ -26976,11 +26985,13 @@ def _canonical_object_id(value):
     return raw
 
 
-def _normalize_tool_call(name, args):
+def _normalize_tool_call(name, args, dialect=True):
     """Repair only unambiguous tool dialect aliases.
 
     Returns ``(name, args, notes)``.  This is shared by direct calls and
     recipes so batching does not mysteriously accept a different dialect.
+    ``dialect=False`` leaves unknown names in place: the rollout guard reads
+    them as a call from a newer release, which waits instead of being fitted.
     """
     name = str(name or "").strip()
     args = dict(args or {})
@@ -27085,7 +27096,7 @@ def _normalize_tool_call(name, args):
             notes.append("static motion_motif dropped")
     _argument_aliases(name, args, notes)
     entry = TOOLS.get(name)
-    if entry:
+    if entry and dialect:
         tool_dialect.repair(name, args, entry[0], entry[2], notes)
     return name, args, notes
 
@@ -34451,7 +34462,9 @@ def _call_notes_begin(ctx, repairs):
     if isinstance(ctx, _RecipeContext):
         return
     try:
-        ctx._call_notes = list(repairs or [])
+        # A respelled name or value is the same call; what was dropped or
+        # defaulted is what the model must read.
+        ctx._call_notes = [note for note in repairs or [] if " -> " not in note]
     except Exception:  # noqa: BLE001 - a frozen test context has no receipt
         pass
 

@@ -150,7 +150,8 @@ def _mcp_problem(payload):
     if not tool or tool in _MCP_CONTROL_TOOLS:
         return None
     try:
-        name, normalized, _notes = agent_tools._normalize_tool_call(tool, args)
+        name, normalized, _notes = agent_tools._normalize_tool_call(
+            tool, args, dialect=False)
     except Exception:
         name, normalized = tool, args
     entry = agent_tools.TOOLS.get(name)

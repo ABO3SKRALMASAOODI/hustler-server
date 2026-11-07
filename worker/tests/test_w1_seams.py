@@ -509,7 +509,7 @@ def test_batch_write_path_is_apply_batch(monkeypatch):
     assert written[0][0]["texts"][0]["id"] == "t1"
     bad = dict(op, value=dict(op["value"], colr="red"))
     assert _write.commit(Ctx(), [bad], "x").startswith(
-        "REJECTED (EDL v4 unchanged): Unknown field")
+        "REJECTED (EDL v4 unchanged): texts[0].color")
     assert _write.upsert_fx({"id": "a", "type": "accent"}) == {
         "action": "upsert", "layer": "fx", "id": "a",
         "value": {"id": "a", "type": "accent"}}

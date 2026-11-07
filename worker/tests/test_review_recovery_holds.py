@@ -21,6 +21,15 @@ from test_review_loop_after_preview import (AUTO_RENDER, ASK, _auto_render_retur
                                             _delivered, _nothing_changed, _run, _walled)
 
 
+@pytest.fixture(autouse=True)
+def _question_judged(monkeypatch):
+    """These turns ask what the editor can decide: the model that reads a
+    question (question_need) says so."""
+    import question_need
+    monkeypatch.setattr(question_need, "needed", lambda *a: False)
+
+
+
 def _msgs(calls):
     return [str(m.get("content")) for call in calls for m in call["messages"]]
 

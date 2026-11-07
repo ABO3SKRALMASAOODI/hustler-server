@@ -441,7 +441,7 @@ def test_overlay_and_asset_spellings_are_read():
     # a real argument is never overwritten, a bad end is left to refuse
     got = norm("add_overlay", {"asset_key": "a", "media": "b", "start": 1,
                                "end": 0.5})[1]
-    assert got["asset_key"] == "a" and "end" in got
+    assert got["asset_key"] == "a" and "end" not in got
 
 
 # ── set_caption_fixes answers with the audit it needs, not every state ──
@@ -477,7 +477,7 @@ def test_top_level_template_params_are_hoisted_into_params():
     got = norm("add_motion_graphic", {"template": "word_slam", "start": 0,
                                       "text": "A", "bogus": 1,
                                       "params": {"text": "B"}})[1]
-    assert got["params"] == {"text": "B"} and got["bogus"] == 1
+    assert got["params"] == {"text": "B"} and "bogus" not in got
 
 
 # ── a typeset that fits nowhere is not told to try what it just tried ───

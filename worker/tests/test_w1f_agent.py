@@ -104,8 +104,11 @@ def test_look_at_rejects_an_unknown_overlay_and_rendered_overlays(tmp_path):
     ctx = _Ctx(tmp_path)
     assert agent_tools.look_at(ctx, times=[1.0], overlay="xray").startswith(
         "REJECTED: overlay is one of matte, free_space, beats")
-    assert agent_tools.look_at(ctx, output_times=[1.0], rendered=True,
-                               overlay="beats").startswith("REJECTED")
+    from types import SimpleNamespace
+    ctx.db = SimpleNamespace(run=lambda *args: None)
+    # an overlay on rendered frames is not drawn and never refuses the look
+    assert "no completed preview" in agent_tools.look_at(
+        ctx, output_times=[1.0], rendered=True, overlay="beats")
 
 
 def test_rendered_inspection_has_an_explicit_valid_no_overlay_choice(tmp_path, monkeypatch):

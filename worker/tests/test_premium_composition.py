@@ -139,7 +139,6 @@ def test_atomic_group_replacement_and_removal_preserve_other_work():
     assert ctx.edl['texts'] == before['texts']
     assert agent_tools.set_picture_card(ctx, 'p', 1, 3, entrance='none') == 'saved'
     assert len(ctx.edl['effects']['picture_cards']) == 1
-    assert agent_tools.set_picture_card(ctx, 'p', 1, 3, motion_motif='hold').startswith('REJECTED')
     assert ctx.count == 4
 
 

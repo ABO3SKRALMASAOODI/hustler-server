@@ -78,12 +78,13 @@ def test_motion_authoring_tool_stores_only_a_declared_non_hold_motif():
     assert result.startswith("EDL v1 -> v2")
     assert ctx.latest_edl()["json"]["effects"]["zooms"][0][
         "motion_motif"] == "proof_push"
-    assert agent_tools.add_zoom(
-        _Ctx(plan=_plan()), 2, 4, motion_motif="invented_move").startswith(
-            "REJECTED: motion_motif 'invented_move' is not declared")
-    assert agent_tools.add_zoom(
-        _Ctx(plan=_plan()), 2, 4, motion_motif="hold").startswith(
-            "REJECTED: 'hold'")
+    # a motif records why; a bad one is left off and the zoom still lands
+    for bad in ("invented_move", "hold"):
+        ctx = _Ctx(plan=_plan())
+        assert agent_tools.add_zoom(
+            ctx, 2, 4, motion_motif=bad).startswith("EDL v1 -> v2")
+        assert not ctx.latest_edl()["json"]["effects"]["zooms"][0].get(
+            "motion_motif")
 
 
 def test_generic_binder_closes_only_the_exact_existing_motion_object():

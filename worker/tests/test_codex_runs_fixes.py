@@ -211,9 +211,17 @@ def test_a_full_frame_still_is_pointed_to_animate_still():
     edl = default_edl(5.0)
     edl["overlays"] = [{"id": "ov1", "asset_key": "image.png", "kind": "image",
                         "start": 0.0, "duration_s": 3.0, "fit": "picture"}]
-    out = agent_tools.set_overlay_motion(_OverlayCtx(edl), "ov1", {
-        "scale": [{"t": 0, "v": 1.0}, {"t": 3, "v": 1.04}]})
-    assert out.startswith("REJECTED") and "animate_still(id='ov1')" in out
+    seen = {}
+    real = agent_tools.TOOLS["animate_still"]
+    agent_tools.TOOLS["animate_still"] = (
+        lambda ctx, id, path: seen.update(id=id, path=path) or "EDL v2",
+        real[1], real[2])
+    try:
+        out = agent_tools.set_overlay_motion(_OverlayCtx(edl), "ov1", {
+            "scale": [{"t": 0, "v": 1.0}, {"t": 3, "v": 1.04}]})
+    finally:
+        agent_tools.TOOLS["animate_still"] = real
+    assert out == "EDL v2" and seen == {"id": "ov1", "path": "push_in"}
 
 
 def test_a_pip_scale_past_full_width_is_named_not_silently_flattened():
@@ -262,9 +270,10 @@ def test_caption_style_fields_at_the_top_level_say_where_they_go():
     before = default_edl(20.0)
     before["keep"] = [[0.0, 10.0]]
     before = validate_edl(before, 20.0).model_dump()
-    with pytest.raises(ValueError, match="put them under captions.style"):
-        _batch(before, [{"action": "set", "layer": "captions", "value": {
-            "mode": "from_transcript", "font": "Inter", "size_scale": 0.9}}])
+    after = _batch(before, [{"action": "set", "layer": "captions", "value": {
+        "mode": "from_transcript", "font": "Anton", "size_scale": 0.9}}])
+    assert after["captions"]["style"]["font"] == "Anton"
+    assert after["captions"]["style"]["size_scale"] == 0.9
 
 
 # ── pixel units read as pixels ──────────────────────────────────────────────

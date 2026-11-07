@@ -24,9 +24,9 @@ except ImportError:
 # FX_AUTHORABLE_TYPES), because until then validation rejects any item.
 LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "caption_mutes", "texts", "vectors", "music", "sfx", "voiceover", "volume", "master",
-    "effects", "overlays", "canvas", "motion", "fx", "patches"))
+    "effects", "overlays", "canvas", "motion", "fx"))
 ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
-    "motion", "fx", "patches"))
+    "motion", "fx"))
 
 
 # Device cards (worker/devices/cards/<id>.json), read as plain JSON so this
@@ -503,6 +503,14 @@ def _item_near_misses(edl, layers):
                     notes.append(f"text {item.get('id') or '?'}: {side} "
                                  "dropped, its motion curve owns the animation")
     captions = edl.get("captions") if "captions" in layers else None
+    if isinstance(captions, dict):
+        stray = {key: captions.pop(key) for key in tuple(captions)
+                 if key in CaptionStyle.model_fields
+                 and key not in ("mode", "style")}
+        if stray:
+            captions["style"] = {**stray, **(captions.get("style") or {})}
+            notes.append(f"{', '.join(sorted(stray))} moved under "
+                         "captions.style")
     if isinstance(captions, dict) and captions.get("mode") != "from_transcript":
         mode = str(captions.get("mode")).strip().lower()
         if mode in _NONE_WORDS:
@@ -686,7 +694,7 @@ def _fit_operation(op, before, notes):
             op["value"] = {"width": size[0], "height": size[1],
                            **({"bg_color": fill} if fill else {}),
                            **({"fps": value["fps"]} if "fps" in value else {})}
-    if layer in ITEM_LAYERS and op.get("action") == "set":
+    if layer in ITEM_LAYERS and op.get("action") == "set" and not op.get("id"):
         if isinstance(value, dict):
             op["value"] = [value] if value else []
     return op
@@ -787,6 +795,11 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
         if action == "set" and layer in ITEM_LAYERS and op.get("id") \
                 and isinstance(op.get("value"), dict):
             action = op["action"] = "upsert"
+        if layer == "patches" and action == "remove":
+            # Erase patches are read in get_edl; a remove by id means them.
+            edl["patches"] = [item for item in edl.get("patches") or []
+                              if item.get("id") != op.get("id")]
+            continue
         if layer == "fx":
             # Engine/test fx types render but are never authored.
             value = op.get("value")
