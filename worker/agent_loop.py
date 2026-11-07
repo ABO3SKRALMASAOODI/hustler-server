@@ -2688,7 +2688,7 @@ def _trial_render_refusal(ctx, name, args=None):
     if int(getattr(ctx, "trial_previews", 0) or 0) < int(cap):
         return None
     import preview_budget
-    if preview_budget.undo_allowed(ctx, name):
+    if preview_budget.undo_allowed(ctx, name, args):
         return None
     if preview_budget.repair_allowed(ctx):
         return None

@@ -34,6 +34,25 @@ def test_undo_tools_are_real_write_tools():
     assert 'remove_filler_words' not in preview_budget.UNDO_TOOLS
 
 
+def test_every_removal_of_something_added_is_a_way_back():
+    """p5533: the cycle stopped and refused remove_region_effect. A new remove_*
+    tool that is neither here nor named below fails this test."""
+    removals = {n for n in agent_tools.WRITE_TOOLS if n.startswith('remove_')}
+    assert removals - preview_budget.UNDO_TOOLS == {'remove_filler_words'}
+
+
+def test_a_batch_of_removals_is_a_way_back_and_a_mixed_batch_is_not():
+    ctx = stopped()
+    removes = {'operations': [
+        {'action': 'remove', 'layer': 'fx', 'id': 'bg_wall_left'},
+        {'action': 'remove', 'layer': 'fx', 'id': 'bg_curtain_right'}]}
+    mixed = {'operations': removes['operations'] + [
+        {'action': 'upsert', 'layer': 'fx', 'id': 'bg_top', 'value': {}}]}
+    assert agent_loop._trial_render_refusal(ctx, 'apply_edit_batch', mixed).startswith('REJECTED')
+    assert agent_loop._trial_render_refusal(ctx, 'apply_edit_batch', {}).startswith('REJECTED')
+    assert agent_loop._trial_render_refusal(ctx, 'apply_edit_batch', removes) is None
+
+
 def test_new_work_stays_refused_but_the_turn_can_undo_and_show_it():
     ctx = stopped()
     assert agent_loop._trial_render_refusal(ctx, 'blur_region').startswith('REJECTED')
