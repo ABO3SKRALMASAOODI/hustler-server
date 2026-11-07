@@ -61,6 +61,22 @@ def test_a_named_cut_and_a_named_stretch_inside_one_file():
     assert [j["at"] for j in _junctions(ctx)] == [8.0, 12.0]
 
 
+def test_reapplying_the_same_dissolves_writes_no_version():
+    """A new version of an identical edit cancels the preview rendering it."""
+    ctx = _ctx()
+    assert P.set_junction(ctx, "dissolve", duration=1.0).startswith("EDL")
+    before = ctx.version, [j["id"] for j in _junctions(ctx)]
+    out = P.set_junction(ctx, "dissolve", duration=1.0)
+    assert out.startswith("NO CHANGE"), out
+    assert (ctx.version, [j["id"] for j in _junctions(ctx)]) == before
+    assert agent_tools.set_transitions(
+        ctx, "dissolve", 1.0).startswith("NO CHANGE")
+    out = P.set_junction(ctx, "dissolve", duration=0.6, at=[8.0])
+    assert out.startswith("EDL"), out
+    assert sorted(j["duration_s"] for j in _junctions(ctx)) == [0.6, 1.0, 1.0,
+                                                                1.0]
+
+
 def test_a_file_with_no_shot_change_still_says_so():
     ctx = Ctx(ONE_FILE)
     assert "no cut to decorate" in P.set_junction(ctx, "dissolve")
@@ -74,9 +90,10 @@ def test_the_junction_survives_the_keep_change_that_exposed_its_cut():
     assert [i["at"] for i in kept["fx"]] == [8.0] and not notes
 
 
-def test_a_slide_is_a_valid_edl_junction():
+@pytest.mark.parametrize("style", ["slide_right", "film_strip", "fade_black"])
+def test_the_customers_words_are_valid_edl_junctions(style):
     ctx = _ctx()
-    P.set_junction(ctx, "slide_right", at=[4.0])
+    assert P.set_junction(ctx, style, at=[4.0]).startswith("EDL")
     schemas.validate_edl(copy.deepcopy(ctx.edl), 20.0)
 
 
@@ -185,7 +202,8 @@ def test_a_contract_compiled_before_this_release_still_reads():
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
 @pytest.mark.parametrize("style,moves", [("dissolve", False),
-                                         ("slide_left", True)])
+                                         ("slide_left", True),
+                                         ("film_strip", True)])
 def test_the_two_photos_really_meet_on_screen(style, moves, tmp_path,
                                               monkeypatch):
     """A rendered program: the outgoing photo's frame is held, so the middle
@@ -239,3 +257,33 @@ def test_every_asked_dissolve_is_drawn_past_the_render_budget(tmp_path,
                            for i in range(4)])
     _, rep = render(edl, src, str(tmp_path / "out.mp4"), idx=idx)
     assert len(rep) == 3 and {r["rung"] for r in rep} == {"full"}, rep
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
+def test_a_fade_to_black_falls_and_rises_once(tmp_path, monkeypatch):
+    """Measured, not assumed: xfade's fadeblack leapt to black, rose and fell
+    again inside the window, a flicker on the cut the customer asked to smooth."""
+    from w1d_support import IDX, frames, lossless, render
+    src = str(tmp_path / "slides.mp4")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=0xE0E0E0:s=320x180:r=25:d=2",
+         "-f", "lavfi", "-i", "color=c=0xA0A0A0:s=320x180:r=25:d=2",
+         "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:d=4",
+         "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+         "-map", "[v]", "-map", "2:a", "-c:v", "libx264", "-qp", "0",
+         "-pix_fmt", "yuv420p", "-t", "4", src], check=True)
+    lossless(monkeypatch)
+    edl = {"keep": [[0.0, 2.0], [2.0, 4.0]], "captions": {"enabled": False},
+           "fx": [{"id": "j1", "type": "junction", "stage": "junction",
+                   "at": 2.0, "style": "fade_black", "duration_s": 0.8}]}
+    idx = dict(IDX, shots=[{"id": 0, "start": 0.0, "end": 2.0},
+                           {"id": 1, "start": 2.0, "end": 4.0}])
+    out = str(tmp_path / "out.mp4")
+    render(edl, src, out, idx=idx, duration=4.0)
+    luma, _ = frames(out)
+    curve = [float(f.mean()) for f in luma[40:60]]
+    low = curve.index(min(curve))
+    assert 8 <= low <= 11 and curve[low] < 25
+    assert all(a >= b - 1 for a, b in zip(curve[:low], curve[1:low + 1]))
+    assert all(a <= b + 1 for a, b in zip(curve[low:], curve[low + 1:]))

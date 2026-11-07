@@ -56,7 +56,7 @@ from fx_schemas.accents import DEFAULT_BOX_STEPS, decay_strengths
 # slide_*: both pictures travel together, side by side, like a film strip.
 XFADE_NAMES = {"fadegrays": "fadegrays", "pixelize": "pixelize",
                "radial": "radial", "slide_left": "slideleft",
-               "slide_right": "slideright"}
+               "slide_right": "slideright", "film_strip": "slideleft"}
 SLICE_NAMES = {"left": "hlslice", "right": "hrslice", "up": "vuslice",
                "down": "vdslice", None: "hrslice"}
 MASK_SEQ_STYLES = ("wipe_left", "wipe_right", "wipe_up", "wipe_down",
@@ -100,7 +100,8 @@ class _Junction:
     FILTERS = ("split", "trim", "setpts", "concat", "format", "overlay",
                "alphamerge", "xfade", "color", "geq", "scale", "blend",
                "crop", "vstack", "gblur", "remap", "loop", "zoompan",
-               "negate", "dilation", "nullsink", "tpad", "null", "settb")
+               "negate", "dilation", "nullsink", "tpad", "null", "settb",
+               "fade")
 
     # -- prepare ---------------------------------------------------------
     def prepare(self, plan, item):
@@ -338,6 +339,18 @@ class _Junction:
         d = N / ctx.fps3
         ctx.parts.append(f"[{ctx.a_label}][{ctx.b_label}]xfade=transition="
                          f"{name}:duration={d:.6f}:offset=0[{u}]")
+        return self._settle(ctx, u, N), None
+
+    def _fade_black(self, ctx, item, h, N):
+        """Out to black on the outgoing side, in from black on the incoming
+        one, exactly on the cut. xfade's fadeblack jumped to black, rose and
+        fell again on a 12-frame window (measured on p5520's replay)."""
+        u = ctx.uid("jf")
+        ctx.parts.append(f"[{ctx.a_label}]trim=end_frame={h},setpts=PTS-STARTPTS,"
+                         f"fade=t=out:s=0:n={h}[{u}a]")
+        ctx.parts.append(f"[{ctx.b_label}]trim=start_frame={h},"
+                         f"setpts=PTS-STARTPTS,fade=t=in:s=0:n={h}[{u}b]")
+        ctx.parts.append(f"[{u}a][{u}b]concat=n=2:v=1:a=0[{u}]")
         return self._settle(ctx, u, N), None
 
     def _dissolve(self, ctx, item, h, N):

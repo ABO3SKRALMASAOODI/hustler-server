@@ -126,3 +126,14 @@ def test_exposing_baked_cuts_is_not_a_cut_change():
     real = {'keep': [[0.0, 10.0], [12.0, 30.0]]}
     assert scope_guard.preservation_violations(
         before, real, protected={'cuts'})
+
+
+def test_a_dissolve_junction_counts_as_a_delivered_transition():
+    import quality_verifier
+    import reply_grounding
+    edl = {'keep': [[0, 5], [5, 10]], 'effects': {},
+           'fx': [{'id': 'jn1', 'type': 'junction', 'style': 'dissolve', 'at': 5.0}]}
+    assert reply_grounding.has_rendered_transitions(edl, {})
+    assert not reply_grounding.has_rendered_transitions({**edl, 'fx': []}, {})
+    source = open(quality_verifier.__file__).read()
+    assert '"junction"' in source

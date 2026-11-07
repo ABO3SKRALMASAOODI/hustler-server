@@ -46,7 +46,8 @@ JUNCTION_CARDS = {
     "dissolve": "junction_dissolve", "fadegrays": "junction_xfade",
     "pixelize": "junction_xfade", "radial": "junction_xfade",
     "slices": "junction_xfade", "slide_left": "junction_xfade",
-    "slide_right": "junction_xfade", "wipe_left": "junction_wipe",
+    "slide_right": "junction_xfade", "film_strip": "junction_xfade",
+    "fade_black": "junction_xfade", "wipe_left": "junction_wipe",
     "wipe_right": "junction_wipe", "wipe_up": "junction_wipe",
     "wipe_down": "junction_wipe", "iris": "junction_iris",
     "columns": "junction_columns", "staircase": "junction_staircase",
@@ -60,6 +61,7 @@ JUNCTION_CARDS = {
     "radial_blur": "junction_zoom_blur", "datamosh": "junction_datamosh"}
 # style -> default window (seconds); the cards' params agree
 JUNCTION_DURATION = {"dissolve": 0.5, "slide_left": 0.8, "slide_right": 0.8,
+                     "film_strip": 1.0, "fade_black": 0.8,
                      "iris": 0.4, "columns": 0.5,
                      "staircase": 0.5, "box_steps": 0.8, "bands": 0.5,
                      "letter_window": 0.8, "matte_cut": 0.5,
@@ -687,7 +689,8 @@ _JUNCTION_DIALECT = {
     "crossfade": "dissolve", "cross_fade": "dissolve",
     "cross_dissolve": "dissolve", "crossdissolve": "dissolve",
     "fade": "dissolve", "mix": "dissolve",
-    "dip_black": "dissolve", "dip_to_black": "dissolve",
+    "dip_black": "fade_black", "dip_to_black": "fade_black",
+    "filmstrip": "film_strip",
     "dip_white": "hit_flash", "dip_to_white": "hit_flash",
     "flash": "hit_flash", "white_flash": "hit_flash",
     "push_left": "slide_left", "push_right": "slide_right",
@@ -822,6 +825,23 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
         if style == "datamosh":
             item["seed"] = 1
         items.append(item)
+    # What already sits on a cut stays. Rewriting it made a new version of an
+    # identical edit, which cancels the preview rendering it: on p5520's replay
+    # the same dissolves were reapplied while waiting and none ever finished.
+    shape = ("style", "duration_s", "origin", "count", "direction", "colour")
+
+    def _same(it):
+        return next((e["id"] for e in existing
+                     if abs(float(e.get("at") or -9) - it["at"]) <= 1.5 / fps
+                     and all(e.get(k) == it.get(k) for k in shape)), None)
+    kept = {_same(it) for it in items} - {None}
+    items = [it for it in items if _same(it) is None]
+    removed = [i for i in removed if i not in kept]
+    ops = [w.remove_fx(i) for i in removed]
+    if not items and not ops and not keep_ops:
+        return (f"NO CHANGE: {style} is already on those cuts. If a preview "
+                "is rendering, wait for it. Do NOT tell the user you changed "
+                "anything.")
     # flash safety on the cuts that flash (hit_flash, box_steps, and
     # matte_cut, whose substitute is a flash on the cut): each
     # item's own reading (JunctionFx.flash_times — box steps flash once per
@@ -974,7 +994,8 @@ TOOL_SPECS = {
         "A designed cut device at real cuts, duration-preserving (sound and "
         "timing untouched), also on shot changes inside one uploaded file "
         "(a slideshow): the edge frames hold through the window. dissolve "
-        "(cross-dissolve), slide_left/right (film strip), fadegrays, pixelize, "
+        "(cross-dissolve), film_strip (both pictures travel as one), "
+        "slide_left/right, fade_black (through black), fadegrays, pixelize, "
         "radial, slices, wipe_left/right/up/down, iris, columns, staircase, box_steps, bands, "
         "letter_window (origin = a motion item id), matte_cut, "
         "double_exposure, pixel_stretch, hit_flash, whip_up/down, zoom_blur, "
@@ -1025,7 +1046,8 @@ COMPACT = {
     "set_junction": (
         "Cut device at real cuts, including shot changes inside one uploaded "
         "file (at= or cuts='scene'|'every', start/end window), duration-"
-        "preserving: dissolve (cross-dissolve), slide_left/right (film strip), "
+        "preserving: dissolve (cross-dissolve), film_strip, slide_left/right, "
+        "fade_black, "
         "fadegrays, pixelize, radial, slices, wipe_*, "
         "iris, columns, staircase, box_steps, bands, letter_window, "
         "matte_cut, double_exposure, pixel_stretch, hit_flash, whip_up/down, "

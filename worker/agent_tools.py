@@ -11533,7 +11533,8 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "cut_silences — only right for a montage built from separate "
                 "clips. 'media' puts one only where B-roll, a still or a "
                 "card enters or leaves (camera changes stay hard cuts).")
-    if p in ("dissolve", "slide_left", "slide_right"):
+    if p in ("dissolve", "slide_left", "slide_right", "film_strip",
+             "fade_black"):
         # p5520: asked three times for cross-dissolves, the editor reached
         # for this tool, found dips only and told the customer it could not.
         return _dissolve_at_cuts(ctx, duration_s, sc, p, start, end)
@@ -11551,9 +11552,9 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 f"{', '.join(TRANSITION_STYLES)} — or 'none' to clear. "
                 + "; ".join(f"{k} = {v}" for k, v in TRANSITION_DESC.items())
                 + ". All are duration-preserving junction effects. For a "
-                "cross-dissolve or a film-strip slide use style='dissolve' or "
-                "'slide_left'/'slide_right' here: they work on the cuts baked "
-                "into an uploaded montage too.")
+                "mix per cut use set_junction: dissolve, film_strip, slide_left, "
+                "slide_right, fade_black, on the cuts baked into an uploaded "
+                "montage too.")
     try:
         d = round(min(max(float(duration_s if duration_s is not None
                                 else 0.3), TRANSITION_MIN_S),

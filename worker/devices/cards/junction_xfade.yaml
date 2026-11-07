@@ -4,7 +4,7 @@ family: "transition"
 verb: "set_junction"
 fx_type: "junction"
 stage: "junction"
-params: {style: ["fadegrays", "pixelize", "radial", "slices", "slide_left", "slide_right"], duration_s: [0.4, 0.5]}
+params: {style: ["fadegrays", "pixelize", "radial", "slices", "slide_left", "slide_right", "film_strip", "fade_black"], duration_s: [0.4, 0.5]}
 needs: {sidecars: [], lane_features: ["ffmpeg:xfade"], footage: "a real cut (a shot change or an insert)"}
 binds_to: ["cut", "section"]
 budget: {calm: {per_short: 2, min_gap_s: 4}, designed: {per_short: 4, min_gap_s: 2}, charged: {per_short: 10, min_gap_s: 1}}
