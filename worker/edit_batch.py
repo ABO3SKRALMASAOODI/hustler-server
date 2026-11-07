@@ -4,6 +4,7 @@ All authored times in a batch describe the resulting timeline. This explicit
 contract prevents an implicit remap from moving captions/music twice.
 """
 import copy
+import difflib
 import json
 import os
 import sys
@@ -654,6 +655,17 @@ def _fit_operation(op, before, notes):
     field = (layer if layer not in LAYERS else
              op.get("id") if layer == "effects" else None)
     if isinstance(field, str) and field in Effects.model_fields:
+        rows = ((before or {}).get("effects") or {}).get(field)
+        item_id = op.get("id") if layer not in LAYERS else None
+        if isinstance(rows, list) and (op.get("action") == "remove"
+                                       or isinstance(value, dict)):
+            # One item of a list inside effects, named by its id.
+            item_id = item_id or (value or {}).get("id")
+            kept = [row for row in rows if row.get("id") != item_id]
+            if op.get("action") != "remove":
+                old = next((r for r in rows if r.get("id") == item_id), {})
+                kept.append({**old, **value})
+            value = kept
         op.update(layer="effects", action="upsert", value={field: value})
         op.pop("id", None)
         return op
@@ -892,10 +904,16 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     # Pydantic's historical EDL schema tolerates extras. A field it would
     # have dropped silently is said in the result: the near spelling of a real
     # field is kept, anything else is named as left out.
-    left_out = []
+    left_out, renamed = [], []
     def check_fields(raw, clean, path):
         if isinstance(raw, dict) and isinstance(clean, dict):
             unknown = set(raw) - set(clean)
+            for key in sorted(unknown):
+                near = difflib.get_close_matches(
+                    key, [k for k in clean if k not in raw], n=1, cutoff=0.8)
+                if near:
+                    renamed.append((raw, key, near[0], path))
+                    unknown = unknown - {key}
             if unknown:
                 left_out.append(f"{path}: {', '.join(sorted(unknown))}."
                                 + _style_field_hint(path, unknown))
@@ -918,6 +936,12 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                 check_fields(value, checked, f"{path}[{index}]")
     for layer in {op["layer"] for op in operations}:
         check_fields(edl.get(layer), normalized.get(layer), layer)
+    if renamed:
+        for raw, key, field, path in renamed:
+            raw[field] = raw.pop(key)
+            left_out.append(f"{path}: read {key} as {field}.")
+        normalized = validate_edl(edl, duration).model_dump()
     if left_out and notes is not None:
-        notes.extend("Not a field, left out of " + row for row in left_out)
+        notes.extend("Not a field, left out of " + row
+                     if "read " not in row else row for row in left_out)
     return normalized

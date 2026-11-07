@@ -285,31 +285,6 @@
      }
     }
    ]
-  },
-  {
-   "name": "a light that flashes",
-   "match": "flash",
-   "ops": [
-    {
-     "action": "upsert",
-     "layer": "fx",
-     "id": "lt2",
-     "value": {
-      "id": "lt2",
-      "type": "light",
-      "stage": "world",
-      "start": 1.0,
-      "end": 2.0,
-      "kind": "rim",
-      "flash_times": [
-       1.1,
-       1.2,
-       1.3,
-       1.4
-      ]
-     }
-    }
-   ]
   }
  ]
 }

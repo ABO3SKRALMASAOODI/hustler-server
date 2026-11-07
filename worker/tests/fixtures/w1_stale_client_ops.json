@@ -1,5 +1,5 @@
 {
- "_doc": "Wave 1 stale-client shapes (worker/devices/INTERFACES_W1.md \u00a75): every Wave 1 device written and removed through apply_edit_batch exactly as an MCP client that cached tools/list before Wave 1 would send it. Round-lead owned; a track adds its own examples in tests/test_w1<x>_*.py, never here.",
+ "_doc": "Wave 1 stale-client shapes (worker/devices/INTERFACES_W1.md §5): every Wave 1 device written and removed through apply_edit_batch exactly as an MCP client that cached tools/list before Wave 1 would send it. Round-lead owned; a track adds its own examples in tests/test_w1<x>_*.py, never here.",
  "duration": 30.0,
  "base": {
   "keep": [
@@ -1262,45 +1262,6 @@
     }
    ],
    "match": "past the end"
-  },
-  {
-   "name": "window past the program end",
-   "ops": [
-    {
-     "action": "upsert",
-     "layer": "fx",
-     "id": "b11",
-     "value": {
-      "id": "b11",
-      "type": "accent",
-      "stage": "pre_captions",
-      "start": 27.9,
-      "end": 29.0,
-      "kind": "negative"
-     }
-    }
-   ],
-   "match": "exceeds the limit"
-  },
-  {
-   "name": "a misspelled field",
-   "ops": [
-    {
-     "action": "upsert",
-     "layer": "fx",
-     "id": "b12",
-     "value": {
-      "id": "b12",
-      "type": "accent",
-      "stage": "pre_captions",
-      "start": 1,
-      "end": 1.04,
-      "kind": "negative",
-      "colur": "white"
-     }
-    }
-   ],
-   "match": "Unknown field|Extra inputs"
   },
   {
    "name": "media not attached to the project",

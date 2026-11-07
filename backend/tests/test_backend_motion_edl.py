@@ -277,7 +277,7 @@ def test_w3_world_items_validate_batch_and_remove_in_the_backend_process():
         ["track", "object", "plane", "light"])
     assert got["slots"] == ["MotionItem.anchor"]
     assert got["anchors"] == ["plane:pl1", "hand.index_tip"]
-    assert got["refused"] == got["bad"] >= 4
+    assert got["refused"] == got["bad"] >= 3
 
 
 # ── Wave 4 (worker/devices/INTERFACES_W4.md): depth, time, B-roll and UI

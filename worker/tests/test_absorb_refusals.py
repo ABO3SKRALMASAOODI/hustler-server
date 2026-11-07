@@ -742,3 +742,22 @@ def test_batch_caption_mutes_are_held_to_the_programme():
                               "value": [[0.0, 40.0]]}], duration=30.21)
     assert out["caption_mutes"][0][1] == 30.21 or \
         out["caption_mutes"][0]["end"] == 30.21
+
+
+def test_batch_a_list_inside_effects_can_be_named_as_a_layer():
+    edl = fx_edl()
+    edl["effects"]["zooms"] = [{"id": "zm1", "start": 1.0, "end": 2.0,
+                                "strength": 1.2}]
+    out, _ = batch(edl, [{"action": "upsert", "layer": "zooms", "id": "zm1",
+                          "value": {"id": "zm1", "end": 3.0}}])
+    assert out["effects"]["zooms"][0]["end"] == 3.0
+    out, _ = batch(edl, [{"action": "remove", "layer": "zooms", "id": "zm1"}])
+    assert not (out["effects"] or {}).get("zooms")
+
+
+def test_batch_a_near_spelling_reaches_the_real_field():
+    edl = fx_edl()
+    out, notes = batch(edl, [{"action": "set", "layer": "texts", "value": [{
+        "id": "tx1", "text": "hi", "start": 0, "end": 2, "colr": "#FFFFFF"}]}])
+    assert out["texts"][0]["color"] == "#FFFFFF"
+    assert any("read colr as color" in n for n in notes)
