@@ -1020,3 +1020,10 @@ def test_a_batch_builds_on_this_requests_own_versions_only(written, works):
         ctx, 3, [{"action": "set", "layer": "effects", "value": {"fade_out_s": 1.0}}], "x")
     assert out.startswith("EDL") is works, out
     assert ("current EDL is v5" in out) is (not works)
+
+
+def test_a_slower_zoom_keeps_the_strength_it_asked_for(zoom_ctx):
+    out = agent_tools.add_zoom(zoom_ctx, start=0.0, end=4.6, mode="push_in",
+                               strength=0.03, cx=0.5, cy=0.5)
+    assert out.startswith("EDL"), out
+    assert zoom_ctx.edl["effects"]["zooms"][-1]["strength"] == 0.03

@@ -384,7 +384,7 @@ def test_zoom_on_an_archival_crop_is_capped_with_a_note():
     zoom = ctx.latest_edl()["json"]["effects"]["zooms"][-1]
     # already 4x: only the minimum move remains
     assert zoom["strength"] == agent_tools.ZOOM_STRENGTH_MIN
-    assert "NOTE: zoom strength capped 0.12 -> 0.05" in res
+    assert "NOTE: zoom strength capped 0.12 -> 0.02" in res
     assert "646x480" in res and "4.0x" in res
 
 

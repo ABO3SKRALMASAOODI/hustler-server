@@ -1156,7 +1156,9 @@ GRADE_PRESETS = ("vibrant", "warm", "cool", "bw", "vintage", "cinematic")
 # recording reads as a glitch, below 0.25 as a freeze.
 INSERT_RATE_MIN = 0.25
 INSERT_RATE_MAX = 4.0
-ZOOM_STRENGTH_MIN = 0.05
+# 0.05 was silently lifted from what was asked: p5520 asked for 3-6% and slower,
+# the editor passed 0.03 and got 5% every time, and spent 19 versions on it.
+ZOOM_STRENGTH_MIN = 0.02
 # Widened from 1.0 (round 35), 1.5 (round 75), 2.5 (round 76). The launch
 # video's chat bubbles sit ~0.01 of the frame apart, so excluding the
 # NEIGHBOURING message from a bubble close-up needs a ~0.19-tall viewport —
