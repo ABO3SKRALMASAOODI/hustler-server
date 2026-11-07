@@ -274,3 +274,57 @@ def test_a_failed_reread_leaves_the_protection(monkeypatch):
     ctx, _calls = _reread_ctx(monkeypatch, RuntimeError("provider down"))
     assert rc.reread_refused(ctx, {"grade"}, ["color grade"]) == set()
     assert "grade" in rc.protected_lanes(ctx)
+
+
+def test_the_edit_origin_is_what_the_chat_stored():
+    rows = [{"id": 1, "role": "assistant", "meta": {"kind": "index_ready"}},
+            {"id": 2, "role": "assistant", "meta": {"kind": "first_cut"}},
+            {"id": 3, "role": "user", "meta": {}},
+            {"id": 4, "role": "assistant", "meta": {}},
+            {"id": 5, "role": "user", "meta": {}}]
+    assert rc.edit_origin(rows, 3) == {
+        "made_by": "automatic_first_cut", "customer_requests_since": 0}
+    assert rc.edit_origin(rows, 5)["customer_requests_since"] == 1
+    assert rc.edit_origin(rows[2:], 5) is None
+    assert rc.edit_origin([{"id": 1, "role": "assistant", "meta": None}], 2) is None
+
+
+def test_the_brief_is_told_who_made_the_cut(monkeypatch):
+    ctx = context()
+    ctx.semantic_contract = None
+    ctx.request_contract_history = []
+    ctx.operator_instruction = None
+    ctx.request_preservation_baseline = None
+    ctx.request_edit_origin = {"made_by": "automatic_first_cut",
+                               "customer_requests_since": 0}
+    seen = {}
+
+    def call(_ctx, _name, _schema, system, evidence):
+        seen.update(system=system, evidence=evidence)
+        return {"mode": "edit", "output_count": 1, "timing_policy": "edit",
+                "music_requested": False, "changed_lanes": ["cuts", "frame_ratio"],
+                "requirements": [
+                    {"action": "preserve", "lanes": ["cuts", "frame_ratio"],
+                     "description": "Leave my video as uploaded", "source_ref": 0,
+                     "relative_to": "source_footage"},
+                    {"action": "change", "description": "New subtitles",
+                     "source_ref": 0}]}
+    monkeypatch.setattr(rc, "_call", call)
+    contract = rc.ensure(ctx)
+    assert seen["evidence"]["current_edit_origin"]["made_by"] == "automatic_first_cut"
+    assert "automatic first cut" in seen["system"]
+    assert not {"cuts", "frame_ratio", "timeline_timing"} & rc.protected_lanes(ctx)
+    assert contract["timing_policy"] == "edit"
+
+
+def test_the_reread_sees_the_way_back_to_the_upload(monkeypatch):
+    ctx, calls = _reread_ctx(monkeypatch, True)
+    ctx.duration = 265.8
+    ctx.request_edit_origin = {"made_by": "automatic_first_cut",
+                               "customer_requests_since": 0}
+    assert rc.reread_refused(ctx, {"cuts"}, ["picture cuts"], "keep_segments",
+                             {"keep": [[0, 265.8]]}) == {"cuts"}
+    change = json.loads(calls[0][1]["content"])["change"]
+    assert change["upload_seconds"] == 265.8
+    assert change["current_edit_origin"]["made_by"] == "automatic_first_cut"
+    assert change["current_seconds"] == 16.0 and "265.8" in change["after"]
