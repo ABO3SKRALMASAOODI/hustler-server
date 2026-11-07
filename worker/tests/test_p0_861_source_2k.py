@@ -100,6 +100,7 @@ class _ToolCtx:
 
     def write_edl(self, edl, desc):
         self.written = edl
+        self._edl = {"version": 12, "json": edl}
         return f"EDL v11 -> v12: {desc}"
 
 
@@ -144,3 +145,18 @@ def test_a_2k_final_is_written_at_2k(tmp_path):
     assert renderer.delivery_upscale({"keep": [[0, 1]]}, str(src),
                                      str(tmp_path)) is None
     assert not [p for p in os.listdir(tmp_path) if p.startswith("upscale_")]
+
+
+def test_a_2k_export_survives_validation_on_an_uncropped_edit():
+    # replay p0861: enhance_video(resolution="2k") on the full upload stored
+    # no frame at all, because a "source" frame was always dropped
+    ctx = _ToolCtx({"keep": [[0.0, 9535.04]]})
+    agent_tools.enhance_video(ctx, resolution="2k", sharpen=0.5)
+    first = ctx.written
+    stored = schemas.validate_edl(first, 9535.041)
+    stored = stored if isinstance(stored, dict) else stored.model_dump()
+    assert (stored.get("frame") or {}).get("resolution") == "2k"
+    plain = schemas.validate_edl({"keep": [[0.0, 10.0]],
+                                  "frame": {"ratio": "source"}}, 10.0)
+    plain = plain if isinstance(plain, dict) else plain.model_dump()
+    assert not plain.get("frame")

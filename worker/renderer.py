@@ -7608,6 +7608,10 @@ def render_edl(edl_dict, index, src_path, out_path, workdir, preview,
             0.0 if seek_main_source else float(info.get("format_start") or 0.0))
 
     frame = edl.get("frame") or None
+    if frame and (frame.get("ratio") or "source") == "source":
+        # a source frame holds only the export resolution (#861), which
+        # delivery_upscale applies after the render: no geometry here
+        frame = None
     W, H = frame_dims(info["width"], info["height"],
                       (frame or {}).get("ratio"), delivery=not preview)
     frame_mode = (frame or {}).get("mode", "crop") if frame else None

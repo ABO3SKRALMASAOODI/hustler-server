@@ -1150,7 +1150,7 @@ def _seed_frame(ctx):
     fitted). (version, note), or None when the cut already has a frame."""
     row = ctx.latest_edl()
     edl = dict(row.get("json") or {})
-    if edl.get("frame"):
+    if (edl.get("frame") or {}).get("ratio") not in (None, "source"):
         return None
     video = (ctx.index or {}).get("video") or {}
     try:

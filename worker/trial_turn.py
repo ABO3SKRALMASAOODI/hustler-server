@@ -489,7 +489,7 @@ def lift_screen(ctx, steps):
     import schemas
     from timeline import Timeline
     edl = ctx.latest_edl()["json"]
-    if not first_cut._screen_like(ctx.index) or edl.get("frame"):
+    if not first_cut._screen_like(ctx.index) or (edl.get("frame") or {}).get("ratio") not in (None, "source"):
         return False
     prog = float(schemas.program_duration(edl))
     zooms = (edl.get("effects") or {}).get("zooms") or []

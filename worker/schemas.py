@@ -3333,8 +3333,13 @@ def validate_edl(data, duration=None, *, render_fragment=False):
 
     # Frame: 'source' is the absence of a frame — normalize so old EDLs and
     # explicit-source EDLs compare identical.
+    # A source frame carrying only an export resolution stays (#861: the
+    # drop erased "2k" from every uncropped edit).
     if edl.frame is not None and edl.frame.ratio == "source":
-        edl.frame = None
+        if edl.frame.resolution:
+            edl.frame = Frame(resolution=edl.frame.resolution)
+        else:
+            edl.frame = None
 
     # Inserts: concrete durations, unique ids, and every splice point must
     # sit exactly on a keep boundary (the tools snap; this is the backstop).
