@@ -1,4 +1,5 @@
 """The brief protects what the customer protected, measured on the EDL."""
+import json
 from copy import deepcopy
 from types import SimpleNamespace as NS
 
@@ -230,3 +231,46 @@ def test_durable_checkpoint_keeps_the_brief():
     fresh.semantic_contract = None
     agent_loop._restore_preview_checkpoint(fresh, saved)
     assert fresh.semantic_contract == ctx.semantic_contract
+
+
+def _reread_ctx(monkeypatch, answer):
+    ctx = context()
+    ctx.llm_client, ctx.agent_model = object(), "claude-haiku-5-5"
+    ctx.semantic_contract = {
+        "mode": "edit", "timing_policy": "edit", "changed_lanes": ["effects"],
+        "request_digest": rc.digest(ctx), "schema_version": 1, "requirements": [
+            {"id": "r1", "action": "preserve", "lanes": ["grade"], "inherited": False,
+             "quote": "", "description": "Keep the natural colours."}]}
+    calls = []
+
+    def create(client, model, messages, **_k):
+        calls.append(messages)
+        if isinstance(answer, Exception):
+            raise answer
+        fn = NS(name="change_asked", arguments=json.dumps({"asked": answer}))
+        return NS(choices=[NS(message=NS(tool_calls=[NS(function=fn)]))], usage=None)
+    monkeypatch.setattr(rc.llm, "create_with_dialect", create)
+    monkeypatch.setattr(rc.llm, "record", lambda *a, **k: None)
+    return ctx, calls
+
+
+def test_a_refused_lane_the_request_asks_for_opens_after_a_model_reads_it(monkeypatch):
+    ctx, calls = _reread_ctx(monkeypatch, True)
+    assert "grade" in rc.protected_lanes(ctx)
+    opened = rc.reread_refused(ctx, {"grade"}, ["color grade"], "set_grade_custom",
+                               {"highlights": -0.08})
+    assert opened == {"grade"} and "grade" not in rc.protected_lanes(ctx)
+    assert "set_grade_custom" in calls[0][1]["content"]
+
+
+def test_a_lane_the_request_protects_stays_and_is_read_once(monkeypatch):
+    ctx, calls = _reread_ctx(monkeypatch, False)
+    for _ in range(2):
+        assert rc.reread_refused(ctx, {"grade"}, ["color grade"]) == set()
+    assert len(calls) == 1 and "grade" in rc.protected_lanes(ctx)
+
+
+def test_a_failed_reread_leaves_the_protection(monkeypatch):
+    ctx, _calls = _reread_ctx(monkeypatch, RuntimeError("provider down"))
+    assert rc.reread_refused(ctx, {"grade"}, ["color grade"]) == set()
+    assert "grade" in rc.protected_lanes(ctx)

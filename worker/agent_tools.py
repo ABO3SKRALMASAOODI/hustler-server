@@ -744,14 +744,23 @@ class ToolContext:
                 return (f"REJECTED (EDL v{prev['version']} unchanged): the request "
                         "excludes these output channels: " + ", ".join(forbidden))
         preservation_baseline = getattr(self, "request_preservation_baseline", None)
-        if protected is not None and preservation_baseline:
-            violations = scope_guard.recovery_update_violations(
-                prev["json"], normalized, preservation_baseline, protected,
-                source_shape=_source_shape(self))
-        else:
-            violations = scope_guard.preservation_violations(
+
+        def _guarded():
+            if protected is not None and preservation_baseline:
+                return scope_guard.recovery_update_violations(
+                    prev["json"], normalized, preservation_baseline, protected,
+                    source_shape=_source_shape(self))
+            return scope_guard.preservation_violations(
                 prev["json"], normalized, self.user_message,
                 source_shape=_source_shape(self), protected=protected)
+        violations = _guarded()
+        if violations and protected is not None \
+                and request_contract.reread_refused(
+                    self, scope_guard.lanes_of(violations), violations,
+                    getattr(self, "_executing_tool", None),
+                    getattr(self, "_executing_args", None)):
+            protected = request_contract.protected_lanes(self)
+            violations = _guarded()
         if violations:
             request_contract.note_refused(self, scope_guard.lanes_of(violations))
             return scope_guard.rejection_message(prev["version"], violations)
@@ -34903,6 +34912,7 @@ def _execute(ctx, name, args):
     fn = entry[0]
     previous_executing_tool = getattr(ctx, "_executing_tool", None)
     ctx._executing_tool = name
+    ctx._executing_args = args
     before_version = None
     look_before = None
     try:
