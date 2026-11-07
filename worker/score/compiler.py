@@ -1870,6 +1870,7 @@ def mark_rects(ctx, a, z):
 
 
 THUMB_W, THUMB_H, THUMB_FPS = 72, 128, 3
+STILL_EXT = (".jpg", ".jpeg", ".png", ".webp", ".bmp")
 FFMPEG = os.environ.get("FFMPEG_BIN", "ffmpeg")
 
 
@@ -1888,13 +1889,17 @@ def thumbs(ctx, aid):
     d = os.path.join(ctx.work, "thumbs")
     p = os.path.join(d, aid.replace(":", "_") + ".npy")
     import numpy as np
+    # A found clip reaches the session as its still (supply: bin/N.jpg, the clip itself stays in storage).
+    # The fps filter makes no frame from a still, so every found clip read as nothing: no ink flip, no
+    # edge and no light match over it (p5374: cream captions on a white clock face and on bokeh).
+    moving = a.get("kind") == "video" and os.path.splitext(src)[1].lower() not in STILL_EXT
     try:
         if not os.path.exists(p) or os.path.getmtime(p) < os.path.getmtime(src):
             os.makedirs(d, exist_ok=True)
-            vf = f"scale={THUMB_W}:{THUMB_H}:flags=area,format=gray" if a.get("kind") != "video" else f"fps={THUMB_FPS},scale={THUMB_W}:{THUMB_H}:flags=area,format=gray"
+            vf = f"fps={THUMB_FPS},scale={THUMB_W}:{THUMB_H}:flags=area,format=gray" if moving else f"scale={THUMB_W}:{THUMB_H}:flags=area,format=gray"
             r = subprocess.run([FFMPEG, "-nostdin", "-v", "error", "-threads", "1", "-i", src, "-vf", vf, "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, timeout=120)
             arr = np.frombuffer(r.stdout, np.uint8).reshape(-1, THUMB_H, THUMB_W)
-            np.save(p, arr if a.get("kind") == "video" else arr[:1])
+            np.save(p, arr if moving else arr[:1])
         arr = np.load(p).astype(np.float32) / 255
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
@@ -1968,6 +1973,17 @@ def ink_over(ctx, s, f, rect):
 # AQUI NA, DIA 20 and COM PROMOCOES on white tiles and a white page, low_quality_text). Such a word is
 # marked `edge`, and the lowering gives it the dark edge today's renderer can draw.
 EDGE_BELOW = 0.34         # the bar ink_over itself reads by
+
+
+def clip_by_still(ctx, s):
+    """A found clip whose frames this session cannot read, only its still (production fetches clips on
+    the egress lane and orchestration holds no media bytes). Its moving picture can be far from the
+    still (p5374: a dark still, then a white bokeh under cream captions), so a word over it always
+    carries the edge: ink chosen from the still, readable whichever way the clip turns."""
+    if not s or not str(s.get("pic") or "").startswith("bin:"):
+        return False
+    a = ctx.assets.get(s["pic"]) or {}
+    return a.get("kind") == "video" and os.path.splitext(str(a.get("path") or ""))[1].lower() in STILL_EXT
 
 
 def ink_margin(ctx, s, f, rect, ink):
@@ -2346,7 +2362,7 @@ def place_word(ctx, iid, t, v, x, y, a, end, ink, role, chunk=None, region=None,
             m = 1.0 - luma(pl["c0"]) if luma(ink2) > 0.5 else luma(pl["c0"]) - 0.07
         else:
             m = ink_margin(ctx, s, (f + q) // 2, rect, ink2)
-        edge = m is not None and m < EDGE_BELOW
+        edge = (m is not None and m < EDGE_BELOW) or clip_by_still(ctx, s)
         if pieces and pieces[-1][2] == ink2 and pieces[-1][3] == edge:
             pieces[-1][1] = q
         else:

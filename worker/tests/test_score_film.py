@@ -485,3 +485,48 @@ def test_every_offered_type_gesture_in_persian_lowers_to_an_edl_the_write_accept
         comp = compiler.compile_score("\n".join(json.dumps(x) for x in lines) + "\n", index=idx)
         edl, _locals, _rep = lower.lower(comp.l1, str(tmp_path))
         schemas.validate_edl(edl, 30.0)
+
+
+def _bin_work(tmp_path, kind, rgb):
+    from PIL import Image
+    os.makedirs(tmp_path / "bin", exist_ok=True)
+    Image.new("RGB", (630, 1200), rgb).save(tmp_path / "bin" / "0.jpg")
+    with open(tmp_path / "bin.json", "w") as f:
+        json.dump({"items": [{"id": 0, "kind": kind, "path": "bin/0.jpg", "w": 630, "h": 1200}]}, f)
+    with open(tmp_path / "index.json", "w") as f:
+        json.dump(talk_index(10.0), f)
+    return str(tmp_path)
+
+
+def _caps_over_bin(work):
+    beats = [{"k": "b", "id": "b01", "w": "0-20", "job": "j", "cut": "pulse 1", "pic": "bin:0", "type": [{"cap": "cap:2", "ink": "#EFE6D6"}]}]
+    comp = compiler.compile_score("\n".join(json.dumps(x) for x in [FILM] + beats) + "\n", work_dir=work, perception={})
+    return comp, [i for i in comp.l1["items"] if i["k"] == "word" and i.get("role") == "cap"]
+
+
+def _over_bin(comp, caps):
+    shots = [i for i in comp.l1["items"] if i["k"] == "shot" and i.get("pic") == "bin:0"]
+    return [c for c in caps if any(s["f"][0] <= (c["f"][0] + c["f"][1]) // 2 < s["f"][1] for s in shots)]
+
+
+def test_a_found_clip_read_from_its_still_is_measured_and_its_words_carry_the_edge(tmp_path):
+    """p5374 (Gauntlet dirf-dbg1): a found clip reaches the session as its still, and the fps filter made
+    no frame of it, so no found clip was ever measured: cream captions sat bare on a white clock face and
+    on bokeh. The still is read now, and since the clip's frames can differ from it, its words carry the edge."""
+    import types
+    work = _bin_work(tmp_path, "video", (12, 12, 14))            # a dark still: the clip may still turn white
+    ctx = types.SimpleNamespace(thumb_cache={}, work=work, assets=compiler.load_bin(work))
+    arr = compiler.thumbs(ctx, "0")
+    assert arr is not None and len(arr) == 1 and float(arr.mean()) < 0.1
+    comp, caps = _caps_over_bin(work)
+    over = _over_bin(comp, caps)
+    assert len(over) >= 10 and all(i.get("edge") for i in over)
+    edl, _l, rep = lower.lower(comp.l1, work)
+    assert rep.get("captions_edged") and any(c["style"].get("outline_color") == "#111111" for c in edl["captions"])
+
+
+def test_a_found_still_image_keeps_its_measured_edge(tmp_path):
+    """A found image is what it shows: light ink on a dark picture reads, and gets no edge."""
+    comp, caps = _caps_over_bin(_bin_work(tmp_path, "image", (12, 12, 14)))
+    over = _over_bin(comp, caps)
+    assert len(over) >= 10 and not any(i.get("edge") for i in over)
