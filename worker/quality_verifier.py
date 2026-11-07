@@ -1383,7 +1383,7 @@ def build_verification_record(project_id, version, manifest, edl, index,
             {"preview": {key: preview.get(key) for key in
                          ("edl_version", "scope", "storage_key", "asset_id")}},
             "render one complete preview and review it"))
-    if edl.get("captions") and not (
+    if edl.get("captions") and not _captions_all_muted(edl, preview) and not (
             preview.get("caption_pages") or preview.get("caption_sheet_key")):
         findings.append(_finding(
             "caption_render_evidence_missing", "captions",
@@ -1446,6 +1446,39 @@ def build_verification_record(project_id, version, manifest, edl, index,
     }
 
 
+def _captions_all_muted(edl, preview):
+    """Captions muted for the whole programme render no page, so a missing
+    caption page is no finding (#390): it could never clear."""
+    spans = []
+    for span in edl.get("caption_mutes") or []:
+        try:
+            start, end = (span.get("start"), span.get("end"))                 if isinstance(span, dict) else (span[0], span[1])
+            spans.append((float(start), float(end)))
+        except (IndexError, KeyError, TypeError, ValueError):
+            continue
+    try:
+        total = float(preview.get("duration_s") or preview.get("duration")
+                      or program_duration(edl))
+    except (KeyError, TypeError, ValueError):
+        return False
+    reach = 0.0
+    for start, end in sorted(spans):
+        if start > reach + 0.05:
+            return False
+        reach = max(reach, end)
+    return bool(spans) and reach >= total - 0.05
+
+
+def _quoted_finding(row, requested):
+    """A finding named by the sentence we printed for it, not by its id: the
+    model read the words off the record, so the words identify it."""
+    said = " ".join(str(row.get(k) or "") for k in ("message", "title",
+                                                     "detail")).strip().lower()
+    return bool(said) and any(
+        len(value) >= 12 and (value.lower() in said or said in value.lower())
+        for value in requested)
+
+
 def justify_findings(record, finding_ids, justification, evidence_ids=None):
     """Return a new record with direct-evidence false positives resolved.
 
@@ -1468,7 +1501,8 @@ def justify_findings(record, finding_ids, justification, evidence_ids=None):
     unresolved = list(updated.get("unresolved_findings") or [])
     matches = [row for row in unresolved
                if str(row.get("finding_id")) in requested
-               or str(row.get("code")) in requested]
+               or str(row.get("code")) in requested
+               or _quoted_finding(row, requested)]
     if not matches:
         already = updated.get("justifications") or []
         if all(any((value == str(row.get("finding_id")) or value == str(row.get("code")))

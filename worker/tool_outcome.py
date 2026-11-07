@@ -62,6 +62,14 @@ class ToolOutcome:
         return text
 
 
+def _our_own_words(line):
+    """A result line without what it quotes back: a read of frames repeats
+    the model's own question, and a question holding the word 'failed' filed
+    a good read as a failure (7 rows on 1 Nov)."""
+    return re.sub(r'"[^"]*"|“[^”]*”', " ", line.split(" — ")[0]
+                  if line.startswith(("FRAMES", "PREVIEW", "LOOK")) else line)
+
+
 def from_legacy(result, *, state_changed=False, idempotent=False,
                 affected_ranges=None):
     text = str(result if result is not None else "")
@@ -93,7 +101,8 @@ def from_legacy(result, *, state_changed=False, idempotent=False,
         pass
     elif upper.startswith(("TRANSIENT_FAILURE", "TRANSIENT FAILURE",
                            "TOOL ", "FAILED", "COULD NOT")) or re.search(
-            r"\b(?:FAILED|COULD NOT|UNAVAILABLE|ERRORED)\b", first):
+            r"\b(?:FAILED|COULD NOT|UNAVAILABLE|ERRORED)\b",
+            _our_own_words(first)):
         status = "transient_failure"
         retryable = True
     if status == "prerequisite":
@@ -105,9 +114,15 @@ def from_legacy(result, *, state_changed=False, idempotent=False,
             if name in low:
                 prerequisite = name
                 break
+    evidence = {}
+    if status == "success" and not state_changed \
+            and upper.startswith("NO CHANGE"):
+        # Nothing was written. Still a success for the model (it asked for a
+        # state that already holds), but counted as what it is.
+        evidence["no_change"] = True
     return ToolOutcome(
         status=status, message=text, state_changed=bool(state_changed),
         retryable=retryable, idempotent=bool(idempotent),
         corrected_argument_guidance=guidance,
         prerequisite_tool=prerequisite, safe_fallback=fallback,
-        affected_ranges=list(affected_ranges or []))
+        evidence=evidence, affected_ranges=list(affected_ranges or []))

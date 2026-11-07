@@ -66,6 +66,64 @@ _EDL_SECTION_ALIASES = {
 _EDL_OVERVIEW_ALIASES = {"program", "program_map", "overview", "summary", "video"}
 _EDL_ALL_ALIASES = {"all", "everything", "full"}
 
+PAGE_CHARS = 21000
+
+
+def _dig(edl, name):
+    node = edl
+    for part in str(name).split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    return node
+
+
+def _page_that_fits(payload, wanted, version):
+    """The page answers. A large section comes back as its first rows and how
+    to read the next ones; the old answer was an error, and p5520 spent five
+    model calls in a row halving a limit to reach this."""
+    rendered = json.dumps(payload, indent=1)
+    if len(rendered) <= PAGE_CHARS:
+        return rendered
+    payload.pop("overview", None)
+    sections = payload.get("sections") or {}
+    pages = payload.setdefault("pagination", {})
+    lists = sorted((name for name, value in sections.items()
+                    if isinstance(value, list) and len(value) > 1),
+                   key=lambda name: -len(json.dumps(sections[name])))
+    for name in lists:
+        rows, page = sections[name], pages.get(name) or {}
+        keep = len(rows)
+        while keep > 1 and len(json.dumps(payload, indent=1)) > PAGE_CHARS:
+            keep = max(1, keep * 2 // 3)
+            sections[name] = rows[:keep]
+        offset = int(page.get("offset") or 0)
+        page.update(returned=keep, next_offset=(
+            offset + keep if offset + keep < int(page.get("total") or 0)
+            else page.get("next_offset")))
+        pages[name] = page
+    # An object (effects holds every zoom and region): its largest lists page
+    # the same way, under a dotted section name.
+    for name, value in list(sections.items()):
+        if not isinstance(value, dict):
+            continue
+        value = sections[name] = dict(value)
+        fields = sorted((key for key, item in value.items()
+                         if isinstance(item, list) and len(item) > 1),
+                        key=lambda key: -len(json.dumps(value[key])))
+        for key in fields:
+            if len(json.dumps(payload, indent=1)) <= PAGE_CHARS:
+                break
+            rows, keep = value[key], len(value[key])
+            while keep > 1 and len(json.dumps(payload, indent=1)) > PAGE_CHARS:
+                keep = max(1, keep * 2 // 3)
+                value[key] = rows[:keep]
+            pages[f"{name}.{key}"] = {"offset": 0, "returned": keep,
+                                      "total": len(rows), "next_offset": keep}
+    payload["notice"] = (
+        "A page of what you asked: get_edl(sections=['<section or "
+        "effects.zooms>'], offset=<next_offset>) reads the next rows.")
+    return json.dumps(payload, indent=1)
+
+
 def read_edl(row, duration, program_map, sections=None, compact=False, offset=0, limit=100):
     """Current EDL without ever returning amputated/invalid JSON.
 
@@ -107,6 +165,8 @@ def read_edl(row, duration, program_map, sections=None, compact=False, offset=0,
         elif low in _EDL_SECTION_ALIASES:
             names = tuple(n for n in _EDL_SECTION_ALIASES[low] if n in edl)
             resolved[label] = list(names)
+        elif _dig(edl, label) is not None:
+            names = (label,)           # effects.zooms: a page of one field
         elif low in _EDL_OVERVIEW_ALIASES:
             overview = True
             resolved[label] = ["compact_overview"]
@@ -132,7 +192,7 @@ def read_edl(row, duration, program_map, sections=None, compact=False, offset=0,
         selected, pages = {}, {}
         for raw_name in wanted:
             name = str(raw_name)
-            value = edl.get(name)
+            value = _dig(edl, name)
             if isinstance(value, list):
                 selected[name] = value[off:off + lim]
                 pages[name] = {"offset": off,
@@ -155,16 +215,7 @@ def read_edl(row, duration, program_map, sections=None, compact=False, offset=0,
                 "These names are not EDL sections. Use overview.available_sections "
                 "for exact fields; feature settings live inside effects, texts or "
                 "captions. Read the creative plan with get_edit_plan. No state changed.")
-        rendered = json.dumps(payload, indent=1)
-        if len(rendered) > 21000:
-            return json.dumps({
-                "version": row["version"],
-                "error": ("Requested page is too large for a reliable tool "
-                          "response; request fewer sections or a smaller limit."),
-                "requested_sections": wanted,
-                "suggested_limit": max(1, lim // 2),
-            }, indent=1)
-        return rendered
+        return _page_that_fits(payload, wanted, row["version"])
     rendered = json.dumps(edl, indent=1)
     if len(rendered) <= 19000:
         header = {"version": row["version"],

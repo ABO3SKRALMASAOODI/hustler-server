@@ -2970,7 +2970,14 @@ def add_motion_graphic(ctx, template, start, end=None, params=None, html=None,
         if not _ID_RE.match(str(id)):
             return "REJECTED: id must be 1-40 letters, digits, '_' or '-'."
         if any(m.get("id") == id for m in items):
-            return f"REJECTED: a motion graphic '{id}' already exists — use set_motion_graphic to change it."
+            # The same id again is a change to that graphic: 56 calls were
+            # told to say it with the other verb.
+            at.call_note(ctx, f"{id} already placed: changed in place")
+            return set_motion_graphic(
+                ctx, id, start=start, end=end, params=params, html=html,
+                layer=layer, box=box, mute_captions=mute_captions, sfx=sfx,
+                template=template, purpose=purpose,
+                allow_face_overlap=allow_face_overlap)
         mid = str(id)
     else:
         mid = at._next_item_id(items, "mg")
@@ -3571,7 +3578,8 @@ TOOL_SPECS = {
         "each template's purpose, params and built-in sound cues. Call once before designing "
         "motion beats.",
         {"category": {"type": "string", "description": "Optional filter: type, data, callout, social, "
-                      "layout, transition, texture, cta, caption."}}),
+                      "layout, transition, texture, cta, caption."},
+         "template": {"type": "string", "description": "One template's name: reads only that template."}}),
     "add_motion_graphic": (
         add_motion_graphic,
         "Place a browser-rendered, After-Effects-grade motion graphic on the PROGRAM clock: "

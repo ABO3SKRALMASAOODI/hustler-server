@@ -95,6 +95,8 @@ import ytaccess
 import visual
 import visual_index
 import quality_verifier
+import question_need
+import tool_dialect
 import tool_outcome as tool_outcome_mod
 import tool_retry
 import webrecord
@@ -930,21 +932,21 @@ def _motion_motif_value(ctx, value, *, allow_clear=False):
     motif = str(value).strip().lower()
     if allow_clear and motif in {"", "none", "off", "clear"}:
         return None, None
-    if motif == "hold":
-        return None, ("REJECTED: 'hold' is a deliberately still sequence "
-                      "beat, not a motif that can be attached to an animated "
-                      "EDL event.")
-    if not _MOTION_MOTIF_ID.fullmatch(motif):
-        return None, ("REJECTED: motion_motif must be a short lowercase "
-                      "identifier beginning with a letter, such as "
-                      "'proof_push'.")
+    # A motif records why a move exists; it renders nothing. A bad one is
+    # left off the item and said, and the edit it was attached to goes on.
+    if motif in {"", "none", "off", "clear", "hold"} \
+            or not _MOTION_MOTIF_ID.fullmatch(motif):
+        if motif:
+            call_note(ctx, f"motion_motif {str(value)[:40]!r} left off: a "
+                           "motif is a short lowercase identifier")
+        return None, None
     plan = director.normalize_blueprint(getattr(ctx, "edit_plan", None)) or {}
     language = plan.get("motion_language") or {}
     declared = [row["id"] for row in language.get("motifs") or []]
     if declared and motif not in declared:
-        return None, (f"REJECTED: motion_motif {motif!r} is not declared by "
-                      "the active motion language. Use one of: "
-                      + ", ".join(declared) + ".")
+        call_note(ctx, f"motion_motif {motif!r} left off: the motion language "
+                       "declares " + ", ".join(declared))
+        return None, None
     return motif, None
 
 
@@ -1948,9 +1950,11 @@ def look_at(ctx, times=None, question="", start=None, end=None,
     # CURRENT immutable EDL version and inspects those real pixels instead,
     # including captions, overlays, grades and designed text.
     if rendered and overlay:
-        return ("REJECTED: overlay reads the source moment behind each frame "
-                "— use it with times=[...] or output_times=[...], not "
-                "rendered=true.")
+        # #207: an overlay annotates the source moment, and a render already
+        # shows the finished picture. The frames are what was asked for.
+        call_note(ctx, f"overlay {overlay} not drawn: it reads source frames, "
+                       "and these are rendered frames")
+        overlay = None
     if rendered:
         row = ctx.latest_edl()
         asset = ctx.db.run(dbx.find_render_asset, ctx.project_id, "preview",
@@ -1972,7 +1976,8 @@ def look_at(ctx, times=None, question="", start=None, end=None,
             start=0 if start is None else start, end=end,
             native_resolution=native_resolution)
     if native_resolution:
-        return "REJECTED: native_resolution requires rendered=true; use look_at_asset for original media."
+        call_note(ctx, "source frames at working size: native_resolution "
+                       "reads rendered frames (rendered=true)")
 
     # An empty array is "not asked", not a request: the model fills every
     # schema field, and `times=[2, 6], output_times=[]` burned nine straight
@@ -5610,10 +5615,10 @@ def add_captions(ctx, mode=None, items=None, style=None,
             except (TypeError, ValueError):
                 return "REJECTED: min_words_per_caption must be an integer."
             if not premium or caplib._preset_of(caplib._norm_style(parsed_style))["mode"] != "static":
-                return "REJECTED: a phrase minimum requires a static phrase preset such as clean."
-            if not 1 <= minimum <= (mw or 16):
-                return "REJECTED: minimum must be between 1 and max_words_per_caption."
-            cfg["min_words_per_caption"] = minimum
+                call_note(ctx, "min_words_per_caption left out: only a static "
+                               "phrase preset such as clean keeps a minimum")
+            else:
+                cfg["min_words_per_caption"] = min(max(minimum, 1), mw or 16)
         # Re-running add_captions to change the visual treatment must not
         # silently erase spelling corrections already approved by the user.
         # Production project 1056 lost "cooked" -> "got" this way even
@@ -11013,9 +11018,12 @@ def add_zoom(ctx, start, end, strength=None, mode=None, cx=None, cy=None,
                     "output frame ((0,0) = top-left, (0.5,0.5) = center). "
                     "Use look_at to find the subject first.")
     if (cx is None) != (cy is None):
-        return ("REJECTED: a zoom target needs BOTH cx and cy. Inspect the "
-                "exact frame with look_at and provide the measured point, or "
-                "pass rect=[x0,y0,x1,y1] to frame a measured region.")
+        # One axis named: the other is the frame's centre, which is what a
+        # zoom with neither would hold. 4 of p5520's calls stopped here.
+        absent = "cx" if cx is None else "cy"
+        tgt[absent] = 0.5
+        cx, cy = tgt["cx"], tgt["cy"]
+        call_note(ctx, f"{absent} set to 0.5, the frame's centre")
     # rect (round 72): FRAME A REGION. cx/cy pin a POINT — the renderer keeps
     # the aimed point at ITS OWN screen position while everything magnifies
     # around it, which is right for emphasis on a well-composed subject and
@@ -13160,6 +13168,8 @@ def insert_media(ctx, asset_key, at_output_s, duration_s=None,
                 "FINAL edited video, in seconds.")
     if motion is not None:
         motion = str(motion).strip().lower() or None
+        if motion in tool_dialect.NONE_WORDS:
+            motion = None
     if motion:
         if motion not in INSERT_MOTIONS:
             return (f"REJECTED: motion must be one of "
@@ -14569,16 +14579,18 @@ def set_overlay_motion(ctx, id, motion, motion_motif=None):
                + f" — overlay {id} has fit={hit.get('fit')}, which always "
                  f"fills {fills}. Use a PIP overlay for position/scale motion."
                + still)
-    if ignored and not set(motion) - ignored:
-        return (f"REJECTED: overlay {id} has fit={hit.get('fit')}; such "
-                f"overlays always fill {fills} and ignore "
-                + ", ".join(sorted(ignored))
-                + ". Animate opacity/rotation, or use a PIP overlay for "
-                  "position and scale motion." + still)
-    # Apply the properties a cover CAN render in this same call and say
-    # exactly what was dropped, instead of rejecting the whole move.
-    motion = {k: v for k, v in motion.items() if k not in ignored}
     before = dict(hit)
+    if ignored:
+        # Asking a filling overlay to move means it should stop filling: it
+        # becomes a placed overlay that starts where it was, full width and
+        # centred, and takes the move. The customer's filmstrip (p5520) was
+        # two overlays sliding across the frame, refused twice.
+        hit["fit"] = None
+        hit["x"], hit["y"] = 0.5, 0.5
+        hit["scale"] = 1.0
+        dropped = (f"\nOverlay {id} no longer fills {fills}: it is placed at "
+                   "full width, centred, and moves as asked."
+                   + (still if "scale" in ignored else ""))
     for name in _OVERLAY_MOTION_FIELDS:
         if name not in motion:
             continue
@@ -17425,6 +17437,8 @@ def add_color_screen(ctx, at_output_s, duration_s=2.0, color="#000000",
         return "REJECTED: duration_s must be a number of seconds."
     if motion is not None:
         motion = str(motion).strip().lower() or None
+        if motion in tool_dialect.NONE_WORDS:
+            motion = None
         if motion and motion not in INSERT_MOTIONS:
             return (f"REJECTED: motion must be one of "
                     f"{', '.join(INSERT_MOTIONS)}.")
@@ -19665,8 +19679,6 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
     to the footage. One operation: builds the blank card, splices it into the
     program, and centres the text on it."""
     t = (text or "").strip()
-    if not t:
-        return "REJECTED: text is empty — a title card needs its line."
     tpl = (template or "title").strip().lower()
     if tpl not in TEXT_TEMPLATES:
         return (f"REJECTED: template must be one of "
@@ -19692,6 +19704,10 @@ def add_title_card(ctx, text, at_output_s, duration_s=2.2, template="title",
     placed = insert_media(ctx, key, at, duration_s=dur)
     if not placed.startswith("EDL v"):
         return placed                      # REJECTED / failure, verbatim
+    if not t:
+        # A blank card (a held black between two parts) needs no words.
+        call_note(ctx, "no text given: a blank card")
+        return placed
 
     edl = dict(ctx.latest_edl()["json"])
     inserts = [dict(i) for i in (edl.get("inserts") or [])]
@@ -20635,6 +20651,8 @@ def bind_motion_motif(ctx, target_type, motion_motif=None, id=None):
     }
     parent_name, collection, event_kinds = paths[kind]
     parent = edl if parent_name is None else edl.setdefault(parent_name, {})
+    if parent is None:
+        parent = edl[parent_name] = {}
     items = parent.get(collection) or []
     hit = next((row for row in items
                 if isinstance(row, dict) and str(row.get("id")) == str(id)),
@@ -23926,7 +23944,12 @@ def wait_for_job(ctx, job_id):
         return "UNSAFE: the current project owner could not be verified."
     if job_id == ctx.job.get('id'):
         return "CORRECTION_NEEDED: this is the current editing job; wait only for its background work."
-    deadline = time.monotonic() + 45.0
+    # The wait is ours and free; each return to the model is a full prompt.
+    # 2661 made 33 of those across a 1,017 s render. An MCP caller's container
+    # keeps its short park.
+    park_s = _mcp_render_park_s(ctx)
+    deadline = time.monotonic() + (
+        config.PREVIEW_WAIT_TIMEOUT_S if park_s is None else park_s)
     while True:
         if ctx.job.get('total_claims') is not None and not ctx.db.run(
                 dbx.lease_is_current, ctx.job['id'], ctx.job['total_claims']):
@@ -26146,8 +26169,17 @@ def _question_can_wait(ctx, question):
             or getattr(ctx, "_question_held", False)
             or music_gate.offered_slugs(question)):
         return False
+    # A question only the customer can answer goes to them the first time.
+    # What was already asked once this turn is never held again.
     ctx._question_held = True
-    return True
+    return not _question_needs_customer(ctx, question)
+
+
+def _question_needs_customer(ctx, question):
+    lane = (getattr(ctx, "agent_lanes", None) or [{}])[0]
+    return question_need.needed(
+        lane.get("client"), lane.get("model"),
+        quality_verifier.request_text_for(ctx), question)
 
 
 def ask_user(ctx, question):
@@ -26158,14 +26190,17 @@ def ask_user(ctx, question):
     if repeat_offer:
         return repeat_offer
     import request_contract
+    held_before = bool(getattr(ctx, "_question_held", False))
     held = _question_can_wait(ctx, q)
     # A refused write can come after the first hold was spent, and the refusal
     # itself says to ask. A question about a lane that just opened is the
-    # "approve what you already asked for" wall, so it goes back too.
+    # "approve what you already asked for" wall, so it goes back too, once:
+    # the lane is open either way, and no question is held twice.
     released = ([] if getattr(ctx, "versions_written", None)
                 or music_gate.offered_slugs(q)
                 else request_contract.release_inherited(ctx))
-    if held or released:
+    if held or (released and not held_before):
+        ctx._question_held = True
         return ("CORRECTION_NEEDED: not asked yet. Nothing has changed in this "
                 "turn, and the customer is waiting for an edit, not a "
                 "question. Do what the request clearly asks now: choose any "
@@ -26438,10 +26473,12 @@ def load_tools(ctx, names=None, domains=None):
                 requested.append(name)
         else:
             bad.append(name or "(empty)")
-    if bad:
+    if bad and not requested and not names:
         return ("CORRECTION NEEDED: unknown tool domain(s): " + ", ".join(bad)
                 + ". Available: " + ", ".join(sorted(TOOL_DOMAIN_NAMES))
                 + ".")
+    if bad:
+        call_note(ctx, "not loaded, no such domain: " + ", ".join(bad))
     exact, bad_names = [], []
     for raw in names:
         tool = str(raw or "").strip()
@@ -26450,10 +26487,15 @@ def load_tools(ctx, names=None, domains=None):
                 exact.append(tool)
         else:
             bad_names.append(tool or "(empty)")
-    if bad_names:
+    if bad_names and not exact and not requested:
+        near = [tool_dialect.closest(n, TOOLS) for n in bad_names]
         return ("CORRECTION NEEDED: unknown or unavailable tool name(s): "
                 + ", ".join(bad_names)
-                + ". Use the capability directory's exact names.")
+                + ". Use the capability directory's exact names."
+                + (" Closest: " + ", ".join(n for n in near if n) + "."
+                   if any(near) else ""))
+    if bad_names:
+        call_note(ctx, "not loaded, no such tool: " + ", ".join(bad_names))
     loaded_domains = set(getattr(ctx, "_loaded_tool_domains", None) or set())
     loaded_names = set(getattr(ctx, "_loaded_tool_names", None) or set())
     before = (set(loaded_domains), set(loaded_names))
@@ -27048,6 +27090,9 @@ def _normalize_tool_call(name, args):
             args.pop("motion_motif", None)
             notes.append("static motion_motif dropped")
     _argument_aliases(name, args, notes)
+    entry = TOOLS.get(name)
+    if entry:
+        tool_dialect.repair(name, args, entry[0], entry[2], notes)
     return name, args, notes
 
 
@@ -34387,6 +34432,130 @@ def parse_tool_arguments(raw):
     return args
 
 
+def _call_notes_begin(ctx, repairs):
+    """Start this call's receipt: what was repaired or defaulted."""
+    if isinstance(ctx, _RecipeContext):
+        return
+    try:
+        ctx._call_notes = list(repairs or [])
+    except Exception:  # noqa: BLE001 - a frozen test context has no receipt
+        pass
+
+
+def call_note(ctx, text):
+    """A tool's own 'I applied a default' line, printed under its result."""
+    notes = getattr(ctx, "_call_notes", None)
+    if isinstance(notes, list) and text not in notes:
+        notes.append(text)
+
+
+def _call_notes_end(ctx, text):
+    """Say what was applied, so the model never has to guess why a value
+    moved and its reply to the customer stays honest."""
+    notes = getattr(ctx, "_call_notes", None)
+    if isinstance(ctx, _RecipeContext) or not notes:
+        return text
+    try:
+        ctx._call_notes = None
+    except Exception:  # noqa: BLE001
+        pass
+    outcome = getattr(ctx, "last_structured_tool_outcome", None)
+    if isinstance(outcome, dict):
+        outcome.setdefault("evidence", {})["call_repairs"] = list(notes)
+    return f"{text}\nApplied to this call: " + "; ".join(notes) + "."
+
+
+_ALL_ASSET_KINDS = ["music", "image_ref", "video_clip", "render", "original"]
+_MAIN_KEY_WORDS = frozenset(("main", "source", "original", "main_video"))
+
+
+def _project_asset(ctx, key, notes):
+    """(key, row) for a key as this project holds it: our own full stop or
+    quotes taken off, then one mistyped token against this project's own keys.
+    (key, None) when no file of the project is meant. Never raises: the tool
+    answers for a key it cannot find."""
+    fixed = tool_dialect.clean_key(key)
+    try:
+        row = ctx.db.run(dbx.asset_by_key, ctx.project_id, fixed)
+        if row:
+            if fixed != key:
+                notes.append(f"asset key {key!r} -> {fixed!r}")
+            return fixed, row
+        rows = ctx.db.run(dbx.assets_by_kinds, ctx.project_id,
+                          _ALL_ASSET_KINDS) or []
+    except Exception:  # noqa: BLE001
+        return key, None
+    keys = [r.get("storage_key") for r in rows
+            if isinstance(r, dict) and r.get("storage_key")]
+    base = str(fixed).rsplit("/", 1)[-1]
+    named = [k for k in keys if k.rsplit("/", 1)[-1] == base]
+    near = named[0] if len(named) == 1 else \
+        tool_dialect.closest(fixed, keys, cutoff=0.88)
+    if not near:
+        return fixed, None
+    notes.append(f"asset key {key!r} -> {near!r}")
+    return near, next(r for r in rows if r.get("storage_key") == near)
+
+
+def _resolve_from_project(ctx, name, args, notes):
+    """Repairs that need the project: what its state already knows is not
+    asked of the model a second time. Outer calls only; a recipe's staged
+    operations were resolved when the recipe was checked."""
+    if isinstance(ctx, _RecipeContext):
+        return name, args
+    key = args.get("asset_key")
+    if isinstance(key, str) and key.strip():
+        word = key.strip().lower()
+        row = None
+        if word not in _MAIN_KEY_WORDS:
+            fixed, row = _project_asset(ctx, key, notes)
+            if fixed != key:
+                args = dict(args, asset_key=fixed)
+        main = word in _MAIN_KEY_WORDS or \
+            (row or {}).get("kind") in ("original", "proxy")
+    else:
+        main = name == "look_at_asset" and "asset_key" not in args
+    if main and name == "look_at_asset":
+        # look_at is the main video's reader; both answer the same question
+        args = {k: v for k, v in args.items() if k != "asset_key"}
+        if args.get("start") in (0, 0.0, "0"):
+            args.pop("start")
+        notes.append("main video: read through look_at, times are source "
+                     "seconds")
+        return "look_at", args
+    if main and name in ("get_words", "get_audio_analysis", "get_transcript"):
+        args = {k: v for k, v in args.items() if k != "asset_key"}
+        notes.append("main video: asset_key left out")
+    # A card named by id already has its window: a patch does not restate it.
+    if name == "set_picture_card" and args.get("id") \
+            and ("start" not in args or "end" not in args):
+        try:
+            cards = ((ctx.latest_edl()["json"].get("effects") or {})
+                     .get("picture_cards") or [])
+        except Exception:  # noqa: BLE001
+            cards = []
+        card = next((c for c in cards if c.get("id") == args["id"]), None)
+        if card:
+            args = dict(args)
+            for side in ("start", "end"):
+                if side not in args and card.get(side) is not None:
+                    args[side] = card[side]
+                    notes.append(f"{side} kept from card {args['id']}")
+    return name, args
+
+
+def _fan_out_ids(ctx, name, args):
+    """``ids=[a, b]`` on a tool that takes one ``id``: the same call once for
+    each, in order. None when this call is not that shape. (repair leaves
+    ``ids`` alone for exactly this.)"""
+    if "ids" not in args:
+        return None
+    ids = _json_text(args["ids"])
+    ids = ids if isinstance(ids, list) else [ids]
+    rest = {k: v for k, v in args.items() if k != "ids"}
+    return "\n".join(_execute(ctx, name, dict(rest, id=one)) for one in ids)
+
+
 def execute(ctx, name, args):
     """Dispatch one tool call. Returns a string for the model (AskUser
     propagates). The outermost call (not a recipe's staged operations)
@@ -34449,6 +34618,23 @@ def _execute(ctx, name, args):
         _count_tool_outcome(ctx, "tool_refused")
         return (f"Unknown tool '{name}'. Available: "
                 + ", ".join(t for t in TOOLS if not _tool_disabled(t)))
+    name, args = _resolve_from_project(ctx, name, args, _repairs)
+    entry = TOOLS.get(name) or entry
+    many = _fan_out_ids(ctx, name, args)
+    if many is not None:
+        return many
+    absent = tool_dialect.missing(entry[0], args)
+    if absent:
+        _count_tool_outcome(ctx, "tool_refused")
+        outcome = tool_outcome_mod.ToolOutcome(
+            status="correction_needed",
+            message=(f"{name} needs {', '.join(absent)}. No operation was "
+                     "run. Exact call: "
+                     + tool_dialect.exact_call(name, entry[0], entry[2], args)),
+            safe_fallback="send that call with the missing values filled in")
+        ctx.last_structured_tool_outcome = outcome.to_dict()
+        return outcome.render_text()
+    _call_notes_begin(ctx, _repairs)
     # Shorts and Website demos come with Pro and Max (owner, 30 Oct 2026;
     # feature_gate.py): a Studio turn of a trial account or a new Plus
     # subscriber never runs them. The loop answers with the upgrade card.
@@ -34582,7 +34768,7 @@ def _execute(ctx, name, args):
         affected_ranges=ranges)
     ctx.last_structured_tool_outcome = outcome.to_dict()
     ctx._executing_tool = previous_executing_tool
-    return outcome.render_text()
+    return _call_notes_end(ctx, outcome.render_text())
 
 
 # Department tools (worker/tools_ext/, worker/devices/INTERFACES.md §7). The

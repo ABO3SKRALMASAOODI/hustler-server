@@ -10,10 +10,12 @@ import sys
 
 try:
     from schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, CaptionStyle,
-                         program_duration, validate_edl)
+                         Effects, keep_boundaries, program_duration,
+                         sped_len, validate_edl)
 except ImportError:
     from worker_schemas import (FX_AUTHORABLE_TYPES, FX_TYPES, CaptionStyle,
-                                program_duration, validate_edl)
+                                Effects, keep_boundaries, program_duration,
+                                sped_len, validate_edl)
 
 # "fx" (Wave 0 seam, worker/devices/INTERFACES.md §4): registered effect
 # items by id. Accepted here always; advertised in apply_edit_batch's layer
@@ -21,9 +23,9 @@ except ImportError:
 # FX_AUTHORABLE_TYPES), because until then validation rejects any item.
 LAYERS = frozenset(("keep", "speed", "inserts", "frame", "captions",
     "caption_mutes", "texts", "vectors", "music", "sfx", "voiceover", "volume", "master",
-    "effects", "overlays", "canvas", "motion", "fx"))
+    "effects", "overlays", "canvas", "motion", "fx", "patches"))
 ITEM_LAYERS = frozenset(("inserts", "texts", "vectors", "music", "sfx", "voiceover", "overlays",
-    "motion", "fx"))
+    "motion", "fx", "patches"))
 
 
 # Device cards (worker/devices/cards/<id>.json), read as plain JSON so this
@@ -349,22 +351,19 @@ def end_with_programme(before, edl, operations):
     time: the owner's Jensen run, s25 (project 3762 v12/v13): 'motion[0]:
     end 32.35 exceeds the limit 31.35s', the headline re-ended by hand, then
     'picture card: end 32.35 exceeds the limit 31.35s', and the short was
-    abandoned. Returns the notes; raises ValueError naming every item that
-    still overruns."""
+    abandoned. Items the batch itself named are held to the same end: times
+    past the programme have one meaning, up to its end, and a refusal cost a
+    full model call each time. Returns the notes."""
     old_end, new_end = _programme_end(before), _programme_end(edl)
-    if old_end is None or new_end is None or new_end >= old_end - 0.005:
+    if new_end is None:
         return []
-    touched_layers, touched_ids = set(), set()
-    for op in operations:
-        layer = op.get("layer")
-        if op.get("id"):
-            touched_ids.add((layer, op.get("id")))
-        else:
-            touched_layers.add(layer)
-    ended, over = [], []
+    old_end = new_end if old_end is None else old_end
+    ended, gone = [], []
     for path, name in _END_LAYERS + (("overlays", "overlay"),):
-        top = path.split(".")[0]
-        for item in _layer_items(edl, path):
+        node, leaf = edl, path.split(".")
+        for part in leaf[:-1]:
+            node = node.get(part) if isinstance(node, dict) else None
+        for item in list(_layer_items(edl, path)):
             try:
                 start = float(item.get("start"))
                 end = (start + float(item["duration_s"]) if path == "overlays"
@@ -374,35 +373,32 @@ def end_with_programme(before, edl, operations):
             if end <= new_end + 0.01:
                 continue
             label = f"{name} '{item.get('id') or '?'}'"
-            authored = top in touched_layers or \
-                (top, item.get("id")) in touched_ids
-            if not authored and abs(end - old_end) <= END_WITH_PROGRAMME_S \
-                    and new_end - start >= 0.2:
-                if path == "overlays":
-                    item["duration_s"] = round(new_end - start, 3)
-                else:
-                    item["end"] = round(new_end, 3)
+            if new_end - start < 0.2:
+                # Nothing of it is left to show.
+                node[leaf[-1]] = [i for i in node[leaf[-1]] if i is not item]
+                gone.append(label)
+            elif path == "overlays":
+                item["duration_s"] = round(new_end - start, 3)
                 ended.append(label)
             else:
-                over.append(f"{label} ends at {end:g}s")
-    if over:
-        raise ValueError(
-            f"This batch makes the programme {new_end:g}s long (it was "
-            f"{old_end:g}s), and these items end after it: "
-            + "; ".join(over) + ". A batch's times describe the resulting "
-            "timeline: end each one at or before the new end in this same "
-            "batch (items that ran to the old end and that the batch does "
-            "not name are ended with it), or remove an insert with "
-            "remove_insert, which re-anchors every item.")
-    if not ended:
-        return []
-    return [f"PROGRAMME END {old_end:g}s -> {new_end:g}s: "
-            + ", ".join(ended) + f" ran to the end and now end at {new_end:g}s."]
+                item["end"] = round(new_end, 3)
+                ended.append(label)
+    notes = []
+    if ended:
+        notes.append((f"PROGRAMME END {old_end:g}s -> {new_end:g}s: "
+                      if new_end < old_end - 0.005 else
+                      f"PROGRAMME END {new_end:g}s: ")
+                     + ", ".join(ended) + f" now end at {new_end:g}s.")
+    if gone:
+        notes.append(f"Past the programme's end ({new_end:g}s), removed: "
+                     + ", ".join(gone) + ".")
+    return notes
 
 
 # Near misses a batch author means unambiguously (the owner's Codex runs,
 # 13-16 Oct: each cost a rejected batch with a raw validation dump).
 _NO_TRANSITION = ("cut", "none", "hard_cut", "hard cut", "")
+_NONE_WORDS = frozenset(("none", "null", "nil", "off", "no", "n/a", ""))
 _CARD_FIT = {"contain": "pad", "letterbox": "pad", "fit": "pad",
              "cover": "crop", "fill": "crop"}
 _CARD_ANIM_MIN_S = 0.12
@@ -413,6 +409,10 @@ def _near_misses(edl, layers):
     notes = []
     fx = edl.get("effects") if "effects" in layers else None
     if isinstance(fx, dict):
+        grade = fx.get("grade")
+        if isinstance(grade, str) and grade.strip().lower() in _NONE_WORDS:
+            fx["grade"] = None
+            notes.append(f"effects.grade '{grade}' is no grade: cleared")
         tr = fx.get("transition")
         style = tr.get("style") if isinstance(tr, dict) else tr
         if tr is not None and isinstance(style, str) and \
@@ -445,7 +445,225 @@ def _near_misses(edl, layers):
                 notes.append(f"picture card {cid}: duration_s is its entrance/exit "
                              f"animation (0.12-1.2 s), so {dur:g} is stored as 0.12; "
                              "the card's window is start-end")
+    notes += _item_near_misses(edl, layers)
     return notes
+
+
+_INSERT_FIT = {"cover": "crop", "fill": "crop", "contain": "pad",
+               "letterbox": "pad", "fit": "pad", "blur": "pad_blur",
+               "blurred": "pad_blur"}
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".heic")
+
+
+def _media_kind(key):
+    return "image" if str(key or "").lower().endswith(_IMAGE_EXTS) else "video"
+
+
+def _item_near_misses(edl, layers):
+    """One spelling across the item layers: 'none' on a field that has no
+    'none' means no such field, and a field the item needs is read from it."""
+    notes = []
+    for item in (edl.get("overlays") if "overlays" in layers else None) or []:
+        if not isinstance(item, dict):
+            continue
+        for side in ("entrance", "exit"):
+            if str(item.get(side)).strip().lower() in _NONE_WORDS:
+                item.pop(side, None)
+        if not item.get("kind") and item.get("asset_key"):
+            item["kind"] = _media_kind(item["asset_key"])
+    for item in (edl.get("inserts") if "inserts" in layers else None) or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("motion")).strip().lower() in _NONE_WORDS:
+            item.pop("motion", None)
+        if "clip_start_s" in item:
+            item.setdefault("source_start_s", item.pop("clip_start_s"))
+            item.pop("clip_start_s", None)
+        if not item.get("kind") and item.get("asset_key"):
+            item["kind"] = _media_kind(item["asset_key"])
+        fit = item.get("fit")
+        if isinstance(fit, str) and fit.strip().lower() in _INSERT_FIT:
+            item["fit"] = _INSERT_FIT[fit.strip().lower()]
+    for item in (edl.get("texts") if "texts" in layers else None) or []:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("motion"), dict) and any(
+                isinstance(v, list) and v for v in item["motion"].values()):
+            # An authored curve owns the animation, as add_text has it.
+            for side in ("entrance", "exit"):
+                if item.get(side) not in (None, "none"):
+                    item[side] = "none"
+                    notes.append(f"text {item.get('id') or '?'}: {side} "
+                                 "dropped, its motion curve owns the animation")
+    captions = edl.get("captions") if "captions" in layers else None
+    if isinstance(captions, dict) and captions.get("mode") != "from_transcript":
+        mode = str(captions.get("mode")).strip().lower()
+        if mode in _NONE_WORDS:
+            edl["captions"] = None
+            notes.append("captions off: cleared")
+        elif isinstance(captions.get("items"), list):
+            edl["captions"] = captions["items"]
+            notes.append("captions given as their own items: stored as that "
+                         "list")
+    if "keep" in layers and isinstance(edl.get("keep"), list):
+        notes += _tidy_keep(edl)
+    return notes
+
+
+def _tidy_keep(edl):
+    """Keep spans sorted and whole: a repeated or overlapping span is one
+    span. To show footage twice, insert it (inserts takes the main video)."""
+    spans, bad = [], 0
+    for span in edl["keep"]:
+        try:
+            start, end = float(span[0]), float(span[1])
+        except (IndexError, KeyError, TypeError, ValueError):
+            return []                   # the schema words this one
+        if end <= start:
+            bad += 1
+            continue
+        spans.append([start, end])
+    spans.sort()
+    merged = []
+    for span in spans:
+        if merged and span[0] < merged[-1][1] - 0.001:
+            merged[-1][1] = max(merged[-1][1], span[1])
+        else:
+            merged.append(list(span))
+    if len(merged) == len(edl["keep"]) and merged == spans:
+        edl["keep"] = merged
+        return []
+    edl["keep"] = merged
+    return [f"keep spans overlapped or were empty ({len(spans)} + {bad} empty "
+            f"-> {len(merged)}): merged. To repeat footage, place it as an "
+            "insert."]
+
+
+def _on_keep_boundaries(edl):
+    """Every insert lands on a splice point: within a second the nearest
+    existing one, past that the kept span is split where the insert asked."""
+    notes, inserts = [], edl.get("inserts")
+    keep = edl.get("keep")
+    if not isinstance(inserts, list) or not isinstance(keep, list) or not keep:
+        return notes
+    speed = edl.get("speed") or []
+    try:
+        for item in inserts:
+            if not isinstance(item, dict) or item.get("at_output_s") is None:
+                continue
+            at = float(item["at_output_s"])
+            bounds = keep_boundaries(keep, speed)
+            near = min(bounds, key=lambda b: abs(b - at))
+            if abs(near - at) <= 0.02:
+                continue
+            if abs(near - at) <= 1.0 or speed or at > bounds[-1]:
+                item["at_output_s"] = near
+                notes.append(f"insert {item.get('id') or '?'}: {at:g}s moved "
+                             f"to the cut at {near:g}s")
+                continue
+            acc = 0.0
+            for index, (start, end) in enumerate(keep):
+                length = sped_len(start, end, speed)
+                if at < acc + length:
+                    point = round(start + (at - acc), 2)
+                    keep[index:index + 1] = [[start, point], [point, end]]
+                    break
+                acc += length
+            notes.append(f"insert {item.get('id') or '?'}: the kept footage "
+                         f"was split at {at:g}s to take it")
+    except (KeyError, TypeError, ValueError):
+        return notes                    # the schema words this one
+    return notes
+
+
+_OP_ALIASES = (("action", ("op", "operation", "verb", "do")),
+               ("layer", ("target", "path", "section")),
+               ("value", ("data", "item", "patch", "body", "items")))
+_ACTION_WORDS = {"add": "upsert", "update": "upsert", "patch": "upsert",
+                 "merge": "upsert", "insert": "upsert", "create": "upsert",
+                 "put": "upsert", "replace": "set", "delete": "remove",
+                 "clear": "remove"}
+_LAYER_WORDS = {"text": "texts", "insert": "inserts", "overlay": "overlays",
+                "vector": "vectors", "caption": "captions",
+                "motion_graphics": "motion", "fades": "effects"}
+
+
+def _fit_operation(op, before, notes):
+    """One operation in the batch's own shape. Only machine syntax is read:
+    the keys and tokens a batch author writes against our schema."""
+    if isinstance(op, str):
+        try:
+            op = json.loads(op)
+        except ValueError:
+            return op
+    if not isinstance(op, dict):
+        return op
+    op = dict(op)
+    for key, spellings in _OP_ALIASES:
+        for spelling in spellings:
+            if key not in op and spelling in op:
+                op[key] = op.pop(spelling)
+    action = op.get("action")
+    if isinstance(action, str):
+        op["action"] = _ACTION_WORDS.get(action.strip().lower(),
+                                         action.strip().lower())
+    layer = op.get("layer")
+    if isinstance(layer, str):
+        layer = op["layer"] = _LAYER_WORDS.get(layer.strip().lower(),
+                                               layer.strip().lower())
+    extra = {k: op.pop(k) for k in tuple(op)
+             if k not in ("action", "layer", "value", "id")}
+    if extra:
+        if isinstance(op.get("value"), dict):
+            op["value"] = {**extra, **op["value"]}
+        elif "value" not in op:
+            op["value"] = extra
+    value = op.get("value")
+    if isinstance(value, str) and value.strip()[:1] in ("[", "{"):
+        try:
+            op["value"] = value = json.loads(value)
+        except ValueError:
+            pass
+    # A field of effects named as a layer, or as an id on the effects layer.
+    field = (layer if layer not in LAYERS else
+             op.get("id") if layer == "effects" else None)
+    if isinstance(field, str) and field in Effects.model_fields:
+        op.update(layer="effects", action="upsert", value={field: value})
+        op.pop("id", None)
+        return op
+    if layer == "effects" and isinstance(value, list):
+        merged = {}
+        for row in value:
+            if isinstance(row, dict) and row.get("kind") in Effects.model_fields:
+                rest = {k: v for k, v in row.items() if k != "kind"}
+                merged[row["kind"]] = (rest.get("preset")
+                                       if row["kind"] == "grade" else rest)
+        if merged:
+            op.update(action="upsert", value=merged)
+            return op
+    if layer == "canvas" and isinstance(value, dict) and "width" not in value:
+        size = _canvas_size(value.get("ratio") or value.get("aspect"))
+        if size:
+            fill = value.get("bg_color") or value.get("background")
+            op["value"] = {"width": size[0], "height": size[1],
+                           **({"bg_color": fill} if fill else {}),
+                           **({"fps": value["fps"]} if "fps" in value else {})}
+    if layer in ITEM_LAYERS and op.get("action") == "set":
+        if isinstance(value, dict):
+            op["value"] = [value] if value else []
+    return op
+
+
+def _canvas_size(ratio):
+    try:
+        wide, high = (float(side) for side in str(ratio).split(":"))
+    except ValueError:
+        return None
+    if wide <= 0 or high <= 0:
+        return None
+    if wide >= high:
+        return int(round(1080 * wide / high / 2) * 2), 1080
+    return 1080, int(round(1080 * high / wide / 2) * 2)
 
 
 def _style_field_hint(path, unknown):
@@ -461,6 +679,25 @@ def _style_field_hint(path, unknown):
             "\"style\": {\"font\": ..., \"size\": ...}}.")
 
 
+def _keep_inside_source(edl, duration):
+    """A keep end past the source means up to its end."""
+    if not isinstance(edl.get("keep"), list) or not duration:
+        return []
+    trimmed, spans = [], []
+    for span in edl["keep"]:
+        start, end = span[0], span[1]
+        if start >= duration - 0.05:
+            trimmed.append(f"[{start:g}, {end:g}]")
+            continue
+        if end > duration + 0.75:
+            trimmed.append(f"[{start:g}, {end:g}]")
+            end = round(duration, 2)
+        spans.append([start, end])
+    edl["keep"] = spans
+    return ([f"keep held to the source's {duration:g}s: "
+             + ", ".join(trimmed) + "."] if trimmed else [])
+
+
 def apply_batch(before, operations, duration, allowed_keys, notes=None):
     """``notes``: an optional list the batch appends its receipts to (an
     item ended with a shortened programme)."""
@@ -469,7 +706,9 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     if len(json.dumps(operations, allow_nan=False)) > 256_000:
         raise ValueError("This edit batch is too large; split it into smaller batches.")
     edl = copy.deepcopy(before)
-    operations = copy.deepcopy(operations)
+    near_ops = []
+    operations = [_fit_operation(op, before, near_ops)
+                  for op in copy.deepcopy(operations)]
     # Keys already in the EDL were placed by Valmera's own tools (erase
     # patches, subject mattes, fetched stock, library sounds) and validated
     # when written; many never appear in the project's assets table. Only
@@ -478,7 +717,9 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     known = set(media_keys(before)) | _motion_refs(before)
     for op in operations:
         if not isinstance(op, dict) or set(op) - {"action", "layer", "value", "id"}:
-            raise ValueError("An operation accepts action, layer, value and id only.")
+            raise ValueError('An operation is {"action", "layer", "value", '
+                             '"id"}, for example {"action": "upsert", "layer": '
+                             '"texts", "id": "tx1", "value": {"end": 5}}.')
         action, layer = op.get("action"), op.get("layer")
         if layer == "text":
             layer = op["layer"] = "texts"
@@ -506,6 +747,12 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
             edl[layer] = copy.deepcopy(op["value"])
             if layer == "keep":
                 edl.pop("split_keep_boundaries", None)
+        elif action == "upsert" and layer not in ITEM_LAYERS \
+                and isinstance(edl.get(layer) or {}, dict) \
+                and isinstance(op.get("value"), dict):
+            # upsert on a layer that is one object patches its fields, the
+            # same word doing the same thing on every layer.
+            edl[layer] = {**(edl.get(layer) or {}), **op["value"]}
         elif action in ("upsert", "remove") and layer in ITEM_LAYERS:
             item_id = op.get("id")
             if not isinstance(item_id, str) or not item_id:
@@ -574,9 +821,13 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
     if (set(media_keys(edl)) | _motion_refs(edl)) - known - set(allowed_keys):
         raise ValueError("Use media attached to this project. A referenced asset is not available here.")
     near = _near_misses(edl, {op["layer"] for op in operations})
+    near += _on_keep_boundaries(edl)
+    if isinstance(duration, (int, float)) and "keep" in {
+            op["layer"] for op in operations}:
+        near += _keep_inside_source(edl, float(duration))
     moved = end_with_programme(before, edl, operations)
     if notes is not None:
-        notes.extend(near + moved)
+        notes.extend(near_ops + near + moved)
     _check_new_motion_params(before, edl)
     # A graphic behind the subject needs a subject mask: a measured clip
     # (add_motion_graphic builds one) or, from Wave 1, the program matte.
@@ -590,16 +841,19 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                 end = (item.get("source_start_s") or 0) + item["duration_s"] * (item.get("rate") or 1)
                 if end > float(asset_duration) + .05:
                     raise ValueError(f"Clip {item['id']} extends beyond its source video.")
-    # Pydantic's historical EDL schema tolerates extras. Authoring a new
-    # batch must not silently discard a misspelled field and claim success.
+    # Pydantic's historical EDL schema tolerates extras. A field it would
+    # have dropped silently is said in the result: the near spelling of a real
+    # field is kept, anything else is named as left out.
+    left_out = []
     def check_fields(raw, clean, path):
         if isinstance(raw, dict) and isinstance(clean, dict):
             unknown = set(raw) - set(clean)
             if unknown:
-                raise ValueError(f"Unknown field in {path}: {', '.join(sorted(unknown))}."
-                                 + _style_field_hint(path, unknown))
+                left_out.append(f"{path}: {', '.join(sorted(unknown))}."
+                                + _style_field_hint(path, unknown))
             for key, value in raw.items():
-                check_fields(value, clean[key], f"{path}.{key}")
+                if key in clean:
+                    check_fields(value, clean[key], f"{path}.{key}")
         elif isinstance(raw, list) and isinstance(clean, list):
             # validate_edl re-sorts item layers (motion by start, ...): pair
             # items by id where they have one, never by position — an item
@@ -615,5 +869,7 @@ def apply_batch(before, operations, duration, allowed_keys, notes=None):
                     continue
                 check_fields(value, checked, f"{path}[{index}]")
     for layer in {op["layer"] for op in operations}:
-        check_fields(edl[layer], normalized[layer], layer)
+        check_fields(edl.get(layer), normalized.get(layer), layer)
+    if left_out and notes is not None:
+        notes.extend("Not a field, left out of " + row for row in left_out)
     return normalized

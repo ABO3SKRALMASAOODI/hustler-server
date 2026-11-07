@@ -683,11 +683,31 @@ def _parse_origin(origin, edl):
                      "item id")
 
 
+_JUNCTION_DIALECT = {
+    "crossfade": "dissolve", "cross_fade": "dissolve",
+    "cross_dissolve": "dissolve", "crossdissolve": "dissolve",
+    "fade": "dissolve", "mix": "dissolve",
+    "dip_black": "dissolve", "dip_to_black": "dissolve",
+    "dip_white": "hit_flash", "dip_to_white": "hit_flash",
+    "flash": "hit_flash", "white_flash": "hit_flash",
+    "push_left": "slide_left", "push_right": "slide_right",
+    "wipe": "wipe_left", "slide": "slide_left",
+    "cut": "none", "hard_cut": "none",
+}
+
+
 def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
                  count=None, direction=None, colour=None, start=None,
                  end=None):
     from fx_schemas.accents import JUNCTION_STYLES
-    style = str(style or "").strip().lower()
+    style = str(style or "").strip().lower().replace("-", "_")
+    # One language for transitions: what set_transitions and an editor call a
+    # style means its nearest junction here.
+    meant = _JUNCTION_DIALECT.get(style)
+    if meant:
+        import agent_tools
+        agent_tools.call_note(ctx, f"style {style} -> {meant}")
+        style = meant
     if style not in JUNCTION_STYLES + ("none",):
         return _r(f"style must be one of {', '.join(JUNCTION_STYLES)} or "
                   "'none'.")
@@ -736,8 +756,18 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
             targets.append(near)
     else:
         mode = (cuts or "scene")
+        if isinstance(mode, (list, tuple)) and len(mode) == 1 \
+                and isinstance(mode[0], str):
+            try:
+                float(mode[0])
+            except ValueError:
+                mode = mode[0]      # cuts=['scene'] is cuts='scene'
         if isinstance(mode, str):
-            mode = mode.strip().strip('"\'').strip()
+            mode = mode.strip().strip('"\'').strip().lower()
+            if mode in ("all", "every_cut", "each"):
+                mode = "every"
+            elif mode in ("scenes", "scene_changes"):
+                mode = "scene"
         if isinstance(mode, (list, tuple)):
             for t in mode:
                 near = min(all_cuts, key=lambda c: abs(c[0] - float(t)))

@@ -940,9 +940,14 @@ def list_assets(ctx, kind=None):
     return result
 
 
-def list_motion_templates(ctx, category=None):
+def list_motion_templates(ctx, category=None, template=None):
+    """``template`` reads one template's parameters without the whole list."""
     motion_templates = _mod("motion_templates")
     cat = motion_templates.catalog(category or None)
+    if template:
+        one = [t for t in motion_templates.catalog()
+               if t["name"] == str(template).strip()]
+        cat = one or cat
     if not cat:
         if category:
             known = sorted({c for t in motion_templates.catalog()
