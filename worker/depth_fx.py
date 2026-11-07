@@ -213,6 +213,61 @@ def cover_crop(img, W, H, centre=(0.5, 0.5), margin=1.0):
     return big[cy:cy + H, cx:cx + W]
 
 
+# Where a face may sit along the axis a cover crop slides on, as fractions of
+# the crop: the middle of a wide still's 9:16 window; for a tall still in a
+# landscape window, high enough to leave the shoulders in.
+FACE_BAND_ACROSS = (0.3, 0.7)
+FACE_BAND_DOWN = (0.2, 0.6)
+FACE_WEIGHT = 2.0       # a face outweighs all of the picture's saliency (1.0)
+FOCUS_READ_W = 960      # YuNet missed a 34 px face at 480 (CES keynote)
+
+
+def still_focus(img, W, H):
+    """(fx, fy): where a W x H cover crop of the still ``img`` should centre.
+
+    Every face the picture's detector finds pulls the crop, by its share of
+    the faces' area, until it sits well inside it; what is left is settled by
+    the picture's saliency (broll_score, the measure a cutaway's crop reads).
+    Measured from the still, so a preview and its final crop alike."""
+    import broll_score
+    h, w = img.shape[:2]
+    aspect = W / float(H)
+    if abs(w / float(h) - aspect) / aspect < 0.01:
+        return (0.5, 0.5)
+    small = broll_score._small(img, FOCUS_READ_W)
+    sh, sw = small.shape[:2]
+    across = sw / float(sh) > aspect
+    length, win = (sw, max(2, int(round(sh * aspect)))) if across else \
+        (sh, max(2, int(round(sw / aspect))))
+    if win >= length:
+        return (0.5, 0.5)
+    sal = broll_score.saliency(broll_score._gray(small))
+    cs = np.concatenate([[0.0], np.cumsum(sal.sum(axis=0 if across else 1))])
+    score = cs[win:] - cs[:-win]
+    at = np.arange(score.size)
+    faces = broll_score.faces(small)
+    total = sum(f[2] * f[3] for f in faces)
+    lo, hi = FACE_BAND_ACROSS if across else FACE_BAND_DOWN
+    for f in faces:
+        a, size = (f[0], f[2]) if across else (f[1], f[3])
+        mid = a + size / 2.0
+        inside = (at <= a) & (a + size <= at + win)
+        placed = (at + lo * win <= mid) & (mid <= at + hi * win)
+        score = score + FACE_WEIGHT * f[2] * f[3] / total * (
+            0.5 * inside + 0.5 * placed)
+    centre = (int(np.argmax(score)) + win / 2.0) / float(length)
+    return (round(centre, 4), 0.5) if across else (0.5, round(centre, 4))
+
+
+def _still_centre(img, W, H):
+    """still_focus, or the plain centre: a crop never fails an edit."""
+    try:
+        return still_focus(img, W, H)
+    except Exception as e:  # noqa: BLE001
+        print(f"[depth_fx] still focus unread: {str(e)[:120]}", flush=True)
+        return (0.5, 0.5)
+
+
 def _main_window(plan, src_t, t):
     """The source rect (fractions) the program shows at program second
     ``t`` (SOURCE second ``src_t``), expanded to the frame's aspect, or
@@ -526,12 +581,12 @@ def visible_inpaint_planes(planes, W, H, move, n):
     return worst
 
 
-def render_ken_burns(img, W, H, n, move, writer):
+def render_ken_burns(img, W, H, n, move, writer, centre=(0.5, 0.5)):
     import cv2
     path = (move or {}).get("path") or "push_in"
     amount = float((move or {}).get("amount") or 0.35)
     ez = (move or {}).get("ease") or "in_out"
-    base = cover_crop(img, W, H, margin=1.0 + 0.12 * amount)
+    base = cover_crop(img, W, H, centre=centre, margin=1.0 + 0.12 * amount)
     for i in range(n):
         p = ease(i / max(1, n - 1), ez)
         m = layer_affine(path, amount * 0.8, 0.5, p, W, H)
@@ -1049,22 +1104,23 @@ class _Depth:
         out = os.path.join(plan.workdir, f"w4d_{_key(item, plan)}.mkv")
         move = item.get("move") or {"path": "push_in", "amount": 0.35,
                                     "ease": "in_out"}
+        centre = _still_centre(img, W, H)
         if item["kind"] == "ken_burns":
             w = ClipWriter(out, W, H, plan.fps3, "rgb24")
-            render_ken_burns(img, W, H, n, move, w)
+            render_ken_burns(img, W, H, n, move, w, centre)
             w.close()
             return {"clip": out, "replace": True}
         depth, rung, reason = still_depth(plan, item, img, origin, wait_s)
         if depth is None:
             w = ClipWriter(out, W, H, plan.fps3, "rgb24")
-            render_ken_burns(img, W, H, n, move, w)
+            render_ken_burns(img, W, H, n, move, w, centre)
             w.close()
             return {"clip": out, "replace": True, "rung": "substitute",
                     "reason": f"{reason} -> ken_burns"}
         margin = 1.0 + 0.10 * float(move.get("amount") or 0.35)
-        pic = cover_crop(img, W, H, margin=1.0)
+        pic = cover_crop(img, W, H, centre=centre, margin=1.0)
         dep = cover_crop(np.dstack([depth] * 3).astype(np.float32), W, H,
-                         margin=1.0)[..., 0]
+                         centre=centre, margin=1.0)[..., 0]
         planes = two_planes(pic, np.clip(dep, 0, 1))
         w = ClipWriter(out, W, H, plan.fps3, "rgb24")
         render_parallax_planes(pic, planes, W, H, n, move, w)
@@ -1181,8 +1237,8 @@ class _Depth:
                                               wait_s)
             if depth is None:
                 return {"rung": "omit", "reason": reason}
-            dep = cover_crop(np.dstack([depth] * 3).astype(np.float32), W, H
-                             )[..., 0]
+            dep = cover_crop(np.dstack([depth] * 3).astype(np.float32), W, H,
+                             centre=_still_centre(img, W, H))[..., 0]
             w = ClipWriter(out, W, H, plan.fps3, "rgb24")
             for i in range(n):
                 p = ease(i / max(1, n - 1), "in_out")

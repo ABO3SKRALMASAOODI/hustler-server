@@ -6501,10 +6501,9 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
         mx = float(max_seconds) if max_seconds is not None else None
     except (TypeError, ValueError):
         return "REJECTED: min_seconds/max_seconds must be numbers."
-    # Do not infer tool permission from keywords in the chat.  Search is
-    # commercial-safe by default; the agent may explicitly set false when a
-    # non-commercial catalog is appropriate.
-    commercial = commercial_use is not False
+    # One licence rule for every library (music_rights.commercial_ok): a
+    # customer's video may be a business's, whatever the chat says about it.
+    commercial = True
     try:
         hits = music_search.search(query, min_s=mn, max_s=mx,
                                    commercial_only=commercial)
@@ -6536,8 +6535,7 @@ def search_music(ctx, query, min_seconds=None, max_seconds=None,
                 "own apps only.")
     ctx._music_hits = {h["id"]: h for h in hits}
     _remember_search_hits(ctx, "music", hits)
-    gate = (" Commercial-use request detected: non-commercial tracks were "
-            "excluded." if commercial else "")
+    gate = " Non-commercial tracks are never offered."
     duration_note = (
         " No source track matched the requested duration, so these longer "
         "tracks are candidates to trim/fit to the edit."
@@ -31273,10 +31271,8 @@ TOOLS = {
                      "and mechanically derived commercial-use, attribution "
                      "and derivative-use signals. These are provider-reported "
                      "metadata, not independent legal verification; unknown "
-                     "never falls back to CC BY. Relay the terms. Business/ad "
-                     "briefs automatically "
-                     "exclude non-commercial tracks; set commercial_use "
-                     "true when an ambiguous brief also needs that safety. "
+                     "never falls back to CC BY. Relay the terms. "
+                     "Non-commercial tracks are never offered. "
                      "min_seconds/max_seconds filter length. For a "
                      "SPECIFIC song, a pasted LINK is fetch_url's job; a "
                      "TRENDING platform sound only the user can provide "
@@ -31284,8 +31280,7 @@ TOOLS = {
                      "substituting silently.",
                      {"query": {"type": "string"},
                       "min_seconds": {"type": "number"},
-                      "max_seconds": {"type": "number"},
-                      "commercial_use": {"type": "boolean"}}),
+                      "max_seconds": {"type": "number"}}),
     "research_music": (
         research_music,
         "Search AND acoustically compare one soundtrack slate in a single "

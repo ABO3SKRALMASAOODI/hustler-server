@@ -19,6 +19,7 @@ VideoIndex -> seed EDL + greet. Steps (clip): the same lanes minus the
 proxy encode/EDL/greeting — clips are perception-only.
 """
 
+import contextlib
 import math
 import os
 import re
@@ -101,18 +102,47 @@ def _index_has_tiles(idx):
         return False
 
 
+class _StageClock:
+    """Seconds per analysis stage, for the job result. The stages of a lane
+    overlap (round 91), so each one times itself on the thread that ran it:
+    together they add up to more than the wall, and the longest in a lane is
+    the one that owns that lane's time."""
+
+    def __init__(self):
+        self.seconds = {}
+        self._lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def stage(self, name):
+        began = time.monotonic()
+        try:
+            yield
+        finally:
+            took = time.monotonic() - began
+            with self._lock:
+                self.seconds[name] = round(
+                    self.seconds.get(name, 0.0) + took, 2)
+
+    def timed(self, name, fn, *args, **kwargs):
+        with self.stage(name):
+            return fn(*args, **kwargs)
+
+
 def _transcribe_wav(job_id, wav_local, duration, warnings,
-                    progress_cb=None):
+                    progress_cb=None, clock=None):
     """words, sentences, language — with one retry on a transient crash."""
+    clock = clock or _StageClock()
     words, sentences, language = [], [], None
     if not wav_local:
         return words, sentences, language
     for attempt in range(2):
         try:
-            words, language = transcribe.transcribe(
-                wav_local, warnings, progress_cb=progress_cb)
+            words, language = clock.timed(
+                "snd_asr_s", transcribe.transcribe, wav_local, warnings,
+                progress_cb=progress_cb)
             import transcript_verify
-            words = transcript_verify.verify(words, wav_local, language, warnings)
+            words = clock.timed("snd_verify_s", transcript_verify.verify,
+                                words, wav_local, language, warnings)
             # ASR on music invents timings past the end of the file — clamp
             # before sentences inherit the bad spans.
             words = clamp_word_times(words, duration)
@@ -141,14 +171,16 @@ def _detect_silences(job_id, wav_local, duration, warnings):
 
 
 def _build_and_upload_tiles(job_id, project_id, sha, src_path, duration,
-                            workdir, warnings, seek_ceiling=None):
+                            workdir, warnings, seek_ceiling=None,
+                            clock=None):
     """Filmstrip tiles from src_path -> uploaded keys. Returns
     (tile_keys, tile_step_s, spatial_sidecar). Degrades to an empty strip with a warning —
     the transcript and cut points are unaffected."""
+    clock = clock or _StageClock()
     tile_dir = os.path.join(workdir, "tiles")
     try:
-        built, step, sample_times, sample_frames = \
-            tilestrip.build_for_video_with_frames(
+        built, step, sample_times, sample_frames = clock.timed(
+            "pic_strip_s", tilestrip.build_for_video_with_frames,
             src_path, duration, tile_dir, seek_ceiling=seek_ceiling,
             parallelism=config.THUMB_PARALLELISM)
     except Exception as e:
@@ -161,7 +193,8 @@ def _build_and_upload_tiles(job_id, project_id, sha, src_path, duration,
                         "no visual strip; use look_at instead")
         return [], None, None
     try:
-        spatial_sidecar = spatial.analyze_frames(
+        spatial_sidecar = clock.timed(
+            "pic_spatial_s", spatial.analyze_frames,
             sample_times, sample_frames,
             max_samples=spatial.FILMSTRIP_SAMPLE_BUDGET)
     except Exception as e:
@@ -172,7 +205,7 @@ def _build_and_upload_tiles(job_id, project_id, sha, src_path, duration,
     jobs = [(tp, f"tiles/{project_id}/{sha}/tile_{i:03d}.jpg")
             for i, (tp, _t0, _t1) in enumerate(built, start=1)]
     ok = {}
-    with futures.ThreadPoolExecutor(
+    with clock.stage("pic_tile_upload_s"), futures.ThreadPoolExecutor(
             max_workers=config.UPLOAD_PARALLELISM) as pool:
         futs = {pool.submit(storage.upload_file, tp, key, "image/jpeg"):
                 (i, key) for i, (tp, key) in enumerate(jobs)}
@@ -423,6 +456,7 @@ def run_index_job(worker_db, job):
     workdir = os.path.join(config.TMP_DIR, f"index_{job_id}")
     os.makedirs(workdir, exist_ok=True)
     timings, _t = {}, time.monotonic()
+    clock = _StageClock()
 
     def _mark(stage):
         nonlocal _t
@@ -562,6 +596,7 @@ def run_index_job(worker_db, job):
         worker_db.run(dbx.update_asset_probe, asset["id"], info["duration"],
                       info["width"], info["height"], info["fps"], sha)
         _set_progress(worker_db, job_id, 12)
+        _mark("probe_s")
 
         proxy_key = f"proxies/{project_id}/{sha}.mp4"
 
@@ -604,6 +639,7 @@ def run_index_job(worker_db, job):
                   f"stale (pipeline v{cached.get('pipeline_version', 1)} < "
                   f"v{config.PIPELINE_VERSION} or tiles missing) — "
                   "re-indexing", flush=True)
+        _mark("cache_lookup_s")
 
         # Non-fatal degradations recorded here and stored on the index so a
         # partially-degraded analysis is visible in admin instead of silently
@@ -666,7 +702,8 @@ def run_index_job(worker_db, job):
                     cancelled_cb=lambda: _cancelled(worker_db), **proxy_kwargs)
                 # Probed here, not at upload time: tile extraction needs the
                 # proxy's REAL duration to keep frame seeks inside it.
-                state["proxy_info"] = media.probe(proxy_local)
+                state["proxy_info"] = clock.timed(
+                    "pic_proxy_probe_s", media.probe, proxy_local)
             state["proxy_local"] = proxy_local
             p_info = state["proxy_info"]
             # The index is about to describe this video to the agent, the
@@ -688,15 +725,19 @@ def run_index_job(worker_db, job):
             proxy_dur = p_info["duration"]
             ceil = max(0.0, proxy_dur - 0.05) if proxy_dur > 0 else None
             with futures.ThreadPoolExecutor(max_workers=4) as sub:
-                f_shots = sub.submit(scenes.detect_shots, proxy_local,
+                f_shots = sub.submit(clock.timed, "pic_shots_s",
+                                     scenes.detect_shots, proxy_local,
                                      info["duration"], warnings)
                 f_motion = sub.submit(
+                    clock.timed, "pic_motion_s",
                     motion_judge.analyze_video, proxy_local, info["duration"])
                 f_tiles = sub.submit(
+                    clock.timed, "pic_tiles_s",
                     _build_and_upload_tiles, job_id, project_id, sha,
                     proxy_local, info["duration"], workdir, warnings,
-                    seek_ceiling=ceil)
-                f_up = sub.submit(storage.upload_file, proxy_local,
+                    seek_ceiling=ceil, clock=clock)
+                f_up = sub.submit(clock.timed, "pic_proxy_upload_s",
+                                  storage.upload_file, proxy_local,
                                   proxy_key, "video/mp4")
                 state["shots"] = f_shots.result()
                 _lane_progress("picture", 0.72)
@@ -711,7 +752,9 @@ def run_index_job(worker_db, job):
                  state["spatial"]) = f_tiles.result()
                 _lane_progress("picture", 0.90)
                 try:
-                    state["spatial"] = spatial.augment_with_shot_frames(
+                    state["spatial"] = clock.timed(
+                        "pic_shot_spatial_s",
+                        spatial.augment_with_shot_frames,
                         proxy_local, info["duration"], workdir,
                         state.get("spatial"), state["shots"])
                 except Exception as e:
@@ -722,7 +765,8 @@ def run_index_job(worker_db, job):
                     # What the frame is made of (a call window, its chrome,
                     # the self-view), once per source: every short cut from
                     # it inherits this through the shared index row.
-                    state["source_layout"] = source_layout.analyze(
+                    state["source_layout"] = clock.timed(
+                        "pic_layout_s", source_layout.analyze,
                         proxy_local, info["duration"], state["shots"],
                         src_w=info["width"], src_h=info["height"],
                         spatial=state.get("spatial"))
@@ -743,8 +787,8 @@ def run_index_job(worker_db, job):
             wav_local = None
             if info["has_audio"]:
                 wav_local = os.path.join(workdir, "audio.wav")
-                media.extract_wav(
-                    src, wav_local,
+                clock.timed(
+                    "snd_wav_s", media.extract_wav, src, wav_local,
                     cancelled_cb=lambda: _cancelled(worker_db),
                     limit_s=info.get("limit_s"))
             state["wav_local"] = wav_local
@@ -753,7 +797,8 @@ def run_index_job(worker_db, job):
             up = None
             if wav_local:
                 with futures.ThreadPoolExecutor(max_workers=1) as sub:
-                    up = sub.submit(storage.upload_file, wav_local,
+                    up = sub.submit(clock.timed, "snd_upload_s",
+                                    storage.upload_file, wav_local,
                                     f"audio/{project_id}/{sha}.wav",
                                     "audio/wav")
                     state["words"], state["sentences"], state["language"] = \
@@ -761,8 +806,10 @@ def run_index_job(worker_db, job):
                                         warnings,
                                         progress_cb=lambda frac:
                                         _lane_progress(
-                                            "sound", 0.12 + 0.70 * frac))
-                    state["silences"] = _detect_silences(
+                                            "sound", 0.12 + 0.70 * frac),
+                                        clock=clock)
+                    state["silences"] = clock.timed(
+                        "snd_silences_s", _detect_silences,
                         job_id, wav_local, info["duration"], warnings)
                     _lane_progress("sound", 0.88)
                     # Perception sidecar (round 35): beat grid / energy /
@@ -771,7 +818,8 @@ def run_index_job(worker_db, job):
                     # feeds DECISIONS, never renders.
                     try:
                         import perception as perception_mod
-                        state["perception"] = perception_mod.analyze_audio(
+                        state["perception"] = clock.timed(
+                            "snd_perception_s", perception_mod.analyze_audio,
                             wav_local)
                     except Exception as e:
                         warnings.append(
@@ -793,8 +841,8 @@ def run_index_job(worker_db, job):
             _lane_progress("sound", 1.0)
 
         with futures.ThreadPoolExecutor(max_workers=2) as lanes:
-            f_pic = lanes.submit(_picture_lane)
-            f_snd = lanes.submit(_sound_lane)
+            f_pic = lanes.submit(clock.timed, "pic_lane_s", _picture_lane)
+            f_snd = lanes.submit(clock.timed, "snd_lane_s", _sound_lane)
             # Persist the measured lane fractions from THIS thread. Progress
             # writes remain both monotone and connection-safe.
             pct = 12
@@ -823,7 +871,8 @@ def run_index_job(worker_db, job):
         layout_sidecar = state.get("source_layout")
         motion_sidecar = state.get("motion")
         try:
-            visual_storyboard = visual_index.build(
+            visual_storyboard = clock.timed(
+                "storyboard_s", visual_index.build,
                 proxy_local, info["duration"], shots, motion_sidecar,
                 spatial_sidecar, sentences, sha, workdir,
                 seek_ceiling=max(0.0, info["duration"] - 0.05))
@@ -881,14 +930,15 @@ def run_index_job(worker_db, job):
             visual_storyboard=visual_storyboard,
         ).model_dump()
         worker_db.run(dbx.upsert_index, project_id, sha, index)
-        _claude_trial_indexed(worker_db, job, trial_scope)
-        _finish_setup(worker_db, project_id, session_id, info, index,
-                      job["user_id"],
-                      reindex=bool(job["payload"].get("reindex")),
-                      asset_id=asset["id"],
-                      execution_policy=config.execution_policy_for(job),
-                      selection_pool=(job["payload"].get(
-                          "selection_pool") or 0))
+        clock.timed("trial_indexed_s", _claude_trial_indexed, worker_db, job,
+                    trial_scope)
+        clock.timed("finish_setup_s", _finish_setup, worker_db, project_id,
+                    session_id, info, index, job["user_id"],
+                    reindex=bool(job["payload"].get("reindex")),
+                    asset_id=asset["id"],
+                    execution_policy=config.execution_policy_for(job),
+                    selection_pool=(job["payload"].get(
+                        "selection_pool") or 0))
         try:
             worker_db.run(
                 dbx.record_client_event, job["user_id"], project_id,
@@ -904,6 +954,7 @@ def run_index_job(worker_db, job):
         sidecars.prefetch_after_index(project_id, sha, proxy_key, proxy_info,
                                       shots, duration=info["duration"])
         _mark("upload_persist_s")
+        timings.update(clock.seconds)
         return {"sha256": sha, "cached": False, "shots": len(shots),
                 "from_client_proxy": from_client_proxy,
                 "streamed_source": streamed_source,

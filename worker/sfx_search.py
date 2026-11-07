@@ -10,10 +10,10 @@ same aggregator music_search already trusts) fronts Freesound's half a
 million recorded effects — the exact library a working editor's whoosh,
 camera shutter and UI click already come from — served as direct CDN mp3s.
 
-The music_search rules apply verbatim: licenses are LABELS, not walls
-(public domain / credit / NON-COMMERCIAL-ONLY stated per hit, only
-no-derivatives excluded, since layering a sound under picture is an
-adaptation), and downloads ride net_fetch's SSRF policy into ordinary
+Only licences that allow commercial use and edits pass (the one rule of
+every library, music_rights.commercial_ok: layering a sound under picture is
+an adaptation, and a customer's video may be a business's), with the credit
+stated per hit, and downloads ride net_fetch's SSRF policy into ordinary
 project assets. One sfx-specific twist: results are duration-capped —
 a "click" that runs four minutes is a field recording, not an accent.
 """
@@ -24,7 +24,8 @@ import re
 import config
 import net_fetch
 import music_search
-from music_search import _license_note, _license_ok
+from music_rights import commercial_ok
+from music_search import _license_note
 
 OPENVERSE_API = "https://api.openverse.org/v1/audio/"
 
@@ -178,10 +179,9 @@ def search(query, max_s=None, count=MAX_RESULTS):
         raise SfxSearchError("a search query is required")
     count = max(1, min(int(count or MAX_RESULTS), MAX_RESULTS))
     cap = min(float(max_s or DEFAULT_MAX_S), HARD_MAX_S)
-    # modification only: ND may not be layered into an edit at all. The
-    # category field is unpopulated on Freesound entries, so the one-shot
+    # The category field is unpopulated on Freesound entries, so the one-shot
     # shape is enforced by the duration cap, not a category filter.
-    params = {"q": query, "license_type": "modification",
+    params = {"q": query, "license_type": "commercial,modification",
               "page_size": max(count * 2, 10)}
     try:
         data = music_search._openverse_get_json(OPENVERSE_API, params=params)
@@ -193,7 +193,7 @@ def search(query, max_s=None, count=MAX_RESULTS):
     raw_results = data.get("results") or []
     ranked = []
     for provider_i, t in enumerate(raw_results):
-        if not _license_ok(t.get("license") or ""):
+        if not commercial_ok(t.get("license")):
             continue
         url = t.get("url")
         if not url:

@@ -47,6 +47,7 @@ UNMATCHABLE_DE = 25.0
 LOOK_PENALTY_FROM = 12.0
 MAX_MOMENTS = 8
 SHORTLIST = 3
+COMMONS_READ = 4          # a moment's Commons items its short list could take
 DEFAULT_SPAN = 2.4
 MIN_SPAN, MAX_SPAN = 1.0, 6.0
 HOOK_S = 0.8                 # the face establishes first: no cutaway before
@@ -254,6 +255,23 @@ def _dedupe(cands):
         seen.add(k)
         out.append(c)
     return out
+
+
+def _without_ai_made(found):
+    """``found`` [(spec, ranked, errors)] with Commons' AI items gone from
+    every moment's slate: one model call for the whole board, on this turn's
+    lane, before anything is fetched. Only the head of a slate can reach a
+    short list, so only that is read; the rest of its Commons items go too."""
+    import broll_source
+    heads = {}
+    for _spec, ranked, _errs in found:
+        commons = [c for c in ranked if broll_source.from_commons(c)]
+        heads.update((c["id"], c) for c in commons[:COMMONS_READ])
+    kept, note = broll_source.drop_ai_made(list(heads.values()))
+    passed = {c["id"] for c in kept}
+    return [(spec, [c for c in ranked if not broll_source.from_commons(c)
+                    or c["id"] in passed], errs + ([note] if note else []))
+            for spec, ranked, errs in found]
 
 
 def _interleave(cands, n):
@@ -559,6 +577,7 @@ def _source_broll(ctx, moments, limit, providers, place):
             str(q).strip()[:120] for q in (m.get("query_variants") or [])
             if str(q).strip()][:2]
         specs.append({"id": mid, "queries": qs, "kind": kind,
+                      "depicts": str(m.get("depicts") or "").strip()[:120],
                       "purpose": str(m.get("purpose") or "")[:160],
                       "archival": bool(m.get("archival")), "start": s,
                       "end": e, "bind": bind,
@@ -603,9 +622,19 @@ def _source_broll(ctx, moments, limit, providers, place):
                         archival=spec["archival"])
                 cands += c
                 errs += e
-        ranked = broll_source.prerank(_dedupe(cands), spec["queries"], W, H,
-                                      need_s=spec["duration_s"],
-                                      archival=spec["archival"])
+        # the model named who or what the shot shows: Commons knows it by that
+        # identity, not by the words of a shot's description
+        if spec["depicts"] and "wikimedia" in (providers or ["wikimedia"]):
+            for k in kinds:
+                c, e, _lanes = search_fn(
+                    spec["depicts"], k, orientation, count=4,
+                    providers=["wikimedia"], archival=False)
+                cands += c
+                errs += e
+        ranked = broll_source.prerank(
+            _dedupe(cands), spec["queries"] + (
+                [spec["depicts"]] if spec["depicts"] else []), W, H,
+            need_s=spec["duration_s"], archival=spec["archival"])
         return spec, ranked, errs
     import time as _time
     stage = {"search": 0.0, "hero": 0.0, "fetch": 0.0, "judge": 0.0,
@@ -613,6 +642,7 @@ def _source_broll(ctx, moments, limit, providers, place):
     _t = _time.monotonic()
     with ThreadPoolExecutor(max_workers=min(4, len(specs))) as pool:
         found = list(pool.map(find, specs))
+    found = _without_ai_made(found)
     stage["search"] += _time.monotonic() - _t
 
     # 2. acquire + judge a short list per moment
@@ -840,6 +870,8 @@ _MOMENT = {"type": "object", "properties": {
     "id": {"type": "string"},
     "query": {"type": "string", "description": "what the shot SHOWS"},
     "query_variants": {"type": "array", "items": {"type": "string"}},
+    "depicts": {"type": "string", "description": "the real person, place or "
+                "thing the shot must show, by its encyclopedia name"},
     "purpose": {"type": "string"},
     "word": {"type": "string", "description": "cut in on this word"},
     "at": {"type": "number"},
@@ -851,6 +883,7 @@ TOOL_SPECS = {
     "source_broll": (
         source_broll,
         "WRITE: the B-roll director. moments=[{query (what the shot SHOWS), "
+        "depicts (a named real subject: 'Elon Musk'), "
         "word or at, purpose, duration_s, kind video|photo|any, archival}] "
         "-> searches Pexels, Pixabay, Openverse, Wikimedia Commons, NASA "
         "(and the Internet Archive when archival) in parallel, keeps only "

@@ -695,6 +695,9 @@ def _encode_proxy(src, dst, fps, vfr, has_audio, pad_s=0.0, progress_cb=None,
            _proxy_vf(config.PROXY_HEIGHT, pad_s, fps if lead else None),
            "-c:v", "libx264", "-preset", config.PROXY_PRESET,
            "-crf", str(config.PROXY_CRF), "-pix_fmt", "yuv420p"]
+    if config.PROXY_KEYINT > 0:
+        cmd += ["-g", str(config.PROXY_KEYINT),
+                "-keyint_min", str(config.PROXY_KEYINT), "-sc_threshold", "0"]
     if maxrate_kbps:
         cmd += ["-maxrate", f"{int(maxrate_kbps)}k",
                 "-bufsize", f"{2 * int(maxrate_kbps)}k"]

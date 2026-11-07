@@ -147,8 +147,9 @@ NASA = {"collection": {"items": [
 IA = {"response": {"docs": [
     {"identifier": "film1", "title": "Factory film 1952",
      "licenseurl": "http://creativecommons.org/publicdomain/mark/1.0/",
-     "creator": "Archive Films"},
+     "creator": "Archive Films", "collection": ["prelinger", "fav-someone"]},
     {"identifier": "film2", "title": "Restricted",
+     "collection": ["prelinger"],
      "licenseurl": "https://creativecommons.org/licenses/by-nc/4.0/"}]}}
 
 

@@ -6,17 +6,23 @@ Six libraries, searched in parallel, every hit carrying its licence:
                     and photo (stock.py's provider lanes)
   openverse         keyless CC photos (stock.py's lane)
   wikimedia         Wikimedia Commons: video (transcoded renditions) and
-                    photos, licence from the file's own metadata
+                    photos, licence from the file's own metadata; a query
+                    that is the name of one thing is searched by its
+                    Wikidata id first (``depicts``, P180), then as text
   nasa              NASA Image and Video Library: video and photos, public
                     domain under NASA's media guidelines
   archive           Internet Archive moving images under public-domain / CC0
-                    / CC BY(-SA) only (the archival lane)
+                    / CC BY(-SA) only, from ARCHIVE_COLLECTIONS alone: an
+                    uploader's licence field proves nothing anywhere else
+                    (the archival lane)
 
 Licence policy (``canon_licence``): public domain, CC0, CC BY, CC BY-SA and
 the Pexels / Pixabay licences pass; NC, ND, "all rights reserved" and
 unknown licences never reach the editor. Every candidate keeps its
 provider, title, author, licence, licence URL and page — the ledger line the
-``broll`` fx item carries.
+``broll`` fx item carries. Commons also hosts pictures made by image
+generators beside real photographs: ``drop_ai_made`` has a model read their
+metadata before anything is fetched.
 
 Acquisition reuses the stock lane: ``stock.download`` (and on the redesign
 policy the executor's ``stock_acquire`` job) fetches a hit by its
@@ -26,6 +32,7 @@ decode. Nothing here publishes, uploads to a provider or keeps reference
 media.
 """
 
+import json
 import os
 import re
 import subprocess
@@ -41,9 +48,15 @@ PROVIDERS = ("pexels", "pixabay", "openverse", "wikimedia", "nasa",
 KEYLESS = ("openverse", "wikimedia", "nasa", "archive")
 API_TIMEOUT_S = 15.0
 COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+WIKIDATA_TIMEOUT_S = 3.0
 NASA_API = "https://images-api.nasa.gov/search"
 IA_SEARCH = "https://archive.org/advancedsearch.php"
 IA_META = "https://archive.org/metadata/"
+# The curated collections whose items are what their licence field says.
+# Everywhere else on the Archive that field is the uploader's word: its search
+# returns Digimon and Blue's Clues as CC0 (SOURCING section 8).
+ARCHIVE_COLLECTIONS = ("prelinger", "FedFlix", "nasa", "universal_newsreels")
 MAX_VIDEO_BYTES = 90 * 1024 * 1024
 NASA_LICENCE = ("Public domain (NASA media guidelines)",
                 "https://www.nasa.gov/nasa-brand-center/images-and-media/")
@@ -145,23 +158,82 @@ def _allowed():
     return {p.strip().lower() for p in raw.split(",") if p.strip()}
 
 
-def _wikimedia(query, kind, orientation, count):
+_WIKIDATA_IDS = {}          # query, folded -> (id, label) or None
+
+
+def _wikidata_id(query):
+    """(id, label) when the whole query is the name of one Wikidata item,
+    else None. Wikidata's own label and alias match decides, so a sentence
+    about a shot stays a text search. Best effort: None when it does not
+    answer."""
+    name = " ".join(str(query or "").split()).casefold()
+    if not name:
+        return None
+    if name in _WIKIDATA_IDS:
+        return _WIKIDATA_IDS[name]
+    try:
+        data = net_fetch.get_json(WIKIDATA_API, params={
+            "action": "wbsearchentities", "format": "json", "type": "item",
+            "search": query, "language": "en", "uselang": "en", "limit": 1},
+            timeout_s=WIKIDATA_TIMEOUT_S,
+            allowed_hosts=["www.wikidata.org"])
+    except Exception as e:  # noqa: BLE001 — the text search still answers
+        print(f"[broll] wikidata: {str(e)[:120]}", flush=True)
+        return None
+    hit = next(iter(data.get("search") or []), None) or {}
+    match = hit.get("match") or {}
+    found = None
+    if hit.get("id") and match.get("type") in ("label", "alias") and \
+            str(match.get("text") or "").casefold() == name:
+        found = (hit["id"], hit.get("label") or str(query))
+    if len(_WIKIDATA_IDS) >= 4096:
+        _WIKIDATA_IDS.clear()
+    _WIKIDATA_IDS[name] = found
+    return found
+
+
+def _commons_pages(search, kind, count):
+    """One Commons search: the result pages, best first."""
     filetype = "video" if kind == KIND_VIDEO else "bitmap"
     prop = "videoinfo" if kind == KIND_VIDEO else "imageinfo"
     pre = "vi" if kind == KIND_VIDEO else "ii"
     params = {"action": "query", "format": "json", "generator": "search",
-              "gsrnamespace": 6, "gsrsearch": f"{query} filetype:{filetype}",
+              "gsrnamespace": 6, "gsrsearch": f"{search} filetype:{filetype}",
               "gsrlimit": max(6, count * 3), "prop": prop,
               f"{pre}prop": "url|size|mime|extmetadata" + (
                   "|derivatives" if kind == KIND_VIDEO else ""),
               f"{pre}urlwidth": 640,
               f"{pre}extmetadatafilter": "LicenseShortName|LicenseUrl|"
-              "Artist|ObjectName|ImageDescription|AttributionRequired"}
+              "Artist|ObjectName|ImageDescription|AttributionRequired|"
+              "Categories|Credit"}
     data = net_fetch.get_json(COMMONS_API, params=params,
                               timeout_s=API_TIMEOUT_S,
                               allowed_hosts=["commons.wikimedia.org"])
-    pages = sorted(((data.get("query") or {}).get("pages") or {}).values(),
-                   key=lambda p: p.get("index", 0))
+    return sorted(((data.get("query") or {}).get("pages") or {}).values(),
+                  key=lambda p: p.get("index", 0))
+
+
+def _depicted_pages(query, kind, count):
+    """(pages stating they depict what the query names, its label)."""
+    named = _wikidata_id(query)
+    if not named:
+        return [], None
+    try:
+        return _commons_pages(f"haswbstatement:P180={named[0]}", kind,
+                              count), named[1]
+    except Exception as e:  # noqa: BLE001 — the text search still answers
+        print(f"[broll] commons depicts: {str(e)[:120]}", flush=True)
+        return [], None
+
+
+def _wikimedia(query, kind, orientation, count):
+    prop = "videoinfo" if kind == KIND_VIDEO else "imageinfo"
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        depicted_f = pool.submit(_depicted_pages, query, kind, count)
+        pages = _commons_pages(query, kind, count)
+        depicted, label = depicted_f.result()
+    named = {p.get("pageid") for p in depicted}
+    pages = depicted + [p for p in pages if p.get("pageid") not in named]
     out = []
     for p in pages:
         info = (p.get(prop) or [{}])[0]
@@ -180,7 +252,13 @@ def _wikimedia(query, kind, orientation, count):
                 "license_url": lic[1], "attribution_required": lic[2],
                 "page_url": info.get("descriptionurl"),
                 "_thumb": info.get("thumburl"),
+                "_file": p.get("title"),
+                "_categories": _clip(mv("Categories"), 300),
+                "_source_note": _clip(mv("Credit"), 200),
                 "width": info.get("width"), "height": info.get("height")}
+        if p.get("pageid") in named:
+            # its own words may not name it: the statement does
+            base["keywords"] = [label]
         if kind == KIND_VIDEO:
             files = []
             dur = float(info.get("duration") or 0.0)
@@ -302,10 +380,11 @@ def _archive(query, kind, orientation, count):
     if kind != KIND_VIDEO:
         return []
     q = (f"({query}) AND mediatype:movies AND "
+         f"collection:({' OR '.join(ARCHIVE_COLLECTIONS)}) AND "
          "licenseurl:(*publicdomain* OR *creativecommons*)")
     data = net_fetch.get_json(IA_SEARCH, params={
         "q": q, "fl[]": ["identifier", "title", "licenseurl", "creator",
-                         "year", "subject", "description"],
+                         "year", "subject", "description", "collection"],
         "rows": max(20, count * 6),
         "output": "json"}, timeout_s=API_TIMEOUT_S + 10,
         allowed_hosts=["archive.org"])
@@ -314,6 +393,10 @@ def _archive(query, kind, orientation, count):
     for d in docs:
         lic = canon_licence(d.get("licenseurl"), d.get("licenseurl"))
         if not lic or not d.get("identifier"):
+            continue
+        held_in = d.get("collection")
+        held_in = held_in if isinstance(held_in, list) else [held_in]
+        if not set(held_in) & set(ARCHIVE_COLLECTIONS):
             continue
         ident = str(d["identifier"])
         out.append({
@@ -449,6 +532,83 @@ def search(query, kind=KIND_VIDEO, orientation="portrait", count=4,
     for p in lanes:
         out.extend(got.get(p) or [])
     return out, errors, lanes
+
+
+# ── pictures an image generator made ─────────────────────────────────────
+
+AI_CHECK_MAX = 40          # one call reads this many items
+AI_CHECK_TIMEOUT_S = 30.0
+_AI_MADE = {}              # candidate id -> True: an image generator's work
+_AI_SYSTEM = """You check picture metadata for a video editor. Wikimedia \
+Commons hosts images made by AI image generators beside real photographs, and \
+the editor must never use one as a real picture.
+
+For each numbered item, read its file name, title, description, categories \
+and source line, in any language. An item is AI-made when they say or plainly \
+imply that a generative model made the picture or invented what it shows: \
+text-to-image output, an AI portrait of a real person, an AI "reconstruction" \
+of a scene. A real photograph, scan or drawing about the subject of AI is not \
+AI-made, and neither is one retouched by ordinary software.
+
+Answer with only a JSON array of the numbers of the AI-made items, [] if none."""
+
+
+def from_commons(cand):
+    """Commons' own pictures, and the same files reached through Openverse."""
+    return cand.get("provider") == "wikimedia" or \
+        cand.get("_origin") == "wikimedia"
+
+
+def _ai_row(n, cand):
+    return {"n": n, "file": cand.get("_file"), "title": cand.get("title"),
+            "description": cand.get("description"),
+            "categories": cand.get("_categories"),
+            "source": cand.get("_source_note") or cand.get("credit")}
+
+
+def _read_ai_made(cands):
+    """{candidate id: True when a model reads its metadata as AI-made}, or
+    None when no model answered."""
+    import llm
+    lane = None
+    if llm.claude_trial_lane() is None and \
+            not llm.paid_editor_plan(llm.turn_plan()):
+        # Library searches run on pool threads, which hold no turn.
+        import claude_lane
+        if claude_lane.available():
+            lane = (claude_lane.ClaudeLaneClient(timeout=AI_CHECK_TIMEOUT_S),
+                    config.CLAUDE_TRIAL_MODEL)
+    rows = [_ai_row(n, c) for n, c in enumerate(cands, 1)]
+    got = llm.ask_text(_AI_SYSTEM, json.dumps(rows, ensure_ascii=False),
+                       max_tokens=1000, temperature=0.0,
+                       purpose="commons_ai_items", reasoning_effort="low",
+                       retry_empty=True, lane=lane)
+    picked = llm.extract_json_array((got or {}).get("text"))
+    if picked is None or not all(
+            isinstance(n, int) and 1 <= n <= len(cands) for n in picked):
+        return None
+    return {c["id"]: n in picked for n, c in enumerate(cands, 1)}
+
+
+def drop_ai_made(cands):
+    """(candidates without Commons' AI items, a note or None). Nothing from
+    Commons passes unread: with no model to read it those items are left out
+    and the note says so, and the other libraries carry the search."""
+    todo = {c["id"]: c for c in cands
+            if from_commons(c) and c["id"] not in _AI_MADE}
+    note = None
+    if todo:
+        batch = list(todo.values())[:AI_CHECK_MAX]
+        read = _read_ai_made(batch)
+        if read is None:
+            note = ("Wikimedia Commons pictures were left out: their AI check "
+                    "did not answer")
+        else:
+            if len(_AI_MADE) >= 8192:
+                _AI_MADE.clear()
+            _AI_MADE.update(read)
+    return [c for c in cands if not from_commons(c)
+            or _AI_MADE.get(c["id"]) is False], note
 
 
 # ── ranking before anything is downloaded ────────────────────────────────

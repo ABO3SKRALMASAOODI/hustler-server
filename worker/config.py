@@ -2206,6 +2206,10 @@ VIDEO_PRICE_USD_PER_SEC = float(os.getenv("VIDEO_PRICE_USD_PER_SEC", "0.07"))
 PROXY_HEIGHT = int(os.getenv("PROXY_HEIGHT", "540"))
 PROXY_PRESET = os.getenv("PROXY_PRESET", "veryfast")
 PROXY_CRF = int(os.getenv("PROXY_CRF", "25"))
+# A keyframe every this many proxy frames; 0 leaves it to the encoder (x264's
+# 250). Everything that reads the proxy seeks: 39 shots cost 219 core-ms each
+# at x264's default and 115 at 30, for about 17% more bytes (bench/light_probe).
+PROXY_KEYINT = int(os.getenv("PROXY_KEYINT", "30"))
 
 
 # Round 39 — repainting burned-in text/objects out of the source (inpaint.py).
