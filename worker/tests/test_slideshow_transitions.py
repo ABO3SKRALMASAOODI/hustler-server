@@ -90,9 +90,10 @@ def test_the_junction_survives_the_keep_change_that_exposed_its_cut():
     assert [i["at"] for i in kept["fx"]] == [8.0] and not notes
 
 
-def test_a_slide_is_a_valid_edl_junction():
+@pytest.mark.parametrize("style", ["slide_right", "film_strip", "fade_black"])
+def test_the_customers_words_are_valid_edl_junctions(style):
     ctx = _ctx()
-    P.set_junction(ctx, "slide_right", at=[4.0])
+    assert P.set_junction(ctx, style, at=[4.0]).startswith("EDL")
     schemas.validate_edl(copy.deepcopy(ctx.edl), 20.0)
 
 
@@ -201,7 +202,8 @@ def test_a_contract_compiled_before_this_release_still_reads():
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="needs ffmpeg")
 @pytest.mark.parametrize("style,moves", [("dissolve", False),
-                                         ("slide_left", True)])
+                                         ("slide_left", True),
+                                         ("film_strip", True)])
 def test_the_two_photos_really_meet_on_screen(style, moves, tmp_path,
                                               monkeypatch):
     """A rendered program: the outgoing photo's frame is held, so the middle

@@ -49,8 +49,8 @@ ACCENT_KINDS = ("negative", "white_hit", "colour_hit", "threshold",
 # xfade built-ins | mask wipes (precomputed gray mask clip + maskedmerge) |
 # composites and smears.
 XFADE_STYLES = ("dissolve", "fadegrays", "pixelize", "radial", "slices",
-                "slide_left", "slide_right", "wipe_left", "wipe_right",
-                "wipe_up", "wipe_down")
+                "slide_left", "slide_right", "film_strip", "fade_black",
+                "wipe_left", "wipe_right", "wipe_up", "wipe_down")
 MASK_STYLES = ("iris", "columns", "staircase", "box_steps", "bands",
                "letter_window", "matte_cut")
 OTHER_STYLES = ("double_exposure", "pixel_stretch", "hit_flash", "whip_up",
@@ -359,7 +359,8 @@ class JunctionFx(FxItemBase):
 
     type: Literal["junction"] = "junction"
     style: Literal["dissolve", "fadegrays", "pixelize", "radial", "slices",
-                   "slide_left", "slide_right", "wipe_left", "wipe_right", "wipe_up", "wipe_down",
+                   "slide_left", "slide_right", "film_strip", "fade_black",
+                   "wipe_left", "wipe_right", "wipe_up", "wipe_down",
                    "iris", "columns", "staircase", "box_steps", "bands",
                    "letter_window", "matte_cut", "double_exposure",
                    "pixel_stretch", "hit_flash", "whip_up", "whip_down",

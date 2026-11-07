@@ -11,7 +11,9 @@
       "radial",
       "slices",
       "slide_left",
-      "slide_right"
+      "slide_right",
+      "film_strip",
+      "fade_black"
     ],
     "duration_s": [
       0.4,

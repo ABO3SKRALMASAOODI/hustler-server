@@ -46,7 +46,8 @@ JUNCTION_CARDS = {
     "dissolve": "junction_dissolve", "fadegrays": "junction_xfade",
     "pixelize": "junction_xfade", "radial": "junction_xfade",
     "slices": "junction_xfade", "slide_left": "junction_xfade",
-    "slide_right": "junction_xfade", "wipe_left": "junction_wipe",
+    "slide_right": "junction_xfade", "film_strip": "junction_xfade",
+    "fade_black": "junction_xfade", "wipe_left": "junction_wipe",
     "wipe_right": "junction_wipe", "wipe_up": "junction_wipe",
     "wipe_down": "junction_wipe", "iris": "junction_iris",
     "columns": "junction_columns", "staircase": "junction_staircase",
@@ -60,6 +61,7 @@ JUNCTION_CARDS = {
     "radial_blur": "junction_zoom_blur", "datamosh": "junction_datamosh"}
 # style -> default window (seconds); the cards' params agree
 JUNCTION_DURATION = {"dissolve": 0.5, "slide_left": 0.8, "slide_right": 0.8,
+                     "film_strip": 1.0, "fade_black": 0.8,
                      "iris": 0.4, "columns": 0.5,
                      "staircase": 0.5, "box_steps": 0.8, "bands": 0.5,
                      "letter_window": 0.8, "matte_cut": 0.5,
@@ -961,7 +963,8 @@ TOOL_SPECS = {
         "A designed cut device at real cuts, duration-preserving (sound and "
         "timing untouched), also on shot changes inside one uploaded file "
         "(a slideshow): the edge frames hold through the window. dissolve "
-        "(cross-dissolve), slide_left/right (film strip), fadegrays, pixelize, "
+        "(cross-dissolve), film_strip (both pictures travel as one), "
+        "slide_left/right, fade_black (through black), fadegrays, pixelize, "
         "radial, slices, wipe_left/right/up/down, iris, columns, staircase, box_steps, bands, "
         "letter_window (origin = a motion item id), matte_cut, "
         "double_exposure, pixel_stretch, hit_flash, whip_up/down, zoom_blur, "
@@ -1012,7 +1015,8 @@ COMPACT = {
     "set_junction": (
         "Cut device at real cuts, including shot changes inside one uploaded "
         "file (at= or cuts='scene'|'every', start/end window), duration-"
-        "preserving: dissolve (cross-dissolve), slide_left/right (film strip), "
+        "preserving: dissolve (cross-dissolve), film_strip, slide_left/right, "
+        "fade_black, "
         "fadegrays, pixelize, radial, slices, wipe_*, "
         "iris, columns, staircase, box_steps, bands, letter_window, "
         "matte_cut, double_exposure, pixel_stretch, hit_flash, whip_up/down, "

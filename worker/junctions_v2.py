@@ -56,7 +56,8 @@ from fx_schemas.accents import DEFAULT_BOX_STEPS, decay_strengths
 # slide_*: both pictures travel together, side by side, like a film strip.
 XFADE_NAMES = {"fadegrays": "fadegrays", "pixelize": "pixelize",
                "radial": "radial", "slide_left": "slideleft",
-               "slide_right": "slideright"}
+               "slide_right": "slideright", "film_strip": "slideleft",
+               "fade_black": "fadeblack"}
 SLICE_NAMES = {"left": "hlslice", "right": "hrslice", "up": "vuslice",
                "down": "vdslice", None: "hrslice"}
 MASK_SEQ_STYLES = ("wipe_left", "wipe_right", "wipe_up", "wipe_down",
