@@ -441,8 +441,8 @@ def test_over_the_limit_only_not_handled_goes_and_the_rest_waits(world,
     sent = []
     alert_tick(world, monkeypatch, sent)
     assert [s for s, _ in sent] and len(sent) == 1
-    assert sent[0][0].startswith("NOT HANDLED, ")
-    assert f": P0 #{t['id']} " in sent[0][0]
+    assert sent[0][0].startswith("Blocked: ")      # no P0 watch heartbeat
+    assert sent[0][0].endswith(f"(P0 #{t['id']})")
     world.c.execute("SELECT count(*) AS n FROM app_kv WHERE key LIKE %s",
                     (f"cockpit_alert:p0:{other['id']}:%",))
     assert world.c.fetchone()["n"] == 0

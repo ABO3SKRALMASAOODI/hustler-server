@@ -3,6 +3,11 @@
 but its a good idea to indicate whether it was handled correctly or not so i
 know whether i should freak out or no".
 
+Superseded the same day (owner: "not fixed yet, no action needed" is
+"absurd"): three kinds of email only, ISSUE, FIXED (proven by a replay) and
+BLOCKED, and every ISSUE ends in FIXED or BLOCKED, at the latest 4 h after it
+and then every 24 h while unproven. History of the earlier versions:
+
 358fd95f emailed only a P0 nobody claimed: #387, released with its fix live,
 was never mailed at all. fa908840 mailed every state change, and #883 (a
 customer who left mid-upload) sent BEING FIXED, then STILL STUCK 4 minutes
@@ -88,6 +93,9 @@ class Db:
     def verified(self, tid, at):
         self.add(tid, ev("verified", at))
 
+    def wont_fix(self, tid, at, reason="owner decision: not offered"):
+        self.add(tid, ev("wont_fix", at, reason=reason), "wont_fix")
+
     def verify_failed(self, tid, at):
         self.add(tid, ev("verify_failed", at, note="replay failed"), "open")
 
@@ -110,12 +118,18 @@ class Cur:
             self._row = {"got": True}
         elif "to_regclass" in flat:
             self._row = {"t": "tickets"}
+        elif "/* ticket watch */" in flat:
+            self._rows = [copy.deepcopy(t) for t in self.db.tickets.values()
+                          if t["status"] in ("open", "fixing")
+                          or t["updated_at"] >= params[0]]
         elif "FROM tickets" in flat:
             self._rows = [copy.deepcopy(t) for t in self.db.tickets.values()
-                          if t["severity"] == "P0"
-                          and t["status"] in ("open", "fixing", "fixed")
-                          and max(t["updated_at"], t["last_seen"])
-                          >= params[0]]
+                          if (t["severity"] == "P0" or any(
+                              h.get("severity") == "P0" for h in t["history"]))
+                          and (t["status"] in ("open", "fixing") or (
+                              t["status"] in ("fixed", "wont_fix")
+                              and max(t["updated_at"], t["last_seen"])
+                              >= params[0]))]
         elif flat.startswith("SELECT key FROM app_kv WHERE left(key"):
             self._rows = [{"key": k} for k in kv if k.startswith(params[1])]
         elif flat.startswith("INSERT INTO app_kv") and "DO NOTHING" in flat:
@@ -269,239 +283,227 @@ def test_a_p1_raised_to_p0_is_timed_from_the_raising(db):
     assert s["state"] == "NOT HANDLED" and s["p0_at"] == T0 + 30 * MIN
 
 
-# ── The emails: at most two an episode, held 10 minutes, never twice ─────
+# ── The emails: ISSUE, then FIXED or BLOCKED, and nothing else ───────────
 
 D883 = datetime(2026, 11, 7, 15, 56, tzinfo=timezone.utc)
 UPLOAD = ("film.mov · 3592318976 bytes · original · sent 806354944 · last "
           "heard upload_interrupted")
+TITLE = "Export failed: the render ran out of memory"
+FORBIDDEN = ("no action needed", "not fixed yet", "act now", "still stuck",
+             "waiting on customer,", "fix live")
 
 
-def _replay(db, start, end, step=timedelta(seconds=15)):
-    """Every alert tick from `start` to `end`, the watch beating every 5 min."""
+def run(db, start, end, step=MIN, beat=True):
+    """Every alert tick from `start` to `end` (the watch beating every 5 min
+    when `beat`): [(at, subject, body)]."""
     got, at = [], start
     while at <= end:
-        db.beat(at - timedelta(minutes=at.minute % 5, seconds=at.second))
-        got += [(at, s) for s in tick(db, at)]
+        if beat:
+            db.beat(at - timedelta(minutes=at.minute % 5, seconds=at.second))
+        sent = []
+        alerts.run_tick(at, send=lambda s, b: sent.append((s, b)) or True,
+                        rconn=Conn(db), wconn=Conn(db))
+        got += [(at, s, b) for s, b in sent]
         at += step
+    for _, subject, _ in got:
+        assert not any(w in subject.lower() for w in FORBIDDEN), subject
     return got
 
 
-def test_883_replayed_is_one_waiting_on_customer_never_still_stuck(db):
-    """#883, 7 Nov: opened 15:56, a Fixer claimed it at 16:05:29 (old code:
-    BEING FIXED at 16:05:45), released it at 16:09:30 because customer 2878
-    left mid-upload (old code: STILL STUCK at 16:09:45)."""
-    db.open(883, D883, user=2878, severity="P0", detail=UPLOAD,
-            title="An upload stopped without landing: the page went away")
+def subjects(got):
+    return [s for _, s, _ in got]
+
+
+def test_issue_at_the_first_claim_and_nothing_while_it_is_worked(db):
+    db.open(2, T0)
+    db.claim(2, T0 + 3 * MIN)
+    db.live(2, T0 + 40 * MIN)                # live is not proven: nothing
+    got = run(db, T0, T0 + 4 * 60 * MIN)
+    assert [(at, s) for at, s, _ in got] == [
+        (T0 + 3 * MIN, f"Issue: {TITLE} (P0 #2), being fixed")]
+
+
+def test_issue_ten_minutes_after_opening_when_nobody_claimed(db):
+    db.open(1, T0)
+    got = run(db, T0, T0 + 60 * MIN)
+    assert [(at, s) for at, s, _ in got] == [
+        (T0 + 10 * MIN, f"Issue: {TITLE} (P0 #1), being fixed")]
+
+
+def test_883_replayed_is_an_issue_then_blocked_on_the_customer_then_fixed(db):
+    """#883, 7 Nov: opened 15:56, claimed 16:05:29, handed back at 16:09:30
+    because customer 2878 left mid-upload (43 of 200 parts)."""
+    title = "An upload stopped without landing: the page went away"
+    db.open(883, D883, user=2878, detail=UPLOAD, title=title)
     db.claim(883, D883 + timedelta(minutes=9, seconds=29))
     db.release(883, D883 + timedelta(minutes=13, seconds=30),
                note="customer 2878 left mid-upload at part 43 of 200",
                waiting="the studio resumes from part 44 of 200 when they pick "
                        "the same file again in the same browser (6 days)")
-    got = _replay(db, D883, D883 + timedelta(hours=8))
-    subjects = [s for _, s in got]
-    assert not any("STILL STUCK" in s for s in subjects), subjects
-    assert len(subjects) <= 2
-    assert sum(s.startswith("WAITING ON CUSTOMER") for s in subjects) == 1
-    assert subjects == [
-        "WAITING ON CUSTOMER, no action needed: P0 #883 An upload stopped "
-        "without landing: the page went away (our side ready since 20:09 "
-        "Dubai, it moves when the customer returns)"]
-    # Sent once the hand-back held 10 minutes, not at it.
-    assert got[0][0] == D883 + timedelta(minutes=23, seconds=30)
+    got = run(db, D883, D883 + timedelta(hours=8),
+              step=timedelta(seconds=15))
+    assert [(at, s) for at, s, _ in got] == [
+        (D883 + timedelta(minutes=9, seconds=30),
+         f"Issue: {title} (P0 #883), being fixed"),
+        (D883 + timedelta(minutes=23, seconds=30),
+         f"Blocked: {title} (P0 #883)")]
+    from routes.newsletter_content import plain_text
+    text = plain_text(got[1][2])
+    assert "waits on the customer" in text and "part 44 of 200" in text
+    # The product side proven: FIXED, once.
+    db.live(883, D883 + timedelta(hours=9))
+    db.verified(883, D883 + timedelta(hours=9, minutes=30))
+    got = run(db, D883 + timedelta(hours=9), D883 + timedelta(hours=10))
+    assert subjects(got) == [f"Fixed: {title} (P0 #883)"]
 
 
-def test_883_released_without_the_flag_is_one_not_handled(db):
-    db.open(883, D883, user=2878, detail=UPLOAD,
-            title="An upload stopped without landing: the page went away")
-    db.claim(883, D883 + timedelta(minutes=9, seconds=29))
-    db.release(883, D883 + timedelta(minutes=13, seconds=30),
-               note="nothing more until they return")
-    got = _replay(db, D883, D883 + timedelta(hours=8))
-    assert [s for _, s in got] == [
-        "NOT HANDLED, no action needed: P0 #883 An upload stopped without "
-        "landing: the page went away (handed back at 20:09 Dubai with no fix)"]
-    assert got[0][0] == D883 + timedelta(minutes=13, seconds=30)
-
-
-def test_at_most_two_emails_an_episode_first_held_state_then_outcome(db):
+def test_a_live_fix_sends_nothing_until_a_replay_proves_it(db):
     db.open(1, T0)
-    got = tick(db, T0 + 10 * MIN)
-    assert len(got) == 1 and got[0].startswith(
-        "NOT HANDLED, no action needed: P0 #1 Export failed")
-    assert tick(db, T0 + 11 * MIN) == []                   # restart: nothing
-    db.claim(1, T0 + 12 * MIN)
-    assert tick(db, T0 + 30 * MIN) == []     # BEING FIXED is never the outcome
-    db.live(1, T0 + 31 * MIN)
-    assert tick(db, T0 + 50 * MIN) == []     # FIX LIVE waits for its proof
-    db.verified(1, T0 + 60 * MIN)
-    assert tick(db, T0 + 69 * MIN) == []     # held 9 min: pending
-    got = tick(db, T0 + 70 * MIN)
-    assert got == ["FIXED, no action needed: P0 #1 Export failed: the render "
-                   "ran out of memory (proven by a replay at 14:00 Dubai)"]
-    db.release(1, T0 + 72 * MIN)
-    db.fail(1, T0 + 80 * MIN)
-    db.beat(T0 + 88 * MIN)
-    assert tick(db, T0 + 90 * MIN) == []     # STILL STUCK: two already sent
-    assert sorted(k.split(":")[4] for k in db.kv
-                  if k.startswith("cockpit_alert:p0:")) == [
-        "fixed", "not-handled"]
-
-
-def test_the_proof_is_the_outcome_that_wins_over_fix_live(db):
-    db.open(2, T0)
-    db.claim(2, T0 + 3 * MIN)
-    db.live(2, T0 + 20 * MIN)
-    sent = [s for m in range(4, 61) for s in tick(db, T0 + m * MIN)]
-    assert [s.split(",")[0] for s in sent] == ["BEING FIXED"]
-    db.verified(2, T0 + 50 * MIN)
-    sent += [s for m in range(61, 300, 5) for s in tick(db, T0 + m * MIN)]
-    assert [s.split(",")[0] for s in sent] == ["BEING FIXED", "FIXED"]
-
-
-def test_fix_live_unproven_is_the_outcome_after_the_proof_wait(db):
-    db.open(2, T0)
-    db.claim(2, T0 + 3 * MIN)
-    assert len(tick(db, T0 + 13 * MIN)) == 1                 # BEING FIXED
-    db.live(2, T0 + 20 * MIN)
-    assert tick(db, T0 + 20 * MIN + intake.P0_PROOF_WAIT - MIN) == []
-    got = tick(db, T0 + 20 * MIN + intake.P0_PROOF_WAIT)
-    assert len(got) == 1 and got[0].startswith("FIX LIVE, no action needed")
-    assert "not proven yet" in got[0]
-
-
-def test_a_failed_proof_is_not_fixed_yet_and_taken_again_at_once(db):
-    db.open(3, T0)
-    db.claim(3, T0 + 3 * MIN)
-    db.live(3, T0 + 5 * MIN)
-    got = tick(db, T0 + 15 * MIN)
-    assert len(got) == 1 and got[0].startswith("FIX LIVE, no action needed")
-    db.verify_failed(3, T0 + 30 * MIN)
-    s = state(db, 3, T0 + 31 * MIN)
-    assert s["state"] == "NOT FIXED" and s["quiet_until"] is None
-    db.beat(T0 + 36 * MIN)
-    assert tick(db, T0 + 39 * MIN) == []                     # held 9 min
-    got = tick(db, T0 + 40 * MIN)
-    assert got == ["NOT FIXED yet, no action needed: P0 #3 Export failed: the "
-                   "render ran out of memory (the proof of fix 8f3c2a1 failed "
-                   "at 13:30 Dubai, a Fixer takes it again automatically)"]
-    db.claim(3, T0 + 41 * MIN)
-    s = state(db, 3, T0 + 42 * MIN)
-    assert s["state"] == "NOT FIXED" and s["retaken_at"] == T0 + 41 * MIN
-    db.live(3, T0 + 60 * MIN, sha=SHA2)
-    db.verified(3, T0 + 90 * MIN)
-    assert state(db, 3, T0 + 91 * MIN)["state"] == "FIXED"
-    assert tick(db, T0 + 120 * MIN) == []                    # two sent
-
-
-def test_a_state_that_changes_within_the_hold_replaces_the_pending_one(db):
-    db.open(2, T0)
-    db.claim(2, T0 + 3 * MIN)
-    assert tick(db, T0 + 4 * MIN) == []      # BEING FIXED pending
-    db.live(2, T0 + 8 * MIN)
-    db.release(2, T0 + 9 * MIN)
-    assert tick(db, T0 + 13 * MIN) == []     # BEING FIXED replaced, not sent
-    got = tick(db, T0 + 18 * MIN)
-    assert len(got) == 1 and got[0].startswith("FIX LIVE, no action needed")
-    assert tick(db, T0 + 6 * 60 * MIN) == []
-
-
-def test_a_p0_claimed_in_time_is_mailed_once_the_claim_held(db):
-    db.open(2, T0)
-    db.claim(2, T0 + 3 * MIN)
-    assert tick(db, T0 + 12 * MIN) == []
-    got = tick(db, T0 + 13 * MIN)
-    assert got == ["BEING FIXED, no action needed: P0 #2 Export failed: the "
-                   "render ran out of memory (a Fixer is on it since 13:03 "
-                   "Dubai)"]
-    assert tick(db, T0 + 20 * MIN) == [] and tick(db, T0 + 6 * 60 * MIN) == []
-
-
-def test_the_387_case_is_mailed_not_silenced(db):
-    """358fd95f: released with its fix live, #387 got no email at all."""
-    db.open(387, T0)
-    db.claim(387, T0 + 4 * MIN)
-    db.live(387, T0 + 50 * MIN)
-    db.release(387, T0 + 51 * MIN)
-    got = tick(db, T0 + 60 * MIN)
-    assert len(got) == 1 and got[0].startswith("FIX LIVE, no action needed: "
-                                               "P0 #387 ")
-    for hours in (1, 6, 7, 30):
-        assert tick(db, T0 + timedelta(hours=hours, minutes=52)) == [], hours
-
-
-def test_still_stuck_says_the_watch_takes_it_again_and_asks_nothing(db):
-    db.open(3, T0)
-    db.claim(3, T0 + 2 * MIN)
-    db.live(3, T0 + 3 * MIN)
-    db.release(3, T0 + 4 * MIN)
-    db.fail(3, T0 + 5 * MIN)                 # FIX LIVE held 2 min: replaced
-    db.beat(T0 + 13 * MIN, running=1, top=3)
-    sent = []
-    for m in range(4, 16):
-        alerts.run_tick(T0 + m * MIN, rconn=Conn(db), wconn=Conn(db),
-                        send=lambda s, b: sent.append((m, s, b)) or True)
-    (m, subject, body), = sent
-    assert m == 15 and subject.startswith("STILL STUCK, no action needed: "
-                                          "P0 #3 ")
+    db.claim(1, T0 + 3 * MIN)
+    db.live(1, T0 + 20 * MIN)
+    db.release(1, T0 + 21 * MIN)
+    db.verify_failed(1, T0 + 45 * MIN)       # once: a Fixer takes it again
+    db.claim(1, T0 + 50 * MIN)
+    db.live(1, T0 + 70 * MIN, sha=SHA2)
+    db.verified(1, T0 + 100 * MIN)
+    got = run(db, T0, T0 + 30 * 60 * MIN, step=5 * MIN)
+    assert [(at, s) for at, s, _ in got] == [
+        (T0 + 5 * MIN, f"Issue: {TITLE} (P0 #1), being fixed"),
+        (T0 + 100 * MIN, f"Fixed: {TITLE} (P0 #1)")]
     from routes.newsletter_content import plain_text
-    assert "starts a Fixer on it again automatically" in plain_text(body)
+    text = plain_text(got[1][2])
+    assert "What was wrong:" in text and "Proof: a replay" in text
+    assert "1e2d3c4" in text
 
 
-def test_needs_you_only_when_only_the_owner_can_fix_it(db):
-    db.open(4, T0)
-    db.beat(T0 - 30 * MIN)                  # the watch stopped 40 min ago
-    got = tick(db, T0 + 10 * MIN)
-    assert got == ["NOT HANDLED, needs you (wake the Mac): P0 #4 Export "
-                   "failed: the render ran out of memory (no Fixer 10 min "
-                   "after it opened)"]
-    db.open(5, T0, detail="final job 91240 failed: Your credit balance is "
-                          "too low to access the Anthropic API")
-    db.beat(T0 + 8 * MIN, running=3, top=3)
-    got = tick(db, T0 + 10 * MIN)
-    assert got == ["NOT HANDLED, needs you (top up Anthropic): P0 #5 Export "
-                   "failed: the render ran out of memory (no Fixer 10 min "
-                   "after it opened)"]
-    db.open(6, T0)
-    sent = []
-    alerts.run_tick(T0 + 11 * MIN, send=lambda s, b: sent.append((s, b)) or True,
-                    rconn=Conn(db), wconn=Conn(db))
-    (subject, body), = sent
-    assert subject.startswith("NOT HANDLED, no action needed: P0 #6 ")
-    from routes.newsletter_content import plain_text
-    assert "All 3 Fixers are busy" in plain_text(body)
-    assert "act now" not in subject
-
-
-def test_a_recurrence_is_a_new_episode_and_mailed_again(db):
+def test_a_close_through_the_gate_is_fixed_with_what_was_wrong(db):
     db.open(3, T0)
     db.claim(3, T0 + 2 * MIN)
     db.live(3, T0 + 20 * MIN)
-    db.close(3, T0 + 60 * MIN)
-    assert len(tick(db, T0 + 70 * MIN)) == 1
-    later = T0 + 5 * 60 * MIN
-    db.add(3, ev("recurred", later, auto=True), "open")
-    db.fail(3, later)
-    db.beat(later + 5 * MIN)
-    assert tick(db, later + 5 * MIN) == []
-    got = tick(db, later + 10 * MIN)
-    assert len(got) == 1 and got[0].startswith("NOT HANDLED, no action needed: "
-                                               "P0 #3")
+    got = run(db, T0, T0 + 55 * MIN, step=5 * MIN)
+    db.tickets[3]["root_cause"] = "the final render sized its memory by RAM"
+    db.add(3, ev("fixed", T0 + 60 * MIN, fix_sha=SHA,
+                 replay={"session": "p5302", "run": "r1"}), "fixed")
+    got += run(db, T0 + 60 * MIN, T0 + 3 * 60 * MIN, step=5 * MIN)
+    assert subjects(got) == [f"Issue: {TITLE} (P0 #3), being fixed",
+                             f"Fixed: {TITLE} (P0 #3)"]
+    from routes.newsletter_content import plain_text
+    text = plain_text(got[1][2])
+    assert ("What was wrong: the final render sized its memory by RAM. "
+            "Proof: a replay of the customer's request on a copy passed at "
+            "14:00 Dubai (session p5302, run r1)") in text
 
 
-def test_an_episode_from_before_the_switch_mails_its_outcome_only(db):
-    at = alerts.STATE_MAIL_FROM - timedelta(hours=2)
-    db.open(4, at)
-    db.claim(4, at + 5 * MIN)
-    now = alerts.STATE_MAIL_FROM + timedelta(hours=1)
-    assert tick(db, now) == []                  # BEING FIXED was known
-    db.live(4, now + MIN)
-    assert tick(db, now + 11 * MIN) == []       # the proof is the outcome
-    got = tick(db, now + MIN + intake.P0_PROOF_WAIT)
-    assert len(got) == 1 and got[0].startswith("FIX LIVE, no action needed: "
-                                               "P0 #4 ")
+def test_blocked_with_the_step_when_the_mac_sleeps_never_an_issue_too(db):
+    db.open(4, T0)
+    db.beat(T0 - 30 * MIN)                   # the watch stopped
+    got = run(db, T0, T0 + 30 * MIN, beat=False)
+    assert subjects(got) == [f"Blocked: {TITLE} (P0 #4)"]
+    from routes.newsletter_content import plain_text
+    text = plain_text(got[0][2])
+    assert "Only you can clear it: wake the Mac" in text
+    db.claim(4, T0 + 60 * MIN)
+    assert run(db, T0 + 60 * MIN, T0 + 3 * 60 * MIN) == []
 
 
-def test_keys_sent_before_this_change_count_toward_the_two(db):
+def test_blocked_with_the_step_when_a_provider_is_out_of_credit(db):
+    db.open(5, T0, detail="final job 91240 failed: Your credit balance is "
+                          "too low to access the Anthropic API")
+    got = run(db, T0, T0 + 20 * MIN)
+    assert subjects(got) == [f"Blocked: {TITLE} (P0 #5)"]
+    assert "top up Anthropic" in got[0][2]
+
+
+def test_blocked_when_the_proof_failed_twice_not_once(db):
+    db.open(6, T0)
+    db.claim(6, T0 + 2 * MIN)
+    db.live(6, T0 + 20 * MIN)
+    db.verify_failed(6, T0 + 45 * MIN)
+    db.claim(6, T0 + 50 * MIN)
+    db.live(6, T0 + 70 * MIN, sha=SHA2)
+    assert subjects(run(db, T0, T0 + 90 * MIN)) == [
+        f"Issue: {TITLE} (P0 #6), being fixed"]
+    db.verify_failed(6, T0 + 95 * MIN)
+    got = run(db, T0 + 91 * MIN, T0 + 3 * 60 * MIN)
+    assert subjects(got) == [f"Blocked: {TITLE} (P0 #6)"]
+    assert "failed the VERIFY replay 2 times" in got[0][2]
+    assert "Only you can clear it" not in got[0][2]
+
+
+def test_not_proven_after_4_h_is_blocked_then_daily_past_the_window(db):
+    db.open(7, T0)
+    db.claim(7, T0 + 3 * MIN)
+    db.live(7, T0 + 20 * MIN)
+    got = run(db, T0, T0 + 80 * 60 * MIN, step=10 * MIN)
+    issue = T0 + 3 * MIN
+    blocked = [at for at, s, _ in got if s.startswith("Blocked:")]
+    assert blocked == [issue + timedelta(hours=h) + 7 * MIN
+                       for h in (4, 28, 52, 76)]    # the 10-min tick grid
+    from routes.newsletter_content import plain_text
+    text = plain_text(got[1][2])
+    assert "Not proven fixed after 4 h" in text
+    assert "is live since 13:20 Dubai and its VERIFY replay has not passed" \
+        in text
+    assert "Not proven fixed after 76 h" in plain_text(got[-1][2])
+
+
+def _path(db, name):
+    tid = 10
+    db.open(tid, T0)
+    if name == "released":
+        db.claim(tid, T0 + 3 * MIN)
+        db.release(tid, T0 + 30 * MIN, note="could not reproduce")
+    elif name == "waiting":
+        db.claim(tid, T0 + 3 * MIN)
+        db.release(tid, T0 + 9 * MIN, waiting="resumes on re-pick")
+    elif name == "verify_failed":
+        db.claim(tid, T0 + 3 * MIN)
+        db.live(tid, T0 + 20 * MIN)
+        db.release(tid, T0 + 21 * MIN)
+        db.verify_failed(tid, T0 + 60 * MIN)
+    elif name == "wont_fix":
+        db.claim(tid, T0 + 3 * MIN)
+        db.wont_fix(tid, T0 + 30 * MIN)
+    elif name == "deduped":
+        db.fail(tid, T0 + 5 * MIN, user=2900)
+        db.fail(tid, T0 + 20 * MIN, user=2901)
+    elif name == "lowered_to_p1":
+        db.claim(tid, T0 + 3 * MIN)
+        db.release(tid, T0 + 20 * MIN)
+        db.tickets[tid]["severity"] = "P1"
+        db.add(tid, ev("lowered", T0 + 30 * MIN, severity="P1"))
+    elif name == "closed_fixed":
+        db.claim(tid, T0 + 3 * MIN)
+        db.live(tid, T0 + 20 * MIN)
+        db.close(tid, T0 + 60 * MIN)
+    elif name == "live_unproven":
+        db.claim(tid, T0 + 3 * MIN)
+        db.live(tid, T0 + 20 * MIN)
+        db.release(tid, T0 + 21 * MIN)
+    elif name == "failed_after_fix":
+        db.claim(tid, T0 + 3 * MIN)
+        db.live(tid, T0 + 20 * MIN)
+        db.release(tid, T0 + 21 * MIN)
+        db.fail(tid, T0 + 40 * MIN, user=2950)
+    # "no_failures": opened, nothing else ever happens
+
+
+@pytest.mark.parametrize("name", [
+    "released", "waiting", "verify_failed", "wont_fix", "deduped",
+    "lowered_to_p1", "closed_fixed", "live_unproven", "failed_after_fix",
+    "no_failures"])
+def test_no_silent_end_every_issue_ends_fixed_or_blocked(db, name):
+    _path(db, name)
+    got = run(db, T0, T0 + 5 * 60 * MIN, step=5 * MIN)
+    kinds = [s.split(":")[0] for s in subjects(got)]
+    assert kinds and kinds[0] in ("Issue", "Blocked", "Fixed"), kinds
+    assert set(kinds[1:] or kinds) & {"Fixed", "Blocked"}, (name, kinds)
+    end = next(at for at, s, _ in got if s.split(":")[0] in ("Fixed",
+                                                            "Blocked"))
+    assert end <= T0 + 10 * MIN + intake.P0_PROOF_BOUND + 5 * MIN, (name, end)
+
+
+def test_keys_from_the_earlier_versions_count_as_the_issue_told(db):
     """#883 in production already had BEING FIXED and STILL STUCK sent."""
     db.open(883, D883, user=2878, detail=UPLOAD)
     db.claim(883, D883 + timedelta(minutes=9, seconds=29))
@@ -509,21 +511,34 @@ def test_keys_sent_before_this_change_count_toward_the_two(db):
     ep = "cockpit_alert:p0:883:20261107T155600:"
     db.kv[ep + "being-fixed:20261107T160529"] = "1"
     db.kv[ep + "still-stuck:no-fix"] = "1"
-    assert _replay(db, D883 + 20 * MIN, D883 + timedelta(hours=8),
-                   step=MIN) == []
+    got = run(db, D883 + 20 * MIN, D883 + timedelta(hours=8), step=5 * MIN)
+    assert [s.split(":")[0] for s in subjects(got)] == ["Blocked"]
+    assert "Not proven fixed after 4 h" in got[0][2]
 
 
-def test_not_handled_passes_the_daily_cap_and_the_rest_wait(db):
-    db.kv[alerts._count_key(T0 + 20 * MIN)] = json.dumps(
-        {"n": alerts.MAX_ALERT_EMAILS_PER_DAY})
-    db.open(5, T0)
-    db.open(6, T0)
-    db.claim(6, T0 + 2 * MIN)
-    db.beat(T0 + 18 * MIN)
-    got = tick(db, T0 + 20 * MIN)
-    assert len(got) == 1 and got[0].startswith("NOT HANDLED, no action "
-                                               "needed: P0 #5")
-    assert not any(":6:" in k for k in db.kv)   # waits unclaimed
+def test_no_backlog_of_fixed_or_issue_at_the_switch(db):
+    at = alerts.STATE_MAIL_FROM - timedelta(hours=2)
+    db.open(8, at)
+    db.claim(8, at + 5 * MIN)
+    db.live(8, at + 20 * MIN)
+    db.close(8, alerts.FIXED_MAIL_FROM - 30 * MIN)
+    assert run(db, alerts.FIXED_MAIL_FROM, alerts.FIXED_MAIL_FROM + 2 * 60 *
+               MIN, step=10 * MIN) == []
+
+
+def test_a_recurrence_is_a_new_episode_and_a_new_issue(db):
+    db.open(3, T0)
+    db.claim(3, T0 + 2 * MIN)
+    db.live(3, T0 + 20 * MIN)
+    db.close(3, T0 + 60 * MIN)
+    later = T0 + 5 * 60 * MIN
+    db.add(3, ev("recurred", later, auto=True), "open")
+    db.fail(3, later)
+    got = run(db, T0, later + 20 * MIN, step=5 * MIN)
+    assert [(at, s) for at, s, _ in got] == [
+        (T0 + 5 * MIN, f"Issue: {TITLE} (P0 #3), being fixed"),
+        (T0 + 60 * MIN, f"Fixed: {TITLE} (P0 #3)"),
+        (later + 10 * MIN, f"Issue: {TITLE} (P0 #3), being fixed")]
 
 
 def test_a_failed_send_is_sent_by_the_next_tick(db):
@@ -534,7 +549,18 @@ def test_a_failed_send_is_sent_by_the_next_tick(db):
     assert tick(db, T0 + 12 * MIN) == []
 
 
-def test_each_p0_state_is_its_own_email_and_others_share_one(db, monkeypatch):
+def test_only_what_the_owner_can_clear_passes_the_daily_cap(db):
+    db.kv[alerts._count_key(T0 + 20 * MIN)] = json.dumps(
+        {"n": alerts.MAX_ALERT_EMAILS_PER_DAY})
+    db.open(5, T0)
+    db.open(6, T0)
+    db.claim(6, T0 + 2 * MIN)
+    got = tick(db, T0 + 20 * MIN)         # the watch last beat at T0
+    assert got == [f"Blocked: {TITLE} (P0 #5)"]
+    assert not any(":6:" in k for k in db.kv)   # its ISSUE waits unclaimed
+
+
+def test_each_p0_email_is_its_own_and_others_share_one(db, monkeypatch):
     from ops_loop import paid_out
     monkeypatch.setattr(paid_out, "alerts", lambda cur, now: [
         (91, "Subscriber #2123 ran out of credits with a request undone")])
@@ -542,86 +568,52 @@ def test_each_p0_state_is_its_own_email_and_others_share_one(db, monkeypatch):
     db.open(9, T0)
     got = tick(db, T0 + 10 * MIN)
     assert sorted(got) == [
-        "NOT HANDLED, no action needed: P0 #8 Export failed: the render ran "
-        "out of memory (no Fixer 10 min after it opened)",
-        "NOT HANDLED, no action needed: P0 #9 Export failed: the render ran "
-        "out of memory (no Fixer 10 min after it opened)",
+        f"Issue: {TITLE} (P0 #8), being fixed",
+        f"Issue: {TITLE} (P0 #9), being fixed",
         "Valmera alert: A subscriber ran out of credits with their request "
         "undone"]
 
 
+def test_the_digest_lists_new_tickets_and_every_one_open_over_24_h(db):
+    now = T0 + 30 * 60 * MIN
+    db.open(20, now - 2 * 60 * MIN)                          # P0, new
+    db.open(21, now - 3 * 24 * 60 * MIN, severity="P1", title="Slow index")
+    db.open(22, now - 5 * 60 * MIN, severity="P2", title="Caption drift")
+    db.claim(22, now - 4 * 60 * MIN)
+    db.open(23, now - 2 * 24 * 60 * MIN, severity="P1", title="Old, fixed")
+    db.close(23, now - 30 * 60 * MIN)
+    tw = alerts.ticket_watch(Cur(db), now)
+    from routes.newsletter_content import plain_text
+    new = [plain_text(x) for x in tw["new"]]
+    old = [plain_text(x) for x in tw["old"]]
+    assert [x.split(" ")[0] for x in new] == ["#22", "#20"]
+    assert new[1].endswith("nobody on it yet") and "being fixed" in new[0]
+    assert len(old) == 1 and old[0].startswith("#21 ")
+    assert old[0].endswith("[P1] Slow index: open for 3 d 0 h")
+    lines = dict(alerts.digest_sections({"ticket_watch": tw}))[
+        "Every issue, and what is still open"]
+    assert any("Slow index" in x for x in lines)
+
+
 # ── What the owner reads ─────────────────────────────────────────────────
 
-def _samples():
-    db = Db()
+def test_rendered_samples_of_the_three_kinds(db, capsys):
+    from routes.newsletter_content import plain_text
     db.open(861, T0)
     db.fail(861, T0 + 2 * MIN, user=2846)
-    out = {"NOT HANDLED": (state(db, 861, T0 + 12 * MIN), T0 + 12 * MIN)}
-    db.claim(861, T0 + 14 * MIN)
-    out["BEING FIXED"] = (state(db, 861, T0 + 24 * MIN), T0 + 24 * MIN)
-    db.live(861, T0 + 52 * MIN)
-    db.release(861, T0 + 53 * MIN)
-    out["FIX LIVE"] = (state(db, 861, T0 + 62 * MIN), T0 + 62 * MIN)
-    db.fail(861, T0 + 69 * MIN, user=3001)
-    out["STILL STUCK"] = (state(db, 861, T0 + 80 * MIN), T0 + 80 * MIN)
-    db.claim(861, T0 + 82 * MIN)
-    db.live(861, T0 + 100 * MIN, sha=SHA2)
-    db.verify_failed(861, T0 + 125 * MIN)
-    out["NOT FIXED"] = (state(db, 861, T0 + 135 * MIN), T0 + 135 * MIN)
-    db.claim(861, T0 + 137 * MIN)
-    db.live(861, T0 + 160 * MIN)
-    db.verified(861, T0 + 190 * MIN)
-    out["FIXED"] = (state(db, 861, T0 + 200 * MIN), T0 + 200 * MIN)
-    w = Db()
-    w.open(883, D883, user=2878, detail=UPLOAD,
-           title="An upload stopped without landing: the page went away")
-    w.claim(883, D883 + timedelta(minutes=9, seconds=29))
-    w.release(883, D883 + timedelta(minutes=13, seconds=30),
-              waiting="the studio resumes from part 44 of 200 when they pick "
-                      "the same file again in the same browser within 6 days")
-    out["WAITING ON CUSTOMER"] = (state(w, 883, D883 + 24 * MIN),
-                                  D883 + 24 * MIN)
-    return out
-
-
-def test_rendered_samples_say_state_doing_customers_stuck_link_and_what(capsys):
-    from routes.newsletter_content import plain_text
-    for name, (s, now) in _samples().items():
-        assert s["state"] == name, (name, s["state"])
-        subject, body = alerts.p0_mail(s, now, beat=3, late=20, fixers=(1, 3))
-        assert subject.startswith(alerts.STATE_LABELS.get(name, name)
-                                  + ", no action needed: ")
-        text = plain_text(body)
-        assert "What the system is doing:" in text
-        assert "Customers:" in text and "Stuck right now:" in text
-        assert "What happened:" in text and "act now" not in text
-        assert f"?tab=tickets&ticket={s['id']}" in body
-        with capsys.disabled():
-            print(f"\n──── {name} ────\nSubject: {subject}\n{text}")
-    s, now = _samples()["NOT HANDLED"]
-    subject, body = alerts.p0_mail(s, now, beat=3, late=20)
-    assert subject == ("NOT HANDLED, no action needed: P0 #861 Export failed: "
-                       "the render ran out of memory (no Fixer 12 min after "
-                       "it opened)")
-    assert "#dc2626" not in body and "2 customers" in plain_text(body)
-    assert "Yes. No fix is live" in plain_text(body)
-    assert "starts a Fixer on it automatically" in plain_text(body)
-    subject, body = alerts.p0_mail(s, now, beat=25, late=20)
-    assert subject.startswith("NOT HANDLED, needs you (wake the Mac): ")
-    assert "#dc2626" in body and "Needs you: wake the Mac" in plain_text(body)
-    s, now = _samples()["FIX LIVE"]
-    text = plain_text(alerts.p0_mail(s, now)[1])
-    assert "No. Nobody has failed on it since the fix went live" in text
-    assert "not proven yet" in text and "VERIFY run" in text
-    s, now = _samples()["FIXED"]
-    subject, body = alerts.p0_mail(s, now)
-    assert "(proven by a replay at 16:10 Dubai)" in subject
-    s, now = _samples()["NOT FIXED"]
-    subject, body = alerts.p0_mail(s, now, beat=3, late=20)
-    assert subject.startswith("NOT FIXED yet, no action needed: ")
-    assert ("the proof of fix 1e2d3c4 failed at 15:05 Dubai, a Fixer takes "
-            "it again automatically") in subject
-    assert "starts a Fixer on it again automatically" in plain_text(body)
-    s, now = _samples()["WAITING ON CUSTOMER"]
-    text = plain_text(alerts.p0_mail(s, now)[1])
-    assert "part 44 of 200" in text and "only their return moves it" in text
+    db.claim(861, T0 + 4 * MIN)
+    db.live(861, T0 + 40 * MIN)
+    db.open(862, T0)
+    db.beat(T0 - 30 * MIN)
+    got = run(db, T0, T0 + 60 * MIN, step=2 * MIN, beat=False)
+    db.tickets[861]["root_cause"] = ("the final render sized its memory by "
+                                     "the host's RAM, not the container's")
+    db.add(861, ev("fixed", T0 + 70 * MIN, fix_sha=SHA,
+                   replay={"session": "p5302", "run": "r1"}), "fixed")
+    got += run(db, T0 + 70 * MIN, T0 + 80 * MIN, step=2 * MIN, beat=False)
+    with capsys.disabled():
+        for _, subject, body in got:
+            print(f"\n──── {subject.split(':')[0]} ────\nSubject: {subject}\n"
+                  f"{plain_text(body)}")
+    assert [s.split(":")[0] for s in subjects(got)] == ["Issue", "Blocked",
+                                                        "Fixed"]

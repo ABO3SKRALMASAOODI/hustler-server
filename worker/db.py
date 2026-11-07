@@ -2717,22 +2717,26 @@ def staged_assets(conn, project_id):
         return cur.fetchall()
 
 
-def extracted_audio_asset(conn, project_id, source_key, source_sha=None):
+def extracted_audio_asset(conn, project_id, source_key, source_sha=None,
+                          stem=""):
     """The music asset previously extracted from THIS video, or None.
 
     Matched on the source's sha as well as its storage key: the studio mints a
     fresh object per upload, so a user who attaches the same file twice — which
     is exactly what someone does when the first attempt was refused — would
     otherwise pay the download + encode again for audio we already have.
+    ``stem`` picks one separated side ('music' or 'voice', ticket #386);
+    the default '' is the whole soundtrack, never a separated side.
     """
     with conn.cursor() as cur:
         cur.execute("""SELECT * FROM assets
                        WHERE project_id = %s AND kind = 'music'
                          AND (meta->>'from_asset_key' = %s
                               OR (%s <> '' AND meta->>'from_sha256' = %s))
+                         AND coalesce(meta->>'stem', '') = %s
                        ORDER BY id DESC LIMIT 1""",
                     (project_id, source_key, source_sha or "",
-                     source_sha or ""))
+                     source_sha or "", stem or ""))
         return cur.fetchone()
 
 

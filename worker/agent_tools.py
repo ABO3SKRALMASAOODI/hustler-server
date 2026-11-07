@@ -6381,9 +6381,85 @@ def _sound_only_note(source_name, audio_asset):
             "the clip itself was added.")
 
 
-def extract_audio(ctx, asset_key):
+STEM_PARTS = {"music": ("accomp", "music only"),
+              "voice": ("vocals", "voice only")}
+
+
+def _clip_stem(ctx, asset, part):
+    """(audio_asset, error): ONE side of a clip's soundtrack, separated.
+
+    Ticket #386: a customer linked a reference video and asked for its
+    background music under their own video. add_music on the clip took the
+    whole soundtrack, the speaker included, and separate_music works only on
+    the main video, so the editor told the customer it could not be done.
+    The clip's sound is lifted once (_audio_from_clip), separated once by
+    the same Demucs job separate_music uses, and the chosen side is saved as
+    a music asset that names its source clip, so the music gate treats it
+    exactly like the clip's own sound."""
+    stem_name, label = STEM_PARTS[part]
+    name = _asset_name(asset)
+    cached = ctx.db.run(dbx.extracted_audio_asset, ctx.project_id,
+                        asset["storage_key"], asset.get("sha256"), part)
+    if cached:
+        return cached, None
+    if _stems_supported() is False:
+        return None, (
+            "Separating music from speech isn't available on the render "
+            "service right now, so the " + label.split()[0] + " of '"
+            + name + "' cannot be taken on its own. part='all' still takes "
+            "the clip's whole soundtrack. Tell the user plainly.")
+    full, _note, err = _audio_from_clip(ctx, asset)
+    if err:
+        return None, err
+    dur = float(full.get("duration_s") or 0.0)
+    if dur > config.STEMS_MAX_SOURCE_S:
+        return None, (
+            f"'{name}' has {dur / 60:.0f} minutes of sound; separation "
+            f"supports up to {config.STEMS_MAX_SOURCE_S / 60:.0f} minutes. "
+            "Tell the user plainly; part='all' still takes the whole "
+            "soundtrack.")
+    base = (f"stems/{asset['sha256']}" if asset.get("sha256") else
+            f"stems/p{ctx.project_id}/a{asset['id']}")
+    keys = {"vocals": f"{base}/vocals.m4a", "accomp": f"{base}/accomp.m4a"}
+    if not (storage.exists(keys["vocals"]) and storage.exists(keys["accomp"])):
+        try:
+            res = remote.run_stems_remote(
+                ctx.project_id,
+                {"src_key": full["storage_key"], "vocals_key": keys["vocals"],
+                 "accomp_key": keys["accomp"]},
+                user_id=ctx.job.get("user_id"))
+        except Exception as e:
+            return None, (
+                f"Separating the sound of '{name}' failed ({str(e)[:160]}). "
+                "Nothing was added. Tell the user honestly; part='all' "
+                "still takes the whole soundtrack.")
+        if not (res or {}).get("ok"):
+            return None, (f"Separating the sound of '{name}' failed "
+                          f"({str(res)[:120]}). Nothing was added.")
+    key = keys[stem_name]
+    fname = f"{os.path.splitext(name)[0][:60]} ({label}).m4a"
+    row = {"id": ctx.db.run(dbx.insert_asset, ctx.project_id, "music", key,
+                            duration_s=dur or None,
+                            meta={"filename": fname,
+                                  "from_asset_key": asset["storage_key"],
+                                  "from_sha256": asset.get("sha256"),
+                                  "extracted_from_video": True,
+                                  "stem": part,
+                                  "caption": f"{label}, separated from the "
+                                             f"video '{name}'"}),
+           "kind": "music", "storage_key": key, "duration_s": dur,
+           "meta": {"filename": fname, "stem": part}}
+    ctx.audio_extracted.append({"storage_key": key, "from": name})
+    return row, None
+
+
+def extract_audio(ctx, asset_key, part="all"):
     """Take ONLY the sound out of an uploaded video, as a file the audio tools
-    can use. The video's picture is not shown anywhere."""
+    can use. The video's picture is not shown anywhere. part='music' keeps
+    the clip's music and drops its speech; part='voice' the reverse."""
+    part = str(part or "all").strip().lower()
+    if part not in ("all", "music", "voice"):
+        return "REJECTED: part must be 'all', 'music' or 'voice'."
     asset = ctx.db.run(dbx.asset_by_key, ctx.project_id, asset_key)
     if asset and asset["kind"] in ("original", "proxy"):
         return ("REJECTED: that is the MAIN video — its own sound is already "
@@ -6405,6 +6481,18 @@ def extract_audio(ctx, asset_key):
                 if avail else "No video has been uploaded to this project "
                               "besides the main one.")
         return (f"REJECTED: '{asset_key}' is not an uploaded video. {hint}")
+    if part != "all":
+        got, err = _clip_stem(ctx, asset, part)
+        if err:
+            return err
+        dur = got.get("duration_s") or 0.0
+        return (f"The {STEM_PARTS[part][1]} sound of '{_asset_name(asset)}' "
+                f"— storage_key={got['storage_key']} ({dur:.0f}s), separated "
+                "from the rest of its soundtrack. Nothing is in the edit yet: "
+                "pass that key to add_music. Separation is strong but not "
+                "surgical: render_preview and check before promising that "
+                "no trace of the other side remains. The video's picture is "
+                "NOT used.")
     got, note, err = _audio_from_clip(ctx, asset)
     if err:
         return err
@@ -31671,8 +31759,13 @@ TOOLS = {
                       "tools does the same thing in one step; call this when "
                       "you want the file first (e.g. to get_audio_analysis "
                       "its beats). If the clip is silent it says so — never "
-                      "claim a sound was added.",
-                      {"asset_key": {"type": "string"}}),
+                      "claim a sound was added. part='music' keeps only "
+                      "its music, without the speaker (a reference "
+                      "video's background music); 'voice' only the "
+                      "speech.",
+                      {"asset_key": {"type": "string"},
+                       "part": {"type": "string",
+                                "enum": ["all", "music", "voice"]}}),
     "find_footage": (find_footage, "Find REAL footage of a NAMED topic on "
                      "the web — the b-roll move: the speaker mentions Elon "
                      "Musk, the cut shows his rocket. Query the concrete "
@@ -34465,7 +34558,8 @@ _COMPACT_CONTRACTS = {
     "extract_audio": (
         "Extract sound from an uploaded video_clip by exact asset_key. Returns "
         "a music storage_key to place with add_music/add_sfx. Silent sources "
-        "cannot yield sound. Main-video audio is already in the edit; use set_volume."),
+        "cannot yield sound. part=music drops its speech. Main-video audio is "
+        "already in the edit; use set_volume."),
     "get_edl": (
         "Read current version and exact EDL shapes. sections accepts layer names "
         "or an array; compact=true gives an index; offset/limit page long lists. "

@@ -12,11 +12,10 @@ How it runs:
     BEFORE it is sent, so restarts, overlapping workers and retries never
     send the same alert twice; a failed send releases its claims for the
     next tick;
-  * alerts are what the owner must not miss: every P0 ticket, with what the
-    system is doing about it (7 Nov 2026: at most two emails an episode, its
-    first state that held 10 minutes and its outcome; subject NOT HANDLED /
-    BEING FIXED / FIX LIVE / WAITING ON CUSTOMER / STILL STUCK, then "no
-    action needed" or "needs you (<step>)"; see p0_alerts), a paying
+  * alerts are what the owner must not miss: every P0 ticket as three
+    kinds of email (7 Nov 2026): ISSUE when it appears, FIXED once a replay
+    proves the fix, BLOCKED when something keeps it from being fixed or it
+    is not proven fixed 4 h after the ISSUE (see p0_alerts), a paying
     customer out of credits with their request undone, a scheduled agent
     that stopped, or a model provider out of credit; never payments,
     renewals, refunds or spend;
@@ -119,34 +118,31 @@ def _customer_sql(alias="u"):
     return (f"{defs.customer(alias)} AND NOT ({alias}.id = ANY(%(internal)s))")
 
 
-# ── Every P0, with what the system is doing about it (owner, 7 Nov 2026) ──
-# "i should still receive the mail so i dont miss something and i become blind
-# but its a good idea to indicate whether it was handled correctly or not so i
-# know whether i should freak out or no"; then "try not to make it annoying"
-# (#883: BEING FIXED, then STILL STUCK 4 minutes later, for a customer who had
-# left mid-upload); then "it is stupid that I need to act ... what I'm gonna do
-# is I'm gonna come to you and tell you". So:
-#   * at most intake.P0_MAILS_PER_EPISODE emails an episode: its first state
-#     that held intake.P0_MAIL_HOLD (NOT HANDLED and STILL STUCK at once), then
-#     its outcome, never a second BEING FIXED. A state that changes within the
-#     hold replaces the pending email: nothing is claimed until it held;
-#   * the subject is the state, then "no action needed", or "needs you (<the
-#     exact step>)" only when the cause is one only the owner can fix: the P0
-#     watch stopped (the Mac asleep or offline, or Claude's weekly limit), or a
-#     model provider out of credit. The body says what the system does next.
-# The dedupe keys are app_kv claims,
-# `cockpit_alert:p0:<id>:<episode>:<state>:<variant>`: what was sent survives
-# restarts, and the keys sent before this change count toward the two. An
-# episode that began before STATE_MAIL_FROM counts its state at that moment as
-# one email already told (the old alerts covered it).
+# ── Every P0: ISSUE, then FIXED or BLOCKED (owner, 7 Nov 2026) ───────────
+# "try not to make it annoying"; "it is stupid that I need to act"; and then
+# "you need to make sure that you actually don't accidentally start omitting
+# issues or things that gets unfixed". Three kinds of email a P0 episode, and
+# nothing else:
+#   ISSUE    "Issue: <title> (P0 #N), being fixed", at the first claim or
+#            intake.P0_ISSUE_AFTER after it opened, whichever comes first;
+#   FIXED    "Fixed: <title> (P0 #N)", once the fix is PROVEN: a 'verified'
+#            event or a close through the replay gate. Live is not proven;
+#   BLOCKED  "Blocked: <title> (P0 #N)", with the reason, and the step when
+#            only the owner can clear it: the P0 watch stopped (the Mac asleep
+#            or offline, or Claude's weekly limit), a provider out of credit,
+#            the proof failed twice, a hand-back waiting on the customer, a
+#            won't-fix close, or not proven fixed intake.P0_PROOF_BOUND after
+#            the ISSUE (then again every intake.P0_BLOCKED_REPEAT while it
+#            stays unproven).
+# So every ISSUE ends in FIXED or BLOCKED. Dedupe keys are app_kv claims,
+# `cockpit_alert:p0:<id>:<episode>:<kind>`; keys sent by earlier versions of
+# this email count as the ISSUE told. An episode from before STATE_MAIL_FROM
+# was told by the old alerts; FIXED and won't-fix closes from before
+# FIXED_MAIL_FROM are not mailed now (no backlog at the switch).
 P0_PREFIX = "p0:"
 STATE_MAIL_FROM = datetime(2026, 11, 7, 15, 0, tzinfo=timezone.utc)
-NEEDS_YOU_COLOUR = "#dc2626"
-STATE_COLOURS = {"NOT HANDLED": "#d97706", "STILL STUCK": "#d97706",
-                 "BEING FIXED": "#2563eb", "FIX LIVE": "#0891b2",
-                 "WAITING ON CUSTOMER": "#7c3aed", "FIXED": "#16a34a",
-                 "NOT FIXED": "#d97706"}
-STATE_LABELS = {"NOT FIXED": "NOT FIXED yet"}
+FIXED_MAIL_FROM = datetime(2026, 11, 7, 16, 50, tzinfo=timezone.utc)
+OWNER_STEPS = ("watch", "provider")     # BLOCKED only the owner can clear
 # The provider error codes the out-of-credit alert below reads (event_alerts),
 # with who to top up. Machine text from the provider, never a customer's.
 PROVIDER_OUT = (("credit balance is too low", "Anthropic"),
@@ -158,23 +154,16 @@ def _p0_episode_key(s):
     return f"{P0_PREFIX}{s['id']}:{s['p0_at']:%Y%m%dT%H%M%S}:"
 
 
-def _p0_key(s):
-    return (_p0_episode_key(s) + s["state"].lower().replace(" ", "-") + ":"
-            + str(s["variant"]))
-
-
 def _p0_sent(rcur, s):
-    """The emails already sent for this episode, as their keys: one per email.
-    An episode from before STATE_MAIL_FROM counts its state then as one."""
+    """What was already mailed for this episode: the key suffixes after the
+    episode key ('issue', 'fixed', 'blocked:<cause>', or an older version's
+    state keys). An episode from before STATE_MAIL_FROM counts as told."""
     prefix = "cockpit_alert:" + _p0_episode_key(s)
     rcur.execute("SELECT key FROM app_kv WHERE left(key, %s) = %s",
                  (len(prefix), prefix))
-    sent = {r["key"][len("cockpit_alert:"):] for r in rcur.fetchall() or []}
+    sent = {r["key"][len(prefix):] for r in rcur.fetchall() or []}
     if s["p0_at"] < STATE_MAIL_FROM:
-        from ops_loop import intake
-        before = intake.p0_state(s["row"], STATE_MAIL_FROM)
-        sent.add(_p0_key(before) if before and before["state"]
-                 else "known before state mails")
+        sent.add("known before state mails")
     return sent
 
 
@@ -192,6 +181,10 @@ def _plural(n, word):
     return f"{n} {word}{'' if n == 1 else 's'}"
 
 
+def _one(text, n=240):
+    return " ".join(str(text or "").split())[:n]
+
+
 def _provider_out(s):
     """Who to top up when this P0's customers failed on a provider out of
     credit, from the provider's own error code in the failure details."""
@@ -203,221 +196,257 @@ def _provider_out(s):
     return None
 
 
-def _p0_doing(s, now, beat, late, fixers):
-    """(the owner's step or None, what the system is doing) for one P0: why
-    nobody holds it and what happens next, read from the P0 watch's heartbeat
-    and the provider errors on the ticket."""
-    state = s["state"]
-    provider = _provider_out(s) if s["stuck_now"] else None
-    if provider:
-        return (f"top up {provider}",
-                f"Its customers failed because {provider} is out of credit. "
-                "Only you can top it up; no Fixer can. Once topped up, the "
-                "next attempt runs as usual.")
-    if state == "BEING FIXED":
-        return None, "A Fixer is on it."
-    if state == "FIX LIVE":
-        return None, ("The fix is live but not proven yet: a VERIFY run "
-                      "replays the customer's request on a copy once it has "
-                      "been live 20 minutes, and the ticket closes only when "
-                      "that replay reaches the bar.")
-    if state == "FIXED":
-        return None, (f"Proven by a replay at {_when(s['verified_at'], now)}"
-                      + (": the ticket is closed." if s["status"] == "fixed"
-                         else "."))
-    if state == "NOT FIXED" and s.get("retaken_at"):
-        return None, (f"The proof failed, and a Fixer took it again "
-                      f"automatically at {_when(s['retaken_at'], now)}.")
-    if state == "WAITING ON CUSTOMER":
-        return None, ("Waiting on the customer: our side is ready and only "
-                      "their return moves it. How the product picks it up: "
-                      + " ".join(str(s["waiting_on_customer"]).split())
-                      .rstrip(".") + ".")
-    # NOT HANDLED or STILL STUCK: nobody holds it. Is the watch running?
-    if beat is None or (late is not None and beat >= late):
+def _issue_at(s):
+    due = s["p0_at"] + intake_p0().P0_ISSUE_AFTER
+    return min(s["claimed_at"], due) if s.get("claimed_at") else due
+
+
+def intake_p0():
+    from ops_loop import intake
+    return intake
+
+
+def _in_the_way(s, now, beat):
+    """Where it stands, in one or two sentences, for a BLOCKED email."""
+    sha = (s.get("live_sha") or "")[:7]
+    if s.get("waiting_now"):
+        return (f"It waits on the customer since "
+                f"{_when(s['released_at'], now)}: our side is ready and only "
+                "their return can move it. How the product picks it up: "
+                f"{_one(s['waiting_now'], 400).rstrip('.')}.")
+    if s.get("verify_failed_at") and not s.get("verified_at"):
+        return (f"Its fix {sha} failed its VERIFY replay at "
+                f"{_when(s['verify_failed_at'], now)}"
+                + (f" ({_one(s.get('verify_note'), 200)})"
+                   if s.get("verify_note") else "") + "; "
+                + ("a Fixer took it again." if s["status"] == "fixing" else
+                   "the P0 watch takes it again."))
+    if s.get("failed_after_fix_at"):
+        return (f"A customer failed after fix {sha} went live, at "
+                f"{_when(s['failed_after_fix_at'], now)}"
+                + ("; a Fixer is on it." if s["status"] == "fixing" else "."))
+    if s.get("live_at"):
+        return (f"Fix {sha} is live since {_when(s['live_at'], now)} and its "
+                "VERIFY replay has not passed yet.")
+    if s["status"] == "fixing":
+        return (f"A Fixer is on it since {_when(s['last_claim_at'], now)}, "
+                "with no fix live yet.")
+    if s.get("released_at"):
+        return (f"A Fixer handed it back at {_when(s['released_at'], now)} "
+                "with no fix"
+                + (f": {_one(s.get('release_note'), 200)}"
+                   if s.get("release_note") else "") + ".")
+    return ("Nobody has claimed it"
+            + (f"; the P0 watch last ran {beat} min ago." if beat is not None
+               else "."))
+
+
+def p0_blocked(s, now, beat, late):
+    """[(cause, reason, owner's step or None)] for what keeps this unproven P0
+    from being fixed right now, most urgent first."""
+    out = []
+    provider = _provider_out(s)
+    if provider and s["stuck_now"]:
+        out.append(("provider", f"{provider} is out of credit: its customers' "
+                    "requests fail on it, and no Fixer can change that.",
+                    f"top up {provider}"))
+    stopped = beat is None or (late is not None and beat >= late)
+    if stopped and s.get("due_at") and now >= s["due_at"]:
         ran = (f"last ran {beat} min ago" if beat is not None
                else "has not reported running")
-        return ("wake the Mac",
-                f"The P0 watch {ran}, so nothing starts a Fixer: the Mac is "
-                "asleep or offline, or Claude's weekly usage limit is reached "
-                "(it stops every watcher until the reset). Wake the Mac; if "
-                "it is awake, the usage limit is the cause.")
-    if s.get("stale_claim"):
-        return None, ("The P0 watch takes a claim this old over at its next "
-                      f"run (it last ran {beat} min ago).")
-    running, top = fixers or (None, None)
-    busy = (f"All {top} Fixers are busy, so " if top and running is not None
-            and running >= top else "")
-    if s.get("quiet_until") and now < s["quiet_until"]:
-        return None, (f"{busy}The P0 watch takes it again at "
-                      f"{_when(s['quiet_until'], now)} (6 h after a hand-back), "
-                      "or at once if a customer fails on it.")
-    again = "again " if state in ("STILL STUCK", "NOT FIXED") else ""
-    return None, (f"{busy}{'t' if busy else 'T'}he P0 watch starts a Fixer on "
-                  f"it {again}automatically at its next run (it last ran "
-                  f"{beat} min ago).")
+        dead = (f"A Fixer claimed it at {_when(s['last_claim_at'], now)} and "
+                "nothing went live: the run has probably died. "
+                if s["status"] == "fixing" else "")
+        out.append(("watch", f"{dead}The P0 watch {ran}, so no Fixer can start "
+                    "on it: the Mac is asleep or offline, or Claude's weekly "
+                    "usage limit is reached.",
+                    "wake the Mac (if it is awake, the weekly usage limit is "
+                    "the cause and it clears at the weekly reset)"))
+    if s.get("verify_fails", 0) >= 2:
+        out.append(("verify-twice", f"Its fix failed the VERIFY replay "
+                    f"{s['verify_fails']} times, latest at "
+                    f"{_when(s['verify_failed_at'] or now, now)}"
+                    + (f": {_one(s.get('verify_note'), 200)}"
+                       if s.get("verify_note") else "")
+                    + ". A Fixer takes it again automatically.", None))
+    if s.get("waiting_now") and \
+            now - s["released_at"] >= intake_p0().P0_ISSUE_AFTER:
+        out.append((f"waiting-{s['released_at']:%Y%m%dT%H%M%S}",
+                    _in_the_way(s, now, beat), None))
+    return out
 
 
-def p0_mail(s, now, beat=None, late=None, fixers=None):
-    """(subject, body html) for one P0's state. The subject is the state, then
-    "no action needed" or "needs you (<step>)"; the body says what the system
-    is doing, how many customers, whether anyone is stuck now, what happened,
-    and links the ticket."""
-    state, tid = s["state"], s["id"]
-    title = " ".join(str(s["title"]).split())[:80]
+def _p0_lines(s, now, extra):
+    tid = s["id"]
+    what = _e(_one(s["title"], 80)) + (f": {_e(_one(s.get('what')))}"
+                                       if s.get("what") else "")
+    return extra + [
+        f"<b>Customers:</b> {_plural(s['customers'], 'customer')} since it "
+        f"opened at {_e(_when(s['p0_at'], now))}.",
+        f"<b>What happened:</b> {what}",
+        f"<b>Ticket:</b> <a href=\"{ADMIN_URL}?tab=tickets&ticket={tid}\" "
+        f"style=\"color:#f87171\">P0 #{tid}</a>"]
+
+
+def p0_issue_mail(s, now, beat=None):
+    title, tid = _one(s["title"], 80), s["id"]
+    subject = f"Issue: {title} (P0 #{tid}), being fixed"
+    who = (f"A Fixer claimed it at {_when(s['claimed_at'], now)}."
+           if s.get("claimed_at") else
+           "The P0 watch starts a Fixer on it automatically"
+           + (f" (it last ran {beat} min ago)." if beat is not None else "."))
+    body = _shell(f"Issue: P0 #{tid}", [("Being fixed", _p0_lines(s, now, [
+        f"A customer issue opened at {_e(_when(s['p0_at'], now))}. "
+        f"{_e(who)}"]))],
+        "Sent to the admin inbox only. One more email follows: Fixed when a "
+        "replay proves the fix, or Blocked if something keeps it from being "
+        "fixed, and at the latest 4 h from now if it is not proven fixed.")
+    return subject, body
+
+
+def p0_fixed_mail(s, now):
+    title, tid = _one(s["title"], 80), s["id"]
     sha = (s.get("live_sha") or "")[:7]
-    opened = _when(s["p0_at"], now)
-    step, doing = _p0_doing(s, now, beat, late, fixers)
-    if state == "NOT HANDLED" and s.get("stale_claim"):
-        claim = s["last_claim_at"]
-        tail = (f"claim from {_when(claim, now)} went quiet, "
-                f"{_mins(claim, now) // 60} h with no fix")
-        head = (f"A Fixer claimed it at {_when(claim, now)} and nothing went "
-                f"live in {_mins(claim, now) // 60} h, while a customer failed "
-                f"on it at {_when(s['stuck_since'], now)}: the run has "
-                "probably died. Nobody is on it.")
-    elif state == "NOT HANDLED" and s.get("handed_back"):
-        at = _when(s["released_at"], now)
-        tail = f"handed back at {at} with no fix"
-        head = (f"A Fixer handed it back at {at} with no fix live, and our "
-                "side can still help its customers. Nobody is on it now.")
-    elif state == "NOT HANDLED":
-        wait = _mins(s["stuck_since"], now)
-        again = s["stuck_since"] != s["p0_at"]
-        tail = (f"no Fixer {wait} min after "
-                + ("a customer failed again" if again else "it opened"))
-        if not again:
-            event = f"it opened at {opened}"
-        else:
-            event = (f"a customer failed on it again at "
-                     f"{_when(s['stuck_since'], now)}")
-            if s.get("released_at"):
-                event += f" (handed back at {_when(s['released_at'], now)})"
-        head = f"No Fixer has claimed it {wait} min after {event}."
-    elif state == "BEING FIXED":
-        claim = s["reclaimed_at"] or s["claimed_at"]
-        tail = (f"a Fixer is on it since {_when(claim, now)}" if claim
-                else "a Fixer is on it")
-        if s.get("reclaimed_at"):
-            head = (f"A customer failed on fix {sha} at "
-                    f"{_when(s['failed_after_fix_at'], now)}, and a Fixer took "
-                    f"it again at {_when(claim, now)}.")
-        elif claim:
-            head = (f"A Fixer claimed it at {_when(claim, now)}, "
-                    f"{_mins(s['p0_at'], claim)} min after it opened at "
-                    f"{opened}." + ("" if s.get("live_at") else
-                                    " No fix is live yet."))
-        else:
-            head = "A Fixer holds the claim. No fix is live yet."
-    elif state == "FIX LIVE":
-        tail = (f"fix {sha} live since {_when(s['live_at'], now)}, no failure "
-                "since, not proven yet")
-        head = (f"Fix {sha} went live at {_when(s['live_at'], now)} and no "
-                "customer has failed on it since. It is not proven yet.")
-    elif state == "FIXED":
-        tail = f"proven by a replay at {_when(s['verified_at'], now)}"
-        head = (f"Fix {sha} went live at {_when(s['live_at'], now)} and a "
-                "replay of the customer's request on a copy proved it at "
-                f"{_when(s['verified_at'], now)}. No customer has failed on "
-                "it since.")
-    elif state == "NOT FIXED":
-        at = _when(s["verify_failed_at"], now)
-        tail = (f"the proof of fix {sha} failed at {at}, a Fixer "
-                + (f"took it again at {_when(s['retaken_at'], now)}"
-                   if s.get("retaken_at") else "takes it again automatically"))
-        head = (f"Fix {sha} went live at {_when(s['live_at'], now)}, but its "
-                f"proof, a replay on a copy, failed at {at}: it is not fixed "
-                "yet.")
-    elif state == "WAITING ON CUSTOMER":
-        at = _when(s["released_at"], now)
-        tail = f"our side ready since {at}, it moves when the customer returns"
-        head = (f"A Fixer found our side ready and handed it back at {at}: "
-                "only the customer's return can move it.")
-    else:   # STILL STUCK
-        at = _when(s["failed_after_fix_at"], now)
-        tail = f"a customer failed at {at} after fix {sha}"
-        head = (f"Fix {sha} went live at {_when(s['live_at'], now)}, but "
-                f"{_plural(s['customers_after_fix'], 'customer')} failed on it "
-                f"after, first at {at}: the fix did not hold."
-                + (f" A Fixer handed it back at {_when(s['released_at'], now)}."
-                   if s.get("handed_back") else ""))
-    ask = f"needs you ({step})" if step else "no action needed"
-    label = STATE_LABELS.get(state, state)
-    subject = f"{label}, {ask}: P0 #{tid} {title} ({tail})"
-    if state == "NOT FIXED" and not s["stuck_now"]:
-        stuck = ("Nobody has failed on it since the fix went live, but its "
-                 "proof failed, so it may still fail them.")
-    elif not s["stuck_now"]:
-        stuck = (f"No. Nobody has failed on it since the fix went live at "
-                 f"{_when(s['live_at'], now)}.")
-    elif state == "WAITING ON CUSTOMER":
-        stuck = "Until the customer returns: nothing on our side holds them."
-    elif s.get("failed_after_fix_at"):
-        stuck = (f"Yes. A customer failed after the fix, latest at "
-                 f"{_when(s['last_failure_at'] or s['failed_after_fix_at'], now)}.")
-    else:
-        stuck = ("Yes. No fix is live, so "
-                 f"{'its customer is' if s['customers'] == 1 else 'its customers are'}"
-                 " still waiting"
-                 + (f" (latest failure {_when(s['last_failure_at'], now)})."
-                    if s.get("last_failure_at") else "."))
-    what = _e(title) + (f": {_e(' '.join(str(s['what']).split())[:240])}"
-                        if s.get("what") else "")
-    colour = NEEDS_YOU_COLOUR if step else STATE_COLOURS.get(state, "#6b6b75")
-    verdict = (f"Needs you: {step}" if step else "No action needed")
-    lines = [f'<span style="background:{colour};color:#fff;padding:2px 8px;'
-             f'border-radius:6px;font-weight:700">{_e(label)}</span> '
-             f'{_e(head)}',
-             f"<b>What the system is doing:</b> {_e(doing)}",
-             f"<b>Customers:</b> {_plural(s['customers'], 'customer')} on "
-             f"this P0 since it opened at {_e(opened)}"
-             + (f", {s['customers_after_fix']} after the fix"
-                if s.get("failed_after_fix_at") else "") + ".",
-             f"<b>Stuck right now:</b> {_e(stuck)}",
-             f"<b>What happened:</b> {what}",
-             f"<b>Ticket:</b> <a href=\"{ADMIN_URL}?tab=tickets&ticket={tid}\" "
-             f"style=\"color:#f87171\">P0 #{tid}</a>"]
-    body = _shell(f"{label}: P0 #{tid}", [(verdict, lines)],
-                  "Sent to the admin inbox only, never to a customer. At most "
-                  "two emails a P0: its first state once it held 10 minutes "
-                  "(at once when nobody is on it), then its outcome. Nothing "
-                  "here asks you to act unless the subject says \"needs you\".")
+    proof = s.get("proof") if isinstance(s.get("proof"), dict) else {}
+    ref = ", ".join(f"{k} {proof[k]}" for k in ("session", "run") if
+                    proof.get(k))
+    wrong = _one(s.get("root_cause") or s.get("what") or s["title"], 300)
+    subject = f"Fixed: {title} (P0 #{tid})"
+    line = (f"What was wrong: {wrong.rstrip('.')}. Proof: a replay of the "
+            f"customer's request on a copy passed at "
+            f"{_when(s['verified_at'], now)}" + (f" ({ref})" if ref else "")
+            + (f", with fix {sha} live." if sha else "."))
+    body = _shell(f"Fixed: P0 #{tid}", [("Fixed and proven",
+                                         _p0_lines(s, now, [_e(line)]))],
+                  "Sent to the admin inbox only, never to a customer.")
+    return subject, body
+
+
+def p0_blocked_mail(s, now, cause, reason, step):
+    title, tid = _one(s["title"], 80), s["id"]
+    subject = f"Blocked: {title} (P0 #{tid})"
+    lines = [f"<b>Why:</b> {_e(reason)}"]
+    if step:
+        lines.append(f"<b>Only you can clear it:</b> {_e(step)}.")
+    body = _shell(f"Blocked: P0 #{tid}", [("Blocked", _p0_lines(s, now, lines))],
+                  "Sent to the admin inbox only. While it is not proven fixed "
+                  "this repeats once every 24 h; a proven fix sends Fixed.")
     return subject, body
 
 
 def p0_alerts(rcur, now):
-    """(dedupe key, subject, body html) for each P0 whose state the owner has
-    not been told yet, at most intake.P0_MAILS_PER_EPISODE an episode: the
-    first state that held intake.P0_MAIL_HOLD (NOT HANDLED and STILL STUCK at
-    once), then the outcome (any later state but BEING FIXED)."""
-    from ops_loop import intake
+    """(dedupe key, subject, body html) for each P0 email due now: ISSUE,
+    FIXED or BLOCKED (see the block comment above)."""
+    intake = intake_p0()
     late = intake.HEARTBEAT_LATE["p0_watch"].total_seconds() // 60
-    watch = intake.watch_report(rcur, now)
+    beat = intake.watch_beat(rcur, now)
     out = []
     for s in intake.p0_states(rcur, now):
-        if not s["state"]:
-            continue                    # not known yet: give the watch its turn
-        key = _p0_key(s)
+        ep = _p0_episode_key(s)
         sent = _p0_sent(rcur, s)
-        if key in sent or len(sent) >= intake.P0_MAILS_PER_EPISODE:
+        if s.get("verified_at"):
+            if "fixed" not in sent and s["verified_at"] >= FIXED_MAIL_FROM:
+                out.append((ep + "fixed", *p0_fixed_mail(s, now)))
             continue
-        if sent and s["state"] == intake.BEING_FIXED:
-            continue                    # the second email is the outcome
-        hold = intake.P0_MAIL_HOLD
-        if sent and s["state"] == intake.FIX_LIVE:
-            hold = intake.P0_PROOF_WAIT  # the proof is the outcome that wins
-        if s["state"] in intake.HELD and now - s["since"] < hold:
-            continue                    # pending: a change replaces it
-        subject, body = p0_mail(s, now, watch["beat"], late,
-                                (watch["running"], watch["top"]))
-        out.append((key, subject, body))
+        if s["status"] == "wont_fix":
+            if "blocked:wont-fix" not in sent and s.get("wont_fix_at") and \
+                    s["wont_fix_at"] >= FIXED_MAIL_FROM:
+                why = ("Closed as won't fix"
+                       + (f": {_one(s.get('wont_fix_reason'), 400)}"
+                          if s.get("wont_fix_reason") else "")
+                       + ". No fix was proven; a new failure reopens it.")
+                out.append((ep + "blocked:wont-fix",
+                            *p0_blocked_mail(s, now, "wont-fix", why, None)))
+            continue
+        if s["status"] not in ("open", "fixing"):
+            continue
+        causes = [c for c in p0_blocked(s, now, beat, late)
+                  if "blocked:" + c[0] not in sent]
+        issue_at = _issue_at(s)
+        over = now - issue_at - intake.P0_PROOF_BOUND
+        if over >= timedelta():
+            n = int(over // intake.P0_BLOCKED_REPEAT)
+            blocked_before = any(k.startswith("blocked:") for k in sent)
+            if f"blocked:unproven:{n}" not in sent and not (
+                    n == 0 and blocked_before):
+                hours = int((intake.P0_PROOF_BOUND
+                             + n * intake.P0_BLOCKED_REPEAT).total_seconds()
+                            // 3600)
+                causes.append((f"unproven:{n}", f"Not proven fixed after "
+                               f"{hours} h. {_in_the_way(s, now, beat)}",
+                               None))
+        if causes:
+            cause, reason, step = causes[0]
+            out.append((ep + "blocked:" + cause,
+                        *p0_blocked_mail(s, now, cause, reason, step)))
+        elif not sent and now >= issue_at:
+            out.append((ep + "issue", *p0_issue_mail(s, now, beat)))
     return out
 
 
 def _always(key):
-    """Past the daily cap: what only the owner can act on."""
-    return key.startswith(ALWAYS_SENT) or (key.startswith(P0_PREFIX)
-                                           and ":not-handled:" in key)
+    """Past the daily cap: what only the owner can clear."""
+    return key.startswith(ALWAYS_SENT) or (
+        key.startswith(P0_PREFIX)
+        and any(f":blocked:{c}" in key for c in OWNER_STEPS))
+
+
+# ── Every ticket in the digest (owner, 7 Nov 2026) ───────────────────────
+# "Nothing that isn't fixed can drop off the owner's view": the daily digest
+# lists every ticket opened in the last 24 h with where it stands, and every
+# ticket of any severity open longer than 24 h with its age.
+P0_WORDS = {"NOT HANDLED": "nobody on it yet", "BEING FIXED": "being fixed",
+            "FIX LIVE": "fix live, not proven yet",
+            "WAITING ON CUSTOMER": "waiting on the customer",
+            "STILL STUCK": "a customer failed after the fix",
+            "FIXED": "fixed, proven by a replay",
+            "NOT FIXED": "its proof failed, being fixed again"}
+STATUS_WORDS = {"fixed": "fixed", "fixing": "being fixed", "open": "open",
+                "wont_fix": "won't fix"}
+
+
+def _age(a, b):
+    m = _mins(a, b)
+    return (f"{m // 1440} d {m % 1440 // 60} h" if m >= 1440
+            else f"{m // 60} h {m % 60} min")
+
+
+def ticket_watch(rcur, now):
+    """{'new': [line], 'old': [line]}: tickets opened in the last 24 h with
+    their state, and tickets open over 24 h with their age, oldest first."""
+    intake = intake_p0()
+    rcur.execute("""/* ticket watch */
+        SELECT id, severity, title, status, history, last_seen, created_at,
+               updated_at, root_cause, wont_fix_reason
+          FROM tickets
+         WHERE status IN ('open', 'fixing') OR updated_at >= %s
+         ORDER BY id""", (now - timedelta(hours=24),))
+    new, old = [], []
+    for r in rcur.fetchall() or []:
+        r = dict(r)
+        opened = max((intake._hist_at(h) for h in r.get("history") or []
+                      if isinstance(h, dict) and h.get("event") in
+                      ("opened", "recurred", "reopened")
+                      and intake._hist_at(h) and intake._hist_at(h) <= now),
+                     default=None) or intake._aware(r.get("created_at"))
+        if opened is None:
+            continue
+        head = (f"<a href=\"{ADMIN_URL}?tab=tickets&ticket={r['id']}\" "
+                f"style=\"color:#f87171\">#{r['id']}</a> "
+                f"<b>[{_e(r['severity'])}]</b> {_e(_one(r['title'], 90))}")
+        if opened >= now - timedelta(hours=24):
+            s = intake.p0_state(r, now)
+            word = (P0_WORDS.get(s["state"]) if s and s.get("state") else
+                    None)
+            if s and s.get("status") == "wont_fix":
+                word = "won't fix"
+            word = word or STATUS_WORDS.get(r["status"], r["status"])
+            new.append((opened, f"{head}: {_e(word)}"))
+        elif r["status"] in ("open", "fixing"):
+            old.append((opened, f"{head}: {_e(STATUS_WORDS[r['status']])} "
+                                f"for {_e(_age(opened, now))}"))
+    return {"new": [l for _, l in sorted(new)],
+            "old": [l for _, l in sorted(old)]}
 
 
 def event_alerts(rcur, since, now):
@@ -563,6 +592,12 @@ def digest_facts(rcur, now, presign=_evidence_link):
     day, start, end = day_window(now)
     facts = views.awareness(rcur, start, end, now)
     facts["day"] = day.isoformat()
+    try:
+        facts["ticket_watch"] = ticket_watch(rcur, now)
+    except Exception as e:
+        facts["ticket_watch"] = None
+        facts.setdefault("errors", {})["ticket_watch"] = \
+            f"{type(e).__name__}: {e}"[:200]
     try:
         proof = views.digest_facts(rcur, start, end, presign=presign) or {}
         facts["thumbnails"] = proof.get("thumbnails") or []
@@ -712,8 +747,13 @@ def digest_sections(f):
         f"${_e(costs.get('cycle_to_date_usd'))} this cycle, projected "
         f"${_e(costs.get('cycle_projected_usd'))} (Cloudflare executors + "
         f"R2, from our own ledger)"]
+    tw = f.get("ticket_watch")
+    watch = (["Could not read the tickets."] if tw is None else
+             ["<b>Opened in the last 24 h:</b>"] + (tw["new"] or ["none"])
+             + ["<b>Open longer than 24 h:</b>"] + (tw["old"] or ["none"]))
     return [("Did customers get good results?", good),
             ("What failed, and what was fixed automatically", failed),
+            ("Every issue, and what is still open", watch),
             ("Signups and active customers", people),
             ("Infrastructure", infra_lines)]
 
