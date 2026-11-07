@@ -1,5 +1,5 @@
 {
- "bytes": 82057,
- "sha256": "564789cf653ae43ba0726fef0da7424d67556c83d4e376a7fcfc81b40a2ff78b",
- "_doc": "Core compact catalog with automatic wave growth set aside. Customer recovery adds source-region cropping, overlay stacking and original-source excerpts. look_at now exposes the supported none overlay for rendered frames (+48 B). Full compact catalog 82552 B; existing 82,700 B ceiling unchanged. Previous pin: 82,030 B."
+ "bytes": 82087,
+ "sha256": "fe936be810516b95692760fa7d7d175ea6d6e05345070c6554421ff136ab701d",
+ "_doc": "Core compact catalog with automatic wave growth set aside. add_kinetic_text takes authored phrases on footage with no speech and its compact line says so (+30 B, ticket 859). Existing 82,700 B ceiling unchanged. Previous pin: 82,057 B."
 }
