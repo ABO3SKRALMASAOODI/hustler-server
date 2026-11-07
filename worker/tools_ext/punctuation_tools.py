@@ -792,6 +792,23 @@ def set_junction(ctx, style, at=None, cuts=None, origin=None, duration=None,
         if style == "datamosh":
             item["seed"] = 1
         items.append(item)
+    # What already sits on a cut stays. Rewriting it made a new version of an
+    # identical edit, which cancels the preview rendering it: on p5520's replay
+    # the same dissolves were reapplied while waiting and none ever finished.
+    shape = ("style", "duration_s", "origin", "count", "direction", "colour")
+
+    def _same(it):
+        return next((e["id"] for e in existing
+                     if abs(float(e.get("at") or -9) - it["at"]) <= 1.5 / fps
+                     and all(e.get(k) == it.get(k) for k in shape)), None)
+    kept = {_same(it) for it in items} - {None}
+    items = [it for it in items if _same(it) is None]
+    removed = [i for i in removed if i not in kept]
+    ops = [w.remove_fx(i) for i in removed]
+    if not items and not ops and not keep_ops:
+        return (f"NO CHANGE: {style} is already on those cuts. If a preview "
+                "is rendering, wait for it. Do NOT tell the user you changed "
+                "anything.")
     # flash safety on the cuts that flash (hit_flash, box_steps, and
     # matte_cut, whose substitute is a flash on the cut): each
     # item's own reading (JunctionFx.flash_times — box steps flash once per

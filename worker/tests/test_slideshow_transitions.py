@@ -61,6 +61,22 @@ def test_a_named_cut_and_a_named_stretch_inside_one_file():
     assert [j["at"] for j in _junctions(ctx)] == [8.0, 12.0]
 
 
+def test_reapplying_the_same_dissolves_writes_no_version():
+    """A new version of an identical edit cancels the preview rendering it."""
+    ctx = _ctx()
+    assert P.set_junction(ctx, "dissolve", duration=1.0).startswith("EDL")
+    before = ctx.version, [j["id"] for j in _junctions(ctx)]
+    out = P.set_junction(ctx, "dissolve", duration=1.0)
+    assert out.startswith("NO CHANGE"), out
+    assert (ctx.version, [j["id"] for j in _junctions(ctx)]) == before
+    assert agent_tools.set_transitions(
+        ctx, "dissolve", 1.0).startswith("NO CHANGE")
+    out = P.set_junction(ctx, "dissolve", duration=0.6, at=[8.0])
+    assert out.startswith("EDL"), out
+    assert sorted(j["duration_s"] for j in _junctions(ctx)) == [0.6, 1.0, 1.0,
+                                                                1.0]
+
+
 def test_a_file_with_no_shot_change_still_says_so():
     ctx = Ctx(ONE_FILE)
     assert "no cut to decorate" in P.set_junction(ctx, "dissolve")
