@@ -133,8 +133,8 @@ def test_a_film_strip_reaches_the_named_stretch_from_the_transitions_tool():
     ctx = _ctx()
     out = agent_tools.set_transitions(ctx, "slide_left", 0.8, start=5, end=13)
     assert out.startswith("EDL"), out
-    assert [(j["at"], j["style"]) for j in _junctions(ctx)] == [
-        (8.0, "slide_left"), (12.0, "slide_left")]
+    assert [(j["at"], j["style"], j["direction"]) for j in _junctions(ctx)] == [
+        (8.0, "slide", "left"), (12.0, "slide", "left")]
 
 
 def test_every_photo_change_stays_available_to_the_customer():

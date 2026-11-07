@@ -93,9 +93,25 @@ def _holds_unread(layers, read):
     return any(k not in read and v not in (None, [], {}) for k, v in (layers or {}).items())
 
 
+def rendered_fx_parts(edl):
+    """What only a render can draw of the fx layer, as plain phrases."""
+    items = [i for i in (edl or {}).get("fx") or []
+             if isinstance(i, dict) and i.get("stage") != "music_bus"]
+    kinds = {i.get("type") for i in items}
+    parts = [name for kind, name in (("junction", "transitions"),
+                                     ("filmstrip", "the filmstrip"),
+                                     ("photo_fill", "the blurred fill"))
+             if kind in kinds]
+    if kinds - {"junction", "filmstrip", "photo_fill"}:
+        parts.append("layered effects")
+    return parts
+
+
 def render_only_layers(edl):
-    found = [name for key, name in RENDER_ONLY.items()
-             if (edl or {}).get(key) not in (None, [], {})]
+    found = []
+    for key, name in RENDER_ONLY.items():
+        if (edl or {}).get(key) not in (None, [], {}):
+            found += rendered_fx_parts(edl) if key == "fx" else [name]
     if (_holds_unread(edl, PLAYER_LAYERS | set(RENDER_ONLY))
             or _holds_unread((edl or {}).get("effects"), PLAYER_EFFECTS)):
         found.append("effects that need a full render")
@@ -120,7 +136,7 @@ def playback_limitations(edl):
     note(frame.get("follow"), "the moving crop")
     note(edl.get("source_clean") or edl.get("patches"), "erased areas")
     note(edl.get("overlays"), "overlays")
-    note(fx.get("transition"), "transitions")
+    note(fx.get("transition") and "transitions" not in missing, "transitions")
     note(fx.get("regions"), "blurred regions")
     note(fx.get("screen_frame") or fx.get("frame_shifts") or edl.get("screen_takeovers"),
          "screen effects")

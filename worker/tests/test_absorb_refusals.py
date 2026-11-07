@@ -67,9 +67,9 @@ def batch(edl, operations, duration=60.0, keys=()):
 
 def test_bad_arguments_a_name_the_tool_does_not_take_is_dropped_and_said():
     name, args, notes = norm("set_junction", style="dissolve", duration=0.6,
-                             cuts=["scene"], scope="scene")
-    assert name == "set_junction" and "scope" not in args
-    assert any("scope ignored" in n for n in notes)
+                             cuts=["scene"], urgency="high")
+    assert name == "set_junction" and "urgency" not in args
+    assert any("urgency ignored" in n for n in notes)
 
 
 @pytest.mark.parametrize("tool,sent,field", [
