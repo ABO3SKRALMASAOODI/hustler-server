@@ -12,6 +12,7 @@ from types import SimpleNamespace as NS
 import pytest
 
 import agent_loop
+import agent_prompt
 import agent_tools
 import db as dbx
 import followup_recipes
@@ -421,3 +422,10 @@ def test_with_no_brief_at_all_the_words_stand():
     ctx = NS(semantic_contract=None,
              latest_edl=lambda: {"version": 3, "json": {"keep": [[0, 20]]}})
     assert followup_recipes.start(ctx, "make the captions bigger")
+
+
+def test_the_reply_is_written_for_someone_who_has_never_seen_our_internals():
+    """Nothing rewrites the reply now, and 7 of 31 replayed replies named a
+    version ("passed on the current version (v23)")."""
+    text = " ".join(str(v) for v in vars(agent_prompt).values() if isinstance(v, str))
+    assert "No version numbers, no tool names and no names of our checks" in text
