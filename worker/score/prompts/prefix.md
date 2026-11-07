@@ -95,7 +95,7 @@ flash at f mode(white|tint|neg|threshold|burn|complement|posterise|halftone|mosa
 burn at rect. Burns to a white floor, resolves over 7 frames
 tiles at f mode(burn|fill|neg) c n lines. A 3x3 relay, one cell at a time, ending centre
 punch at z d. Hard punch-in until the next cut
-counter from to at step fmt size seat font. Digits step hard, slowing at the end
+counter from to at step fmt("DIA {n}", "{n:02d}") size seat font. Digits step hard, slowing at the end
 pile pic[] at every w h. Prints land on each other, tilted, settling
 split pic[] at dir(v|h) bg gap. Two or three synced windows
 glitch at rect. A small inverted patch, on 1, off 1, on 2 frames

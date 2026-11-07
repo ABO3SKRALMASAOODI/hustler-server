@@ -3125,7 +3125,24 @@ def g_freeze(ctx, b, g, i):
     g_snd(ctx, b, g, a)
 
 
-@gesture("counter", 'from to at step fmt size seat font. Digits step hard, slowing at the end', lower="text")
+_FMT_FIELD = re.compile(r"\{n(?::0?(\d+)d?)?\}|%0?(\d*)d")      # Score syntax a model writes: {n}, {n:02d}, %d, %02d
+
+
+def counter_text(fmt, v, whole, sep=False):
+    """A counter's step, through its format. A p5374 replay wrote fmt "11:%02d pm" and the film showed
+    the format itself: printf fields are read like {n}, with their zero padding."""
+    num = f"{int(round(v)):,}" if whole and sep else str(int(round(v))) if whole else f"{v:.1f}"
+
+    def field(m):
+        width = m.group(1) or m.group(2)
+        return num.zfill(int(width)) if width and whole and not sep else num
+    out, k = _FMT_FIELD.subn(field, fmt)
+    if k and "%" in fmt:
+        out = out.replace("%%", "%")
+    return out if k else f"{fmt} {num}".strip() if fmt else num
+
+
+@gesture("counter", 'from to at step fmt("DIA {n}", "{n:02d}") size seat font. Digits step hard, slowing at the end', lower="text")
 def g_counter(ctx, b, g, i):
     a, z = span_of(ctx, b, g.get("at"))
     z = b.pf1 if z is None else z
@@ -3141,7 +3158,7 @@ def g_counter(ctx, b, g, i):
         p = (j + 1) / n
         p = 1 - (1 - p) ** 2.2
         v = v0 + (v1 - v0) * p
-        s = fmt.replace("{n}", f"{int(round(v)):,}" if whole and g.get("sep") else str(int(round(v))) if whole else f"{v:.1f}")
+        s = counter_text(fmt, v, whole, g.get("sep"))
         f = a + j * step
         q = z if j == n - 1 else f + step
         if g.get("hold") and j == n - 1:

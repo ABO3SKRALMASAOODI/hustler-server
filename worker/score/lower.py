@@ -730,7 +730,52 @@ def lower_texts(l1, rep, runs=None):
                 a = min(a, b - n_min)
             top = shown_piece(g, runs, (a + b) // 2) if runs else g[-1]
             out.append(text_item(l1, dict(g[-1], f=[a, b], op=None, s=None, ink=top.get("ink"), edge=top.get("edge")), a, b, rep))
-    return out
+    return no_double_type(out, rep)
+
+
+def _x_overlap(a, b):
+    """Share of the narrower word's width the two cover together, from an advance of 0.55 em a letter."""
+    def span(q):
+        w = min(len(q["text"]) * 0.55 * float(q["font_size"]), 0.96)
+        return float(q["x"]) - w / 2, float(q["x"]) + w / 2
+    (a0, a1), (b0, b1) = span(a), span(b)
+    return max(0.0, min(a1, b1) - max(a0, b0)) / max(min(a1 - a0, b1 - b0), 1e-6)
+
+
+def _clip_motion(tx):
+    """Keyframes are local to the item: a shortened item keeps only the ones inside it."""
+    n = tx["end"] - tx["start"]
+    for k, kfs in list((tx.get("motion") or {}).items()):
+        inside = [q for q in kfs if q["t"] <= n + 1e-6]
+        tx["motion"][k] = inside or kfs[:1]
+
+
+def no_double_type(texts, rep):
+    """One gesture never draws two of its words on top of each other. A counter's steps move as they
+    step, so each is its own chain, and stretched to today's 0.3 s each ran into the next: DIA 23 and
+    DIA 24 drawn over one another (a p5302 replay). An earlier step ends where the next one starts on
+    the same spot, and a step left under the minimum goes; the count always lands on its last."""
+    groups = collections.defaultdict(list)
+    for tx in texts:
+        groups[".".join(tx["id"].split(".")[1:3])].append(tx)
+    drop = set()
+    for items in groups.values():
+        items.sort(key=lambda q: (q["start"], q["id"]))
+        for i, tx in enumerate(items[:-1]):
+            for nxt in items[i + 1:]:
+                if nxt["start"] >= tx["end"]:
+                    break
+                fs = max(float(tx["font_size"]), float(nxt["font_size"]))
+                if abs(float(tx["y"]) - float(nxt["y"])) < 0.8 * fs and _x_overlap(tx, nxt) > 0.2:
+                    tx["end"] = nxt["start"]
+                    if tx["end"] - tx["start"] < TX_MIN_S - 1e-6:
+                        drop.add(tx["id"])
+                    else:
+                        _clip_motion(tx)
+                    break
+    if drop:
+        rep["type_steps_dropped"] = rep.get("type_steps_dropped", 0) + len(drop)
+    return [tx for tx in texts if tx["id"] not in drop]
 
 
 # ------------------------------------------------------------------ the film

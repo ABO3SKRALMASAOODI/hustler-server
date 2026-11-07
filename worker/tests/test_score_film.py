@@ -427,3 +427,24 @@ def test_every_offered_gesture_lowers_to_an_edl_the_write_accepts(tmp_path, gest
         comp = compiler.compile_score("\n".join(json.dumps(x) for x in lines) + "\n", index=idx)
         edl, _locals, _rep = lower.lower(comp.l1, str(tmp_path))
         schemas.validate_edl(edl, 30.0)
+
+
+def test_a_counter_never_draws_two_steps_over_each_other(tmp_path):
+    """A p5302 replay: a moving count's steps, each stretched to 0.3 s, drew DIA 23 over DIA 24."""
+    beats = [{"k": "b", "id": "b01", "w": "0-20", "job": "j", "cut": "pulse 1", "pic": "main",
+              "do": [{"g": "counter", "from": 20, "to": 29, "at": "w4..w7", "step": 1, "fmt": "DIA {n}", "size": 0.1, "seat": [0.5, 0.3]}]}]
+    edl, _l, rep = _lowered(tmp_path, beats)
+    steps = sorted((t for t in edl["texts"] if ".counter" in t["id"]), key=lambda t: t["start"])
+    assert steps and steps[-1]["text"] == "DIA 29"
+    for a, b in zip(steps, steps[1:]):
+        assert a["end"] <= b["start"] + 1e-6 or abs(a["y"] - b["y"]) >= 0.8 * a["font_size"]
+    assert all(t["end"] - t["start"] >= 0.3 - 1e-6 for t in steps)
+
+
+def test_a_counter_reads_the_formats_a_model_writes():
+    """A p5374 replay showed "11:%02d pm" on screen."""
+    assert compiler.counter_text("11:%02d pm", 4, True) == "11:04 pm"
+    assert compiler.counter_text("DIA {n}", 22, True) == "DIA 22"
+    assert compiler.counter_text("{n:02d}h", 7, True) == "07h"
+    assert compiler.counter_text("%d%%", 50, True) == "50%"
+    assert compiler.counter_text("", 3, True) == "3"
