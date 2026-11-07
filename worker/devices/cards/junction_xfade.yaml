@@ -1,10 +1,10 @@
-# Track 1D junction: fadegrays, pixelize, radial, slices, slide_left, slide_right (worker/junctions_v2.py).
+# Track 1D junction: fade_black, slide, film_strip, fadegrays, pixelize, radial, slices (worker/junctions_v2.py).
 id: "junction_xfade"
 family: "transition"
 verb: "set_junction"
 fx_type: "junction"
 stage: "junction"
-params: {style: ["fadegrays", "pixelize", "radial", "slices", "slide_left", "slide_right", "film_strip", "fade_black"], duration_s: [0.4, 0.5]}
+params: {style: ["fade_black", "slide", "fadegrays", "pixelize", "radial", "slices", "slide_left", "slide_right", "film_strip"], duration_s: [0.4, 0.5, 1.0]}
 needs: {sidecars: [], lane_features: ["ffmpeg:xfade"], footage: "a real cut (a shot change or an insert)"}
 binds_to: ["cut", "section"]
 budget: {calm: {per_short: 2, min_gap_s: 4}, designed: {per_short: 4, min_gap_s: 2}, charged: {per_short: 10, min_gap_s: 1}}

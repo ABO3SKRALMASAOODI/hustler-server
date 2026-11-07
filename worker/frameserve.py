@@ -35,6 +35,7 @@ import config
 import execution_inputs
 import media
 import motion_judge
+import picture_map
 import storage
 
 # More than a look ever asks for (look_at_asset samples at most 6). A bound,
@@ -70,6 +71,7 @@ def run_frames_job(worker_db, job):
         # 4K upload. Use the same range-reading policy as inserted video renders.
         # Motion analysis scans the clip and retains the staged-file path.
         if (not payload.get("motion_profile")
+                and not payload.get("picture_map")
                 and execution_inputs.streams_asset(key, storage.object_bytes(key))):
             local = storage.presign_get(key)
         else:
@@ -101,12 +103,15 @@ def run_frames_job(worker_db, job):
                 motion_profile = motion_judge.analyze_video(local, dur)
             except Exception:
                 pass
+        pictures = picture_map.run_on(local) if payload.get("picture_map") \
+            else None
         # Dims ride along because the caller usually has none: browser
         # uploads record duration only, and the aspect feeds the screen
         # detector's plausibility check (probe applies the display matrix, so
         # a rotated phone clip reports its true shape).
         return {"keys": out_keys, "errors": errors, "duration_s": dur,
                 "width": w_, "height": h_, "fps": fps_,
-                "motion_profile": motion_profile}
+                "motion_profile": motion_profile,
+                "picture_map": pictures}
     finally:
         shutil.rmtree(workdir, ignore_errors=True)

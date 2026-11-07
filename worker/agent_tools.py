@@ -11492,6 +11492,14 @@ def _split_keeps_at_shot_boundaries(keep, index):
     return out, added
 
 
+# The set_transitions words that are a per-cut device in set_junction.
+# dip_black stays a global transition of its own.
+JUNCTION_TRANSITIONS = ("dissolve", "crossfade", "cross_dissolve",
+                        "crossdissolve", "slide", "slide_left", "slide_right",
+                        "slide_up", "slide_down", "film_strip", "fade_black",
+                        "fade_through_black", "fadeblack")
+
+
 def _dissolve_at_cuts(ctx, duration_s, scope, style="dissolve", start=None,
                       end=None):
     """A cross-dissolve or a slide is a per-cut device (set_junction), which
@@ -11523,6 +11531,7 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                     end=None):
     p = (style or "").strip().lower()
     sc = (scope or "scene").strip().lower()
+    from tools_ext import punctuation_tools as _pt
     if sc not in TRANSITION_SCOPES:
         return (f"REJECTED: scope must be one of "
                 f"{', '.join(TRANSITION_SCOPES)}. 'scene' (the default) puts "
@@ -11532,8 +11541,7 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 "cut_silences — only right for a montage built from separate "
                 "clips. 'media' puts one only where B-roll, a still or a "
                 "card enters or leaves (camera changes stay hard cuts).")
-    if p in ("dissolve", "slide_left", "slide_right", "film_strip",
-             "fade_black"):
+    if p in JUNCTION_TRANSITIONS:
         # p5520: asked three times for cross-dissolves, the editor reached
         # for this tool, found dips only and told the customer it could not.
         return _dissolve_at_cuts(ctx, duration_s, sc, p, start, end)
@@ -11541,6 +11549,9 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
     fx = dict(edl.get("effects") or {})
     if p in ("none", "off"):
         if not fx.get("transition"):
+            if any(isinstance(i, dict) and i.get("type") == "junction"
+                   for i in edl.get("fx") or []):
+                return _pt.set_junction(ctx, "none")
             return ("NO CHANGE: there are no transitions to remove. Do NOT "
                     "tell the user you changed anything.")
         fx["transition"] = None
@@ -11550,10 +11561,11 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
         return (f"REJECTED: style must be one of "
                 f"{', '.join(TRANSITION_STYLES)} — or 'none' to clear. "
                 + "; ".join(f"{k} = {v}" for k, v in TRANSITION_DESC.items())
-                + ". All are duration-preserving junction effects. For a "
-                "mix per cut use set_junction: dissolve, film_strip, slide_left, "
-                "slide_right, fade_black, on the cuts baked into an uploaded "
-                "montage too.")
+                + ". All are duration-preserving junction effects. A cross-"
+                "dissolve, a slide, a film strip or a fade through black is "
+                "set_junction(style='dissolve'|'slide'|'film_strip'|'fade_black', "
+                "duration=...): one call, every cut, the cuts baked into an "
+                "uploaded montage included.")
     try:
         d = round(min(max(float(duration_s if duration_s is not None
                                 else 0.3), TRANSITION_MIN_S),
@@ -11652,7 +11664,9 @@ def set_transitions(ctx, style, duration_s=0.3, scope="scene",
                 f"{safe_max} or fewer to mark only selected changes. If the "
                 f"customer asked for every change, pass max_transitions={hit}; "
                 "if they named a stretch, pass start= and end= to cover every "
-                "change inside it. A soft cross-dissolve is set_junction.")
+                "change inside it. A soft cross-dissolve, a slide or a fade "
+                "through black on every picture is set_junction(style=..., "
+                "cuts='every'): one call.")
 
     if limit is not None and hit > limit:
         ordered = sorted(eligible)
@@ -32559,7 +32573,8 @@ TOOLS = {
                         "removes them (hard cuts again). style='dissolve' is a "
                         "true cross-dissolve at every scene change, including "
                         "the cuts baked into an uploaded montage (0.8-1.5 s "
-                        "suits photographs).",
+                        "suits photographs). A slide or a fade through black "
+                        "goes the same way: one call for the whole film.",
                         {"style": {"type": "string",
                                    "enum": list(TRANSITION_STYLES)
                                    + ["dissolve", "slide_left", "slide_right",
@@ -33841,6 +33856,9 @@ TOOL_DOMAINS = {
         "set_frame", "auto_reframe", "add_zoom", "remove_zoom", "add_zoom_path",
         "remove_zoom_path", "set_text_motion", "set_overlay_motion",
         "punch_in_on_emphasis", "conceal_jump_cuts",
+        # The first thing a transition ask loads: without these beside
+        # set_transitions a model looped add_zoom over 83 baked photos.
+        "set_junction", "add_filmstrip", "remove_filmstrip", "set_photo_fill",
         "set_transitions",
         "set_fades", "bind_motion_motif", "add_aspect_shift",
         "remove_aspect_shift", "add_color_screen", "add_corrupt_screen",

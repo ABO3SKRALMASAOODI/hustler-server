@@ -6,18 +6,20 @@
   "stage": "junction",
   "params": {
     "style": [
+      "fade_black",
+      "slide",
       "fadegrays",
       "pixelize",
       "radial",
       "slices",
       "slide_left",
       "slide_right",
-      "film_strip",
-      "fade_black"
+      "film_strip"
     ],
     "duration_s": [
       0.4,
-      0.5
+      0.5,
+      1.0
     ]
   },
   "needs": {

@@ -721,6 +721,12 @@ def _window_fx(items, w0, w1, fps, music_ids):
         if lb - la < 0.01 - 1e-9:
             continue
         moved = {**it, "start": la, "end": lb}
+        if it.get("type") == "filmstrip":
+            # the run's clock survives the cut: a piece of the strip shows
+            # the pictures the full render shows there
+            run = it.get("run") or [a, b]
+            moved["run"] = [round(float(run[0]) - w0, 3),
+                            round(float(run[1]) - w0, 3)]
         if it.get("hold_t") is not None:
             # the held subject frame rides the piece's clock too when it is
             # inside the item's own window AND the piece (a hold_t outside
