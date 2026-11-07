@@ -172,3 +172,11 @@ def test_version_check_never_blocks_dispatch(monkeypatch):
                                           "project_id": 1, "user_id": 1,
                                           "attempts": 1, "payload": {}})
     assert out == {"ok": True}
+
+
+def test_a_skill_is_part_of_what_a_release_ships():
+    """Ticket #77: the box rolls when the fingerprint moves, and a skill-only
+    fix did not move it."""
+    import version
+    files = {os.path.relpath(p, version._DIR) for p in version._source_files()}
+    assert os.path.join("skills", "subject-fx.md") in files

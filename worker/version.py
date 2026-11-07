@@ -65,7 +65,11 @@ _RUNTIME_DATA = (".py", ".yaml", ".yml", ".json")
 # image carries these files (Dockerfile ``COPY . .``, Modal add_local_dir).
 _RUNTIME_FILES = ("cost_model.json", "models.lock")
 _RUNTIME_DIRS = (("models", (".json",)), (os.path.join("motion", "lib"),
-                                         (".js",)))
+                                         (".js",)),
+                 # The skills are what the editor reads. The box rolls only
+                 # when this fingerprint moves, so a skill-only fix passed CI
+                 # and reached nobody (ticket #77).
+                 ("skills", (".md",)))
 
 _cached = None
 
