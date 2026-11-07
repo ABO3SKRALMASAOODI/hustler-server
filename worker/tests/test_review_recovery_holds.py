@@ -320,6 +320,47 @@ def test_a_brief_with_no_change_row_is_not_asked_what_it_writes(monkeypatch):
     assert len(seen) == 1
 
 
+# ---- a read cannot leave a request unfinished -------------------------------------
+
+JUSTIFY_EARLY = ("PREREQUISITE: no complete verification record exists for EDL v11. "
+                 "Render and inspect the complete preview first.")
+
+
+def test_a_bookkeeping_call_made_too_early_leaves_a_delivered_edit_fulfilled(monkeypatch):
+    """p5388: justified before the render, the render cleared the finding,
+    nothing called it again, and the delivered edit ended partial: a P0."""
+    ctx, _db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    agent_loop._record_outer_tool_outcome(
+        ctx, "justify_verification_findings", JUSTIFY_EARLY)
+    assert agent_loop._turn_completion(ctx, "replied")[0] == "fulfilled"
+
+
+@pytest.mark.parametrize("tool", sorted(agent_loop._DELIVERS_NOTHING))
+def test_every_read_is_counted_as_delivering_nothing(monkeypatch, tool):
+    ctx, _db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    agent_loop._record_outer_tool_outcome(ctx, tool, JUSTIFY_EARLY)
+    assert agent_loop._turn_completion(ctx, "replied")[0] == "fulfilled"
+
+
+@pytest.mark.parametrize("tool", ["fetch_url", "edit_shorts", "start_asset_index"])
+def test_a_tool_that_brings_work_keeps_its_prerequisite_open(monkeypatch, tool):
+    """The customer's clip never arrived: that is not a delivered request."""
+    ctx, _db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    agent_loop._record_outer_tool_outcome(
+        ctx, tool, "PREREQUISITE: the source is still processing.")
+    assert agent_loop._turn_completion(ctx, "replied")[0] == "partial"
+
+
+def test_a_render_still_running_stays_open_until_its_job_lands(monkeypatch):
+    ctx, _db, _posted, _checkpoint, _calls = _delivered(monkeypatch)
+    agent_loop._record_outer_tool_outcome(
+        ctx, "render_preview",
+        "PREREQUISITE: complete preview for EDL v73 is still running as job 41.")
+    assert agent_loop._turn_completion(ctx, "replied")[0] == "partial"
+    agent_tools._resolve_job_waits(ctx, 41)
+    assert agent_loop._turn_completion(ctx, "replied")[0] == "fulfilled"
+
+
 # ---- a word list never outranks the model's reading -----------------------------
 
 P5388 = "Turn this into a punchy original 16:9 short with big kinetic captions"
