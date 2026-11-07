@@ -448,3 +448,40 @@ def test_a_counter_reads_the_formats_a_model_writes():
     assert compiler.counter_text("{n:02d}h", 7, True) == "07h"
     assert compiler.counter_text("%d%%", 50, True) == "50%"
     assert compiler.counter_text("", 3, True) == "3"
+
+
+@pytest.mark.skipif(compiler.font_path("NotoSansArabic-Bold.ttf") is None, reason="no Arabic-script font on this machine")
+def test_a_persian_word_on_the_last_frame_never_outruns_the_programme(tmp_path):
+    """p5374 with its Persian words (Gauntlet dirf-on3): joined-script type was lowered after the end clamp,
+    so a short word on the last frames, held to today's 0.2 s minimum, ran past the programme and
+    validate_edl refused the whole film."""
+    import schemas
+    idx = talk_index(20.0)
+    n = len(idx["words"]) - 1
+    beats = [{"k": "b", "id": "b01", "w": f"0-{n}", "job": "j", "cut": "pulse 1", "pic": "main",
+              "do": [{"g": "big", "t": "جون", "at": f"w{n}", "size": 0.08, "font": "nastaliq"}]}]
+    comp = compiler.compile_score("\n".join(json.dumps(x) for x in [FILM] + beats) + "\n", index=idx)
+    word = next(i for i in comp.l1["items"] if i["k"] == "word" and i["t"] == "جون")
+    word["f"] = [comp.l1["dur_f"] - 4, comp.l1["dur_f"]]          # four frames, under the 0.2 s minimum
+    edl, locals_, rep = lower.lower(comp.l1, str(tmp_path))
+    prog = sum(b - a for a, b in edl["keep"]) + sum(float(i.get("duration_s") or 0) for i in edl["inserts"])
+    st = [o for o in edl["overlays"] if o["id"].startswith("st.")]
+    assert st and rep["script_type_stills"] == len(st)
+    assert all(o["start"] + o["duration_s"] <= prog + 1e-6 and o["duration_s"] >= lower.OV_MIN_S for o in edl["overlays"])
+    schemas.validate_edl(edl, 20.0)
+
+
+@pytest.mark.skipif(compiler.font_path("NotoSansArabic-Bold.ttf") is None, reason="no Arabic-script font on this machine")
+@pytest.mark.parametrize("gesture", sorted(g for g in compiler.TODAY_GESTURES if "t" in GESTURE_ARGS.get(g, {})))
+def test_every_offered_type_gesture_in_persian_lowers_to_an_edl_the_write_accepts(tmp_path, gesture):
+    """The same, in a joined script: Persian type takes its own lowering (baked stills), which the Mac
+    never ran because its fonts live only in the production images."""
+    import schemas
+    idx = talk_index(30.0)
+    n = len(idx["words"]) - 1
+    for at, f in (("w3", 2), ("w6..w14", 8), (f"w{n}", 1), (f"w{n - 1}..w{n}", 2)):
+        lines = [FILM, {"k": "b", "id": "b01", "w": f"0-{n}", "job": "j", "cut": "pulse 0.6", "pic": "main",
+                        "do": [{"g": gesture, "at": at, "f": f, **GESTURE_ARGS[gesture], "t": "به جون چشات"}]}]
+        comp = compiler.compile_score("\n".join(json.dumps(x) for x in lines) + "\n", index=idx)
+        edl, _locals, _rep = lower.lower(comp.l1, str(tmp_path))
+        schemas.validate_edl(edl, 30.0)

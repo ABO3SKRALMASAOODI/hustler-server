@@ -842,9 +842,16 @@ def lower(l1, work):
     if src_dur:
         keep = [[a, r2(min(b, src_dur))] for a, b in keep if min(b, src_dur) - a > 0.04]
     prog = sum(k[1] - k[0] for k in keep) + sum(float(i.get("duration_s") or 0) for i in inserts)
-    for ov in overlays + pool_ov + cards:      # keep spans round to 0.01: the last overlay must not outrun the programme by a rounding
+    # Every overlay lane, joined-script type included: a Persian word on the last frame, held to today's
+    # 0.2 s minimum, outran the programme by 0.01 s and validate_edl refused the whole film (p5374).
+    script_type = lower_script_type(l1, bake, rep)
+    for ov in overlays + pool_ov + cards + script_type:      # keep spans round to 0.01: the last overlay must not outrun the programme by a rounding
         if isinstance(ov.get("duration_s"), (int, float)) and float(ov["start"]) + float(ov["duration_s"]) > prog:
-            ov["duration_s"] = max(OV_MIN_S, math.floor((prog - float(ov["start"])) * 100) / 100)
+            room = math.floor((prog - float(ov["start"])) * 100) / 100
+            if room < OV_MIN_S:                # too near the end for today's minimum: it starts earlier, it never runs past
+                ov["start"] = max(0.0, math.floor((prog - OV_MIN_S) * 100) / 100)
+                room = math.floor((prog - float(ov["start"])) * 100) / 100
+            ov["duration_s"] = max(OV_MIN_S, room)
     # Programme time never passes the programme: the source clamp above can end it a frame early.
     lim = math.floor(prog * 100) / 100
     zooms = [dict(z, end=min(z["end"], lim)) for z in zooms if min(z["end"], lim) - z["start"] >= 0.05]
@@ -854,7 +861,7 @@ def lower(l1, work):
     if stylize:
         effects["stylize"] = stylize
     edl = {"keep": keep, "frame": {"ratio": "9:16", "mode": "crop"} if l1["frame"][1] > l1["frame"][0] else {"ratio": "16:9", "mode": "crop"},
-           "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + lower_script_type(l1, bake, rep),
+           "inserts": inserts, "captions": lower_captions(l1, rep, src_dur), "sfx": sfx, "overlays": overlays + pool_ov + cards + script_type,
            "texts": lower_texts(l1, rep, runs), "vectors": vectors, "fx": tr_fx + flash_fx, "effects": effects, "master": {"loudness": "social"}}
     for lane, least in (("texts", TX_MIN_S), ("vectors", TX_MIN_S), ("fx", 1 / fps)):
         kept = []
