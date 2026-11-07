@@ -2877,6 +2877,22 @@ def compare_uploaded_media(ctx, asset_keys, question="", samples_per_asset=4):
 #  WRITE tools                                                         #
 # ------------------------------------------------------------------ #
 
+def _keep_exposed_cuts(before, after):
+    """Spans that touched before a write still touch after it. They mark cuts
+    baked into the footage, and the dissolves sit on them: a trim of the last
+    0.33 s merged 83 spans into one and took all 82 dissolves with it."""
+    points = [before[i][0] for i in range(1, len(before))
+              if abs(before[i][0] - before[i - 1][1]) < 0.01]
+    if not points:
+        return after
+    out = []
+    for start, end in after:
+        inside = [p for p in points if start + 0.05 < p < end - 0.05]
+        edges = [start] + inside + [end]
+        out.extend([edges[i], edges[i + 1]] for i in range(len(edges) - 1))
+    return out
+
+
 def _merge_touching(spans):
     spans = sorted([list(x) for x in spans], key=lambda x: x[0])
     merged = [spans[0]]
@@ -3283,6 +3299,7 @@ def _write_keep(ctx, new_keep, desc, snap_to_words=None,
     if snap_to_words is False:
         quiet_edges, safe_edges = _exact_keep_quiet_edges(ctx, new_keep,
                                                           words)
+    new_keep = _keep_exposed_cuts(prev_keep, new_keep)
     edl = dict(prev["json"])
     edl["keep"] = new_keep
     speed = edl.get("speed") or []

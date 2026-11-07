@@ -903,7 +903,7 @@ def _request_findings(edl, request_text, media_keys=None, semantic_contract=None
             "it"))
     ask = str(request_text or "").lower()
     if not semantic_contract and _requested_transitions(ask) \
-            and not ((edl.get("effects") or {}).get("transition")):
+            and not _has_transition(edl):
         findings.append(_finding(
             "requested_transitions_missing", "motion",
             "The user explicitly requested transitions, but the latest EDL "
@@ -1444,6 +1444,27 @@ def build_verification_record(project_id, version, manifest, edl, index,
         "advisories": [row for row in findings if not is_blocking(row)],
         "repairs": list(repairs or []), "justifications": justifications,
     }
+
+
+def _has_transition(edl):
+    """Any treatment of a cut counts: a dip in effects, a junction device, or
+    a transition graphic. Looking only at effects.transition told a customer
+    with 82 dissolves that the edit had no transitions (p5520), and the repair
+    loop that followed spent the turn."""
+    if (edl.get("effects") or {}).get("transition"):
+        return True
+    if any(isinstance(item, dict) and item.get("type") == "junction"
+           for item in edl.get("fx") or []):
+        return True
+    import motion_templates
+    for item in edl.get("motion") or []:
+        try:
+            spec = motion_templates.spec(str(item.get("template") or ""))
+            if "transition" in motion_templates.categories(spec):
+                return True
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    return False
 
 
 def _captions_all_muted(edl, preview):

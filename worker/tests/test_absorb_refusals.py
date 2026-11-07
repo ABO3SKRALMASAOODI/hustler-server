@@ -838,3 +838,18 @@ def test_a_write_stops_in_front_of_look_frames_and_the_next_reads_it_back():
         {"role": "user", "content": [{"type": "text", "text": "z"}]}]
     block, index = claude_lane._released_pixels_anchor(released)
     assert block is released[0]["content"] and index == 0
+
+
+def test_a_junction_is_a_transition_the_customer_asked_for():
+    edl = default_edl(60.0)
+    assert not quality_verifier._has_transition(edl)
+    edl["fx"] = [{"type": "junction", "at": 4.0}]
+    assert quality_verifier._has_transition(edl)
+
+
+def test_a_trim_keeps_the_cuts_baked_into_the_footage():
+    before = [[0.0, 4.6], [4.6, 9.4], [9.4, 14.0]]
+    assert agent_tools._keep_exposed_cuts(before, [[0.0, 13.67]]) == [
+        [0.0, 4.6], [4.6, 9.4], [9.4, 13.67]]
+    assert agent_tools._keep_exposed_cuts([[0.0, 4.0], [6.0, 8.0]],
+                                          [[0.0, 3.0]]) == [[0.0, 3.0]]
